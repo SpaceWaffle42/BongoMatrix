@@ -5,6 +5,8 @@
 **Baseline:** deliberately restored 173-test revision  
 **Purpose:** backlog for later improvement work; no application improvements were implemented during this review.
 
+> **Behavior update — 2026-08-04:** The paired media-reclassification API and dashboard controls were subsequently removed at the user's request. Built-in status is now immutable through the web application and derived only from physical placement under `resources/media/built-in/`. Findings that depend on the removed move transaction or `classifyMedia()` are retained as historical review evidence but no longer describe reachable production behavior.
+
 ## Executive summary
 
 The project has a strong functional test suite for its size and contains unusually careful handling in several high-risk areas: paired access, media path confinement, `O_NOFOLLOW`, descriptor-relative file operations, atomic configuration replacement, helper-process privilege separation, and exclusive ownership of the physical Matrix.

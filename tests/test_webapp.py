@@ -467,21 +467,19 @@ console.log(JSON.stringify({
         self.assertIn("keep_aspect", asset)
         self.assertIn("drawImage", asset)
 
-    def test_dashboard_groups_media_and_offers_friendly_reorganization_controls(self):
+    def test_dashboard_groups_media_without_reclassification_controls(self):
         self.pair_browser()
 
         body = self.client.get("/").get_data(as_text=True)
 
         self.assertIn("Built-in media", body)
         self.assertIn("My media", body)
-        self.assertIn("Move to Built-in", body)
-        self.assertIn("Move to My media", body)
-        self.assertIn("classifyMedia(item.name", body)
-        self.assertIn("/classification", body)
-        self.assertIn("replaceEditorMediaReference", body)
-        self.assertIn("mediaItems=mediaItems.map", body)
-        self.assertIn("catch(refreshError)", body)
-        self.assertIn("await refreshMedia();renderCustomModules()", body)
+        self.assertIn("Default files managed from the built-in media folder.", body)
+        self.assertIn("Files you can remove from the dashboard.", body)
+        self.assertNotIn("Move to Built-in", body)
+        self.assertNotIn("Move to My media", body)
+        self.assertNotIn("classifyMedia", body)
+        self.assertNotIn("/classification", body)
 
     def test_dashboard_has_friendly_weather_layout_motion_and_units_controls(self):
         self.store.update({"weather": {
@@ -665,272 +663,27 @@ console.log(JSON.stringify({
         served.close()
         self.assertEqual(self.client.delete("/api/media/built-in/system.gif").status_code, 403)
 
-    def test_media_can_move_between_my_media_and_built_in(self):
+    def test_media_classification_cannot_be_changed_through_the_api(self):
         self.pair_browser()
-        original = self.gif_bytes().getvalue()
-        (self.media_dir / "custom.gif").write_bytes(original)
+        built_in = self.media_dir / "built-in"
+        built_in.mkdir()
+        payload = self.gif_bytes().getvalue()
+        (self.media_dir / "custom.gif").write_bytes(payload)
+        (built_in / "system.gif").write_bytes(payload)
 
         promoted = self.client.post(
             "/api/media/custom.gif/classification", json={"built_in": True}
         )
-
-        self.assertEqual(promoted.status_code, 200, promoted.get_data(as_text=True))
-        self.assertEqual(promoted.get_json()["name"], "built-in/custom.gif")
-        self.assertTrue(promoted.get_json()["built_in"])
-        self.assertFalse((self.media_dir / "custom.gif").exists())
-        self.assertEqual((self.media_dir / "built-in" / "custom.gif").read_bytes(), original)
-
         demoted = self.client.post(
-            "/api/media/built-in/custom.gif/classification", json={"built_in": False}
+            "/api/media/built-in/system.gif/classification", json={"built_in": False}
         )
 
-        self.assertEqual(demoted.status_code, 200, demoted.get_data(as_text=True))
-        self.assertEqual(demoted.get_json()["name"], "custom.gif")
-        self.assertFalse(demoted.get_json()["built_in"])
-        self.assertEqual((self.media_dir / "custom.gif").read_bytes(), original)
-        self.assertFalse((self.media_dir / "built-in" / "custom.gif").exists())
-
-    def test_moving_media_updates_every_saved_reference(self):
-        self.pair_browser()
-        (self.media_dir / "custom.gif").write_bytes(self.gif_bytes().getvalue())
-        self.store.update({
-            "media": {"splash": "custom.gif"},
-            "custom_modules": [{
-                "id": "custom_media", "name": "Media", "type": "canvas",
-                "background": "#000000", "frame_count": 2, "fps": 10, "playback": "hold",
-                "layers": [{
-                    "id": "layer_media", "name": "Media", "type": "media", "visible": True,
-                    "properties": {
-                        "x": 0, "y": 0, "width": 64, "height": 32, "rotation": 0,
-                        "source": "custom.gif", "keep_aspect": True,
-                    },
-                    "keyframes": [{
-                        "frame": 1, "easing": "linear", "properties": {"source": "custom.gif"},
-                    }],
-                }],
-                "overrides": [{
-                    "frame": 0, "layer_id": "layer_media", "properties": {"source": "custom.gif"},
-                }],
-            }],
-        })
-
-        response = self.client.post(
-            "/api/media/custom.gif/classification", json={"built_in": True}
-        )
-
-        self.assertEqual(response.status_code, 200, response.get_data(as_text=True))
-        saved = self.store.get()
-        self.assertEqual(saved["media"]["splash"], "built-in/custom.gif")
-        layer = saved["custom_modules"][0]["layers"][0]
-        self.assertEqual(layer["properties"]["source"], "built-in/custom.gif")
-        self.assertEqual(layer["keyframes"][0]["properties"]["source"], "built-in/custom.gif")
-        self.assertEqual(
-            saved["custom_modules"][0]["overrides"][0]["properties"]["source"],
-            "built-in/custom.gif",
-        )
-        self.controller.reload.assert_called_once_with()
-
-    def test_moving_media_never_overwrites_a_destination_name_collision(self):
-        self.pair_browser()
-        built_in = self.media_dir / "built-in"
-        built_in.mkdir()
-        source = self.gif_bytes().getvalue()
-        destination = Image.new("RGB", (64, 32), "orange")
-        destination_bytes = io.BytesIO()
-        destination.save(destination_bytes, format="GIF")
-        (self.media_dir / "same.gif").write_bytes(source)
-        (built_in / "same.gif").write_bytes(destination_bytes.getvalue())
-
-        response = self.client.post(
-            "/api/media/same.gif/classification", json={"built_in": True}
-        )
-
-        self.assertEqual(response.status_code, 409)
-        self.assertEqual((self.media_dir / "same.gif").read_bytes(), source)
-        self.assertEqual((built_in / "same.gif").read_bytes(), destination_bytes.getvalue())
-        self.controller.reload.assert_not_called()
-
-    def test_media_move_recovers_same_inode_duplicate_after_restart(self):
-        self.pair_browser()
-        payload = self.gif_bytes().getvalue()
-        (self.media_dir / "built-in").mkdir()
-
-        for index, configuration_already_committed in enumerate((False, True), start=1):
-            name = f"custom{index}.gif"
-            target_name = f"built-in/{name}"
-            saved_reference = target_name if configuration_already_committed else name
-            with self.subTest(configuration_already_committed=configuration_already_committed):
-                source = self.media_dir / name
-                destination = self.media_dir / target_name
-                source.write_bytes(payload)
-                os.link(source, destination)
-                self.store.update({"media": {"splash": saved_reference}})
-
-                response = self.client.post(
-                    f"/api/media/{name}/classification", json={"built_in": True}
-                )
-
-                self.assertEqual(response.status_code, 200)
-                self.assertFalse(source.exists())
-                self.assertTrue(destination.is_file())
-                self.assertEqual(self.store.get()["media"]["splash"], target_name)
-
-    def test_interrupted_move_recovery_preserves_a_replaced_source(self):
-        self.pair_browser()
-        original = self.gif_bytes().getvalue()
-        replacement = b"replacement-source"
-        built_in = self.media_dir / "built-in"
-        built_in.mkdir()
-        source = self.media_dir / "custom.gif"
-        destination = built_in / "custom.gif"
-        source.write_bytes(original)
-        os.link(source, destination)
-        self.store.update({"media": {"splash": "custom.gif"}})
-        real_update = self.store.update
-
-        def replace_source_during_config_update(changes):
-            result = real_update(changes)
-            source.unlink(missing_ok=True)
-            source.write_bytes(replacement)
-            return result
-
-        self.store.update = Mock(side_effect=replace_source_during_config_update)
-
-        response = self.client.post(
-            "/api/media/custom.gif/classification", json={"built_in": True}
-        )
-
-        self.assertEqual(response.status_code, 409)
-        self.assertEqual(source.read_bytes(), replacement)
-        self.assertEqual(destination.read_bytes(), original)
-        self.assertEqual(self.store.get()["media"]["splash"], "custom.gif")
-        self.controller.reload.assert_not_called()
-
-    def test_media_move_cleans_up_destination_if_config_write_reports_file_exists(self):
-        self.pair_browser()
-        payload = self.gif_bytes().getvalue()
-        source = self.media_dir / "custom.gif"
-        source.write_bytes(payload)
-        self.store.update({"media": {"splash": "custom.gif"}})
-        self.store.update = Mock(side_effect=FileExistsError("config temp collision"))
-
-        response = self.client.post(
-            "/api/media/custom.gif/classification", json={"built_in": True}
-        )
-
-        self.assertEqual(response.status_code, 409, response.get_data(as_text=True))
-        self.assertEqual(source.read_bytes(), payload)
-        self.assertFalse((self.media_dir / "built-in" / "custom.gif").exists())
-        self.controller.reload.assert_not_called()
-
-    def test_media_move_preserves_source_and_replacement_if_destination_changes_mid_move(self):
-        self.pair_browser()
-        original = self.gif_bytes().getvalue()
-        source = self.media_dir / "custom.gif"
-        source.write_bytes(original)
-        self.store.update({"media": {"splash": "custom.gif"}})
-        destination = self.media_dir / "built-in" / "custom.gif"
-        displaced = self.media_dir / "built-in" / "linked-original.gif"
-        replacement_buffer = io.BytesIO()
-        Image.new("RGB", (64, 32), "orange").save(replacement_buffer, format="GIF")
-        replacement = replacement_buffer.getvalue()
-        real_update = self.store.update
-        update_calls = 0
-
-        def update_then_replace(changes):
-            nonlocal update_calls
-            result = real_update(changes)
-            update_calls += 1
-            if update_calls == 1:
-                destination.rename(displaced)
-                destination.write_bytes(replacement)
-            return result
-
-        self.store.update = Mock(side_effect=update_then_replace)
-        response = self.client.post(
-            "/api/media/custom.gif/classification", json={"built_in": True}
-        )
-
-        self.assertEqual(response.status_code, 409, response.get_data(as_text=True))
-        self.assertEqual(source.read_bytes(), original)
-        self.assertEqual(displaced.read_bytes(), original)
-        self.assertEqual(destination.read_bytes(), replacement)
-        self.assertEqual(self.store.get()["media"]["splash"], "custom.gif")
-        self.controller.reload.assert_not_called()
-
-    def test_media_move_reports_success_if_display_reload_fails_after_commit(self):
-        self.pair_browser()
-        payload = self.gif_bytes().getvalue()
-        (self.media_dir / "custom.gif").write_bytes(payload)
-        self.controller.reload.side_effect = RuntimeError("reload failed")
-
-        response = self.client.post(
-            "/api/media/custom.gif/classification", json={"built_in": True}
-        )
-
-        self.assertEqual(response.status_code, 200, response.get_data(as_text=True))
-        self.assertFalse(response.get_json()["display_reloaded"])
-        self.assertFalse((self.media_dir / "custom.gif").exists())
-        self.assertEqual((self.media_dir / "built-in" / "custom.gif").read_bytes(), payload)
-
-    def test_media_move_rejects_a_source_replaced_during_the_operation(self):
-        self.pair_browser()
-        source = self.media_dir / "custom.gif"
-        original = self.gif_bytes().getvalue()
-        source.write_bytes(original)
-        replacement_buffer = io.BytesIO()
-        Image.new("RGB", (64, 32), "orange").save(replacement_buffer, format="GIF")
-        replacement = replacement_buffer.getvalue()
-        displaced = self.media_dir / "displaced.gif"
-        real_link = os.link
-
-        def swap_then_link(*args, **kwargs):
-            source.rename(displaced)
-            source.write_bytes(replacement)
-            return real_link(*args, **kwargs)
-
-        with patch("webapp.os.link", side_effect=swap_then_link):
-            response = self.client.post(
-                "/api/media/custom.gif/classification", json={"built_in": True}
-            )
-
-        self.assertEqual(response.status_code, 409, response.get_data(as_text=True))
-        self.assertEqual(displaced.read_bytes(), original)
-        self.assertEqual(source.read_bytes(), replacement)
-        self.assertFalse((self.media_dir / "built-in" / "custom.gif").exists())
-        self.controller.reload.assert_not_called()
-
-    def test_media_move_requires_pairing_and_rejects_invalid_or_symlink_sources(self):
-        (self.media_dir / "custom.gif").write_bytes(self.gif_bytes().getvalue())
-        self.assertEqual(
-            self.client.post(
-                "/api/media/custom.gif/classification", json={"built_in": True}
-            ).status_code,
-            401,
-        )
-        self.pair_browser()
-        self.assertEqual(
-            self.client.post(
-                "/api/media/custom.gif/classification", json={"built_in": "yes"}
-            ).status_code,
-            400,
-        )
-        self.assertEqual(
-            self.client.post(
-                "/api/media/custom.gif/classification",
-                json={"built_in": True, "destination": "elsewhere"},
-            ).status_code,
-            400,
-        )
-        (self.media_dir / "linked.gif").symlink_to(self.media_dir / "custom.gif")
-        self.assertEqual(
-            self.client.post(
-                "/api/media/linked.gif/classification", json={"built_in": True}
-            ).status_code,
-            404,
-        )
-        self.assertTrue((self.media_dir / "custom.gif").is_file())
-        self.assertFalse((self.media_dir / "built-in" / "custom.gif").exists())
+        self.assertEqual(promoted.status_code, 405)
+        self.assertEqual(demoted.status_code, 405)
+        self.assertEqual((self.media_dir / "custom.gif").read_bytes(), payload)
+        self.assertEqual((built_in / "system.gif").read_bytes(), payload)
+        self.assertFalse((built_in / "custom.gif").exists())
+        self.assertFalse((self.media_dir / "system.gif").exists())
 
     def test_media_listing_reports_automatic_timeline_for_animated_gif(self):
         self.pair_browser()
