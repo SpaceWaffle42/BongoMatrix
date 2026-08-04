@@ -695,48 +695,30 @@ The request cap is 128 MB. Images/GIFs are decoded as an unprivileged sanitizer 
 - `/root/matrix_new/tests/test_weather.py` — weather request/render customization coverage.
 - `/root/matrix_new/tests/test_webapp.py` — grouped editor, reset, dashboard, and API coverage.
 
-## Media reorganization — completed and deployed 2026-08-04
+## Filesystem-only default media — current behavior
 
-The media classification limitation is resolved. Classification remains location-based, but paired users now have friendly controls to change it:
+The later user decision supersedes the prior paired media-reorganization feature:
 
-- Built-in cards expose `Move to My media`.
-- My media cards expose `Move to Built-in`.
-- The paired route is `POST /api/media/<path>/classification` with an exact boolean `built_in` body.
-- Moves preserve the original inode with no-overwrite hard linking, descriptor-relative directory access, source/destination identity rechecks, config rollback, and replacement-safe cleanup.
-- Splash, sleep, and advanced-canvas base/keyframe/override media references migrate automatically.
-- The dashboard updates its local media/model/select state from the committed response before trying a second refresh request. A failed refresh therefore cannot leave stale controls after a successful move.
-- A post-commit display reload failure is reported as a successful move with a clear warning, rather than a false HTTP 500.
-- Legacy bundled-reference migration is filesystem-aware: it runs only when the built-in file exists and the root file does not. Intentionally demoted bundled names therefore survive service restarts. Canvas references participate in this migration too.
-- Media and configuration directory entries are `fsync`ed after link, unlink, rollback, and atomic config replacement. If a process interruption leaves source and destination as the exact same regular-file inode, retrying the requested classification safely completes reference migration and source cleanup; a different-inode collision remains untouched.
-- On 2026-08-04 the user explicitly rejected and rolled back the later fsync fault-handling/hidden-transaction-link revision. The five application/test files were restored exactly from `/home/admin/matrix-backups/pre-final-fsync-fault-fixes-20260804T173315Z`; do not reapply that rejected revision without a new explicit request.
+- Every regular media file physically under `resources/media/built-in/` is a protected default file.
+- Media outside that directory is user media and exposes a dashboard Remove action, subject to reference-safety checks for active splash, sleep, and custom-canvas use.
+- The dashboard has no `Move to Built-in` or `Move to My media` controls.
+- `POST /api/media/<path>/classification` no longer exists; Flask returns `405` and leaves both source and destination paths unchanged.
+- The only way to change default classification is for an administrator to deliberately move, add, replace, or remove files in the host filesystem.
+- Uploads continue to land outside `built-in/`, so uploaded media remains removable user media.
+- Existing path-confinement, regular-file, symlink, media-validation, and active-reference safeguards remain in place.
 
-Verification:
+Historical note: the previous move transaction and its paired controls were implemented and verified, then intentionally removed at the user's request. Do not restore them without a new explicit request. The rejected 176-test fsync-hardening revision also remains rejected.
 
-- Final local suite after rollback: 173 tests passed.
-- Final deployed Pi suite after rollback: 173 tests passed, with two Node-only tests skipped on the Pi; both pass locally where Node is installed.
-- Rendered inline dashboard JavaScript passed `/usr/local/bin/node --check`.
-- The later fault-handling changes prompted by the final review were intentionally rolled back at the user's request.
-- Backup: `/home/admin/matrix-backups/pre-media-reorganization-20260804T165128Z`.
-- Crash-recovery hardening backup: `/home/admin/matrix-backups/pre-media-crash-recovery-20260804T171631Z`.
-- Final fsync fault-handling backup: `/home/admin/matrix-backups/pre-final-fsync-fault-fixes-20260804T173315Z`.
-- Source/config/media/paired data were backed up before deployment; deployment excluded `venv`, `data`, and `resources/media`.
-- Current service after rollback refresh: active/running, master PID `426079`, worker PID `426095`, `NRestarts=0`.
-- Hardware lock owner is worker `426095`; a second claim is blocked when tested against `/run/matrix-display/matrix-display.lock`.
-- HTTP `/` returns the expected `302` when unpaired; paired-only media API returns `401` without a session.
-- Warning-level journal after final restart: none.
-- Local/deployed source checksum drift: none.
-- Paired registry remains 3 devices; current registry SHA-256 is `c169e7022199c57eaaaa0e7e5a79bdd327d42916ed45dd957eabd4e07c468d24`.
+Local verification for this behavior change:
 
-The user chose to exercise the controls in their paired dashboard instead of allowing the agent's automated authenticated move/preview script. Live state confirms that test changed classification in both directions and survived the final service restart:
-
-- Built-in: `built-in/sleep.gif`, `built-in/squares.gif`
-- My media: `hermes_self_portrait.png`, `squares_tb.gif`
-- Splash reference: `built-in/squares.gif`
-- Sleep reference: `built-in/sleep.gif`
-- Current config SHA-256: `f6c7fdde7f60bef16d8392d9fe0dff7d1303702887a49965e4874f5b88827460`
-- Custom modules: 0
-
-Do not restore the pre-deployment media/config arrangement: the current organization is a legitimate user change. The blocked automated live-check command did not execute, and its local temporary script was removed; no temporary pairing device, cookie, media, or remote verifier state was created.
+- RED: focused dashboard/API tests initially failed because controls and the move route were still present.
+- GREEN: 4 focused tests passed after removing the route and controls.
+- Full local suite: 164 tests passed. The count decreased only because eight obsolete tests for the intentionally removed move transaction were retired and replaced by immutable-classification coverage.
+- `python3 -m compileall` passed.
+- `node --check app/static/custom_canvas.js` passed.
+- Rendered inline dashboard JavaScript passed Node syntax checking in a temporary ad-hoc verifier.
+- Ad-hoc media behavior marker: `HERMES_AD_HOC_MEDIA_DEFAULTS_PASS checks=12`.
+- Deployment and live verification were pending when this section was first written; inspect the latest Git history and service state rather than relying on historical PIDs below.
 
 ## Remaining known roadmap
 
