@@ -16,9 +16,13 @@ def play_media(matrix, filename, duration, stop_event=None, settings=None):
         }
     suffix = Path(filename).suffix.lower()
     if suffix == ".gif":
+        playback = {}
+        if settings and "gif_speed_percent" in settings:
+            playback["playback_rate"] = settings["gif_speed_percent"] / 100.0
         return matrix.show_gif(
             filename,
             **geometry,
+            **playback,
             loops=0,
             stop_event=stop_event,
             max_duration=duration,

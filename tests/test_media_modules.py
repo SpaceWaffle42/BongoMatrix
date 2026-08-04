@@ -21,6 +21,26 @@ class MediaModuleTests(unittest.TestCase):
         self.assertTrue(result)
         matrix.show_gif.assert_called_once_with("sleep.gif", loops=0, stop_event=stop, max_duration=2)
 
+    def test_sleep_gif_speed_percentage_is_forwarded_as_playback_rate(self):
+        matrix = Mock()
+        matrix.show_gif.return_value = True
+        settings = {
+            "x": 0, "y": 0, "width": 64, "height": 32,
+            "keep_aspect": True, "video_fps": 20, "gif_speed_percent": 250,
+        }
+
+        result = sleep_screen.run(
+            matrix,
+            {"media": {"sleep": "sleep.gif"}, "media_layout": {"sleep": settings}},
+            duration=2,
+        )
+
+        self.assertTrue(result)
+        matrix.show_gif.assert_called_once_with(
+            "sleep.gif", x=0, y=0, width=64, height=32, keep_aspect=True,
+            playback_rate=2.5, loops=0, stop_event=None, max_duration=2,
+        )
+
     def test_mp4_uses_interruptible_video_playback(self):
         matrix = Mock()
         matrix.show_video.return_value = True
@@ -72,6 +92,30 @@ class MediaModuleTests(unittest.TestCase):
         )
         self.assertTrue(result)
         matrix.show_image.assert_called_once_with("custom.png", delay=None)
+        matrix.show_gif.assert_not_called()
+
+    def test_static_sleep_image_ignores_gif_playback_speed(self):
+        matrix = Mock()
+        matrix.show_image.return_value = True
+        stop = threading.Event()
+        stop.set()
+        settings = {
+            "x": 0, "y": 0, "width": 64, "height": 32,
+            "keep_aspect": True, "video_fps": 20, "gif_speed_percent": 400,
+        }
+
+        result = sleep_screen.run(
+            matrix,
+            {"media": {"sleep": "custom.png"}, "media_layout": {"sleep": settings}},
+            duration=8,
+            stop_event=stop,
+        )
+
+        self.assertTrue(result)
+        matrix.show_image.assert_called_once_with(
+            "custom.png", x=0, y=0, width=64, height=32,
+            keep_aspect=True, delay=None,
+        )
         matrix.show_gif.assert_not_called()
 
 

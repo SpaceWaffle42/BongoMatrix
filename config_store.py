@@ -108,7 +108,7 @@ DEFAULT_CONFIG = {
     "media": {"splash": "built-in/squares_tb.gif", "sleep": "built-in/sleep.gif"},
     "media_layout": {
         "splash": {"x": 0, "y": 0, "width": 64, "height": 32, "keep_aspect": True, "video_fps": 20},
-        "sleep": {"x": 0, "y": 0, "width": 64, "height": 32, "keep_aspect": True, "video_fps": 20},
+        "sleep": {"x": 0, "y": 0, "width": 64, "height": 32, "keep_aspect": True, "video_fps": 20, "gif_speed_percent": 100},
     },
     "custom_modules": [],
     "playlist": [
@@ -534,7 +534,10 @@ def validate_config(config):
             )
 
     for module_name, settings in config["media_layout"].items():
-        if set(settings) != {"x", "y", "width", "height", "keep_aspect", "video_fps"}:
+        expected_fields = {"x", "y", "width", "height", "keep_aspect", "video_fps"}
+        if module_name == "sleep":
+            expected_fields.add("gif_speed_percent")
+        if set(settings) != expected_fields:
             raise ValueError(f"media layout {module_name} has invalid fields")
         for key, low, high in (
             ("x", 0, 63), ("y", 0, 31), ("width", 1, 64),
@@ -545,6 +548,10 @@ def validate_config(config):
                 raise ValueError(f"media layout {module_name} {key} must be between {low} and {high}")
         if not isinstance(settings["keep_aspect"], bool):
             raise ValueError(f"media layout {module_name} keep_aspect must be a boolean")
+        if module_name == "sleep":
+            speed = settings["gif_speed_percent"]
+            if isinstance(speed, bool) or not isinstance(speed, int) or not 25 <= speed <= 400:
+                raise ValueError("sleep GIF playback speed must be between 25 and 400 percent")
 
     custom_modules = config["custom_modules"]
     if not isinstance(custom_modules, list) or len(custom_modules) > 20:
