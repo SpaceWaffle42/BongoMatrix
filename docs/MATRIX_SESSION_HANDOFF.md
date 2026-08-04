@@ -718,7 +718,12 @@ Local verification for this behavior change:
 - `node --check app/static/custom_canvas.js` passed.
 - Rendered inline dashboard JavaScript passed Node syntax checking in a temporary ad-hoc verifier.
 - Ad-hoc media behavior marker: `HERMES_AD_HOC_MEDIA_DEFAULTS_PASS checks=12`.
-- Deployment and live verification were pending when this section was first written; inspect the latest Git history and service state rather than relying on historical PIDs below.
+- Deployed from merged GitLab MR `!3` after backup `/home/admin/matrix-backups/pre-filesystem-default-media-20260804T222656`; deployment excluded `venv/`, `data/`, and `resources/media/`.
+- Full deployed suite: 164 tests passed, with the same two Node-only browser tests skipped on the Matrix host and passing locally.
+- Production restarted successfully with `NRestarts=0`; `/` returned `302`, unpaired `/api/media` returned `401`, and the removed classification POST returned `405`.
+- The sole gunicorn worker held `/run/matrix-display/matrix-display.lock`; a competing lock acquisition was rejected.
+- Warning-level service journal since restart was empty, and a checksum-oriented rsync dry-run reported no source drift.
+- Concurrent legitimate dashboard activity during deployment added `cat_cleaning_1.gif` and `off_hours.gif`, changed sleep to `off_hours.gif`, and updated display/device state. These newer persistent changes were preserved rather than overwritten from backup. Built-in files remained `built-in/sleep.gif` and `built-in/squares.gif`, splash remained `built-in/squares.gif`, paired-device count remained three, and custom-module count remained zero.
 
 ## Remaining known roadmap
 
