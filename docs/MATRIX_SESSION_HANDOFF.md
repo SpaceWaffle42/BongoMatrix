@@ -1,6 +1,6 @@
 # Raspberry Pi RGB Matrix — Fresh-session handoff
 
-Generated: 2026-08-04T23:08:17+00:00 (Pi timezone: Europe/London)
+Generated: 2026-08-04T23:41:43+00:00 (Pi timezone: Europe/London)
 
 ## Purpose
 
@@ -33,26 +33,38 @@ Always preserve the deployed `venv`, `data`, and `resources/media` directories d
 
 ## Current live health
 
-Verified after the OpenWeather deployment on 2026-08-05:
+Verified after the sleep-GIF-speed deployment on 2026-08-05:
 
-- GitLab MR `!5` merged to protected `main` as `b1ed83a`.
-- `matrix-web.service`: `active/running`; `MainPID=483710`; `NRestarts=0`.
+- GitLab MR `!7` merged to protected `main` as `eed6798`.
+- `matrix-web.service`: `active/running`; `MainPID=490262`; `NRestarts=0`.
 - HTTP `/` returns the expected `302` and the unauthenticated OpenWeather secret API returns `401`.
-- Production worker `483715` owns `/run/matrix-display/matrix-display.lock`; a competing root process was rejected.
+- Production worker `490267` owns `/run/matrix-display/matrix-display.lock`; a competing root process was rejected.
 - Warning-level service journal count since refresh: `0`.
-- Local suite: `194/194` passed. Deployed suite: `194/194` passed with two expected Node-only skips.
-- Python compilation passed locally and on the Pi; rendered dashboard JavaScript passed locally.
+- Local suite: `207/207` passed. Deployed suite: `207/207` passed with two expected Node-only skips.
+- Python compilation passed locally and on the Pi; static and rendered dashboard JavaScript passed locally.
 - Checksum deployment comparison reports `SOURCE_CHECKSUM_DRIFT=0`.
-- Existing keyless Open-Meteo `weather` remains enabled. Migration changed no prior setting or playlist entry and appended only disabled `openweather_overview` and `openweather_forecast` entries plus their settings sections.
-- No OpenWeather key was supplied. The separate secret file does not exist, and ordinary configuration contains no API key.
+- Migration changed exactly one setting: `media_layout.sleep.gif_speed_percent=100`. The selected sleep media remains `built-in/off_hours.gif`.
+- Existing keyless Open-Meteo remains enabled, optional OpenWeather apps remain disabled, and no OpenWeather key was supplied.
 - Paired-device registry remains byte-identical (`b0547667151dba45324645bb9a104ad9e1384a97eef798b9526e57821a44535c`) with three devices.
-- All six media files remain byte-identical as manifest SHA-256 `2878680b4f27c0d56ff02abfcc086113dc2d275ba4b44398c79f45d01aa14bf3`.
-- Post-migration configuration SHA-256: `01b41fd9fcda14e1825f0de01f7460c26787cd05ac7560063676114ad3e131eb`.
-- Verified root-owned `0700` backup: `/home/admin/matrix-backups/pre-openweather-20260805T000306`, containing tested `0600` source, data, and media archives.
+- All six media files remain byte-identical as manifest SHA-256 `c4a93b493f9a61b484937f5d98f6e5ab6c44606fc8e9775a4ba0d8bb84d687b5`.
+- Verified root-owned `0700` backup: `/home/admin/matrix-backups/pre-sleep-gif-speed-20260805T003847`, containing tested `0600` source, data, and media archives.
 
 PIDs and pairing PINs are ephemeral; re-check them rather than treating the values above as permanent.
 
-## Latest completed feature: optional OpenWeather apps and separate device secret
+## Latest completed feature: sleep GIF playback speed
+
+- The grouped Sleep media editor now exposes a friendly `GIF playback speed (%)` control from `25%` through `400%` in five-percent steps.
+- `100%` preserves each GIF frame's embedded timing. Effective frame delay is embedded delay divided by the playback-rate multiplier.
+- Legacy configuration migrates to `100%` without changing the selected media, layout, playlists, paired devices, or files.
+- Validation rejects booleans, strings, zero, negatives, non-finite values, fractional percentages, and values outside `25..400`; the renderer independently enforces `0.25x..4.0x`.
+- A 10 ms frame-delay floor prevents zero-delay loops. Waits never exceed the remaining module duration and use the stop event so wake-up, preview interruption, and shutdown remain responsive at the slowest rate.
+- Static sleep images and MP4 files ignore the GIF speed. Splash behavior is unchanged because only Sleep settings contain the rate field.
+- Playback streams frames with Pillow, preserves disposal/compositing behavior, closes the source on every exit, and never rewrites the GIF file.
+- Browser preview polls the same capture-aware framebuffer submitted to the physical Matrix, so it cannot apply a contradictory independent rate.
+- The actual selected 30-frame production GIF has 100 ms embedded frame timing; read-only verification left its size and modification timestamp unchanged.
+- Independent review passed with no security concerns or logic errors. Local and production suites both passed `207/207`; production had only the two expected Node-only skips.
+
+## Previous completed feature: optional OpenWeather apps and separate device secret
 
 - The existing keyless Open-Meteo app remains the enabled free default.
 - Optional OpenWeather Overview and three-hour Forecast apps are added disabled, with independent friendly location, units, colour, layout, and timing editors.
