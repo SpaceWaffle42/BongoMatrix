@@ -1,0 +1,29 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>Pair Matrix</title>
+  <style>
+    :root{color-scheme:dark;font-family:system-ui,sans-serif;background:#060811;color:#edfaff}
+    body{min-height:100vh;display:grid;place-items:center;margin:0;background:radial-gradient(circle at 50% 25%,#152b48,#060811 55%)}
+    main{width:min(88vw,420px);padding:2rem;border:1px solid #1ec8d8;border-radius:18px;background:#09121ed9;box-shadow:0 0 50px #22d3ee26;text-align:center}
+    h1{letter-spacing:.18em;color:#67e8f9}.hint{color:#9fb6c4;line-height:1.5}.error{color:#fb7185}
+    input{box-sizing:border-box;width:100%;margin:1rem 0;padding:1rem;color:#fff;background:#030712;border:1px solid #40506a;border-radius:10px}
+    input[name=pin]{font:700 1.5rem monospace;text-align:center;letter-spacing:.3em}
+    button{width:100%;padding:.9rem;border:0;border-radius:10px;background:#22d3ee;color:#041116;font-weight:800;cursor:pointer}
+  </style>
+</head>
+<body><main>
+  <h1>MATRIX</h1>
+  {% if error %}<p class="error">{{ error }}</p>{% endif %}
+  {% if paired %}
+  {% if pairing_ready %}<p>Pairing is ready. Enter the PIN shown on the Matrix on the new device.</p>{% endif %}
+  <p class="hint">This device is already paired. Start pairing when you want to add another phone, tablet, or computer.</p>
+  <form method="post" action="/pair/new"><button>PAIR ANOTHER DEVICE</button></form>
+  <p class="hint"><a href="/">Return to Matrix settings</a></p>
+  {% else %}
+  <p class="hint">Enter the six-digit PIN currently shown on the LED display.</p>
+  <form method="post"><input name="device_name" maxlength="40" autocomplete="name" placeholder="Name this device, e.g. Alex's phone" required><input name="pin" inputmode="numeric" pattern="[0-9]{6}" maxlength="6" autocomplete="one-time-code" autofocus required><button>PAIR DISPLAY</button></form>
+  {% endif %}
+</main></body></html>

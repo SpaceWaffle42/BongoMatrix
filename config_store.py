@@ -1,0 +1,654 @@
+"""Persistent, validated configuration for the Matrix display."""
+
+from __future__ import annotations
+
+import copy
+import json
+import math
+import os
+import re
+import tempfile
+import threading
+from pathlib import Path
+
+from module_options import LAVA_PALETTES
+
+ALLOWED_MODULES = {"clock_lava", "weather", "splash", "sleep"}
+CUSTOM_FONT_ADVANCES = {"4x6": 4, "5x7": 5, "6x10": 6, "7x13": 7, "9x18B": 9}
+
+
+def scrolling_text_duration(module, matrix_width=64):
+    """Return the nominal time for every configured pixel traversal."""
+    text_width = len(module["text"]) * CUSTOM_FONT_ADVANCES[module["font"]]
+    frames_per_loop = matrix_width + text_width + 1
+    milliseconds = frames_per_loop * module["loops"] * module["speed"] * 1000
+    return math.floor(milliseconds + 0.5) / 1000
+
+DEFAULT_CONFIG = {
+
+    "device": {"name": "Matrix"},
+    "pairing": {"max_devices": 4},
+    "display": {
+        "day_brightness": 100,
+        "night_brightness": 10,
+        "active_start": "08:00",
+        "active_end": "20:00",
+    },
+    "weather": {
+        "location": "Brighton, GB",
+        "latitude": None,
+        "longitude": None,
+        "units": "celsius",
+        "temperature_y": 17,
+        "ticker_y": 31,
+        "scroll_direction": "left",
+        "scroll_speed": "normal",
+        "now_x": 1,
+        "now_y": 7,
+        "temperature_x": 2,
+        "high_x": 35,
+        "high_y": 8,
+        "low_x": 35,
+        "low_y": 15,
+        "line_y": 20,
+        "background_colour": "#000000",
+        "text_colour": "#dcd5d5",
+        "high_colour": "#ff71ce",
+        "low_colour": "#01cdfe",
+        "line_colour": "#00ffff",
+        "ticker_colour": "#ffb300",
+    },
+    "lava": {
+        "enabled_palettes": list(LAVA_PALETTES),
+        "custom_enabled": False,
+        "custom_colours": ["#000000", "#ff00ff", "#00ffff"],
+        "custom_palettes": [],
+        "blob_count": 4,
+        "blob_min_radius": 5,
+        "blob_max_radius": 10,
+        "blob_speed": 0.25,
+        "field_threshold": 1.0,
+        "blur_radius": 2,
+        "edge_width": 4,
+        "show_time": True,
+        "show_date": True,
+        "time_font": "9x18B",
+        "date_font": "clR6x12",
+        "time_align": "center",
+        "date_align": "center",
+        "time_y": 15,
+        "date_y": 27,
+        "text_colour": "#ffffff",
+        "border_colour": "#000000",
+    },
+    "media": {"splash": "built-in/squares_tb.gif", "sleep": "built-in/sleep.gif"},
+    "media_layout": {
+        "splash": {"x": 0, "y": 0, "width": 64, "height": 32, "keep_aspect": True, "video_fps": 20},
+        "sleep": {"x": 0, "y": 0, "width": 64, "height": 32, "keep_aspect": True, "video_fps": 20},
+    },
+    "custom_modules": [],
+    "playlist": [
+        {"module": "splash", "duration": 8, "enabled": True},
+        {"module": "weather", "duration": 20, "enabled": True},
+        {"module": "clock_lava", "duration": 300, "enabled": True},
+    ],
+}
+
+
+def _merge(base, changes):
+    result = copy.deepcopy(base)
+    for key, value in changes.items():
+        if isinstance(value, dict) and isinstance(result.get(key), dict):
+            result[key] = _merge(result[key], value)
+        else:
+            result[key] = copy.deepcopy(value)
+    return result
+
+
+def _validate_time(value):
+    try:
+        hour, minute = (int(part) for part in value.split(":"))
+    except (AttributeError, TypeError, ValueError) as exc:
+        raise ValueError(f"Invalid time: {value!r}") from exc
+    if not 0 <= hour <= 23 or not 0 <= minute <= 59:
+        raise ValueError(f"Invalid time: {value!r}")
+
+
+def _validate_update_keys(changes, schema, prefix=""):
+    for key, value in changes.items():
+        if key not in schema:
+            raise ValueError(f"Unknown configuration key: {prefix}{key}")
+        if isinstance(value, dict):
+            if not isinstance(schema[key], dict):
+                raise ValueError(f"{prefix}{key} must not be an object")
+            _validate_update_keys(value, schema[key], f"{prefix}{key}.")
+
+
+def _is_hex_colour(value):
+    return bool(isinstance(value, str) and re.fullmatch(r"#[0-9a-fA-F]{6}", value))
+
+
+def _is_safe_media_reference(value):
+    if not isinstance(value, str):
+        return False
+    parts = Path(value).parts
+    if len(parts) == 1:
+        filename = parts[0]
+    elif len(parts) == 2 and parts[0] == "built-in":
+        filename = parts[1]
+    else:
+        return False
+    return bool(
+        re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,127}", filename)
+        and Path(filename).suffix.lower() in {".gif", ".png", ".jpg", ".jpeg", ".webp", ".mp4"}
+    )
+
+
+def _validate_canvas_properties(properties, layer_type, *, partial=False):
+    fields = {
+        "text": {"x", "y", "text", "font", "colour"},
+        "time": {"x", "y", "format", "font", "colour"},
+        "pixels": {"points", "colour"},
+        "line": {"x1", "y1", "x2", "y2", "width", "colour"},
+        "rectangle": {"x", "y", "width", "height", "rotation", "colour", "filled"},
+        "polygon": {"points", "rotation", "colour", "filled"},
+        "circle": {"x", "y", "radius", "colour", "filled"},
+        "ellipse": {"x", "y", "radius_x", "radius_y", "rotation", "colour", "filled"},
+        "media": {"x", "y", "width", "height", "rotation", "source", "keep_aspect"},
+    }.get(layer_type)
+    if fields is None:
+        raise ValueError("custom canvas layer type is not supported")
+    optional_fields = {"rotation"} if layer_type in {"text", "time", "pixels", "line"} else set()
+    allowed_fields = fields | optional_fields | {"present", "z_index"}
+    if (
+        not isinstance(properties, dict)
+        or (not partial and (not fields <= set(properties) or not set(properties) <= allowed_fields))
+        or (partial and not set(properties) <= allowed_fields)
+    ):
+        raise ValueError("custom canvas layer properties are invalid")
+    for key in ("x", "y", "x1", "y1", "x2", "y2"):
+        if key in properties:
+            value = properties[key]
+            if isinstance(value, bool) or not isinstance(value, (int, float)) or not -128 <= value <= 191:
+                raise ValueError(f"custom canvas {key} must be between -128 and 191")
+    for key in ("width", "height"):
+        if key in properties:
+            value = properties[key]
+            high = 8 if layer_type == "line" and key == "width" else 128
+            if isinstance(value, bool) or not isinstance(value, (int, float)) or not 1 <= value <= high:
+                raise ValueError(f"custom canvas {key} must be between 1 and {high}")
+    for key in ("radius", "radius_x", "radius_y"):
+        if key in properties:
+            value = properties[key]
+            if isinstance(value, bool) or not isinstance(value, (int, float)) or not 1 <= value <= 128:
+                raise ValueError(f"custom canvas {key} must be between 1 and 128")
+    if "rotation" in properties:
+        value = properties["rotation"]
+        if isinstance(value, bool) or not isinstance(value, (int, float)) or not -3600 <= value <= 3600:
+            raise ValueError("custom canvas rotation must be between -3600 and 3600")
+    if "colour" in properties:
+        if not _is_hex_colour(properties["colour"]):
+            raise ValueError("custom canvas colours must use #RRGGBB format")
+        properties["colour"] = properties["colour"].lower()
+    if "filled" in properties and not isinstance(properties["filled"], bool):
+        raise ValueError("custom canvas filled must be a boolean")
+    if "keep_aspect" in properties and not isinstance(properties["keep_aspect"], bool):
+        raise ValueError("custom canvas keep_aspect must be a boolean")
+    if "present" in properties and not isinstance(properties["present"], bool):
+        raise ValueError("custom canvas present must be a boolean")
+    if "z_index" in properties:
+        value = properties["z_index"]
+        if isinstance(value, bool) or not isinstance(value, int) or not -64 <= value <= 64:
+            raise ValueError("custom canvas z_index must be an integer between -64 and 64")
+    if "source" in properties and not _is_safe_media_reference(properties["source"]):
+        raise ValueError("custom canvas media source is invalid")
+    if "text" in properties and (
+        not isinstance(properties["text"], str)
+        or not 1 <= len(properties["text"]) <= 200
+        or any(ord(character) < 32 for character in properties["text"])
+    ):
+        raise ValueError("custom canvas text must be 1-200 printable characters")
+    if "font" in properties and properties["font"] not in {"4x6", "5x7", "6x10", "7x13", "9x18B"}:
+        raise ValueError("custom canvas font is not supported")
+    if "format" in properties and properties["format"] not in {"24h", "24h_seconds", "12h", "12h_seconds"}:
+        raise ValueError("custom canvas time format is not supported")
+    if "points" in properties:
+        points = properties["points"]
+        minimum = 3 if layer_type == "polygon" else 1
+        maximum = 64 if layer_type == "polygon" else 2048
+        if not isinstance(points, list) or not minimum <= len(points) <= maximum:
+            raise ValueError(f"custom canvas {layer_type} points count is invalid")
+        for point in points:
+            if (
+                not isinstance(point, list) or len(point) != 2
+                or any(isinstance(value, bool) or not isinstance(value, (int, float)) or not -128 <= value <= 191 for value in point)
+            ):
+                raise ValueError("custom canvas points must be numeric x/y pairs")
+    return len(properties.get("points", []))
+
+
+def _validate_canvas_module(item):
+    required = {
+        "id", "name", "type", "background", "frame_count", "fps",
+        "playback", "layers", "overrides",
+    }
+    if set(item) != required:
+        raise ValueError("custom canvas modules have invalid fields")
+    if len(json.dumps(item, separators=(",", ":")).encode()) > 1_048_576:
+        raise ValueError("custom canvas module must not exceed 1 MiB")
+    if not _is_hex_colour(item["background"]):
+        raise ValueError("custom canvas background must use #RRGGBB format")
+    item["background"] = item["background"].lower()
+    frame_count = item["frame_count"]
+    if isinstance(frame_count, bool) or not isinstance(frame_count, int) or not 1 <= frame_count <= 120:
+        raise ValueError("custom canvas frame_count must be between 1 and 120")
+    fps = item["fps"]
+    if isinstance(fps, bool) or not isinstance(fps, (int, float)) or not 1 <= fps <= 60:
+        raise ValueError("custom canvas fps must be between 1 and 60")
+    if item["playback"] not in {"loop", "ping_pong", "hold"}:
+        raise ValueError("custom canvas playback must be loop, ping_pong, or hold")
+    layers = item["layers"]
+    if not isinstance(layers, list) or not 1 <= len(layers) <= 64:
+        raise ValueError("custom canvas layers must contain 1-64 items")
+    layer_ids = set()
+    keyframe_total = 0
+    point_total = 0
+    for layer in layers:
+        if not isinstance(layer, dict) or set(layer) != {"id", "name", "type", "visible", "properties", "keyframes"}:
+            raise ValueError("custom canvas layers have invalid fields")
+        layer_id = layer["id"]
+        if not isinstance(layer_id, str) or not re.fullmatch(r"layer_[a-z0-9_-]{1,40}", layer_id) or layer_id in layer_ids:
+            raise ValueError("custom canvas layer ids must be unique safe ids")
+        layer_ids.add(layer_id)
+        if not isinstance(layer["name"], str) or not 1 <= len(layer["name"].strip()) <= 40:
+            raise ValueError("custom canvas layer name must be 1-40 characters")
+        if not isinstance(layer["visible"], bool):
+            raise ValueError("custom canvas layer visible must be a boolean")
+        point_total += _validate_canvas_properties(layer["properties"], layer["type"])
+        keyframes = layer["keyframes"]
+        if not isinstance(keyframes, list):
+            raise ValueError("custom canvas keyframes must be a list")
+        keyframe_total += len(keyframes)
+        seen_frames = set()
+        for keyframe in keyframes:
+            if not isinstance(keyframe, dict) or set(keyframe) != {"frame", "easing", "properties"}:
+                raise ValueError("custom canvas keyframes have invalid fields")
+            frame = keyframe["frame"]
+            if isinstance(frame, bool) or not isinstance(frame, int) or not 0 <= frame < frame_count or frame in seen_frames:
+                raise ValueError("custom canvas keyframe frame is invalid or duplicated")
+            seen_frames.add(frame)
+            if keyframe["easing"] not in {"linear", "ease_in", "ease_out", "ease_in_out", "step"}:
+                raise ValueError("custom canvas keyframe easing is invalid")
+            point_total += _validate_canvas_properties(keyframe["properties"], layer["type"], partial=True)
+    if keyframe_total > 512:
+        raise ValueError("custom canvas supports at most 512 keyframes")
+    overrides = item["overrides"]
+    if not isinstance(overrides, list) or len(overrides) > 512:
+        raise ValueError("custom canvas overrides must be a list with at most 512 items")
+    seen_overrides = set()
+    layer_types = {layer["id"]: layer["type"] for layer in layers}
+    for override in overrides:
+        if not isinstance(override, dict) or set(override) != {"frame", "layer_id", "properties"}:
+            raise ValueError("custom canvas overrides have invalid fields")
+        frame = override["frame"]
+        layer_id = override["layer_id"]
+        key = (frame, layer_id)
+        if isinstance(frame, bool) or not isinstance(frame, int) or not 0 <= frame < frame_count:
+            raise ValueError("custom canvas override frame is invalid")
+        if layer_id not in layer_types or key in seen_overrides:
+            raise ValueError("custom canvas override layer is invalid or duplicated")
+        seen_overrides.add(key)
+        point_total += _validate_canvas_properties(override["properties"], layer_types[layer_id], partial=True)
+    if point_total > 8192:
+        raise ValueError("custom canvas supports at most 8192 aggregate points")
+
+
+def validate_config(config):
+
+    name = config["device"]["name"]
+    if not isinstance(name, str) or not name.strip() or len(name.strip()) > 40:
+        raise ValueError("device name must be 1-40 characters")
+
+    max_devices = config["pairing"]["max_devices"]
+    if isinstance(max_devices, bool) or not isinstance(max_devices, int) or not 1 <= max_devices <= 10:
+        raise ValueError("pairing max_devices must be an integer from 1 to 10")
+
+    display = config["display"]
+    for key in ("day_brightness", "night_brightness"):
+        value = display[key]
+        if not isinstance(value, int) or not 1 <= value <= 100:
+            raise ValueError(f"{key} must be an integer from 1 to 100")
+    _validate_time(display["active_start"])
+    _validate_time(display["active_end"])
+
+    location = config["weather"]["location"]
+    if not isinstance(location, str) or not location.strip() or len(location) > 100:
+        raise ValueError("weather location must be 1-100 characters")
+    if config["weather"]["units"] not in {"celsius", "fahrenheit"}:
+        raise ValueError("weather units must be celsius or fahrenheit")
+    latitude = config["weather"]["latitude"]
+    longitude = config["weather"]["longitude"]
+    if (latitude is None) != (longitude is None):
+        raise ValueError("weather latitude and longitude must both be set or both be empty")
+    if latitude is not None:
+        if isinstance(latitude, bool) or not isinstance(latitude, (int, float)) or not -90 <= latitude <= 90:
+            raise ValueError("weather latitude must be between -90 and 90")
+        if isinstance(longitude, bool) or not isinstance(longitude, (int, float)) or not -180 <= longitude <= 180:
+            raise ValueError("weather longitude must be between -180 and 180")
+    if config["weather"]["scroll_direction"] not in {"left", "right"}:
+        raise ValueError("weather scroll direction must be left or right")
+    if config["weather"]["scroll_speed"] not in {"slow", "normal", "fast"}:
+        raise ValueError("weather scroll speed must be slow, normal, or fast")
+    for key in ("now_x", "temperature_x", "high_x", "low_x"):
+        value = config["weather"][key]
+        if isinstance(value, bool) or not isinstance(value, int) or not -63 <= value <= 63:
+            raise ValueError(f"weather {key} must be between -63 and 63")
+    for key in ("now_y", "temperature_y", "high_y", "low_y", "line_y", "ticker_y"):
+        value = config["weather"][key]
+        if isinstance(value, bool) or not isinstance(value, int) or not 0 <= value <= 31:
+            raise ValueError(f"weather {key} must be between 0 and 31")
+    for key in (
+        "background_colour", "text_colour", "high_colour", "low_colour",
+        "line_colour", "ticker_colour",
+    ):
+        if not _is_hex_colour(config["weather"][key]):
+            raise ValueError(f"weather {key} must use #RRGGBB format")
+        config["weather"][key] = config["weather"][key].lower()
+
+    lava = config["lava"]
+    for key, low, high in (
+        ("blob_count", 1, 8), ("blob_min_radius", 2, 12),
+        ("blob_max_radius", 3, 16), ("blur_radius", 0, 4),
+        ("edge_width", 1, 6), ("time_y", 5, 31), ("date_y", 5, 31),
+    ):
+        value = lava[key]
+        if isinstance(value, bool) or not isinstance(value, int) or not low <= value <= high:
+            raise ValueError(f"lava {key} must be between {low} and {high}")
+    if lava["blob_min_radius"] > lava["blob_max_radius"]:
+        raise ValueError("lava blob minimum radius must not exceed maximum radius")
+    for key, low, high in (("blob_speed", 0.05, 1.0), ("field_threshold", 0.2, 4.0)):
+        value = lava[key]
+        if isinstance(value, bool) or not isinstance(value, (int, float)) or not low <= value <= high:
+            raise ValueError(f"lava {key} must be between {low} and {high}")
+    for key in ("show_time", "show_date"):
+        if not isinstance(lava[key], bool):
+            raise ValueError(f"lava {key} must be a boolean")
+    if lava["time_font"] not in {"6x10", "7x13B", "9x18B"}:
+        raise ValueError("lava time font is not supported")
+    if lava["date_font"] not in {"4x6", "6x10", "clR6x12"}:
+        raise ValueError("lava date font is not supported")
+    for key in ("time_align", "date_align"):
+        if lava[key] not in {"left", "center", "right"}:
+            raise ValueError(f"lava {key} must be left, center, or right")
+    for key in ("text_colour", "border_colour"):
+        if not _is_hex_colour(lava[key]):
+            raise ValueError(f"lava {key} must use #RRGGBB format")
+        lava[key] = lava[key].lower()
+    enabled_palettes = lava["enabled_palettes"]
+    if not isinstance(enabled_palettes, list) or len(enabled_palettes) != len(set(enabled_palettes)):
+        raise ValueError("lava enabled palettes must be a list without duplicates")
+    if any(name not in LAVA_PALETTES for name in enabled_palettes):
+        raise ValueError("lava enabled palettes contain an unknown palette")
+    if not isinstance(lava["custom_enabled"], bool):
+        raise ValueError("lava custom enabled must be a boolean")
+    colours = lava["custom_colours"]
+    if (
+        not isinstance(colours, list)
+        or len(colours) != 3
+        or any(
+            not isinstance(colour, str)
+            or len(colour) != 7
+            or colour[0] != "#"
+            or any(character not in "0123456789abcdefABCDEF" for character in colour[1:])
+            for colour in colours
+        )
+    ):
+        raise ValueError("lava custom colours must contain three #RRGGBB colours")
+    lava["custom_colours"] = [colour.lower() for colour in colours]
+    custom_palettes = lava["custom_palettes"]
+    if not isinstance(custom_palettes, list) or len(custom_palettes) > 20:
+        raise ValueError("lava custom palettes must be a list with at most 20 items")
+    custom_palette_ids = set()
+    custom_palette_names = set()
+    required_palette_keys = {"id", "name", "colours", "enabled"}
+    for palette in custom_palettes:
+        if not isinstance(palette, dict) or set(palette) != required_palette_keys:
+            raise ValueError("lava custom palettes have invalid fields")
+        palette_id = palette["id"]
+        if not isinstance(palette_id, str) or not re.fullmatch(r"palette_[a-z0-9_-]{1,40}", palette_id):
+            raise ValueError("lava custom palette id must start with palette_")
+        if palette_id in custom_palette_ids:
+            raise ValueError("lava custom palette ids must be unique")
+        custom_palette_ids.add(palette_id)
+        palette_name = palette["name"].strip() if isinstance(palette["name"], str) else ""
+        if (
+            not 1 <= len(palette_name) <= 40
+            or any(not character.isprintable() for character in palette_name)
+        ):
+            raise ValueError("lava custom palette name must be 1-40 printable characters")
+        normalized_palette_name = palette_name.casefold()
+        if normalized_palette_name in custom_palette_names:
+            raise ValueError("lava custom palette names must be unique")
+        custom_palette_names.add(normalized_palette_name)
+        if not isinstance(palette["enabled"], bool):
+            raise ValueError("lava custom palette enabled must be a boolean")
+        palette_colours = palette["colours"]
+        if (
+            not isinstance(palette_colours, list)
+            or len(palette_colours) != 3
+            or any(not _is_hex_colour(colour) for colour in palette_colours)
+        ):
+            raise ValueError("lava custom palette colours must contain three #RRGGBB colours")
+        palette["name"] = palette["name"].strip()
+        palette["colours"] = [colour.lower() for colour in palette_colours]
+    if (
+        not enabled_palettes
+        and not lava["custom_enabled"]
+        and not any(palette["enabled"] for palette in custom_palettes)
+    ):
+        raise ValueError("enable at least one predefined or custom lava palette")
+
+    for key, filename in config["media"].items():
+        if not _is_safe_media_reference(filename):
+            raise ValueError(
+                f"media.{key} must be a safe GIF, PNG, JPEG, WebP, or MP4 media reference"
+            )
+
+    for module_name, settings in config["media_layout"].items():
+        if set(settings) != {"x", "y", "width", "height", "keep_aspect", "video_fps"}:
+            raise ValueError(f"media layout {module_name} has invalid fields")
+        for key, low, high in (
+            ("x", 0, 63), ("y", 0, 31), ("width", 1, 64),
+            ("height", 1, 32), ("video_fps", 1, 60),
+        ):
+            value = settings[key]
+            if isinstance(value, bool) or not isinstance(value, int) or not low <= value <= high:
+                raise ValueError(f"media layout {module_name} {key} must be between {low} and {high}")
+        if not isinstance(settings["keep_aspect"], bool):
+            raise ValueError(f"media layout {module_name} keep_aspect must be a boolean")
+
+    custom_modules = config["custom_modules"]
+    if not isinstance(custom_modules, list) or len(custom_modules) > 20:
+        raise ValueError("custom modules must be a list with at most 20 items")
+    custom_ids = set()
+    required_simple_keys = {
+        "id", "name", "type", "text", "font", "colour", "background",
+        "x", "y", "direction", "speed", "loops",
+    }
+    for item in custom_modules:
+        if not isinstance(item, dict):
+            raise ValueError("custom modules must be objects")
+        module_id = item.get("id")
+        if not isinstance(module_id, str) or not re.fullmatch(r"custom_[a-z0-9_-]{1,40}", module_id):
+            raise ValueError("custom module id must start with custom_ and use lowercase letters, numbers, _ or -")
+        if module_id in custom_ids:
+            raise ValueError("custom module ids must be unique")
+        custom_ids.add(module_id)
+        if not isinstance(item.get("name"), str) or not 1 <= len(item["name"].strip()) <= 40:
+            raise ValueError("custom module name must be 1-40 characters")
+        if item.get("type") == "canvas":
+            _validate_canvas_module(item)
+            continue
+        item.setdefault("loops", 1)
+        if set(item) != required_simple_keys:
+            raise ValueError("custom text modules have invalid fields")
+        if item["type"] not in {"text", "text_scroll"}:
+            raise ValueError("custom module type must be text or text_scroll")
+        if (
+            not isinstance(item["text"], str)
+            or not 1 <= len(item["text"]) <= 200
+            or any(ord(character) < 32 for character in item["text"])
+        ):
+            raise ValueError("custom module text must be 1-200 printable characters")
+        if item["font"] not in {"4x6", "5x7", "6x10", "7x13", "9x18B"}:
+            raise ValueError("custom module font is not supported")
+        if not _is_hex_colour(item["colour"]) or not _is_hex_colour(item["background"]):
+            raise ValueError("custom module colours must use #RRGGBB format")
+        item["colour"] = item["colour"].lower()
+        item["background"] = item["background"].lower()
+        if isinstance(item["x"], bool) or not isinstance(item["x"], int) or not -128 <= item["x"] <= 63:
+            raise ValueError("custom module x must be between -128 and 63")
+        if isinstance(item["y"], bool) or not isinstance(item["y"], int) or not 5 <= item["y"] <= 31:
+            raise ValueError("custom module y must be between 5 and 31")
+        if item["direction"] not in {"left", "right"}:
+            raise ValueError("custom module direction must be left or right")
+        speed = item["speed"]
+        if isinstance(speed, bool) or not isinstance(speed, (int, float)) or not 0.01 <= speed <= 1:
+            raise ValueError("custom module speed must be between 0.01 and 1 second")
+        loops = item["loops"]
+        if isinstance(loops, bool) or not isinstance(loops, int) or not 1 <= loops <= 10:
+            raise ValueError("custom module loops must be between 1 and 10")
+
+    playlist = config["playlist"]
+    if not isinstance(playlist, list) or not playlist:
+        raise ValueError("playlist must contain at least one module")
+    custom_by_id = {item["id"]: item for item in custom_modules}
+    for item in playlist:
+        if not isinstance(item, dict) or set(item) != {"module", "duration", "enabled"}:
+            raise ValueError("playlist items require only module, duration, and enabled")
+        if item.get("module") not in ALLOWED_MODULES and item.get("module") not in custom_ids:
+            raise ValueError(f"Unknown module: {item.get('module')!r}")
+        custom_module = custom_by_id.get(item["module"])
+        if custom_module is not None and custom_module["type"] == "text_scroll":
+            item["duration"] = scrolling_text_duration(custom_module)
+        else:
+            duration = item.get("duration")
+            if isinstance(duration, bool) or not isinstance(duration, (int, float)) or not 1 <= duration <= 3600:
+                raise ValueError("module duration must be between 1 and 3600 seconds")
+        if not isinstance(item.get("enabled"), bool):
+            raise ValueError("module enabled must be a boolean")
+    return config
+
+
+def _replace_canvas_media_references(modules, replacements):
+    for module in modules if isinstance(modules, list) else []:
+        if not isinstance(module, dict) or module.get("type") != "canvas":
+            continue
+        media_layer_ids = set()
+        for layer in module.get("layers", []):
+            if not isinstance(layer, dict) or layer.get("type") != "media":
+                continue
+            media_layer_ids.add(layer.get("id"))
+            property_sets = [layer.get("properties", {})]
+            property_sets.extend(
+                keyframe.get("properties", {})
+                for keyframe in layer.get("keyframes", [])
+                if isinstance(keyframe, dict)
+            )
+            for properties in property_sets:
+                if isinstance(properties, dict) and properties.get("source") in replacements:
+                    properties["source"] = replacements[properties["source"]]
+        for override in module.get("overrides", []):
+            if not isinstance(override, dict) or override.get("layer_id") not in media_layer_ids:
+                continue
+            properties = override.get("properties", {})
+            if isinstance(properties, dict) and properties.get("source") in replacements:
+                properties["source"] = replacements[properties["source"]]
+
+
+class ConfigStore:
+    def __init__(self, path, media_dir=None):
+        self.path = Path(path)
+        self.media_root = Path(media_dir or Path(__file__).resolve().parent / "resources" / "media")
+        self._lock = threading.RLock()
+        if not self.path.exists():
+            self._write(DEFAULT_CONFIG)
+        else:
+            current = json.loads(self.path.read_text())
+            if not isinstance(current, dict):
+                raise ValueError("configuration file must contain a JSON object")
+
+            _validate_update_keys(current, DEFAULT_CONFIG)
+            lava = current.get("lava")
+            if (
+                isinstance(lava, dict)
+                and "custom_palettes" not in lava
+                and lava.get("custom_enabled") is True
+            ):
+                lava["custom_palettes"] = [{
+                    "id": "palette_migrated",
+                    "name": "My custom palette",
+                    "colours": copy.deepcopy(lava.get("custom_colours")),
+                    "enabled": True,
+                }]
+                lava["custom_enabled"] = False
+            legacy_built_ins = {
+                "squares_tb.gif": "built-in/squares_tb.gif",
+                "sleep.gif": "built-in/sleep.gif",
+                "hermes_self_portrait.png": "built-in/hermes_self_portrait.png",
+            }
+            built_in_root = self.media_root / "built-in"
+            available_migrations = {}
+            if built_in_root.is_dir() and not built_in_root.is_symlink():
+                for original, migrated in legacy_built_ins.items():
+                    original_path = self.media_root / original
+                    migrated_path = self.media_root / migrated
+                    if (
+                        migrated_path.is_file()
+                        and not migrated_path.is_symlink()
+                        and not original_path.exists()
+                        and not original_path.is_symlink()
+                    ):
+                        available_migrations[original] = migrated
+            media = current.get("media")
+            if isinstance(media, dict):
+                for slot, filename in list(media.items()):
+                    if filename in available_migrations:
+                        media[slot] = available_migrations[filename]
+            _replace_canvas_media_references(
+                current.get("custom_modules", []), available_migrations
+            )
+            self._write(validate_config(_merge(DEFAULT_CONFIG, current)))
+
+    def _write(self, config):
+        self.path.parent.mkdir(parents=True, exist_ok=True)
+        data = json.dumps(config, indent=2, sort_keys=True) + "\n"
+        fd, temp_name = tempfile.mkstemp(prefix=self.path.name, dir=self.path.parent)
+        try:
+            with os.fdopen(fd, "w") as handle:
+                handle.write(data)
+                handle.flush()
+                os.fsync(handle.fileno())
+            os.replace(temp_name, self.path)
+            directory_fd = os.open(self.path.parent, os.O_RDONLY | os.O_DIRECTORY)
+            try:
+                os.fsync(directory_fd)
+            finally:
+                os.close(directory_fd)
+        finally:
+            if os.path.exists(temp_name):
+                os.unlink(temp_name)
+
+    def get(self):
+        with self._lock:
+            return json.loads(self.path.read_text())
+
+    def update(self, changes):
+        if not isinstance(changes, dict):
+            raise ValueError("configuration update must be a JSON object")
+
+        _validate_update_keys(changes, DEFAULT_CONFIG)
+        with self._lock:
+            updated = validate_config(_merge(self.get(), changes))
+            self._write(updated)
+            return copy.deepcopy(updated)
