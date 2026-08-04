@@ -13,7 +13,10 @@ from pathlib import Path
 
 from module_options import LAVA_PALETTES
 
-ALLOWED_MODULES = {"clock_lava", "weather", "splash", "sleep"}
+ALLOWED_MODULES = {
+    "clock_lava", "weather", "openweather_overview", "openweather_forecast",
+    "splash", "sleep",
+}
 CUSTOM_FONT_ADVANCES = {"4x6": 4, "5x7": 5, "6x10": 6, "7x13": 7, "9x18B": 9}
 
 
@@ -58,6 +61,27 @@ DEFAULT_CONFIG = {
         "line_colour": "#00ffff",
         "ticker_colour": "#ffb300",
     },
+    "openweather_overview": {
+        "location": "Brighton, GB", "latitude": None, "longitude": None,
+        "units": "celsius", "icon_x": 0, "icon_y": 0,
+        "now_x": 2, "now_y": 22, "temperature_x": 26, "temperature_y": 15,
+        "high_x": 50, "high_y": 11, "low_x": 50, "low_y": 20,
+        "ticker_y": 28, "scroll_direction": "left", "scroll_speed": "normal",
+        "background_colour": "#000000", "text_colour": "#dcd5d5",
+        "high_colour": "#ff71ce", "low_colour": "#01cdfe",
+        "ticker_colour": "#dcd5d5",
+    },
+    "openweather_forecast": {
+        "location": "Brighton, GB", "latitude": None, "longitude": None,
+        "units": "celsius", "forecast_items": 6, "card_seconds": 5,
+        "icon_x": 0, "icon_y": 0, "time_x": 2, "time_y": 22,
+        "temperature_x": 26, "temperature_y": 15,
+        "high_x": 50, "high_y": 11, "low_x": 50, "low_y": 20,
+        "ticker_y": 28, "scroll_direction": "left", "scroll_speed": "normal",
+        "background_colour": "#000000", "text_colour": "#dcd5d5",
+        "high_colour": "#ff71ce", "low_colour": "#01cdfe",
+        "ticker_colour": "#dcd5d5",
+    },
     "lava": {
         "enabled_palettes": list(LAVA_PALETTES),
         "custom_enabled": False,
@@ -91,6 +115,8 @@ DEFAULT_CONFIG = {
         {"module": "splash", "duration": 8, "enabled": True},
         {"module": "weather", "duration": 20, "enabled": True},
         {"module": "clock_lava", "duration": 300, "enabled": True},
+        {"module": "openweather_overview", "duration": 20, "enabled": False},
+        {"module": "openweather_forecast", "duration": 30, "enabled": False},
     ],
 }
 
@@ -126,6 +152,52 @@ def _validate_update_keys(changes, schema, prefix=""):
 
 def _is_hex_colour(value):
     return bool(isinstance(value, str) and re.fullmatch(r"#[0-9a-fA-F]{6}", value))
+
+
+def _validate_openweather_settings(settings, name, *, forecast=False):
+    location = settings["location"]
+    if not isinstance(location, str) or not location.strip() or len(location) > 100:
+        raise ValueError(f"{name} location must be 1-100 characters")
+    if settings["units"] not in {"celsius", "fahrenheit"}:
+        raise ValueError(f"{name} units must be celsius or fahrenheit")
+    latitude, longitude = settings["latitude"], settings["longitude"]
+    if (latitude is None) != (longitude is None):
+        raise ValueError(f"{name} latitude and longitude must both be set or both be empty")
+    if latitude is not None:
+        if isinstance(latitude, bool) or not isinstance(latitude, (int, float)) or not -90 <= latitude <= 90:
+            raise ValueError(f"{name} latitude must be between -90 and 90")
+        if isinstance(longitude, bool) or not isinstance(longitude, (int, float)) or not -180 <= longitude <= 180:
+            raise ValueError(f"{name} longitude must be between -180 and 180")
+    if settings["scroll_direction"] not in {"left", "right"}:
+        raise ValueError(f"{name} scroll direction must be left or right")
+    if settings["scroll_speed"] not in {"slow", "normal", "fast"}:
+        raise ValueError(f"{name} scroll speed must be slow, normal, or fast")
+    x_fields = ["icon_x", "temperature_x", "high_x", "low_x"]
+    y_fields = ["icon_y", "temperature_y", "high_y", "low_y", "ticker_y"]
+    if forecast:
+        x_fields.append("time_x")
+        y_fields.append("time_y")
+        for key, low, high in (("forecast_items", 1, 8), ("card_seconds", 1, 60)):
+            value = settings[key]
+            if isinstance(value, bool) or not isinstance(value, int) or not low <= value <= high:
+                raise ValueError(f"{name} {key} must be between {low} and {high}")
+    else:
+        x_fields.append("now_x")
+        y_fields.append("now_y")
+    for key in x_fields:
+        value = settings[key]
+        if isinstance(value, bool) or not isinstance(value, int) or not -63 <= value <= 63:
+            raise ValueError(f"{name} {key} must be between -63 and 63")
+    for key in y_fields:
+        value = settings[key]
+        if isinstance(value, bool) or not isinstance(value, int) or not 0 <= value <= 31:
+            raise ValueError(f"{name} {key} must be between 0 and 31")
+    for key in (
+        "background_colour", "text_colour", "high_colour", "low_colour", "ticker_colour",
+    ):
+        if not _is_hex_colour(settings[key]):
+            raise ValueError(f"{name} {key} must use #RRGGBB format")
+        settings[key] = settings[key].lower()
 
 
 def _is_safe_media_reference(value):
@@ -354,6 +426,13 @@ def validate_config(config):
         if not _is_hex_colour(config["weather"][key]):
             raise ValueError(f"weather {key} must use #RRGGBB format")
         config["weather"][key] = config["weather"][key].lower()
+
+    _validate_openweather_settings(
+        config["openweather_overview"], "openweather overview"
+    )
+    _validate_openweather_settings(
+        config["openweather_forecast"], "openweather forecast", forecast=True
+    )
 
     lava = config["lava"]
     for key, low, high in (
@@ -592,6 +671,17 @@ class ConfigStore:
                     "enabled": True,
                 }]
                 lava["custom_enabled"] = False
+            playlist = current.get("playlist")
+            if isinstance(playlist, list):
+                existing_modules = {
+                    item.get("module") for item in playlist if isinstance(item, dict)
+                }
+                for item in DEFAULT_CONFIG["playlist"]:
+                    if (
+                        item["module"] in {"openweather_overview", "openweather_forecast"}
+                        and item["module"] not in existing_modules
+                    ):
+                        playlist.append(copy.deepcopy(item))
             legacy_built_ins = {
                 "squares_tb.gif": "built-in/squares_tb.gif",
                 "sleep.gif": "built-in/sleep.gif",

@@ -25,6 +25,7 @@ from config_store import ALLOWED_MODULES, DEFAULT_CONFIG
 from module_options import COLOUR_HEX, LAVA_PALETTES
 from modules.weather_app import OpenMeteoClient
 from pairing import PairedDeviceStore
+from secret_store import SecretDurabilityError, SecretStore
 
 MEDIA_EXTENSIONS = {".gif", ".png", ".jpg", ".jpeg", ".webp", ".mp4"}
 Image.MAX_IMAGE_PIXELS = 1_000_000
@@ -42,6 +43,7 @@ def create_app(
     sanitizer_python=None,
     sanitizer_identity=None,
     device_store=None,
+    openweather_secrets=None,
 ):
     session_generation = session_generation or secrets.token_hex(16)
     media_root = Path(media_dir or Path(__file__).resolve().parent / "resources" / "media")
@@ -52,6 +54,10 @@ def create_app(
     sanitizer_python = sanitizer_python or sys.executable
     location_search = location_search or OpenMeteoClient(timeout=5).search_locations
     device_store = device_store or PairedDeviceStore()
+    if openweather_secrets is None:
+        config_path = getattr(config_store, "path", None)
+        secret_root = Path(config_path).parent if config_path is not None else media_root.parent
+        openweather_secrets = SecretStore(secret_root / "secrets" / "openweather-api-key")
     app = Flask(__name__, template_folder="app/templates", static_folder="app/static")
     app.config.update(
         SECRET_KEY=secret_key,
@@ -427,16 +433,37 @@ def create_app(
             }
             for name, colours in LAVA_PALETTES.items()
         ]
+        try:
+            openweather_secret_configured = openweather_secrets.configured()
+            openweather_secret_unavailable = False
+        except (OSError, RuntimeError) as exc:
+            LOGGER.error(
+                "OpenWeather secret storage unavailable (%s)", type(exc).__name__
+            )
+            openweather_secret_configured = False
+            openweather_secret_unavailable = True
         return render_template(
             "dashboard.html",
             config=config,
             modules=sorted(ALLOWED_MODULES) + custom_names,
+            module_labels={
+                "weather": "Weather (Free · Open-Meteo)",
+                "openweather_overview": "OpenWeather Overview",
+                "openweather_forecast": "OpenWeather Forecast",
+                "clock_lava": "Lava Clock",
+                "splash": "Splash",
+                "sleep": "Sleep",
+            },
             lava_palettes=lava_palettes,
             status=controller.status(),
             paired_devices=paired_devices,
             media_files=media_items(),
+            openweather_secret_configured=openweather_secret_configured,
+            openweather_secret_unavailable=openweather_secret_unavailable,
             built_in_defaults={
                 "weather": DEFAULT_CONFIG["weather"],
+                "openweather_overview": DEFAULT_CONFIG["openweather_overview"],
+                "openweather_forecast": DEFAULT_CONFIG["openweather_forecast"],
                 "clock_lava": DEFAULT_CONFIG["lava"],
                 "splash": DEFAULT_CONFIG["media_layout"]["splash"],
                 "sleep": DEFAULT_CONFIG["media_layout"]["sleep"],
@@ -605,6 +632,54 @@ def create_app(
             return jsonify(location_search(query, count=6))
         except Exception:
             return jsonify({"error": "Location search is temporarily unavailable."}), 502
+
+    @app.get("/api/secrets/openweather")
+    @requires_pairing
+    def openweather_secret_status():
+        try:
+            return jsonify(openweather_secrets.status())
+        except (OSError, RuntimeError) as exc:
+            LOGGER.error(
+                "OpenWeather secret status unavailable (%s)", type(exc).__name__
+            )
+            return jsonify({"error": "Secret storage is unavailable."}), 503
+
+    @app.put("/api/secrets/openweather")
+    @requires_pairing
+    def set_openweather_secret():
+        payload = request.get_json(silent=True)
+        try:
+            openweather_secrets.set(payload.get("api_key") if isinstance(payload, dict) else None)
+            return jsonify(openweather_secrets.status())
+        except ValueError as exc:
+            return jsonify({"error": str(exc)}), 400
+        except SecretDurabilityError as exc:
+            return jsonify({
+                "configured": exc.configured,
+                "error": str(exc),
+            }), 503
+        except (OSError, RuntimeError) as exc:
+            LOGGER.error(
+                "OpenWeather secret update unavailable (%s)", type(exc).__name__
+            )
+            return jsonify({"error": "Secret storage is unavailable."}), 503
+
+    @app.delete("/api/secrets/openweather")
+    @requires_pairing
+    def clear_openweather_secret():
+        try:
+            openweather_secrets.clear()
+            return jsonify(openweather_secrets.status())
+        except SecretDurabilityError as exc:
+            return jsonify({
+                "configured": exc.configured,
+                "error": str(exc),
+            }), 503
+        except (OSError, RuntimeError) as exc:
+            LOGGER.error(
+                "OpenWeather secret removal unavailable (%s)", type(exc).__name__
+            )
+            return jsonify({"error": "Secret storage is unavailable."}), 503
 
     @app.post("/api/preview/<module_name>")
     @requires_pairing

@@ -70,6 +70,61 @@ class DisplayControllerTests(unittest.TestCase):
         with self.assertRaises(KeyError):
             controller.preview("unknown")
 
+    def test_openweather_module_receives_secret_without_adding_it_to_config(self):
+        matrix = Mock()
+        store = Mock()
+        secrets = Mock()
+        secrets.get.return_value = "test_key_1234567890"
+        controller = DisplayController(matrix, store, openweather_secrets=secrets)
+        module = Mock()
+        module.run.return_value = True
+        config = {"custom_modules": [], "openweather_overview": {"location": "Brighton, GB"}}
+
+        with patch("display_controller.importlib.import_module", return_value=module) as importer:
+            result = controller._execute("openweather_overview", config, 9)
+
+        self.assertTrue(result)
+        importer.assert_called_once_with("modules.openweather_overview")
+        module.run.assert_called_once()
+        self.assertEqual(module.run.call_args.kwargs["api_key"], "test_key_1234567890")
+        self.assertNotIn("api_key", str(config))
+
+    def test_openweather_preparation_runs_outside_display_lock(self):
+        matrix = Mock()
+        secrets = Mock()
+        secrets.get.return_value = "test_key_1234567890"
+        controller = DisplayController(matrix, Mock(), openweather_secrets=secrets)
+        module = Mock()
+        module.run.return_value = True
+        preparation_started = threading.Event()
+        release_preparation = threading.Event()
+
+        def prepare(*_args, **_kwargs):
+            preparation_started.set()
+            release_preparation.wait(1)
+            return "prepared-weather"
+
+        module.prepare.side_effect = prepare
+        result = []
+        config = {"custom_modules": [], "openweather_overview": {}}
+
+        with patch("display_controller.importlib.import_module", return_value=module):
+            worker = threading.Thread(
+                target=lambda: result.append(
+                    controller._execute("openweather_overview", config, 9)
+                )
+            )
+            worker.start()
+            self.assertTrue(preparation_started.wait(0.5))
+            self.assertTrue(controller._display_lock.acquire(timeout=0.2))
+            controller._display_lock.release()
+            release_preparation.set()
+            worker.join(1)
+
+        self.assertFalse(worker.is_alive())
+        self.assertEqual(result, [True])
+        self.assertEqual(module.run.call_args.kwargs["prepared"], "prepared-weather")
+
     def test_custom_module_can_be_previewed(self):
         store = Mock()
         store.get.return_value = {"custom_modules": [{"id": "custom_welcome"}]}

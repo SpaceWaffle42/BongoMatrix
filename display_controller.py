@@ -14,6 +14,8 @@ LOGGER = logging.getLogger(__name__)
 MODULES = {
     "clock_lava": "modules.clock_lava",
     "weather": "modules.weather_app",
+    "openweather_overview": "modules.openweather_overview",
+    "openweather_forecast": "modules.openweather_forecast",
     "splash": "modules.splash_screen",
     "sleep": "modules.sleep_screen",
 }
@@ -39,7 +41,9 @@ def local_ip_address():
 
 
 class DisplayController:
-    def __init__(self, matrix, config_store, ip_address_provider=None):
+    def __init__(
+        self, matrix, config_store, ip_address_provider=None, openweather_secrets=None
+    ):
         self.matrix = matrix
         self.config_store = config_store
         self._shutdown = threading.Event()
@@ -58,6 +62,7 @@ class DisplayController:
         self._pairing_ip = None
         self._pairing_show_ip = False
         self._ip_address_provider = ip_address_provider or local_ip_address
+        self._openweather_secrets = openweather_secrets
         self.current_module = None
         self.last_error = None
 
@@ -293,13 +298,23 @@ class DisplayController:
         self.current_module = name
         self.last_error = None
         try:
+            options = {
+                "duration": duration,
+                "stop_event": stop_event,
+            }
+            if custom is not None:
+                options["module_config"] = custom
+            if name in {"openweather_overview", "openweather_forecast"}:
+                api_key = self._openweather_secrets.get() if self._openweather_secrets else None
+                options["api_key"] = api_key
+                options["prepared"] = module.prepare(
+                    config,
+                    stop_event=stop_event,
+                    api_key=api_key,
+                )
+                if stop_event.is_set():
+                    return False
             with self._display_lock:
-                options = {
-                    "duration": duration,
-                    "stop_event": stop_event,
-                }
-                if custom is not None:
-                    options["module_config"] = custom
                 return module.run(
                     self.matrix,
                     config,

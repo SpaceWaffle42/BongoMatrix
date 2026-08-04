@@ -7,6 +7,30 @@ from config_store import ConfigStore, DEFAULT_CONFIG
 
 
 class ConfigStoreTests(unittest.TestCase):
+    def test_legacy_config_gains_disabled_openweather_apps_without_changing_existing_playlist(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "config.json"
+            legacy = json.loads(json.dumps(DEFAULT_CONFIG))
+            legacy.pop("openweather_overview", None)
+            legacy.pop("openweather_forecast", None)
+            legacy["playlist"] = [
+                item for item in legacy["playlist"]
+                if item["module"] not in {"openweather_overview", "openweather_forecast"}
+            ]
+            expected_existing = json.loads(json.dumps(legacy["playlist"]))
+            path.write_text(json.dumps(legacy))
+
+            config = ConfigStore(path).get()
+
+            self.assertEqual(config["playlist"][:len(expected_existing)], expected_existing)
+            self.assertEqual(config["playlist"][-2:], [
+                {"module": "openweather_overview", "duration": 20, "enabled": False},
+                {"module": "openweather_forecast", "duration": 30, "enabled": False},
+            ])
+            self.assertTrue(next(item for item in config["playlist"] if item["module"] == "weather")["enabled"])
+            self.assertIn("openweather_overview", config)
+            self.assertIn("openweather_forecast", config)
+
     @staticmethod
     def advanced_module(**changes):
         module = {

@@ -19,6 +19,7 @@ from display_controller import DisplayController
 from hardware_lock import DisplayOwnershipLock
 from matrix_framework import Matrix
 from pairing import PairedDeviceStore, PairingManager, initialize_pairing_display
+from secret_store import SecretStore
 from webapp import create_app
 
 
@@ -51,7 +52,10 @@ display_lock = DisplayOwnershipLock(os.environ.get("MATRIX_LOCK_FILE", "/run/mat
 display_lock.acquire()
 atexit.register(display_lock.release)
 matrix = Matrix()
-controller = DisplayController(matrix, config_store)
+openweather_secrets = SecretStore(ROOT / "data" / "secrets" / "openweather-api-key")
+controller = DisplayController(
+    matrix, config_store, openweather_secrets=openweather_secrets
+)
 pairing = PairingManager(ttl_seconds=600)
 session_secret = load_secret(ROOT / "data" / "session.key")
 sanitizer_path = os.environ.get("MATRIX_SANITIZER_PATH")
@@ -63,6 +67,7 @@ app = create_app(
     secret_key=session_secret,
     session_generation=session_secret,
     device_store=device_store,
+    openweather_secrets=openweather_secrets,
     sanitizer_path=sanitizer_path,
     sanitizer_python=os.environ.get("MATRIX_SANITIZER_PYTHON"),
     sanitizer_identity=(nobody.pw_uid, nobody.pw_gid) if nobody else None,

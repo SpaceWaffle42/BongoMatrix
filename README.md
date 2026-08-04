@@ -6,6 +6,8 @@ A 64x32 RGB LED Matrix runtime with a PIN-paired Flask control panel.
 
 - `clock_lava`: animated lava clock
 - `weather`: configurable keyless Open-Meteo weather view with dashboard place search and exact saved coordinates
+- `openweather_overview`: optional legacy-style OpenWeather current-conditions view
+- `openweather_forecast`: optional legacy-style OpenWeather three-hour forecast cards
 - `splash`: configurable splash GIF
 - `sleep`: configurable night GIF
 - `network`: lightweight connectivity helper
@@ -23,6 +25,15 @@ The setup hotspot is intentionally open for easy onboarding; the LED PIN authori
 After onboarding, the service listens on port 5000 on the home LAN. During browser pairing, the LED panel alternates every three seconds between the six-digit PIN and a second screen showing the LAN IP address and port 5000. Open `http://<shown-ip>:5000/pair` and enter the PIN. Five failed attempts trigger a one-minute lockout. Browser sessions expire after 12 hours and are invalidated by a service restart. The redesigned dashboard provides a 64×32 screen simulator, structured module/device workspaces, playlist controls, and a media library.
 
 Configuration is saved atomically in `data/config.json`. Paired users can upload supported media, assign it to splash or sleep, preview it, and remove unreferenced user files. Every regular media file physically stored under `resources/media/built-in/` is a protected default; classification cannot be changed from the dashboard or API. Administrators must deliberately move or replace files in that directory on the host filesystem to change the default collection. Upload names and media contents are validated, and media remains confined to `resources/media`. The Flask session secret is created without following symlinks and forced to owner-only permissions.
+
+## Weather apps
+
+The original `weather` playlist app uses Open-Meteo and remains the enabled, free-access default. Two additional legacy-style apps are available but disabled by default:
+
+- **OpenWeather Overview** displays the provider icon, `NOW`, current temperature, high/low values, and a scrolling location/status/feels-like ticker.
+- **OpenWeather Forecast** cycles through configurable upcoming three-hour forecast cards with the same icon, temperature, high/low, and ticker presentation.
+
+Each app has independent searchable location, units, layout, colour, and ticker controls. Forecast card count and time per card are also configurable. The two OpenWeather apps share one API key entered through the paired dashboard's masked **OpenWeather secret** field. The key is never returned by the API or included in `config.json`; it is atomically stored at `data/secrets/openweather-api-key` with owner-only file permissions inside an owner-only directory. `data/` is runtime state and must remain excluded from source control and source-only deployments.
 
 ## Run manually as root
 
