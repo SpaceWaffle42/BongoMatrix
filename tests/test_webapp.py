@@ -13,6 +13,7 @@ from PIL import Image
 
 from config_store import ConfigStore
 from pairing import PairedDeviceStore
+from secret_store import SecretDurabilityError, SecretStore
 from webapp import create_app
 
 
@@ -22,6 +23,7 @@ class WebAppTests(unittest.TestCase):
         Path(self.temp.name).chmod(0o755)
         self.store = ConfigStore(Path(self.temp.name) / "config.json")
         self.device_store = PairedDeviceStore(Path(self.temp.name) / "paired-devices.json")
+        self.openweather_secrets = SecretStore(Path(self.temp.name) / "secrets" / "openweather-api-key")
         self.media_dir = Path(self.temp.name) / "media"
         self.media_dir.mkdir()
         self.media_dir.chmod(0o755)
@@ -41,12 +43,184 @@ class WebAppTests(unittest.TestCase):
             media_dir=self.media_dir,
             location_search=self.location_search,
             device_store=self.device_store,
+            openweather_secrets=self.openweather_secrets,
         )
         self.client = self.app.test_client()
 
     def pair_browser(self):
         self.pairing.verify.return_value = True
         self.client.post("/pair", data={"pin": "123456", "device_name": "Test browser"})
+
+    def test_openweather_secret_api_is_paired_and_never_echoes_the_key(self):
+        key = "test_key_1234567890"
+        self.assertEqual(self.client.get("/api/secrets/openweather").status_code, 401)
+        self.assertEqual(
+            self.client.put("/api/secrets/openweather", json={"api_key": key}).status_code,
+            401,
+        )
+        self.pair_browser()
+
+        self.assertEqual(
+            self.client.get("/api/secrets/openweather").get_json(),
+            {"configured": False},
+        )
+        saved = self.client.put("/api/secrets/openweather", json={"api_key": key})
+        self.assertEqual(saved.status_code, 200)
+        self.assertEqual(saved.get_json(), {"configured": True})
+        self.assertNotIn(key, saved.get_data(as_text=True))
+        self.assertEqual(self.openweather_secrets.get(), key)
+
+        status = self.client.get("/api/secrets/openweather")
+        self.assertEqual(status.get_json(), {"configured": True})
+        self.assertNotIn(key, status.get_data(as_text=True))
+
+        removed = self.client.delete("/api/secrets/openweather")
+        self.assertEqual(removed.get_json(), {"configured": False})
+        self.assertIsNone(self.openweather_secrets.get())
+
+    def test_default_openweather_secret_store_uses_config_data_directory(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            data = root / "data"
+            media = root / "resources" / "media"
+            media.mkdir(parents=True)
+            store = ConfigStore(data / "config.json")
+            devices = PairedDeviceStore(data / "paired-devices.json")
+            pairing = Mock()
+            pairing.verify.return_value = True
+            app = create_app(
+                Mock(), store, pairing,
+                secret_key="test", session_generation="generation-one",
+                media_dir=media, device_store=devices,
+            )
+            client = app.test_client()
+            client.post("/pair", data={"pin": "123456", "device_name": "Test browser"})
+
+            response = client.put(
+                "/api/secrets/openweather", json={"api_key": "test_key_1234567890"}
+            )
+
+            self.assertEqual(response.status_code, 200)
+            self.assertTrue((data / "secrets" / "openweather-api-key").is_file())
+            self.assertFalse((root / "resources" / "openweather-api-key").exists())
+
+    def test_openweather_secret_api_reports_post_commit_state_on_fsync_failure(self):
+        self.pair_browser()
+        with patch.object(
+            self.openweather_secrets, "set",
+            side_effect=SecretDurabilityError(configured=True),
+        ):
+            saved = self.client.put(
+                "/api/secrets/openweather", json={"api_key": "test_key_1234567890"}
+            )
+        self.assertEqual(saved.status_code, 503)
+        self.assertEqual(saved.get_json()["configured"], True)
+        self.assertNotIn("test_key_1234567890", saved.get_data(as_text=True))
+
+        with patch.object(
+            self.openweather_secrets, "clear",
+            side_effect=SecretDurabilityError(configured=False),
+        ):
+            cleared = self.client.delete("/api/secrets/openweather")
+        self.assertEqual(cleared.status_code, 503)
+        self.assertEqual(cleared.get_json()["configured"], False)
+
+        body = self.client.get("/").get_data(as_text=True)
+        self.assertIn("error.data=data", body)
+        self.assertIn("error.data?.configured", body)
+
+    def test_openweather_secret_storage_failures_return_sanitized_json_503(self):
+        self.pair_browser()
+        cases = (
+            ("status", "get", {}, "/api/secrets/openweather"),
+            ("set", "put", {"json": {"api_key": "test_key_1234567890"}}, "/api/secrets/openweather"),
+            ("clear", "delete", {}, "/api/secrets/openweather"),
+        )
+        for attribute, method, kwargs, path in cases:
+            with self.subTest(attribute=attribute), patch.object(
+                self.openweather_secrets,
+                attribute,
+                side_effect=RuntimeError("unsafe /private/secret path"),
+            ):
+                response = getattr(self.client, method)(path, **kwargs)
+
+            self.assertEqual(response.status_code, 503)
+            self.assertEqual(response.content_type, "application/json")
+            self.assertEqual(response.get_json(), {"error": "Secret storage is unavailable."})
+            self.assertNotIn("/private/secret", response.get_data(as_text=True))
+            self.assertNotIn("test_key_1234567890", response.get_data(as_text=True))
+
+    def test_dashboard_remains_available_when_secret_storage_is_unavailable(self):
+        self.pair_browser()
+        with patch.object(
+            self.openweather_secrets,
+            "configured",
+            side_effect=OSError("unavailable /private/secret path"),
+        ):
+            response = self.client.get("/")
+
+        self.assertEqual(response.status_code, 200)
+        body = response.get_data(as_text=True)
+        self.assertIn("Secret storage unavailable", body)
+        self.assertIn("initialOpenWeatherSecretUnavailable=true", body)
+        self.assertNotIn("/private/secret", body)
+
+    def test_malformed_stored_secret_returns_json_503_and_keeps_dashboard_available(self):
+        path = self.openweather_secrets.path
+        path.parent.mkdir(mode=0o700)
+        path.write_bytes(b"\xff\xfe")
+        path.chmod(0o600)
+        self.pair_browser()
+
+        status = self.client.get("/api/secrets/openweather")
+        dashboard = self.client.get("/")
+
+        self.assertEqual(status.status_code, 503)
+        self.assertEqual(status.content_type, "application/json")
+        self.assertEqual(status.get_json(), {"error": "Secret storage is unavailable."})
+        self.assertEqual(dashboard.status_code, 200)
+        body = dashboard.get_data(as_text=True)
+        self.assertIn("initialOpenWeatherSecretUnavailable=true", body)
+        self.assertNotIn("Stored API key", status.get_data(as_text=True))
+        self.assertNotIn("Stored API key", body)
+
+    def test_dashboard_masks_openweather_secret_and_keeps_it_out_of_config(self):
+        key = "test_key_1234567890"
+        self.openweather_secrets.set(key)
+        self.pair_browser()
+
+        body = self.client.get("/").get_data(as_text=True)
+
+        self.assertIn('id="openweather-api-key"', body)
+        self.assertIn('type="password"', body)
+        self.assertIn('autocomplete="new-password"', body)
+        self.assertIn('id="openweather-secret-status"', body)
+        self.assertIn("/api/secrets/openweather", body)
+        self.assertNotIn(key, body)
+        self.assertNotIn("api_key", str(self.store.get()))
+
+    def test_dashboard_offers_two_disabled_openweather_apps_with_independent_editors(self):
+        self.pair_browser()
+
+        body = self.client.get("/").get_data(as_text=True)
+
+        self.assertIn('data-module="weather"', body)
+        self.assertIn('data-module="openweather_overview"', body)
+        self.assertIn('data-module="openweather_forecast"', body)
+        self.assertIn("Weather (Free · Open-Meteo)", body)
+        self.assertIn("OpenWeather Overview", body)
+        self.assertIn("OpenWeather Forecast", body)
+        self.assertIn('data-module-editor="openweather_overview"', body)
+        self.assertIn('data-module-editor="openweather_forecast"', body)
+        self.assertIn("openweather_overview:builtInSettings.openweather_overview", body)
+        self.assertIn("openweather_forecast:builtInSettings.openweather_forecast", body)
+        self.assertIn("forecast_items", body)
+        self.assertIn("card_seconds", body)
+        self.assertIn("makeWeatherLocationGroup", body)
+        config = self.store.get()
+        self.assertTrue(next(item for item in config["playlist"] if item["module"] == "weather")["enabled"])
+        self.assertFalse(next(item for item in config["playlist"] if item["module"] == "openweather_overview")["enabled"])
+        self.assertFalse(next(item for item in config["playlist"] if item["module"] == "openweather_forecast")["enabled"])
 
     def test_successful_pairing_registers_a_named_device_session(self):
         self.pair_browser()
