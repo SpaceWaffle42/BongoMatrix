@@ -1,0 +1,41 @@
+# Python bytecode and caches
+__pycache__/
+*.py[cod]
+*$py.class
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+
+# Virtual environments
+venv/
+.venv/
+env/
+
+# Runtime state and secrets
+data/
+*.pid
+*.lock
+
+# Local/editor files
+.DS_Store
+.idea/
+.vscode/
+*~
+*.swp
+
+# Local backups and generated deployment artifacts
+*.pre-*
+*.bak
+matrix-backups/
+
+# Runtime/user media is persistent state, not source. Keep bundled assets.
+resources/media/*
+!resources/media/built-in/
+!resources/media/built-in/**
+
+# Temporary upload/sanitizer transaction files
+resources/media/.upload-*
+resources/media/.sanitized-*
+resources/media/.move-*
