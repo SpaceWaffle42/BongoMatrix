@@ -1,6 +1,6 @@
 # Raspberry Pi RGB Matrix — Fresh-session handoff
 
-Generated: 2026-08-04T00:04:14+00:00 (Pi timezone: Europe/London)
+Generated: 2026-08-04T23:08:17+00:00 (Pi timezone: Europe/London)
 
 ## Purpose
 
@@ -27,34 +27,45 @@ Read this file first in a fresh Hermes session. It records the current verified 
 - Persistent media: `/home/admin/matrix/resources/media`
 - Active unit: `/etc/systemd/system/matrix-web.service`
 - Hardware lock: `/run/matrix-display/matrix-display.lock`
-- This local directory is **not a Git repository**.
+- This local directory is a Git repository tracking protected GitLab `main`.
 
 Always preserve the deployed `venv`, `data`, and `resources/media` directories during synchronization.
 
 ## Current live health
 
-Verified at the latest handoff update:
+Verified after the OpenWeather deployment on 2026-08-05:
 
-- `matrix-web.service`: `active`
-- `MainPID`: `408482`
-- `NRestarts`: `0`
-- Hardware lock present at `/run/matrix-display/matrix-display.lock`
-- Saved custom lava palettes: `1`
-- Saved palette ID: `palette_migrated`
-- Legacy custom source enabled: `False`
-- Weather units: `celsius`
-- Weather layout: NOW `(1,7)`, temperature `(2,17)`, separator height `19`, ticker height `28`
-- Weather ticker defaults: direction `left`, speed `normal`
-- Custom module count: `1`; the saved scrolling module uses `10` loops, `0.05s` frame delay, leftward movement, and an automatically derived nominal runtime of `62.5s`.
-- Maximum paired devices: `4` (validated range `1..10`)
-- Paired-device registry count: `4`; these trusted devices were preserved during verification.
-- Persistent config SHA-256: `aab2dd9c9c5cc3a507edba192c3c0bb83d67c9ee7353c3741ba77e2e0b496c79`; the only change from the pre-auto-runtime backup is the intended scrolling playlist duration migration from `15` to `62.5` seconds.
-- Latest source checksum dry-run showed no local/deployed file drift.
-- Latest warning-level service journal query showed no entries.
+- GitLab MR `!5` merged to protected `main` as `b1ed83a`.
+- `matrix-web.service`: `active/running`; `MainPID=483710`; `NRestarts=0`.
+- HTTP `/` returns the expected `302` and the unauthenticated OpenWeather secret API returns `401`.
+- Production worker `483715` owns `/run/matrix-display/matrix-display.lock`; a competing root process was rejected.
+- Warning-level service journal count since refresh: `0`.
+- Local suite: `194/194` passed. Deployed suite: `194/194` passed with two expected Node-only skips.
+- Python compilation passed locally and on the Pi; rendered dashboard JavaScript passed locally.
+- Checksum deployment comparison reports `SOURCE_CHECKSUM_DRIFT=0`.
+- Existing keyless Open-Meteo `weather` remains enabled. Migration changed no prior setting or playlist entry and appended only disabled `openweather_overview` and `openweather_forecast` entries plus their settings sections.
+- No OpenWeather key was supplied. The separate secret file does not exist, and ordinary configuration contains no API key.
+- Paired-device registry remains byte-identical (`b0547667151dba45324645bb9a104ad9e1384a97eef798b9526e57821a44535c`) with three devices.
+- All six media files remain byte-identical as manifest SHA-256 `2878680b4f27c0d56ff02abfcc086113dc2d275ba4b44398c79f45d01aa14bf3`.
+- Post-migration configuration SHA-256: `01b41fd9fcda14e1825f0de01f7460c26787cd05ac7560063676114ad3e131eb`.
+- Verified root-owned `0700` backup: `/home/admin/matrix-backups/pre-openweather-20260805T000306`, containing tested `0600` source, data, and media archives.
 
 PIDs and pairing PINs are ephemeral; re-check them rather than treating the values above as permanent.
 
-## Latest completed feature: automatic scrolling-text runtime
+## Latest completed feature: optional OpenWeather apps and separate device secret
+
+- The existing keyless Open-Meteo app remains the enabled free default.
+- Optional OpenWeather Overview and three-hour Forecast apps are added disabled, with independent friendly location, units, colour, layout, and timing editors.
+- A paired dashboard user can set, replace, check, or clear the provider key through a password-style control. APIs and HTML expose only configured/not-configured state.
+- The key is never stored in `config.json`; production injects it into OpenWeather execution only at runtime from an owner-only secret beside persistent configuration.
+- Secret persistence rejects unsafe/symlinked ancestors and non-owner-only files, uses no-follow directory handles and atomic replacement, distinguishes post-commit durability uncertainty, and normalizes malformed stored data to sanitized unavailable-state responses.
+- Provider calls use fixed OpenWeather hosts and bounded timeouts. Errors are sanitized so request URLs and keys are never reflected.
+- Provider and icon preparation runs outside the global Matrix lock. Cancellation is checked before provider work, after blocking calls, and between icon downloads.
+- Transparent/paletted icons are composited onto the configured background and converted to RGB before Matrix drawing. Forecast icons are prepared before visible card timing starts.
+- Final fail-closed review passed with no security concerns or logic errors after reproducing all prior defects. Fresh malformed-file, cancellation, lock, rendered-JavaScript, migration, secret, and media-policy probes passed.
+- Filesystem-only built-in media classification remains unchanged: only files physically under `resources/media/built-in/` are protected defaults.
+
+## Previous completed feature: automatic scrolling-text runtime
 
 - Simple `text_scroll` playlist time is no longer a manually editable scheduler ceiling. It is derived from `(64 + rendered text width + 1 boundary frame) × loops × frame delay`.
 - The allowed simple fonts are monospaced; server and browser use their exact BDF advances (`4`, `5`, `6`, `7`, and `9` pixels). Python and JavaScript share positive half-up millisecond rounding, including the reviewed `0.7935 -> 0.794` boundary.
