@@ -705,6 +705,37 @@ console.log(JSON.stringify({
         self.assertIn("media_layout:{splash:builtInSettings.splash,sleep:builtInSettings.sleep}", body)
         self.assertIn("...builtInSettings.clock_lava", body)
 
+    def test_sleep_editor_exposes_bounded_gif_playback_speed_percentage(self):
+        self.store.update({"media_layout": {"sleep": {"gif_speed_percent": 175}}})
+        self.pair_browser()
+
+        body = self.client.get("/").get_data(as_text=True)
+
+        self.assertIn(
+            "field:'gif_speed_percent',label:'GIF playback speed (%)',type:'number',min:25,max:400,step:5",
+            body,
+        )
+        self.assertIn('"gif_speed_percent": 175', body)
+        self.assertIn('"gif_speed_percent": 100', body)
+        self.assertIn("builtInSettings[module][definition.field]=", body)
+        self.assertIn("builtInSettings[module]=structuredClone(builtInDefaults[module])", body)
+        self.assertIn("media_layout:{splash:builtInSettings.splash,sleep:builtInSettings.sleep}", body)
+
+    def test_sleep_gif_speed_round_trips_through_paired_config_api(self):
+        self.pair_browser()
+
+        saved = self.client.post(
+            "/api/config",
+            json={"media_layout": {"sleep": {"gif_speed_percent": 225}}},
+        )
+
+        self.assertEqual(saved.status_code, 200)
+        self.assertEqual(saved.get_json()["media_layout"]["sleep"]["gif_speed_percent"], 225)
+        loaded = self.client.get("/api/config")
+        self.assertEqual(loaded.status_code, 200)
+        self.assertEqual(loaded.get_json()["media_layout"]["sleep"]["gif_speed_percent"], 225)
+        self.controller.reload.assert_called_once_with()
+
     def test_weather_editor_has_full_positioning_and_separate_separator_and_ticker_controls(self):
         self.pair_browser()
 

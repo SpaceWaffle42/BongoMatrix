@@ -31,6 +31,30 @@ class ConfigStoreTests(unittest.TestCase):
             self.assertIn("openweather_overview", config)
             self.assertIn("openweather_forecast", config)
 
+    def test_legacy_config_gains_default_sleep_gif_speed_without_changing_layout(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "config.json"
+            legacy = json.loads(json.dumps(DEFAULT_CONFIG))
+            legacy["media_layout"]["sleep"].pop("gif_speed_percent", None)
+            expected_layout = json.loads(json.dumps(legacy["media_layout"]["sleep"]))
+            path.write_text(json.dumps(legacy))
+
+            config = ConfigStore(path).get()
+
+            self.assertEqual(config["media_layout"]["sleep"]["gif_speed_percent"], 100)
+            actual_layout = dict(config["media_layout"]["sleep"])
+            actual_layout.pop("gif_speed_percent")
+            self.assertEqual(actual_layout, expected_layout)
+            self.assertNotIn("gif_speed_percent", config["media_layout"]["splash"])
+
+    def test_sleep_gif_speed_rejects_malformed_and_unsafe_percentages(self):
+        invalid_values = [False, 0, -1, 24, 401, 10_000, 1.5, float("nan"), float("inf"), "100", None]
+        for value in invalid_values:
+            with self.subTest(value=value), tempfile.TemporaryDirectory() as directory:
+                store = ConfigStore(Path(directory) / "config.json")
+                with self.assertRaises(ValueError):
+                    store.update({"media_layout": {"sleep": {"gif_speed_percent": value}}})
+
     @staticmethod
     def advanced_module(**changes):
         module = {

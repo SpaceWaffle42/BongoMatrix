@@ -26,6 +26,8 @@ After onboarding, the service listens on port 5000 on the home LAN. During brows
 
 Configuration is saved atomically in `data/config.json`. Paired users can upload supported media, assign it to splash or sleep, preview it, and remove unreferenced user files. Every regular media file physically stored under `resources/media/built-in/` is a protected default; classification cannot be changed from the dashboard or API. Administrators must deliberately move or replace files in that directory on the host filesystem to change the default collection. Upload names and media contents are validated, and media remains confined to `resources/media`. The Flask session secret is created without following symlinks and forced to owner-only permissions.
 
+The sleep editor includes a **GIF playback speed (%)** control from 25% to 400%. The 100% default preserves each GIF's embedded frame timing; lower values slow playback and higher values speed it up. The setting changes runtime delays only, never rewrites media, and has no effect on static sleep images or videos. The browser preview polls the same captured frames sent to the physical Matrix, so it reflects the same playback rate. Slow playback remains interruptible by schedule wake-up, preview changes, service stop, and shutdown.
+
 ## Weather apps
 
 The original `weather` playlist app uses Open-Meteo and remains the enabled, free-access default. Two additional legacy-style apps are available but disabled by default:

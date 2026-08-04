@@ -21,6 +21,7 @@ for name, previous in previous_modules.items():
         sys.modules.pop(name, None)
     else:
         sys.modules[name] = previous
+from PIL import Image as PillowImage, ImageSequence as PillowImageSequence
 Matrix = framework.Matrix
 
 
@@ -125,6 +126,162 @@ class MatrixFrameworkTests(unittest.TestCase):
         with patch.object(framework.Image, "open", return_value=Mock()), patch.object(framework.ImageSequence, "Iterator", return_value=[frame]):
             self.assertTrue(matrix.show_gif("sleep.gif", loops=0, stop_event=stop, max_duration=10))
         matrix.canvas.SetImage.assert_not_called()
+
+    def test_show_gif_playback_rate_scales_embedded_frame_duration(self):
+        matrix = Matrix.__new__(Matrix)
+        matrix.canvas = Mock()
+        matrix.matrix = Mock(width=64, height=32)
+        matrix._frame_capture = Mock()
+        matrix.clear = Mock()
+        matrix.swap = Mock(return_value=matrix.canvas)
+        frame = Mock(info={"duration": 200})
+        frame.copy.return_value = frame
+        matrix._prepare_image = Mock(return_value=frame)
+        matrix._media_file = Mock(return_value=Mock())
+
+        for rate, expected_delay in ((0.5, 0.4), (1.0, 0.2), (2.0, 0.1)):
+            matrix.canvas.SetImage.reset_mock()
+            matrix._frame_capture.set_image.reset_mock()
+            matrix.swap.reset_mock()
+            with self.subTest(rate=rate), patch.object(
+                framework.Image, "open", return_value=Mock()
+            ), patch.object(
+                framework.ImageSequence, "Iterator", return_value=[frame]
+            ), patch.object(framework.time, "sleep") as sleep:
+                self.assertTrue(matrix.show_gif("sleep.gif", loops=1, playback_rate=rate))
+                matrix.canvas.SetImage.assert_called_once()
+                matrix._frame_capture.set_image.assert_called_once()
+                matrix.swap.assert_called_once_with()
+                sleep.assert_called_once_with(expected_delay)
+
+    def test_show_gif_rejects_invalid_playback_rates_before_opening_media(self):
+        matrix = Matrix.__new__(Matrix)
+        matrix._media_file = Mock(side_effect=AssertionError("media lookup must not run"))
+
+        for rate in (False, 0, -1, 0.24, 4.01, float("nan"), float("inf"), "1"):
+            with self.subTest(rate=rate), self.assertRaises(ValueError):
+                matrix.show_gif("sleep.gif", playback_rate=rate)
+
+        matrix._media_file.assert_not_called()
+
+    def test_show_gif_with_no_decodable_frames_closes_and_returns_false(self):
+        matrix = Matrix.__new__(Matrix)
+        matrix._media_file = Mock(return_value=Mock())
+        opened = Mock()
+
+        with patch.object(framework.Image, "open", return_value=opened), patch.object(
+            framework.ImageSequence, "Iterator", return_value=[]
+        ):
+            self.assertFalse(matrix.show_gif("sleep.gif", loops=0))
+
+        opened.close.assert_called_once_with()
+
+    def test_show_gif_never_uses_a_zero_frame_delay(self):
+        matrix = Matrix.__new__(Matrix)
+        matrix.canvas = Mock()
+        matrix.matrix = Mock(width=64, height=32)
+        matrix._frame_capture = Mock()
+        matrix.clear = Mock()
+        matrix.swap = Mock(return_value=matrix.canvas)
+        frame = Mock(info={"duration": 0})
+        frame.copy.return_value = frame
+        matrix._prepare_image = Mock(return_value=frame)
+        matrix._media_file = Mock(return_value=Mock())
+
+        with patch.object(framework.Image, "open", return_value=Mock()), patch.object(
+            framework.ImageSequence, "Iterator", return_value=[frame]
+        ), patch.object(framework.time, "sleep") as sleep:
+            self.assertTrue(matrix.show_gif("sleep.gif", loops=1, playback_rate=4.0))
+
+        sleep.assert_called_once_with(0.01)
+
+    def test_show_gif_wait_never_exceeds_remaining_module_duration(self):
+        matrix = Matrix.__new__(Matrix)
+        matrix.canvas = Mock()
+        matrix.matrix = Mock(width=64, height=32)
+        matrix._frame_capture = Mock()
+        matrix.clear = Mock()
+        matrix.swap = Mock(return_value=matrix.canvas)
+        frame = Mock(info={"duration": 10_000})
+        frame.copy.return_value = frame
+        matrix._prepare_image = Mock(return_value=frame)
+        matrix._media_file = Mock(return_value=Mock())
+
+        with patch.object(framework.Image, "open", return_value=Mock()), patch.object(
+            framework.ImageSequence, "Iterator", return_value=[frame]
+        ), patch.object(framework.time, "monotonic", side_effect=[0.0, 0.0, 0.0]), patch.object(
+            framework.time, "sleep"
+        ) as sleep:
+            self.assertTrue(
+                matrix.show_gif(
+                    "sleep.gif", loops=1, playback_rate=0.25, max_duration=0.05
+                )
+            )
+
+        sleep.assert_called_once_with(0.05)
+
+    def test_slowest_show_gif_rate_stops_promptly_when_interrupted(self):
+        matrix = Matrix.__new__(Matrix)
+        matrix.canvas = Mock()
+        matrix.matrix = Mock(width=64, height=32)
+        matrix._frame_capture = Mock()
+        matrix.clear = Mock()
+        frame_ready = threading.Event()
+        matrix.swap = Mock(side_effect=lambda: frame_ready.set() or matrix.canvas)
+        frame = Mock(info={"duration": 10_000})
+        frame.copy.return_value = frame
+        matrix._prepare_image = Mock(return_value=frame)
+        matrix._media_file = Mock(return_value=Mock())
+        stop = threading.Event()
+        result = []
+
+        with patch.object(framework.Image, "open", return_value=Mock()), patch.object(
+            framework.ImageSequence, "Iterator", return_value=[frame]
+        ):
+            worker = threading.Thread(
+                target=lambda: result.append(
+                    matrix.show_gif(
+                        "sleep.gif", loops=0, playback_rate=0.25, stop_event=stop
+                    )
+                )
+            )
+            worker.start()
+            self.assertTrue(frame_ready.wait(0.5))
+            stop.set()
+            worker.join(0.5)
+
+        self.assertFalse(worker.is_alive())
+        self.assertEqual(result, [True])
+
+    def test_show_gif_playback_does_not_modify_the_media_file(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "sleep.gif"
+            first = PillowImage.new("RGB", (2, 2), "red")
+            second = PillowImage.new("RGB", (2, 2), "blue")
+            first.save(
+                path,
+                format="GIF",
+                save_all=True,
+                append_images=[second],
+                duration=[100, 200],
+                loop=0,
+            )
+            before = path.read_bytes()
+            matrix = Matrix.__new__(Matrix)
+            matrix.canvas = Mock()
+            matrix.matrix = Mock(width=64, height=32)
+            matrix._frame_capture = Mock()
+            matrix.clear = Mock()
+            matrix.swap = Mock(return_value=matrix.canvas)
+            matrix._prepare_image = Mock(side_effect=lambda frame, **_: frame.copy())
+            matrix._media_file = Mock(return_value=path)
+
+            with patch.object(framework.Image, "open", side_effect=PillowImage.open), patch.object(
+                framework.ImageSequence, "Iterator", side_effect=PillowImageSequence.Iterator
+            ), patch.object(framework.time, "sleep"):
+                self.assertTrue(matrix.show_gif("sleep.gif", loops=1, playback_rate=2.0))
+
+            self.assertEqual(path.read_bytes(), before)
 
     def test_show_video_decodes_frames_into_hardware_and_live_preview(self):
         matrix = Matrix.__new__(Matrix)
