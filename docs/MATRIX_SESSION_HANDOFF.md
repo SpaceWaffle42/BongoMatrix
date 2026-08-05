@@ -1,6 +1,6 @@
 # Raspberry Pi RGB Matrix — Fresh-session handoff
 
-Generated: 2026-08-04T23:41:43+00:00 (Pi timezone: Europe/London)
+Generated: 2026-08-05T01:53:25+00:00 (Pi timezone: Europe/London)
 
 ## Purpose
 
@@ -33,25 +33,47 @@ Always preserve the deployed `venv`, `data`, and `resources/media` directories d
 
 ## Current live health
 
-Verified after the sleep-GIF-speed deployment on 2026-08-05:
+Verified after the advanced-canvas examples deployment on 2026-08-05:
 
-- GitLab MR `!7` merged to protected `main` as `eed6798`.
-- `matrix-web.service`: `active/running`; `MainPID=490262`; `NRestarts=0`.
-- HTTP `/` returns the expected `302` and the unauthenticated OpenWeather secret API returns `401`.
-- Production worker `490267` owns `/run/matrix-display/matrix-display.lock`; a competing root process was rejected.
-- Warning-level service journal count since refresh: `0`.
-- Local suite: `207/207` passed. Deployed suite: `207/207` passed with two expected Node-only skips.
-- Python compilation passed locally and on the Pi; static and rendered dashboard JavaScript passed locally.
-- Checksum deployment comparison reports `SOURCE_CHECKSUM_DRIFT=0`.
-- Migration changed exactly one setting: `media_layout.sleep.gif_speed_percent=100`. The selected sleep media remains `built-in/off_hours.gif`.
-- Existing keyless Open-Meteo remains enabled, optional OpenWeather apps remain disabled, and no OpenWeather key was supplied.
-- Paired-device registry remains byte-identical (`b0547667151dba45324645bb9a104ad9e1384a97eef798b9526e57821a44535c`) with three devices.
-- All six media files remain byte-identical as manifest SHA-256 `c4a93b493f9a61b484937f5d98f6e5ab6c44606fc8e9775a4ba0d8bb84d687b5`.
-- Verified root-owned `0700` backup: `/home/admin/matrix-backups/pre-sleep-gif-speed-20260805T003847`, containing tested `0600` source, data, and media archives.
+- GitLab MR `!11` merged to protected `main` as `5956e5a`; feature commits `98b40e2` and `0282c86` are ancestors of `origin/main`.
+- `matrix-web.service`: `active/running`; `MainPID=502694`; `NRestarts=0`.
+- HTTP `/` returns the expected `302`; the served advanced-editor JavaScript matches deployed disk at SHA-256 `679e9ab9128a7165863108e829114728d31a3389adcfa8da961d4104d1a22745`.
+- `/run/matrix-display/matrix-display.lock` is owned by the service path and a competing production-lock acquisition was rejected.
+- Warning-level service journal count after physical verification: `0`.
+- Complete local suite: `225/225` passed. Complete deployed suite: `225/225` passed with four expected Node-only skips because Node is not installed on the Pi.
+- Local Node syntax validation and Python compilation passed; deployed Python compilation passed.
+- Final checksum-aware deployment dry run for the three changed source/test files is empty.
+- Physical Matrix verification rendered the generated Matrix rain and Rainbow pulse records through the production schema and custom-canvas renderer: `PHYSICAL_ADVANCED_EXAMPLES_PASS matrix_rain=frames:58,unique:48,colours:4 rainbow=frames:52,unique:18,colours:7`.
+- Existing shared weather location remains `Cheltenham, England, GB` (`51.90006`, `-2.07972`); all three weather apps remain at `normal` tick speed with one scrolling loop.
+- Persistent configuration remains byte-identical at SHA-256 `c084204bc5dce91e0403f71096cb59b2b861e6277ff0fc04901790ca120618de`.
+- Paired-device registry remains byte-identical at SHA-256 `b0547667151dba45324645bb9a104ad9e1384a97eef798b9526e57821a44535c`.
+- All six media files remain byte-identical as manifest SHA-256 `848a89147c19ef4fc9161553c2f9f5e4d2faaeeaf311e42fb15904ae364c8924`.
+- Verified root-owned backup: `/home/admin/matrix-backups/pre-advanced-canvas-examples-20260805T014800Z`, containing the prior changed sources plus configuration and paired-device snapshots.
 
 PIDs and pairing PINs are ephemeral; re-check them rather than treating the values above as permanent.
 
-## Latest completed feature: sleep GIF playback speed
+## Latest completed feature: five advanced-canvas examples
+
+- The advanced editor now presents exactly five starter examples, with `Blank canvas` retained separately as a utility rather than counted as an example.
+- The five examples are `Spinning square`, `Spinning RGB cube`, `Three lines and circle`, `Matrix rain`, and `Rainbow pulse`.
+- Matrix rain is a deterministic 48-frame, 20-FPS loop made from twelve falling green glyph columns with four brightness levels per stream. Its generated record contains 48 safe text layers and 96 bounded keyframes.
+- Rainbow pulse is a seamless 35-frame, 18-FPS loop made from seven concentric circle layers. Radius and seven-colour tracks expand, shift colour, and return exactly to their initial state.
+- Example generation uses the same safe layer constructors and declarative schema as user-created content; no executable user code or new runtime format was introduced.
+- A Node/Python contract test executes all five production example builders, checks the exact example list, validates Matrix-rain/Rainbow structure, and submits every generated record through `ConfigStore` validation.
+- Independent fail-closed review found no blocker, high, or medium issue. Its one low finding was a one-RGB-level browser/physical rounding difference at one Rainbow frame. A red parity regression reproduced it; changing the pulse to two odd-length interpolation spans removed every half-value tie and now proves exact browser/physical colours on all 35 frames.
+- The complete local/deployed suites, live asset identity, physical render, persistent-state preservation, service readiness, clean logs, and hardware-lock contention all passed as recorded in Current live health.
+
+## Previous completed feature: shared weather location and loop-based timing
+
+- Weather/Open-Meteo, OpenWeather Overview, and OpenWeather Forecast use one authoritative top-level `weather` location. The dashboard exposes one searchable accessible location selector rather than contradictory per-provider coordinates.
+- Fresh and missing-value defaults use `London, England, GB` (`51.5074`, `-0.1278`), while migration preserved the existing Cheltenham installation exactly.
+- The dropdown supports pointer and keyboard selection, combobox/listbox ARIA state, and cancellation/generation invalidation for reset, Escape, outside-click dismissal, and superseding searches so stale responses cannot reopen.
+- Weather runtime is controlled only by existing slow/normal/fast ticker cadence and bounded integer `scroll_loops` (`1..10`). Weather playlist durations normalize to automatic sentinel `0`.
+- Weather and Overview complete the configured number of non-wrapping traversals. Forecast completes that loop count for each sequential forecast card. Legacy Forecast `card_seconds` is removed during normalization.
+- An already-stopped Weather/Open-Meteo run exits before constructing or calling its provider client. All render loops remain stop-event responsive.
+- Shared-location MR `!9` and weather-timing MR `!10` were merged to protected `main`, deployed, restarted, and physically verified. The timing verifier observed two loops for Weather, two for Overview, and two loops on each of two Forecast cards at the configured fast-tick probe.
+
+## Previous completed feature: sleep GIF playback speed
 
 - The grouped Sleep media editor now exposes a friendly `GIF playback speed (%)` control from `25%` through `400%` in five-percent steps.
 - `100%` preserves each GIF frame's embedded timing. Effective frame delay is embedded delay divided by the playback-rate multiplier.
