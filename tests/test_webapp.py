@@ -1612,13 +1612,98 @@ process.stdout.write(JSON.stringify(output));
         body = self.client.get("/").get_data(as_text=True)
 
         self.assertIn("function addAnnouncement()", body)
-        self.assertIn("id:'announcement_'+", body)
+        self.assertIn("id:nextAnnouncementId()", body)
+        self.assertIn("id='announcement_'+Date.now().toString(36)", body)
         self.assertIn("enabled:false", body)
         self.assertIn("layout:'text_notice'", body)
         self.assertIn("timing:{mode:'static',duration_seconds:8}", body)
         self.assertIn("transition:{type:'cut'}", body)
         self.assertIn("schedule:{start_date:today,end_date:today,days:[0,1,2,3,4,5,6],start_time:'00:00',end_time:'23:59'}", body)
         self.assertIn("makeButton('Add announcement',addAnnouncement", body)
+
+    def test_announcement_content_group_exposes_bound_schema_fields(self):
+        self.pair_browser()
+        body = self.client.get("/").get_data(as_text=True)
+
+        self.assertIn("function announcementControl(announcement,labelText,path,type", body)
+        for field in ("enabled", "name", "layout", "headline", "message", "media"):
+            self.assertIn(f"path:'{field}'", body)
+        for layout in ("text_notice", "icon_notice", "image_banner", "full_image_notice"):
+            self.assertIn(f"'{layout}'", body)
+        self.assertIn("announcementPathSet(announcement,path,value)", body)
+
+    def test_announcement_media_control_tracks_layout_without_saving(self):
+        self.pair_browser()
+        body = self.client.get("/").get_data(as_text=True)
+
+        self.assertIn("function renderAnnouncementContent(announcement,fieldset)", body)
+        self.assertIn("mediaControl.hidden=announcement.layout==='text_notice'", body)
+        self.assertIn("layoutControl.addEventListener('input',syncMediaVisibility)", body)
+        self.assertIn("missing.textContent=current+' (missing)'", body)
+
+    def test_announcement_schedule_group_binds_dates_times_and_weekdays(self):
+        self.pair_browser()
+        body = self.client.get("/").get_data(as_text=True)
+
+        for path in ("schedule.start_date", "schedule.end_date", "schedule.start_time", "schedule.end_time"):
+            self.assertIn(f"path:'{path}'", body)
+        self.assertIn("const announcementWeekdays=['Monday','Tuesday','Wednesday','Thursday','Friday','Saturday','Sunday']", body)
+        self.assertIn("announcement.schedule.days.includes(index)", body)
+        self.assertIn("announcement.schedule.days=[...selected].sort()", body)
+        self.assertIn("if(group.name==='Schedule')renderAnnouncementSchedule(announcement,fieldset)", body)
+
+    def test_announcement_appearance_group_exposes_all_style_fields(self):
+        self.pair_browser()
+        body = self.client.get("/").get_data(as_text=True)
+
+        for path in ("style.font", "style.foreground", "style.background", "style.alignment", "style.border", "style.border_colour"):
+            self.assertIn(f"path:'{path}'", body)
+        self.assertIn("options:['left','center','right']", body)
+        self.assertIn("options:['none','solid','inset']", body)
+        self.assertIn("if(group.name==='Appearance')renderAnnouncementFields(announcement,fieldset,announcementAppearanceFields)", body)
+
+    def test_announcement_timing_switches_between_exact_static_and_scroll_schemas(self):
+        self.pair_browser()
+        body = self.client.get("/").get_data(as_text=True)
+
+        self.assertIn("function renderAnnouncementTiming(announcement,fieldset)", body)
+        self.assertIn("announcement.timing={mode:'static',duration_seconds:8}", body)
+        self.assertIn("announcement.timing={mode:'scroll',loops:1,frame_delay:.05}", body)
+        self.assertIn("path:'timing.duration_seconds'", body)
+        self.assertIn("path:'timing.loops'", body)
+        self.assertIn("path:'timing.frame_delay'", body)
+        self.assertIn("type==='number'?Number(control.value)", body)
+        self.assertIn("if(group.name==='Timing')renderAnnouncementTiming(announcement,fieldset)", body)
+
+    def test_announcement_transition_switches_to_exact_contextual_schema(self):
+        self.pair_browser()
+        body = self.client.get("/").get_data(as_text=True)
+
+        self.assertIn("function renderAnnouncementTransition(announcement,fieldset)", body)
+        self.assertIn("['cut','fade','slide','wipe','pixel_dissolve']", body)
+        self.assertIn("announcement.transition={type:'cut'}", body)
+        self.assertIn("announcement.transition={type:type,duration_seconds:.5}", body)
+        self.assertIn("announcement.transition={type:type,direction:'left',duration_seconds:.5}", body)
+        self.assertIn("path:'transition.direction'", body)
+        self.assertIn("path:'transition.duration_seconds'", body)
+        self.assertIn("if(group.name==='Transition')renderAnnouncementTransition(announcement,fieldset)", body)
+
+    def test_announcement_actions_duplicate_delete_reorder_and_confirm_reset(self):
+        self.pair_browser()
+        body = self.client.get("/").get_data(as_text=True)
+
+        self.assertIn("function duplicateAnnouncement(id)", body)
+        self.assertIn("copy.id=nextAnnouncementId()", body)
+        self.assertIn("copy.enabled=false", body)
+        self.assertIn("function deleteAnnouncement(id)", body)
+        self.assertIn("confirm('Delete '+announcement.name+'?')", body)
+        self.assertIn("function moveAnnouncement(id,offset)", body)
+        self.assertIn("announcements.splice(index+offset,0,announcements.splice(index,1)[0])", body)
+        self.assertIn("function resetAnnouncementBoard()", body)
+        self.assertIn("confirm('Reset Announcement Board and remove all announcements?')", body)
+        self.assertIn("announcements=[]", body)
+        for label in ("Duplicate", "Delete", "Move up", "Move down"):
+            self.assertIn(f"makeButton('{label}'", body)
 
     def test_playlist_builtin_editors_are_grouped_complete_and_resettable(self):
         self.pair_browser()
