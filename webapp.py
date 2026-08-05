@@ -938,7 +938,10 @@ def create_app(
         candidate = json.loads(json.dumps(config_store.get()))
         candidate["announcement_board"] = {"announcements": [request.get_json()]}
         try:
-            validated = validate_config(candidate)
+            validated = validate_config(
+                candidate,
+                allow_legacy_announcements=False,
+            )
         except ValueError as error:
             return jsonify({"error": str(error)}), 400
         announcement = validated["announcement_board"]["announcements"][0]

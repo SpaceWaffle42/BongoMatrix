@@ -578,6 +578,7 @@ class DisplayController:
                 self._mark_scheduler_healthy()
                 continue
 
+            cycle_rendered = False
             for item in playlist:
                 if (
                     self._shutdown.is_set()
@@ -587,15 +588,30 @@ class DisplayController:
                     break
                 announcement_preview = self._take_announcement_preview()
                 if announcement_preview:
-                    self._execute_announcement_preview(announcement_preview)
+                    cycle_rendered = bool(
+                        self._execute_announcement_preview(announcement_preview)
+                    ) or cycle_rendered
                     break
                 media_preview = self._take_media_preview()
                 if media_preview:
-                    self._execute_media(media_preview, 15)
+                    cycle_rendered = bool(
+                        self._execute_media(media_preview, 15)
+                    ) or cycle_rendered
                     break
                 preview = self._take_preview()
                 if preview:
-                    self._execute(preview, config, 15)
+                    cycle_rendered = bool(
+                        self._execute(preview, config, 15)
+                    ) or cycle_rendered
                     break
-                self._execute(item["module"], config, item["duration"])
+                cycle_rendered = bool(
+                    self._execute(item["module"], config, item["duration"])
+                ) or cycle_rendered
+            if (
+                not cycle_rendered
+                and not self._shutdown.is_set()
+                and not self._reload_requested.is_set()
+                and not self._pairing_pause.is_set()
+            ):
+                self._shutdown.wait(0.25)
             self._mark_scheduler_healthy()

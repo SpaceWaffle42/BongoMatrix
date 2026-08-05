@@ -244,6 +244,34 @@ class DisplayControllerTests(unittest.TestCase):
 
         self.assertEqual(calls, ["announcement_board", "clock_lava"])
 
+    def test_scheduler_idles_when_announcement_only_playlist_has_no_active_record(self):
+        config = {
+            **DEFAULT_CONFIG,
+            "playlist": [
+                {"module": "announcement_board", "duration": 0, "enabled": True},
+            ],
+        }
+        store = Mock()
+        store.get.return_value = config
+        controller = DisplayController(Mock(), store)
+        controller._execute = Mock(return_value=False)
+        original_wait = controller._shutdown.wait
+        waits = []
+
+        def stop_after_idle(seconds):
+            waits.append(seconds)
+            controller._shutdown.set()
+            return original_wait(0)
+
+        with (
+            patch.object(controller, "_is_active", return_value=True),
+            patch.object(controller._shutdown, "wait", side_effect=stop_after_idle),
+        ):
+            controller._run_loop_unchecked()
+
+        controller._execute.assert_called_once_with("announcement_board", config, 0)
+        self.assertEqual(waits, [0.25])
+
     def test_openweather_module_receives_secret_without_adding_it_to_config(self):
         matrix = Mock()
         store = Mock()

@@ -1612,6 +1612,43 @@ process.stdout.write(JSON.stringify(output));
         self.assertIn("status.textContent=messages.length?messages.join(' '):'Announcement fields are valid.'", body)
 
     @unittest.skipUnless(shutil.which("node"), "Node.js is required")
+    def test_announcement_client_validation_matches_contextual_scrolling_schema(self):
+        source = (Path(__file__).parents[1] / "app" / "templates" / "dashboard.html").read_text()
+        match = re.search(
+            r"function validateAnnouncement\(announcement\)\{.*?\nfunction applyAnnouncementValidation",
+            source,
+            re.DOTALL,
+        )
+        self.assertIsNotNone(match)
+        if match is None:
+            self.fail("announcement validator function not found")
+        function_source = match.group(0).rsplit("\nfunction applyAnnouncementValidation", 1)[0]
+        announcement = test_config_store.ConfigStoreTests.announcement(
+            timing={"mode": "scroll", "loops": 1, "frame_delay": 0.05},
+        )
+        announcement["schedule"]["days"] = list(range(7))
+        announcement["layout"] = "icon_notice"
+        harness = function_source + "\nconst a=" + json.dumps(announcement) + ";let e=validateAnnouncement(a);if(!e.layout)throw new Error('layout');a.layout='text_notice';a.style.border='solid';e=validateAnnouncement(a);if(!e['style.border'])throw new Error('border');a.style.border='none';a.transition={type:'fade',duration_seconds:.5};e=validateAnnouncement(a);if(!e['transition.type'])throw new Error('transition');console.log('SCROLL_CONTEXT_PASS');"
+        node = shutil.which("node")
+        assert node is not None
+        result = subprocess.run(
+            [node, "-e", harness], cwd=Path(__file__).parents[1],
+            text=True, capture_output=True, check=False,
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("SCROLL_CONTEXT_PASS", result.stdout)
+
+    def test_announcement_context_rerender_restores_focused_control(self):
+        self.pair_browser()
+        body = self.client.get("/").get_data(as_text=True)
+
+        self.assertIn("function rerenderAnnouncementEditorsWithFocus(announcement,path)", body)
+        self.assertIn("CSS.escape(announcement.id)", body)
+        self.assertIn("CSS.escape(path)", body)
+        self.assertIn("rerenderAnnouncementEditorsWithFocus(announcement,'timing.mode')", body)
+        self.assertIn("rerenderAnnouncementEditorsWithFocus(announcement,'transition.type')", body)
+
+    @unittest.skipUnless(shutil.which("node"), "Node.js is required")
     def test_announcement_client_validation_allows_backend_valid_media_fallback(self):
         source = (Path(__file__).parents[1] / "app" / "templates" / "dashboard.html").read_text()
         start = source.index("function validateAnnouncement(announcement)")
@@ -2550,6 +2587,33 @@ process.stdout.write(JSON.stringify(output));
         self.assertEqual(previewed["style"]["foreground"], "#ffffff")
         self.assertEqual(self.store.get(), before)
         self.controller.reload.assert_not_called()
+
+    def test_unsaved_announcement_preview_rejects_legacy_missing_fields(self):
+        self.pair_browser()
+        base = {
+            "id": "announcement_preview", "enabled": False, "name": "Draft preview",
+            "layout": "text_notice", "headline": "PREVIEW", "message": "Unsaved draft",
+            "media": None,
+            "schedule": {"start_date": "2030-01-15", "end_date": "2030-01-15", "days": [0, 1, 2, 3, 4, 5, 6], "start_time": "09:00", "end_time": "17:00"},
+            "style": {"foreground": "#FFFFFF", "background": "#000000", "font": "5x7", "alignment": "center", "border": "none", "border_colour": "#FFFFFF"},
+            "timing": {"mode": "static", "duration_seconds": 8},
+            "transition": {"type": "cut"},
+        }
+        invalid_payloads = []
+        for field in ("enabled", "name"):
+            payload = json.loads(json.dumps(base))
+            payload.pop(field)
+            invalid_payloads.append(payload)
+        missing_days = json.loads(json.dumps(base))
+        missing_days["schedule"].pop("days")
+        invalid_payloads.append(missing_days)
+
+        for payload in invalid_payloads:
+            with self.subTest(payload=payload):
+                response = self.client.post("/api/preview/announcement", json=payload)
+                self.assertEqual(response.status_code, 400)
+                self.assertIn("invalid fields", response.get_json()["error"])
+        self.controller.preview_announcement.assert_not_called()
 
     def test_unsaved_announcement_preview_rejects_invalid_payload_without_hardware_work(self):
         self.pair_browser()

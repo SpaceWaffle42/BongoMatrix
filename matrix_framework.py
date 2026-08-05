@@ -416,15 +416,21 @@ class Matrix:
         self._frame_capture.set_image(canvas, prepared, int(x), int(y))
         return prepared
 
-    def media_frames(self, filename, frame_count, fps):
-        """Decode a media file into a bounded module-timeline frame list."""
+    def media_frames(self, filename, frame_count, fps, stop_event=None, decode_timeout=45):
+        """Decode a bounded media timeline while observing cancellation/deadlines."""
         if (
             isinstance(frame_count, bool) or not isinstance(frame_count, int)
             or not 1 <= frame_count <= 120
             or isinstance(fps, bool) or not isinstance(fps, (int, float))
             or not 1 <= fps <= 60
+            or isinstance(decode_timeout, bool)
+            or not isinstance(decode_timeout, (int, float))
+            or not 0 < decode_timeout <= 120
         ):
             raise ValueError("media timeline bounds are invalid")
+        if stop_event is not None and stop_event.is_set():
+            return []
+        deadline = time.monotonic() + decode_timeout
         path = self._media_file(filename)
         if path is None:
             return []
@@ -433,6 +439,10 @@ class Matrix:
                 source_frames = []
                 durations = []
                 for frame in ImageSequence.Iterator(media):
+                    if stop_event is not None and stop_event.is_set():
+                        return []
+                    if time.monotonic() >= deadline:
+                        raise ValueError("media decoder did not finish in time")
                     source_frames.append(frame.copy().convert("RGBA"))
                     durations.append(max(20, int(frame.info.get("duration", 100) or 100)))
             if len(source_frames) == 1:
@@ -472,11 +482,19 @@ class Matrix:
             frame_size = self.matrix.width * self.matrix.height * 3
             frames = []
             for _ in range(frame_count):
-                raw = process.stdout.read(frame_size)
+                raw = _read_exact_interruptibly(
+                    process.stdout,
+                    frame_size,
+                    stop_event=stop_event,
+                    deadline=deadline,
+                )
+                if stop_event is not None and stop_event.is_set():
+                    return []
                 if len(raw) != frame_size:
-                    break
+                    raise ValueError("MP4 could not be decoded for the custom module timeline")
                 frames.append(Image.frombytes("RGB", (self.matrix.width, self.matrix.height), raw))
-            return_code = process.wait(timeout=45)
+            timeout = max(0.1, deadline - time.monotonic())
+            return_code = process.wait(timeout=timeout)
             if return_code != 0 or len(frames) != frame_count:
                 raise ValueError("MP4 could not be decoded for the custom module timeline")
             return frames

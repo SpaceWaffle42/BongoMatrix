@@ -403,7 +403,7 @@ def _announcement_date(value, field):
     return parsed
 
 
-def _validate_announcement_board(board):
+def _validate_announcement_board(board, *, allow_legacy=True):
     if not isinstance(board, dict) or set(board) != {"announcements"}:
         raise ValueError("announcement board has invalid fields")
     announcements = board["announcements"]
@@ -418,12 +418,16 @@ def _validate_announcement_board(board):
     for item in announcements:
         if (
             not isinstance(item, dict)
-            or not legacy_required.issubset(item)
-            or not set(item).issubset(required)
+            or (
+                set(item) != required
+                if not allow_legacy
+                else not legacy_required.issubset(item) or not set(item).issubset(required)
+            )
         ):
             raise ValueError("announcement has invalid fields")
-        item.setdefault("enabled", True)
-        item.setdefault("name", item["headline"])
+        if allow_legacy:
+            item.setdefault("enabled", True)
+            item.setdefault("name", item["headline"])
         if not isinstance(item["enabled"], bool):
             raise ValueError("announcement enabled must be a boolean")
         if (
@@ -460,11 +464,16 @@ def _validate_announcement_board(board):
         schedule_fields = legacy_schedule_fields | {"days"}
         if (
             not isinstance(schedule, dict)
-            or not legacy_schedule_fields.issubset(schedule)
-            or not set(schedule).issubset(schedule_fields)
+            or (
+                set(schedule) != schedule_fields
+                if not allow_legacy
+                else not legacy_schedule_fields.issubset(schedule)
+                or not set(schedule).issubset(schedule_fields)
+            )
         ):
             raise ValueError("announcement schedule has invalid fields")
-        schedule.setdefault("days", [0, 1, 2, 3, 4, 5, 6])
+        if allow_legacy:
+            schedule.setdefault("days", [0, 1, 2, 3, 4, 5, 6])
         days = schedule["days"]
         if (
             not isinstance(days, list)
@@ -564,9 +573,17 @@ def _validate_announcement_board(board):
                 )
         else:
             raise ValueError("announcement transition is not supported")
+        if timing["mode"] == "scroll" and (
+            item["layout"] != "text_notice"
+            or style["border"] != "none"
+            or transition["type"] != "cut"
+        ):
+            raise ValueError(
+                "scrolling announcement must use text_notice, no border, and a cut transition"
+            )
 
 
-def validate_config(config):
+def validate_config(config, *, allow_legacy_announcements=True):
 
     name = config["device"]["name"]
     if not isinstance(name, str) or not name.strip() or len(name.strip()) > 40:
@@ -758,7 +775,10 @@ def validate_config(config):
             if isinstance(speed, bool) or not isinstance(speed, int) or not 25 <= speed <= 400:
                 raise ValueError("sleep GIF playback speed must be between 25 and 400 percent")
 
-    _validate_announcement_board(config["announcement_board"])
+    _validate_announcement_board(
+        config["announcement_board"],
+        allow_legacy=allow_legacy_announcements,
+    )
 
     custom_modules = config["custom_modules"]
     if not isinstance(custom_modules, list) or len(custom_modules) > 20:

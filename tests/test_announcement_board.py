@@ -98,6 +98,37 @@ class AnnouncementBoardTests(unittest.TestCase):
         for now in inactive_times:
             with self.subTest(now=now):
                 self.assertEqual(active_announcements([announcement], now=now), [])
+    def test_rechecks_eligibility_before_each_record_starts(self):
+        matrix = Mock()
+        matrix.matrix.width = 64
+        matrix.matrix.CreateFrameCanvas.return_value = "canvas"
+        matrix.font.side_effect = lambda name: f"font:{name}"
+        matrix.colour_rgb.side_effect = lambda value: {
+            "#ffffff": Mock(red=255, green=255, blue=255),
+            "#000000": Mock(red=0, green=0, blue=0),
+        }[value]
+        matrix.swap.return_value = "canvas"
+        stop = Mock()
+        stop.is_set.return_value = False
+        stop.wait.return_value = False
+        first = self.item("announcement_first", "09:00", "10:00")
+        second = self.item("announcement_expired", "09:00", "09:01")
+        moments = iter([
+            dt.datetime(2030, 1, 15, 9, 0),
+            dt.datetime(2030, 1, 15, 9, 2),
+        ])
+
+        self.assertTrue(run(
+            matrix,
+            {"announcement_board": {"announcements": [first, second]}},
+            duration=0,
+            stop_event=stop,
+            now_provider=lambda: next(moments),
+        ))
+
+        matrix.swap.assert_called_once_with("canvas")
+        stop.wait.assert_called_once_with(8)
+
     def test_no_active_announcement_yields_without_touching_matrix(self):
         matrix = Mock()
         config = {
@@ -297,7 +328,9 @@ class AnnouncementBoardTests(unittest.TestCase):
             now_provider=lambda: dt.datetime(2030, 1, 15, 12, 0),
         ))
 
-        matrix.media_frames.assert_called_once_with("events/open-day.png", 1, 1)
+        matrix.media_frames.assert_called_once_with(
+            "events/open-day.png", 1, 1, stop_event=stop,
+        )
         matrix.draw_image.assert_called_once_with(
             "icon-frame", 1, 1, width=14, height=14, canvas="canvas",
         )
@@ -385,7 +418,7 @@ class AnnouncementBoardTests(unittest.TestCase):
         stop.is_set.return_value = False
         stop.wait.return_value = False
         announcement = self.item("announcement_full", "09:00", "17:00")
-        announcement["layout"] = "full_image"
+        announcement["layout"] = "full_image_notice"
         announcement["media"] = "events/keynote.jpg"
         announcement["message"] = ""
 

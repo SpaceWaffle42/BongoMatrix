@@ -85,6 +85,24 @@ class MatrixFrameworkTests(unittest.TestCase):
         canvas.SetImage.assert_called_once_with(rotated, 4, 5)
         matrix._frame_capture.set_image.assert_called_once_with(canvas, rotated, 4, 5)
 
+    def test_media_frames_observes_cancellation_during_image_decode(self):
+        matrix = Matrix.__new__(Matrix)
+        matrix.matrix = Mock(width=64, height=32)
+        matrix._media_file = Mock(return_value=framework.pathlib.Path("/tmp/animation.gif"))
+        stop = threading.Event()
+        stop.set()
+        media = Mock()
+
+        with patch.object(framework.Image, "open", return_value=media) as image_open, patch.object(
+            framework.ImageSequence, "Iterator", return_value=[Mock(), Mock()]
+        ) as iterator:
+            self.assertEqual(
+                matrix.media_frames("animation.gif", 1, 1, stop_event=stop),
+                [],
+            )
+        image_open.assert_not_called()
+        iterator.assert_not_called()
+
     def test_media_frames_decodes_mp4_to_bounded_canvas_timeline(self):
         matrix = Matrix.__new__(Matrix)
         matrix.matrix = Mock(width=64, height=32)
@@ -98,11 +116,15 @@ class MatrixFrameworkTests(unittest.TestCase):
         with patch.object(framework.os, "open", return_value=9), patch.object(
             framework.os, "close"
         ), patch.object(framework.subprocess, "Popen", return_value=process) as popen, patch.object(
+            framework, "_read_exact_interruptibly", return_value=raw
+        ) as reader, patch.object(
             framework.Image, "frombytes", side_effect=images, create=True
         ):
             frames = matrix.media_frames("clip.mp4", frame_count=3, fps=12)
 
         self.assertEqual(frames, images)
+        self.assertEqual(reader.call_count, 3)
+        self.assertTrue(all(call.kwargs["stop_event"] is None for call in reader.call_args_list))
         command = popen.call_args.args[0]
         self.assertIn("-stream_loop", command)
         video_filter = command[command.index("-vf") + 1]

@@ -228,6 +228,25 @@ class ConfigStoreTests(unittest.TestCase):
             updated = store.update({"announcement_board": {"announcements": [legacy]}})
             self.assertEqual(updated["announcement_board"]["announcements"][0]["schedule"]["days"], [0, 1, 2, 3, 4, 5, 6])
 
+    def test_announcement_rejects_runtime_unsupported_scrolling_combinations(self):
+        cases = []
+        media_layout = self.announcement(timing={"mode": "scroll", "loops": 1, "frame_delay": 0.05})
+        media_layout["layout"] = "icon_notice"
+        cases.append(media_layout)
+        bordered = self.announcement(timing={"mode": "scroll", "loops": 1, "frame_delay": 0.05})
+        bordered["style"]["border"] = "solid"
+        cases.append(bordered)
+        transitioned = self.announcement(timing={"mode": "scroll", "loops": 1, "frame_delay": 0.05})
+        transitioned["transition"] = {"type": "fade", "duration_seconds": 0.5}
+        cases.append(transitioned)
+
+        with tempfile.TemporaryDirectory() as directory:
+            store = ConfigStore(Path(directory) / "config.json")
+            for announcement in cases:
+                with self.subTest(announcement=announcement):
+                    with self.assertRaisesRegex(ValueError, "scrolling announcement"):
+                        store.update({"announcement_board": {"announcements": [announcement]}})
+
     def test_announcement_rejects_equal_start_and_end_times(self):
         invalid = self.announcement()
         invalid["schedule"]["end_time"] = invalid["schedule"]["start_time"]
