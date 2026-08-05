@@ -410,13 +410,28 @@ def _validate_announcement_board(board):
     if not isinstance(announcements, list) or len(announcements) > 50:
         raise ValueError("announcement board must contain at most 50 announcements")
     seen_ids = set()
-    required = {
+    legacy_required = {
         "id", "layout", "headline", "message", "media", "schedule",
         "style", "timing", "transition",
     }
+    required = legacy_required | {"enabled", "name"}
     for item in announcements:
-        if not isinstance(item, dict) or set(item) != required:
+        if (
+            not isinstance(item, dict)
+            or not legacy_required.issubset(item)
+            or not set(item).issubset(required)
+        ):
             raise ValueError("announcement has invalid fields")
+        item.setdefault("enabled", True)
+        item.setdefault("name", item["headline"])
+        if not isinstance(item["enabled"], bool):
+            raise ValueError("announcement enabled must be a boolean")
+        if (
+            not isinstance(item["name"], str)
+            or not 1 <= len(item["name"]) <= 100
+            or any(not character.isprintable() for character in item["name"])
+        ):
+            raise ValueError("announcement name must be 1-100 printable characters")
         item_id = item["id"]
         if (
             not isinstance(item_id, str)

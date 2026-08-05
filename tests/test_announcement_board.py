@@ -56,6 +56,15 @@ class AnnouncementBoardTests(unittest.TestCase):
             [item["id"] for item in at_end],
             ["announcement_second"],
         )
+    def test_disabled_announcement_is_never_active(self):
+        announcement = self.item("announcement_disabled", "08:00", "18:00")
+        announcement["enabled"] = False
+
+        self.assertEqual(
+            active_announcements([announcement], now=dt.datetime(2030, 1, 15, 9, 0)),
+            [],
+        )
+
     def test_overnight_range_uses_eligible_start_dates_and_extends_final_date_into_morning(self):
         announcement = self.item("announcement_overnight", "22:00", "02:00")
         announcement["schedule"]["end_date"] = "2030-01-16"

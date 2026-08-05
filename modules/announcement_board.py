@@ -38,7 +38,8 @@ def active_announcements(announcements, *, now):
     return [
         announcement
         for announcement in announcements
-        if is_announcement_active(announcement, now=now)
+        if announcement.get("enabled", True)
+        and is_announcement_active(announcement, now=now)
     ]
 
 

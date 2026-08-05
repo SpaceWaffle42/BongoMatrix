@@ -194,6 +194,27 @@ class ConfigStoreTests(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, "pixel dissolve announcement transition"):
                 store.update({"announcement_board": {"announcements": [dissolve]}})
 
+    def test_editor_shaped_announcement_preserves_disabled_state_and_name(self):
+        with tempfile.TemporaryDirectory() as directory:
+            store = ConfigStore(Path(directory) / "config.json")
+            item = self.announcement(enabled=False, name="Front desk welcome")
+
+            updated = store.update({"announcement_board": {"announcements": [item]}})
+
+            saved = updated["announcement_board"]["announcements"][0]
+            self.assertFalse(saved["enabled"])
+            self.assertEqual(saved["name"], "Front desk welcome")
+
+    def test_legacy_announcement_record_gains_enabled_name_defaults(self):
+        with tempfile.TemporaryDirectory() as directory:
+            store = ConfigStore(Path(directory) / "config.json")
+
+            updated = store.update({"announcement_board": {"announcements": [self.announcement()]}})
+
+            saved = updated["announcement_board"]["announcements"][0]
+            self.assertTrue(saved["enabled"])
+            self.assertEqual(saved["name"], "Welcome")
+
     def test_announcement_rejects_equal_start_and_end_times(self):
         invalid = self.announcement()
         invalid["schedule"]["end_time"] = invalid["schedule"]["start_time"]
