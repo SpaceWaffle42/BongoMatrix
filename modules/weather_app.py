@@ -169,10 +169,12 @@ def _render_error(matrix, message, duration, stop_event):
     matrix.draw_text_with_border(matrix.font("5x7"), 7, 12, red, black, "WEATHER", canvas=canvas)
     matrix.draw_text_with_border(matrix.font("4x6"), 2, 25, white, black, message[:15], canvas=canvas)
     matrix.swap(canvas)
-    _wait(stop_event, min(duration, 5))
+    _wait(stop_event, min(duration if duration > 0 else 5, 5))
 
 
 def run(matrix, config, duration=20, stop_event=None, client=None):
+    if stop_event and stop_event.is_set():
+        return False
     client = client or OpenMeteoClient()
     weather_config = config.get("weather", {})
     location = weather_config.get("location", "London, England, GB")
@@ -214,16 +216,18 @@ def run(matrix, config, duration=20, stop_event=None, client=None):
     small = matrix.font("4x6")
     main = matrix.font("5x7")
     scroll = f"{weather.location} | {weather.status} | Feels {weather.feels_like}{unit_suffix} | Humidity {weather.humidity}%"
+    text_width = matrix.draw_text(
+        small, -10000, ticker_y, yellow, scroll, canvas=canvas
+    )
     if scroll_direction == "right":
-        text_width = matrix.draw_text(small, -10000, ticker_y, yellow, scroll, canvas=canvas)
         scroll_x = -text_width
         scroll_step = -1
     else:
         scroll_x = canvas.width
         scroll_step = 1
-    end_time = time.monotonic() + duration
+    loops_remaining = weather_config.get("scroll_loops", 1)
 
-    while time.monotonic() < end_time and not (stop_event and stop_event.is_set()):
+    while loops_remaining > 0 and not (stop_event and stop_event.is_set()):
         if "background_colour" in weather_config:
             matrix.fill(*_hex_rgb(background_hex), canvas=canvas)
         else:
@@ -235,8 +239,14 @@ def run(matrix, config, duration=20, stop_event=None, client=None):
         matrix.draw_line(0, line_y, 63, line_y, blue, canvas=canvas)
         scroll_x, _ = matrix.widget_scroll(
             scroll, small, scroll_x, ticker_y, yellow,
-            canvas=canvas, step=scroll_step, wrap=True,
+            canvas=canvas, step=scroll_step, wrap=False,
         )
+        if scroll_step >= 0 and scroll_x + text_width < 0:
+            loops_remaining -= 1
+            scroll_x = canvas.width
+        elif scroll_step < 0 and scroll_x > canvas.width:
+            loops_remaining -= 1
+            scroll_x = -text_width
         canvas = matrix.swap(canvas)
         if _wait(stop_event, frame_delay):
             break

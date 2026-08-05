@@ -215,7 +215,10 @@ class WebAppTests(unittest.TestCase):
         self.assertIn("openweather_overview:withSharedWeatherLocation(builtInSettings.openweather_overview)", body)
         self.assertIn("openweather_forecast:withSharedWeatherLocation(builtInSettings.openweather_forecast)", body)
         self.assertIn("forecast_items", body)
-        self.assertIn("card_seconds", body)
+        self.assertNotIn("field:'card_seconds'", body)
+        self.assertEqual(body.count("field:'scroll_loops'"), 3)
+        self.assertEqual(body.count("label:'Ticker loops'"), 3)
+        self.assertEqual(body.count("label:'Tick speed'"), 3)
         self.assertNotIn("makeWeatherLocationGroup", body)
         config = self.store.get()
         self.assertTrue(next(item for item in config["playlist"] if item["module"] == "weather")["enabled"])
@@ -490,6 +493,15 @@ async function settle(){await new Promise(resolve=>setImmediate(resolve));await 
         self.assertIn("duration.readOnly=isAutomatic", body)
         self.assertIn("isAutomatic?'Auto seconds ':'Seconds '", body)
         self.assertIn("calculatedScrollDuration(module)", body)
+
+    def test_weather_playlist_duration_is_automatic_from_ticker_controls(self):
+        self.pair_browser()
+        body = self.client.get("/").get_data(as_text=True)
+
+        self.assertIn("const automaticWeatherModules=new Set(['weather','openweather_overview','openweather_forecast'])", body)
+        self.assertIn("isWeatherAutomatic=automaticWeatherModules.has(row.dataset.module)", body)
+        self.assertIn("duration.value=0", body)
+        self.assertIn("'Auto · ticker loops × tick speed '", body)
 
     def test_custom_scrolling_text_editor_has_bounded_loop_count_defaulting_to_one(self):
         self.pair_browser()
