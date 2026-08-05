@@ -1601,6 +1601,16 @@ process.stdout.write(JSON.stringify(output));
         for group in ("Content", "Schedule", "Appearance", "Timing", "Transition"):
             self.assertIn(f"name:'{group}'", body)
 
+    def test_announcement_native_constraints_are_required_and_announced(self):
+        self.pair_browser()
+        body = self.client.get("/").get_data(as_text=True)
+
+        self.assertIn("if(['date','time','number'].includes(type))control.required=true", body)
+        self.assertIn("nativeMessages=[]", body)
+        self.assertIn("if(nativeError&&!nativeMessages.includes(nativeError))nativeMessages.push(nativeError)", body)
+        self.assertIn("const messages=[...Object.values(errors),...nativeMessages]", body)
+        self.assertIn("status.textContent=messages.length?messages.join(' '):'Announcement fields are valid.'", body)
+
     @unittest.skipUnless(shutil.which("node"), "Node.js is required")
     def test_announcement_client_validation_allows_backend_valid_media_fallback(self):
         source = (Path(__file__).parents[1] / "app" / "templates" / "dashboard.html").read_text()
