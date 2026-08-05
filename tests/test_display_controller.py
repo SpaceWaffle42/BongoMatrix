@@ -310,6 +310,59 @@ class DisplayControllerTests(unittest.TestCase):
         self.assertEqual(controller._take_preview(), "custom_welcome")
         controller.start.assert_called_once_with()
 
+    def test_announcement_preview_queue_is_last_request_wins_and_isolated(self):
+        controller = DisplayController(Mock(), Mock())
+        controller.start = Mock()
+        controller._module_stop = Mock()
+        first = {"id": "announcement_first", "headline": "FIRST"}
+        second = {"id": "announcement_second", "headline": "SECOND"}
+
+        controller.preview_announcement(first)
+        first["headline"] = "MUTATED"
+        controller.preview_announcement(second)
+
+        self.assertEqual(controller._take_announcement_preview(), second)
+        self.assertIsNone(controller._take_announcement_preview())
+        self.assertIsNone(controller._take_preview())
+        self.assertIsNone(controller._take_media_preview())
+        controller._module_stop.set.assert_called()
+        self.assertEqual(controller.start.call_count, 2)
+
+    def test_execute_announcement_preview_uses_exact_draft_and_stop_lifecycle(self):
+        matrix = Mock()
+        controller = DisplayController(matrix, Mock())
+        announcement = {"id": "announcement_preview", "enabled": False, "headline": "EXACT"}
+        module = Mock()
+        module.run_preview.return_value = True
+
+        with patch("display_controller.importlib.import_module", return_value=module) as importer:
+            result = controller._execute_announcement_preview(announcement)
+
+        self.assertTrue(result)
+        importer.assert_called_once_with("modules.announcement_board")
+        module.run_preview.assert_called_once()
+        self.assertIs(module.run_preview.call_args.args[0], matrix)
+        self.assertEqual(module.run_preview.call_args.args[1], announcement)
+        self.assertIsNotNone(module.run_preview.call_args.kwargs["stop_event"])
+        self.assertIsNone(controller.current_module)
+        self.assertIsNone(controller._module_stop)
+
+    def test_scheduler_executes_queued_announcement_before_normal_playlist(self):
+        store = Mock()
+        store.get.side_effect = [DEFAULT_CONFIG, RuntimeError("stop test loop")]
+        controller = DisplayController(Mock(), store)
+        draft = {"id": "announcement_preview"}
+        controller._announcement_preview = draft
+        controller._execute = Mock()
+        controller._execute_media = Mock()
+        controller._execute_announcement_preview = Mock(side_effect=lambda item: controller._shutdown.set() or True)
+
+        controller._run_loop_unchecked()
+
+        controller._execute_announcement_preview.assert_called_once_with(draft)
+        controller._execute.assert_not_called()
+        controller._execute_media.assert_not_called()
+
     def test_media_file_can_be_queued_and_executed_as_a_one_off_preview(self):
         matrix = Mock()
         controller = DisplayController(matrix, Mock())

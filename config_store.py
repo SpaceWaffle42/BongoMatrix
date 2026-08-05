@@ -456,10 +456,24 @@ def _validate_announcement_board(board):
             raise ValueError("announcement media must be empty or a safe media reference")
 
         schedule = item["schedule"]
-        if not isinstance(schedule, dict) or set(schedule) != {
-            "start_date", "end_date", "start_time", "end_time",
-        }:
+        legacy_schedule_fields = {"start_date", "end_date", "start_time", "end_time"}
+        schedule_fields = legacy_schedule_fields | {"days"}
+        if (
+            not isinstance(schedule, dict)
+            or not legacy_schedule_fields.issubset(schedule)
+            or not set(schedule).issubset(schedule_fields)
+        ):
             raise ValueError("announcement schedule has invalid fields")
+        schedule.setdefault("days", [0, 1, 2, 3, 4, 5, 6])
+        days = schedule["days"]
+        if (
+            not isinstance(days, list)
+            or not days
+            or any(isinstance(day, bool) or not isinstance(day, int) or not 0 <= day <= 6 for day in days)
+            or len(days) != len(set(days))
+        ):
+            raise ValueError("announcement schedule days must be unique weekdays 0-6")
+        schedule["days"] = sorted(days)
         start_date = _announcement_date(schedule["start_date"], "start_date")
         end_date = _announcement_date(schedule["end_date"], "end_date")
         if end_date < start_date:

@@ -1600,6 +1600,24 @@ process.stdout.write(JSON.stringify(output));
         for group in ("Content", "Schedule", "Appearance", "Timing", "Transition"):
             self.assertIn(f"name:'{group}'", body)
 
+    def test_announcement_validation_marks_controls_and_blocks_save(self):
+        self.pair_browser()
+        body = self.client.get("/").get_data(as_text=True)
+
+        self.assertIn("function validateAnnouncement(announcement)", body)
+        self.assertIn("function validateAnnouncementBoard({focusFirst=false}={})", body)
+        self.assertIn("status.setAttribute('role','status')", body)
+        self.assertIn("status.setAttribute('aria-live','polite')", body)
+        self.assertIn("control.setAttribute('aria-invalid',String(Boolean(error)))", body)
+        self.assertIn("control.setAttribute('aria-describedby',status.id)", body)
+        self.assertIn("validateAnnouncementBoard()", body)
+        self.assertIn("if(typeof validateAnnouncementBoard==='function'&&!validateAnnouncementBoard({focusFirst:true}))", body)
+        self.assertIn("return {saved:false,warning:'Fix the highlighted announcement fields before saving.'}", body)
+        self.assertLess(
+            body.index("if(typeof validateAnnouncementBoard==='function'&&!validateAnnouncementBoard({focusFirst:true}))"),
+            body.index("await api('/api/config'"),
+        )
+
     def test_announcement_board_editor_serializes_ordered_state_in_config_body(self):
         self.pair_browser()
         body = self.client.get("/").get_data(as_text=True)
@@ -1687,6 +1705,17 @@ process.stdout.write(JSON.stringify(output));
         self.assertIn("path:'transition.direction'", body)
         self.assertIn("path:'transition.duration_seconds'", body)
         self.assertIn("if(group.name==='Transition')renderAnnouncementTransition(announcement,fieldset)", body)
+
+    def test_announcement_card_previews_unsaved_draft_without_saving(self):
+        self.pair_browser()
+        body = self.client.get("/").get_data(as_text=True)
+
+        self.assertIn("function previewAnnouncement(id)", body)
+        self.assertIn("makeButton('Preview on Matrix',()=>previewAnnouncement(announcement.id),'btn primary')", body)
+        self.assertIn("applyAnnouncementValidation(card,announcement)", body)
+        self.assertIn("api('/api/preview/announcement',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(announcement)})", body)
+        preview_function = body[body.index("function previewAnnouncement(id)"):body.index("function duplicateAnnouncement(id)")]
+        self.assertNotIn("saveConfig", preview_function)
 
     def test_announcement_actions_duplicate_delete_reorder_and_confirm_reset(self):
         self.pair_browser()
@@ -2460,6 +2489,38 @@ process.stdout.write(JSON.stringify(output));
         self.assertEqual(response.status_code, 200)
         self.assertEqual(response.get_json()["weather"]["location"], "London, GB")
         self.controller.reload.assert_called_once()
+
+    def test_unsaved_announcement_preview_validates_without_mutating_config(self):
+        self.pair_browser()
+        before = self.store.get()
+        announcement = {
+            "id": "announcement_preview", "enabled": False, "name": "Draft preview",
+            "layout": "text_notice", "headline": "PREVIEW", "message": "Unsaved draft",
+            "media": None,
+            "schedule": {"start_date": "2030-01-15", "end_date": "2030-01-15", "days": [0, 1, 2, 3, 4, 5, 6], "start_time": "09:00", "end_time": "17:00"},
+            "style": {"foreground": "#FFFFFF", "background": "#000000", "font": "5x7", "alignment": "center", "border": "none", "border_colour": "#FFFFFF"},
+            "timing": {"mode": "static", "duration_seconds": 8},
+            "transition": {"type": "cut"},
+        }
+
+        response = self.client.post("/api/preview/announcement", json=announcement)
+
+        self.assertEqual(response.status_code, 202)
+        previewed = self.controller.preview_announcement.call_args.args[0]
+        self.assertFalse(previewed["enabled"])
+        self.assertEqual(previewed["style"]["foreground"], "#ffffff")
+        self.assertEqual(self.store.get(), before)
+        self.controller.reload.assert_not_called()
+
+    def test_unsaved_announcement_preview_rejects_invalid_payload_without_hardware_work(self):
+        self.pair_browser()
+
+        response = self.client.post("/api/preview/announcement", json={"headline": "BROKEN"})
+
+        self.assertEqual(response.status_code, 400)
+        self.assertEqual(response.content_type, "application/json")
+        self.assertIn("invalid", response.get_json()["error"].lower())
+        self.controller.preview_announcement.assert_not_called()
 
     def test_preview_only_accepts_known_modules(self):
         self.pairing.verify.return_value = True

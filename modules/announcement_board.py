@@ -19,14 +19,19 @@ def _scheduled_interval(schedule):
 
 def is_announcement_active(announcement, *, now):
     """Return whether a validated announcement is active at local ``now``."""
-    start_date, end_date, start_time, end_time = _scheduled_interval(
-        announcement["schedule"]
-    )
+    schedule = announcement["schedule"]
+    start_date, end_date, start_time, end_time = _scheduled_interval(schedule)
     if start_time < end_time:
-        return start_date <= now.date() <= end_date and start_time <= now.time() < end_time
+        return (
+            start_date <= now.date() <= end_date
+            and now.weekday() in schedule.get("days", range(7))
+            and start_time <= now.time() < end_time
+        )
 
     owning_date = now.date() if now.time() >= start_time else now.date() - dt.timedelta(days=1)
     if not start_date <= owning_date <= end_date:
+        return False
+    if owning_date.weekday() not in schedule.get("days", range(7)):
         return False
     interval_start = dt.datetime.combine(owning_date, start_time)
     interval_end = dt.datetime.combine(owning_date + dt.timedelta(days=1), end_time)
@@ -374,19 +379,13 @@ def _render_pixel_dissolve(matrix, canvas, announcement, stop_event):
     return canvas, False
 
 
-def run(matrix, config, duration, stop_event=None, now_provider=dt.datetime.now):
-    """Render each active announcement once in its configured order."""
-    del duration
+def _run_announcements(matrix, announcements, stop_event=None):
     if stop_event is not None and stop_event.is_set():
         return False
-    active = active_announcements(
-        config["announcement_board"]["announcements"],
-        now=now_provider(),
-    )
-    if not active:
+    if not announcements:
         return False
     canvas = matrix.matrix.CreateFrameCanvas()
-    for announcement in active:
+    for announcement in announcements:
         if stop_event is not None and stop_event.is_set():
             break
         if announcement["timing"]["mode"] == "scroll":
@@ -434,3 +433,18 @@ def run(matrix, config, duration, stop_event=None, now_provider=dt.datetime.now)
             else:
                 time.sleep(seconds)
     return True
+
+
+def run_preview(matrix, announcement, stop_event=None):
+    """Render one validated draft regardless of enabled or schedule state."""
+    return _run_announcements(matrix, [announcement], stop_event=stop_event)
+
+
+def run(matrix, config, duration, stop_event=None, now_provider=dt.datetime.now):
+    """Render each active announcement once in its configured order."""
+    del duration
+    active = active_announcements(
+        config["announcement_board"]["announcements"],
+        now=now_provider(),
+    )
+    return _run_announcements(matrix, active, stop_event=stop_event)

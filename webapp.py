@@ -21,7 +21,7 @@ from PIL import Image, UnidentifiedImageError
 from werkzeug.exceptions import HTTPException, RequestEntityTooLarge
 from werkzeug.utils import secure_filename
 
-from config_store import ALLOWED_MODULES, DEFAULT_CONFIG, ConfigDurabilityError
+from config_store import ALLOWED_MODULES, DEFAULT_CONFIG, ConfigDurabilityError, validate_config
 from module_options import COLOUR_HEX, LAVA_PALETTES
 from modules.weather_app import OpenMeteoClient
 from pairing import PairedDeviceStore, PairingDurabilityError
@@ -931,6 +931,19 @@ def create_app(
                 "OpenWeather secret removal unavailable (%s)", type(exc).__name__
             )
             return jsonify({"error": "Secret storage is unavailable."}), 503
+
+    @app.post("/api/preview/announcement")
+    @requires_pairing
+    def preview_announcement():
+        candidate = json.loads(json.dumps(config_store.get()))
+        candidate["announcement_board"] = {"announcements": [request.get_json()]}
+        try:
+            validated = validate_config(candidate)
+        except ValueError as error:
+            return jsonify({"error": str(error)}), 400
+        announcement = validated["announcement_board"]["announcements"][0]
+        controller.preview_announcement(announcement)
+        return jsonify({"previewing": announcement["id"]}), 202
 
     @app.post("/api/preview/<module_name>")
     @requires_pairing

@@ -215,6 +215,19 @@ class ConfigStoreTests(unittest.TestCase):
             self.assertTrue(saved["enabled"])
             self.assertEqual(saved["name"], "Welcome")
 
+    def test_announcement_weekdays_are_preserved_and_legacy_defaults_to_every_day(self):
+        with tempfile.TemporaryDirectory() as directory:
+            store = ConfigStore(Path(directory) / "config.json")
+            weekdays = self.announcement()
+            weekdays["schedule"]["days"] = [0, 2, 4]
+
+            updated = store.update({"announcement_board": {"announcements": [weekdays]}})
+            self.assertEqual(updated["announcement_board"]["announcements"][0]["schedule"]["days"], [0, 2, 4])
+
+            legacy = self.announcement()
+            updated = store.update({"announcement_board": {"announcements": [legacy]}})
+            self.assertEqual(updated["announcement_board"]["announcements"][0]["schedule"]["days"], [0, 1, 2, 3, 4, 5, 6])
+
     def test_announcement_rejects_equal_start_and_end_times(self):
         invalid = self.announcement()
         invalid["schedule"]["end_time"] = invalid["schedule"]["start_time"]

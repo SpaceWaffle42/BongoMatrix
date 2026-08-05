@@ -65,6 +65,18 @@ class AnnouncementBoardTests(unittest.TestCase):
             [],
         )
 
+    def test_weekdays_filter_daytime_and_use_owning_date_for_overnight(self):
+        daytime = self.item("announcement_daytime", "09:00", "17:00")
+        daytime["schedule"]["start_date"] = "2030-01-14"
+        daytime["schedule"]["days"] = [0]
+        self.assertEqual(active_announcements([daytime], now=dt.datetime(2030, 1, 15, 10, 0)), [])
+        self.assertEqual(active_announcements([daytime], now=dt.datetime(2030, 1, 14, 10, 0)), [daytime])
+
+        overnight = self.item("announcement_overnight_day", "22:00", "02:00")
+        overnight["schedule"]["start_date"] = "2030-01-14"
+        overnight["schedule"]["days"] = [0]
+        self.assertEqual(active_announcements([overnight], now=dt.datetime(2030, 1, 15, 1, 0)), [overnight])
+
     def test_overnight_range_uses_eligible_start_dates_and_extends_final_date_into_morning(self):
         announcement = self.item("announcement_overnight", "22:00", "02:00")
         announcement["schedule"]["end_date"] = "2030-01-16"
@@ -104,6 +116,31 @@ class AnnouncementBoardTests(unittest.TestCase):
         self.assertFalse(result)
         matrix.assert_not_called()
         self.assertEqual(matrix.mock_calls, [])
+    def test_preview_renders_disabled_out_of_schedule_draft_without_mutating_it(self):
+        matrix = Mock()
+        matrix.matrix.CreateFrameCanvas.return_value = "canvas"
+        matrix.font.side_effect = lambda name: f"font:{name}"
+        matrix.colour_rgb.side_effect = lambda value: {
+            "#ffffff": Mock(red=255, green=255, blue=255),
+            "#000000": Mock(red=0, green=0, blue=0),
+        }[value]
+        matrix.swap.return_value = "canvas"
+        stop = Mock()
+        stop.is_set.return_value = False
+        stop.wait.return_value = False
+        draft = self.item("announcement_preview", "09:00", "17:00")
+        draft["enabled"] = False
+        draft["schedule"]["start_date"] = "2099-01-01"
+        draft["schedule"]["end_date"] = "2099-01-01"
+        expected = dict(draft)
+
+        result = announcement_board.run_preview(matrix, draft, stop_event=stop)
+
+        self.assertTrue(result)
+        self.assertEqual(draft, expected)
+        matrix.swap.assert_called_once_with("canvas")
+        stop.wait.assert_called_once_with(8)
+
     def test_active_static_text_notice_renders_one_frame_and_waits_its_own_duration(self):
         matrix = Mock()
         matrix.matrix.CreateFrameCanvas.return_value = "canvas"
