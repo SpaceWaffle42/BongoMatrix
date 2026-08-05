@@ -17,6 +17,7 @@ from PIL import Image, UnidentifiedImageError
 from config_store import ConfigStore
 from pairing import PairedDeviceStore, PairingDurabilityError
 from secret_store import SecretDurabilityError, SecretStore
+from tests import test_config_store
 from webapp import create_app
 
 
@@ -1599,6 +1600,34 @@ process.stdout.write(JSON.stringify(output));
         self.assertIn("createElement('legend')", body)
         for group in ("Content", "Schedule", "Appearance", "Timing", "Transition"):
             self.assertIn(f"name:'{group}'", body)
+
+    @unittest.skipUnless(shutil.which("node"), "Node.js is required")
+    def test_announcement_client_validation_allows_backend_valid_media_fallback(self):
+        source = (Path(__file__).parents[1] / "app" / "templates" / "dashboard.html").read_text()
+        start = source.index("function validateAnnouncement(announcement)")
+        end = source.index("\nfunction applyAnnouncementValidation", start)
+        function_source = source[start:end]
+        announcement = test_config_store.ConfigStoreTests.announcement()
+        announcement["schedule"]["days"] = list(range(7))
+        announcement["layout"] = "image_banner"
+        announcement["media"] = None
+        harness = function_source + "\nconst errors=validateAnnouncement(" + json.dumps(announcement) + ");if(errors.media)throw new Error(errors.media);console.log('MEDIA_FALLBACK_VALIDATION_PASS');"
+        node = shutil.which("node")
+        assert node is not None
+        result = subprocess.run(
+            [node, "-e", harness], cwd=Path(__file__).parents[1],
+            text=True, capture_output=True, check=False,
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("MEDIA_FALLBACK_VALIDATION_PASS", result.stdout)
+
+    def test_announcement_editor_enforces_backend_board_limit(self):
+        self.pair_browser()
+        body = self.client.get("/").get_data(as_text=True)
+
+        self.assertIn("if(announcements.length>=50)", body)
+        self.assertIn("Announcement Board supports up to 50 announcements.", body)
+        self.assertIn("if(announcements.length>50)", body)
 
     def test_announcement_validation_marks_controls_and_blocks_save(self):
         self.pair_browser()
