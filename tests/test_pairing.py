@@ -1,7 +1,8 @@
+import json
 import unittest
 import tempfile
 from pathlib import Path
-from unittest.mock import Mock
+from unittest.mock import Mock, patch
 
 from pairing import PairedDeviceStore, PairingManager, initialize_pairing_display
 
@@ -54,6 +55,65 @@ class PairingManagerTests(unittest.TestCase):
         store.add("First phone", max_devices=1)
         with self.assertRaisesRegex(ValueError, "maximum paired devices reached"):
             store.add("Second phone", max_devices=1)
+
+    def test_paired_device_registry_rejects_malformed_or_duplicate_entries(self):
+        valid_id = "A" * 32
+        cases = [
+            [{"id": valid_id}],
+            [
+                {"id": valid_id, "name": "Phone", "paired_at": 1},
+                {"id": valid_id, "name": "Tablet", "paired_at": 2},
+            ],
+            [{"id": "x", "name": "Phone", "paired_at": 1}],
+            [{"id": "A" * 33, "name": "Phone", "paired_at": 1}],
+            [{"id": valid_id, "name": "   ", "paired_at": 1}],
+            [{"id": valid_id, "name": "Phone\nInjected", "paired_at": 1}],
+            [{"id": valid_id, "name": "N" * 41, "paired_at": 1}],
+            [{"id": valid_id, "name": "Phone", "paired_at": True}],
+            [{"id": valid_id, "name": "Phone", "paired_at": -1}],
+            [{"id": valid_id, "name": "Phone", "paired_at": 1, "extra": True}],
+            [
+                {"id": f"{index:032d}", "name": "Phone", "paired_at": 1}
+                for index in range(11)
+            ],
+        ]
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "paired-devices.json"
+            for devices in cases:
+                with self.subTest(devices=devices):
+                    path.write_text(json.dumps(devices))
+                    with self.assertRaisesRegex(ValueError, "paired device"):
+                        PairedDeviceStore(path)
+
+    def test_paired_device_registry_does_not_mutate_memory_when_write_fails(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "paired-devices.json"
+            store = PairedDeviceStore(path)
+            existing = store.add("Existing phone", max_devices=4)
+
+            with patch.object(store, "_write", side_effect=OSError("disk full")):
+                with self.assertRaises(OSError):
+                    store.add("New phone", max_devices=4)
+                with self.assertRaises(OSError):
+                    store.remove(existing["id"])
+
+            self.assertEqual(store.list(), [existing])
+            self.assertEqual(PairedDeviceStore(path).list(), [existing])
+
+    def test_paired_device_registry_reports_visible_state_when_directory_sync_fails(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "paired-devices.json"
+            store = PairedDeviceStore(path)
+            device = store.add("Existing phone", max_devices=4)
+
+            with patch(
+                "pairing.os.fsync",
+                side_effect=[None, OSError("directory sync unavailable")],
+            ), self.assertRaisesRegex(OSError, "durability"):
+                store.remove(device["id"])
+
+            self.assertEqual(store.list(), [])
+            self.assertEqual(PairedDeviceStore(path).list(), [])
 
     def test_paired_device_registry_removes_devices(self):
         store = PairedDeviceStore()

@@ -1,5 +1,80 @@
 # Matrix Display Project — Deep Code Review
 
+## Current review addendum — 2026-08-05
+
+**Baseline:** clean `main` at `220f552`; 225 tests passed before review.
+**Method:** complete source inventory, full suite, targeted fault injection, three independent fail-closed review tracks (backend/security, hardware/runtime, and frontend/test quality), then regression-first remediation.
+**Scope of the remediation MR:** narrow correctness, security, lifecycle, and persistence fixes. It deliberately does not combine those changes with a wholesale frontend/rendering/persistence rewrite.
+
+### Confirmed defects corrected in the remediation MR
+
+| Severity | Finding | Evidence before fix | Resolution |
+|---|---|---|---|
+| P0 | Schedule values accepted by storage could kill the scheduler | Noncanonical and Unicode-digit forms passed `_validate_time` but failed `datetime.time.fromisoformat`; booleans also passed brightness validation | Exact ASCII `HH:MM` validation, explicit boolean rejection, and parser-closure regressions |
+| P1 | Production media sanitizer skipped CPU/address-space limits | WSGI starts the helper unprivileged, causing `drop_privileges()` to return before `setrlimit()` | Limits apply regardless of UID, preserve stricter inherited ceilings, and identity dropping remains root-only |
+| P1 | An unpaired LAN client could interrupt an already-paired display | `GET /pair` issued and displayed a PIN even with trusted devices present | Public PIN creation is allowed only for first-device provisioning; additional pairing requires an authenticated pairing window |
+| P1 | Config could commit while API returned an ambiguous HTML 500 | Fault-injected `controller.reload()` left the requested config on disk but returned generic 500 | JSON 503 now reports `committed: true`, returns the committed config, and hides internal exception details |
+| P1 | Config directory-sync failure hid a visible commit behind HTML 500 | Parent-directory `fsync` failed after `os.replace`, leaving the new config readable while `update()` raised an untyped error | A typed durability exception carries the committed config; API reloads it and returns sanitized JSON 503 with `committed: true` and `durability_uncertain: true` |
+| P1 | Scheduler-level exceptions killed the sole display thread or retried downstream failures at full speed | Fault-injected config/brightness/playlist failures terminated the daemon or reset retry state before a complete iteration | Boundary records a sanitized error; retries use bounded exponential backoff and rate-limited tracebacks, resetting only after a complete scheduling iteration |
+| P1 | `stop(timeout)` could block indefinitely or race a replacement scheduler | Worker or pairing callback retained `_display_lock`; a new scheduler could start before stop cleared hardware | One deadline covers join and hardware-lock acquisition; `_stopping` serializes restart; API reports JSON 503 instead of claiming success |
+| P1 | Brightness hardware writes bypassed display ownership serialization | Scheduler changed brightness outside `_display_lock` and could overlap pairing drawing | Brightness changes now hold the display lock and recheck shutdown, reload, and pairing state after acquisition |
+| P1 | Stale pairing callbacks could redraw ended state or clear a replacement PIN | Timer cancellation could not stop an expiry or rotation callback that had already begun | Expiry, rotation, and draw callbacks carry generation tokens and recheck state under the relevant locks; stale callbacks cannot alter or draw a replacement generation |
+| P1 | MP4 playback ignored `keep_aspect`; sanitization baked in a matte | Playback always stretched video, then a first fix fitted an already-letterboxed 64×32 stream | Sanitization retains bounded source aspect dimensions; playback performs the requested final scale-and-pad or direct scale |
+| P2 | Paired-device authorization state changed before persistence succeeded | Fault-injected write left memory and disk with different add/remove state | Candidate state is written first and published to memory only after success |
+| P2 | Malformed paired-device entries were accepted at startup | Missing/extra fields, weak or duplicate IDs, invalid names/timestamps, and excessive entries could become authorization state | Startup and writer share the exact 32-character ID, 40-printable-character name, timestamp, uniqueness, and count contract |
+| P2 | Provisioning thread creation failure permanently wedged setup | Thread construction or `start()` failure left `_busy=True` and consumed the PIN | Both failure points reset status/busy state, restore pairing display, and remain retryable |
+| P2 | Upload failure or cleanup failure could hide publication state | Metadata exceptions, rollback failure, or post-success temporary unlink failure could leave a destination while returning opaque HTML 500 | Transaction-owned rollback covers every post-link exception; rollback and temporary-cleanup failures return sanitized committed-state JSON, while unexpected bugs re-raise only after successful rollback |
+| P2 | One-frame browser ping-pong advanced out of range | Frame `0` became `1` when `frame_count == 1` | Playback advancement is a bounded tested helper shared by the editor timer |
+| P1 | Pairing-limit writes raced new-device admission | A device could be admitted after the count check while `max_devices` was lowered | Config and pairing admission now share the paired-registry transaction, with a deterministic interleaving regression |
+| P1 | Ending pairing could return while an already-checked callback still drew | Generation checks occurred before the callback acquired/used hardware | `end_pairing()` now synchronizes with the display lock without breaking bounded controller stop, covered by a blocked-after-check regression |
+| P1 | Committed upload/config warnings were discarded by secondary browser handlers | Advanced upload omitted the published item; silent config save returned plain `true` and preview replaced its warning | Shipped handlers consume typed committed results, refresh/adopt committed media, and preserve combined warning state in executed Node tests |
+| P2 | Media publication, rollback, and removal acknowledgements lacked directory durability | Sanitized output and media-directory mutations could be acknowledged without the required fsync barriers | Sanitizer output is fsynced; publication, rollback, and deletion sync `media_root`; post-mutation failures return explicit durability uncertainty |
+| P2 | A blocked FFmpeg pipe read ignored video cancellation and duration deadlines | `stdout.read(frame_size)` could wait indefinitely after the preceding cancellation check | Select-based exact reads poll cancellation/deadlines, enforce a no-progress bound, and promptly terminate FFmpeg in a real blocked-pipe regression |
+| P2 | API edge paths returned inconsistent HTML or leaked committed-state ambiguity | Malformed JSON, wrong content types, missing resources, and paired-registry failures crossed inconsistent handlers | `/api/` errors are sanitized JSON, config requires JSON content type, and paired-device durability uncertainty has a typed route contract |
+| P1 | First-device directory-sync uncertainty committed authorization without a browser session | The PIN was consumed and the registry gained a device, but `/pair` returned 500 and subsequent pairing was forbidden | Add-side durability errors carry the committed device; `/pair` establishes the durable session and renders an explicit warning before returning 503 |
+| P1 | Ordinary module exceptions bypassed scheduler backoff | `_execute()` swallowed failures, logged every attempt, and the playlist retried thousands of times per second | Module failures now reach the rate-limited exponential-backoff boundary; a real scheduler-thread regression bounds attempts and tracebacks |
+| P1 | Committed upload/deletion reconciliation could discard its warning | Refresh failures rejected handlers; committed device/media removals left stale controls, redirected without warning continuity, or lost the primary warning if local rerendering or advanced-editor layer adoption threw or silently refused the layer | Executed Node regressions cover upload refresh failure, media deletion refresh failure, current/non-current device reconciliation, compound refresh/local/editor failures, and explicit silent editor-adoption refusal while preserving the committed warning |
+| P2 | Non-object nested `media` configuration caused an internal error | Valid JSON arrays, strings, numbers, and null reached `.values()` before schema validation | The API rejects all non-object media payloads as sanitized JSON 400 responses before reference checks |
+| P2 | Logout and current-device reconciliation mishandled removal outcomes | Committed removal initially retained an invalid session, while a later fix cleared the only recovery session even when removal failed before commit; forwarded warnings were also accepted as arbitrary query text | Logout now clears only after successful or committed removal, preserves the session on pre-commit failure, and redirects with a fixed warning code mapped to trusted server/UI text; pairing guidance preserves stronger durability state |
+| P2 | Follow-up preview/library refresh failures obscured known commits | Failed preview replaced a committed config warning, while successful media mutations followed by failed refresh looked like plain failures or left stale library controls | Config warnings survive failed previews; uploads and removals reconcile validated mutation results into local media state and rerender selectors/library when authoritative refresh fails |
+| P1 | Sanitizer rejection or descriptor close failure could orphan a private helper output | Helper-side unlink failures and close exceptions could prevent the route from receiving output ownership | `MediaSanitizerError` transfers private output ownership/cleanup state; descriptor closes are isolated and non-overriding so the route can always publish or clean the known path |
+| P1 | Pairing setup could violate stop deadlines or survive a failed stop/restart | A blocked provider originally held state indefinitely; after deadline bounding, restart could clear `_shutdown`, and a later pre-draw scheduling gap could still admit the stale PIN | IP discovery runs outside controller state locks; every stop advances a lifecycle epoch and always performs deadline-bounded pairing-generation/display invalidation before reporting an in-flight setup timeout, preventing stale provider and pre-draw paths across restart |
+| P2 | Navigation warnings trusted arbitrary URL query text | `/pair` rendered `warning` directly and dashboard JavaScript surfaced any query value as a trusted warning | Navigation now accepts only a fixed warning code and maps it to controlled text; adversarial query tests execute both server and dashboard behavior |
+| P2 | A stale expiry could cancel replacement pairing during setup | The replacement generation was assigned only after blocking setup work, allowing the old expiry to clear pairing pause before the new draw | Replacement setup reserves its generation before fallible/blocking work and commits only while that reservation remains current; a deterministic interleaving regression proves the new PIN is drawn |
+
+### Confirmed residual risks and simplification backlog
+
+These are real findings, not approvals. They remain outside this narrow MR because each needs an explicit product/architecture cycle and broader migration or browser/hardware validation.
+
+1. **P1 — Optimistic concurrency is absent.** Multiple paired dashboards can overwrite newer unrelated edits. Add config revisions/ETags, conditional updates, and a user-friendly conflict workflow.
+2. **P1 — “Preview” and media-slot actions can persist unrelated drafts.** Add a non-persistent draft-preview API or an authoritative frontend draft store with explicit dirty-state semantics.
+3. **P1 — Advanced browser rendering is not pixel-canonical.** Browser text metrics, primitive rasterization, transforms, and animated media differ from the Python/hardware renderer. Prefer server-rendered draft frames or one shared renderer plus golden fixtures.
+4. **P2 — FrameCapture lifecycle and double-buffer modelling are incomplete.** Abandoned canvas buffers can accumulate; retained hardware pixels and frame/revision reads can diverge. Model both hardware buffers explicitly and provide one atomic snapshot API.
+5. **P2 — Video presentation timing still drifts.** Fixed post-render sleeps do not account for decode/render time. Schedule frame presentation against monotonic deadlines.
+6. **P2 — Hidden dashboards continue polling, PNG decoding, timers, and autoplay.** Pause work on `visibilitychange`, make frame fetches revision-aware, and stop media outside visible editors.
+7. **P2 — Pairing failure throttling is global.** Repeated bad submissions from one LAN client can temporarily lock out the correct PIN for everyone. Add source-aware throttling plus a bounded global backstop without trusting proxy headers by default.
+8. **P2 — Dynamic editor accessibility is incomplete.** Add live regions, visible pairing labels, keyboard canvas operations, named icon controls, focus restoration, and reduced-motion behavior.
+9. **P3 — The application is over-centralized.** `create_app`, the embedded 67 KB dashboard asset, canvas schema logic, and four persistence implementations duplicate policy. Split focused blueprints/services, move frontend code into formatted modules, and consolidate atomic-file behavior only after characterization tests exist.
+10. **Accepted deployment risks:** setup credentials currently cross an open HTTP hotspot, and the web service runs as root to own Matrix hardware. These require threat-model and deployment changes, not incidental refactoring.
+
+### Candidate verification
+
+- Full regression suite: **290 tests passed**.
+- The rendered paired-dashboard inline JavaScript is syntax-checked with Node, and committed partial-success responses are wired through the real config-save and media-upload handlers.
+- JavaScript syntax, Python compilation, and `git diff --check`: passed.
+- Production added-line credential/injection scan: no hardcoded credentials, `shell=True`, `eval`/`exec`, or unsafe pickle use; the Node contract test intentionally evaluates the repository-owned browser asset.
+- Real FFmpeg aspect filter produced one 64×32 RGB24 frame (**6,144 bytes**).
+- Live paired registry: three entries, all compatible with the exact writer schema; identifiers and names were not emitted.
+- Expected tracebacks in the suite are deliberate fault-injection and sanitizer rejection paths.
+
+### Review gate for this MR
+
+The MR may merge only when all changed-file findings are addressed, focused and full tests pass, JavaScript/Python syntax and diff checks pass, no credential material is present, and a second independent review reports no unresolved blocker/high/medium defect in the remediation itself. A pending/no-runner GitLab pipeline must not be described as passing.
+
+---
+
+## Historical review — 2026-08-04
+
 **Review date:** 2026-08-04  
 **Reviewed tree:** `/root/matrix_new`  
 **Baseline:** deliberately restored 173-test revision  

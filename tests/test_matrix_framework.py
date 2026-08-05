@@ -1,7 +1,9 @@
 import importlib
+import os
 import sys
 import tempfile
 import threading
+import time
 import types
 import unittest
 from pathlib import Path
@@ -293,7 +295,6 @@ class MatrixFrameworkTests(unittest.TestCase):
         matrix._media_file = Mock(return_value=framework.pathlib.Path("/tmp/clip.mp4"))
         frame = b"\x10\x20\x30" * (64 * 32)
         process = Mock()
-        process.stdout.read.side_effect = [frame, b""]
         process.wait.return_value = 0
         image = Mock()
 
@@ -301,14 +302,79 @@ class MatrixFrameworkTests(unittest.TestCase):
             framework.os, "lseek"
         ), patch.object(framework.os, "close"), patch.object(
             framework.subprocess, "Popen", return_value=process
-        ), patch.object(
+        ) as popen, patch.object(
             framework.Image, "frombytes", return_value=image, create=True
+        ), patch.object(
+            framework, "_read_exact_interruptibly", side_effect=[frame, b""]
         ), patch.object(framework.time, "sleep"):
             self.assertTrue(matrix.show_video("clip.mp4", loops=1))
 
         matrix.canvas.SetImage.assert_called_once_with(image, 0, 0)
         matrix._frame_capture.set_image.assert_called_once_with(matrix.canvas, image, 0, 0)
         matrix.swap.assert_called_once()
+        command = popen.call_args.args[0]
+        video_filter = command[command.index("-vf") + 1]
+        self.assertEqual(
+            video_filter,
+            "scale=64:32:force_original_aspect_ratio=decrease,"
+            "pad=64:32:(ow-iw)/2:(oh-ih)/2:black",
+        )
+
+    def test_show_video_cancellation_interrupts_blocked_decoder_read(self):
+        matrix = Matrix.__new__(Matrix)
+        matrix.matrix = Mock(width=64, height=32)
+        matrix.canvas = Mock()
+        matrix._frame_capture = Mock()
+        matrix.clear = Mock()
+        matrix.swap = Mock(return_value=matrix.canvas)
+        stop = threading.Event()
+        decoder_started = threading.Event()
+        finished = threading.Event()
+        read_fd, write_fd = os.pipe()
+        process = Mock()
+        process.stdout = os.fdopen(read_fd, "rb", buffering=0)
+        process.poll.return_value = None
+        process.wait.return_value = 0
+
+        def launch(*_args, **_kwargs):
+            decoder_started.set()
+            return process
+
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "blocked.mp4"
+            path.write_bytes(b"input")
+            matrix._media_file = Mock(return_value=path)
+            with patch.object(framework.subprocess, "Popen", side_effect=launch):
+                worker = threading.Thread(
+                    target=lambda: (
+                        matrix.show_video("blocked.mp4", stop_event=stop), finished.set()
+                    )
+                )
+                worker.start()
+                self.assertTrue(decoder_started.wait(0.5))
+                stop.set()
+                stopped_promptly = finished.wait(0.3)
+                os.close(write_fd)
+                worker.join(1)
+
+        process.stdout.close()
+        self.assertTrue(stopped_promptly, "cancellation did not interrupt the FFmpeg read")
+        self.assertFalse(worker.is_alive())
+        process.terminate.assert_called_once_with()
+
+    def test_blocked_decoder_read_observes_video_deadline(self):
+        read_fd, write_fd = os.pipe()
+        started = time.monotonic()
+        try:
+            with os.fdopen(read_fd, "rb", buffering=0) as stream:
+                frame = framework._read_exact_interruptibly(
+                    stream, 64 * 32 * 3, deadline=started + 0.05
+                )
+        finally:
+            os.close(write_fd)
+
+        self.assertEqual(frame, b"")
+        self.assertLess(time.monotonic() - started, 0.3)
 
     def test_widget_scroll_is_mirrored_into_the_live_preview(self):
         matrix = Matrix.__new__(Matrix)

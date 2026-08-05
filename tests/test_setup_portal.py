@@ -1,10 +1,38 @@
 import unittest
-from unittest.mock import Mock
+from unittest.mock import Mock, patch
 
-from setup_portal import create_setup_app
+from setup_portal import ProvisioningCoordinator, create_setup_app
 
 
 class SetupPortalTests(unittest.TestCase):
+    def test_thread_construction_failure_does_not_wedge_provisioning(self):
+        pairing = Mock()
+        coordinator = ProvisioningCoordinator(
+            Mock(), pairing, Mock(), Mock(), handoff_delay=0,
+        )
+
+        with patch("setup_portal.threading.Thread", side_effect=RuntimeError("thread unavailable")):
+            with self.assertRaisesRegex(RuntimeError, "thread unavailable"):
+                coordinator.submit("Home", "password123")
+
+        self.assertFalse(coordinator.is_busy())
+        self.assertEqual(coordinator.status()["state"], "error")
+        pairing.issue_pin.assert_called_once()
+
+    def test_thread_start_failure_does_not_wedge_provisioning(self):
+        coordinator = ProvisioningCoordinator(
+            Mock(), Mock(), Mock(), Mock(), handoff_delay=0,
+        )
+        worker = Mock()
+        worker.start.side_effect = RuntimeError("thread unavailable")
+
+        with patch("setup_portal.threading.Thread", return_value=worker):
+            with self.assertRaisesRegex(RuntimeError, "thread unavailable"):
+                coordinator.submit("Home", "password123")
+
+        self.assertFalse(coordinator.is_busy())
+        self.assertEqual(coordinator.status()["state"], "error")
+
     def setUp(self):
         self.network = Mock()
         self.pairing = Mock()

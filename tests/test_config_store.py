@@ -2,11 +2,29 @@ import json
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
-from config_store import ConfigStore, DEFAULT_CONFIG
+from config_store import ConfigDurabilityError, ConfigStore, DEFAULT_CONFIG
 
 
 class ConfigStoreTests(unittest.TestCase):
+    def test_directory_sync_failure_reports_visible_committed_config(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "config.json"
+            store = ConfigStore(path)
+
+            with patch(
+                "config_store.os.fsync",
+                side_effect=[None, OSError("directory unavailable")],
+            ), self.assertRaises(ConfigDurabilityError) as raised:
+                store.update({"device": {"name": "Committed Despite Error"}})
+
+            self.assertEqual(
+                raised.exception.config["device"]["name"],
+                "Committed Despite Error",
+            )
+            self.assertEqual(store.get()["device"]["name"], "Committed Despite Error")
+
     def test_legacy_config_gains_disabled_openweather_apps_without_changing_existing_playlist(self):
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / "config.json"
@@ -167,6 +185,28 @@ class ConfigStoreTests(unittest.TestCase):
             for value in (0, 11, True, 4.5, "4"):
                 with self.subTest(value=value), self.assertRaises(ValueError):
                     store.update({"pairing": {"max_devices": value}})
+
+    def test_display_schedule_requires_runtime_parseable_times_and_integer_brightness(self):
+        with tempfile.TemporaryDirectory() as directory:
+            store = ConfigStore(Path(directory) / "config.json")
+            for value in (
+                "8:0", "08:00:00", "08:00+01:00",
+                "٠٨:٠٠", "０８:００", True, None,
+            ):
+                with self.subTest(time=value), self.assertRaises(ValueError):
+                    store.update({"display": {"active_start": value}})
+            for value in (True, False, 1.5, "50"):
+                with self.subTest(brightness=value), self.assertRaises(ValueError):
+                    store.update({"display": {"day_brightness": value}})
+
+            saved = store.update({"display": {
+                "active_start": "08:00", "active_end": "20:00",
+                "day_brightness": 1, "night_brightness": 100,
+            }})
+            self.assertEqual(saved["display"], {
+                "active_start": "08:00", "active_end": "20:00",
+                "day_brightness": 1, "night_brightness": 100,
+            })
 
     def test_rejects_invalid_module_names_brightness_and_media_paths(self):
         with tempfile.TemporaryDirectory() as directory:

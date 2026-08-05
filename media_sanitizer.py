@@ -105,7 +105,7 @@ def _sanitize_mp4(source, destination):
             "-map", "0:v:0", "-an", "-sn", "-dn",
             "-vf", (
                 "scale=64:32:force_original_aspect_ratio=decrease:force_divisible_by=2,"
-                "pad=64:32:(ow-iw)/2:(oh-ih)/2:black,fps=20"
+                "fps=20"
             ),
             "-frames:v", str(MAX_VIDEO_FRAMES),
             "-c:v", "libx264", "-threads", "1", "-preset", "veryfast", "-crf", "28",
@@ -119,18 +119,26 @@ def _sanitize_mp4(source, destination):
     if os.fstat(destination_fd).st_size > MAX_VIDEO_OUTPUT_BYTES:
         raise ValueError("sanitized MP4 exceeds the output size policy")
     _, optimized = _probe_mp4(destination)
-    if (int(optimized.get("width", 0)), int(optimized.get("height", 0))) != MATRIX_SIZE:
+    optimized_width = int(optimized.get("width", 0))
+    optimized_height = int(optimized.get("height", 0))
+    if not (1 <= optimized_width <= MATRIX_SIZE[0] and 1 <= optimized_height <= MATRIX_SIZE[1]):
         raise ValueError("sanitized MP4 dimensions are invalid")
     if abs(_fraction(optimized.get("avg_frame_rate")) - VIDEO_OUTPUT_FPS) > 0.01:
         raise ValueError("sanitized MP4 frame rate is invalid")
 
 
 def drop_privileges():
+    def tighten(resource_type, requested):
+        soft, hard = resource.getrlimit(resource_type)
+        target_hard = requested if hard == resource.RLIM_INFINITY else min(requested, hard)
+        target_soft = requested if soft == resource.RLIM_INFINITY else min(requested, soft)
+        resource.setrlimit(resource_type, (min(target_soft, target_hard), target_hard))
+
+    tighten(resource.RLIMIT_CPU, 30)
+    tighten(resource.RLIMIT_AS, 768 * 1024 * 1024)
     if os.geteuid() != 0:
         return
     nobody = pwd.getpwnam("nobody")
-    resource.setrlimit(resource.RLIMIT_CPU, (30, 30))
-    resource.setrlimit(resource.RLIMIT_AS, (768 * 1024 * 1024, 768 * 1024 * 1024))
     os.setgroups([])
     os.setgid(nobody.pw_gid)
     os.setuid(nobody.pw_uid)
@@ -140,6 +148,8 @@ def sanitize(source, destination, filename):
     suffix = Path(filename).suffix.lower()
     if suffix == ".mp4":
         _sanitize_mp4(source, destination)
+        destination.flush()
+        os.fsync(destination.fileno())
         return
     expected = FORMAT_BY_EXTENSION.get(suffix)
     if expected is None:
@@ -199,6 +209,7 @@ def sanitize(source, destination, filename):
         if verified.format != expected:
             raise ValueError("sanitized output format mismatch")
         verified.verify()
+    os.fsync(destination.fileno())
 
 
 def main():

@@ -3,6 +3,8 @@ import time
 import unittest
 from unittest.mock import Mock, patch
 
+import display_controller
+from config_store import DEFAULT_CONFIG
 from display_controller import DisplayController
 
 
@@ -62,6 +64,135 @@ class DisplayControllerTests(unittest.TestCase):
         self.assertIn("PAIR", texts)
         self.assertIn("123456", texts)
         matrix.swap.assert_called()
+
+    def test_stale_pairing_timer_cannot_draw_after_pairing_ends(self):
+        matrix = Mock()
+        controller = DisplayController(matrix, Mock())
+        controller._pairing_ip = "192.168.1.4"
+
+        controller._draw_pairing_page(show_ip=True)
+
+        matrix.clear.assert_not_called()
+        matrix.swap.assert_not_called()
+
+    def test_end_pairing_waits_for_draw_that_already_passed_generation_check(self):
+        matrix = Mock()
+        draw_started = threading.Event()
+        release_draw = threading.Event()
+        end_returned = threading.Event()
+
+        def blocked_clear():
+            draw_started.set()
+            release_draw.wait(1)
+
+        matrix.clear.side_effect = blocked_clear
+        controller = DisplayController(matrix, Mock())
+        controller._pairing_pause.set()
+        controller._pairing_generation = 1
+        controller._pairing_pin = "123456"
+
+        draw = threading.Thread(
+            target=controller._draw_pairing_page,
+            kwargs={"show_ip": False, "generation": 1},
+        )
+        draw.start()
+        self.assertTrue(draw_started.wait(0.5))
+
+        ending = threading.Thread(
+            target=lambda: (controller.end_pairing(1), end_returned.set())
+        )
+        ending.start()
+        self.assertFalse(end_returned.wait(0.1))
+
+        release_draw.set()
+        draw.join(1)
+        ending.join(1)
+        self.assertFalse(draw.is_alive())
+        self.assertFalse(ending.is_alive())
+        self.assertTrue(end_returned.is_set())
+        self.assertFalse(controller.pairing_active)
+
+    def test_stale_pairing_callbacks_cannot_end_or_draw_a_new_generation(self):
+        matrix = Mock()
+        timers = []
+
+        class FakeTimer:
+            def __init__(self, interval, callback):
+                self.interval = interval
+                self.callback = callback
+                self.daemon = False
+                self.cancelled = False
+                timers.append(self)
+
+            def start(self):
+                pass
+
+            def cancel(self):
+                self.cancelled = True
+
+        with patch("display_controller.threading.Timer", FakeTimer):
+            controller = DisplayController(matrix, Mock())
+            controller.show_pairing_pin("111111", ttl_seconds=60)
+            old_expiry, old_rotation = timers[:2]
+            controller.show_pairing_pin("222222", ttl_seconds=60)
+
+            matrix.reset_mock()
+            old_expiry.callback()
+            old_rotation.callback()
+
+            self.assertTrue(controller.pairing_active)
+            self.assertEqual(controller._pairing_pin, "222222")
+            matrix.clear.assert_not_called()
+            matrix.swap.assert_not_called()
+
+            new_expiry = timers[2]
+            new_expiry.callback()
+            self.assertFalse(controller.pairing_active)
+
+    def test_old_expiry_cannot_cancel_replacement_pairing_during_setup(self):
+        matrix = Mock()
+        timers = []
+        replacement_interrupt_started = threading.Event()
+        release_replacement = threading.Event()
+
+        class FakeTimer:
+            def __init__(self, interval, callback):
+                self.callback = callback
+                self.daemon = False
+                timers.append(self)
+
+            def start(self):
+                pass
+
+            def cancel(self):
+                pass
+
+        with patch("display_controller.threading.Timer", FakeTimer):
+            controller = DisplayController(matrix, Mock())
+            controller.show_pairing_pin("111111", ttl_seconds=60)
+            old_expiry = timers[0]
+
+            def block_replacement_interrupt(timeout=None):
+                replacement_interrupt_started.set()
+                release_replacement.wait(1)
+                return True
+
+            controller._interrupt_module = block_replacement_interrupt
+            replacement = threading.Thread(
+                target=lambda: controller.show_pairing_pin("222222", ttl_seconds=60)
+            )
+            replacement.start()
+            self.assertTrue(replacement_interrupt_started.wait(0.2))
+
+            old_expiry.callback()
+            release_replacement.set()
+            replacement.join(1)
+
+        self.assertFalse(replacement.is_alive())
+        self.assertTrue(controller.pairing_active)
+        self.assertEqual(controller._pairing_pin, "222222")
+        texts = [call.args[5] for call in matrix.draw_text_with_border.call_args_list]
+        self.assertIn("222222", texts)
 
     def test_unknown_preview_is_rejected(self):
         store = Mock()
@@ -216,6 +347,249 @@ class DisplayControllerTests(unittest.TestCase):
             for caller in callers:
                 caller.join()
         self.assertEqual(len(created), 1)
+
+    def test_scheduler_survives_top_level_fault_and_reports_it(self):
+        matrix = Mock()
+        store = Mock()
+        store.get.side_effect = RuntimeError("brightness hardware unavailable")
+        controller = DisplayController(matrix, store)
+
+        controller.start()
+        deadline = time.time() + 0.5
+        while controller.last_error is None and time.time() < deadline:
+            time.sleep(0.01)
+
+        self.assertTrue(controller.running)
+        self.assertEqual(
+            controller.last_error,
+            "RuntimeError: brightness hardware unavailable",
+        )
+        controller.stop(timeout=1)
+
+    def test_persistent_scheduler_faults_back_off_and_rate_limit_tracebacks(self):
+        store = Mock()
+        store.get.return_value = DEFAULT_CONFIG
+        matrix = Mock()
+        matrix.set_brightness.side_effect = RuntimeError("persistent failure")
+        controller = DisplayController(matrix, store)
+
+        with patch.object(display_controller.LOGGER, "exception") as log_exception:
+            controller.start()
+            time.sleep(0.82)
+            controller.stop(timeout=1)
+
+        self.assertGreaterEqual(matrix.set_brightness.call_count, 2)
+        self.assertLessEqual(matrix.set_brightness.call_count, 3)
+        log_exception.assert_called_once()
+
+    def test_downstream_scheduler_faults_back_off_after_brightness_succeeds(self):
+        store = Mock()
+        store.get.return_value = {**DEFAULT_CONFIG, "playlist": [None]}
+        matrix = Mock()
+        controller = DisplayController(matrix, store)
+
+        with patch.object(display_controller.LOGGER, "exception") as log_exception:
+            controller.start()
+            time.sleep(0.82)
+            controller.stop(timeout=1)
+
+        self.assertGreaterEqual(matrix.set_brightness.call_count, 2)
+        self.assertLessEqual(matrix.set_brightness.call_count, 3)
+        log_exception.assert_called_once()
+
+    def test_module_failures_back_off_and_rate_limit_tracebacks(self):
+        store = Mock()
+        store.get.return_value = {
+            **DEFAULT_CONFIG,
+            "playlist": [{"module": "weather", "duration": 1, "enabled": True}],
+        }
+        matrix = Mock()
+        module = Mock()
+        module.run.side_effect = RuntimeError("module failed")
+        controller = DisplayController(matrix, store)
+
+        with patch.object(display_controller.importlib, "import_module", return_value=module), \
+             patch.object(display_controller.LOGGER, "exception") as log_exception:
+            controller.start()
+            time.sleep(0.82)
+            controller.stop(timeout=1)
+
+        self.assertGreaterEqual(module.run.call_count, 2)
+        self.assertLessEqual(module.run.call_count, 3)
+        log_exception.assert_called_once()
+
+    def test_stop_blocks_concurrent_restart_until_hardware_is_cleared(self):
+        matrix = Mock()
+        controller = DisplayController(matrix, Mock())
+        old_thread = Mock()
+        old_thread.is_alive.return_value = False
+        controller._thread = old_thread
+        restart_results = []
+        old_thread.join.side_effect = lambda _timeout: restart_results.append(controller.start())
+
+        self.assertTrue(controller.stop(timeout=1))
+
+        self.assertEqual(restart_results, [False])
+        self.assertFalse(controller.running)
+        matrix.clear.assert_called_once()
+        matrix.swap.assert_called_once()
+
+    def test_stop_timeout_does_not_wait_for_display_lock_after_worker_exits(self):
+        matrix = Mock()
+        controller = DisplayController(matrix, Mock())
+        lock_held = threading.Event()
+        release_lock = threading.Event()
+
+        def hold_display_lock():
+            with controller._display_lock:
+                lock_held.set()
+                release_lock.wait(1)
+
+        holder = threading.Thread(target=hold_display_lock)
+        holder.start()
+        self.assertTrue(lock_held.wait(0.2))
+
+        started = time.monotonic()
+        result = controller.stop(timeout=0)
+        elapsed = time.monotonic() - started
+
+        release_lock.set()
+        holder.join(1)
+        self.assertFalse(result)
+        self.assertLess(elapsed, 0.1)
+        matrix.clear.assert_not_called()
+        matrix.swap.assert_not_called()
+
+    def test_stop_timeout_does_not_wait_on_display_lock_held_by_live_worker(self):
+        matrix = Mock()
+        controller = DisplayController(matrix, Mock())
+        worker = Mock()
+        worker.is_alive.return_value = True
+        controller._thread = worker
+        lock_held = threading.Event()
+        release_lock = threading.Event()
+
+        def hold_display_lock():
+            with controller._display_lock:
+                lock_held.set()
+                release_lock.wait(1)
+
+        holder = threading.Thread(target=hold_display_lock)
+        holder.start()
+        self.assertTrue(lock_held.wait(0.2))
+        result = []
+        caller = threading.Thread(target=lambda: result.append(controller.stop(timeout=0)))
+        caller.start()
+        caller.join(0.1)
+        blocked = caller.is_alive()
+        release_lock.set()
+        holder.join(1)
+        caller.join(1)
+
+        self.assertFalse(blocked, "stop exceeded its timeout waiting for the display lock")
+        self.assertEqual(result, [False])
+        matrix.clear.assert_not_called()
+        matrix.swap.assert_not_called()
+
+    def test_stop_deadline_is_bounded_while_pairing_ip_resolution_is_stalled(self):
+        matrix = Mock()
+        provider_started = threading.Event()
+        release_provider = threading.Event()
+
+        def blocked_ip_provider():
+            provider_started.set()
+            release_provider.wait(1)
+            return "192.168.1.4"
+
+        controller = DisplayController(
+            matrix, Mock(), ip_address_provider=blocked_ip_provider,
+        )
+        pairing_thread = threading.Thread(
+            target=lambda: controller.show_pairing_pin("123456", ttl_seconds=60),
+        )
+        pairing_thread.start()
+        self.assertTrue(provider_started.wait(0.2))
+
+        result = []
+        started = time.monotonic()
+        stop_thread = threading.Thread(target=lambda: result.append(controller.stop(timeout=0.05)))
+        stop_thread.start()
+        stop_thread.join(0.2)
+        elapsed = time.monotonic() - started
+
+        release_provider.set()
+        pairing_thread.join(1)
+        stop_thread.join(1)
+        self.assertFalse(stop_thread.is_alive(), "stop exceeded its deadline on pairing state")
+        self.assertEqual(result, [False])
+        self.assertLess(elapsed, 0.2)
+        self.assertFalse(controller.pairing_active)
+
+    def test_timed_out_stop_invalidates_stalled_pairing_before_restart(self):
+        matrix = Mock()
+        provider_started = threading.Event()
+        release_provider = threading.Event()
+
+        def blocked_ip_provider():
+            provider_started.set()
+            release_provider.wait(1)
+            return "192.168.1.4"
+
+        controller = DisplayController(
+            matrix, Mock(), ip_address_provider=blocked_ip_provider,
+        )
+        pairing_thread = threading.Thread(
+            target=lambda: controller.show_pairing_pin("123456", ttl_seconds=60),
+        )
+        pairing_thread.start()
+        self.assertTrue(provider_started.wait(0.2))
+
+        self.assertFalse(controller.stop(timeout=0.05))
+        controller._run_loop = Mock()
+        matrix.reset_mock()
+        self.assertTrue(controller.start())
+
+        release_provider.set()
+        pairing_thread.join(1)
+
+        self.assertFalse(pairing_thread.is_alive())
+        self.assertFalse(controller.pairing_active)
+        matrix.clear.assert_not_called()
+        matrix.swap.assert_not_called()
+
+    def test_timed_out_stop_invalidates_pairing_at_pre_draw_boundary(self):
+        matrix = Mock()
+        draw_admission_started = threading.Event()
+        release_draw_admission = threading.Event()
+        controller = DisplayController(
+            matrix, Mock(), ip_address_provider=lambda: "192.168.1.4",
+        )
+        original_draw = controller._draw_pairing_page
+
+        def blocked_draw(*args, **kwargs):
+            draw_admission_started.set()
+            release_draw_admission.wait(1)
+            return original_draw(*args, **kwargs)
+
+        controller._draw_pairing_page = blocked_draw
+        pairing_thread = threading.Thread(
+            target=lambda: controller.show_pairing_pin("123456", ttl_seconds=60),
+        )
+        pairing_thread.start()
+        self.assertTrue(draw_admission_started.wait(0.2))
+
+        self.assertFalse(controller.stop(timeout=0.05))
+        controller._run_loop = Mock()
+        matrix.reset_mock()
+        self.assertTrue(controller.start())
+
+        release_draw_admission.set()
+        pairing_thread.join(1)
+
+        self.assertFalse(pairing_thread.is_alive())
+        self.assertFalse(controller.pairing_active)
+        matrix.clear.assert_not_called()
+        matrix.swap.assert_not_called()
 
     def test_reload_breaks_playlist_and_loads_new_config(self):
         old = {"display": {"active_start": "00:00", "active_end": "00:00", "day_brightness": 100, "night_brightness": 10}, "playlist": [{"module": "splash", "duration": 2, "enabled": True}, {"module": "weather", "duration": 2, "enabled": True}]}
