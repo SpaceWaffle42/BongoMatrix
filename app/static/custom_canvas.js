@@ -7,6 +7,9 @@
   const layerTypes = ['text', 'time', 'pixels', 'line', 'rectangle', 'polygon', 'circle', 'ellipse', 'media'];
   const layerLabels = {time: 'Time', media: 'Image / GIF / MP4'};
   const mediaPreviews = new Map();
+  const mediaRetryCounts = new Map();
+  const mediaLoadQueue = [];
+  let activeMediaLoads = 0;
   let layerSerial = 0;
 
   const clone = value => structuredClone(value);
@@ -324,7 +327,24 @@
   }
   window.beginLayerRotation = beginLayerRotation;
 
-  function mediaUrl(source) { return '/media/' + source.split('/').map(encodeURIComponent).join('/'); }
+  function mediaTimelineRevision(source) { return mediaItems.find(item => item.name === source)?.revision || 'unversioned'; }
+
+  function mediaTimelineUrl(source, frameCount, fps, revision = mediaTimelineRevision(source)) { return '/api/media-timeline/' + source.split('/').map(encodeURIComponent).join('/') + '?frame_count=' + frameCount + '&fps=' + fps + '&revision=' + encodeURIComponent(revision); }
+
+  function rememberMediaRetry(key, value) {
+    mediaRetryCounts.delete(key);
+    mediaRetryCounts.set(key, value);
+    while (mediaRetryCounts.size > 32) mediaRetryCounts.delete(mediaRetryCounts.keys().next().value);
+  }
+
+  function mediaFrameIndex(layer, frame) {
+    let startFrame = 0;
+    if (layer.properties?.present === false) {
+      const appearances = (layer.keyframes || []).filter(keyframe => keyframe.properties?.present === true).map(keyframe => keyframe.frame);
+      if (appearances.length) startFrame = Math.min(...appearances);
+    }
+    return Math.max(0, frame - startFrame);
+  }
 
   function redrawMediaCanvases() {
     for (const card of document.querySelectorAll('.advanced-card')) {
@@ -333,20 +353,65 @@
     }
   }
 
-  function mediaPreviewElement(source) {
-    if (mediaPreviews.has(source)) return mediaPreviews.get(source);
-    const video = source.toLowerCase().endsWith('.mp4');
-    const element = document.createElement(video ? 'video' : 'img');
-    element.src = mediaUrl(source);
-    if (video) {
-      element.muted = true; element.loop = true; element.autoplay = true; element.playsInline = true;
-      element.addEventListener('loadeddata', () => { element.play().catch(() => {}); redrawMediaCanvases(); });
-    } else element.addEventListener('load', redrawMediaCanvases);
-    mediaPreviews.set(source, element);
+  function mediaTimelineElement(source, frameCount, fps) {
+    const revision = mediaTimelineRevision(source);
+    const key = source + '|' + revision + '|' + frameCount + '|' + fps;
+    if (mediaPreviews.has(key)) return mediaPreviews.get(key);
+    if (mediaRetryCounts.get(key) === Infinity) return null;
+    if (mediaPreviews.size >= 32) {
+      const oldestKey = mediaPreviews.keys().next().value;
+      const oldest = mediaPreviews.get(oldestKey);
+      const queued = mediaLoadQueue.findIndex(item => item.element === oldest);
+      if (queued >= 0) mediaLoadQueue.splice(queued, 1);
+      else if (oldest) oldest.src = '';
+      mediaPreviews.delete(oldestKey);
+      mediaRetryCounts.delete(oldestKey);
+    }
+    const element = document.createElement('img');
+    const url = mediaTimelineUrl(source, frameCount, fps, revision);
+    mediaLoadQueue.push({element, url, key});
+    pumpMediaLoadQueue();
+    mediaPreviews.set(key, element);
     return element;
   }
 
-  function drawShape(context, layer, properties, alpha = 1) {
+  function pumpMediaLoadQueue() {
+    while (activeMediaLoads < 2 && mediaLoadQueue.length) {
+      const {element, url, key} = mediaLoadQueue.shift();
+      activeMediaLoads++;
+      let completed = false;
+      const complete = redraw => {
+        if (completed) return;
+        completed = true;
+        activeMediaLoads--;
+        if (redraw) redrawMediaCanvases();
+        pumpMediaLoadQueue();
+      };
+      element.addEventListener('load', () => {
+        mediaRetryCounts.delete(key);
+        complete(true);
+      }, {once: true});
+      element.addEventListener('error', () => {
+        if (mediaPreviews.get(key) !== element) {
+          complete(false);
+          return;
+        }
+        mediaPreviews.delete(key);
+        const retries = mediaRetryCounts.get(key) || 0;
+        if (retries < 1) {
+          rememberMediaRetry(key, retries + 1);
+          complete(false);
+          setTimeout(redrawMediaCanvases, 250);
+        } else {
+          rememberMediaRetry(key, Infinity);
+          complete(false);
+        }
+      }, {once: true});
+      element.src = url;
+    }
+  }
+
+  function drawShape(context, layer, properties, alpha = 1, frame = 0, fps = 1, frameCount = 1) {
     context.save(); context.globalAlpha = alpha; context.strokeStyle = properties.colour; context.fillStyle = properties.colour; context.lineWidth = Math.max(.12, properties.width || .12);
     beginLayerRotation(context, properties, layer.type);
     if (layer.type === 'text' || layer.type === 'time') { context.font = `${Math.max(4, Number(properties.font.split('x')[1]?.replace(/\D/g, '') || 7))}px monospace`; context.textBaseline = 'alphabetic'; context.fillText(layer.type === 'time' ? currentTimeText(properties.format) : properties.text, properties.x, properties.y); }
@@ -357,12 +422,13 @@
     else if (layer.type === 'circle') { context.beginPath(); context.arc(properties.x, properties.y, properties.radius, 0, Math.PI * 2); properties.filled ? context.fill() : context.stroke(); }
     else if (layer.type === 'ellipse') { context.beginPath(); context.ellipse(properties.x, properties.y, properties.radius_x, properties.radius_y, properties.rotation * Math.PI / 180, 0, Math.PI * 2); properties.filled ? context.fill() : context.stroke(); }
     else if (layer.type === 'media' && properties.source) {
-      const media = mediaPreviewElement(properties.source), naturalWidth = media.videoWidth || media.naturalWidth, naturalHeight = media.videoHeight || media.naturalHeight;
+      const media = mediaTimelineElement(properties.source, frameCount, fps), naturalWidth = media.naturalWidth, naturalHeight = media.naturalHeight / frameCount;
       if (naturalWidth && naturalHeight) {
+        const mediaFrame = mediaFrameIndex(layer, frame) % frameCount;
         let width = properties.width, height = properties.height;
         if (properties.keep_aspect) { const scale = Math.min(width / naturalWidth, height / naturalHeight); width = naturalWidth * scale; height = naturalHeight * scale; }
         context.translate(properties.x + properties.width / 2, properties.y + properties.height / 2); context.rotate(properties.rotation * Math.PI / 180);
-        context.drawImage(media, -properties.width / 2, -properties.height / 2, width, height);
+        context.drawImage(media, 0, mediaFrame * naturalHeight, naturalWidth, naturalHeight, -properties.width / 2, -properties.height / 2, width, height);
       }
     }
     context.restore();
@@ -371,8 +437,8 @@
   function drawEditor(module, canvas) {
     const state = stateFor(module), context = canvas.getContext('2d');
     context.setTransform(10, 0, 0, 10, 0, 0); context.imageSmoothingEnabled = false; context.fillStyle = module.background; context.fillRect(0, 0, 64, 32);
-    if (state.onion) for (const onionFrame of [state.frame - 1, state.frame + 1]) if (onionFrame >= 0 && onionFrame < module.frame_count) for (const {layer, properties} of orderedLayersForFrame(module, onionFrame)) { if (layer.visible && properties.present !== false) drawShape(context, layer, properties, .18); }
-    for (const {layer, properties} of orderedLayersForFrame(module, state.frame)) { if (layer.visible && properties.present !== false) drawShape(context, layer, properties); }
+    if (state.onion) for (const onionFrame of [state.frame - 1, state.frame + 1]) if (onionFrame >= 0 && onionFrame < module.frame_count) for (const {layer, properties} of orderedLayersForFrame(module, onionFrame)) { if (layer.visible && properties.present !== false) drawShape(context, layer, properties, .18, onionFrame, module.fps, module.frame_count); }
+    for (const {layer, properties} of orderedLayersForFrame(module, state.frame)) { if (layer.visible && properties.present !== false) drawShape(context, layer, properties, 1, state.frame, module.fps, module.frame_count); }
     const selected = module.layers.find(layer => layer.id === state.selected);
     if (selected) {
       const box = bounds(resolvedProperties(module, selected, state.frame), selected.type); context.save(); context.strokeStyle = '#00ffff'; context.fillStyle = '#00ffff'; context.lineWidth = .12; context.setLineDash([.5, .35]); context.strokeRect(box.minX, box.minY, Math.max(1, box.maxX - box.minX), Math.max(1, box.maxY - box.minY)); context.setLineDash([]); context.fillRect(box.maxX - .7, box.maxY - .7, 1.4, 1.4); if (supportsRotation(selected.type)) { context.beginPath(); context.arc((box.minX + box.maxX) / 2, box.minY - 2.5, .75, 0, Math.PI * 2); context.fill(); } context.restore();

@@ -188,6 +188,177 @@ class MatrixFrameworkTests(unittest.TestCase):
         video_filter = popen.call_args.args[0][popen.call_args.args[0].index("-vf") + 1]
         self.assertIn("fps=2:eof_action=pass", video_filter)
 
+    def test_media_frames_can_preserve_source_dimensions_for_canvas_layers(self):
+        matrix = Matrix.__new__(Matrix)
+        matrix.matrix = Mock(width=64, height=32)
+        with tempfile.TemporaryDirectory() as directory:
+            os.chmod(directory, 0o755)
+            path = Path(directory) / "square.png"
+            PillowImage.new("RGB", (10, 10), (255, 0, 0)).save(path)
+            os.chmod(path, 0o644)
+            matrix._media_file = Mock(return_value=path)
+
+            with patch.object(
+                framework.Image, "frombytes", side_effect=PillowImage.frombytes,
+            ):
+                frames = matrix.media_frames(
+                    "square.png", 2, 10, preserve_size=True, decode_timeout=5,
+                )
+
+        self.assertEqual([frame.size for frame in frames], [(10, 10), (10, 10)])
+        self.assertEqual(frames[0].getbbox(), (0, 0, 10, 10))
+
+    def test_media_frames_bounds_post_kill_reaping(self):
+        matrix = Matrix.__new__(Matrix)
+        matrix.matrix = Mock(width=64, height=32)
+        matrix._media_file = Mock(return_value=framework.pathlib.Path("/tmp/animation.gif"))
+        stop = threading.Event()
+        process = Mock()
+        process.stdout = Mock()
+        process.poll.return_value = None
+        process.wait.return_value = 0
+
+        def cancel_during_read(*_args, **_kwargs):
+            stop.set()
+            return b""
+
+        with patch.object(framework.os, "open", return_value=9), patch.object(
+            framework.os, "close"
+        ), patch.object(framework.subprocess, "Popen", return_value=process), patch.object(
+            framework, "_read_exact_interruptibly", side_effect=cancel_during_read,
+        ):
+            self.assertEqual(
+                matrix.media_frames("animation.gif", 1, 1, stop_event=stop),
+                [],
+            )
+
+        process.kill.assert_called_once_with()
+        self.assertIn("timeout", process.wait.call_args.kwargs)
+        self.assertLessEqual(process.wait.call_args.kwargs["timeout"], 0.25)
+
+    def test_media_frames_defers_reaping_after_expired_cleanup_wait(self):
+        matrix = Matrix.__new__(Matrix)
+        matrix.matrix = Mock(width=64, height=32)
+        matrix._media_file = Mock(return_value=framework.pathlib.Path("/tmp/animation.gif"))
+        stop = threading.Event()
+        process = Mock()
+        process.stdout = Mock()
+        process.poll.return_value = None
+        process.wait.side_effect = framework.subprocess.TimeoutExpired("ffmpeg", 0.25)
+
+        def cancel_during_read(*_args, **_kwargs):
+            stop.set()
+            return b""
+
+        reaper = Mock()
+        with patch.object(framework.time, "monotonic", side_effect=[0, 46]), patch.object(
+            framework.os, "open", return_value=9,
+        ), patch.object(framework.os, "close"), patch.object(
+            framework.subprocess, "Popen", return_value=process,
+        ), patch.object(
+            framework, "_read_exact_interruptibly", side_effect=cancel_during_read,
+        ), patch.object(framework.threading, "Thread", return_value=reaper) as thread:
+            self.assertEqual(
+                matrix.media_frames("animation.gif", 1, 1, stop_event=stop),
+                [],
+            )
+
+        process.kill.assert_called_once_with()
+        process.wait.assert_called_once_with(timeout=0.25)
+        self.assertTrue(thread.call_args.kwargs["daemon"])
+        reaper.start.assert_called_once_with()
+
+    def test_media_frames_cancels_while_waiting_for_decoder_completion(self):
+        matrix = Matrix.__new__(Matrix)
+        matrix.matrix = Mock(width=64, height=32)
+        matrix._media_file = Mock(return_value=framework.pathlib.Path("/tmp/animation.gif"))
+        stop = threading.Event()
+        completion_started = threading.Event()
+        finished = threading.Event()
+        process = Mock()
+        process.stdout = Mock()
+        process.poll.return_value = None
+        raw = b"\x10\x20\x30" * (64 * 32)
+        result, errors = [], []
+
+        def stalled_wait(timeout=None):
+            if timeout == 0.25:
+                return 0
+            assert timeout is not None
+            completion_started.set()
+            time.sleep(min(timeout, 1))
+            raise framework.subprocess.TimeoutExpired("ffmpeg", timeout)
+
+        process.wait.side_effect = stalled_wait
+
+        def decode():
+            try:
+                result.extend(matrix.media_frames("animation.gif", 1, 1, stop_event=stop))
+            except Exception as error:
+                errors.append(error)
+            finally:
+                finished.set()
+
+        with patch.object(framework.os, "open", return_value=9), patch.object(
+            framework.os, "close",
+        ), patch.object(
+            framework.subprocess, "Popen", return_value=process,
+        ), patch.object(framework, "_read_exact_interruptibly", return_value=raw):
+            worker = threading.Thread(target=decode)
+            worker.start()
+            self.assertTrue(completion_started.wait(0.5))
+            stop.set()
+            stopped_promptly = finished.wait(0.3)
+            worker.join(1.2)
+
+        self.assertTrue(stopped_promptly, "completion wait ignored cancellation")
+        self.assertFalse(worker.is_alive())
+        self.assertEqual(errors, [])
+        self.assertEqual(result, [])
+        process.kill.assert_called_once_with()
+
+    def test_media_frames_preserves_tall_and_wide_source_geometry(self):
+        matrix = Matrix.__new__(Matrix)
+        matrix.matrix = Mock(width=64, height=32)
+        with tempfile.TemporaryDirectory() as directory:
+            os.chmod(directory, 0o755)
+            for name, size in (("tall.png", (10, 20)), ("wide.png", (20, 10))):
+                with self.subTest(size=size):
+                    path = Path(directory) / name
+                    PillowImage.new("RGB", size, (255, 0, 0)).save(path)
+                    os.chmod(path, 0o644)
+                    matrix._media_file = Mock(return_value=path)
+                    with patch.object(
+                        framework.Image, "frombytes", side_effect=PillowImage.frombytes,
+                    ):
+                        frames = matrix.media_frames(
+                            name, 1, 10, preserve_size=True, decode_timeout=5,
+                        )
+                    self.assertEqual(frames[0].size, size)
+
+    def test_media_frames_resolved_path_is_regular_and_bypasses_global_lookup(self):
+        matrix = Matrix.__new__(Matrix)
+        matrix.matrix = Mock(width=64, height=32)
+        matrix._media_file = Mock(side_effect=AssertionError("global lookup used"))
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "source.png"
+            PillowImage.new("RGB", (10, 10), "red").save(path)
+            os.chmod(directory, 0o755)
+            os.chmod(path, 0o644)
+            with patch.object(
+                framework.Image, "frombytes", side_effect=PillowImage.frombytes,
+            ):
+                frames = matrix.media_frames(
+                    "logical.png", 1, 1, preserve_size=True,
+                    resolved_path=path,
+                )
+            self.assertEqual(frames[0].size, (10, 10))
+            self.assertEqual(
+                matrix.media_frames("logical.png", 1, 1, resolved_path=path.parent),
+                [],
+            )
+        matrix._media_file.assert_not_called()
+
     def test_media_frames_deadline_interrupts_blocked_decoder(self):
         matrix = Matrix.__new__(Matrix)
         matrix.matrix = Mock(width=64, height=32)
@@ -202,7 +373,7 @@ class MatrixFrameworkTests(unittest.TestCase):
             with patch.object(framework.os, "open", return_value=9), patch.object(
                 framework.os, "close"
             ), patch.object(framework.subprocess, "Popen", return_value=process):
-                with self.assertRaisesRegex(ValueError, "media could not be decoded"):
+                with self.assertRaisesRegex(ValueError, "media decoder did not finish in time"):
                     matrix.media_frames("animation.gif", 1, 1, decode_timeout=0.05)
         finally:
             os.close(write_fd)

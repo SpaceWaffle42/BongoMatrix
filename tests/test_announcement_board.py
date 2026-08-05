@@ -476,6 +476,39 @@ class AnnouncementBoardTests(unittest.TestCase):
             [call.args[0] for call in stop.wait.call_args_list],
             [0.1, 0.1, 0.1, 0.1, 8],
         )
+
+    def test_media_transition_decodes_announcement_source_once(self):
+        matrix = Mock()
+        matrix.matrix.width = 64
+        matrix.matrix.height = 32
+        matrix.matrix.CreateFrameCanvas.return_value = "canvas"
+        matrix.font.return_value = "font:5x7"
+        matrix.colour_rgb.side_effect = lambda value: Mock(
+            red=int(value[1:3], 16), green=int(value[3:5], 16), blue=int(value[5:7], 16),
+        )
+        matrix.media_frames.return_value = [Image.new("RGB", (10, 10), "red")]
+        matrix.swap.return_value = "canvas"
+        stop = Mock()
+        stop.is_set.return_value = False
+        stop.wait.return_value = False
+        announcement = self.item("announcement_media_fade", "09:00", "17:00")
+        announcement["layout"] = "icon_notice"
+        announcement["media"] = "events/open-day.png"
+        announcement["transition"] = {"type": "fade", "duration_seconds": 0.4}
+
+        self.assertTrue(run(
+            matrix,
+            {"announcement_board": {"announcements": [announcement]}},
+            duration=0,
+            stop_event=stop,
+            now_provider=lambda: dt.datetime(2030, 1, 15, 12, 0),
+        ))
+
+        matrix.media_frames.assert_called_once_with(
+            "events/open-day.png", 1, 1, stop_event=stop,
+        )
+        self.assertEqual(matrix.draw_image.call_count, 4)
+
     def test_slide_left_transition_moves_notice_in_four_steps_before_hold(self):
         matrix = Mock()
         matrix.matrix.width = 64

@@ -154,13 +154,13 @@ def _scroll_text_notice(matrix, canvas, announcement, stop_event):
 
 def _render_icon_notice(
     matrix, canvas, announcement, media_brightness=1, x_offset=0, stop_event=None,
+    media_frame=None,
 ):
     style = announcement["style"]
     background = matrix.colour_rgb(style["background"])
     foreground = matrix.colour_rgb(style["foreground"])
     matrix.fill(background.red, background.green, background.blue, canvas=canvas)
-    frames = matrix.media_frames(announcement["media"], 1, 1, stop_event=stop_event)
-    if not frames:
+    if media_frame is None:
         fallback_font = matrix.font("4x6")
         fallback_x = _aligned_text_x(
             matrix, canvas, fallback_font, foreground, "Media unavailable",
@@ -172,7 +172,7 @@ def _render_icon_notice(
         )
         _draw_border(matrix, canvas, style)
         return
-    image = frames[0]
+    image = media_frame
     if media_brightness != 1:
         image = _scaled_image(image, media_brightness)
     matrix.draw_image(image, 1 + x_offset, 1, width=14, height=14, canvas=canvas)
@@ -200,20 +200,20 @@ def _render_icon_notice(
 
 def _render_image_banner(
     matrix, canvas, announcement, media_brightness=1, x_offset=0, stop_event=None,
+    media_frame=None,
 ):
     style = announcement["style"]
     background = matrix.colour_rgb(style["background"])
     foreground = matrix.colour_rgb(style["foreground"])
     matrix.fill(background.red, background.green, background.blue, canvas=canvas)
-    frames = matrix.media_frames(announcement["media"], 1, 1, stop_event=stop_event)
-    if not frames:
+    if media_frame is None:
         matrix.draw_text(
             matrix.font("4x6"), 2, 18, foreground,
             "Media unavailable", canvas=canvas,
         )
         _draw_border(matrix, canvas, style)
         return
-    image = frames[0]
+    image = media_frame
     if media_brightness != 1:
         image = _scaled_image(image, media_brightness)
     matrix.draw_image(
@@ -245,20 +245,20 @@ def _render_image_banner(
 
 def _render_full_image(
     matrix, canvas, announcement, media_brightness=1, x_offset=0, stop_event=None,
+    media_frame=None,
 ):
     style = announcement["style"]
     background = matrix.colour_rgb(style["background"])
     foreground = matrix.colour_rgb(style["foreground"])
     matrix.fill(background.red, background.green, background.blue, canvas=canvas)
-    frames = matrix.media_frames(announcement["media"], 1, 1, stop_event=stop_event)
-    if not frames:
+    if media_frame is None:
         matrix.draw_text(
             matrix.font("4x6"), 2, 18, foreground,
             "Media unavailable", canvas=canvas,
         )
         _draw_border(matrix, canvas, style)
         return
-    image = frames[0]
+    image = media_frame
     if media_brightness != 1:
         image = _scaled_image(image, media_brightness)
     matrix.draw_image(
@@ -290,20 +290,24 @@ def _render_full_image(
 
 def _render_static_layout(
     matrix, canvas, announcement, media_brightness=1, x_offset=0, stop_event=None,
+    media_frame=None,
 ):
     if announcement["layout"] == "text_notice":
         _render_text_notice(matrix, canvas, announcement, x_offset=x_offset)
     elif announcement["layout"] == "icon_notice":
         _render_icon_notice(
             matrix, canvas, announcement, media_brightness, x_offset, stop_event,
+            media_frame,
         )
     elif announcement["layout"] == "image_banner":
         _render_image_banner(
             matrix, canvas, announcement, media_brightness, x_offset, stop_event,
+            media_frame,
         )
     elif announcement["layout"] == "full_image_notice":
         _render_full_image(
             matrix, canvas, announcement, media_brightness, x_offset, stop_event,
+            media_frame,
         )
     else:
         raise NotImplementedError("announcement layout is not implemented")
@@ -322,7 +326,7 @@ def _scaled_image(image, factor):
     return Image.merge("RGBA", (red, green, blue, image.getchannel("A")))
 
 
-def _render_fade(matrix, canvas, announcement, stop_event):
+def _render_fade(matrix, canvas, announcement, stop_event, media_frame=None):
     delay = announcement["transition"]["duration_seconds"] / 4
     for step in range(1, 5):
         if stop_event is not None and stop_event.is_set():
@@ -345,6 +349,7 @@ def _render_fade(matrix, canvas, announcement, stop_event):
         }
         _render_static_layout(
             matrix, canvas, faded, media_brightness=factor, stop_event=stop_event,
+            media_frame=media_frame,
         )
         canvas = matrix.swap(canvas)
         if stop_event is not None:
@@ -355,7 +360,7 @@ def _render_fade(matrix, canvas, announcement, stop_event):
     return canvas, False
 
 
-def _render_slide(matrix, canvas, announcement, stop_event):
+def _render_slide(matrix, canvas, announcement, stop_event, media_frame=None):
     delay = announcement["transition"]["duration_seconds"] / 4
     direction = announcement["transition"]["direction"]
     for step in range(1, 5):
@@ -367,6 +372,7 @@ def _render_slide(matrix, canvas, announcement, stop_event):
             offset = -offset
         _render_static_layout(
             matrix, canvas, announcement, x_offset=offset, stop_event=stop_event,
+            media_frame=media_frame,
         )
         canvas = matrix.swap(canvas)
         if stop_event is not None:
@@ -377,7 +383,7 @@ def _render_slide(matrix, canvas, announcement, stop_event):
     return canvas, False
 
 
-def _render_wipe(matrix, canvas, announcement, stop_event):
+def _render_wipe(matrix, canvas, announcement, stop_event, media_frame=None):
     delay = announcement["transition"]["duration_seconds"] / 4
     direction = announcement["transition"]["direction"]
     background = matrix.colour_rgb(announcement["style"]["background"])
@@ -386,7 +392,10 @@ def _render_wipe(matrix, canvas, announcement, stop_event):
     for step in range(1, 5):
         if stop_event is not None and stop_event.is_set():
             return canvas, True
-        _render_static_layout(matrix, canvas, announcement, stop_event=stop_event)
+        _render_static_layout(
+            matrix, canvas, announcement, stop_event=stop_event,
+            media_frame=media_frame,
+        )
         reveal_width = (width * step) // 4
         hidden_columns = (
             range(reveal_width, width)
@@ -404,7 +413,7 @@ def _render_wipe(matrix, canvas, announcement, stop_event):
     return canvas, False
 
 
-def _render_pixel_dissolve(matrix, canvas, announcement, stop_event):
+def _render_pixel_dissolve(matrix, canvas, announcement, stop_event, media_frame=None):
     delay = announcement["transition"]["duration_seconds"] / 4
     background = matrix.colour_rgb(announcement["style"]["background"])
     order = dissolve_pixel_order(
@@ -413,7 +422,10 @@ def _render_pixel_dissolve(matrix, canvas, announcement, stop_event):
     for step in range(1, 5):
         if stop_event is not None and stop_event.is_set():
             return canvas, True
-        _render_static_layout(matrix, canvas, announcement, stop_event=stop_event)
+        _render_static_layout(
+            matrix, canvas, announcement, stop_event=stop_event,
+            media_frame=media_frame,
+        )
         revealed = (len(order) * step) // 4
         for x, y in order[revealed:]:
             matrix.pixel(
@@ -442,6 +454,12 @@ def _run_announcements(matrix, announcements, stop_event=None, eligibility=None)
         if canvas is None:
             canvas = matrix.matrix.CreateFrameCanvas()
         rendered = True
+        media_frame = None
+        if announcement["layout"] != "text_notice":
+            frames = matrix.media_frames(
+                announcement["media"], 1, 1, stop_event=stop_event,
+            )
+            media_frame = frames[0] if frames else None
         if announcement["timing"]["mode"] == "scroll":
             if announcement["transition"]["type"] != "cut":
                 raise NotImplementedError("scrolling announcement transition is not implemented")
@@ -455,30 +473,33 @@ def _run_announcements(matrix, announcements, stop_event=None, eligibility=None)
         else:
             if announcement["transition"]["type"] == "fade":
                 canvas, interrupted = _render_fade(
-                    matrix, canvas, announcement, stop_event,
+                    matrix, canvas, announcement, stop_event, media_frame,
                 )
                 if interrupted:
                     break
             elif announcement["transition"]["type"] == "slide":
                 canvas, interrupted = _render_slide(
-                    matrix, canvas, announcement, stop_event,
+                    matrix, canvas, announcement, stop_event, media_frame,
                 )
                 if interrupted:
                     break
             elif announcement["transition"]["type"] == "wipe":
                 canvas, interrupted = _render_wipe(
-                    matrix, canvas, announcement, stop_event,
+                    matrix, canvas, announcement, stop_event, media_frame,
                 )
                 if interrupted:
                     break
             elif announcement["transition"]["type"] == "pixel_dissolve":
                 canvas, interrupted = _render_pixel_dissolve(
-                    matrix, canvas, announcement, stop_event,
+                    matrix, canvas, announcement, stop_event, media_frame,
                 )
                 if interrupted:
                     break
             else:
-                _render_static_layout(matrix, canvas, announcement, stop_event=stop_event)
+                _render_static_layout(
+                    matrix, canvas, announcement, stop_event=stop_event,
+                    media_frame=media_frame,
+                )
                 canvas = matrix.swap(canvas)
             seconds = announcement["timing"]["duration_seconds"]
             if stop_event is not None:

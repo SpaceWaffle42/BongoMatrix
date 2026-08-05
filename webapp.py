@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import hashlib
+import io
 import json
 import math
 import secrets
@@ -65,6 +67,7 @@ def create_app(
     media_root.mkdir(parents=True, exist_ok=True)
     built_in_media_root = media_root / "built-in"
     media_lock = threading.RLock()
+    media_timeline_slots = threading.BoundedSemaphore(2)
     sanitizer = Path(sanitizer_path or Path(__file__).resolve().parent / "media_sanitizer.py")
     sanitizer_python = sanitizer_python or sys.executable
     location_search = location_search or OpenMeteoClient(timeout=5).search_locations
@@ -74,6 +77,7 @@ def create_app(
         secret_root = Path(config_path).parent if config_path is not None else media_root.parent
         openweather_secrets = SecretStore(secret_root / "secrets" / "openweather-api-key")
     app = Flask(__name__, template_folder="app/templates", static_folder="app/static")
+    app.extensions["media_timeline_slots"] = media_timeline_slots
     app.config.update(
         SECRET_KEY=secret_key,
         SESSION_COOKIE_HTTPONLY=True,
@@ -168,6 +172,12 @@ def create_app(
             return {
                 "name": relative_name,
                 "size": info.st_size,
+                "revision": hashlib.sha256(
+                    ":".join(str(value) for value in (
+                        info.st_dev, info.st_ino, info.st_size,
+                        info.st_mtime_ns, info.st_ctime_ns,
+                    )).encode("ascii")
+                ).hexdigest()[:32],
                 "width": width,
                 "height": height,
                 "kind": path.suffix.lower().lstrip("."),
@@ -569,6 +579,59 @@ def create_app(
     @requires_pairing
     def list_media():
         return jsonify(media_items())
+
+    @app.get("/api/media-timeline/<path:filename>")
+    @requires_pairing
+    def media_timeline(filename):
+        frame_count = request.args.get("frame_count", type=int)
+        fps = request.args.get("fps", type=float)
+        if (
+            frame_count is None or fps is None or not 1 <= frame_count <= 120
+            or not math.isfinite(fps) or not 1 <= fps <= 60
+        ):
+            return jsonify({"error": "Media timeline bounds are out of range."}), 400
+        reference = safe_media_reference(filename)
+        resolved = media_path(reference) if reference is not None else None
+        if resolved is None:
+            abort(404)
+        try:
+            if not stat.S_ISREG(os.lstat(resolved).st_mode):
+                abort(404)
+        except OSError:
+            abort(404)
+        if not media_timeline_slots.acquire(blocking=False):
+            response = jsonify({"error": "Media timeline service is busy."})
+            response.status_code = 429
+            response.headers["Retry-After"] = "1"
+            return response
+        try:
+            frames = controller.matrix.media_frames(
+                reference, frame_count, fps,
+                preserve_size=True, decode_timeout=5,
+                resolved_path=resolved,
+            )
+        except (OSError, ValueError, subprocess.SubprocessError):
+            LOGGER.exception("Canvas media timeline decode failed")
+            return jsonify({"error": "Media timeline is unavailable."}), 422
+        finally:
+            media_timeline_slots.release()
+        if len(frames) != frame_count:
+            return jsonify({"error": "Media timeline is unavailable."}), 422
+        width, height = frames[0].size
+        if any(frame.size != (width, height) for frame in frames):
+            return jsonify({"error": "Media timeline is unavailable."}), 422
+        sprite = Image.new("RGB", (width, height * frame_count))
+        for index, frame in enumerate(frames):
+            sprite.paste(frame.convert("RGB"), (0, index * height))
+        output = io.BytesIO()
+        sprite.save(output, format="PNG")
+        output.seek(0)
+        response = send_file(output, mimetype="image/png", max_age=0)
+        response.headers["Cache-Control"] = "private, no-cache"
+        response.headers["X-Frame-Count"] = str(frame_count)
+        response.headers["X-Frame-Width"] = str(width)
+        response.headers["X-Frame-Height"] = str(height)
+        return response
 
     @app.post("/api/media")
     @requires_pairing

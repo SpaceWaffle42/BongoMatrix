@@ -3,6 +3,8 @@ import types
 import unittest
 from unittest.mock import Mock, call, patch
 
+from PIL import Image
+
 from modules import custom_text
 
 
@@ -386,16 +388,75 @@ class CustomTextModuleTests(unittest.TestCase):
             module_config=self.canvas_options(layers=[layer]),
         )
 
-        matrix.media_frames.assert_called_once_with(
-            "animation.gif", 3, 10, stop_event=stop,
+        matrix.media_frames.assert_called_once()
+        call = matrix.media_frames.call_args
+        self.assertEqual(call.args, ("animation.gif", 3, 10))
+        self.assertIs(call.kwargs["stop_event"], stop)
+        self.assertIs(call.kwargs["preserve_size"], True)
+        self.assertGreater(call.kwargs["decode_timeout"], 0)
+        self.assertLessEqual(call.kwargs["decode_timeout"], 5)
+
+    def test_canvas_media_preloading_shares_one_aggregate_decode_budget(self):
+        matrix = self.matrix()
+        clock = [0.0]
+
+        def preload(*_args, **_kwargs):
+            clock[0] += 4
+            return ["frame"] * 3
+
+        matrix.media_frames.side_effect = preload
+        stop = Mock()
+        stop.wait.return_value = True
+        layers = [
+            {
+                "id": f"layer_{index}", "name": source, "type": "media", "visible": True,
+                "properties": {"source": source, "x": 0, "y": 0, "width": 10,
+                               "height": 10, "rotation": 0, "keep_aspect": True},
+                "keyframes": [],
+            }
+            for index, source in enumerate(("first.png", "second.gif"))
+        ]
+
+        with patch("modules.custom_text.time.monotonic", side_effect=lambda: clock[0]):
+            custom_text.run(
+                matrix, {}, duration=1, stop_event=stop,
+                module_config=self.canvas_options(layers=layers),
+            )
+
+        self.assertEqual(matrix.media_frames.call_count, 2)
+        self.assertEqual(
+            [entry.kwargs["decode_timeout"] for entry in matrix.media_frames.call_args_list],
+            [5, 1],
         )
+        self.assertTrue(all(
+            entry.kwargs["preserve_size"] is True
+            for entry in matrix.media_frames.call_args_list
+        ))
+
+    def test_canvas_media_preloading_enforces_aggregate_memory_budget(self):
+        matrix = self.matrix()
+        matrix.media_frames.return_value = [Image.new("RGB", (2, 2), "red")]
+        stop = Mock()
+        layer = {
+            "id": "layer_media", "name": "Media", "type": "media", "visible": True,
+            "properties": {"source": "large.gif", "x": 0, "y": 0, "width": 10,
+                           "height": 10, "rotation": 0, "keep_aspect": True},
+            "keyframes": [],
+        }
+
+        with patch.object(custom_text, "CANVAS_MEDIA_CACHE_BYTES", 1):
+            with self.assertRaisesRegex(ValueError, "aggregate memory budget"):
+                custom_text.run(
+                    matrix, {}, duration=1, stop_event=stop,
+                    module_config=self.canvas_options(layers=[layer]),
+                )
 
     def test_canvas_stop_interrupts_media_preloading(self):
         matrix = self.matrix()
         entered_decoder = threading.Event()
         stop = threading.Event()
 
-        def blocked_decode(*_, stop_event):
+        def blocked_decode(*_, stop_event, **__):
             entered_decoder.set()
             stop_event.wait(5)
             return []
@@ -466,7 +527,7 @@ class CustomTextModuleTests(unittest.TestCase):
             },
         ]
 
-        with patch("modules.custom_text.time.monotonic", side_effect=[0, 0, 0.1]):
+        with patch("modules.custom_text.time.monotonic", side_effect=[0, 0, 0, 0, 0, 0.1, 0.2]):
             result = custom_text.run(
                 matrix, {}, duration=1, stop_event=stop,
                 module_config=self.canvas_options(layers=layers),

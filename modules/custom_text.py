@@ -6,6 +6,11 @@ import copy
 import math
 import time
 
+from PIL import Image
+
+CANVAS_MEDIA_PREPARE_TIMEOUT = 5
+CANVAS_MEDIA_CACHE_BYTES = 32 * 1024 * 1024
+
 
 def _wait(stop_event, seconds):
     if stop_event is not None:
@@ -244,13 +249,29 @@ def _run_canvas(matrix, duration, stop_event, module_config):
         for override in module_config["overrides"]:
             if override["layer_id"] == layer["id"] and "source" in override["properties"]:
                 media_sources.add(override["properties"]["source"])
-    media_cache = {
-        source: matrix.media_frames(
+    media_cache = {}
+    media_cache_bytes = 0
+    prepare_deadline = (
+        time.monotonic() + CANVAS_MEDIA_PREPARE_TIMEOUT if media_sources else None
+    )
+    for source in sorted(media_sources):
+        assert prepare_deadline is not None
+        remaining = prepare_deadline - time.monotonic()
+        if remaining <= 0:
+            raise ValueError("canvas media preparation exceeded its aggregate deadline")
+        frames = matrix.media_frames(
             source, module_config["frame_count"], module_config["fps"],
-            stop_event=stop_event,
+            stop_event=stop_event, preserve_size=True,
+            decode_timeout=min(CANVAS_MEDIA_PREPARE_TIMEOUT, remaining),
         )
-        for source in sorted(media_sources)
-    }
+        media_cache_bytes += sum(
+            image.width * image.height * 3
+            for image in {id(frame): frame for frame in frames}.values()
+            if isinstance(image, Image.Image)
+        )
+        if media_cache_bytes > CANVAS_MEDIA_CACHE_BYTES:
+            raise ValueError("canvas media cache exceeds its aggregate memory budget")
+        media_cache[source] = frames
     started = time.monotonic()
     while time.monotonic() - started < duration:
         frame = sequence[min(cycle_index, len(sequence) - 1)]

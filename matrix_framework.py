@@ -2,7 +2,9 @@ import math
 import os
 import pwd
 import select
+import stat
 import subprocess
+import threading
 import time
 import datetime
 import pathlib
@@ -46,6 +48,59 @@ def _read_exact_interruptibly(stream, size, stop_event=None, deadline=None):
         remaining -= len(chunk)
         idle_deadline = time.monotonic() + 5
     return b"".join(chunks)
+
+
+def _read_ppm_token_interruptibly(stream, stop_event=None, deadline=None):
+    """Read one bounded ASCII token from an ffmpeg PPM stream."""
+    token = bytearray()
+    while True:
+        byte = _read_exact_interruptibly(
+            stream, 1, stop_event=stop_event, deadline=deadline,
+        )
+        if not byte:
+            return bytes(token) if token else None
+        if byte in b" \t\r\n":
+            if token:
+                return bytes(token)
+            continue
+        token.extend(byte)
+        if len(token) > 32:
+            raise ValueError("media decoder produced an invalid frame header")
+
+
+def _read_ppm_frame_interruptibly(stream, stop_event=None, deadline=None):
+    """Read one source-sized RGB frame from ffmpeg's PPM image pipe."""
+    magic = _read_ppm_token_interruptibly(stream, stop_event, deadline)
+    if magic is None:
+        return None
+    width_token = _read_ppm_token_interruptibly(stream, stop_event, deadline)
+    height_token = _read_ppm_token_interruptibly(stream, stop_event, deadline)
+    maximum_token = _read_ppm_token_interruptibly(stream, stop_event, deadline)
+    try:
+        width = int(width_token or b"")
+        height = int(height_token or b"")
+        maximum = int(maximum_token or b"")
+    except ValueError as error:
+        raise ValueError("media decoder produced an invalid frame header") from error
+    if magic != b"P6" or maximum != 255 or not 1 <= width <= 4096 or not 1 <= height <= 4096:
+        raise ValueError("media decoder produced an invalid frame header")
+    if width * height > 1_000_000:
+        raise ValueError("media decoder frame is too large")
+    raw = _read_exact_interruptibly(
+        stream, width * height * 3,
+        stop_event=stop_event, deadline=deadline,
+    )
+    if len(raw) != width * height * 3:
+        raise ValueError("media could not be decoded for the custom module timeline")
+    return Image.frombytes("RGB", (width, height), raw)
+
+
+def _reap_decoder(process):
+    """Collect a killed decoder outside the request path if bounded reaping expires."""
+    try:
+        process.wait()
+    except OSError:
+        pass
 
 
 class Matrix:
@@ -416,7 +471,10 @@ class Matrix:
         self._frame_capture.set_image(canvas, prepared, int(x), int(y))
         return prepared
 
-    def media_frames(self, filename, frame_count, fps, stop_event=None, decode_timeout=45):
+    def media_frames(
+        self, filename, frame_count, fps, stop_event=None, decode_timeout=45,
+        preserve_size=False, resolved_path=None,
+    ):
         """Decode a bounded media timeline while observing cancellation/deadlines."""
         if (
             isinstance(frame_count, bool) or not isinstance(frame_count, int)
@@ -426,35 +484,64 @@ class Matrix:
             or isinstance(decode_timeout, bool)
             or not isinstance(decode_timeout, (int, float))
             or not 0 < decode_timeout <= 120
+            or not isinstance(preserve_size, bool)
+            or resolved_path is not None and not isinstance(resolved_path, (str, os.PathLike))
         ):
             raise ValueError("media timeline bounds are invalid")
         if stop_event is not None and stop_event.is_set():
             return []
         deadline = time.monotonic() + decode_timeout
-        path = self._media_file(filename)
+        path = pathlib.Path(resolved_path) if resolved_path is not None else self._media_file(filename)
         if path is None:
             return []
         input_fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW)
+        if resolved_path is not None:
+            try:
+                is_regular = stat.S_ISREG(os.fstat(input_fd).st_mode)
+            except OSError:
+                os.close(input_fd)
+                raise
+            if not is_regular:
+                os.close(input_fd)
+                return []
         identity = {}
         if os.geteuid() == 0:
             nobody = pwd.getpwnam("nobody")
             identity = {"user": nobody.pw_uid, "group": nobody.pw_gid, "extra_groups": []}
         process = None
         try:
-            process = subprocess.Popen(
-                [
+            command = [
                     "/usr/bin/ffmpeg", "-nostdin", "-v", "error", "-threads", "1",
                     "-i", "pipe:0",
                     "-map", "0:v:0", "-an", "-sn", "-dn",
-                    "-vf", f"scale=64:32:force_original_aspect_ratio=decrease,pad=64:32:(ow-iw)/2:(oh-ih)/2,fps={fps}:eof_action=pass", "-frames:v", str(frame_count),
-                    "-f", "rawvideo", "-pix_fmt", "rgb24", "pipe:1",
-                ],
+                    "-vf", (
+                        f"scale=w='min({self.matrix.width},iw)':h='min({self.matrix.height},ih)':force_original_aspect_ratio=decrease,fps={fps}:eof_action=pass" if preserve_size else
+                        f"scale=64:32:force_original_aspect_ratio=decrease,pad=64:32:(ow-iw)/2:(oh-ih)/2,fps={fps}:eof_action=pass"
+                    ),
+                    "-frames:v", str(frame_count),
+                ]
+            if preserve_size:
+                command.extend(["-f", "image2pipe", "-c:v", "ppm", "pipe:1"])
+            else:
+                command.extend(["-f", "rawvideo", "-pix_fmt", "rgb24", "pipe:1"])
+            process = subprocess.Popen(
+                command,
                 stdin=input_fd, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
                 **identity,
             )
             frame_size = self.matrix.width * self.matrix.height * 3
             frames = []
             for _ in range(frame_count):
+                if preserve_size:
+                    image = _read_ppm_frame_interruptibly(
+                        process.stdout, stop_event=stop_event, deadline=deadline,
+                    )
+                    if stop_event is not None and stop_event.is_set():
+                        return []
+                    if image is None:
+                        break
+                    frames.append(image)
+                    continue
                 raw = _read_exact_interruptibly(
                     process.stdout,
                     frame_size,
@@ -468,18 +555,39 @@ class Matrix:
                 if len(raw) != frame_size:
                     raise ValueError("media could not be decoded for the custom module timeline")
                 frames.append(Image.frombytes("RGB", (self.matrix.width, self.matrix.height), raw))
-            timeout = max(0.1, deadline - time.monotonic())
-            try:
-                return_code = process.wait(timeout=timeout)
-            except subprocess.TimeoutExpired as error:
-                raise ValueError("media decoder did not finish in time") from error
+            while True:
+                if stop_event is not None and stop_event.is_set():
+                    return []
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    raise ValueError("media decoder did not finish in time")
+                try:
+                    return_code = process.wait(
+                        timeout=min(0.05, remaining) if stop_event is not None else remaining
+                    )
+                    break
+                except subprocess.TimeoutExpired:
+                    continue
             if return_code != 0 or not frames:
                 raise ValueError("media could not be decoded for the custom module timeline")
             return [frames[index % len(frames)] for index in range(frame_count)]
         finally:
+            if process is not None and process.stdout is not None:
+                process.stdout.close()
             if process is not None and process.poll() is None:
-                process.kill()
-                process.wait()
+                try:
+                    process.kill()
+                except ProcessLookupError:
+                    pass
+                try:
+                    process.wait(timeout=0.25)
+                except subprocess.TimeoutExpired:
+                    threading.Thread(
+                        target=_reap_decoder,
+                        args=(process,),
+                        name="matrix-media-reaper",
+                        daemon=True,
+                    ).start()
             os.close(input_fd)
 
     def show_image(

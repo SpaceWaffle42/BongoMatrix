@@ -1529,6 +1529,64 @@ process.stdout.write(JSON.stringify(output));
         self.assertIn("timeline frames created automatically", asset)
         self.assertIn("expandTimelineForAnimatedMedia(module, source)", asset)
 
+    @unittest.skipUnless(shutil.which("node"), "Node.js is required")
+    def test_advanced_canvas_media_preview_samples_selected_timeline_frame(self):
+        source = (Path(__file__).parents[1] / "app" / "static" / "custom_canvas.js").read_text()
+        start = source.index("function mediaTimelineRevision(source")
+        end = source.index("\n  function drawEditor", start)
+        functions = source[start:end]
+        harness = """
+const mediaPreviews=new Map(), mediaRetryCounts=new Map(), mediaLoadQueue=[], customModules=[], mediaItems=[{name:'built-in/clip.mp4',revision:'r1'}];let activeMediaLoads=0;
+const document={
+  createElement(tag){return {tag,listeners:{},addEventListener(type,listener){this.listeners[type]=listener}}},
+  querySelectorAll(){return []}
+};
+function byId(){return null}
+function beginLayerRotation(){}
+""" + functions + """
+const first=mediaTimelineElement('built-in/clip.mp4',24,12.5);
+const second=mediaTimelineElement('built-in/clip.mp4',24,12.5);
+if(first!==second)throw new Error('cache miss');
+if(first.tag!=='img')throw new Error('preview must use sampled sprite');
+if(first.src!=='/api/media-timeline/built-in/clip.mp4?frame_count=24&fps=12.5&revision=r1')throw new Error(first.src);
+first.naturalWidth=10;first.naturalHeight=240;
+let drawArgs=null;
+const context={save(){},restore(){},translate(){},rotate(){},drawImage(...args){drawArgs=args}};
+drawShape(context,{type:'media',keyframes:[]},{x:0,y:0,width:10,height:10,rotation:0,source:'built-in/clip.mp4',keep_aspect:true},1,7,12.5,24);
+if(!drawArgs||drawArgs.length!==9||drawArgs[1]!==0||drawArgs[2]!==70||drawArgs[3]!==10||drawArgs[4]!==10)throw new Error('wrong sprite crop '+JSON.stringify(drawArgs));
+first.listeners.error();
+const retry=mediaTimelineElement('built-in/clip.mp4',24,12.5);
+if(retry===first)throw new Error('failed timeline remained cached');
+retry.listeners.error();
+if(mediaTimelineElement('built-in/clip.mp4',24,12.5)!==null)throw new Error('terminal failure retried without revision change');
+mediaItems[0].revision='r2';
+const replacement=mediaTimelineElement('built-in/clip.mp4',24,12.5);
+if(!replacement||replacement===retry||!replacement.src.endsWith('&revision=r2'))throw new Error('revision did not replace timeline');
+for(let count=1;count<=33;count++)mediaTimelineElement('many.gif',count,12);
+if(mediaPreviews.size!==32)throw new Error('unbounded cache '+mediaPreviews.size);
+if(mediaLoadQueue.length>32)throw new Error('unbounded queue '+mediaLoadQueue.length);
+console.log('TIMELINE_MEDIA_PREVIEW_PASS');
+"""
+        node = shutil.which("node")
+        assert node is not None
+        result = subprocess.run(
+            [node, "-e", harness], cwd=Path(__file__).parents[1],
+            text=True, capture_output=True, check=False,
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("TIMELINE_MEDIA_PREVIEW_PASS", result.stdout)
+
+    def test_media_metadata_revision_changes_when_filename_is_reused(self):
+        self.pair_browser()
+        media = self.media_dir / "same.png"
+        Image.new("RGB", (2, 2), "red").save(media)
+        first = self.client.get("/api/media").get_json()[0]["revision"]
+        media.unlink()
+        Image.new("RGB", (2, 2), "blue").save(media)
+        second = self.client.get("/api/media").get_json()[0]["revision"]
+
+        self.assertNotEqual(first, second)
+
     def test_dashboard_advanced_canvas_supports_uploaded_resizable_media_layers(self):
         self.pair_browser()
 
@@ -1667,6 +1725,32 @@ process.stdout.write(JSON.stringify(output));
         )
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertIn("MEDIA_FALLBACK_VALIDATION_PASS", result.stdout)
+
+    @unittest.skipUnless(shutil.which("node"), "Node.js is required")
+    def test_announcement_client_validation_rejects_backend_nonprintable_unicode(self):
+        source = (Path(__file__).parents[1] / "app" / "templates" / "dashboard.html").read_text()
+        start = source.index("function validateAnnouncement(announcement)")
+        end = source.index("\nfunction applyAnnouncementValidation", start)
+        function_source = source[start:end]
+        announcement = test_config_store.ConfigStoreTests.announcement()
+        announcement["schedule"]["days"] = list(range(7))
+        harness = function_source + "\nconst a=" + json.dumps(announcement) + ";for(const value of ['Bad\\u0085Name','Bad\\u2028Name']){a.name=value;const errors=validateAnnouncement(a);if(!errors.name)throw new Error('accepted '+JSON.stringify(value));}a.name='😀'.repeat(100);if(validateAnnouncement(a).name)throw new Error('rejected 100 code points');a.name+='😀';if(!validateAnnouncement(a).name)throw new Error('accepted 101 code points');console.log('NONPRINTABLE_UNICODE_REJECTED');"
+        node = shutil.which("node")
+        assert node is not None
+        result = subprocess.run(
+            [node, "-e", harness], cwd=Path(__file__).parents[1],
+            text=True, capture_output=True, check=False,
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("NONPRINTABLE_UNICODE_REJECTED", result.stdout)
+
+    def test_global_action_message_is_an_adaptive_live_region(self):
+        self.pair_browser()
+        body = self.client.get("/").get_data(as_text=True)
+
+        self.assertIn('id="message" role="status" aria-live="polite" aria-atomic="true"', body)
+        self.assertIn("message.setAttribute('role',error?'alert':'status')", body)
+        self.assertIn("message.setAttribute('aria-live',error?'assertive':'polite')", body)
 
     def test_announcement_editor_enforces_backend_board_limit(self):
         self.pair_browser()
@@ -2120,6 +2204,54 @@ console.log('ANNOUNCEMENT_HEADING_SYNC_PASS');
         self.assertEqual((built_in / "system.gif").read_bytes(), payload)
         self.assertFalse((built_in / "custom.gif").exists())
         self.assertFalse((self.media_dir / "system.gif").exists())
+
+    def test_media_timeline_endpoint_is_paired_bounded_and_source_sized(self):
+        media = self.media_dir / "square.png"
+        Image.new("RGB", (10, 10), "red").save(media)
+        decoded = Image.new("RGB", (10, 10), "blue")
+        self.controller.matrix.media_frames.return_value = [decoded] * 8
+
+        self.assertEqual(
+            self.client.get("/api/media-timeline/square.png?frame_count=8&fps=12.5").status_code,
+            401,
+        )
+        self.pair_browser()
+        response = self.client.get("/api/media-timeline/square.png?frame_count=8&fps=12.5")
+
+        self.assertEqual((response.status_code, response.mimetype), (200, "image/png"))
+        with Image.open(io.BytesIO(response.data)) as image:
+            self.assertEqual((image.size, image.getpixel((0, 70))), ((10, 80), (0, 0, 255)))
+        self.controller.matrix.media_frames.assert_called_once_with(
+            "square.png", 8, 12.5, preserve_size=True, decode_timeout=5,
+            resolved_path=media,
+        )
+        for query in ("frame_count=0&fps=12", "frame_count=121&fps=12", "frame_count=1&fps=0", "frame_count=1&fps=61", "frame_count=1&fps=nan"):
+            self.assertEqual(
+                self.client.get("/api/media-timeline/square.png?" + query).status_code,
+                400,
+            )
+        (self.media_dir / "directory.png").mkdir()
+        os.symlink(media, self.media_dir / "link.png")
+        for name in ("missing.png", "directory.png", "link.png", "%2e%2e/config.json"):
+            self.assertEqual(
+                self.client.get(f"/api/media-timeline/{name}?frame_count=1&fps=12").status_code,
+                404,
+            )
+        self.controller.matrix.media_frames.side_effect = ValueError("decoder internals")
+        unavailable = self.client.get("/api/media-timeline/square.png?frame_count=1&fps=12")
+        self.assertEqual(unavailable.status_code, 422)
+        self.assertEqual(unavailable.get_json(), {"error": "Media timeline is unavailable."})
+        self.assertNotIn(b"decoder internals", unavailable.data)
+        slots = self.app.extensions["media_timeline_slots"]
+        self.assertTrue(slots.acquire(blocking=False))
+        self.assertTrue(slots.acquire(blocking=False))
+        try:
+            busy = self.client.get("/api/media-timeline/square.png?frame_count=1&fps=12")
+        finally:
+            slots.release()
+            slots.release()
+        self.assertEqual((busy.status_code, busy.headers.get("Retry-After")), (429, "1"))
+        self.assertEqual(busy.get_json(), {"error": "Media timeline service is busy."})
 
     def test_media_listing_reports_automatic_timeline_for_animated_gif(self):
         self.pair_browser()
