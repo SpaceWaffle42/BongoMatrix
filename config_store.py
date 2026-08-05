@@ -13,6 +13,14 @@ from pathlib import Path
 
 from module_options import LAVA_PALETTES
 
+
+class ConfigDurabilityError(OSError):
+    """The config is visible after replace, but directory durability is uncertain."""
+
+    def __init__(self, config):
+        super().__init__("configuration committed but directory sync failed")
+        self.config = copy.deepcopy(config)
+
 ALLOWED_MODULES = {
     "clock_lava", "weather", "openweather_overview", "openweather_forecast",
     "splash", "sleep",
@@ -135,10 +143,9 @@ def _merge(base, changes):
 
 
 def _validate_time(value):
-    try:
-        hour, minute = (int(part) for part in value.split(":"))
-    except (AttributeError, TypeError, ValueError) as exc:
-        raise ValueError(f"Invalid time: {value!r}") from exc
+    if not isinstance(value, str) or not re.fullmatch(r"[0-9]{2}:[0-9]{2}", value):
+        raise ValueError(f"Invalid time: {value!r}")
+    hour, minute = (int(part) for part in value.split(":"))
     if not 0 <= hour <= 23 or not 0 <= minute <= 59:
         raise ValueError(f"Invalid time: {value!r}")
 
@@ -394,7 +401,7 @@ def validate_config(config):
     display = config["display"]
     for key in ("day_brightness", "night_brightness"):
         value = display[key]
-        if not isinstance(value, int) or not 1 <= value <= 100:
+        if isinstance(value, bool) or not isinstance(value, int) or not 1 <= value <= 100:
             raise ValueError(f"{key} must be an integer from 1 to 100")
     _validate_time(display["active_start"])
     _validate_time(display["active_end"])
@@ -754,11 +761,14 @@ class ConfigStore:
                 handle.flush()
                 os.fsync(handle.fileno())
             os.replace(temp_name, self.path)
-            directory_fd = os.open(self.path.parent, os.O_RDONLY | os.O_DIRECTORY)
             try:
-                os.fsync(directory_fd)
-            finally:
-                os.close(directory_fd)
+                directory_fd = os.open(self.path.parent, os.O_RDONLY | os.O_DIRECTORY)
+                try:
+                    os.fsync(directory_fd)
+                finally:
+                    os.close(directory_fd)
+            except OSError as error:
+                raise ConfigDurabilityError(config) from error
         finally:
             if os.path.exists(temp_name):
                 os.unlink(temp_name)

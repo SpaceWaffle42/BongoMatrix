@@ -5,11 +5,22 @@ from __future__ import annotations
 import hmac
 import json
 import os
+import re
 import secrets
 import tempfile
 import threading
 import time
+from contextlib import contextmanager
 from pathlib import Path
+
+
+class PairingDurabilityError(OSError):
+    """The registry is visible after replace, but directory durability is uncertain."""
+
+    def __init__(self, devices, device=None):
+        super().__init__("paired-device registry committed but durability is uncertain")
+        self.devices = json.loads(json.dumps(devices))
+        self.device = json.loads(json.dumps(device)) if device is not None else None
 
 
 def initialize_pairing_display(controller, pairing, device_store):
@@ -33,22 +44,59 @@ class PairedDeviceStore:
                 devices = json.loads(self.path.read_text())
                 if not isinstance(devices, list):
                     raise ValueError("paired device file must contain a JSON list")
+                self._validate_devices(devices)
                 self._devices = devices
             else:
-                self._write()
+                self._write(self._devices)
 
-    def _write(self):
+    @staticmethod
+    def _validate_devices(devices):
+        if len(devices) > 10:
+            raise ValueError("paired device file contains too many entries")
+        seen = set()
+        for device in devices:
+            if not isinstance(device, dict) or set(device) != {"id", "name", "paired_at"}:
+                raise ValueError("paired device entries must contain id, name, and paired_at")
+            device_id = device["id"]
+            name = device["name"]
+            paired_at = device["paired_at"]
+            if (
+                not isinstance(device_id, str)
+                or not re.fullmatch(r"[A-Za-z0-9_-]{32}", device_id)
+                or device_id in seen
+            ):
+                raise ValueError("paired device ids must be unique URL-safe strings")
+            if (
+                not isinstance(name, str)
+                or name != name.strip()
+                or not name.isprintable()
+                or not 1 <= len(name) <= 40
+            ):
+                raise ValueError("paired device names must contain 1 to 40 printable characters")
+            if isinstance(paired_at, bool) or not isinstance(paired_at, int) or paired_at < 0:
+                raise ValueError("paired device timestamps must be non-negative integers")
+            seen.add(device_id)
+
+    def _write(self, devices):
         if self.path is None:
             return
         self.path.parent.mkdir(parents=True, exist_ok=True)
         fd, temporary = tempfile.mkstemp(prefix=self.path.name, dir=self.path.parent)
         try:
             with os.fdopen(fd, "w") as handle:
-                json.dump(self._devices, handle, indent=2, sort_keys=True)
+                json.dump(devices, handle, indent=2, sort_keys=True)
                 handle.write("\n")
                 handle.flush()
                 os.fsync(handle.fileno())
             os.replace(temporary, self.path)
+            try:
+                directory_fd = os.open(self.path.parent, os.O_RDONLY | os.O_DIRECTORY)
+                try:
+                    os.fsync(directory_fd)
+                finally:
+                    os.close(directory_fd)
+            except OSError as error:
+                raise PairingDurabilityError(devices) from error
         finally:
             if os.path.exists(temporary):
                 os.unlink(temporary)
@@ -61,13 +109,22 @@ class PairedDeviceStore:
         with self._lock:
             return any(device["id"] == device_id for device in self._devices)
 
+    @contextmanager
+    def transaction(self):
+        with self._lock:
+            yield
+
     def remove(self, device_id):
         with self._lock:
             remaining = [device for device in self._devices if device["id"] != device_id]
             if len(remaining) == len(self._devices):
                 return False
+            try:
+                self._write(remaining)
+            except PairingDurabilityError as error:
+                self._devices = error.devices
+                raise
             self._devices = remaining
-            self._write()
             return True
 
     def add(self, name, max_devices):
@@ -82,8 +139,14 @@ class PairedDeviceStore:
                 "name": name,
                 "paired_at": int(time.time()),
             }
-            self._devices.append(device)
-            self._write()
+            updated = [*self._devices, device]
+            self._validate_devices(updated)
+            try:
+                self._write(updated)
+            except PairingDurabilityError as error:
+                self._devices = error.devices
+                raise PairingDurabilityError(error.devices, device=device) from error
+            self._devices = updated
             return json.loads(json.dumps(device))
 
 

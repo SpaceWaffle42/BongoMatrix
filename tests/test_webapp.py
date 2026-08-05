@@ -1,18 +1,21 @@
 import io
+import json
+import re
 import os
 import pwd
 import shutil
 import subprocess
 import tempfile
+import threading
 import unittest
 from datetime import timedelta
 from pathlib import Path
 from unittest.mock import Mock, patch
 
-from PIL import Image
+from PIL import Image, UnidentifiedImageError
 
 from config_store import ConfigStore
-from pairing import PairedDeviceStore
+from pairing import PairedDeviceStore, PairingDurabilityError
 from secret_store import SecretDurabilityError, SecretStore
 from webapp import create_app
 
@@ -50,6 +53,231 @@ class WebAppTests(unittest.TestCase):
     def pair_browser(self):
         self.pairing.verify.return_value = True
         self.client.post("/pair", data={"pin": "123456", "device_name": "Test browser"})
+
+    def test_control_stop_reports_timeout_without_claiming_success(self):
+        self.pair_browser()
+        self.controller.stop.return_value = False
+        self.controller.status.return_value = {"running": True}
+
+        response = self.client.post("/api/control/stop")
+
+        self.assertEqual(response.status_code, 503)
+        self.assertEqual(response.get_json(), {
+            "error": "Display did not stop within the timeout.",
+            "running": True,
+        })
+
+    def test_config_update_reports_committed_state_when_display_reload_fails(self):
+        self.pair_browser()
+        self.controller.reload.side_effect = RuntimeError("display unavailable")
+
+        response = self.client.post("/api/config", json={"device": {"name": "Saved Matrix"}})
+
+        self.assertEqual(response.status_code, 503)
+        self.assertEqual(response.content_type, "application/json")
+        self.assertTrue(response.get_json()["committed"])
+        self.assertEqual(response.get_json()["config"]["device"]["name"], "Saved Matrix")
+        self.assertEqual(self.store.get()["device"]["name"], "Saved Matrix")
+        self.assertNotIn("display unavailable", response.get_data(as_text=True))
+
+    def test_config_update_reports_committed_state_when_directory_sync_fails(self):
+        self.pair_browser()
+
+        with patch(
+            "config_store.os.fsync",
+            side_effect=[None, OSError("directory unavailable")],
+        ):
+            response = self.client.post(
+                "/api/config",
+                json={"device": {"name": "Committed Despite Error"}},
+            )
+
+        self.assertEqual(response.status_code, 503)
+        self.assertEqual(response.content_type, "application/json")
+        self.assertEqual(response.get_json()["committed"], True)
+        self.assertEqual(response.get_json()["durability_uncertain"], True)
+        self.assertEqual(
+            response.get_json()["config"]["device"]["name"],
+            "Committed Despite Error",
+        )
+        self.assertEqual(self.store.get()["device"]["name"], "Committed Despite Error")
+        self.controller.reload.assert_called_once_with()
+        self.assertNotIn("directory unavailable", response.get_data(as_text=True))
+
+    def test_lowering_pairing_limit_serializes_with_new_pairing(self):
+        self.pair_browser()
+        config_entered = threading.Event()
+        release_config = threading.Event()
+        original_update = self.store.update
+        results = {}
+
+        def blocked_update(changes):
+            config_entered.set()
+            self.assertTrue(release_config.wait(2))
+            return original_update(changes)
+
+        def lower_limit():
+            client = self.app.test_client()
+            with client.session_transaction() as session_data:
+                session_data["paired"] = True
+                session_data["generation"] = "generation-one"
+                session_data["device_id"] = self.device_store.list()[0]["id"]
+            results["config"] = client.post(
+                "/api/config", json={"pairing": {"max_devices": 1}},
+            )
+
+        def add_device():
+            client = self.app.test_client()
+            results["pair"] = client.post(
+                "/pair", data={"pin": "123456", "device_name": "Racing browser"},
+            )
+
+        with patch.object(self.store, "update", side_effect=blocked_update):
+            config_thread = threading.Thread(target=lower_limit)
+            pair_thread = threading.Thread(target=add_device)
+            config_thread.start()
+            self.assertTrue(config_entered.wait(2))
+            pair_thread.start()
+            release_config.set()
+            config_thread.join(2)
+            pair_thread.join(2)
+
+        self.assertFalse(config_thread.is_alive())
+        self.assertFalse(pair_thread.is_alive())
+        self.assertEqual(results["config"].status_code, 200)
+        self.assertEqual(results["pair"].status_code, 409)
+        self.assertEqual(self.store.get()["pairing"]["max_devices"], 1)
+        self.assertEqual(len(self.device_store.list()), 1)
+
+    def test_api_errors_are_json_and_config_requires_json_content_type(self):
+        self.pair_browser()
+        malformed = self.client.post(
+            "/api/config", data="{", content_type="application/json",
+        )
+        wrong_type = self.client.post(
+            "/api/config",
+            data=json.dumps({"device": {"name": "Wrong type"}}),
+            content_type="text/plain",
+        )
+        missing = self.client.post("/api/media/missing.gif/preview")
+
+        self.assertEqual((malformed.status_code, malformed.is_json), (400, True))
+        self.assertEqual((wrong_type.status_code, wrong_type.is_json), (415, True))
+        self.assertEqual((missing.status_code, missing.is_json), (404, True))
+
+    def test_config_rejects_non_object_media_as_client_validation_error(self):
+        self.pair_browser()
+        for media in ([], "bad", 3, None):
+            with self.subTest(media=media):
+                response = self.client.post(
+                    "/api/config",
+                    data=json.dumps({"media": media}),
+                    content_type="application/json",
+                )
+                self.assertEqual(response.status_code, 400)
+                self.assertTrue(response.is_json)
+
+    def test_device_registry_write_failure_returns_sanitized_json(self):
+        self.pair_browser()
+        device_id = self.device_store.list()[0]["id"]
+
+        with patch.object(self.device_store, "_write", side_effect=OSError("disk details")):
+            response = self.client.delete(f"/api/devices/{device_id}")
+
+        self.assertEqual(response.status_code, 500)
+        self.assertTrue(response.is_json)
+        self.assertEqual(response.get_json(), {"error": "Internal server error."})
+        self.assertNotIn("disk details", response.get_data(as_text=True))
+        self.assertTrue(self.device_store.contains(device_id))
+
+    def test_device_removal_reports_committed_durability_uncertainty(self):
+        self.pair_browser()
+        device_id = self.device_store.list()[0]["id"]
+
+        with patch.object(
+            self.device_store,
+            "remove",
+            side_effect=PairingDurabilityError([]),
+        ):
+            response = self.client.delete(f"/api/devices/{device_id}")
+
+        self.assertEqual(response.status_code, 503)
+        self.assertEqual(response.get_json(), {
+            "removed": device_id,
+            "current": True,
+            "committed": True,
+            "durability_uncertain": True,
+            "error": "The device was removed, but durable storage could not be confirmed.",
+        })
+        self.assertEqual(self.client.get("/").status_code, 302)
+
+    def test_removed_current_device_sees_forwarded_durability_warning(self):
+        self.pair_browser()
+        device_id = self.device_store.list()[0]["id"]
+        with patch.object(
+            self.device_store, "remove", side_effect=PairingDurabilityError([])
+        ):
+            response = self.client.delete(f"/api/devices/{device_id}")
+
+        self.assertEqual(response.status_code, 503)
+        warning = response.get_json()["error"]
+        pairing_page = self.client.get(
+            "/pair", query_string={"warning": "device-removal-durability"}
+        )
+        self.assertIn(warning, pairing_page.get_data(as_text=True))
+
+    def test_removed_current_device_warning_survives_when_another_device_remains(self):
+        self.pair_browser()
+        current_id = self.device_store.list()[0]["id"]
+        second = self.device_store.add("Second browser", max_devices=4)
+        self.pairing.active_pin.return_value = None
+        with patch.object(
+            self.device_store, "_write", side_effect=PairingDurabilityError([second])
+        ):
+            response = self.client.delete(f"/api/devices/{current_id}")
+
+        self.assertEqual(response.status_code, 503)
+        warning = response.get_json()["error"]
+        pairing_page = self.client.get(
+            "/pair", query_string={"warning": "device-removal-durability"}
+        )
+        self.assertEqual(pairing_page.status_code, 403)
+        self.assertIn(warning, pairing_page.get_data(as_text=True))
+
+    def test_pairing_page_does_not_render_arbitrary_warning_query_text(self):
+        response = self.client.get(
+            "/pair", query_string={"warning": "Forged trusted warning"}
+        )
+        self.assertNotIn("Forged trusted warning", response.get_data(as_text=True))
+
+    def test_logout_clears_session_after_committed_removal_uncertainty(self):
+        self.pair_browser()
+        with patch.object(
+            self.device_store, "remove", side_effect=PairingDurabilityError([])
+        ):
+            response = self.client.post("/logout")
+
+        self.assertEqual(response.status_code, 302)
+        self.assertIn("warning=", response.headers["Location"])
+        with self.client.session_transaction() as browser_session:
+            self.assertNotIn("device_id", browser_session)
+            self.assertNotIn("paired", browser_session)
+        warning_page = self.client.get(response.headers["Location"])
+        self.assertIn("removed", warning_page.get_data(as_text=True))
+
+    def test_logout_precommit_failure_preserves_recovery_session(self):
+        self.pair_browser()
+        device_id = self.device_store.list()[0]["id"]
+        with patch.object(self.device_store, "remove", side_effect=OSError("disk failed")):
+            response = self.client.post("/logout")
+
+        self.assertEqual(response.status_code, 503)
+        self.assertIn("could not be removed", response.get_data(as_text=True))
+        with self.client.session_transaction() as browser_session:
+            self.assertEqual(browser_session.get("device_id"), device_id)
+            self.assertTrue(browser_session.get("paired"))
+        self.assertTrue(self.device_store.contains(device_id))
+        self.assertEqual(self.client.get("/").status_code, 200)
 
     def test_openweather_secret_api_is_paired_and_never_echoes_the_key(self):
         key = "test_key_1234567890"
@@ -234,6 +462,21 @@ class WebAppTests(unittest.TestCase):
         with self.client.session_transaction() as browser_session:
             self.assertEqual(browser_session["device_id"], devices[0]["id"])
 
+    def test_first_pairing_durability_uncertainty_keeps_browser_authorized(self):
+        self.pairing.verify.return_value = True
+        with patch("pairing.os.fsync", side_effect=[None, OSError("directory unavailable")]):
+            response = self.client.post(
+                "/pair", data={"pin": "123456", "device_name": "First browser"}
+            )
+
+        self.assertEqual(response.status_code, 503)
+        self.assertIn("already paired", response.get_data(as_text=True))
+        devices = self.device_store.list()
+        self.assertEqual(len(devices), 1)
+        with self.client.session_transaction() as browser_session:
+            self.assertEqual(browser_session["device_id"], devices[0]["id"])
+        self.assertEqual(self.client.get("/").status_code, 200)
+
     def test_paired_device_session_remains_durable_until_revoked(self):
         self.assertEqual(self.app.permanent_session_lifetime, timedelta(days=365))
 
@@ -246,6 +489,17 @@ class WebAppTests(unittest.TestCase):
 
         self.assertEqual(response.status_code, 401)
         self.assertEqual(response.get_json()["error"], "Pairing session expired.")
+
+    def test_unpaired_client_cannot_interrupt_an_already_paired_display(self):
+        self.device_store.add("Existing browser", max_devices=4)
+        self.pairing.active_pin.return_value = None
+
+        response = self.client.get("/pair")
+
+        self.assertEqual(response.status_code, 403)
+        self.assertIn("paired device", response.get_data(as_text=True).lower())
+        self.pairing.issue_pin.assert_not_called()
+        self.controller.show_pairing_pin.assert_not_called()
 
     def test_paired_login_screen_offers_an_additional_device_button(self):
         self.pair_browser()
@@ -485,6 +739,394 @@ async function settle(){await new Promise(resolve=>setImmediate(resolve));await 
             body,
         )
 
+    @unittest.skipUnless(shutil.which("node"), "Node.js is required")
+    def test_advanced_upload_adopts_committed_item_without_losing_warning(self):
+        source = (Path(__file__).parents[1] / "app" / "static" / "custom_canvas.js").read_text()
+        start = source.index("  async function uploadAdvancedMedia")
+        end = source.index("\n  window.uploadAdvancedMedia", start)
+        function_source = source[start:end]
+        harness = r"""
+global.FormData=class { append(){} };
+let refreshed=0, layers=[], messages=[];
+async function api(){const error=new Error('Saved, but durable storage could not be confirmed.');error.data={committed:true,item:{name:'saved.gif'}};throw error;}
+async function refreshMedia(){refreshed++;}
+function addAdvancedLayer(id,type,name){layers.push({id,type,name});}
+function setMessage(text,error=false){messages.push({text,error});}
+""" + function_source + r"""
+(async()=>{
+  const input={files:[{name:'saved.gif',size:100}],value:'selected'};
+  await uploadAdvancedMedia('custom_test',input);
+  if(refreshed!==1) throw new Error('committed upload did not refresh media');
+  if(JSON.stringify(layers)!==JSON.stringify([{id:'custom_test',type:'media',name:'saved.gif'}])) throw new Error('committed upload did not add its layer');
+  const final=messages.at(-1);
+  if(!final.error || !final.text.includes('durable storage')) throw new Error('commit warning was lost');
+  if(input.value!=='') throw new Error('file input was not reset');
+  console.log('ADVANCED_COMMITTED_UPLOAD_PASS');
+})().catch(error=>{console.error(error);process.exit(1)});
+"""
+        result = subprocess.run(
+            [shutil.which("node"), "-e", harness], cwd=Path(__file__).parents[1],
+            text=True, capture_output=True, check=False,
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("ADVANCED_COMMITTED_UPLOAD_PASS", result.stdout)
+
+    @unittest.skipUnless(shutil.which("node"), "Node.js is required")
+    def test_advanced_successful_upload_reports_later_refresh_failure_as_committed(self):
+        source = (Path(__file__).parents[1] / "app" / "static" / "custom_canvas.js").read_text()
+        start = source.index("  async function uploadAdvancedMedia")
+        end = source.index("\n  window.uploadAdvancedMedia", start)
+        function_source = source[start:end]
+        harness = r"""
+global.FormData=class {append(){}};
+let layerAttempts=0,messages=[];
+async function api(){return {name:'saved.gif'};}
+async function refreshMedia(){throw new Error('Library refresh failed.');}
+globalThis.reconcileMediaItem=()=>{throw new Error('Local reconciliation failed.');};
+function addAdvancedLayer(){layerAttempts++;throw new Error('Editor rendering failed.');}
+function setMessage(text,error=false){messages.push({text,error});}
+""" + function_source + r"""
+(async()=>{
+  const input={files:[{name:'saved.gif',size:100}],value:'selected'};
+  await uploadAdvancedMedia('custom_test',input);
+  const final=messages.at(-1);
+  if(!final.error || !final.text.includes('saved') || !final.text.includes('Library refresh failed') || !final.text.includes('Local reconciliation failed') || !final.text.includes('Editor rendering failed'))throw new Error('known upload commit was lost');
+  if(layerAttempts!==1)throw new Error('saved media adoption was not attempted exactly once');
+  if(input.value!=='')throw new Error('file input was not reset');
+  console.log('ADVANCED_SUCCESS_REFRESH_FAILURE_PASS');
+})().catch(error=>{console.error(error);process.exit(1)});
+"""
+        node = shutil.which("node")
+        assert node is not None
+        result = subprocess.run(
+            [node, "-e", harness], cwd=Path(__file__).parents[1],
+            text=True, capture_output=True, check=False,
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("ADVANCED_SUCCESS_REFRESH_FAILURE_PASS", result.stdout)
+
+    @unittest.skipUnless(shutil.which("node"), "Node.js is required")
+    def test_advanced_successful_upload_reports_silent_layer_adoption_failure(self):
+        source = (Path(__file__).parents[1] / "app" / "static" / "custom_canvas.js").read_text()
+        start = source.index("  async function uploadAdvancedMedia")
+        end = source.index("\n  window.uploadAdvancedMedia", start)
+        function_source = source[start:end]
+        harness = r"""
+global.FormData=class {append(){}};
+let messages=[],layerAttempts=0;
+async function api(){return {name:'saved.gif'};}
+async function refreshMedia(){}
+function addAdvancedLayer(){layerAttempts++;return false;}
+function setMessage(text,error=false){messages.push({text,error});}
+""" + function_source + r"""
+(async()=>{
+  const input={files:[{name:'saved.gif',size:100}],value:'selected'};
+  let rejection=null;
+  try{await uploadAdvancedMedia('missing_module',input);}catch(error){rejection=error.message;}
+  const final=messages.at(-1);
+  if(rejection!==null)throw new Error('handler rejected: '+rejection);
+  if(layerAttempts!==1)throw new Error('layer adoption was not attempted exactly once');
+  if(!final?.error || !final.text.includes('saved.gif') || !final.text.includes('saved') || !final.text.includes('editor'))throw new Error('silent adoption failure hid committed upload');
+  if(input.value!=='')throw new Error('file input was not reset');
+  console.log('ADVANCED_SILENT_ADOPTION_FAILURE_PASS');
+})().catch(error=>{console.error(error);process.exit(1)});
+"""
+        node = shutil.which("node")
+        assert node is not None
+        result = subprocess.run(
+            [node, "-e", harness], cwd=Path(__file__).parents[1],
+            text=True, capture_output=True, check=False,
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("ADVANCED_SILENT_ADOPTION_FAILURE_PASS", result.stdout)
+
+    @unittest.skipUnless(shutil.which("node"), "Node.js is required")
+    def test_standard_upload_preserves_committed_warning_when_refresh_fails(self):
+        self.pair_browser()
+        page = self.client.get("/").get_data(as_text=True)
+        start = page.index("async function uploadMedia()")
+        end = page.index("\n\nasync function removeMedia", start)
+        function_source = page[start:end]
+        harness = r"""
+let messages=[];
+const input={files:[{name:'saved.gif',size:10}],value:'selected'};
+global.FormData=class {append(){}};
+global.document={querySelector(){return input;}};
+function setMessage(text,error=false){messages.push({text,error});}
+async function api(){const error=new Error('Saved, but durability is uncertain.');error.data={committed:true,item:{name:'saved.gif'}};throw error;}
+async function refreshMedia(){throw new Error('Library refresh failed.');}
+""" + function_source + r"""
+(async()=>{
+  let rejection=null;
+  try{await uploadMedia();}catch(error){rejection=error.message;}
+  const final=messages.at(-1);
+  if(rejection!==null)throw new Error('handler rejected: '+rejection);
+  if(input.value!=='')throw new Error('file input was not reset');
+  if(!final.error || !final.text.includes('Saved, but durability is uncertain.') || !final.text.includes('Library refresh failed.'))throw new Error('combined warning was not shown');
+  console.log('STANDARD_COMMITTED_UPLOAD_REFRESH_FAILURE_PASS');
+})().catch(error=>{console.error(error);process.exit(1)});
+"""
+        node = shutil.which("node")
+        assert node is not None
+        result = subprocess.run(
+            [node, "-e", harness], cwd=Path(__file__).parents[1],
+            text=True, capture_output=True, check=False,
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("STANDARD_COMMITTED_UPLOAD_REFRESH_FAILURE_PASS", result.stdout)
+
+    @unittest.skipUnless(shutil.which("node"), "Node.js is required")
+    def test_standard_successful_upload_reports_later_refresh_failure_as_committed(self):
+        self.pair_browser()
+        page = self.client.get("/").get_data(as_text=True)
+        start = page.index("async function uploadMedia()")
+        end = page.index("\n\nasync function removeMedia", start)
+        function_source = page[start:end]
+        harness = r"""
+let messages=[];
+const input={files:[{name:'saved.gif',size:10}],value:'selected'};
+global.FormData=class {append(){}};
+global.document={querySelector(){return input;}};
+function setMessage(text,error=false){messages.push({text,error});}
+async function api(){return {name:'saved.gif'};}
+async function refreshMedia(){throw new Error('Library refresh failed.');}
+globalThis.reconcileMediaItem=()=>{throw new Error('Local reconciliation failed.');};
+""" + function_source + r"""
+(async()=>{
+  await uploadMedia();
+  const final=messages.at(-1);
+  if(!final.error || !final.text.includes('saved.gif') || !final.text.includes('uploaded') || !final.text.includes('Library refresh failed') || !final.text.includes('Local reconciliation failed'))throw new Error('known upload commit was lost');
+  if(input.value!=='')throw new Error('file input was not reset');
+  console.log('STANDARD_SUCCESS_REFRESH_FAILURE_PASS');
+})().catch(error=>{console.error(error);process.exit(1)});
+"""
+        node = shutil.which("node")
+        assert node is not None
+        result = subprocess.run(
+            [node, "-e", harness], cwd=Path(__file__).parents[1],
+            text=True, capture_output=True, check=False,
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("STANDARD_SUCCESS_REFRESH_FAILURE_PASS", result.stdout)
+
+    @unittest.skipUnless(shutil.which("node"), "Node.js is required")
+    def test_committed_device_removal_reconciles_current_and_other_devices(self):
+        self.pair_browser()
+        page = self.client.get("/").get_data(as_text=True)
+        start = page.index("async function removePairedDevice")
+        end = page.index("\nasync function preview", start)
+        function_source = page[start:end]
+        harness = r"""
+let removal={committed:true,current:true},messages=[];
+global.confirm=()=>true;
+global.window={location:{}};
+function setMessage(text,error=false){messages.push({text,error});}
+async function api(){const error=new Error('Removal committed, but durability is uncertain.');error.data=removal;throw error;}
+""" + function_source + r"""
+(async()=>{
+  await removePairedDevice('one','One');
+  if(typeof window.location!=='string' || !window.location.startsWith('/pair?warning='))throw new Error('current device did not reconcile through pairing page');
+  removal={committed:true,current:false};window.location={};
+  await removePairedDevice('two','Two');
+  if(typeof window.location!=='string' || !window.location.startsWith('/?warning='))throw new Error('other device did not reconcile through dashboard');
+  console.log('COMMITTED_DEVICE_REMOVAL_RECONCILIATION_PASS');
+})().catch(error=>{console.error(error);process.exit(1)});
+"""
+        node = shutil.which("node")
+        assert node is not None
+        result = subprocess.run(
+            [node, "-e", harness], cwd=Path(__file__).parents[1],
+            text=True, capture_output=True, check=False,
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("COMMITTED_DEVICE_REMOVAL_RECONCILIATION_PASS", result.stdout)
+
+    @unittest.skipUnless(shutil.which("node"), "Node.js is required")
+    def test_dashboard_maps_only_known_navigation_warning_codes(self):
+        source = (Path(__file__).parents[1] / "app" / "templates" / "dashboard.html").read_text()
+        warning_source = next(
+            line for line in source.splitlines() if line.startswith("const navigationWarningCode=")
+        )
+        harness = r"""
+let messages=[],code='forged-warning';
+global.window={location:{search:''}};
+global.URLSearchParams=class {get(){return code;}};
+function setMessage(text,error=false){messages.push({text,error});}
+function execute(){eval(WARNING_SOURCE);}
+execute();
+if(messages.length!==0)throw new Error('arbitrary warning code was trusted');
+code='device-removal-durability';execute();
+if(messages.length!==1 || !messages[0].error || !messages[0].text.includes('durable storage'))throw new Error('known warning code was not mapped');
+console.log('NAVIGATION_WARNING_CODE_PASS');
+""".replace("WARNING_SOURCE", json.dumps(warning_source))
+        node = shutil.which("node")
+        assert node is not None
+        result = subprocess.run(
+            [node, "-e", harness], cwd=Path(__file__).parents[1],
+            text=True, capture_output=True, check=False,
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("NAVIGATION_WARNING_CODE_PASS", result.stdout)
+
+    @unittest.skipUnless(shutil.which("node"), "Node.js is required")
+    def test_local_media_reconciliation_updates_library_selectors_and_rendering(self):
+        source = (Path(__file__).parents[1] / "app" / "templates" / "dashboard.html").read_text()
+        start = source.index("function reconcileMediaItem")
+        end = source.index("\nasync function previewMedia", start)
+        function_source = source[start:end]
+        harness = r"""
+let mediaItems=[{name:'old.gif'},{name:'remove.gif'}],syncs=0,renders=0;
+function syncMediaSelects(){syncs++;}
+function renderMedia(){renders++;}
+""" + function_source + r"""
+reconcileMediaItem({name:'saved.gif',type:'gif'});
+if(!mediaItems.some(item=>item.name==='saved.gif'))throw new Error('upload item missing');
+reconcileMediaItem({name:'saved.gif',type:'updated'});
+if(mediaItems.filter(item=>item.name==='saved.gif').length!==1 || mediaItems.find(item=>item.name==='saved.gif').type!=='updated')throw new Error('upload item was not replaced');
+reconcileMediaRemoval('remove.gif');
+if(mediaItems.some(item=>item.name==='remove.gif'))throw new Error('removed item remained');
+if(syncs!==3 || renders!==3)throw new Error('selectors or library were not rerendered');
+console.log('LOCAL_MEDIA_RECONCILIATION_PASS');
+"""
+        node = shutil.which("node")
+        assert node is not None
+        result = subprocess.run(
+            [node, "-e", harness], cwd=Path(__file__).parents[1],
+            text=True, capture_output=True, check=False,
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("LOCAL_MEDIA_RECONCILIATION_PASS", result.stdout)
+
+    @unittest.skipUnless(shutil.which("node"), "Node.js is required")
+    def test_committed_media_removal_preserves_warning_when_refresh_fails(self):
+        self.pair_browser()
+        page = self.client.get("/").get_data(as_text=True)
+        start = page.index("async function removeMedia")
+        end = page.index("\nasync function assignMedia", start)
+        function_source = page[start:end]
+        harness = r"""
+let messages=[];
+global.confirm=()=>true;
+function setMessage(text,error=false){messages.push({text,error});}
+async function api(){const error=new Error('Removal committed, but durability is uncertain.');error.data={committed:true,removed:'saved.gif'};throw error;}
+async function refreshMedia(){throw new Error('Library refresh failed.');}
+""" + function_source + r"""
+(async()=>{
+  let rejection=null;
+  try{await removeMedia('saved.gif');}catch(error){rejection=error.message;}
+  const final=messages.at(-1);
+  if(rejection!==null)throw new Error('handler rejected: '+rejection);
+  if(!final.error || !final.text.includes('Removal committed') || !final.text.includes('Library refresh failed.'))throw new Error('combined removal warning was not shown');
+  console.log('COMMITTED_MEDIA_REMOVAL_RECONCILIATION_PASS');
+})().catch(error=>{console.error(error);process.exit(1)});
+"""
+        node = shutil.which("node")
+        assert node is not None
+        result = subprocess.run(
+            [node, "-e", harness], cwd=Path(__file__).parents[1],
+            text=True, capture_output=True, check=False,
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("COMMITTED_MEDIA_REMOVAL_RECONCILIATION_PASS", result.stdout)
+
+    @unittest.skipUnless(shutil.which("node"), "Node.js is required")
+    def test_successful_media_removal_reports_later_refresh_failure_as_committed(self):
+        self.pair_browser()
+        page = self.client.get("/").get_data(as_text=True)
+        start = page.index("async function removeMedia")
+        end = page.index("\nasync function assignMedia", start)
+        function_source = page[start:end]
+        harness = r"""
+let messages=[];
+global.confirm=()=>true;
+function setMessage(text,error=false){messages.push({text,error});}
+async function api(){return {removed:'saved.gif'};}
+async function refreshMedia(){throw new Error('Library refresh failed.');}
+globalThis.reconcileMediaRemoval=()=>{throw new Error('Local reconciliation failed.');};
+""" + function_source + r"""
+(async()=>{
+  await removeMedia('saved.gif');
+  const final=messages.at(-1);
+  if(!final.error || !final.text.includes('saved.gif') || !final.text.includes('removed') || !final.text.includes('Library refresh failed') || !final.text.includes('Local reconciliation failed'))throw new Error('known removal commit was lost');
+  console.log('MEDIA_REMOVAL_SUCCESS_REFRESH_FAILURE_PASS');
+})().catch(error=>{console.error(error);process.exit(1)});
+"""
+        node = shutil.which("node")
+        assert node is not None
+        result = subprocess.run(
+            [node, "-e", harness], cwd=Path(__file__).parents[1],
+            text=True, capture_output=True, check=False,
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("MEDIA_REMOVAL_SUCCESS_REFRESH_FAILURE_PASS", result.stdout)
+
+    @unittest.skipUnless(shutil.which("node"), "Node.js is required")
+    def test_silent_committed_save_warning_survives_custom_preview(self):
+        source = (Path(__file__).parents[1] / "app" / "templates" / "dashboard.html").read_text()
+        save_start = source.index("async function saveConfig")
+        save_end = source.index("\nfunction updateOpenWeatherSecretStatus", save_start)
+        preview_start = source.index("async function preview(name)")
+        preview_end = source.index("\nfunction previewSelected", preview_start)
+        function_source = source[save_start:save_end] + "\n" + source[preview_start:preview_end]
+        harness = r"""
+let messages=[],previewCalls=0,previewModule='';
+function configBody(){return {};}
+function setMessage(text,error=false){messages.push({text,error});}
+global.document={querySelector(){return {value:''};}};
+async function api(path){
+  if(path==='/api/config'){const error=new Error('Configuration saved, but display reload failed.');error.data={committed:true,display_reloaded:false};throw error;}
+  previewCalls++;return {};
+}
+""" + function_source + r"""
+(async()=>{
+  await preview('custom_test');
+  if(previewCalls!==1) throw new Error('preview did not continue after committed save');
+  const final=messages.at(-1);
+  if(!final.error || !final.text.includes('reload failed') || !final.text.includes('Previewing custom_test')) throw new Error('preview overwrote the committed-save warning');
+  console.log('SILENT_COMMITTED_SAVE_PASS');
+})().catch(error=>{console.error(error);process.exit(1)});
+"""
+        result = subprocess.run(
+            [shutil.which("node"), "-e", harness], cwd=Path(__file__).parents[1],
+            text=True, capture_output=True, check=False,
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("SILENT_COMMITTED_SAVE_PASS", result.stdout)
+
+    @unittest.skipUnless(shutil.which("node"), "Node.js is required")
+    def test_failed_preview_preserves_committed_save_warning(self):
+        source = (Path(__file__).parents[1] / "app" / "templates" / "dashboard.html").read_text()
+        save_start = source.index("async function saveConfig")
+        save_end = source.index("\nfunction updateOpenWeatherSecretStatus", save_start)
+        preview_start = source.index("async function preview(name)")
+        preview_end = source.index("\nfunction previewSelected", preview_start)
+        function_source = source[save_start:save_end] + "\n" + source[preview_start:preview_end]
+        harness = r"""
+let messages=[],previewModule='';
+function configBody(){return {};}
+function setMessage(text,error=false){messages.push({text,error});}
+global.document={querySelector(){return {value:''};}};
+async function api(path){
+  if(path==='/api/config'){const error=new Error('Configuration saved, but display reload failed.');error.data={committed:true};throw error;}
+  throw new Error('Preview hardware unavailable.');
+}
+""" + function_source + r"""
+(async()=>{
+  await preview('custom_test');
+  const final=messages.at(-1);
+  if(!final.error || !final.text.includes('display reload failed') || !final.text.includes('Preview hardware unavailable'))throw new Error('failed preview overwrote committed-save warning');
+  console.log('FAILED_PREVIEW_COMMITTED_WARNING_PASS');
+})().catch(error=>{console.error(error);process.exit(1)});
+"""
+        node = shutil.which("node")
+        assert node is not None
+        result = subprocess.run(
+            [node, "-e", harness], cwd=Path(__file__).parents[1],
+            text=True, capture_output=True, check=False,
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("FAILED_PREVIEW_COMMITTED_WARNING_PASS", result.stdout)
+
     def test_scrolling_text_duration_is_automatic_in_the_playlist_editor(self):
         self.pair_browser()
         body = self.client.get("/").get_data(as_text=True)
@@ -722,7 +1364,12 @@ const rainbowColours = Array.from(
   {length: rainbow.frame_count},
   (_, frame) => orderedLayersForFrame(rainbow, frame).map(item => item.properties.colour),
 );
-process.stdout.write(JSON.stringify({examples: canvasStarterExamples, modules, rainbowColours}));
+process.stdout.write(JSON.stringify({
+  examples: canvasStarterExamples,
+  modules,
+  rainbowColours,
+  singleFramePingPong: advanceCanvasPlaybackFrame(0, 1, 'ping_pong', 1),
+}));
 """
         node = shutil.which("node")
         assert node is not None
@@ -753,6 +1400,10 @@ process.stdout.write(JSON.stringify({examples: canvasStarterExamples, modules, r
         )
         self.assertEqual(len(modules["rainbow_pulse"]["layers"]), 7)
         self.assertEqual(modules["rainbow_pulse"]["playback"], "loop")
+        self.assertEqual(
+            payload["singleFramePingPong"],
+            {"frame": 0, "direction": 1, "done": False},
+        )
 
         from modules.custom_text import ordered_layers_for_frame
         physical_colours = [
@@ -768,6 +1419,66 @@ process.stdout.write(JSON.stringify({examples: canvasStarterExamples, modules, r
                 ConfigStore(Path(directory) / "config.json").update({
                     "custom_modules": [module],
                 })
+
+    @unittest.skipUnless(shutil.which("node"), "Node.js is required")
+    def test_browser_playback_sequences_match_physical_renderer(self):
+        asset = (Path(__file__).parents[1] / "app/static/custom_canvas.js").read_text()
+        self.assertIn(
+            "const advanced = window.advanceCanvasPlaybackFrame(state.frame, module.frame_count, module.playback, direction);",
+            asset,
+        )
+        self.assertIn("state.frame = advanced.frame; direction = advanced.direction;", asset)
+        self.assertIn("if (advanced.done) { clearInterval(state.timer); state.playing = false;", asset)
+        harness = r"""
+const fs = require('fs');
+global.window = global;
+global.document = {
+  querySelectorAll: () => [],
+  querySelector: () => ({replaceChildren() {}, append() {}}),
+  createElement: () => ({}),
+};
+global.CSS = {escape: value => value};
+global.customModules = [];
+global.mediaItems = [];
+global.confirm = () => true;
+global.setInterval = () => 0;
+global.syncCustomModuleUI = () => {};
+global.syncPlaylistDurations = () => {};
+global.setMessage = () => {};
+eval(fs.readFileSync('app/static/custom_canvas.js', 'utf8'));
+const output = {};
+for (const count of [1, 2, 3]) for (const playback of ['loop', 'hold', 'ping_pong']) {
+  let frame = 0, direction = 1;
+  const frames = [0];
+  for (let step = 0; step < 20; step++) {
+    const result = advanceCanvasPlaybackFrame(frame, count, playback, direction);
+    if (result.frame < 0 || result.frame >= count) throw new Error('frame out of range');
+    if (![-1, 1].includes(result.direction)) throw new Error('direction out of range');
+    if (result.done || (result.frame === 0 && frames.length > 0 && playback !== 'hold')) break;
+    frames.push(result.frame);
+    frame = result.frame;
+    direction = result.direction;
+  }
+  output[`${count}:${playback}`] = frames;
+}
+process.stdout.write(JSON.stringify(output));
+"""
+        node = shutil.which("node")
+        assert node is not None
+        result = subprocess.run(
+            [node, "-e", harness],
+            cwd=Path(__file__).parents[1], text=True, capture_output=True, check=False,
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        browser = json.loads(result.stdout)
+
+        from modules.custom_text import frame_sequence
+        for count in (1, 2, 3):
+            for playback in ("loop", "hold", "ping_pong"):
+                self.assertEqual(
+                    browser[f"{count}:{playback}"],
+                    frame_sequence(count, playback),
+                )
 
     def test_dashboard_advanced_canvas_has_time_image_shortcuts_and_rotation_snapping(self):
         self.pair_browser()
@@ -1153,7 +1864,7 @@ process.stdout.write(JSON.stringify({examples: canvasStarterExamples, modules, r
         self.assertEqual(response.status_code, 201, response.get_data(as_text=True))
         item = response.get_json()
         self.assertEqual(item["kind"], "mp4")
-        self.assertEqual((item["width"], item["height"]), (64, 32))
+        self.assertEqual((item["width"], item["height"]), (56, 32))
         listing = self.client.get("/api/media").get_json()
         self.assertEqual([entry["name"] for entry in listing], ["clip.mp4"])
         served = self.client.get("/media/clip.mp4")
@@ -1270,6 +1981,261 @@ process.stdout.write(JSON.stringify({examples: canvasStarterExamples, modules, r
         response = self.client.post("/api/config", json={"media": {"splash": "missing.gif"}})
         self.assertEqual(response.status_code, 400)
 
+    def test_rejected_upload_does_not_leave_a_retry_blocking_destination(self):
+        self.pair_browser()
+        failures = (
+            KeyError("missing metadata"),
+            IndexError("missing stream"),
+            subprocess.CalledProcessError(1, ["ffprobe"]),
+            subprocess.TimeoutExpired(["ffprobe"], 1),
+            json.JSONDecodeError("bad metadata", "{", 1),
+            UnidentifiedImageError("bad image"),
+        )
+        for failure in failures:
+            with self.subTest(failure=type(failure).__name__):
+                with patch("webapp.subprocess.run"), patch(
+                    "webapp.Image.open", side_effect=failure,
+                ):
+                    response = self.client.post(
+                        "/api/media",
+                        data={"file": (self.gif_bytes(), "rejected.gif")},
+                        content_type="multipart/form-data",
+                    )
+
+                self.assertEqual(response.status_code, 400)
+                self.assertTrue(response.is_json)
+                self.assertIn("error", response.get_json())
+                self.assertFalse((self.media_dir / "rejected.gif").exists())
+
+                retry = self.client.post(
+                    "/api/media",
+                    data={"file": (self.gif_bytes(), "rejected.gif")},
+                    content_type="multipart/form-data",
+                )
+                self.assertEqual(retry.status_code, 201)
+                (self.media_dir / "rejected.gif").unlink()
+
+        with patch("webapp.subprocess.run"), patch(
+            "webapp.Image.open", side_effect=RuntimeError("unexpected bug"),
+        ):
+            response = self.client.post(
+                "/api/media",
+                data={"file": (self.gif_bytes(), "rejected.gif")},
+                content_type="multipart/form-data",
+            )
+        self.assertEqual(response.status_code, 500)
+        self.assertFalse((self.media_dir / "rejected.gif").exists())
+
+    def test_upload_reports_committed_state_if_publication_rollback_fails(self):
+        self.pair_browser()
+        destination = self.media_dir / "rollback-failed.gif"
+        original_unlink = Path.unlink
+
+        def fail_destination_unlink(path, *args, **kwargs):
+            if path == destination:
+                raise OSError("disk unavailable")
+            return original_unlink(path, *args, **kwargs)
+
+        with (
+            patch("webapp.subprocess.run"),
+            patch("webapp.Image.open", side_effect=KeyError("missing metadata")),
+            patch.object(Path, "unlink", autospec=True, side_effect=fail_destination_unlink),
+        ):
+            response = self.client.post(
+                "/api/media",
+                data={"file": (self.gif_bytes(), destination.name)},
+                content_type="multipart/form-data",
+            )
+
+        self.assertEqual(response.status_code, 500)
+        self.assertTrue(response.is_json)
+        self.assertEqual(response.get_json()["committed"], True)
+        self.assertEqual(response.get_json()["filename"], destination.name)
+        self.assertTrue(destination.exists())
+        destination.unlink()
+
+    def test_upload_reports_committed_state_if_temporary_cleanup_fails(self):
+        self.pair_browser()
+        original_unlink = Path.unlink
+
+        for prefix in (".upload-", ".sanitized-"):
+            with self.subTest(prefix=prefix):
+                destination = self.media_dir / f"cleanup-{prefix[1:-1]}.gif"
+                failed_paths = []
+
+                def fail_selected_cleanup(path, *args, **kwargs):
+                    if (
+                        path.parent == self.media_dir
+                        and path.name.startswith(prefix)
+                        and not failed_paths
+                    ):
+                        failed_paths.append(path)
+                        raise OSError("cleanup unavailable")
+                    return original_unlink(path, *args, **kwargs)
+
+                with patch.object(
+                    Path,
+                    "unlink",
+                    autospec=True,
+                    side_effect=fail_selected_cleanup,
+                ):
+                    response = self.client.post(
+                        "/api/media",
+                        data={"file": (self.gif_bytes(), destination.name)},
+                        content_type="multipart/form-data",
+                    )
+
+                self.assertEqual(response.status_code, 503)
+                self.assertTrue(response.is_json)
+                self.assertEqual(response.get_json()["committed"], True)
+                self.assertEqual(response.get_json()["item"]["name"], destination.name)
+                self.assertTrue(destination.exists())
+                self.assertEqual(len(failed_paths), 1)
+                self.assertTrue(failed_paths[0].exists())
+
+                destination.unlink()
+                for leaked in self.media_dir.iterdir():
+                    if leaked.name.startswith((".upload-", ".sanitized-")):
+                        leaked.unlink(missing_ok=True)
+
+    def test_rejected_upload_reports_temporary_cleanup_failures(self):
+        self.pair_browser()
+        original_unlink = Path.unlink
+
+        for prefix in (".upload-", ".sanitized-"):
+            with self.subTest(prefix=prefix):
+                destination = self.media_dir / f"rejected-{prefix[1:-1]}.gif"
+                failed_paths = []
+
+                def fail_selected_cleanup(path, *args, **kwargs):
+                    if path.name.startswith(prefix) and not failed_paths:
+                        failed_paths.append(path)
+                        raise OSError("cleanup unavailable")
+                    return original_unlink(path, *args, **kwargs)
+
+                with (
+                    patch("webapp.Image.open", side_effect=KeyError("bad metadata")),
+                    patch.object(
+                        Path, "unlink", autospec=True, side_effect=fail_selected_cleanup,
+                    ),
+                ):
+                    response = self.client.post(
+                        "/api/media",
+                        data={"file": (self.gif_bytes(), destination.name)},
+                        content_type="multipart/form-data",
+                    )
+
+                self.assertEqual(response.status_code, 500)
+                self.assertEqual(response.get_json()["committed"], False)
+                self.assertEqual(response.get_json()["cleanup_failed"], True)
+                self.assertFalse(destination.exists())
+                self.assertEqual(len(failed_paths), 1)
+                self.assertTrue(failed_paths[0].exists())
+                failed_paths[0].unlink(missing_ok=True)
+
+    def test_sanitizer_descriptor_close_failures_do_not_lose_output_ownership(self):
+        self.pair_browser()
+        original_close = os.close
+        original_run = subprocess.run
+        for failed_call, filename in ((1, "source-close.gif"), (2, "output-close.gif")):
+            with self.subTest(failed_call=failed_call):
+                close_calls = 0
+                helper_finished = False
+
+                def run_helper(*args, **kwargs):
+                    nonlocal helper_finished
+                    result = original_run(*args, **kwargs)
+                    helper_finished = True
+                    return result
+
+                def close_then_fail(fd):
+                    nonlocal close_calls
+                    original_close(fd)
+                    if helper_finished:
+                        close_calls += 1
+                        if close_calls == failed_call:
+                            raise OSError("descriptor close status unavailable")
+
+                with (
+                    patch("webapp.subprocess.run", side_effect=run_helper),
+                    patch("webapp.os.close", side_effect=close_then_fail),
+                ):
+                    response = self.client.post(
+                        "/api/media",
+                        data={"file": (self.gif_bytes(), filename)},
+                        content_type="multipart/form-data",
+                    )
+
+                self.assertEqual(response.status_code, 201)
+                self.assertTrue((self.media_dir / filename).exists())
+                self.assertEqual(list(self.media_dir.glob(".sanitized-*")), [])
+
+    def test_sanitizer_rejection_reports_helper_output_cleanup_failure(self):
+        self.pair_browser()
+        original_unlink = Path.unlink
+        failed_paths = []
+
+        def fail_sanitized_cleanup(path, *args, **kwargs):
+            if path.parent == self.media_dir and path.name.startswith(".sanitized-"):
+                if path not in failed_paths:
+                    failed_paths.append(path)
+                raise OSError("cleanup unavailable")
+            return original_unlink(path, *args, **kwargs)
+
+        with (
+            patch(
+                "webapp.subprocess.run",
+                side_effect=subprocess.CalledProcessError(1, ["sanitizer"]),
+            ),
+            patch.object(
+                Path, "unlink", autospec=True, side_effect=fail_sanitized_cleanup,
+            ),
+        ):
+            response = self.client.post(
+                "/api/media",
+                data={"file": (self.gif_bytes(), "rejected-helper.gif")},
+                content_type="multipart/form-data",
+            )
+
+        self.assertEqual(response.status_code, 500)
+        self.assertEqual(response.get_json()["committed"], False)
+        self.assertEqual(response.get_json()["cleanup_failed"], True)
+        self.assertEqual(len(failed_paths), 1)
+        self.assertTrue(failed_paths[0].exists())
+        failed_paths[0].unlink(missing_ok=True)
+
+    def test_upload_reports_post_publication_durability_uncertainty(self):
+        self.pair_browser()
+        with patch("webapp.os.fsync", side_effect=OSError("directory unavailable")):
+            response = self.client.post(
+                "/api/media",
+                data={"file": (self.gif_bytes(), "uncertain.gif")},
+                content_type="multipart/form-data",
+            )
+
+        self.assertEqual(response.status_code, 503)
+        self.assertEqual(response.get_json()["committed"], True)
+        self.assertEqual(response.get_json()["durability_uncertain"], True)
+        self.assertEqual(response.get_json()["item"]["name"], "uncertain.gif")
+        self.assertTrue((self.media_dir / "uncertain.gif").exists())
+
+    def test_upload_rollback_reports_directory_durability_uncertainty(self):
+        self.pair_browser()
+        with (
+            patch("webapp.os.fsync", side_effect=[None, OSError("directory unavailable")]),
+            patch("webapp.Image.open", side_effect=KeyError("bad metadata")),
+        ):
+            response = self.client.post(
+                "/api/media",
+                data={"file": (self.gif_bytes(), "rollback-uncertain.gif")},
+                content_type="multipart/form-data",
+            )
+
+        self.assertEqual(response.status_code, 503)
+        self.assertEqual(response.get_json()["committed"], False)
+        self.assertEqual(response.get_json()["durability_uncertain"], True)
+        self.assertFalse((self.media_dir / "rollback-uncertain.gif").exists())
+
     def test_media_upload_rejects_unsafe_or_invalid_files(self):
         self.pair_browser()
         for filename, payload in (
@@ -1296,6 +2262,15 @@ process.stdout.write(JSON.stringify({examples: canvasStarterExamples, modules, r
         response = self.client.delete("/api/media/squares_tb.gif")
         self.assertEqual(response.status_code, 200)
         self.assertFalse((self.media_dir / "squares_tb.gif").exists())
+
+        (self.media_dir / "durability.gif").write_bytes(self.gif_bytes().read())
+        with patch("webapp.os.fsync", side_effect=OSError("directory unavailable")):
+            uncertain = self.client.delete("/api/media/durability.gif")
+        self.assertEqual(uncertain.status_code, 503)
+        self.assertEqual(uncertain.get_json()["committed"], True)
+        self.assertEqual(uncertain.get_json()["durability_uncertain"], True)
+        self.assertFalse((self.media_dir / "durability.gif").exists())
+
         (self.media_dir / "active.gif").write_bytes(self.gif_bytes().read())
         self.store.update({"media": {"splash": "active.gif"}})
         response = self.client.delete("/api/media/active.gif")
@@ -1307,6 +2282,37 @@ process.stdout.write(JSON.stringify({examples: canvasStarterExamples, modules, r
 
     def tearDown(self):
         self.temp.cleanup()
+
+    def test_dashboard_handles_committed_partial_success_without_blind_retry(self):
+        self.pair_browser()
+        page = self.client.get("/").get_data(as_text=True)
+
+        self.assertIn(
+            "if(error.data?.committed){if(!silent)setMessage(error.message,true);return {saved:true,warning:error.message,data:error.data}}",
+            page,
+        )
+        self.assertIn("if(error.data?.committed){input.value='';try{await refreshMedia()}", page)
+
+    @unittest.skipUnless(shutil.which("node"), "Node.js is required")
+    def test_rendered_dashboard_inline_javascript_is_syntactically_valid(self):
+        self.pair_browser()
+        page = self.client.get("/").get_data(as_text=True)
+        inline = "\n".join(
+            script for script in re.findall(r"<script[^>]*>(.*?)</script>", page, re.DOTALL)
+            if script.strip()
+        )
+
+        node = shutil.which("node")
+        assert node is not None
+        result = subprocess.run(
+            [node, "--check", "-"],
+            input=inline,
+            text=True,
+            capture_output=True,
+            check=False,
+        )
+
+        self.assertEqual(result.returncode, 0, result.stderr)
 
     def test_dashboard_requires_pairing(self):
         response = self.client.get("/")

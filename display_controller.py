@@ -7,6 +7,7 @@ import importlib
 import logging
 import socket
 import threading
+import time
 
 from modules.media_player import play_media
 
@@ -49,10 +50,13 @@ class DisplayController:
         self._shutdown = threading.Event()
         self._reload_requested = threading.Event()
         self._pairing_pause = threading.Event()
+        self._pairing_setup = threading.Event()
         self._display_lock = threading.RLock()
         self._lifecycle_lock = threading.Lock()
         self._state_lock = threading.Lock()
         self._thread = None
+        self._stopping = False
+        self._lifecycle_generation = 0
         self._module_stop = None
         self._preview_name = None
         self._media_preview_name = None
@@ -61,10 +65,13 @@ class DisplayController:
         self._pairing_pin = None
         self._pairing_ip = None
         self._pairing_show_ip = False
+        self._pairing_generation = 0
         self._ip_address_provider = ip_address_provider or local_ip_address
         self._openweather_secrets = openweather_secrets
         self.current_module = None
         self.last_error = None
+        self._scheduler_fault_backoff = 0.25
+        self._scheduler_next_fault_log = 0.0
 
     @property
     def running(self):
@@ -77,8 +84,8 @@ class DisplayController:
 
     def start(self):
         with self._lifecycle_lock:
-            if self._thread and self._thread.is_alive():
-                return
+            if self._stopping or (self._thread and self._thread.is_alive()):
+                return False
             self._shutdown.clear()
             self._reload_requested.clear()
             self._thread = threading.Thread(
@@ -87,23 +94,59 @@ class DisplayController:
                 daemon=True,
             )
             self._thread.start()
+            return True
 
-    def _interrupt_module(self):
-        with self._state_lock:
+    def _interrupt_module(self, timeout=None):
+        if timeout is None:
+            acquired = self._state_lock.acquire()
+        else:
+            acquired = self._state_lock.acquire(timeout=max(0, timeout))
+        if not acquired:
+            return False
+        try:
             if self._module_stop is not None:
                 self._module_stop.set()
+            return True
+        finally:
+            self._state_lock.release()
 
     def stop(self, timeout=5):
-        self._shutdown.set()
-        self._interrupt_module()
-        self.end_pairing()
+        deadline = time.monotonic() + max(0, float(timeout))
         with self._lifecycle_lock:
+            if self._stopping:
+                return False
+            self._stopping = True
+            self._lifecycle_generation += 1
+            self._shutdown.set()
             thread = self._thread
-        if thread and thread is not threading.current_thread():
-            thread.join(timeout)
-        with self._display_lock:
-            self.matrix.clear()
-            self.matrix.swap()
+        try:
+            if not self._interrupt_module(timeout=max(0, deadline - time.monotonic())):
+                return False
+            pairing_setup_active = self._pairing_setup.is_set()
+            if not self.end_pairing(timeout=max(0, deadline - time.monotonic())):
+                return False
+            if pairing_setup_active:
+                return False
+            if thread and thread is not threading.current_thread():
+                thread.join(max(0, deadline - time.monotonic()))
+                if thread.is_alive():
+                    LOGGER.error("Matrix display thread did not stop within %s seconds", timeout)
+                    return False
+            if not self._display_lock.acquire(timeout=max(0, deadline - time.monotonic())):
+                LOGGER.error("Matrix display lock was not released within %s seconds", timeout)
+                return False
+            try:
+                self.matrix.clear()
+                self.matrix.swap()
+            finally:
+                self._display_lock.release()
+            with self._lifecycle_lock:
+                if self._thread is thread:
+                    self._thread = None
+            return True
+        finally:
+            with self._lifecycle_lock:
+                self._stopping = False
 
     def reload(self):
         self._reload_requested.set()
@@ -142,28 +185,76 @@ class DisplayController:
         return self.matrix.latest_frame_png()
 
     def show_pairing_pin(self, pin, ttl_seconds=600):
-        self._pairing_pause.set()
-        self._interrupt_module()
+        with self._lifecycle_lock:
+            if self._shutdown.is_set():
+                return
+            lifecycle_generation = self._lifecycle_generation
+            self._pairing_setup.set()
         with self._state_lock:
-            if self._pairing_timer is not None:
-                self._pairing_timer.cancel()
-            if self._pairing_page_timer is not None:
-                self._pairing_page_timer.cancel()
-            self._pairing_pin = str(pin)
-            self._pairing_ip = self._ip_address_provider()
-            self._pairing_show_ip = False
-            self._pairing_timer = threading.Timer(
-                max(1, float(ttl_seconds)), self.end_pairing
-            )
-            self._pairing_timer.daemon = True
-            self._pairing_timer.start()
-            self._pairing_page_timer = threading.Timer(3, self._rotate_pairing_page)
-            self._pairing_page_timer.daemon = True
-            self._pairing_page_timer.start()
-        self._draw_pairing_page(show_ip=False)
+            self._pairing_generation += 1
+            generation = self._pairing_generation
+        try:
+            pairing_ip = self._ip_address_provider()
+            with self._lifecycle_lock:
+                lifecycle_current = (
+                    lifecycle_generation == self._lifecycle_generation
+                    and not self._shutdown.is_set()
+                )
+            if not lifecycle_current:
+                self.end_pairing(generation)
+                return
+            self._interrupt_module()
+            abort = False
+            with self._state_lock:
+                if self._shutdown.is_set():
+                    abort = True
+                elif generation != self._pairing_generation:
+                    return
+                else:
+                    self._pairing_pause.set()
+                    if self._pairing_timer is not None:
+                        self._pairing_timer.cancel()
+                    if self._pairing_page_timer is not None:
+                        self._pairing_page_timer.cancel()
+                    self._pairing_pin = str(pin)
+                    self._pairing_ip = pairing_ip
+                    self._pairing_show_ip = False
+                    self._pairing_timer = threading.Timer(
+                        max(1, float(ttl_seconds)), lambda: self.end_pairing(generation)
+                    )
+                    self._pairing_timer.daemon = True
+                    self._pairing_timer.start()
+                    self._pairing_page_timer = threading.Timer(
+                        3, lambda: self._rotate_pairing_page(generation)
+                    )
+                    self._pairing_page_timer.daemon = True
+                    self._pairing_page_timer.start()
+            if abort:
+                self.end_pairing(generation)
+                return
+            with self._lifecycle_lock:
+                lifecycle_current = (
+                    lifecycle_generation == self._lifecycle_generation
+                    and not self._shutdown.is_set()
+                )
+            if not lifecycle_current:
+                self.end_pairing(generation)
+                return
+            self._draw_pairing_page(show_ip=False, generation=generation)
+        except Exception:
+            self.end_pairing(generation)
+            raise
+        finally:
+            self._pairing_setup.clear()
 
-    def _draw_pairing_page(self, show_ip):
+    def _draw_pairing_page(self, show_ip, generation=None):
         with self._display_lock:
+            if (
+                not self._pairing_pause.is_set()
+                or generation is not None
+                and generation != self._pairing_generation
+            ):
+                return
             self.matrix.clear()
             white = self.matrix.colour("white")
             cyan = self.matrix.colour("vapor_cyan")
@@ -187,33 +278,59 @@ class DisplayController:
                 )
             self.matrix.swap()
 
-    def _rotate_pairing_page(self):
+    def _rotate_pairing_page(self, generation):
         with self._state_lock:
             if self._pairing_page_timer is not None:
                 self._pairing_page_timer.cancel()
-            if not self._pairing_pause.is_set():
+            if generation != self._pairing_generation or not self._pairing_pause.is_set():
                 self._pairing_page_timer = None
                 return
             self._pairing_show_ip = not self._pairing_show_ip
             show_ip = self._pairing_show_ip
-            self._pairing_page_timer = threading.Timer(3, self._rotate_pairing_page)
+            self._pairing_page_timer = threading.Timer(
+                3, lambda: self._rotate_pairing_page(generation)
+            )
             self._pairing_page_timer.daemon = True
             self._pairing_page_timer.start()
-        self._draw_pairing_page(show_ip=show_ip)
+        self._draw_pairing_page(show_ip=show_ip, generation=generation)
 
-    def end_pairing(self):
-        self._pairing_pause.clear()
-        with self._state_lock:
+    def end_pairing(self, generation=None, timeout=None):
+        deadline = None if timeout is None else time.monotonic() + max(0, timeout)
+        if deadline is None:
+            state_acquired = self._state_lock.acquire()
+        else:
+            state_acquired = self._state_lock.acquire(timeout=max(0, deadline - time.monotonic()))
+        if not state_acquired:
+            return False
+        try:
+            if generation is not None and generation != self._pairing_generation:
+                return True
+            self._pairing_generation += 1
+            self._pairing_pause.clear()
             timer = self._pairing_timer
             page_timer = self._pairing_page_timer
             self._pairing_timer = None
             self._pairing_page_timer = None
             self._pairing_pin = None
             self._pairing_ip = None
+        finally:
+            self._state_lock.release()
+        # A callback can pass its generation check before the state above changes.
+        # Waiting on the display lock ensures that any such hardware draw has
+        # finished before callers are told pairing has ended.
+        if deadline is None:
+            synchronized = self._display_lock.acquire()
+        else:
+            synchronized = self._display_lock.acquire(
+                timeout=max(0, deadline - time.monotonic())
+            )
+        if synchronized:
+            self._display_lock.release()
         if timer is not None and timer is not threading.current_thread():
             timer.cancel()
         if page_timer is not None and page_timer is not threading.current_thread():
             page_timer.cancel()
+        return synchronized
 
     @staticmethod
     def _is_active(config, now=None):
@@ -321,9 +438,8 @@ class DisplayController:
                     **options,
                 )
         except Exception as exc:
-            LOGGER.exception("Matrix module %s failed", name)
             self.last_error = f"{type(exc).__name__}: {exc}"
-            return False
+            raise
         finally:
             self.current_module = None
             with self._state_lock:
@@ -336,6 +452,24 @@ class DisplayController:
 
     def _run_loop(self):
         while not self._shutdown.is_set():
+            try:
+                self._run_loop_unchecked()
+            except Exception as exc:
+                now = time.monotonic()
+                if now >= self._scheduler_next_fault_log:
+                    LOGGER.exception("Matrix scheduler failed; retrying with backoff")
+                    self._scheduler_next_fault_log = now + 30
+                self.last_error = f"{type(exc).__name__}: {exc}"
+                delay = self._scheduler_fault_backoff
+                self._scheduler_fault_backoff = min(delay * 2, 30)
+                self._shutdown.wait(delay)
+
+    def _mark_scheduler_healthy(self):
+        self._scheduler_fault_backoff = 0.25
+        self._scheduler_next_fault_log = 0.0
+
+    def _run_loop_unchecked(self):
+        while not self._shutdown.is_set():
             self._wait_while_pairing()
             if self._shutdown.is_set():
                 break
@@ -345,10 +479,12 @@ class DisplayController:
             media_preview = self._take_media_preview()
             if media_preview:
                 self._execute_media(media_preview, 15)
+                self._mark_scheduler_healthy()
                 continue
             preview = self._take_preview()
             if preview:
                 self._execute(preview, config, 15)
+                self._mark_scheduler_healthy()
                 continue
 
             active = self._is_active(config)
@@ -357,16 +493,23 @@ class DisplayController:
                 if active
                 else config["display"]["night_brightness"]
             )
-            self.matrix.set_brightness(brightness)
-
-
+            with self._display_lock:
+                if (
+                    self._shutdown.is_set()
+                    or self._reload_requested.is_set()
+                    or self._pairing_pause.is_set()
+                ):
+                    continue
+                self.matrix.set_brightness(brightness)
             if not active:
                 self._execute("sleep", config, 60)
+                self._mark_scheduler_healthy()
                 continue
 
             playlist = [item for item in config["playlist"] if item["enabled"]]
             if not playlist:
                 self._shutdown.wait(1)
+                self._mark_scheduler_healthy()
                 continue
 
             for item in playlist:
@@ -385,3 +528,4 @@ class DisplayController:
                     self._execute(preview, config, 15)
                     break
                 self._execute(item["module"], config, item["duration"])
+            self._mark_scheduler_healthy()

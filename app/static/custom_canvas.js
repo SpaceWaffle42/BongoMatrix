@@ -591,10 +591,10 @@
 
   function addAdvancedLayer(id, type, source) {
     const module = byId(id);
-    if (!module || module.layers.length >= 64) return;
+    if (!module || module.layers.length >= 64) return false;
     if (type === 'media' && !(source || mediaItems.length)) {
       setMessage('Upload an image, GIF or MP4 before adding a media layer.', true);
-      return;
+      return false;
     }
     const effectiveSource = type === 'media' ? (source || mediaItems[0]?.name) : source;
     const expansion = type === 'media' ? expandTimelineForAnimatedMedia(module, effectiveSource) : null;
@@ -609,16 +609,50 @@
       setMessage(layer.name + ' added with a complete keyframe at frame ' + (stateFor(module).frame + 1) + '.');
     }
     refreshAdvanced(id);
+    return true;
   }
   window.addAdvancedLayer = addAdvancedLayer;
 
   async function uploadAdvancedMedia(id, input) {
     const file = input.files[0]; if (!file) return;
+    const reconcile = item => {
+      try { globalThis.reconcileMediaItem?.(item); return ''; }
+      catch (error) { return ' Local reconciliation failed: ' + error.message; }
+    };
+    const adopt = item => {
+      try {
+        return addAdvancedLayer(id, 'media', item.name) === false
+          ? ' Editor update failed: the media layer could not be added.' : '';
+      }
+      catch (error) { return ' Editor update failed: ' + error.message; }
+    };
     if (file.size > 128 * 1024 * 1024) { setMessage('That file exceeds the 128 MB upload limit.', true); input.value = ''; return; }
     const form = new FormData(); form.append('file', file); setMessage('Uploading and optimizing ' + file.name + '…');
-    try { const item = await api('/api/media', {method: 'POST', body: form}); await refreshMedia(); addAdvancedLayer(id, 'media', item.name); }
-    catch (error) { setMessage(error.message, true); }
-    finally { input.value = ''; }
+    try {
+      let item;
+      try { item = await api('/api/media', {method: 'POST', body: form}); }
+      catch (error) {
+        if (error.data?.committed && error.data?.item?.name) {
+          let refreshWarning = '';
+          try { await refreshMedia(); }
+          catch (refreshError) {
+            refreshWarning = ' The saved item could not be refreshed: ' + refreshError.message + reconcile(error.data.item);
+          }
+          const editorWarning = adopt(error.data.item);
+          setMessage(error.message + refreshWarning + editorWarning, true);
+        } else setMessage(error.message, true);
+        return;
+      }
+      try { await refreshMedia(); }
+      catch (refreshError) {
+        const reconciliationWarning = reconcile(item);
+        const editorWarning = adopt(item);
+        setMessage(item.name + ' was saved, but the library refresh failed: ' + refreshError.message + reconciliationWarning + editorWarning, true);
+        return;
+      }
+      const editorWarning = adopt(item);
+      if (editorWarning) setMessage(item.name + ' was saved, but the editor could not be updated.' + editorWarning, true);
+    } finally { input.value = ''; }
   }
   window.uploadAdvancedMedia = uploadAdvancedMedia;
 
@@ -632,12 +666,23 @@
     module.frame_count++; state.frame = insert; for (const snapshot of snapshots) module.overrides.push({frame: insert, layer_id: snapshot.layer_id, properties: snapshot.properties}); refreshAdvanced(module.id);
   }
 
+  window.advanceCanvasPlaybackFrame = function advanceCanvasPlaybackFrame(frame, frameCount, playback, direction = 1) {
+    frameCount = Math.max(1, Math.round(frameCount));
+    frame = Math.max(0, Math.min(frameCount - 1, Math.round(frame)));
+    if (playback === 'hold' && frame === frameCount - 1) return {frame, direction, done: true};
+    if (playback !== 'ping_pong') return {frame: (frame + 1) % frameCount, direction: 1, done: false};
+    if (frameCount === 1) return {frame: 0, direction: 1, done: false};
+    if (frame === frameCount - 1) direction = -1;
+    else if (frame === 0) direction = 1;
+    return {frame: frame + direction, direction, done: false};
+  };
+
   function playBrowserPreview(module) {
     const state = stateFor(module); if (state.playing) { clearInterval(state.timer); state.playing = false; refreshAdvanced(module.id); return; }
     state.playing = true; let direction = 1; state.timer = setInterval(() => {
-      if (module.playback === 'hold' && state.frame === module.frame_count - 1) { clearInterval(state.timer); state.playing = false; refreshAdvanced(module.id); return; }
-      if (module.playback === 'ping_pong') { if (state.frame === module.frame_count - 1) direction = -1; if (state.frame === 0) direction = 1; state.frame += direction; }
-      else state.frame = (state.frame + 1) % module.frame_count;
+      const advanced = window.advanceCanvasPlaybackFrame(state.frame, module.frame_count, module.playback, direction);
+      if (advanced.done) { clearInterval(state.timer); state.playing = false; refreshAdvanced(module.id); return; }
+      state.frame = advanced.frame; direction = advanced.direction;
       const card = document.querySelector(`.custom-module-card[data-id="${CSS.escape(module.id)}"]`); if (card) { drawEditor(module, card.querySelector('canvas')); updateTimelineSelection(module, card.querySelector('.timeline')); }
     }, 1000 / module.fps); refreshAdvanced(module.id);
   }

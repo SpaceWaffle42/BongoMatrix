@@ -18,18 +18,33 @@ from pathlib import Path
 
 from flask import Flask, abort, jsonify, redirect, render_template, request, send_file, session, url_for
 from PIL import Image, UnidentifiedImageError
-from werkzeug.exceptions import RequestEntityTooLarge
+from werkzeug.exceptions import HTTPException, RequestEntityTooLarge
 from werkzeug.utils import secure_filename
 
-from config_store import ALLOWED_MODULES, DEFAULT_CONFIG
+from config_store import ALLOWED_MODULES, DEFAULT_CONFIG, ConfigDurabilityError
 from module_options import COLOUR_HEX, LAVA_PALETTES
 from modules.weather_app import OpenMeteoClient
-from pairing import PairedDeviceStore
+from pairing import PairedDeviceStore, PairingDurabilityError
 from secret_store import SecretDurabilityError, SecretStore
 
 MEDIA_EXTENSIONS = {".gif", ".png", ".jpg", ".jpeg", ".webp", ".mp4"}
 Image.MAX_IMAGE_PIXELS = 1_000_000
 LOGGER = logging.getLogger(__name__)
+DEVICE_REMOVAL_DURABILITY_WARNING = "The device was removed, but durable storage could not be confirmed."
+MEDIA_METADATA_ERRORS = (
+    OSError, ValueError, KeyError, IndexError, json.JSONDecodeError,
+    subprocess.SubprocessError, UnidentifiedImageError, Image.DecompressionBombError,
+)
+
+
+class MediaSanitizerError(ValueError):
+    """Sanitizer rejection with ownership of its private output path."""
+
+    def __init__(self, output, cleanup_failed=False):
+        super().__init__("invalid or unsafe media")
+        self.output = output
+        self.cleanup_failed = cleanup_failed
+
 
 def create_app(
     controller,
@@ -66,6 +81,13 @@ def create_app(
         PERMANENT_SESSION_LIFETIME=timedelta(days=365),
         MAX_CONTENT_LENGTH=128 * 1024 * 1024,
     )
+
+    def sync_media_directory():
+        directory_fd = os.open(media_root, os.O_RDONLY | os.O_DIRECTORY)
+        try:
+            os.fsync(directory_fd)
+        finally:
+            os.close(directory_fd)
 
     def identity_options():
         if sanitizer_identity is None:
@@ -170,11 +192,7 @@ def create_app(
                     continue
                 try:
                     items.append(media_item(path))
-                except (
-                    OSError, ValueError, KeyError, IndexError, json.JSONDecodeError,
-                    subprocess.SubprocessError, UnidentifiedImageError,
-                    Image.DecompressionBombError,
-                ):
+                except MEDIA_METADATA_ERRORS:
                     continue
         return items
 
@@ -207,12 +225,21 @@ def create_app(
                 str(detail).strip()[:500] or "no helper detail",
                 exc_info=True,
             )
-            output.unlink(missing_ok=True)
-            raise ValueError("invalid or unsafe media")
+            cleanup_failed = False
+            try:
+                output.unlink(missing_ok=True)
+            except OSError:
+                cleanup_failed = True
+                LOGGER.exception("Media sanitizer output cleanup failed")
+            raise MediaSanitizerError(output, cleanup_failed) from error
         finally:
-            if source_fd is not None:
-                os.close(source_fd)
-            os.close(output_fd)
+            for descriptor, label in ((source_fd, "source"), (output_fd, "output")):
+                if descriptor is None:
+                    continue
+                try:
+                    os.close(descriptor)
+                except OSError:
+                    LOGGER.exception("Media sanitizer %s descriptor close failed", label)
 
     def safe_media_name(filename):
         if (
@@ -315,6 +342,20 @@ def create_app(
             return jsonify({"error": "That file exceeds the 128 MB upload limit."}), 413
         return "That file exceeds the 128 MB upload limit.", 413
 
+    @app.errorhandler(HTTPException)
+    def http_error(error):
+        if request.path.startswith("/api/"):
+            return jsonify({"error": error.description}), error.code
+        return error
+
+    @app.errorhandler(Exception)
+    def unexpected_error(error):
+        if request.path.startswith("/api/"):
+            LOGGER.exception("Unhandled API error")
+            return jsonify({"error": "Internal server error."}), 500
+        LOGGER.exception("Unhandled request error")
+        return "Internal server error.", 500
+
     def begin_additional_pairing():
         max_devices = config_store.get()["pairing"]["max_devices"]
         if len(device_store.list()) >= max_devices:
@@ -325,33 +366,55 @@ def create_app(
 
     @app.get("/pair")
     def pair():
+        warning_code = request.args.get("warning")
+        warning = (
+            DEVICE_REMOVAL_DURABILITY_WARNING
+            if warning_code == "device-removal-durability"
+            else None
+        )
         if session.get("paired") and device_store.contains(session.get("device_id")):
-            return render_template("pair.html", paired=True)
+            return render_template("pair.html", paired=True, error=warning)
         pin = pairing.active_pin()
+        if pin is None and device_store.list():
+            pairing_gate = "Pairing another browser must be started from an already paired device."
+            return render_template(
+                "pair.html",
+                error=f"{warning} {pairing_gate}" if warning else pairing_gate,
+            ), 403
         if pin is None:
             pin = pairing.issue_pin()
         controller.show_pairing_pin(pin, ttl_seconds=pairing.remaining_seconds())
-        return render_template("pair.html")
+        return render_template("pair.html", error=warning)
 
     @app.post("/pair")
     def pair_submit():
         device_name = request.form.get("device_name", "").strip()
         if not 1 <= len(device_name) <= 40 or any(not character.isprintable() for character in device_name):
             return render_template("pair.html", error="Device name must be 1-40 characters."), 400
-        max_devices = config_store.get()["pairing"]["max_devices"]
-        if len(device_store.list()) >= max_devices:
-            return render_template(
-                "pair.html",
-                error="The Matrix has reached its paired-device limit. Remove a device before pairing another.",
-            ), 409
-        if pairing.verify(request.form.get("pin", "").strip()):
-            try:
-                device = device_store.add(device_name, max_devices=max_devices)
-            except ValueError:
+        durability_uncertain = False
+        with device_store.transaction():
+            max_devices = config_store.get()["pairing"]["max_devices"]
+            if len(device_store.list()) >= max_devices:
                 return render_template(
                     "pair.html",
                     error="The Matrix has reached its paired-device limit. Remove a device before pairing another.",
                 ), 409
+            if pairing.verify(request.form.get("pin", "").strip()):
+                try:
+                    device = device_store.add(device_name, max_devices=max_devices)
+                except PairingDurabilityError as error:
+                    if error.device is None:
+                        raise
+                    device = error.device
+                    durability_uncertain = True
+                except ValueError:
+                    return render_template(
+                        "pair.html",
+                        error="The Matrix has reached its paired-device limit. Remove a device before pairing another.",
+                    ), 409
+            else:
+                device = None
+        if device is not None:
             session.clear()
             session["paired"] = True
             session["generation"] = session_generation
@@ -359,6 +422,16 @@ def create_app(
             session.permanent = True
             controller.end_pairing()
             controller.start()
+            if durability_uncertain:
+                return render_template(
+                    "pair.html",
+                    paired=True,
+                    error=(
+                        "This browser is already paired, but storage durability could not be "
+                        "confirmed. You can continue to Matrix settings; verify the device "
+                        "remains listed after the next restart."
+                    ),
+                ), 503
             return redirect(url_for("dashboard"))
         error = (
             "Too many attempts. Wait a minute and try again."
@@ -401,8 +474,19 @@ def create_app(
     @requires_pairing
     def remove_paired_device(device_id):
         current = device_id == session["device_id"]
-        if not device_store.remove(device_id):
-            abort(404)
+        try:
+            if not device_store.remove(device_id):
+                abort(404)
+        except PairingDurabilityError:
+            if current:
+                session.clear()
+            return jsonify({
+                "removed": device_id,
+                "current": current,
+                "committed": True,
+                "durability_uncertain": True,
+                "error": DEVICE_REMOVAL_DURABILITY_WARNING,
+            }), 503
         if current:
             session.clear()
         return jsonify({"removed": device_id, "current": current})
@@ -410,8 +494,18 @@ def create_app(
     @app.post("/logout")
     def logout():
         device_id = session.get("device_id")
-        if device_id:
-            device_store.remove(device_id)
+        try:
+            if device_id:
+                device_store.remove(device_id)
+        except PairingDurabilityError:
+            session.clear()
+            return redirect(url_for("pair", warning="device-removal-durability"))
+        except OSError:
+            LOGGER.exception("Paired-device removal failed before logout committed")
+            return render_template(
+                "pair.html", paired=True,
+                error="This device could not be removed, so this browser remains signed in.",
+            ), 503
         session.clear()
         return redirect(url_for("pair"))
 
@@ -484,6 +578,23 @@ def create_app(
             return jsonify({"error": "Choose a GIF, PNG, JPEG, WebP, or MP4 file with a safe filename."}), 400
         destination = media_root / filename
         temporary = sanitized = None
+        cleanup_failed = False
+        response_body = None
+        response_status = None
+
+        def rollback_destination():
+            try:
+                destination.unlink(missing_ok=True)
+            except OSError:
+                LOGGER.exception("Published media rollback failed")
+                return False, False
+            try:
+                sync_media_directory()
+            except OSError:
+                LOGGER.exception("Published media rollback directory sync failed")
+                return True, True
+            return True, False
+
         with media_lock:
             if destination.exists() or destination.is_symlink():
                 return jsonify({"error": "A media file with that name already exists."}), 409
@@ -497,15 +608,112 @@ def create_app(
                 try:
                     os.link(sanitized, destination, follow_symlinks=False)
                 except FileExistsError:
-                    return jsonify({"error": "A media file with that name already exists."}), 409
-                item = media_item(destination)
+                    response_body = {"error": "A media file with that name already exists."}
+                    response_status = 409
+                else:
+                    publication_durability_uncertain = False
+                    try:
+                        sync_media_directory()
+                    except OSError:
+                        publication_durability_uncertain = True
+                        LOGGER.exception("Published media directory sync failed")
+                    try:
+                        item = media_item(destination)
+                    except MEDIA_METADATA_ERRORS:
+                        LOGGER.exception("Published media failed metadata validation")
+                        removed, rollback_durability_uncertain = rollback_destination()
+                        if not removed:
+                            response_body = {
+                                "error": "The upload failed, but the published file could not be removed.",
+                                "committed": True,
+                                "filename": filename,
+                            }
+                            response_status = 500
+                        elif rollback_durability_uncertain:
+                            response_body = {
+                                "error": "The invalid upload was removed, but durable storage could not be confirmed.",
+                                "committed": False,
+                                "durability_uncertain": True,
+                            }
+                            response_status = 503
+                        else:
+                            response_body = {
+                                "error": "The uploaded file is not valid or exceeds the media safety limits."
+                            }
+                            response_status = 400
+                    except Exception:
+                        removed, rollback_durability_uncertain = rollback_destination()
+                        if not removed:
+                            response_body = {
+                                "error": "The upload failed, but the published file could not be removed.",
+                                "committed": True,
+                                "filename": filename,
+                            }
+                            response_status = 500
+                        elif rollback_durability_uncertain:
+                            response_body = {
+                                "error": "The upload failed and its removal could not be confirmed durable.",
+                                "committed": False,
+                                "durability_uncertain": True,
+                            }
+                            response_status = 503
+                        else:
+                            raise
+                    else:
+                        if publication_durability_uncertain:
+                            response_body = {
+                                "committed": True,
+                                "durability_uncertain": True,
+                                "item": item,
+                                "error": "The media was saved, but durable storage could not be confirmed.",
+                            }
+                            response_status = 503
+                        else:
+                            response_body = item
+                            response_status = 201
+            except MediaSanitizerError as error:
+                sanitized = error.output
+                cleanup_failed = cleanup_failed or error.cleanup_failed
+                response_body = {"error": "The uploaded file is not valid or exceeds the media safety limits."}
+                response_status = 400
             except (OSError, ValueError):
-                return jsonify({"error": "The uploaded file is not valid or exceeds the media safety limits."}), 400
+                response_body = {"error": "The uploaded file is not valid or exceeds the media safety limits."}
+                response_status = 400
             finally:
-                temporary.unlink(missing_ok=True)
-                if sanitized is not None:
-                    sanitized.unlink(missing_ok=True)
-        return jsonify(item), 201
+                for cleanup_path in (temporary, sanitized):
+                    if cleanup_path is None:
+                        continue
+                    try:
+                        cleanup_path.unlink(missing_ok=True)
+                    except OSError:
+                        cleanup_failed = True
+                        LOGGER.exception("Media upload temporary cleanup failed")
+        if cleanup_failed:
+            committed = bool(response_body and response_body.get("committed", response_status == 201))
+            if committed:
+                if response_status == 201:
+                    response_body = {
+                        "committed": True,
+                        "item": response_body,
+                        "cleanup_failed": True,
+                        "error": "The media was saved, but temporary cleanup could not be completed.",
+                    }
+                    response_status = 503
+                else:
+                    response_body = {
+                        **response_body,
+                        "cleanup_failed": True,
+                        "error": response_body["error"] + " Temporary cleanup also failed.",
+                    }
+            else:
+                response_body = {
+                    **(response_body or {}),
+                    "committed": False,
+                    "cleanup_failed": True,
+                    "error": "The upload was rejected, but temporary cleanup could not be completed.",
+                }
+                response_status = 500
+        return jsonify(response_body), response_status
 
     @app.get("/media/<path:filename>")
     @requires_pairing
@@ -570,6 +778,16 @@ def create_app(
             if not stat.S_ISREG(info.st_mode) or path.is_symlink():
                 abort(404)
             path.unlink()
+            try:
+                sync_media_directory()
+            except OSError:
+                LOGGER.exception("Removed media directory sync failed")
+                return jsonify({
+                    "removed": filename,
+                    "committed": True,
+                    "durability_uncertain": True,
+                    "error": "The media was removed, but durable storage could not be confirmed.",
+                }), 503
         return jsonify({"removed": filename})
 
     @app.get("/api/config")
@@ -580,32 +798,64 @@ def create_app(
     @app.post("/api/config")
     @requires_pairing
     def update_config():
+        durability_uncertain = False
         try:
-            changes = request.get_json(force=True)
-            requested_max = (
-                changes.get("pairing", {}).get("max_devices")
-                if isinstance(changes, dict) and isinstance(changes.get("pairing", {}), dict)
-                else None
-            )
-            paired_count = len(device_store.list())
-            if (
-                isinstance(requested_max, int) and not isinstance(requested_max, bool)
-                and requested_max < paired_count
-            ):
-                raise ValueError(
-                    f"maximum devices cannot be below the {paired_count} currently paired devices"
+            if not request.is_json:
+                abort(415, description="Content-Type must be application/json.")
+            changes = request.get_json()
+            with device_store.transaction():
+                requested_max = (
+                    changes.get("pairing", {}).get("max_devices")
+                    if isinstance(changes, dict) and isinstance(changes.get("pairing", {}), dict)
+                    else None
                 )
-            with media_lock:
-                if isinstance(changes, dict) and "media" in changes:
-                    for filename in changes["media"].values():
-                        ensure_media_file(filename)
-                if isinstance(changes, dict) and isinstance(changes.get("custom_modules"), list):
-                    for reference in canvas_media_references(changes["custom_modules"]):
-                        ensure_media_file(reference)
-                config = config_store.update(changes)
+                paired_count = len(device_store.list())
+                if (
+                    isinstance(requested_max, int) and not isinstance(requested_max, bool)
+                    and requested_max < paired_count
+                ):
+                    raise ValueError(
+                        f"maximum devices cannot be below the {paired_count} currently paired devices"
+                    )
+                with media_lock:
+                    if isinstance(changes, dict) and "media" in changes:
+                        media_changes = changes["media"]
+                        if not isinstance(media_changes, dict):
+                            raise ValueError("media must be an object")
+                        for filename in media_changes.values():
+                            ensure_media_file(filename)
+                    if isinstance(changes, dict) and isinstance(changes.get("custom_modules"), list):
+                        for reference in canvas_media_references(changes["custom_modules"]):
+                            ensure_media_file(reference)
+                    config = config_store.update(changes)
+        except ConfigDurabilityError as exc:
+            config = exc.config
+            durability_uncertain = True
+            LOGGER.exception("Configuration committed but directory sync failed")
         except (TypeError, ValueError, KeyError) as exc:
             return jsonify({"error": str(exc)}), 400
-        controller.reload()
+        try:
+            controller.reload()
+        except Exception:
+            LOGGER.exception("Configuration committed but display reload failed")
+            return jsonify({
+                "committed": True,
+                "config": config,
+                "durability_uncertain": durability_uncertain,
+                "error": (
+                    "Configuration was saved without confirmed durability, and the display "
+                    "could not be reloaded."
+                    if durability_uncertain else
+                    "Configuration was saved, but the display could not be reloaded."
+                ),
+            }), 503
+        if durability_uncertain:
+            return jsonify({
+                "committed": True,
+                "config": config,
+                "durability_uncertain": True,
+                "error": "Configuration was saved, but durable storage could not be confirmed.",
+            }), 503
         return jsonify(config)
 
     @app.get("/api/display-frame")
@@ -696,7 +946,11 @@ def create_app(
         if action == "start":
             controller.start()
         elif action == "stop":
-            controller.stop()
+            if controller.stop() is False:
+                return jsonify({
+                    **controller.status(),
+                    "error": "Display did not stop within the timeout.",
+                }), 503
         elif action == "reload":
             controller.reload()
         else:

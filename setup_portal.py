@@ -53,13 +53,24 @@ class ProvisioningCoordinator:
                 return False
             self._busy = True
             self._status = {"state": "connecting", "message": f"Connecting to {ssid}."}
-        worker = threading.Thread(
-            target=self._connect,
-            args=(ssid, password),
-            name="matrix-wifi-handoff",
-            daemon=True,
-        )
-        worker.start()
+        try:
+            worker = threading.Thread(
+                target=self._connect,
+                args=(ssid, password),
+                name="matrix-wifi-handoff",
+                daemon=True,
+            )
+            worker.start()
+        except Exception:
+            with self._lock:
+                self._busy = False
+                self._status = {
+                    "state": "error",
+                    "message": "Could not start the connection attempt. Please try again.",
+                }
+            pin = self.pairing.issue_pin()
+            self.display_pin(pin)
+            raise
         return True
 
     def _connect(self, ssid, password):

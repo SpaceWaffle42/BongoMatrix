@@ -1,6 +1,7 @@
 import math
 import os
 import pwd
+import select
 import subprocess
 import time
 import datetime
@@ -13,6 +14,38 @@ from frame_capture import BdfFont, FrameCapture
 root_path = pathlib.Path(__file__).resolve().parent
 fonts_path = root_path / "resources" / "fonts"
 media_path = root_path / "resources" / "media"
+
+
+def _read_exact_interruptibly(stream, size, stop_event=None, deadline=None):
+    """Read one decoder frame while observing cancellation and deadlines."""
+    fd = stream.fileno()
+    chunks = []
+    remaining = size
+    idle_deadline = time.monotonic() + 5
+    while remaining:
+        if stop_event is not None and stop_event.is_set():
+            break
+        now = time.monotonic()
+        if deadline is not None and now >= deadline:
+            break
+        if now >= idle_deadline:
+            raise ValueError("MP4 decoder did not produce a frame in time")
+        wait_for = min(0.05, idle_deadline - now)
+        if deadline is not None:
+            wait_for = min(wait_for, max(0, deadline - now))
+        readable, _, _ = select.select([fd], [], [], wait_for)
+        if not readable:
+            continue
+        try:
+            chunk = os.read(fd, remaining)
+        except InterruptedError:
+            continue
+        if not chunk:
+            break
+        chunks.append(chunk)
+        remaining -= len(chunk)
+        idle_deadline = time.monotonic() + 5
+    return b"".join(chunks)
 
 
 class Matrix:
@@ -574,6 +607,7 @@ class Matrix:
         frame_delay = 1.0 / fps
         frame_size = frame_width * frame_height * 3
         started = time.monotonic()
+        deadline = started + max_duration if max_duration is not None else None
         completed = 0
         shown = False
         input_fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW)
@@ -593,11 +627,17 @@ class Matrix:
                         "group": nobody.pw_gid,
                         "extra_groups": [],
                     }
+                video_filter = f"scale={frame_width}:{frame_height}"
+                if keep_aspect:
+                    video_filter += (
+                        ":force_original_aspect_ratio=decrease,"
+                        f"pad={frame_width}:{frame_height}:(ow-iw)/2:(oh-ih)/2:black"
+                    )
                 process = subprocess.Popen(
                     [
                         "/usr/bin/ffmpeg", "-nostdin", "-v", "error", "-threads", "1",
                         "-i", f"pipe:{input_fd}", "-map", "0:v:0", "-an", "-sn", "-dn",
-                        "-vf", f"scale={frame_width}:{frame_height}",
+                        "-vf", video_filter,
                         "-pix_fmt", "rgb24", "-f", "rawvideo", "pipe:1",
                     ],
                     stdin=subprocess.DEVNULL,
@@ -612,7 +652,16 @@ class Matrix:
                             return shown
                         if max_duration is not None and time.monotonic() - started >= max_duration:
                             return shown
-                        frame = process.stdout.read(frame_size)
+                        frame = _read_exact_interruptibly(
+                            process.stdout,
+                            frame_size,
+                            stop_event=stop_event,
+                            deadline=deadline,
+                        )
+                        if stop_event is not None and stop_event.is_set():
+                            return shown
+                        if deadline is not None and time.monotonic() >= deadline:
+                            return shown
                         if len(frame) != frame_size:
                             break
                         image = Image.frombytes("RGB", (frame_width, frame_height), frame)
