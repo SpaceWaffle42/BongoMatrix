@@ -985,6 +985,8 @@ class ConfigStore:
 
         _validate_update_keys(changes, DEFAULT_CONFIG)
         with self._lock:
-            updated = validate_config(_merge(self.get(), changes))
+            updated = validate_config(
+                _merge(self.get(), changes), allow_legacy_announcements=False,
+            )
             self._write(updated)
             return copy.deepcopy(updated)

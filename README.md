@@ -28,6 +28,16 @@ Configuration is saved atomically in `data/config.json`. Paired users can upload
 
 The sleep editor includes a **GIF playback speed (%)** control from 25% to 400%. The 100% default preserves each GIF's embedded frame timing; lower values slow playback and higher values speed it up. The setting changes runtime delays only, never rewrites media, and has no effect on static sleep images or videos. The browser preview polls the same captured frames sent to the physical Matrix, so it reflects the same playback rate. Slow playback remains interruptible by schedule wake-up, preview changes, service stop, and shutdown.
 
+### Announcement Board
+
+The separate **Announcement Board** playlist module displays an ordered set of deliberately scheduled notices. Open its grouped **Edit** controls to add, duplicate, reorder, delete, or reset notices. New notices and duplicates start disabled; edit the draft, enable it when ready, and use **Save configuration** to persist local changes.
+
+Each notice has an inclusive start date, inclusive end date, selected weekdays, and a start-inclusive/end-exclusive time window. Overnight windows such as `22:00–02:00` belong to their starting date and may continue into the following morning. When no notice is currently eligible, the module yields immediately to the next playlist item instead of displaying a blank screen.
+
+The four layouts are Text notice, Icon notice, Image banner, and Full-image notice. Media is selected from the existing Media Library; a missing item fails safely with a visible fallback. Static notices use their own display duration. Scrolling notices use only loop count and frame delay, with no contradictory manual duration. Each notice can use Cut, Fade, Slide, Wipe, or Pixel dissolve where compatible with its timing mode.
+
+**Preview on Matrix** sends the exact unsaved notice draft through the normal physical-display controller without saving it or creating another Matrix owner. Preview does not bypass validation. The live browser image polls the same captured frame submitted to the physical panel.
+
 ## Weather apps
 
 The original `weather` playlist app uses Open-Meteo and remains the enabled, free-access default. Two additional legacy-style apps are available but disabled by default:

@@ -245,7 +245,10 @@ def _run_canvas(matrix, duration, stop_event, module_config):
             if override["layer_id"] == layer["id"] and "source" in override["properties"]:
                 media_sources.add(override["properties"]["source"])
     media_cache = {
-        source: matrix.media_frames(source, module_config["frame_count"], module_config["fps"])
+        source: matrix.media_frames(
+            source, module_config["frame_count"], module_config["fps"],
+            stop_event=stop_event,
+        )
         for source in sorted(media_sources)
     }
     started = time.monotonic()

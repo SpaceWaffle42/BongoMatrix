@@ -1701,6 +1701,28 @@ process.stdout.write(JSON.stringify(output));
         self.assertIn("function announcementsFromEditor()", body)
         self.assertIn("announcement_board:{announcements:announcementsFromEditor()}", body)
 
+    def test_current_config_api_rejects_legacy_announcement_shapes(self):
+        self.pair_browser()
+        for missing in ("enabled", "name", "schedule.days"):
+            with self.subTest(missing=missing):
+                announcement = test_config_store.ConfigStoreTests.announcement()
+                announcement["schedule"]["days"] = list(range(7))
+                announcement["enabled"] = True
+                announcement["name"] = "Welcome"
+                if missing == "schedule.days":
+                    del announcement["schedule"]["days"]
+                else:
+                    del announcement[missing]
+
+                response = self.client.post(
+                    "/api/config",
+                    json={"announcement_board": {"announcements": [announcement]}},
+                )
+
+                self.assertEqual(response.status_code, 400)
+                self.assertEqual(response.content_type, "application/json")
+                self.assertIn("invalid fields", response.get_json()["error"])
+
     def test_add_announcement_creates_disabled_schema_valid_draft(self):
         self.pair_browser()
         body = self.client.get("/").get_data(as_text=True)
@@ -1807,8 +1829,84 @@ process.stdout.write(JSON.stringify(output));
         self.assertIn("function resetAnnouncementBoard()", body)
         self.assertIn("confirm('Reset Announcement Board and remove all announcements?')", body)
         self.assertIn("announcements=[]", body)
+        self.assertIn("addButton.dataset.announcementAction='add'", body)
         for label in ("Duplicate", "Delete", "Move up", "Move down"):
             self.assertIn(f"makeButton('{label}'", body)
+
+    @unittest.skipUnless(shutil.which("node"), "Node.js is required")
+    def test_announcement_actions_preserve_focus_and_bounded_copy_names(self):
+        source = (Path(__file__).parents[1] / "app" / "templates" / "dashboard.html").read_text()
+        start = source.index("function renderAllAnnouncementEditors")
+        end = source.index("\nfunction renderAnnouncementEditor", start)
+        functions = source[start:end]
+        announcement = test_config_store.ConfigStoreTests.announcement()
+        announcement["schedule"]["days"] = list(range(7))
+        announcement["name"] = "N" * 100
+        harness = functions + """
+let announcements=[__ANNOUNCEMENT_JSON__],announcementIdSequence=0;
+const focusLog=[];
+const CSS={escape:value=>value};
+const document={querySelectorAll:()=>[{}],querySelector:selector=>({focus:()=>focusLog.push(selector)})};
+const requestAnimationFrame=callback=>callback();
+const confirm=()=>true;
+const setMessage=()=>{};
+const renderAnnouncementEditor=()=>{};
+const announcementsFromEditor=()=>structuredClone(announcements);
+const nextAnnouncementId=()=>`announcement_copy_${++announcementIdSequence}`;
+const base=structuredClone(announcements[0]);
+for(const length of [95,96,100]){
+  announcements=[structuredClone(base)];announcements[0].name='N'.repeat(length);
+  duplicateAnnouncement(announcements[0].id);
+  if(announcements[1].name.length>100)throw new Error('copy name exceeded schema at '+length);
+  duplicateAnnouncement(announcements[1].id);
+  if(announcements[2].name.length>100||announcements[2].name===announcements[1].name)throw new Error('repeated copy name at '+length);
+}
+announcements=[];focusLog.length=0;addAnnouncement();
+if(!focusLog.at(-1)?.includes('[data-announcement-path="name"]'))throw new Error('add focus');
+focusLog.length=0;deleteAnnouncement(announcements[0].id);
+if(!focusLog.at(-1)?.includes('[data-announcement-action="add"]'))throw new Error('delete-last focus');
+announcements=[__ANNOUNCEMENT_JSON__];focusLog.length=0;resetAnnouncementBoard();
+if(!focusLog.at(-1)?.includes('[data-announcement-action="add"]'))throw new Error('reset focus');
+console.log('ANNOUNCEMENT_ACTION_BOUNDARIES_PASS');
+""".replace("__ANNOUNCEMENT_JSON__", json.dumps(announcement))
+        node = shutil.which("node")
+        assert node is not None
+        result = subprocess.run(
+            [node, "-e", harness], cwd=Path(__file__).parents[1],
+            text=True, capture_output=True, check=False,
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("ANNOUNCEMENT_ACTION_BOUNDARIES_PASS", result.stdout)
+
+    @unittest.skipUnless(shutil.which("node"), "Node.js is required")
+    def test_announcement_name_input_updates_the_visible_card_heading(self):
+        source = (Path(__file__).parents[1] / "app" / "templates" / "dashboard.html").read_text()
+        start = source.index("function announcementPathGet")
+        end = source.index("\nfunction renderAnnouncementContent", start)
+        functions = source[start:end]
+        announcement = test_config_store.ConfigStoreTests.announcement()
+        harness = functions + """
+const announcement=__ANNOUNCEMENT_JSON__;
+const heading={textContent:announcement.name};
+const control={dataset:{},listeners:{},addEventListener(type,handler){this.listeners[type]=handler}};
+const label={textContent:'',append(){}};
+const document={createElement:tag=>tag==='label'?label:control,querySelector:()=>heading};
+const CSS={escape:value=>value};
+const validateAnnouncementBoard=()=>true;
+announcementControl(announcement,'Name','name','text');
+control.value='Updated heading';control.listeners.input();
+if(announcement.name!=='Updated heading')throw new Error('model stale');
+if(heading.textContent!=='Updated heading')throw new Error('heading stale');
+console.log('ANNOUNCEMENT_HEADING_SYNC_PASS');
+""".replace("__ANNOUNCEMENT_JSON__", json.dumps(announcement))
+        node = shutil.which("node")
+        assert node is not None
+        result = subprocess.run(
+            [node, "-e", harness], cwd=Path(__file__).parents[1],
+            text=True, capture_output=True, check=False,
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("ANNOUNCEMENT_HEADING_SYNC_PASS", result.stdout)
 
     def test_playlist_builtin_editors_are_grouped_complete_and_resettable(self):
         self.pair_browser()

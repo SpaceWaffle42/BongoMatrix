@@ -1,3 +1,4 @@
+import threading
 import types
 import unittest
 from unittest.mock import Mock, call, patch
@@ -341,7 +342,7 @@ class CustomTextModuleTests(unittest.TestCase):
     def test_canvas_media_preloading_does_not_consume_module_duration(self):
         matrix = self.matrix()
         clock = [0.0]
-        def preload(*_):
+        def preload(*_, **__):
             clock[0] = 5.0
             return ["frame"]
         matrix.media_frames.side_effect = preload
@@ -366,6 +367,65 @@ class CustomTextModuleTests(unittest.TestCase):
         matrix.draw_image.assert_called_once()
         matrix.swap.assert_called_once()
 
+    def test_canvas_media_preloading_receives_the_module_stop_event(self):
+        matrix = self.matrix()
+        matrix.media_frames.return_value = ["frame"] * 3
+        stop = Mock()
+        stop.wait.return_value = True
+        layer = {
+            "id": "layer_media", "name": "Media", "type": "media", "visible": True,
+            "properties": {
+                "source": "animation.gif", "x": 0, "y": 0, "width": 64,
+                "height": 32, "rotation": 0, "keep_aspect": True,
+            },
+            "keyframes": [],
+        }
+
+        custom_text.run(
+            matrix, {}, duration=10, stop_event=stop,
+            module_config=self.canvas_options(layers=[layer]),
+        )
+
+        matrix.media_frames.assert_called_once_with(
+            "animation.gif", 3, 10, stop_event=stop,
+        )
+
+    def test_canvas_stop_interrupts_media_preloading(self):
+        matrix = self.matrix()
+        entered_decoder = threading.Event()
+        stop = threading.Event()
+
+        def blocked_decode(*_, stop_event):
+            entered_decoder.set()
+            stop_event.wait(5)
+            return []
+
+        matrix.media_frames.side_effect = blocked_decode
+        layer = {
+            "id": "layer_media", "name": "Media", "type": "media", "visible": True,
+            "properties": {
+                "source": "animation.gif", "x": 0, "y": 0, "width": 64,
+                "height": 32, "rotation": 0, "keep_aspect": True,
+            },
+            "keyframes": [],
+        }
+        worker = threading.Thread(
+            target=custom_text.run,
+            args=(matrix, {}),
+            kwargs={
+                "duration": 10, "stop_event": stop,
+                "module_config": self.canvas_options(layers=[layer]),
+            },
+            daemon=True,
+        )
+        worker.start()
+
+        self.assertTrue(entered_decoder.wait(0.5))
+        stop.set()
+        worker.join(0.5)
+
+        self.assertFalse(worker.is_alive())
+
     def test_media_frame_index_starts_when_an_inserted_layer_first_appears(self):
         layer = {
             "properties": {"present": False},
@@ -385,7 +445,7 @@ class CustomTextModuleTests(unittest.TestCase):
             "animation.gif": ["gif-0", "gif-1", "gif-2"],
             "built-in/clip.mp4": ["video-0", "video-1", "video-2"],
         }
-        matrix.media_frames.side_effect = lambda source, frame_count, fps: media_frames[source]
+        matrix.media_frames.side_effect = lambda source, frame_count, fps, **_: media_frames[source]
         stop = Mock()
         stop.wait.side_effect = [False, True]
         layers = [
@@ -414,6 +474,9 @@ class CustomTextModuleTests(unittest.TestCase):
 
         self.assertTrue(result)
         self.assertEqual(matrix.media_frames.call_count, 3)
+        self.assertTrue(
+            all(entry.kwargs["stop_event"] is stop for entry in matrix.media_frames.call_args_list)
+        )
         self.assertEqual(
             [entry.args[0] for entry in matrix.draw_image.call_args_list],
             ["photo-0", "gif-0", "video-0", "photo-1", "gif-1", "video-1"],

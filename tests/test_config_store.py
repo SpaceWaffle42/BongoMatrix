@@ -207,9 +207,16 @@ class ConfigStoreTests(unittest.TestCase):
 
     def test_legacy_announcement_record_gains_enabled_name_defaults(self):
         with tempfile.TemporaryDirectory() as directory:
-            store = ConfigStore(Path(directory) / "config.json")
+            path = Path(directory) / "config.json"
+            store = ConfigStore(path)
+            historical = store.get()
+            legacy = self.announcement()
+            legacy.pop("enabled")
+            legacy.pop("name")
+            historical["announcement_board"]["announcements"] = [legacy]
+            path.write_text(json.dumps(historical))
 
-            updated = store.update({"announcement_board": {"announcements": [self.announcement()]}})
+            updated = ConfigStore(path).get()
 
             saved = updated["announcement_board"]["announcements"][0]
             self.assertTrue(saved["enabled"])
@@ -217,15 +224,22 @@ class ConfigStoreTests(unittest.TestCase):
 
     def test_announcement_weekdays_are_preserved_and_legacy_defaults_to_every_day(self):
         with tempfile.TemporaryDirectory() as directory:
-            store = ConfigStore(Path(directory) / "config.json")
-            weekdays = self.announcement()
+            path = Path(directory) / "config.json"
+            store = ConfigStore(path)
+            weekdays = self.announcement(enabled=True, name="Weekdays")
             weekdays["schedule"]["days"] = [0, 2, 4]
 
             updated = store.update({"announcement_board": {"announcements": [weekdays]}})
             self.assertEqual(updated["announcement_board"]["announcements"][0]["schedule"]["days"], [0, 2, 4])
 
             legacy = self.announcement()
-            updated = store.update({"announcement_board": {"announcements": [legacy]}})
+            legacy.pop("enabled")
+            legacy.pop("name")
+            legacy["schedule"].pop("days")
+            historical = store.get()
+            historical["announcement_board"]["announcements"] = [legacy]
+            path.write_text(json.dumps(historical))
+            updated = ConfigStore(path).get()
             self.assertEqual(updated["announcement_board"]["announcements"][0]["schedule"]["days"], [0, 1, 2, 3, 4, 5, 6])
 
     def test_announcement_rejects_runtime_unsupported_scrolling_combinations(self):
@@ -268,6 +282,8 @@ class ConfigStoreTests(unittest.TestCase):
     def announcement(**changes):
         item = {
             "id": "announcement_welcome",
+            "enabled": True,
+            "name": "Welcome",
             "layout": "text_notice",
             "headline": "Welcome",
             "message": "Front desk closes at 5 PM",
@@ -277,6 +293,7 @@ class ConfigStoreTests(unittest.TestCase):
                 "end_date": "2030-01-15",
                 "start_time": "09:00",
                 "end_time": "17:00",
+                "days": [0, 1, 2, 3, 4, 5, 6],
             },
             "style": {
                 "foreground": "#FFFFFF",
