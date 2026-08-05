@@ -1,6 +1,6 @@
 # Raspberry Pi RGB Matrix — Fresh-session handoff
 
-Generated: 2026-08-05T01:53:25+00:00 (Pi timezone: Europe/London)
+Generated: 2026-08-05T14:39:57+00:00 (Pi timezone: Europe/London)
 
 ## Purpose
 
@@ -33,7 +33,29 @@ Always preserve the deployed `venv`, `data`, and `resources/media` directories d
 
 ## Current live health
 
-Verified after the advanced-canvas examples deployment on 2026-08-05:
+Verified after the deep correctness, durability, and lifecycle review deployment on 2026-08-05:
+
+- GitLab MR `!13` merged the reviewed commit `ed592e2` to protected `main` as merge commit `41629af`; local `main` and `origin/main` were verified equal before deployment.
+- The approved baseline-to-review binary diff SHA-256 is `55f76c4d1f1a5c3007bfdd2b8ca43fc9377941179b5a95d9ae91aab48a226c9f`. Three independent backend, lifecycle/hardware/media, and frontend/test/docs reviews approved that unchanged digest with no blocker/high/medium finding.
+- GitLab pipeline `36` remained pending with no runner assigned to any job. It was explicitly recorded as unavailable, not represented as passing; merge evidence instead includes the exact-diff approvals and executed verification below.
+- Complete local suite: `290/290` passed. Complete deployed Pi suite under the production root parent identity: `290/290` passed with 18 expected environment-dependent skips. A non-root Pi invocation separately produced two expected sanitizer-identity failures because `admin` cannot perform the service's root-to-`nobody` transition.
+- All 18 deployed source/test/documentation paths checksum-match merged local `main`; the deployment preserved `.git`, `venv`, `data`, `resources/media`, caches, runtime state, and secrets.
+- `matrix-web.service`: `active/running`; final observed `MainPID=505510`; `NRestarts=0`; `ExecMainStatus=0`. HTTP `/` returned the expected `302` to `/pair`.
+- Unauthenticated `/api/status` and `/api/config` returned JSON `401`; `/pair` returned the expected `403` with the existing paired registry; the shipped `custom_canvas.js` returned `200`.
+- Hardware ownership was fail-closed: a competing root lock acquisition was rejected while the service owned `/run/matrix-display/matrix-display.lock`.
+- Real-panel aspect verification passed through the physical `Matrix` backend: `PHYSICAL_ASPECT_PASS revision=1 left=(0, 0, 0) centre=(252, 0, 0) right=(0, 0, 0)`. Portrait video remained centered with black side padding, and cleanup cleared the panel before service restart.
+- The paired dashboard resumed live publication after the final restart; 106 successful `/api/display-frame` responses were observed, with the latest returning a non-empty 1,668-byte frame payload.
+- Warning-or-higher service journal entries after final startup: `0`.
+- Persistent configuration remains byte-identical at SHA-256 `c084204bc5dce91e0403f71096cb59b2b861e6277ff0fc04901790ca120618de`.
+- Paired-device registry remains byte-identical at SHA-256 `b0547667151dba45324645bb9a104ad9e1384a97eef798b9526e57821a44535c`; all 3 paired devices remain present.
+- All 6 persistent media files remain present.
+- Verified root-owned mode-`0600` backup: `/home/admin/matrix-backups/deep-review-20260805T142943Z.tar.gz` (179,065 bytes), containing prior deployed source, configuration, paired-device state, and media.
+
+PIDs are ephemeral; re-check them rather than treating the observed value above as permanent.
+
+## Previous live health: advanced-canvas examples
+
+Verified after the advanced-canvas examples deployment earlier on 2026-08-05:
 
 - GitLab MR `!11` merged to protected `main` as `5956e5a`; feature commits `98b40e2` and `0282c86` are ancestors of `origin/main`.
 - `matrix-web.service`: `active/running`; `MainPID=502694`; `NRestarts=0`.
@@ -50,7 +72,7 @@ Verified after the advanced-canvas examples deployment on 2026-08-05:
 - All six media files remain byte-identical as manifest SHA-256 `848a89147c19ef4fc9161553c2f9f5e4d2faaeeaf311e42fb15904ae364c8924`.
 - Verified root-owned backup: `/home/admin/matrix-backups/pre-advanced-canvas-examples-20260805T014800Z`, containing the prior changed sources plus configuration and paired-device snapshots.
 
-PIDs and pairing PINs are ephemeral; re-check them rather than treating the values above as permanent.
+Pairing PINs are ephemeral and must never be recorded.
 
 ## Latest completed feature: five advanced-canvas examples
 
