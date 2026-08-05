@@ -7,7 +7,7 @@ import time
 import types
 import unittest
 from pathlib import Path
-from unittest.mock import Mock, patch
+from unittest.mock import MagicMock, Mock, patch
 
 fake_graphics = types.SimpleNamespace(Color=lambda *rgb: types.SimpleNamespace(red=rgb[0], green=rgb[1], blue=rgb[2]), Font=Mock)
 fake_rgb = types.SimpleNamespace(RGBMatrix=Mock, RGBMatrixOptions=Mock, graphics=fake_graphics)
@@ -85,6 +85,66 @@ class MatrixFrameworkTests(unittest.TestCase):
         canvas.SetImage.assert_called_once_with(rotated, 4, 5)
         matrix._frame_capture.set_image.assert_called_once_with(canvas, rotated, 4, 5)
 
+    def test_media_frames_cancellation_interrupts_blocked_image_decoder(self):
+        matrix = Matrix.__new__(Matrix)
+        matrix.matrix = Mock(width=64, height=32)
+        matrix._media_file = Mock(return_value=framework.pathlib.Path("/tmp/animation.gif"))
+        stop = threading.Event()
+        decoder_started = threading.Event()
+        release_pillow = threading.Event()
+        finished = threading.Event()
+        result = []
+        read_fd, write_fd = os.pipe()
+        process = Mock()
+        process.stdout = os.fdopen(read_fd, "rb", buffering=0)
+        process.poll.return_value = None
+        process.wait.return_value = 0
+        media = MagicMock()
+
+        def blocked_image_open(*_args, **_kwargs):
+            decoder_started.set()
+            release_pillow.wait(1)
+            return media
+
+        def launch_decoder(*_args, **_kwargs):
+            decoder_started.set()
+            return process
+
+        def decode():
+            try:
+                result.extend(
+                    matrix.media_frames(
+                        "animation.gif", 1, 1, stop_event=stop, decode_timeout=0.05,
+                    )
+                )
+            finally:
+                finished.set()
+
+        with patch.object(
+            framework.Image, "open", side_effect=blocked_image_open,
+        ) as pillow_open, patch.object(
+            framework.ImageSequence, "Iterator", return_value=[]
+        ), patch.object(framework.os, "open", return_value=9), patch.object(
+            framework.os, "close"
+        ), patch.object(
+            framework.subprocess, "Popen", side_effect=launch_decoder
+        ):
+            worker = threading.Thread(target=decode)
+            worker.start()
+            self.assertTrue(decoder_started.wait(0.5))
+            stop.set()
+            stopped_promptly = finished.wait(0.3)
+            release_pillow.set()
+            os.close(write_fd)
+            worker.join(1)
+
+        process.stdout.close()
+        self.assertTrue(stopped_promptly, "cancellation did not interrupt image decoding")
+        self.assertFalse(worker.is_alive())
+        self.assertEqual(result, [])
+        pillow_open.assert_not_called()
+        process.kill.assert_called_once_with()
+
     def test_media_frames_observes_cancellation_during_image_decode(self):
         matrix = Matrix.__new__(Matrix)
         matrix.matrix = Mock(width=64, height=32)
@@ -102,6 +162,54 @@ class MatrixFrameworkTests(unittest.TestCase):
             )
         image_open.assert_not_called()
         iterator.assert_not_called()
+
+    def test_media_frames_repeats_clean_short_decoder_timeline(self):
+        matrix = Matrix.__new__(Matrix)
+        matrix.matrix = Mock(width=64, height=32)
+        matrix._media_file = Mock(return_value=framework.pathlib.Path("/tmp/still.png"))
+        raw = b"\x10\x20\x30" * (64 * 32)
+        image = Mock()
+        process = Mock()
+        process.stdout = Mock()
+        process.poll.return_value = 0
+        process.wait.return_value = 0
+
+        with patch.object(framework.os, "open", return_value=9), patch.object(
+            framework.os, "close"
+        ), patch.object(framework.subprocess, "Popen", return_value=process) as popen, patch.object(
+            framework, "_read_exact_interruptibly", side_effect=[raw, b""]
+        ), patch.object(
+            framework.Image, "frombytes", return_value=image, create=True
+        ) as frombytes:
+            frames = matrix.media_frames("still.png", 3, 2)
+
+        self.assertEqual(frames, [image, image, image])
+        frombytes.assert_called_once_with("RGB", (64, 32), raw)
+        video_filter = popen.call_args.args[0][popen.call_args.args[0].index("-vf") + 1]
+        self.assertIn("fps=2:eof_action=pass", video_filter)
+
+    def test_media_frames_deadline_interrupts_blocked_decoder(self):
+        matrix = Matrix.__new__(Matrix)
+        matrix.matrix = Mock(width=64, height=32)
+        matrix._media_file = Mock(return_value=framework.pathlib.Path("/tmp/animation.gif"))
+        read_fd, write_fd = os.pipe()
+        process = Mock()
+        process.stdout = os.fdopen(read_fd, "rb", buffering=0)
+        process.poll.return_value = None
+        process.wait.return_value = 0
+        started = time.monotonic()
+        try:
+            with patch.object(framework.os, "open", return_value=9), patch.object(
+                framework.os, "close"
+            ), patch.object(framework.subprocess, "Popen", return_value=process):
+                with self.assertRaisesRegex(ValueError, "media could not be decoded"):
+                    matrix.media_frames("animation.gif", 1, 1, decode_timeout=0.05)
+        finally:
+            os.close(write_fd)
+            process.stdout.close()
+
+        self.assertLess(time.monotonic() - started, 0.3)
+        process.kill.assert_called_once_with()
 
     def test_media_frames_decodes_mp4_to_bounded_canvas_timeline(self):
         matrix = Matrix.__new__(Matrix)
@@ -126,12 +234,13 @@ class MatrixFrameworkTests(unittest.TestCase):
         self.assertEqual(reader.call_count, 3)
         self.assertTrue(all(call.kwargs["stop_event"] is None for call in reader.call_args_list))
         command = popen.call_args.args[0]
-        self.assertIn("-stream_loop", command)
+        self.assertNotIn("-stream_loop", command)
         video_filter = command[command.index("-vf") + 1]
         self.assertIn("scale=64:32", video_filter)
         self.assertIn("fps=12", video_filter)
         self.assertIn("pipe:0", command)
         self.assertEqual(popen.call_args.kwargs["stdin"], 9)
+        self.assertIs(popen.call_args.kwargs["stderr"], framework.subprocess.DEVNULL)
         self.assertNotIn("pass_fds", popen.call_args.kwargs)
 
     def test_show_gif_can_be_interrupted(self):

@@ -434,33 +434,6 @@ class Matrix:
         path = self._media_file(filename)
         if path is None:
             return []
-        if path.suffix.lower() != ".mp4":
-            with Image.open(path) as media:
-                source_frames = []
-                durations = []
-                for frame in ImageSequence.Iterator(media):
-                    if stop_event is not None and stop_event.is_set():
-                        return []
-                    if time.monotonic() >= deadline:
-                        raise ValueError("media decoder did not finish in time")
-                    source_frames.append(frame.copy().convert("RGBA"))
-                    durations.append(max(20, int(frame.info.get("duration", 100) or 100)))
-            if len(source_frames) == 1:
-                return [source_frames[0]] * frame_count
-            total_duration = sum(durations)
-            result = []
-            for output_index in range(frame_count):
-                timestamp = (output_index * 1000 / fps) % total_duration
-                elapsed = 0
-                selected = source_frames[-1]
-                for frame, duration in zip(source_frames, durations):
-                    elapsed += duration
-                    if timestamp < elapsed:
-                        selected = frame
-                        break
-                result.append(selected)
-            return result
-
         input_fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW)
         identity = {}
         if os.geteuid() == 0:
@@ -471,12 +444,12 @@ class Matrix:
             process = subprocess.Popen(
                 [
                     "/usr/bin/ffmpeg", "-nostdin", "-v", "error", "-threads", "1",
-                    "-stream_loop", "-1", "-i", "pipe:0",
+                    "-i", "pipe:0",
                     "-map", "0:v:0", "-an", "-sn", "-dn",
-                    "-vf", f"scale=64:32:force_original_aspect_ratio=decrease,pad=64:32:(ow-iw)/2:(oh-ih)/2,fps={fps}", "-frames:v", str(frame_count),
+                    "-vf", f"scale=64:32:force_original_aspect_ratio=decrease,pad=64:32:(ow-iw)/2:(oh-ih)/2,fps={fps}:eof_action=pass", "-frames:v", str(frame_count),
                     "-f", "rawvideo", "-pix_fmt", "rgb24", "pipe:1",
                 ],
-                stdin=input_fd, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                stdin=input_fd, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
                 **identity,
             )
             frame_size = self.matrix.width * self.matrix.height * 3
@@ -490,14 +463,19 @@ class Matrix:
                 )
                 if stop_event is not None and stop_event.is_set():
                     return []
+                if not raw:
+                    break
                 if len(raw) != frame_size:
-                    raise ValueError("MP4 could not be decoded for the custom module timeline")
+                    raise ValueError("media could not be decoded for the custom module timeline")
                 frames.append(Image.frombytes("RGB", (self.matrix.width, self.matrix.height), raw))
             timeout = max(0.1, deadline - time.monotonic())
-            return_code = process.wait(timeout=timeout)
-            if return_code != 0 or len(frames) != frame_count:
-                raise ValueError("MP4 could not be decoded for the custom module timeline")
-            return frames
+            try:
+                return_code = process.wait(timeout=timeout)
+            except subprocess.TimeoutExpired as error:
+                raise ValueError("media decoder did not finish in time") from error
+            if return_code != 0 or not frames:
+                raise ValueError("media could not be decoded for the custom module timeline")
+            return [frames[index % len(frames)] for index in range(frame_count)]
         finally:
             if process is not None and process.poll() is None:
                 process.kill()
