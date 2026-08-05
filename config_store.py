@@ -497,8 +497,36 @@ def _validate_announcement_board(board):
                 or not 1 <= duration <= 3600
             ):
                 raise ValueError("static announcement duration must be between 1 and 3600 seconds")
-        if item["transition"] != {"type": "cut"}:
-            raise ValueError("announcement transition must be an instant cut")
+        transition = item["transition"]
+        if not isinstance(transition, dict):
+            raise ValueError("announcement transition must be an object")
+        if transition.get("type") == "cut":
+            if transition != {"type": "cut"}:
+                raise ValueError("cut announcement transition has invalid fields")
+        elif transition.get("type") == "fade":
+            if set(transition) != {"type", "duration_seconds"}:
+                raise ValueError("fade announcement transition has invalid fields")
+            transition_duration = transition["duration_seconds"]
+            if (
+                isinstance(transition_duration, bool)
+                or not isinstance(transition_duration, (int, float))
+                or not 0.1 <= transition_duration <= 3
+            ):
+                raise ValueError("fade announcement transition duration must be between 0.1 and 3 seconds")
+        elif transition.get("type") == "slide":
+            if set(transition) != {"type", "direction", "duration_seconds"}:
+                raise ValueError("slide announcement transition has invalid fields")
+            if transition["direction"] not in {"left", "right"}:
+                raise ValueError("slide announcement transition direction must be left or right")
+            transition_duration = transition["duration_seconds"]
+            if (
+                isinstance(transition_duration, bool)
+                or not isinstance(transition_duration, (int, float))
+                or not 0.1 <= transition_duration <= 3
+            ):
+                raise ValueError("slide announcement transition duration must be between 0.1 and 3 seconds")
+        else:
+            raise ValueError("announcement transition is not supported")
 
 
 def validate_config(config):

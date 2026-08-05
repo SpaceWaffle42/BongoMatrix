@@ -118,6 +118,44 @@ class ConfigStoreTests(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, "scrolling announcement timing"):
                 store.update({"announcement_board": {"announcements": [scrolling]}})
 
+    def test_fade_transition_has_only_a_bounded_duration(self):
+        fading = self.announcement()
+        fading["transition"] = {"type": "fade", "duration_seconds": 0.4}
+        with tempfile.TemporaryDirectory() as directory:
+            store = ConfigStore(Path(directory) / "config.json")
+
+            saved = store.update({
+                "announcement_board": {"announcements": [fading]},
+            })
+
+            self.assertEqual(
+                saved["announcement_board"]["announcements"][0]["transition"],
+                {"type": "fade", "duration_seconds": 0.4},
+            )
+            fading["transition"]["steps"] = 4
+            with self.assertRaisesRegex(ValueError, "fade announcement transition"):
+                store.update({"announcement_board": {"announcements": [fading]}})
+
+    def test_slide_transition_has_direction_and_bounded_duration(self):
+        sliding = self.announcement()
+        sliding["transition"] = {
+            "type": "slide", "direction": "left", "duration_seconds": 0.4,
+        }
+        with tempfile.TemporaryDirectory() as directory:
+            store = ConfigStore(Path(directory) / "config.json")
+
+            saved = store.update({
+                "announcement_board": {"announcements": [sliding]},
+            })
+
+            self.assertEqual(
+                saved["announcement_board"]["announcements"][0]["transition"],
+                {"type": "slide", "direction": "left", "duration_seconds": 0.4},
+            )
+            sliding["transition"]["direction"] = "up"
+            with self.assertRaisesRegex(ValueError, "slide announcement transition direction"):
+                store.update({"announcement_board": {"announcements": [sliding]}})
+
     def test_announcement_rejects_equal_start_and_end_times(self):
         invalid = self.announcement()
         invalid["schedule"]["end_time"] = invalid["schedule"]["start_time"]
