@@ -83,8 +83,87 @@ class WeatherTests(unittest.TestCase):
         request = urlopen.call_args.args[0]
         self.assertIn("temperature_unit=fahrenheit", request.full_url)
 
-    @patch("modules.weather_app.time.monotonic", side_effect=[0, 0, 2])
-    def test_renderer_fallback_location_is_london(self, monotonic):
+    def test_renderer_does_not_fetch_when_already_stopped(self):
+        matrix = Mock()
+        client = Mock()
+        stop_event = Mock()
+        stop_event.is_set.return_value = True
+
+        self.assertFalse(run(
+            matrix, {"weather": {}}, duration=0,
+            stop_event=stop_event, client=client,
+        ))
+
+        client.fetch.assert_not_called()
+        matrix.matrix.CreateFrameCanvas.assert_not_called()
+
+    @patch("modules.weather_app._wait", return_value=False)
+    def test_renderer_uses_ticker_loops_instead_of_playlist_duration(self, wait):
+        canvas = SimpleNamespace(width=2)
+        matrix = Mock()
+        matrix.matrix.CreateFrameCanvas.return_value = canvas
+        matrix.colour.side_effect = lambda name: name
+        matrix.colour_rgb.side_effect = lambda value: value
+        matrix.font.side_effect = lambda name: name
+        matrix.draw_text.return_value = 1
+        matrix.widget_scroll.side_effect = (
+            lambda text, font, x, y, colour, canvas=None, step=1, wrap=True:
+            (x - step, 1)
+        )
+        matrix.swap.return_value = canvas
+        client = Mock()
+        client.fetch.return_value = WeatherSnapshot(
+            location="London", status="Clear", temperature=16,
+            feels_like=15, high=18, low=12, humidity=70,
+        )
+        config = {"weather": {
+            "scroll_direction": "left", "scroll_speed": "slow",
+            "scroll_loops": 2,
+        }}
+
+        self.assertTrue(run(matrix, config, duration=0, client=client))
+
+        self.assertEqual(matrix.swap.call_count, 8)
+        self.assertEqual(wait.call_count, 8)
+        wait.assert_called_with(None, 0.1)
+        self.assertTrue(all(
+            call.kwargs["wrap"] is False
+            for call in matrix.widget_scroll.call_args_list
+        ))
+
+    @patch("modules.weather_app._wait", return_value=False)
+    def test_renderer_counts_right_scrolling_ticker_loops(self, wait):
+        canvas = SimpleNamespace(width=2)
+        matrix = Mock()
+        matrix.matrix.CreateFrameCanvas.return_value = canvas
+        matrix.colour.side_effect = lambda name: name
+        matrix.colour_rgb.side_effect = lambda value: value
+        matrix.font.side_effect = lambda name: name
+        matrix.draw_text.return_value = 1
+        matrix.widget_scroll.side_effect = (
+            lambda text, font, x, y, colour, canvas=None, step=1, wrap=True:
+            (x - step, 1)
+        )
+        matrix.swap.return_value = canvas
+        client = Mock()
+        client.fetch.return_value = WeatherSnapshot(
+            location="London", status="Clear", temperature=16,
+            feels_like=15, high=18, low=12, humidity=70,
+        )
+
+        self.assertTrue(run(matrix, {"weather": {
+            "scroll_direction": "right", "scroll_speed": "normal",
+            "scroll_loops": 1,
+        }}, duration=0, client=client))
+
+        self.assertEqual(matrix.swap.call_count, 4)
+        self.assertEqual(wait.call_count, 4)
+        first_scroll = matrix.widget_scroll.call_args_list[0]
+        self.assertEqual(first_scroll.args[2], -1)
+        self.assertEqual(first_scroll.kwargs["step"], -1)
+        self.assertFalse(first_scroll.kwargs["wrap"])
+
+    def test_renderer_fallback_location_is_london(self):
         canvas = SimpleNamespace(width=64)
         matrix = Mock()
         matrix.matrix.CreateFrameCanvas.return_value = canvas
@@ -101,7 +180,7 @@ class WeatherTests(unittest.TestCase):
         )
         stop_event = Mock()
         stop_event.is_set.return_value = False
-        stop_event.wait.return_value = False
+        stop_event.wait.return_value = True
 
         self.assertTrue(
             run(matrix, {"weather": {}}, duration=1, stop_event=stop_event, client=client)
@@ -111,8 +190,7 @@ class WeatherTests(unittest.TestCase):
             "London, England, GB", latitude=None, longitude=None, units="celsius"
         )
 
-    @patch("modules.weather_app.time.monotonic", side_effect=[0, 0, 2])
-    def test_renderer_applies_units_layout_direction_and_speed(self, monotonic):
+    def test_renderer_applies_units_layout_direction_and_speed(self):
         canvas = SimpleNamespace(width=64)
         matrix = Mock()
         matrix.matrix.CreateFrameCanvas.return_value = canvas
@@ -129,7 +207,7 @@ class WeatherTests(unittest.TestCase):
         )
         stop_event = Mock()
         stop_event.is_set.return_value = False
-        stop_event.wait.return_value = False
+        stop_event.wait.return_value = True
         config = {"weather": {
             "location": "Brighton, GB", "latitude": 50.82, "longitude": -0.14,
             "units": "fahrenheit", "temperature_y": 2, "ticker_y": 27,
@@ -163,7 +241,7 @@ class WeatherTests(unittest.TestCase):
         matrix.draw_line.assert_called_once_with(0, 23, 63, 23, "#0000ff", canvas=canvas)
         matrix.widget_scroll.assert_called_once_with(
             "Brighton, GB | Clear sky | Feels 61F | Humidity 70%",
-            "4x6", -120, 27, "#ffff00", canvas=canvas, step=-1, wrap=True,
+            "4x6", -120, 27, "#ffff00", canvas=canvas, step=-1, wrap=False,
         )
         stop_event.wait.assert_called_once_with(0.1)
 

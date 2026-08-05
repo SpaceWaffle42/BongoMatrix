@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import time
 from dataclasses import dataclass
 
 from modules.openweather_common import OpenWeatherClient, OpenWeatherError, composite_icon
@@ -80,8 +79,10 @@ def run(
     ticker_y = settings.get("ticker_y", 28)
     scroll = f"{weather.location} | {weather.status} | Feels like {weather.feels_like}{suffix}"
     direction = settings.get("scroll_direction", "left")
+    text_width = matrix.draw_text(
+        ticker_font, -10000, ticker_y, ticker, scroll, canvas=canvas
+    )
     if direction == "right":
-        text_width = matrix.draw_text(ticker_font, -10000, ticker_y, ticker, scroll, canvas=canvas)
         scroll_x = -text_width
         step = -1
     else:
@@ -90,9 +91,9 @@ def run(
     frame_delay = {"slow": 0.1, "normal": 0.05, "fast": 0.025}.get(
         settings.get("scroll_speed", "normal"), 0.05
     )
-    end_time = time.monotonic() + duration
+    loops_remaining = settings.get("scroll_loops", 1)
 
-    while time.monotonic() < end_time and not (stop_event and stop_event.is_set()):
+    while loops_remaining > 0 and not (stop_event and stop_event.is_set()):
         matrix.fill(*_hex_rgb(background_hex), canvas=canvas)
         matrix.draw_image(
             icon,
@@ -118,8 +119,14 @@ def run(
         )
         scroll_x, _ = matrix.widget_scroll(
             scroll, ticker_font, scroll_x, ticker_y, ticker,
-            canvas=canvas, step=step, wrap=True,
+            canvas=canvas, step=step, wrap=False,
         )
+        if step >= 0 and scroll_x + text_width < 0:
+            loops_remaining -= 1
+            scroll_x = canvas.width
+        elif step < 0 and scroll_x > canvas.width:
+            loops_remaining -= 1
+            scroll_x = -text_width
         canvas = matrix.swap(canvas)
         if _wait(stop_event, frame_delay):
             break

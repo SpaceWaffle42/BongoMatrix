@@ -247,14 +247,54 @@ class OpenWeatherOverviewTests(unittest.TestCase):
         client.fetch_icon.assert_not_called()
         matrix.matrix.CreateFrameCanvas.assert_not_called()
 
-    @patch("modules.openweather_overview.time.monotonic", side_effect=[0, 0, 2])
-    def test_overview_recreates_icon_temperature_high_low_and_ticker(self, monotonic):
+    @patch("modules.openweather_overview._wait", return_value=False)
+    def test_overview_uses_ticker_loops_instead_of_playlist_duration(self, wait):
+        canvas = SimpleNamespace(width=2)
+        matrix = Mock()
+        matrix.matrix.CreateFrameCanvas.return_value = canvas
+        matrix.colour_rgb.side_effect = lambda value: value
+        matrix.font.side_effect = lambda name: name
+        matrix.draw_text.return_value = 1
+        matrix.widget_scroll.side_effect = (
+            lambda text, font, x, y, colour, canvas=None, step=1, wrap=True:
+            (x - step, 1)
+        )
+        matrix.swap.return_value = canvas
+        client = Mock()
+        client.fetch_current.return_value = OpenWeatherSnapshot(
+            location="London", status="Clear", temperature=16,
+            feels_like=15, high=18, low=12, humidity=70,
+            icon_code="01d",
+        )
+        client.fetch_icon.return_value = Image.new("RGBA", (20, 20), "blue")
+        config = {
+            "weather": {"location": "London", "latitude": 51.5, "longitude": -0.1},
+            "openweather_overview": {
+                "scroll_direction": "left", "scroll_speed": "fast",
+                "scroll_loops": 2,
+            },
+        }
+
+        self.assertTrue(run_overview(
+            matrix, config, duration=0, client=client, api_key="x"
+        ))
+
+        self.assertEqual(matrix.swap.call_count, 8)
+        self.assertEqual(wait.call_count, 8)
+        wait.assert_called_with(None, 0.025)
+        self.assertTrue(all(
+            invocation.kwargs["wrap"] is False
+            for invocation in matrix.widget_scroll.call_args_list
+        ))
+
+    def test_overview_recreates_icon_temperature_high_low_and_ticker(self):
         canvas = SimpleNamespace(width=64)
         matrix = Mock()
         matrix.matrix.CreateFrameCanvas.return_value = canvas
         matrix.colour.side_effect = lambda name: name
         matrix.colour_rgb.side_effect = lambda value: value
         matrix.font.side_effect = lambda name: name
+        matrix.draw_text.return_value = 180
         matrix.widget_scroll.return_value = (-1, 180)
         matrix.swap.return_value = canvas
         client = Mock()
@@ -273,7 +313,7 @@ class OpenWeatherOverviewTests(unittest.TestCase):
         client.fetch_icon.return_value = icon
         stop_event = Mock()
         stop_event.is_set.return_value = False
-        stop_event.wait.return_value = False
+        stop_event.wait.return_value = True
         settings = {
             "location": "Brighton, England, GB",
             "latitude": 50.82,
@@ -329,7 +369,7 @@ class OpenWeatherOverviewTests(unittest.TestCase):
         self.assertIn(call("5x7", 50, 20, "#01cdfe", "#010203", "12", canvas=canvas), matrix.draw_text_with_border.call_args_list)
         matrix.widget_scroll.assert_called_once_with(
             "Brighton, England, GB | Broken clouds | Feels like 16C",
-            "4x6", 64, 28, "#dcd5d5", canvas=canvas, step=1, wrap=True,
+            "4x6", 64, 28, "#dcd5d5", canvas=canvas, step=1, wrap=False,
         )
         stop_event.wait.assert_called_once_with(0.025)
 
@@ -424,13 +464,72 @@ class OpenWeatherForecastTests(unittest.TestCase):
         client.fetch_icon.assert_called_once_with("10d")
         matrix.matrix.CreateFrameCanvas.assert_not_called()
 
-    @patch("modules.openweather_forecast.time.monotonic", side_effect=[0, 0, 2])
-    def test_forecast_renders_upcoming_period_as_legacy_weather_card(self, monotonic):
+    @patch("modules.openweather_forecast._wait", return_value=False)
+    def test_forecast_uses_ticker_loops_per_card_instead_of_seconds(self, wait):
+        canvas = SimpleNamespace(width=2)
+        matrix = Mock()
+        matrix.matrix.CreateFrameCanvas.return_value = canvas
+        matrix.colour_rgb.side_effect = lambda value: value
+        matrix.font.side_effect = lambda name: name
+        matrix.draw_text.return_value = 1
+        matrix.widget_scroll.side_effect = (
+            lambda text, font, x, y, colour, canvas=None, step=1, wrap=True:
+            (x - step, 1)
+        )
+        matrix.swap.return_value = canvas
+        periods = [
+            OpenWeatherForecastPeriod(
+                label="Tue 15:00", status="Rain", temperature=18,
+                feels_like=17, high=20, low=14, icon_code="10d",
+            ),
+            OpenWeatherForecastPeriod(
+                label="Tue 18:00", status="Cloudy", temperature=16,
+                feels_like=15, high=18, low=13, icon_code="04d",
+            ),
+        ]
+        client = Mock()
+        client.fetch_forecast.return_value = periods
+        client.fetch_icon.return_value = Image.new("RGB", (20, 20), "blue")
+        config = {
+            "weather": {"location": "London", "latitude": 51.5, "longitude": -0.1},
+            "openweather_forecast": {
+                "forecast_items": 2, "card_seconds": 999,
+                "scroll_direction": "right", "scroll_speed": "normal",
+                "scroll_loops": 2,
+            },
+        }
+
+        self.assertTrue(run_forecast(
+            matrix, config, duration=0, client=client, api_key="x"
+        ))
+
+        self.assertEqual(matrix.swap.call_count, 16)
+        self.assertEqual(wait.call_count, 16)
+        wait.assert_called_with(None, 0.05)
+        rendered_labels = [
+            invocation.args[5]
+            for invocation in matrix.draw_text_with_border.call_args_list
+            if len(invocation.args) > 5 and invocation.args[5].startswith("Tue")
+        ]
+        self.assertEqual(
+            rendered_labels,
+            ["Tue 15:00"] * 8 + ["Tue 18:00"] * 8,
+        )
+        self.assertTrue(all(
+            invocation.kwargs["wrap"] is False
+            for invocation in matrix.widget_scroll.call_args_list
+        ))
+        self.assertEqual(
+            matrix.widget_scroll.call_args_list[0].kwargs["step"], -1
+        )
+
+    def test_forecast_renders_upcoming_period_as_legacy_weather_card(self):
         canvas = SimpleNamespace(width=64)
         matrix = Mock()
         matrix.matrix.CreateFrameCanvas.return_value = canvas
         matrix.colour_rgb.side_effect = lambda value: value
         matrix.font.side_effect = lambda name: name
+        matrix.draw_text.return_value = 180
         matrix.widget_scroll.return_value = (-1, 180)
         matrix.swap.return_value = canvas
         period = OpenWeatherForecastPeriod(
@@ -446,14 +545,10 @@ class OpenWeatherForecastTests(unittest.TestCase):
         client.fetch_forecast.return_value = [period]
         icon = Image.new("RGB", (20, 20), "blue")
 
-        def fetch_icon_before_deadline(icon_code):
-            self.assertEqual(monotonic.call_count, 0)
-            return icon
-
-        client.fetch_icon.side_effect = fetch_icon_before_deadline
+        client.fetch_icon.return_value = icon
         stop_event = Mock()
         stop_event.is_set.return_value = False
-        stop_event.wait.return_value = False
+        stop_event.wait.return_value = True
         settings = {
             "location": "Brighton, England, GB",
             "latitude": 50.82,
@@ -505,7 +600,7 @@ class OpenWeatherForecastTests(unittest.TestCase):
         self.assertIn(call("5x7", 26, 15, "#dcd5d5", "#010203", "18C", canvas=canvas), matrix.draw_text_with_border.call_args_list)
         matrix.widget_scroll.assert_called_once_with(
             "Brighton, England, GB | Light rain | Feels like 17C",
-            "4x6", 64, 28, "#dcd5d5", canvas=canvas, step=1, wrap=True,
+            "4x6", 64, 28, "#dcd5d5", canvas=canvas, step=1, wrap=False,
         )
         stop_event.wait.assert_called_once_with(0.05)
 

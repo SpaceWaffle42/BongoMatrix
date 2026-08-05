@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import time
 from dataclasses import dataclass
 
 from modules.openweather_common import OpenWeatherClient, OpenWeatherError, composite_icon
@@ -97,58 +96,53 @@ def run(
     frame_delay = {"slow": 0.1, "normal": 0.05, "fast": 0.025}.get(
         settings.get("scroll_speed", "normal"), 0.05
     )
-    card_seconds = settings.get("card_seconds", 5)
+    loops_per_card = settings.get("scroll_loops", 1)
     canvas = matrix.matrix.CreateFrameCanvas()
-    active_index = None
-    scroll_x = canvas.width
-    scroll = ""
-    started = time.monotonic()
-    end_time = started + duration
 
-    while not (stop_event and stop_event.is_set()):
-        now = time.monotonic()
-        if now >= end_time:
+    for period in periods:
+        if stop_event and stop_event.is_set():
             break
-        index = int((now - started) // card_seconds) % len(periods)
-        period = periods[index]
-        if index != active_index:
-            active_index = index
-            scroll = f"{location} | {period.status} | Feels like {period.feels_like}{suffix}"
-            if direction == "right":
-                text_width = matrix.draw_text(
-                    small_font, -10000, ticker_y, ticker, scroll, canvas=canvas
-                )
-                scroll_x = -text_width
-            else:
+        scroll = f"{location} | {period.status} | Feels like {period.feels_like}{suffix}"
+        text_width = matrix.draw_text(
+            small_font, -10000, ticker_y, ticker, scroll, canvas=canvas
+        )
+        scroll_x = -text_width if direction == "right" else canvas.width
+        loops_remaining = loops_per_card
+        while loops_remaining > 0 and not (stop_event and stop_event.is_set()):
+            matrix.fill(*_hex_rgb(background_hex), canvas=canvas)
+            matrix.draw_image(
+                icons[period.icon_code],
+                settings.get("icon_x", 0),
+                settings.get("icon_y", 0),
+                canvas=canvas,
+            )
+            matrix.draw_text_with_border(
+                small_font, settings.get("time_x", 2), settings.get("time_y", 22),
+                text, background, period.label, canvas=canvas,
+            )
+            matrix.draw_text_with_border(
+                main_font, settings.get("temperature_x", 26), settings.get("temperature_y", 15),
+                text, background, f"{period.temperature}{suffix}", canvas=canvas,
+            )
+            matrix.draw_text_with_border(
+                main_font, settings.get("high_x", 50), settings.get("high_y", 11),
+                high, background, str(period.high), canvas=canvas,
+            )
+            matrix.draw_text_with_border(
+                main_font, settings.get("low_x", 50), settings.get("low_y", 20),
+                low, background, str(period.low), canvas=canvas,
+            )
+            scroll_x, _ = matrix.widget_scroll(
+                scroll, small_font, scroll_x, ticker_y, ticker,
+                canvas=canvas, step=step, wrap=False,
+            )
+            if step >= 0 and scroll_x + text_width < 0:
+                loops_remaining -= 1
                 scroll_x = canvas.width
-        matrix.fill(*_hex_rgb(background_hex), canvas=canvas)
-        matrix.draw_image(
-            icons[period.icon_code],
-            settings.get("icon_x", 0),
-            settings.get("icon_y", 0),
-            canvas=canvas,
-        )
-        matrix.draw_text_with_border(
-            small_font, settings.get("time_x", 2), settings.get("time_y", 22),
-            text, background, period.label, canvas=canvas,
-        )
-        matrix.draw_text_with_border(
-            main_font, settings.get("temperature_x", 26), settings.get("temperature_y", 15),
-            text, background, f"{period.temperature}{suffix}", canvas=canvas,
-        )
-        matrix.draw_text_with_border(
-            main_font, settings.get("high_x", 50), settings.get("high_y", 11),
-            high, background, str(period.high), canvas=canvas,
-        )
-        matrix.draw_text_with_border(
-            main_font, settings.get("low_x", 50), settings.get("low_y", 20),
-            low, background, str(period.low), canvas=canvas,
-        )
-        scroll_x, _ = matrix.widget_scroll(
-            scroll, small_font, scroll_x, ticker_y, ticker,
-            canvas=canvas, step=step, wrap=True,
-        )
-        canvas = matrix.swap(canvas)
-        if _wait(stop_event, frame_delay):
-            break
+            elif step < 0 and scroll_x > canvas.width:
+                loops_remaining -= 1
+                scroll_x = -text_width
+            canvas = matrix.swap(canvas)
+            if _wait(stop_event, frame_delay):
+                return True
     return True

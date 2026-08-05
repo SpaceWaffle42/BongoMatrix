@@ -46,6 +46,7 @@ DEFAULT_CONFIG = {
         "ticker_y": 31,
         "scroll_direction": "left",
         "scroll_speed": "normal",
+        "scroll_loops": 1,
         "now_x": 1,
         "now_y": 7,
         "temperature_x": 2,
@@ -67,17 +68,19 @@ DEFAULT_CONFIG = {
         "now_x": 2, "now_y": 22, "temperature_x": 26, "temperature_y": 15,
         "high_x": 50, "high_y": 11, "low_x": 50, "low_y": 20,
         "ticker_y": 28, "scroll_direction": "left", "scroll_speed": "normal",
+        "scroll_loops": 1,
         "background_colour": "#000000", "text_colour": "#dcd5d5",
         "high_colour": "#ff71ce", "low_colour": "#01cdfe",
         "ticker_colour": "#dcd5d5",
     },
     "openweather_forecast": {
         "location": "London, England, GB", "latitude": 51.5074, "longitude": -0.1278,
-        "units": "celsius", "forecast_items": 6, "card_seconds": 5,
+        "units": "celsius", "forecast_items": 6,
         "icon_x": 0, "icon_y": 0, "time_x": 2, "time_y": 22,
         "temperature_x": 26, "temperature_y": 15,
         "high_x": 50, "high_y": 11, "low_x": 50, "low_y": 20,
         "ticker_y": 28, "scroll_direction": "left", "scroll_speed": "normal",
+        "scroll_loops": 1,
         "background_colour": "#000000", "text_colour": "#dcd5d5",
         "high_colour": "#ff71ce", "low_colour": "#01cdfe",
         "ticker_colour": "#dcd5d5",
@@ -113,10 +116,10 @@ DEFAULT_CONFIG = {
     "custom_modules": [],
     "playlist": [
         {"module": "splash", "duration": 8, "enabled": True},
-        {"module": "weather", "duration": 20, "enabled": True},
+        {"module": "weather", "duration": 0, "enabled": True},
         {"module": "clock_lava", "duration": 300, "enabled": True},
-        {"module": "openweather_overview", "duration": 20, "enabled": False},
-        {"module": "openweather_forecast", "duration": 30, "enabled": False},
+        {"module": "openweather_overview", "duration": 0, "enabled": False},
+        {"module": "openweather_forecast", "duration": 0, "enabled": False},
     ],
 }
 
@@ -172,12 +175,15 @@ def _validate_openweather_settings(settings, name, *, forecast=False):
         raise ValueError(f"{name} scroll direction must be left or right")
     if settings["scroll_speed"] not in {"slow", "normal", "fast"}:
         raise ValueError(f"{name} scroll speed must be slow, normal, or fast")
+    loops = settings["scroll_loops"]
+    if isinstance(loops, bool) or not isinstance(loops, int) or not 1 <= loops <= 10:
+        raise ValueError(f"{name} scroll loops must be between 1 and 10")
     x_fields = ["icon_x", "temperature_x", "high_x", "low_x"]
     y_fields = ["icon_y", "temperature_y", "high_y", "low_y", "ticker_y"]
     if forecast:
         x_fields.append("time_x")
         y_fields.append("time_y")
-        for key, low, high in (("forecast_items", 1, 8), ("card_seconds", 1, 60)):
+        for key, low, high in (("forecast_items", 1, 8),):
             value = settings[key]
             if isinstance(value, bool) or not isinstance(value, int) or not low <= value <= high:
                 raise ValueError(f"{name} {key} must be between {low} and {high}")
@@ -411,6 +417,13 @@ def validate_config(config):
         raise ValueError("weather scroll direction must be left or right")
     if config["weather"]["scroll_speed"] not in {"slow", "normal", "fast"}:
         raise ValueError("weather scroll speed must be slow, normal, or fast")
+    weather_loops = config["weather"]["scroll_loops"]
+    if (
+        isinstance(weather_loops, bool)
+        or not isinstance(weather_loops, int)
+        or not 1 <= weather_loops <= 10
+    ):
+        raise ValueError("weather scroll loops must be between 1 and 10")
     for key in ("now_x", "temperature_x", "high_x", "low_x"):
         value = config["weather"][key]
         if isinstance(value, bool) or not isinstance(value, int) or not -63 <= value <= 63:
@@ -622,7 +635,11 @@ def validate_config(config):
         if item.get("module") not in ALLOWED_MODULES and item.get("module") not in custom_ids:
             raise ValueError(f"Unknown module: {item.get('module')!r}")
         custom_module = custom_by_id.get(item["module"])
-        if custom_module is not None and custom_module["type"] == "text_scroll":
+        if item["module"] in {
+            "weather", "openweather_overview", "openweather_forecast",
+        }:
+            item["duration"] = 0
+        elif custom_module is not None and custom_module["type"] == "text_scroll":
             item["duration"] = scrolling_text_duration(custom_module)
         else:
             duration = item.get("duration")
@@ -671,6 +688,9 @@ class ConfigStore:
             if not isinstance(current, dict):
                 raise ValueError("configuration file must contain a JSON object")
 
+            legacy_forecast = current.get("openweather_forecast")
+            if isinstance(legacy_forecast, dict):
+                legacy_forecast.pop("card_seconds", None)
             _validate_update_keys(current, DEFAULT_CONFIG)
             lava = current.get("lava")
             if (

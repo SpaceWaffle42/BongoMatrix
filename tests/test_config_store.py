@@ -24,8 +24,8 @@ class ConfigStoreTests(unittest.TestCase):
 
             self.assertEqual(config["playlist"][:len(expected_existing)], expected_existing)
             self.assertEqual(config["playlist"][-2:], [
-                {"module": "openweather_overview", "duration": 20, "enabled": False},
-                {"module": "openweather_forecast", "duration": 30, "enabled": False},
+                {"module": "openweather_overview", "duration": 0, "enabled": False},
+                {"module": "openweather_forecast", "duration": 0, "enabled": False},
             ])
             self.assertTrue(next(item for item in config["playlist"] if item["module"] == "weather")["enabled"])
             self.assertIn("openweather_overview", config)
@@ -203,6 +203,65 @@ class ConfigStoreTests(unittest.TestCase):
                 {key: DEFAULT_CONFIG[module][key] for key in expected},
                 expected,
             )
+
+    def test_legacy_forecast_card_seconds_is_removed(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "config.json"
+            legacy = json.loads(json.dumps(DEFAULT_CONFIG))
+            legacy["openweather_forecast"]["card_seconds"] = 5
+            legacy["openweather_forecast"]["forecast_items"] = 7
+            legacy["device"]["name"] = "Preserved Matrix"
+            path.write_text(json.dumps(legacy))
+
+            config = ConfigStore(path).get()
+
+            self.assertNotIn("card_seconds", config["openweather_forecast"])
+            self.assertEqual(config["openweather_forecast"]["forecast_items"], 7)
+            self.assertEqual(config["device"]["name"], "Preserved Matrix")
+
+    def test_weather_playlist_timing_is_automatic_from_ticker_loops(self):
+        with tempfile.TemporaryDirectory() as directory:
+            store = ConfigStore(Path(directory) / "config.json")
+            updated = store.get()
+            updated["weather"]["scroll_loops"] = 2
+            updated["openweather_overview"]["scroll_loops"] = 3
+            updated["openweather_forecast"]["scroll_loops"] = 4
+            for item in updated["playlist"]:
+                if item["module"] in {
+                    "weather", "openweather_overview", "openweather_forecast",
+                }:
+                    item["duration"] = 999
+
+            saved = store.update(updated)
+
+            self.assertEqual(saved["weather"]["scroll_loops"], 2)
+            self.assertEqual(saved["openweather_overview"]["scroll_loops"], 3)
+            self.assertEqual(saved["openweather_forecast"]["scroll_loops"], 4)
+            weather_durations = {
+                item["module"]: item["duration"]
+                for item in saved["playlist"]
+                if item["module"] in {
+                    "weather", "openweather_overview", "openweather_forecast",
+                }
+            }
+            self.assertEqual(weather_durations, {
+                "weather": 0,
+                "openweather_overview": 0,
+                "openweather_forecast": 0,
+            })
+
+    def test_weather_scroll_loops_are_bounded_in_all_weather_apps(self):
+        for section in (
+            "weather", "openweather_overview", "openweather_forecast",
+        ):
+            for invalid in (True, 0, 11, 1.5):
+                with self.subTest(section=section, invalid=invalid):
+                    with tempfile.TemporaryDirectory() as directory:
+                        store = ConfigStore(Path(directory) / "config.json")
+                        updated = store.get()
+                        updated[section]["scroll_loops"] = invalid
+                        with self.assertRaisesRegex(ValueError, "scroll loops"):
+                            store.update(updated)
 
     def test_weather_location_accepts_selected_coordinates(self):
         with tempfile.TemporaryDirectory() as directory:
