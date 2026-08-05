@@ -1127,6 +1127,16 @@ async function api(path){
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertIn("FAILED_PREVIEW_COMMITTED_WARNING_PASS", result.stdout)
 
+    def test_announcement_board_has_friendly_label_and_automatic_playlist_timing(self):
+        self.pair_browser()
+        body = self.client.get("/").get_data(as_text=True)
+
+        self.assertIn(">Announcement Board<", body)
+        self.assertIn(
+            "const automaticBoardModules=new Set(['announcement_board'])",
+            body,
+        )
+
     def test_scrolling_text_duration_is_automatic_in_the_playlist_editor(self):
         self.pair_browser()
         body = self.client.get("/").get_data(as_text=True)

@@ -201,6 +201,48 @@ class DisplayControllerTests(unittest.TestCase):
         with self.assertRaises(KeyError):
             controller.preview("unknown")
 
+    def test_announcement_board_executes_through_builtin_controller_path(self):
+        matrix = Mock()
+        controller = DisplayController(matrix, Mock())
+        module = Mock()
+        module.run.return_value = False
+        config = {"custom_modules": [], "announcement_board": {"announcements": []}}
+
+        with patch("display_controller.importlib.import_module", return_value=module) as importer:
+            result = controller._execute("announcement_board", config, 0)
+
+        self.assertFalse(result)
+        importer.assert_called_once_with("modules.announcement_board")
+        module.run.assert_called_once()
+        self.assertIs(module.run.call_args.args[0], matrix)
+        self.assertIs(module.run.call_args.args[1], config)
+        self.assertEqual(module.run.call_args.kwargs["duration"], 0)
+        self.assertIsNotNone(module.run.call_args.kwargs["stop_event"])
+
+    def test_scheduler_continues_to_next_playlist_item_when_board_has_no_active_record(self):
+        config = {
+            **DEFAULT_CONFIG,
+            "playlist": [
+                {"module": "announcement_board", "duration": 0, "enabled": True},
+                {"module": "clock_lava", "duration": 1, "enabled": True},
+            ],
+        }
+        store = Mock()
+        store.get.return_value = config
+        controller = DisplayController(Mock(), store)
+        calls = []
+
+        def execute(name, *_args):
+            calls.append(name)
+            if name == "clock_lava":
+                controller._shutdown.set()
+            return name != "announcement_board"
+
+        controller._execute = Mock(side_effect=execute)
+        controller._run_loop_unchecked()
+
+        self.assertEqual(calls, ["announcement_board", "clock_lava"])
+
     def test_openweather_module_receives_secret_without_adding_it_to_config(self):
         matrix = Mock()
         store = Mock()

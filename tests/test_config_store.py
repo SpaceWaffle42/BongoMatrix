@@ -49,6 +49,26 @@ class ConfigStoreTests(unittest.TestCase):
             self.assertIn("openweather_overview", config)
             self.assertIn("openweather_forecast", config)
 
+    def test_legacy_config_gains_disabled_empty_announcement_board_without_reordering_playlist(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "config.json"
+            legacy = json.loads(json.dumps(DEFAULT_CONFIG))
+            legacy.pop("announcement_board", None)
+            legacy["playlist"] = [
+                item for item in legacy["playlist"]
+                if item["module"] != "announcement_board"
+            ]
+            expected_existing = json.loads(json.dumps(legacy["playlist"]))
+            path.write_text(json.dumps(legacy))
+
+            config = ConfigStore(path).get()
+
+            self.assertEqual(config["playlist"][:-1], expected_existing)
+            self.assertEqual(config["playlist"][-1], {
+                "module": "announcement_board", "duration": 0, "enabled": False,
+            })
+            self.assertEqual(config["announcement_board"], {"announcements": []})
+
     def test_legacy_config_gains_default_sleep_gif_speed_without_changing_layout(self):
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / "config.json"
@@ -65,6 +85,30 @@ class ConfigStoreTests(unittest.TestCase):
             self.assertEqual(actual_layout, expected_layout)
             self.assertNotIn("gif_speed_percent", config["media_layout"]["splash"])
 
+    def test_static_announcement_is_validated_and_colours_are_canonicalized(self):
+        with tempfile.TemporaryDirectory() as directory:
+            store = ConfigStore(Path(directory) / "config.json")
+
+            config = store.update({
+                "announcement_board": {"announcements": [self.announcement()]},
+            })
+
+            announcement = config["announcement_board"]["announcements"][0]
+            self.assertEqual(announcement["style"]["foreground"], "#ffffff")
+            self.assertEqual(announcement["style"]["border_colour"], "#ffffff")
+            self.assertEqual(announcement["timing"], {
+                "mode": "static", "duration_seconds": 8,
+            })
+
+    def test_announcement_rejects_equal_start_and_end_times(self):
+        invalid = self.announcement()
+        invalid["schedule"]["end_time"] = invalid["schedule"]["start_time"]
+        with tempfile.TemporaryDirectory() as directory:
+            store = ConfigStore(Path(directory) / "config.json")
+
+            with self.assertRaisesRegex(ValueError, "must differ"):
+                store.update({"announcement_board": {"announcements": [invalid]}})
+
     def test_sleep_gif_speed_rejects_malformed_and_unsafe_percentages(self):
         invalid_values = [False, 0, -1, 24, 401, 10_000, 1.5, float("nan"), float("inf"), "100", None]
         for value in invalid_values:
@@ -72,6 +116,34 @@ class ConfigStoreTests(unittest.TestCase):
                 store = ConfigStore(Path(directory) / "config.json")
                 with self.assertRaises(ValueError):
                     store.update({"media_layout": {"sleep": {"gif_speed_percent": value}}})
+
+    @staticmethod
+    def announcement(**changes):
+        item = {
+            "id": "announcement_welcome",
+            "layout": "text_notice",
+            "headline": "Welcome",
+            "message": "Front desk closes at 5 PM",
+            "media": None,
+            "schedule": {
+                "start_date": "2030-01-15",
+                "end_date": "2030-01-15",
+                "start_time": "09:00",
+                "end_time": "17:00",
+            },
+            "style": {
+                "foreground": "#FFFFFF",
+                "background": "#000000",
+                "font": "5x7",
+                "alignment": "center",
+                "border": "none",
+                "border_colour": "#FFFFFF",
+            },
+            "timing": {"mode": "static", "duration_seconds": 8},
+            "transition": {"type": "cut"},
+        }
+        item.update(changes)
+        return item
 
     @staticmethod
     def advanced_module(**changes):

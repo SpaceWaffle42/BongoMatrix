@@ -13,6 +13,7 @@ from modules.media_player import play_media
 
 LOGGER = logging.getLogger(__name__)
 MODULES = {
+    "announcement_board": "modules.announcement_board",
     "clock_lava": "modules.clock_lava",
     "weather": "modules.weather_app",
     "openweather_overview": "modules.openweather_overview",

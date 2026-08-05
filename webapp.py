@@ -541,6 +541,7 @@ def create_app(
             config=config,
             modules=sorted(ALLOWED_MODULES) + custom_names,
             module_labels={
+                "announcement_board": "Announcement Board",
                 "weather": "Weather (Free · Open-Meteo)",
                 "openweather_overview": "OpenWeather Overview",
                 "openweather_forecast": "OpenWeather Forecast",
