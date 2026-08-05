@@ -84,6 +84,34 @@ class WeatherTests(unittest.TestCase):
         self.assertIn("temperature_unit=fahrenheit", request.full_url)
 
     @patch("modules.weather_app.time.monotonic", side_effect=[0, 0, 2])
+    def test_renderer_fallback_location_is_london(self, monotonic):
+        canvas = SimpleNamespace(width=64)
+        matrix = Mock()
+        matrix.matrix.CreateFrameCanvas.return_value = canvas
+        matrix.colour.side_effect = lambda name: name
+        matrix.colour_rgb.side_effect = lambda value: value
+        matrix.font.side_effect = lambda name: name
+        matrix.draw_text.return_value = 80
+        matrix.widget_scroll.return_value = (-1, 80)
+        matrix.swap.return_value = canvas
+        client = Mock()
+        client.fetch.return_value = WeatherSnapshot(
+            location="London, England, GB", status="Clear", temperature=16,
+            feels_like=15, high=18, low=12, humidity=70,
+        )
+        stop_event = Mock()
+        stop_event.is_set.return_value = False
+        stop_event.wait.return_value = False
+
+        self.assertTrue(
+            run(matrix, {"weather": {}}, duration=1, stop_event=stop_event, client=client)
+        )
+
+        client.fetch.assert_called_once_with(
+            "London, England, GB", latitude=None, longitude=None, units="celsius"
+        )
+
+    @patch("modules.weather_app.time.monotonic", side_effect=[0, 0, 2])
     def test_renderer_applies_units_layout_direction_and_speed(self, monotonic):
         canvas = SimpleNamespace(width=64)
         matrix = Mock()

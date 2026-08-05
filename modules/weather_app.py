@@ -175,7 +175,7 @@ def _render_error(matrix, message, duration, stop_event):
 def run(matrix, config, duration=20, stop_event=None, client=None):
     client = client or OpenMeteoClient()
     weather_config = config.get("weather", {})
-    location = weather_config.get("location", "Brighton, GB")
+    location = weather_config.get("location", "London, England, GB")
     units = weather_config.get("units", "celsius")
     unit_suffix = "F" if units == "fahrenheit" else "C"
     temperature_y = weather_config.get("temperature_y", 17)

@@ -19,20 +19,21 @@ class PreparedForecast:
 
 def prepare(config, stop_event=None, client=None, api_key=None):
     settings = config.get("openweather_forecast", {})
+    location_settings = config.get("weather", settings)
     if stop_event and stop_event.is_set():
         return PreparedForecast(cancelled=True)
     if not api_key:
         return PreparedForecast(error="KEY NOT SET")
     client = client or OpenWeatherClient()
-    location = settings.get("location", "Brighton, GB")
+    location = location_settings.get("location", "London, England, GB")
     units = settings.get("units", "celsius")
     max_items = settings.get("forecast_items", 6)
     try:
         periods = client.fetch_forecast(
             api_key=api_key,
             location=location,
-            latitude=settings.get("latitude"),
-            longitude=settings.get("longitude"),
+            latitude=location_settings.get("latitude"),
+            longitude=location_settings.get("longitude"),
             units=units,
             max_items=max_items,
         )
@@ -77,7 +78,9 @@ def run(
         return False
     periods = prepared.periods
     icons = prepared.icons
-    location = settings.get("location", "Brighton, GB")
+    location = config.get("weather", settings).get(
+        "location", "London, England, GB"
+    )
     units = settings.get("units", "celsius")
     suffix = "F" if units == "fahrenheit" else "C"
     background_hex = settings.get("background_colour", "#000000")
