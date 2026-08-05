@@ -147,7 +147,7 @@ class ConfigStoreTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / "config.json"
             store = ConfigStore(path)
-            self.assertEqual(store.get()["weather"]["location"], "Brighton, GB")
+            self.assertEqual(store.get()["weather"]["location"], "London, England, GB")
             self.assertTrue(path.exists())
 
             updated = store.update({"weather": {"location": "London, GB"}})
@@ -191,6 +191,19 @@ class ConfigStoreTests(unittest.TestCase):
                     updated = store.update({"media": {"splash": filename}})
                     self.assertEqual(updated["media"]["splash"], filename)
 
+    def test_default_weather_location_is_london_for_every_weather_app(self):
+        expected = {
+            "location": "London, England, GB",
+            "latitude": 51.5074,
+            "longitude": -0.1278,
+        }
+
+        for module in ("weather", "openweather_overview", "openweather_forecast"):
+            self.assertEqual(
+                {key: DEFAULT_CONFIG[module][key] for key in expected},
+                expected,
+            )
+
     def test_weather_location_accepts_selected_coordinates(self):
         with tempfile.TemporaryDirectory() as directory:
             store = ConfigStore(Path(directory) / "config.json")
@@ -202,6 +215,73 @@ class ConfigStoreTests(unittest.TestCase):
             self.assertEqual(updated["weather"]["latitude"], 50.8225)
             with self.assertRaises(ValueError):
                 store.update({"weather": {"latitude": 91}})
+
+    def test_weather_location_is_authoritative_for_every_weather_app(self):
+        with tempfile.TemporaryDirectory() as directory:
+            store = ConfigStore(Path(directory) / "config.json")
+
+            updated = store.update({
+                "weather": {
+                    "location": "Worthing, England, GB",
+                    "latitude": 50.8179,
+                    "longitude": -0.3729,
+                },
+                "openweather_overview": {
+                    "location": "Stale overview location",
+                    "latitude": 1,
+                    "longitude": 2,
+                },
+                "openweather_forecast": {
+                    "location": "Stale forecast location",
+                    "latitude": 3,
+                    "longitude": 4,
+                },
+            })
+
+            expected = {
+                "location": "Worthing, England, GB",
+                "latitude": 50.8179,
+                "longitude": -0.3729,
+            }
+            for module in ("weather", "openweather_overview", "openweather_forecast"):
+                self.assertEqual(
+                    {key: updated[module][key] for key in expected},
+                    expected,
+                )
+
+    def test_legacy_independent_locations_migrate_to_the_existing_shared_location(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "config.json"
+            saved = json.loads(json.dumps(DEFAULT_CONFIG))
+            saved["weather"].update({
+                "location": "Cheltenham, England, GB",
+                "latitude": 51.90006,
+                "longitude": -2.07972,
+            })
+            saved["openweather_overview"].update({
+                "location": "Stale overview",
+                "latitude": 1,
+                "longitude": 2,
+            })
+            saved["openweather_forecast"].update({
+                "location": "Stale forecast",
+                "latitude": 3,
+                "longitude": 4,
+            })
+            path.write_text(json.dumps(saved))
+
+            migrated = ConfigStore(path).get()
+
+            expected = {
+                "location": "Cheltenham, England, GB",
+                "latitude": 51.90006,
+                "longitude": -2.07972,
+            }
+            for module in ("weather", "openweather_overview", "openweather_forecast"):
+                self.assertEqual(
+                    {key: migrated[module][key] for key in expected},
+                    expected,
+                )
 
     def test_weather_display_options_are_saved_and_validated(self):
         with tempfile.TemporaryDirectory() as directory:

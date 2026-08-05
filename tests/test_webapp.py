@@ -199,7 +199,7 @@ class WebAppTests(unittest.TestCase):
         self.assertNotIn(key, body)
         self.assertNotIn("api_key", str(self.store.get()))
 
-    def test_dashboard_offers_two_disabled_openweather_apps_with_independent_editors(self):
+    def test_dashboard_offers_two_disabled_openweather_apps_with_independent_settings_editors(self):
         self.pair_browser()
 
         body = self.client.get("/").get_data(as_text=True)
@@ -212,11 +212,11 @@ class WebAppTests(unittest.TestCase):
         self.assertIn("OpenWeather Forecast", body)
         self.assertIn('data-module-editor="openweather_overview"', body)
         self.assertIn('data-module-editor="openweather_forecast"', body)
-        self.assertIn("openweather_overview:builtInSettings.openweather_overview", body)
-        self.assertIn("openweather_forecast:builtInSettings.openweather_forecast", body)
+        self.assertIn("openweather_overview:withSharedWeatherLocation(builtInSettings.openweather_overview)", body)
+        self.assertIn("openweather_forecast:withSharedWeatherLocation(builtInSettings.openweather_forecast)", body)
         self.assertIn("forecast_items", body)
         self.assertIn("card_seconds", body)
-        self.assertIn("makeWeatherLocationGroup", body)
+        self.assertNotIn("makeWeatherLocationGroup", body)
         config = self.store.get()
         self.assertTrue(next(item for item in config["playlist"] if item["module"] == "weather")["enabled"])
         self.assertFalse(next(item for item in config["playlist"] if item["module"] == "openweather_overview")["enabled"])
@@ -381,6 +381,93 @@ class WebAppTests(unittest.TestCase):
         self.assertIn("previewMedia(item.name)", body)
         self.assertIn("/preview`,{method:'POST'}", body)
         self.assertNotIn("window.open(", body)
+
+    def test_dashboard_uses_one_top_level_location_for_every_weather_app(self):
+        self.pair_browser()
+        body = self.client.get("/").get_data(as_text=True)
+
+        self.assertEqual(body.count('id="weather-location"'), 1)
+        self.assertIn("Used by all weather apps", body)
+        self.assertNotIn("makeWeatherLocationGroup", body)
+        self.assertNotIn("openweather_overview-location", body)
+        self.assertNotIn("openweather_forecast-location", body)
+        self.assertIn('.location-option[aria-selected="true"]', body)
+        self.assertIn("function withSharedWeatherLocation(settings)", body)
+        self.assertIn(
+            "openweather_overview:withSharedWeatherLocation(builtInSettings.openweather_overview)",
+            body,
+        )
+        self.assertIn(
+            "openweather_forecast:withSharedWeatherLocation(builtInSettings.openweather_forecast)",
+            body,
+        )
+
+    @unittest.skipUnless(shutil.which("node"), "Node.js is required")
+    def test_weather_location_dropdown_supports_pointer_and_keyboard_selection(self):
+        source = (Path(__file__).parents[1] / "app" / "templates" / "dashboard.html").read_text()
+        start = source.index("function wireWeatherLocationSearch")
+        end = source.index("\nconst locationInput", start)
+        function_source = source[start:end]
+        harness = r"""
+class Element {
+  constructor(id='') { this.id=id; this.value=''; this.hidden=true; this._children=[]; this.attributes={}; this.listeners={}; this.textContent=''; }
+  get children() { const collection={length:this._children.length,[Symbol.iterator]:()=>this._children[Symbol.iterator]()}; this._children.forEach((item,index)=>collection[index]=item); return collection; }
+  setAttribute(name,value) { this.attributes[name]=String(value); }
+  getAttribute(name) { return this.attributes[name]; }
+  removeAttribute(name) { delete this.attributes[name]; }
+  addEventListener(name,handler) { (this.listeners[name]??=[]).push(handler); }
+  emit(name,key) { const event={key,target:this,prevented:false,preventDefault(){this.prevented=true}}; for(const handler of this.listeners[name]??[]) handler(event); return event; }
+  append(...items) { this._children.push(...items); }
+  replaceChildren(...items) { this._children=[...items]; }
+  contains(target) { return target===this || target===input || target===results || this._children.includes(target); }
+}
+const search=new Element('search'), input=new Element('weather-location'), results=new Element('weather-results'), hint=new Element('hint');
+input.closest=()=>search;
+const places=[
+  {label:'London, England, GB',latitude:51.5074,longitude:-0.1278},
+  {label:'London, Ontario, CA',latitude:42.9834,longitude:-81.233}
+];
+let chosen=null, edited=null, deferred=false, pendingResolve=null;
+global.document={listeners:{},createElement:()=>new Element(),addEventListener(name,handler){(this.listeners[name]??=[]).push(handler)},emit(name,event){for(const handler of this.listeners[name]??[])handler(event)}};
+global.clearTimeout=()=>{};
+global.setTimeout=handler=>{queueMicrotask(handler);return 1};
+global.api=async()=>deferred?await new Promise(resolve=>{pendingResolve=resolve}):places;
+global.setMessage=message=>{throw new Error(message)};
+""" + function_source + r"""
+const controller=wireWeatherLocationSearch(input,results,hint,place=>{chosen=place},value=>{edited=value});
+async function settle(){await new Promise(resolve=>setImmediate(resolve));await new Promise(resolve=>setImmediate(resolve));}
+(async()=>{
+  input.value='Lon'; input.emit('input'); await settle();
+  if(results.hidden || results.children.length!==2 || input.getAttribute('aria-expanded')!=='true') throw new Error('results did not open');
+  results.children[0].onclick();
+  if(chosen?.label!=='London, England, GB' || !results.hidden) throw new Error('pointer selection failed');
+  input.value='London'; input.emit('input'); await settle();
+  const down1=input.emit('keydown','ArrowDown'), down2=input.emit('keydown','ArrowDown');
+  const enter=input.emit('keydown','Enter');
+  if(!down1.prevented || !down2.prevented || !enter.prevented) throw new Error('navigation keys were not handled');
+  if(chosen?.label!=='London, Ontario, CA') throw new Error('keyboard selection failed');
+  if(!results.hidden || input.getAttribute('aria-expanded')!=='false') throw new Error('selection did not close results');
+  if(edited!=='London') throw new Error('editing callback did not receive the query');
+  deferred=true; input.value='Old location'; input.emit('input'); await settle();
+  if(typeof pendingResolve!=='function') throw new Error('deferred request did not start');
+  input.emit('keydown','Escape'); pendingResolve(places); await settle();
+  if(!results.hidden || results.children.length!==0) throw new Error('Escape allowed stale results to reopen');
+  pendingResolve=null; input.value='Another old location'; input.emit('input'); await settle();
+  if(typeof pendingResolve!=='function') throw new Error('second deferred request did not start');
+  document.emit('click',{target:new Element('outside')}); pendingResolve(places); await settle();
+  if(!results.hidden || results.children.length!==0) throw new Error('outside click allowed stale results to reopen');
+  controller.cancel();
+  console.log('LOCATION_DROPDOWN_BEHAVIOR_PASS');
+})().catch(error=>{console.error(error);process.exit(1)});
+"""
+        node = shutil.which("node")
+        assert node is not None
+        result = subprocess.run(
+            [node, "-e", harness], cwd=Path(__file__).parents[1],
+            text=True, capture_output=True, check=False,
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("LOCATION_DROPDOWN_BEHAVIOR_PASS", result.stdout)
 
     def test_dashboard_dropdowns_have_contrasting_background_and_text(self):
         self.pair_browser()

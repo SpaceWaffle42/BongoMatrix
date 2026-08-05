@@ -11,8 +11,8 @@ from PIL import Image
 
 from modules.openweather_common import OpenWeatherClient, OpenWeatherError
 from modules.openweather_common import OpenWeatherForecastPeriod, OpenWeatherSnapshot
-from modules.openweather_forecast import run as run_forecast
-from modules.openweather_overview import run as run_overview
+from modules.openweather_forecast import prepare as prepare_forecast, run as run_forecast
+from modules.openweather_overview import prepare as prepare_overview, run as run_overview
 
 
 class FakeResponse:
@@ -164,6 +164,39 @@ class OpenWeatherClientTests(unittest.TestCase):
 
 
 class OpenWeatherOverviewTests(unittest.TestCase):
+    def test_prepare_uses_the_shared_top_level_weather_location(self):
+        client = Mock()
+        client.fetch_current.return_value = OpenWeatherSnapshot(
+            location="Worthing, England, GB", status="Clear", temperature=16,
+            feels_like=15, high=18, low=12, humidity=70, icon_code="01d",
+        )
+        client.fetch_icon.return_value = Image.new("RGBA", (2, 2), "white")
+        config = {
+            "weather": {
+                "location": "Worthing, England, GB",
+                "latitude": 50.8179,
+                "longitude": -0.3729,
+            },
+            "openweather_overview": {
+                "location": "Stale per-app location",
+                "latitude": 1,
+                "longitude": 2,
+                "units": "celsius",
+                "background_colour": "#000000",
+            },
+        }
+
+        prepared = prepare_overview(config, client=client, api_key="x")
+
+        self.assertIsNone(prepared.error)
+        client.fetch_current.assert_called_once_with(
+            api_key="x",
+            location="Worthing, England, GB",
+            latitude=50.8179,
+            longitude=-0.3729,
+            units="celsius",
+        )
+
     def test_already_cancelled_run_performs_no_provider_requests(self):
         stop_event = threading.Event()
         stop_event.set()
@@ -302,6 +335,42 @@ class OpenWeatherOverviewTests(unittest.TestCase):
 
 
 class OpenWeatherForecastTests(unittest.TestCase):
+    def test_prepare_uses_the_shared_top_level_weather_location(self):
+        period = OpenWeatherForecastPeriod(
+            label="Tue 15:00", status="Rain", temperature=18,
+            feels_like=17, high=20, low=16, icon_code="10d",
+        )
+        client = Mock()
+        client.fetch_forecast.return_value = [period]
+        client.fetch_icon.return_value = Image.new("RGBA", (2, 2), "white")
+        config = {
+            "weather": {
+                "location": "Worthing, England, GB",
+                "latitude": 50.8179,
+                "longitude": -0.3729,
+            },
+            "openweather_forecast": {
+                "location": "Stale per-app location",
+                "latitude": 1,
+                "longitude": 2,
+                "units": "fahrenheit",
+                "forecast_items": 4,
+                "background_colour": "#000000",
+            },
+        }
+
+        prepared = prepare_forecast(config, client=client, api_key="x")
+
+        self.assertIsNone(prepared.error)
+        client.fetch_forecast.assert_called_once_with(
+            api_key="x",
+            location="Worthing, England, GB",
+            latitude=50.8179,
+            longitude=-0.3729,
+            units="fahrenheit",
+            max_items=4,
+        )
+
     def test_already_cancelled_run_performs_no_provider_requests(self):
         stop_event = threading.Event()
         stop_event.set()

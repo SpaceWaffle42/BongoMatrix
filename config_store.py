@@ -38,9 +38,9 @@ DEFAULT_CONFIG = {
         "active_end": "20:00",
     },
     "weather": {
-        "location": "Brighton, GB",
-        "latitude": None,
-        "longitude": None,
+        "location": "London, England, GB",
+        "latitude": 51.5074,
+        "longitude": -0.1278,
         "units": "celsius",
         "temperature_y": 17,
         "ticker_y": 31,
@@ -62,7 +62,7 @@ DEFAULT_CONFIG = {
         "ticker_colour": "#ffb300",
     },
     "openweather_overview": {
-        "location": "Brighton, GB", "latitude": None, "longitude": None,
+        "location": "London, England, GB", "latitude": 51.5074, "longitude": -0.1278,
         "units": "celsius", "icon_x": 0, "icon_y": 0,
         "now_x": 2, "now_y": 22, "temperature_x": 26, "temperature_y": 15,
         "high_x": 50, "high_y": 11, "low_x": 50, "low_y": 20,
@@ -72,7 +72,7 @@ DEFAULT_CONFIG = {
         "ticker_colour": "#dcd5d5",
     },
     "openweather_forecast": {
-        "location": "Brighton, GB", "latitude": None, "longitude": None,
+        "location": "London, England, GB", "latitude": 51.5074, "longitude": -0.1278,
         "units": "celsius", "forecast_items": 6, "card_seconds": 5,
         "icon_x": 0, "icon_y": 0, "time_x": 2, "time_y": 22,
         "temperature_x": 26, "temperature_y": 15,
@@ -426,6 +426,13 @@ def validate_config(config):
         if not _is_hex_colour(config["weather"][key]):
             raise ValueError(f"weather {key} must use #RRGGBB format")
         config["weather"][key] = config["weather"][key].lower()
+
+    shared_location = {
+        key: config["weather"][key]
+        for key in ("location", "latitude", "longitude")
+    }
+    for module in ("openweather_overview", "openweather_forecast"):
+        config[module].update(shared_location)
 
     _validate_openweather_settings(
         config["openweather_overview"], "openweather overview"
