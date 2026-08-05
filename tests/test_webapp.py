@@ -717,7 +717,12 @@ for (const example of canvasStarterExamples) {
   applyCanvasTemplate('custom_example', example.id);
   modules.push(structuredClone(global.customModules[0]));
 }
-process.stdout.write(JSON.stringify({examples: canvasStarterExamples, modules}));
+const rainbow = modules.find(module => module.layers.every(layer => layer.type === 'circle'));
+const rainbowColours = Array.from(
+  {length: rainbow.frame_count},
+  (_, frame) => orderedLayersForFrame(rainbow, frame).map(item => item.properties.colour),
+);
+process.stdout.write(JSON.stringify({examples: canvasStarterExamples, modules, rainbowColours}));
 """
         node = shutil.which("node")
         assert node is not None
@@ -748,6 +753,15 @@ process.stdout.write(JSON.stringify({examples: canvasStarterExamples, modules}))
         )
         self.assertEqual(len(modules["rainbow_pulse"]["layers"]), 7)
         self.assertEqual(modules["rainbow_pulse"]["playback"], "loop")
+
+        from modules.custom_text import ordered_layers_for_frame
+        physical_colours = [
+            [properties["colour"] for _, properties in ordered_layers_for_frame(
+                modules["rainbow_pulse"], frame,
+            )]
+            for frame in range(modules["rainbow_pulse"]["frame_count"])
+        ]
+        self.assertEqual(payload["rainbowColours"], physical_colours)
 
         for module in payload["modules"]:
             with tempfile.TemporaryDirectory() as directory:

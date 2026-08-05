@@ -186,11 +186,11 @@
       layer.keyframes = [
         {frame: 0, easing: 'ease_in_out', properties: {radius, colour}},
         {frame: 17, easing: 'ease_in_out', properties: {radius: radius + 5, colour: colours[(index + 1) % colours.length]}},
-        {frame: 35, easing: 'ease_in_out', properties: {radius, colour}},
+        {frame: 34, easing: 'ease_in_out', properties: {radius, colour}},
       ];
       return layer;
     });
-    Object.assign(module, {background: '#030008', frame_count: 36, fps: 18, playback: 'loop', layers, overrides: []});
+    Object.assign(module, {background: '#030008', frame_count: 35, fps: 18, playback: 'loop', layers, overrides: []});
   }
 
   const canvasStarterExamples = Object.freeze([
