@@ -503,28 +503,36 @@ def _validate_announcement_board(board):
         if transition.get("type") == "cut":
             if transition != {"type": "cut"}:
                 raise ValueError("cut announcement transition has invalid fields")
-        elif transition.get("type") == "fade":
+        elif transition.get("type") in {"fade", "pixel_dissolve"}:
+            transition_label = transition["type"].replace("_", " ")
             if set(transition) != {"type", "duration_seconds"}:
-                raise ValueError("fade announcement transition has invalid fields")
+                raise ValueError(f"{transition_label} announcement transition has invalid fields")
             transition_duration = transition["duration_seconds"]
             if (
                 isinstance(transition_duration, bool)
                 or not isinstance(transition_duration, (int, float))
                 or not 0.1 <= transition_duration <= 3
             ):
-                raise ValueError("fade announcement transition duration must be between 0.1 and 3 seconds")
-        elif transition.get("type") == "slide":
+                raise ValueError(
+                    f"{transition_label} announcement transition duration must be between 0.1 and 3 seconds"
+                )
+        elif transition.get("type") in {"slide", "wipe"}:
+            transition_type = transition["type"]
             if set(transition) != {"type", "direction", "duration_seconds"}:
-                raise ValueError("slide announcement transition has invalid fields")
+                raise ValueError(f"{transition_type} announcement transition has invalid fields")
             if transition["direction"] not in {"left", "right"}:
-                raise ValueError("slide announcement transition direction must be left or right")
+                raise ValueError(
+                    f"{transition_type} announcement transition direction must be left or right"
+                )
             transition_duration = transition["duration_seconds"]
             if (
                 isinstance(transition_duration, bool)
                 or not isinstance(transition_duration, (int, float))
                 or not 0.1 <= transition_duration <= 3
             ):
-                raise ValueError("slide announcement transition duration must be between 0.1 and 3 seconds")
+                raise ValueError(
+                    f"{transition_type} announcement transition duration must be between 0.1 and 3 seconds"
+                )
         else:
             raise ValueError("announcement transition is not supported")
 

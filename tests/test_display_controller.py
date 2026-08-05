@@ -239,7 +239,8 @@ class DisplayControllerTests(unittest.TestCase):
             return name != "announcement_board"
 
         controller._execute = Mock(side_effect=execute)
-        controller._run_loop_unchecked()
+        with patch.object(controller, "_is_active", return_value=True):
+            controller._run_loop_unchecked()
 
         self.assertEqual(calls, ["announcement_board", "clock_lava"])
 
@@ -430,7 +431,8 @@ class DisplayControllerTests(unittest.TestCase):
         matrix = Mock()
         controller = DisplayController(matrix, store)
 
-        with patch.object(display_controller.LOGGER, "exception") as log_exception:
+        with patch.object(display_controller.LOGGER, "exception") as log_exception, \
+             patch.object(controller, "_is_active", return_value=True):
             controller.start()
             time.sleep(0.82)
             controller.stop(timeout=1)

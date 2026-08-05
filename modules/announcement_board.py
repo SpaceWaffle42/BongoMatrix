@@ -3,7 +3,10 @@
 from __future__ import annotations
 
 import datetime as dt
+import hashlib
 import time
+
+from PIL import Image
 
 
 def _scheduled_interval(schedule):
@@ -37,6 +40,21 @@ def active_announcements(announcements, *, now):
         for announcement in announcements
         if is_announcement_active(announcement, now=now)
     ]
+
+
+def dissolve_pixel_order(announcement_id, width, height):
+    """Return a stable ID-specific permutation of panel coordinates."""
+    coordinates = [(x, y) for y in range(height) for x in range(width)]
+    return sorted(
+        coordinates,
+        key=lambda point: (
+            hashlib.sha256(
+                f"{announcement_id}:{point[0]}:{point[1]}".encode("utf-8")
+            ).digest(),
+            point[1],
+            point[0],
+        ),
+    )
 
 
 def _aligned_text_x(matrix, canvas, font, colour, text, alignment, baseline):
@@ -125,7 +143,7 @@ def _scroll_text_notice(matrix, canvas, announcement, stop_event):
     return canvas, False
 
 
-def _render_icon_notice(matrix, canvas, announcement):
+def _render_icon_notice(matrix, canvas, announcement, media_brightness=1, x_offset=0):
     style = announcement["style"]
     if style["alignment"] != "left":
         raise NotImplementedError("icon notice alignment is not implemented")
@@ -140,20 +158,23 @@ def _render_icon_notice(matrix, canvas, announcement):
         )
         _draw_border(matrix, canvas, style)
         return
-    matrix.draw_image(frames[0], 1, 1, width=14, height=14, canvas=canvas)
+    image = frames[0]
+    if media_brightness != 1:
+        image = _scaled_image(image, media_brightness)
+    matrix.draw_image(image, 1 + x_offset, 1, width=14, height=14, canvas=canvas)
     matrix.draw_text(
-        matrix.font(style["font"]), 18, 11, foreground,
+        matrix.font(style["font"]), 18 + x_offset, 11, foreground,
         announcement["headline"], canvas=canvas,
     )
     if announcement["message"]:
         matrix.draw_text(
-            matrix.font("4x6"), 18, 23, foreground,
+            matrix.font("4x6"), 18 + x_offset, 23, foreground,
             announcement["message"], canvas=canvas,
         )
     _draw_border(matrix, canvas, style)
 
 
-def _render_image_banner(matrix, canvas, announcement):
+def _render_image_banner(matrix, canvas, announcement, media_brightness=1, x_offset=0):
     style = announcement["style"]
     if style["alignment"] != "left":
         raise NotImplementedError("image banner alignment is not implemented")
@@ -168,24 +189,27 @@ def _render_image_banner(matrix, canvas, announcement):
         )
         _draw_border(matrix, canvas, style)
         return
+    image = frames[0]
+    if media_brightness != 1:
+        image = _scaled_image(image, media_brightness)
     matrix.draw_image(
-        frames[0], 0, 0,
+        image, x_offset, 0,
         width=matrix.matrix.width, height=matrix.matrix.height // 2,
         keep_aspect=False, canvas=canvas,
     )
     matrix.draw_text(
-        matrix.font(style["font"]), 2, 24, foreground,
+        matrix.font(style["font"]), 2 + x_offset, 24, foreground,
         announcement["headline"], canvas=canvas,
     )
     if announcement["message"]:
         matrix.draw_text(
-            matrix.font("4x6"), 2, 31, foreground,
+            matrix.font("4x6"), 2 + x_offset, 31, foreground,
             announcement["message"], canvas=canvas,
         )
     _draw_border(matrix, canvas, style)
 
 
-def _render_full_image(matrix, canvas, announcement):
+def _render_full_image(matrix, canvas, announcement, media_brightness=1, x_offset=0):
     style = announcement["style"]
     if style["alignment"] != "left":
         raise NotImplementedError("full image alignment is not implemented")
@@ -200,32 +224,35 @@ def _render_full_image(matrix, canvas, announcement):
         )
         _draw_border(matrix, canvas, style)
         return
+    image = frames[0]
+    if media_brightness != 1:
+        image = _scaled_image(image, media_brightness)
     matrix.draw_image(
-        frames[0], 0, 0,
+        image, x_offset, 0,
         width=matrix.matrix.width, height=matrix.matrix.height,
         keep_aspect=False, canvas=canvas,
     )
     if announcement["message"]:
         matrix.draw_text(
-            matrix.font("4x6"), 2, 21, foreground,
+            matrix.font("4x6"), 2 + x_offset, 21, foreground,
             announcement["message"], canvas=canvas,
         )
     matrix.draw_text(
-        matrix.font(style["font"]), 2, 30, foreground,
+        matrix.font(style["font"]), 2 + x_offset, 30, foreground,
         announcement["headline"], canvas=canvas,
     )
     _draw_border(matrix, canvas, style)
 
 
-def _render_static_layout(matrix, canvas, announcement):
+def _render_static_layout(matrix, canvas, announcement, media_brightness=1, x_offset=0):
     if announcement["layout"] == "text_notice":
-        _render_text_notice(matrix, canvas, announcement)
+        _render_text_notice(matrix, canvas, announcement, x_offset=x_offset)
     elif announcement["layout"] == "icon_notice":
-        _render_icon_notice(matrix, canvas, announcement)
+        _render_icon_notice(matrix, canvas, announcement, media_brightness, x_offset)
     elif announcement["layout"] == "image_banner":
-        _render_image_banner(matrix, canvas, announcement)
+        _render_image_banner(matrix, canvas, announcement, media_brightness, x_offset)
     elif announcement["layout"] == "full_image":
-        _render_full_image(matrix, canvas, announcement)
+        _render_full_image(matrix, canvas, announcement, media_brightness, x_offset)
     else:
         raise NotImplementedError("announcement layout is not implemented")
 
@@ -235,9 +262,15 @@ def _scaled_colour(value, factor):
     return "#" + "".join(f"{channel:02x}" for channel in channels)
 
 
+def _scaled_image(image, factor):
+    rgb = image.convert("RGB").point(lambda channel: round(channel * factor))
+    if "A" not in image.getbands():
+        return rgb
+    red, green, blue = rgb.split()
+    return Image.merge("RGBA", (red, green, blue, image.getchannel("A")))
+
+
 def _render_fade(matrix, canvas, announcement, stop_event):
-    if announcement["layout"] != "text_notice":
-        raise NotImplementedError("media announcement fade is not implemented")
     delay = announcement["transition"]["duration_seconds"] / 4
     for step in range(1, 5):
         if stop_event is not None and stop_event.is_set():
@@ -258,7 +291,7 @@ def _render_fade(matrix, canvas, announcement, stop_event):
                 ),
             },
         }
-        _render_static_layout(matrix, canvas, faded)
+        _render_static_layout(matrix, canvas, faded, media_brightness=factor)
         canvas = matrix.swap(canvas)
         if stop_event is not None:
             if stop_event.wait(delay):
@@ -269,8 +302,6 @@ def _render_fade(matrix, canvas, announcement, stop_event):
 
 
 def _render_slide(matrix, canvas, announcement, stop_event):
-    if announcement["layout"] != "text_notice":
-        raise NotImplementedError("media announcement slide is not implemented")
     delay = announcement["transition"]["duration_seconds"] / 4
     direction = announcement["transition"]["direction"]
     for step in range(1, 5):
@@ -280,7 +311,59 @@ def _render_slide(matrix, canvas, announcement, stop_event):
         offset = (matrix.matrix.width * remaining) // 4
         if direction == "right":
             offset = -offset
-        _render_text_notice(matrix, canvas, announcement, x_offset=offset)
+        _render_static_layout(matrix, canvas, announcement, x_offset=offset)
+        canvas = matrix.swap(canvas)
+        if stop_event is not None:
+            if stop_event.wait(delay):
+                return canvas, True
+        else:
+            time.sleep(delay)
+    return canvas, False
+
+
+def _render_wipe(matrix, canvas, announcement, stop_event):
+    delay = announcement["transition"]["duration_seconds"] / 4
+    direction = announcement["transition"]["direction"]
+    background = matrix.colour_rgb(announcement["style"]["background"])
+    width = matrix.matrix.width
+    bottom = matrix.matrix.height - 1
+    for step in range(1, 5):
+        if stop_event is not None and stop_event.is_set():
+            return canvas, True
+        _render_static_layout(matrix, canvas, announcement)
+        reveal_width = (width * step) // 4
+        hidden_columns = (
+            range(reveal_width, width)
+            if direction == "left"
+            else range(0, width - reveal_width)
+        )
+        for x in hidden_columns:
+            matrix.draw_line(x, 0, x, bottom, background, canvas=canvas)
+        canvas = matrix.swap(canvas)
+        if stop_event is not None:
+            if stop_event.wait(delay):
+                return canvas, True
+        else:
+            time.sleep(delay)
+    return canvas, False
+
+
+def _render_pixel_dissolve(matrix, canvas, announcement, stop_event):
+    delay = announcement["transition"]["duration_seconds"] / 4
+    background = matrix.colour_rgb(announcement["style"]["background"])
+    order = dissolve_pixel_order(
+        announcement["id"], matrix.matrix.width, matrix.matrix.height,
+    )
+    for step in range(1, 5):
+        if stop_event is not None and stop_event.is_set():
+            return canvas, True
+        _render_static_layout(matrix, canvas, announcement)
+        revealed = (len(order) * step) // 4
+        for x, y in order[revealed:]:
+            matrix.pixel(
+                x, y, background.red, background.green, background.blue,
+                canvas=canvas,
+            )
         canvas = matrix.swap(canvas)
         if stop_event is not None:
             if stop_event.wait(delay):
@@ -324,6 +407,18 @@ def run(matrix, config, duration, stop_event=None, now_provider=dt.datetime.now)
                     break
             elif announcement["transition"]["type"] == "slide":
                 canvas, interrupted = _render_slide(
+                    matrix, canvas, announcement, stop_event,
+                )
+                if interrupted:
+                    break
+            elif announcement["transition"]["type"] == "wipe":
+                canvas, interrupted = _render_wipe(
+                    matrix, canvas, announcement, stop_event,
+                )
+                if interrupted:
+                    break
+            elif announcement["transition"]["type"] == "pixel_dissolve":
+                canvas, interrupted = _render_pixel_dissolve(
                     matrix, canvas, announcement, stop_event,
                 )
                 if interrupted:

@@ -2,6 +2,9 @@ import datetime as dt
 import unittest
 from unittest.mock import Mock
 
+from PIL import Image
+
+import modules.announcement_board as announcement_board
 from modules.announcement_board import active_announcements, run
 
 
@@ -428,6 +431,151 @@ class AnnouncementBoardTests(unittest.TestCase):
             [call.args[0] for call in stop.wait.call_args_list],
             [0.1, 0.1, 0.1, 0.1, 8],
         )
+    def test_wipe_left_transition_reveals_four_column_bands_before_hold(self):
+        matrix = Mock()
+        matrix.matrix.width = 64
+        matrix.matrix.height = 32
+        matrix.matrix.CreateFrameCanvas.return_value = "canvas"
+        matrix.font.return_value = "font:5x7"
+        white = Mock(red=255, green=255, blue=255)
+        black = Mock(red=0, green=0, blue=0)
+        matrix.colour_rgb.side_effect = lambda value: {"#ffffff": white, "#000000": black}[value]
+        matrix.swap.return_value = "canvas"
+        stop = Mock()
+        stop.is_set.return_value = False
+        stop.wait.return_value = False
+        announcement = self.item("announcement_wipe", "09:00", "17:00")
+        announcement["message"] = ""
+        announcement["transition"] = {
+            "type": "wipe", "direction": "left", "duration_seconds": 0.4,
+        }
+
+        self.assertTrue(run(
+            matrix,
+            {"announcement_board": {"announcements": [announcement]}},
+            duration=0,
+            stop_event=stop,
+            now_provider=lambda: dt.datetime(2030, 1, 15, 12, 0),
+        ))
+
+        self.assertEqual(
+            [call.args[0] for call in matrix.draw_line.call_args_list],
+            list(range(16, 64)) + list(range(32, 64)) + list(range(48, 64)),
+        )
+        self.assertTrue(all(call.args[1:4] == (0, call.args[0], 31) for call in matrix.draw_line.call_args_list))
+        self.assertTrue(all(call.args[4] is black for call in matrix.draw_line.call_args_list))
+        self.assertEqual(matrix.swap.call_count, 4)
+        self.assertEqual([call.args[0] for call in stop.wait.call_args_list], [0.1] * 4 + [8])
+    def test_pixel_dissolve_order_is_stable_complete_and_id_specific(self):
+        first = announcement_board.dissolve_pixel_order("announcement_one", 4, 2)
+        repeated = announcement_board.dissolve_pixel_order("announcement_one", 4, 2)
+        other = announcement_board.dissolve_pixel_order("announcement_two", 4, 2)
+
+        self.assertEqual(first, repeated)
+        self.assertEqual(set(first), {(x, y) for y in range(2) for x in range(4)})
+        self.assertEqual(len(first), 8)
+        self.assertNotEqual(first, other)
+    def test_pixel_dissolve_masks_unrevealed_suffix_in_four_stable_steps(self):
+        matrix = Mock()
+        matrix.matrix.width = 4
+        matrix.matrix.height = 2
+        matrix.matrix.CreateFrameCanvas.return_value = "canvas"
+        matrix.font.return_value = "font:5x7"
+        white = Mock(red=255, green=255, blue=255)
+        black = Mock(red=0, green=0, blue=0)
+        matrix.colour_rgb.side_effect = lambda value: {"#ffffff": white, "#000000": black}[value]
+        matrix.swap.return_value = "canvas"
+        stop = Mock()
+        stop.is_set.return_value = False
+        stop.wait.return_value = False
+        announcement = self.item("announcement_dissolve", "09:00", "17:00")
+        announcement["message"] = ""
+        announcement["transition"] = {
+            "type": "pixel_dissolve", "duration_seconds": 0.4,
+        }
+        order = announcement_board.dissolve_pixel_order("announcement_dissolve", 4, 2)
+
+        self.assertTrue(run(
+            matrix,
+            {"announcement_board": {"announcements": [announcement]}},
+            duration=0,
+            stop_event=stop,
+            now_provider=lambda: dt.datetime(2030, 1, 15, 12, 0),
+        ))
+
+        expected_hidden = order[2:] + order[4:] + order[6:]
+        self.assertEqual(
+            [call.args[:2] for call in matrix.pixel.call_args_list],
+            expected_hidden,
+        )
+        self.assertTrue(all(call.args[2:5] == (0, 0, 0) for call in matrix.pixel.call_args_list))
+        self.assertEqual(matrix.swap.call_count, 4)
+        self.assertEqual([call.args[0] for call in stop.wait.call_args_list], [0.1] * 4 + [8])
+    def test_fade_transition_dims_icon_pixels_as_well_as_text(self):
+        matrix = Mock()
+        matrix.matrix.width = 64
+        matrix.matrix.height = 32
+        matrix.matrix.CreateFrameCanvas.return_value = "canvas"
+        matrix.font.return_value = "font:5x7"
+        matrix.colour_rgb.side_effect = lambda value: Mock(
+            red=int(value[1:3], 16), green=int(value[3:5], 16), blue=int(value[5:7], 16),
+        )
+        matrix.media_frames.return_value = [Image.new("RGB", (1, 1), "white")]
+        matrix.swap.return_value = "canvas"
+        stop = Mock()
+        stop.is_set.return_value = False
+        stop.wait.return_value = False
+        announcement = self.item("announcement_icon_fade", "09:00", "17:00")
+        announcement["layout"] = "icon_notice"
+        announcement["media"] = "icon.png"
+        announcement["message"] = ""
+        announcement["transition"] = {"type": "fade", "duration_seconds": 0.4}
+
+        self.assertTrue(run(
+            matrix,
+            {"announcement_board": {"announcements": [announcement]}},
+            duration=0,
+            stop_event=stop,
+            now_provider=lambda: dt.datetime(2030, 1, 15, 12, 0),
+        ))
+
+        self.assertEqual(
+            [call.args[0].getpixel((0, 0))[0] for call in matrix.draw_image.call_args_list],
+            [64, 128, 191, 255],
+        )
+        self.assertEqual([call.args[3].red for call in matrix.draw_text.call_args_list], [64, 128, 191, 255])
+    def test_slide_transition_moves_icon_and_text_together(self):
+        matrix = Mock()
+        matrix.matrix.width = 64
+        matrix.matrix.height = 32
+        matrix.matrix.CreateFrameCanvas.return_value = "canvas"
+        matrix.font.return_value = "font:5x7"
+        matrix.colour_rgb.side_effect = lambda value: Mock(
+            red=int(value[1:3], 16), green=int(value[3:5], 16), blue=int(value[5:7], 16),
+        )
+        matrix.media_frames.return_value = ["icon-frame"]
+        matrix.swap.return_value = "canvas"
+        stop = Mock()
+        stop.is_set.return_value = False
+        stop.wait.return_value = False
+        announcement = self.item("announcement_icon_slide", "09:00", "17:00")
+        announcement["layout"] = "icon_notice"
+        announcement["media"] = "icon.png"
+        announcement["message"] = ""
+        announcement["transition"] = {
+            "type": "slide", "direction": "left", "duration_seconds": 0.4,
+        }
+
+        self.assertTrue(run(
+            matrix,
+            {"announcement_board": {"announcements": [announcement]}},
+            duration=0,
+            stop_event=stop,
+            now_provider=lambda: dt.datetime(2030, 1, 15, 12, 0),
+        ))
+
+        self.assertEqual([call.args[1] for call in matrix.draw_image.call_args_list], [49, 33, 17, 1])
+        self.assertEqual([call.args[1] for call in matrix.draw_text.call_args_list], [66, 50, 34, 18])
 
 
 if __name__ == "__main__":

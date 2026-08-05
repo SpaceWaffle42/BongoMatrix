@@ -156,6 +156,44 @@ class ConfigStoreTests(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, "slide announcement transition direction"):
                 store.update({"announcement_board": {"announcements": [sliding]}})
 
+    def test_wipe_transition_has_direction_and_bounded_duration(self):
+        wiping = self.announcement()
+        wiping["transition"] = {
+            "type": "wipe", "direction": "left", "duration_seconds": 0.4,
+        }
+        with tempfile.TemporaryDirectory() as directory:
+            store = ConfigStore(Path(directory) / "config.json")
+
+            saved = store.update({
+                "announcement_board": {"announcements": [wiping]},
+            })
+
+            self.assertEqual(
+                saved["announcement_board"]["announcements"][0]["transition"],
+                {"type": "wipe", "direction": "left", "duration_seconds": 0.4},
+            )
+            wiping["transition"]["direction"] = "down"
+            with self.assertRaisesRegex(ValueError, "wipe announcement transition direction"):
+                store.update({"announcement_board": {"announcements": [wiping]}})
+
+    def test_pixel_dissolve_transition_has_only_a_bounded_duration(self):
+        dissolve = self.announcement()
+        dissolve["transition"] = {"type": "pixel_dissolve", "duration_seconds": 0.4}
+        with tempfile.TemporaryDirectory() as directory:
+            store = ConfigStore(Path(directory) / "config.json")
+
+            saved = store.update({
+                "announcement_board": {"announcements": [dissolve]},
+            })
+
+            self.assertEqual(
+                saved["announcement_board"]["announcements"][0]["transition"],
+                {"type": "pixel_dissolve", "duration_seconds": 0.4},
+            )
+            dissolve["transition"]["seed"] = 42
+            with self.assertRaisesRegex(ValueError, "pixel dissolve announcement transition"):
+                store.update({"announcement_board": {"announcements": [dissolve]}})
+
     def test_announcement_rejects_equal_start_and_end_times(self):
         invalid = self.announcement()
         invalid["schedule"]["end_time"] = invalid["schedule"]["start_time"]
