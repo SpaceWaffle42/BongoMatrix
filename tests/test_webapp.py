@@ -1586,6 +1586,40 @@ process.stdout.write(JSON.stringify(output));
         self.assertIn("temperature_y:Number(document.querySelector('#weather-temperature-y').value)", body)
         self.assertIn("ticker_y:Number(document.querySelector('#weather-ticker-y').value)", body)
 
+    def test_announcement_board_editor_has_accessible_grouped_foundation(self):
+        self.pair_browser()
+        body = self.client.get("/").get_data(as_text=True)
+
+        self.assertIn('data-module-editor="announcement_board"', body)
+        self.assertIn("initialAnnouncements", body)
+        self.assertIn("announcementEditorGroups", body)
+        self.assertIn("makeButton('Add announcement'", body)
+        self.assertIn("makeButton('Reset announcement board'", body)
+        self.assertIn("createElement('fieldset')", body)
+        self.assertIn("createElement('legend')", body)
+        for group in ("Content", "Schedule", "Appearance", "Timing", "Transition"):
+            self.assertIn(f"name:'{group}'", body)
+
+    def test_announcement_board_editor_serializes_ordered_state_in_config_body(self):
+        self.pair_browser()
+        body = self.client.get("/").get_data(as_text=True)
+
+        self.assertIn("function announcementsFromEditor()", body)
+        self.assertIn("announcement_board:{announcements:announcementsFromEditor()}", body)
+
+    def test_add_announcement_creates_disabled_schema_valid_draft(self):
+        self.pair_browser()
+        body = self.client.get("/").get_data(as_text=True)
+
+        self.assertIn("function addAnnouncement()", body)
+        self.assertIn("id:'announcement_'+", body)
+        self.assertIn("enabled:false", body)
+        self.assertIn("layout:'text_notice'", body)
+        self.assertIn("timing:{mode:'static',duration_seconds:8}", body)
+        self.assertIn("transition:{type:'cut'}", body)
+        self.assertIn("schedule:{start_date:today,end_date:today,days:[0,1,2,3,4,5,6],start_time:'00:00',end_time:'23:59'}", body)
+        self.assertIn("makeButton('Add announcement',addAnnouncement", body)
+
     def test_playlist_builtin_editors_are_grouped_complete_and_resettable(self):
         self.pair_browser()
         body = self.client.get("/").get_data(as_text=True)
