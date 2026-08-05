@@ -680,6 +680,95 @@ console.log(JSON.stringify({
         self.assertIn("'#0000ff'", asset)
         self.assertIn("frame_count: 32", asset)
 
+    @unittest.skipUnless(shutil.which("node"), "Node.js is required")
+    def test_advanced_editor_offers_five_valid_examples_including_matrix_rain_and_rainbow(self):
+        harness = r"""
+const fs = require('fs');
+global.window = global;
+const list = {replaceChildren: () => {}, append: () => {}};
+global.document = {
+  querySelectorAll: () => [],
+  querySelector: selector => selector === '#custom-modules' ? list : null,
+  createElement: () => ({}),
+};
+global.CSS = {escape: value => value};
+global.customModules = [];
+global.mediaItems = [];
+global.confirm = () => true;
+global.setInterval = () => 0;
+global.syncCustomModuleUI = () => {};
+global.syncPlaylistDurations = () => {};
+global.setMessage = () => {};
+eval(fs.readFileSync('app/static/custom_canvas.js', 'utf8'));
+global.renderCustomModules = () => {};
+const base = {
+  id: 'custom_example', name: 'Example', type: 'canvas', background: '#000000',
+  frame_count: 1, fps: 10, playback: 'hold',
+  layers: [{
+    id: 'layer_initial', name: 'Initial', type: 'text', visible: true,
+    properties: {x: 1, y: 7, text: 'X', font: '4x6', colour: '#ffffff'},
+    keyframes: [],
+  }],
+  overrides: [],
+};
+const modules = [];
+for (const example of canvasStarterExamples) {
+  global.customModules = [structuredClone(base)];
+  applyCanvasTemplate('custom_example', example.id);
+  modules.push(structuredClone(global.customModules[0]));
+}
+const rainbow = modules.find(module => module.layers.every(layer => layer.type === 'circle'));
+const rainbowColours = Array.from(
+  {length: rainbow.frame_count},
+  (_, frame) => orderedLayersForFrame(rainbow, frame).map(item => item.properties.colour),
+);
+process.stdout.write(JSON.stringify({examples: canvasStarterExamples, modules, rainbowColours}));
+"""
+        node = shutil.which("node")
+        assert node is not None
+        result = subprocess.run(
+            [node, "-e", harness],
+            cwd=Path(__file__).parents[1], text=True, capture_output=True, check=False,
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        payload = __import__("json").loads(result.stdout)
+
+        self.assertEqual(
+            [example["id"] for example in payload["examples"]],
+            [
+                "spinning_square", "spinning_rgb_cube", "three_lines_circle",
+                "matrix_rain", "rainbow_pulse",
+            ],
+        )
+        modules = dict(zip(
+            [example["id"] for example in payload["examples"]],
+            payload["modules"],
+        ))
+        self.assertGreaterEqual(len(modules["matrix_rain"]["layers"]), 24)
+        self.assertEqual(modules["matrix_rain"]["playback"], "loop")
+        self.assertTrue(all(layer["keyframes"] for layer in modules["matrix_rain"]["layers"]))
+        self.assertEqual(
+            {layer["type"] for layer in modules["rainbow_pulse"]["layers"]},
+            {"circle"},
+        )
+        self.assertEqual(len(modules["rainbow_pulse"]["layers"]), 7)
+        self.assertEqual(modules["rainbow_pulse"]["playback"], "loop")
+
+        from modules.custom_text import ordered_layers_for_frame
+        physical_colours = [
+            [properties["colour"] for _, properties in ordered_layers_for_frame(
+                modules["rainbow_pulse"], frame,
+            )]
+            for frame in range(modules["rainbow_pulse"]["frame_count"])
+        ]
+        self.assertEqual(payload["rainbowColours"], physical_colours)
+
+        for module in payload["modules"]:
+            with tempfile.TemporaryDirectory() as directory:
+                ConfigStore(Path(directory) / "config.json").update({
+                    "custom_modules": [module],
+                })
+
     def test_dashboard_advanced_canvas_has_time_image_shortcuts_and_rotation_snapping(self):
         self.pair_browser()
 

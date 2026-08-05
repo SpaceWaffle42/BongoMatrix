@@ -153,17 +153,74 @@
     Object.assign(module, {background: '#000000', frame_count: 1, fps: 10, playback: 'hold', layers: [...labels, circle], overrides: []});
   }
 
+  function matrixRain(module) {
+    const offsets = [-28, -12, 4, 20, -20, -4, 12, -24, -8, 8, 21, -16];
+    const glyphs = ['0', '1', '+', '*'];
+    const colours = ['#aaffcc', '#00ff66', '#00bb44', '#005522'];
+    const layers = [];
+    for (let column = 0; column < offsets.length; column += 1) {
+      for (let trail = 0; trail < 4; trail += 1) {
+        const layer = newLayer('text', `Rain ${column + 1}.${trail + 1}`);
+        const startY = offsets[column] - trail * 7;
+        Object.assign(layer.properties, {
+          x: 1 + column * 5, y: startY,
+          text: glyphs[(column * 3 + trail) % glyphs.length],
+          font: '4x6', colour: colours[trail],
+        });
+        layer.keyframes = [
+          {frame: 0, easing: 'linear', properties: {y: startY}},
+          {frame: 47, easing: 'linear', properties: {y: startY + 64}},
+        ];
+        layers.push(layer);
+      }
+    }
+    Object.assign(module, {background: '#000300', frame_count: 48, fps: 20, playback: 'loop', layers, overrides: []});
+  }
+
+  function rainbowPulse(module) {
+    const colours = ['#ff004c', '#ff7a00', '#ffe600', '#20e060', '#00d9ff', '#3973ff', '#a855f7'];
+    const layers = colours.map((colour, index) => {
+      const layer = newLayer('circle', `Rainbow ring ${index + 1}`);
+      const radius = 3 + index * 3;
+      Object.assign(layer.properties, {x: 32, y: 16, radius, colour, filled: false});
+      layer.keyframes = [
+        {frame: 0, easing: 'ease_in_out', properties: {radius, colour}},
+        {frame: 17, easing: 'ease_in_out', properties: {radius: radius + 5, colour: colours[(index + 1) % colours.length]}},
+        {frame: 34, easing: 'ease_in_out', properties: {radius, colour}},
+      ];
+      return layer;
+    });
+    Object.assign(module, {background: '#030008', frame_count: 35, fps: 18, playback: 'loop', layers, overrides: []});
+  }
+
+  const canvasStarterExamples = Object.freeze([
+    Object.freeze({id: 'spinning_square', label: 'Spinning square'}),
+    Object.freeze({id: 'spinning_rgb_cube', label: 'Spinning RGB cube'}),
+    Object.freeze({id: 'three_lines_circle', label: 'Three lines and circle'}),
+    Object.freeze({id: 'matrix_rain', label: 'Matrix rain'}),
+    Object.freeze({id: 'rainbow_pulse', label: 'Rainbow pulse'}),
+  ]);
+  const canvasTemplateBuilders = Object.freeze({
+    spinning_square: spinningSquare,
+    spinning_rgb_cube: spinningRgbCube,
+    three_lines_circle: linesAndCircle,
+    matrix_rain: matrixRain,
+    rainbow_pulse: rainbowPulse,
+  });
+
   function applyTemplate(id, template) {
     const module = byId(id);
-    if (!module || !confirm('Replace this canvas with the ' + template.replaceAll('_', ' ') + ' template?')) return;
-    if (template === 'spinning_square') spinningSquare(module);
-    else if (template === 'spinning_rgb_cube') spinningRgbCube(module);
-    else if (template === 'three_lines_circle') linesAndCircle(module);
-    else Object.assign(module, {background: '#000000', frame_count: 1, fps: 10, playback: 'hold', layers: [newLayer('text', 'Text')], overrides: []});
+    if (!module || !confirm('Replace this canvas with the ' + template.replaceAll('_', ' ') + ' example?')) return;
+    const builder = canvasTemplateBuilders[template];
+    if (typeof builder === 'function') builder(module);
+    else if (template === 'blank') Object.assign(module, {background: '#000000', frame_count: 1, fps: 10, playback: 'hold', layers: [newLayer('text', 'Text')], overrides: []});
+    else return;
     editorState.delete(module.id);
     renderCustomModules();
-    setMessage('Starter template loaded locally. Save configuration to apply.');
+    setMessage('Starter example loaded locally. Save configuration to apply.');
   }
+  window.canvasStarterExamples = canvasStarterExamples;
+  window.applyCanvasTemplate = applyTemplate;
 
   function convertToAdvanced(id) {
     const index = customModules.findIndex(module => module.id === id);
@@ -591,7 +648,7 @@
     const state = stateFor(module); card.replaceChildren(); card.className = 'custom-module-card advanced-card'; card.dataset.id = module.id; card.dataset.editorType = 'canvas'; headerFor(module, card, true);
     const layout = document.createElement('div'); layout.className = 'advanced-layout'; const stage = document.createElement('div'); stage.className = 'canvas-stage'; const sidebar = document.createElement('div'); sidebar.className = 'advanced-sidebar';
     const nameRow = document.createElement('div'); nameRow.className = 'canvas-toolbar'; nameRow.append(moduleControl('Name', module.name, 'text', value => { module.name = value; syncCustomModuleUI(); }), moduleControl('Background', module.background, 'color', value => { module.background = value; drawEditor(module, canvas); }), moduleControl('Frames', module.frame_count, 'number', value => { module.frame_count = Math.max(1, Math.min(120, Math.round(value))); module.overrides = module.overrides.filter(item => item.frame < module.frame_count); for (const layer of module.layers) layer.keyframes = layer.keyframes.filter(item => item.frame < module.frame_count); refreshAdvanced(module.id); }), moduleControl('FPS', module.fps, 'number', value => { module.fps = Math.max(1, Math.min(60, value)); }), moduleControl('Playback', module.playback, 'select', value => { module.playback = value; }, ['loop', 'ping_pong', 'hold']), moduleControl('Rotation snap', state.rotationSnap || 'off', 'select', value => { state.rotationSnap = value === 'off' ? 0 : Number(value); }, ['off', '15', '30', '45', '90']));
-    const templateRow = document.createElement('div'); templateRow.className = 'template-row'; const template = document.createElement('select'); [['spinning_square', 'Spinning square'], ['spinning_rgb_cube', 'Spinning RGB cube'], ['three_lines_circle', 'Three lines and circle'], ['blank', 'Blank canvas']].forEach(([value, text]) => { const option = document.createElement('option'); option.value = value; option.textContent = text; template.append(option); }); const templateLabel = document.createElement('label'); templateLabel.textContent = 'Starter template'; templateLabel.append(template); templateRow.append(templateLabel, makeButton('Load template', () => applyTemplate(module.id, template.value)));
+    const templateRow = document.createElement('div'); templateRow.className = 'template-row'; const template = document.createElement('select'); [...canvasStarterExamples, {id: 'blank', label: 'Blank canvas'}].forEach(({id, label}) => { const option = document.createElement('option'); option.value = id; option.textContent = label; template.append(option); }); const templateLabel = document.createElement('label'); templateLabel.textContent = 'Starter example'; templateLabel.append(template); templateRow.append(templateLabel, makeButton('Load example', () => applyTemplate(module.id, template.value)));
     const canvasWrap = document.createElement('div'); canvasWrap.className = 'editor-canvas-wrap'; const canvas = document.createElement('canvas'); canvas.className = 'editor-canvas'; canvas.width = 640; canvas.height = 320; canvas.setAttribute('aria-label', 'Direct 64 by 32 custom module canvas editor'); canvasWrap.append(canvas);
     const help = document.createElement('p'); help.className = 'canvas-help'; help.textContent = 'Drag a layer to move it. Drag the square handle to resize, the round handle to rotate, or draw directly when a Pixels layer is selected. Higher depth values draw in front; keyframe Depth to change the stack on a chosen frame.';
     const timelineTools = document.createElement('div'); timelineTools.className = 'timeline-toolbar'; const onion = moduleControl('Onion skin', state.onion, 'checkbox', value => { state.onion = value; drawEditor(module, canvas); }); timelineTools.append(onion, makeButton(state.playing ? 'Stop browser preview' : 'Play browser preview', () => playBrowserPreview(module), 'btn primary'), makeButton('Copy frame', () => copyFrame(module)), makeButton('Paste frame', () => pasteFrame(module)), makeButton('Duplicate frame', () => duplicateFrame(module)));
