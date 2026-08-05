@@ -100,6 +100,24 @@ class ConfigStoreTests(unittest.TestCase):
                 "mode": "static", "duration_seconds": 8,
             })
 
+    def test_scrolling_announcement_uses_only_bounded_loops_and_frame_delay(self):
+        scrolling = self.announcement()
+        scrolling["timing"] = {"mode": "scroll", "loops": 2, "frame_delay": 0.05}
+        with tempfile.TemporaryDirectory() as directory:
+            store = ConfigStore(Path(directory) / "config.json")
+
+            saved = store.update({
+                "announcement_board": {"announcements": [scrolling]},
+            })
+
+            self.assertEqual(
+                saved["announcement_board"]["announcements"][0]["timing"],
+                {"mode": "scroll", "loops": 2, "frame_delay": 0.05},
+            )
+            scrolling["timing"]["duration_seconds"] = 8
+            with self.assertRaisesRegex(ValueError, "scrolling announcement timing"):
+                store.update({"announcement_board": {"announcements": [scrolling]}})
+
     def test_announcement_rejects_equal_start_and_end_times(self):
         invalid = self.announcement()
         invalid["schedule"]["end_time"] = invalid["schedule"]["start_time"]

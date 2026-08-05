@@ -471,11 +471,32 @@ def _validate_announcement_board(board):
             raise ValueError("announcement border is not supported")
 
         timing = item["timing"]
-        if not isinstance(timing, dict) or set(timing) != {"mode", "duration_seconds"}:
-            raise ValueError("static announcement timing has invalid fields")
-        duration = timing["duration_seconds"]
-        if timing["mode"] != "static" or isinstance(duration, bool) or not isinstance(duration, (int, float)) or not 1 <= duration <= 3600:
-            raise ValueError("static announcement duration must be between 1 and 3600 seconds")
+        if not isinstance(timing, dict):
+            raise ValueError("announcement timing must be an object")
+        if timing.get("mode") == "scroll":
+            if set(timing) != {"mode", "loops", "frame_delay"}:
+                raise ValueError("scrolling announcement timing has invalid fields")
+            loops = timing["loops"]
+            frame_delay = timing["frame_delay"]
+            if isinstance(loops, bool) or not isinstance(loops, int) or not 1 <= loops <= 10:
+                raise ValueError("scrolling announcement loops must be between 1 and 10")
+            if (
+                isinstance(frame_delay, bool)
+                or not isinstance(frame_delay, (int, float))
+                or not 0.01 <= frame_delay <= 1
+            ):
+                raise ValueError("scrolling announcement frame_delay must be between 0.01 and 1 second")
+        else:
+            if set(timing) != {"mode", "duration_seconds"}:
+                raise ValueError("static announcement timing has invalid fields")
+            duration = timing["duration_seconds"]
+            if (
+                timing["mode"] != "static"
+                or isinstance(duration, bool)
+                or not isinstance(duration, (int, float))
+                or not 1 <= duration <= 3600
+            ):
+                raise ValueError("static announcement duration must be between 1 and 3600 seconds")
         if item["transition"] != {"type": "cut"}:
             raise ValueError("announcement transition must be an instant cut")
 

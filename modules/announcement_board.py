@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import datetime as dt
+import time
 
 
 def _scheduled_interval(schedule):
@@ -38,22 +39,182 @@ def active_announcements(announcements, *, now):
     ]
 
 
+def _aligned_text_x(matrix, canvas, font, colour, text, alignment, baseline):
+    if alignment == "left":
+        return 2
+    if alignment not in {"center", "right"}:
+        raise NotImplementedError("announcement text alignment is not implemented")
+    width = matrix.draw_text(font, -10000, baseline, colour, text, canvas=canvas)
+    if alignment == "center":
+        return (matrix.matrix.width - width) // 2
+    return matrix.matrix.width - width - 2
+
+
+def _draw_border(matrix, canvas, style):
+    if style["border"] == "none":
+        return
+    if style["border"] not in {"solid", "inset"}:
+        raise NotImplementedError("announcement border is not implemented")
+    colour = matrix.colour_rgb(style["border_colour"])
+    offset = 1 if style["border"] == "inset" else 0
+    right = matrix.matrix.width - 1 - offset
+    bottom = matrix.matrix.height - 1 - offset
+    for x1, y1, x2, y2 in (
+        (offset, offset, right, offset),
+        (right, offset, right, bottom),
+        (right, bottom, offset, bottom),
+        (offset, bottom, offset, offset),
+    ):
+        matrix.draw_line(x1, y1, x2, y2, colour, canvas=canvas)
+
+
 def _render_text_notice(matrix, canvas, announcement):
     style = announcement["style"]
-    if style["alignment"] != "left" or style["border"] != "none":
-        raise NotImplementedError("announcement alignment and border are not implemented")
     background = matrix.colour_rgb(style["background"])
     foreground = matrix.colour_rgb(style["foreground"])
     matrix.fill(background.red, background.green, background.blue, canvas=canvas)
+    headline_font = matrix.font(style["font"])
+    headline_x = _aligned_text_x(
+        matrix, canvas, headline_font, foreground,
+        announcement["headline"], style["alignment"], 11,
+    )
     matrix.draw_text(
-        matrix.font(style["font"]), 2, 11, foreground,
+        headline_font, headline_x, 11, foreground,
+        announcement["headline"], canvas=canvas,
+    )
+    if announcement["message"]:
+        message_font = matrix.font("4x6")
+        message_x = _aligned_text_x(
+            matrix, canvas, message_font, foreground,
+            announcement["message"], style["alignment"], 23,
+        )
+        matrix.draw_text(
+            message_font, message_x, 23, foreground,
+            announcement["message"], canvas=canvas,
+        )
+    _draw_border(matrix, canvas, style)
+
+
+def _scroll_text_notice(matrix, canvas, announcement, stop_event):
+    style = announcement["style"]
+    if style["border"] != "none":
+        raise NotImplementedError("scrolling announcement border is not implemented")
+    background = matrix.colour_rgb(style["background"])
+    foreground = matrix.colour_rgb(style["foreground"])
+    font = matrix.font(style["font"])
+    text = announcement["headline"]
+    if announcement["message"]:
+        text += " - " + announcement["message"]
+    timing = announcement["timing"]
+    for _ in range(timing["loops"]):
+        x = matrix.matrix.width
+        while True:
+            if stop_event is not None and stop_event.is_set():
+                return canvas, True
+            matrix.fill(background.red, background.green, background.blue, canvas=canvas)
+            text_width = matrix.draw_text(font, x, 20, foreground, text, canvas=canvas)
+            canvas = matrix.swap(canvas)
+            if stop_event is not None:
+                if stop_event.wait(timing["frame_delay"]):
+                    return canvas, True
+            else:
+                time.sleep(timing["frame_delay"])
+            if x <= -text_width:
+                break
+            x -= 1
+    return canvas, False
+
+
+def _render_icon_notice(matrix, canvas, announcement):
+    style = announcement["style"]
+    if style["alignment"] != "left":
+        raise NotImplementedError("icon notice alignment is not implemented")
+    background = matrix.colour_rgb(style["background"])
+    foreground = matrix.colour_rgb(style["foreground"])
+    matrix.fill(background.red, background.green, background.blue, canvas=canvas)
+    frames = matrix.media_frames(announcement["media"], 1, 1)
+    if not frames:
+        matrix.draw_text(
+            matrix.font("4x6"), 2, 18, foreground,
+            "Media unavailable", canvas=canvas,
+        )
+        _draw_border(matrix, canvas, style)
+        return
+    matrix.draw_image(frames[0], 1, 1, width=14, height=14, canvas=canvas)
+    matrix.draw_text(
+        matrix.font(style["font"]), 18, 11, foreground,
         announcement["headline"], canvas=canvas,
     )
     if announcement["message"]:
         matrix.draw_text(
-            matrix.font("4x6"), 2, 23, foreground,
+            matrix.font("4x6"), 18, 23, foreground,
             announcement["message"], canvas=canvas,
         )
+    _draw_border(matrix, canvas, style)
+
+
+def _render_image_banner(matrix, canvas, announcement):
+    style = announcement["style"]
+    if style["alignment"] != "left":
+        raise NotImplementedError("image banner alignment is not implemented")
+    background = matrix.colour_rgb(style["background"])
+    foreground = matrix.colour_rgb(style["foreground"])
+    matrix.fill(background.red, background.green, background.blue, canvas=canvas)
+    frames = matrix.media_frames(announcement["media"], 1, 1)
+    if not frames:
+        matrix.draw_text(
+            matrix.font("4x6"), 2, 18, foreground,
+            "Media unavailable", canvas=canvas,
+        )
+        _draw_border(matrix, canvas, style)
+        return
+    matrix.draw_image(
+        frames[0], 0, 0,
+        width=matrix.matrix.width, height=matrix.matrix.height // 2,
+        keep_aspect=False, canvas=canvas,
+    )
+    matrix.draw_text(
+        matrix.font(style["font"]), 2, 24, foreground,
+        announcement["headline"], canvas=canvas,
+    )
+    if announcement["message"]:
+        matrix.draw_text(
+            matrix.font("4x6"), 2, 31, foreground,
+            announcement["message"], canvas=canvas,
+        )
+    _draw_border(matrix, canvas, style)
+
+
+def _render_full_image(matrix, canvas, announcement):
+    style = announcement["style"]
+    if style["alignment"] != "left":
+        raise NotImplementedError("full image alignment is not implemented")
+    background = matrix.colour_rgb(style["background"])
+    foreground = matrix.colour_rgb(style["foreground"])
+    matrix.fill(background.red, background.green, background.blue, canvas=canvas)
+    frames = matrix.media_frames(announcement["media"], 1, 1)
+    if not frames:
+        matrix.draw_text(
+            matrix.font("4x6"), 2, 18, foreground,
+            "Media unavailable", canvas=canvas,
+        )
+        _draw_border(matrix, canvas, style)
+        return
+    matrix.draw_image(
+        frames[0], 0, 0,
+        width=matrix.matrix.width, height=matrix.matrix.height,
+        keep_aspect=False, canvas=canvas,
+    )
+    if announcement["message"]:
+        matrix.draw_text(
+            matrix.font("4x6"), 2, 21, foreground,
+            announcement["message"], canvas=canvas,
+        )
+    matrix.draw_text(
+        matrix.font(style["font"]), 2, 30, foreground,
+        announcement["headline"], canvas=canvas,
+    )
+    _draw_border(matrix, canvas, style)
 
 
 def run(matrix, config, duration, stop_event=None, now_provider=dt.datetime.now):
@@ -71,15 +232,30 @@ def run(matrix, config, duration, stop_event=None, now_provider=dt.datetime.now)
     for announcement in active:
         if stop_event is not None and stop_event.is_set():
             break
-        if announcement["layout"] != "text_notice":
-            raise NotImplementedError("announcement layout is not implemented")
-        _render_text_notice(matrix, canvas, announcement)
-        canvas = matrix.swap(canvas)
-        seconds = announcement["timing"]["duration_seconds"]
-        if stop_event is not None:
-            if stop_event.wait(seconds):
+        if announcement["timing"]["mode"] == "scroll":
+            if announcement["layout"] != "text_notice":
+                raise NotImplementedError("scrolling announcement layout is not implemented")
+            canvas, interrupted = _scroll_text_notice(
+                matrix, canvas, announcement, stop_event,
+            )
+            if interrupted:
                 break
         else:
-            import time
-            time.sleep(seconds)
+            if announcement["layout"] == "text_notice":
+                _render_text_notice(matrix, canvas, announcement)
+            elif announcement["layout"] == "icon_notice":
+                _render_icon_notice(matrix, canvas, announcement)
+            elif announcement["layout"] == "image_banner":
+                _render_image_banner(matrix, canvas, announcement)
+            elif announcement["layout"] == "full_image":
+                _render_full_image(matrix, canvas, announcement)
+            else:
+                raise NotImplementedError("announcement layout is not implemented")
+            canvas = matrix.swap(canvas)
+            seconds = announcement["timing"]["duration_seconds"]
+            if stop_event is not None:
+                if stop_event.wait(seconds):
+                    break
+            else:
+                time.sleep(seconds)
     return True
