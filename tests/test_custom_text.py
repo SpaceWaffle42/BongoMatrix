@@ -551,6 +551,69 @@ class CustomTextModuleTests(unittest.TestCase):
             rotation=15, canvas="canvas",
         )
 
+    def test_canvas_operational_media_failure_does_not_abort_other_layers(self):
+        matrix = self.matrix()
+
+        def decode(source, frame_count, fps, **_):
+            if source == "broken.gif":
+                raise ValueError("decode failed")
+            return ["healthy-frame"]
+
+        matrix.media_frames.side_effect = decode
+        stop = Mock()
+        stop.wait.return_value = True
+        layers = [
+            {
+                "id": "broken", "name": "Broken", "type": "media", "visible": True,
+                "properties": {"x": 0, "y": 0, "width": 16, "height": 16, "rotation": 0, "source": "broken.gif", "keep_aspect": True},
+                "keyframes": [],
+            },
+            {
+                "id": "healthy", "name": "Healthy", "type": "media", "visible": True,
+                "properties": {"x": 16, "y": 0, "width": 16, "height": 16, "rotation": 0, "source": "healthy.png", "keep_aspect": True},
+                "keyframes": [],
+            },
+            {
+                "id": "primitive", "name": "Primitive", "type": "rectangle", "visible": True,
+                "properties": {"x": 1, "y": 1, "width": 6, "height": 5, "rotation": 0, "colour": "#ffffff", "filled": False},
+                "keyframes": [],
+            },
+        ]
+
+        result = custom_text.run(
+            matrix, {}, duration=1, stop_event=stop,
+            module_config=self.canvas_options(frame_count=1, layers=layers),
+        )
+
+        self.assertTrue(result)
+        self.assertEqual(
+            [call.args[0] for call in matrix.media_frames.call_args_list],
+            ["broken.gif", "healthy.png"],
+        )
+        matrix.draw_image.assert_called_once_with(
+            "healthy-frame", 16, 0, width=16, height=16, keep_aspect=True,
+            rotation=0, canvas="canvas",
+        )
+        self.assertGreaterEqual(matrix.draw_line.call_count, 4)
+        matrix.swap.assert_called_once_with("canvas")
+
+    def test_canvas_unexpected_media_programming_error_still_propagates(self):
+        matrix = self.matrix()
+        matrix.media_frames.side_effect = RuntimeError("programming defect")
+        layer = {
+            "id": "media", "name": "Media", "type": "media", "visible": True,
+            "properties": {"x": 0, "y": 0, "width": 16, "height": 16, "rotation": 0, "source": "media.png", "keep_aspect": True},
+            "keyframes": [],
+        }
+
+        with self.assertRaisesRegex(RuntimeError, "programming defect"):
+            custom_text.run(
+                matrix, {}, duration=1, stop_event=threading.Event(),
+                module_config=self.canvas_options(frame_count=1, layers=[layer]),
+            )
+
+        matrix.swap.assert_not_called()
+
     def test_canvas_renderer_draws_dynamic_time_layer(self):
         matrix = self.matrix()
         stop = Mock()

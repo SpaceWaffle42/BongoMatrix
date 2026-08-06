@@ -462,8 +462,9 @@
         const mediaFrame = mediaFrameIndex(layer, frame) % frameCount;
         let width = properties.width, height = properties.height;
         if (properties.keep_aspect) { const scale = Math.min(width / naturalWidth, height / naturalHeight); width = naturalWidth * scale; height = naturalHeight * scale; }
-        context.translate(properties.x + properties.width / 2, properties.y + properties.height / 2); context.rotate(properties.rotation * Math.PI / 180);
-        context.drawImage(media, 0, mediaFrame * naturalHeight, naturalWidth, naturalHeight, -properties.width / 2, -properties.height / 2, width, height);
+        context.beginPath(); context.rect(properties.x, properties.y, width, height); context.clip();
+        context.translate(properties.x + width / 2, properties.y + height / 2); context.rotate(properties.rotation * Math.PI / 180);
+        context.drawImage(media, 0, mediaFrame * naturalHeight, naturalWidth, naturalHeight, -width / 2, -height / 2, width, height);
       }
     }
     context.restore();

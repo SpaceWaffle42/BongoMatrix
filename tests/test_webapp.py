@@ -1238,6 +1238,51 @@ console.log(JSON.stringify({
             '{"line":[["translate",15,10],["rotate",1.571],["translate",-15,-10]],"text":[["translate",7,4.5],["rotate",3.142],["translate",-7,-4.5]],"circle":[]}',
         )
 
+    @unittest.skipUnless(shutil.which("node"), "Node.js is required")
+    def test_browser_rotated_aspect_media_uses_fitted_origin_centre_and_clip(self):
+        asset = (Path(__file__).parents[1] / "app/static/custom_canvas.js").read_text()
+        start = asset.index("  function drawShape(")
+        end = asset.index("\n\n  function drawEditor(", start)
+        function_source = asset[start:end]
+        harness = f"""
+function mediaFrameIndex(){{return 0;}}
+function beginLayerRotation(){{}}
+let naturalWidth=32,naturalHeight=32;
+function mediaTimelineElement(){{return {{naturalWidth,naturalHeight}};}}
+{function_source}
+function probe(sourceWidth,sourceHeight){{
+  naturalWidth=sourceWidth; naturalHeight=sourceHeight;
+  const calls=[];
+  const context={{
+    save(){{}},restore(){{}},set globalAlpha(value){{}},set strokeStyle(value){{}},
+    set fillStyle(value){{}},set lineWidth(value){{}},beginPath(){{calls.push(['beginPath']);}},
+    rect(...args){{calls.push(['rect',...args]);}},clip(){{calls.push(['clip']);}},
+    translate(...args){{calls.push(['translate',...args]);}},rotate(value){{calls.push(['rotate',Math.round(value*1000)/1000]);}},
+    drawImage(...args){{calls.push(['drawImage',...args.slice(5)]);}},
+  }};
+  drawShape(context,{{type:'media'}},{{source:'media.png',x:3,y:4,width:64,height:32,keep_aspect:true,rotation:90}},1,0,1,1);
+  return calls;
+}}
+console.log(JSON.stringify({{square:probe(32,32),tall:probe(16,32),wide:probe(64,16)}}));
+"""
+        result = subprocess.run(
+            [shutil.which("node"), "-e", harness], cwd=Path(__file__).parents[1],
+            text=True, capture_output=True, check=True,
+        )
+        data = json.loads(result.stdout)
+
+        for name, width, height in (
+            ("square", 32, 32), ("tall", 16, 32), ("wide", 64, 16),
+        ):
+            with self.subTest(name=name):
+                self.assertIn(["rect", 3, 4, width, height], data[name])
+                self.assertIn(["clip"], data[name])
+                self.assertIn(["translate", 3 + width / 2, 4 + height / 2], data[name])
+                self.assertIn(
+                    ["drawImage", -width / 2, -height / 2, width, height],
+                    data[name],
+                )
+
     def test_advanced_editor_has_aseprite_style_layer_tracks_and_depth_controls(self):
         self.pair_browser()
 
@@ -1551,7 +1596,7 @@ if(first.tag!=='img')throw new Error('preview must use sampled sprite');
 if(first.src!=='/api/media-timeline/built-in/clip.mp4?frame_count=24&fps=12.5&revision=r1')throw new Error(first.src);
 first.naturalWidth=10;first.naturalHeight=240;
 let drawArgs=null;
-const context={save(){},restore(){},translate(){},rotate(){},drawImage(...args){drawArgs=args}};
+const context={save(){},restore(){},beginPath(){},rect(){},clip(){},translate(){},rotate(){},drawImage(...args){drawArgs=args}};
 drawShape(context,{type:'media',keyframes:[]},{x:0,y:0,width:10,height:10,rotation:0,source:'built-in/clip.mp4',keep_aspect:true},1,7,12.5,24);
 if(!drawArgs||drawArgs.length!==9||drawArgs[1]!==0||drawArgs[2]!==70||drawArgs[3]!==10||drawArgs[4]!==10)throw new Error('wrong sprite crop '+JSON.stringify(drawArgs));
 first.listeners.error();

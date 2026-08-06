@@ -261,11 +261,14 @@ def _run_canvas(matrix, duration, stop_event, module_config):
         remaining = prepare_deadline - time.monotonic()
         if remaining <= 0:
             raise ValueError("canvas media preparation exceeded its aggregate deadline")
-        frames = matrix.media_frames(
-            source, module_config["frame_count"], module_config["fps"],
-            stop_event=stop_event, preserve_size=True,
-            decode_timeout=min(CANVAS_MEDIA_PREPARE_TIMEOUT, remaining),
-        )
+        try:
+            frames = matrix.media_frames(
+                source, module_config["frame_count"], module_config["fps"],
+                stop_event=stop_event, preserve_size=True,
+                decode_timeout=min(CANVAS_MEDIA_PREPARE_TIMEOUT, remaining),
+            )
+        except (OSError, ValueError):
+            frames = []
         if stop_event is not None and stop_event.is_set() is True:
             return False
         media_cache_bytes += sum(
