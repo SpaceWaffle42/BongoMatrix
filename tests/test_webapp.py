@@ -1536,7 +1536,7 @@ process.stdout.write(JSON.stringify(output));
         end = source.index("\n  function drawEditor", start)
         functions = source[start:end]
         harness = """
-const mediaPreviews=new Map(), mediaRetryCounts=new Map(), mediaLoadQueue=[], customModules=[], mediaItems=[{name:'built-in/clip.mp4',revision:'r1'}];let activeMediaLoads=0;
+const mediaPreviews=new Map(), mediaFailureStates=new Map(), mediaLoadQueue=[], customModules=[], mediaItems=[{name:'built-in/clip.mp4',revision:'r1'}];let activeMediaLoads=0;
 const document={
   createElement(tag){return {tag,listeners:{},addEventListener(type,listener){this.listeners[type]=listener}}},
   querySelectorAll(){return []}
@@ -1575,6 +1575,45 @@ console.log('TIMELINE_MEDIA_PREVIEW_PASS');
         )
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertIn("TIMELINE_MEDIA_PREVIEW_PASS", result.stdout)
+
+    @unittest.skipUnless(shutil.which("node"), "Node.js is required")
+    def test_advanced_canvas_terminal_media_failures_stay_bounded_and_draw_safely(self):
+        source = (Path(__file__).parents[1] / "app" / "static" / "custom_canvas.js").read_text()
+        start = source.index("function mediaTimelineRevision(source")
+        end = source.index("\n  function drawEditor", start)
+        functions = source[start:end]
+        harness = """
+const mediaPreviews=new Map(), mediaFailureStates=new Map(), mediaLoadQueue=[], customModules=[];let activeMediaLoads=0;
+const mediaItems=Array.from({length:33},(_,index)=>({name:'failed-'+index+'.gif',revision:'r'+index}));
+let created=0;
+const document={
+  createElement(tag){created++;return {tag,listeners:{},addEventListener(type,listener){this.listeners[type]=listener}}},
+  querySelectorAll(){return []}
+};
+function byId(){return null}
+function beginLayerRotation(){}
+globalThis.setTimeout=()=>0;
+""" + functions + """
+for(const item of mediaItems){
+  const first=mediaTimelineElement(item.name,12,12);first.listeners.error();
+  const retry=mediaTimelineElement(item.name,12,12);retry.listeners.error();
+}
+const before=created;
+if(mediaTimelineElement(mediaItems[0].name,12,12)!==null||created!==before)throw new Error('oldest terminal revision restarted');
+let saves=0,restores=0;
+const context={save(){saves++},restore(){restores++}};
+drawShape(context,{type:'media',keyframes:[]},{source:mediaItems.at(-1).name,colour:'#fff',width:10,height:10,x:0,y:0,rotation:0,keep_aspect:true},1,0,12,12);
+if(saves!==1||restores!==1||created!==before)throw new Error('terminal draw was unsafe');
+console.log('TERMINAL_MEDIA_PREVIEW_PASS');
+"""
+        node = shutil.which("node")
+        assert node is not None
+        result = subprocess.run(
+            [node, "-e", harness], cwd=Path(__file__).parents[1],
+            text=True, capture_output=True, check=False,
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("TERMINAL_MEDIA_PREVIEW_PASS", result.stdout)
 
     def test_media_metadata_revision_changes_when_filename_is_reused(self):
         self.pair_browser()

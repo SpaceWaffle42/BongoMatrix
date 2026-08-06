@@ -7,7 +7,7 @@
   const layerTypes = ['text', 'time', 'pixels', 'line', 'rectangle', 'polygon', 'circle', 'ellipse', 'media'];
   const layerLabels = {time: 'Time', media: 'Image / GIF / MP4'};
   const mediaPreviews = new Map();
-  const mediaRetryCounts = new Map();
+  const mediaFailureStates = new Map();
   const mediaLoadQueue = [];
   let activeMediaLoads = 0;
   let layerSerial = 0;
@@ -331,11 +331,6 @@
 
   function mediaTimelineUrl(source, frameCount, fps, revision = mediaTimelineRevision(source)) { return '/api/media-timeline/' + source.split('/').map(encodeURIComponent).join('/') + '?frame_count=' + frameCount + '&fps=' + fps + '&revision=' + encodeURIComponent(revision); }
 
-  function rememberMediaRetry(key, value) {
-    mediaRetryCounts.delete(key);
-    mediaRetryCounts.set(key, value);
-    while (mediaRetryCounts.size > 32) mediaRetryCounts.delete(mediaRetryCounts.keys().next().value);
-  }
 
   function mediaFrameIndex(layer, frame) {
     let startFrame = 0;
@@ -357,7 +352,9 @@
     const revision = mediaTimelineRevision(source);
     const key = source + '|' + revision + '|' + frameCount + '|' + fps;
     if (mediaPreviews.has(key)) return mediaPreviews.get(key);
-    if (mediaRetryCounts.get(key) === Infinity) return null;
+    const previousFailure = mediaFailureStates.get(source);
+    if (previousFailure && previousFailure.revision !== revision) mediaFailureStates.delete(source);
+    if (mediaFailureStates.get(source)?.terminal) return null;
     if (mediaPreviews.size >= 32) {
       const oldestKey = mediaPreviews.keys().next().value;
       const oldest = mediaPreviews.get(oldestKey);
@@ -365,11 +362,10 @@
       if (queued >= 0) mediaLoadQueue.splice(queued, 1);
       else if (oldest) oldest.src = '';
       mediaPreviews.delete(oldestKey);
-      mediaRetryCounts.delete(oldestKey);
     }
     const element = document.createElement('img');
     const url = mediaTimelineUrl(source, frameCount, fps, revision);
-    mediaLoadQueue.push({element, url, key});
+    mediaLoadQueue.push({element, url, key, source, revision});
     pumpMediaLoadQueue();
     mediaPreviews.set(key, element);
     return element;
@@ -377,7 +373,7 @@
 
   function pumpMediaLoadQueue() {
     while (activeMediaLoads < 2 && mediaLoadQueue.length) {
-      const {element, url, key} = mediaLoadQueue.shift();
+      const {element, url, key, source, revision} = mediaLoadQueue.shift();
       activeMediaLoads++;
       let completed = false;
       const complete = redraw => {
@@ -388,7 +384,8 @@
         pumpMediaLoadQueue();
       };
       element.addEventListener('load', () => {
-        mediaRetryCounts.delete(key);
+        const failure = mediaFailureStates.get(source);
+        if (failure?.revision === revision && !failure.terminal) mediaFailureStates.delete(source);
         complete(true);
       }, {once: true});
       element.addEventListener('error', () => {
@@ -397,13 +394,14 @@
           return;
         }
         mediaPreviews.delete(key);
-        const retries = mediaRetryCounts.get(key) || 0;
-        if (retries < 1) {
-          rememberMediaRetry(key, retries + 1);
+        const failure = mediaFailureStates.get(source);
+        const attempts = failure?.revision === revision ? failure.attempts : 0;
+        if (attempts < 1) {
+          mediaFailureStates.set(source, {revision, attempts: attempts + 1, terminal: false});
           complete(false);
           setTimeout(redrawMediaCanvases, 250);
         } else {
-          rememberMediaRetry(key, Infinity);
+          mediaFailureStates.set(source, {revision, attempts: attempts + 1, terminal: true});
           complete(false);
         }
       }, {once: true});
@@ -422,7 +420,9 @@
     else if (layer.type === 'circle') { context.beginPath(); context.arc(properties.x, properties.y, properties.radius, 0, Math.PI * 2); properties.filled ? context.fill() : context.stroke(); }
     else if (layer.type === 'ellipse') { context.beginPath(); context.ellipse(properties.x, properties.y, properties.radius_x, properties.radius_y, properties.rotation * Math.PI / 180, 0, Math.PI * 2); properties.filled ? context.fill() : context.stroke(); }
     else if (layer.type === 'media' && properties.source) {
-      const media = mediaTimelineElement(properties.source, frameCount, fps), naturalWidth = media.naturalWidth, naturalHeight = media.naturalHeight / frameCount;
+      const media = mediaTimelineElement(properties.source, frameCount, fps);
+      if (!media) { context.restore(); return; }
+      const naturalWidth = media.naturalWidth, naturalHeight = media.naturalHeight / frameCount;
       if (naturalWidth && naturalHeight) {
         const mediaFrame = mediaFrameIndex(layer, frame) % frameCount;
         let width = properties.width, height = properties.height;
