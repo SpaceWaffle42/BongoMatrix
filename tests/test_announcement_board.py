@@ -271,6 +271,56 @@ class AnnouncementBoardTests(unittest.TestCase):
             [entry.args[:4] for entry in matrix.draw_line.call_args_list],
             [(0, 0, 63, 0), (63, 0, 63, 31), (63, 31, 0, 31), (0, 31, 0, 0)],
         )
+
+    def test_slide_translates_and_clips_solid_and_inset_borders_in_both_directions(self):
+        cases = {
+            ("solid", "left"): (
+                [(48, 0, 63, 0), (63, 31, 48, 31), (48, 31, 48, 0)],
+                [(0, 0, 63, 0), (63, 0, 63, 31), (63, 31, 0, 31), (0, 31, 0, 0)],
+            ),
+            ("solid", "right"): (
+                [(0, 0, 15, 0), (15, 0, 15, 31), (15, 31, 0, 31)],
+                [(0, 0, 63, 0), (63, 0, 63, 31), (63, 31, 0, 31), (0, 31, 0, 0)],
+            ),
+            ("inset", "left"): (
+                [(49, 1, 63, 1), (63, 30, 49, 30), (49, 30, 49, 1)],
+                [(1, 1, 62, 1), (62, 1, 62, 30), (62, 30, 1, 30), (1, 30, 1, 1)],
+            ),
+            ("inset", "right"): (
+                [(0, 1, 14, 1), (14, 1, 14, 30), (14, 30, 0, 30)],
+                [(1, 1, 62, 1), (62, 1, 62, 30), (62, 30, 1, 30), (1, 30, 1, 1)],
+            ),
+        }
+        for (border, direction), (first_frame, final_frame) in cases.items():
+            with self.subTest(border=border, direction=direction):
+                matrix = Mock()
+                matrix.matrix.width = 64
+                matrix.matrix.height = 32
+                matrix.font.return_value = "font:5x7"
+                matrix.colour_rgb.side_effect = lambda value: Mock(red=0, green=0, blue=0)
+                matrix.draw_text.return_value = 20
+                matrix.swap.return_value = "canvas"
+                stop = Mock()
+                stop.is_set.return_value = False
+                stop.wait.return_value = False
+                announcement = self.item("announcement_slide_border", "09:00", "17:00")
+                announcement["message"] = ""
+                announcement["style"]["border"] = border
+                announcement["transition"] = {
+                    "type": "slide", "direction": direction, "duration_seconds": 0.4,
+                }
+
+                canvas, cancelled = announcement_board._render_slide(
+                    matrix, "canvas", announcement, stop,
+                )
+
+                self.assertEqual(canvas, "canvas")
+                self.assertFalse(cancelled)
+                segments = [entry.args[:4] for entry in matrix.draw_line.call_args_list]
+                self.assertEqual(segments[:3], first_frame)
+                self.assertEqual(segments[-4:], final_frame)
+                self.assertEqual(matrix.swap.call_count, 4)
+
     def test_right_aligned_static_notice_draws_inset_border(self):
         matrix = Mock()
         matrix.matrix.width = 64

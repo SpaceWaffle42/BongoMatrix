@@ -80,21 +80,30 @@ def _aligned_text_x(
     return right - width
 
 
-def _draw_border(matrix, canvas, style):
+def _draw_border(matrix, canvas, style, x_offset=0):
     if style["border"] == "none":
         return
     if style["border"] not in {"solid", "inset"}:
         raise NotImplementedError("announcement border is not implemented")
     colour = matrix.colour_rgb(style["border_colour"])
     offset = 1 if style["border"] == "inset" else 0
-    right = matrix.matrix.width - 1 - offset
+    left = offset + x_offset
+    right = matrix.matrix.width - 1 - offset + x_offset
     bottom = matrix.matrix.height - 1 - offset
     for x1, y1, x2, y2 in (
-        (offset, offset, right, offset),
+        (left, offset, right, offset),
         (right, offset, right, bottom),
-        (right, bottom, offset, bottom),
-        (offset, bottom, offset, offset),
+        (right, bottom, left, bottom),
+        (left, bottom, left, offset),
     ):
+        if x1 == x2:
+            if not 0 <= x1 < matrix.matrix.width:
+                continue
+        else:
+            if max(x1, x2) < 0 or min(x1, x2) >= matrix.matrix.width:
+                continue
+            x1 = min(matrix.matrix.width - 1, max(0, x1))
+            x2 = min(matrix.matrix.width - 1, max(0, x2))
         matrix.draw_line(x1, y1, x2, y2, colour, canvas=canvas)
 
 
@@ -122,7 +131,7 @@ def _render_text_notice(matrix, canvas, announcement, x_offset=0):
             message_font, message_x, 23, foreground,
             announcement["message"], canvas=canvas,
         )
-    _draw_border(matrix, canvas, style)
+    _draw_border(matrix, canvas, style, x_offset)
 
 
 def _scroll_text_notice(matrix, canvas, announcement, stop_event):
@@ -173,7 +182,7 @@ def _render_icon_notice(
             fallback_font, fallback_x, 18, foreground,
             "Media unavailable", canvas=canvas,
         )
-        _draw_border(matrix, canvas, style)
+        _draw_border(matrix, canvas, style, x_offset)
         return
     image = media_frame
     if media_brightness != 1:
@@ -198,7 +207,7 @@ def _render_icon_notice(
             message_font, message_x, 23, foreground,
             announcement["message"], canvas=canvas,
         )
-    _draw_border(matrix, canvas, style)
+    _draw_border(matrix, canvas, style, x_offset)
 
 
 def _render_image_banner(
@@ -211,10 +220,10 @@ def _render_image_banner(
     matrix.fill(background.red, background.green, background.blue, canvas=canvas)
     if media_frame is None:
         matrix.draw_text(
-            matrix.font("4x6"), 2, 18, foreground,
+            matrix.font("4x6"), 2 + x_offset, 18, foreground,
             "Media unavailable", canvas=canvas,
         )
-        _draw_border(matrix, canvas, style)
+        _draw_border(matrix, canvas, style, x_offset)
         return
     image = media_frame
     if media_brightness != 1:
@@ -243,7 +252,7 @@ def _render_image_banner(
             message_font, message_x, 31, foreground,
             announcement["message"], canvas=canvas,
         )
-    _draw_border(matrix, canvas, style)
+    _draw_border(matrix, canvas, style, x_offset)
 
 
 def _render_full_image(
@@ -256,10 +265,10 @@ def _render_full_image(
     matrix.fill(background.red, background.green, background.blue, canvas=canvas)
     if media_frame is None:
         matrix.draw_text(
-            matrix.font("4x6"), 2, 18, foreground,
+            matrix.font("4x6"), 2 + x_offset, 18, foreground,
             "Media unavailable", canvas=canvas,
         )
-        _draw_border(matrix, canvas, style)
+        _draw_border(matrix, canvas, style, x_offset)
         return
     image = media_frame
     if media_brightness != 1:
@@ -288,7 +297,7 @@ def _render_full_image(
         headline_font, headline_x, 30, foreground,
         announcement["headline"], canvas=canvas,
     )
-    _draw_border(matrix, canvas, style)
+    _draw_border(matrix, canvas, style, x_offset)
 
 
 def _render_static_layout(

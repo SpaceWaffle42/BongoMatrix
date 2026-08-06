@@ -1899,6 +1899,46 @@ console.log('TERMINAL_MEDIA_PREVIEW_PASS');
         self.assertIn("layoutControl.addEventListener('input',syncMediaVisibility)", body)
         self.assertIn("missing.textContent=current+' (missing)'", body)
 
+    def test_announcement_media_selects_refresh_in_place_after_library_changes(self):
+        source = (Path(__file__).parents[1] / "app" / "templates" / "dashboard.html").read_text()
+        start = source.index("function syncAnnouncementMediaSelects")
+        end = source.index("\nfunction syncMediaSelects", start)
+        function_source = source[start:end]
+        harness = r"""
+class Select {
+  constructor(value){this.value=value;this.options=[];this.dataset={announcementPath:'media'};}
+  replaceChildren(){this.options=[];}
+  append(option){this.options.push(option);}
+}
+const select=new Select('draft/selected.gif');
+const document={
+  activeElement:select,
+  querySelectorAll(selector){
+    if(selector!=='.module-editor[data-module-editor="announcement_board"] select[data-announcement-path="media"]')throw new Error('unexpected selector '+selector);
+    return [select];
+  },
+  createElement(tag){if(tag!=='option')throw new Error('unexpected element '+tag);return {value:'',textContent:''};},
+};
+let mediaItems=[{name:'draft/selected.gif'},{name:'new/upload.gif'}];
+""" + function_source + r"""
+syncAnnouncementMediaSelects();
+if(select.value!=='draft/selected.gif')throw new Error('unsaved draft selection changed');
+if(!select.options.some(option=>option.value==='new/upload.gif'))throw new Error('uploaded media missing');
+if(document.activeElement!==select)throw new Error('focus identity changed after upload');
+mediaItems=[{name:'new/upload.gif'}];
+syncAnnouncementMediaSelects();
+const missing=select.options.find(option=>option.value==='draft/selected.gif');
+if(!missing||missing.textContent!=='draft/selected.gif (missing)')throw new Error('removed media not marked missing');
+if(select.value!=='draft/selected.gif')throw new Error('removed draft value changed');
+if(document.activeElement!==select)throw new Error('focus identity changed after removal');
+console.log('ANNOUNCEMENT_MEDIA_SELECT_REFRESH_PASS');
+"""
+        result = subprocess.run(
+            ["node", "-e", harness], capture_output=True, text=True, check=False,
+        )
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn("ANNOUNCEMENT_MEDIA_SELECT_REFRESH_PASS", result.stdout)
+
     def test_announcement_schedule_group_binds_dates_times_and_weekdays(self):
         self.pair_browser()
         body = self.client.get("/").get_data(as_text=True)
