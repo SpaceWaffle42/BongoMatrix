@@ -7,6 +7,9 @@
   const layerTypes = ['text', 'time', 'pixels', 'line', 'rectangle', 'polygon', 'circle', 'ellipse', 'media'];
   const layerLabels = {time: 'Time', media: 'Image / GIF / MP4'};
   const mediaPreviews = new Map();
+  const mediaFailureStates = new Map();
+  const mediaLoadQueue = [];
+  let activeMediaLoads = 0;
   let layerSerial = 0;
 
   const clone = value => structuredClone(value);
@@ -324,7 +327,49 @@
   }
   window.beginLayerRotation = beginLayerRotation;
 
-  function mediaUrl(source) { return '/media/' + source.split('/').map(encodeURIComponent).join('/'); }
+  function mediaTimelineRevision(source) { return mediaItems.find(item => item.name === source)?.revision || 'unversioned'; }
+
+  function mediaTimelineUrl(source, frameCount, fps, revision = mediaTimelineRevision(source)) { return '/api/media-timeline/' + source.split('/').map(encodeURIComponent).join('/') + '?frame_count=' + frameCount + '&fps=' + fps + '&revision=' + encodeURIComponent(revision); }
+
+  function currentCanvasMediaSources() {
+    const sources = new Set();
+    const maximumSources = 20 * (64 + 512 + 512);
+    const remember = source => {
+      if (typeof source === 'string' && source && sources.size < maximumSources) sources.add(source);
+    };
+    for (const module of customModules) {
+      if (module.type !== 'canvas') continue;
+      const mediaLayerIds = new Set();
+      for (const layer of module.layers) {
+        if (layer.type !== 'media') continue;
+        mediaLayerIds.add(layer.id);
+        remember(layer.properties?.source);
+        for (const keyframe of layer.keyframes || []) remember(keyframe.properties?.source);
+      }
+      for (const override of module.overrides || []) {
+        if (mediaLayerIds.has(override.layer_id)) remember(override.properties?.source);
+      }
+    }
+    return sources;
+  }
+
+  function pruneMediaFailureStates() {
+    const referenced = currentCanvasMediaSources();
+    for (const source of mediaFailureStates.keys()) {
+      if (!referenced.has(source)) mediaFailureStates.delete(source);
+    }
+    return referenced;
+  }
+
+
+  function mediaFrameIndex(layer, frame) {
+    let startFrame = 0;
+    if (layer.properties?.present === false) {
+      const appearances = (layer.keyframes || []).filter(keyframe => keyframe.properties?.present === true).map(keyframe => keyframe.frame);
+      if (appearances.length) startFrame = Math.min(...appearances);
+    }
+    return Math.max(0, frame - startFrame);
+  }
 
   function redrawMediaCanvases() {
     for (const card of document.querySelectorAll('.advanced-card')) {
@@ -333,20 +378,73 @@
     }
   }
 
-  function mediaPreviewElement(source) {
-    if (mediaPreviews.has(source)) return mediaPreviews.get(source);
-    const video = source.toLowerCase().endsWith('.mp4');
-    const element = document.createElement(video ? 'video' : 'img');
-    element.src = mediaUrl(source);
-    if (video) {
-      element.muted = true; element.loop = true; element.autoplay = true; element.playsInline = true;
-      element.addEventListener('loadeddata', () => { element.play().catch(() => {}); redrawMediaCanvases(); });
-    } else element.addEventListener('load', redrawMediaCanvases);
-    mediaPreviews.set(source, element);
+  function mediaTimelineElement(source, frameCount, fps) {
+    const revision = mediaTimelineRevision(source);
+    const key = source + '|' + revision + '|' + frameCount + '|' + fps;
+    if (mediaPreviews.has(key)) return mediaPreviews.get(key);
+    const previousFailure = mediaFailureStates.get(source);
+    if (previousFailure && previousFailure.revision !== revision) mediaFailureStates.delete(source);
+    if (mediaFailureStates.get(source)?.terminal) return null;
+    if (mediaPreviews.size >= 32) {
+      const oldestKey = mediaPreviews.keys().next().value;
+      const oldest = mediaPreviews.get(oldestKey);
+      const queued = mediaLoadQueue.findIndex(item => item.element === oldest);
+      if (queued >= 0) mediaLoadQueue.splice(queued, 1);
+      else if (oldest) oldest.src = '';
+      mediaPreviews.delete(oldestKey);
+    }
+    const element = document.createElement('img');
+    const url = mediaTimelineUrl(source, frameCount, fps, revision);
+    mediaLoadQueue.push({element, url, key, source, revision});
+    pumpMediaLoadQueue();
+    mediaPreviews.set(key, element);
     return element;
   }
 
-  function drawShape(context, layer, properties, alpha = 1) {
+  function pumpMediaLoadQueue() {
+    while (activeMediaLoads < 2 && mediaLoadQueue.length) {
+      const {element, url, key, source, revision} = mediaLoadQueue.shift();
+      activeMediaLoads++;
+      let completed = false;
+      const complete = redraw => {
+        if (completed) return;
+        completed = true;
+        activeMediaLoads--;
+        if (redraw) redrawMediaCanvases();
+        pumpMediaLoadQueue();
+      };
+      element.addEventListener('load', () => {
+        const failure = mediaFailureStates.get(source);
+        if (failure?.revision === revision && !failure.terminal) mediaFailureStates.delete(source);
+        complete(true);
+      }, {once: true});
+      element.addEventListener('error', () => {
+        if (mediaPreviews.get(key) !== element) {
+          complete(false);
+          return;
+        }
+        mediaPreviews.delete(key);
+        const referenced = pruneMediaFailureStates();
+        if (!referenced.has(source)) {
+          complete(false);
+          return;
+        }
+        const failure = mediaFailureStates.get(source);
+        const attempts = failure?.revision === revision ? failure.attempts : 0;
+        if (attempts < 1) {
+          mediaFailureStates.set(source, {revision, attempts: attempts + 1, terminal: false});
+          complete(false);
+          setTimeout(redrawMediaCanvases, 250);
+        } else {
+          mediaFailureStates.set(source, {revision, attempts: attempts + 1, terminal: true});
+          complete(false);
+        }
+      }, {once: true});
+      element.src = url;
+    }
+  }
+
+  function drawShape(context, layer, properties, alpha = 1, frame = 0, fps = 1, frameCount = 1) {
     context.save(); context.globalAlpha = alpha; context.strokeStyle = properties.colour; context.fillStyle = properties.colour; context.lineWidth = Math.max(.12, properties.width || .12);
     beginLayerRotation(context, properties, layer.type);
     if (layer.type === 'text' || layer.type === 'time') { context.font = `${Math.max(4, Number(properties.font.split('x')[1]?.replace(/\D/g, '') || 7))}px monospace`; context.textBaseline = 'alphabetic'; context.fillText(layer.type === 'time' ? currentTimeText(properties.format) : properties.text, properties.x, properties.y); }
@@ -357,12 +455,44 @@
     else if (layer.type === 'circle') { context.beginPath(); context.arc(properties.x, properties.y, properties.radius, 0, Math.PI * 2); properties.filled ? context.fill() : context.stroke(); }
     else if (layer.type === 'ellipse') { context.beginPath(); context.ellipse(properties.x, properties.y, properties.radius_x, properties.radius_y, properties.rotation * Math.PI / 180, 0, Math.PI * 2); properties.filled ? context.fill() : context.stroke(); }
     else if (layer.type === 'media' && properties.source) {
-      const media = mediaPreviewElement(properties.source), naturalWidth = media.videoWidth || media.naturalWidth, naturalHeight = media.videoHeight || media.naturalHeight;
+      const media = mediaTimelineElement(properties.source, frameCount, fps);
+      if (!media) { context.restore(); return; }
+      const naturalWidth = media.naturalWidth, naturalHeight = media.naturalHeight / frameCount;
       if (naturalWidth && naturalHeight) {
-        let width = properties.width, height = properties.height;
-        if (properties.keep_aspect) { const scale = Math.min(width / naturalWidth, height / naturalHeight); width = naturalWidth * scale; height = naturalHeight * scale; }
-        context.translate(properties.x + properties.width / 2, properties.y + properties.height / 2); context.rotate(properties.rotation * Math.PI / 180);
-        context.drawImage(media, -properties.width / 2, -properties.height / 2, width, height);
+        const mediaFrame = mediaFrameIndex(layer, frame) % frameCount;
+        const pythonRound = value => {
+          const lower = Math.floor(value), fraction = value - lower;
+          if (fraction < .5) return lower;
+          if (fraction > .5) return lower + 1;
+          return lower % 2 === 0 ? lower : lower + 1;
+        };
+        const x = pythonRound(properties.x), y = pythonRound(properties.y);
+        let width = pythonRound(properties.width), height = pythonRound(properties.height);
+        if (properties.keep_aspect) {
+          const boxWidth = width, boxHeight = height;
+          if (boxWidth >= naturalWidth && boxHeight >= naturalHeight) {
+            width = naturalWidth; height = naturalHeight;
+          } else {
+            const aspect = naturalWidth / naturalHeight;
+            if (boxWidth / boxHeight >= aspect) {
+              height = boxHeight;
+              const exactWidth = height * aspect;
+              const lower = Math.floor(exactWidth), upper = Math.ceil(exactWidth);
+              width = Math.max(1,
+                Math.abs(aspect - lower / height) <= Math.abs(aspect - upper / height)
+                  ? lower : upper);
+            } else {
+              width = boxWidth;
+              const exactHeight = width / aspect;
+              const lower = Math.floor(exactHeight), upper = Math.ceil(exactHeight);
+              const error = candidate => candidate === 0 ? 0 : Math.abs(aspect - width / candidate);
+              height = Math.max(1, error(lower) <= error(upper) ? lower : upper);
+            }
+          }
+        }
+        context.beginPath(); context.rect(x, y, width, height); context.clip();
+        context.translate(x + width / 2, y + height / 2); context.rotate(properties.rotation * Math.PI / 180);
+        context.drawImage(media, 0, mediaFrame * naturalHeight, naturalWidth, naturalHeight, -width / 2, -height / 2, width, height);
       }
     }
     context.restore();
@@ -371,8 +501,8 @@
   function drawEditor(module, canvas) {
     const state = stateFor(module), context = canvas.getContext('2d');
     context.setTransform(10, 0, 0, 10, 0, 0); context.imageSmoothingEnabled = false; context.fillStyle = module.background; context.fillRect(0, 0, 64, 32);
-    if (state.onion) for (const onionFrame of [state.frame - 1, state.frame + 1]) if (onionFrame >= 0 && onionFrame < module.frame_count) for (const {layer, properties} of orderedLayersForFrame(module, onionFrame)) { if (layer.visible && properties.present !== false) drawShape(context, layer, properties, .18); }
-    for (const {layer, properties} of orderedLayersForFrame(module, state.frame)) { if (layer.visible && properties.present !== false) drawShape(context, layer, properties); }
+    if (state.onion) for (const onionFrame of [state.frame - 1, state.frame + 1]) if (onionFrame >= 0 && onionFrame < module.frame_count) for (const {layer, properties} of orderedLayersForFrame(module, onionFrame)) { if (layer.visible && properties.present !== false) drawShape(context, layer, properties, .18, onionFrame, module.fps, module.frame_count); }
+    for (const {layer, properties} of orderedLayersForFrame(module, state.frame)) { if (layer.visible && properties.present !== false) drawShape(context, layer, properties, 1, state.frame, module.fps, module.frame_count); }
     const selected = module.layers.find(layer => layer.id === state.selected);
     if (selected) {
       const box = bounds(resolvedProperties(module, selected, state.frame), selected.type); context.save(); context.strokeStyle = '#00ffff'; context.fillStyle = '#00ffff'; context.lineWidth = .12; context.setLineDash([.5, .35]); context.strokeRect(box.minX, box.minY, Math.max(1, box.maxX - box.minX), Math.max(1, box.maxY - box.minY)); context.setLineDash([]); context.fillRect(box.maxX - .7, box.maxY - .7, 1.4, 1.4); if (supportsRotation(selected.type)) { context.beginPath(); context.arc((box.minX + box.maxX) / 2, box.minY - 2.5, .75, 0, Math.PI * 2); context.fill(); } context.restore();
@@ -444,7 +574,7 @@
     if (supportsRotation(layer.type) && !Object.hasOwn(values, 'rotation')) values.rotation = 0;
     for (const [field, labelText, type] of editableFields) {
       let label;
-      if (type === 'select' || type === 'media-select' || type === 'time-format') label = moduleControl(labelText, values[field], 'select', value => { saveFrameProperties(module, layer, {[field]: value}); drawEditor(module, container.closest('.advanced-card').querySelector('canvas')); }, type === 'media-select' ? mediaItems.map(item => item.name) : (type === 'time-format' ? ['24h', '24h_seconds', '12h', '12h_seconds'] : (field === 'font' ? fonts : [])));
+      if (type === 'select' || type === 'media-select' || type === 'time-format') label = moduleControl(labelText, values[field], 'select', value => { saveFrameProperties(module, layer, {[field]: value}); if (type === 'media-select') pruneMediaFailureStates(); drawEditor(module, container.closest('.advanced-card').querySelector('canvas')); }, type === 'media-select' ? mediaItems.map(item => item.name) : (type === 'time-format' ? ['24h', '24h_seconds', '12h', '12h_seconds'] : (field === 'font' ? fonts : [])));
       else if (type === 'points') { label = document.createElement('label'); label.textContent = labelText; label.className = 'wide'; const textarea = document.createElement('textarea'); textarea.rows = 4; textarea.dataset.property = field; textarea.value = formatPoints(values[field]); textarea.addEventListener('change', () => { const points = parsePoints(textarea.value); if (points.length) { saveFrameProperties(module, layer, {points}); refreshAdvanced(module.id); } }); label.append(textarea); }
       else label = moduleControl(labelText, values[field], type, value => { const nextValue = field === 'z_index' ? Math.max(-64, Math.min(64, Math.round(value))) : value; saveFrameProperties(module, layer, {[field]: nextValue}); drawEditor(module, container.closest('.advanced-card').querySelector('canvas')); }, null);
       label.querySelector('input,select,textarea').dataset.property = field; grid.append(label);
@@ -687,7 +817,7 @@
     }, 1000 / module.fps); refreshAdvanced(module.id);
   }
 
-  function refreshAdvanced(id) { const module = byId(id); if (!module) return; const card = document.querySelector(`.custom-module-card[data-id="${CSS.escape(id)}"]`); if (!card) { renderCustomModules(); return; } renderAdvancedInto(module, card); }
+  function refreshAdvanced(id) { pruneMediaFailureStates(); const module = byId(id); if (!module) return; const card = document.querySelector(`.custom-module-card[data-id="${CSS.escape(id)}"]`); if (!card) { renderCustomModules(); return; } renderAdvancedInto(module, card); }
 
   function renderAdvancedInto(module, card) {
     const state = stateFor(module); card.replaceChildren(); card.className = 'custom-module-card advanced-card'; card.dataset.id = module.id; card.dataset.editorType = 'canvas'; headerFor(module, card, true);
@@ -705,6 +835,7 @@
   function renderAdvanced(module, list) { const card = document.createElement('div'); list.append(card); renderAdvancedInto(module, card); }
 
   window.renderCustomModules = function renderCustomModules() {
+    pruneMediaFailureStates();
     const list = document.querySelector('#custom-modules'); list.replaceChildren();
     if (!customModules.length) { const empty = document.createElement('div'); empty.className = 'empty'; empty.textContent = 'No custom modules yet. Add simple text, then convert it into a layered animation when needed.'; list.append(empty); syncCustomModuleUI(); syncPlaylistDurations(); return; }
     for (const module of customModules) module.type === 'canvas' ? renderAdvanced(module, list) : renderSimple(module, list);

@@ -1,6 +1,9 @@
+import threading
 import types
 import unittest
 from unittest.mock import Mock, call, patch
+
+from PIL import Image
 
 from modules import custom_text
 
@@ -341,7 +344,7 @@ class CustomTextModuleTests(unittest.TestCase):
     def test_canvas_media_preloading_does_not_consume_module_duration(self):
         matrix = self.matrix()
         clock = [0.0]
-        def preload(*_):
+        def preload(*_, **__):
             clock[0] = 5.0
             return ["frame"]
         matrix.media_frames.side_effect = preload
@@ -366,6 +369,128 @@ class CustomTextModuleTests(unittest.TestCase):
         matrix.draw_image.assert_called_once()
         matrix.swap.assert_called_once()
 
+    def test_canvas_media_preloading_receives_the_module_stop_event(self):
+        matrix = self.matrix()
+        matrix.media_frames.return_value = ["frame"] * 3
+        stop = Mock()
+        stop.wait.return_value = True
+        layer = {
+            "id": "layer_media", "name": "Media", "type": "media", "visible": True,
+            "properties": {
+                "source": "animation.gif", "x": 0, "y": 0, "width": 64,
+                "height": 32, "rotation": 0, "keep_aspect": True,
+            },
+            "keyframes": [],
+        }
+
+        custom_text.run(
+            matrix, {}, duration=10, stop_event=stop,
+            module_config=self.canvas_options(layers=[layer]),
+        )
+
+        matrix.media_frames.assert_called_once()
+        call = matrix.media_frames.call_args
+        self.assertEqual(call.args, ("animation.gif", 3, 10))
+        self.assertIs(call.kwargs["stop_event"], stop)
+        self.assertIs(call.kwargs["preserve_size"], True)
+        self.assertGreater(call.kwargs["decode_timeout"], 0)
+        self.assertLessEqual(call.kwargs["decode_timeout"], 5)
+
+    def test_canvas_media_preloading_shares_one_aggregate_decode_budget(self):
+        matrix = self.matrix()
+        clock = [0.0]
+
+        def preload(*_args, **_kwargs):
+            clock[0] += 4
+            return ["frame"] * 3
+
+        matrix.media_frames.side_effect = preload
+        stop = Mock()
+        stop.wait.return_value = True
+        layers = [
+            {
+                "id": f"layer_{index}", "name": source, "type": "media", "visible": True,
+                "properties": {"source": source, "x": 0, "y": 0, "width": 10,
+                               "height": 10, "rotation": 0, "keep_aspect": True},
+                "keyframes": [],
+            }
+            for index, source in enumerate(("first.png", "second.gif"))
+        ]
+
+        with patch("modules.custom_text.time.monotonic", side_effect=lambda: clock[0]):
+            custom_text.run(
+                matrix, {}, duration=1, stop_event=stop,
+                module_config=self.canvas_options(layers=layers),
+            )
+
+        self.assertEqual(matrix.media_frames.call_count, 2)
+        self.assertEqual(
+            [entry.kwargs["decode_timeout"] for entry in matrix.media_frames.call_args_list],
+            [2.5, 1],
+        )
+        self.assertTrue(all(
+            entry.kwargs["preserve_size"] is True
+            for entry in matrix.media_frames.call_args_list
+        ))
+
+    def test_canvas_media_preloading_enforces_aggregate_memory_budget(self):
+        matrix = self.matrix()
+        matrix.media_frames.return_value = [Image.new("RGB", (2, 2), "red")]
+        stop = Mock()
+        layer = {
+            "id": "layer_media", "name": "Media", "type": "media", "visible": True,
+            "properties": {"source": "large.gif", "x": 0, "y": 0, "width": 10,
+                           "height": 10, "rotation": 0, "keep_aspect": True},
+            "keyframes": [],
+        }
+
+        with patch.object(custom_text, "CANVAS_MEDIA_CACHE_BYTES", 1):
+            with self.assertRaisesRegex(ValueError, "aggregate memory budget"):
+                custom_text.run(
+                    matrix, {}, duration=1, stop_event=stop,
+                    module_config=self.canvas_options(layers=[layer]),
+                )
+
+    def test_canvas_stop_interrupts_media_preloading(self):
+        matrix = self.matrix()
+        entered_decoder = threading.Event()
+        stop = threading.Event()
+
+        def blocked_decode(*_, stop_event, **__):
+            entered_decoder.set()
+            stop_event.wait(5)
+            return []
+
+        matrix.media_frames.side_effect = blocked_decode
+        layer = {
+            "id": "layer_media", "name": "Media", "type": "media", "visible": True,
+            "properties": {
+                "source": "animation.gif", "x": 0, "y": 0, "width": 64,
+                "height": 32, "rotation": 0, "keep_aspect": True,
+            },
+            "keyframes": [],
+        }
+        worker = threading.Thread(
+            target=custom_text.run,
+            args=(matrix, {}),
+            kwargs={
+                "duration": 10, "stop_event": stop,
+                "module_config": self.canvas_options(layers=[layer]),
+            },
+            daemon=True,
+        )
+        worker.start()
+
+        self.assertTrue(entered_decoder.wait(0.5))
+        stop.set()
+        worker.join(0.5)
+
+        self.assertFalse(worker.is_alive())
+        matrix.fill.assert_not_called()
+        matrix.draw_image.assert_not_called()
+        matrix.draw_text.assert_not_called()
+        matrix.swap.assert_not_called()
+
     def test_media_frame_index_starts_when_an_inserted_layer_first_appears(self):
         layer = {
             "properties": {"present": False},
@@ -385,7 +510,7 @@ class CustomTextModuleTests(unittest.TestCase):
             "animation.gif": ["gif-0", "gif-1", "gif-2"],
             "built-in/clip.mp4": ["video-0", "video-1", "video-2"],
         }
-        matrix.media_frames.side_effect = lambda source, frame_count, fps: media_frames[source]
+        matrix.media_frames.side_effect = lambda source, frame_count, fps, **_: media_frames[source]
         stop = Mock()
         stop.wait.side_effect = [False, True]
         layers = [
@@ -406,7 +531,7 @@ class CustomTextModuleTests(unittest.TestCase):
             },
         ]
 
-        with patch("modules.custom_text.time.monotonic", side_effect=[0, 0, 0.1]):
+        with patch("modules.custom_text.time.monotonic", side_effect=[0, 0, 0, 0, 0, 0.1, 0.2]):
             result = custom_text.run(
                 matrix, {}, duration=1, stop_event=stop,
                 module_config=self.canvas_options(layers=layers),
@@ -414,6 +539,9 @@ class CustomTextModuleTests(unittest.TestCase):
 
         self.assertTrue(result)
         self.assertEqual(matrix.media_frames.call_count, 3)
+        self.assertTrue(
+            all(entry.kwargs["stop_event"] is stop for entry in matrix.media_frames.call_args_list)
+        )
         self.assertEqual(
             [entry.args[0] for entry in matrix.draw_image.call_args_list],
             ["photo-0", "gif-0", "video-0", "photo-1", "gif-1", "video-1"],
@@ -422,6 +550,119 @@ class CustomTextModuleTests(unittest.TestCase):
             "gif-1", 4, 5, width=24, height=12, keep_aspect=False,
             rotation=15, canvas="canvas",
         )
+
+    def test_canvas_operational_media_failure_does_not_abort_other_layers(self):
+        matrix = self.matrix()
+
+        def decode(source, frame_count, fps, **_):
+            if source == "broken.gif":
+                raise ValueError("decode failed")
+            return ["healthy-frame"]
+
+        matrix.media_frames.side_effect = decode
+        stop = Mock()
+        stop.wait.return_value = True
+        layers = [
+            {
+                "id": "broken", "name": "Broken", "type": "media", "visible": True,
+                "properties": {"x": 0, "y": 0, "width": 16, "height": 16, "rotation": 0, "source": "broken.gif", "keep_aspect": True},
+                "keyframes": [],
+            },
+            {
+                "id": "healthy", "name": "Healthy", "type": "media", "visible": True,
+                "properties": {"x": 16, "y": 0, "width": 16, "height": 16, "rotation": 0, "source": "healthy.png", "keep_aspect": True},
+                "keyframes": [],
+            },
+            {
+                "id": "primitive", "name": "Primitive", "type": "rectangle", "visible": True,
+                "properties": {"x": 1, "y": 1, "width": 6, "height": 5, "rotation": 0, "colour": "#ffffff", "filled": False},
+                "keyframes": [],
+            },
+        ]
+
+        result = custom_text.run(
+            matrix, {}, duration=1, stop_event=stop,
+            module_config=self.canvas_options(frame_count=1, layers=layers),
+        )
+
+        self.assertTrue(result)
+        self.assertEqual(
+            [call.args[0] for call in matrix.media_frames.call_args_list],
+            ["broken.gif", "healthy.png"],
+        )
+        matrix.draw_image.assert_called_once_with(
+            "healthy-frame", 16, 0, width=16, height=16, keep_aspect=True,
+            rotation=0, canvas="canvas",
+        )
+        self.assertGreaterEqual(matrix.draw_line.call_count, 4)
+        matrix.swap.assert_called_once_with("canvas")
+
+    def test_canvas_timed_out_media_reserves_decode_time_for_later_sources(self):
+        matrix = self.matrix()
+        clock = [0.0]
+
+        def decode(source, frame_count, fps, **kwargs):
+            clock[0] += kwargs["decode_timeout"]
+            if source == "broken.gif":
+                raise ValueError("decoder timed out")
+            return ["healthy-frame"]
+
+        matrix.media_frames.side_effect = decode
+        stop = Mock()
+        stop.wait.return_value = True
+        layers = [
+            {
+                "id": "broken", "name": "Broken", "type": "media", "visible": True,
+                "properties": {"x": 0, "y": 0, "width": 16, "height": 16, "rotation": 0, "source": "broken.gif", "keep_aspect": True},
+                "keyframes": [],
+            },
+            {
+                "id": "healthy", "name": "Healthy", "type": "media", "visible": True,
+                "properties": {"x": 16, "y": 0, "width": 16, "height": 16, "rotation": 0, "source": "healthy.png", "keep_aspect": True},
+                "keyframes": [],
+            },
+            {
+                "id": "primitive", "name": "Primitive", "type": "rectangle", "visible": True,
+                "properties": {"x": 1, "y": 1, "width": 6, "height": 5, "rotation": 0, "colour": "#ffffff", "filled": False},
+                "keyframes": [],
+            },
+        ]
+
+        with patch("modules.custom_text.time.monotonic", side_effect=lambda: clock[0]):
+            result = custom_text.run(
+                matrix, {}, duration=1, stop_event=stop,
+                module_config=self.canvas_options(frame_count=1, layers=layers),
+            )
+
+        self.assertTrue(result)
+        self.assertEqual(
+            [(call.args[0], call.kwargs["decode_timeout"])
+             for call in matrix.media_frames.call_args_list],
+            [("broken.gif", 2.5), ("healthy.png", 2.5)],
+        )
+        matrix.draw_image.assert_called_once_with(
+            "healthy-frame", 16, 0, width=16, height=16, keep_aspect=True,
+            rotation=0, canvas="canvas",
+        )
+        self.assertGreaterEqual(matrix.draw_line.call_count, 4)
+        matrix.swap.assert_called_once_with("canvas")
+
+    def test_canvas_unexpected_media_programming_error_still_propagates(self):
+        matrix = self.matrix()
+        matrix.media_frames.side_effect = RuntimeError("programming defect")
+        layer = {
+            "id": "media", "name": "Media", "type": "media", "visible": True,
+            "properties": {"x": 0, "y": 0, "width": 16, "height": 16, "rotation": 0, "source": "media.png", "keep_aspect": True},
+            "keyframes": [],
+        }
+
+        with self.assertRaisesRegex(RuntimeError, "programming defect"):
+            custom_text.run(
+                matrix, {}, duration=1, stop_event=threading.Event(),
+                module_config=self.canvas_options(frame_count=1, layers=[layer]),
+            )
+
+        matrix.swap.assert_not_called()
 
     def test_canvas_renderer_draws_dynamic_time_layer(self):
         matrix = self.matrix()

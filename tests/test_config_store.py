@@ -49,6 +49,26 @@ class ConfigStoreTests(unittest.TestCase):
             self.assertIn("openweather_overview", config)
             self.assertIn("openweather_forecast", config)
 
+    def test_legacy_config_gains_disabled_empty_announcement_board_without_reordering_playlist(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "config.json"
+            legacy = json.loads(json.dumps(DEFAULT_CONFIG))
+            legacy.pop("announcement_board", None)
+            legacy["playlist"] = [
+                item for item in legacy["playlist"]
+                if item["module"] != "announcement_board"
+            ]
+            expected_existing = json.loads(json.dumps(legacy["playlist"]))
+            path.write_text(json.dumps(legacy))
+
+            config = ConfigStore(path).get()
+
+            self.assertEqual(config["playlist"][:-1], expected_existing)
+            self.assertEqual(config["playlist"][-1], {
+                "module": "announcement_board", "duration": 0, "enabled": False,
+            })
+            self.assertEqual(config["announcement_board"], {"announcements": []})
+
     def test_legacy_config_gains_default_sleep_gif_speed_without_changing_layout(self):
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / "config.json"
@@ -65,6 +85,191 @@ class ConfigStoreTests(unittest.TestCase):
             self.assertEqual(actual_layout, expected_layout)
             self.assertNotIn("gif_speed_percent", config["media_layout"]["splash"])
 
+    def test_static_announcement_is_validated_and_colours_are_canonicalized(self):
+        with tempfile.TemporaryDirectory() as directory:
+            store = ConfigStore(Path(directory) / "config.json")
+
+            config = store.update({
+                "announcement_board": {"announcements": [self.announcement()]},
+            })
+
+            announcement = config["announcement_board"]["announcements"][0]
+            self.assertEqual(announcement["style"]["foreground"], "#ffffff")
+            self.assertEqual(announcement["style"]["border_colour"], "#ffffff")
+            self.assertEqual(announcement["timing"], {
+                "mode": "static", "duration_seconds": 8,
+            })
+
+    def test_scrolling_announcement_uses_only_bounded_loops_and_frame_delay(self):
+        scrolling = self.announcement()
+        scrolling["timing"] = {"mode": "scroll", "loops": 2, "frame_delay": 0.05}
+        with tempfile.TemporaryDirectory() as directory:
+            store = ConfigStore(Path(directory) / "config.json")
+
+            saved = store.update({
+                "announcement_board": {"announcements": [scrolling]},
+            })
+
+            self.assertEqual(
+                saved["announcement_board"]["announcements"][0]["timing"],
+                {"mode": "scroll", "loops": 2, "frame_delay": 0.05},
+            )
+            scrolling["timing"]["duration_seconds"] = 8
+            with self.assertRaisesRegex(ValueError, "scrolling announcement timing"):
+                store.update({"announcement_board": {"announcements": [scrolling]}})
+
+    def test_fade_transition_has_only_a_bounded_duration(self):
+        fading = self.announcement()
+        fading["transition"] = {"type": "fade", "duration_seconds": 0.4}
+        with tempfile.TemporaryDirectory() as directory:
+            store = ConfigStore(Path(directory) / "config.json")
+
+            saved = store.update({
+                "announcement_board": {"announcements": [fading]},
+            })
+
+            self.assertEqual(
+                saved["announcement_board"]["announcements"][0]["transition"],
+                {"type": "fade", "duration_seconds": 0.4},
+            )
+            fading["transition"]["steps"] = 4
+            with self.assertRaisesRegex(ValueError, "fade announcement transition"):
+                store.update({"announcement_board": {"announcements": [fading]}})
+
+    def test_slide_transition_has_direction_and_bounded_duration(self):
+        sliding = self.announcement()
+        sliding["transition"] = {
+            "type": "slide", "direction": "left", "duration_seconds": 0.4,
+        }
+        with tempfile.TemporaryDirectory() as directory:
+            store = ConfigStore(Path(directory) / "config.json")
+
+            saved = store.update({
+                "announcement_board": {"announcements": [sliding]},
+            })
+
+            self.assertEqual(
+                saved["announcement_board"]["announcements"][0]["transition"],
+                {"type": "slide", "direction": "left", "duration_seconds": 0.4},
+            )
+            sliding["transition"]["direction"] = "up"
+            with self.assertRaisesRegex(ValueError, "slide announcement transition direction"):
+                store.update({"announcement_board": {"announcements": [sliding]}})
+
+    def test_wipe_transition_has_direction_and_bounded_duration(self):
+        wiping = self.announcement()
+        wiping["transition"] = {
+            "type": "wipe", "direction": "left", "duration_seconds": 0.4,
+        }
+        with tempfile.TemporaryDirectory() as directory:
+            store = ConfigStore(Path(directory) / "config.json")
+
+            saved = store.update({
+                "announcement_board": {"announcements": [wiping]},
+            })
+
+            self.assertEqual(
+                saved["announcement_board"]["announcements"][0]["transition"],
+                {"type": "wipe", "direction": "left", "duration_seconds": 0.4},
+            )
+            wiping["transition"]["direction"] = "down"
+            with self.assertRaisesRegex(ValueError, "wipe announcement transition direction"):
+                store.update({"announcement_board": {"announcements": [wiping]}})
+
+    def test_pixel_dissolve_transition_has_only_a_bounded_duration(self):
+        dissolve = self.announcement()
+        dissolve["transition"] = {"type": "pixel_dissolve", "duration_seconds": 0.4}
+        with tempfile.TemporaryDirectory() as directory:
+            store = ConfigStore(Path(directory) / "config.json")
+
+            saved = store.update({
+                "announcement_board": {"announcements": [dissolve]},
+            })
+
+            self.assertEqual(
+                saved["announcement_board"]["announcements"][0]["transition"],
+                {"type": "pixel_dissolve", "duration_seconds": 0.4},
+            )
+            dissolve["transition"]["seed"] = 42
+            with self.assertRaisesRegex(ValueError, "pixel dissolve announcement transition"):
+                store.update({"announcement_board": {"announcements": [dissolve]}})
+
+    def test_editor_shaped_announcement_preserves_disabled_state_and_name(self):
+        with tempfile.TemporaryDirectory() as directory:
+            store = ConfigStore(Path(directory) / "config.json")
+            item = self.announcement(enabled=False, name="Front desk welcome")
+
+            updated = store.update({"announcement_board": {"announcements": [item]}})
+
+            saved = updated["announcement_board"]["announcements"][0]
+            self.assertFalse(saved["enabled"])
+            self.assertEqual(saved["name"], "Front desk welcome")
+
+    def test_legacy_announcement_record_gains_enabled_name_defaults(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "config.json"
+            store = ConfigStore(path)
+            historical = store.get()
+            legacy = self.announcement()
+            legacy.pop("enabled")
+            legacy.pop("name")
+            historical["announcement_board"]["announcements"] = [legacy]
+            path.write_text(json.dumps(historical))
+
+            updated = ConfigStore(path).get()
+
+            saved = updated["announcement_board"]["announcements"][0]
+            self.assertTrue(saved["enabled"])
+            self.assertEqual(saved["name"], "Welcome")
+
+    def test_announcement_weekdays_are_preserved_and_legacy_defaults_to_every_day(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "config.json"
+            store = ConfigStore(path)
+            weekdays = self.announcement(enabled=True, name="Weekdays")
+            weekdays["schedule"]["days"] = [0, 2, 4]
+
+            updated = store.update({"announcement_board": {"announcements": [weekdays]}})
+            self.assertEqual(updated["announcement_board"]["announcements"][0]["schedule"]["days"], [0, 2, 4])
+
+            legacy = self.announcement()
+            legacy.pop("enabled")
+            legacy.pop("name")
+            legacy["schedule"].pop("days")
+            historical = store.get()
+            historical["announcement_board"]["announcements"] = [legacy]
+            path.write_text(json.dumps(historical))
+            updated = ConfigStore(path).get()
+            self.assertEqual(updated["announcement_board"]["announcements"][0]["schedule"]["days"], [0, 1, 2, 3, 4, 5, 6])
+
+    def test_announcement_rejects_runtime_unsupported_scrolling_combinations(self):
+        cases = []
+        media_layout = self.announcement(timing={"mode": "scroll", "loops": 1, "frame_delay": 0.05})
+        media_layout["layout"] = "icon_notice"
+        cases.append(media_layout)
+        bordered = self.announcement(timing={"mode": "scroll", "loops": 1, "frame_delay": 0.05})
+        bordered["style"]["border"] = "solid"
+        cases.append(bordered)
+        transitioned = self.announcement(timing={"mode": "scroll", "loops": 1, "frame_delay": 0.05})
+        transitioned["transition"] = {"type": "fade", "duration_seconds": 0.5}
+        cases.append(transitioned)
+
+        with tempfile.TemporaryDirectory() as directory:
+            store = ConfigStore(Path(directory) / "config.json")
+            for announcement in cases:
+                with self.subTest(announcement=announcement):
+                    with self.assertRaisesRegex(ValueError, "scrolling announcement"):
+                        store.update({"announcement_board": {"announcements": [announcement]}})
+
+    def test_announcement_rejects_equal_start_and_end_times(self):
+        invalid = self.announcement()
+        invalid["schedule"]["end_time"] = invalid["schedule"]["start_time"]
+        with tempfile.TemporaryDirectory() as directory:
+            store = ConfigStore(Path(directory) / "config.json")
+
+            with self.assertRaisesRegex(ValueError, "must differ"):
+                store.update({"announcement_board": {"announcements": [invalid]}})
+
     def test_sleep_gif_speed_rejects_malformed_and_unsafe_percentages(self):
         invalid_values = [False, 0, -1, 24, 401, 10_000, 1.5, float("nan"), float("inf"), "100", None]
         for value in invalid_values:
@@ -72,6 +277,37 @@ class ConfigStoreTests(unittest.TestCase):
                 store = ConfigStore(Path(directory) / "config.json")
                 with self.assertRaises(ValueError):
                     store.update({"media_layout": {"sleep": {"gif_speed_percent": value}}})
+
+    @staticmethod
+    def announcement(**changes):
+        item = {
+            "id": "announcement_welcome",
+            "enabled": True,
+            "name": "Welcome",
+            "layout": "text_notice",
+            "headline": "Welcome",
+            "message": "Front desk closes at 5 PM",
+            "media": None,
+            "schedule": {
+                "start_date": "2030-01-15",
+                "end_date": "2030-01-15",
+                "start_time": "09:00",
+                "end_time": "17:00",
+                "days": [0, 1, 2, 3, 4, 5, 6],
+            },
+            "style": {
+                "foreground": "#FFFFFF",
+                "background": "#000000",
+                "font": "5x7",
+                "alignment": "center",
+                "border": "none",
+                "border_colour": "#FFFFFF",
+            },
+            "timing": {"mode": "static", "duration_seconds": 8},
+            "transition": {"type": "cut"},
+        }
+        item.update(changes)
+        return item
 
     @staticmethod
     def advanced_module(**changes):

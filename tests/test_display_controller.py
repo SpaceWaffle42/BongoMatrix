@@ -201,6 +201,77 @@ class DisplayControllerTests(unittest.TestCase):
         with self.assertRaises(KeyError):
             controller.preview("unknown")
 
+    def test_announcement_board_executes_through_builtin_controller_path(self):
+        matrix = Mock()
+        controller = DisplayController(matrix, Mock())
+        module = Mock()
+        module.run.return_value = False
+        config = {"custom_modules": [], "announcement_board": {"announcements": []}}
+
+        with patch("display_controller.importlib.import_module", return_value=module) as importer:
+            result = controller._execute("announcement_board", config, 0)
+
+        self.assertFalse(result)
+        importer.assert_called_once_with("modules.announcement_board")
+        module.run.assert_called_once()
+        self.assertIs(module.run.call_args.args[0], matrix)
+        self.assertIs(module.run.call_args.args[1], config)
+        self.assertEqual(module.run.call_args.kwargs["duration"], 0)
+        self.assertIsNotNone(module.run.call_args.kwargs["stop_event"])
+
+    def test_scheduler_continues_to_next_playlist_item_when_board_has_no_active_record(self):
+        config = {
+            **DEFAULT_CONFIG,
+            "playlist": [
+                {"module": "announcement_board", "duration": 0, "enabled": True},
+                {"module": "clock_lava", "duration": 1, "enabled": True},
+            ],
+        }
+        store = Mock()
+        store.get.return_value = config
+        controller = DisplayController(Mock(), store)
+        calls = []
+
+        def execute(name, *_args):
+            calls.append(name)
+            if name == "clock_lava":
+                controller._shutdown.set()
+            return name != "announcement_board"
+
+        controller._execute = Mock(side_effect=execute)
+        with patch.object(controller, "_is_active", return_value=True):
+            controller._run_loop_unchecked()
+
+        self.assertEqual(calls, ["announcement_board", "clock_lava"])
+
+    def test_scheduler_idles_when_announcement_only_playlist_has_no_active_record(self):
+        config = {
+            **DEFAULT_CONFIG,
+            "playlist": [
+                {"module": "announcement_board", "duration": 0, "enabled": True},
+            ],
+        }
+        store = Mock()
+        store.get.return_value = config
+        controller = DisplayController(Mock(), store)
+        controller._execute = Mock(return_value=False)
+        original_wait = controller._shutdown.wait
+        waits = []
+
+        def stop_after_idle(seconds):
+            waits.append(seconds)
+            controller._shutdown.set()
+            return original_wait(0)
+
+        with (
+            patch.object(controller, "_is_active", return_value=True),
+            patch.object(controller._shutdown, "wait", side_effect=stop_after_idle),
+        ):
+            controller._run_loop_unchecked()
+
+        controller._execute.assert_called_once_with("announcement_board", config, 0)
+        self.assertEqual(waits, [0.25])
+
     def test_openweather_module_receives_secret_without_adding_it_to_config(self):
         matrix = Mock()
         store = Mock()
@@ -266,6 +337,59 @@ class DisplayControllerTests(unittest.TestCase):
 
         self.assertEqual(controller._take_preview(), "custom_welcome")
         controller.start.assert_called_once_with()
+
+    def test_announcement_preview_queue_is_last_request_wins_and_isolated(self):
+        controller = DisplayController(Mock(), Mock())
+        controller.start = Mock()
+        controller._module_stop = Mock()
+        first = {"id": "announcement_first", "headline": "FIRST"}
+        second = {"id": "announcement_second", "headline": "SECOND"}
+
+        controller.preview_announcement(first)
+        first["headline"] = "MUTATED"
+        controller.preview_announcement(second)
+
+        self.assertEqual(controller._take_announcement_preview(), second)
+        self.assertIsNone(controller._take_announcement_preview())
+        self.assertIsNone(controller._take_preview())
+        self.assertIsNone(controller._take_media_preview())
+        controller._module_stop.set.assert_called()
+        self.assertEqual(controller.start.call_count, 2)
+
+    def test_execute_announcement_preview_uses_exact_draft_and_stop_lifecycle(self):
+        matrix = Mock()
+        controller = DisplayController(matrix, Mock())
+        announcement = {"id": "announcement_preview", "enabled": False, "headline": "EXACT"}
+        module = Mock()
+        module.run_preview.return_value = True
+
+        with patch("display_controller.importlib.import_module", return_value=module) as importer:
+            result = controller._execute_announcement_preview(announcement)
+
+        self.assertTrue(result)
+        importer.assert_called_once_with("modules.announcement_board")
+        module.run_preview.assert_called_once()
+        self.assertIs(module.run_preview.call_args.args[0], matrix)
+        self.assertEqual(module.run_preview.call_args.args[1], announcement)
+        self.assertIsNotNone(module.run_preview.call_args.kwargs["stop_event"])
+        self.assertIsNone(controller.current_module)
+        self.assertIsNone(controller._module_stop)
+
+    def test_scheduler_executes_queued_announcement_before_normal_playlist(self):
+        store = Mock()
+        store.get.side_effect = [DEFAULT_CONFIG, RuntimeError("stop test loop")]
+        controller = DisplayController(Mock(), store)
+        draft = {"id": "announcement_preview"}
+        controller._announcement_preview = draft
+        controller._execute = Mock()
+        controller._execute_media = Mock()
+        controller._execute_announcement_preview = Mock(side_effect=lambda item: controller._shutdown.set() or True)
+
+        controller._run_loop_unchecked()
+
+        controller._execute_announcement_preview.assert_called_once_with(draft)
+        controller._execute.assert_not_called()
+        controller._execute_media.assert_not_called()
 
     def test_media_file_can_be_queued_and_executed_as_a_one_off_preview(self):
         matrix = Mock()
@@ -388,7 +512,8 @@ class DisplayControllerTests(unittest.TestCase):
         matrix = Mock()
         controller = DisplayController(matrix, store)
 
-        with patch.object(display_controller.LOGGER, "exception") as log_exception:
+        with patch.object(display_controller.LOGGER, "exception") as log_exception, \
+             patch.object(controller, "_is_active", return_value=True):
             controller.start()
             time.sleep(0.82)
             controller.stop(timeout=1)

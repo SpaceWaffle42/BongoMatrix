@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import copy
+import datetime as dt
 import json
 import math
 import os
@@ -23,7 +24,7 @@ class ConfigDurabilityError(OSError):
 
 ALLOWED_MODULES = {
     "clock_lava", "weather", "openweather_overview", "openweather_forecast",
-    "splash", "sleep",
+    "announcement_board", "splash", "sleep",
 }
 CUSTOM_FONT_ADVANCES = {"4x6": 4, "5x7": 5, "6x10": 6, "7x13": 7, "9x18B": 9}
 
@@ -121,6 +122,7 @@ DEFAULT_CONFIG = {
         "splash": {"x": 0, "y": 0, "width": 64, "height": 32, "keep_aspect": True, "video_fps": 20},
         "sleep": {"x": 0, "y": 0, "width": 64, "height": 32, "keep_aspect": True, "video_fps": 20, "gif_speed_percent": 100},
     },
+    "announcement_board": {"announcements": []},
     "custom_modules": [],
     "playlist": [
         {"module": "splash", "duration": 8, "enabled": True},
@@ -128,6 +130,7 @@ DEFAULT_CONFIG = {
         {"module": "clock_lava", "duration": 300, "enabled": True},
         {"module": "openweather_overview", "duration": 0, "enabled": False},
         {"module": "openweather_forecast", "duration": 0, "enabled": False},
+        {"module": "announcement_board", "duration": 0, "enabled": False},
     ],
 }
 
@@ -388,7 +391,199 @@ def _validate_canvas_module(item):
         raise ValueError("custom canvas supports at most 8192 aggregate points")
 
 
-def validate_config(config):
+def _announcement_date(value, field):
+    if not isinstance(value, str):
+        raise ValueError(f"announcement {field} must be an ISO date")
+    try:
+        parsed = dt.date.fromisoformat(value)
+    except ValueError as error:
+        raise ValueError(f"announcement {field} must be an ISO date") from error
+    if parsed.isoformat() != value:
+        raise ValueError(f"announcement {field} must be an ISO date")
+    return parsed
+
+
+def _validate_announcement_board(board, *, allow_legacy=True):
+    if not isinstance(board, dict) or set(board) != {"announcements"}:
+        raise ValueError("announcement board has invalid fields")
+    announcements = board["announcements"]
+    if not isinstance(announcements, list) or len(announcements) > 50:
+        raise ValueError("announcement board must contain at most 50 announcements")
+    seen_ids = set()
+    legacy_required = {
+        "id", "layout", "headline", "message", "media", "schedule",
+        "style", "timing", "transition",
+    }
+    required = legacy_required | {"enabled", "name"}
+    for item in announcements:
+        if (
+            not isinstance(item, dict)
+            or (
+                set(item) != required
+                if not allow_legacy
+                else not legacy_required.issubset(item) or not set(item).issubset(required)
+            )
+        ):
+            raise ValueError("announcement has invalid fields")
+        if allow_legacy:
+            item.setdefault("enabled", True)
+            item.setdefault("name", item["headline"])
+        if not isinstance(item["enabled"], bool):
+            raise ValueError("announcement enabled must be a boolean")
+        if (
+            not isinstance(item["name"], str)
+            or not 1 <= len(item["name"]) <= 100
+            or any(not character.isprintable() for character in item["name"])
+        ):
+            raise ValueError("announcement name must be 1-100 printable characters")
+        item_id = item["id"]
+        if (
+            not isinstance(item_id, str)
+            or not re.fullmatch(r"announcement_[a-z0-9_-]{1,40}", item_id)
+            or item_id in seen_ids
+        ):
+            raise ValueError("announcement ids must be unique safe ids")
+        seen_ids.add(item_id)
+        if item["layout"] not in {
+            "text_notice", "icon_notice", "image_banner", "full_image_notice",
+        }:
+            raise ValueError("announcement layout is not supported")
+        for field, minimum, maximum in (("headline", 1, 100), ("message", 0, 300)):
+            value = item[field]
+            if (
+                not isinstance(value, str)
+                or not minimum <= len(value) <= maximum
+                or any(not character.isprintable() for character in value)
+            ):
+                raise ValueError(f"announcement {field} must be {minimum}-{maximum} printable characters")
+        if item["media"] is not None and not _is_safe_media_reference(item["media"]):
+            raise ValueError("announcement media must be empty or a safe media reference")
+
+        schedule = item["schedule"]
+        legacy_schedule_fields = {"start_date", "end_date", "start_time", "end_time"}
+        schedule_fields = legacy_schedule_fields | {"days"}
+        if (
+            not isinstance(schedule, dict)
+            or (
+                set(schedule) != schedule_fields
+                if not allow_legacy
+                else not legacy_schedule_fields.issubset(schedule)
+                or not set(schedule).issubset(schedule_fields)
+            )
+        ):
+            raise ValueError("announcement schedule has invalid fields")
+        if allow_legacy:
+            schedule.setdefault("days", [0, 1, 2, 3, 4, 5, 6])
+        days = schedule["days"]
+        if (
+            not isinstance(days, list)
+            or not days
+            or any(isinstance(day, bool) or not isinstance(day, int) or not 0 <= day <= 6 for day in days)
+            or len(days) != len(set(days))
+        ):
+            raise ValueError("announcement schedule days must be unique weekdays 0-6")
+        schedule["days"] = sorted(days)
+        start_date = _announcement_date(schedule["start_date"], "start_date")
+        end_date = _announcement_date(schedule["end_date"], "end_date")
+        if end_date < start_date:
+            raise ValueError("announcement end_date must not be before start_date")
+        _validate_time(schedule["start_time"])
+        _validate_time(schedule["end_time"])
+        if schedule["start_time"] == schedule["end_time"]:
+            raise ValueError("announcement start_time and end_time must differ")
+
+        style = item["style"]
+        if not isinstance(style, dict) or set(style) != {
+            "foreground", "background", "font", "alignment", "border", "border_colour",
+        }:
+            raise ValueError("announcement style has invalid fields")
+        for field in ("foreground", "background", "border_colour"):
+            if not _is_hex_colour(style[field]):
+                raise ValueError(f"announcement {field} must use #RRGGBB format")
+            style[field] = style[field].lower()
+        if style["font"] not in CUSTOM_FONT_ADVANCES:
+            raise ValueError("announcement font is not supported")
+        if style["alignment"] not in {"left", "center", "right"}:
+            raise ValueError("announcement alignment is not supported")
+        if style["border"] not in {"none", "solid", "inset"}:
+            raise ValueError("announcement border is not supported")
+
+        timing = item["timing"]
+        if not isinstance(timing, dict):
+            raise ValueError("announcement timing must be an object")
+        if timing.get("mode") == "scroll":
+            if set(timing) != {"mode", "loops", "frame_delay"}:
+                raise ValueError("scrolling announcement timing has invalid fields")
+            loops = timing["loops"]
+            frame_delay = timing["frame_delay"]
+            if isinstance(loops, bool) or not isinstance(loops, int) or not 1 <= loops <= 10:
+                raise ValueError("scrolling announcement loops must be between 1 and 10")
+            if (
+                isinstance(frame_delay, bool)
+                or not isinstance(frame_delay, (int, float))
+                or not 0.01 <= frame_delay <= 1
+            ):
+                raise ValueError("scrolling announcement frame_delay must be between 0.01 and 1 second")
+        else:
+            if set(timing) != {"mode", "duration_seconds"}:
+                raise ValueError("static announcement timing has invalid fields")
+            duration = timing["duration_seconds"]
+            if (
+                timing["mode"] != "static"
+                or isinstance(duration, bool)
+                or not isinstance(duration, (int, float))
+                or not 1 <= duration <= 3600
+            ):
+                raise ValueError("static announcement duration must be between 1 and 3600 seconds")
+        transition = item["transition"]
+        if not isinstance(transition, dict):
+            raise ValueError("announcement transition must be an object")
+        if transition.get("type") == "cut":
+            if transition != {"type": "cut"}:
+                raise ValueError("cut announcement transition has invalid fields")
+        elif transition.get("type") in {"fade", "pixel_dissolve"}:
+            transition_label = transition["type"].replace("_", " ")
+            if set(transition) != {"type", "duration_seconds"}:
+                raise ValueError(f"{transition_label} announcement transition has invalid fields")
+            transition_duration = transition["duration_seconds"]
+            if (
+                isinstance(transition_duration, bool)
+                or not isinstance(transition_duration, (int, float))
+                or not 0.1 <= transition_duration <= 3
+            ):
+                raise ValueError(
+                    f"{transition_label} announcement transition duration must be between 0.1 and 3 seconds"
+                )
+        elif transition.get("type") in {"slide", "wipe"}:
+            transition_type = transition["type"]
+            if set(transition) != {"type", "direction", "duration_seconds"}:
+                raise ValueError(f"{transition_type} announcement transition has invalid fields")
+            if transition["direction"] not in {"left", "right"}:
+                raise ValueError(
+                    f"{transition_type} announcement transition direction must be left or right"
+                )
+            transition_duration = transition["duration_seconds"]
+            if (
+                isinstance(transition_duration, bool)
+                or not isinstance(transition_duration, (int, float))
+                or not 0.1 <= transition_duration <= 3
+            ):
+                raise ValueError(
+                    f"{transition_type} announcement transition duration must be between 0.1 and 3 seconds"
+                )
+        else:
+            raise ValueError("announcement transition is not supported")
+        if timing["mode"] == "scroll" and (
+            item["layout"] != "text_notice"
+            or style["border"] != "none"
+            or transition["type"] != "cut"
+        ):
+            raise ValueError(
+                "scrolling announcement must use text_notice, no border, and a cut transition"
+            )
+
+
+def validate_config(config, *, allow_legacy_announcements=True):
 
     name = config["device"]["name"]
     if not isinstance(name, str) or not name.strip() or len(name.strip()) > 40:
@@ -580,6 +775,11 @@ def validate_config(config):
             if isinstance(speed, bool) or not isinstance(speed, int) or not 25 <= speed <= 400:
                 raise ValueError("sleep GIF playback speed must be between 25 and 400 percent")
 
+    _validate_announcement_board(
+        config["announcement_board"],
+        allow_legacy=allow_legacy_announcements,
+    )
+
     custom_modules = config["custom_modules"]
     if not isinstance(custom_modules, list) or len(custom_modules) > 20:
         raise ValueError("custom modules must be a list with at most 20 items")
@@ -643,7 +843,7 @@ def validate_config(config):
             raise ValueError(f"Unknown module: {item.get('module')!r}")
         custom_module = custom_by_id.get(item["module"])
         if item["module"] in {
-            "weather", "openweather_overview", "openweather_forecast",
+            "weather", "openweather_overview", "openweather_forecast", "announcement_board",
         }:
             item["duration"] = 0
         elif custom_module is not None and custom_module["type"] == "text_scroll":
@@ -719,7 +919,9 @@ class ConfigStore:
                 }
                 for item in DEFAULT_CONFIG["playlist"]:
                     if (
-                        item["module"] in {"openweather_overview", "openweather_forecast"}
+                        item["module"] in {
+                            "openweather_overview", "openweather_forecast", "announcement_board",
+                        }
                         and item["module"] not in existing_modules
                     ):
                         playlist.append(copy.deepcopy(item))
@@ -783,6 +985,8 @@ class ConfigStore:
 
         _validate_update_keys(changes, DEFAULT_CONFIG)
         with self._lock:
-            updated = validate_config(_merge(self.get(), changes))
+            updated = validate_config(
+                _merge(self.get(), changes), allow_legacy_announcements=False,
+            )
             self._write(updated)
             return copy.deepcopy(updated)

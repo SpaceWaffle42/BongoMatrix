@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import copy
 import datetime as dt
 import importlib
 import logging
@@ -13,6 +14,7 @@ from modules.media_player import play_media
 
 LOGGER = logging.getLogger(__name__)
 MODULES = {
+    "announcement_board": "modules.announcement_board",
     "clock_lava": "modules.clock_lava",
     "weather": "modules.weather_app",
     "openweather_overview": "modules.openweather_overview",
@@ -60,6 +62,7 @@ class DisplayController:
         self._module_stop = None
         self._preview_name = None
         self._media_preview_name = None
+        self._announcement_preview = None
         self._pairing_timer = None
         self._pairing_page_timer = None
         self._pairing_pin = None
@@ -158,6 +161,7 @@ class DisplayController:
         with self._state_lock:
             self._preview_name = module_name
             self._media_preview_name = None
+            self._announcement_preview = None
             if self._module_stop is not None:
                 self._module_stop.set()
         self.start()
@@ -168,6 +172,17 @@ class DisplayController:
         with self._state_lock:
             self._media_preview_name = filename
             self._preview_name = None
+            self._announcement_preview = None
+            if self._module_stop is not None:
+                self._module_stop.set()
+        self.start()
+
+    def preview_announcement(self, announcement):
+        """Queue a validated unsaved announcement as a one-off preview."""
+        with self._state_lock:
+            self._announcement_preview = copy.deepcopy(announcement)
+            self._preview_name = None
+            self._media_preview_name = None
             if self._module_stop is not None:
                 self._module_stop.set()
         self.start()
@@ -356,6 +371,46 @@ class DisplayController:
             self._media_preview_name = None
             return filename
 
+    def _take_announcement_preview(self):
+        with self._state_lock:
+            announcement = self._announcement_preview
+            self._announcement_preview = None
+            return announcement
+
+    def _execute_announcement_preview(self, announcement):
+        if self._shutdown.is_set() or self._pairing_pause.is_set():
+            return False
+        stop_event = threading.Event()
+        module = importlib.import_module("modules.announcement_board")
+        with self._state_lock:
+            if (
+                self._shutdown.is_set()
+                or self._pairing_pause.is_set()
+                or self._announcement_preview is not None
+                or self._media_preview_name is not None
+                or self._preview_name is not None
+            ):
+                return False
+            self._module_stop = stop_event
+        self.current_module = "announcement_board:preview"
+        self.last_error = None
+        try:
+            with self._display_lock:
+                return module.run_preview(
+                    self.matrix,
+                    announcement,
+                    stop_event=stop_event,
+                )
+        except Exception as exc:
+            LOGGER.exception("Matrix announcement preview failed")
+            self.last_error = f"{type(exc).__name__}: {exc}"
+            return False
+        finally:
+            self.current_module = None
+            with self._state_lock:
+                if self._module_stop is stop_event:
+                    self._module_stop = None
+
     def _execute_media(self, filename, duration):
         if self._shutdown.is_set() or self._pairing_pause.is_set():
             return False
@@ -364,6 +419,7 @@ class DisplayController:
             if (
                 self._shutdown.is_set()
                 or self._pairing_pause.is_set()
+                or self._announcement_preview is not None
                 or self._media_preview_name is not None
                 or self._preview_name is not None
             ):
@@ -395,7 +451,11 @@ class DisplayController:
         custom = custom_module(config, name)
         stop_event = threading.Event()
         with self._state_lock:
-            if self._media_preview_name is not None or self._preview_name is not None:
+            if (
+                self._announcement_preview is not None
+                or self._media_preview_name is not None
+                or self._preview_name is not None
+            ):
                 return False
         if name in MODULES:
             module = importlib.import_module(MODULES[name])
@@ -407,6 +467,7 @@ class DisplayController:
             if (
                 self._shutdown.is_set()
                 or self._pairing_pause.is_set()
+                or self._announcement_preview is not None
                 or self._media_preview_name is not None
                 or self._preview_name is not None
             ):
@@ -476,6 +537,11 @@ class DisplayController:
             self._reload_requested.clear()
             config = self.config_store.get()
 
+            announcement_preview = self._take_announcement_preview()
+            if announcement_preview:
+                self._execute_announcement_preview(announcement_preview)
+                self._mark_scheduler_healthy()
+                continue
             media_preview = self._take_media_preview()
             if media_preview:
                 self._execute_media(media_preview, 15)
@@ -512,6 +578,7 @@ class DisplayController:
                 self._mark_scheduler_healthy()
                 continue
 
+            cycle_rendered = False
             for item in playlist:
                 if (
                     self._shutdown.is_set()
@@ -519,13 +586,32 @@ class DisplayController:
                     or self._pairing_pause.is_set()
                 ):
                     break
+                announcement_preview = self._take_announcement_preview()
+                if announcement_preview:
+                    cycle_rendered = bool(
+                        self._execute_announcement_preview(announcement_preview)
+                    ) or cycle_rendered
+                    break
                 media_preview = self._take_media_preview()
                 if media_preview:
-                    self._execute_media(media_preview, 15)
+                    cycle_rendered = bool(
+                        self._execute_media(media_preview, 15)
+                    ) or cycle_rendered
                     break
                 preview = self._take_preview()
                 if preview:
-                    self._execute(preview, config, 15)
+                    cycle_rendered = bool(
+                        self._execute(preview, config, 15)
+                    ) or cycle_rendered
                     break
-                self._execute(item["module"], config, item["duration"])
+                cycle_rendered = bool(
+                    self._execute(item["module"], config, item["duration"])
+                ) or cycle_rendered
+            if (
+                not cycle_rendered
+                and not self._shutdown.is_set()
+                and not self._reload_requested.is_set()
+                and not self._pairing_pause.is_set()
+            ):
+                self._shutdown.wait(0.25)
             self._mark_scheduler_healthy()

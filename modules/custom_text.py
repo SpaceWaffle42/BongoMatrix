@@ -6,6 +6,11 @@ import copy
 import math
 import time
 
+from PIL import Image
+
+CANVAS_MEDIA_PREPARE_TIMEOUT = 5
+CANVAS_MEDIA_CACHE_BYTES = 32 * 1024 * 1024
+
 
 def _wait(stop_event, seconds):
     if stop_event is not None:
@@ -227,6 +232,8 @@ def _draw_layer(matrix, canvas, layer, properties, *, media_cache=None, frame=0)
 
 
 def _run_canvas(matrix, duration, stop_event, module_config):
+    if stop_event is not None and stop_event.is_set() is True:
+        return False
     canvas = matrix.matrix.CreateFrameCanvas()
     background = matrix.colour_rgb(module_config["background"])
     sequence = frame_sequence(module_config["frame_count"], module_config["playback"])
@@ -244,11 +251,46 @@ def _run_canvas(matrix, duration, stop_event, module_config):
         for override in module_config["overrides"]:
             if override["layer_id"] == layer["id"] and "source" in override["properties"]:
                 media_sources.add(override["properties"]["source"])
-    media_cache = {
-        source: matrix.media_frames(source, module_config["frame_count"], module_config["fps"])
-        for source in sorted(media_sources)
-    }
+    media_cache = {}
+    media_cache_bytes = 0
+    prepare_deadline = (
+        time.monotonic() + CANVAS_MEDIA_PREPARE_TIMEOUT if media_sources else None
+    )
+    sorted_media_sources = sorted(media_sources)
+    for index, source in enumerate(sorted_media_sources):
+        assert prepare_deadline is not None
+        if stop_event is not None and stop_event.is_set() is True:
+            return False
+        remaining = prepare_deadline - time.monotonic()
+        if remaining <= 0:
+            media_cache[source] = []
+            continue
+        remaining_source_count = len(sorted_media_sources) - index
+        try:
+            frames = matrix.media_frames(
+                source, module_config["frame_count"], module_config["fps"],
+                stop_event=stop_event, preserve_size=True,
+                decode_timeout=min(
+                    CANVAS_MEDIA_PREPARE_TIMEOUT,
+                    remaining / remaining_source_count,
+                ),
+            )
+        except (OSError, ValueError):
+            frames = []
+        if stop_event is not None and stop_event.is_set() is True:
+            return False
+        media_cache_bytes += sum(
+            image.width * image.height * 3
+            for image in {id(frame): frame for frame in frames}.values()
+            if isinstance(image, Image.Image)
+        )
+        if media_cache_bytes > CANVAS_MEDIA_CACHE_BYTES:
+            raise ValueError("canvas media cache exceeds its aggregate memory budget")
+        media_cache[source] = frames
+    if stop_event is not None and stop_event.is_set() is True:
+        return False
     started = time.monotonic()
+    rendered = False
     while time.monotonic() - started < duration:
         frame = sequence[min(cycle_index, len(sequence) - 1)]
         _fill_background(matrix, canvas, background)
@@ -260,20 +302,25 @@ def _run_canvas(matrix, duration, stop_event, module_config):
                     matrix, canvas, layer, properties,
                     media_cache=media_cache, frame=frame,
                 )
+        if stop_event is not None and stop_event.is_set() is True:
+            return rendered
         canvas = matrix.swap(canvas)
+        rendered = True
         if _wait(stop_event, delay):
             break
         if module_config["playback"] == "hold":
             cycle_index = min(cycle_index + 1, len(sequence) - 1)
         else:
             cycle_index = (cycle_index + 1) % len(sequence)
-    return True
+    return rendered
 
 
 def run(matrix, config, duration=15, stop_event=None, module_config=None):
     """Render one validated custom definition using capture-aware Matrix calls."""
     if module_config is None:
         raise ValueError("custom module configuration is required")
+    if stop_event is not None and stop_event.is_set() is True:
+        return False
     if module_config["type"] == "canvas":
         return _run_canvas(matrix, duration, stop_event, module_config)
 
@@ -287,6 +334,8 @@ def run(matrix, config, duration=15, stop_event=None, module_config=None):
     if module_config["type"] == "text":
         _fill_background(matrix, canvas, background)
         matrix.draw_text(font, module_config["x"], y, foreground, text, canvas=canvas)
+        if stop_event is not None and stop_event.is_set() is True:
+            return False
         matrix.swap(canvas)
         _wait(stop_event, duration)
         return True
@@ -303,10 +352,16 @@ def run(matrix, config, duration=15, stop_event=None, module_config=None):
 
     completed_loops = 0
     loop_limit = module_config.get("loops", 1)
+    rendered = False
     while completed_loops < loop_limit:
+        if stop_event is not None and stop_event.is_set() is True:
+            return rendered
         _fill_background(matrix, canvas, background)
         drawn_width = matrix.draw_text(font, position, y, foreground, text, canvas=canvas)
+        if stop_event is not None and stop_event.is_set() is True:
+            return rendered
         canvas = matrix.swap(canvas)
+        rendered = True
         text_width = text_width or drawn_width
         loop_finished = False
         if direction == "left":
@@ -325,4 +380,4 @@ def run(matrix, config, duration=15, stop_event=None, module_config=None):
                     position = -text_width
         if _wait(stop_event, module_config["speed"]) or loop_finished:
             break
-    return True
+    return rendered

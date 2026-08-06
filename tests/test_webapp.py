@@ -17,6 +17,7 @@ from PIL import Image, UnidentifiedImageError
 from config_store import ConfigStore
 from pairing import PairedDeviceStore, PairingDurabilityError
 from secret_store import SecretDurabilityError, SecretStore
+from tests import test_config_store
 from webapp import create_app
 
 
@@ -1127,6 +1128,16 @@ async function api(path){
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertIn("FAILED_PREVIEW_COMMITTED_WARNING_PASS", result.stdout)
 
+    def test_announcement_board_has_friendly_label_and_automatic_playlist_timing(self):
+        self.pair_browser()
+        body = self.client.get("/").get_data(as_text=True)
+
+        self.assertIn(">Announcement Board<", body)
+        self.assertIn(
+            "const automaticBoardModules=new Set(['announcement_board'])",
+            body,
+        )
+
     def test_scrolling_text_duration_is_automatic_in_the_playlist_editor(self):
         self.pair_browser()
         body = self.client.get("/").get_data(as_text=True)
@@ -1226,6 +1237,127 @@ console.log(JSON.stringify({
             result.stdout.strip(),
             '{"line":[["translate",15,10],["rotate",1.571],["translate",-15,-10]],"text":[["translate",7,4.5],["rotate",3.142],["translate",-7,-4.5]],"circle":[]}',
         )
+
+    @unittest.skipUnless(shutil.which("node"), "Node.js is required")
+    def test_browser_rotated_aspect_media_uses_fitted_origin_centre_and_clip(self):
+        asset = (Path(__file__).parents[1] / "app/static/custom_canvas.js").read_text()
+        start = asset.index("  function drawShape(")
+        end = asset.index("\n\n  function drawEditor(", start)
+        function_source = asset[start:end]
+        harness = f"""
+function mediaFrameIndex(){{return 0;}}
+function beginLayerRotation(){{}}
+let naturalWidth=32,naturalHeight=32;
+function mediaTimelineElement(){{return {{naturalWidth,naturalHeight}};}}
+{function_source}
+function probe(sourceWidth,sourceHeight){{
+  naturalWidth=sourceWidth; naturalHeight=sourceHeight;
+  const calls=[];
+  const context={{
+    save(){{}},restore(){{}},set globalAlpha(value){{}},set strokeStyle(value){{}},
+    set fillStyle(value){{}},set lineWidth(value){{}},beginPath(){{calls.push(['beginPath']);}},
+    rect(...args){{calls.push(['rect',...args]);}},clip(){{calls.push(['clip']);}},
+    translate(...args){{calls.push(['translate',...args]);}},rotate(value){{calls.push(['rotate',Math.round(value*1000)/1000]);}},
+    drawImage(...args){{calls.push(['drawImage',...args.slice(5)]);}},
+  }};
+  drawShape(context,{{type:'media'}},{{source:'media.png',x:3,y:4,width:64,height:32,keep_aspect:true,rotation:90}},1,0,1,1);
+  return calls;
+}}
+console.log(JSON.stringify({{square:probe(32,32),tall:probe(16,32),wide:probe(64,16)}}));
+"""
+        result = subprocess.run(
+            [shutil.which("node"), "-e", harness], cwd=Path(__file__).parents[1],
+            text=True, capture_output=True, check=True,
+        )
+        data = json.loads(result.stdout)
+
+        for name, width, height in (
+            ("square", 32, 32), ("tall", 16, 32), ("wide", 64, 16),
+        ):
+            with self.subTest(name=name):
+                self.assertIn(["rect", 3, 4, width, height], data[name])
+                self.assertIn(["clip"], data[name])
+                self.assertIn(["translate", 3 + width / 2, 4 + height / 2], data[name])
+                self.assertIn(
+                    ["drawImage", -width / 2, -height / 2, width, height],
+                    data[name],
+                )
+
+    @unittest.skipUnless(shutil.which("node"), "Node.js is required")
+    def test_browser_aspect_media_geometry_matches_complete_physical_path(self):
+        asset = (Path(__file__).parents[1] / "app/static/custom_canvas.js").read_text()
+        start = asset.index("  function drawShape(")
+        end = asset.index("\n\n  function drawEditor(", start)
+        function_source = asset[start:end]
+        cases = [
+            {"source": [1, 4], "box": [5.5, 3.5], "position": [2.5, 3.5]},
+            {"source": [3, 2], "box": [20, 10], "position": [3, 4]},
+            {"source": [20, 10], "box": [15, 15], "position": [-2.5, -3.5]},
+            {"source": [5, 2], "box": [9, 1], "position": [0.5, 1.5]},
+            {"source": [2, 5], "box": [1, 9], "position": [4.5, 5.5]},
+        ]
+        source_sizes = [(1, 1), (1, 4), (3, 2), (8, 13), (20, 10)]
+        box_values = (1, 1.5, 2.5, 3.5, 5, 5.5, 9.5, 15)
+        for source_index, source in enumerate(source_sizes):
+            for width_index, width in enumerate(box_values):
+                for height_index, height in enumerate(box_values):
+                    cases.append({
+                        "source": source,
+                        "box": [width, height],
+                        "position": [
+                            box_values[(source_index + width_index) % len(box_values)],
+                            -box_values[(source_index + height_index) % len(box_values)],
+                        ],
+                    })
+        harness = f"""
+function mediaFrameIndex(){{return 0;}}
+function beginLayerRotation(){{}}
+let naturalWidth=1,naturalHeight=1;
+function mediaTimelineElement(){{return {{naturalWidth,naturalHeight}};}}
+{function_source}
+function probe(item){{
+  naturalWidth=item.source[0]; naturalHeight=item.source[1];
+  const calls=[];
+  const context={{
+    save(){{}},restore(){{}},set globalAlpha(value){{}},set strokeStyle(value){{}},
+    set fillStyle(value){{}},set lineWidth(value){{}},beginPath(){{}},
+    rect(...args){{calls.push(['rect',...args]);}},clip(){{}},
+    translate(...args){{calls.push(['translate',...args]);}},rotate(){{}},
+    drawImage(...args){{calls.push(['drawImage',...args.slice(5)]);}},
+  }};
+  drawShape(context,{{type:'media'}},{{source:'media.png',x:item.position[0],y:item.position[1],width:item.box[0],height:item.box[1],keep_aspect:true,rotation:90}},1,0,1,1);
+  return calls;
+}}
+console.log(JSON.stringify({json.dumps(cases)}.map(probe)));
+"""
+        result = subprocess.run(
+            [shutil.which("node"), "-e", harness], cwd=Path(__file__).parents[1],
+            text=True, capture_output=True, check=True,
+        )
+        browser_calls = json.loads(result.stdout)
+        for case, calls in zip(cases, browser_calls, strict=True):
+            source_width, source_height = case["source"]
+            box_width, box_height = map(round, case["box"])
+            x, y = map(round, case["position"])
+            physical = Image.new("RGB", (source_width, source_height))
+            physical.thumbnail(
+                (box_width, box_height), Image.Resampling.LANCZOS,
+            )
+            fitted_width, fitted_height = physical.size
+            with self.subTest(
+                source=case["source"], box=case["box"],
+                position=case["position"],
+            ):
+                self.assertIn(["rect", x, y, fitted_width, fitted_height], calls)
+                self.assertIn(
+                    ["translate", x + fitted_width / 2, y + fitted_height / 2],
+                    calls,
+                )
+                self.assertIn(
+                    ["drawImage", -fitted_width / 2, -fitted_height / 2,
+                     fitted_width, fitted_height],
+                    calls,
+                )
 
     def test_advanced_editor_has_aseprite_style_layer_tracks_and_depth_controls(self):
         self.pair_browser()
@@ -1518,6 +1650,122 @@ process.stdout.write(JSON.stringify(output));
         self.assertIn("timeline frames created automatically", asset)
         self.assertIn("expandTimelineForAnimatedMedia(module, source)", asset)
 
+    @unittest.skipUnless(shutil.which("node"), "Node.js is required")
+    def test_advanced_canvas_media_preview_samples_selected_timeline_frame(self):
+        source = (Path(__file__).parents[1] / "app" / "static" / "custom_canvas.js").read_text()
+        start = source.index("function mediaTimelineRevision(source")
+        end = source.index("\n  function drawEditor", start)
+        functions = source[start:end]
+        harness = """
+const mediaPreviews=new Map(), mediaFailureStates=new Map(), mediaLoadQueue=[], customModules=[{type:'canvas',layers:[{id:'layer_media',type:'media',properties:{source:'built-in/clip.mp4'},keyframes:[]}],overrides:[]}], mediaItems=[{name:'built-in/clip.mp4',revision:'r1'}];let activeMediaLoads=0;
+const document={
+  createElement(tag){return {tag,listeners:{},addEventListener(type,listener){this.listeners[type]=listener}}},
+  querySelectorAll(){return []}
+};
+function byId(){return null}
+function beginLayerRotation(){}
+""" + functions + """
+const first=mediaTimelineElement('built-in/clip.mp4',24,12.5);
+const second=mediaTimelineElement('built-in/clip.mp4',24,12.5);
+if(first!==second)throw new Error('cache miss');
+if(first.tag!=='img')throw new Error('preview must use sampled sprite');
+if(first.src!=='/api/media-timeline/built-in/clip.mp4?frame_count=24&fps=12.5&revision=r1')throw new Error(first.src);
+first.naturalWidth=10;first.naturalHeight=240;
+let drawArgs=null;
+const context={save(){},restore(){},beginPath(){},rect(){},clip(){},translate(){},rotate(){},drawImage(...args){drawArgs=args}};
+drawShape(context,{type:'media',keyframes:[]},{x:0,y:0,width:10,height:10,rotation:0,source:'built-in/clip.mp4',keep_aspect:true},1,7,12.5,24);
+if(!drawArgs||drawArgs.length!==9||drawArgs[1]!==0||drawArgs[2]!==70||drawArgs[3]!==10||drawArgs[4]!==10)throw new Error('wrong sprite crop '+JSON.stringify(drawArgs));
+first.listeners.error();
+const retry=mediaTimelineElement('built-in/clip.mp4',24,12.5);
+if(retry===first)throw new Error('failed timeline remained cached');
+retry.listeners.error();
+if(mediaTimelineElement('built-in/clip.mp4',24,12.5)!==null)throw new Error('terminal failure retried without revision change');
+mediaItems[0].revision='r2';
+const replacement=mediaTimelineElement('built-in/clip.mp4',24,12.5);
+if(!replacement||replacement===retry||!replacement.src.endsWith('&revision=r2'))throw new Error('revision did not replace timeline');
+for(let count=1;count<=33;count++)mediaTimelineElement('many.gif',count,12);
+if(mediaPreviews.size!==32)throw new Error('unbounded cache '+mediaPreviews.size);
+if(mediaLoadQueue.length>32)throw new Error('unbounded queue '+mediaLoadQueue.length);
+console.log('TIMELINE_MEDIA_PREVIEW_PASS');
+"""
+        node = shutil.which("node")
+        assert node is not None
+        result = subprocess.run(
+            [node, "-e", harness], cwd=Path(__file__).parents[1],
+            text=True, capture_output=True, check=False,
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("TIMELINE_MEDIA_PREVIEW_PASS", result.stdout)
+
+    @unittest.skipUnless(shutil.which("node"), "Node.js is required")
+    def test_advanced_canvas_terminal_media_failures_stay_bounded_and_draw_safely(self):
+        source = (Path(__file__).parents[1] / "app" / "static" / "custom_canvas.js").read_text()
+        start = source.index("function mediaTimelineRevision(source")
+        end = source.index("\n  function drawEditor", start)
+        functions = source[start:end]
+        harness = """
+const mediaPreviews=new Map(), mediaFailureStates=new Map(), mediaLoadQueue=[];let activeMediaLoads=0;
+const mediaItems=Array.from({length:33},(_,index)=>({name:'failed-'+index+'.gif',revision:'r'+index}));
+const retainedLayer={id:'layer_retained',type:'media',properties:{source:mediaItems[0].name},keyframes:[{properties:{source:mediaItems[31].name}}]};
+const customModules=[{
+  type:'canvas',
+  layers:[retainedLayer,...mediaItems.slice(1,31).map((item,index)=>({id:'layer_'+index,type:'media',properties:{source:item.name},keyframes:[]}))],
+  overrides:[{layer_id:'layer_retained',properties:{source:mediaItems[32].name}}]
+}];
+let created=0;
+const document={
+  createElement(tag){created++;return {tag,listeners:{},addEventListener(type,listener){this.listeners[type]=listener}}},
+  querySelectorAll(){return []}
+};
+function byId(){return null}
+function beginLayerRotation(){}
+globalThis.setTimeout=()=>0;
+""" + functions + """
+for(const item of mediaItems){
+  const first=mediaTimelineElement(item.name,12,12);first.listeners.error();
+  const retry=mediaTimelineElement(item.name,12,12);retry.listeners.error();
+}
+const before=created;
+if(mediaFailureStates.size!==33)throw new Error('live terminal revisions were not retained');
+if(mediaFailureStates.size>20*(64+512+512))throw new Error('failure state exceeded schema bound');
+if(mediaTimelineElement(mediaItems[0].name,12,12)!==null||created!==before)throw new Error('oldest terminal revision restarted');
+customModules[0].layers=[retainedLayer];customModules[0].overrides=[];retainedLayer.keyframes=[];
+pruneMediaFailureStates();
+if(mediaFailureStates.size!==1||!mediaFailureStates.has(mediaItems[0].name))throw new Error('obsolete terminal revisions were not pruned');
+for(let index=0;index<1000;index++){
+  const source='obsolete-'+index+'.gif';
+  const first=mediaTimelineElement(source,12,12);first.listeners.error();
+  const second=mediaTimelineElement(source,12,12);second.listeners.error();
+}
+if(mediaFailureStates.size!==1||!mediaFailureStates.has(mediaItems[0].name))throw new Error('obsolete source churn grew failure state');
+const afterChurn=created;
+if(mediaTimelineElement(mediaItems[0].name,12,12)!==null||created!==afterChurn)throw new Error('retained terminal revision restarted after pruning');
+let saves=0,restores=0;
+const context={save(){saves++},restore(){restores++}};
+drawShape(context,{type:'media',keyframes:[]},{source:mediaItems[0].name,colour:'#fff',width:10,height:10,x:0,y:0,rotation:0,keep_aspect:true},1,0,12,12);
+if(saves!==1||restores!==1||created!==afterChurn)throw new Error('terminal draw was unsafe');
+console.log('TERMINAL_MEDIA_PREVIEW_PASS');
+"""
+        node = shutil.which("node")
+        assert node is not None
+        result = subprocess.run(
+            [node, "-e", harness], cwd=Path(__file__).parents[1],
+            text=True, capture_output=True, check=False,
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("TERMINAL_MEDIA_PREVIEW_PASS", result.stdout)
+
+    def test_media_metadata_revision_changes_when_filename_is_reused(self):
+        self.pair_browser()
+        media = self.media_dir / "same.png"
+        Image.new("RGB", (2, 2), "red").save(media)
+        first = self.client.get("/api/media").get_json()[0]["revision"]
+        media.unlink()
+        Image.new("RGB", (2, 2), "blue").save(media)
+        second = self.client.get("/api/media").get_json()[0]["revision"]
+
+        self.assertNotEqual(first, second)
+
     def test_dashboard_advanced_canvas_supports_uploaded_resizable_media_layers(self):
         self.pair_browser()
 
@@ -1575,6 +1823,393 @@ process.stdout.write(JSON.stringify(output));
         self.assertIn("units:document.querySelector('#weather-units').value", body)
         self.assertIn("temperature_y:Number(document.querySelector('#weather-temperature-y').value)", body)
         self.assertIn("ticker_y:Number(document.querySelector('#weather-ticker-y').value)", body)
+
+    def test_announcement_board_editor_has_accessible_grouped_foundation(self):
+        self.pair_browser()
+        body = self.client.get("/").get_data(as_text=True)
+
+        self.assertIn('data-module-editor="announcement_board"', body)
+        self.assertIn("initialAnnouncements", body)
+        self.assertIn("announcementEditorGroups", body)
+        self.assertIn("makeButton('Add announcement'", body)
+        self.assertIn("makeButton('Reset announcement board'", body)
+        self.assertIn("createElement('fieldset')", body)
+        self.assertIn("createElement('legend')", body)
+        for group in ("Content", "Schedule", "Appearance", "Timing", "Transition"):
+            self.assertIn(f"name:'{group}'", body)
+
+    def test_announcement_native_constraints_are_required_and_announced(self):
+        self.pair_browser()
+        body = self.client.get("/").get_data(as_text=True)
+
+        self.assertIn("if(['date','time','number'].includes(type))control.required=true", body)
+        self.assertIn("nativeMessages=[]", body)
+        self.assertIn("if(nativeError&&!nativeMessages.includes(nativeError))nativeMessages.push(nativeError)", body)
+        self.assertIn("const messages=[...Object.values(errors),...nativeMessages]", body)
+        self.assertIn("status.textContent=messages.length?messages.join(' '):'Announcement fields are valid.'", body)
+
+    @unittest.skipUnless(shutil.which("node"), "Node.js is required")
+    def test_announcement_client_validation_matches_contextual_scrolling_schema(self):
+        source = (Path(__file__).parents[1] / "app" / "templates" / "dashboard.html").read_text()
+        match = re.search(
+            r"function validateAnnouncement\(announcement\)\{.*?\nfunction applyAnnouncementValidation",
+            source,
+            re.DOTALL,
+        )
+        self.assertIsNotNone(match)
+        if match is None:
+            self.fail("announcement validator function not found")
+        function_source = match.group(0).rsplit("\nfunction applyAnnouncementValidation", 1)[0]
+        announcement = test_config_store.ConfigStoreTests.announcement(
+            timing={"mode": "scroll", "loops": 1, "frame_delay": 0.05},
+        )
+        announcement["schedule"]["days"] = list(range(7))
+        announcement["layout"] = "icon_notice"
+        harness = function_source + "\nconst a=" + json.dumps(announcement) + ";let e=validateAnnouncement(a);if(!e.layout)throw new Error('layout');a.layout='text_notice';a.style.border='solid';e=validateAnnouncement(a);if(!e['style.border'])throw new Error('border');a.style.border='none';a.transition={type:'fade',duration_seconds:.5};e=validateAnnouncement(a);if(!e['transition.type'])throw new Error('transition');console.log('SCROLL_CONTEXT_PASS');"
+        node = shutil.which("node")
+        assert node is not None
+        result = subprocess.run(
+            [node, "-e", harness], cwd=Path(__file__).parents[1],
+            text=True, capture_output=True, check=False,
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("SCROLL_CONTEXT_PASS", result.stdout)
+
+    def test_announcement_context_rerender_restores_focused_control(self):
+        self.pair_browser()
+        body = self.client.get("/").get_data(as_text=True)
+
+        self.assertIn("function rerenderAnnouncementEditorsWithFocus(announcement,path)", body)
+        self.assertIn("CSS.escape(announcement.id)", body)
+        self.assertIn("CSS.escape(path)", body)
+        self.assertIn("rerenderAnnouncementEditorsWithFocus(announcement,'timing.mode')", body)
+        self.assertIn("rerenderAnnouncementEditorsWithFocus(announcement,'transition.type')", body)
+
+    @unittest.skipUnless(shutil.which("node"), "Node.js is required")
+    def test_announcement_client_validation_allows_backend_valid_media_fallback(self):
+        source = (Path(__file__).parents[1] / "app" / "templates" / "dashboard.html").read_text()
+        start = source.index("function validateAnnouncement(announcement)")
+        end = source.index("\nfunction applyAnnouncementValidation", start)
+        function_source = source[start:end]
+        announcement = test_config_store.ConfigStoreTests.announcement()
+        announcement["schedule"]["days"] = list(range(7))
+        announcement["layout"] = "image_banner"
+        announcement["media"] = None
+        harness = function_source + "\nconst errors=validateAnnouncement(" + json.dumps(announcement) + ");if(errors.media)throw new Error(errors.media);console.log('MEDIA_FALLBACK_VALIDATION_PASS');"
+        node = shutil.which("node")
+        assert node is not None
+        result = subprocess.run(
+            [node, "-e", harness], cwd=Path(__file__).parents[1],
+            text=True, capture_output=True, check=False,
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("MEDIA_FALLBACK_VALIDATION_PASS", result.stdout)
+
+    @unittest.skipUnless(shutil.which("node"), "Node.js is required")
+    def test_announcement_client_validation_rejects_backend_nonprintable_unicode(self):
+        source = (Path(__file__).parents[1] / "app" / "templates" / "dashboard.html").read_text()
+        start = source.index("function validateAnnouncement(announcement)")
+        end = source.index("\nfunction applyAnnouncementValidation", start)
+        function_source = source[start:end]
+        announcement = test_config_store.ConfigStoreTests.announcement()
+        announcement["schedule"]["days"] = list(range(7))
+        harness = function_source + "\nconst a=" + json.dumps(announcement) + ";for(const value of ['Bad\\u0085Name','Bad\\u2028Name']){a.name=value;const errors=validateAnnouncement(a);if(!errors.name)throw new Error('accepted '+JSON.stringify(value));}a.name='😀'.repeat(100);if(validateAnnouncement(a).name)throw new Error('rejected 100 code points');a.name+='😀';if(!validateAnnouncement(a).name)throw new Error('accepted 101 code points');console.log('NONPRINTABLE_UNICODE_REJECTED');"
+        node = shutil.which("node")
+        assert node is not None
+        result = subprocess.run(
+            [node, "-e", harness], cwd=Path(__file__).parents[1],
+            text=True, capture_output=True, check=False,
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("NONPRINTABLE_UNICODE_REJECTED", result.stdout)
+
+    def test_global_action_message_is_an_adaptive_live_region(self):
+        self.pair_browser()
+        body = self.client.get("/").get_data(as_text=True)
+
+        self.assertIn('id="message" role="status" aria-live="polite" aria-atomic="true"', body)
+        self.assertIn("message.setAttribute('role',error?'alert':'status')", body)
+        self.assertIn("message.setAttribute('aria-live',error?'assertive':'polite')", body)
+
+    def test_announcement_editor_enforces_backend_board_limit(self):
+        self.pair_browser()
+        body = self.client.get("/").get_data(as_text=True)
+
+        self.assertIn("if(announcements.length>=50)", body)
+        self.assertIn("Announcement Board supports up to 50 announcements.", body)
+        self.assertIn("if(announcements.length>50)", body)
+
+    def test_announcement_validation_marks_controls_and_blocks_save(self):
+        self.pair_browser()
+        body = self.client.get("/").get_data(as_text=True)
+
+        self.assertIn("function validateAnnouncement(announcement)", body)
+        self.assertIn("function validateAnnouncementBoard({focusFirst=false}={})", body)
+        self.assertIn("status.setAttribute('role','status')", body)
+        self.assertIn("status.setAttribute('aria-live','polite')", body)
+        self.assertIn("control.setAttribute('aria-invalid',String(Boolean(error)))", body)
+        self.assertIn("control.setAttribute('aria-describedby',status.id)", body)
+        self.assertIn("validateAnnouncementBoard()", body)
+        self.assertIn("if(typeof validateAnnouncementBoard==='function'&&!validateAnnouncementBoard({focusFirst:true}))", body)
+        self.assertIn("return {saved:false,warning:'Fix the highlighted announcement fields before saving.'}", body)
+        self.assertLess(
+            body.index("if(typeof validateAnnouncementBoard==='function'&&!validateAnnouncementBoard({focusFirst:true}))"),
+            body.index("await api('/api/config'"),
+        )
+
+    def test_announcement_board_editor_serializes_ordered_state_in_config_body(self):
+        self.pair_browser()
+        body = self.client.get("/").get_data(as_text=True)
+
+        self.assertIn("function announcementsFromEditor()", body)
+        self.assertIn("announcement_board:{announcements:announcementsFromEditor()}", body)
+
+    def test_current_config_api_rejects_legacy_announcement_shapes(self):
+        self.pair_browser()
+        for missing in ("enabled", "name", "schedule.days"):
+            with self.subTest(missing=missing):
+                announcement = test_config_store.ConfigStoreTests.announcement()
+                announcement["schedule"]["days"] = list(range(7))
+                announcement["enabled"] = True
+                announcement["name"] = "Welcome"
+                if missing == "schedule.days":
+                    del announcement["schedule"]["days"]
+                else:
+                    del announcement[missing]
+
+                response = self.client.post(
+                    "/api/config",
+                    json={"announcement_board": {"announcements": [announcement]}},
+                )
+
+                self.assertEqual(response.status_code, 400)
+                self.assertEqual(response.content_type, "application/json")
+                self.assertIn("invalid fields", response.get_json()["error"])
+
+    def test_add_announcement_creates_disabled_schema_valid_draft(self):
+        self.pair_browser()
+        body = self.client.get("/").get_data(as_text=True)
+
+        self.assertIn("function addAnnouncement()", body)
+        self.assertIn("id:nextAnnouncementId()", body)
+        self.assertIn("id='announcement_'+Date.now().toString(36)", body)
+        self.assertIn("enabled:false", body)
+        self.assertIn("layout:'text_notice'", body)
+        self.assertIn("timing:{mode:'static',duration_seconds:8}", body)
+        self.assertIn("transition:{type:'cut'}", body)
+        self.assertIn("schedule:{start_date:today,end_date:today,days:[0,1,2,3,4,5,6],start_time:'00:00',end_time:'23:59'}", body)
+        self.assertIn("makeButton('Add announcement',addAnnouncement", body)
+
+    def test_announcement_content_group_exposes_bound_schema_fields(self):
+        self.pair_browser()
+        body = self.client.get("/").get_data(as_text=True)
+
+        self.assertIn("function announcementControl(announcement,labelText,path,type", body)
+        for field in ("enabled", "name", "layout", "headline", "message", "media"):
+            self.assertIn(f"path:'{field}'", body)
+        for layout in ("text_notice", "icon_notice", "image_banner", "full_image_notice"):
+            self.assertIn(f"'{layout}'", body)
+        self.assertIn("announcementPathSet(announcement,path,value)", body)
+
+    def test_announcement_media_control_tracks_layout_without_saving(self):
+        self.pair_browser()
+        body = self.client.get("/").get_data(as_text=True)
+
+        self.assertIn("function renderAnnouncementContent(announcement,fieldset)", body)
+        self.assertIn("mediaControl.hidden=announcement.layout==='text_notice'", body)
+        self.assertIn("layoutControl.addEventListener('input',syncMediaVisibility)", body)
+        self.assertIn("missing.textContent=current+' (missing)'", body)
+
+    def test_announcement_media_selects_refresh_in_place_after_library_changes(self):
+        source = (Path(__file__).parents[1] / "app" / "templates" / "dashboard.html").read_text()
+        start = source.index("function syncAnnouncementMediaSelects")
+        end = source.index("\nfunction syncMediaSelects", start)
+        function_source = source[start:end]
+        harness = r"""
+class Select {
+  constructor(value){this.value=value;this.options=[];this.dataset={announcementPath:'media'};}
+  replaceChildren(){this.options=[];}
+  append(option){this.options.push(option);}
+}
+const select=new Select('draft/selected.gif');
+const document={
+  activeElement:select,
+  querySelectorAll(selector){
+    if(selector!=='.module-editor[data-module-editor="announcement_board"] select[data-announcement-path="media"]')throw new Error('unexpected selector '+selector);
+    return [select];
+  },
+  createElement(tag){if(tag!=='option')throw new Error('unexpected element '+tag);return {value:'',textContent:''};},
+};
+let mediaItems=[{name:'draft/selected.gif'},{name:'new/upload.gif'}];
+""" + function_source + r"""
+syncAnnouncementMediaSelects();
+if(select.value!=='draft/selected.gif')throw new Error('unsaved draft selection changed');
+if(!select.options.some(option=>option.value==='new/upload.gif'))throw new Error('uploaded media missing');
+if(document.activeElement!==select)throw new Error('focus identity changed after upload');
+mediaItems=[{name:'new/upload.gif'}];
+syncAnnouncementMediaSelects();
+const missing=select.options.find(option=>option.value==='draft/selected.gif');
+if(!missing||missing.textContent!=='draft/selected.gif (missing)')throw new Error('removed media not marked missing');
+if(select.value!=='draft/selected.gif')throw new Error('removed draft value changed');
+if(document.activeElement!==select)throw new Error('focus identity changed after removal');
+console.log('ANNOUNCEMENT_MEDIA_SELECT_REFRESH_PASS');
+"""
+        result = subprocess.run(
+            ["node", "-e", harness], capture_output=True, text=True, check=False,
+        )
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn("ANNOUNCEMENT_MEDIA_SELECT_REFRESH_PASS", result.stdout)
+
+    def test_announcement_schedule_group_binds_dates_times_and_weekdays(self):
+        self.pair_browser()
+        body = self.client.get("/").get_data(as_text=True)
+
+        for path in ("schedule.start_date", "schedule.end_date", "schedule.start_time", "schedule.end_time"):
+            self.assertIn(f"path:'{path}'", body)
+        self.assertIn("const announcementWeekdays=['Monday','Tuesday','Wednesday','Thursday','Friday','Saturday','Sunday']", body)
+        self.assertIn("announcement.schedule.days.includes(index)", body)
+        self.assertIn("announcement.schedule.days=[...selected].sort()", body)
+        self.assertIn("if(group.name==='Schedule')renderAnnouncementSchedule(announcement,fieldset)", body)
+
+    def test_announcement_appearance_group_exposes_all_style_fields(self):
+        self.pair_browser()
+        body = self.client.get("/").get_data(as_text=True)
+
+        for path in ("style.font", "style.foreground", "style.background", "style.alignment", "style.border", "style.border_colour"):
+            self.assertIn(f"path:'{path}'", body)
+        self.assertIn("options:['left','center','right']", body)
+        self.assertIn("options:['none','solid','inset']", body)
+        self.assertIn("if(group.name==='Appearance')renderAnnouncementFields(announcement,fieldset,announcementAppearanceFields)", body)
+
+    def test_announcement_timing_switches_between_exact_static_and_scroll_schemas(self):
+        self.pair_browser()
+        body = self.client.get("/").get_data(as_text=True)
+
+        self.assertIn("function renderAnnouncementTiming(announcement,fieldset)", body)
+        self.assertIn("announcement.timing={mode:'static',duration_seconds:8}", body)
+        self.assertIn("announcement.timing={mode:'scroll',loops:1,frame_delay:.05}", body)
+        self.assertIn("path:'timing.duration_seconds'", body)
+        self.assertIn("path:'timing.loops'", body)
+        self.assertIn("path:'timing.frame_delay'", body)
+        self.assertIn("type==='number'?Number(control.value)", body)
+        self.assertIn("if(group.name==='Timing')renderAnnouncementTiming(announcement,fieldset)", body)
+
+    def test_announcement_transition_switches_to_exact_contextual_schema(self):
+        self.pair_browser()
+        body = self.client.get("/").get_data(as_text=True)
+
+        self.assertIn("function renderAnnouncementTransition(announcement,fieldset)", body)
+        self.assertIn("['cut','fade','slide','wipe','pixel_dissolve']", body)
+        self.assertIn("announcement.transition={type:'cut'}", body)
+        self.assertIn("announcement.transition={type:type,duration_seconds:.5}", body)
+        self.assertIn("announcement.transition={type:type,direction:'left',duration_seconds:.5}", body)
+        self.assertIn("path:'transition.direction'", body)
+        self.assertIn("path:'transition.duration_seconds'", body)
+        self.assertIn("if(group.name==='Transition')renderAnnouncementTransition(announcement,fieldset)", body)
+
+    def test_announcement_card_previews_unsaved_draft_without_saving(self):
+        self.pair_browser()
+        body = self.client.get("/").get_data(as_text=True)
+
+        self.assertIn("function previewAnnouncement(id)", body)
+        self.assertIn("makeButton('Preview on Matrix',()=>previewAnnouncement(announcement.id),'btn primary')", body)
+        self.assertIn("applyAnnouncementValidation(card,announcement)", body)
+        self.assertIn("api('/api/preview/announcement',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(announcement)})", body)
+        preview_function = body[body.index("function previewAnnouncement(id)"):body.index("function duplicateAnnouncement(id)")]
+        self.assertNotIn("saveConfig", preview_function)
+
+    def test_announcement_actions_duplicate_delete_reorder_and_confirm_reset(self):
+        self.pair_browser()
+        body = self.client.get("/").get_data(as_text=True)
+
+        self.assertIn("function duplicateAnnouncement(id)", body)
+        self.assertIn("copy.id=nextAnnouncementId()", body)
+        self.assertIn("copy.enabled=false", body)
+        self.assertIn("function deleteAnnouncement(id)", body)
+        self.assertIn("confirm('Delete '+announcement.name+'?')", body)
+        self.assertIn("function moveAnnouncement(id,offset)", body)
+        self.assertIn("announcements.splice(index+offset,0,announcements.splice(index,1)[0])", body)
+        self.assertIn("function resetAnnouncementBoard()", body)
+        self.assertIn("confirm('Reset Announcement Board and remove all announcements?')", body)
+        self.assertIn("announcements=[]", body)
+        self.assertIn("addButton.dataset.announcementAction='add'", body)
+        for label in ("Duplicate", "Delete", "Move up", "Move down"):
+            self.assertIn(f"makeButton('{label}'", body)
+
+    @unittest.skipUnless(shutil.which("node"), "Node.js is required")
+    def test_announcement_actions_preserve_focus_and_bounded_copy_names(self):
+        source = (Path(__file__).parents[1] / "app" / "templates" / "dashboard.html").read_text()
+        start = source.index("function renderAllAnnouncementEditors")
+        end = source.index("\nfunction renderAnnouncementEditor", start)
+        functions = source[start:end]
+        announcement = test_config_store.ConfigStoreTests.announcement()
+        announcement["schedule"]["days"] = list(range(7))
+        announcement["name"] = "N" * 100
+        harness = functions + """
+let announcements=[__ANNOUNCEMENT_JSON__],announcementIdSequence=0;
+const focusLog=[];
+const CSS={escape:value=>value};
+const document={querySelectorAll:()=>[{}],querySelector:selector=>({focus:()=>focusLog.push(selector)})};
+const requestAnimationFrame=callback=>callback();
+const confirm=()=>true;
+const setMessage=()=>{};
+const renderAnnouncementEditor=()=>{};
+const announcementsFromEditor=()=>structuredClone(announcements);
+const nextAnnouncementId=()=>`announcement_copy_${++announcementIdSequence}`;
+const base=structuredClone(announcements[0]);
+for(const length of [95,96,100]){
+  announcements=[structuredClone(base)];announcements[0].name='N'.repeat(length);
+  duplicateAnnouncement(announcements[0].id);
+  if(announcements[1].name.length>100)throw new Error('copy name exceeded schema at '+length);
+  duplicateAnnouncement(announcements[1].id);
+  if(announcements[2].name.length>100||announcements[2].name===announcements[1].name)throw new Error('repeated copy name at '+length);
+}
+announcements=[];focusLog.length=0;addAnnouncement();
+if(!focusLog.at(-1)?.includes('[data-announcement-path="name"]'))throw new Error('add focus');
+focusLog.length=0;deleteAnnouncement(announcements[0].id);
+if(!focusLog.at(-1)?.includes('[data-announcement-action="add"]'))throw new Error('delete-last focus');
+announcements=[__ANNOUNCEMENT_JSON__];focusLog.length=0;resetAnnouncementBoard();
+if(!focusLog.at(-1)?.includes('[data-announcement-action="add"]'))throw new Error('reset focus');
+console.log('ANNOUNCEMENT_ACTION_BOUNDARIES_PASS');
+""".replace("__ANNOUNCEMENT_JSON__", json.dumps(announcement))
+        node = shutil.which("node")
+        assert node is not None
+        result = subprocess.run(
+            [node, "-e", harness], cwd=Path(__file__).parents[1],
+            text=True, capture_output=True, check=False,
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("ANNOUNCEMENT_ACTION_BOUNDARIES_PASS", result.stdout)
+
+    @unittest.skipUnless(shutil.which("node"), "Node.js is required")
+    def test_announcement_name_input_updates_the_visible_card_heading(self):
+        source = (Path(__file__).parents[1] / "app" / "templates" / "dashboard.html").read_text()
+        start = source.index("function announcementPathGet")
+        end = source.index("\nfunction renderAnnouncementContent", start)
+        functions = source[start:end]
+        announcement = test_config_store.ConfigStoreTests.announcement()
+        harness = functions + """
+const announcement=__ANNOUNCEMENT_JSON__;
+const heading={textContent:announcement.name};
+const control={dataset:{},listeners:{},addEventListener(type,handler){this.listeners[type]=handler}};
+const label={textContent:'',append(){}};
+const document={createElement:tag=>tag==='label'?label:control,querySelector:()=>heading};
+const CSS={escape:value=>value};
+const validateAnnouncementBoard=()=>true;
+announcementControl(announcement,'Name','name','text');
+control.value='Updated heading';control.listeners.input();
+if(announcement.name!=='Updated heading')throw new Error('model stale');
+if(heading.textContent!=='Updated heading')throw new Error('heading stale');
+console.log('ANNOUNCEMENT_HEADING_SYNC_PASS');
+""".replace("__ANNOUNCEMENT_JSON__", json.dumps(announcement))
+        node = shutil.which("node")
+        assert node is not None
+        result = subprocess.run(
+            [node, "-e", harness], cwd=Path(__file__).parents[1],
+            text=True, capture_output=True, check=False,
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("ANNOUNCEMENT_HEADING_SYNC_PASS", result.stdout)
 
     def test_playlist_builtin_editors_are_grouped_complete_and_resettable(self):
         self.pair_browser()
@@ -1788,6 +2423,54 @@ process.stdout.write(JSON.stringify(output));
         self.assertEqual((built_in / "system.gif").read_bytes(), payload)
         self.assertFalse((built_in / "custom.gif").exists())
         self.assertFalse((self.media_dir / "system.gif").exists())
+
+    def test_media_timeline_endpoint_is_paired_bounded_and_source_sized(self):
+        media = self.media_dir / "square.png"
+        Image.new("RGB", (10, 10), "red").save(media)
+        decoded = Image.new("RGB", (10, 10), "blue")
+        self.controller.matrix.media_frames.return_value = [decoded] * 8
+
+        self.assertEqual(
+            self.client.get("/api/media-timeline/square.png?frame_count=8&fps=12.5").status_code,
+            401,
+        )
+        self.pair_browser()
+        response = self.client.get("/api/media-timeline/square.png?frame_count=8&fps=12.5")
+
+        self.assertEqual((response.status_code, response.mimetype), (200, "image/png"))
+        with Image.open(io.BytesIO(response.data)) as image:
+            self.assertEqual((image.size, image.getpixel((0, 70))), ((10, 80), (0, 0, 255)))
+        self.controller.matrix.media_frames.assert_called_once_with(
+            "square.png", 8, 12.5, preserve_size=True, decode_timeout=5,
+            resolved_path=media,
+        )
+        for query in ("frame_count=0&fps=12", "frame_count=121&fps=12", "frame_count=1&fps=0", "frame_count=1&fps=61", "frame_count=1&fps=nan"):
+            self.assertEqual(
+                self.client.get("/api/media-timeline/square.png?" + query).status_code,
+                400,
+            )
+        (self.media_dir / "directory.png").mkdir()
+        os.symlink(media, self.media_dir / "link.png")
+        for name in ("missing.png", "directory.png", "link.png", "%2e%2e/config.json"):
+            self.assertEqual(
+                self.client.get(f"/api/media-timeline/{name}?frame_count=1&fps=12").status_code,
+                404,
+            )
+        self.controller.matrix.media_frames.side_effect = ValueError("decoder internals")
+        unavailable = self.client.get("/api/media-timeline/square.png?frame_count=1&fps=12")
+        self.assertEqual(unavailable.status_code, 422)
+        self.assertEqual(unavailable.get_json(), {"error": "Media timeline is unavailable."})
+        self.assertNotIn(b"decoder internals", unavailable.data)
+        slots = self.app.extensions["media_timeline_slots"]
+        self.assertTrue(slots.acquire(blocking=False))
+        self.assertTrue(slots.acquire(blocking=False))
+        try:
+            busy = self.client.get("/api/media-timeline/square.png?frame_count=1&fps=12")
+        finally:
+            slots.release()
+            slots.release()
+        self.assertEqual((busy.status_code, busy.headers.get("Retry-After")), (429, "1"))
+        self.assertEqual(busy.get_json(), {"error": "Media timeline service is busy."})
 
     def test_media_listing_reports_automatic_timeline_for_animated_gif(self):
         self.pair_browser()
@@ -2331,6 +3014,65 @@ process.stdout.write(JSON.stringify(output));
         self.assertEqual(response.status_code, 200)
         self.assertEqual(response.get_json()["weather"]["location"], "London, GB")
         self.controller.reload.assert_called_once()
+
+    def test_unsaved_announcement_preview_validates_without_mutating_config(self):
+        self.pair_browser()
+        before = self.store.get()
+        announcement = {
+            "id": "announcement_preview", "enabled": False, "name": "Draft preview",
+            "layout": "text_notice", "headline": "PREVIEW", "message": "Unsaved draft",
+            "media": None,
+            "schedule": {"start_date": "2030-01-15", "end_date": "2030-01-15", "days": [0, 1, 2, 3, 4, 5, 6], "start_time": "09:00", "end_time": "17:00"},
+            "style": {"foreground": "#FFFFFF", "background": "#000000", "font": "5x7", "alignment": "center", "border": "none", "border_colour": "#FFFFFF"},
+            "timing": {"mode": "static", "duration_seconds": 8},
+            "transition": {"type": "cut"},
+        }
+
+        response = self.client.post("/api/preview/announcement", json=announcement)
+
+        self.assertEqual(response.status_code, 202)
+        previewed = self.controller.preview_announcement.call_args.args[0]
+        self.assertFalse(previewed["enabled"])
+        self.assertEqual(previewed["style"]["foreground"], "#ffffff")
+        self.assertEqual(self.store.get(), before)
+        self.controller.reload.assert_not_called()
+
+    def test_unsaved_announcement_preview_rejects_legacy_missing_fields(self):
+        self.pair_browser()
+        base = {
+            "id": "announcement_preview", "enabled": False, "name": "Draft preview",
+            "layout": "text_notice", "headline": "PREVIEW", "message": "Unsaved draft",
+            "media": None,
+            "schedule": {"start_date": "2030-01-15", "end_date": "2030-01-15", "days": [0, 1, 2, 3, 4, 5, 6], "start_time": "09:00", "end_time": "17:00"},
+            "style": {"foreground": "#FFFFFF", "background": "#000000", "font": "5x7", "alignment": "center", "border": "none", "border_colour": "#FFFFFF"},
+            "timing": {"mode": "static", "duration_seconds": 8},
+            "transition": {"type": "cut"},
+        }
+        invalid_payloads = []
+        for field in ("enabled", "name"):
+            payload = json.loads(json.dumps(base))
+            payload.pop(field)
+            invalid_payloads.append(payload)
+        missing_days = json.loads(json.dumps(base))
+        missing_days["schedule"].pop("days")
+        invalid_payloads.append(missing_days)
+
+        for payload in invalid_payloads:
+            with self.subTest(payload=payload):
+                response = self.client.post("/api/preview/announcement", json=payload)
+                self.assertEqual(response.status_code, 400)
+                self.assertIn("invalid fields", response.get_json()["error"])
+        self.controller.preview_announcement.assert_not_called()
+
+    def test_unsaved_announcement_preview_rejects_invalid_payload_without_hardware_work(self):
+        self.pair_browser()
+
+        response = self.client.post("/api/preview/announcement", json={"headline": "BROKEN"})
+
+        self.assertEqual(response.status_code, 400)
+        self.assertEqual(response.content_type, "application/json")
+        self.assertIn("invalid", response.get_json()["error"].lower())
+        self.controller.preview_announcement.assert_not_called()
 
     def test_preview_only_accepts_known_modules(self):
         self.pairing.verify.return_value = True
