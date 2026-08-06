@@ -1,4 +1,5 @@
 import datetime as dt
+import types
 import unittest
 from unittest.mock import Mock
 
@@ -330,6 +331,7 @@ class AnnouncementBoardTests(unittest.TestCase):
 
         matrix.media_frames.assert_called_once_with(
             "events/open-day.png", 1, 1, stop_event=stop,
+            preserve_size=True, decode_timeout=5,
         )
         matrix.draw_image.assert_called_once_with(
             "icon-frame", 1, 1, width=14, height=14, canvas="canvas",
@@ -506,8 +508,96 @@ class AnnouncementBoardTests(unittest.TestCase):
 
         matrix.media_frames.assert_called_once_with(
             "events/open-day.png", 1, 1, stop_event=stop,
+            preserve_size=True, decode_timeout=5,
         )
         self.assertEqual(matrix.draw_image.call_count, 4)
+
+    def test_media_layouts_transform_original_square_tall_and_wide_sources_once(self):
+        source_sizes = {
+            "square": ((10, 10), (10, 10)),
+            "tall": ((10, 20), (7, 14)),
+            "wide": ((20, 10), (14, 7)),
+        }
+        layouts = {
+            "icon_notice": (1, 1, None),
+            "image_banner": (0, 0, (64, 16)),
+            "full_image_notice": (0, 0, (64, 32)),
+        }
+
+        for source_name, (source_size, icon_size) in source_sizes.items():
+            for layout, (expected_x, expected_y, forced_size) in layouts.items():
+                with self.subTest(source=source_name, layout=layout):
+                    source = Image.new("RGB", source_size, "red")
+                    canvas = Image.new("RGB", (64, 32), "black")
+                    matrix = Mock()
+                    matrix.matrix.width = 64
+                    matrix.matrix.height = 32
+                    matrix.matrix.CreateFrameCanvas.return_value = canvas
+                    matrix.font.return_value = "font:5x7"
+                    matrix.colour_rgb.side_effect = lambda value: {
+                        "#ffffff": types.SimpleNamespace(red=255, green=255, blue=255),
+                        "#000000": types.SimpleNamespace(red=0, green=0, blue=0),
+                    }[value]
+
+                    def decode(reference, frame_count, fps, **kwargs):
+                        self.assertEqual(reference, f"fixtures/{source_name}.png")
+                        self.assertEqual((frame_count, fps), (1, 1))
+                        self.assertTrue(kwargs["preserve_size"])
+                        self.assertEqual(kwargs["decode_timeout"], 5)
+                        return [source]
+
+                    def draw_image(image, x, y, width, height, canvas, keep_aspect=True):
+                        prepared = image.copy()
+                        if keep_aspect:
+                            prepared.thumbnail((width, height), Image.Resampling.LANCZOS)
+                        else:
+                            prepared = prepared.resize(
+                                (width, height), Image.Resampling.LANCZOS,
+                            )
+                        canvas.paste(prepared, (x, y))
+
+                    matrix.media_frames.side_effect = decode
+                    matrix.draw_image.side_effect = draw_image
+                    matrix.fill.side_effect = lambda red, green, blue, canvas: canvas.paste(
+                        (red, green, blue), (0, 0, 64, 32)
+                    )
+                    matrix.draw_text.return_value = 0
+                    matrix.swap.side_effect = lambda submitted: submitted
+                    stop = Mock()
+                    stop.is_set.return_value = False
+                    stop.wait.return_value = False
+                    announcement = self.item(
+                        f"announcement_{source_name}_{layout}", "09:00", "17:00",
+                    )
+                    announcement["layout"] = layout
+                    announcement["media"] = f"fixtures/{source_name}.png"
+                    announcement["message"] = ""
+
+                    self.assertTrue(run(
+                        matrix,
+                        {"announcement_board": {"announcements": [announcement]}},
+                        duration=0,
+                        stop_event=stop,
+                        now_provider=lambda: dt.datetime(2030, 1, 15, 12, 0),
+                    ))
+
+                    red_pixels = [
+                        (x, y) for y in range(32) for x in range(64)
+                        if canvas.getpixel((x, y)) == (255, 0, 0)
+                    ]
+                    expected_size = forced_size or icon_size
+                    self.assertEqual(
+                        (
+                            min(x for x, _ in red_pixels), min(y for _, y in red_pixels),
+                            max(x for x, _ in red_pixels) + 1,
+                            max(y for _, y in red_pixels) + 1,
+                        ),
+                        (
+                            expected_x, expected_y,
+                            expected_x + expected_size[0],
+                            expected_y + expected_size[1],
+                        ),
+                    )
 
     def test_slide_left_transition_moves_notice_in_four_steps_before_hold(self):
         matrix = Mock()

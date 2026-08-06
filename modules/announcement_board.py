@@ -9,6 +9,9 @@ import time
 from PIL import Image
 
 
+ANNOUNCEMENT_MEDIA_DECODE_TIMEOUT = 5
+
+
 def _scheduled_interval(schedule):
     start_date = dt.date.fromisoformat(schedule["start_date"])
     end_date = dt.date.fromisoformat(schedule["end_date"])
@@ -458,6 +461,8 @@ def _run_announcements(matrix, announcements, stop_event=None, eligibility=None)
         if announcement["layout"] != "text_notice":
             frames = matrix.media_frames(
                 announcement["media"], 1, 1, stop_event=stop_event,
+                preserve_size=True,
+                decode_timeout=ANNOUNCEMENT_MEDIA_DECODE_TIMEOUT,
             )
             media_frame = frames[0] if frames else None
         if announcement["timing"]["mode"] == "scroll":
