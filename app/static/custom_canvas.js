@@ -331,6 +331,36 @@
 
   function mediaTimelineUrl(source, frameCount, fps, revision = mediaTimelineRevision(source)) { return '/api/media-timeline/' + source.split('/').map(encodeURIComponent).join('/') + '?frame_count=' + frameCount + '&fps=' + fps + '&revision=' + encodeURIComponent(revision); }
 
+  function currentCanvasMediaSources() {
+    const sources = new Set();
+    const maximumSources = 20 * (64 + 512 + 512);
+    const remember = source => {
+      if (typeof source === 'string' && source && sources.size < maximumSources) sources.add(source);
+    };
+    for (const module of customModules) {
+      if (module.type !== 'canvas') continue;
+      const mediaLayerIds = new Set();
+      for (const layer of module.layers) {
+        if (layer.type !== 'media') continue;
+        mediaLayerIds.add(layer.id);
+        remember(layer.properties?.source);
+        for (const keyframe of layer.keyframes || []) remember(keyframe.properties?.source);
+      }
+      for (const override of module.overrides || []) {
+        if (mediaLayerIds.has(override.layer_id)) remember(override.properties?.source);
+      }
+    }
+    return sources;
+  }
+
+  function pruneMediaFailureStates() {
+    const referenced = currentCanvasMediaSources();
+    for (const source of mediaFailureStates.keys()) {
+      if (!referenced.has(source)) mediaFailureStates.delete(source);
+    }
+    return referenced;
+  }
+
 
   function mediaFrameIndex(layer, frame) {
     let startFrame = 0;
@@ -394,6 +424,11 @@
           return;
         }
         mediaPreviews.delete(key);
+        const referenced = pruneMediaFailureStates();
+        if (!referenced.has(source)) {
+          complete(false);
+          return;
+        }
         const failure = mediaFailureStates.get(source);
         const attempts = failure?.revision === revision ? failure.attempts : 0;
         if (attempts < 1) {
@@ -510,7 +545,7 @@
     if (supportsRotation(layer.type) && !Object.hasOwn(values, 'rotation')) values.rotation = 0;
     for (const [field, labelText, type] of editableFields) {
       let label;
-      if (type === 'select' || type === 'media-select' || type === 'time-format') label = moduleControl(labelText, values[field], 'select', value => { saveFrameProperties(module, layer, {[field]: value}); drawEditor(module, container.closest('.advanced-card').querySelector('canvas')); }, type === 'media-select' ? mediaItems.map(item => item.name) : (type === 'time-format' ? ['24h', '24h_seconds', '12h', '12h_seconds'] : (field === 'font' ? fonts : [])));
+      if (type === 'select' || type === 'media-select' || type === 'time-format') label = moduleControl(labelText, values[field], 'select', value => { saveFrameProperties(module, layer, {[field]: value}); if (type === 'media-select') pruneMediaFailureStates(); drawEditor(module, container.closest('.advanced-card').querySelector('canvas')); }, type === 'media-select' ? mediaItems.map(item => item.name) : (type === 'time-format' ? ['24h', '24h_seconds', '12h', '12h_seconds'] : (field === 'font' ? fonts : [])));
       else if (type === 'points') { label = document.createElement('label'); label.textContent = labelText; label.className = 'wide'; const textarea = document.createElement('textarea'); textarea.rows = 4; textarea.dataset.property = field; textarea.value = formatPoints(values[field]); textarea.addEventListener('change', () => { const points = parsePoints(textarea.value); if (points.length) { saveFrameProperties(module, layer, {points}); refreshAdvanced(module.id); } }); label.append(textarea); }
       else label = moduleControl(labelText, values[field], type, value => { const nextValue = field === 'z_index' ? Math.max(-64, Math.min(64, Math.round(value))) : value; saveFrameProperties(module, layer, {[field]: nextValue}); drawEditor(module, container.closest('.advanced-card').querySelector('canvas')); }, null);
       label.querySelector('input,select,textarea').dataset.property = field; grid.append(label);
@@ -753,7 +788,7 @@
     }, 1000 / module.fps); refreshAdvanced(module.id);
   }
 
-  function refreshAdvanced(id) { const module = byId(id); if (!module) return; const card = document.querySelector(`.custom-module-card[data-id="${CSS.escape(id)}"]`); if (!card) { renderCustomModules(); return; } renderAdvancedInto(module, card); }
+  function refreshAdvanced(id) { pruneMediaFailureStates(); const module = byId(id); if (!module) return; const card = document.querySelector(`.custom-module-card[data-id="${CSS.escape(id)}"]`); if (!card) { renderCustomModules(); return; } renderAdvancedInto(module, card); }
 
   function renderAdvancedInto(module, card) {
     const state = stateFor(module); card.replaceChildren(); card.className = 'custom-module-card advanced-card'; card.dataset.id = module.id; card.dataset.editorType = 'canvas'; headerFor(module, card, true);
@@ -771,6 +806,7 @@
   function renderAdvanced(module, list) { const card = document.createElement('div'); list.append(card); renderAdvancedInto(module, card); }
 
   window.renderCustomModules = function renderCustomModules() {
+    pruneMediaFailureStates();
     const list = document.querySelector('#custom-modules'); list.replaceChildren();
     if (!customModules.length) { const empty = document.createElement('div'); empty.className = 'empty'; empty.textContent = 'No custom modules yet. Add simple text, then convert it into a layered animation when needed.'; list.append(empty); syncCustomModuleUI(); syncPlaylistDurations(); return; }
     for (const module of customModules) module.type === 'canvas' ? renderAdvanced(module, list) : renderSimple(module, list);

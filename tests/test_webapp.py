@@ -1536,7 +1536,7 @@ process.stdout.write(JSON.stringify(output));
         end = source.index("\n  function drawEditor", start)
         functions = source[start:end]
         harness = """
-const mediaPreviews=new Map(), mediaFailureStates=new Map(), mediaLoadQueue=[], customModules=[], mediaItems=[{name:'built-in/clip.mp4',revision:'r1'}];let activeMediaLoads=0;
+const mediaPreviews=new Map(), mediaFailureStates=new Map(), mediaLoadQueue=[], customModules=[{type:'canvas',layers:[{id:'layer_media',type:'media',properties:{source:'built-in/clip.mp4'},keyframes:[]}],overrides:[]}], mediaItems=[{name:'built-in/clip.mp4',revision:'r1'}];let activeMediaLoads=0;
 const document={
   createElement(tag){return {tag,listeners:{},addEventListener(type,listener){this.listeners[type]=listener}}},
   querySelectorAll(){return []}
@@ -1583,8 +1583,14 @@ console.log('TIMELINE_MEDIA_PREVIEW_PASS');
         end = source.index("\n  function drawEditor", start)
         functions = source[start:end]
         harness = """
-const mediaPreviews=new Map(), mediaFailureStates=new Map(), mediaLoadQueue=[], customModules=[];let activeMediaLoads=0;
+const mediaPreviews=new Map(), mediaFailureStates=new Map(), mediaLoadQueue=[];let activeMediaLoads=0;
 const mediaItems=Array.from({length:33},(_,index)=>({name:'failed-'+index+'.gif',revision:'r'+index}));
+const retainedLayer={id:'layer_retained',type:'media',properties:{source:mediaItems[0].name},keyframes:[{properties:{source:mediaItems[31].name}}]};
+const customModules=[{
+  type:'canvas',
+  layers:[retainedLayer,...mediaItems.slice(1,31).map((item,index)=>({id:'layer_'+index,type:'media',properties:{source:item.name},keyframes:[]}))],
+  overrides:[{layer_id:'layer_retained',properties:{source:mediaItems[32].name}}]
+}];
 let created=0;
 const document={
   createElement(tag){created++;return {tag,listeners:{},addEventListener(type,listener){this.listeners[type]=listener}}},
@@ -1599,11 +1605,24 @@ for(const item of mediaItems){
   const retry=mediaTimelineElement(item.name,12,12);retry.listeners.error();
 }
 const before=created;
+if(mediaFailureStates.size!==33)throw new Error('live terminal revisions were not retained');
+if(mediaFailureStates.size>20*(64+512+512))throw new Error('failure state exceeded schema bound');
 if(mediaTimelineElement(mediaItems[0].name,12,12)!==null||created!==before)throw new Error('oldest terminal revision restarted');
+customModules[0].layers=[retainedLayer];customModules[0].overrides=[];retainedLayer.keyframes=[];
+pruneMediaFailureStates();
+if(mediaFailureStates.size!==1||!mediaFailureStates.has(mediaItems[0].name))throw new Error('obsolete terminal revisions were not pruned');
+for(let index=0;index<1000;index++){
+  const source='obsolete-'+index+'.gif';
+  const first=mediaTimelineElement(source,12,12);first.listeners.error();
+  const second=mediaTimelineElement(source,12,12);second.listeners.error();
+}
+if(mediaFailureStates.size!==1||!mediaFailureStates.has(mediaItems[0].name))throw new Error('obsolete source churn grew failure state');
+const afterChurn=created;
+if(mediaTimelineElement(mediaItems[0].name,12,12)!==null||created!==afterChurn)throw new Error('retained terminal revision restarted after pruning');
 let saves=0,restores=0;
 const context={save(){saves++},restore(){restores++}};
-drawShape(context,{type:'media',keyframes:[]},{source:mediaItems.at(-1).name,colour:'#fff',width:10,height:10,x:0,y:0,rotation:0,keep_aspect:true},1,0,12,12);
-if(saves!==1||restores!==1||created!==before)throw new Error('terminal draw was unsafe');
+drawShape(context,{type:'media',keyframes:[]},{source:mediaItems[0].name,colour:'#fff',width:10,height:10,x:0,y:0,rotation:0,keep_aspect:true},1,0,12,12);
+if(saves!==1||restores!==1||created!==afterChurn)throw new Error('terminal draw was unsafe');
 console.log('TERMINAL_MEDIA_PREVIEW_PASS');
 """
         node = shutil.which("node")
