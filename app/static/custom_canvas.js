@@ -268,10 +268,12 @@
     const name = customControl('Name', 'name', 'text', module.name); name.classList.add('wide');
     name.querySelector('input').addEventListener('input', event => { module.name = event.target.value; title.textContent = event.target.value; syncCustomModuleUI(); });
     const text = customControl('Text', 'text', 'text', module.text); text.classList.add('wide');
-    fields.append(name, text, customControl('Mode', 'type', 'select', module.type, ['text', 'text_scroll']), customControl('Font', 'font', 'select', module.font, fonts), customControl('Text colour', 'colour', 'color', module.colour), customControl('Background', 'background', 'color', module.background), customControl('X position', 'x', 'number', module.x), customControl('Baseline Y', 'y', 'number', module.y), customControl('Scroll direction', 'direction', 'select', module.direction, ['left', 'right']), customControl('Frame delay', 'speed', 'number', module.speed), customControl('Scroll loops', 'loops', 'number', module.loops ?? 1));
+    fields.append(name, text, customControl('Mode', 'type', 'select', module.type, ['text', 'text_scroll']), customControl('Font', 'font', 'select', module.font, fonts), customControl('Text colour', 'colour', 'color', module.colour), customControl('Background', 'background', 'color', module.background), customControl('X position', 'x', 'number', module.x), customControl('Baseline Y', 'y', 'number', module.y), customControl('Scroll direction', 'direction', 'select', module.direction, ['left', 'right']), customControl('Frame delay (seconds)', 'speed', 'number', module.speed), customControl('Scroll loops', 'loops', 'number', module.loops ?? 1));
     for (const control of fields.querySelectorAll('[data-field]')) control.addEventListener('input', syncPlaylistDurations);
     const convert = makeButton('Convert to advanced canvas', () => convertToAdvanced(module.id), 'btn primary'); convert.style.marginTop = '12px';
-    card.append(fields, convert); list.append(card);
+    const runtime = scrollPhysicalTimeReadout(module.type === 'text_scroll' ? calculatedScrollDuration(module) : Number.NaN);
+    runtime.hidden = module.type !== 'text_scroll';
+    card.append(fields, runtime, convert); list.append(card);
   }
 
   function moduleControl(labelText, value, type, handler, options) {

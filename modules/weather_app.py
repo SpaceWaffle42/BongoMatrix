@@ -9,6 +9,8 @@ from dataclasses import dataclass
 from urllib.parse import urlencode
 from urllib.request import Request, urlopen
 
+from modules.scroll_timing import frame_delay_seconds
+
 
 @dataclass(frozen=True)
 class WeatherSnapshot:
@@ -183,9 +185,7 @@ def run(matrix, config, duration=20, stop_event=None, client=None):
     temperature_y = weather_config.get("temperature_y", 17)
     ticker_y = weather_config.get("ticker_y", 31)
     scroll_direction = weather_config.get("scroll_direction", "left")
-    frame_delay = {"slow": 0.1, "normal": 0.05, "fast": 0.025}.get(
-        weather_config.get("scroll_speed", "normal"), 0.05
-    )
+    frame_delay = frame_delay_seconds(weather_config.get("scroll_speed", 0.05))
     now_x = weather_config.get("now_x", 1)
     now_y = weather_config.get("now_y", 7)
     temperature_x = weather_config.get("temperature_x", 2)

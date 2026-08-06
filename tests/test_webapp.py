@@ -5,8 +5,10 @@ import os
 import pwd
 import shutil
 import subprocess
+import sys
 import tempfile
 import threading
+import time
 import unittest
 from datetime import timedelta
 from pathlib import Path
@@ -446,8 +448,8 @@ class WebAppTests(unittest.TestCase):
         self.assertIn("forecast_items", body)
         self.assertNotIn("field:'card_seconds'", body)
         self.assertEqual(body.count("field:'scroll_loops'"), 3)
-        self.assertEqual(body.count("label:'Ticker loops'"), 3)
-        self.assertEqual(body.count("label:'Tick speed'"), 3)
+        self.assertEqual(body.count("field:'scroll_loops',label:'Scroll loops'"), 3)
+        self.assertEqual(body.count("field:'scroll_speed',label:'Frame delay (seconds)'"), 3)
         self.assertNotIn("makeWeatherLocationGroup", body)
         config = self.store.get()
         self.assertTrue(next(item for item in config["playlist"] if item["module"] == "weather")["enabled"])
@@ -626,6 +628,7 @@ class WebAppTests(unittest.TestCase):
         self.assertIn('id="matrix-preview"', body)
         self.assertIn('id="media-library"', body)
         self.assertIn('id="media-upload"', body)
+        self.assertIn('<label for="media-upload">Choose media file</label>', body)
         self.assertIn('class="app-shell"', body)
         self.assertIn('id="weather-results"', body)
         self.assertIn('id="weather-latitude"', body)
@@ -1128,6 +1131,203 @@ async function api(path){
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertIn("FAILED_PREVIEW_COMMITTED_WARNING_PASS", result.stdout)
 
+    @unittest.skipUnless(shutil.which("node"), "Node.js is required")
+    def test_playlist_uses_one_physical_time_format_for_every_row(self):
+        self.pair_browser()
+        body = self.client.get("/").get_data(as_text=True)
+
+        self.assertEqual(body.count('class="physical-time"'), len(self.store.get()["playlist"]))
+        self.assertIn("function formatPhysicalTime(seconds)", body)
+        source = body[body.index("function formatPhysicalTime(seconds)"):]
+        function_source = source[:source.index("\nfunction ", 1)]
+        harness = function_source + r"""
+const cases = new Map([
+  [0, '00:00:00'],
+  [0.025, '00:00:00.025'],
+  [8, '00:00:08'],
+  [90, '00:01:30'],
+  [3661, '01:01:01'],
+]);
+for (const [seconds, expected] of cases) {
+  const actual = formatPhysicalTime(seconds);
+  if (actual !== expected) throw new Error(`${seconds}: ${actual} !== ${expected}`);
+}
+console.log('UNIFIED_PHYSICAL_TIME_FORMAT_PASS');
+"""
+        node = shutil.which("node")
+        assert node is not None
+        result = subprocess.run(
+            [node, "-e", harness], cwd=Path(__file__).parents[1],
+            text=True, capture_output=True, check=False,
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("UNIFIED_PHYSICAL_TIME_FORMAT_PASS", result.stdout)
+
+    def test_physical_time_wraps_on_narrow_mobile_layouts(self):
+        self.pair_browser()
+        body = self.client.get("/").get_data(as_text=True)
+        mobile = body[body.index("@media(max-width:600px)"):body.index("</style>")]
+        self.assertIn("@media(max-width:600px)", body)
+        self.assertIn(".module-row{grid-template-columns:24px minmax(0,1fr)}", body)
+        self.assertIn(".module-row>label{min-width:0}", body)
+        self.assertIn(
+            ".physical-time{white-space:normal;overflow-wrap:anywhere}",
+            mobile,
+        )
+
+    @unittest.skipUnless(shutil.which("node"), "Node.js is required")
+    @unittest.skipUnless(
+        os.environ.get("MATRIX_CHROMIUM")
+        and Path(os.environ.get("MATRIX_CHROMIUM", "")).is_file()
+        and os.access(os.environ.get("MATRIX_CHROMIUM", ""), os.X_OK),
+        "MATRIX_CHROMIUM browser is required",
+    )
+    def test_playlist_timing_and_reorder_controls_in_real_chromium_at_320px(self):
+        self.pair_browser()
+        body = self.client.get("/").get_data(as_text=True)
+        chromium = os.environ["MATRIX_CHROMIUM"]
+        node = shutil.which("node")
+        assert node is not None
+        probe = r"""
+const port=process.argv[1],pagePath=process.argv[2];
+let endpoint;
+for(let attempt=0;attempt<50;attempt++){
+  try{endpoint=await fetch(`http://127.0.0.1:${port}/json/new`,{method:'PUT'}).then(response=>response.json());break}
+  catch(error){await new Promise(resolve=>setTimeout(resolve,100))}
+}
+if(!endpoint)throw new Error('Chromium DevTools endpoint unavailable');
+const socket=new WebSocket(endpoint.webSocketDebuggerUrl),pending=new Map(),exceptions=[];
+let nextId=1,loadResolve,loaded=new Promise(resolve=>{loadResolve=resolve});
+socket.onmessage=event=>{const message=JSON.parse(event.data);if(message.id&&pending.has(message.id)){const request=pending.get(message.id);pending.delete(message.id);message.error?request.reject(new Error(JSON.stringify(message.error))):request.resolve(message.result);return}if(message.method==='Runtime.exceptionThrown')exceptions.push(message.params.exceptionDetails);if(message.method==='Page.loadEventFired')loadResolve()};
+try{
+await new Promise((resolve,reject)=>{socket.onopen=resolve;socket.onerror=reject});
+function send(method,params={}){const id=nextId++;socket.send(JSON.stringify({id,method,params}));return new Promise((resolve,reject)=>pending.set(id,{resolve,reject}))}
+await send('Runtime.enable');await send('Page.enable');
+await send('Emulation.setDeviceMetricsOverride',{width:320,height:900,deviceScaleFactor:1,mobile:false});
+loaded=new Promise(resolve=>{loadResolve=resolve});
+await send('Page.navigate',{url:'file://'+pagePath});
+await Promise.race([loaded,new Promise((_,reject)=>setTimeout(()=>reject(new Error('page load timeout')),5000))]);
+const expression=`JSON.stringify((()=>{const wrapper=createPlaylistRow({module:'custom_probe',duration:15,enabled:true});document.querySelector('#playlist').append(wrapper);syncPlaylistDurations();const buttons=[...wrapper.querySelectorAll('.module-actions button')],duration=wrapper.querySelector('.duration');duration.value='90';duration.dispatchEvent(new Event('input',{bubbles:true}));const physical=wrapper.querySelector('.physical-time'),playback=[...document.querySelectorAll('.physical-time')].find(element=>element.textContent.includes('calculated at playback')),style=getComputedStyle(playback),rect=playback.getBoundingClientRect(),itemRect=playback.closest('.module-item').getBoundingClientRect(),range=document.createRange();range.selectNodeContents(playback);return {viewport:innerWidth,labels:buttons.slice(0,2).map(button=>button.getAttribute('aria-label')),physical:physical.textContent,whiteSpace:style.whiteSpace,overflowWrap:style.overflowWrap,lineCount:range.getClientRects().length,clipped:rect.right>itemRect.right+.5}})())`;
+const evaluated=await send('Runtime.evaluate',{expression,returnByValue:true,awaitPromise:true});
+if(evaluated.exceptionDetails)throw new Error(JSON.stringify(evaluated.exceptionDetails));
+console.log(JSON.stringify({result:JSON.parse(evaluated.result.value),exceptions:exceptions.map(item=>item.text)}));
+}finally{socket.close()}
+"""
+        with tempfile.TemporaryDirectory(prefix="matrix-chromium-") as directory:
+            page = Path(directory) / "dashboard.html"
+            page.write_text(body)
+            profile = Path(directory) / "profile"
+            browser = subprocess.Popen(
+                [
+                    chromium,
+                    "--headless",
+                    "--no-sandbox",
+                    "--disable-gpu",
+                    "--remote-debugging-port=0",
+                    f"--user-data-dir={profile}",
+                    "about:blank",
+                ],
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+            )
+            try:
+                active_port = profile / "DevToolsActivePort"
+                for _attempt in range(50):
+                    if active_port.is_file():
+                        break
+                    if browser.poll() is not None:
+                        self.fail("Chromium exited before publishing its DevTools port")
+                    time.sleep(0.1)
+                self.assertTrue(active_port.is_file(), "Chromium DevTools port unavailable")
+                port = active_port.read_text().splitlines()[0]
+                completed = subprocess.run(
+                    [node, "-e", probe, str(port), str(page)],
+                    capture_output=True,
+                    text=True,
+                    timeout=15,
+                )
+            finally:
+                browser.terminate()
+                try:
+                    browser.wait(timeout=5)
+                except subprocess.TimeoutExpired:
+                    browser.kill()
+                    browser.wait(timeout=5)
+        self.assertEqual(completed.returncode, 0, completed.stderr)
+        report = json.loads(completed.stdout.strip().splitlines()[-1])
+        self.assertEqual(report["exceptions"], [])
+        self.assertEqual(report["result"]["viewport"], 320)
+        self.assertEqual(report["result"]["labels"], ["Move up", "Move down"])
+        self.assertEqual(report["result"]["physical"], "Physical time · 00:01:30")
+        self.assertEqual(report["result"]["whiteSpace"], "normal")
+        self.assertEqual(report["result"]["overflowWrap"], "anywhere")
+        self.assertGreaterEqual(report["result"]["lineCount"], 2)
+        self.assertFalse(report["result"]["clipped"])
+
+    def test_real_chromium_regression_skips_a_non_executable_browser_path(self):
+        with tempfile.NamedTemporaryFile() as candidate:
+            Path(candidate.name).chmod(0o600)
+            environment = dict(
+                os.environ,
+                MATRIX_CHROMIUM=candidate.name,
+                PYTHONDONTWRITEBYTECODE="1",
+            )
+            completed = subprocess.run(
+                [
+                    sys.executable,
+                    "-B",
+                    "-m",
+                    "unittest",
+                    "tests.test_webapp.WebAppTests."
+                    "test_playlist_timing_and_reorder_controls_in_real_chromium_at_320px",
+                    "-v",
+                ],
+                cwd=Path(__file__).parents[1],
+                env=environment,
+                capture_output=True,
+                text=True,
+                timeout=15,
+            )
+        self.assertEqual(completed.returncode, 0, completed.stderr)
+        self.assertIn("skipped", completed.stderr)
+
+    @unittest.skipUnless(shutil.which("node"), "Node.js is required")
+    def test_playlist_physical_time_readouts_synchronize_in_the_browser(self):
+        self.pair_browser()
+        body = self.client.get("/").get_data(as_text=True)
+        function_start = body.index("const customFontAdvances=")
+        function_end = body.index("\nfunction playlist()", function_start)
+        function_source = body[function_start:function_end]
+        harness = function_source + r"""
+const custom={id:'custom_scroll',type:'text_scroll',text:'A',font:'5x7',loops:2,speed:.05};
+function makeRow(module,value){
+  const label={childNodes:[{textContent:''}]};
+  const duration={value:String(value),hidden:false,readOnly:false,title:'',min:'',max:'',step:'',closest(){return label},removeAttribute(name){delete this[name]}};
+  const physical={textContent:''};
+  return {dataset:{module},duration,physical,querySelector(selector){return selector==='.duration'?duration:selector==='.physical-time'?physical:null}};
+}
+const rows=[makeRow('splash',90),makeRow('custom_scroll',1),makeRow('weather',9)];
+const runtime={hidden:true,textContent:''};
+const card={dataset:{id:'custom_scroll'},querySelector(selector){return selector==='.scroll-runtime'?runtime:null}};
+global.document={querySelectorAll(selector){if(selector==='.module-row')return rows;if(selector==='.custom-module-card')return [card];return []},createElement(){return {setAttribute(){}}}};
+function customModulesFromEditor(){return [custom]}
+syncPlaylistDurations();
+if(rows[0].physical.textContent!=='Physical time · 00:01:30')throw new Error('fixed runtime did not synchronize');
+if(Number(rows[1].duration.value)!==7 || rows[1].physical.textContent!=='Physical time · 00:00:07')throw new Error('scroll runtime did not synchronize: '+JSON.stringify({value:rows[1].duration.value,physical:rows[1].physical.textContent}));
+if(!rows[1].duration.hidden || !rows[1].duration.readOnly)throw new Error('derived runtime remained editable');
+if(rows[2].physical.textContent!=='Physical time · calculated at playback' || Number(rows[2].duration.value)!==0)throw new Error('weather runtime was misleading');
+if(runtime.hidden || runtime.textContent!=='Physical time · 00:00:07')throw new Error('custom editor badge did not synchronize');
+console.log('PLAYLIST_TIMING_DOM_PASS');
+"""
+        node = shutil.which("node")
+        assert node is not None
+        result = subprocess.run(
+            [node, "-e", harness], cwd=Path(__file__).parents[1],
+            text=True, capture_output=True, check=False,
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("PLAYLIST_TIMING_DOM_PASS", result.stdout)
+
     def test_announcement_board_has_friendly_label_and_automatic_playlist_timing(self):
         self.pair_browser()
         body = self.client.get("/").get_data(as_text=True)
@@ -1143,18 +1343,104 @@ async function api(path){
         body = self.client.get("/").get_data(as_text=True)
 
         self.assertIn("function calculatedScrollDuration(module)", body)
-        self.assertIn("duration.readOnly=isAutomatic", body)
-        self.assertIn("isAutomatic?'Auto seconds ':'Seconds '", body)
+        self.assertIn("duration.readOnly=isAutomatic||isBuiltInAutomatic", body)
+        self.assertIn("isAutomatic?'Derived scroll runtime '", body)
+        self.assertIn("physicalTime.textContent='Physical time · '+formatPhysicalTime(duration.value)", body)
         self.assertIn("calculatedScrollDuration(module)", body)
 
-    def test_weather_playlist_duration_is_automatic_from_ticker_controls(self):
+    def test_dynamic_playlist_reorder_buttons_have_accessible_names(self):
         self.pair_browser()
         body = self.client.get("/").get_data(as_text=True)
 
-        self.assertIn("const automaticWeatherModules=new Set(['weather','openweather_overview','openweather_forecast'])", body)
-        self.assertIn("isWeatherAutomatic=automaticWeatherModules.has(row.dataset.module)", body)
-        self.assertIn("duration.value=0", body)
-        self.assertIn("'Auto · ticker loops × tick speed '", body)
+        self.assertIn("moveUp.setAttribute('aria-label','Move up')", body)
+        self.assertIn("moveDown.setAttribute('aria-label','Move down')", body)
+
+    def test_weather_scroll_controls_use_numeric_frame_delay(self):
+        self.pair_browser()
+        body = self.client.get("/").get_data(as_text=True)
+
+        self.assertEqual(body.count("field:'scroll_speed',label:'Frame delay (seconds)',type:'number',min:.01,max:1,step:.005"), 3)
+        self.assertEqual(body.count("field:'scroll_loops',label:'Scroll loops',type:'number'"), 3)
+        self.assertNotIn("label:'Tick speed'", body)
+        self.assertNotIn("label:'Ticker loops'", body)
+
+    @unittest.skipUnless(shutil.which("node"), "Node.js is required")
+    def test_weather_frame_delay_serializes_as_a_number(self):
+        self.pair_browser()
+        body = self.client.get("/").get_data(as_text=True)
+        helper_start = body.index("function withSharedWeatherLocation(settings)")
+        helper_end = body.index("\nasync function saveConfig", helper_start)
+        harness = body[helper_start:helper_end] + r"""
+const values={
+  '#max-paired-devices':'5','#day-brightness':'50','#night-brightness':'25',
+  '#weather-scroll-speed':'0.05','#weather-latitude':'','#weather-longitude':'',
+};
+global.document={
+  querySelector(selector){return {value:values[selector]??'',checked:false}},
+  querySelectorAll(){return []},
+};
+let customModules=[];
+let customLavaPalettes=[];
+const builtInSettings={weather:{},openweather_overview:{},openweather_forecast:{},clock_lava:{},splash:{},sleep:{}};
+const legacyCustomLavaColours=[];
+const announcements=[];
+function customModulesFromEditor(){return []}
+function customLavaPalettesFromEditor(){return []}
+function announcementsFromEditor(){return []}
+function playlist(){return []}
+const payload=configBody();
+if(typeof payload.weather.scroll_speed!=='number' || payload.weather.scroll_speed!==0.05){
+  throw new Error('weather frame delay was not numeric: '+JSON.stringify(payload.weather.scroll_speed));
+}
+console.log('WEATHER_FRAME_DELAY_SERIALIZATION_PASS');
+"""
+        node = shutil.which("node")
+        assert node is not None
+        result = subprocess.run(
+            [node, "-e", harness], cwd=Path(__file__).parents[1],
+            text=True, capture_output=True, check=False,
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("WEATHER_FRAME_DELAY_SERIALIZATION_PASS", result.stdout)
+
+    @unittest.skipUnless(shutil.which("node"), "Node.js is required")
+    def test_all_scroll_editors_share_labels_and_physical_time_readouts(self):
+        self.pair_browser()
+        body = self.client.get("/").get_data(as_text=True)
+        asset = (Path(__file__).parents[1] / "app" / "static" / "custom_canvas.js").read_text()
+
+        self.assertIn("function calculatedAnnouncementDuration(announcement)", body)
+        self.assertIn("function scrollPhysicalTimeReadout", body)
+        self.assertIn("customControl('Frame delay (seconds)','speed','number'", body)
+        self.assertIn("customControl('Frame delay (seconds)', 'speed', 'number'", asset)
+        self.assertIn("Physical time · calculated at playback from live ticker text", body)
+        self.assertIn("syncAnnouncementRuntime(announcement);validateAnnouncementBoard()", body)
+
+        function_start = body.index("const customFontAdvances=")
+        function_end = body.index("\nconst automaticWeatherModules", function_start)
+        sync_start = body.index("function syncAnnouncementRuntime(announcement)")
+        sync_end = body.index("\nfunction ", sync_start + 1)
+        harness = body[function_start:function_end] + "\n" + body[sync_start:sync_end] + r"""
+const announcement={headline:'A',message:'',style:{font:'5x7'},timing:{mode:'scroll',loops:2,frame_delay:.05},transition:{type:'cut'}};
+if(calculatedAnnouncementDuration(announcement)!==7)throw new Error('scroll announcement runtime mismatch');
+announcement.timing={mode:'static',duration_seconds:8};
+if(calculatedAnnouncementDuration(announcement)!==8)throw new Error('static announcement runtime mismatch');
+announcement.transition={type:'fade',duration_seconds:1.5};
+if(calculatedAnnouncementDuration(announcement)!==9.5)throw new Error('transition runtime was omitted');
+const runtime={textContent:''};
+global.document={querySelectorAll(){return [runtime]}};
+syncAnnouncementRuntime(announcement);
+if(runtime.textContent!=='Physical time · 00:00:09.500')throw new Error('transition edit did not synchronize runtime badge');
+console.log('UNIFIED_SCROLL_RUNTIME_PASS');
+"""
+        node = shutil.which("node")
+        assert node is not None
+        result = subprocess.run(
+            [node, "-e", harness], cwd=Path(__file__).parents[1],
+            text=True, capture_output=True, check=False,
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("UNIFIED_SCROLL_RUNTIME_PASS", result.stdout)
 
     def test_custom_scrolling_text_editor_has_bounded_loop_count_defaulting_to_one(self):
         self.pair_browser()
@@ -1805,7 +2091,7 @@ console.log('TERMINAL_MEDIA_PREVIEW_PASS');
     def test_dashboard_has_friendly_weather_layout_motion_and_units_controls(self):
         self.store.update({"weather": {
             "units": "fahrenheit", "temperature_y": 18, "ticker_y": 29,
-            "scroll_direction": "right", "scroll_speed": "slow",
+            "scroll_direction": "right", "scroll_speed": 0.075,
         }})
         self.pair_browser()
 
@@ -1819,7 +2105,7 @@ console.log('TERMINAL_MEDIA_PREVIEW_PASS');
             self.assertIn(f"id:'{control_id}'", body)
         self.assertIn('<option value="fahrenheit" selected>', body)
         self.assertIn('"scroll_direction": "right"', body)
-        self.assertIn('"scroll_speed": "slow"', body)
+        self.assertIn('"scroll_speed": 0.075', body)
         self.assertIn("units:document.querySelector('#weather-units').value", body)
         self.assertIn("temperature_y:Number(document.querySelector('#weather-temperature-y').value)", body)
         self.assertIn("ticker_y:Number(document.querySelector('#weather-ticker-y').value)", body)
@@ -2020,6 +2306,7 @@ console.log('TERMINAL_MEDIA_PREVIEW_PASS');
         self.assertIn("layoutControl.addEventListener('input',syncMediaVisibility)", body)
         self.assertIn("missing.textContent=current+' (missing)'", body)
 
+    @unittest.skipUnless(shutil.which("node"), "Node.js is required")
     def test_announcement_media_selects_refresh_in_place_after_library_changes(self):
         source = (Path(__file__).parents[1] / "app" / "templates" / "dashboard.html").read_text()
         start = source.index("function syncAnnouncementMediaSelects")
@@ -2054,8 +2341,10 @@ if(select.value!=='draft/selected.gif')throw new Error('removed draft value chan
 if(document.activeElement!==select)throw new Error('focus identity changed after removal');
 console.log('ANNOUNCEMENT_MEDIA_SELECT_REFRESH_PASS');
 """
+        node = shutil.which("node")
+        assert node is not None
         result = subprocess.run(
-            ["node", "-e", harness], capture_output=True, text=True, check=False,
+            [node, "-e", harness], capture_output=True, text=True, check=False,
         )
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         self.assertIn("ANNOUNCEMENT_MEDIA_SELECT_REFRESH_PASS", result.stdout)
@@ -2193,7 +2482,7 @@ const announcement=__ANNOUNCEMENT_JSON__;
 const heading={textContent:announcement.name};
 const control={dataset:{},listeners:{},addEventListener(type,handler){this.listeners[type]=handler}};
 const label={textContent:'',append(){}};
-const document={createElement:tag=>tag==='label'?label:control,querySelector:()=>heading};
+const document={createElement:tag=>tag==='label'?label:control,querySelector:()=>heading,querySelectorAll:()=>[]};
 const CSS={escape:value=>value};
 const validateAnnouncementBoard=()=>true;
 announcementControl(announcement,'Name','name','text');
