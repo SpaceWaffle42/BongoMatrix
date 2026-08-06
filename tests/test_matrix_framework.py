@@ -236,7 +236,7 @@ class MatrixFrameworkTests(unittest.TestCase):
         self.assertIn("timeout", process.wait.call_args.kwargs)
         self.assertLessEqual(process.wait.call_args.kwargs["timeout"], 0.25)
 
-    def test_media_frames_defers_reaping_after_expired_cleanup_wait(self):
+    def test_media_frames_defers_reaping_immediately_after_decode_deadline(self):
         matrix = Matrix.__new__(Matrix)
         matrix.matrix = Mock(width=64, height=32)
         matrix._media_file = Mock(return_value=framework.pathlib.Path("/tmp/animation.gif"))
@@ -244,7 +244,6 @@ class MatrixFrameworkTests(unittest.TestCase):
         process = Mock()
         process.stdout = Mock()
         process.poll.return_value = None
-        process.wait.side_effect = framework.subprocess.TimeoutExpired("ffmpeg", 0.25)
 
         def cancel_during_read(*_args, **_kwargs):
             stop.set()
@@ -264,9 +263,124 @@ class MatrixFrameworkTests(unittest.TestCase):
             )
 
         process.kill.assert_called_once_with()
-        process.wait.assert_called_once_with(timeout=0.25)
+        process.wait.assert_not_called()
         self.assertTrue(thread.call_args.kwargs["daemon"])
         reaper.start.assert_called_once_with()
+
+    def test_canvas_many_source_deadline_includes_decoder_cleanup(self):
+        from config_store import _validate_canvas_module
+        from modules import custom_text
+
+        matrix = Matrix.__new__(Matrix)
+        matrix.matrix = Mock(width=64, height=32)
+        matrix.matrix.CreateFrameCanvas.return_value = "canvas"
+        matrix.fill = Mock()
+        matrix.colour_rgb = Mock(return_value=Mock())
+        matrix.draw_image = Mock()
+        matrix.draw_line = Mock()
+        matrix.swap = Mock(return_value="canvas")
+        clock = [0.0]
+        current_source = [None]
+        attempted_sources = []
+        processes = []
+
+        media_layers = []
+        for index in range(62):
+            source = f"{index:03d}-broken.gif"
+            media_layers.append({
+                "id": f"layer_media_{index}", "name": f"Media {index}",
+                "type": "media", "visible": True,
+                "properties": {
+                    "x": 0, "y": 0, "width": 8, "height": 8,
+                    "rotation": 0, "source": source, "keep_aspect": True,
+                },
+                "keyframes": [],
+            })
+        media_layers.append({
+            "id": "layer_media_healthy", "name": "Healthy media",
+            "type": "media", "visible": True,
+            "properties": {
+                "x": 8, "y": 0, "width": 8, "height": 8,
+                "rotation": 0, "source": "zzz-healthy.png", "keep_aspect": True,
+            },
+            "keyframes": [],
+        })
+        primitive = {
+            "id": "layer_primitive", "name": "Primitive", "type": "rectangle",
+            "visible": True,
+            "properties": {
+                "x": 1, "y": 1, "width": 6, "height": 5,
+                "rotation": 0, "colour": "#ffffff", "filled": False,
+            },
+            "keyframes": [],
+        }
+        options = {
+            "id": "custom_many_media", "name": "Many media", "type": "canvas",
+            "background": "#000000", "frame_count": 1, "fps": 1,
+            "playback": "hold", "layers": [*media_layers, primitive],
+            "overrides": [],
+        }
+        _validate_canvas_module(options)
+
+        def media_path(source):
+            current_source[0] = source
+            return framework.pathlib.Path("/tmp/source.gif")
+
+        def launch_decoder(*_args, **_kwargs):
+            source = current_source[0]
+            attempted_sources.append(source)
+            process = Mock()
+            process.stdout = Mock(source=source)
+            process.poll.return_value = 0 if source == "zzz-healthy.png" else None
+
+            def wait(timeout=None):
+                if source == "zzz-healthy.png":
+                    return 0
+                assert timeout is not None
+                clock[0] += timeout
+                raise framework.subprocess.TimeoutExpired("ffmpeg", timeout)
+
+            process.wait.side_effect = wait
+            processes.append(process)
+            return process
+
+        def read_frame(stream, *, deadline, **_kwargs):
+            if stream.source == "zzz-healthy.png":
+                return "healthy-frame"
+            clock[0] = deadline
+            return None
+
+        matrix._media_file = Mock(side_effect=media_path)
+        stop = Mock()
+        stop.is_set.return_value = False
+        stop.wait.return_value = True
+        reaper = Mock()
+        with patch.object(framework.time, "monotonic", side_effect=lambda: clock[0]), patch.object(
+            framework.os, "open", return_value=9,
+        ), patch.object(framework.os, "close"), patch.object(
+            framework.subprocess, "Popen", side_effect=launch_decoder,
+        ), patch.object(
+            framework, "_read_ppm_frame_interruptibly", side_effect=read_frame,
+        ), patch.object(framework.threading, "Thread", return_value=reaper):
+            result = custom_text.run(
+                matrix, {}, duration=1, stop_event=stop, module_config=options,
+            )
+
+        self.assertTrue(result)
+        self.assertLessEqual(clock[0], custom_text.CANVAS_MEDIA_PREPARE_TIMEOUT)
+        self.assertEqual(attempted_sources, sorted(attempted_sources))
+        self.assertEqual(len(attempted_sources), 63)
+        self.assertEqual(attempted_sources[-1], "zzz-healthy.png")
+        matrix.draw_image.assert_called_once_with(
+            "healthy-frame", 8, 0, width=8, height=8, keep_aspect=True,
+            rotation=0, canvas="canvas",
+        )
+        self.assertGreaterEqual(matrix.draw_line.call_count, 4)
+        matrix.swap.assert_called_once_with("canvas")
+        self.assertTrue(all(
+            process.wait.call_count == 0
+            for process in processes[:-1]
+        ))
 
     def test_media_frames_cancels_while_waiting_for_decoder_completion(self):
         matrix = Matrix.__new__(Matrix)

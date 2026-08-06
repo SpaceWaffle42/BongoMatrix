@@ -579,9 +579,14 @@ class Matrix:
                     process.kill()
                 except ProcessLookupError:
                     pass
-                try:
-                    process.wait(timeout=0.25)
-                except subprocess.TimeoutExpired:
+                cleanup_remaining = deadline - time.monotonic()
+                reap_in_background = cleanup_remaining <= 0
+                if not reap_in_background:
+                    try:
+                        process.wait(timeout=min(0.25, cleanup_remaining))
+                    except subprocess.TimeoutExpired:
+                        reap_in_background = True
+                if reap_in_background:
                     threading.Thread(
                         target=_reap_decoder,
                         args=(process,),
