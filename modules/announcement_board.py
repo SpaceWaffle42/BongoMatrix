@@ -145,23 +145,27 @@ def _scroll_text_notice(matrix, canvas, announcement, stop_event):
     if announcement["message"]:
         text += " - " + announcement["message"]
     timing = announcement["timing"]
+    submitted = False
     for _ in range(timing["loops"]):
         x = matrix.matrix.width
         while True:
             if stop_event is not None and stop_event.is_set():
-                return canvas, True
+                return canvas, True, submitted
             matrix.fill(background.red, background.green, background.blue, canvas=canvas)
             text_width = matrix.draw_text(font, x, 20, foreground, text, canvas=canvas)
+            if stop_event is not None and stop_event.is_set():
+                return canvas, True, submitted
             canvas = matrix.swap(canvas)
+            submitted = True
             if stop_event is not None:
                 if stop_event.wait(timing["frame_delay"]):
-                    return canvas, True
+                    return canvas, True, submitted
             else:
                 time.sleep(timing["frame_delay"])
             if x <= -text_width:
                 break
             x -= 1
-    return canvas, False
+    return canvas, False, submitted
 
 
 def _render_icon_notice(
@@ -340,9 +344,10 @@ def _scaled_image(image, factor):
 
 def _render_fade(matrix, canvas, announcement, stop_event, media_frame=None):
     delay = announcement["transition"]["duration_seconds"] / 4
+    submitted = False
     for step in range(1, 5):
         if stop_event is not None and stop_event.is_set():
-            return canvas, True
+            return canvas, True, submitted
         factor = step / 4
         faded = {
             **announcement,
@@ -363,21 +368,25 @@ def _render_fade(matrix, canvas, announcement, stop_event, media_frame=None):
             matrix, canvas, faded, media_brightness=factor, stop_event=stop_event,
             media_frame=media_frame,
         )
+        if stop_event is not None and stop_event.is_set():
+            return canvas, True, submitted
         canvas = matrix.swap(canvas)
+        submitted = True
         if stop_event is not None:
             if stop_event.wait(delay):
-                return canvas, True
+                return canvas, True, submitted
         else:
             time.sleep(delay)
-    return canvas, False
+    return canvas, False, submitted
 
 
 def _render_slide(matrix, canvas, announcement, stop_event, media_frame=None):
     delay = announcement["transition"]["duration_seconds"] / 4
     direction = announcement["transition"]["direction"]
+    submitted = False
     for step in range(1, 5):
         if stop_event is not None and stop_event.is_set():
-            return canvas, True
+            return canvas, True, submitted
         remaining = 4 - step
         offset = (matrix.matrix.width * remaining) // 4
         if direction == "right":
@@ -386,13 +395,16 @@ def _render_slide(matrix, canvas, announcement, stop_event, media_frame=None):
             matrix, canvas, announcement, x_offset=offset, stop_event=stop_event,
             media_frame=media_frame,
         )
+        if stop_event is not None and stop_event.is_set():
+            return canvas, True, submitted
         canvas = matrix.swap(canvas)
+        submitted = True
         if stop_event is not None:
             if stop_event.wait(delay):
-                return canvas, True
+                return canvas, True, submitted
         else:
             time.sleep(delay)
-    return canvas, False
+    return canvas, False, submitted
 
 
 def _render_wipe(matrix, canvas, announcement, stop_event, media_frame=None):
@@ -401,9 +413,10 @@ def _render_wipe(matrix, canvas, announcement, stop_event, media_frame=None):
     background = matrix.colour_rgb(announcement["style"]["background"])
     width = matrix.matrix.width
     bottom = matrix.matrix.height - 1
+    submitted = False
     for step in range(1, 5):
         if stop_event is not None and stop_event.is_set():
-            return canvas, True
+            return canvas, True, submitted
         _render_static_layout(
             matrix, canvas, announcement, stop_event=stop_event,
             media_frame=media_frame,
@@ -416,13 +429,16 @@ def _render_wipe(matrix, canvas, announcement, stop_event, media_frame=None):
         )
         for x in hidden_columns:
             matrix.draw_line(x, 0, x, bottom, background, canvas=canvas)
+        if stop_event is not None and stop_event.is_set():
+            return canvas, True, submitted
         canvas = matrix.swap(canvas)
+        submitted = True
         if stop_event is not None:
             if stop_event.wait(delay):
-                return canvas, True
+                return canvas, True, submitted
         else:
             time.sleep(delay)
-    return canvas, False
+    return canvas, False, submitted
 
 
 def _render_pixel_dissolve(matrix, canvas, announcement, stop_event, media_frame=None):
@@ -431,9 +447,10 @@ def _render_pixel_dissolve(matrix, canvas, announcement, stop_event, media_frame
     order = dissolve_pixel_order(
         announcement["id"], matrix.matrix.width, matrix.matrix.height,
     )
+    submitted = False
     for step in range(1, 5):
         if stop_event is not None and stop_event.is_set():
-            return canvas, True
+            return canvas, True, submitted
         _render_static_layout(
             matrix, canvas, announcement, stop_event=stop_event,
             media_frame=media_frame,
@@ -444,13 +461,16 @@ def _render_pixel_dissolve(matrix, canvas, announcement, stop_event, media_frame
                 x, y, background.red, background.green, background.blue,
                 canvas=canvas,
             )
+        if stop_event is not None and stop_event.is_set():
+            return canvas, True, submitted
         canvas = matrix.swap(canvas)
+        submitted = True
         if stop_event is not None:
             if stop_event.wait(delay):
-                return canvas, True
+                return canvas, True, submitted
         else:
             time.sleep(delay)
-    return canvas, False
+    return canvas, False, submitted
 
 
 def _run_announcements(matrix, announcements, stop_event=None, eligibility=None):
@@ -478,40 +498,44 @@ def _run_announcements(matrix, announcements, stop_event=None, eligibility=None)
             if stop_event is not None and stop_event.is_set():
                 break
             media_frame = frames[0] if frames else None
-        rendered = True
         if announcement["timing"]["mode"] == "scroll":
             if announcement["transition"]["type"] != "cut":
                 raise NotImplementedError("scrolling announcement transition is not implemented")
             if announcement["layout"] != "text_notice":
                 raise NotImplementedError("scrolling announcement layout is not implemented")
-            canvas, interrupted = _scroll_text_notice(
+            canvas, interrupted, submitted = _scroll_text_notice(
                 matrix, canvas, announcement, stop_event,
             )
+            rendered = rendered or submitted
             if interrupted:
                 break
         else:
             if announcement["transition"]["type"] == "fade":
-                canvas, interrupted = _render_fade(
+                canvas, interrupted, submitted = _render_fade(
                     matrix, canvas, announcement, stop_event, media_frame,
                 )
+                rendered = rendered or submitted
                 if interrupted:
                     break
             elif announcement["transition"]["type"] == "slide":
-                canvas, interrupted = _render_slide(
+                canvas, interrupted, submitted = _render_slide(
                     matrix, canvas, announcement, stop_event, media_frame,
                 )
+                rendered = rendered or submitted
                 if interrupted:
                     break
             elif announcement["transition"]["type"] == "wipe":
-                canvas, interrupted = _render_wipe(
+                canvas, interrupted, submitted = _render_wipe(
                     matrix, canvas, announcement, stop_event, media_frame,
                 )
+                rendered = rendered or submitted
                 if interrupted:
                     break
             elif announcement["transition"]["type"] == "pixel_dissolve":
-                canvas, interrupted = _render_pixel_dissolve(
+                canvas, interrupted, submitted = _render_pixel_dissolve(
                     matrix, canvas, announcement, stop_event, media_frame,
                 )
+                rendered = rendered or submitted
                 if interrupted:
                     break
             else:
@@ -519,7 +543,10 @@ def _run_announcements(matrix, announcements, stop_event=None, eligibility=None)
                     matrix, canvas, announcement, stop_event=stop_event,
                     media_frame=media_frame,
                 )
+                if stop_event is not None and stop_event.is_set():
+                    break
                 canvas = matrix.swap(canvas)
+                rendered = True
             seconds = announcement["timing"]["duration_seconds"]
             if stop_event is not None:
                 if stop_event.wait(seconds):

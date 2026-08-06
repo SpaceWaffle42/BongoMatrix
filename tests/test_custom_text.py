@@ -486,6 +486,10 @@ class CustomTextModuleTests(unittest.TestCase):
         worker.join(0.5)
 
         self.assertFalse(worker.is_alive())
+        matrix.fill.assert_not_called()
+        matrix.draw_image.assert_not_called()
+        matrix.draw_text.assert_not_called()
+        matrix.swap.assert_not_called()
 
     def test_media_frame_index_starts_when_an_inserted_layer_first_appears(self):
         layer = {

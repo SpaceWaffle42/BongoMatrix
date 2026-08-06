@@ -310,12 +310,13 @@ class AnnouncementBoardTests(unittest.TestCase):
                     "type": "slide", "direction": direction, "duration_seconds": 0.4,
                 }
 
-                canvas, cancelled = announcement_board._render_slide(
+                canvas, cancelled, submitted = announcement_board._render_slide(
                     matrix, "canvas", announcement, stop,
                 )
 
                 self.assertEqual(canvas, "canvas")
                 self.assertFalse(cancelled)
+                self.assertTrue(submitted)
                 segments = [entry.args[:4] for entry in matrix.draw_line.call_args_list]
                 self.assertEqual(segments[:3], first_frame)
                 self.assertEqual(segments[-4:], final_frame)
@@ -484,6 +485,47 @@ class AnnouncementBoardTests(unittest.TestCase):
         matrix.draw_text.assert_not_called()
         matrix.draw_image.assert_not_called()
         matrix.swap.assert_not_called()
+
+    def test_cancellation_during_final_draw_prevents_cut_scroll_and_transition_swaps(self):
+        cases = ["cut", "scroll", "fade", "slide", "wipe", "pixel_dissolve"]
+        for transition_type in cases:
+            with self.subTest(transition_type=transition_type):
+                matrix = Mock()
+                matrix.matrix.width = 64
+                matrix.matrix.height = 32
+                matrix.matrix.CreateFrameCanvas.return_value = "canvas"
+                matrix.font.return_value = "font:5x7"
+                matrix.colour_rgb.return_value = Mock(red=0, green=0, blue=0)
+                matrix.draw_text.return_value = 20
+                matrix.swap.return_value = "canvas"
+                stop = threading.Event()
+                matrix.fill.side_effect = lambda *args, **kwargs: stop.set()
+                announcement = self.item(
+                    "announcement_cancel_" + transition_type, "09:00", "17:00",
+                )
+                announcement["message"] = ""
+                if transition_type == "scroll":
+                    announcement["timing"] = {
+                        "mode": "scroll", "loops": 1, "frame_delay": 0.05,
+                    }
+                    announcement["transition"] = {"type": "cut"}
+                elif transition_type == "cut":
+                    announcement["transition"] = {"type": "cut"}
+                else:
+                    announcement["transition"] = {
+                        "type": transition_type, "duration_seconds": 0.4,
+                    }
+                    if transition_type in {"slide", "wipe"}:
+                        announcement["transition"]["direction"] = "left"
+
+                self.assertFalse(run(
+                    matrix,
+                    {"announcement_board": {"announcements": [announcement]}},
+                    duration=0,
+                    stop_event=stop,
+                    now_provider=lambda: dt.datetime(2030, 1, 15, 12, 0),
+                ))
+                matrix.swap.assert_not_called()
 
     def test_static_image_banner_draws_media_above_headline(self):
         matrix = Mock()
