@@ -456,15 +456,20 @@ def _run_announcements(matrix, announcements, stop_event=None, eligibility=None)
             continue
         if canvas is None:
             canvas = matrix.matrix.CreateFrameCanvas()
-        rendered = True
         media_frame = None
         if announcement["layout"] != "text_notice":
-            frames = matrix.media_frames(
-                announcement["media"], 1, 1, stop_event=stop_event,
-                preserve_size=True,
-                decode_timeout=ANNOUNCEMENT_MEDIA_DECODE_TIMEOUT,
-            )
+            try:
+                frames = matrix.media_frames(
+                    announcement["media"], 1, 1, stop_event=stop_event,
+                    preserve_size=True,
+                    decode_timeout=ANNOUNCEMENT_MEDIA_DECODE_TIMEOUT,
+                )
+            except (OSError, ValueError):
+                frames = []
+            if stop_event is not None and stop_event.is_set():
+                break
             media_frame = frames[0] if frames else None
+        rendered = True
         if announcement["timing"]["mode"] == "scroll":
             if announcement["transition"]["type"] != "cut":
                 raise NotImplementedError("scrolling announcement transition is not implemented")

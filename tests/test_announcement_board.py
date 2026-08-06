@@ -1,4 +1,5 @@
 import datetime as dt
+import threading
 import types
 import unittest
 from unittest.mock import Mock
@@ -369,6 +370,71 @@ class AnnouncementBoardTests(unittest.TestCase):
         self.assertIn("Media unavailable", [call.args[4] for call in matrix.draw_text.call_args_list])
         matrix.swap.assert_called_once_with("canvas")
         stop.wait.assert_called_once_with(8)
+
+    def test_media_decode_timeout_renders_fallback_and_continues_to_next_announcement(self):
+        matrix = Mock()
+        matrix.matrix.width = 64
+        matrix.matrix.height = 32
+        matrix.matrix.CreateFrameCanvas.return_value = "canvas"
+        matrix.font.side_effect = lambda name: f"font:{name}"
+        matrix.colour_rgb.side_effect = lambda value: {
+            "#ffffff": Mock(red=255, green=255, blue=255),
+            "#000000": Mock(red=0, green=0, blue=0),
+        }[value]
+        matrix.media_frames.side_effect = ValueError("media decoder did not finish in time")
+        matrix.swap.return_value = "canvas"
+        stop = Mock()
+        stop.is_set.return_value = False
+        stop.wait.return_value = False
+        failed = self.item("announcement_failed_media", "09:00", "17:00")
+        failed["layout"] = "icon_notice"
+        failed["media"] = "events/slow.mp4"
+        following = self.item("announcement_following", "09:00", "17:00")
+        following["headline"] = "Still running"
+        following["message"] = ""
+
+        self.assertTrue(run(
+            matrix,
+            {"announcement_board": {"announcements": [failed, following]}},
+            duration=0,
+            stop_event=stop,
+            now_provider=lambda: dt.datetime(2030, 1, 15, 12, 0),
+        ))
+
+        drawn_text = [call.args[4] for call in matrix.draw_text.call_args_list]
+        self.assertIn("Media unavailable", drawn_text)
+        self.assertIn("Still running", drawn_text)
+        self.assertEqual(matrix.swap.call_count, 2)
+
+    def test_cancellation_during_media_decode_submits_no_stale_fallback(self):
+        matrix = Mock()
+        matrix.matrix.width = 64
+        matrix.matrix.height = 32
+        matrix.matrix.CreateFrameCanvas.return_value = "canvas"
+        stop = threading.Event()
+
+        def cancel_decode(*args, **kwargs):
+            stop.set()
+            return []
+
+        matrix.media_frames.side_effect = cancel_decode
+        announcement = self.item("announcement_cancel_decode", "09:00", "17:00")
+        announcement["layout"] = "icon_notice"
+        announcement["media"] = "events/slow.mp4"
+
+        self.assertFalse(run(
+            matrix,
+            {"announcement_board": {"announcements": [announcement]}},
+            duration=0,
+            stop_event=stop,
+            now_provider=lambda: dt.datetime(2030, 1, 15, 12, 0),
+        ))
+
+        matrix.fill.assert_not_called()
+        matrix.draw_text.assert_not_called()
+        matrix.draw_image.assert_not_called()
+        matrix.swap.assert_not_called()
+
     def test_static_image_banner_draws_media_above_headline(self):
         matrix = Mock()
         matrix.matrix.width = 64
