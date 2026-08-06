@@ -382,6 +382,32 @@ class MatrixFrameworkTests(unittest.TestCase):
             for process in processes[:-1]
         ))
 
+    def test_media_frames_stdout_close_failure_still_reaps_and_closes_input(self):
+        matrix = Matrix.__new__(Matrix)
+        matrix.matrix = Mock(width=64, height=32)
+        matrix._media_file = Mock(return_value=framework.pathlib.Path("/tmp/asset.gif"))
+        process = Mock()
+        process.stdout.close.side_effect = OSError("pipe close failed")
+        process.poll.return_value = None
+        process.wait.return_value = 0
+
+        with patch.object(framework.os, "open", return_value=19), patch.object(
+            framework.os, "close",
+        ) as close_fd, patch.object(
+            framework.subprocess, "Popen", return_value=process,
+        ), patch.object(
+            framework, "_read_ppm_frame_interruptibly", return_value="frame",
+        ):
+            with self.assertRaisesRegex(OSError, "pipe close failed"):
+                matrix.media_frames(
+                    "asset.gif", frame_count=1, fps=10,
+                    preserve_size=True, decode_timeout=1,
+                )
+
+        process.kill.assert_called_once_with()
+        self.assertGreaterEqual(process.wait.call_count, 2)
+        close_fd.assert_called_once_with(19)
+
     def test_media_frames_cancels_while_waiting_for_decoder_completion(self):
         matrix = Matrix.__new__(Matrix)
         matrix.matrix = Mock(width=64, height=32)

@@ -572,28 +572,32 @@ class Matrix:
                 raise ValueError("media could not be decoded for the custom module timeline")
             return [frames[index % len(frames)] for index in range(frame_count)]
         finally:
-            if process is not None and process.stdout is not None:
-                process.stdout.close()
-            if process is not None and process.poll() is None:
+            try:
+                if process is not None and process.stdout is not None:
+                    process.stdout.close()
+            finally:
                 try:
-                    process.kill()
-                except ProcessLookupError:
-                    pass
-                cleanup_remaining = deadline - time.monotonic()
-                reap_in_background = cleanup_remaining <= 0
-                if not reap_in_background:
-                    try:
-                        process.wait(timeout=min(0.25, cleanup_remaining))
-                    except subprocess.TimeoutExpired:
-                        reap_in_background = True
-                if reap_in_background:
-                    threading.Thread(
-                        target=_reap_decoder,
-                        args=(process,),
-                        name="matrix-media-reaper",
-                        daemon=True,
-                    ).start()
-            os.close(input_fd)
+                    if process is not None and process.poll() is None:
+                        try:
+                            process.kill()
+                        except ProcessLookupError:
+                            pass
+                        cleanup_remaining = deadline - time.monotonic()
+                        reap_in_background = cleanup_remaining <= 0
+                        if not reap_in_background:
+                            try:
+                                process.wait(timeout=min(0.25, cleanup_remaining))
+                            except subprocess.TimeoutExpired:
+                                reap_in_background = True
+                        if reap_in_background:
+                            threading.Thread(
+                                target=_reap_decoder,
+                                args=(process,),
+                                name="matrix-media-reaper",
+                                daemon=True,
+                            ).start()
+                finally:
+                    os.close(input_fd)
 
     def show_image(
         self, filename, x=0, y=0, delay=3, width=None, height=None, keep_aspect=True
