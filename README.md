@@ -213,6 +213,10 @@ matrix_framework.py     RGB panel, font, image, GIF, and video primitives
 webapp.py               Paired dashboard and JSON API
 ```
 
+## Future development
+
+Deferred product requirements are tracked in [`docs/FUTURE_DEVELOPMENT.md`](docs/FUTURE_DEVELOPMENT.md). Items in that file are notes only and should not be described as current behavior until implementation, testing, deployment, and physical verification are complete.
+
 ## Contributing
 
 Issues and pull requests are welcome once the repository is public. Keep changes focused, add regression coverage for behavior changes, and run the complete suite before submitting a pull request. Changes to rendering or timing should be checked against both the browser framebuffer and a physical 64×32 panel when possible.
