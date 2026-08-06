@@ -426,7 +426,7 @@ class CustomTextModuleTests(unittest.TestCase):
         self.assertEqual(matrix.media_frames.call_count, 2)
         self.assertEqual(
             [entry.kwargs["decode_timeout"] for entry in matrix.media_frames.call_args_list],
-            [5, 1],
+            [2.5, 1],
         )
         self.assertTrue(all(
             entry.kwargs["preserve_size"] is True
@@ -589,6 +589,56 @@ class CustomTextModuleTests(unittest.TestCase):
         self.assertEqual(
             [call.args[0] for call in matrix.media_frames.call_args_list],
             ["broken.gif", "healthy.png"],
+        )
+        matrix.draw_image.assert_called_once_with(
+            "healthy-frame", 16, 0, width=16, height=16, keep_aspect=True,
+            rotation=0, canvas="canvas",
+        )
+        self.assertGreaterEqual(matrix.draw_line.call_count, 4)
+        matrix.swap.assert_called_once_with("canvas")
+
+    def test_canvas_timed_out_media_reserves_decode_time_for_later_sources(self):
+        matrix = self.matrix()
+        clock = [0.0]
+
+        def decode(source, frame_count, fps, **kwargs):
+            clock[0] += kwargs["decode_timeout"]
+            if source == "broken.gif":
+                raise ValueError("decoder timed out")
+            return ["healthy-frame"]
+
+        matrix.media_frames.side_effect = decode
+        stop = Mock()
+        stop.wait.return_value = True
+        layers = [
+            {
+                "id": "broken", "name": "Broken", "type": "media", "visible": True,
+                "properties": {"x": 0, "y": 0, "width": 16, "height": 16, "rotation": 0, "source": "broken.gif", "keep_aspect": True},
+                "keyframes": [],
+            },
+            {
+                "id": "healthy", "name": "Healthy", "type": "media", "visible": True,
+                "properties": {"x": 16, "y": 0, "width": 16, "height": 16, "rotation": 0, "source": "healthy.png", "keep_aspect": True},
+                "keyframes": [],
+            },
+            {
+                "id": "primitive", "name": "Primitive", "type": "rectangle", "visible": True,
+                "properties": {"x": 1, "y": 1, "width": 6, "height": 5, "rotation": 0, "colour": "#ffffff", "filled": False},
+                "keyframes": [],
+            },
+        ]
+
+        with patch("modules.custom_text.time.monotonic", side_effect=lambda: clock[0]):
+            result = custom_text.run(
+                matrix, {}, duration=1, stop_event=stop,
+                module_config=self.canvas_options(frame_count=1, layers=layers),
+            )
+
+        self.assertTrue(result)
+        self.assertEqual(
+            [(call.args[0], call.kwargs["decode_timeout"])
+             for call in matrix.media_frames.call_args_list],
+            [("broken.gif", 2.5), ("healthy.png", 2.5)],
         )
         matrix.draw_image.assert_called_once_with(
             "healthy-frame", 16, 0, width=16, height=16, keep_aspect=True,

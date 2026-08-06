@@ -1283,6 +1283,82 @@ console.log(JSON.stringify({{square:probe(32,32),tall:probe(16,32),wide:probe(64
                     data[name],
                 )
 
+    @unittest.skipUnless(shutil.which("node"), "Node.js is required")
+    def test_browser_aspect_media_geometry_matches_complete_physical_path(self):
+        asset = (Path(__file__).parents[1] / "app/static/custom_canvas.js").read_text()
+        start = asset.index("  function drawShape(")
+        end = asset.index("\n\n  function drawEditor(", start)
+        function_source = asset[start:end]
+        cases = [
+            {"source": [1, 4], "box": [5.5, 3.5], "position": [2.5, 3.5]},
+            {"source": [3, 2], "box": [20, 10], "position": [3, 4]},
+            {"source": [20, 10], "box": [15, 15], "position": [-2.5, -3.5]},
+            {"source": [5, 2], "box": [9, 1], "position": [0.5, 1.5]},
+            {"source": [2, 5], "box": [1, 9], "position": [4.5, 5.5]},
+        ]
+        source_sizes = [(1, 1), (1, 4), (3, 2), (8, 13), (20, 10)]
+        box_values = (1, 1.5, 2.5, 3.5, 5, 5.5, 9.5, 15)
+        for source_index, source in enumerate(source_sizes):
+            for width_index, width in enumerate(box_values):
+                for height_index, height in enumerate(box_values):
+                    cases.append({
+                        "source": source,
+                        "box": [width, height],
+                        "position": [
+                            box_values[(source_index + width_index) % len(box_values)],
+                            -box_values[(source_index + height_index) % len(box_values)],
+                        ],
+                    })
+        harness = f"""
+function mediaFrameIndex(){{return 0;}}
+function beginLayerRotation(){{}}
+let naturalWidth=1,naturalHeight=1;
+function mediaTimelineElement(){{return {{naturalWidth,naturalHeight}};}}
+{function_source}
+function probe(item){{
+  naturalWidth=item.source[0]; naturalHeight=item.source[1];
+  const calls=[];
+  const context={{
+    save(){{}},restore(){{}},set globalAlpha(value){{}},set strokeStyle(value){{}},
+    set fillStyle(value){{}},set lineWidth(value){{}},beginPath(){{}},
+    rect(...args){{calls.push(['rect',...args]);}},clip(){{}},
+    translate(...args){{calls.push(['translate',...args]);}},rotate(){{}},
+    drawImage(...args){{calls.push(['drawImage',...args.slice(5)]);}},
+  }};
+  drawShape(context,{{type:'media'}},{{source:'media.png',x:item.position[0],y:item.position[1],width:item.box[0],height:item.box[1],keep_aspect:true,rotation:90}},1,0,1,1);
+  return calls;
+}}
+console.log(JSON.stringify({json.dumps(cases)}.map(probe)));
+"""
+        result = subprocess.run(
+            [shutil.which("node"), "-e", harness], cwd=Path(__file__).parents[1],
+            text=True, capture_output=True, check=True,
+        )
+        browser_calls = json.loads(result.stdout)
+        for case, calls in zip(cases, browser_calls, strict=True):
+            source_width, source_height = case["source"]
+            box_width, box_height = map(round, case["box"])
+            x, y = map(round, case["position"])
+            physical = Image.new("RGB", (source_width, source_height))
+            physical.thumbnail(
+                (box_width, box_height), Image.Resampling.LANCZOS,
+            )
+            fitted_width, fitted_height = physical.size
+            with self.subTest(
+                source=case["source"], box=case["box"],
+                position=case["position"],
+            ):
+                self.assertIn(["rect", x, y, fitted_width, fitted_height], calls)
+                self.assertIn(
+                    ["translate", x + fitted_width / 2, y + fitted_height / 2],
+                    calls,
+                )
+                self.assertIn(
+                    ["drawImage", -fitted_width / 2, -fitted_height / 2,
+                     fitted_width, fitted_height],
+                    calls,
+                )
+
     def test_advanced_editor_has_aseprite_style_layer_tracks_and_depth_controls(self):
         self.pair_browser()
 

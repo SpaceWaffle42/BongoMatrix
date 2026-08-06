@@ -460,10 +460,38 @@
       const naturalWidth = media.naturalWidth, naturalHeight = media.naturalHeight / frameCount;
       if (naturalWidth && naturalHeight) {
         const mediaFrame = mediaFrameIndex(layer, frame) % frameCount;
-        let width = properties.width, height = properties.height;
-        if (properties.keep_aspect) { const scale = Math.min(width / naturalWidth, height / naturalHeight); width = naturalWidth * scale; height = naturalHeight * scale; }
-        context.beginPath(); context.rect(properties.x, properties.y, width, height); context.clip();
-        context.translate(properties.x + width / 2, properties.y + height / 2); context.rotate(properties.rotation * Math.PI / 180);
+        const pythonRound = value => {
+          const lower = Math.floor(value), fraction = value - lower;
+          if (fraction < .5) return lower;
+          if (fraction > .5) return lower + 1;
+          return lower % 2 === 0 ? lower : lower + 1;
+        };
+        const x = pythonRound(properties.x), y = pythonRound(properties.y);
+        let width = pythonRound(properties.width), height = pythonRound(properties.height);
+        if (properties.keep_aspect) {
+          const boxWidth = width, boxHeight = height;
+          if (boxWidth >= naturalWidth && boxHeight >= naturalHeight) {
+            width = naturalWidth; height = naturalHeight;
+          } else {
+            const aspect = naturalWidth / naturalHeight;
+            if (boxWidth / boxHeight >= aspect) {
+              height = boxHeight;
+              const exactWidth = height * aspect;
+              const lower = Math.floor(exactWidth), upper = Math.ceil(exactWidth);
+              width = Math.max(1,
+                Math.abs(aspect - lower / height) <= Math.abs(aspect - upper / height)
+                  ? lower : upper);
+            } else {
+              width = boxWidth;
+              const exactHeight = width / aspect;
+              const lower = Math.floor(exactHeight), upper = Math.ceil(exactHeight);
+              const error = candidate => candidate === 0 ? 0 : Math.abs(aspect - width / candidate);
+              height = Math.max(1, error(lower) <= error(upper) ? lower : upper);
+            }
+          }
+        }
+        context.beginPath(); context.rect(x, y, width, height); context.clip();
+        context.translate(x + width / 2, y + height / 2); context.rotate(properties.rotation * Math.PI / 180);
         context.drawImage(media, 0, mediaFrame * naturalHeight, naturalWidth, naturalHeight, -width / 2, -height / 2, width, height);
       }
     }

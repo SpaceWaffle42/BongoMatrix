@@ -256,16 +256,24 @@ def _run_canvas(matrix, duration, stop_event, module_config):
     prepare_deadline = (
         time.monotonic() + CANVAS_MEDIA_PREPARE_TIMEOUT if media_sources else None
     )
-    for source in sorted(media_sources):
+    sorted_media_sources = sorted(media_sources)
+    for index, source in enumerate(sorted_media_sources):
         assert prepare_deadline is not None
+        if stop_event is not None and stop_event.is_set() is True:
+            return False
         remaining = prepare_deadline - time.monotonic()
         if remaining <= 0:
-            raise ValueError("canvas media preparation exceeded its aggregate deadline")
+            media_cache[source] = []
+            continue
+        remaining_source_count = len(sorted_media_sources) - index
         try:
             frames = matrix.media_frames(
                 source, module_config["frame_count"], module_config["fps"],
                 stop_event=stop_event, preserve_size=True,
-                decode_timeout=min(CANVAS_MEDIA_PREPARE_TIMEOUT, remaining),
+                decode_timeout=min(
+                    CANVAS_MEDIA_PREPARE_TIMEOUT,
+                    remaining / remaining_source_count,
+                ),
             )
         except (OSError, ValueError):
             frames = []
