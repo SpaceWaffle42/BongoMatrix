@@ -117,7 +117,7 @@ class WeatherTests(unittest.TestCase):
             feels_like=15, high=18, low=12, humidity=70,
         )
         config = {"weather": {
-            "scroll_direction": "left", "scroll_speed": "slow",
+            "scroll_direction": "left", "scroll_speed": 0.075,
             "scroll_loops": 2,
         }}
 
@@ -125,7 +125,7 @@ class WeatherTests(unittest.TestCase):
 
         self.assertEqual(matrix.swap.call_count, 8)
         self.assertEqual(wait.call_count, 8)
-        wait.assert_called_with(None, 0.1)
+        wait.assert_called_with(None, 0.075)
         self.assertTrue(all(
             call.kwargs["wrap"] is False
             for call in matrix.widget_scroll.call_args_list

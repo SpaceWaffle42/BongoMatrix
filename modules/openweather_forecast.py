@@ -5,6 +5,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 
 from modules.openweather_common import OpenWeatherClient, OpenWeatherError, composite_icon
+from modules.scroll_timing import frame_delay_seconds
 from modules.weather_app import _hex_rgb, _render_error, _wait
 
 
@@ -93,9 +94,7 @@ def run(
     ticker_y = settings.get("ticker_y", 28)
     direction = settings.get("scroll_direction", "left")
     step = -1 if direction == "right" else 1
-    frame_delay = {"slow": 0.1, "normal": 0.05, "fast": 0.025}.get(
-        settings.get("scroll_speed", "normal"), 0.05
-    )
+    frame_delay = frame_delay_seconds(settings.get("scroll_speed", 0.05))
     loops_per_card = settings.get("scroll_loops", 1)
     canvas = matrix.matrix.CreateFrameCanvas()
 

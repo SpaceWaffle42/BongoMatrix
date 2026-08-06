@@ -54,7 +54,7 @@ DEFAULT_CONFIG = {
         "temperature_y": 17,
         "ticker_y": 31,
         "scroll_direction": "left",
-        "scroll_speed": "normal",
+        "scroll_speed": 0.05,
         "scroll_loops": 1,
         "now_x": 1,
         "now_y": 7,
@@ -76,7 +76,7 @@ DEFAULT_CONFIG = {
         "units": "celsius", "icon_x": 0, "icon_y": 0,
         "now_x": 2, "now_y": 22, "temperature_x": 26, "temperature_y": 15,
         "high_x": 50, "high_y": 11, "low_x": 50, "low_y": 20,
-        "ticker_y": 28, "scroll_direction": "left", "scroll_speed": "normal",
+        "ticker_y": 28, "scroll_direction": "left", "scroll_speed": 0.05,
         "scroll_loops": 1,
         "background_colour": "#000000", "text_colour": "#dcd5d5",
         "high_colour": "#ff71ce", "low_colour": "#01cdfe",
@@ -88,7 +88,7 @@ DEFAULT_CONFIG = {
         "icon_x": 0, "icon_y": 0, "time_x": 2, "time_y": 22,
         "temperature_x": 26, "temperature_y": 15,
         "high_x": 50, "high_y": 11, "low_x": 50, "low_y": 20,
-        "ticker_y": 28, "scroll_direction": "left", "scroll_speed": "normal",
+        "ticker_y": 28, "scroll_direction": "left", "scroll_speed": 0.05,
         "scroll_loops": 1,
         "background_colour": "#000000", "text_colour": "#dcd5d5",
         "high_colour": "#ff71ce", "low_colour": "#01cdfe",
@@ -167,6 +167,11 @@ def _is_hex_colour(value):
     return bool(isinstance(value, str) and re.fullmatch(r"#[0-9a-fA-F]{6}", value))
 
 
+def _validate_frame_delay(value, name):
+    if isinstance(value, bool) or not isinstance(value, (int, float)) or not 0.01 <= value <= 1:
+        raise ValueError(f"{name} frame delay must be between 0.01 and 1 second")
+
+
 def _validate_openweather_settings(settings, name, *, forecast=False):
     location = settings["location"]
     if not isinstance(location, str) or not location.strip() or len(location) > 100:
@@ -183,8 +188,7 @@ def _validate_openweather_settings(settings, name, *, forecast=False):
             raise ValueError(f"{name} longitude must be between -180 and 180")
     if settings["scroll_direction"] not in {"left", "right"}:
         raise ValueError(f"{name} scroll direction must be left or right")
-    if settings["scroll_speed"] not in {"slow", "normal", "fast"}:
-        raise ValueError(f"{name} scroll speed must be slow, normal, or fast")
+    _validate_frame_delay(settings["scroll_speed"], name)
     loops = settings["scroll_loops"]
     if isinstance(loops, bool) or not isinstance(loops, int) or not 1 <= loops <= 10:
         raise ValueError(f"{name} scroll loops must be between 1 and 10")
@@ -617,8 +621,7 @@ def validate_config(config, *, allow_legacy_announcements=True):
             raise ValueError("weather longitude must be between -180 and 180")
     if config["weather"]["scroll_direction"] not in {"left", "right"}:
         raise ValueError("weather scroll direction must be left or right")
-    if config["weather"]["scroll_speed"] not in {"slow", "normal", "fast"}:
-        raise ValueError("weather scroll speed must be slow, normal, or fast")
+    _validate_frame_delay(config["weather"]["scroll_speed"], "weather")
     weather_loops = config["weather"]["scroll_loops"]
     if (
         isinstance(weather_loops, bool)
@@ -898,6 +901,14 @@ class ConfigStore:
             legacy_forecast = current.get("openweather_forecast")
             if isinstance(legacy_forecast, dict):
                 legacy_forecast.pop("card_seconds", None)
+            legacy_speed_delays = {"slow": 0.1, "normal": 0.05, "fast": 0.025}
+            for module_name in ("weather", "openweather_overview", "openweather_forecast"):
+                module_settings = current.get(module_name)
+                if (
+                    isinstance(module_settings, dict)
+                    and module_settings.get("scroll_speed") in legacy_speed_delays
+                ):
+                    module_settings["scroll_speed"] = legacy_speed_delays[module_settings["scroll_speed"]]
             _validate_update_keys(current, DEFAULT_CONFIG)
             lava = current.get("lava")
             if (

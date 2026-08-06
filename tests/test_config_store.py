@@ -626,24 +626,48 @@ class ConfigStoreTests(unittest.TestCase):
                 "temperature_y": 18,
                 "ticker_y": 29,
                 "scroll_direction": "right",
-                "scroll_speed": "slow",
+                "scroll_speed": 0.075,
             }})
             self.assertEqual(updated["weather"]["units"], "fahrenheit")
             self.assertEqual(updated["weather"]["temperature_y"], 18)
             self.assertEqual(updated["weather"]["ticker_y"], 29)
             self.assertEqual(updated["weather"]["scroll_direction"], "right")
-            self.assertEqual(updated["weather"]["scroll_speed"], "slow")
+            self.assertEqual(updated["weather"]["scroll_speed"], 0.075)
 
             invalid_values = {
                 "units": "kelvin",
                 "temperature_y": 32,
                 "ticker_y": -1,
                 "scroll_direction": "up",
-                "scroll_speed": "warp",
             }
             for key, value in invalid_values.items():
                 with self.subTest(key=key), self.assertRaises(ValueError):
                     store.update({"weather": {key: value}})
+            for value in (True, 0.009, 1.001, "normal"):
+                with self.subTest(scroll_speed=value), self.assertRaises(ValueError):
+                    store.update({"weather": {"scroll_speed": value}})
+
+    def test_legacy_weather_speed_presets_migrate_to_frame_delay_seconds(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "config.json"
+            saved = json.loads(json.dumps(DEFAULT_CONFIG))
+            saved["device"]["name"] = "Migration sentinel"
+            saved["display"]["day_brightness"] = 37
+            presets = {
+                "weather": ("slow", 0.1),
+                "openweather_overview": ("normal", 0.05),
+                "openweather_forecast": ("fast", 0.025),
+            }
+            for module, (preset, _seconds) in presets.items():
+                saved[module]["scroll_speed"] = preset
+            path.write_text(json.dumps(saved))
+
+            migrated = ConfigStore(path).get()
+
+            for module, (_preset, seconds) in presets.items():
+                self.assertEqual(migrated[module]["scroll_speed"], seconds)
+            self.assertEqual(migrated["device"]["name"], "Migration sentinel")
+            self.assertEqual(migrated["display"]["day_brightness"], 37)
 
     def test_weather_elements_can_move_to_every_matrix_edge(self):
         with tempfile.TemporaryDirectory() as directory:

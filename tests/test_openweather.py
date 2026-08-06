@@ -270,7 +270,7 @@ class OpenWeatherOverviewTests(unittest.TestCase):
         config = {
             "weather": {"location": "London", "latitude": 51.5, "longitude": -0.1},
             "openweather_overview": {
-                "scroll_direction": "left", "scroll_speed": "fast",
+                "scroll_direction": "left", "scroll_speed": 0.075,
                 "scroll_loops": 2,
             },
         }
@@ -281,7 +281,7 @@ class OpenWeatherOverviewTests(unittest.TestCase):
 
         self.assertEqual(matrix.swap.call_count, 8)
         self.assertEqual(wait.call_count, 8)
-        wait.assert_called_with(None, 0.025)
+        wait.assert_called_with(None, 0.075)
         self.assertTrue(all(
             invocation.kwargs["wrap"] is False
             for invocation in matrix.widget_scroll.call_args_list
@@ -494,7 +494,7 @@ class OpenWeatherForecastTests(unittest.TestCase):
             "weather": {"location": "London", "latitude": 51.5, "longitude": -0.1},
             "openweather_forecast": {
                 "forecast_items": 2, "card_seconds": 999,
-                "scroll_direction": "right", "scroll_speed": "normal",
+                "scroll_direction": "right", "scroll_speed": 0.075,
                 "scroll_loops": 2,
             },
         }
@@ -505,7 +505,7 @@ class OpenWeatherForecastTests(unittest.TestCase):
 
         self.assertEqual(matrix.swap.call_count, 16)
         self.assertEqual(wait.call_count, 16)
-        wait.assert_called_with(None, 0.05)
+        wait.assert_called_with(None, 0.075)
         rendered_labels = [
             invocation.args[5]
             for invocation in matrix.draw_text_with_border.call_args_list
