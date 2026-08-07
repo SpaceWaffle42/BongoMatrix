@@ -61,6 +61,20 @@ Basic custom modules should allow the user to select a GIF or video as the modul
 - Do not add text overlays, layered elements, or compositing to the basic editor.
 - Do not imply that the basic module can combine text and media.
 
+## GIF and MP4 playback speed across modules
+
+Every module that displays a GIF or MP4 should offer a playback-speed control. Use the same control model and terminology across built-in modules, basic custom modules, announcements, and Advanced Canvas wherever that media type is supported.
+
+- The default `100%` or `1×` setting should preserve the media's original playback timing.
+- Lower values should slow playback and higher values should speed it up.
+- GIF speed should scale the embedded frame delays without rewriting the source file.
+- MP4 speed should scale effective video playback timing without rewriting or transcoding the source file.
+- Use safe, bounded values and reject zero, negative, Boolean, malformed, or unsupported speeds.
+- Browser previews and physical Matrix output must use the same effective playback rate.
+- Playlist timing and displayed runtime should reflect the adjusted physical playback time rather than the source duration alone.
+- Slow playback must remain interruptible by module changes, preview changes, schedule changes, service stop, and shutdown.
+- Existing saved configurations should migrate to normal speed without altering unrelated settings.
+
 ## Advanced Canvas owns composition
 
 Use Advanced Canvas for text over GIFs or videos, multiple layers, overlays, and complex positioning.
