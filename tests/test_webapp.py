@@ -17,6 +17,7 @@ from unittest.mock import Mock, patch
 from PIL import Image, UnidentifiedImageError
 
 from config_store import ConfigStore
+from font_catalog import available_font_names
 from pairing import PairedDeviceStore, PairingDurabilityError
 from secret_store import SecretDurabilityError, SecretStore
 from tests import test_config_store
@@ -56,6 +57,20 @@ class WebAppTests(unittest.TestCase):
     def pair_browser(self):
         self.pairing.verify.return_value = True
         self.client.post("/pair", data={"pin": "123456", "device_name": "Test browser"})
+
+    def test_dashboard_exposes_every_installed_font_to_all_font_editors(self):
+        self.pair_browser()
+
+        body = self.client.get("/").get_data(as_text=True)
+        match = re.search(r"const installedFonts=(.*?);", body)
+        self.assertIsNotNone(match)
+        fonts = json.loads(match.group(1))
+        canvas_source = (Path(__file__).parents[1] / "app/static/custom_canvas.js").read_text()
+
+        self.assertEqual(fonts, list(available_font_names()))
+        self.assertIn("options:installedFonts", body)
+        self.assertIn("const announcementAppearanceFields=[{label:'Font',path:'style.font',type:'select',options:installedFonts}", body)
+        self.assertIn("const fonts = globalThis.matrixInstalledFonts || [];", canvas_source)
 
     def test_control_stop_reports_timeout_without_claiming_success(self):
         self.pair_browser()
@@ -1422,6 +1437,7 @@ console.log('WEATHER_FRAME_DELAY_SERIALIZATION_PASS');
         sync_end = body.index("\nfunction ", sync_start + 1)
         harness = body[function_start:function_end] + "\n" + body[sync_start:sync_end] + r"""
 const announcement={headline:'A',message:'',style:{font:'5x7'},timing:{mode:'scroll',loops:2,frame_delay:.05},transition:{type:'cut'}};
+if(calculatedTextWidth('helvR12','é😀')!==16)throw new Error('Unicode font width does not match the BDF renderer');
 if(calculatedAnnouncementDuration(announcement)!==7)throw new Error('scroll announcement runtime mismatch');
 announcement.timing={mode:'static',duration_seconds:8};
 if(calculatedAnnouncementDuration(announcement)!==8)throw new Error('static announcement runtime mismatch');

@@ -24,6 +24,7 @@ from werkzeug.exceptions import HTTPException, RequestEntityTooLarge
 from werkzeug.utils import secure_filename
 
 from config_store import ALLOWED_MODULES, DEFAULT_CONFIG, ConfigDurabilityError, validate_config
+from font_catalog import available_font_names, font_advance_catalog
 from module_options import COLOUR_HEX, LAVA_PALETTES
 from modules.weather_app import OpenMeteoClient
 from pairing import PairedDeviceStore, PairingDurabilityError
@@ -573,6 +574,8 @@ def create_app(
                 "splash": DEFAULT_CONFIG["media_layout"]["splash"],
                 "sleep": DEFAULT_CONFIG["media_layout"]["sleep"],
             },
+            installed_fonts=available_font_names(),
+            font_advances=font_advance_catalog(),
         )
 
     @app.get("/api/media")

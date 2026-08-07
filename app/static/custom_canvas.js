@@ -2,7 +2,7 @@
   'use strict';
 
   const editorState = new Map();
-  const fonts = ['4x6', '5x7', '6x10', '7x13', '9x18B'];
+  const fonts = globalThis.matrixInstalledFonts || [];
   const easings = ['linear', 'ease_in', 'ease_out', 'ease_in_out', 'step'];
   const layerTypes = ['text', 'time', 'pixels', 'line', 'rectangle', 'polygon', 'circle', 'ellipse', 'media'];
   const layerLabels = {time: 'Time', media: 'Image / GIF / MP4'};

@@ -1139,6 +1139,55 @@ class ConfigStoreTests(unittest.TestCase):
             with self.assertRaises(ValueError):
                 store.update({"custom_modules": [invalid]})
 
+    def test_every_installed_font_is_valid_in_every_user_font_setting(self):
+        with tempfile.TemporaryDirectory() as directory:
+            store = ConfigStore(Path(directory) / "config.json")
+            font = "tom_thumb"
+            simple = {
+                "id": "custom_font", "name": "Installed font", "type": "text",
+                "text": "HELLO", "font": font, "colour": "#ffffff",
+                "background": "#000000", "x": 0, "y": 20,
+                "direction": "left", "speed": 0.05, "loops": 1,
+            }
+            canvas = self.advanced_module(layers=[{
+                "id": "layer_text", "name": "Text", "type": "text", "visible": True,
+                "properties": {"x": 1, "y": 7, "text": "HI", "font": font, "colour": "#ffffff"},
+                "keyframes": [],
+            }], overrides=[])
+            announcement = self.announcement(style={
+                "foreground": "#FFFFFF", "background": "#000000", "font": font,
+                "alignment": "center", "border": "none", "border_colour": "#FFFFFF",
+            })
+
+            updated = store.update({
+                "lava": {"time_font": font, "date_font": font},
+                "custom_modules": [simple, canvas],
+                "announcement_board": {"announcements": [announcement]},
+            })
+
+            self.assertEqual(updated["lava"]["time_font"], font)
+            self.assertEqual(updated["custom_modules"][0]["font"], font)
+            self.assertEqual(updated["custom_modules"][1]["layers"][0]["properties"]["font"], font)
+            self.assertEqual(updated["announcement_board"]["announcements"][0]["style"]["font"], font)
+
+    def test_scrolling_duration_supports_an_installed_font_outside_the_old_allowlist(self):
+        with tempfile.TemporaryDirectory() as directory:
+            store = ConfigStore(Path(directory) / "config.json")
+            module = {
+                "id": "custom_font", "name": "Installed font", "type": "text_scroll",
+                "text": "HELLO", "font": "tom_thumb", "colour": "#ffffff",
+                "background": "#000000", "x": 0, "y": 20,
+                "direction": "left", "speed": 0.05, "loops": 1,
+            }
+            playlist = store.get()["playlist"] + [
+                {"module": module["id"], "duration": 1, "enabled": True},
+            ]
+
+            updated = store.update({"custom_modules": [module], "playlist": playlist})
+
+            duration = updated["playlist"][-1]["duration"]
+            self.assertGreater(duration, 0)
+
 
 if __name__ == "__main__":
     unittest.main()
