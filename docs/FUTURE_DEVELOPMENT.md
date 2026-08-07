@@ -143,6 +143,99 @@ Support optional read-only Google Calendar synchronization alongside local Matri
 - Bounded provider pagination, payload, memory, and storage limits.
 - Whether Google recurrence exceptions retain provider order after conversion to Matrix local time.
 
+## Spotify Now Playing module
+
+Add a display-only Spotify Now Playing playlist module. Playback control remains in Spotify; Matrix must not expose play, pause, previous, next, seek, volume, shuffle, repeat, or device-selection controls.
+
+### Account and authorization model
+
+- Support one connected Spotify account in the first version.
+- Provide a dashboard **Connect Spotify** action that opens browser authorization and returns automatically to the dashboard.
+- Follow whichever device is currently active on that account without displaying the device name.
+- Use a user-created Spotify application/client ID with Authorization Code and PKCE so the installation does not need to retain a client secret.
+- Request only the minimum read scopes required for current-playback metadata; do not request playback-control scopes.
+- Store access and refresh tokens in protected secret storage outside the repository and `config.json`. Never return tokens through dashboard APIs, logs, previews, exports, or diagnostics.
+- Validate OAuth state, redirect targets, account eligibility, API availability, and current Spotify platform requirements against provider documentation during implementation.
+- Support explicit disconnect, token deletion, and provider revocation. If authorization becomes permanently invalid, yield on the Matrix and show a reconnect warning only in the dashboard.
+
+### Supported playback and metadata
+
+Display every item Spotify reports as currently playing, including music, podcasts, audiobooks, advertisements, local items, and other provider-defined playback types when usable metadata exists.
+
+- Display explicit tracks and show a small **E** indicator when the 64×32 layout has room.
+- For music, use the item title and credited artist metadata.
+- For podcasts, use the episode title and show name.
+- For audiobooks, use the title and author or narrator when available.
+- For advertisements and unknown item types, use Spotify's supplied creator when present; otherwise show the normalized playback type.
+- Treat provider text as untrusted bounded plain text. Normalize missing, malformed, excessively long, or unsupported metadata without blocking playlist playback.
+
+### Confirmed 64×32 layout
+
+Use one combined layout rather than rotating separate artwork and detail screens:
+
+- center-cropped **Cover** artwork in a 16×16 area on the left;
+- title and a secondary artist/creator line on the right; and
+- a full-width playback-progress bar along the bottom.
+
+Additional behavior:
+
+- Keep the secondary line fixed on one line and truncate overflow with an ellipsis.
+- Scroll a long title exactly once using the shared scrolling-text timing controls.
+- Fall back automatically to a text-only arrangement when no usable artwork exists.
+- Hide the progress bar when duration or position is unavailable rather than inventing progress.
+- Provide Spotify-style default colours, optional per-element overrides, and an option to derive colours deterministically from album artwork.
+- Automatic colours must enforce readable physical-display contrast and fall back to Spotify defaults when a safe palette cannot be derived.
+- Browser preview and physical rendering must use the same prepared artwork, text fitting, colours, progress geometry, frame timing, and transition semantics.
+
+### Playlist timing and playback state
+
+- Make the module hold configurable with a 10-second default.
+- If one title pass needs longer than the configured hold, extend physical runtime until that single pass completes; never increase scroll count or cut the title off mid-pass.
+- When nothing is playing, yield immediately to the next playlist module.
+- When playback is paused, retain the current item for 30 seconds, then yield if playback has not resumed.
+- On an item change, cancel superseded artwork/text work and switch immediately to the newest normalized playback state.
+- Holds, title scrolling, transitions, provider waits, and image preparation must remain cancellable so playlist changes, preview changes, schedule changes, service stop, and shutdown advance promptly.
+
+### Polling, progress, cache, and failure behavior
+
+- Poll continuously in the background while the Spotify integration is enabled.
+- Make the polling interval configurable from 2 through 60 seconds, with a 5-second default.
+- Interpolate progress locally between successful provider responses instead of polling once per rendered frame.
+- Respect rate-limit responses and provider backoff even when that temporarily exceeds the configured interval. Use bounded timeouts and cancellation-aware retries.
+- Keep provider network and artwork preparation outside the physical rendering loop.
+- During a temporary API failure, retain the last known item for 30 seconds, mark it stale in the editor, and then yield.
+- Cache recently played artwork in a bounded 50 MB disk cache with deterministic eviction and safe atomic writes.
+- Fetch artwork only from validated provider-returned HTTPS locations using bounded redirects, response sizes, decode dimensions, formats, and preparation time. A failed image must fall back to the text-only layout.
+
+### Configurable transitions
+
+Configure module entry, item change, and module exit independently.
+
+- Each stage offers **Cut**, **Dissolve**, and **Fade**.
+- Default every stage to **Cut**.
+- Give entry, item change, and exit separate duration controls, each defaulting to 0.5 seconds when a non-Cut transition is selected.
+- **Dissolve** uses linear frame blending.
+- **Fade** uses smooth ease-in/out frame blending.
+- Transition execution must be cancellable and must blend the exact physical frames, not a browser-only approximation.
+
+### Migration, validation, and tests
+
+- Add the module disabled by default and migrate existing configurations without changing unrelated settings.
+- Bound every string, duration, polling interval, colour, cache setting, transition type, and transition duration in the configuration layer.
+- Test OAuth success, denial, state mismatch, refresh, disconnect, revocation, and secret non-disclosure.
+- Test tracks, explicit items, podcasts, audiobooks, advertisements, local/unknown items, missing metadata, missing artwork, and unavailable duration/progress.
+- Test playing, paused grace, idle yield, temporary stale grace, permanent authorization failure, item changes, rate limiting, and cancellation.
+- Test title timing, the 10-second default hold, long-title runtime extension, progress interpolation/correction, all transition paths, automatic-colour contrast fallback, and browser/physical parity.
+- Test the 50 MB artwork-cache boundary, eviction, malformed images, oversized responses, redirects, partial writes, and restart recovery.
+
+### Decisions still required before implementation
+
+- Exact fonts, pixel coordinates, progress-bar height, ellipsis threshold, and when the **E** indicator has sufficient room.
+- Allowed artwork hosts, redirects, media formats, decode limits, cache eviction policy, and artwork-colour extraction algorithm.
+- Minimum and maximum transition durations and the exact easing function used for **Fade**.
+- Spotify application setup guidance, redirect-URI rules, attribution, branding, account eligibility, API quotas, and provider-policy changes in force at implementation time.
+- Dashboard connection, stale, paused, disconnected, reset-default, cache-management, and accessibility wording.
+
 ## RSS and Headline Ticker module
 
 Add an RSS/Atom playlist module for BBC news and other user-selected publishers. It should present deliberately selected headlines rather than acting as a device-monitoring dashboard.
