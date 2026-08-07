@@ -117,6 +117,61 @@ Support optional read-only Google Calendar synchronization alongside local Matri
 - Sync interval, cache expiry, and offline fallback duration.
 - Maximum event count, title length, colour controls, icon source, and default **NOW** duration.
 
+## RSS and Headline Ticker module
+
+Add an RSS/Atom playlist module for BBC news and other user-selected publishers. It should present deliberately selected headlines rather than acting as a device-monitoring dashboard.
+
+### Confirmed sources and feed controls
+
+- Provide built-in BBC presets for **Top Stories**, **World**, **UK**, and regional news.
+- Also allow arbitrary user-supplied RSS or Atom feed URLs.
+- Refresh feeds every 30 minutes.
+- Apply one shared include-word list and one shared exclude-word list across the module.
+- Merge eligible stories in round-robin feed order so a high-volume source cannot dominate.
+- Make stories per playlist pass configurable, with a default of five.
+- Prefer stories not previously shown; when all eligible stories have been shown, fall back to the newest stories.
+- Deduplicate stories across feeds using stable IDs or canonical links where available, with a conservative title/date fallback.
+
+BBC preset URLs and regional availability must be verified against BBC's official current feed catalogue during implementation rather than copied from an unverified or stale list.
+
+### Confirmed 64×32 presentation
+
+- Keep the headline fixed while a short overview scrolls upward beneath it.
+- When a usable feed image is available, keep a small thumbnail beside the fixed headline while the overview scrolls below.
+- When no usable image exists, reflow into the text-only layout without leaving an empty image box.
+- Strip markup from feed descriptions and render bounded plain text; do not execute embedded HTML, scripts, tracking pixels, or feed styling.
+- Offer shared **Slow**, **Normal**, and **Fast** overview presets for the whole module. Persist their canonical numeric frame delays so preview and physical playback use the same timing path.
+- Calculate and display physical runtime after content is fetched because headline, overview, image availability, and story count affect the duration.
+- Each story should complete one bounded upward-summary pass before the next selected story begins.
+
+### Refresh, cache, and failure behavior
+
+- Fetch and parse feeds outside physical rendering so network latency cannot block the Matrix loop.
+- Use bounded connection/read timeouts, response-size limits, item-count limits, safe XML parsing, and cancellation-aware image preparation.
+- Cache the last successful normalized story set and the minimum required thumbnails.
+- If refresh fails, continue with the last successful cache and visibly mark its state as stale in the editor.
+- If no valid cached stories exist, yield immediately to the next playlist module instead of showing a blank screen or hot-looping.
+- Isolate feed failures: one invalid or unavailable source must not prevent healthy sources from refreshing or displaying.
+- Preserve the unseen/story-rotation cursor across normal playlist passes, but reset it safely when feeds or filters materially change.
+
+### Custom-feed security boundaries
+
+- Treat feed URLs, redirects, XML, story text, links, and images as untrusted input.
+- Block loopback, link-local, private-network, metadata-service, and other unsafe destinations for custom URLs; revalidate every redirect and resolved destination.
+- Defend against DNS rebinding and enforce bounded redirect counts.
+- Never expose fetched feed content as trusted HTML in the dashboard.
+- Reject unsupported URL schemes and oversized or invalid media without affecting the rest of the feed.
+
+### Decisions still required before implementation
+
+- Exact font sizes, thumbnail dimensions, clipping rules, and upward-scroll geometry.
+- Case, phrase, and word-boundary semantics for include/exclude filtering.
+- Maximum cache age, stale-data display lifetime, and disk cache limits.
+- Regional BBC preset list and how presets are updated when providers change URLs.
+- Whether story-seen state survives service restarts and how long it is retained.
+- Image format limits, preparation budget, and fallback artwork.
+- Accessibility labels, empty states, reset defaults, and feed-test feedback in the editor.
+
 ## Advanced Canvas owns composition
 
 Use Advanced Canvas for text over GIFs or videos, multiple layers, overlays, and complex positioning.
