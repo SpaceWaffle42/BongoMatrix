@@ -172,6 +172,71 @@ BBC preset URLs and regional availability must be verified against BBC's officia
 - Image format limits, preparation budget, and fallback artwork.
 - Accessibility labels, empty states, reset defaults, and feed-test feedback in the editor.
 
+## Moon Phases and Astronomical Events module
+
+Add one configurable Astronomy playlist module with independent checkboxes for current Moon information, lunar events, meteor showers, and planetary events.
+
+### Confirmed content
+
+- **Current Moon:** stylized phase icon, phase name, illumination percentage, local moonrise/moonset, and the next major phase.
+- **Lunar events:** new and full moons, eclipses, supermoons, and blue moons.
+- **Meteor showers:** peak date/window, expected activity level, and radiant direction.
+- **Planetary events:** conjunctions, oppositions, and selected visible-planet highlights, including object names, local visibility window, and compass direction.
+- Show only events observable from the selected location.
+- Show the current Moon first, then all enabled upcoming events in chronological order.
+- Make the future-event horizon configurable, with a 90-day default.
+- If no enabled upcoming event is observable, show the current Moon when enabled and otherwise yield immediately to the next playlist module.
+
+### Location and time
+
+- Reuse the configured weather location by default.
+- Allow an optional astronomy-specific location override using place search or a map pin rather than requiring coordinate entry.
+- Resolve and store the location's timezone explicitly; all dates, rise/set times, visibility windows, and countdowns must use that timezone with daylight-saving transitions handled correctly.
+- Preserve the place label and location provenance so the editor can explain which location is being used.
+
+### Confirmed 64×32 layouts
+
+- Moon disc card with phase name, illumination, and local rise/set times.
+- Next-event card with event type, local date/time, and compact countdown.
+- Meteor-shower card with peak window, activity level, and radiant direction.
+- Planetary-event card with object names, event type, visibility window, and compass direction.
+- Use a simple stylized Moon phase icon without claiming local-sky or north-up orientation.
+- Use separate configurable hold seconds for the Moon screen and event cards.
+- If text must scroll, use the shared physical-time calculation and keep browser preview timing identical to physical rendering.
+
+### Calculation and provider model
+
+Support local astronomical calculations plus an optional provider fallback.
+
+- Recalculate local Moon values for every playlist pass so the displayed phase and rise/set data are current.
+- Refresh provider-backed events every six hours outside the physical rendering loop.
+- Use versioned, checksum-verified ephemeris or astronomical data files for local calculations.
+- Record data-source identity and freshness in the editor without cluttering the physical display.
+- Define one canonical normalized event model so local and provider events use the same visibility, ordering, rendering, and deduplication paths.
+- Deduplicate overlapping local/provider events deterministically.
+- Provider credentials must remain outside `config.json` and must never be returned through dashboard APIs.
+
+### Failure and edge-case behavior
+
+- If the optional provider fails, continue local calculations and use the last valid provider-event cache, visibly marked stale in the editor.
+- Provider errors must never block current-Moon rendering or the playlist loop.
+- Use bounded network timeouts, retries, response sizes, cache sizes, and event counts.
+- Represent polar and unusual rise/set outcomes accurately, including Moon always above, always below, or no rise/set during the local date; never invent a time.
+- Recheck event eligibility immediately before displaying each event because the visibility window may have passed since the list was prepared.
+- Cancellation must stop calculations, provider work, card holds, scrolling, and framebuffer submissions promptly.
+- All disabled content sections should be rejected by validation or yield safely without hot-looping.
+
+### Decisions still required before implementation
+
+- Local astronomy library, ephemeris source, update process, accuracy target, and supported date range.
+- Optional provider and its authentication, licensing, attribution, rate limits, and redistribution terms.
+- Exact definitions for supermoons, blue moons, visible-planet highlights, meteor activity levels, and observability thresholds.
+- Treatment of partial versus total eclipses and events only partly visible from the selected place.
+- Compass-direction granularity, horizon/altitude thresholds, twilight thresholds, and weather-independent meaning of `observable`.
+- Default Moon and event-card hold seconds, fonts, colours, icons, and countdown formatting.
+- Maximum event cards per playlist pass and behavior when more eligible events exist than can be shown.
+- Ephemeris download/storage limits, offline longevity, stale-provider lifetime, and editor diagnostics.
+
 ## Advanced Canvas owns composition
 
 Use Advanced Canvas for text over GIFs or videos, multiple layers, overlays, and complex positioning.
