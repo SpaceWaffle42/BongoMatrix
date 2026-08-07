@@ -13,6 +13,7 @@ import threading
 from pathlib import Path
 
 from module_options import LAVA_PALETTES
+from font_catalog import available_font_names, text_width
 
 
 class ConfigDurabilityError(OSError):
@@ -26,13 +27,13 @@ ALLOWED_MODULES = {
     "clock_lava", "weather", "openweather_overview", "openweather_forecast",
     "announcement_board", "splash", "sleep",
 }
-CUSTOM_FONT_ADVANCES = {"4x6": 4, "5x7": 5, "6x10": 6, "7x13": 7, "9x18B": 9}
+AVAILABLE_FONTS = frozenset(available_font_names())
 
 
 def scrolling_text_duration(module, matrix_width=64):
     """Return the nominal time for every configured pixel traversal."""
-    text_width = len(module["text"]) * CUSTOM_FONT_ADVANCES[module["font"]]
-    frames_per_loop = matrix_width + text_width + 1
+    rendered_width = text_width(module["font"], module["text"])
+    frames_per_loop = matrix_width + rendered_width + 1
     milliseconds = frames_per_loop * module["loops"] * module["speed"] * 1000
     return math.floor(milliseconds + 0.5) / 1000
 
@@ -300,7 +301,7 @@ def _validate_canvas_properties(properties, layer_type, *, partial=False):
         or any(ord(character) < 32 for character in properties["text"])
     ):
         raise ValueError("custom canvas text must be 1-200 printable characters")
-    if "font" in properties and properties["font"] not in {"4x6", "5x7", "6x10", "7x13", "9x18B"}:
+    if "font" in properties and properties["font"] not in AVAILABLE_FONTS:
         raise ValueError("custom canvas font is not supported")
     if "format" in properties and properties["format"] not in {"24h", "24h_seconds", "12h", "12h_seconds"}:
         raise ValueError("custom canvas time format is not supported")
@@ -505,7 +506,7 @@ def _validate_announcement_board(board, *, allow_legacy=True):
             if not _is_hex_colour(style[field]):
                 raise ValueError(f"announcement {field} must use #RRGGBB format")
             style[field] = style[field].lower()
-        if style["font"] not in CUSTOM_FONT_ADVANCES:
+        if style["font"] not in AVAILABLE_FONTS:
             raise ValueError("announcement font is not supported")
         if style["alignment"] not in {"left", "center", "right"}:
             raise ValueError("announcement alignment is not supported")
@@ -677,9 +678,9 @@ def validate_config(config, *, allow_legacy_announcements=True):
     for key in ("show_time", "show_date"):
         if not isinstance(lava[key], bool):
             raise ValueError(f"lava {key} must be a boolean")
-    if lava["time_font"] not in {"6x10", "7x13B", "9x18B"}:
+    if lava["time_font"] not in AVAILABLE_FONTS:
         raise ValueError("lava time font is not supported")
-    if lava["date_font"] not in {"4x6", "6x10", "clR6x12"}:
+    if lava["date_font"] not in AVAILABLE_FONTS:
         raise ValueError("lava date font is not supported")
     for key in ("time_align", "date_align"):
         if lava[key] not in {"left", "center", "right"}:
@@ -816,7 +817,7 @@ def validate_config(config, *, allow_legacy_announcements=True):
             or any(ord(character) < 32 for character in item["text"])
         ):
             raise ValueError("custom module text must be 1-200 printable characters")
-        if item["font"] not in {"4x6", "5x7", "6x10", "7x13", "9x18B"}:
+        if item["font"] not in AVAILABLE_FONTS:
             raise ValueError("custom module font is not supported")
         if not _is_hex_colour(item["colour"]) or not _is_hex_colour(item["background"]):
             raise ValueError("custom module colours must use #RRGGBB format")

@@ -11,10 +11,11 @@ import pathlib
 from rgbmatrix import RGBMatrix, RGBMatrixOptions, graphics
 from PIL import Image, ImageSequence
 
+from font_catalog import FONT_DIR, font_key
 from frame_capture import BdfFont, FrameCapture
 
 root_path = pathlib.Path(__file__).resolve().parent
-fonts_path = root_path / "resources" / "fonts"
+fonts_path = FONT_DIR
 media_path = root_path / "resources" / "media"
 
 
@@ -184,7 +185,7 @@ class Matrix:
         for path in sorted(fonts_path.glob("*.bdf")):
             font = graphics.Font()
             font.LoadFont(str(path))
-            key = path.stem.replace("-", "_")
+            key = font_key(path)
             loaded_fonts[key] = font
             self._capture_fonts[id(font)] = BdfFont(path)
 
