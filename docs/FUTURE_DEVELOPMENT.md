@@ -380,6 +380,22 @@ Every external provider used by these future modules must remain free to use for
 - If a provider removes the required free access, continue any valid local calculation or bounded stale cache where safe, otherwise yield cleanly and mark the integration unavailable. Do not silently switch to a paid provider.
 - Account-bound Spotify and optional Google Calendar features may require user authorization, but their required API capabilities must still be available without provider API charges. If the confirmed behavior requires a paid account or paid API tier at implementation time, leave that provider path deferred until a compliant free option exists.
 
+## Implementation budget estimate
+
+Free data providers do not make roadmap implementation cost-free. GPT-5.6-sol access through ChatGPT Pro, subscription renewals, usage limits, and any explicitly approved additional credits remain genuine development costs.
+
+Current planning estimate as of 2026-08-07:
+
+- Assume ChatGPT Pro costs approximately £200 per billing period; replace this assumption with the actual billed amount if it differs.
+- Completing, testing, reviewing, merging, deploying, and physically verifying the full roadmap is expected to require roughly 2–4 billing periods.
+- Budget **£400–£800** of allocated ChatGPT Pro cost for completion, assuming no additional credits or top-ups.
+- If the current billing period is already paid and treated as a sunk cost, budget approximately **£200–£600** in future renewals.
+- An optimistic one-period completion would allocate approximately **£200**; a six-period contingency would allocate approximately **£1,200**.
+- Keep external data/API provider charges at **£0** under the provider policy above.
+- Treat additional model credits, top-ups, hardware, or other purchases as excluded unless separately estimated and explicitly approved.
+
+The estimate is based on approximately 6–10 substantial implementation/review/release workstreams and historical Matrix usage. Expected model usage is approximately 10–20 million fresh input tokens, 250–600 million cached-input tokens, 0.8–1.8 million output tokens, and 3,000–7,000 model calls. Cached-input volume represents reused context, not newly generated content. This is a planning range rather than a fixed quote; update it if the roadmap scope, subscription price, model, quotas, or observed delivery rate changes materially.
+
 ## Advanced Canvas owns composition
 
 Use Advanced Canvas for text over GIFs or videos, multiple layers, overlays, and complex positioning.
