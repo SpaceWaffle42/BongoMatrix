@@ -366,6 +366,20 @@ Support local astronomical calculations plus an optional provider fallback.
 - Fonts, colours, icons, compact countdown formatting, and cards with missing provider fields.
 - Ephemeris download/storage limits, offline longevity, and editor diagnostics.
 
+## Provider cost and access policy
+
+Every external provider used by these future modules must remain free to use for the required Matrix behavior.
+
+- Do not require a paid subscription, pay-as-you-go billing, prepaid credit, or a temporary trial that later requires payment.
+- A genuinely free account, OAuth connection, or API key is acceptable when the feature inherently accesses personal data or no practical anonymous source exists.
+- Prefer providers and local data sources that require no account, login, API key, or credential.
+- Rank otherwise suitable sources by access friction: local/open data first, anonymous public API or feed second, free authenticated API third.
+- Do not collect payment details merely to activate a nominally free tier.
+- Record applicable free-tier quotas and design polling, caching, and refresh behavior to remain safely within them.
+- Revalidate pricing, account requirements, licensing, redistribution terms, and quotas immediately before implementation and in provider-maintenance documentation.
+- If a provider removes the required free access, continue any valid local calculation or bounded stale cache where safe, otherwise yield cleanly and mark the integration unavailable. Do not silently switch to a paid provider.
+- Account-bound Spotify and optional Google Calendar features may require user authorization, but their required API capabilities must still be available without provider API charges. If the confirmed behavior requires a paid account or paid API tier at implementation time, leave that provider path deferred until a compliant free option exists.
+
 ## Advanced Canvas owns composition
 
 Use Advanced Canvas for text over GIFs or videos, multiple layers, overlays, and complex positioning.
