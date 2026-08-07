@@ -1,6 +1,6 @@
 # Future development notes
 
-Last updated: 2026-08-06
+Last updated: 2026-08-07
 
 This file records requested Matrix features that are intentionally deferred. They are product requirements and design notes, not descriptions of current behavior. Do not treat an item as implemented until its code, tests, review, merge, deployment, and physical-device verification are complete.
 
@@ -74,6 +74,48 @@ Every module that displays a GIF or MP4 should offer a playback-speed control. U
 - Playlist timing and displayed runtime should reflect the adjusted physical playback time rather than the source duration alone.
 - Slow playback must remain interruptible by module changes, preview changes, schedule changes, service stop, and shutdown.
 - Existing saved configurations should migrate to normal speed without altering unrelated settings.
+
+## Event Countdown module
+
+Add an Event Countdown playlist module for birthdays, anniversaries, launches, holidays, openings, and other deliberately selected events.
+
+### Confirmed behavior
+
+- Keep an event list and automatically display the nearest upcoming eligible event.
+- Support one-off date/time events and annually recurring events in the first version.
+- Use an automatic compact countdown format based on the time remaining rather than always forcing every time unit onto the 64×32 screen.
+- At zero, show **NOW** for a configurable period, then advance to the next eligible event.
+- When no event is eligible, yield immediately to the next playlist module instead of showing a blank screen or hot-looping.
+
+### Confirmed layouts
+
+- Large countdown with a short event title.
+- Title, countdown, and optional icon.
+- Compact progress bar showing time remaining.
+
+Media-background composition is not part of the confirmed first-version layouts. Advanced Canvas remains the place for layered text-over-media countdown designs.
+
+### Google Calendar synchronization
+
+Support optional read-only Google Calendar synchronization alongside local Matrix-only events.
+
+- Let the user select one or more Google calendars.
+- For each selected calendar, allow either all events or a user-defined event filter.
+- Imported events must remain read-only in Matrix; the dashboard must not edit or delete Google Calendar events.
+- Local Matrix-only events remain editable and must work when Google Calendar is not connected.
+- Keep OAuth credentials and refresh tokens outside `config.json`, never return them through the API, and support clean account disconnection and token revocation.
+- Handle temporary Google API failures with bounded retries and a visible stale/offline state rather than blocking the playlist.
+- Cache only the minimum event data needed for reliable display and define a safe expiry policy.
+- Merge imported and local candidates deterministically before selecting the nearest upcoming event.
+
+### Decisions still required before implementation
+
+- Timezone source and daylight-saving behavior.
+- Tie-breaking when events share the same start time.
+- Calendar filter fields and matching rules.
+- Treatment of all-day, cancelled, private, declined, and multi-day Google events.
+- Sync interval, cache expiry, and offline fallback duration.
+- Maximum event count, title length, colour controls, icon source, and default **NOW** duration.
 
 ## Advanced Canvas owns composition
 
