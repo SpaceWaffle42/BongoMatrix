@@ -404,6 +404,16 @@ Use Advanced Canvas for text over GIFs or videos, multiple layers, overlays, and
 - Browser previews must match physical rendering.
 - Do not expose browser-only controls or examples that cannot run on the device.
 
+### Mobile Advanced Canvas layer timeline
+
+Revise the Advanced Canvas layer timeline for mobile and narrow-screen users. The current responsive layout can compress the layer timeline until tracks, controls, and timing positions appear squashed and are difficult to understand or operate.
+
+- Preserve readable layer rows and sufficiently large touch targets instead of shrinking the complete timeline to fit the viewport.
+- Prefer a deliberate mobile layout and bounded horizontal timeline scrolling over compressing timing tracks and handles into unusable widths.
+- Keep the active layer identity and essential timeline controls visible while the timing area scrolls.
+- Ensure selecting layers, seeking, dragging timeline items, and editing keyframes remain practical with touch input.
+- Preserve the existing desktop experience and verify the revised timeline in real browsers at representative narrow mobile widths.
+
 ### Pixel drawing tool
 
 Treat **Pixel** in Advanced Canvas as a transparent, editable pixel-art layer rather than a single manually positioned pixel element.
