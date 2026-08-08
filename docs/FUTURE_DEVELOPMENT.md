@@ -127,6 +127,10 @@ Edit Preview should:
 - update as module controls change;
 - use a short debounce for sliders, position controls, and rapid input;
 - accurately render position, colour, ticker, icon, timing, and other supported changes;
+- in the Lava Clock palette editor, render the currently selected built-in or custom palette immediately as a complete animated 64×32 Lava Clock preview, updating as each colour control changes without requiring Save;
+- preview one selected palette at a time rather than rotating through every enabled palette, so the user can inspect that exact colour combination deliberately;
+- use the same palette order, interpolation, animation frame generation, clipping, and colour conversion as physical Lava Clock rendering, with browser/physical parity fixtures;
+- keep the Lava Clock colour preview in the browser unless the user separately enables the opt-in physical-device draft preview;
 - avoid saving configuration automatically; and
 - clearly distinguish draft output from saved live output.
 
