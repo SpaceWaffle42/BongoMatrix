@@ -319,11 +319,27 @@ Support optional read-only Google Calendar synchronization alongside local Matri
 - Do not impose a user-facing event-count limit; enforce bounded provider pagination, payload, memory, and storage safeguards internally.
 - Offer bundled icons plus images selected from the existing media library.
 
-#### Decisions still required before implementation
+#### Confirmed implementation decisions
 
-- Exact title truncation/scroll thresholds, colours, font sizes, progress-bar geometry, and icon fallback.
-- Bounded provider pagination, payload, memory, and storage limits.
-- Whether Google recurrence exceptions retain provider order after conversion to Matrix local time.
+##### Typography, colour, icons, and overflow
+
+- Use `5x7` as the default title font and the largest installed countdown font that fits the selected layout. Allow installed-font overrides for both, with live browser-preview warnings when an override overflows.
+- Scroll a title only when its measured BDF pixel width exceeds its allocated region. Complete exactly one pass with a four-pixel trailing gap, then restore and freeze the title at its starting position.
+- Use one shared module style with optional per-event accent overrides. Default to a black background, white text, and Matrix accent blue `#7170FF` for progress and icon accents.
+- When an event has no selected artwork, use a bundled event-type icon and fall back to a generic calendar icon when no event type matches.
+
+##### Progress geometry and display safe area
+
+- Default to a full-width, two-physical-pixel-high bar at the bottom. Keep its fill anchored on the left and reduce the filled width as the event approaches.
+- Allow progress-bar height from one through four physical pixels, defaulting to two.
+- Apply configurable top, right, bottom, and left safe-area insets to the complete Event Countdown layout, including the progress bar. Allow zero through eight physical pixels per edge and default every inset to zero.
+
+##### Google synchronization bounds and ordering
+
+- Import upcoming eligible events for the next two years plus relevant annual recurrences.
+- Fetch at most 20 provider pages per selected calendar while also enforcing combined limits of 10,000 normalized events, 25 MB of fetched payload, 20 MB of stored cache, and 64 MB of transient synchronization memory.
+- When a pagination, event-count, payload, or storage bound is reached, retain usable partial results and explain the truncation clearly in the dashboard. When the memory bound is exceeded, abort the refresh safely and retain the last valid cache.
+- After timezone conversion, sort recurrence exceptions by Matrix-local start time and use Google provider order only to break equal-time ties.
 
 ### 2.2 RSS and Headline Ticker module
 
@@ -352,7 +368,7 @@ BBC preset URLs and regional availability must be verified against BBC's officia
 - Calculate and display physical runtime after content is fetched because headline, overview, image availability, and story count affect the duration.
 - Each story should complete one bounded upward-summary pass before the next selected story begins.
 - Scroll an overlong headline horizontally while the summary scrolls upward. Provide a toggle between one headline pass followed by a frozen headline and continuous headline looping until the summary pass finishes.
-- The exact frozen position after one headline pass must be established with a 64×32 preview/physical fixture before implementation is considered closed.
+- After one headline pass, restore and freeze the headline at its starting position. Verify that exact behavior with a 64×32 browser-preview/physical fixture before implementation is considered closed.
 - Accept every thumbnail media format already accepted by the media library.
 - Animated thumbnails use source timing by default and expose the shared `10.0%`–`400.0%` speed control only in Advanced settings.
 
@@ -379,12 +395,33 @@ BBC preset URLs and regional availability must be verified against BBC's officia
 - Never expose fetched feed content as trusted HTML in the dashboard.
 - Reject unsupported URL schemes and oversized or invalid media without affecting the rest of the feed.
 
-#### Decisions still required before implementation
+#### Confirmed implementation decisions
 
-- Exact font sizes, clipping rules, upward-scroll geometry, and the one-pass headline freeze position.
-- Disk cache limits, thumbnail preparation budget, and fallback artwork.
-- How verified BBC preset URLs are updated when the provider changes them.
-- Accessibility labels, empty states, reset defaults, and detailed warning language in the editor.
+##### Typography, clipping, and scroll geometry
+
+- Default headlines to `5x7` and summaries to `4x6`. Allow installed-font overrides with live clipping warnings.
+- In the image layout, place the 16×16 thumbnail at columns 0–15 and rows 0–15, reserve column 16 as a one-pixel gap, hard-clip the headline to columns 17–63 and rows 0–15, leave row 16 as vertical separation, and hard-clip the upward-scrolling summary to columns 0–63 and rows 17–31.
+- In the text-only layout, hard-clip the headline to columns 0–63 and rows 0–6, leave row 7 as separation, and hard-clip the summary to columns 0–63 and rows 8–31.
+- Hard-clip thumbnail, headline, and summary rendering to their assigned regions and to the 64×32 frame; they must never overlap or bleed into another region.
+- Wrap the summary to its available width, start it below the fixed header region, and complete one pass only after its final line has fully left the top of the summary viewport.
+- After a one-pass horizontal headline scroll, restore and freeze the headline at its starting position while the upward-summary pass finishes.
+
+##### Thumbnail preparation and cache
+
+- Limit the disk cache to 50 MB, use deterministic least-recently-used eviction, and write cache entries atomically.
+- Limit each thumbnail to a 5 MB download, 4096×4096 decoded dimensions, and a three-second preparation budget before conversion to its 16×16 display representation.
+- If a thumbnail is absent, invalid, rejected, or times out, use no generic fallback artwork and reflow the story into the text-only layout.
+
+##### BBC preset maintenance
+
+- Keep BBC preset URLs in a version-controlled catalogue, verify them against BBC's official feed catalogue during each relevant release, and change them only through the normal reviewed and merged release process.
+
+##### Editor states, reset, warnings, and accessibility
+
+- If no eligible current or cached stories remain after filtering, yield on the Matrix and show a dashboard explanation identifying the responsible feed or filter condition together with a **Test feeds** action.
+- **Reset to defaults** restores BBC Top Stories as the only feed, a 30-minute refresh, five stories per pass, **Normal** speed, empty filters, and one-pass headlines, and clears seen-story and feed/thumbnail cache state.
+- Use action-oriented warning patterns including **Could not update [feed]; showing cache from [time]**, **Cache expired; module will skip**, **Feed rejected: [reason]**, and **Results limited: [limit]**. Announce status accessibly and place raw technical details behind an expandable **Details** section.
+- Give controls explicit accessible names containing the feed or control name and action, expose reorder position and state, and never rely on colour, an icon, or a tooltip alone.
 
 ### 2.3 Moon Phases and Astronomical Events module
 
@@ -434,7 +471,7 @@ Support local astronomical calculations plus an optional provider fallback.
 - Provider credentials must remain outside `config.json` and must never be returned through dashboard APIs.
 - Use provider labels for supermoons, blue moons, meteor activity, and curated visible-planet highlights rather than inventing competing local definitions.
 - Use provider visibility guidance when available. Otherwise require an event to exceed 10° altitude during local astronomical darkness.
-- Include every locally visible partial or total eclipse and label its type.
+- Include every locally visible partial or total eclipse that meets the confirmed minimum local-visibility duration and label its type.
 
 #### Failure and edge-case behavior
 
@@ -447,13 +484,36 @@ Support local astronomical calculations plus an optional provider fallback.
 - Cancellation must stop calculations, provider work, card holds, scrolling, and framebuffer submissions promptly.
 - All disabled content sections should be rejected by validation or yield safely without hot-looping.
 
-#### Decisions still required before implementation
+#### Confirmed implementation decisions
 
-- Local astronomy library, ephemeris source, update process, calculation accuracy target, and supported date range.
-- Optional provider and its authentication, licensing, attribution, rate limits, redistribution terms, and exact label semantics.
-- Treatment of events only partly visible within the local event window.
-- Fonts, colours, icons, compact countdown formatting, and cards with missing provider fields.
-- Ephemeris download/storage limits, offline longevity, and editor diagnostics.
+##### Local calculations, ephemeris, and updates
+
+- Use Skyfield with NASA/JPL's DE440s short ephemeris file (`de440s.bsp`), pinned by checksum; support dates from 2000 through 2100 and target rise/set results within one minute.
+- Update the ephemeris only through a versioned, reviewed release with a pinned source URL and checksum. Retain the previous verified file for rollback.
+- Allow at most 128 MB total for the active and rollback ephemerides. Reject oversized or checksum-mismatched files without replacing the last valid ephemeris.
+
+##### Provider and catalogue policy
+
+- Ship local calculations and versioned open catalogues first. Keep optional provider labels disabled until a compliant free no-login source is verified.
+- Require any future optional provider to have clear licensing, redistribution, and attribution terms, permit the bounded cache, and provide quotas sufficient for six-hour refreshes. Do not enable a provider that fails any of these requirements.
+- Preserve a verified provider label's meaning while normalizing only whitespace and casing. Show its source attribution in the editor and never invent a competing local equivalent.
+
+##### Partial visibility
+
+- Include an event when it has at least 10 continuous minutes that satisfy the local visibility criteria. Show only its locally visible window and label it **Partly visible**.
+
+##### Card presentation and incomplete data
+
+- Default titles to `5x7`, details to `4x6`, and countdowns to the largest installed font that fits. Allow installed-font overrides with clipping warnings.
+- Default to a black background and white text, with Moon `#D9D9D9`, lunar/eclipse `#B388FF`, meteor `#FFD166`, and planetary `#4CC9F0` accents. Allow colour overrides.
+- Use bundled pixel icons per event type and a generic star icon for unknown event types.
+- Format event countdowns with at most two units: days/hours when distant, hours/minutes within one day, minutes within one hour, and **NOW** while active. Never show seconds.
+- Omit missing optional catalogue/provider fields and reflow the card. Reject only events missing identity, time, or location eligibility, and explain each rejection in the dashboard.
+
+##### Offline behavior and diagnostics
+
+- Keep local Moon and planet calculations available indefinitely while the requested date remains inside the supported ephemeris range. Mark an open event catalogue stale after its published update date without blocking valid local cards.
+- Show source/version, checksum status, supported date range, catalogue freshness, last successful update, and stale/error state in the editor, with raw technical details in an expandable area.
 
 ### 2.4 Spotify Now Playing module
 
@@ -540,13 +600,46 @@ Configure module entry, item change, and module exit independently.
 - Test title timing, the 10-second default hold, long-title runtime extension, progress interpolation/correction, all transition paths, automatic-colour contrast fallback, and browser/physical parity.
 - Test the 50 MB artwork-cache boundary, eviction, malformed images, oversized responses, redirects, partial writes, and restart recovery.
 
-#### Decisions still required before implementation
+#### Confirmed implementation decisions
 
-- Exact fonts, pixel coordinates, progress-bar height, ellipsis threshold, and when the **E** indicator has sufficient room.
-- Allowed artwork hosts, redirects, media formats, decode limits, cache eviction policy, and artwork-colour extraction algorithm.
-- Minimum and maximum transition durations and the exact easing function used for **Fade**.
-- Spotify application setup guidance, redirect-URI rules, attribution, branding, account eligibility, API quotas, and provider-policy changes in force at implementation time.
-- Dashboard connection, stale, paused, disconnected, reset-default, cache-management, and accessibility wording.
+##### Typography, coordinates, overflow, and progress
+
+- Default the title to `5x7` and the secondary line to `4x6`. Allow installed-font overrides with live clipping warnings.
+- Anchor 16×16 artwork at the safe-area top-left, start text 18 physical pixels from that left edge, place the title at the top and the secondary line eight pixels below, and anchor the progress bar inside the safe-area bottom.
+- Allow independent top, right, bottom, and left safe-area insets from zero through eight physical pixels. Default every inset to zero.
+- Allow progress-bar height from one through four physical pixels and default it to two.
+- Validate inset and bar-height combinations so `top + bottom + bar height` never exceeds 16 physical pixels. Reject or constrain an invalid combination before saving so the 16-pixel-high artwork/text region and progress bar cannot overlap.
+- Ellipsize the fixed secondary line by measured BDF pixel width, retaining the longest text that fits and appending an ellipsis glyph or `...` fallback.
+- Show **E** only when its measured width plus a one-pixel gap fits while leaving at least 24 physical pixels for the title; otherwise hide it.
+
+##### Artwork validation, preparation, cache, and colour
+
+- Accept only provider-returned HTTPS artwork on a maintained official Spotify CDN allowlist. Permit at most three redirects and revalidate HTTPS scheme, destination safety, and allowed host at every hop.
+- Accept JPEG, PNG, and WebP, decode only a static/first image, and enforce a 5 MB download, 4096×4096 decoded dimensions, and a three-second preparation budget.
+- Use deterministic least-recently-used cache eviction and atomic writes. Do not evict the currently displayed item's artwork during its active hold.
+- With automatic colours off, default to a black background, white text, and Spotify green `#1DB954` progress/accent elements.
+- For automatic colours, use deterministic median-cut quantization to 16 colours; discard candidates below 15% saturation or below 5%/above 95% relative luminance; select the most frequent remaining candidate; and choose black or white text with at least 4.5:1 contrast. Fall back to the default Spotify palette if no safe result remains.
+
+##### Transition bounds
+
+- Allow each transition duration from 0.1 through 3.0 seconds in 0.1-second steps. Keep 0.5 seconds as the default when a non-Cut transition is selected.
+- Use smoothstep `3t²−2t³` easing for **Fade** while retaining linear blending for **Dissolve**.
+
+##### Spotify setup, eligibility, quotas, and branding
+
+- Provide guided setup in the dashboard with the exact redirect URI and a copy action, client-ID entry, a PKCE connection test, minimum-scope explanation, and disconnect/provider-revocation guidance. Never request or retain a client secret.
+- Implement the module only while required playback metadata is available to an eligible free Spotify account without API charges. If a paid account or paid API capability becomes mandatory, keep the module deferred.
+- Treat the configured polling interval as a preference. Increase the effective interval automatically when current quotas or provider backoff require it and show the effective interval in the dashboard.
+- Show required official Spotify attribution in the dashboard connection/settings area, not on the 64×32 playback card unless current policy mandates it.
+- Revalidate application eligibility, exact redirect rules, minimum scopes, quotas, attribution, branding, and all current provider policies against official documentation during implementation.
+
+##### Dashboard states, reset, cache management, and accessibility
+
+- Use explicit connection states: **Not connected**, **Connecting…**, **Connected**, **Temporarily unavailable**, and **Reconnect required**.
+- Use plain-language **Paused**, **Nothing playing**, and **Stale—last updated…** playback states, showing the remaining grace time where applicable.
+- **Reset to defaults** disables the module and restores a 10-second hold, five-second preferred polling, the default Spotify palette, automatic colours off, and **Cut** transitions while preserving the account connection and artwork cache.
+- Show artwork-cache size and item count and provide a confirmation-protected **Clear artwork cache** action; normal LRU eviction remains automatic.
+- Use a polite accessible live region for connection, item, and playback-state changes, never announce interpolated progress continuously, and give every control an explicit accessible label.
 
 ## Planning appendix
 
