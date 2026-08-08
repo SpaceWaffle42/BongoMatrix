@@ -435,6 +435,22 @@ Treat each continuous stroke as one undo action rather than one action per pixel
 
 The **Pick colour** tool must sample the visible pixel under the pointer from the currently displayed composite and set it as the selected drawing colour. It must work through an explicit control for mouse, touch, and keyboard users rather than depending on a pointer-only gesture.
 
+#### Contextual drawing toolbar
+
+Show a compact drawing toolbar only while a pixel-art layer is selected. Keep it inside the Pixel layer editor directly above the 64×32 drawing surface, hide it for every other layer type, and never float it over or obscure the artwork.
+
+On desktop, keep the primary actions in one horizontal toolbar in this order:
+
+**Draw | Erase | Pick | Colour | Undo | Redo | Zoom − | Zoom + | Fit | More**
+
+- Clearly highlight the active drawing tool.
+- Give every icon an accessible name and a visible tooltip; do not rely on unexplained icons.
+- Put **Grid on/off**, **Fill layer**, **Clear layer**, **Reset to last saved state**, and keyboard-shortcut help in **More**.
+- Keep destructive actions out of the primary row and require the deliberate safeguards already specified for them.
+- Keep the toolbar attached to the drawing editor while that editor scrolls, without making it a page-wide Advanced Canvas toolbar.
+
+On narrow and touch layouts, keep the toolbar inside the Pixel editor, allow it to wrap into two compact rows, use sufficiently large touch targets, and show icons with short labels for **Draw**, **Erase**, and **Pick**. Do not use a hover-only toolbar or a draggable floating palette.
+
 #### Keyboard shortcuts
 
 Provide:
