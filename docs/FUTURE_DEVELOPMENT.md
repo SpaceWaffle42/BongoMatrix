@@ -404,6 +404,16 @@ Use Advanced Canvas for text over GIFs or videos, multiple layers, overlays, and
 - Browser previews must match physical rendering.
 - Do not expose browser-only controls or examples that cannot run on the device.
 
+### Pixel drawing tool
+
+Treat **Pixel** in Advanced Canvas as a drawing tool rather than a single manually positioned pixel element.
+
+- Let the user draw directly on the 64×32 canvas, one physical Matrix pixel at a time.
+- Use left-click and drag to draw with the selected colour.
+- Use right-click and drag to erase pixels, and suppress the browser context menu while drawing.
+- Provide an explicit erase mode for touch and keyboard users who cannot right-click.
+- Keep drawn and erased pixels editable after saving, and ensure the browser preview matches the physical Matrix exactly.
+
 ## Shared acceptance criteria
 
 When these items are implemented:
