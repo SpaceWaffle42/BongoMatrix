@@ -77,6 +77,19 @@ Treat the Matrix server's saved configuration as the single source of truth and 
 - Stop sending updates immediately when a device is unpaired or its session is no longer authorized.
 - Add multi-client tests using at least two independently paired sessions, including custom-module creation, playlist insertion, editing, deletion, stale drafts, reconnect recovery, and update-order interruption.
 
+## Borders and backgrounds in basic custom modules
+
+Add an **Appearance** control group to the basic **Add custom module** editor for backgrounds and borders, matching the controls and executed rendering behavior already used by Announcement Board rather than creating a second styling model.
+
+- Provide **Background colour**, **Border style**, and **Border colour** controls.
+- Use the same Announcement Board border choices and labels: **None**, **Solid**, and **Inset**.
+- Keep **None** as the default border style and preserve the existing default background for newly created modules.
+- Apply these controls to both static-text and scrolling-text basic custom modules, including the complete physical rendering path rather than preview-only decoration.
+- Reuse the Announcement Board border geometry, clipping, colour validation, and reset behavior so equivalent settings render identically.
+- Fill the complete 64×32 module background before drawing its text and border.
+- Hide or disable the border-colour control when **None** is selected without discarding the user's previously chosen colour.
+- Include background and border changes in Live/Draft preview, reset defaults, persistence, playlist playback, and browser-versus-physical parity tests.
+
 ## GIF and video support in basic custom modules
 
 Basic custom modules should allow the user to select a GIF or video as the module content.
