@@ -406,13 +406,51 @@ Use Advanced Canvas for text over GIFs or videos, multiple layers, overlays, and
 
 ### Pixel drawing tool
 
-Treat **Pixel** in Advanced Canvas as a drawing tool rather than a single manually positioned pixel element.
+Treat **Pixel** in Advanced Canvas as a transparent, editable pixel-art layer rather than a single manually positioned pixel element.
 
-- Let the user draw directly on the 64×32 canvas, one physical Matrix pixel at a time.
-- Use left-click and drag to draw with the selected colour.
-- Use right-click and drag to erase pixels, and suppress the browser context menu while drawing.
-- Provide an explicit erase mode for touch and keyboard users who cannot right-click.
-- Keep drawn and erased pixels editable after saving, and ensure the browser preview matches the physical Matrix exactly.
+#### Drawing surface and pointer behaviour
+
+- Draw directly on a 64×32 grid in which every editor cell maps to exactly one physical Matrix pixel.
+- Let the user enlarge the editor view without changing its 64×32 resolution.
+- Use left-click and drag to draw continuously with the selected colour.
+- Use right-click and drag to erase continuously, and suppress the browser context menu inside the drawing surface.
+- Fill every grid cell crossed by a stroke so quick pointer movement does not leave gaps.
+- End a stroke cleanly when the pointer is released or leaves the drawing surface.
+- Provide explicit **Draw** and **Erase** modes for touch and keyboard users.
+- Start with an exact one-physical-pixel brush.
+
+#### Grouped drawing controls
+
+Provide:
+
+- **Draw** and **Erase** tools;
+- a colour picker and the existing Matrix colour swatches;
+- **Undo** and **Redo**;
+- **Clear layer** and **Fill layer**; and
+- **Reset to last saved state**.
+
+Treat each continuous stroke as one undo action rather than one action per pixel. Undo and redo must cover drawing, erasing, clearing, and filling. Clear and fill must be deliberate actions that cannot destroy the drawing accidentally.
+
+#### Layer and editing behaviour
+
+- Keep the artwork as a normal Advanced Canvas layer that can be renamed, shown or hidden, reordered, duplicated, deleted, repositioned, and reset to its default position.
+- Moving the layer moves the complete drawing while preserving its internal pixel grid.
+- Transparent pixels reveal lower layers so pixel artwork can be composed with text, images, GIFs, videos, and other pixel-art layers.
+- Selecting an existing pixel-art layer reopens it for drawing, with every saved pixel still individually editable.
+- Switching tools or layers must not discard the current draft.
+- Provide an optional editor-only grid overlay that never appears on the physical Matrix.
+
+#### Preview, persistence, and cancellation
+
+- Update the browser draft preview immediately while drawing.
+- Change the physical Matrix during editing only when the user enables the existing opt-in on-device draft preview.
+- Use the same coordinates, clipping, transparency, and compositing rules in the editor preview and physical renderer.
+- Save through the normal Advanced Canvas save flow, preserving the bounded bitmap in an editable form.
+- Cancelling or resetting restores the last saved version.
+
+#### Confirmed first-version boundaries
+
+The first version is static pixel artwork with a one-pixel brush. Do not include gradients, anti-aliasing, smoothing, spray brushes, shape tools, symmetry tools, imported-image conversion, or a separate animation-frame editor. Existing Advanced Canvas layer positioning and compositing still apply.
 
 ## Shared acceptance criteria
 
