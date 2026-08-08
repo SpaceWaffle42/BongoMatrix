@@ -411,7 +411,9 @@ Treat **Pixel** in Advanced Canvas as a transparent, editable pixel-art layer ra
 #### Drawing surface and pointer behaviour
 
 - Draw directly on a 64×32 grid in which every editor cell maps to exactly one physical Matrix pixel.
-- Let the user enlarge the editor view without changing its 64×32 resolution.
+- Provide **Zoom in**, **Zoom out**, and **Fit canvas** controls, display the current zoom percentage, and never let zoom alter the 64×32 artwork. Keep unrestricted panning out of the first version so the complete small canvas remains manageable.
+- Highlight the grid cell beneath the pointer and show its exact `X` and `Y` coordinate together with whether the current action will draw, erase, or pick a colour.
+- Use an editor-only transparency pattern so transparent pixels are visibly distinct from black pixels.
 - Use left-click and drag to draw continuously with the selected colour.
 - Use right-click and drag to erase continuously, and suppress the browser context menu inside the drawing surface.
 - Fill every grid cell crossed by a stroke so quick pointer movement does not leave gaps.
@@ -423,13 +425,27 @@ Treat **Pixel** in Advanced Canvas as a transparent, editable pixel-art layer ra
 
 Provide:
 
-- **Draw** and **Erase** tools;
+- **Draw**, **Erase**, and **Pick colour** tools;
 - a colour picker and the existing Matrix colour swatches;
 - **Undo** and **Redo**;
 - **Clear layer** and **Fill layer**; and
 - **Reset to last saved state**.
 
 Treat each continuous stroke as one undo action rather than one action per pixel. Undo and redo must cover drawing, erasing, clearing, and filling. Clear and fill must be deliberate actions that cannot destroy the drawing accidentally.
+
+The **Pick colour** tool must sample the visible pixel under the pointer from the currently displayed composite and set it as the selected drawing colour. It must work through an explicit control for mouse, touch, and keyboard users rather than depending on a pointer-only gesture.
+
+#### Keyboard shortcuts
+
+Provide:
+
+- `Ctrl/Cmd + Z` for undo;
+- `Ctrl/Cmd + Shift + Z` and `Ctrl/Cmd + Y` for redo;
+- `D` for Draw;
+- `E` for Erase; and
+- `I` for Pick colour.
+
+Do not activate drawing shortcuts while the user is typing in a text, number, or other editable form field. Keep every shortcut paired with a visible control so pointer, touch, and keyboard users receive the same functionality.
 
 #### Layer and editing behaviour
 
