@@ -63,6 +63,20 @@ Add a separate **Preview edits on device** checkbox beneath the browser preview.
 - Use adaptive debounce timing: 150 ms for simple controls and 500 ms for media changes or other expensive renders.
 - Cancel superseded draft work so an older slow render can never replace a newer edit on the device.
 
+## Synchronize saved changes across paired devices
+
+Treat the Matrix server's saved configuration as the single source of truth and synchronize each committed display change to every currently paired browser or device. This must prevent one paired client from showing an outdated playlist, missing a custom module referenced by the playlist, or exposing controls that no longer match the physical display.
+
+- Publish one revisioned, atomic configuration update after every successful save, covering the playlist, custom-module definitions, module settings, media references, and other dependent state together.
+- Ensure dependent records such as custom modules are available in the same synchronized revision as playlist entries that reference them; never expose a partially updated playlist.
+- Update open paired clients promptly without requiring a manual page refresh, including module pickers, playlist rows, editors, Live preview state, and any cached client-side catalogs derived from configuration.
+- On reconnect, page focus, or recovery from a missed update, compare revisions and fetch the latest complete saved state before permitting another save.
+- Do not silently overwrite an unsaved draft on another paired device. Clearly report that the saved display changed elsewhere and offer that user a safe choice to reload the latest saved state or remain with their unsaved draft for review.
+- Reject or reconcile stale saves using the revision they were based on so an older client cannot unknowingly replace newer changes.
+- Synchronize saved changes only; do not broadcast another user's temporary Edit Preview or opt-in on-device draft as if it were committed configuration.
+- Stop sending updates immediately when a device is unpaired or its session is no longer authorized.
+- Add multi-client tests using at least two independently paired sessions, including custom-module creation, playlist insertion, editing, deletion, stale drafts, reconnect recovery, and update-order interruption.
+
 ## GIF and video support in basic custom modules
 
 Basic custom modules should allow the user to select a GIF or video as the module content.
