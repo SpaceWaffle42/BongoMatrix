@@ -6,11 +6,16 @@ __pycache__/
 .mypy_cache/
 .ruff_cache/
 .coverage
+coverage.xml
 htmlcov/
+test-results/
+gl-code-quality-report.json
+dependency-audit.json
 
 # Virtual environments
 venv/
 .venv/
+.venv-ci/
 env/
 
 # Runtime state and secrets

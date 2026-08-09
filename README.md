@@ -187,6 +187,14 @@ PYTHONDONTWRITEBYTECODE=1 ./venv/bin/python -B -m unittest discover -s tests -v
 
 Browser-backed checks run when their executable prerequisites are available. On a minimal Raspberry Pi without Node.js or Chromium, those checks skip rather than making the application or Pi-focused suite fail.
 
+### GitLab CI
+
+Merge requests and updates to `main` run the project-owned `.gitlab-ci.yml` pipeline. A manual pipeline can also be started from GitLab when a fresh evaluation is needed without changing source.
+
+The pipeline performs Python syntax validation, the complete test suite with Node.js, FFmpeg, and headless Chromium enabled, coverage reporting, focused Ruff static analysis, dependency vulnerability auditing, GitLab SAST, and GitLab secret detection. JUnit, Cobertura coverage, code-quality, and dependency-audit artifacts remain available in GitLab for 14 days.
+
+The pipeline deliberately does not deploy to the Matrix device. Deployment, rollback preparation, and physical 64×32 verification remain explicit release steps after an exact merged artifact passes review.
+
 Useful service checks on a deployed Pi:
 
 ```bash
