@@ -29,14 +29,6 @@ variables:
   tags:
     - matrix-docker
   interruptible: true
-  cache:
-    key:
-      files:
-        - requirements.txt
-        - .gitlab-ci.yml
-      prefix: "$CI_JOB_NAME"
-    paths:
-      - .cache/pip/
   retry:
     max: 1
     when:

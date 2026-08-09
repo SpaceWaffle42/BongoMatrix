@@ -29,6 +29,15 @@ def block(sections, name):
     return "\n".join(sections[name])
 
 
+def active_cache_keys(text):
+    return [
+        line
+        for line in text.splitlines()
+        if not line.lstrip().startswith("#")
+        and re.match(r"^\s*cache\s*:", line)
+    ]
+
+
 class GitLabPipelineContractTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
@@ -90,16 +99,19 @@ class GitLabPipelineContractTests(unittest.TestCase):
             self.assertIn("- matrix-docker", security_job)
             self.assertIn("interruptible: true", security_job)
 
-    def test_project_jobs_inherit_cancelation_runner_and_scoped_cache(self):
+    def test_project_jobs_inherit_cancelation_and_runner_without_cache_volumes(self):
         hidden_default = block(self.sections, ".default_project_job")
         self.assertIn("image: python:3.12-bookworm", hidden_default)
         self.assertIn("- matrix-docker", hidden_default)
         self.assertIn("interruptible: true", hidden_default)
-        self.assertIn("cache:", hidden_default)
-        self.assertIn("- requirements.txt", hidden_default)
-        self.assertIn("- .gitlab-ci.yml", hidden_default)
-        self.assertIn('prefix: "$CI_JOB_NAME"', hidden_default)
-        self.assertNotIn("cache", self.sections.get("variables", []))
+        self.assertEqual([], active_cache_keys(self.pipeline))
+
+        adversarial = self.pipeline.replace(
+            "full_test_suite:\n",
+            "full_test_suite:\n  cache:\n    paths:\n      - .cache/pip/\n",
+            1,
+        )
+        self.assertEqual(["  cache:"], active_cache_keys(adversarial))
 
         for name in (
             "python_syntax",
