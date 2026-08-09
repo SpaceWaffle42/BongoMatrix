@@ -38,17 +38,77 @@ def active_cache_keys(text):
     ]
 
 
+def workflow_rules(sections):
+    rules = []
+    for line in sections["workflow"]:
+        stripped = line.strip()
+        if stripped == "rules:":
+            continue
+        if stripped.startswith("- if: "):
+            expression = stripped.removeprefix("- if: ").strip("'")
+            rules.append([expression, "on_success"])
+        elif stripped.startswith("when: "):
+            rules[-1][1] = stripped.removeprefix("when: ")
+        elif stripped.startswith("- when: "):
+            rules.append([None, stripped.removeprefix("- when: ")])
+        else:
+            raise AssertionError(f"Unsupported workflow rule syntax: {line}")
+    return [tuple(rule) for rule in rules]
+
+
+def workflow_allows(rules, source, branch=False, open_merge_request=False):
+    conditions = {
+        '$CI_PIPELINE_SOURCE == "merge_request_event"': source == "merge_request_event",
+        '$CI_PIPELINE_SOURCE == "push" && $CI_COMMIT_BRANCH && $CI_OPEN_MERGE_REQUESTS': (
+            source == "push" and branch and open_merge_request
+        ),
+        '$CI_PIPELINE_SOURCE == "push" && $CI_COMMIT_BRANCH': (
+            source == "push" and branch
+        ),
+    }
+    for expression, action in rules:
+        if expression is None or conditions.get(expression, False):
+            return action != "never"
+    return False
+
+
 class GitLabPipelineContractTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
         cls.pipeline = CI_CONFIG.read_text(encoding="utf-8")
         cls.sections = top_level_sections(cls.pipeline)
 
-    def test_pipeline_targets_merge_requests_and_main_without_deploying(self):
-        workflow = block(self.sections, "workflow")
-        self.assertIn('CI_PIPELINE_SOURCE == "merge_request_event"', workflow)
-        self.assertIn("CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH", workflow)
-        self.assertIn('CI_PIPELINE_SOURCE == "web"', workflow)
+    def test_pipeline_targets_merge_requests_and_all_branches_without_deploying(self):
+        rules = workflow_rules(self.sections)
+        self.assertEqual(
+            rules,
+            [
+                ('$CI_PIPELINE_SOURCE == "merge_request_event"', "on_success"),
+                (
+                    '$CI_PIPELINE_SOURCE == "push" && $CI_COMMIT_BRANCH && $CI_OPEN_MERGE_REQUESTS',
+                    "never",
+                ),
+                ('$CI_PIPELINE_SOURCE == "push" && $CI_COMMIT_BRANCH', "on_success"),
+                (None, "never"),
+            ],
+        )
+        cases = [
+            ("merge_request_event", False, False, True),
+            ("push", True, False, True),
+            ("push", True, True, False),
+            ("push", False, False, False),
+            ("web", True, False, False),
+            ("schedule", True, False, False),
+            ("api", True, False, False),
+            ("trigger", True, False, False),
+            ("parent_pipeline", False, False, False),
+        ]
+        for source, branch, open_mr, expected in cases:
+            with self.subTest(source=source, branch=branch, open_mr=open_mr):
+                self.assertEqual(
+                    workflow_allows(rules, source, branch, open_mr),
+                    expected,
+                )
 
         stages = block(self.sections, "stages")
         self.assertEqual(
@@ -81,6 +141,9 @@ class GitLabPipelineContractTests(unittest.TestCase):
         self.assertIn("when: always", job)
 
     def test_pipeline_publishes_quality_and_security_evidence(self):
+        variables = block(self.sections, "variables")
+        self.assertIn('AST_ENABLE_MR_PIPELINES: "true"', variables)
+
         includes = block(self.sections, "include")
         self.assertIn("Jobs/SAST.gitlab-ci.yml", includes)
         self.assertIn("Jobs/Secret-Detection.gitlab-ci.yml", includes)

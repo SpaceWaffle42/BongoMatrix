@@ -189,7 +189,7 @@ Browser-backed checks run when their executable prerequisites are available. On 
 
 ### GitLab CI
 
-Merge requests and updates to `main` run the project-owned `.gitlab-ci.yml` pipeline. A manual pipeline can also be started from GitLab when a fresh evaluation is needed without changing source.
+Merge requests and pushes to every branch run the project-owned `.gitlab-ci.yml` pipeline. When a branch already has an open merge request, GitLab runs only its merge-request pipeline instead of duplicating the same work in a branch pipeline. Manual, scheduled, API-triggered, tag, and other unsupported pipeline sources are denied by the workflow rules.
 
 The pipeline performs Python syntax validation, the complete test suite with Node.js, FFmpeg, and headless Chromium enabled, coverage reporting, focused Ruff static analysis, dependency vulnerability auditing, GitLab SAST, and GitLab secret detection. JUnit, Cobertura coverage, code-quality, and dependency-audit artifacts remain available in GitLab for 14 days.
 
