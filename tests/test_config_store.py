@@ -1,13 +1,189 @@
 import json
 import tempfile
+import threading
 import unittest
 from pathlib import Path
 from unittest.mock import patch
 
-from config_store import ConfigDurabilityError, ConfigStore, DEFAULT_CONFIG
+from config_store import (
+    ConfigConflictError, ConfigDurabilityError, ConfigStore, DEFAULT_CONFIG,
+    validate_config,
+)
 
 
 class ConfigStoreTests(unittest.TestCase):
+    def test_legacy_config_gains_revision_without_changing_unrelated_state(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "config.json"
+            legacy = json.loads(json.dumps(DEFAULT_CONFIG))
+            legacy.pop("revision")
+            legacy["device"]["name"] = "Migration sentinel"
+            legacy["display"]["day_brightness"] = 37
+            path.write_text(json.dumps(legacy))
+
+            config = ConfigStore(path).get()
+
+            self.assertEqual(config["revision"], 0)
+            without_revision = dict(config)
+            without_revision.pop("revision")
+            self.assertEqual(without_revision, legacy)
+
+    def test_atomic_update_increments_revision_once_with_dependent_records(self):
+        with tempfile.TemporaryDirectory() as directory:
+            store = ConfigStore(Path(directory) / "config.json")
+            custom = {
+                "id": "custom_welcome", "name": "Welcome", "type": "text",
+                "text": "HELLO", "font": "5x7", "colour": "#ffffff",
+                "background": "#000000", "x": 0, "y": 20,
+                "direction": "left", "speed": 0.05, "loops": 1,
+            }
+
+            saved = store.update({
+                "device": {"name": "Revision one"},
+                "custom_modules": [custom],
+                "playlist": [{"module": custom["id"], "duration": 8, "enabled": True}],
+            }, base_revision=0)
+
+            self.assertEqual(saved["revision"], 1)
+            self.assertEqual(store.get(), saved)
+            self.assertEqual(saved["playlist"][0]["module"], saved["custom_modules"][0]["id"])
+
+    def test_same_base_revision_cannot_commit_twice(self):
+        with tempfile.TemporaryDirectory() as directory:
+            store = ConfigStore(Path(directory) / "config.json")
+            barrier = threading.Barrier(3)
+            results = []
+
+            def update(name):
+                barrier.wait()
+                try:
+                    results.append(store.update({"device": {"name": name}}, base_revision=0))
+                except ConfigConflictError as error:
+                    results.append(error)
+
+            threads = [threading.Thread(target=update, args=(name,)) for name in ("First", "Second")]
+            for thread in threads:
+                thread.start()
+            barrier.wait()
+            for thread in threads:
+                thread.join(2)
+
+            commits = [result for result in results if isinstance(result, dict)]
+            conflicts = [result for result in results if isinstance(result, ConfigConflictError)]
+            self.assertEqual((len(commits), len(conflicts)), (1, 1))
+            self.assertEqual(commits[0]["revision"], 1)
+            self.assertEqual(conflicts[0].current_revision, 1)
+            self.assertEqual(store.get(), commits[0])
+
+    def test_revision_is_server_owned_and_must_be_nonnegative_integer_on_load(self):
+        with tempfile.TemporaryDirectory() as directory:
+            store = ConfigStore(Path(directory) / "config.json")
+            for value in (True, -1, 1.5, "1"):
+                with self.subTest(value=value):
+                    saved = store.get()
+                    saved["revision"] = value
+                    store.path.write_text(json.dumps(saved))
+                    with self.assertRaisesRegex(ValueError, "revision"):
+                        ConfigStore(store.path)
+                    saved["revision"] = 0
+                    store.path.write_text(json.dumps(saved))
+            with self.assertRaisesRegex(ValueError, "server-owned"):
+                store.update({"revision": 4})
+
+    def test_current_saves_bound_playlist_and_canonical_snapshot_without_rewriting_on_failure(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "config.json"
+            store = ConfigStore(path)
+            original = path.read_bytes()
+            item = {"module": "splash", "duration": 1, "enabled": True}
+            with self.assertRaisesRegex(ValueError, "at most 256"):
+                store.update({"playlist": [item] * 257})
+            self.assertEqual(path.read_bytes(), original)
+
+            modules = []
+            for module_index in range(8):
+                layers = []
+                for layer_index in range(64):
+                    layers.append({
+                        "id": f"layer_{module_index}_{layer_index}", "name": "Large layer",
+                        "type": "text", "visible": True,
+                        "properties": {"x": 0, "y": 7, "text": "X" * 200,
+                                       "font": "5x7", "colour": "#ffffff"},
+                        "keyframes": [
+                            {"frame": frame, "easing": "linear", "properties": {"text": "Y" * 200}}
+                            for frame in range(8)
+                        ],
+                    })
+                modules.append(self.advanced_module(
+                    id=f"custom_large_{module_index}", name=f"Large {module_index}",
+                    layers=layers, overrides=[],
+                ))
+            with self.assertRaisesRegex(ValueError, "1 MiB"):
+                store.update({"custom_modules": modules})
+            self.assertEqual(path.read_bytes(), original)
+
+    def test_atomic_writer_bounds_the_exact_persisted_bytes(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "config.json"
+            store = ConfigStore(path)
+            empty_size = len(json.dumps(
+                {"padding": ""}, sort_keys=True, separators=(",", ":"),
+            ).encode("utf-8"))
+            exact = {"padding": "X" * (1_048_576 - empty_size)}
+
+            store._write(exact)
+
+            self.assertEqual(path.stat().st_size, 1_048_576)
+            original = path.read_bytes()
+            oversized = {"padding": exact["padding"] + "X"}
+            with self.assertRaisesRegex(ValueError, "1 MiB"):
+                store._write(oversized)
+            self.assertEqual(path.read_bytes(), original)
+
+    def test_over_limit_legacy_files_are_reported_without_rewrite(self):
+        item = {"module": "splash", "duration": 1, "enabled": True}
+        cases = []
+        playlist_legacy = json.loads(json.dumps(DEFAULT_CONFIG))
+        playlist_legacy.pop("revision")
+        playlist_legacy["playlist"] = [item] * 257
+        cases.append(("playlist", playlist_legacy))
+
+        snapshot_legacy = json.loads(json.dumps(DEFAULT_CONFIG))
+        snapshot_legacy.pop("revision")
+        modules = []
+        for module_index in range(8):
+            layers = []
+            for layer_index in range(64):
+                layers.append({
+                    "id": f"layer_{module_index}_{layer_index}", "name": "Large layer",
+                    "type": "text", "visible": True,
+                    "properties": {"x": 0, "y": 7, "text": "X" * 200,
+                                   "font": "5x7", "colour": "#ffffff"},
+                    "keyframes": [
+                        {"frame": frame, "easing": "linear", "properties": {"text": "Y" * 200}}
+                        for frame in range(8)
+                    ],
+                })
+            modules.append(self.advanced_module(
+                id=f"custom_legacy_large_{module_index}",
+                name=f"Legacy large {module_index}", layers=layers, overrides=[],
+            ))
+        snapshot_legacy["custom_modules"] = modules
+        cases.append(("snapshot", snapshot_legacy))
+
+        for label, legacy in cases:
+            with self.subTest(label=label), tempfile.TemporaryDirectory() as directory:
+                path = Path(directory) / "config.json"
+                original = json.dumps(legacy).encode("utf-8")
+                path.write_bytes(original)
+
+                with self.assertRaisesRegex(
+                    ValueError, "legacy configuration exceeds current save bounds",
+                ):
+                    ConfigStore(path)
+
+                self.assertEqual(path.read_bytes(), original)
+
     def test_directory_sync_failure_reports_visible_committed_config(self):
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / "config.json"
@@ -499,6 +675,7 @@ class ConfigStoreTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             store = ConfigStore(Path(directory) / "config.json")
             updated = store.get()
+            updated.pop("revision")
             updated["weather"]["scroll_loops"] = 2
             updated["openweather_overview"]["scroll_loops"] = 3
             updated["openweather_forecast"]["scroll_loops"] = 4
@@ -535,6 +712,7 @@ class ConfigStoreTests(unittest.TestCase):
                     with tempfile.TemporaryDirectory() as directory:
                         store = ConfigStore(Path(directory) / "config.json")
                         updated = store.get()
+                        updated.pop("revision")
                         updated[section]["scroll_loops"] = invalid
                         with self.assertRaisesRegex(ValueError, "scroll loops"):
                             store.update(updated)
@@ -850,6 +1028,22 @@ class ConfigStoreTests(unittest.TestCase):
             })
             self.assertEqual(updated["custom_modules"][0]["text"], "Welcome to the Matrix")
             self.assertEqual(updated["playlist"][0]["module"], "custom_welcome")
+
+    def test_save_bounds_validate_the_exact_incremented_snapshot(self):
+        with tempfile.TemporaryDirectory() as directory:
+            store = ConfigStore(Path(directory) / "config.json")
+            validated = []
+
+            def capture(config, **options):
+                validated.append((json.loads(json.dumps(config)), options))
+                return validate_config(config, **options)
+
+            with patch("config_store.validate_config", side_effect=capture):
+                updated = store.update({"device": {"name": "Incremented snapshot"}})
+
+            validated_snapshot, options = validated[-1]
+            self.assertEqual(validated_snapshot["revision"], updated["revision"])
+            self.assertTrue(options["enforce_save_bounds"])
 
     def test_scrolling_custom_text_loop_count_defaults_to_one_and_is_bounded(self):
         with tempfile.TemporaryDirectory() as directory:
