@@ -59,6 +59,7 @@ def workflow_rules(sections):
 def workflow_allows(rules, source, branch=False, open_merge_request=False):
     conditions = {
         '$CI_PIPELINE_SOURCE == "merge_request_event"': source == "merge_request_event",
+        '$CI_PIPELINE_SOURCE == "schedule"': source == "schedule",
         '$CI_PIPELINE_SOURCE == "push" && $CI_COMMIT_BRANCH && $CI_OPEN_MERGE_REQUESTS': (
             source == "push" and branch and open_merge_request
         ),
@@ -84,6 +85,7 @@ class GitLabPipelineContractTests(unittest.TestCase):
             rules,
             [
                 ('$CI_PIPELINE_SOURCE == "merge_request_event"', "on_success"),
+                ('$CI_PIPELINE_SOURCE == "schedule"', "on_success"),
                 (
                     '$CI_PIPELINE_SOURCE == "push" && $CI_COMMIT_BRANCH && $CI_OPEN_MERGE_REQUESTS',
                     "never",
@@ -98,7 +100,7 @@ class GitLabPipelineContractTests(unittest.TestCase):
             ("push", True, True, False),
             ("push", False, False, False),
             ("web", True, False, False),
-            ("schedule", True, False, False),
+            ("schedule", True, False, True),
             ("api", True, False, False),
             ("trigger", True, False, False),
             ("parent_pipeline", False, False, False),
@@ -113,7 +115,7 @@ class GitLabPipelineContractTests(unittest.TestCase):
         stages = block(self.sections, "stages")
         self.assertEqual(
             re.findall(r"^  - ([a-z-]+)$", stages, flags=re.MULTILINE),
-            ["validate", "test", "quality", "security"],
+            ["validate", "test", "quality", "security", "summary"],
         )
         self.assertNotIn("deploy", self.sections)
         active_lines = "\n".join(
@@ -184,11 +186,40 @@ class GitLabPipelineContractTests(unittest.TestCase):
         ):
             self.assertIn("extends: .default_project_job", block(self.sections, name))
 
+    def test_summary_job_reduces_reports_to_bounded_gitlab_artifacts(self):
+        summary = block(self.sections, "ci_summary")
+        self.assertIn("stage: summary", summary)
+        self.assertIn("when: always", summary)
+        for job in (
+            "full_test_suite",
+            "python_static_analysis",
+            "dependency_audit",
+            "semgrep-sast",
+            "secret_detection",
+        ):
+            self.assertRegex(summary, rf"- job: {job}\n\s+artifacts: true")
+        for optional_job in ("semgrep-sast", "secret_detection"):
+            self.assertRegex(
+                summary,
+                rf"- job: {optional_job}\n\s+artifacts: true\n\s+optional: true",
+            )
+        self.assertIn("scripts/ci_summary.py", summary)
+        self.assertIn("python -m pip install --no-cache-dir defusedxml==0.7.1", summary)
+        self.assertIn("ci/sast-baseline.json", summary)
+        self.assertIn(
+            "--expected-baseline-source 8b9994024098320fbea99d92c117036c918fede4",
+            summary,
+        )
+        self.assertIn("ci-summary.json", summary)
+        self.assertIn("ci-summary.txt", summary)
+        self.assertIn("expire_in: 14 days", summary)
+
     def test_expected_top_level_jobs_and_controls_are_present(self):
         required = {
             "workflow", "stages", "include", "variables", ".default_project_job",
             "python_syntax", "full_test_suite", "python_static_analysis",
             "dependency_audit", "semgrep-sast", "secret_detection",
+            "ci_summary",
         }
         self.assertEqual(set(self.sections), required)
 

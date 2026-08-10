@@ -32,9 +32,15 @@
     return value;
   }
 
+  function isHexColor(value) {
+    if (typeof value !== 'string' || value.length !== 7 || value[0] !== '#') return false;
+    const hexDigits = '0123456789abcdefABCDEF';
+    return [...value.slice(1)].every(character => hexDigits.includes(character));
+  }
+
   function interpolate(left, right, amount) {
     if (typeof left === 'number' && typeof right === 'number') return left + (right - left) * amount;
-    if (typeof left === 'string' && /^#[0-9a-f]{6}$/i.test(left) && /^#[0-9a-f]{6}$/i.test(right)) {
+    if (isHexColor(left) && isHexColor(right)) {
       const channels = [1, 3, 5].map(offset => Math.round(parseInt(left.slice(offset, offset + 2), 16) + (parseInt(right.slice(offset, offset + 2), 16) - parseInt(left.slice(offset, offset + 2), 16)) * amount));
       return '#' + channels.map(value => value.toString(16).padStart(2, '0')).join('');
     }
