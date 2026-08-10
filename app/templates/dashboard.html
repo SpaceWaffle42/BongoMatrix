@@ -136,7 +136,7 @@
         </article>
       </section>
 
-      <div class="sticky-save"><p class="message" id="message" role="status" aria-live="polite" aria-atomic="true">Changes are local until saved.</p><div class="row"><form method="post" action="/logout"><button class="btn" type="submit">Unpair</button></form><button class="btn primary" onclick="saveConfig()">Save configuration</button></div></div>
+      <div class="sticky-save"><p class="message" id="message" role="status" aria-live="polite" aria-atomic="true">Changes are local until saved.</p><div class="row"><form method="post" action="/logout"><button class="btn" type="submit">Unpair</button></form><button class="btn primary" id="save-config" onclick="saveConfig()">Save configuration</button></div></div>
     </div>
   </main>
 </div>
@@ -157,12 +157,13 @@ let announcementIdSequence=0;
 const message=document.querySelector('#message'), canvas=document.querySelector('#matrix-preview'), ctx=canvas.getContext('2d');
 ctx.imageSmoothingEnabled=false;
 function setMessage(text,error=false){message.setAttribute('role',error?'alert':'status');message.setAttribute('aria-live',error?'assertive':'polite');message.textContent=text;message.classList.toggle('error',error)}
-const MATRIX_CLIENT_CONTRACT=1;
+const MATRIX_CLIENT_CONTRACT=2;
 let matrixLoadedRevision={{ config.revision|tojson }},matrixDirty=false,matrixSavedSnapshot=null,matrixAcknowledgedMinimumContract=MATRIX_CLIENT_CONTRACT,matrixNotifiedMinimumContract=MATRIX_CLIENT_CONTRACT,matrixUpgradeReloadRequested=false;
+let highestNotifiedRemoteRevision=matrixLoadedRevision,matrixRecoveryPending=false,matrixSyncStopped=false,matrixSyncController=null,matrixSyncGeneration=0,matrixSyncTimer=null,matrixStatusTimer=null,matrixFrameTimer=null;
 function matrixRevisionETag(){return '"'+matrixLoadedRevision+'"'}
 function markMatrixDirty(){matrixDirty=true}
 function matrixCurrentSnapshot(){try{return JSON.stringify(configBody())}catch(_){return null}}
-function matrixHasUnsavedDraft(){const current=matrixCurrentSnapshot();return matrixSavedSnapshot===null||current===null||current!==matrixSavedSnapshot}
+function matrixHasUnsavedDraft(){const current=matrixCurrentSnapshot();return matrixDirty||matrixSavedSnapshot===null||current===null||current!==matrixSavedSnapshot}
 document.addEventListener('input',markMatrixDirty);
 document.addEventListener('change',markMatrixDirty);
 function handleMinimumClientContract(minimum){
@@ -184,7 +185,50 @@ function handleMinimumClientContract(minimum){
   dialog.addEventListener('cancel',event=>event.preventDefault());
   actions.append(reload,remain);dialog.append(title,text,actions);document.body.append(dialog);dialog.showModal();reload.focus();
 }
-async function api(path,options={}){options.headers={...(options.headers||{}),'X-Matrix-Client-Contract':String(MATRIX_CLIENT_CONTRACT)};const response=await fetch(path,options);if(response.status===401||response.redirected){window.location='/pair';throw new Error('Pairing session expired.')}let data={};try{data=await response.json()}catch(_){throw new Error('Unexpected server response.')}if(!response.ok){const error=new Error(data.error||response.statusText);error.data=data;throw error}return data}
+function setMatrixRecoveryPending(pending){matrixRecoveryPending=pending;const save=document.querySelector('#save-config');if(save)save.disabled=pending}
+function dismissMatrixRevisionDialogThrough(revision){const dialog=document.querySelector('.config-revision-dialog');if(!dialog||dialog.matrixRemoteRevision>revision)return;setMatrixRecoveryPending(false);dialog.close();dialog.remove();dialog.matrixPreviousFocus?.focus?.()}
+function showMatrixRevisionDialog(remoteRevision){
+  const existingDialog=document.querySelector('.config-revision-dialog');
+  if(existingDialog){existingDialog.matrixRemoteRevision=Math.max(existingDialog.matrixRemoteRevision,remoteRevision);return;}
+  setMatrixRecoveryPending(true);
+  const previousFocus=document.activeElement,dialog=document.createElement('dialog'),title=document.createElement('h2'),text=document.createElement('p'),actions=document.createElement('div'),reload=document.createElement('button'),remain=document.createElement('button');
+  dialog.matrixRemoteRevision=remoteRevision;dialog.matrixPreviousFocus=previousFocus;
+  title.id='config-revision-title';title.textContent='Newer saved configuration available';
+  text.id='config-revision-description';text.textContent='Another paired device saved a newer complete configuration. Reloading will discard the unsaved draft.';
+  dialog.className='config-upgrade-dialog config-revision-dialog';dialog.setAttribute('aria-labelledby',title.id);dialog.setAttribute('aria-describedby',text.id);
+  actions.className='config-upgrade-actions';reload.type=remain.type='button';reload.className='btn primary';remain.className='btn';reload.textContent='Reload latest saved state';remain.textContent='Remain with unsaved draft';
+  reload.onclick=()=>window.location.reload();
+  remain.onclick=()=>{highestNotifiedRemoteRevision=Math.max(highestNotifiedRemoteRevision,dialog.matrixRemoteRevision);setMatrixRecoveryPending(false);dialog.close();dialog.remove();previousFocus?.focus?.()};
+  dialog.addEventListener('cancel',event=>event.preventDefault());
+  dialog.addEventListener('keydown',event=>{if(event.key!=='Tab')return;event.preventDefault();(document.activeElement===reload?remain:reload).focus()});
+  actions.append(reload,remain);dialog.append(title,text,actions);document.body.append(dialog);dialog.showModal();reload.focus();
+}
+function stopMatrixConfigSync(){matrixSyncStopped=true;if(matrixSyncTimer!==null){clearInterval(matrixSyncTimer);matrixSyncTimer=null}if(matrixStatusTimer!==null){clearInterval(matrixStatusTimer);matrixStatusTimer=null}if(matrixFrameTimer!==null){clearTimeout(matrixFrameTimer);matrixFrameTimer=null}if(matrixSyncController){matrixSyncController.abort();matrixSyncController=null}window.removeEventListener('focus',matrixCheckForNewerConfig);window.removeEventListener('online',matrixCheckForNewerConfig);document.removeEventListener('visibilitychange',matrixVisibilityCheck)}
+function matrixVisibilityCheck(){if(document.visibilityState==='visible')matrixCheckForNewerConfig()}
+async function matrixCheckForNewerConfig(){
+  if(matrixSyncStopped)return;
+  const generation=++matrixSyncGeneration;
+  if(matrixSyncController)matrixSyncController.abort();
+  matrixSyncController=new AbortController();
+  try{
+    const response=await fetch('/api/config',{headers:{'X-Matrix-Client-Contract':String(MATRIX_CLIENT_CONTRACT),'If-None-Match':matrixRevisionETag()},signal:matrixSyncController.signal,cache:'no-store'});
+    if(generation!==matrixSyncGeneration)return;
+    handleMinimumClientContract(response.headers.get('X-Matrix-Minimum-Client-Contract'));
+    if(response.status===401||response.redirected){stopMatrixConfigSync();window.location='/pair';return}
+    if(response.status===304)return;
+    if(!response.ok)return;
+    const remote=await response.json();
+    if(generation!==matrixSyncGeneration)return;
+    const remoteRevision=Number(remote.revision);
+    if(!Number.isSafeInteger(remoteRevision))return;
+    if(remoteRevision<=matrixLoadedRevision)return;
+    if(!matrixHasUnsavedDraft()){if(!matrixUpgradeReloadRequested){matrixUpgradeReloadRequested=true;setMatrixRecoveryPending(true);window.location.reload()}return}
+    if(remoteRevision<=highestNotifiedRemoteRevision)return;
+    showMatrixRevisionDialog(remoteRevision);
+  }catch(error){if(error.name!=='AbortError')setMessage('Saved-state synchronization is reconnecting.',true)}
+}
+function startMatrixConfigSync(){if(matrixSyncStopped)return;window.addEventListener('focus',matrixCheckForNewerConfig);window.addEventListener('online',matrixCheckForNewerConfig);document.addEventListener('visibilitychange',matrixVisibilityCheck);matrixSyncTimer=setInterval(matrixCheckForNewerConfig,2500);matrixCheckForNewerConfig()}
+async function api(path,options={}){options.headers={...(options.headers||{}),'X-Matrix-Client-Contract':String(MATRIX_CLIENT_CONTRACT)};const response=await fetch(path,options);if(response.status===401||response.redirected){stopMatrixConfigSync();window.location='/pair';throw new Error('Pairing session expired.')}let data={};try{data=await response.json()}catch(_){throw new Error('Unexpected server response.')}if(!response.ok){const error=new Error(data.error||response.statusText);error.data=data;throw error}return data}
 const customFontAdvances={{ font_advances|tojson }};
 function fontCharacterAdvance(metrics,character){const codepoint=character.codePointAt(0);let low=0,high=metrics.ranges.length-1;while(low<=high){const middle=(low+high)>>1,[start,end,advance]=metrics.ranges[middle];if(codepoint<start)high=middle-1;else if(codepoint>end)low=middle+1;else return advance}return metrics.default}
 function calculatedTextWidth(font,text){const metrics=customFontAdvances[font];return [...text].reduce((width,character)=>width+fontCharacterAdvance(metrics,character),0)}
@@ -204,7 +248,7 @@ function validateAnnouncementBoard({focusFirst=false}={}){if(announcements.lengt
 function customLavaPalettesFromEditor(){return [...document.querySelectorAll('.custom-lava-card')].map(card=>({id:card.dataset.id,name:card.querySelector('[data-field=name]').value.trim(),colours:[0,1,2].map(index=>card.querySelector('[data-colour="'+index+'"]').value),enabled:card.querySelector('[data-field=enabled]').checked}))}
 function withSharedWeatherLocation(settings){const latitude=document.querySelector('#weather-latitude').value,longitude=document.querySelector('#weather-longitude').value;return {...settings,location:document.querySelector('#weather-location').value,latitude:latitude===''?null:Number(latitude),longitude:longitude===''?null:Number(longitude)}}
 function configBody(){customModules=customModulesFromEditor();customLavaPalettes=customLavaPalettesFromEditor();return {device:{name:document.querySelector('#device-name').value},pairing:{max_devices:Number(document.querySelector('#max-paired-devices').value)},display:{day_brightness:Number(document.querySelector('#day-brightness').value),night_brightness:Number(document.querySelector('#night-brightness').value),active_start:document.querySelector('#active-start').value,active_end:document.querySelector('#active-end').value},announcement_board:{announcements:announcementsFromEditor()},weather:{...withSharedWeatherLocation(builtInSettings.weather),units:document.querySelector('#weather-units').value,temperature_y:Number(document.querySelector('#weather-temperature-y').value),ticker_y:Number(document.querySelector('#weather-ticker-y').value),scroll_direction:document.querySelector('#weather-scroll-direction').value,scroll_speed:Number(document.querySelector('#weather-scroll-speed').value)},openweather_overview:withSharedWeatherLocation(builtInSettings.openweather_overview),openweather_forecast:withSharedWeatherLocation(builtInSettings.openweather_forecast),lava:{...builtInSettings.clock_lava,enabled_palettes:[...document.querySelectorAll('.lava-palette:checked')].map(input=>input.value),custom_enabled:false,custom_colours:legacyCustomLavaColours,custom_palettes:customLavaPalettesFromEditor()},media:{splash:document.querySelector('#splash-file').value,sleep:document.querySelector('#sleep-file').value},media_layout:{splash:builtInSettings.splash,sleep:builtInSettings.sleep},custom_modules:customModules,playlist:playlist()}}
-async function saveConfig(silent=false){if(typeof validateAnnouncementBoard==='function'&&!validateAnnouncementBoard({focusFirst:true})){const warning='Fix the highlighted announcement fields before saving.';setMessage(warning,true);return {saved:false,warning:'Fix the highlighted announcement fields before saving.'}}const submitted=configBody(),submittedSnapshot=JSON.stringify(submitted);try{const saved=await api('/api/config',{method:'POST',headers:{'Content-Type':'application/json','If-Match':matrixRevisionETag()},body:submittedSnapshot});matrixLoadedRevision=saved.revision;matrixSavedSnapshot=submittedSnapshot;matrixDirty=false;if(!silent)setMessage('Configuration saved and display reloaded.');return {saved:true,warning:null}}catch(error){if(error.data?.committed){matrixLoadedRevision=error.data.config.revision;matrixSavedSnapshot=submittedSnapshot;matrixDirty=false;if(!silent)setMessage(error.message,true);return {saved:true,warning:error.message,data:error.data}}setMessage(error.message,true);return {saved:false,warning:error.message}}}
+async function saveConfig(silent=false){if(matrixRecoveryPending){const warning='Resolve the newer saved configuration before saving.';setMessage(warning,true);return {saved:false,warning}}if(typeof validateAnnouncementBoard==='function'&&!validateAnnouncementBoard({focusFirst:true})){const warning='Fix the highlighted announcement fields before saving.';setMessage(warning,true);return {saved:false,warning:'Fix the highlighted announcement fields before saving.'}}const submitted=configBody(),submittedSnapshot=JSON.stringify(submitted);try{const saved=await api('/api/config',{method:'POST',headers:{'Content-Type':'application/json','If-Match':matrixRevisionETag()},body:submittedSnapshot});matrixLoadedRevision=saved.revision;highestNotifiedRemoteRevision=Math.max(highestNotifiedRemoteRevision,matrixLoadedRevision);dismissMatrixRevisionDialogThrough(matrixLoadedRevision);matrixSavedSnapshot=submittedSnapshot;matrixDirty=false;if(!silent)setMessage('Configuration saved and display reloaded.');return {saved:true,warning:null}}catch(error){if(error.data?.committed){matrixLoadedRevision=error.data.config.revision;highestNotifiedRemoteRevision=Math.max(highestNotifiedRemoteRevision,matrixLoadedRevision);dismissMatrixRevisionDialogThrough(matrixLoadedRevision);matrixSavedSnapshot=submittedSnapshot;matrixDirty=false;if(!silent)setMessage(error.message,true);return {saved:true,warning:error.message,data:error.data}}setMessage(error.message,true);return {saved:false,warning:error.message}}}
 function updateOpenWeatherSecretStatus(configured,unavailable=false){const status=document.querySelector('#openweather-secret-status');status.textContent=unavailable?'Secret storage unavailable':(configured?'Secret configured':'Secret not configured');status.dataset.state=unavailable?'error':(configured?'running':'stopped')}
 async function saveOpenWeatherSecret(){const input=document.querySelector('#openweather-api-key'),apiKey=input.value.trim();if(!apiKey){setMessage('Enter an OpenWeather API key first.',true);return}try{const result=await api('/api/secrets/openweather',{method:'PUT',headers:{'Content-Type':'application/json'},body:JSON.stringify({api_key:apiKey})});input.value='';updateOpenWeatherSecretStatus(result.configured);setMessage('OpenWeather secret saved securely.')}catch(error){input.value='';if(typeof error.data?.configured==='boolean')updateOpenWeatherSecretStatus(error.data.configured);setMessage(error.message,true)}}
 async function removeOpenWeatherSecret(){if(!confirm('Remove the saved OpenWeather API key? The OpenWeather modules will stop working until a new key is saved.'))return;try{const result=await api('/api/secrets/openweather',{method:'DELETE'});document.querySelector('#openweather-api-key').value='';updateOpenWeatherSecretStatus(result.configured);setMessage('OpenWeather secret removed.')}catch(error){if(typeof error.data?.configured==='boolean')updateOpenWeatherSecretStatus(error.data.configured);setMessage(error.message,true)}}
@@ -301,7 +345,7 @@ function renderCustomModules(){const list=document.querySelector('#custom-module
 function addCustomModule(){customModules=customModulesFromEditor();if(customModules.length>=20){setMessage('You can create up to 20 custom modules.',true);return}const id='custom_'+Date.now().toString(36);const module={id,name:'Custom text '+(customModules.length+1),type:'text_scroll',text:'HELLO MATRIX',font:'5x7',colour:'#ffffff',background:'#000000',x:2,y:20,direction:'left',speed:.05,loops:1};customModules.push(module);document.querySelector('#playlist').append(createPlaylistRow({module:id,duration:15,enabled:true}));markMatrixDirty();renderCustomModules();setMessage('Custom module added to the playlist. Edit it, then save or preview it.')}
 function removeCustomModule(id){if(!confirm('Remove '+customName(id)+' from the custom modules and playlist?'))return;customModules=customModulesFromEditor().filter(item=>item.id!==id);for(const row of document.querySelectorAll('.module-row'))if(row.dataset.module===id)row.closest('.module-item').remove();markMatrixDirty();renderCustomModules();setMessage('Custom module removed. Save configuration to apply.')}
 function updateStatus(status){const text=status.last_error?'error':(status.current_module||(status.running?'running':'stopped')),badge=document.querySelector('#status');badge.textContent=text;badge.dataset.state=status.last_error?'error':(status.running?'running':'stopped');document.querySelector('#current-label').textContent=status.last_error?status.last_error:(status.current_module?'Showing '+status.current_module:'Display '+text);if(status.current_module){previewModule=status.current_module;document.querySelector('#preview-select').value=status.current_module;document.querySelector('#preview-module').textContent='Live · '+status.current_module}}
-async function refreshDisplayFrame(){try{const response=await fetch('/api/display-frame?time='+Date.now(),{cache:'no-store'});if(response.status===401||response.redirected){window.location='/pair';return}if(!response.ok)throw new Error('Frame unavailable');const bitmap=await createImageBitmap(await response.blob());ctx.clearRect(0,0,64,32);ctx.drawImage(bitmap,0,0,64,32);bitmap.close();document.querySelector('#preview-frame').textContent='64 × 32 · frame '+(response.headers.get('X-Matrix-Frame')||'live')}catch(error){document.querySelector('#preview-frame').textContent='64 × 32 · reconnecting'}finally{setTimeout(refreshDisplayFrame,100)}}
+async function refreshDisplayFrame(){try{const response=await fetch('/api/display-frame?time='+Date.now(),{cache:'no-store'});if(response.status===401||response.redirected){stopMatrixConfigSync();window.location='/pair';return}if(!response.ok)throw new Error('Frame unavailable');const bitmap=await createImageBitmap(await response.blob());ctx.clearRect(0,0,64,32);ctx.drawImage(bitmap,0,0,64,32);bitmap.close();document.querySelector('#preview-frame').textContent='64 × 32 · frame '+(response.headers.get('X-Matrix-Frame')||'live')}catch(error){document.querySelector('#preview-frame').textContent='64 × 32 · reconnecting'}finally{if(!matrixSyncStopped)matrixFrameTimer=setTimeout(refreshDisplayFrame,100)}}
 function wireWeatherLocationSearch(input,results,hint,onChoose,onEdit){
   let timer=null,request=null,places=[],activeIndex=-1,generation=0;
   const close=()=>{results.hidden=true;input.setAttribute('aria-expanded','false');input.removeAttribute('aria-activedescendant');activeIndex=-1};
@@ -332,10 +376,13 @@ async function uploadMedia(){const input=document.querySelector('#media-upload')
 async function removeMedia(name){const reconcile=removed=>{try{globalThis.reconcileMediaRemoval?.(removed);return ''}catch(error){return ' Local reconciliation failed: '+error.message}};if(!confirm('Remove '+name+' from the Matrix media library?'))return;try{await api('/api/media/'+encodeURIComponent(name),{method:'DELETE'})}catch(error){let refreshWarning='';if(error.data?.committed){try{await refreshMedia()}catch(refreshError){refreshWarning=' Library refresh failed: '+refreshError.message+reconcile(error.data?.removed||name)}}setMessage(error.message+refreshWarning,true);return}try{await refreshMedia()}catch(error){const reconciliationWarning=reconcile(name);setMessage(name+' was removed, but the library refresh failed: '+error.message+reconciliationWarning,true);return}setMessage(name+' removed.')}
 async function assignMedia(slot,name){document.querySelector(slot==='sleep'?'#sleep-file':'#splash-file').value=name;previewModule=slot;await saveConfig()}
 const zone=document.querySelector('#upload-zone');for(const eventName of ['dragenter','dragover'])zone.addEventListener(eventName,event=>{event.preventDefault();zone.classList.add('drag')});for(const eventName of ['dragleave','drop'])zone.addEventListener(eventName,event=>{event.preventDefault();zone.classList.remove('drag')});zone.addEventListener('drop',event=>{document.querySelector('#media-upload').files=event.dataTransfer.files;uploadMedia()});
-renderMedia();renderCustomLavaPalettes();renderCustomModules();renderBuiltInEditors();refreshDisplayFrame();window.addEventListener('load',()=>{matrixSavedSnapshot=matrixCurrentSnapshot();matrixDirty=false},{once:true});setInterval(async()=>{try{const status=await api('/api/status');handleMinimumClientContract(status.minimum_client_contract);updateStatus(status)}catch(_){}},2500);
+renderMedia();renderCustomLavaPalettes();renderCustomModules();renderBuiltInEditors();
+</script>
+<script src="{{ url_for('static', filename='custom_canvas.js') }}"></script>
+<script>
+matrixSavedSnapshot=matrixCurrentSnapshot();refreshDisplayFrame();window.addEventListener('load',()=>{startMatrixConfigSync()},{once:true});window.addEventListener('beforeunload',stopMatrixConfigSync,{once:true});matrixStatusTimer=setInterval(async()=>{try{const status=await api('/api/status');handleMinimumClientContract(status.minimum_client_contract);updateStatus(status)}catch(_){}},2500);
 updateOpenWeatherSecretStatus(initialOpenWeatherSecretConfigured,initialOpenWeatherSecretUnavailable);
 const navigationWarningCode=new URLSearchParams(window.location.search).get('warning'),navigationWarnings={'device-removal-durability':'The device was removed, but durable storage could not be confirmed.'};if(navigationWarnings[navigationWarningCode])setMessage(navigationWarnings[navigationWarningCode],true);
 </script>
-<script src="{{ url_for('static', filename='custom_canvas.js') }}"></script>
 </body>
 </html>
