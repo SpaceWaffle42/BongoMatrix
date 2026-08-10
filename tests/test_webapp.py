@@ -98,6 +98,217 @@ class WebAppTests(unittest.TestCase):
         self.assertEqual(self.store.get()["device"]["name"], "Saved Matrix")
         self.assertNotIn("display unavailable", response.get_data(as_text=True))
 
+    def test_config_get_supports_revision_etag(self):
+        self.pair_browser()
+
+        response = self.client.get("/api/config")
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.headers["ETag"], '"0"')
+        self.assertEqual(response.get_json()["revision"], 0)
+        for validator in ('"0"', 'W/"0"', '"99", W/"0"', '"a,b", W/"0"', '*'):
+            with self.subTest(validator=validator):
+                unchanged = self.client.get("/api/config", headers={"If-None-Match": validator})
+                self.assertEqual(unchanged.status_code, 304)
+                self.assertEqual(unchanged.headers["ETag"], '"0"')
+                self.assertEqual(unchanged.get_data(), b"")
+        changed = self.client.get("/api/config", headers={"If-None-Match": 'W/"9", "10"'})
+        self.assertEqual(changed.status_code, 200)
+
+    def test_optional_conditional_config_save_rejects_stale_revision(self):
+        self.pair_browser()
+        committed = self.client.post(
+            "/api/config", json={"device": {"name": "Winner"}},
+            headers={"If-Match": '"opaque", "0"'},
+        )
+
+        self.assertEqual(committed.status_code, 200)
+        self.assertEqual(committed.headers["ETag"], '"1"')
+        self.assertEqual(committed.get_json()["revision"], 1)
+        stale = self.client.post(
+            "/api/config", json={"device": {"name": "Loser"}},
+            headers={"If-Match": '"0"'},
+        )
+        self.assertEqual(stale.status_code, 412)
+        self.assertEqual(stale.headers["ETag"], '"1"')
+        self.assertEqual(stale.get_json(), {
+            "error": "Configuration has changed since this client loaded it.",
+            "revision": 1,
+        })
+        self.assertEqual(self.store.get()["device"]["name"], "Winner")
+        self.assertEqual(self.controller.reload.call_count, 1)
+
+    def test_config_conditionals_enforce_parser_and_route_bounds(self):
+        self.pair_browser()
+        malformed_cases = [
+            ("GET", "If-None-Match", '0'),
+            ("GET", "If-None-Match", '"0",'),
+            ("POST", "If-Match", 'W/'),
+            ("POST", "If-Match", '"a\\"b"'),
+            ("GET", "If-None-Match", '"valid" junk'),
+        ]
+        for method, header, value in malformed_cases:
+            with self.subTest(method=method, header=header, value=value):
+                response = self.client.open(
+                    "/api/config", method=method, json={} if method == "POST" else None,
+                    headers={header: value},
+                )
+                self.assertEqual(response.status_code, 400)
+        valid_nonmatching = ('""', '"opaque"', 'W/"opaque"', '"a:b"', '"a,b"', '"\x80"')
+        for validator in valid_nonmatching:
+            with self.subTest(valid_nonmatching=validator):
+                changed = self.client.get(
+                    "/api/config", headers={"If-None-Match": validator},
+                )
+                stale = self.client.post(
+                    "/api/config", json={}, headers={"If-Match": validator},
+                )
+                self.assertEqual(changed.status_code, 200)
+                self.assertEqual(stale.status_code, 412)
+        for header in ("If-None-Match", "If-Match"):
+            with self.subTest(header=header):
+                response = self.client.open(
+                    "/api/config", method="POST" if header == "If-Match" else "GET",
+                    json={} if header == "If-Match" else None,
+                    headers={header: '"' + ('1' * 4095) + '"'},
+                )
+                self.assertEqual(response.status_code, 431)
+
+        weak_write = self.client.post("/api/config", json={}, headers={"If-Match": 'W/"0"'})
+        stale_list = self.client.post("/api/config", json={}, headers={"If-Match": '"8", "9"'})
+        self.assertEqual(weak_write.status_code, 412)
+        self.assertEqual(stale_list.status_code, 412)
+        wildcard = self.client.post(
+            "/api/config", json={"device": {"name": "Wildcard"}}, headers={"If-Match": "*"},
+        )
+        self.assertEqual((wildcard.status_code, wildcard.headers["ETag"]), (200, '"1"'))
+
+        oversized = self.client.post(
+            "/api/config", data=b"{" + (b" " * 1_048_576),
+            content_type="application/json",
+        )
+        self.assertEqual(oversized.status_code, 413)
+
+        streamed_oversized = self.client.post(
+            "/api/config", data=b"{" + (b" " * 1_048_576),
+            content_type="application/json",
+            environ_overrides={"CONTENT_LENGTH": "", "wsgi.input_terminated": True},
+        )
+        self.assertEqual(streamed_oversized.status_code, 413)
+
+    def test_preview_does_not_publish_config_revision(self):
+        self.pair_browser()
+        before = self.store.get()["revision"]
+
+        response = self.client.post("/api/preview/clock_lava")
+
+        self.assertEqual(response.status_code, 202)
+        self.assertEqual(self.store.get()["revision"], before)
+
+    @unittest.skipUnless(shutil.which("node"), "Node.js is required")
+    def test_open_b1_dashboard_transitions_safely_to_b2_server(self):
+        self.pair_browser()
+        body = self.client.get("/").get_data(as_text=True)
+
+        self.assertIn("const MATRIX_CLIENT_CONTRACT=1", body)
+        self.assertIn("let matrixLoadedRevision=0", body)
+        self.assertIn("'X-Matrix-Client-Contract':String(MATRIX_CLIENT_CONTRACT)", body)
+        self.assertIn("'If-Match':matrixRevisionETag()", body)
+        self.assertIn("function matrixHasUnsavedDraft()", body)
+        self.assertIn("Reload latest saved state", body)
+        self.assertIn("Remain with unsaved draft", body)
+        self.assertIn("aria-labelledby", body)
+        self.assertIn("aria-describedby", body)
+        self.assertIn("event.preventDefault()", body)
+        self.assertIn("config-upgrade-actions", body)
+        self.assertIn("width:min(32rem,calc(100vw - 2rem))", body)
+        self.assertIn("min-height:44px", body)
+
+        start = body.index("const MATRIX_CLIENT_CONTRACT=1")
+        end = body.index("const customFontAdvances", start)
+        bridge = body[start:end]
+        harness = r"""
+class Element {
+  constructor(tag='div'){this.tag=tag;this.children=[];this.textContent='';this.open=false;this.listeners={};}
+  append(...items){this.children.push(...items)}
+  setAttribute(name,value){this[name]=value}
+  addEventListener(name,handler){this.listeners[name]=handler}
+  showModal(){this.open=true}
+  focus(){this.focused=true}
+  close(){this.open=false}
+  remove(){this.removed=true}
+}
+const listeners={}, bodyElement=new Element('body');
+const document={
+  body:bodyElement,
+  activeElement:new Element('input'),
+  querySelector(selector){return selector==='#message'?new Element():null},
+  createElement(tag){return new Element(tag)},
+  addEventListener(name,handler){listeners[name]=handler},
+};
+let reloads=0, requests=[],configState={canvas:{operation:'saved'}};
+function configBody(){return structuredClone(configState)}
+const window={location:{reload(){reloads++},set href(value){this._href=value}},matrixInstalledFonts:[]};
+async function fetch(path,options={}){requests.push({path,options});return {status:200,redirected:false,ok:true,json:async()=>({})}}
+globalThis.document=document;globalThis.window=window;globalThis.fetch=fetch;
+""" + bridge + r"""
+(async()=>{
+  matrixSavedSnapshot=matrixCurrentSnapshot();
+  await api('/api/status');
+  if(requests[0].options.headers['X-Matrix-Client-Contract']!=='1')throw new Error('contract header missing');
+  handleMinimumClientContract(2);
+  if(reloads!==1)throw new Error('clean page did not reload');
+  matrixUpgradeReloadRequested=false;
+  configState.canvas.operation='template conversion';
+  listeners.input({target:{}});
+  handleMinimumClientContract(3);
+  const first=bodyElement.children.at(-1),firstActions=first.children.at(-1);
+  if(!first.open)throw new Error('dirty guard not shown');
+  if(firstActions.children[0].textContent!=='Reload latest saved state'||firstActions.children[1].textContent!=='Remain with unsaved draft')throw new Error('choices changed');
+  if(!firstActions.children[0].focused)throw new Error('initial focus missing');
+  let cancelled=false;first.listeners.cancel({preventDefault(){cancelled=true}});
+  if(!cancelled||!first.open)throw new Error('escape dismissed decision');
+  firstActions.children[1].onclick();
+  const count=bodyElement.children.length;
+  handleMinimumClientContract(3);
+  if(bodyElement.children.length!==count)throw new Error('acknowledged contract churned');
+  handleMinimumClientContract(4);
+  if(bodyElement.children.length!==count+1)throw new Error('newer contract did not warn');
+  const second=bodyElement.children.at(-1),secondActions=second.children.at(-1);
+  secondActions.children[1].onclick();
+  configState.canvas.operation='saved';
+  matrixUpgradeReloadRequested=false;
+  handleMinimumClientContract(4);
+  if(reloads!==2)throw new Error('clean page remained stranded after acknowledgement');
+  console.log('B1_TRANSITION_PASS');
+})().catch(error=>{console.error(error);process.exit(1)});
+"""
+        node = shutil.which("node")
+        assert node is not None
+        result = subprocess.run(
+            [node, "-e", harness], text=True, capture_output=True,
+            cwd=Path(__file__).parents[1], check=False,
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("B1_TRANSITION_PASS", result.stdout)
+
+    def test_dashboard_programmatic_editor_mutations_mark_the_draft_dirty(self):
+        self.pair_browser()
+        body = self.client.get("/").get_data(as_text=True)
+
+        mutators = (
+            "moveModule", "duplicateAnnouncement", "deleteAnnouncement",
+            "moveAnnouncement", "resetAnnouncementBoard", "addAnnouncement",
+            "resetBuiltInModule", "addCustomLavaPalette", "removeCustomLavaPalette",
+            "addCustomModule", "removeCustomModule",
+        )
+        for index, function_name in enumerate(mutators):
+            with self.subTest(function=function_name):
+                start = body.index(f"function {function_name}(")
+                next_start = body.find("\nfunction ", start + 1)
+                source = body[start:next_start if next_start >= 0 else None]
+                self.assertIn("markMatrixDirty()", source)
+
     def test_config_update_reports_committed_state_when_directory_sync_fails(self):
         self.pair_browser()
 
@@ -129,10 +340,10 @@ class WebAppTests(unittest.TestCase):
         original_update = self.store.update
         results = {}
 
-        def blocked_update(changes):
+        def blocked_update(changes, **options):
             config_entered.set()
             self.assertTrue(release_config.wait(2))
-            return original_update(changes)
+            return original_update(changes, **options)
 
         def lower_limit():
             client = self.app.test_client()
@@ -1088,12 +1299,13 @@ globalThis.reconcileMediaRemoval=()=>{throw new Error('Local reconciliation fail
         preview_end = source.index("\nfunction previewSelected", preview_start)
         function_source = source[save_start:save_end] + "\n" + source[preview_start:preview_end]
         harness = r"""
-let messages=[],previewCalls=0,previewModule='';
+let messages=[],previewCalls=0,previewModule='',matrixLoadedRevision=0,matrixDirty=true;
+function matrixRevisionETag(){return '"'+matrixLoadedRevision+'"';}
 function configBody(){return {};}
 function setMessage(text,error=false){messages.push({text,error});}
 global.document={querySelector(){return {value:''};}};
 async function api(path){
-  if(path==='/api/config'){const error=new Error('Configuration saved, but display reload failed.');error.data={committed:true,display_reloaded:false};throw error;}
+  if(path==='/api/config'){const error=new Error('Configuration saved, but display reload failed.');error.data={committed:true,display_reloaded:false,config:{revision:1}};throw error;}
   previewCalls++;return {};
 }
 """ + function_source + r"""
@@ -1121,12 +1333,13 @@ async function api(path){
         preview_end = source.index("\nfunction previewSelected", preview_start)
         function_source = source[save_start:save_end] + "\n" + source[preview_start:preview_end]
         harness = r"""
-let messages=[],previewModule='';
+let messages=[],previewModule='',matrixLoadedRevision=0,matrixDirty=true;
+function matrixRevisionETag(){return '"'+matrixLoadedRevision+'"';}
 function configBody(){return {};}
 function setMessage(text,error=false){messages.push({text,error});}
 global.document={querySelector(){return {value:''};}};
 async function api(path){
-  if(path==='/api/config'){const error=new Error('Configuration saved, but display reload failed.');error.data={committed:true};throw error;}
+  if(path==='/api/config'){const error=new Error('Configuration saved, but display reload failed.');error.data={committed:true,config:{revision:1}};throw error;}
   throw new Error('Preview hardware unavailable.');
 }
 """ + function_source + r"""
@@ -2458,6 +2671,7 @@ const document={querySelectorAll:()=>[{}],querySelector:selector=>({focus:()=>fo
 const requestAnimationFrame=callback=>callback();
 const confirm=()=>true;
 const setMessage=()=>{};
+const markMatrixDirty=()=>{};
 const renderAnnouncementEditor=()=>{};
 const announcementsFromEditor=()=>structuredClone(announcements);
 const nextAnnouncementId=()=>`announcement_copy_${++announcementIdSequence}`;
@@ -3276,7 +3490,7 @@ console.log('ANNOUNCEMENT_HEADING_SYNC_PASS');
         page = self.client.get("/").get_data(as_text=True)
 
         self.assertIn(
-            "if(error.data?.committed){if(!silent)setMessage(error.message,true);return {saved:true,warning:error.message,data:error.data}}",
+            "if(error.data?.committed){matrixLoadedRevision=error.data.config.revision;matrixSavedSnapshot=submittedSnapshot;matrixDirty=false;if(!silent)setMessage(error.message,true);return {saved:true,warning:error.message,data:error.data}}",
             page,
         )
         self.assertIn("if(error.data?.committed){input.value='';try{await refreshMedia()}", page)

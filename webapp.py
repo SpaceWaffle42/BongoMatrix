@@ -9,6 +9,7 @@ import math
 import secrets
 import logging
 import os
+import re
 import stat
 import subprocess
 import sys
@@ -23,7 +24,10 @@ from PIL import Image, UnidentifiedImageError
 from werkzeug.exceptions import HTTPException, RequestEntityTooLarge
 from werkzeug.utils import secure_filename
 
-from config_store import ALLOWED_MODULES, DEFAULT_CONFIG, ConfigDurabilityError, validate_config
+from config_store import (
+    ALLOWED_MODULES, DEFAULT_CONFIG, ConfigConflictError, ConfigDurabilityError,
+    validate_config,
+)
 from font_catalog import available_font_names, font_advance_catalog
 from module_options import COLOUR_HEX, LAVA_PALETTES
 from modules.weather_app import OpenMeteoClient
@@ -38,6 +42,49 @@ MEDIA_METADATA_ERRORS = (
     OSError, ValueError, KeyError, IndexError, json.JSONDecodeError,
     subprocess.SubprocessError, UnidentifiedImageError, Image.DecompressionBombError,
 )
+CONFIG_REQUEST_LIMIT = 1_048_576
+CONDITIONAL_HEADER_LIMIT = 4096
+MINIMUM_CLIENT_CONTRACT = 1
+ETAG_ITEM = re.compile(r'(?P<weak>W/)?"(?P<opaque>[\x21\x23-\x7e\x80-\xff]*)"')
+
+
+def _revision_etag(revision):
+    return f'"{revision}"'
+
+
+def _parse_revision_validators(value):
+    if value is None:
+        return None
+    try:
+        encoded_length = len(value.encode("latin-1"))
+    except UnicodeEncodeError as exc:
+        raise ValueError("malformed conditional revision header") from exc
+    if encoded_length > CONDITIONAL_HEADER_LIMIT:
+        raise OverflowError("conditional header exceeds 4 KiB")
+    if value.strip(" \t") == "*":
+        return "*"
+    validators = []
+    position = 0
+    while position < len(value):
+        while position < len(value) and value[position] in " \t":
+            position += 1
+        match = ETAG_ITEM.match(value, position)
+        if match is None:
+            raise ValueError("malformed conditional revision header")
+        validators.append((match.group("weak") is not None, match.group("opaque")))
+        position = match.end()
+        while position < len(value) and value[position] in " \t":
+            position += 1
+        if position == len(value):
+            break
+        if value[position] != ",":
+            raise ValueError("malformed conditional revision header")
+        position += 1
+        if not value[position:].strip(" \t"):
+            raise ValueError("malformed conditional revision header")
+    if not validators:
+        raise ValueError("malformed conditional revision header")
+    return validators
 
 
 class MediaSanitizerError(ValueError):
@@ -86,6 +133,12 @@ def create_app(
         PERMANENT_SESSION_LIFETIME=timedelta(days=365),
         MAX_CONTENT_LENGTH=128 * 1024 * 1024,
     )
+
+    @app.after_request
+    def advertise_client_contract(response):
+        if request.path == "/api/config":
+            response.headers["X-Matrix-Minimum-Client-Contract"] = str(MINIMUM_CLIENT_CONTRACT)
+        return response
 
     def sync_media_directory():
         directory_fd = os.open(media_root, os.O_RDONLY | os.O_DIRECTORY)
@@ -860,13 +913,52 @@ def create_app(
     @app.get("/api/config")
     @requires_pairing
     def get_config():
-        return jsonify(config_store.get())
+        config = config_store.get()
+        try:
+            validators = _parse_revision_validators(request.headers.get("If-None-Match"))
+        except OverflowError as exc:
+            return jsonify({"error": str(exc)}), 431
+        except ValueError as exc:
+            return jsonify({"error": str(exc)}), 400
+        if validators == "*" or (
+            validators is not None
+            and any(opaque == str(config["revision"]) for _weak, opaque in validators)
+        ):
+            response = app.response_class(status=304)
+        else:
+            response = jsonify(config)
+        response.headers["ETag"] = _revision_etag(config["revision"])
+        return response
 
     @app.post("/api/config")
     @requires_pairing
     def update_config():
         durability_uncertain = False
         try:
+            request.max_content_length = CONFIG_REQUEST_LIMIT + 1
+            if request.content_length is not None and request.content_length > CONFIG_REQUEST_LIMIT:
+                return jsonify({"error": "Configuration request must not exceed 1 MiB."}), 413
+            if len(request.get_data(cache=True)) > CONFIG_REQUEST_LIMIT:
+                return jsonify({"error": "Configuration request must not exceed 1 MiB."}), 413
+            validators = _parse_revision_validators(request.headers.get("If-Match"))
+            current_revision = config_store.get()["revision"]
+            if validators is None:
+                base_revision = None
+            elif validators == "*":
+                base_revision = None
+            else:
+                if not any(
+                    not weak and opaque == str(current_revision)
+                    for weak, opaque in validators
+                ):
+                    response = jsonify({
+                        "error": "Configuration has changed since this client loaded it.",
+                        "revision": current_revision,
+                    })
+                    response.status_code = 412
+                    response.headers["ETag"] = _revision_etag(current_revision)
+                    return response
+                base_revision = current_revision
             if not request.is_json:
                 abort(415, description="Content-Type must be application/json.")
             changes = request.get_json()
@@ -894,18 +986,28 @@ def create_app(
                     if isinstance(changes, dict) and isinstance(changes.get("custom_modules"), list):
                         for reference in canvas_media_references(changes["custom_modules"]):
                             ensure_media_file(reference)
-                    config = config_store.update(changes)
+                    config = config_store.update(changes, base_revision=base_revision)
         except ConfigDurabilityError as exc:
             config = exc.config
             durability_uncertain = True
             LOGGER.exception("Configuration committed but directory sync failed")
+        except ConfigConflictError as exc:
+            response = jsonify({
+                "error": "Configuration has changed since this client loaded it.",
+                "revision": exc.current_revision,
+            })
+            response.status_code = 412
+            response.headers["ETag"] = _revision_etag(exc.current_revision)
+            return response
+        except OverflowError as exc:
+            return jsonify({"error": str(exc)}), 431
         except (TypeError, ValueError, KeyError) as exc:
             return jsonify({"error": str(exc)}), 400
         try:
             controller.reload()
         except Exception:
             LOGGER.exception("Configuration committed but display reload failed")
-            return jsonify({
+            response = jsonify({
                 "committed": True,
                 "config": config,
                 "durability_uncertain": durability_uncertain,
@@ -915,15 +1017,23 @@ def create_app(
                     if durability_uncertain else
                     "Configuration was saved, but the display could not be reloaded."
                 ),
-            }), 503
+            })
+            response.status_code = 503
+            response.headers["ETag"] = _revision_etag(config["revision"])
+            return response
         if durability_uncertain:
-            return jsonify({
+            response = jsonify({
                 "committed": True,
                 "config": config,
                 "durability_uncertain": True,
                 "error": "Configuration was saved, but durable storage could not be confirmed.",
-            }), 503
-        return jsonify(config)
+            })
+            response.status_code = 503
+            response.headers["ETag"] = _revision_etag(config["revision"])
+            return response
+        response = jsonify(config)
+        response.headers["ETag"] = _revision_etag(config["revision"])
+        return response
 
     @app.get("/api/display-frame")
     @requires_pairing
@@ -937,7 +1047,10 @@ def create_app(
     @app.get("/api/status")
     @requires_pairing
     def status():
-        return jsonify(controller.status())
+        current = controller.status()
+        payload = dict(current) if isinstance(current, dict) else {}
+        payload["minimum_client_contract"] = MINIMUM_CLIENT_CONTRACT
+        return jsonify(payload)
 
     @app.get("/api/locations")
     @requires_pairing

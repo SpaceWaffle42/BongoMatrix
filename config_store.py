@@ -23,11 +23,25 @@ class ConfigDurabilityError(OSError):
         super().__init__("configuration committed but directory sync failed")
         self.config = copy.deepcopy(config)
 
+
+class ConfigConflictError(ValueError):
+    """A conditional update was based on an older configuration revision."""
+
+    def __init__(self, current_revision):
+        super().__init__("configuration revision conflict")
+        self.current_revision = current_revision
+
 ALLOWED_MODULES = {
     "clock_lava", "weather", "openweather_overview", "openweather_forecast",
     "announcement_board", "splash", "sleep",
 }
+PLAYLIST_LIMIT = 256
+CONFIG_SNAPSHOT_LIMIT = 1_048_576
 AVAILABLE_FONTS = frozenset(available_font_names())
+
+
+def _serialize_config(config):
+    return json.dumps(config, sort_keys=True, separators=(",", ":")).encode("utf-8")
 
 
 def scrolling_text_duration(module, matrix_width=64):
@@ -38,7 +52,7 @@ def scrolling_text_duration(module, matrix_width=64):
     return math.floor(milliseconds + 0.5) / 1000
 
 DEFAULT_CONFIG = {
-
+    "revision": 0,
     "device": {"name": "Matrix"},
     "pairing": {"max_devices": 4},
     "display": {
@@ -588,7 +602,11 @@ def _validate_announcement_board(board, *, allow_legacy=True):
             )
 
 
-def validate_config(config, *, allow_legacy_announcements=True):
+def validate_config(config, *, allow_legacy_announcements=True, enforce_save_bounds=False):
+
+    revision = config["revision"]
+    if isinstance(revision, bool) or not isinstance(revision, int) or revision < 0:
+        raise ValueError("revision must be a nonnegative integer")
 
     name = config["device"]["name"]
     if not isinstance(name, str) or not name.strip() or len(name.strip()) > 40:
@@ -839,6 +857,8 @@ def validate_config(config, *, allow_legacy_announcements=True):
     playlist = config["playlist"]
     if not isinstance(playlist, list) or not playlist:
         raise ValueError("playlist must contain at least one module")
+    if enforce_save_bounds and len(playlist) > PLAYLIST_LIMIT:
+        raise ValueError("playlist must contain at most 256 modules")
     custom_by_id = {item["id"]: item for item in custom_modules}
     for item in playlist:
         if not isinstance(item, dict) or set(item) != {"module", "duration", "enabled"}:
@@ -858,6 +878,11 @@ def validate_config(config, *, allow_legacy_announcements=True):
                 raise ValueError("module duration must be between 1 and 3600 seconds")
         if not isinstance(item.get("enabled"), bool):
             raise ValueError("module enabled must be a boolean")
+    if (
+        enforce_save_bounds
+        and len(_serialize_config(config)) > CONFIG_SNAPSHOT_LIMIT
+    ):
+        raise ValueError("canonical configuration snapshot must not exceed 1 MiB")
     return config
 
 
@@ -898,6 +923,14 @@ class ConfigStore:
             current = json.loads(self.path.read_text())
             if not isinstance(current, dict):
                 raise ValueError("configuration file must contain a JSON object")
+            current_playlist = current.get("playlist")
+            if (
+                isinstance(current_playlist, list)
+                and len(current_playlist) > PLAYLIST_LIMIT
+            ) or len(_serialize_config(current)) > CONFIG_SNAPSHOT_LIMIT:
+                raise ValueError(
+                    "legacy configuration exceeds current save bounds; file was not rewritten"
+                )
 
             legacy_forecast = current.get("openweather_forecast")
             if isinstance(legacy_forecast, dict):
@@ -910,6 +943,7 @@ class ConfigStore:
                     and module_settings.get("scroll_speed") in legacy_speed_delays
                 ):
                     module_settings["scroll_speed"] = legacy_speed_delays[module_settings["scroll_speed"]]
+            current.setdefault("revision", 0)
             _validate_update_keys(current, DEFAULT_CONFIG)
             lava = current.get("lava")
             if (
@@ -967,10 +1001,12 @@ class ConfigStore:
 
     def _write(self, config):
         self.path.parent.mkdir(parents=True, exist_ok=True)
-        data = json.dumps(config, indent=2, sort_keys=True) + "\n"
+        data = _serialize_config(config)
+        if len(data) > CONFIG_SNAPSHOT_LIMIT:
+            raise ValueError("canonical configuration snapshot must not exceed 1 MiB")
         fd, temp_name = tempfile.mkstemp(prefix=self.path.name, dir=self.path.parent)
         try:
-            with os.fdopen(fd, "w") as handle:
+            with os.fdopen(fd, "wb") as handle:
                 handle.write(data)
                 handle.flush()
                 os.fsync(handle.fileno())
@@ -991,14 +1027,29 @@ class ConfigStore:
         with self._lock:
             return json.loads(self.path.read_text())
 
-    def update(self, changes):
+    def update(self, changes, *, base_revision=None):
         if not isinstance(changes, dict):
             raise ValueError("configuration update must be a JSON object")
 
+        if "revision" in changes:
+            raise ValueError("revision is server-owned")
+        if (
+            base_revision is not None
+            and (isinstance(base_revision, bool) or not isinstance(base_revision, int) or base_revision < 0)
+        ):
+            raise ValueError("base revision must be a nonnegative integer")
+
         _validate_update_keys(changes, DEFAULT_CONFIG)
         with self._lock:
+            current = self.get()
+            if base_revision is not None and base_revision != current["revision"]:
+                raise ConfigConflictError(current["revision"])
+            updated = _merge(current, changes)
+            updated["revision"] = current["revision"] + 1
             updated = validate_config(
-                _merge(self.get(), changes), allow_legacy_announcements=False,
+                updated,
+                allow_legacy_announcements=False,
+                enforce_save_bounds=True,
             )
             self._write(updated)
             return copy.deepcopy(updated)
