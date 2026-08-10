@@ -189,11 +189,13 @@ Browser-backed checks run when their executable prerequisites are available. On 
 
 ### GitLab CI
 
-Merge requests and pushes to every branch run the project-owned `.gitlab-ci.yml` pipeline. When a branch already has an open merge request, GitLab runs only its merge-request pipeline instead of duplicating the same work in a branch pipeline. Manual, scheduled, API-triggered, tag, and other unsupported pipeline sources are denied by the workflow rules.
+Merge requests, pushes to every branch, and the configured scheduled audit run the project-owned `.gitlab-ci.yml` pipeline. When a branch already has an open merge request, GitLab runs only its merge-request pipeline instead of duplicating the same work in a branch pipeline. Manual, API-triggered, tag, and other unsupported pipeline sources are denied by the workflow rules.
 
-The pipeline performs Python syntax validation, the complete test suite with Node.js, FFmpeg, and headless Chromium enabled, coverage reporting, focused Ruff static analysis, dependency vulnerability auditing, GitLab SAST, and GitLab secret detection. JUnit, Cobertura coverage, code-quality, and dependency-audit artifacts remain available in GitLab for 14 days.
+The pipeline performs Python syntax validation, the complete test suite with Node.js, FFmpeg, and headless Chromium enabled, coverage reporting, focused Ruff static analysis, dependency vulnerability auditing, GitLab SAST, and GitLab secret detection. JUnit, Cobertura coverage, code-quality, dependency-audit, and bounded acceptance-summary artifacts remain available in GitLab for 14 days. Read `ci-summary.txt` or `ci-summary.json` before opening full job logs; the summary distinguishes independently accepted SAST baseline findings from new findings without reproducing candidate secret text.
 
 The pipeline deliberately does not deploy to the Matrix device. Deployment, rollback preparation, and physical 64×32 verification remain explicit release steps after an exact merged artifact passes review.
+
+See [`docs/CI.md`](docs/CI.md) for the focused local-test handoff, artifact policy, SAST baseline rules, and checks that must remain manual.
 
 Useful service checks on a deployed Pi:
 
@@ -227,7 +229,7 @@ Deferred product requirements are tracked in [`docs/FUTURE_DEVELOPMENT.md`](docs
 
 ## Contributing
 
-Issues and pull requests are welcome once the repository is public. Keep changes focused, add regression coverage for behavior changes, and run the complete suite before submitting a pull request. Changes to rendering or timing should be checked against both the browser framebuffer and a physical 64×32 panel when possible.
+Issues and pull requests are welcome once the repository is public. Keep changes focused, add regression coverage for behavior changes, and run focused RED/GREEN tests locally; GitLab runs the complete automated suite against the pushed commit. Changes to rendering or timing should be checked against both the browser framebuffer and a physical 64×32 panel when possible.
 
 Do not include `data/`, session keys, paired-device records, API keys, user uploads, local backups, or other runtime state in commits.
 

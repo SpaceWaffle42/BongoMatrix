@@ -4,6 +4,7 @@
 workflow:
   rules:
     - if: '$CI_PIPELINE_SOURCE == "merge_request_event"'
+    - if: '$CI_PIPELINE_SOURCE == "schedule"'
     - if: '$CI_PIPELINE_SOURCE == "push" && $CI_COMMIT_BRANCH && $CI_OPEN_MERGE_REQUESTS'
       when: never
     - if: '$CI_PIPELINE_SOURCE == "push" && $CI_COMMIT_BRANCH'
@@ -14,6 +15,7 @@ stages:
   - test
   - quality
   - security
+  - summary
 
 include:
   - template: Jobs/SAST.gitlab-ci.yml
@@ -129,3 +131,37 @@ secret_detection:
   tags:
     - matrix-docker
   interruptible: true
+
+ci_summary:
+  extends: .default_project_job
+  stage: summary
+  when: always
+  before_script:
+    - python -m pip install --no-cache-dir defusedxml==0.7.1
+  needs:
+    - job: full_test_suite
+      artifacts: true
+    - job: python_static_analysis
+      artifacts: true
+    - job: dependency_audit
+      artifacts: true
+    - job: semgrep-sast
+      artifacts: true
+      optional: true
+    - job: secret_detection
+      artifacts: true
+      optional: true
+  script:
+    - >-
+      python scripts/ci_summary.py
+      --root .
+      --baseline ci/sast-baseline.json
+      --expected-baseline-source 8b9994024098320fbea99d92c117036c918fede4
+      --json-output ci-summary.json
+      --text-output ci-summary.txt
+  artifacts:
+    when: always
+    expire_in: 14 days
+    paths:
+      - ci-summary.json
+      - ci-summary.txt

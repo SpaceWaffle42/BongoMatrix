@@ -11,6 +11,8 @@ htmlcov/
 test-results/
 gl-code-quality-report.json
 dependency-audit.json
+ci-summary.json
+ci-summary.txt
 
 # Virtual environments
 venv/
