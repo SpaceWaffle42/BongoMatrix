@@ -44,7 +44,7 @@ MEDIA_METADATA_ERRORS = (
 )
 CONFIG_REQUEST_LIMIT = 1_048_576
 CONDITIONAL_HEADER_LIMIT = 4096
-MINIMUM_CLIENT_CONTRACT = 1
+MINIMUM_CLIENT_CONTRACT = 2
 ETAG_ITEM = re.compile(r'(?P<weak>W/)?"(?P<opaque>[\x21\x23-\x7e\x80-\xff]*)"')
 
 
@@ -943,7 +943,13 @@ def create_app(
             validators = _parse_revision_validators(request.headers.get("If-Match"))
             current_revision = config_store.get()["revision"]
             if validators is None:
-                base_revision = None
+                response = jsonify({
+                    "error": "A configuration base revision is required.",
+                    "revision": current_revision,
+                })
+                response.status_code = 428
+                response.headers["ETag"] = _revision_etag(current_revision)
+                return response
             elif validators == "*":
                 base_revision = None
             else:

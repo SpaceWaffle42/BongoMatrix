@@ -11,6 +11,7 @@ import threading
 import time
 import unittest
 from datetime import timedelta
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from unittest.mock import Mock, patch
 
@@ -54,6 +55,14 @@ class WebAppTests(unittest.TestCase):
         )
         self.client = self.app.test_client()
 
+    def post_config(self, json=None, client=None, require_revision=True, **kwargs):
+        client = client or self.client
+        if require_revision:
+            headers = dict(kwargs.pop("headers", {}))
+            headers.setdefault("If-Match", f'"{self.store.get()["revision"]}"')
+            kwargs["headers"] = headers
+        return client.post("/api/config", json=json, **kwargs)
+
     def pair_browser(self):
         self.pairing.verify.return_value = True
         self.client.post("/pair", data={"pin": "123456", "device_name": "Test browser"})
@@ -89,7 +98,7 @@ class WebAppTests(unittest.TestCase):
         self.pair_browser()
         self.controller.reload.side_effect = RuntimeError("display unavailable")
 
-        response = self.client.post("/api/config", json={"device": {"name": "Saved Matrix"}})
+        response = self.post_config( json={"device": {"name": "Saved Matrix"}})
 
         self.assertEqual(response.status_code, 503)
         self.assertEqual(response.content_type, "application/json")
@@ -115,18 +124,30 @@ class WebAppTests(unittest.TestCase):
         changed = self.client.get("/api/config", headers={"If-None-Match": 'W/"9", "10"'})
         self.assertEqual(changed.status_code, 200)
 
+    def test_config_save_requires_base_revision(self):
+        self.pair_browser()
+        before = self.store.get()
+
+        response = self.post_config(
+            json={"device": {"name": "Revisionless loser"}}, require_revision=False,
+        )
+
+        self.assertEqual(response.status_code, 428)
+        self.assertLessEqual(len(response.data), 1024)
+        self.assertEqual(response.headers["X-Matrix-Minimum-Client-Contract"], "2")
+        self.assertEqual(self.store.get(), before)
+        self.controller.reload.assert_not_called()
+
     def test_optional_conditional_config_save_rejects_stale_revision(self):
         self.pair_browser()
-        committed = self.client.post(
-            "/api/config", json={"device": {"name": "Winner"}},
+        committed = self.post_config( json={"device": {"name": "Winner"}},
             headers={"If-Match": '"opaque", "0"'},
         )
 
         self.assertEqual(committed.status_code, 200)
         self.assertEqual(committed.headers["ETag"], '"1"')
         self.assertEqual(committed.get_json()["revision"], 1)
-        stale = self.client.post(
-            "/api/config", json={"device": {"name": "Loser"}},
+        stale = self.post_config( json={"device": {"name": "Loser"}},
             headers={"If-Match": '"0"'},
         )
         self.assertEqual(stale.status_code, 412)
@@ -160,8 +181,7 @@ class WebAppTests(unittest.TestCase):
                 changed = self.client.get(
                     "/api/config", headers={"If-None-Match": validator},
                 )
-                stale = self.client.post(
-                    "/api/config", json={}, headers={"If-Match": validator},
+                stale = self.post_config( json={}, headers={"If-Match": validator},
                 )
                 self.assertEqual(changed.status_code, 200)
                 self.assertEqual(stale.status_code, 412)
@@ -174,23 +194,20 @@ class WebAppTests(unittest.TestCase):
                 )
                 self.assertEqual(response.status_code, 431)
 
-        weak_write = self.client.post("/api/config", json={}, headers={"If-Match": 'W/"0"'})
-        stale_list = self.client.post("/api/config", json={}, headers={"If-Match": '"8", "9"'})
+        weak_write = self.post_config( json={}, headers={"If-Match": 'W/"0"'})
+        stale_list = self.post_config( json={}, headers={"If-Match": '"8", "9"'})
         self.assertEqual(weak_write.status_code, 412)
         self.assertEqual(stale_list.status_code, 412)
-        wildcard = self.client.post(
-            "/api/config", json={"device": {"name": "Wildcard"}}, headers={"If-Match": "*"},
+        wildcard = self.post_config( json={"device": {"name": "Wildcard"}}, headers={"If-Match": "*"},
         )
         self.assertEqual((wildcard.status_code, wildcard.headers["ETag"]), (200, '"1"'))
 
-        oversized = self.client.post(
-            "/api/config", data=b"{" + (b" " * 1_048_576),
+        oversized = self.post_config( data=b"{" + (b" " * 1_048_576),
             content_type="application/json",
         )
         self.assertEqual(oversized.status_code, 413)
 
-        streamed_oversized = self.client.post(
-            "/api/config", data=b"{" + (b" " * 1_048_576),
+        streamed_oversized = self.post_config( data=b"{" + (b" " * 1_048_576),
             content_type="application/json",
             environ_overrides={"CONTENT_LENGTH": "", "wsgi.input_terminated": True},
         )
@@ -206,11 +223,931 @@ class WebAppTests(unittest.TestCase):
         self.assertEqual(self.store.get()["revision"], before)
 
     @unittest.skipUnless(shutil.which("node"), "Node.js is required")
+    def test_dashboard_conditionally_saves_loaded_revision(self):
+        self.pair_browser()
+        body = self.client.get("/").get_data(as_text=True)
+
+        self.assertIn("const MATRIX_CLIENT_CONTRACT=2", body)
+        self.assertIn("let matrixLoadedRevision=0", body)
+        self.assertIn("'If-Match':matrixRevisionETag()", body)
+        self.assertIn("matrixLoadedRevision=saved.revision", body)
+        self.assertIn("matrixLoadedRevision=error.data.config.revision", body)
+
+    @unittest.skipUnless(shutil.which("node"), "Node.js is required")
+    def test_dashboard_preload_edit_remains_dirty_when_sync_starts(self):
+        self.pair_browser()
+        body = self.client.get("/").get_data(as_text=True)
+        sync_start = body.index("const MATRIX_CLIENT_CONTRACT=2")
+        sync_end = body.index("const customFontAdvances", sync_start)
+        save_start = body.index("async function saveConfig(")
+        save_end = body.index("\nfunction updateOpenWeatherSecretStatus", save_start)
+        editor_initialization = next(
+            line for line in body.splitlines()
+            if line.startswith("renderMedia();renderCustomLavaPalettes();")
+        )
+        baseline_initialization = next(
+            line for line in body.splitlines()
+            if line.startswith("matrixSavedSnapshot=matrixCurrentSnapshot();")
+        )
+        production = (
+            body[sync_start:sync_end] + body[save_start:save_end] + "\n"
+            + editor_initialization + "\n" + baseline_initialization
+        )
+        scenario = r"""
+class Element {
+  constructor(tag='div'){this.tag=tag;this.children=[];this.listeners={};this.disabled=false;this.removed=false;this.value='';}
+  append(...items){this.children.push(...items)}
+  setAttribute(name,value){this[name]=value}
+  addEventListener(name,handler){(this.listeners[name]??=[]).push(handler)}
+  showModal(){this.open=true;currentDialog=this}
+  focus(){document.activeElement=this}
+  close(){this.open=false}
+  remove(){this.removed=true;if(currentDialog===this)currentDialog=null}
+}
+let currentDialog=null,reloads=0,redirect=null,nextTimer=1;
+const windowListeners={},documentListeners={},responses=[];
+const saveButton=new Element('button'),bodyElement=new Element('body'),field=new Element('input');
+field.value='initial rendered';
+const document={
+  body:bodyElement,activeElement:field,visibilityState:'visible',
+  querySelector(selector){if(selector==='#save-config')return saveButton;if(selector==='.config-revision-dialog')return currentDialog;return null},
+  createElement(tag){return new Element(tag)},
+  addEventListener(name,handler){(documentListeners[name]??=[]).push(handler)},
+  removeEventListener(name,handler){documentListeners[name]=(documentListeners[name]||[]).filter(item=>item!==handler)},
+};
+const locationObject={reload(){reloads++}};
+const window={
+  addEventListener(name,handler){(windowListeners[name]??=[]).push(handler)},
+  removeEventListener(name,handler){windowListeners[name]=(windowListeners[name]||[]).filter(item=>item!==handler)},
+};
+Object.defineProperty(window,'location',{get(){return locationObject},set(value){redirect=value}});
+function configBody(){return {device:{name:field.value}}}
+function setMessage(){}
+function setInterval(){return nextTimer++} function clearInterval(){}
+function setTimeout(){return nextTimer++} function clearTimeout(){}
+function renderMedia(){} function renderCustomLavaPalettes(){} function renderCustomModules(){} function renderBuiltInEditors(){} function refreshDisplayFrame(){}
+function updateStatus(){} function updateOpenWeatherSecretStatus(){}
+function response(status,revision=null,data=null){return {status,statusText:'failed',redirected:false,ok:status>=200&&status<300,headers:{get(name){return name==='X-Matrix-Minimum-Client-Contract'?'2':null}},json:async()=>(data??{revision})}}
+async function fetch(){const item=responses.shift();if(!item)throw new Error('unexpected fetch');return await item}
+globalThis.document=document;globalThis.window=window;globalThis.fetch=fetch;
+""" + production + r"""
+const initialSnapshot=matrixCurrentSnapshot();
+if(PRELOAD_EDIT){
+  field.value='typed before load';field.focus();
+  for(const handler of documentListeners.input||[])handler({target:field});
+}
+responses.push(response(200,1));
+for(const handler of windowListeners.load||[])handler();
+await new Promise(resolve=>setImmediate(resolve));
+if(PRELOAD_EDIT){
+  if(matrixSavedSnapshot!==initialSnapshot||!matrixDirty||!matrixHasUnsavedDraft()||reloads!==0||!currentDialog||currentDialog.matrixRemoteRevision!==1||field.value!=='typed before load'||document.activeElement===field||!saveButton.disabled){
+    throw new Error('pre-load edit was reclassified as saved: newer poll reloaded or failed to open the dirty conflict dialog');
+  }
+  const actions=currentDialog.children.at(-1);
+  if(currentDialog.children[0].textContent!=='Newer saved configuration available'||actions.children[0].textContent!=='Reload latest saved state'||actions.children[1].textContent!=='Remain with unsaved draft')throw new Error('newer poll did not open the exact dirty conflict dialog');
+  const dialogFocus=document.activeElement;
+  responses.push(response(200,2));
+  const saved=await saveConfig();
+  if(saved.saved!==false||document.activeElement!==dialogFocus||field.value!=='typed before load'||!saveButton.disabled)throw new Error('save was not gated while the conflict remained unresolved');
+  actions.children[1].onclick();
+  if(document.activeElement!==field||field.value!=='typed before load'||saveButton.disabled||matrixRecoveryPending)throw new Error('Remain did not preserve the pre-load draft and restore its focus');
+  responses.push(response(200,2,{revision:2}));
+  const successful=await saveConfig();
+  if(!successful.saved||matrixSavedSnapshot!==matrixCurrentSnapshot()||matrixDirty||matrixLoadedRevision!==2)throw new Error('normal save did not update the saved baseline');
+}else{
+  if(matrixSavedSnapshot!==initialSnapshot||matrixDirty||matrixHasUnsavedDraft()||reloads!==1||currentDialog)throw new Error('initial no-edit path was not clean or did not reload exactly once');
+}
+"""
+        harness = r"""
+const vm=require('node:vm');
+const scenario=SCENARIO_SOURCE;
+const run=preloadEdit=>vm.runInNewContext(
+  '(async()=>{'+scenario.replaceAll('PRELOAD_EDIT',preloadEdit?'true':'false')+'})()',
+  {console,AbortController,structuredClone,setImmediate},
+);
+(async()=>{
+ await run(true);
+ await run(false);
+ console.log('PRELOAD_EDIT_SYNC_PASS');
+})().catch(error=>{console.error(error);process.exit(1)});
+""".replace("SCENARIO_SOURCE", json.dumps(scenario))
+        node = shutil.which("node")
+        assert node is not None
+        result = subprocess.run(
+            [node, "-e", harness], text=True, capture_output=True,
+            cwd=Path(__file__).parents[1], check=False,
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("PRELOAD_EDIT_SYNC_PASS", result.stdout)
+
+    @unittest.skipUnless(shutil.which("node"), "Node.js is required")
+    @unittest.skipUnless(
+        os.environ.get("MATRIX_CHROMIUM")
+        and Path(os.environ.get("MATRIX_CHROMIUM", "")).is_file()
+        and os.access(os.environ.get("MATRIX_CHROMIUM", ""), os.X_OK),
+        "MATRIX_CHROMIUM browser is required",
+    )
+    def test_advanced_canvas_baseline_uses_real_editor_before_load(self):
+        advanced_canvas = {
+            "id": "custom_adversarial_canvas",
+            "name": "Distinctive advanced canvas",
+            "type": "canvas",
+            "background": "#102938",
+            "frame_count": 37,
+            "fps": 23,
+            "playback": "ping_pong",
+            "layers": [{
+                "id": "layer_distinctive",
+                "name": "Layer with exact fields",
+                "type": "rectangle",
+                "visible": True,
+                "properties": {
+                    "present": True, "x": 7, "y": 11, "width": 19, "height": 13,
+                    "rotation": 17, "colour": "#abcdef", "filled": True, "z_index": 9,
+                },
+                "keyframes": [{
+                    "frame": 31, "easing": "ease_in_out",
+                    "properties": {"x": 41, "rotation": 271, "colour": "#fedcba"},
+                }],
+            }],
+            "overrides": [{
+                "frame": 19, "layer_id": "layer_distinctive",
+                "properties": {"y": 29, "present": False, "z_index": -4},
+            }],
+        }
+        self.store.update({"custom_modules": [advanced_canvas]})
+        expected_canvas = self.store.get()["custom_modules"][0]
+        self.pair_browser()
+        body = self.client.get("/").get_data(as_text=True)
+        asset = (Path(__file__).parents[1] / "app/static/custom_canvas.js").read_text()
+        chromium = os.environ["MATRIX_CHROMIUM"]
+        node = shutil.which("node")
+        assert node is not None
+
+        probe_template = r"""
+<script>
+const PROBE_EDIT=__PROBE_EDIT__,PROBE_EXPECTED=__PROBE_EXPECTED__;
+let probePosted=null;
+globalThis.fetch=async(path,options={})=>{
+  path=String(path);
+  if(path.startsWith('/api/display-frame'))return {status:503,redirected:false,ok:false};
+  if(path==='/api/status')return {status:200,redirected:false,ok:true,json:async()=>({running:false,minimum_client_contract:2})};
+  if(path==='/api/config'&&options.method==='POST'){
+    probePosted=JSON.parse(options.body);
+    return {status:200,redirected:false,ok:true,headers:{get:()=>null},json:async()=>({revision:2})};
+  }
+  if(path==='/api/config')return PROBE_EDIT
+    ? {status:200,redirected:false,ok:true,headers:{get:()=> '2'},json:async()=>({revision:2})}
+    : {status:304,redirected:false,ok:false,headers:{get:()=> '2'},json:async()=>({})};
+  return {status:404,redirected:false,ok:false,headers:{get:()=>null},json:async()=>({})};
+};
+const probeField=document.querySelector('#device-name');
+if(PROBE_EDIT){probeField.value='typed after canvas init before load';probeField.focus();probeField.dispatchEvent(new Event('input',{bubbles:true}));}
+addEventListener('load',async()=>{
+  await new Promise(resolve=>setTimeout(resolve,0));
+  const saved=JSON.parse(matrixSavedSnapshot),current=JSON.parse(matrixCurrentSnapshot());
+  const initial={
+    savedCanvas:saved.custom_modules[0],currentCanvas:current.custom_modules[0],
+    canvasEditor:document.querySelector('.custom-module-card')?.dataset.editorType||null,
+    dirty:matrixDirty,unsaved:matrixHasUnsavedDraft(),value:probeField.value,
+    conflict:!!document.querySelector('.config-revision-dialog'),recovery:matrixRecoveryPending,
+  };
+  if(PROBE_EDIT)document.querySelector('.config-revision-dialog .btn:not(.primary)').click();
+  stopMatrixConfigSync();
+  probeField.value=PROBE_EDIT?'unrelated save after pre-load edit':'unrelated normal save';
+  const savedResult=await saveConfig();
+  globalThis.__advancedCanvasProbe={initial,savedResult,postedCanvas:probePosted?.custom_modules?.[0],expected:PROBE_EXPECTED};
+});
+</script>
+"""
+        cdp_probe = r"""
+const port=process.argv[1],pages=JSON.parse(process.argv[2]);let endpoint;
+for(let attempt=0;attempt<50;attempt++){try{endpoint=await fetch(`http://127.0.0.1:${port}/json/new`,{method:'PUT'}).then(r=>r.json());break}catch(_){await new Promise(r=>setTimeout(r,100))}}
+if(!endpoint)throw new Error('Chromium DevTools endpoint unavailable');
+const socket=new WebSocket(endpoint.webSocketDebuggerUrl),pending=new Map();let nextId=1,loadedResolve=()=>{};
+socket.onmessage=event=>{const message=JSON.parse(event.data);if(message.id&&pending.has(message.id)){const request=pending.get(message.id);pending.delete(message.id);message.error?request.reject(new Error(JSON.stringify(message.error))):request.resolve(message.result)}else if(message.method==='Page.loadEventFired')loadedResolve()};
+await new Promise((resolve,reject)=>{socket.onopen=resolve;socket.onerror=reject});
+const send=(method,params={})=>{const id=nextId++;socket.send(JSON.stringify({id,method,params}));return new Promise((resolve,reject)=>pending.set(id,{resolve,reject}))};
+const evaluate=async expression=>{const result=await send('Runtime.evaluate',{expression,returnByValue:true});if(result.exceptionDetails)throw new Error(JSON.stringify(result.exceptionDetails));return result.result.value};
+try{
+ await send('Runtime.enable');await send('Page.enable');
+ const reports=[];
+ for(const page of pages){
+   const loaded=new Promise(resolve=>loadedResolve=resolve);await send('Page.navigate',{url:'file://'+page});await loaded;
+   let report;for(let attempt=0;attempt<100;attempt++){report=await evaluate('globalThis.__advancedCanvasProbe||null');if(report)break;await new Promise(resolve=>setTimeout(resolve,20))}
+   if(!report)throw new Error('advanced canvas probe timed out');reports.push(report);
+ }
+ console.log(JSON.stringify(reports));
+}finally{socket.close()}
+"""
+        with tempfile.TemporaryDirectory(prefix="matrix-canvas-baseline-") as directory:
+            directory = Path(directory)
+            (directory / "custom_canvas.js").write_text(asset)
+            pages = []
+            for edit in (False, True):
+                injected = probe_template.replace("__PROBE_EDIT__", "true" if edit else "false").replace(
+                    "__PROBE_EXPECTED__", json.dumps(expected_canvas),
+                )
+                page_body = body.replace('src="/static/custom_canvas.js"', 'src="custom_canvas.js"')
+                page = directory / ("edit.html" if edit else "clean.html")
+                page.write_text(page_body.replace("</body>", injected + "</body>"))
+                pages.append(str(page))
+            profile = directory / "profile"
+            browser = subprocess.Popen([
+                chromium, "--headless", "--no-sandbox", "--disable-gpu",
+                "--remote-debugging-port=0", f"--user-data-dir={profile}", "about:blank",
+            ], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            try:
+                active_port = profile / "DevToolsActivePort"
+                for _attempt in range(50):
+                    if active_port.is_file():
+                        break
+                    if browser.poll() is not None:
+                        self.fail("Chromium exited before publishing its DevTools port")
+                    time.sleep(0.1)
+                self.assertTrue(active_port.is_file(), "Chromium DevTools port unavailable")
+                completed = subprocess.run(
+                    [node, "-e", cdp_probe, active_port.read_text().splitlines()[0], json.dumps(pages)],
+                    capture_output=True, text=True, timeout=30,
+                )
+            finally:
+                browser.terminate()
+                try:
+                    browser.wait(timeout=5)
+                except subprocess.TimeoutExpired:
+                    browser.kill(); browser.wait(timeout=5)
+                for cleanup_attempt in range(20):
+                    try:
+                        shutil.rmtree(profile)
+                        break
+                    except FileNotFoundError:
+                        break
+                    except OSError:
+                        if cleanup_attempt == 19:
+                            raise
+                        time.sleep(0.05)
+        self.assertEqual(completed.returncode, 0, completed.stderr)
+        clean, edited = json.loads(completed.stdout.strip().splitlines()[-1])
+        for report in (clean, edited):
+            self.assertEqual(report["initial"]["savedCanvas"], expected_canvas)
+            self.assertEqual(report["initial"]["currentCanvas"], expected_canvas)
+            self.assertEqual(report["initial"]["canvasEditor"], "canvas")
+            self.assertEqual(report["postedCanvas"], expected_canvas)
+            self.assertTrue(report["savedResult"]["saved"])
+        self.assertFalse(clean["initial"]["dirty"])
+        self.assertFalse(clean["initial"]["unsaved"])
+        self.assertFalse(clean["initial"]["conflict"])
+        self.assertTrue(edited["initial"]["dirty"])
+        self.assertTrue(edited["initial"]["unsaved"])
+        self.assertTrue(edited["initial"]["conflict"])
+        self.assertTrue(edited["initial"]["recovery"])
+        self.assertEqual(edited["initial"]["value"], "typed after canvas init before load")
+
+    @unittest.skipUnless(shutil.which("node"), "Node.js is required")
+    @unittest.skipUnless(
+        os.environ.get("MATRIX_CHROMIUM")
+        and Path(os.environ.get("MATRIX_CHROMIUM", "")).is_file()
+        and os.access(os.environ.get("MATRIX_CHROMIUM", ""), os.X_OK),
+        "MATRIX_CHROMIUM browser is required",
+    )
+    def test_delayed_canvas_asset_preserves_prebaseline_real_input(self):
+        self.pair_browser()
+        body = self.client.get("/").get_data(as_text=True)
+        asset = (Path(__file__).parents[1] / "app/static/custom_canvas.js").read_bytes()
+        state = {
+            name: {"pages": 0, "assets": 0, "gets": 0, "posts": 0}
+            for name in ("edited", "clean")
+        }
+
+        class Handler(BaseHTTPRequestHandler):
+            def log_message(self, format, *args):
+                pass
+
+            def send(self, status, content=b"", content_type="application/json", headers=None):
+                self.send_response(status)
+                self.send_header("Content-Type", content_type)
+                self.send_header("Content-Length", str(len(content)))
+                for name, value in (headers or {}).items():
+                    self.send_header(name, value)
+                self.end_headers()
+                self.wfile.write(content)
+
+            def scenario(self):
+                referer = self.headers.get("Referer", "")
+                return "clean" if "/clean" in referer or "scenario=clean" in self.path else "edited"
+
+            def do_GET(self):
+                scenario = self.scenario()
+                if self.path in ("/edited", "/clean"):
+                    scenario = self.path[1:]
+                    state[scenario]["pages"] += 1
+                    page = body.replace(
+                        'src="/static/custom_canvas.js"',
+                        f'src="/custom_canvas.js?scenario={scenario}"',
+                    ).encode()
+                    self.send(200, page, "text/html; charset=utf-8")
+                elif self.path.startswith("/custom_canvas.js"):
+                    state[scenario]["assets"] += 1
+                    if state[scenario]["assets"] == 1:
+                        time.sleep(2.5)
+                    self.send(200, asset, "text/javascript; charset=utf-8")
+                elif self.path == "/static/custom_canvas.css":
+                    self.send(200, b"", "text/css")
+                elif self.path.startswith("/api/display-frame"):
+                    self.send(503, json.dumps({"error": "probe"}).encode())
+                elif self.path == "/api/status":
+                    self.send(200, json.dumps({"running": False, "minimum_client_contract": 2}).encode())
+                elif self.path == "/api/config":
+                    state[scenario]["gets"] += 1
+                    time.sleep(0.2)
+                    revision = 3 if state[scenario]["posts"] else 2
+                    if state[scenario]["gets"] == 1 or (state[scenario]["posts"] and state[scenario]["gets"] == 2):
+                        self.send(200, json.dumps({"revision": revision}).encode(), headers={
+                            "ETag": f'"{revision}"', "X-Matrix-Minimum-Client-Contract": "2",
+                        })
+                    else:
+                        self.send(304, b"", headers={"ETag": f'"{revision}"'})
+                else:
+                    self.send(404, b"{}")
+
+            def do_POST(self):
+                scenario = self.scenario()
+                length = int(self.headers.get("Content-Length", "0"))
+                self.rfile.read(length)
+                if self.path == "/api/config":
+                    state[scenario]["posts"] += 1
+                    self.send(200, b'{"revision":2}')
+                else:
+                    self.send(404, b"{}")
+
+        server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+        server_thread = threading.Thread(target=server.serve_forever, daemon=True)
+        server_thread.start()
+        def stop_server():
+            server.shutdown()
+            server.server_close()
+            server_thread.join(timeout=5)
+        self.addCleanup(stop_server)
+        chromium = os.environ["MATRIX_CHROMIUM"]
+        node = shutil.which("node")
+        assert node is not None
+        cdp_probe = r"""
+const debugPort=process.argv[1],appPort=process.argv[2];
+const sleep=ms=>new Promise(resolve=>setTimeout(resolve,ms));
+let endpoint;
+for(let attempt=0;attempt<50;attempt++){try{endpoint=await fetch(`http://127.0.0.1:${debugPort}/json/new`,{method:'PUT'}).then(r=>r.json());break}catch(_){await sleep(100)}}
+if(!endpoint)throw new Error('Chromium DevTools endpoint unavailable');
+const socket=new WebSocket(endpoint.webSocketDebuggerUrl),pending=new Map();let nextId=1;
+socket.onmessage=event=>{const message=JSON.parse(event.data);if(message.id&&pending.has(message.id)){const request=pending.get(message.id);pending.delete(message.id);message.error?request.reject(new Error(JSON.stringify(message.error))):request.resolve(message.result)}};
+await new Promise((resolve,reject)=>{socket.onopen=resolve;socket.onerror=reject});
+const send=(method,params={})=>{const id=nextId++;socket.send(JSON.stringify({id,method,params}));return new Promise((resolve,reject)=>pending.set(id,{resolve,reject}))};
+const evaluate=async(expression,awaitPromise=false)=>{const result=await send('Runtime.evaluate',{expression,returnByValue:true,awaitPromise});if(result.exceptionDetails)throw new Error(JSON.stringify(result.exceptionDetails));return result.result.value};
+const waitFor=async(expression,timeout=10000)=>{const deadline=Date.now()+timeout;let value;while(Date.now()<deadline){try{value=await evaluate(expression);if(value)return value}catch(_){}await sleep(25)}throw new Error('timed out waiting for '+expression)};
+try{
+  await send('Runtime.enable');await send('Page.enable');
+  await send('Page.navigate',{url:`http://127.0.0.1:${appPort}/edited`});
+  await waitFor(`document.readyState==='loading'&&typeof matrixDirty==='boolean'&&matrixSavedSnapshot===null&&typeof window.orderedLayersForFrame==='undefined'&&!!document.querySelector('#device-name')`);
+  await evaluate(`document.querySelector('#device-name').focus();document.querySelector('#device-name').select();true`);
+  await send('Input.insertText',{text:'pre-baseline Chromium draft'});
+  const during=await evaluate(`({ready:document.readyState,external:typeof window.orderedLayersForFrame!=='undefined',baseline:matrixSavedSnapshot,dirty:matrixDirty,value:document.querySelector('#device-name').value,focused:document.activeElement===document.querySelector('#device-name')})`);
+  if(during.ready!=='loading'||during.external||during.baseline!==null||!during.dirty||during.value!=='pre-baseline Chromium draft'||!during.focused)throw new Error('CDP input did not create the intended parser-blocked dirty state: '+JSON.stringify(during));
+  await waitFor(`document.readyState==='complete'`);
+  const outcome=await waitFor(`document.querySelector('.config-revision-dialog')&&({
+    value:document.querySelector('#device-name').value,dirty:matrixDirty,unsaved:matrixHasUnsavedDraft(),
+    equal:matrixSavedSnapshot===matrixCurrentSnapshot(),recovery:matrixRecoveryPending,disabled:document.querySelector('#save-config').disabled,
+    title:document.querySelector('.config-revision-dialog h2').textContent,
+    buttons:[...document.querySelectorAll('.config-revision-dialog button')].map(button=>button.textContent),
+    focus:document.activeElement?.textContent
+  })`,7000);
+  if(outcome.value!=='pre-baseline Chromium draft'||!outcome.dirty||!outcome.unsaved||!outcome.equal||!outcome.recovery||!outcome.disabled||outcome.title!=='Newer saved configuration available'||JSON.stringify(outcome.buttons)!==JSON.stringify(['Reload latest saved state','Remain with unsaved draft'])||outcome.focus!=='Reload latest saved state')throw new Error('pre-baseline draft was silently reloaded or conflict behavior was incomplete: '+JSON.stringify(outcome));
+  const gated=await evaluate(`saveConfig()`,true);
+  if(gated.saved!==false||await evaluate(`document.querySelector('#device-name').value!=='pre-baseline Chromium draft'||!document.querySelector('#save-config').disabled||document.activeElement?.textContent!=='Reload latest saved state'`))throw new Error('conflict did not gate save without moving focus');
+  await evaluate(`document.querySelectorAll('.config-revision-dialog button')[1].click();true`);
+  if(!await waitFor(`!document.querySelector('.config-revision-dialog')&&document.activeElement===document.querySelector('#device-name')&&!matrixRecoveryPending&&!document.querySelector('#save-config').disabled`))throw new Error('Remain did not preserve draft and restore focus');
+  const saved=await evaluate(`saveConfig()`,true);
+  const committed=await evaluate(`({value:document.querySelector('#device-name').value,dirty:matrixDirty,unsaved:matrixHasUnsavedDraft(),equal:matrixSavedSnapshot===matrixCurrentSnapshot(),revision:matrixLoadedRevision})`);
+  if(!saved.saved||committed.value!=='pre-baseline Chromium draft'||committed.dirty||committed.unsaved||!committed.equal||committed.revision!==2)throw new Error('successful save did not commit the draft baseline: '+JSON.stringify(committed));
+  const directMutation=await evaluate(`(()=>{const field=document.querySelector('#device-name');field.value='programmatic draft';const unsaved=matrixHasUnsavedDraft(),dirty=matrixDirty;field.value='pre-baseline Chromium draft';return {unsaved,dirty,restoredClean:!matrixHasUnsavedDraft()}})()`);
+  if(!directMutation.unsaved||directMutation.dirty||!directMutation.restoredClean)throw new Error('snapshot mismatch did not catch a direct DOM mutation: '+JSON.stringify(directMutation));
+  await evaluate(`matrixCheckForNewerConfig()`);
+  await waitFor(`performance.getEntriesByType('navigation')[0]?.type==='reload'`,7000);
+
+  const clean=await fetch(`http://127.0.0.1:${debugPort}/json/new`,{method:'PUT'}).then(response=>response.json());
+  const cleanSocket=new WebSocket(clean.webSocketDebuggerUrl),cleanPending=new Map();let cleanId=1;
+  cleanSocket.onmessage=event=>{const message=JSON.parse(event.data);if(message.id&&cleanPending.has(message.id)){const request=cleanPending.get(message.id);cleanPending.delete(message.id);message.error?request.reject(new Error(JSON.stringify(message.error))):request.resolve(message.result)}};
+  await new Promise((resolve,reject)=>{cleanSocket.onopen=resolve;cleanSocket.onerror=reject});
+  const cleanSend=(method,params={})=>{const id=cleanId++;cleanSocket.send(JSON.stringify({id,method,params}));return new Promise((resolve,reject)=>cleanPending.set(id,{resolve,reject}))};
+  const cleanEval=async expression=>{const result=await cleanSend('Runtime.evaluate',{expression,returnByValue:true});return result.result?.value};
+  await cleanSend('Runtime.enable');await cleanSend('Page.enable');await cleanSend('Page.navigate',{url:`http://127.0.0.1:${appPort}/clean`});
+  const cleanDeadline=Date.now()+10000;let cleanInitial=false;while(Date.now()<cleanDeadline){try{cleanInitial=await cleanEval(`document.readyState==='complete'&&matrixSavedSnapshot!==null&&!matrixDirty&&!matrixHasUnsavedDraft()`);if(cleanInitial)break}catch(_){}await sleep(20)}
+  if(!cleanInitial)throw new Error('no-edit delayed-asset path was not initially clean');
+  let cleanReload=false;while(Date.now()<cleanDeadline){try{cleanReload=await cleanEval(`performance.getEntriesByType('navigation')[0]?.type==='reload'`);if(cleanReload)break}catch(_){}await sleep(20)}
+  if(!cleanReload)throw new Error('no-edit delayed-asset path did not auto-reload');
+  await sleep(500);cleanSocket.close();
+  console.log('DELAYED_CANVAS_PREBASELINE_PASS');
+}finally{socket.close()}
+"""
+        with tempfile.TemporaryDirectory(prefix="matrix-delayed-canvas-") as directory:
+            profile = Path(directory) / "profile"
+            browser = subprocess.Popen([
+                chromium, "--headless", "--no-sandbox", "--disable-gpu",
+                "--remote-debugging-port=0", f"--user-data-dir={profile}", "about:blank",
+            ], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            try:
+                active_port = profile / "DevToolsActivePort"
+                for _attempt in range(50):
+                    if active_port.is_file():
+                        break
+                    if browser.poll() is not None:
+                        self.fail("Chromium exited before publishing its DevTools port")
+                    time.sleep(0.1)
+                self.assertTrue(active_port.is_file(), "Chromium DevTools port unavailable")
+                completed = subprocess.run([
+                    node, "-e", cdp_probe, active_port.read_text().splitlines()[0], str(server.server_port),
+                ], capture_output=True, text=True, timeout=35)
+                self.assertEqual(completed.returncode, 0, completed.stderr)
+                self.assertIn("DELAYED_CANVAS_PREBASELINE_PASS", completed.stdout)
+                self.assertEqual(state["edited"]["pages"], 2)
+                self.assertEqual(state["edited"]["posts"], 1)
+                self.assertEqual(state["clean"]["pages"], 2)
+                self.assertEqual(state["clean"]["posts"], 0)
+            finally:
+                active_failure = sys.exc_info()[0] is not None
+                browser.terminate()
+                try:
+                    browser.wait(timeout=5)
+                except subprocess.TimeoutExpired:
+                    browser.kill(); browser.wait(timeout=5)
+                cleanup_error = None
+                for cleanup_attempt in range(20):
+                    try:
+                        shutil.rmtree(profile)
+                        cleanup_error = None
+                        break
+                    except FileNotFoundError:
+                        cleanup_error = None
+                        break
+                    except OSError as error:
+                        cleanup_error = error
+                        time.sleep(0.05)
+                if cleanup_error is not None and not active_failure:
+                    raise cleanup_error
+    @unittest.skipUnless(shutil.which("node"), "Node.js is required")
+    def test_stale_save_preserves_client_draft(self):
+        self.pair_browser()
+        winner = self.post_config(json={"device": {"name": "Winner"}}, headers={"If-Match": '"0"'})
+        stale = self.post_config(json={"device": {"name": "Draft"}}, headers={"If-Match": '"0"'})
+        body = self.client.get("/").get_data(as_text=True)
+
+        self.assertEqual(winner.status_code, 200)
+        self.assertEqual(stale.status_code, 412)
+        self.assertEqual(stale.get_json()["revision"], 1)
+        start = body.index("async function saveConfig(")
+        end = body.index("\nfunction updateOpenWeatherSecretStatus", start)
+        save_function = body[start:end]
+        harness = r"""
+let matrixRecoveryPending=false,matrixLoadedRevision=0,highestNotifiedRemoteRevision=0;
+let matrixSavedSnapshot='saved baseline',matrixDirty=true,messageText='',request=null;
+const configState={device:{name:'unsaved draft'}};
+function matrixRevisionETag(){return '"'+matrixLoadedRevision+'"'}
+function configBody(){return structuredClone(configState)}
+function setMessage(text){messageText=text}
+async function api(path,options){request={path,options};const error=new Error('Configuration changed elsewhere.');error.data={revision:1};throw error}
+""" + save_function + r"""
+(async()=>{
+ const result=await saveConfig();
+ if(result.saved!==false||matrixLoadedRevision!==0||highestNotifiedRemoteRevision!==0||matrixSavedSnapshot!=='saved baseline'||matrixDirty!==true)throw new Error('stale response changed local save state');
+ if(configState.device.name!=='unsaved draft'||request.options.headers['If-Match']!=='"0"'||JSON.parse(request.options.body).device.name!=='unsaved draft')throw new Error('draft request was not preserved');
+ console.log('STALE_SAVE_PRESERVATION_PASS');
+})().catch(error=>{console.error(error);process.exit(1)});
+"""
+        node = shutil.which("node")
+        assert node is not None
+        result = subprocess.run(
+            [node, "-e", harness], text=True, capture_output=True,
+            cwd=Path(__file__).parents[1], check=False,
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("STALE_SAVE_PRESERVATION_PASS", result.stdout)
+
+    @unittest.skipUnless(shutil.which("node"), "Node.js is required")
+    def test_paired_revision_sync_preserves_dirty_draft_and_orders_responses(self):
+        self.pair_browser()
+        body = self.client.get("/").get_data(as_text=True)
+
+        required = (
+            "let highestNotifiedRemoteRevision=matrixLoadedRevision",
+            "async function matrixCheckForNewerConfig()",
+            "'If-None-Match':matrixRevisionETag()",
+            "if(remoteRevision<=matrixLoadedRevision)",
+            "if(remoteRevision<=highestNotifiedRemoteRevision)",
+            "matrixSyncController.abort()",
+            "setInterval(matrixCheckForNewerConfig,2500)",
+            "window.addEventListener('focus',matrixCheckForNewerConfig)",
+            "window.addEventListener('online',matrixCheckForNewerConfig)",
+            "document.visibilityState==='visible'",
+            "clearInterval(matrixStatusTimer)",
+            "if(!matrixSyncStopped)matrixFrameTimer=setTimeout",
+            "Reload latest saved state",
+            "Remain with unsaved draft",
+        )
+        for source in required:
+            with self.subTest(source=source):
+                self.assertIn(source, body)
+
+        start = body.index("const MATRIX_CLIENT_CONTRACT=2")
+        end = body.index("const customFontAdvances", start)
+        synchronization = body[start:end]
+        save_start = body.index("async function saveConfig(")
+        save_end = body.index("\nfunction updateOpenWeatherSecretStatus", save_start)
+        save_function = body[save_start:save_end]
+        harness = r"""
+class Element {
+  constructor(tag='div'){this.tag=tag;this.children=[];this.listeners={};this.disabled=false;this.removed=false;}
+  append(...items){this.children.push(...items)}
+  setAttribute(name,value){this[name]=value}
+  addEventListener(name,handler){this.listeners[name]=handler}
+  showModal(){this.open=true;currentDialog=this}
+  focus(){document.activeElement=this}
+  close(){this.open=false}
+  remove(){this.removed=true;if(currentDialog===this)currentDialog=null}
+}
+let currentDialog=null,reloads=0,redirect=null,configState={device:{name:'saved'}},nextTimer=1;
+const windowListeners={},documentListeners={},clearedIntervals=[],clearedTimeouts=[];
+const message=new Element('p'),saveButton=new Element('button'),bodyElement=new Element('body'),originalFocus=new Element('input');
+message.classList={toggle(){}};
+const document={
+  body:bodyElement,activeElement:originalFocus,visibilityState:'visible',
+  querySelector(selector){if(selector==='#message')return message;if(selector==='#save-config')return saveButton;if(selector==='.config-revision-dialog')return currentDialog;return null},
+  createElement(tag){return new Element(tag)},
+  addEventListener(name,handler){documentListeners[name]=handler},
+  removeEventListener(name,handler){if(documentListeners[name]===handler)delete documentListeners[name]},
+};
+const locationObject={reload(){reloads++}};
+const window={
+  addEventListener(name,handler){windowListeners[name]=handler},
+  removeEventListener(name,handler){if(windowListeners[name]===handler)delete windowListeners[name]},
+};
+Object.defineProperty(window,'location',{get(){return locationObject},set(value){redirect=value}});
+function configBody(){return structuredClone(configState)}
+function setMessage(text){message.textContent=text}
+function setInterval(){return nextTimer++} function clearInterval(id){clearedIntervals.push(id)}
+function setTimeout(){return nextTimer++} function clearTimeout(id){clearedTimeouts.push(id)}
+const responses=[];
+function response(status,revision=null,data=null){return {status,statusText:'failed',redirected:false,ok:status>=200&&status<300,headers:{get(name){return name==='X-Matrix-Minimum-Client-Contract'?'2':null}},json:async()=>(data??{revision})}}
+async function fetch(){const item=responses.shift();return await item}
+globalThis.document=document;globalThis.window=window;globalThis.fetch=fetch;
+""" + synchronization + "\n" + save_function + r"""
+(async()=>{
+ matrixSavedSnapshot=matrixCurrentSnapshot();
+ responses.push(response(200,1));await matrixCheckForNewerConfig();
+ if(reloads!==1||!matrixRecoveryPending)throw new Error('clean newer snapshot did not reload exactly once');
+ matrixUpgradeReloadRequested=false;setMatrixRecoveryPending(false);matrixLoadedRevision=0;highestNotifiedRemoteRevision=0;
+ configState.device.name='unsaved';matrixDirty=true;const savedBaseline=matrixSavedSnapshot;
+ document.activeElement=originalFocus;responses.push(response(200,1));await matrixCheckForNewerConfig();
+ let dialog=currentDialog;if(!dialog||matrixLoadedRevision!==0||matrixSavedSnapshot!==savedBaseline||configState.device.name!=='unsaved')throw new Error('dirty draft/base changed');
+ let actions=dialog.children.at(-1);if(!saveButton.disabled)throw new Error('save was not gated');
+ actions.children[1].onclick();
+ if(highestNotifiedRemoteRevision!==1||matrixRecoveryPending||saveButton.disabled||document.activeElement!==originalFocus)throw new Error('Remain did not preserve and restore state');
+ const priorDialogs=bodyElement.children.length;responses.push(response(200,1));await matrixCheckForNewerConfig();
+ if(bodyElement.children.length!==priorDialogs)throw new Error('same revision warned twice');
+ responses.push(response(200,2));await matrixCheckForNewerConfig();
+ if(!currentDialog||bodyElement.children.length!==priorDialogs+1)throw new Error('newer revision did not warn');
+ currentDialog.children.at(-1).children[1].onclick();
+ let resolveOld,resolveNew;responses.push(new Promise(resolve=>resolveOld=resolve));responses.push(new Promise(resolve=>resolveNew=resolve));
+ const oldCheck=matrixCheckForNewerConfig(),newCheck=matrixCheckForNewerConfig();resolveNew(response(200,4));await newCheck;
+ currentDialog.children.at(-1).children[1].onclick();resolveOld(response(200,3));await oldCheck;
+ if(highestNotifiedRemoteRevision!==4||currentDialog)throw new Error('older delayed response was not superseded');
+ matrixLoadedRevision=0;highestNotifiedRemoteRevision=0;matrixUpgradeReloadRequested=false;setMatrixRecoveryPending(false);
+ configState.device.name='saved';matrixSavedSnapshot=matrixCurrentSnapshot();configState.device.name='local save';matrixDirty=true;document.activeElement=originalFocus;
+ const submittedSnapshot=matrixCurrentSnapshot(),reloadsBeforeLocalSave=reloads;
+ let resolveSave;responses.push(new Promise(resolve=>resolveSave=resolve));responses.push(response(200,1));responses.push(response(200,3));
+ const localSave=saveConfig();await matrixCheckForNewerConfig();
+ const localSaveDialog=currentDialog,localSaveDialogFocus=document.activeElement;
+ if(!localSaveDialog||localSaveDialog.matrixRemoteRevision!==1||!matrixRecoveryPending||!saveButton.disabled)throw new Error('committed local revision was not observed during pending save');
+ await matrixCheckForNewerConfig();
+ if(currentDialog!==localSaveDialog||currentDialog.matrixRemoteRevision!==3||document.activeElement!==localSaveDialogFocus)throw new Error('later revision was forgotten while successful save response remained pending');
+ resolveSave(response(200,1));const localSaveResult=await localSave;
+ if(!localSaveResult.saved||currentDialog!==localSaveDialog||currentDialog.matrixRemoteRevision!==3||!matrixRecoveryPending||!saveButton.disabled)throw new Error('successful local save dismissed or ungated a later remote conflict');
+ if(matrixLoadedRevision!==1||matrixSavedSnapshot!==submittedSnapshot||matrixCurrentSnapshot()!==submittedSnapshot||document.activeElement!==localSaveDialogFocus||reloads!==reloadsBeforeLocalSave)throw new Error('successful local save did not advance baseline/revision while preserving draft, focus, and reload state');
+ currentDialog.children.at(-1).children[1].onclick();
+ if(highestNotifiedRemoteRevision!==3)throw new Error('Remain did not acknowledge the latest revision retained by the successful-save dialog');
+ matrixLoadedRevision=0;highestNotifiedRemoteRevision=0;matrixUpgradeReloadRequested=false;setMatrixRecoveryPending(false);
+ configState.device.name='warning baseline';matrixSavedSnapshot=matrixCurrentSnapshot();configState.device.name='warning equality draft';matrixDirty=true;document.activeElement=originalFocus;
+ const warningEqualitySnapshot=matrixCurrentSnapshot(),reloadsBeforeWarningEquality=reloads;
+ let resolveWarningEquality;responses.push(new Promise(resolve=>resolveWarningEquality=resolve));responses.push(response(200,1));
+ const warningEqualitySave=saveConfig();await matrixCheckForNewerConfig();
+ if(!currentDialog||document.activeElement===originalFocus)throw new Error('warning equality poll did not focus its real dialog');
+ resolveWarningEquality(response(503,null,{error:'Committed equality warning',committed:true,config:{revision:1}}));const warningEqualityResult=await warningEqualitySave;
+ if(!warningEqualityResult.saved||warningEqualityResult.warning!=='Committed equality warning'||message.textContent!=='Committed equality warning')throw new Error('committed equality warning was not preserved');
+ if(currentDialog||matrixRecoveryPending||saveButton.disabled||document.activeElement!==originalFocus)throw new Error('committed equality warning did not dismiss, ungate, and restore focus');
+ if(matrixLoadedRevision!==1||matrixSavedSnapshot!==warningEqualitySnapshot||reloads!==reloadsBeforeWarningEquality)throw new Error('committed equality warning did not advance baseline/revision without reload');
+ matrixLoadedRevision=0;highestNotifiedRemoteRevision=0;matrixUpgradeReloadRequested=false;setMatrixRecoveryPending(false);
+ configState.device.name='warning newer baseline';matrixSavedSnapshot=matrixCurrentSnapshot();configState.device.name='warning newer draft';matrixDirty=true;document.activeElement=originalFocus;
+ const warningNewerSnapshot=matrixCurrentSnapshot(),reloadsBeforeWarningNewer=reloads;
+ let resolveWarningNewer;responses.push(new Promise(resolve=>resolveWarningNewer=resolve));responses.push(response(200,1));responses.push(response(200,3));
+ const warningNewerSave=saveConfig();await matrixCheckForNewerConfig();const warningNewerDialog=currentDialog,warningNewerDialogFocus=document.activeElement;
+ if(!warningNewerDialog||warningNewerDialog.matrixRemoteRevision!==1)throw new Error('committed-warning equality poll did not open its real dialog');
+ await matrixCheckForNewerConfig();
+ if(currentDialog!==warningNewerDialog||currentDialog.matrixRemoteRevision!==3||document.activeElement!==warningNewerDialogFocus)throw new Error('later revision was forgotten while committed-warning response remained pending');
+ resolveWarningNewer(response(503,null,{error:'Committed newer warning',committed:true,config:{revision:1}}));const warningNewerResult=await warningNewerSave;
+ if(!warningNewerResult.saved||warningNewerResult.warning!=='Committed newer warning'||message.textContent!=='Committed newer warning')throw new Error('committed genuinely-newer warning was not preserved');
+ if(currentDialog!==warningNewerDialog||currentDialog.matrixRemoteRevision!==3||!matrixRecoveryPending||!saveButton.disabled||document.activeElement!==warningNewerDialogFocus)throw new Error('committed warning dismissed, ungated, or moved focus from a later poll dialog');
+ if(matrixLoadedRevision!==1||matrixSavedSnapshot!==warningNewerSnapshot||matrixCurrentSnapshot()!==warningNewerSnapshot||reloads!==reloadsBeforeWarningNewer)throw new Error('committed newer warning did not advance baseline/revision while preserving draft and reload state');
+ currentDialog.children.at(-1).children[1].onclick();
+ if(highestNotifiedRemoteRevision!==3)throw new Error('Remain did not acknowledge the latest revision retained by the committed-warning dialog');
+ matrixLoadedRevision=0;highestNotifiedRemoteRevision=0;matrixUpgradeReloadRequested=false;setMatrixRecoveryPending(false);
+ configState.device.name='stale baseline';matrixSavedSnapshot=matrixCurrentSnapshot();configState.device.name='stale draft';matrixDirty=true;document.activeElement=originalFocus;
+ const staleBaseline=matrixSavedSnapshot,staleDraft=matrixCurrentSnapshot(),reloadsBeforeStale=reloads;
+ let resolveStale;responses.push(new Promise(resolve=>resolveStale=resolve));responses.push(response(200,2));
+ const staleSave=saveConfig();await matrixCheckForNewerConfig();const staleDialog=currentDialog,staleDialogFocus=document.activeElement;
+ resolveStale(response(412,null,{error:'Stale save',revision:2}));const staleResult=await staleSave;
+ if(staleResult.saved||currentDialog!==staleDialog||!matrixRecoveryPending||!saveButton.disabled)throw new Error('stale save changed the poll-created recovery barrier');
+ if(matrixLoadedRevision!==0||matrixSavedSnapshot!==staleBaseline||matrixCurrentSnapshot()!==staleDraft||document.activeElement!==staleDialogFocus||reloads!==reloadsBeforeStale)throw new Error('stale save changed base/baseline/draft/focus/reload state');
+ currentDialog.children.at(-1).children[1].onclick();
+ matrixSyncTimer=81;matrixStatusTimer=82;matrixFrameTimer=83;responses.push(response(401));await matrixCheckForNewerConfig();
+ if(!matrixSyncStopped||redirect!=='/pair'||!clearedIntervals.includes(81)||!clearedIntervals.includes(82)||!clearedTimeouts.includes(83))throw new Error('authorization loss did not tear down polling');
+ console.log('PAIRED_SYNC_STATE_MACHINE_PASS');
+})().catch(error=>{console.error(error);process.exit(1)});
+"""
+        node = shutil.which("node")
+        assert node is not None
+        result = subprocess.run(
+            [node, "-e", harness], text=True, capture_output=True,
+            cwd=Path(__file__).parents[1], check=False,
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("PAIRED_SYNC_STATE_MACHINE_PASS", result.stdout)
+
+    def test_two_paired_clients_recover_atomic_snapshots_and_reject_stale_save(self):
+        self.pairing.verify.return_value = True
+        client_a = self.app.test_client()
+        client_b = self.app.test_client()
+        self.assertEqual(client_a.post("/pair", data={"pin": "123456", "device_name": "A"}).status_code, 302)
+        self.assertEqual(client_b.post("/pair", data={"pin": "123456", "device_name": "B"}).status_code, 302)
+
+        base_a = client_a.get("/api/config").get_json()
+        base_b = client_b.get("/api/config").get_json()
+        module = {
+            "id": "custom_sync", "name": "Created", "type": "text",
+            "text": "PAIR", "font": "5x7", "colour": "#ffffff",
+            "background": "#000000", "x": 2, "y": 20,
+            "direction": "left", "speed": 0.05, "loops": 1,
+        }
+        created = client_a.post(
+            "/api/config",
+            json={
+                "pairing": {"max_devices": 10},
+                "custom_modules": [module],
+                "playlist": [{
+                    "module": "custom_sync", "duration": 15, "enabled": True,
+                }],
+            },
+            headers={"If-Match": f'"{base_a["revision"]}"'},
+        )
+        self.assertEqual(created.status_code, 200, created.get_data(as_text=True))
+        self.assertEqual(created.get_json()["revision"], 1)
+
+        recovered = client_b.get(
+            "/api/config", headers={"If-None-Match": f'"{base_b["revision"]}"'},
+        )
+        self.assertEqual(recovered.status_code, 200)
+        self.assertEqual(recovered.get_json()["custom_modules"], [module])
+        self.assertEqual(recovered.get_json()["playlist"], [{
+            "module": "custom_sync", "duration": 15, "enabled": True,
+        }])
+
+        race_barrier = threading.Barrier(3)
+        race_results = {}
+
+        def race_save(label, client):
+            race_barrier.wait()
+            race_results[label] = client.post(
+                "/api/config", json={"device": {"name": label}},
+                headers={"If-Match": '"1"'},
+            )
+
+        race_threads = [
+            threading.Thread(target=race_save, args=("Winner A", client_a)),
+            threading.Thread(target=race_save, args=("Winner B", client_b)),
+        ]
+        for thread in race_threads:
+            thread.start()
+        race_barrier.wait()
+        for thread in race_threads:
+            thread.join(timeout=5)
+            self.assertFalse(thread.is_alive())
+        self.assertEqual(sorted(response.status_code for response in race_results.values()), [200, 412])
+        conflict = next(response for response in race_results.values() if response.status_code == 412)
+        self.assertEqual(conflict.get_json()["revision"], 2)
+
+        deleted = client_a.post(
+            "/api/config", json={"custom_modules": [], "playlist": base_a["playlist"]},
+            headers={"If-Match": '"2"'},
+        )
+        self.assertEqual(deleted.status_code, 200)
+        missed = client_b.get("/api/config", headers={"If-None-Match": '"1"'})
+        self.assertEqual(missed.get_json()["revision"], 3)
+        self.assertEqual(missed.get_json()["custom_modules"], [])
+        self.assertEqual(missed.get_json()["playlist"], base_a["playlist"])
+
+        maximum_playlist = [
+            {"module": "clock_lava", "duration": 1, "enabled": True}
+            for _index in range(256)
+        ]
+        maximum = client_a.post(
+            "/api/config", json={"playlist": maximum_playlist},
+            headers={"If-Match": '"3"'},
+        )
+        self.assertEqual(maximum.status_code, 200, maximum.get_data(as_text=True))
+        self.assertEqual(maximum.get_json()["revision"], 4)
+        complete_snapshot = client_a.get("/api/config")
+        self.assertEqual(len(complete_snapshot.get_json()["playlist"]), 256)
+        self.assertLessEqual(len(complete_snapshot.data), 1_048_576)
+
+        with client_b.session_transaction() as b_session:
+            b_device_id = b_session["device_id"]
+        revoked = client_a.delete(f"/api/devices/{b_device_id}")
+        self.assertEqual(revoked.status_code, 200)
+        self.assertEqual(client_b.get("/api/config").status_code, 401)
+        self.assertEqual(
+            client_b.post("/api/config", json={}, headers={"If-Match": '"4"'}).status_code,
+            401,
+        )
+
+        polling_clients = [client_a]
+        for index in range(9):
+            client = self.app.test_client()
+            self.assertEqual(
+                client.post(
+                    "/pair", data={"pin": "123456", "device_name": f"Poll client {index}"},
+                ).status_code,
+                302,
+            )
+            polling_clients.append(client)
+        polling_device_ids = set()
+        for client in polling_clients:
+            with client.session_transaction() as polling_session:
+                polling_device_ids.add(polling_session["device_id"])
+        self.assertEqual(len(polling_device_ids), 10)
+
+        response_sizes = []
+        started = time.monotonic()
+        for client in polling_clients:
+            unchanged = client.get("/api/config", headers={"If-None-Match": '"4"'})
+            self.assertEqual(unchanged.status_code, 304)
+            response_sizes.append(len(unchanged.data))
+        elapsed = time.monotonic() - started
+        self.assertEqual(response_sizes, [0] * 10)
+        self.assertLess(elapsed, 5.0)
+
+    @unittest.skipUnless(shutil.which("node"), "Node.js is required")
+    @unittest.skipUnless(
+        os.environ.get("MATRIX_CHROMIUM")
+        and Path(os.environ.get("MATRIX_CHROMIUM", "")).is_file()
+        and os.access(os.environ.get("MATRIX_CHROMIUM", ""), os.X_OK),
+        "MATRIX_CHROMIUM browser is required",
+    )
+    def test_real_chromium_paired_sync_conflict_matrix(self):
+        self.pair_browser()
+        body = self.client.get("/").get_data(as_text=True)
+        chromium = os.environ["MATRIX_CHROMIUM"]
+        node = shutil.which("node")
+        assert node is not None
+        probe = r"""
+const port=process.argv[1],pagePath=process.argv[2];let endpoint;
+for(let attempt=0;attempt<50;attempt++){try{endpoint=await fetch(`http://127.0.0.1:${port}/json/new`,{method:'PUT'}).then(r=>r.json());break}catch(_){await new Promise(r=>setTimeout(r,100))}}
+if(!endpoint)throw new Error('Chromium DevTools endpoint unavailable');
+const socket=new WebSocket(endpoint.webSocketDebuggerUrl),pending=new Map();let nextId=1,loadResolve=()=>{},loaded;
+socket.onmessage=event=>{const message=JSON.parse(event.data);if(message.id&&pending.has(message.id)){const request=pending.get(message.id);pending.delete(message.id);message.error?request.reject(new Error(JSON.stringify(message.error))):request.resolve(message.result)}else if(message.method==='Page.loadEventFired')loadResolve()};
+await new Promise((resolve,reject)=>{socket.onopen=resolve;socket.onerror=reject});
+const send=(method,params={})=>{const id=nextId++;socket.send(JSON.stringify({id,method,params}));return new Promise((resolve,reject)=>pending.set(id,{resolve,reject}))};
+const evaluate=async(expression,awaitPromise=false)=>{const result=await send('Runtime.evaluate',{expression,awaitPromise,returnByValue:true});if(result.exceptionDetails)throw new Error(JSON.stringify(result.exceptionDetails));return result.result.value};
+const waitFor=async(expression,label)=>{for(let attempt=0;attempt<100;attempt++){if(await evaluate(expression))return;await new Promise(resolve=>setTimeout(resolve,20))}throw new Error('timeout waiting for '+label)};
+const metrics=async(width,height,mobile=width<900)=>send('Emulation.setDeviceMetricsOverride',{width,height,deviceScaleFactor:1,mobile,screenOrientation:{type:width>height?'landscapePrimary':'portraitPrimary',angle:width>height?90:0}});
+const dialogPoint=async(revision,value,label)=>evaluate(`(()=>{const field=document.querySelector('#device-name');field.value=${JSON.stringify(value)};field.focus();field.setSelectionRange(2,5);showMatrixRevisionDialog(${revision});const button=[...document.querySelectorAll('.config-revision-dialog button')].find(item=>item.textContent===${JSON.stringify(label)}),rect=button.getBoundingClientRect();return {x:rect.left+rect.width/2,y:rect.top+rect.height/2}})()`);
+const mouseClick=async point=>{await send('Input.dispatchMouseEvent',{type:'mousePressed',x:point.x,y:point.y,button:'left',clickCount:1});await send('Input.dispatchMouseEvent',{type:'mouseReleased',x:point.x,y:point.y,button:'left',clickCount:1})};
+const touchTap=async point=>{await send('Input.dispatchTouchEvent',{type:'touchStart',touchPoints:[{x:point.x,y:point.y,radiusX:1,radiusY:1,force:1,id:1}]});await send('Input.dispatchTouchEvent',{type:'touchEnd',touchPoints:[]})};
+try{
+ await send('Runtime.enable');await send('Page.enable');await send('Network.enable');
+ await metrics(320,568,true);await send('Emulation.setTouchEmulationEnabled',{enabled:true,maxTouchPoints:1});
+ loaded=new Promise(resolve=>loadResolve=resolve);await send('Page.navigate',{url:'file://'+pagePath});await Promise.race([loaded,new Promise((_,reject)=>setTimeout(()=>reject(new Error('load timeout')),5000))]);
+ const viewports=[[320,568],[360,800],[390,844],[412,915],[768,1024],[820,1180],[1024,768],[1280,720],[1440,900]],geometry=[];
+ for(let index=0;index<viewports.length;index++){
+  const [width,height]=viewports[index];await metrics(width,height,false);
+  geometry.push(await evaluate(`(()=>{const field=document.querySelector('#device-name');field.value='unsaved-${index}';field.focus();field.setSelectionRange(2,5);scrollTo(0,Math.min(300,document.documentElement.scrollHeight));const before={value:field.value,start:field.selectionStart,end:field.selectionEnd,scroll:scrollY};showMatrixRevisionDialog(${index+1});const dialog=document.querySelector('.config-revision-dialog'),buttons=[...dialog.querySelectorAll('button')],rect=dialog.getBoundingClientRect(),sizes=buttons.map(button=>{const r=button.getBoundingClientRect();return [r.width,r.height]});const initiallyFocused=document.activeElement===buttons[0];dialog.dispatchEvent(new KeyboardEvent('keydown',{key:'Tab',bubbles:true}));const trapped=document.activeElement===buttons[1];buttons[1].click();return {width:innerWidth,height:innerHeight,before,after:{value:field.value,start:field.selectionStart,end:field.selectionEnd,scroll:scrollY},initiallyFocused,trapped,dialogFits:rect.top>=0&&rect.bottom<=innerHeight,sizes,restored:document.activeElement===field}})()`));
+ }
+ await metrics(320,568,true);const zoomBefore=await evaluate(`({innerWidth,innerHeight,scale:visualViewport.scale,visualWidth:visualViewport.width,visualHeight:visualViewport.height})`);await send('Emulation.setPageScaleFactor',{pageScaleFactor:2});const zoomAfter=await evaluate(`(()=>{const field=document.querySelector('#device-name');field.value='zoom draft';field.focus();field.setSelectionRange(2,5);showMatrixRevisionDialog(100);const dialog=document.querySelector('.config-revision-dialog'),buttons=[...dialog.querySelectorAll('button')],rect=dialog.getBoundingClientRect(),result={innerWidth,innerHeight,scale:visualViewport.scale,visualWidth:visualViewport.width,visualHeight:visualViewport.height,dialogFits:rect.top>=0&&rect.bottom<=innerHeight,sizes:buttons.map(button=>{const r=button.getBoundingClientRect();return [r.width,r.height]})};buttons[1].click();return result})()`);await send('Emulation.resetPageScaleFactor');
+ const breakpoint=[];for(const width of [599,600,601,899,900,901]){await metrics(width,700);breakpoint.push(await evaluate(`({width:innerWidth,grid:getComputedStyle(document.querySelector('.grid')).display,nav:getComputedStyle(document.querySelector('.nav')).display})`))}
+ await metrics(899,700);const dynamicBefore=await evaluate(`(()=>{const field=document.querySelector('#device-name');field.value='dynamic draft';field.focus();field.setSelectionRange(1,6);scrollTo(0,Math.min(240,document.documentElement.scrollHeight));return {width:innerWidth,nav:getComputedStyle(document.querySelector('.nav')).display,value:field.value,start:field.selectionStart,end:field.selectionEnd,scroll:scrollY}})()`);await metrics(901,700,false);const dynamicAfter=await evaluate(`(()=>{const field=document.querySelector('#device-name');return {width:innerWidth,nav:getComputedStyle(document.querySelector('.nav')).display,value:field.value,start:field.selectionStart,end:field.selectionEnd,scroll:scrollY}})()`);
+ await metrics(390,844,true);const mousePoint=await dialogPoint(101,'mouse draft','Remain with unsaved draft');await mouseClick(mousePoint);const mouse=await evaluate(`(()=>{const field=document.querySelector('#device-name');return {closed:!document.querySelector('.config-revision-dialog'),restored:document.activeElement===field,value:field.value,start:field.selectionStart,end:field.selectionEnd}})()`);
+ const touchPoint=await dialogPoint(102,'touch draft','Remain with unsaved draft');await touchTap(touchPoint);const touch=await evaluate(`(()=>{const field=document.querySelector('#device-name');return {closed:!document.querySelector('.config-revision-dialog'),restored:document.activeElement===field,value:field.value,start:field.selectionStart,end:field.selectionEnd}})()`);
+ await evaluate(`(()=>{if(matrixSyncTimer!==null){clearInterval(matrixSyncTimer);matrixSyncTimer=null}globalThis.__matrixRecovery={fetches:0,events:[],visibility:[]};globalThis.fetch=async()=>{__matrixRecovery.fetches++;return {status:304,redirected:false,ok:true,headers:{get:()=>String(MATRIX_CLIENT_CONTRACT)},json:async()=>({})}};addEventListener('offline',()=>__matrixRecovery.events.push('offline'));addEventListener('online',()=>__matrixRecovery.events.push('online'));document.addEventListener('visibilitychange',()=>__matrixRecovery.visibility.push({state:document.visibilityState,fetches:__matrixRecovery.fetches}));return true})()`);
+ await send('Network.emulateNetworkConditions',{offline:true,latency:0,downloadThroughput:-1,uploadThroughput:-1});await waitFor(`navigator.onLine===false&&__matrixRecovery.events.includes('offline')`,'offline event');const offlineFetches=await evaluate(`__matrixRecovery.fetches`);await send('Network.emulateNetworkConditions',{offline:false,latency:0,downloadThroughput:-1,uploadThroughput:-1});await waitFor(`navigator.onLine===true&&__matrixRecovery.events.includes('online')&&__matrixRecovery.fetches>${offlineFetches}`,'online recovery poll');const onlineOffline=await evaluate(`({events:__matrixRecovery.events,offlineFetches:${offlineFetches},fetches:__matrixRecovery.fetches})`);
+ const visibilityBefore=await evaluate(`__matrixRecovery.fetches`),visibilityMode='event-override';const visibilityHidden=await evaluate(`(()=>{globalThis.__matrixVisibilityState='hidden';Object.defineProperty(document,'visibilityState',{configurable:true,get:()=>globalThis.__matrixVisibilityState});document.dispatchEvent(new Event('visibilitychange'));return __matrixRecovery.visibility.at(-1)})()`);await evaluate(`(()=>{globalThis.__matrixVisibilityState='visible';document.dispatchEvent(new Event('visibilitychange'));return true})()`);await waitFor(`__matrixRecovery.fetches>${visibilityBefore}`,'visible event recovery');const visibilityVisible={state:await evaluate(`document.visibilityState`),fetches:await evaluate(`__matrixRecovery.fetches`)};
+ await send('Emulation.setEmulatedMedia',{media:'screen',features:[{name:'prefers-reduced-motion',value:'reduce'}]});const reducedPoint=await dialogPoint(103,'reduced draft','Remain with unsaved draft');const reducedBefore=await evaluate(`({matches:matchMedia('(prefers-reduced-motion: reduce)').matches,focused:document.activeElement.textContent==='Reload latest saved state',fits:(()=>{const r=document.querySelector('.config-revision-dialog').getBoundingClientRect();return r.top>=0&&r.bottom<=innerHeight})()})`);await mouseClick(reducedPoint);const reducedAfter=await evaluate(`({closed:!document.querySelector('.config-revision-dialog'),restored:document.activeElement===document.querySelector('#device-name')})`);
+ await metrics(390,844,true);const reloadPoint=await dialogPoint(104,'discard this draft','Reload latest saved state');loaded=new Promise(resolve=>loadResolve=resolve);await mouseClick(reloadPoint);await Promise.race([loaded,new Promise((_,reject)=>setTimeout(()=>reject(new Error('reload choice timeout')),5000))]);const reloadChoice=await evaluate(`({value:document.querySelector('#device-name').value,dialog:!!document.querySelector('.config-revision-dialog')})`);
+ console.log(JSON.stringify({geometry,zoomBefore,zoomAfter,breakpoint,dynamicBefore,dynamicAfter,mouse,touch,onlineOffline,visibilityMode,visibilityBefore,visibilityHidden,visibilityVisible,reducedBefore,reducedAfter,reloadChoice}));
+}finally{socket.close()}
+"""
+        with tempfile.TemporaryDirectory(prefix="matrix-sync-chromium-") as directory:
+            page = Path(directory) / "dashboard.html"
+            page.write_text(body)
+            profile = Path(directory) / "profile"
+            browser = subprocess.Popen([
+                chromium, "--headless", "--no-sandbox", "--disable-gpu",
+                "--remote-debugging-port=0", f"--user-data-dir={profile}", "about:blank",
+            ], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            try:
+                active_port = profile / "DevToolsActivePort"
+                for _attempt in range(50):
+                    if active_port.is_file():
+                        break
+                    if browser.poll() is not None:
+                        self.fail("Chromium exited before publishing its DevTools port")
+                    time.sleep(0.1)
+                self.assertTrue(active_port.is_file(), "Chromium DevTools port unavailable")
+                completed = subprocess.run(
+                    [node, "-e", probe, active_port.read_text().splitlines()[0], str(page)],
+                    capture_output=True, text=True, timeout=30,
+                )
+            finally:
+                browser.terminate()
+                try:
+                    browser.wait(timeout=5)
+                except subprocess.TimeoutExpired:
+                    browser.kill(); browser.wait(timeout=5)
+        self.assertEqual(completed.returncode, 0, completed.stderr)
+        report = json.loads(completed.stdout.strip().splitlines()[-1])
+        self.assertIn("visibilityHidden", report, report)
+        geometry = report["geometry"]
+        self.assertEqual(
+            [(item["width"], item["height"]) for item in geometry],
+            [
+                (320, 568), (360, 800), (390, 844), (412, 915),
+                (768, 1024), (820, 1180), (1024, 768),
+                (1280, 720), (1440, 900),
+            ],
+        )
+        for item in geometry:
+            self.assertEqual(item["before"], item["after"])
+            self.assertTrue(item["initiallyFocused"])
+            self.assertTrue(item["trapped"])
+            self.assertTrue(item["dialogFits"])
+            self.assertTrue(item["restored"])
+            self.assertTrue(all(width >= 44 and height >= 44 for width, height in item["sizes"]))
+        self.assertGreater(report["zoomBefore"]["innerWidth"], 0)
+        self.assertGreater(report["zoomBefore"]["innerHeight"], 0)
+        self.assertGreater(report["zoomAfter"]["scale"], report["zoomBefore"]["scale"])
+        self.assertAlmostEqual(report["zoomAfter"]["scale"], 2, places=2)
+        self.assertAlmostEqual(
+            report["zoomAfter"]["visualWidth"] * report["zoomAfter"]["scale"],
+            320, places=1,
+        )
+        self.assertAlmostEqual(
+            report["zoomAfter"]["visualHeight"] * report["zoomAfter"]["scale"],
+            568, places=1,
+        )
+        self.assertTrue(report["zoomAfter"]["dialogFits"])
+        self.assertTrue(all(width >= 44 and height >= 44 for width, height in report["zoomAfter"]["sizes"]))
+        self.assertLess(report["zoomAfter"]["visualWidth"], report["zoomBefore"]["visualWidth"])
+        self.assertLess(report["zoomAfter"]["visualHeight"], report["zoomBefore"]["visualHeight"])
+        self.assertEqual(
+            [(item["width"], item["grid"], item["nav"]) for item in report["breakpoint"]],
+            [
+                (599, "block", "none"), (600, "block", "none"),
+                (601, "grid", "none"), (899, "grid", "none"),
+                (900, "grid", "none"), (901, "grid", "grid"),
+            ],
+        )
+        self.assertEqual(report["dynamicBefore"]["width"], 899)
+        self.assertEqual(report["dynamicAfter"]["width"], 901)
+        self.assertEqual(report["dynamicBefore"]["nav"], "none")
+        self.assertEqual(report["dynamicAfter"]["nav"], "grid")
+        for key in ("value", "start", "end", "scroll"):
+            self.assertEqual(report["dynamicBefore"][key], report["dynamicAfter"][key])
+        for activation, value in ((report["mouse"], "mouse draft"), (report["touch"], "touch draft")):
+            self.assertTrue(activation["closed"])
+            self.assertTrue(activation["restored"])
+            self.assertEqual(activation["value"], value)
+        self.assertEqual(report["onlineOffline"]["events"], ["offline", "online"])
+        self.assertGreater(report["onlineOffline"]["fetches"], report["onlineOffline"]["offlineFetches"])
+        self.assertIn(report["visibilityMode"], {"target-switch", "event-override"})
+        self.assertEqual(report["visibilityHidden"]["state"], "hidden")
+        self.assertEqual(report["visibilityHidden"]["fetches"], report["visibilityBefore"])
+        self.assertEqual(report["visibilityVisible"]["state"], "visible")
+        self.assertGreater(report["visibilityVisible"]["fetches"], report["visibilityBefore"])
+        self.assertEqual(report["reducedBefore"], {"matches": True, "focused": True, "fits": True})
+        self.assertEqual(report["reducedAfter"], {"closed": True, "restored": True})
+        self.assertNotEqual(report["reloadChoice"]["value"], "discard this draft")
+        self.assertFalse(report["reloadChoice"]["dialog"])
+
+    @unittest.skipUnless(shutil.which("node"), "Node.js is required")
     def test_open_b1_dashboard_transitions_safely_to_b2_server(self):
         self.pair_browser()
         body = self.client.get("/").get_data(as_text=True)
 
-        self.assertIn("const MATRIX_CLIENT_CONTRACT=1", body)
+        self.assertIn("const MATRIX_CLIENT_CONTRACT=2", body)
         self.assertIn("let matrixLoadedRevision=0", body)
         self.assertIn("'X-Matrix-Client-Contract':String(MATRIX_CLIENT_CONTRACT)", body)
         self.assertIn("'If-Match':matrixRevisionETag()", body)
@@ -224,9 +1161,10 @@ class WebAppTests(unittest.TestCase):
         self.assertIn("width:min(32rem,calc(100vw - 2rem))", body)
         self.assertIn("min-height:44px", body)
 
-        start = body.index("const MATRIX_CLIENT_CONTRACT=1")
-        end = body.index("const customFontAdvances", start)
-        bridge = body[start:end]
+        frozen_b1 = body.replace("const MATRIX_CLIENT_CONTRACT=2", "const MATRIX_CLIENT_CONTRACT=1", 1)
+        start = frozen_b1.index("const MATRIX_CLIENT_CONTRACT=1")
+        end = frozen_b1.index("const customFontAdvances", start)
+        bridge = frozen_b1[start:end]
         harness = r"""
 class Element {
   constructor(tag='div'){this.tag=tag;this.children=[];this.textContent='';this.open=false;this.listeners={};}
@@ -277,6 +1215,7 @@ globalThis.document=document;globalThis.window=window;globalThis.fetch=fetch;
   const second=bodyElement.children.at(-1),secondActions=second.children.at(-1);
   secondActions.children[1].onclick();
   configState.canvas.operation='saved';
+  matrixDirty=false;
   matrixUpgradeReloadRequested=false;
   handleMinimumClientContract(4);
   if(reloads!==2)throw new Error('clean page remained stranded after acknowledgement');
@@ -316,8 +1255,7 @@ globalThis.document=document;globalThis.window=window;globalThis.fetch=fetch;
             "config_store.os.fsync",
             side_effect=[None, OSError("directory unavailable")],
         ):
-            response = self.client.post(
-                "/api/config",
+            response = self.post_config(
                 json={"device": {"name": "Committed Despite Error"}},
             )
 
@@ -351,8 +1289,8 @@ globalThis.document=document;globalThis.window=window;globalThis.fetch=fetch;
                 session_data["paired"] = True
                 session_data["generation"] = "generation-one"
                 session_data["device_id"] = self.device_store.list()[0]["id"]
-            results["config"] = client.post(
-                "/api/config", json={"pairing": {"max_devices": 1}},
+            results["config"] = self.post_config(
+                json={"pairing": {"max_devices": 1}}, client=client,
             )
 
         def add_device():
@@ -380,11 +1318,9 @@ globalThis.document=document;globalThis.window=window;globalThis.fetch=fetch;
 
     def test_api_errors_are_json_and_config_requires_json_content_type(self):
         self.pair_browser()
-        malformed = self.client.post(
-            "/api/config", data="{", content_type="application/json",
+        malformed = self.post_config( data="{", content_type="application/json",
         )
-        wrong_type = self.client.post(
-            "/api/config",
+        wrong_type = self.post_config(
             data=json.dumps({"device": {"name": "Wrong type"}}),
             content_type="text/plain",
         )
@@ -398,8 +1334,7 @@ globalThis.document=document;globalThis.window=window;globalThis.fetch=fetch;
         self.pair_browser()
         for media in ([], "bad", 3, None):
             with self.subTest(media=media):
-                response = self.client.post(
-                    "/api/config",
+                response = self.post_config(
                     data=json.dumps({"media": media}),
                     content_type="application/json",
                 )
@@ -810,7 +1745,7 @@ globalThis.document=document;globalThis.window=window;globalThis.fetch=fetch;
         self.assertIn("Pair another device", body)
         self.assertIn("Second browser", body)
 
-        response = self.client.post("/api/config", json={"pairing": {"max_devices": 1}})
+        response = self.post_config( json={"pairing": {"max_devices": 1}})
         self.assertEqual(response.status_code, 400)
         self.assertIn("below the 2 currently paired devices", response.get_json()["error"])
 
@@ -1299,10 +2234,11 @@ globalThis.reconcileMediaRemoval=()=>{throw new Error('Local reconciliation fail
         preview_end = source.index("\nfunction previewSelected", preview_start)
         function_source = source[save_start:save_end] + "\n" + source[preview_start:preview_end]
         harness = r"""
-let messages=[],previewCalls=0,previewModule='',matrixLoadedRevision=0,matrixDirty=true;
+let messages=[],previewCalls=0,previewModule='',matrixLoadedRevision=0,matrixDirty=true,matrixRecoveryPending=false,highestNotifiedRemoteRevision=0;
 function matrixRevisionETag(){return '"'+matrixLoadedRevision+'"';}
 function configBody(){return {};}
 function setMessage(text,error=false){messages.push({text,error});}
+function dismissMatrixRevisionDialogThrough(){}
 global.document={querySelector(){return {value:''};}};
 async function api(path){
   if(path==='/api/config'){const error=new Error('Configuration saved, but display reload failed.');error.data={committed:true,display_reloaded:false,config:{revision:1}};throw error;}
@@ -1333,10 +2269,11 @@ async function api(path){
         preview_end = source.index("\nfunction previewSelected", preview_start)
         function_source = source[save_start:save_end] + "\n" + source[preview_start:preview_end]
         harness = r"""
-let messages=[],previewModule='',matrixLoadedRevision=0,matrixDirty=true;
+let messages=[],previewModule='',matrixLoadedRevision=0,matrixDirty=true,matrixRecoveryPending=false,highestNotifiedRemoteRevision=0;
 function matrixRevisionETag(){return '"'+matrixLoadedRevision+'"';}
 function configBody(){return {};}
 function setMessage(text,error=false){messages.push({text,error});}
+function dismissMatrixRevisionDialogThrough(){}
 global.document={querySelector(){return {value:''};}};
 async function api(path){
   if(path==='/api/config'){const error=new Error('Configuration saved, but display reload failed.');error.data={committed:true,config:{revision:1}};throw error;}
@@ -1481,6 +2418,16 @@ console.log(JSON.stringify({result:JSON.parse(evaluated.result.value),exceptions
                 except subprocess.TimeoutExpired:
                     browser.kill()
                     browser.wait(timeout=5)
+                for cleanup_attempt in range(20):
+                    try:
+                        shutil.rmtree(profile)
+                        break
+                    except FileNotFoundError:
+                        break
+                    except OSError:
+                        if cleanup_attempt == 19:
+                            raise
+                        time.sleep(0.05)
         self.assertEqual(completed.returncode, 0, completed.stderr)
         report = json.loads(completed.stdout.strip().splitlines()[-1])
         self.assertEqual(report["exceptions"], [])
@@ -2492,8 +3439,7 @@ console.log('TERMINAL_MEDIA_PREVIEW_PASS');
                 else:
                     del announcement[missing]
 
-                response = self.client.post(
-                    "/api/config",
+                response = self.post_config(
                     json={"announcement_board": {"announcements": [announcement]}},
                 )
 
@@ -2777,8 +3723,7 @@ console.log('ANNOUNCEMENT_HEADING_SYNC_PASS');
     def test_sleep_gif_speed_round_trips_through_paired_config_api(self):
         self.pair_browser()
 
-        saved = self.client.post(
-            "/api/config",
+        saved = self.post_config(
             json={"media_layout": {"sleep": {"gif_speed_percent": 225}}},
         )
 
@@ -2873,8 +3818,7 @@ console.log('ANNOUNCEMENT_HEADING_SYNC_PASS');
             "overrides": [],
         }]
 
-        response = self.client.post(
-            "/api/config", json={"custom_modules": config["custom_modules"]}
+        response = self.post_config( json={"custom_modules": config["custom_modules"]}
         )
 
         self.assertEqual(response.status_code, 400)
@@ -3180,7 +4124,7 @@ console.log('ANNOUNCEMENT_HEADING_SYNC_PASS');
         outside.write_bytes(self.gif_bytes().read())
         (self.media_dir / "leak.gif").symlink_to(outside)
         self.assertEqual(self.client.get("/media/leak.gif").status_code, 404)
-        response = self.client.post("/api/config", json={"media": {"splash": "missing.gif"}})
+        response = self.post_config( json={"media": {"splash": "missing.gif"}})
         self.assertEqual(response.status_code, 400)
 
     def test_rejected_upload_does_not_leave_a_retry_blocking_destination(self):
@@ -3490,7 +4434,7 @@ console.log('ANNOUNCEMENT_HEADING_SYNC_PASS');
         page = self.client.get("/").get_data(as_text=True)
 
         self.assertIn(
-            "if(error.data?.committed){matrixLoadedRevision=error.data.config.revision;matrixSavedSnapshot=submittedSnapshot;matrixDirty=false;if(!silent)setMessage(error.message,true);return {saved:true,warning:error.message,data:error.data}}",
+            "if(error.data?.committed){matrixLoadedRevision=error.data.config.revision;highestNotifiedRemoteRevision=Math.max(highestNotifiedRemoteRevision,matrixLoadedRevision);dismissMatrixRevisionDialogThrough(matrixLoadedRevision);matrixSavedSnapshot=submittedSnapshot;matrixDirty=false;if(!silent)setMessage(error.message,true);return {saved:true,warning:error.message,data:error.data}}",
             page,
         )
         self.assertIn("if(error.data?.committed){input.value='';try{await refreshMedia()}", page)
@@ -3529,7 +4473,7 @@ console.log('ANNOUNCEMENT_HEADING_SYNC_PASS');
         with self.client.session_transaction() as browser_session:
             self.assertTrue(browser_session.permanent)
             self.assertEqual(browser_session["generation"], "generation-one")
-        response = self.client.post("/api/config", json={"weather": {"location": "London, GB"}})
+        response = self.post_config( json={"weather": {"location": "London, GB"}})
         self.assertEqual(response.status_code, 200)
         self.assertEqual(response.get_json()["weather"]["location"], "London, GB")
         self.controller.reload.assert_called_once()
