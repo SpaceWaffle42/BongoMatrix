@@ -666,11 +666,13 @@
       const layer = module.layers[index], properties = resolvedProperties(module, layer, state.frame);
       const depth = Object.hasOwn(properties, 'z_index') ? properties.z_index : index;
       const row = document.createElement('div'); row.className = 'layer-row' + (layer.id === state.selected ? ' active' : '');
-      const visible = document.createElement('input'); visible.type = 'checkbox'; visible.checked = layer.visible; visible.title = 'Visible'; visible.onchange = () => { layer.visible = visible.checked; refreshAdvanced(module.id); };
-      const name = document.createElement('button'); name.className = 'btn'; name.textContent = layer.name + ' · ' + layer.type + ' · depth ' + depth; name.onclick = () => { state.selected = layer.id; refreshAdvanced(module.id); };
-      const forward = makeButton('Bring forward', () => moveLayerStack(module, layer.id, 1), 'btn icon'); forward.disabled = index === module.layers.length - 1;
-      const backward = makeButton('Send backward', () => moveLayerStack(module, layer.id, -1), 'btn icon'); backward.disabled = index === 0;
-      const remove = makeButton('×', () => { if (module.layers.length === 1) { setMessage('An advanced canvas needs at least one layer.', true); return; } module.layers.splice(index, 1); module.overrides = module.overrides.filter(item => item.layer_id !== layer.id); state.selected = module.layers[Math.max(0, index - 1)].id; refreshAdvanced(module.id); }, 'btn danger');
+      const visible = document.createElement('input'); visible.type = 'checkbox'; visible.checked = layer.visible; visible.title = 'Visible'; visible.setAttribute('aria-label', 'Show ' + layer.name); visible.onchange = () => { layer.visible = visible.checked; refreshAdvanced(module.id); };
+      const name = document.createElement('button'); name.className = 'btn layer-select'; name.setAttribute('aria-label', 'Select ' + layer.name + ', ' + layer.type + ', depth ' + depth); name.onclick = () => { state.selected = layer.id; refreshAdvanced(module.id); };
+      const layerName = document.createElement('span'); layerName.className = 'layer-name'; layerName.textContent = layer.name;
+      const layerMeta = document.createElement('span'); layerMeta.className = 'layer-meta'; layerMeta.textContent = 'depth ' + depth + ' · ' + layer.type; name.append(layerName, layerMeta);
+      const forward = makeButton('Bring forward', () => moveLayerStack(module, layer.id, 1), 'btn icon layer-stack-action layer-forward'); forward.textContent = '↑'; forward.title = 'Bring forward'; forward.setAttribute('aria-label', 'Bring forward'); forward.disabled = index === module.layers.length - 1;
+      const backward = makeButton('Send backward', () => moveLayerStack(module, layer.id, -1), 'btn icon layer-stack-action layer-backward'); backward.textContent = '↓'; backward.title = 'Send backward'; backward.setAttribute('aria-label', 'Send backward'); backward.disabled = index === 0;
+      const remove = makeButton('×', () => { if (module.layers.length === 1) { setMessage('An advanced canvas needs at least one layer.', true); return; } module.layers.splice(index, 1); module.overrides = module.overrides.filter(item => item.layer_id !== layer.id); state.selected = module.layers[Math.max(0, index - 1)].id; refreshAdvanced(module.id); }, 'btn danger layer-remove'); remove.title = 'Remove ' + layer.name; remove.setAttribute('aria-label', 'Remove ' + layer.name);
       row.append(visible, name, forward, backward, remove); list.append(row);
     }
     container.append(list);

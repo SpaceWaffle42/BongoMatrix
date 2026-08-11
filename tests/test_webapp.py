@@ -2839,6 +2839,14 @@ console.log(JSON.stringify({json.dumps(cases)}.map(probe)));
         self.assertIn("Depth at this frame", asset)
         self.assertIn("Bring forward", asset)
         self.assertIn("Send backward", asset)
+        self.assertIn("layerName.className = 'layer-name'", asset)
+        self.assertIn("layerMeta.className = 'layer-meta'", asset)
+        self.assertIn("forward.textContent = '↑'", asset)
+        self.assertIn("backward.textContent = '↓'", asset)
+        self.assertIn("forward.setAttribute('aria-label', 'Bring forward')", asset)
+        self.assertIn("backward.setAttribute('aria-label', 'Send backward')", asset)
+        self.assertIn(".layer-name", styles)
+        self.assertIn(".layer-meta", styles)
         self.assertIn("layer-frame-cell", asset)
         self.assertIn("cell.dataset.layerId", asset)
         self.assertIn("cell.dataset.frame", asset)
@@ -2907,7 +2915,7 @@ try{
  const viewports=[[320,568,true,1],[360,800,true,1],[390,844,true,1],[844,390,true,1],[412,915,true,1],[599,800,false,1],[600,800,false,1],[601,800,false,1],[768,1024,true,1],[820,1180,true,1],[899,768,false,1],[900,768,false,1],[901,768,false,1],[1024,768,true,1],[1280,720,false,1],[1440,900,false,1],[390,844,true,2],[390,844,true,3]],reports=[];
  for(const [width,height,touch,dpr] of viewports){
   await metrics(width,height,touch,dpr);
-  reports.push(await evaluate(`(async()=>{await new Promise(requestAnimationFrame);const scroll=document.querySelector('.aseprite-timeline-scroll'),cell=document.querySelector('.layer-frame-cell'),header=document.querySelector('.frame-chip'),label=document.querySelector('.layer-track-label.active'),corner=document.querySelector('.layer-track-corner'),active=document.querySelector('.layer-frame-cell.active'),timeline=document.querySelector('.timeline'),context=document.querySelector('.timeline-context'),contextButtons=[...document.querySelectorAll('.timeline-context-actions button')],before=JSON.stringify(customModules),scrollRect=scroll.getBoundingClientRect(),cellRect=cell.getBoundingClientRect(),headerRect=header.getBoundingClientRect(),labelRect=label.getBoundingClientRect(),cornerRect=corner.getBoundingClientRect(),activeIdentity=[active.dataset.layerId,active.dataset.frame];scroll.scrollLeft=scroll.scrollWidth;await new Promise(requestAnimationFrame);const labelAfter=label.getBoundingClientRect();scroll.scrollTop=scroll.scrollHeight;await new Promise(requestAnimationFrame);const cornerAfter=corner.getBoundingClientRect();const documentOverflow=document.documentElement.scrollWidth-document.documentElement.clientWidth;timeline.hidden=true;await new Promise(requestAnimationFrame);const baselineOverflow=document.documentElement.scrollWidth-document.documentElement.clientWidth;timeline.hidden=false;await new Promise(requestAnimationFrame);const wideElements=[...document.querySelectorAll('body *')].map(element=>{const rect=element.getBoundingClientRect();return {tag:element.tagName,className:String(element.className||''),left:rect.left,right:rect.right,width:rect.width,scrollWidth:element.scrollWidth}}).filter(item=>item.right>innerWidth+1||item.width>innerWidth+1).sort((left,right)=>right.right-left.right).slice(0,8);return {width:innerWidth,height:innerHeight,touch:${touch},dpr:devicePixelRatio,layoutColumns:getComputedStyle(document.querySelector('.advanced-layout')).gridTemplateColumns.split(' ').length,documentOverflow,baselineOverflow,timelineOverflow:Math.max(0,documentOverflow-baselineOverflow),wideElements,localOverflow:scroll.scrollWidth-scroll.clientWidth,scrollerInside:scrollRect.left>=-0.5&&scrollRect.right<=innerWidth+0.5,cell:[cellRect.width,cellRect.height],header:[headerRect.width,headerRect.height],label:[labelRect.width,labelRect.height],stickyLabelDelta:Math.abs(labelAfter.left-labelRect.left),stickyHeaderDelta:Math.abs(cornerAfter.top-cornerRect.top),contextOutsideScroll:!scroll.contains(context),contextSummary:context.querySelector('.timeline-context-summary').textContent,contextActions:contextButtons.map(button=>{const rect=button.getBoundingClientRect();return {label:button.getAttribute('aria-label'),disabled:button.disabled,width:rect.width,height:rect.height}}),cellNames:[...document.querySelectorAll('.layer-frame-cell')].slice(0,8).map(button=>({aria:button.getAttribute('aria-label'),title:button.title,text:button.textContent})),statePreserved:before===JSON.stringify(customModules),activePreserved:activeIdentity[0]===document.querySelector('.layer-frame-cell.active').dataset.layerId&&activeIdentity[1]===document.querySelector('.layer-frame-cell.active').dataset.frame}})()`));
+  reports.push(await evaluate(`(async()=>{await new Promise(requestAnimationFrame);const scroll=document.querySelector('.aseprite-timeline-scroll'),cell=document.querySelector('.layer-frame-cell'),header=document.querySelector('.frame-chip'),label=document.querySelector('.layer-track-label.active'),corner=document.querySelector('.layer-track-corner'),active=document.querySelector('.layer-frame-cell.active'),timeline=document.querySelector('.timeline'),context=document.querySelector('.timeline-context'),contextButtons=[...document.querySelectorAll('.timeline-context-actions button')],layerRow=document.querySelector('.layer-row'),layerSelect=layerRow.querySelector('.layer-select'),layerMeta=layerRow.querySelector('.layer-meta'),layerActions=[...layerRow.querySelectorAll('.layer-stack-action,.layer-remove')],before=JSON.stringify(customModules),scrollRect=scroll.getBoundingClientRect(),cellRect=cell.getBoundingClientRect(),headerRect=header.getBoundingClientRect(),labelRect=label.getBoundingClientRect(),cornerRect=corner.getBoundingClientRect(),activeIdentity=[active.dataset.layerId,active.dataset.frame];scroll.scrollLeft=scroll.scrollWidth;await new Promise(requestAnimationFrame);const labelAfter=label.getBoundingClientRect();scroll.scrollTop=scroll.scrollHeight;await new Promise(requestAnimationFrame);const cornerAfter=corner.getBoundingClientRect();const documentOverflow=document.documentElement.scrollWidth-document.documentElement.clientWidth;timeline.hidden=true;await new Promise(requestAnimationFrame);const baselineOverflow=document.documentElement.scrollWidth-document.documentElement.clientWidth;timeline.hidden=false;await new Promise(requestAnimationFrame);const wideElements=[...document.querySelectorAll('body *')].map(element=>{const rect=element.getBoundingClientRect();return {tag:element.tagName,className:String(element.className||''),left:rect.left,right:rect.right,width:rect.width,scrollWidth:element.scrollWidth}}).filter(item=>item.right>innerWidth+1||item.width>innerWidth+1).sort((left,right)=>right.right-left.right).slice(0,8),layerRowRect=layerRow.getBoundingClientRect(),layerSelectRect=layerSelect.getBoundingClientRect();return {layerStack:{inside:layerRowRect.left>=-0.5&&layerRowRect.right<=innerWidth+0.5,selectWidth:layerSelectRect.width,metaWidth:layerMeta.getBoundingClientRect().width,metaScrollWidth:layerMeta.scrollWidth,metaText:layerMeta.textContent,actions:layerActions.map(button=>{const rect=button.getBoundingClientRect();return {text:button.textContent,label:button.getAttribute('aria-label'),title:button.title,width:rect.width,height:rect.height}})},width:innerWidth,height:innerHeight,touch:${touch},dpr:devicePixelRatio,layoutColumns:getComputedStyle(document.querySelector('.advanced-layout')).gridTemplateColumns.split(' ').length,documentOverflow,baselineOverflow,timelineOverflow:Math.max(0,documentOverflow-baselineOverflow),wideElements,localOverflow:scroll.scrollWidth-scroll.clientWidth,scrollerInside:scrollRect.left>=-0.5&&scrollRect.right<=innerWidth+0.5,cell:[cellRect.width,cellRect.height],header:[headerRect.width,headerRect.height],label:[labelRect.width,labelRect.height],stickyLabelDelta:Math.abs(labelAfter.left-labelRect.left),stickyHeaderDelta:Math.abs(cornerAfter.top-cornerRect.top),contextOutsideScroll:!scroll.contains(context),contextSummary:context.querySelector('.timeline-context-summary').textContent,contextActions:contextButtons.map(button=>{const rect=button.getBoundingClientRect();return {label:button.getAttribute('aria-label'),disabled:button.disabled,width:rect.width,height:rect.height}}),cellNames:[...document.querySelectorAll('.layer-frame-cell')].slice(0,8).map(button=>({aria:button.getAttribute('aria-label'),title:button.title,text:button.textContent})),statePreserved:before===JSON.stringify(customModules),activePreserved:activeIdentity[0]===document.querySelector('.layer-frame-cell.active').dataset.layerId&&activeIdentity[1]===document.querySelector('.layer-frame-cell.active').dataset.frame}})()`));
  }
  console.log(JSON.stringify({reports,exceptions:exceptions.map(item=>item.text)}));
 }finally{socket.close()}
@@ -2982,6 +2990,20 @@ try{
                 self.assertEqual(item["layoutColumns"], 1 if item["width"] <= 900 else 2, item)
                 self.assertTrue(item["contextOutsideScroll"])
                 self.assertEqual(item["contextSummary"], "Layer track 1 · frame 1")
+                layer_stack = item["layerStack"]
+                self.assertTrue(layer_stack["inside"], item)
+                self.assertGreaterEqual(layer_stack["selectWidth"], 72, item)
+                self.assertGreaterEqual(layer_stack["metaWidth"], 72, item)
+                self.assertTrue(layer_stack["metaText"].startswith("depth "), item)
+                self.assertEqual(
+                    [(action["text"], action["label"], action["title"])
+                     for action in layer_stack["actions"]],
+                    [
+                        ("↑", "Bring forward", "Bring forward"),
+                        ("↓", "Send backward", "Send backward"),
+                        ("×", "Remove Layer track 14", "Remove Layer track 14"),
+                    ],
+                )
                 for cell_name in item["cellNames"]:
                     self.assertEqual(cell_name["aria"], cell_name["title"], cell_name)
                     self.assertNotEqual(cell_name["aria"], cell_name["text"], cell_name)
@@ -2998,6 +3020,9 @@ try{
                 )
                 if item["touch"] or item["width"] <= 900:
                     for action in item["contextActions"]:
+                        self.assertGreaterEqual(action["width"], 44)
+                        self.assertGreaterEqual(action["height"], 44)
+                    for action in layer_stack["actions"]:
                         self.assertGreaterEqual(action["width"], 44)
                         self.assertGreaterEqual(action["height"], 44)
                     for target in (item["cell"], item["header"], item["label"]):
