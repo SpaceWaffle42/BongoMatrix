@@ -1,6 +1,6 @@
 # Future development notes
 
-Last updated: 2026-08-08
+Last updated: 2026-08-11
 
 This file records requested Matrix features that are intentionally deferred. They are product requirements and design notes, not descriptions of current behavior. Do not treat an item as implemented until its code, tests, review, merge, deployment, and physical-device verification are complete.
 
@@ -61,7 +61,9 @@ Every external provider used by these future modules must remain free to use for
 
 Complete these before usability enhancements or new modules unless an explicit dependency requires otherwise.
 
-### 0.1 Synchronize saved changes across paired devices
+### ~~0.1 Synchronize saved changes across paired devices~~ — Completed
+
+**Completed 2026-08-10:** implemented, tested, independently reviewed, merged, deployed, and verified with paired clients and the physical Matrix.
 
 Treat the Matrix server's saved configuration as the single source of truth and synchronize each committed display change to every currently paired browser or device. This must prevent one paired client from showing an outdated playlist, missing a custom module referenced by the playlist, or exposing controls that no longer match the physical display.
 
@@ -75,7 +77,9 @@ Treat the Matrix server's saved configuration as the single source of truth and 
 - Stop sending updates immediately when a device is unpaired or its session is no longer authorized.
 - Add multi-client tests using at least two independently paired sessions, including custom-module creation, playlist insertion, editing, deletion, stale drafts, reconnect recovery, and update-order interruption.
 
-### 0.2 Fix the mobile Advanced Canvas layer timeline
+### ~~0.2 Fix the mobile Advanced Canvas layer timeline~~ — Completed
+
+**Completed 2026-08-11:** implemented, tested in real Chromium, independently reviewed, merged, deployed, and accepted after visual inspection on Billy PC.
 
 Revise the Advanced Canvas layer timeline for mobile and narrow-screen users. The current responsive layout can compress the layer timeline until tracks, controls, and timing positions appear squashed and are difficult to understand or operate.
 
