@@ -23,6 +23,39 @@
     return state;
   };
 
+  function disposeTimelineResize(state) {
+    state.timelineResizeGeneration = (state.timelineResizeGeneration || 0) + 1;
+    for (const frame of state.timelineResizeFrames || []) cancelAnimationFrame(frame);
+    state.timelineResizeFrames?.clear();
+    state.timelineResizeObserver?.disconnect();
+    if (state.timelineResizeHandler) {
+      window.removeEventListener('resize', state.timelineResizeHandler);
+      window.visualViewport?.removeEventListener('resize', state.timelineResizeHandler);
+    }
+    if (state.timelineResizeTimer) clearTimeout(state.timelineResizeTimer);
+    state.timelineResizeHandler = null;
+    state.timelineResizeTimer = null;
+  }
+
+  function disposeTimelineState(state) {
+    cancelTimelineDrag(state);
+    disposeTimelineResize(state);
+    state.timelineContainer = null;
+  }
+
+  const editorCleanupObserver = typeof MutationObserver === 'undefined' || !document.documentElement
+    ? null
+    : new MutationObserver(() => {
+      for (const state of editorState.values()) {
+        if (state.timelineContainer && !state.timelineContainer.isConnected) disposeTimelineState(state);
+      }
+    });
+  editorCleanupObserver?.observe(document.documentElement, {childList: true, subtree: true});
+  window.addEventListener?.('pagehide', () => {
+    editorCleanupObserver?.disconnect();
+    for (const state of editorState.values()) disposeTimelineState(state);
+  }, {once: true});
+
   function ease(value, kind) {
     value = Math.max(0, Math.min(1, value));
     if (kind === 'step') return 0;
@@ -224,6 +257,8 @@
     if (typeof builder === 'function') builder(module);
     else if (template === 'blank') Object.assign(module, {background: '#000000', frame_count: 1, fps: 10, playback: 'hold', layers: [newLayer('text', 'Text')], overrides: []});
     else return;
+    const previousState = editorState.get(module.id);
+    if (previousState) disposeTimelineState(previousState);
     editorState.delete(module.id);
     renderCustomModules();
     setMessage('Starter example loaded locally. Save configuration to apply.');
@@ -288,6 +323,7 @@
     if (options) for (const optionValue of options) { const option = document.createElement('option'); option.value = optionValue; option.textContent = labelText === 'Rotation snap' ? (optionValue === 'off' ? 'Off' : optionValue + '°') : optionValue.replaceAll('_', ' '); control.append(option); }
     else control.type = type;
     if (type === 'checkbox') control.checked = Boolean(value); else control.value = value;
+    control.dataset.control = labelText;
     control.addEventListener(type === 'checkbox' ? 'change' : 'input', event => handler(type === 'checkbox' ? event.target.checked : (type === 'number' ? Number(event.target.value) : event.target.value)));
     label.append(control); return label;
   }
@@ -640,20 +676,214 @@
     container.append(list);
   }
 
+  function moveTimelineItem(module, layerId, sourceFrame, targetFrame) {
+    const invalidFrame = frame => !Number.isInteger(frame) || frame < 0 || frame >= module.frame_count;
+    if (invalidFrame(sourceFrame) || invalidFrame(targetFrame)) return {moved: false, module, reason: 'out_of_bounds', frame: sourceFrame};
+    if (sourceFrame === targetFrame) return {moved: false, module, reason: 'same_frame', frame: sourceFrame};
+    const layer = module.layers.find(item => item.id === layerId);
+    if (!layer) return {moved: false, module, reason: 'source_missing', frame: sourceFrame};
+    const sourceKeyframe = layer.keyframes.find(item => item.frame === sourceFrame);
+    const sourceOverride = module.overrides.find(item => item.layer_id === layerId && item.frame === sourceFrame);
+    if (!sourceKeyframe && !sourceOverride) return {moved: false, module, reason: 'source_missing', frame: sourceFrame};
+    const targetOccupied = layer.keyframes.some(item => item.frame === targetFrame)
+      || module.overrides.some(item => item.layer_id === layerId && item.frame === targetFrame);
+    if (targetOccupied) return {moved: false, module, reason: 'target_occupied', frame: sourceFrame};
+    const next = JSON.parse(JSON.stringify(module));
+    const nextLayer = next.layers.find(item => item.id === layerId);
+    const nextKeyframe = nextLayer.keyframes.find(item => item.frame === sourceFrame);
+    const nextOverride = next.overrides.find(item => item.layer_id === layerId && item.frame === sourceFrame);
+    if (nextKeyframe) nextKeyframe.frame = targetFrame;
+    if (nextOverride) nextOverride.frame = targetFrame;
+    nextLayer.keyframes.sort((left, right) => left.frame - right.frame);
+    return {moved: true, module: next, reason: null, frame: targetFrame};
+  }
+  window.moveTimelineItem = moveTimelineItem;
+
+  function timelineMoveReason(reason) {
+    return {
+      out_of_bounds: 'timeline edge', same_frame: 'same frame',
+      source_missing: 'no entry at this frame', target_occupied: 'target occupied',
+    }[reason] || 'unavailable';
+  }
+
+  function restoreTimelineActionFocus(id, action, direction) {
+    requestAnimationFrame(() => {
+      const card = document.querySelector(`[data-id="${id}"]`);
+      const preferred = card?.querySelector(`.timeline-context button[data-action="${action}"][data-direction="${direction}"]`);
+      const reverse = card?.querySelector(`.timeline-context button[data-action="${action}"][data-direction="${-direction}"]`);
+      const target = preferred && !preferred.disabled ? preferred : (reverse && !reverse.disabled ? reverse : card?.querySelector('.timeline-context'));
+      target?.focus({preventScroll: true});
+    });
+  }
+
+  function applyCanvasTimelineMove(id, direction) {
+    const module = byId(id), state = module && stateFor(module); if (!module || !state) return false;
+    const result = moveTimelineItem(module, state.selected, state.frame, state.frame + direction);
+    if (!result.moved) return false;
+    const moduleIndex = customModules.findIndex(item => item.id === id);
+    if (moduleIndex < 0) return false;
+    customModules[moduleIndex] = result.module;
+    state.frame = result.frame;
+    syncCustomModuleUI(); refreshAdvanced(id);
+    restoreTimelineActionFocus(id, 'move', direction);
+    return true;
+  }
+
+  function applyCanvasTimelineSeek(id, direction) {
+    const module = byId(id), state = module && stateFor(module); if (!module || !state) return false;
+    const target = state.frame + direction; if (target < 0 || target >= module.frame_count) return false;
+    state.frame = target; refreshAdvanced(id); restoreTimelineActionFocus(id, 'seek', direction); return true;
+  }
+
+  function wireTimelineAction(button, action) {
+    let touchStartedAt = 0, touchStartX = 0, touchStartY = 0, touchMoved = false, multiTouch = false, ignoreClickUntil = 0;
+    button.addEventListener('touchstart', event => {
+      if (event.touches.length === 1) {
+        const touch = event.touches[0];
+        touchStartedAt = event.timeStamp; touchStartX = touch.clientX; touchStartY = touch.clientY; touchMoved = false; multiTouch = false;
+      } else multiTouch = true;
+    }, {passive: true});
+    button.addEventListener('touchmove', event => {
+      if (event.touches.length !== 1) multiTouch = true;
+      else if (Math.hypot(event.touches[0].clientX - touchStartX, event.touches[0].clientY - touchStartY) >= 8) touchMoved = true;
+    }, {passive: true});
+    button.addEventListener('touchend', event => {
+      event.preventDefault(); ignoreClickUntil = performance.now() + 500;
+      if (event.touches.length !== 0) { multiTouch = true; return; }
+      const shortSingleTap = !multiTouch && !touchMoved && touchStartedAt > 0
+        && event.changedTouches.length === 1 && event.timeStamp - touchStartedAt < 500;
+      touchStartedAt = 0; touchMoved = false; multiTouch = false;
+      if (shortSingleTap && !button.disabled) action();
+    });
+    button.addEventListener('touchcancel', () => {
+      touchStartedAt = 0; touchMoved = false; multiTouch = false; ignoreClickUntil = performance.now() + 500;
+    });
+    button.onclick = event => {
+      if (event.detail === 0 || (performance.now() >= ignoreClickUntil && !event.sourceCapabilities?.firesTouchEvents)) action();
+    };
+  }
+
+  function cancelTimelineDrag(state) {
+    const drag = state.timelineDrag;
+    if (!drag) return;
+    try {
+      if (drag.cell?.hasPointerCapture?.(drag.pointerId)) drag.cell.releasePointerCapture(drag.pointerId);
+    } catch (_) {}
+    drag.cell?.classList.remove('dragging');
+    if (drag.blurHandler) window.removeEventListener('blur', drag.blurHandler);
+    state.timelineDrag = null;
+  }
+
+  function restoreTimelineCellFocus(id, layerId, frame) {
+    requestAnimationFrame(() => {
+      const card = document.querySelector(`[data-id="${id}"]`);
+      card?.querySelector(`.layer-frame-cell[data-layer-id="${layerId}"][data-frame="${frame}"]`)?.focus({preventScroll: true});
+    });
+  }
+
+  function wireTimelineMarker(cell, module, state) {
+    const layerId = cell.dataset.layerId, sourceFrame = Number(cell.dataset.frame);
+    const finish = (event, cancelled = false) => {
+      const drag = state.timelineDrag;
+      if (!drag || drag.pointerId !== event.pointerId) return;
+      const moved = drag.moved, targetFrame = drag.targetFrame;
+      cancelTimelineDrag(state);
+      if (cancelled || !moved) return;
+      event.preventDefault(); event.stopPropagation();
+      state.timelineSuppressClickUntil = performance.now() + 500;
+      const result = moveTimelineItem(module, layerId, sourceFrame, targetFrame);
+      if (!result.moved) {
+        const status = cell.closest('.timeline')?.querySelector('.timeline-context-status');
+        if (status) status.textContent = `Cannot move item: ${timelineMoveReason(result.reason)}`;
+        return;
+      }
+      const moduleIndex = customModules.findIndex(item => item.id === module.id);
+      if (moduleIndex < 0) return;
+      customModules[moduleIndex] = result.module;
+      state.selected = layerId; state.frame = result.frame;
+      syncCustomModuleUI(); refreshAdvanced(module.id);
+      restoreTimelineCellFocus(module.id, layerId, result.frame);
+    };
+    cell.addEventListener('pointerdown', event => {
+      if (!event.isPrimary || event.button !== 0) { cancelTimelineDrag(state); return; }
+      cancelTimelineDrag(state);
+      const blurHandler = () => cancelTimelineDrag(state);
+      state.timelineDrag = {
+        pointerId: event.pointerId, cell, layerId, sourceFrame,
+        startX: event.clientX, startY: event.clientY,
+        targetFrame: sourceFrame, moved: false, blurHandler,
+      };
+      cell.setPointerCapture(event.pointerId); cell.classList.add('dragging');
+      window.addEventListener('blur', blurHandler, {once: true});
+    });
+    cell.addEventListener('pointermove', event => {
+      const drag = state.timelineDrag;
+      if (!drag || drag.pointerId !== event.pointerId) return;
+      if (Math.hypot(event.clientX - drag.startX, event.clientY - drag.startY) < 8) return;
+      drag.moved = true;
+      const target = document.elementFromPoint(event.clientX, event.clientY)?.closest('.layer-frame-cell');
+      const sameTimeline = target?.closest('.custom-module-card')?.dataset.id === module.id;
+      if (sameTimeline && target.dataset.layerId === layerId) drag.targetFrame = Number(target.dataset.frame);
+      event.preventDefault();
+    });
+    cell.addEventListener('pointerup', event => finish(event));
+    cell.addEventListener('pointercancel', event => finish(event, true));
+    cell.addEventListener('click', event => {
+      if (performance.now() < (state.timelineSuppressClickUntil || 0)) {
+        event.preventDefault(); event.stopImmediatePropagation();
+      }
+    }, true);
+  }
+
+  function renderTimelineContext(module, state) {
+    const layer = module.layers.find(item => item.id === state.selected);
+    const context = document.createElement('div'); context.className = 'timeline-context'; context.tabIndex = -1;
+    const summary = document.createElement('strong'); summary.className = 'timeline-context-summary';
+    summary.textContent = `${layer?.name || 'No layer'} · frame ${state.frame + 1}`;
+    const actions = document.createElement('div'); actions.className = 'timeline-context-actions';
+    const reasons = [];
+    for (const [direction, label] of [[-1, 'Previous frame'], [1, 'Next frame']]) {
+      const button = document.createElement('button'); button.type = 'button'; button.dataset.action = 'seek'; button.dataset.direction = direction;
+      button.textContent = label; button.setAttribute('aria-label', label); button.disabled = state.frame + direction < 0 || state.frame + direction >= module.frame_count;
+      wireTimelineAction(button, () => applyCanvasTimelineSeek(module.id, direction)); actions.append(button);
+    }
+    for (const [direction, label] of [[-1, 'Move item earlier'], [1, 'Move item later']]) {
+      const availability = moveTimelineItem(module, state.selected, state.frame, state.frame + direction);
+      const button = document.createElement('button'); button.type = 'button'; button.dataset.action = 'move'; button.dataset.direction = direction;
+      button.textContent = label; button.setAttribute('aria-label', label); button.disabled = !availability.moved;
+      button.title = availability.moved ? `Move to frame ${availability.frame + 1}` : `Cannot move: ${timelineMoveReason(availability.reason)}`;
+      wireTimelineAction(button, () => applyCanvasTimelineMove(module.id, direction)); actions.append(button);
+      if (!availability.moved) reasons.push(`${label}: ${timelineMoveReason(availability.reason)}`);
+    }
+    const status = document.createElement('span'); status.className = 'timeline-context-status'; status.setAttribute('aria-live', 'polite');
+    status.textContent = reasons.length ? reasons.join(' · ') : 'Adjacent moves available';
+    context.append(summary, actions, status); return context;
+  }
+
   function renderLayerTimeline(module, container) {
-    container.replaceChildren(); const state = stateFor(module);
+    const state = stateFor(module); cancelTimelineDrag(state); container.replaceChildren();
+    disposeTimelineResize(state);
+    state.timelineContainer = container;
     const title = document.createElement('div'); title.className = 'layer-timeline-title'; title.textContent = 'Layer timeline · top rows are in front';
     const legend = document.createElement('span'); legend.className = 'layer-timeline-legend'; legend.textContent = '◆ keyframe  ● frame edit  · present  ○ hidden'; title.append(legend);
+    const context = renderTimelineContext(module, state);
+    container.addEventListener('pointerdown', event => {
+      const drag = state.timelineDrag;
+      if (drag && event.pointerId !== drag.pointerId) cancelTimelineDrag(state);
+    }, true);
+    container.addEventListener('touchstart', event => {
+      if (event.touches.length > 1) cancelTimelineDrag(state);
+    }, {capture: true, passive: true});
     const scroll = document.createElement('div'); scroll.className = 'aseprite-timeline-scroll';
-    const grid = document.createElement('div'); grid.className = 'aseprite-timeline'; grid.style.gridTemplateColumns = `minmax(150px,190px) repeat(${module.frame_count},28px)`;
+    const grid = document.createElement('div'); grid.className = 'aseprite-timeline'; grid.style.gridTemplateColumns = `var(--timeline-label-size) repeat(${module.frame_count},var(--timeline-frame-size))`;
     const corner = document.createElement('div'); corner.className = 'layer-track-corner'; corner.textContent = 'Layer / frame'; grid.append(corner);
     for (let frame = 0; frame < module.frame_count; frame++) {
-      const header = document.createElement('button'); header.type = 'button'; header.className = 'frame-chip' + (frame === state.frame ? ' active' : ''); header.dataset.frame = frame; header.textContent = frame + 1; header.title = 'Select frame ' + (frame + 1); header.onclick = () => { state.frame = frame; refreshAdvanced(module.id); }; grid.append(header);
+      const header = document.createElement('button'); header.type = 'button'; header.className = 'frame-chip' + (frame === state.frame ? ' active' : ''); header.dataset.frame = frame; header.textContent = frame + 1; header.title = 'Select frame ' + (frame + 1); wireTimelineAction(header, () => { state.frame = frame; refreshAdvanced(module.id); }); grid.append(header);
     }
     const currentStack = [...orderedLayersForFrame(module, state.frame)].reverse();
     for (const {layer, properties: current, index, depth} of currentStack) {
       const row = document.createElement('div'); row.className = 'layer-track-row';
-      const label = document.createElement('button'); label.type = 'button'; label.className = 'layer-track-label' + (layer.id === state.selected ? ' active' : ''); label.textContent = layer.name + ' · z ' + depth; label.title = layer.type + ' — select layer'; label.onclick = () => { state.selected = layer.id; refreshAdvanced(module.id); }; row.append(label);
+      const label = document.createElement('button'); label.type = 'button'; label.className = 'layer-track-label' + (layer.id === state.selected ? ' active' : ''); label.dataset.layerId = layer.id; label.textContent = layer.name + ' · z ' + depth; label.title = layer.type + ' — select layer'; wireTimelineAction(label, () => { state.selected = layer.id; refreshAdvanced(module.id); }); row.append(label);
       for (let frame = 0; frame < module.frame_count; frame++) {
         const keyframe = layer.keyframes.some(item => item.frame === frame);
         const override = module.overrides.some(item => item.frame === frame && item.layer_id === layer.id);
@@ -664,13 +894,74 @@
         cell.classList.toggle('selected-frame', frame === state.frame);
         cell.classList.toggle('has-keyframe', keyframe); cell.classList.toggle('has-override', override); cell.classList.toggle('absent', !present); cell.classList.toggle('held', present && !keyframe && !override);
         cell.textContent = keyframe ? '◆' : (override ? '●' : (!present ? '○' : '·'));
-        cell.title = layer.name + ', frame ' + (frame + 1) + (keyframe ? ', keyframe' : '') + (override ? ', frame override' : '') + (!present ? ', hidden' : '');
-        cell.onclick = () => { state.selected = layer.id; state.frame = frame; refreshAdvanced(module.id); };
+        cell.title = layer.name + ', frame ' + (frame + 1) + (keyframe ? ', keyframe' : (override ? ', frame override' : (!present ? ', hidden' : ', held')));
+        cell.setAttribute('aria-label', cell.title);
+        if (keyframe || override) wireTimelineMarker(cell, module, state);
+        wireTimelineAction(cell, () => { if (performance.now() < (state.timelineSuppressClickUntil || 0)) return; state.selected = layer.id; state.frame = frame; refreshAdvanced(module.id); });
         row.append(cell);
       }
       grid.append(row);
     }
-    scroll.append(grid); container.append(title, scroll);
+    scroll.append(grid); container.append(title, context, scroll);
+    scroll.scrollLeft = state.timelineScrollLeft || 0;
+    scroll.scrollTop = state.timelineScrollTop || 0;
+    scroll.addEventListener('scroll', () => {
+      state.timelineScrollLeft = scroll.scrollLeft;
+      state.timelineScrollTop = scroll.scrollTop;
+    }, {passive: true});
+    {
+      let resizeHandler = null;
+      const keepActiveVisible = () => {
+        if (!scroll.isConnected) {
+          if (state.timelineResizeHandler === resizeHandler) disposeTimelineResize(state);
+          return;
+        }
+        const active = scroll.querySelector('.layer-frame-cell.active');
+        const label = scroll.querySelector('.layer-track-label.active');
+        if (!active || !label) return;
+        const activeRect = active.getBoundingClientRect();
+        const scrollRect = scroll.getBoundingClientRect();
+        const labelRect = label.getBoundingClientRect();
+        if (activeRect.right > scrollRect.right) scroll.scrollLeft += activeRect.right - scrollRect.right + 4;
+        else if (activeRect.left < labelRect.right) scroll.scrollLeft -= labelRect.right - activeRect.left + 4;
+        const focused = document.activeElement;
+        const card = container.closest('.advanced-card');
+        if (focused instanceof HTMLElement && card?.contains(focused)) {
+          const focusedRect = focused.getBoundingClientRect();
+          const viewportTop = (window.visualViewport?.offsetTop || 0) + 16;
+          const viewportBottom = (window.visualViewport?.offsetTop || 0) + (window.visualViewport?.height || innerHeight) - 16;
+          if (focusedRect.top < viewportTop) window.scrollBy(0, focusedRect.top - viewportTop);
+          else if (focusedRect.bottom > viewportBottom) window.scrollBy(0, focusedRect.bottom - viewportBottom);
+        }
+      };
+      resizeHandler = () => {
+        const generation = (state.timelineResizeGeneration || 0) + 1;
+        state.timelineResizeGeneration = generation;
+        for (const frame of state.timelineResizeFrames || []) cancelAnimationFrame(frame);
+        state.timelineResizeFrames?.clear();
+        if (state.timelineResizeTimer) clearTimeout(state.timelineResizeTimer);
+        state.timelineResizeTimer = null;
+        let remaining = 4;
+        const settle = () => {
+          const frame = requestAnimationFrame(() => {
+            state.timelineResizeFrames?.delete(frame);
+            if (state.timelineResizeGeneration !== generation || state.timelineResizeHandler !== resizeHandler) return;
+          keepActiveVisible();
+          if (--remaining > 0) settle();
+          });
+          (state.timelineResizeFrames ||= new Set()).add(frame);
+        };
+        settle();
+        state.timelineResizeTimer = setTimeout(() => {
+          if (state.timelineResizeGeneration !== generation || state.timelineResizeHandler !== resizeHandler) return;
+          state.timelineResizeTimer = null;
+          keepActiveVisible();
+        }, 100);
+      };
+      state.timelineResizeHandler = resizeHandler;
+      window.addEventListener('resize', resizeHandler);
+      window.visualViewport?.addEventListener('resize', resizeHandler);
+    }
   }
 
   function renderTimeline(module, container) { renderLayerTimeline(module, container); }
@@ -825,7 +1116,63 @@
     }, 1000 / module.fps); refreshAdvanced(module.id);
   }
 
-  function refreshAdvanced(id) { pruneMediaFailureStates(); const module = byId(id); if (!module) return; const card = document.querySelector(`.custom-module-card[data-id="${CSS.escape(id)}"]`); if (!card) { renderCustomModules(); return; } renderAdvancedInto(module, card); }
+  function captureTimelineViewState(card, state) {
+    const scroll = card.querySelector('.aseprite-timeline-scroll');
+    if (scroll) {
+      state.timelineScrollLeft = scroll.scrollLeft;
+      state.timelineScrollTop = scroll.scrollTop;
+    }
+    state.viewStateCaptured = true; state.pageScrollX = window.scrollX; state.pageScrollY = window.scrollY;
+    const active = document.activeElement;
+    state.editorFocus = null;
+    if (!active || !card.contains(active)) return;
+    const selection = typeof active.selectionStart === 'number'
+      ? {start: active.selectionStart, end: active.selectionEnd, direction: active.selectionDirection} : null;
+    if (active.matches('.timeline-context button[data-action]')) {
+      state.editorFocus = {type: 'action', action: active.dataset.action, direction: active.dataset.direction};
+    } else if (active.matches('.layer-frame-cell')) {
+      state.editorFocus = {type: 'cell', layerId: active.dataset.layerId, frame: active.dataset.frame};
+    } else if (active.matches('.frame-chip')) {
+      state.editorFocus = {type: 'frame', frame: active.dataset.frame};
+    } else if (active.matches('.layer-track-label[data-layer-id]')) {
+      state.editorFocus = {type: 'layer-label', layerId: active.dataset.layerId};
+    } else if (active.matches('[data-property]')) {
+      state.editorFocus = {type: 'property', property: active.dataset.property, selection};
+    } else if (active.matches('[data-control]')) {
+      state.editorFocus = {type: 'control', control: active.dataset.control, selection};
+    }
+  }
+
+  function restoreEditorViewState(card, state) {
+    if (!state.viewStateCaptured) return;
+    requestAnimationFrame(() => {
+      if (!card.isConnected) return;
+      const focus = state.editorFocus;
+      let target = null;
+      if (focus?.type === 'action') target = card.querySelector(`.timeline-context button[data-action="${CSS.escape(focus.action)}"][data-direction="${CSS.escape(focus.direction)}"]`);
+      else if (focus?.type === 'cell') target = card.querySelector(`.layer-frame-cell[data-layer-id="${CSS.escape(focus.layerId)}"][data-frame="${CSS.escape(focus.frame)}"]`);
+      else if (focus?.type === 'frame') target = card.querySelector(`.frame-chip[data-frame="${CSS.escape(focus.frame)}"]`);
+      else if (focus?.type === 'layer-label') target = card.querySelector(`.layer-track-label[data-layer-id="${CSS.escape(focus.layerId)}"]`);
+      else if (focus?.type === 'property') target = card.querySelector(`[data-property="${CSS.escape(focus.property)}"]`);
+      else if (focus?.type === 'control') target = card.querySelector(`[data-control="${CSS.escape(focus.control)}"]`);
+      if (target && !target.disabled) {
+        target.focus({preventScroll: true});
+        if (focus.selection && typeof target.setSelectionRange === 'function') {
+          try { target.setSelectionRange(focus.selection.start, focus.selection.end, focus.selection.direction); } catch (_) {}
+        }
+      }
+      const scroll = card.querySelector('.aseprite-timeline-scroll');
+      if (scroll) { scroll.scrollLeft = state.timelineScrollLeft || 0; scroll.scrollTop = state.timelineScrollTop || 0; }
+      window.scrollTo(state.pageScrollX || 0, state.pageScrollY || 0);
+    });
+  }
+
+  function refreshAdvanced(id) {
+    pruneMediaFailureStates(); const module = byId(id); if (!module) return;
+    const card = document.querySelector(`.custom-module-card[data-id="${CSS.escape(id)}"]`);
+    if (!card) { renderCustomModules(); return; }
+    captureTimelineViewState(card, stateFor(module)); renderAdvancedInto(module, card);
+  }
 
   function renderAdvancedInto(module, card) {
     const state = stateFor(module); card.replaceChildren(); card.className = 'custom-module-card advanced-card'; card.dataset.id = module.id; card.dataset.editorType = 'canvas'; headerFor(module, card, true);
@@ -837,7 +1184,7 @@
     const timelineTools = document.createElement('div'); timelineTools.className = 'timeline-toolbar'; const onion = moduleControl('Onion skin', state.onion, 'checkbox', value => { state.onion = value; drawEditor(module, canvas); }); timelineTools.append(onion, makeButton(state.playing ? 'Stop browser preview' : 'Play browser preview', () => playBrowserPreview(module), 'btn primary'), makeButton('Copy frame', () => copyFrame(module)), makeButton('Paste frame', () => pasteFrame(module)), makeButton('Duplicate frame', () => duplicateFrame(module)));
     const timeline = document.createElement('div'); timeline.className = 'timeline';
     stage.append(nameRow, templateRow, canvasWrap, help, timelineTools, timeline); const layers = document.createElement('div'); const properties = document.createElement('div'); properties.className = 'advanced-section'; sidebar.append(layers, properties); layout.append(stage, sidebar); card.append(layout);
-    renderTimeline(module, timeline); renderLayers(module, layers); renderProperties(module, properties); bindCanvas(module, canvas); drawEditor(module, canvas);
+    renderTimeline(module, timeline); renderLayers(module, layers); renderProperties(module, properties); bindCanvas(module, canvas); drawEditor(module, canvas); restoreEditorViewState(card, state);
   }
 
   function renderAdvanced(module, list) { const card = document.createElement('div'); list.append(card); renderAdvancedInto(module, card); }
@@ -852,7 +1199,10 @@
 
   window.removeCustomModule = function removeCustomModuleAdvanced(id) {
     if (!confirm('Remove ' + customName(id) + ' from the custom modules and playlist?')) return;
-    customModules = customModulesFromEditor().filter(item => item.id !== id); editorState.delete(id);
+    customModules = customModulesFromEditor().filter(item => item.id !== id);
+    const previousState = editorState.get(id);
+    if (previousState) disposeTimelineState(previousState);
+    editorState.delete(id);
     for (const row of document.querySelectorAll('.module-row')) if (row.dataset.module === id) row.closest('.module-item').remove();
     renderCustomModules(); setMessage('Custom module removed. Save configuration to apply.');
   };

@@ -2848,6 +2848,596 @@ console.log(JSON.stringify({json.dumps(cases)}.map(probe)));
         self.assertIn(".layer-frame-cell", styles)
 
     @unittest.skipUnless(shutil.which("node"), "Node.js is required")
+    @unittest.skipUnless(
+        os.environ.get("MATRIX_CHROMIUM")
+        and Path(os.environ.get("MATRIX_CHROMIUM", "")).is_file()
+        and os.access(os.environ.get("MATRIX_CHROMIUM", ""), os.X_OK),
+        "MATRIX_CHROMIUM browser is required",
+    )
+    def test_advanced_canvas_mobile_timeline_geometry_in_real_chromium(self):
+        layers = []
+        for index in range(14):
+            layers.append({
+                "id": f"layer_track_{index}",
+                "name": f"Layer track {index + 1}",
+                "type": "rectangle",
+                "visible": True,
+                "properties": {
+                    "x": index, "y": index % 16, "width": 8, "height": 8,
+                    "rotation": 0, "colour": "#00ffff", "filled": False,
+                },
+                "keyframes": ([
+                    {"frame": 0, "easing": "linear", "properties": {"x": index}},
+                    {"frame": 119, "easing": "linear", "properties": {"x": index + 1}},
+                ] if index == 0 else []),
+            })
+        module = test_config_store.ConfigStoreTests.advanced_module(
+            frame_count=120,
+            layers=layers,
+            overrides=[{
+                "frame": 60, "layer_id": "layer_track_0",
+                "properties": {"colour": "#ff00ff"},
+            }],
+        )
+        self.store.update({"custom_modules": [module]})
+        self.pair_browser()
+        body = self.client.get("/").get_data(as_text=True)
+        css = (Path(__file__).parents[1] / "app/static/custom_canvas.css").read_text()
+        javascript = (Path(__file__).parents[1] / "app/static/custom_canvas.js").read_text()
+        stylesheet = '<link rel="stylesheet" href="/static/custom_canvas.css">'
+        script = '<script src="/static/custom_canvas.js"></script>'
+        self.assertIn(stylesheet, body)
+        self.assertIn(script, body)
+        body = body.replace(stylesheet, f"<style>{css}</style>", 1)
+        body = body.replace(script, f"<script>{javascript}</script>", 1)
+
+        probe = r"""
+const port=process.argv[1],pagePath=process.argv[2];let endpoint;
+for(let attempt=0;attempt<50;attempt++){try{endpoint=await fetch(`http://127.0.0.1:${port}/json/new`,{method:'PUT'}).then(response=>response.json());break}catch(_){await new Promise(resolve=>setTimeout(resolve,100))}}
+if(!endpoint)throw new Error('Chromium DevTools endpoint unavailable');
+const socket=new WebSocket(endpoint.webSocketDebuggerUrl),pending=new Map(),exceptions=[];let nextId=1,loadResolve=()=>{},loaded;
+socket.onmessage=event=>{const message=JSON.parse(event.data);if(message.id&&pending.has(message.id)){const request=pending.get(message.id);pending.delete(message.id);message.error?request.reject(new Error(JSON.stringify(message.error))):request.resolve(message.result);return}if(message.method==='Runtime.exceptionThrown')exceptions.push(message.params.exceptionDetails);if(message.method==='Page.loadEventFired')loadResolve()};
+await new Promise((resolve,reject)=>{socket.onopen=resolve;socket.onerror=reject});
+const send=(method,params={})=>{const id=nextId++;socket.send(JSON.stringify({id,method,params}));return new Promise((resolve,reject)=>pending.set(id,{resolve,reject}))};
+const evaluate=async expression=>{const result=await send('Runtime.evaluate',{expression,returnByValue:true,awaitPromise:true});if(result.exceptionDetails)throw new Error(JSON.stringify(result.exceptionDetails));return result.result.value};
+const metrics=async(width,height,touch,dpr=1)=>{await send('Emulation.setTouchEmulationEnabled',{enabled:touch,maxTouchPoints:touch?2:1});await send('Emulation.setDeviceMetricsOverride',{width,height,deviceScaleFactor:dpr,mobile:false,screenOrientation:{type:width>height?'landscapePrimary':'portraitPrimary',angle:width>height?90:0}})};
+try{
+ await send('Runtime.enable');await send('Page.enable');
+ await metrics(390,844,true);loaded=new Promise(resolve=>loadResolve=resolve);await send('Page.navigate',{url:'file://'+pagePath});await Promise.race([loaded,new Promise((_,reject)=>setTimeout(()=>reject(new Error('load timeout')),5000))]);
+ const viewports=[[320,568,true,1],[360,800,true,1],[390,844,true,1],[844,390,true,1],[412,915,true,1],[599,800,false,1],[600,800,false,1],[601,800,false,1],[768,1024,true,1],[820,1180,true,1],[899,768,false,1],[900,768,false,1],[901,768,false,1],[1024,768,true,1],[1280,720,false,1],[1440,900,false,1],[390,844,true,2],[390,844,true,3]],reports=[];
+ for(const [width,height,touch,dpr] of viewports){
+  await metrics(width,height,touch,dpr);
+  reports.push(await evaluate(`(async()=>{await new Promise(requestAnimationFrame);const scroll=document.querySelector('.aseprite-timeline-scroll'),cell=document.querySelector('.layer-frame-cell'),header=document.querySelector('.frame-chip'),label=document.querySelector('.layer-track-label.active'),corner=document.querySelector('.layer-track-corner'),active=document.querySelector('.layer-frame-cell.active'),timeline=document.querySelector('.timeline'),context=document.querySelector('.timeline-context'),contextButtons=[...document.querySelectorAll('.timeline-context-actions button')],before=JSON.stringify(customModules),scrollRect=scroll.getBoundingClientRect(),cellRect=cell.getBoundingClientRect(),headerRect=header.getBoundingClientRect(),labelRect=label.getBoundingClientRect(),cornerRect=corner.getBoundingClientRect(),activeIdentity=[active.dataset.layerId,active.dataset.frame];scroll.scrollLeft=scroll.scrollWidth;await new Promise(requestAnimationFrame);const labelAfter=label.getBoundingClientRect();scroll.scrollTop=scroll.scrollHeight;await new Promise(requestAnimationFrame);const cornerAfter=corner.getBoundingClientRect();const documentOverflow=document.documentElement.scrollWidth-document.documentElement.clientWidth;timeline.hidden=true;await new Promise(requestAnimationFrame);const baselineOverflow=document.documentElement.scrollWidth-document.documentElement.clientWidth;timeline.hidden=false;await new Promise(requestAnimationFrame);const wideElements=[...document.querySelectorAll('body *')].map(element=>{const rect=element.getBoundingClientRect();return {tag:element.tagName,className:String(element.className||''),left:rect.left,right:rect.right,width:rect.width,scrollWidth:element.scrollWidth}}).filter(item=>item.right>innerWidth+1||item.width>innerWidth+1).sort((left,right)=>right.right-left.right).slice(0,8);return {width:innerWidth,height:innerHeight,touch:${touch},dpr:devicePixelRatio,layoutColumns:getComputedStyle(document.querySelector('.advanced-layout')).gridTemplateColumns.split(' ').length,documentOverflow,baselineOverflow,timelineOverflow:Math.max(0,documentOverflow-baselineOverflow),wideElements,localOverflow:scroll.scrollWidth-scroll.clientWidth,scrollerInside:scrollRect.left>=-0.5&&scrollRect.right<=innerWidth+0.5,cell:[cellRect.width,cellRect.height],header:[headerRect.width,headerRect.height],label:[labelRect.width,labelRect.height],stickyLabelDelta:Math.abs(labelAfter.left-labelRect.left),stickyHeaderDelta:Math.abs(cornerAfter.top-cornerRect.top),contextOutsideScroll:!scroll.contains(context),contextSummary:context.querySelector('.timeline-context-summary').textContent,contextActions:contextButtons.map(button=>{const rect=button.getBoundingClientRect();return {label:button.getAttribute('aria-label'),disabled:button.disabled,width:rect.width,height:rect.height}}),cellNames:[...document.querySelectorAll('.layer-frame-cell')].slice(0,8).map(button=>({aria:button.getAttribute('aria-label'),title:button.title,text:button.textContent})),statePreserved:before===JSON.stringify(customModules),activePreserved:activeIdentity[0]===document.querySelector('.layer-frame-cell.active').dataset.layerId&&activeIdentity[1]===document.querySelector('.layer-frame-cell.active').dataset.frame}})()`));
+ }
+ console.log(JSON.stringify({reports,exceptions:exceptions.map(item=>item.text)}));
+}finally{socket.close()}
+"""
+        chromium = os.environ["MATRIX_CHROMIUM"]
+        node = shutil.which("node")
+        assert node is not None
+        with tempfile.TemporaryDirectory(prefix="matrix-timeline-geometry-") as directory:
+            page = Path(directory) / "dashboard.html"
+            page.write_text(body)
+            profile = Path(directory) / "profile"
+            browser = subprocess.Popen([
+                chromium, "--headless", "--no-sandbox", "--disable-gpu",
+                "--remote-debugging-port=0", f"--user-data-dir={profile}", "about:blank",
+            ], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            try:
+                active_port = profile / "DevToolsActivePort"
+                for _attempt in range(50):
+                    if active_port.is_file():
+                        break
+                    if browser.poll() is not None:
+                        self.fail("Chromium exited before publishing its DevTools port")
+                    time.sleep(0.1)
+                self.assertTrue(active_port.is_file(), "Chromium DevTools port unavailable")
+                completed = subprocess.run(
+                    [node, "-e", probe, active_port.read_text().splitlines()[0], str(page)],
+                    capture_output=True, text=True, timeout=30,
+                )
+            finally:
+                browser.terminate()
+                try:
+                    browser.wait(timeout=5)
+                except subprocess.TimeoutExpired:
+                    browser.kill(); browser.wait(timeout=5)
+                for cleanup_attempt in range(20):
+                    try:
+                        shutil.rmtree(profile)
+                        break
+                    except FileNotFoundError:
+                        break
+                    except OSError:
+                        if cleanup_attempt == 19:
+                            raise
+                        time.sleep(0.05)
+        self.assertEqual(completed.returncode, 0, completed.stderr)
+        report = json.loads(completed.stdout.strip().splitlines()[-1])
+        self.assertEqual(report["exceptions"], [])
+        self.assertEqual(
+            [(item["width"], item["height"], item["touch"], item["dpr"]) for item in report["reports"]],
+            [
+                (320, 568, True, 1), (360, 800, True, 1),
+                (390, 844, True, 1), (844, 390, True, 1),
+                (412, 915, True, 1),
+                (599, 800, False, 1), (600, 800, False, 1),
+                (601, 800, False, 1), (768, 1024, True, 1),
+                (820, 1180, True, 1), (899, 768, False, 1),
+                (900, 768, False, 1), (901, 768, False, 1),
+                (1024, 768, True, 1), (1280, 720, False, 1),
+                (1440, 900, False, 1), (390, 844, True, 2),
+                (390, 844, True, 3),
+            ],
+        )
+        for item in report["reports"]:
+            with self.subTest(viewport=(item["width"], item["height"])):
+                self.assertLessEqual(item["timelineOverflow"], 1, item)
+                self.assertGreater(item["localOverflow"], 0)
+                self.assertTrue(item["scrollerInside"])
+                self.assertLessEqual(item["stickyLabelDelta"], 1)
+                self.assertLessEqual(item["stickyHeaderDelta"], 1)
+                self.assertTrue(item["statePreserved"])
+                self.assertTrue(item["activePreserved"])
+                self.assertEqual(item["layoutColumns"], 1 if item["width"] <= 900 else 2, item)
+                self.assertTrue(item["contextOutsideScroll"])
+                self.assertEqual(item["contextSummary"], "Layer track 1 · frame 1")
+                for cell_name in item["cellNames"]:
+                    self.assertEqual(cell_name["aria"], cell_name["title"], cell_name)
+                    self.assertNotEqual(cell_name["aria"], cell_name["text"], cell_name)
+                self.assertEqual(
+                    [action["label"] for action in item["contextActions"]],
+                    [
+                        "Previous frame", "Next frame",
+                        "Move item earlier", "Move item later",
+                    ],
+                )
+                self.assertEqual(
+                    [action["disabled"] for action in item["contextActions"]],
+                    [True, False, True, False],
+                )
+                if item["touch"] or item["width"] <= 900:
+                    for action in item["contextActions"]:
+                        self.assertGreaterEqual(action["width"], 44)
+                        self.assertGreaterEqual(action["height"], 44)
+                    for target in (item["cell"], item["header"], item["label"]):
+                        self.assertGreaterEqual(target[0], 44)
+                        self.assertGreaterEqual(target[1], 44)
+                else:
+                    self.assertAlmostEqual(item["cell"][0], 28, delta=0.5)
+                    self.assertAlmostEqual(item["cell"][1], 28, delta=0.5)
+
+    @unittest.skipUnless(shutil.which("node"), "Node.js is required")
+    def test_browser_timeline_item_move_is_atomic_and_collision_safe(self):
+        harness = r"""
+const fs=require('fs');
+global.window={};
+global.customModules=[];
+global.mediaItems=[];
+global.document={querySelector:()=>({replaceChildren(){},append(){}}),querySelectorAll:()=>[]};
+global.syncCustomModuleUI=()=>{};
+global.renderCustomModules=()=>{};
+global.setInterval=()=>0;
+eval(fs.readFileSync('app/static/custom_canvas.js','utf8'));
+const move=window.moveTimelineItem;
+if(typeof move!=='function')throw new Error('production moveTimelineItem helper is missing');
+const source={
+ id:'custom_motion',type:'canvas',frame_count:8,fps:12,playback:'loop',background:'#000000',
+ layers:[
+  {id:'layer_a',name:'A',type:'rectangle',visible:true,properties:{x:1},keyframes:[
+   {frame:1,easing:'linear',properties:{x:2}},
+   {frame:5,easing:'ease_in_out',properties:{x:6}},
+  ]},
+  {id:'layer_b',name:'B',type:'rectangle',visible:true,properties:{x:3},keyframes:[
+   {frame:3,easing:'step',properties:{x:4}},
+  ]},
+ ],
+ overrides:[
+  {frame:1,layer_id:'layer_a',properties:{opacity:0.5}},
+  {frame:2,layer_id:'layer_a',properties:{colour:'#ff0000'}},
+  {frame:6,layer_id:'layer_a',properties:{colour:'#00ff00'}},
+  {frame:1,layer_id:'layer_b',properties:{colour:'#0000ff'}},
+ ],
+};
+function unchanged(before){if(JSON.stringify(source)!==before)throw new Error('helper mutated its input')}
+function rejected(layer,from,to,reason){const before=JSON.stringify(source),result=move(source,layer,from,to);unchanged(before);if(result.moved||result.module!==source||result.reason!==reason||result.frame!==from)throw new Error(`unexpected rejection ${from}->${to}: `+JSON.stringify(result));}
+rejected('layer_a',1,-1,'out_of_bounds');
+rejected('layer_a',1,8,'out_of_bounds');
+rejected('layer_a',-1,4,'out_of_bounds');
+rejected('layer_a',1,1,'same_frame');
+rejected('layer_a',1,5,'target_occupied');
+rejected('layer_a',1,2,'target_occupied');
+rejected('layer_a',2,1,'target_occupied');
+rejected('layer_a',2,6,'target_occupied');
+rejected('layer_a',4,7,'source_missing');
+rejected('missing',1,4,'source_missing');
+rejected('layer_a',1.5,4,'out_of_bounds');
+const cancelledBefore=JSON.stringify(source),cancelled={pointerId:7,cancelled:true};if(!cancelled.cancelled)move(source,'layer_a',1,4);unchanged(cancelledBefore);
+const beforeDual=JSON.stringify(source),dual=move(source,'layer_a',1,4);unchanged(beforeDual);
+if(!dual.moved||dual.frame!==4||dual.module===source)throw new Error('valid dual-data move was rejected');
+if(JSON.stringify(dual.module.layers[0].keyframes)!==JSON.stringify([
+ {frame:4,easing:'linear',properties:{x:2}},
+ {frame:5,easing:'ease_in_out',properties:{x:6}},
+]))throw new Error('keyframe identity/order changed: '+JSON.stringify(dual.module.layers[0].keyframes));
+if(JSON.stringify(dual.module.overrides)!==JSON.stringify([
+ {frame:4,layer_id:'layer_a',properties:{opacity:0.5}},
+ {frame:2,layer_id:'layer_a',properties:{colour:'#ff0000'}},
+ {frame:6,layer_id:'layer_a',properties:{colour:'#00ff00'}},
+ {frame:1,layer_id:'layer_b',properties:{colour:'#0000ff'}},
+]))throw new Error('dual-data override changed: '+JSON.stringify(dual.module.overrides));
+const beforeOverride=JSON.stringify(source),override=move(source,'layer_a',2,4);unchanged(beforeOverride);
+if(!override.moved||override.frame!==4||override.module===source)throw new Error('valid override-only move was rejected');
+if(JSON.stringify(override.module.overrides)!==JSON.stringify([
+ {frame:1,layer_id:'layer_a',properties:{opacity:0.5}},
+ {frame:4,layer_id:'layer_a',properties:{colour:'#ff0000'}},
+ {frame:6,layer_id:'layer_a',properties:{colour:'#00ff00'}},
+ {frame:1,layer_id:'layer_b',properties:{colour:'#0000ff'}},
+]))throw new Error('override identity/order changed: '+JSON.stringify(override.module.overrides));
+const keyframeOnly=move(source,'layer_a',5,7);if(!keyframeOnly.moved||keyframeOnly.frame!==7)throw new Error('keyframe-only move failed');
+if(JSON.stringify(JSON.parse(JSON.stringify(dual.module)))!==JSON.stringify(dual.module))throw new Error('moved module did not serialize exactly');
+console.log('ADVANCED_CANVAS_TIMELINE_MOVE_PASS');
+"""
+        node = shutil.which("node")
+        assert node is not None
+        result = subprocess.run(
+            [node, "-e", harness],
+            cwd=Path(__file__).parents[1], text=True, capture_output=True, check=False,
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("ADVANCED_CANVAS_TIMELINE_MOVE_PASS", result.stdout)
+
+    @unittest.skipUnless(shutil.which("node"), "Node.js is required")
+    def test_moved_canvas_timeline_save_reopen_and_stale_peer_conflict(self):
+        module = test_config_store.ConfigStoreTests.advanced_module(
+            id="custom_motion", name="Motion saved through API", frame_count=120,
+            layers=[{
+                "id": "layer_a", "name": "Primary motion", "type": "rectangle",
+                "visible": True,
+                "properties": {
+                    "x": 1, "y": 2, "width": 8, "height": 8,
+                    "rotation": 0, "colour": "#00ffff", "filled": False,
+                },
+                "keyframes": [
+                    {"frame": 1, "easing": "linear", "properties": {"x": 2}},
+                    {"frame": 4, "easing": "ease_in_out", "properties": {"x": 5}},
+                ],
+            }],
+            overrides=[{
+                "frame": 3, "layer_id": "layer_a",
+                "properties": {"colour": "#ff0000"},
+            }],
+        )
+        self.store.update({"custom_modules": [module]})
+        self.pair_browser()
+        stale_client = self.app.test_client()
+        self.assertEqual(
+            stale_client.post(
+                "/pair", data={"pin": "123456", "device_name": "Stale canvas peer"},
+            ).status_code,
+            302,
+        )
+        baseline = self.client.get("/api/config")
+        self.assertEqual(baseline.status_code, 200)
+        baseline_revision = baseline.get_json()["revision"]
+
+        harness = r"""
+const fs=require('fs');
+global.window={};global.customModules=[];global.mediaItems=[];
+global.document={querySelector:()=>({replaceChildren(){},append(){}}),querySelectorAll:()=>[]};
+global.syncCustomModuleUI=()=>{};global.renderCustomModules=()=>{};global.setInterval=()=>0;
+eval(fs.readFileSync('app/static/custom_canvas.js','utf8'));
+const source=JSON.parse(process.argv[1]);
+const result=window.moveTimelineItem(source,'layer_a',1,2);
+if(!result.moved)throw new Error(JSON.stringify(result));
+console.log(JSON.stringify(result.module));
+"""
+        node = shutil.which("node")
+        assert node is not None
+        moved_result = subprocess.run(
+            [node, "-e", harness, json.dumps(module)],
+            cwd=Path(__file__).parents[1], text=True, capture_output=True, check=False,
+        )
+        self.assertEqual(moved_result.returncode, 0, moved_result.stderr)
+        moved = json.loads(moved_result.stdout)
+        self.assertEqual(
+            [item["frame"] for item in moved["layers"][0]["keyframes"]],
+            [2, 4],
+        )
+
+        saved = self.client.post(
+            "/api/config", json={"custom_modules": [moved]},
+            headers={"If-Match": f'"{baseline_revision}"'},
+        )
+        self.assertEqual(saved.status_code, 200, saved.get_data(as_text=True))
+        saved_revision = saved.get_json()["revision"]
+        reopened = self.client.get("/api/config")
+        self.assertEqual(reopened.status_code, 200)
+        self.assertEqual(reopened.get_json()["custom_modules"], [moved])
+
+        stale_payload = json.loads(json.dumps(module))
+        stale_payload["name"] = "Unsaved dirty peer draft"
+        conflict = stale_client.post(
+            "/api/config", json={"custom_modules": [stale_payload]},
+            headers={"If-Match": f'"{baseline_revision}"'},
+        )
+        self.assertEqual(conflict.status_code, 412, conflict.get_data(as_text=True))
+        self.assertEqual(conflict.headers["ETag"], f'"{saved_revision}"')
+        self.assertEqual(conflict.get_json()["revision"], saved_revision)
+        final_snapshot = self.client.get("/api/config").get_json()
+        self.assertEqual(final_snapshot["custom_modules"], [moved])
+        self.assertEqual(final_snapshot["revision"], saved_revision)
+
+    @unittest.skipUnless(shutil.which("node"), "Node.js is required")
+    @unittest.skipUnless(
+        os.environ.get("MATRIX_CHROMIUM")
+        and Path(os.environ.get("MATRIX_CHROMIUM", "")).is_file()
+        and os.access(os.environ.get("MATRIX_CHROMIUM", ""), os.X_OK),
+        "MATRIX_CHROMIUM browser is required",
+    )
+    def test_advanced_canvas_timeline_touch_keyboard_and_reflow_state_in_real_chromium(self):
+        layers = [
+            {
+                "id": "layer_a", "name": "Primary motion", "type": "rectangle",
+                "visible": True,
+                "properties": {
+                    "x": 1, "y": 2, "width": 8, "height": 8,
+                    "rotation": 0, "colour": "#00ffff", "filled": False,
+                },
+                "keyframes": [
+                    {"frame": 1, "easing": "linear", "properties": {"x": 2}},
+                    {"frame": 4, "easing": "ease_in_out", "properties": {"x": 5}},
+                ],
+            },
+            {
+                "id": "layer_b", "name": "Background", "type": "rectangle",
+                "visible": True,
+                "properties": {
+                    "x": 10, "y": 10, "width": 12, "height": 12,
+                    "rotation": 0, "colour": "#ffffff", "filled": True,
+                },
+                "keyframes": [],
+            },
+        ]
+        module = test_config_store.ConfigStoreTests.advanced_module(
+            id="custom_motion", name="Motion draft", frame_count=120,
+            layers=layers,
+            overrides=[
+                {"frame": 3, "layer_id": "layer_a", "properties": {"colour": "#ff0000"}},
+                {"frame": 6, "layer_id": "layer_a", "properties": {"colour": "#00ff00"}},
+            ],
+        )
+        self.store.update({"custom_modules": [module]})
+        self.pair_browser()
+        body = self.client.get("/").get_data(as_text=True)
+        css = (Path(__file__).parents[1] / "app/static/custom_canvas.css").read_text()
+        javascript = (Path(__file__).parents[1] / "app/static/custom_canvas.js").read_text()
+        stylesheet = '<link rel="stylesheet" href="/static/custom_canvas.css">'
+        script = '<script src="/static/custom_canvas.js"></script>'
+        self.assertIn(stylesheet, body)
+        self.assertIn(script, body)
+        body = body.replace(stylesheet, f"<style>{css}</style>", 1)
+        body = body.replace(script, f"<script>{javascript}</script>", 1)
+
+        probe = r"""
+const port=process.argv[1],pagePath=process.argv[2];let endpoint;
+for(let attempt=0;attempt<50;attempt++){try{endpoint=await fetch(`http://127.0.0.1:${port}/json/new`,{method:'PUT'}).then(response=>response.json());break}catch(_){await new Promise(resolve=>setTimeout(resolve,100))}}
+if(!endpoint)throw new Error('Chromium DevTools endpoint unavailable');
+const socket=new WebSocket(endpoint.webSocketDebuggerUrl),pending=new Map(),exceptions=[];let nextId=1,loadResolve=()=>{},loaded;
+socket.onmessage=event=>{const message=JSON.parse(event.data);if(message.id&&pending.has(message.id)){const request=pending.get(message.id);pending.delete(message.id);message.error?request.reject(new Error(JSON.stringify(message.error))):request.resolve(message.result);return}if(message.method==='Runtime.exceptionThrown')exceptions.push(message.params.exceptionDetails);if(message.method==='Page.loadEventFired')loadResolve()};
+await new Promise((resolve,reject)=>{socket.onopen=resolve;socket.onerror=reject});
+const send=(method,params={})=>{const id=nextId++;socket.send(JSON.stringify({id,method,params}));return new Promise((resolve,reject)=>pending.set(id,{resolve,reject}))};
+const evaluate=async expression=>{const result=await send('Runtime.evaluate',{expression,returnByValue:true,awaitPromise:true});if(result.exceptionDetails)throw new Error(JSON.stringify(result.exceptionDetails));return result.result.value};
+const metrics=async(width,height,touch=true,mobile=touch)=>{await send('Emulation.setTouchEmulationEnabled',{enabled:touch,maxTouchPoints:touch?2:1});await send('Emulation.setDeviceMetricsOverride',{width,height,deviceScaleFactor:1,mobile});await evaluate(`new Promise(resolve=>requestAnimationFrame(()=>requestAnimationFrame(()=>resolve(true))))`)};
+const point=selector=>evaluate(`(async()=>{const element=document.querySelector(${JSON.stringify(selector)});if(!element)throw new Error('missing '+${JSON.stringify(selector)});element.scrollIntoView({behavior:'instant',block:'center',inline:'center'});await new Promise(requestAnimationFrame);let rect=element.getBoundingClientRect();const scroller=element.closest('.aseprite-timeline-scroll'),sticky=scroller?.querySelector('.layer-track-label.active');if(scroller&&sticky){const stickyRect=sticky.getBoundingClientRect();if(rect.left<stickyRect.right+6){scroller.scrollLeft=Math.max(0,scroller.scrollLeft-(stickyRect.right+6-rect.left));await new Promise(requestAnimationFrame);rect=element.getBoundingClientRect()}const visibleRight=Math.min(scroller.getBoundingClientRect().right,visualViewport.width);if(rect.right>visibleRight-4){scroller.scrollLeft+=rect.right-visibleRight+4;await new Promise(requestAnimationFrame);rect=element.getBoundingClientRect()}}const x=rect.left+rect.width/2,y=rect.top+rect.height/2,hit=document.elementFromPoint(x,y);return {x,y,scale:visualViewport.scale,hitTag:hit?.tagName,hitAria:hit?.getAttribute?.('aria-label'),hitClass:String(hit?.className||''),hitLayer:hit?.dataset?.layerId,hitFrame:hit?.dataset?.frame}})()`);
+let touchId=10;const touchTap=async target=>{const id=touchId++,stamp=Date.now()/1000;await send('Input.dispatchTouchEvent',{type:'touchStart',timestamp:stamp,touchPoints:[{x:target.x,y:target.y,radiusX:2,radiusY:2,force:1,id}]});await send('Input.dispatchTouchEvent',{type:'touchEnd',timestamp:stamp+0.05,touchPoints:[]});await evaluate(`new Promise(resolve=>requestAnimationFrame(()=>resolve(true)))`)};
+const pressEnter=async()=>{const key={key:'Enter',code:'Enter',windowsVirtualKeyCode:13,nativeVirtualKeyCode:13};await send('Input.dispatchKeyEvent',{type:'rawKeyDown',...key});await send('Input.dispatchKeyEvent',{type:'char',...key,text:'\r',unmodifiedText:'\r'});await send('Input.dispatchKeyEvent',{type:'keyUp',...key});await evaluate(`new Promise(resolve=>requestAnimationFrame(()=>resolve(true)))`)};
+const mouseDrag=async(source,target)=>{await send('Input.dispatchMouseEvent',{type:'mouseMoved',x:source.x,y:source.y});await send('Input.dispatchMouseEvent',{type:'mousePressed',x:source.x,y:source.y,button:'left',buttons:1,clickCount:1});await send('Input.dispatchMouseEvent',{type:'mouseMoved',x:target.x,y:target.y,button:'left',buttons:1});await send('Input.dispatchMouseEvent',{type:'mouseReleased',x:target.x,y:target.y,button:'left',buttons:0,clickCount:1});await evaluate(`new Promise(resolve=>requestAnimationFrame(()=>resolve(true)))`)};
+const mouseClick=async target=>{await send('Input.dispatchMouseEvent',{type:'mouseMoved',x:target.x,y:target.y});await send('Input.dispatchMouseEvent',{type:'mousePressed',x:target.x,y:target.y,button:'left',buttons:1,clickCount:1});await send('Input.dispatchMouseEvent',{type:'mouseReleased',x:target.x,y:target.y,button:'left',buttons:0,clickCount:1});await evaluate(`new Promise(resolve=>requestAnimationFrame(()=>resolve(true)))`)};
+const touchDrag=async(source,target,cancel=false)=>{const id=touchId++,stamp=Date.now()/1000;await send('Input.dispatchTouchEvent',{type:'touchStart',timestamp:stamp,touchPoints:[{x:source.x,y:source.y,radiusX:2,radiusY:2,force:1,id}]});await send('Input.dispatchTouchEvent',{type:'touchMove',timestamp:stamp+0.05,touchPoints:[{x:target.x,y:target.y,radiusX:2,radiusY:2,force:1,id}]});await send('Input.dispatchTouchEvent',{type:cancel?'touchCancel':'touchEnd',timestamp:stamp+0.1,touchPoints:[]});await evaluate(`new Promise(resolve=>requestAnimationFrame(()=>resolve(true)))`)};
+const pointerEvent=async(selector,type,options)=>evaluate(`(()=>{const element=document.querySelector(${JSON.stringify(selector)});element.dispatchEvent(new PointerEvent(${JSON.stringify(type)},{bubbles:true,cancelable:true,...${JSON.stringify(options)}}));return true})()`);
+try{
+ await send('Runtime.enable');await send('Page.enable');await metrics(390,844,true);
+ loaded=new Promise(resolve=>loadResolve=resolve);await send('Page.navigate',{url:'file://'+pagePath});await Promise.race([loaded,new Promise((_,reject)=>setTimeout(()=>reject(new Error('load timeout')),5000))]);
+ await evaluate(`(()=>{if(matrixSyncTimer!==null){clearInterval(matrixSyncTimer);matrixSyncTimer=null}if(matrixFrameTimer!==null){clearTimeout(matrixFrameTimer);matrixFrameTimer=null}globalThis.__timelineFetches=[];const original=globalThis.fetch;globalThis.fetch=(url,options={})=>{__timelineFetches.push({url:String(url),method:options.method||'GET'});return original(url,options)};const add=EventTarget.prototype.addEventListener,remove=EventTarget.prototype.removeEventListener;globalThis.__trackedWindowResize=new Set();globalThis.__trackedViewportResize=new Set();EventTarget.prototype.addEventListener=function(type,listener,options){if(type==='resize'){if(this===window)__trackedWindowResize.add(listener);else if(this===visualViewport)__trackedViewportResize.add(listener)}return add.call(this,type,listener,options)};EventTarget.prototype.removeEventListener=function(type,listener,options){if(type==='resize'){if(this===window)__trackedWindowResize.delete(listener);else if(this===visualViewport)__trackedViewportResize.delete(listener)}return remove.call(this,type,listener,options)};document.querySelector('.layer-row.active button.btn').click();return true})()`);await send('Emulation.setCPUThrottlingRate',{rate:4});
+ const selectedPoint=await point('.layer-frame-cell[data-layer-id="layer_a"][data-frame="1"]');await touchTap(selectedPoint);
+ const selected=await evaluate(`({summary:document.querySelector('.timeline-context-summary').textContent,active:[document.querySelector('.layer-frame-cell.active').dataset.layerId,document.querySelector('.layer-frame-cell.active').dataset.frame]})`);
+ const emptyPoint=await point('.layer-frame-cell[data-layer-id="layer_b"][data-frame="5"]'),emptyBefore=await evaluate(`(()=>{const active=document.querySelector('.layer-frame-cell.active'),scroll=document.querySelector('.aseprite-timeline-scroll');return {active:[active.dataset.layerId,active.dataset.frame],scrollLeft:scroll.scrollLeft}})()`),panStamp=Date.now()/1000;
+ await send('Input.dispatchTouchEvent',{type:'touchStart',timestamp:panStamp,touchPoints:[{x:emptyPoint.x,y:emptyPoint.y,radiusX:2,radiusY:2,force:1,id:70}]});await send('Input.dispatchTouchEvent',{type:'touchMove',timestamp:panStamp+0.04,touchPoints:[{x:emptyPoint.x-70,y:emptyPoint.y,radiusX:2,radiusY:2,force:1,id:70}]});await send('Input.dispatchTouchEvent',{type:'touchEnd',timestamp:panStamp+0.08,touchPoints:[]});await evaluate(`new Promise(resolve=>requestAnimationFrame(()=>resolve(true)))`);
+ const emptyPan=await evaluate(`(()=>{const active=document.querySelector('.layer-frame-cell.active'),scroll=document.querySelector('.aseprite-timeline-scroll');return {before:${JSON.stringify(emptyBefore)},active:[active.dataset.layerId,active.dataset.frame],scrollLeft:scroll.scrollLeft}})()`);await touchTap(await point('.layer-frame-cell[data-layer-id="layer_a"][data-frame="1"]'));
+ await point('.layer-frame-cell[data-layer-id="layer_a"][data-frame="1"]');const secondPoints=await evaluate(`(()=>{const centre=element=>{const rect=element.getBoundingClientRect();return {x:rect.left+rect.width/2,y:rect.top+rect.height/2}};return {source:centre(document.querySelector('.layer-frame-cell[data-layer-id="layer_a"][data-frame="1"]')),elsewhere:centre(document.querySelector('.timeline-context-status'))}})()`),secondSource=secondPoints.source,secondElsewhere=secondPoints.elsewhere,secondStamp=Date.now()/1000,secondBefore=await evaluate(`JSON.stringify(customModules)`);
+ await send('Input.dispatchTouchEvent',{type:'touchStart',timestamp:secondStamp,touchPoints:[{x:secondSource.x,y:secondSource.y,radiusX:2,radiusY:2,force:1,id:71}]});const dragStarted=await evaluate(`!!document.querySelector('.layer-frame-cell.dragging')`);await send('Input.dispatchTouchEvent',{type:'touchStart',timestamp:secondStamp+0.03,touchPoints:[{x:secondSource.x,y:secondSource.y,radiusX:2,radiusY:2,force:1,id:71},{x:secondElsewhere.x,y:secondElsewhere.y,radiusX:2,radiusY:2,force:1,id:72}]});const dragAfterSecond=await evaluate(`!!document.querySelector('.layer-frame-cell.dragging')`);await send('Input.dispatchTouchEvent',{type:'touchCancel',timestamp:secondStamp+0.06,touchPoints:[]});const secondTouchCancelled={dragStarted,dragAfterSecond,unchanged:secondBefore===await evaluate(`JSON.stringify(customModules)`)};
+ const tinySource=await point('.layer-frame-cell[data-layer-id="layer_a"][data-frame="1"]'),tinyStamp=Date.now()/1000,tinyBefore=await evaluate(`JSON.stringify(customModules)`);await send('Input.dispatchTouchEvent',{type:'touchStart',timestamp:tinyStamp,touchPoints:[{x:tinySource.x,y:tinySource.y,radiusX:2,radiusY:2,force:1,id:73}]});await send('Input.dispatchTouchEvent',{type:'touchMove',timestamp:tinyStamp+0.03,touchPoints:[{x:tinySource.x+4,y:tinySource.y,radiusX:2,radiusY:2,force:1,id:73}]});await send('Input.dispatchTouchEvent',{type:'touchEnd',timestamp:tinyStamp+0.06,touchPoints:[]});await evaluate(`new Promise(resolve=>requestAnimationFrame(()=>resolve(true)))`);const subthreshold=await evaluate(`(()=>{const active=document.querySelector('.layer-frame-cell.active');return {unchanged:JSON.stringify(customModules)===${JSON.stringify(tinyBefore)},active:[active.dataset.layerId,active.dataset.frame]}})()`);
+ const nextSelector='.timeline-context button[data-action="move"][data-direction="1"]',nextPoint=await point(nextSelector);
+ const beforeMulti=await evaluate(`JSON.stringify(customModules)`);
+ await send('Input.dispatchTouchEvent',{type:'touchStart',touchPoints:[{x:nextPoint.x-5,y:nextPoint.y,radiusX:2,radiusY:2,force:1,id:1},{x:nextPoint.x+5,y:nextPoint.y,radiusX:2,radiusY:2,force:1,id:2}]});await send('Input.dispatchTouchEvent',{type:'touchEnd',touchPoints:[]});await new Promise(resolve=>setTimeout(resolve,200));
+ const multiTouchSafe=beforeMulti===await evaluate(`JSON.stringify(customModules)`);
+ const disabledPoint=await point('.timeline-context button[data-action="move"][data-direction="-1"]');
+ await send('Input.dispatchTouchEvent',{type:'touchStart',touchPoints:[{x:disabledPoint.x,y:disabledPoint.y,radiusX:3,radiusY:3,force:1,id:3}]});await new Promise(resolve=>setTimeout(resolve,600));const longPress=await evaluate(`({selection:getSelection().toString(),userSelect:getComputedStyle(document.querySelector('.timeline-context-actions button')).userSelect,module:JSON.stringify(customModules)})`);await send('Input.dispatchTouchEvent',{type:'touchEnd',touchPoints:[]});await new Promise(resolve=>setTimeout(resolve,200));
+ const validMovePoint=await point(nextSelector);await evaluate(`(()=>{globalThis.__timelineTouchEvents=[];const button=document.querySelector(${JSON.stringify(nextSelector)});for(const type of ['touchstart','touchend','click'])button.addEventListener(type,event=>__timelineTouchEvents.push({type,touches:event.touches?.length,changed:event.changedTouches?.length,detail:event.detail,timeStamp:event.timeStamp,prevented:event.defaultPrevented}));return true})()`);await touchTap(validMovePoint);
+ const touchMove=await evaluate(`(()=>{const module=customModules.find(item=>item.id==='custom_motion'),active=document.querySelector('.layer-frame-cell.active');return {point:${JSON.stringify(validMovePoint)},events:__timelineTouchEvents,enabled:!document.querySelector(${JSON.stringify(nextSelector)}).disabled,frames:module.layers.find(item=>item.id==='layer_a').keyframes.map(item=>item.frame),active:[active.dataset.layerId,active.dataset.frame],focused:document.activeElement?.getAttribute('aria-label'),dirty:matrixHasUnsavedDraft(),summary:document.querySelector('.timeline-context-summary').textContent}})()`);
+ const collisionSelector='.timeline-context button[data-action="move"][data-direction="1"]';
+ const collisionBefore=await evaluate(`JSON.stringify(customModules)`);await evaluate(`document.querySelector(${JSON.stringify(collisionSelector)}).click()`);
+ const collision=await evaluate(`({unchanged:JSON.stringify(customModules)===${JSON.stringify(collisionBefore)},disabled:document.querySelector(${JSON.stringify(collisionSelector)}).disabled,status:document.querySelector('.timeline-context-status').textContent})`);
+ const overrideCellPoint=await point('.layer-frame-cell[data-layer-id="layer_a"][data-frame="6"]');await touchTap(overrideCellPoint);const overrideSelection=await evaluate(`(()=>{const active=document.querySelector('.layer-frame-cell.active');return [active.dataset.layerId,active.dataset.frame]})()`);
+ const keyboardBefore=await evaluate(`(()=>{const button=document.querySelector('.timeline-context button[data-action="move"][data-direction="-1"]');globalThis.__timelineKeyEvents=[];for(const type of ['keydown','keyup','click'])button.addEventListener(type,event=>__timelineKeyEvents.push({type,key:event.key,detail:event.detail,sourceTouch:event.sourceCapabilities?.firesTouchEvents}));button.focus();return {cellPoint:${JSON.stringify(overrideCellPoint)},selection:${JSON.stringify(overrideSelection)},disabled:button.disabled,focused:document.activeElement===button,aria:document.activeElement?.getAttribute('aria-label')}})()`);await pressEnter();
+ const keyboardMove=await evaluate(`(()=>{const module=customModules.find(item=>item.id==='custom_motion'),active=document.querySelector('.layer-frame-cell.active');return {before:${JSON.stringify(keyboardBefore)},events:__timelineKeyEvents,frames:module.overrides.filter(item=>item.layer_id==='layer_a').map(item=>item.frame),active:[active.dataset.layerId,active.dataset.frame],focused:document.activeElement?.getAttribute('aria-label'),dirty:matrixHasUnsavedDraft()}})()`);
+ await evaluate(`(()=>{globalThis.__markerFocusCalls=[];globalThis.__markerOriginalFocus=HTMLElement.prototype.focus;HTMLElement.prototype.focus=function(options){__markerFocusCalls.push({aria:this.getAttribute?.('aria-label'),preventScroll:options?.preventScroll===true});return __markerOriginalFocus.call(this,options)}})()`);
+ await point('.layer-frame-cell[data-layer-id="layer_a"][data-frame="5"]');
+ const markerTouchBefore=await evaluate(`(()=>{const scroll=document.querySelector('.aseprite-timeline-scroll');return {local:scroll.scrollLeft,pageX:scrollX,pageY:scrollY}})()`);
+ const touchDragPoints=await evaluate(`(()=>{const centre=element=>{const rect=element.getBoundingClientRect();return {x:rect.left+rect.width/2,y:rect.top+rect.height/2}};return {source:centre(document.querySelector('.layer-frame-cell[data-layer-id="layer_a"][data-frame="5"]')),target:centre(document.querySelector('.layer-frame-cell[data-layer-id="layer_a"][data-frame="6"]'))}})()`);await touchDrag(touchDragPoints.source,touchDragPoints.target);
+ const markerTouchMove=await evaluate(`(()=>{const module=customModules.find(item=>item.id==='custom_motion'),active=document.querySelector('.layer-frame-cell.active'),scroll=document.querySelector('.aseprite-timeline-scroll');return {frames:module.overrides.filter(item=>item.layer_id==='layer_a').map(item=>item.frame),active:[active.dataset.layerId,active.dataset.frame],dirty:matrixHasUnsavedDraft(),focusCalls:__markerFocusCalls.splice(0).filter(item=>item.aria?.includes(', frame ')),local:scroll.scrollLeft,pageX:scrollX,pageY:scrollY,before:${JSON.stringify(markerTouchBefore)}}})()`);
+ await point('.layer-frame-cell[data-layer-id="layer_a"][data-frame="6"]');
+ const markerMouseBefore=await evaluate(`(()=>{const scroll=document.querySelector('.aseprite-timeline-scroll');return {local:scroll.scrollLeft,pageX:scrollX,pageY:scrollY}})()`);
+ const dragPoints=await evaluate(`(()=>{const centre=element=>{const rect=element.getBoundingClientRect(),x=rect.left+rect.width/2,y=rect.top+rect.height/2,hit=document.elementFromPoint(x,y);return {x,y,hitLayer:hit?.dataset?.layerId,hitFrame:hit?.dataset?.frame,hitClass:String(hit?.className||'')}};return {source:centre(document.querySelector('.layer-frame-cell[data-layer-id="layer_a"][data-frame="6"]')),target:centre(document.querySelector('.layer-frame-cell[data-layer-id="layer_a"][data-frame="7"]'))}})()`);await mouseDrag(dragPoints.source,dragPoints.target);
+ const mouseMove=await evaluate(`(()=>{const module=customModules.find(item=>item.id==='custom_motion'),active=document.querySelector('.layer-frame-cell.active'),scroll=document.querySelector('.aseprite-timeline-scroll'),calls=__markerFocusCalls.splice(0).filter(item=>item.aria?.includes(', frame '));HTMLElement.prototype.focus=__markerOriginalFocus;delete globalThis.__markerOriginalFocus;return {points:${JSON.stringify(dragPoints)},frames:module.overrides.filter(item=>item.layer_id==='layer_a').map(item=>item.frame),active:[active.dataset.layerId,active.dataset.frame],dirty:matrixHasUnsavedDraft(),focusCalls:calls,local:scroll.scrollLeft,pageX:scrollX,pageY:scrollY,before:${JSON.stringify(markerMouseBefore)} }})()`);
+ const cancelBefore=await evaluate(`JSON.stringify(customModules)`);await point('.layer-frame-cell[data-layer-id="layer_a"][data-frame="7"]');const cancelPoints=await evaluate(`(()=>{globalThis.__cancelEvents={pointer:0,touch:0};const source=document.querySelector('.layer-frame-cell[data-layer-id="layer_a"][data-frame="7"]');source.addEventListener('pointercancel',()=>__cancelEvents.pointer++);source.addEventListener('touchcancel',()=>__cancelEvents.touch++);const centre=element=>{const rect=element.getBoundingClientRect();return {x:rect.left+rect.width/2,y:rect.top+rect.height/2}};return {source:centre(source),target:centre(document.querySelector('.layer-frame-cell[data-layer-id="layer_a"][data-frame="6"]'))}})()`);await touchDrag(cancelPoints.source,cancelPoints.target,true);const cancelled=await evaluate(`({unchanged:JSON.stringify(customModules)===${JSON.stringify(cancelBefore)},pointerCancels:__cancelEvents.pointer,touchCancels:__cancelEvents.touch,dragging:!!document.querySelector('.layer-frame-cell.dragging')})`);
+ const blurBefore=await evaluate(`JSON.stringify(customModules)`),blurStamp=Date.now()/1000;await send('Input.dispatchTouchEvent',{type:'touchStart',timestamp:blurStamp,touchPoints:[{...cancelPoints.source,radiusX:2,radiusY:2,force:1,id:74}]});const blurStarted=await evaluate(`!!document.querySelector('.layer-frame-cell.dragging')`);await evaluate(`dispatchEvent(new Event('blur'))`);const blurCancelled=!await evaluate(`!!document.querySelector('.layer-frame-cell.dragging')`);await send('Input.dispatchTouchEvent',{type:'touchEnd',timestamp:blurStamp+0.05,touchPoints:[]});const blurSafe={started:blurStarted,cancelled:blurCancelled,unchanged:blurBefore===await evaluate(`JSON.stringify(customModules)`)};
+ const rerenderDragBefore=await evaluate(`JSON.stringify(customModules)`),rerenderStamp=Date.now()/1000;await send('Input.dispatchTouchEvent',{type:'touchStart',timestamp:rerenderStamp,touchPoints:[{...cancelPoints.source,radiusX:2,radiusY:2,force:1,id:75}]});const rerenderDragStarted=await evaluate(`!!document.querySelector('.layer-frame-cell.dragging')`);await evaluate(`document.querySelector('.layer-row.active button.btn').click()`);await evaluate(`new Promise(resolve=>requestAnimationFrame(resolve))`);const rerenderDragCancelled=!await evaluate(`!!document.querySelector('.layer-frame-cell.dragging')`);await send('Input.dispatchTouchEvent',{type:'touchEnd',timestamp:rerenderStamp+0.05,touchPoints:[]});const rerenderDragSafe={started:rerenderDragStarted,cancelled:rerenderDragCancelled,unchanged:rerenderDragBefore===await evaluate(`JSON.stringify(customModules)`)};
+ await evaluate(`(()=>{globalThis.__timelineFocusCalls=[];globalThis.__timelineOriginalFocus=HTMLElement.prototype.focus;HTMLElement.prototype.focus=function(options){__timelineFocusCalls.push({aria:this.getAttribute?.('aria-label'),preventScroll:options?.preventScroll===true});return __timelineOriginalFocus.call(this,options)}})()`);
+ const moveFocusRestores=[];for(const direction of [-1,1]){moveFocusRestores.push(await evaluate(`(async()=>{const button=document.querySelector('.timeline-context button[data-action="move"][data-direction="${direction}"]'),scroll=document.querySelector('.aseprite-timeline-scroll');scroll.scrollLeft=180;document.querySelector('.canvas-toolbar input[type="text"]').focus({preventScroll:true});window.scrollTo(0,0);const before={local:scroll.scrollLeft,pageX:scrollX,pageY:scrollY};button.click();await new Promise(resolve=>requestAnimationFrame(()=>requestAnimationFrame(()=>requestAnimationFrame(resolve))));const nextScroll=document.querySelector('.aseprite-timeline-scroll');return {direction:${direction},local:nextScroll.scrollLeft,beforeLocal:before.local,pageX:scrollX,pageY:scrollY,beforePageX:before.pageX,beforePageY:before.pageY,focused:document.activeElement?.getAttribute('aria-label')}})()`));}
+ const moveFocusCalls=await evaluate(`(()=>{const calls=__timelineFocusCalls.filter(item=>item.aria?.startsWith('Move item'));HTMLElement.prototype.focus=__timelineOriginalFocus;delete globalThis.__timelineOriginalFocus;return calls})()`);
+ const focusRerenders=await evaluate(`(async()=>{const cases=[['frame','.frame-chip[data-frame="7"]'],['layer','.layer-track-label.active'],['property','[data-property="colour"]'],['toolbar','.canvas-toolbar select']];const reports=[];for(const [name,selector] of cases){const scroll=document.querySelector('.aseprite-timeline-scroll');scroll.scrollLeft=137;window.scrollTo(0,Math.min(240,document.documentElement.scrollHeight-innerHeight));const before={local:scroll.scrollLeft,pageX:scrollX,pageY:scrollY};const target=document.querySelector(selector);target.focus({preventScroll:true});document.querySelector('.layer-row.active button.btn').click();await new Promise(resolve=>requestAnimationFrame(()=>requestAnimationFrame(resolve)));const nextScroll=document.querySelector('.aseprite-timeline-scroll');reports.push({name,focused:document.activeElement?.matches(selector)||false,local:nextScroll.scrollLeft,beforeLocal:before.local,pageX:scrollX,pageY:scrollY,beforePageX:before.pageX,beforePageY:before.pageY});}return reports})()`);
+ await evaluate(`(()=>{document.querySelector('.layer-track-label[data-layer-id="layer_a"]')?.click()})()`);
+ await evaluate(`(()=>{const scroll=document.querySelector('.aseprite-timeline-scroll');scroll.scrollLeft=180;scroll.scrollTop=70;document.querySelector('.timeline-context button[data-action="move"][data-direction="-1"]').focus();document.querySelector('.layer-row.active button.btn').click();return new Promise(resolve=>requestAnimationFrame(()=>requestAnimationFrame(()=>resolve(true))))})()`);
+ const rerender=await evaluate(`(()=>{const scroll=document.querySelector('.aseprite-timeline-scroll');return {scrollLeft:scroll.scrollLeft,scrollTop:scroll.scrollTop,focused:document.activeElement?.getAttribute('aria-label')}})()`);
+ await metrics(768,700,true,false);await metrics(320,500,true,false);
+ const reflow=await evaluate(`(()=>{const active=document.querySelector('.layer-frame-cell.active'),scroll=document.querySelector('.aseprite-timeline-scroll'),activeRect=active.getBoundingClientRect(),scrollRect=scroll.getBoundingClientRect();return {active:[active.dataset.layerId,active.dataset.frame],scrollLeft:scroll.scrollLeft,scrollTop:scroll.scrollTop,clientWidth:scroll.clientWidth,scrollWidth:scroll.scrollWidth,innerWidth,activeRect:{left:activeRect.left,right:activeRect.right},scrollRect:{left:scrollRect.left,right:scrollRect.right},focused:document.activeElement?.getAttribute('aria-label')}})()`);
+ await metrics(390,844,true);const fieldState=await evaluate(`(()=>{const field=document.querySelector('[data-id="custom_motion"] .canvas-toolbar label:first-child input');field.value='Mobile keyboard draft';field.dispatchEvent(new Event('input',{bubbles:true}));field.scrollIntoView({block:'center'});field.focus();field.setSelectionRange(2,8);return true})()`);await metrics(390,430,true);
+ const keyboardViewport=await evaluate(`(()=>{const field=document.querySelector('[data-id="custom_motion"] .canvas-toolbar label:first-child input'),active=document.querySelector('.layer-frame-cell.active');return {height:innerHeight,value:field.value,start:field.selectionStart,end:field.selectionEnd,focused:document.activeElement===field,active:[active.dataset.layerId,active.dataset.frame],dirty:matrixHasUnsavedDraft()}})()`);
+ const keyboardCycles=[];for(const height of [844,430,844,430]){await metrics(390,height,true);await evaluate(`(async()=>{visualViewport.dispatchEvent(new Event('resize'));for(let frame=0;frame<6;frame++)await new Promise(requestAnimationFrame);await new Promise(resolve=>setTimeout(resolve,150));return true})()`);keyboardCycles.push(await evaluate(`(()=>{const field=document.querySelector('[data-id="custom_motion"] .canvas-toolbar label:first-child input'),rect=field.getBoundingClientRect(),viewport=visualViewport;return {height:innerHeight,value:field.value,start:field.selectionStart,end:field.selectionEnd,focused:document.activeElement===field,visible:rect.top>=viewport.offsetTop-1&&rect.bottom<=viewport.offsetTop+viewport.height+1,rect:[rect.top,rect.bottom],viewport:[viewport.offsetTop,viewport.height,viewport.pageTop]}})()`))}
+ await metrics(390,844,true);await evaluate(`(()=>{document.activeElement?.blur();const scroll=document.querySelector('.aseprite-timeline-scroll');scroll.scrollLeft=140;window.scrollTo(0,Math.min(180,document.documentElement.scrollHeight-innerHeight));return new Promise(resolve=>requestAnimationFrame(()=>requestAnimationFrame(()=>resolve(true))))})()`);const orientationBefore=await evaluate(`(()=>{const scroll=document.querySelector('.aseprite-timeline-scroll'),active=document.querySelector('.layer-frame-cell.active');return {local:scroll.scrollLeft,page:scrollY,maxPage:document.documentElement.scrollHeight-innerHeight,active:[active.dataset.layerId,active.dataset.frame],focused:document.activeElement?.dataset?.control||null}})()`);await metrics(844,390,true);const orientationAfter=await evaluate(`(()=>{const scroll=document.querySelector('.aseprite-timeline-scroll'),active=document.querySelector('.layer-frame-cell.active');return {local:scroll.scrollLeft,page:scrollY,maxPage:document.documentElement.scrollHeight-innerHeight,active:[active.dataset.layerId,active.dataset.frame],focused:document.activeElement?.dataset?.control||null}})()`);
+ await metrics(899,700,false,false);await evaluate(`(()=>{const scroll=document.querySelector('.aseprite-timeline-scroll');scroll.scrollLeft=160;return true})()`);const breakpointBefore=await evaluate(`(()=>{const scroll=document.querySelector('.aseprite-timeline-scroll');return {local:scroll.scrollLeft,columns:getComputedStyle(document.querySelector('.advanced-layout')).gridTemplateColumns.split(' ').length}})()`);await metrics(901,700,false,false);const breakpointAfter=await evaluate(`(()=>{const scroll=document.querySelector('.aseprite-timeline-scroll'),active=document.querySelector('.layer-frame-cell.active');return {local:scroll.scrollLeft,columns:getComputedStyle(document.querySelector('.advanced-layout')).gridTemplateColumns.split(' ').length,active:[active.dataset.layerId,active.dataset.frame]}})()`);
+ await metrics(390,844,true);await send('Emulation.setPageScaleFactor',{pageScaleFactor:2});await send('Emulation.setEmulatedMedia',{media:'screen',features:[{name:'prefers-reduced-motion',value:'reduce'}]});const zoomReduced=await evaluate(`(()=>{const scroll=document.querySelector('.aseprite-timeline-scroll'),active=document.querySelector('.layer-frame-cell.active'),context=document.querySelector('.timeline-context').getBoundingClientRect(),button=document.querySelector('.timeline-context-actions button').getBoundingClientRect();return {scale:visualViewport.scale,reduced:matchMedia('(prefers-reduced-motion: reduce)').matches,active:[active.dataset.layerId,active.dataset.frame],localOverflow:scroll.scrollWidth-scroll.clientWidth,button:[button.width,button.height],safeHorizontal:context.left>=-0.5&&context.right<=innerWidth+0.5}})()`);await send('Emulation.resetPageScaleFactor');await send('Emulation.setEmulatedMedia',{media:'screen',features:[{name:'prefers-reduced-motion',value:'no-preference'}]});
+ await metrics(1280,720,false,false);const desktopBefore=await evaluate(`JSON.stringify(customModules)`);await mouseClick(await point('.timeline-context button[data-action="seek"][data-direction="-1"]'));await evaluate(`document.querySelector('.timeline-context button[data-action="seek"][data-direction="1"]').focus()`);await pressEnter();const desktop=await evaluate(`(()=>{const active=document.querySelector('.layer-frame-cell.active'),cell=document.querySelector('.layer-frame-cell').getBoundingClientRect();return {active:[active.dataset.layerId,active.dataset.frame],unchanged:JSON.stringify(customModules)===${JSON.stringify(desktopBefore)},columns:getComputedStyle(document.querySelector('.advanced-layout')).gridTemplateColumns.split(' ').length,cell:[cell.width,cell.height],focused:document.activeElement?.getAttribute('aria-label'),overflow:document.documentElement.scrollWidth-document.documentElement.clientWidth}})()`);
+ const safeAreaRule=await evaluate(`[...document.styleSheets].some(sheet=>[...sheet.cssRules].some(rule=>rule.cssText.includes('safe-area-inset')))`);
+ await metrics(390,844,true);await touchTap(await point('.timeline-toolbar button.btn.primary'));await evaluate(`(()=>{globalThis.__timelineChildMutations=0;globalThis.__timelineStartFrame=document.querySelector('.layer-frame-cell.active').dataset.frame;new MutationObserver(items=>{__timelineChildMutations+=items.filter(item=>item.type==='childList').length}).observe(document.querySelector('.aseprite-timeline'),{subtree:true,childList:true,attributes:true});return true})()`);await new Promise(resolve=>setTimeout(resolve,700));
+ const playback=await evaluate(`({start:__timelineStartFrame,end:document.querySelector('.layer-frame-cell.active').dataset.frame,childMutations:__timelineChildMutations})`);await touchTap(await point('.timeline-toolbar button.btn.primary'));await send('Emulation.setCPUThrottlingRate',{rate:1});
+ const finalState=await evaluate(`(()=>{const payload=configBody(),module=customModules.find(item=>item.id==='custom_motion'),mutatingFetches=__timelineFetches.filter(item=>item.method!=='GET'||item.url.includes('/api/preview'));return {payloadMatches:JSON.stringify(payload.custom_modules.find(item=>item.id==='custom_motion'))===JSON.stringify(module),dirty:matrixHasUnsavedDraft(),mutatingFetches,exceptions:${JSON.stringify(exceptions)}}})()`);
+ const resizeLifecycle=await evaluate(`(async()=>{visualViewport.dispatchEvent(new Event('resize'));document.querySelector('.layer-row.active button.btn').click();await new Promise(resolve=>setTimeout(resolve,150));const before={window:__trackedWindowResize.size,viewport:__trackedViewportResize.size};const originalConfirm=globalThis.confirm;globalThis.confirm=()=>true;applyCanvasTemplate('custom_motion','blank');await new Promise(resolve=>requestAnimationFrame(()=>requestAnimationFrame(resolve)));const afterTemplate={window:__trackedWindowResize.size,viewport:__trackedViewportResize.size};removeCustomModule('custom_motion');globalThis.confirm=originalConfirm;await new Promise(resolve=>requestAnimationFrame(()=>requestAnimationFrame(resolve)));return {before,afterTemplate,after:{window:__trackedWindowResize.size,viewport:__trackedViewportResize.size}}})()`);
+ console.log(JSON.stringify({selected,emptyPan,secondTouchCancelled,subthreshold,multiTouchSafe,longPress,touchMove,collision,keyboardMove,markerTouchMove,mouseMove,cancelled,blurSafe,rerenderDragSafe,moveFocusRestores,moveFocusCalls,focusRerenders,rerender,reflow,keyboardViewport,keyboardCycles,orientationBefore,orientationAfter,breakpointBefore,breakpointAfter,zoomReduced,desktop,safeAreaRule,playback,finalState,resizeLifecycle,exceptions:exceptions.map(item=>item.text)}));
+}finally{socket.close()}
+"""
+        chromium = os.environ["MATRIX_CHROMIUM"]
+        node = shutil.which("node")
+        assert node is not None
+        with tempfile.TemporaryDirectory(prefix="matrix-timeline-interactions-") as directory:
+            page = Path(directory) / "dashboard.html"
+            page.write_text(body)
+            profile = Path(directory) / "profile"
+            browser = subprocess.Popen([
+                chromium, "--headless", "--no-sandbox", "--disable-gpu",
+                "--remote-debugging-port=0", f"--user-data-dir={profile}", "about:blank",
+            ], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            try:
+                active_port = profile / "DevToolsActivePort"
+                for _attempt in range(50):
+                    if active_port.is_file():
+                        break
+                    if browser.poll() is not None:
+                        self.fail("Chromium exited before publishing its DevTools port")
+                    time.sleep(0.1)
+                self.assertTrue(active_port.is_file(), "Chromium DevTools port unavailable")
+                completed = subprocess.run(
+                    [node, "-e", probe, active_port.read_text().splitlines()[0], str(page)],
+                    capture_output=True, text=True, timeout=45,
+                )
+            finally:
+                browser.terminate()
+                try:
+                    browser.wait(timeout=5)
+                except subprocess.TimeoutExpired:
+                    browser.kill(); browser.wait(timeout=5)
+                for cleanup_attempt in range(20):
+                    try:
+                        shutil.rmtree(profile)
+                        break
+                    except FileNotFoundError:
+                        break
+                    except OSError:
+                        if cleanup_attempt == 19:
+                            raise
+                        time.sleep(0.05)
+        self.assertEqual(completed.returncode, 0, completed.stderr)
+        report = json.loads(completed.stdout.strip().splitlines()[-1])
+        self.assertEqual(report["exceptions"], [])
+        self.assertEqual(report["selected"], {"summary": "Primary motion · frame 2", "active": ["layer_a", "1"]})
+        self.assertEqual(report["emptyPan"]["active"], report["emptyPan"]["before"]["active"], report["emptyPan"])
+        self.assertNotEqual(report["emptyPan"]["scrollLeft"], report["emptyPan"]["before"]["scrollLeft"], report["emptyPan"])
+        self.assertEqual(report["secondTouchCancelled"], {"dragStarted": True, "dragAfterSecond": False, "unchanged": True})
+        self.assertEqual(report["subthreshold"], {"unchanged": True, "active": ["layer_a", "1"]})
+        self.assertTrue(report["multiTouchSafe"])
+        self.assertEqual(report["longPress"]["selection"], "")
+        self.assertEqual(report["longPress"]["userSelect"], "none")
+        self.assertEqual(report["touchMove"]["frames"], [2, 4], report["touchMove"])
+        self.assertEqual(report["touchMove"]["active"], ["layer_a", "2"])
+        self.assertEqual(report["touchMove"]["focused"], "Move item earlier")
+        self.assertTrue(report["touchMove"]["dirty"])
+        self.assertEqual(report["touchMove"]["summary"], "Primary motion · frame 3")
+        self.assertTrue(report["collision"]["unchanged"])
+        self.assertTrue(report["collision"]["disabled"])
+        self.assertIn("target occupied", report["collision"]["status"])
+        self.assertEqual(report["keyboardMove"]["frames"], [3, 5], report["keyboardMove"])
+        self.assertEqual(report["keyboardMove"]["active"], ["layer_a", "5"])
+        self.assertEqual(report["keyboardMove"]["focused"], "Move item later")
+        self.assertTrue(report["keyboardMove"]["dirty"])
+        self.assertEqual(report["markerTouchMove"]["frames"], [3, 6], report["markerTouchMove"])
+        self.assertEqual(report["markerTouchMove"]["active"], ["layer_a", "6"])
+        self.assertTrue(report["markerTouchMove"]["dirty"])
+        self.assertEqual(report["mouseMove"]["frames"], [3, 7], report["mouseMove"])
+        self.assertEqual(report["mouseMove"]["active"], ["layer_a", "7"])
+        self.assertTrue(report["mouseMove"]["dirty"])
+        for key in ("markerTouchMove", "mouseMove"):
+            item = report[key]
+            self.assertGreaterEqual(len(item["focusCalls"]), 1, item)
+            self.assertTrue(all(call["preventScroll"] for call in item["focusCalls"]), item)
+            self.assertTrue(all("Primary motion, frame" in call["aria"] for call in item["focusCalls"]), item)
+            self.assertEqual(item["local"], item["before"]["local"], item)
+            self.assertEqual((item["pageX"], item["pageY"]),
+                             (item["before"]["pageX"], item["before"]["pageY"]), item)
+        self.assertEqual(report["cancelled"], {"unchanged": True, "pointerCancels": 1, "touchCancels": 1, "dragging": False})
+        self.assertEqual(report["blurSafe"], {"started": True, "cancelled": True, "unchanged": True})
+        self.assertEqual(report["rerenderDragSafe"], {"started": True, "cancelled": True, "unchanged": True})
+        self.assertEqual([item["direction"] for item in report["moveFocusRestores"]], [-1, 1])
+        for item in report["moveFocusRestores"]:
+            self.assertEqual(item["local"], item["beforeLocal"], item)
+            self.assertEqual((item["pageX"], item["pageY"]), (item["beforePageX"], item["beforePageY"]), item)
+            self.assertEqual(item["focused"], "Move item earlier" if item["direction"] < 0 else "Move item later")
+        self.assertEqual(len(report["moveFocusCalls"]), 2, report["moveFocusCalls"])
+        self.assertTrue(all(item["preventScroll"] for item in report["moveFocusCalls"]), report["moveFocusCalls"])
+        self.assertEqual([item["name"] for item in report["focusRerenders"]], ["frame", "layer", "property", "toolbar"])
+        for item in report["focusRerenders"]:
+            self.assertTrue(item["focused"], item)
+            self.assertEqual(item["local"], item["beforeLocal"], item)
+            self.assertEqual((item["pageX"], item["pageY"]), (item["beforePageX"], item["beforePageY"]), item)
+        self.assertGreater(report["rerender"]["scrollLeft"], 0, report["rerender"])
+        self.assertEqual(report["rerender"]["focused"], "Move item earlier")
+        self.assertEqual(report["reflow"]["active"], ["layer_a", "7"])
+        self.assertGreater(report["reflow"]["scrollLeft"], 0, report["reflow"])
+        self.assertEqual(report["reflow"]["focused"], "Move item earlier")
+        self.assertEqual(report["keyboardViewport"], {
+            "height": 430, "value": "Mobile keyboard draft", "start": 2, "end": 8,
+            "focused": True, "active": ["layer_a", "7"], "dirty": True,
+        })
+        self.assertEqual([item["height"] for item in report["keyboardCycles"]], [844, 430, 844, 430])
+        for item in report["keyboardCycles"]:
+            self.assertEqual((item["value"], item["start"], item["end"]), ("Mobile keyboard draft", 2, 8), item)
+            self.assertTrue(item["focused"], item)
+            self.assertTrue(item["visible"], item)
+        self.assertEqual(report["orientationAfter"]["active"], report["orientationBefore"]["active"])
+        self.assertEqual(report["orientationAfter"]["focused"], report["orientationBefore"]["focused"])
+        self.assertEqual(report["orientationAfter"]["local"], report["orientationBefore"]["local"])
+        self.assertLessEqual(
+            abs(report["orientationAfter"]["page"] - report["orientationBefore"]["page"]),
+            32,
+            (report["orientationBefore"], report["orientationAfter"]),
+        )
+        self.assertEqual(report["breakpointBefore"], {"local": 160, "columns": 1})
+        self.assertEqual(report["breakpointAfter"], {"local": 160, "columns": 2, "active": ["layer_a", "7"]})
+        self.assertAlmostEqual(report["zoomReduced"]["scale"], 2, places=2)
+        self.assertTrue(report["zoomReduced"]["reduced"])
+        self.assertEqual(report["zoomReduced"]["active"], ["layer_a", "7"])
+        self.assertGreater(report["zoomReduced"]["localOverflow"], 0)
+        self.assertTrue(all(size >= 44 for size in report["zoomReduced"]["button"]))
+        self.assertTrue(report["zoomReduced"]["safeHorizontal"])
+        self.assertEqual(report["desktop"]["active"], ["layer_a", "7"])
+        self.assertTrue(report["desktop"]["unchanged"])
+        self.assertEqual(report["desktop"]["columns"], 2)
+        self.assertTrue(all(abs(size - 28) <= 0.5 for size in report["desktop"]["cell"]))
+        self.assertEqual(report["desktop"]["focused"], "Next frame")
+        self.assertLessEqual(report["desktop"]["overflow"], 1)
+        self.assertTrue(report["safeAreaRule"])
+        self.assertNotEqual(report["playback"]["start"], report["playback"]["end"])
+        self.assertEqual(report["playback"]["childMutations"], 0)
+        self.assertTrue(report["finalState"]["payloadMatches"])
+        self.assertTrue(report["finalState"]["dirty"])
+        self.assertEqual(report["finalState"]["mutatingFetches"], [])
+        self.assertEqual(report["resizeLifecycle"], {
+            "before": {"window": 1, "viewport": 1},
+            "afterTemplate": {"window": 1, "viewport": 1},
+            "after": {"window": 0, "viewport": 0},
+        })
+
+    @unittest.skipUnless(shutil.which("node"), "Node.js is required")
     def test_browser_depth_order_matches_layer_array_fallback_and_keyframes(self):
         harness = r"""
 const fs = require('fs');
