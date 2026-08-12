@@ -1,6 +1,6 @@
 # Future development notes
 
-Last updated: 2026-08-11
+Last updated: 2026-08-12
 
 This file records requested Matrix features that are intentionally deferred. They are product requirements and design notes, not descriptions of current behavior. Do not treat an item as implemented until its code, tests, review, merge, deployment, and physical-device verification are complete.
 
@@ -89,7 +89,9 @@ Revise the Advanced Canvas layer timeline for mobile and narrow-screen users. Th
 - Ensure selecting layers, seeking, dragging timeline items, and editing keyframes remain practical with touch input.
 - Preserve the existing desktop experience and verify the revised timeline in real browsers at representative narrow mobile widths.
 
-### 0.3 Standardize scrolling-text timing in seconds
+### ~~0.3 Standardize scrolling-text timing in seconds~~ — Completed
+
+**Completed 2026-08-12:** implemented, tested in real Chromium and on the production Pi, independently reviewed, merged, deployed, and verified against the live physical framebuffer.
 
 Every scrolling-text module should display its calculated runtime in seconds, consistent with the duration shown for Lava Clock and Splash.
 
