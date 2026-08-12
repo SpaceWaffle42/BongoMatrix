@@ -1,7 +1,10 @@
+import copy
+import hashlib
 import io
 import json
 import re
 import os
+import signal
 import pwd
 import shutil
 import subprocess
@@ -14,6 +17,7 @@ from datetime import timedelta
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from unittest.mock import Mock, patch
+from werkzeug.serving import make_server
 
 from PIL import Image, UnidentifiedImageError
 
@@ -21,7 +25,10 @@ from config_store import ConfigStore
 from font_catalog import available_font_names
 from pairing import PairedDeviceStore, PairingDurabilityError
 from secret_store import SecretDurabilityError, SecretStore
+from modules.scroll_timing_cache import ScrollTimingCache, TimingCacheBusy
+from modules.scroll_timing import frame_delay_for_seconds
 from tests import test_config_store
+import webapp
 from webapp import create_app
 
 
@@ -32,6 +39,7 @@ class WebAppTests(unittest.TestCase):
         self.store = ConfigStore(Path(self.temp.name) / "config.json")
         self.device_store = PairedDeviceStore(Path(self.temp.name) / "paired-devices.json")
         self.openweather_secrets = SecretStore(Path(self.temp.name) / "secrets" / "openweather-api-key")
+        self.scroll_timing_cache = ScrollTimingCache()
         self.media_dir = Path(self.temp.name) / "media"
         self.media_dir.mkdir()
         self.media_dir.chmod(0o755)
@@ -52,6 +60,7 @@ class WebAppTests(unittest.TestCase):
             location_search=self.location_search,
             device_store=self.device_store,
             openweather_secrets=self.openweather_secrets,
+            scroll_timing_cache=self.scroll_timing_cache,
         )
         self.client = self.app.test_client()
 
@@ -67,6 +76,259 @@ class WebAppTests(unittest.TestCase):
         self.pairing.verify.return_value = True
         self.client.post("/pair", data={"pin": "123456", "device_name": "Test browser"})
 
+    def test_provider_scroll_timing_is_bounded_cached_and_paired(self):
+        from modules.weather_app import WeatherSnapshot
+
+        payload = {
+            "base_revision": self.store.get()["revision"],
+            "settings": {
+                **self.store.get()["weather"],
+                "location": "Unsaved Town, GB",
+                "scroll_loops": 2,
+                "scroll_speed": 0.055,
+            },
+        }
+        self.assertEqual(
+            self.client.post("/api/scroll-timing/weather", json=payload).status_code,
+            401,
+        )
+        self.pair_browser()
+        snapshot = WeatherSnapshot(
+            location="Unsaved Town, GB", status="Clear sky", temperature=20,
+            feels_like=19, high=23, low=12, humidity=50,
+        )
+        with patch("modules.weather_app.OpenMeteoClient.fetch", return_value=snapshot) as fetch:
+            response = self.client.post("/api/scroll-timing/weather", json=payload)
+        self.assertEqual(response.status_code, 200, response.get_data(as_text=True))
+        result = response.get_json()
+        self.assertEqual(result["status"], "fresh")
+        self.assertEqual(result["module"], "weather")
+        self.assertEqual(result["loops"], 2)
+        self.assertGreater(result["frames_per_loop"], 64)
+        self.assertGreater(result["milliseconds"], 0)
+        self.assertRegex(result["settings_digest"], r"^[0-9a-f]{64}$")
+        self.assertNotIn("http", response.get_data(as_text=True).lower())
+        fetch.assert_called_once_with(
+            "Unsaved Town, GB", latitude=payload["settings"]["latitude"],
+            longitude=payload["settings"]["longitude"], units="celsius",
+            deadline=fetch.call_args.kwargs["deadline"],
+        )
+        self.assertGreater(fetch.call_args.kwargs["deadline"], time.monotonic())
+        self.assertLessEqual(fetch.call_args.kwargs["deadline"] - time.monotonic(), 5)
+
+        oversized = b'{"settings":"' + b'x' * (16 * 1024) + b'"}'
+        response = self.client.post(
+            "/api/scroll-timing/weather", data=oversized,
+            content_type="application/json",
+        )
+        self.assertEqual(response.status_code, 413)
+
+    def test_provider_scroll_timing_rejects_unknown_length_body_before_json_parsing(self):
+        self.pair_browser()
+        oversized = b'{"settings":"' + b'x' * (17 * 1024) + b'"}'
+        response = self.client.open(
+            "/api/scroll-timing/weather", method="POST",
+            input_stream=io.BytesIO(oversized), content_type="application/json",
+            environ_overrides={"CONTENT_LENGTH": "", "wsgi.input_terminated": True},
+        )
+        self.assertEqual(response.status_code, 413, response.get_data(as_text=True))
+
+    def test_timing_cache_revalidates_stale_fallback_after_single_flight_wait(self):
+        now = [0.0]
+        cache = ScrollTimingCache(clock=lambda: now[0], fresh_seconds=5, stale_seconds=10)
+        key = ("provider", "module", "digest", 0)
+        cache.get_or_fill(key, lambda: {"milliseconds": 1000})
+        now[0] = 9.0
+
+        class ExpiringWait:
+            def wait(self, _timeout):
+                now[0] = 11.0
+                return True
+
+        cache._fills[key] = ExpiringWait()
+        with self.assertRaisesRegex(RuntimeError, "unavailable"):
+            cache.get_or_fill(key, lambda: self.fail("follower must not fill"))
+
+    def test_timing_cache_ttls_resources_single_flight_and_fill_limit(self):
+        now = [0.0]
+        cache = ScrollTimingCache(clock=lambda: now[0], fresh_seconds=5, stale_seconds=10,
+                                  max_entries=2, max_entry_bytes=64, max_bytes=90, max_fills=1)
+        key = ("provider", "module", "a", 0)
+        self.assertEqual(cache.get_or_fill(key, lambda: {"milliseconds": 1000})["cache"], "fill")
+        now[0] = 5
+        self.assertEqual(cache.get_or_fill(key, lambda: self.fail("fresh boundary refilled"))["status"], "fresh")
+        now[0] = 5.001
+        self.assertEqual(cache.get_or_fill(key, lambda: (_ for _ in ()).throw(OSError()))["status"], "stale")
+        now[0] = 10.001
+        with self.assertRaises(OSError):
+            cache.get_or_fill(key, lambda: (_ for _ in ()).throw(OSError()))
+
+        now[0] = 20
+        for suffix in ("b", "c", "d"):
+            cache.get_or_fill(("provider", "module", suffix, 0), lambda suffix=suffix: {"text": suffix * 20})
+        self.assertLessEqual(len(cache._entries), 2)
+        self.assertLessEqual(cache._bytes, 90)
+        oversized_key = ("provider", "module", "oversized", 0)
+        cache.get_or_fill(oversized_key, lambda: {"text": "x" * 100})
+        self.assertNotIn(oversized_key, cache._entries)
+
+        leader_started = threading.Event()
+        release = threading.Event()
+        results = []
+        concurrent = ScrollTimingCache(max_fills=1)
+        shared_key = ("provider", "module", "shared", 0)
+        def fill():
+            leader_started.set();release.wait(2);return {"milliseconds": 2000}
+        leader = threading.Thread(target=lambda: results.append(concurrent.get_or_fill(shared_key, fill)))
+        follower = threading.Thread(target=lambda: results.append(concurrent.get_or_fill(shared_key, lambda: self.fail("duplicate fill"))))
+        leader.start();self.assertTrue(leader_started.wait(1));follower.start();release.set();leader.join(2);follower.join(2)
+        self.assertEqual(len(results), 2)
+        self.assertEqual({result["cache"] for result in results}, {"fill", "coalesced"})
+
+        blocked = threading.Event();release = threading.Event()
+        first = threading.Thread(target=lambda: concurrent.get_or_fill(
+            ("provider", "module", "first", 0),
+            lambda: (blocked.set(), release.wait(2), {"milliseconds": 1})[-1]))
+        first.start();self.assertTrue(blocked.wait(1))
+        with self.assertRaisesRegex(Exception, "busy"):
+            concurrent.get_or_fill(("provider", "module", "second", 0), lambda: {"milliseconds": 2})
+        release.set();first.join(2)
+
+    def test_provider_timing_propagates_one_monotonic_deadline_to_builder(self):
+        self.pair_browser()
+        settings = self.store.get()["weather"]
+        payload = {"base_revision": self.store.get()["revision"], "settings": settings}
+        observed = []
+
+        def prepare(_config, *, deadline):
+            observed.append(deadline - time.monotonic())
+            return {"frames_per_loop": 100, "total_frames": 100, "loops": 1,
+                    "frame_delay": .05, "milliseconds": 5000, "texts": ["weather"]}
+
+        original_validate = webapp.validate_config
+        def slow_validate(*args, **kwargs):
+            time.sleep(.05)
+            return original_validate(*args, **kwargs)
+        with patch("webapp.validate_config", side_effect=slow_validate), \
+             patch("modules.weather_app.prepare_ticker_plan", side_effect=prepare):
+            response = self.client.post("/api/scroll-timing/weather", json=payload)
+        self.assertEqual(response.status_code, 200, response.get_data(as_text=True))
+        self.assertEqual(len(observed), 1)
+        self.assertGreater(observed[0], 0)
+        self.assertLess(observed[0], 4.98)
+
+    def test_timing_cache_production_bounds_and_request_deadline_cover_followers_and_slots(self):
+        cache = ScrollTimingCache()
+        self.assertEqual((cache.max_entries, cache.max_entry_bytes, cache.max_bytes), (16, 8192, 65536))
+        for index in range(17):
+            cache.get_or_fill(("p", "m", str(index), 0), lambda index=index: {"text": "x" * 4000, "index": index})
+        self.assertEqual(len(cache._entries), 16)
+        self.assertLessEqual(cache._bytes, 65536)
+        oversized = ("p", "m", "oversized", 0)
+        cache.get_or_fill(oversized, lambda: {"text": "x" * 8192})
+        self.assertNotIn(oversized, cache._entries)
+
+        occupied = ScrollTimingCache()
+        releases = [threading.Event(), threading.Event()]
+        started = [threading.Event(), threading.Event()]
+        leaders = []
+        for index in range(2):
+            def run(index=index):
+                occupied.get_or_fill(("p", "m", f"leader-{index}", 0),
+                                     lambda: (started[index].set(), releases[index].wait(2), {"milliseconds": 1})[-1])
+            leaders.append(threading.Thread(target=run))
+            leaders[-1].start()
+            self.assertTrue(started[index].wait(1))
+        with self.assertRaises(TimingCacheBusy):
+            occupied.get_or_fill(("p", "m", "third", 0), lambda: {"milliseconds": 2}, deadline=time.monotonic() + .05)
+        before = time.monotonic()
+        with self.assertRaisesRegex(TimeoutError, "deadline"):
+            occupied.get_or_fill(("p", "m", "leader-0", 0), lambda: self.fail("follower filled"), deadline=before + .05)
+        self.assertLess(time.monotonic() - before, .5)
+        for release in releases: release.set()
+        for leader in leaders: leader.join(2)
+
+    def test_unavailable_automatic_timing_preserves_nonzero_compatibility_durations(self):
+        automatic = {"weather", "openweather_overview", "openweather_forecast", "announcement_board"}
+        durations = {item["module"]: item["duration"] for item in self.store.get()["playlist"] if item["module"] in automatic}
+        self.assertTrue(durations)
+        self.assertTrue(all(1 <= duration <= 3600 for duration in durations.values()), durations)
+
+        current = self.store.get()
+        weather = next(item for item in current["playlist"] if item["module"] == "weather")
+        weather["duration"] = 321
+        saved = self.store.update({"playlist": current["playlist"]}, base_revision=current["revision"])
+        self.assertEqual(next(item for item in saved["playlist"] if item["module"] == "weather")["duration"], 321)
+
+    def test_announcement_timing_api_drives_fresh_and_unavailable_aggregate(self):
+        self.pair_browser()
+        current = self.store.get()
+        active = test_config_store.ConfigStoreTests.announcement()
+        today = time.strftime("%Y-%m-%d")
+        active["schedule"].update({"start_date": today, "end_date": today,
+                                   "days": [time.localtime().tm_wday],
+                                   "start_time": "00:00", "end_time": "23:59"})
+        payload = {"base_revision": current["revision"], "settings": {"announcements": [active]}}
+        response = self.client.post("/api/scroll-timing/announcement_board", json=payload)
+        self.assertEqual(response.status_code, 200, response.get_data(as_text=True))
+        self.assertEqual(response.get_json()["display"], "8.0 s")
+        self.assertEqual(response.get_json()["status"], "fresh")
+        self.assertIn("refresh_at", response.get_json())
+        payload["settings"]["announcements"][0]["enabled"] = False
+        unavailable = self.client.post("/api/scroll-timing/announcement_board", json=payload)
+        self.assertEqual(unavailable.status_code, 200, unavailable.get_data(as_text=True))
+        self.assertEqual(unavailable.get_json()["display"], "Unavailable")
+        self.assertIsNone(unavailable.get_json()["milliseconds"])
+
+    def test_openweather_secret_success_rotates_timing_generation_and_invalidates_cache(self):
+        self.pair_browser()
+        settings = self.store.get()["openweather_overview"]
+        payload = {
+            "base_revision": self.store.get()["revision"],
+            "settings": settings,
+            "weather": self.store.get()["weather"],
+        }
+        plan = {
+            "frames_per_loop": 100,
+            "loops": settings["scroll_loops"],
+            "milliseconds": 5000,
+            "display": "5.0 s",
+        }
+        first_key = "first_key_material_123456"
+        second_key = "second_key_material_654321"
+
+        with patch("modules.openweather_overview.prepare_ticker_plan", return_value=plan) as prepare:
+            initial = self.client.post("/api/scroll-timing/openweather_overview", json=payload)
+            self.assertEqual(initial.status_code, 200, initial.get_data(as_text=True))
+            cached = self.client.post("/api/scroll-timing/openweather_overview", json=payload)
+            self.assertEqual(cached.get_json()["cache"], "hit")
+            self.assertEqual(prepare.call_count, 1)
+
+            saved = self.client.put("/api/secrets/openweather", json={"api_key": first_key})
+            self.assertEqual(saved.status_code, 200)
+            self.assertEqual(len(self.scroll_timing_cache._entries), 0)
+            after_set = self.client.post("/api/scroll-timing/openweather_overview", json=payload)
+            self.assertEqual(after_set.status_code, 200, after_set.get_data(as_text=True))
+            self.assertEqual(prepare.call_count, 2)
+
+            replaced = self.client.put("/api/secrets/openweather", json={"api_key": second_key})
+            self.assertEqual(replaced.status_code, 200)
+            self.assertEqual(len(self.scroll_timing_cache._entries), 0)
+            after_replace = self.client.post("/api/scroll-timing/openweather_overview", json=payload)
+            self.assertEqual(after_replace.status_code, 200, after_replace.get_data(as_text=True))
+            self.assertEqual(prepare.call_count, 3)
+
+            cleared = self.client.delete("/api/secrets/openweather")
+            self.assertEqual(cleared.status_code, 200)
+            self.assertEqual(len(self.scroll_timing_cache._entries), 0)
+            after_clear = self.client.post("/api/scroll-timing/openweather_overview", json=payload)
+            self.assertEqual(after_clear.status_code, 200, after_clear.get_data(as_text=True))
+            self.assertEqual(prepare.call_count, 4)
+
+        cache_keys = repr(tuple(self.scroll_timing_cache._entries))
+        self.assertNotIn(first_key, cache_keys)
+        self.assertNotIn(second_key, cache_keys)
+
     def test_dashboard_exposes_every_installed_font_to_all_font_editors(self):
         self.pair_browser()
 
@@ -80,6 +342,21 @@ class WebAppTests(unittest.TestCase):
         self.assertIn("options:installedFonts", body)
         self.assertIn("const announcementAppearanceFields=[{label:'Font',path:'style.font',type:'select',options:installedFonts}", body)
         self.assertIn("const fonts = globalThis.matrixInstalledFonts || [];", canvas_source)
+
+    def test_dashboard_renders_the_canonical_preview_version_beneath_lan_control(self):
+        self.pair_browser()
+
+        body = self.client.get("/").get_data(as_text=True)
+
+        application_version = getattr(webapp, "APPLICATION_VERSION", None)
+        self.assertEqual(application_version, "0.3.0-preview")
+        self.assertEqual(body.count(f"Version {application_version}"), 1)
+        self.assertRegex(
+            body,
+            rf"LAN CONTROL</span><br><span[^>]*>Version {re.escape(application_version)}</span>",
+        )
+        template = (Path(__file__).parents[1] / "app" / "templates" / "dashboard.html").read_text()
+        self.assertNotIn("0.3.0-preview", template)
 
     def test_control_stop_reports_timeout_without_claiming_success(self):
         self.pair_browser()
@@ -213,6 +490,14 @@ class WebAppTests(unittest.TestCase):
         )
         self.assertEqual(streamed_oversized.status_code, 413)
 
+    def test_dashboard_is_never_reused_from_browser_cache(self):
+        self.pair_browser()
+
+        response = self.client.get("/")
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.headers["Cache-Control"], "no-store")
+
     def test_preview_does_not_publish_config_revision(self):
         self.pair_browser()
         before = self.store.get()["revision"]
@@ -243,7 +528,7 @@ class WebAppTests(unittest.TestCase):
         save_end = body.index("\nfunction updateOpenWeatherSecretStatus", save_start)
         editor_initialization = next(
             line for line in body.splitlines()
-            if line.startswith("renderMedia();renderCustomLavaPalettes();")
+            if line.startswith("renderMedia();")
         )
         baseline_initialization = next(
             line for line in body.splitlines()
@@ -286,6 +571,8 @@ function setMessage(){}
 function setInterval(){return nextTimer++} function clearInterval(){}
 function setTimeout(){return nextTimer++} function clearTimeout(){}
 function renderMedia(){} function renderCustomLavaPalettes(){} function renderCustomModules(){} function renderBuiltInEditors(){} function refreshDisplayFrame(){}
+const automaticWeatherModules=[];const providerTimingPlans=new Map();function loadProviderTiming(){}
+function loadAnnouncementTiming(){}
 function updateStatus(){} function updateOpenWeatherSecretStatus(){}
 function response(status,revision=null,data=null){return {status,statusText:'failed',redirected:false,ok:status>=200&&status<300,headers:{get(name){return name==='X-Matrix-Minimum-Client-Contract'?'2':null}},json:async()=>(data??{revision})}}
 async function fetch(){const item=responses.shift();if(!item)throw new Error('unexpected fetch');return await item}
@@ -2372,7 +2659,7 @@ await send('Emulation.setDeviceMetricsOverride',{width:320,height:900,deviceScal
 loaded=new Promise(resolve=>{loadResolve=resolve});
 await send('Page.navigate',{url:'file://'+pagePath});
 await Promise.race([loaded,new Promise((_,reject)=>setTimeout(()=>reject(new Error('page load timeout')),5000))]);
-const expression=`JSON.stringify((()=>{const wrapper=createPlaylistRow({module:'custom_probe',duration:15,enabled:true});document.querySelector('#playlist').append(wrapper);syncPlaylistDurations();const buttons=[...wrapper.querySelectorAll('.module-actions button')],duration=wrapper.querySelector('.duration');duration.value='90';duration.dispatchEvent(new Event('input',{bubbles:true}));const physical=wrapper.querySelector('.physical-time'),playback=[...document.querySelectorAll('.physical-time')].find(element=>element.textContent.includes('calculated at playback')),style=getComputedStyle(playback),rect=playback.getBoundingClientRect(),itemRect=playback.closest('.module-item').getBoundingClientRect(),range=document.createRange();range.selectNodeContents(playback);return {viewport:innerWidth,labels:buttons.slice(0,2).map(button=>button.getAttribute('aria-label')),physical:physical.textContent,whiteSpace:style.whiteSpace,overflowWrap:style.overflowWrap,lineCount:range.getClientRects().length,clipped:rect.right>itemRect.right+.5}})())`;
+const expression=`JSON.stringify((()=>{const wrapper=createPlaylistRow({module:'custom_probe',duration:15,enabled:true});document.querySelector('#playlist').append(wrapper);providerTimingPlans.set('weather',{frames_per_loop:1000000,status:'stale'});syncPlaylistDurations();const buttons=[...wrapper.querySelectorAll('.module-actions button')],duration=wrapper.querySelector('.duration');duration.value='90';duration.dispatchEvent(new Event('input',{bubbles:true}));const physical=wrapper.querySelector('.physical-time'),automatic=document.querySelector('.module-row[data-module="weather"] .physical-time'),style=getComputedStyle(automatic),rect=automatic.getBoundingClientRect(),itemRect=automatic.closest('.module-item').getBoundingClientRect(),range=document.createRange();range.selectNodeContents(automatic);return {viewport:innerWidth,labels:buttons.slice(0,2).map(button=>button.getAttribute('aria-label')),physical:physical.textContent,automatic:automatic.textContent,whiteSpace:style.whiteSpace,overflowWrap:style.overflowWrap,lineCount:range.getClientRects().length,clipped:rect.right>itemRect.right+.5}})())`;
 const evaluated=await send('Runtime.evaluate',{expression,returnByValue:true,awaitPromise:true});
 if(evaluated.exceptionDetails)throw new Error(JSON.stringify(evaluated.exceptionDetails));
 console.log(JSON.stringify({result:JSON.parse(evaluated.result.value),exceptions:exceptions.map(item=>item.text)}));
@@ -2434,10 +2721,384 @@ console.log(JSON.stringify({result:JSON.parse(evaluated.result.value),exceptions
         self.assertEqual(report["result"]["viewport"], 320)
         self.assertEqual(report["result"]["labels"], ["Move up", "Move down"])
         self.assertEqual(report["result"]["physical"], "Physical time · 00:01:30")
+        self.assertRegex(
+            report["result"]["automatic"],
+            r"^Physical time · Stale · \d+\.\d s$",
+        )
         self.assertEqual(report["result"]["whiteSpace"], "normal")
         self.assertEqual(report["result"]["overflowWrap"], "anywhere")
         self.assertGreaterEqual(report["result"]["lineCount"], 2)
         self.assertFalse(report["result"]["clipped"])
+
+    @unittest.skipUnless(shutil.which("node"), "Node.js is required")
+    @unittest.skipUnless(
+        os.environ.get("MATRIX_CHROMIUM")
+        and Path(os.environ.get("MATRIX_CHROMIUM", "")).is_file()
+        and os.access(os.environ.get("MATRIX_CHROMIUM", ""), os.X_OK),
+        "MATRIX_CHROMIUM browser is required",
+    )
+    def test_scrolling_seconds_editing_and_provider_states_in_real_chromium(self):
+        self.pair_browser()
+        body = self.client.get("/").get_data(as_text=True)
+        chromium = os.environ["MATRIX_CHROMIUM"]
+        probe = r"""
+const port=process.argv[1],pagePath=process.argv[2];let endpoint;
+for(let attempt=0;attempt<50;attempt++){try{endpoint=await fetch(`http://127.0.0.1:${port}/json/new`,{method:'PUT'}).then(r=>r.json());break}catch(_){await new Promise(r=>setTimeout(r,100))}}
+if(!endpoint)throw new Error('CDP unavailable');
+const socket=new WebSocket(endpoint.webSocketDebuggerUrl),pending=new Map();let id=0,resolveLoad,loaded=new Promise(r=>resolveLoad=r);
+socket.onmessage=e=>{const m=JSON.parse(e.data);if(m.id&&pending.has(m.id)){const p=pending.get(m.id);pending.delete(m.id);m.error?p.reject(Error(JSON.stringify(m.error))):p.resolve(m.result)}else if(m.method==='Page.loadEventFired')resolveLoad()};
+await new Promise((r,j)=>{socket.onopen=r;socket.onerror=j});
+const send=(method,params={})=>new Promise((resolve,reject)=>{const request=++id;pending.set(request,{resolve,reject});socket.send(JSON.stringify({id:request,method,params}))});
+await send('Runtime.enable');await send('Page.enable');await send('Page.navigate',{url:'file://'+pagePath});await Promise.race([loaded,new Promise((_,j)=>setTimeout(()=>j(Error('load timeout')),5000))]);
+const expression=`JSON.stringify((()=>{addCustomModule();const card=[...document.querySelectorAll('.custom-module-card')].at(-1),row=document.querySelector('.module-row[data-module="'+CSS.escape(card.dataset.id)+'"]'),seconds=row.querySelector('.duration'),delay=card.querySelector('[data-field="speed"]'),loops=card.querySelector('[data-field="loops"]');const beforeLoops=loops.value,beforeDelay=delay.value;seconds.value='14.01';seconds.dispatchEvent(new Event('input',{bubbles:true}));addAnnouncement();const boardRow=document.querySelector('.module-row[data-module="announcement_board"]'),disabledAnnouncementSeconds=boardRow.querySelector('.duration').value;const announcement=announcements.at(-1);announcement.enabled=true;announcement.layout='text_notice';announcement.style.border='none';announcement.transition={type:'cut'};announcement.timing={mode:'scroll',loops:2,frame_delay:.05};renderAllAnnouncementEditors();announcementDraftMutated(announcement);const announcementSeconds=boardRow.querySelector('.duration').value,announcementPhysical=boardRow.querySelector('.physical-time').textContent;announcement.enabled=false;announcementDraftMutated(announcement);return {seconds:seconds.value,delay:delay.value,loops:loops.value,beforeLoops,beforeDelay,disabledAnnouncementSeconds,announcementSeconds,announcementPhysical,removedAnnouncementSeconds:boardRow.querySelector('.duration').value,removedAnnouncementPhysical:boardRow.querySelector('.physical-time').textContent,separateRuntimeControls:document.querySelectorAll('.scroll-seconds-editor').length,providerStates:[...document.querySelectorAll('[data-provider-timing-state]')].map(e=>e.textContent)}})())`;
+const result=await send('Runtime.evaluate',{expression,returnByValue:true,awaitPromise:true});if(result.exceptionDetails)throw Error(JSON.stringify(result.exceptionDetails));console.log(result.result.value);socket.close();
+"""
+        with tempfile.TemporaryDirectory(prefix="matrix-seconds-") as directory:
+            page = Path(directory) / "dashboard.html"
+            page.write_text(body)
+            profile = Path(directory) / "profile"
+            browser = subprocess.Popen([chromium, "--headless", "--no-sandbox", "--disable-gpu", "--remote-debugging-port=0", f"--user-data-dir={profile}", "about:blank"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            try:
+                active = profile / "DevToolsActivePort"
+                for _ in range(50):
+                    if active.is_file(): break
+                    if browser.poll() is not None: self.fail("Chromium exited")
+                    time.sleep(.1)
+                port = active.read_text().splitlines()[0]
+                completed = subprocess.run([shutil.which("node"), "-e", probe, port, str(page)], capture_output=True, text=True, timeout=15)
+            finally:
+                browser.terminate()
+                try: browser.wait(5)
+                except subprocess.TimeoutExpired: browser.kill(); browser.wait(5)
+        self.assertEqual(completed.returncode, 0, completed.stderr)
+        result = json.loads(completed.stdout.strip().splitlines()[-1])
+        self.assertEqual(result["seconds"], "14.01")
+        self.assertEqual(result["loops"], result["beforeLoops"])
+        self.assertNotEqual(result["delay"], result["beforeDelay"])
+        self.assertRegex(result["delay"], r"^\d+\.\d{4,6}$")
+        self.assertEqual(result["disabledAnnouncementSeconds"], "")
+        self.assertGreater(float(result["announcementSeconds"]), 0)
+        self.assertRegex(result["announcementPhysical"], r"^Physical time · \d+\.\d s$")
+        self.assertEqual(result["removedAnnouncementSeconds"], "")
+        self.assertEqual(result["removedAnnouncementPhysical"], "")
+        self.assertEqual(result["separateRuntimeControls"], 0)
+        self.assertEqual(len(result["providerStates"]), 3)
+        self.assertTrue(all(state != "0.0 s" for state in result["providerStates"]))
+
+    @unittest.skipUnless(shutil.which("node"), "Node.js is required")
+    @unittest.skipUnless(
+        os.environ.get("MATRIX_CHROMIUM")
+        and Path(os.environ.get("MATRIX_CHROMIUM", "")).is_file()
+        and os.access(os.environ.get("MATRIX_CHROMIUM", ""), os.X_OK),
+        "MATRIX_CHROMIUM browser is required",
+    )
+    def test_scrolling_timing_paired_responsive_integration(self):
+        self.pair_browser()
+        peer = self.app.test_client()
+        self.pairing.verify.return_value = True
+        peer.post("/pair", data={"pin": "123456", "device_name": "Peer browser"})
+        base_revision = self.store.get()["revision"]
+        original_loops = self.store.get()["weather"]["scroll_loops"]
+        saved = self.client.post(
+            "/api/config",
+            json={"weather": {"scroll_speed": 0.055}},
+            headers={"If-Match": f'"{base_revision}"'},
+        )
+        self.assertEqual(saved.status_code, 200, saved.get_data(as_text=True))
+        self.assertEqual(saved.get_json()["weather"]["scroll_loops"], original_loops)
+        reopened = self.client.get("/api/config")
+        self.assertEqual(reopened.get_json()["weather"]["scroll_speed"], 0.055)
+        stale = peer.post(
+            "/api/config",
+            json={"weather": {"scroll_speed": 0.06}},
+            headers={"If-Match": f'"{base_revision}"'},
+        )
+        self.assertEqual(stale.status_code, 412)
+        self.assertEqual(self.store.get()["weather"]["scroll_speed"], 0.055)
+
+        self.scroll_timing_cache.get_or_fill(
+            ("openweather", "openweather_overview", "digest-only", 0),
+            lambda: {"milliseconds": 1000, "display": "1.0 s"},
+        )
+        self.assertTrue(self.scroll_timing_cache._entries)
+        restarted_cache = ScrollTimingCache()
+        self.assertFalse(restarted_cache._entries)
+
+        self.controller.status.return_value = {
+            "running": False, "current_module": None, "last_error": None,
+        }
+        body = self.client.get("/").get_data(as_text=True)
+        chromium = os.environ["MATRIX_CHROMIUM"]
+        node = shutil.which("node")
+        assert node is not None
+        expected_vectors = [
+            frame_delay_for_seconds(1.25, 100, 1),
+            frame_delay_for_seconds(0.1, 100, 2),
+            frame_delay_for_seconds(999, 100, 2),
+            frame_delay_for_seconds(9.84, 82, 3),
+        ]
+        probe = r"""
+const port=process.argv[1],pagePath=process.argv[2],expected=JSON.parse(process.argv[3]);let endpoint;
+for(let attempt=0;attempt<50;attempt++){try{endpoint=await fetch(`http://127.0.0.1:${port}/json/new`,{method:'PUT'}).then(r=>r.json());break}catch(_){await new Promise(r=>setTimeout(r,100))}}
+if(!endpoint)throw Error('CDP unavailable');
+const socket=new WebSocket(endpoint.webSocketDebuggerUrl),pending=new Map(),exceptions=[];let id=0,resolveLoad,loaded=new Promise(r=>resolveLoad=r);
+socket.onmessage=e=>{const m=JSON.parse(e.data);if(m.id&&pending.has(m.id)){const p=pending.get(m.id);pending.delete(m.id);m.error?p.reject(Error(JSON.stringify(m.error))):p.resolve(m.result)}else if(m.method==='Page.loadEventFired')resolveLoad();else if(m.method==='Runtime.exceptionThrown')exceptions.push(m.params.exceptionDetails.text)};
+await new Promise((r,j)=>{socket.onopen=r;socket.onerror=j});
+const send=(method,params={})=>new Promise((resolve,reject)=>{const request=++id;pending.set(request,{resolve,reject});socket.send(JSON.stringify({id:request,method,params}))});
+const evaluate=async expression=>{const result=await send('Runtime.evaluate',{expression,returnByValue:true,awaitPromise:true});if(result.exceptionDetails)throw Error(JSON.stringify(result.exceptionDetails));return result.result.value};
+await send('Runtime.enable');await send('Page.enable');await send('Emulation.setDeviceMetricsOverride',{width:390,height:844,deviceScaleFactor:1,mobile:true});await send('Emulation.setTouchEmulationEnabled',{enabled:true,maxTouchPoints:5});await send('Emulation.setEmulatedMedia',{features:[{name:'prefers-reduced-motion',value:'reduce'}]});await send('Page.navigate',{url:'file://'+pagePath});await Promise.race([loaded,new Promise((_,j)=>setTimeout(()=>j(Error('load timeout')),5000))]);
+const vectors=await evaluate(`JSON.stringify([[1.25,100,1],[.1,100,2],[999,100,2],[9.84,82,3]].map(v=>frameDelayForSeconds(...v)))`);
+if(JSON.stringify(JSON.parse(vectors))!==JSON.stringify(expected))throw Error('Python/JavaScript timing vector mismatch');
+const provider=await evaluate(`(async()=>{let aborted=0,calls=0;api=async(_path,options)=>{calls++;const payload=JSON.parse(options.body),digest=await timingSettingsDigest('weather',payload);await new Promise((resolve,reject)=>{const timer=setTimeout(resolve,30);options.signal.addEventListener('abort',()=>{aborted++;clearTimeout(timer);reject(new DOMException('Aborted','AbortError'))},{once:true})});return {status:'fresh',milliseconds:5000,frames_per_loop:100,loops:1,settings_digest:digest,settings_correlation:payload.settings_correlation}};const row=document.querySelector('.module-row[data-module="weather"]'),edit=row.querySelector('.module-actions button:last-child');edit.click();setTimeout(()=>{document.querySelector('#weather-location').value='NEW DRAFT'},5);await new Promise(r=>setTimeout(r,420));return JSON.stringify({calls,aborted,state:row.closest('.module-item').querySelector('[data-provider-timing-state]').textContent,hidden:row.closest('.module-item').querySelector('.module-editor').hidden})})()`);
+const providerResult=JSON.parse(provider);if(providerResult.calls!==2||providerResult.hidden||!providerResult.state.includes('5.5 s'))throw Error('provider lifecycle mismatch: '+provider);
+const announcementOrder=await evaluate(`(async()=>{const pending=[];api=(_path,options)=>new Promise(resolve=>pending.push({resolve,body:options.body}));const first=loadAnnouncementTiming();announcements.push({id:'newer'});const second=loadAnnouncementTiming();pending[1].resolve({status:'fresh',milliseconds:2000,refresh_at:new Date(Date.now()+60000).toISOString()});await second;pending[0].resolve({status:'fresh',milliseconds:1000,refresh_at:new Date(Date.now()+60000).toISOString()});await first;return announcementTimingPlan.milliseconds})()`);if(announcementOrder!==2000)throw Error('announcement timing regressed to older draft: '+announcementOrder);
+await evaluate(`(()=>{addCustomModule();const input=[...document.querySelectorAll('.custom-module-card')].at(-1).querySelector('[data-field="text"]');input.value='PRESERVED DRAFT';input.dispatchEvent(new Event('input',{bubbles:true}));input.focus();return true})()`);
+const viewports=[[320,568],[360,800],[390,844],[412,915],[599,900],[600,900],[601,900],[768,1024],[844,390],[899,800],[900,800],[901,800],[1024,768],[1280,720],[1440,900]],reports=[];
+for(const [width,height] of viewports){await send('Emulation.setDeviceMetricsOverride',{width,height,deviceScaleFactor:1,mobile:width<1024,screenOrientation:{type:width>height?'landscapePrimary':'portraitPrimary',angle:width>height?90:0}});reports.push(JSON.parse(await evaluate(`JSON.stringify((()=>{const edit=document.querySelector('.module-row[data-module="weather"] .module-actions button:last-child'),input=[...document.querySelectorAll('.custom-module-card')].at(-1).querySelector('[data-field="text"]'),offender=[...document.querySelectorAll('body *')].map(element=>({element,right:element.getBoundingClientRect().right})).sort((a,b)=>b.right-a.right)[0];return {width:innerWidth,overflow:document.documentElement.scrollWidth-document.documentElement.clientWidth,editWidth:edit.getBoundingClientRect().width,editHeight:edit.getBoundingClientRect().height,draft:input.value,offender:offender?.element?.outerHTML?.slice(0,180)}})())`)))}
+await send('Emulation.setPageScaleFactor',{pageScaleFactor:2});const zoomDraft=await evaluate(`[...document.querySelectorAll('.custom-module-card')].at(-1).querySelector('[data-field="text"]').value`);await send('Emulation.setPageScaleFactor',{pageScaleFactor:1});
+if(reports.some(r=>r.overflow>1||r.draft!=='PRESERVED DRAFT'))throw Error('responsive overflow or draft loss: '+JSON.stringify(reports));
+if(reports.filter(r=>r.width<=600).some(r=>r.editWidth<44||r.editHeight<44))throw Error('mobile editor action below 44px: '+JSON.stringify(reports));
+if(zoomDraft!=='PRESERVED DRAFT')throw Error('zoom discarded draft');
+console.log(JSON.stringify({reports,provider:providerResult,exceptions}));socket.close();
+"""
+        with tempfile.TemporaryDirectory(prefix="matrix-integration-") as directory:
+            page = Path(directory) / "dashboard.html"
+            page.write_text(body)
+            profile = Path(directory) / "profile"
+            browser = subprocess.Popen(
+                [chromium, "--headless", "--no-sandbox", "--disable-gpu", "--remote-debugging-port=0", f"--user-data-dir={profile}", "about:blank"],
+                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+            )
+            try:
+                active = profile / "DevToolsActivePort"
+                for _attempt in range(50):
+                    if active.is_file():
+                        break
+                    if browser.poll() is not None:
+                        self.fail("Chromium exited before publishing its DevTools port")
+                    time.sleep(0.1)
+                self.assertTrue(active.is_file(), "Chromium DevTools port unavailable")
+                port = active.read_text().splitlines()[0]
+                completed = subprocess.run(
+                    [node, "-e", probe, port, str(page), json.dumps(expected_vectors)],
+                    capture_output=True, text=True, timeout=30,
+                )
+            finally:
+                browser.terminate()
+                try:
+                    browser.wait(timeout=5)
+                except subprocess.TimeoutExpired:
+                    browser.kill()
+                    browser.wait(timeout=5)
+                for cleanup_attempt in range(20):
+                    try:
+                        shutil.rmtree(profile)
+                        break
+                    except FileNotFoundError:
+                        break
+                    except OSError:
+                        if cleanup_attempt == 19:
+                            raise
+                        time.sleep(0.05)
+        self.assertEqual(completed.returncode, 0, completed.stderr)
+        report = json.loads(completed.stdout.strip().splitlines()[-1])
+        self.assertEqual(report["exceptions"], [])
+        self.assertEqual(len(report["reports"]), 15)
+
+    @unittest.skipUnless(shutil.which("node"), "Node.js is required")
+    @unittest.skipUnless(
+        os.environ.get("MATRIX_CHROMIUM")
+        and Path(os.environ.get("MATRIX_CHROMIUM", "")).is_file()
+        and os.access(os.environ.get("MATRIX_CHROMIUM", ""), os.X_OK),
+        "MATRIX_CHROMIUM browser is required",
+    )
+    def test_live_http_pairing_timing_contracts_and_state_preservation(self):
+        self.pairing.active_pin.return_value = "123456"
+        self.pairing.verify.return_value = True
+        self.controller.status.return_value = {
+            "running": False, "current_module": None, "last_error": None,
+        }
+        frame = io.BytesIO()
+        Image.new("RGB", (64, 32)).save(frame, format="PNG")
+        frame_bytes = frame.getvalue()
+        self.controller.frame_png.side_effect = lambda: (io.BytesIO(frame_bytes), 1)
+        current = self.store.get()
+
+        def scenario_settings(name):
+            settings = copy.deepcopy(current["weather"])
+            settings.update({"location": name, "latitude": None, "longitude": None})
+            return settings
+
+        def digest_for(settings):
+            source = {"module": "weather", "settings": settings}
+            return hashlib.sha256(json.dumps(
+                source, sort_keys=True, separators=(",", ":"),
+            ).encode()).hexdigest()
+
+        scenarios = {
+            digest_for(scenario_settings("STALE")): "stale",
+            digest_for(scenario_settings("BUSY")): "busy",
+            digest_for(scenario_settings("UNAVAILABLE")): "unavailable",
+        }
+        provider_locations = []
+
+        def prepare(config, *, deadline):
+            del deadline
+            location = config["weather"]["location"]
+            provider_locations.append(location)
+            if location == "OLD":
+                time.sleep(.7)
+                milliseconds = 7000
+            elif location == "NEW":
+                time.sleep(.1)
+                milliseconds = 9000
+            else:
+                milliseconds = 5500
+            loops = config["weather"]["scroll_loops"]
+            delay = config["weather"]["scroll_speed"]
+            frames = {"OLD": 127, "NEW": 164}.get(location, 100)
+            actual_milliseconds = round(frames * loops * delay * 1000)
+            return {
+                "frames_per_loop": frames, "total_frames": frames * loops,
+                "loops": loops,
+                "frame_delay": delay,
+                "milliseconds": actual_milliseconds,
+                "display": f"{actual_milliseconds / 1000:.1f} s",
+            }
+
+        def cached(key, fill, *, deadline=None):
+            del deadline
+            scenario = scenarios.get(key[2])
+            if scenario == "busy":
+                raise TimingCacheBusy("busy")
+            if scenario == "unavailable":
+                raise OSError("provider unavailable")
+            if scenario == "stale":
+                return {
+                    "frames_per_loop": 100, "total_frames": 100, "loops": 1,
+                    "frame_delay": .05, "milliseconds": 6000, "display": "6.0 s",
+                    "status": "stale", "cache": "stale",
+                }
+            return {**fill(), "status": "fresh", "cache": "fill"}
+
+        server = make_server("127.0.0.1", 0, self.app, threaded=True)
+        server_thread = threading.Thread(target=server.serve_forever, daemon=True)
+        server_thread.start()
+        self.addCleanup(server.server_close)
+        self.addCleanup(server.shutdown)
+        chromium = os.environ["MATRIX_CHROMIUM"]
+        node = shutil.which("node")
+        assert node is not None
+        probe = r"""
+const debugPort=process.argv[1],appPort=process.argv[2],sleep=ms=>new Promise(r=>setTimeout(r,ms));let endpoint;
+for(let attempt=0;attempt<50;attempt++){try{endpoint=await fetch(`http://127.0.0.1:${debugPort}/json/new`,{method:'PUT'}).then(r=>r.json());break}catch(_){await sleep(100)}}
+if(!endpoint)throw Error('CDP unavailable');
+const socket=new WebSocket(endpoint.webSocketDebuggerUrl),pending=new Map(),exceptions=[];let id=0;
+socket.onmessage=e=>{const m=JSON.parse(e.data);if(m.id&&pending.has(m.id)){const p=pending.get(m.id);pending.delete(m.id);m.error?p.reject(Error(JSON.stringify(m.error))):p.resolve(m.result)}else if(m.method==='Runtime.exceptionThrown')exceptions.push(m.params.exceptionDetails.text)};
+await new Promise((r,j)=>{socket.onopen=r;socket.onerror=j});
+const send=(method,params={})=>new Promise((resolve,reject)=>{const request=++id;pending.set(request,{resolve,reject});socket.send(JSON.stringify({id:request,method,params}))});
+const evaluate=async(expression,awaitPromise=false)=>{const result=await send('Runtime.evaluate',{expression,returnByValue:true,awaitPromise});if(result.exceptionDetails)throw Error(JSON.stringify(result.exceptionDetails));return result.result.value};
+const waitFor=async(expression,timeout=10000)=>{const end=Date.now()+timeout;while(Date.now()<end){try{const value=await evaluate(expression);if(value)return value}catch(_){}await sleep(25)}throw Error('timeout: '+expression)};
+try{
+ await send('Runtime.enable');await send('Page.enable');
+ await send('Emulation.setDeviceMetricsOverride',{width:390,height:844,deviceScaleFactor:1,mobile:true});
+ await send('Emulation.setTouchEmulationEnabled',{enabled:true,maxTouchPoints:5});
+ await send('Emulation.setEmulatedMedia',{features:[{name:'prefers-reduced-motion',value:'reduce'}]});
+ await send('Page.navigate',{url:`http://127.0.0.1:${appPort}/pair`});
+ await waitFor(`document.querySelector('input[name="device_name"]')`);
+ const unauthorized=await evaluate(`fetch('/api/scroll-timing/weather',{method:'POST',headers:{'Content-Type':'application/json'},body:'{}'}).then(r=>r.status)`,true);
+ if(unauthorized!==401)throw Error('unauthorized contract mismatch: '+unauthorized);
+ await evaluate(`document.querySelector('input[name="device_name"]').focus();true`);
+ await send('Input.insertText',{text:'Live HTTP Chromium'});
+ await send('Input.dispatchKeyEvent',{type:'keyDown',key:'Tab',code:'Tab'});await send('Input.dispatchKeyEvent',{type:'keyUp',key:'Tab',code:'Tab'});
+ await evaluate(`document.querySelector('input[name="pin"]').focus();true`);
+ await send('Input.insertText',{text:'123456'});
+ const pairButton=await evaluate(`(()=>{const r=document.querySelector('form button').getBoundingClientRect();return {x:r.left+r.width/2,y:r.top+r.height/2}})()`);
+ await send('Input.dispatchTouchEvent',{type:'touchStart',touchPoints:[{x:pairButton.x,y:pairButton.y}]});await send('Input.dispatchTouchEvent',{type:'touchEnd',touchPoints:[]});
+ await waitFor(`location.pathname==='/'&&typeof api==='function'&&document.readyState==='complete'`);
+ await waitFor(`providerTimingPlans.get('weather')?.status==='fresh'&&document.querySelector('.module-row[data-module="weather"] .duration').value==='5.00'`);
+ const initialTiming=await evaluate(`(()=>{const row=document.querySelector('.module-row[data-module="weather"]'),editor=row.closest('.module-item').querySelector('.module-editor'),duration=row.querySelector('.duration');return {editorHidden:editor.hidden,duration:duration.value,readOnly:duration.readOnly,physical:row.querySelector('.physical-time').textContent}})()`);
+ if(!initialTiming.editorHidden||initialTiming.readOnly||initialTiming.duration!=='5.00'||initialTiming.physical!=='Physical time · 5.0 s')throw Error('initial timing was not calculated before editing: '+JSON.stringify(initialTiming));
+ const contracts=await evaluate(`(async()=>{
+   const make=name=>{const payload=providerTimingPayload('weather');payload.settings.location=name;payload.settings.latitude=null;payload.settings.longitude=null;return payload};
+   const freshPayload=providerTimingPayload('weather'),fresh=await api('/api/scroll-timing/weather',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(freshPayload)}),freshDigest=await timingSettingsDigest('weather',freshPayload);
+   const raw=async payload=>{const response=await fetch('/api/scroll-timing/weather',{method:'POST',headers:{'Content-Type':'application/json','X-Matrix-Client-Contract':String(MATRIX_CLIENT_CONTRACT)},body:JSON.stringify(payload)});return {status:response.status,data:await response.json(),retry:response.headers.get('Retry-After')}};
+   const stale=await raw(make('STALE')),busy=await raw(make('BUSY')),unavailable=await raw(make('UNAVAILABLE'));
+   const staleBase=make('STALE');staleBase.base_revision=-1;const precondition=await raw(staleBase);
+   const oversizedResponse=await fetch('/api/scroll-timing/weather',{method:'POST',headers:{'Content-Type':'application/json','X-Matrix-Client-Contract':String(MATRIX_CLIENT_CONTRACT)},body:'{"settings":"'+'x'.repeat(17000)+'"}'});
+   return {fresh,freshDigest,stale,busy,unavailable,precondition,oversized:oversizedResponse.status};
+ })()`,true);
+ if(contracts.fresh.status!=='fresh'||contracts.fresh.settings_digest!==contracts.freshDigest)throw Error('fresh digest contract mismatch: '+JSON.stringify(contracts));
+ if(contracts.stale.status!==200||contracts.stale.data.status!=='stale')throw Error('stale contract mismatch: '+JSON.stringify(contracts.stale));
+ if(contracts.precondition.status!==412||typeof contracts.precondition.data.revision!=='number')throw Error('412 contract mismatch');
+ if(contracts.oversized!==413)throw Error('413 contract mismatch: '+contracts.oversized);
+ if(contracts.busy.status!==429||contracts.busy.retry!=='1'||!contracts.busy.data.retryable)throw Error('429 contract mismatch');
+ if(contracts.unavailable.status!==503||contracts.unavailable.data.status!=='unavailable')throw Error('503 contract mismatch');
+ await evaluate(`providerTimingPlans.delete('weather');syncPlaylistDurations();true`);
+ const fallback=await evaluate(`(()=>{const row=document.querySelector('.module-row[data-module="weather"]'),duration=row.querySelector('.duration'),loops=builtInSettings.weather.scroll_loops,delay=builtInSettings.weather.scroll_speed;duration.value='6.0';duration.dispatchEvent(new Event('input',{bubbles:true}));return {readOnly:duration.readOnly,physical:row.querySelector('.physical-time').textContent,loopsBefore:loops,loopsAfter:builtInSettings.weather.scroll_loops,delayBefore:delay,delayAfter:builtInSettings.weather.scroll_speed}})()`);
+ if(fallback.readOnly||fallback.physical!=='Physical time · 00:00:06'||fallback.loopsAfter!==fallback.loopsBefore||fallback.delayAfter!==fallback.delayBefore)throw Error('unresolved duration fallback mismatch: '+JSON.stringify(fallback));
+ await evaluate(`(()=>{const button=document.querySelector('.module-row[data-module="weather"] .module-actions button:last-child');button.scrollIntoView({block:'center',behavior:'instant'});button.click();return true})()`);
+ await waitFor(`!document.querySelector('.module-row[data-module="weather"]').closest('.module-item').querySelector('.module-editor').hidden`);
+ const resolvedFallback=await evaluate(`(()=>{const row=document.querySelector('.module-row[data-module="weather"]'),editor=row.closest('.module-item').querySelector('.module-editor');return {loops:Number(editor.querySelector('[data-setting="scroll_loops"]').value),delay:Number(editor.querySelector('[data-setting="scroll_speed"]').value),duration:Number(row.querySelector('.duration').value),physical:row.querySelector('.physical-time').textContent}})()`);
+ if(resolvedFallback.loops!==fallback.loopsBefore||resolvedFallback.delay===fallback.delayBefore||!resolvedFallback.physical.endsWith(' s'))throw Error('resolved duration did not adjust delay only: '+JSON.stringify({fallback,resolvedFallback}));
+ let timingRect=await evaluate(`(()=>{const e=document.querySelector('.module-row[data-module="weather"] .duration');e.scrollIntoView({block:'center'});const r=e.getBoundingClientRect();return {x:r.left+r.width/2,y:r.top+r.height/2}})()`);
+ await send('Input.dispatchTouchEvent',{type:'touchStart',touchPoints:[{x:timingRect.x,y:timingRect.y}]});await send('Input.dispatchTouchEvent',{type:'touchEnd',touchPoints:[]});
+ await send('Input.dispatchKeyEvent',{type:'keyDown',key:'Control',code:'ControlLeft',modifiers:2});await send('Input.dispatchKeyEvent',{type:'keyDown',key:'a',code:'KeyA',modifiers:2});await send('Input.dispatchKeyEvent',{type:'keyUp',key:'a',code:'KeyA',modifiers:2});await send('Input.dispatchKeyEvent',{type:'keyUp',key:'Control',code:'ControlLeft'});await evaluate(`document.activeElement.value=''`);await send('Input.insertText',{text:'6.0'});
+ await evaluate(`(()=>{const input=document.querySelector('#weather-location');input.value='OLD';input.dispatchEvent(new Event('input',{bubbles:true}));return true})()`);
+ await sleep(350);await waitFor(`document.querySelector('[data-provider-timing-state]').dataset.state==='loading'`);
+ await evaluate(`(()=>{const input=document.querySelector('#weather-location'),editor=document.querySelector('.module-row[data-module="weather"]').closest('.module-item').querySelector('.module-editor');input.value='NEW';input.dispatchEvent(new Event('input',{bubbles:true}));input.setSelectionRange(1,2);const timing=document.querySelector('.module-row[data-module="weather"] .duration');timing.focus();editor.style.maxHeight='120px';editor.style.overflow='auto';editor.scrollTop=80;scrollTo(0,400);return {page:scrollY,local:editor.scrollTop}})()`);
+ const before=await evaluate(`(()=>{const editor=document.querySelector('.module-row[data-module="weather"]').closest('.module-item').querySelector('.module-editor');return {page:scrollY,local:editor.scrollTop,seconds:document.querySelector('.module-row[data-module="weather"] .duration').value}})()`);
+ await sleep(1000);
+ const preserved=await evaluate(`(async()=>{const editor=document.querySelector('.module-row[data-module="weather"]').closest('.module-item').querySelector('.module-editor'),timing=document.querySelector('.module-row[data-module="weather"] .duration'),locationInput=document.querySelector('#weather-location'),payload=providerTimingPayload('weather');return {focus:document.activeElement===timing,seconds:timing.value,selection:[locationInput.selectionStart,locationInput.selectionEnd],page:scrollY,local:editor.scrollTop,digest:providerTimingPlans.get('weather').settings_digest,currentDigest:await timingSettingsDigest('weather',payload),frames:providerTimingPlans.get('weather').frames_per_loop,delay:document.querySelector('[data-built-in-module="weather"][data-setting="scroll_speed"]').value,state:editor.querySelector('[data-provider-timing-state]').textContent}})()`,true);
+ const expectedSeconds=before.seconds;
+ if(!preserved.focus||preserved.seconds!==expectedSeconds||preserved.state!==expectedSeconds+' s'||JSON.stringify(preserved.selection)!=='[1,2]'||Math.abs(preserved.page-before.page)>1||preserved.local!==before.local||preserved.digest!==preserved.currentDigest)throw Error('provider completion discarded state: '+JSON.stringify({before,preserved,expectedSeconds}));
+ const reduced=await evaluate(`({matches:matchMedia('(prefers-reduced-motion: reduce)').matches,duration:getComputedStyle(document.querySelector('.palette-group summary'),'::before').transitionDuration})`);
+ if(!reduced.matches||reduced.duration!=='0s')throw Error('reduced motion not honored: '+JSON.stringify(reduced));
+ await send('Emulation.setPageScaleFactor',{pageScaleFactor:2});
+ const zoom=await evaluate(`(()=>{const input=document.querySelector('.module-row[data-module="weather"] .duration'),label=input.closest('.duration-label'),style=getComputedStyle(input);return {scale:visualViewport.scale,overflow:label.scrollWidth-label.clientWidth,width:input.getBoundingClientRect().width,font:parseFloat(style.fontSize),label:label.textContent}})()`);
+ if(zoom.scale<1.9||zoom.overflow>1||zoom.width<44||zoom.font<12||!zoom.label.includes('Display duration (seconds)'))throw Error('200% zoom timing control unreadable: '+JSON.stringify(zoom));
+ console.log(JSON.stringify({contracts,preserved,reduced,zoom,exceptions}));
+}finally{socket.close()}
+"""
+        with tempfile.TemporaryDirectory(prefix="matrix-live-http-") as directory, \
+             patch.object(self.scroll_timing_cache, "get_or_fill", side_effect=cached), \
+             patch("modules.weather_app.prepare_ticker_plan", side_effect=prepare):
+            profile = Path(directory) / "profile"
+            browser = subprocess.Popen([
+                chromium, "--headless", "--no-sandbox", "--disable-gpu",
+                "--remote-debugging-port=0", f"--user-data-dir={profile}", "about:blank",
+            ], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, start_new_session=True)
+            try:
+                active = profile / "DevToolsActivePort"
+                for _attempt in range(50):
+                    if active.is_file():
+                        break
+                    if browser.poll() is not None:
+                        self.fail("Chromium exited before publishing DevTools port")
+                    time.sleep(.1)
+                self.assertTrue(active.is_file(), "Chromium DevTools port unavailable")
+                completed = subprocess.run([
+                    node, "-e", probe, active.read_text().splitlines()[0], str(server.server_port),
+                ], capture_output=True, text=True, timeout=30)
+            finally:
+                try:
+                    os.killpg(browser.pid, signal.SIGTERM)
+                except ProcessLookupError:
+                    pass
+                try:
+                    browser.wait(timeout=5)
+                except subprocess.TimeoutExpired:
+                    try:
+                        os.killpg(browser.pid, signal.SIGKILL)
+                    except ProcessLookupError:
+                        pass
+                    browser.wait(timeout=5)
+                time.sleep(.1)
+        self.assertEqual(completed.returncode, 0, completed.stderr)
+        report = json.loads(completed.stdout.strip().splitlines()[-1])
+        self.assertEqual(report["exceptions"], [])
+        self.assertIn("OLD", provider_locations)
+        self.assertIn("NEW", provider_locations)
 
     def test_real_chromium_regression_skips_a_non_executable_browser_path(self):
         with tempfile.NamedTemporaryFile() as candidate:
@@ -2467,6 +3128,97 @@ console.log(JSON.stringify({result:JSON.parse(evaluated.result.value),exceptions
         self.assertIn("skipped", completed.stderr)
 
     @unittest.skipUnless(shutil.which("node"), "Node.js is required")
+    def test_provider_completion_preserves_focused_hundredth_target_and_delay_precision(self):
+        self.pair_browser()
+        body = self.client.get("/").get_data(as_text=True)
+        timing_start = body.index("const MATRIX_SCROLL_WIDTH=")
+        timing_end = body.index("\nfunction fontCharacterAdvance", timing_start)
+        ticker_start = body.index("function tickerFrames(")
+        ticker_end = body.index("\nfunction onPlaylistDurationInput", ticker_start)
+        load_start = body.index("async function loadProviderTiming(")
+        load_end = body.index("\nlet announcementTimingRequest", load_start)
+        harness = (
+            body[timing_start:timing_end] + "\n" +
+            body[ticker_start:ticker_end] + "\n" +
+            body[load_start:load_end] + r"""
+const providerTimingPlans=new Map(),providerTimingRequests=new Map();
+const playlistDurationTargets=new Map([['weather',6.01]]);
+const builtInSettings={weather:{scroll_loops:1,scroll_speed:.05}};
+const duration={value:'6.01'},delay={value:'.05'},state={textContent:'',dataset:{}};
+const container={querySelector(selector){return selector==='[data-provider-timing-state]'?state:null}};
+global.document={
+  activeElement:duration,
+  querySelector(selector){
+    if(selector.includes('.module-row'))return duration;
+    if(selector.includes('[data-setting="scroll_speed"]'))return delay;
+    return null;
+  },
+};
+function markMatrixDirty(){}
+function providerTimingPayload(){return {settings:{}}}
+async function timingSettingsDigest(){return 'same'}
+function providerPlanMilliseconds(){return 6010}
+function syncPlaylistDurations(){}
+async function api(){return {status:'fresh',frames_per_loop:127,settings_digest:'same',settings_correlation:'same'}}
+(async()=>{
+  await loadProviderTiming('weather',container);
+  if(document.activeElement!==duration)throw new Error('duration focus was lost');
+  if(duration.value!=='6.01')throw new Error('focused hundredth target was rounded: '+duration.value);
+  if(Number(delay.value)!==0.047323||builtInSettings.weather.scroll_speed!==0.047323)throw new Error('microsecond frame delay precision was lost: '+JSON.stringify({control:delay.value,setting:builtInSettings.weather.scroll_speed,state}));
+  console.log('PROVIDER_HUNDREDTH_COMPLETION_PASS');
+})().catch(error=>{console.error(error);process.exitCode=1});
+"""
+        )
+        result = subprocess.run(
+            [shutil.which("node") or "", "-e", harness],
+            cwd=Path(__file__).parents[1], text=True, capture_output=True,
+            timeout=10,
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("PROVIDER_HUNDREDTH_COMPLETION_PASS", result.stdout)
+
+    @unittest.skipUnless(shutil.which("node"), "Node.js is required")
+    def test_announcement_unavailable_response_and_failure_remain_blank_in_browser(self):
+        self.pair_browser()
+        body = self.client.get("/").get_data(as_text=True)
+        function_start = body.index("const customFontAdvances=")
+        function_end = body.index("\nfunction playlist()", function_start)
+        load_start = body.index("async function loadAnnouncementTiming()")
+        load_end = body.index("\nlet announcementTimingDebounce", load_start)
+        harness = body[function_start:function_end] + "\n" + body[load_start:load_end] + r"""
+const announcement={
+  enabled:true,headline:'OUTSIDE SCHEDULE',message:'',style:{font:'5x7'},
+  timing:{mode:'static',duration_seconds:8},transition:{type:'cut'},
+};
+const announcements=[announcement];
+const builtInSettings={};
+const matrixLoadedRevision=0;let announcementTimingRequest=null,announcementTimingGeneration=0;
+const label={childNodes:[{textContent:''}]},physical={textContent:''};let row;
+const duration={value:'',hidden:false,readOnly:false,title:'',min:'',max:'',step:'',placeholder:'',dataset:{},closest(selector){return selector==='.module-row'?row:label},removeAttribute(name){delete this[name]}};
+row={dataset:{module:'announcement_board'},querySelector(selector){return selector==='.duration'?duration:selector==='.physical-time'?physical:null}};
+global.document={activeElement:null,querySelector(){return null},querySelectorAll(selector){if(selector==='.module-row')return [row];if(selector==='.custom-module-card')return [];return []},createElement(){return {setAttribute(){}}}};
+global.setTimeout=()=>0;global.clearTimeout=()=>{};
+function customModulesFromEditor(){return []}
+function announcementsFromEditor(){return structuredClone(announcements)}
+api=async()=>({status:'unavailable',milliseconds:null,refresh_at:new Date(Date.now()+60000).toISOString()});
+(async()=>{
+  await loadAnnouncementTiming();
+  if(duration.value!==''||/\\d/.test(physical.textContent))throw new Error('explicit unavailable response was replaced by enabled-only fallback: '+JSON.stringify({value:duration.value,physical:physical.textContent}));
+  api=async()=>{throw new Error('offline')};
+  await loadAnnouncementTiming();
+  if(duration.value!==''||/\\d/.test(physical.textContent))throw new Error('failed request was replaced by enabled-only fallback: '+JSON.stringify({value:duration.value,physical:physical.textContent}));
+  console.log('ANNOUNCEMENT_SCHEDULE_UNAVAILABLE_PASS');
+})().catch(error=>{console.error(error);process.exitCode=1});
+"""
+        result = subprocess.run(
+            [shutil.which("node") or "", "-e", harness],
+            cwd=Path(__file__).parents[1], text=True, capture_output=True,
+            timeout=10,
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("ANNOUNCEMENT_SCHEDULE_UNAVAILABLE_PASS", result.stdout)
+
+    @unittest.skipUnless(shutil.which("node"), "Node.js is required")
     def test_playlist_physical_time_readouts_synchronize_in_the_browser(self):
         self.pair_browser()
         body = self.client.get("/").get_data(as_text=True)
@@ -2475,23 +3227,50 @@ console.log(JSON.stringify({result:JSON.parse(evaluated.result.value),exceptions
         function_source = body[function_start:function_end]
         harness = function_source + r"""
 const custom={id:'custom_scroll',type:'text_scroll',text:'A',font:'5x7',loops:2,speed:.05};
+const builtInSettings={weather:{scroll_loops:1,scroll_speed:.05}};
 function makeRow(module,value){
   const label={childNodes:[{textContent:''}]};
-  const duration={value:String(value),hidden:false,readOnly:false,title:'',min:'',max:'',step:'',closest(){return label},removeAttribute(name){delete this[name]}};
-  const physical={textContent:''};
-  return {dataset:{module},duration,physical,querySelector(selector){return selector==='.duration'?duration:selector==='.physical-time'?physical:null}};
+  const physical={textContent:''};let row;
+  const duration={value:String(value),hidden:false,readOnly:false,title:'',min:'',max:'',step:'',dataset:{},closest(selector){return selector==='.module-row'?row:label},removeAttribute(name){delete this[name]}};
+  row={dataset:{module},duration,physical,querySelector(selector){return selector==='.duration'?duration:selector==='.physical-time'?physical:null}};return row;
 }
-const rows=[makeRow('splash',90),makeRow('custom_scroll',1),makeRow('weather',9)];
+const rows=[makeRow('splash',90),makeRow('custom_scroll',1),makeRow('weather',9),makeRow('announcement_board','')];
+const announcements=[];
 const runtime={hidden:true,textContent:''};
 const card={dataset:{id:'custom_scroll'},querySelector(selector){return selector==='.scroll-runtime'?runtime:null}};
-global.document={querySelectorAll(selector){if(selector==='.module-row')return rows;if(selector==='.custom-module-card')return [card];return []},createElement(){return {setAttribute(){}}}};
+global.document={querySelector(){return null},querySelectorAll(selector){if(selector==='.module-row')return rows;if(selector==='.custom-module-card')return [card];return []},createElement(){return {setAttribute(){}}}};
+function markMatrixDirty(){}
 function customModulesFromEditor(){return [custom]}
 syncPlaylistDurations();
+if(rows[3].duration.value!==''||/\d/.test(rows[3].physical.textContent))throw new Error('empty announcement board should not show a duration');
+announcements.push({id:'announcement_draft',enabled:false,headline:'NEW ANNOUNCEMENT',message:'',style:{font:'5x7'},timing:{mode:'static',duration_seconds:8},transition:{type:'cut'}});
+syncPlaylistDurations();
+if(rows[3].duration.value!==''||/\d/.test(rows[3].physical.textContent))throw new Error('disabled announcement should not show a board duration');
+announcements[0].enabled=true;
+syncPlaylistDurations();
+if(Number(rows[3].duration.value)!==8||rows[3].physical.textContent!=='Physical time · 8.0 s')throw new Error('enabling announcement did not update board duration');
+announcements[0].enabled=false;
+syncPlaylistDurations();
+if(rows[3].duration.value!==''||/\d/.test(rows[3].physical.textContent))throw new Error('removing the last enabled announcement did not clear board duration');
+announcements[0].enabled=true;
+syncPlaylistDurations();
+if(rows[2].duration.readOnly || rows[2].physical.textContent!=='Physical time · 00:00:09' || Number(rows[2].duration.value)!==9)throw new Error('unresolved weather runtime did not use editable playlist fallback');
+const weatherLoopsBefore=builtInSettings.weather.scroll_loops,weatherDelayBefore=builtInSettings.weather.scroll_speed;
+rows[2].duration.value='12.0';onPlaylistDurationInput({currentTarget:rows[2].duration});
+if(builtInSettings.weather.scroll_loops!==weatherLoopsBefore||builtInSettings.weather.scroll_speed!==weatherDelayBefore||rows[2].physical.textContent!=='Physical time · 00:00:12')throw new Error('unresolved weather edit changed timing before frames were known');
+providerTimingPlans.set('weather',{frames_per_loop:100,status:'fresh'});
+const pending=setTickerDelay('weather',null,playlistDurationTargets.get('weather'));syncPlaylistDurations();
+if(!pending||builtInSettings.weather.scroll_loops!==weatherLoopsBefore||builtInSettings.weather.scroll_speed!==0.12||Number(rows[2].duration.value)!==12)throw new Error('resolved weather target did not adjust frame delay only');
 if(rows[0].physical.textContent!=='Physical time · 00:01:30')throw new Error('fixed runtime did not synchronize');
-if(Number(rows[1].duration.value)!==7 || rows[1].physical.textContent!=='Physical time · 00:00:07')throw new Error('scroll runtime did not synchronize: '+JSON.stringify({value:rows[1].duration.value,physical:rows[1].physical.textContent}));
-if(!rows[1].duration.hidden || !rows[1].duration.readOnly)throw new Error('derived runtime remained editable');
-if(rows[2].physical.textContent!=='Physical time · calculated at playback' || Number(rows[2].duration.value)!==0)throw new Error('weather runtime was misleading');
-if(runtime.hidden || runtime.textContent!=='Physical time · 00:00:07')throw new Error('custom editor badge did not synchronize');
+if(Number(rows[1].duration.value)!==7 || rows[1].physical.textContent!=='Physical time · 7.0 s')throw new Error('scroll runtime did not synchronize: '+JSON.stringify({value:rows[1].duration.value,physical:rows[1].physical.textContent}));
+if(rows[1].duration.hidden || rows[1].duration.readOnly || rows[1].duration.closest().childNodes[0].textContent!=='Display duration (seconds) ')throw new Error('calculated scroll row did not match editable Lava layout');
+if(rows[2].duration.hidden || rows[2].duration.readOnly || rows[2].duration.closest().childNodes[0].textContent!=='Display duration (seconds) ')throw new Error('provider row did not match editable Lava layout');
+const loopsBefore=custom.loops;rows[1].duration.value='14.0';onPlaylistDurationInput({currentTarget:rows[1].duration});
+if(custom.loops!==loopsBefore||custom.speed!==0.1||Number(rows[1].duration.value)!==14)throw new Error('editing duration did not change frame delay only: '+JSON.stringify(custom));
+const delayBeforeHundredth=custom.speed;rows[1].duration.value='14.01';onPlaylistDurationInput({currentTarget:rows[1].duration});
+if(custom.loops!==loopsBefore||custom.speed===delayBeforeHundredth||rows[1].duration.value!=='14.01')throw new Error('one-hundredth duration edit was not visibly reflected in frame delay: '+JSON.stringify({duration:rows[1].duration.value,speed:custom.speed}));
+if(rows[2].physical.textContent!=='Physical time · 12.0 s' || Number(rows[2].duration.value)!==12)throw new Error('weather runtime did not use resolved scroll target');
+if(runtime.hidden || runtime.textContent!=='Physical time · 14.0 s')throw new Error('custom editor badge did not synchronize');
 console.log('PLAYLIST_TIMING_DOM_PASS');
 """
         node = shutil.which("node")
@@ -2512,16 +3291,228 @@ console.log('PLAYLIST_TIMING_DOM_PASS');
             "const automaticBoardModules=new Set(['announcement_board'])",
             body,
         )
+        self.assertIn("loadAnnouncementTiming", body)
+        self.assertIn("announcementTimingPlan", body)
+
+    def test_scrolling_seconds_resync_and_provider_digest_lifecycle_are_wired(self):
+        self.pair_browser()
+        body = self.client.get("/").get_data(as_text=True)
+        self.assertIn("stableJSONStringify", body)
+        self.assertIn("currentDigest!==result.settings_correlation", body)
+        self.assertIn("scheduleProviderTiming", body)
+        self.assertIn("providerTimingPlans.get", body)
+        self.assertIn("data-scroll-geometry", body)
+        self.assertNotIn("Physical time · calculated at playback", body)
 
     def test_scrolling_text_duration_is_automatic_in_the_playlist_editor(self):
         self.pair_browser()
         body = self.client.get("/").get_data(as_text=True)
 
         self.assertIn("function calculatedScrollDuration(module)", body)
-        self.assertIn("duration.readOnly=isAutomatic||isBuiltInAutomatic", body)
-        self.assertIn("isAutomatic?'Derived scroll runtime '", body)
+        self.assertIn("duration.readOnly=isBoardAutomatic", body)
+        self.assertIn("function onPlaylistDurationInput(event)", body)
+        self.assertIn("const result=setTickerDelay(moduleName,module,requested)", body)
+        self.assertIn("duration.hidden=false", body)
+        self.assertNotIn("Content-controlled runtime", body)
+        self.assertNotIn("Derived scroll runtime", body)
         self.assertIn("physicalTime.textContent='Physical time · '+formatPhysicalTime(duration.value)", body)
         self.assertIn("calculatedScrollDuration(module)", body)
+
+    def test_automatic_ticker_rows_do_not_render_playlist_defaults_as_runtime(self):
+        self.pair_browser()
+        body = self.client.get("/").get_data(as_text=True)
+
+        row = re.search(r'data-module="weather".*?class="duration"[^>]+', body)
+        if row is None:
+            self.fail("weather duration input was not rendered")
+        self.assertIn('value=""', row.group(0))
+        self.assertRegex(row.group(0), r'data-pending-duration="[0-9.]+"')
+
+    def test_timing_increments_are_consistent_across_editors(self):
+        self.pair_browser()
+        body = self.client.get("/").get_data(as_text=True)
+
+        self.assertIn('class="duration" type="number" min="1" max="3600" step=".01"', body)
+        self.assertIn("duration.step=.01", body)
+        self.assertNotIn("duration.step=1", body)
+        self.assertIn("announcementStaticTimingFields=[{label:'Display duration (seconds)',path:'timing.duration_seconds',type:'number',min:1,max:3600,step:.01}]", body)
+        self.assertEqual(body.count("label:'Frame delay (seconds)',type:'number',min:.01,max:1,step:.000001"), 3)
+        self.assertIn("if(field==='speed'){control.min=.01;control.max=1;control.step=.000001}", body)
+
+    @unittest.skipUnless(shutil.which("node"), "Node.js is required")
+    def test_provider_timing_small_exponential_coordinates_correlate_once(self):
+        self.pairing.active_pin.return_value = "123456"
+        self.pairing.verify.return_value = True
+        self.pair_browser()
+        body = self.client.get("/").get_data(as_text=True)
+        provider_start = body.index("function providerTimingPayload(module)")
+        provider_end = body.index("\nlet announcementTimingRequest", provider_start)
+        shipped_provider_handling = body[provider_start:provider_end]
+        settings = copy.deepcopy(self.store.get()["weather"])
+        settings.update({"latitude": 1e-7, "longitude": -1e-7})
+        plan = {
+            "frames_per_loop": 100, "total_frames": 100, "loops": 1,
+            "frame_delay": .05, "milliseconds": 5000, "display": "5.0 s",
+        }
+        server = make_server("127.0.0.1", 0, self.app, threaded=True)
+        thread = threading.Thread(target=server.serve_forever, daemon=True)
+        thread.start()
+        self.addCleanup(server.server_close)
+        self.addCleanup(server.shutdown)
+        harness = "(async()=>{\n" + shipped_provider_handling + r"""
+const base=process.argv[1],builtInSettings={weather:JSON.parse(process.argv[2])};
+const matrixLoadedRevision=Number(process.argv[3]);
+const providerTimingPlans=new Map(),providerTimingRequests=new Map();
+const playlistDurationTargets=new Map();
+const state={textContent:'',dataset:{}};
+const container={querySelector(selector){return selector==='[data-provider-timing-state]'?state:null}};
+const controls={
+  '#weather-location':{value:builtInSettings.weather.location},
+  '#weather-latitude':{value:'1e-7'},'#weather-longitude':{value:'-1e-7'},
+  '#weather-units':{value:builtInSettings.weather.units},
+};
+global.document={activeElement:null,querySelector(selector){return controls[selector]||null}};
+function providerPlanMilliseconds(_module,result){return result.milliseconds}
+function oneDecimalSeconds(milliseconds){return (milliseconds/1000).toFixed(1)+' s'}
+function syncPlaylistDurations(){}
+function setTickerDelay(){throw new Error('unexpected duration target')}
+let attempts=0,accepted=0;
+async function api(path,options){
+  attempts++;
+  if(attempts>4)throw new Error('recursive request guard');
+  const response=await fetch(base+path,{...options,headers:{...options.headers,Cookie:cookie}});
+  if(response.ok)accepted++;
+  const data=await response.json();
+  if(!response.ok)throw new Error(data.error||response.statusText);
+  return data;
+}
+const pair=await fetch(base+'/pair',{method:'POST',redirect:'manual',headers:{'Content-Type':'application/x-www-form-urlencoded'},body:new URLSearchParams({device_name:'Exponential coordinate probe',pin:'123456'})});
+if(pair.status!==302)throw new Error('pairing failed: '+pair.status);
+const cookie=pair.headers.get('set-cookie').split(';',1)[0];
+const correlated=await loadProviderTiming('weather',container);
+const currentPayload=providerTimingPayload('weather');
+const currentDigest=await timingSettingsDigest('weather',currentPayload);
+const result=providerTimingPlans.get('weather')||null;
+console.log(JSON.stringify({attempts,accepted,correlated,state,result,currentDigest}));
+})().catch(error=>{console.error(error);process.exitCode=1});
+"""
+        with patch("modules.weather_app.prepare_ticker_plan", return_value=plan):
+            completed = subprocess.run(
+                [
+                    shutil.which("node") or "", "-e", harness,
+                    f"http://127.0.0.1:{server.server_port}",
+                    json.dumps(settings), str(self.store.get()["revision"]),
+                ],
+                cwd=Path(__file__).parents[1], capture_output=True, text=True,
+                timeout=15,
+            )
+        self.assertEqual(completed.returncode, 0, completed.stderr)
+        report = json.loads(completed.stdout.strip().splitlines()[-1])
+        self.assertEqual(report["accepted"], 1, report)
+        self.assertEqual(report["attempts"], 1, report)
+        self.assertTrue(report["correlated"], report)
+        self.assertEqual(report["result"]["status"], "fresh", report)
+        self.assertEqual(report["result"]["settings_correlation"], report["currentDigest"])
+        self.assertNotEqual(report["result"]["settings_digest"], report["currentDigest"])
+        cache_keys = list(self.scroll_timing_cache._entries)
+        self.assertEqual(len(cache_keys), 1, cache_keys)
+        self.assertEqual(cache_keys[0][2], report["result"]["settings_digest"])
+
+    @unittest.skipUnless(shutil.which("node"), "Node.js is required")
+    def test_provider_timing_route_digest_matches_browser_effective_unicode_drafts(self):
+        self.pair_browser()
+        body = self.client.get("/").get_data(as_text=True)
+        shared_start = body.index("function withSharedWeatherLocation(settings)")
+        shared_end = body.index("\nfunction configBody", shared_start)
+        provider_start = body.index("function providerTimingPayload(module)")
+        provider_end = body.index("\nfunction scheduleProviderTiming", provider_start)
+        functions = body[shared_start:shared_end] + "\n" + body[provider_start:provider_end]
+        settings = {
+            "weather": self.store.get()["weather"],
+            "openweather_overview": self.store.get()["openweather_overview"],
+        }
+        invocation = r"""
+const values={
+  '#weather-location':'Málaga ☀','#weather-latitude':'12.34',
+  '#weather-longitude':'56.78','#weather-units':'celsius',
+};
+global.document={querySelector(selector){return {value:values[selector]??''}}};
+(async()=>{
+  const result={};
+  for(const module of ['weather','openweather_overview']){
+    const payload=providerTimingPayload(module);
+    result[module]={payload,digest:await timingSettingsDigest(module,payload)};
+  }
+  console.log(JSON.stringify(result));
+})().catch(error=>{console.error(error);process.exitCode=1});
+"""
+        script = (
+            "const matrixLoadedRevision=" + str(self.store.get()["revision"]) + ";"
+            "const builtInSettings=" + json.dumps(settings, ensure_ascii=False) + ";"
+            + functions + invocation
+        )
+        result = subprocess.run(
+            [shutil.which("node") or "", "-e", script], capture_output=True,
+            text=True, timeout=10,
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        browser = json.loads(result.stdout)
+        plan = {
+            "frames_per_loop": 100, "total_frames": 100, "loops": 1,
+            "frame_delay": .05, "milliseconds": 5000, "display": "5.0 s",
+        }
+        route_digests = {}
+        with patch("modules.weather_app.prepare_ticker_plan", return_value=plan):
+            response = self.client.post(
+                "/api/scroll-timing/weather", json=browser["weather"]["payload"],
+            )
+            self.assertEqual(response.status_code, 200, response.get_data(as_text=True))
+            route_digests["weather"] = response.get_json()["settings_digest"]
+        with patch("modules.openweather_overview.prepare_ticker_plan", return_value=plan):
+            response = self.client.post(
+                "/api/scroll-timing/openweather_overview",
+                json=browser["openweather_overview"]["payload"],
+            )
+            self.assertEqual(response.status_code, 200, response.get_data(as_text=True))
+            route_digests["openweather_overview"] = response.get_json()["settings_digest"]
+
+        self.assertEqual(
+            browser["openweather_overview"]["payload"]["settings"]["location"],
+            "Málaga ☀",
+        )
+        self.assertEqual(route_digests, {
+            module: browser[module]["digest"] for module in route_digests
+        })
+
+    @unittest.skipUnless(shutil.which("node"), "Node.js is required")
+    def test_timing_digest_falls_back_on_insecure_lan_origins(self):
+        self.pair_browser()
+        body = self.client.get("/").get_data(as_text=True)
+        start = body.index("function stableJSONStringify")
+        end = body.index("\nfunction scheduleProviderTiming", start)
+        functions = body[start:end]
+        source = {
+            "module": "weather",
+            "settings": {"location": "Málaga ☀", "scroll_loops": 3, "scroll_speed": 0.05},
+        }
+        canonical = json.dumps(source, ensure_ascii=False, separators=(",", ":"), sort_keys=True)
+        expected = hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+        invocation = """
+const payload={settings:{location:'Málaga ☀',scroll_loops:3,scroll_speed:0.05}};
+timingSettingsDigest('weather',payload).then(value=>console.log(value)).catch(error=>{console.error(error);process.exitCode=1});
+"""
+        script = (
+            "const vm=require('node:vm');"
+            "vm.runInNewContext(" + json.dumps(functions + invocation) + ","
+            "{TextEncoder,Uint8Array,console,crypto:undefined,process});"
+        )
+        node = shutil.which("node") or ""
+        self.assertTrue(node)
+        result = subprocess.run(
+            [node, "-e", script], capture_output=True, text=True, timeout=10
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(result.stdout.strip(), expected)
 
     def test_dynamic_playlist_reorder_buttons_have_accessible_names(self):
         self.pair_browser()
@@ -2534,7 +3525,7 @@ console.log('PLAYLIST_TIMING_DOM_PASS');
         self.pair_browser()
         body = self.client.get("/").get_data(as_text=True)
 
-        self.assertEqual(body.count("field:'scroll_speed',label:'Frame delay (seconds)',type:'number',min:.01,max:1,step:.005"), 3)
+        self.assertEqual(body.count("field:'scroll_speed',label:'Frame delay (seconds)',type:'number',min:.01,max:1,step:.000001"), 3)
         self.assertEqual(body.count("field:'scroll_loops',label:'Scroll loops',type:'number'"), 3)
         self.assertNotIn("label:'Tick speed'", body)
         self.assertNotIn("label:'Ticker loops'", body)
@@ -2588,8 +3579,11 @@ console.log('WEATHER_FRAME_DELAY_SERIALIZATION_PASS');
         self.assertIn("function scrollPhysicalTimeReadout", body)
         self.assertIn("customControl('Frame delay (seconds)','speed','number'", body)
         self.assertIn("customControl('Frame delay (seconds)', 'speed', 'number'", asset)
-        self.assertIn("Physical time · calculated at playback from live ticker text", body)
-        self.assertIn("syncAnnouncementRuntime(announcement);validateAnnouncementBoard()", body)
+        self.assertIn("state.dataset.providerTimingState=''", body)
+        self.assertIn("state.textContent='Unavailable'", body)
+        self.assertIn("loadProviderTiming(module,editor)", body)
+        self.assertIn("function announcementDraftMutated(announcement=null)", body)
+        self.assertIn("if(announcement)syncAnnouncementRuntime(announcement);else{syncPlaylistDurations();scheduleAnnouncementTiming()}", body)
 
         function_start = body.index("const customFontAdvances=")
         function_end = body.index("\nconst automaticWeatherModules", function_start)
@@ -2604,9 +3598,11 @@ if(calculatedAnnouncementDuration(announcement)!==8)throw new Error('static anno
 announcement.transition={type:'fade',duration_seconds:1.5};
 if(calculatedAnnouncementDuration(announcement)!==9.5)throw new Error('transition runtime was omitted');
 const runtime={textContent:''};
-global.document={querySelectorAll(){return [runtime]}};
+const syncPlaylistDurations=()=>{};
+const scheduleAnnouncementTiming=()=>{};
+global.document={querySelectorAll(selector){return selector.startsWith('[data-announcement-runtime=')?[runtime]:[]}};
 syncAnnouncementRuntime(announcement);
-if(runtime.textContent!=='Physical time · 00:00:09.500')throw new Error('transition edit did not synchronize runtime badge');
+if(runtime.textContent!=='Physical time · 9.5 s')throw new Error('transition edit did not synchronize runtime badge');
 console.log('UNIFIED_SCROLL_RUNTIME_PASS');
 """
         node = shutil.which("node")
@@ -4233,6 +5229,10 @@ const requestAnimationFrame=callback=>callback();
 const confirm=()=>true;
 const setMessage=()=>{};
 const markMatrixDirty=()=>{};
+let timingRefreshes=0;
+const scheduleAnnouncementTiming=()=>{timingRefreshes++};
+const validateAnnouncementBoard=()=>true;
+const announcementDraftMutated=()=>{scheduleAnnouncementTiming();validateAnnouncementBoard()};
 const renderAnnouncementEditor=()=>{};
 const announcementsFromEditor=()=>structuredClone(announcements);
 const nextAnnouncementId=()=>`announcement_copy_${++announcementIdSequence}`;
@@ -4246,10 +5246,12 @@ for(const length of [95,96,100]){
 }
 announcements=[];focusLog.length=0;addAnnouncement();
 if(!focusLog.at(-1)?.includes('[data-announcement-path="name"]'))throw new Error('add focus');
-focusLog.length=0;deleteAnnouncement(announcements[0].id);
+focusLog.length=0;timingRefreshes=0;deleteAnnouncement(announcements[0].id);
 if(!focusLog.at(-1)?.includes('[data-announcement-action="add"]'))throw new Error('delete-last focus');
-announcements=[__ANNOUNCEMENT_JSON__];focusLog.length=0;resetAnnouncementBoard();
+if(timingRefreshes!==1)throw new Error('delete did not refresh aggregate');
+announcements=[__ANNOUNCEMENT_JSON__];focusLog.length=0;timingRefreshes=0;resetAnnouncementBoard();
 if(!focusLog.at(-1)?.includes('[data-announcement-action="add"]'))throw new Error('reset focus');
+if(timingRefreshes!==1)throw new Error('reset did not refresh aggregate');
 console.log('ANNOUNCEMENT_ACTION_BOUNDARIES_PASS');
 """.replace("__ANNOUNCEMENT_JSON__", json.dumps(announcement))
         node = shutil.which("node")
@@ -4260,6 +5262,45 @@ console.log('ANNOUNCEMENT_ACTION_BOUNDARIES_PASS');
         )
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertIn("ANNOUNCEMENT_ACTION_BOUNDARIES_PASS", result.stdout)
+
+    @unittest.skipUnless(shutil.which("node"), "Node.js is required")
+    def test_announcement_weekday_change_refreshes_aggregate(self):
+        source = (Path(__file__).parents[1] / "app" / "templates" / "dashboard.html").read_text()
+        start = source.index("function renderAnnouncementSchedule")
+        end = source.index("\nconst announcementAppearanceFields", start)
+        functions = source[start:end]
+        harness = functions + """
+const announcement={schedule:{days:[0,1,2,3,4,5,6]}};
+const checkboxes=[];
+const announcementScheduleFields=[];
+const announcementWeekdays=['Monday','Tuesday','Wednesday','Thursday','Friday','Saturday','Sunday'];
+const announcementControl=()=>({});
+let timingRefreshes=0;
+const scheduleAnnouncementTiming=()=>{timingRefreshes++};
+const validateAnnouncementBoard=()=>true;
+const announcementDraftMutated=()=>{scheduleAnnouncementTiming();validateAnnouncementBoard()};
+const document={createElement(tag){
+  if(tag==='input'){
+    const input={checked:false,dataset:{},addEventListener(type,handler){this.handler=handler}};
+    checkboxes.push(input);return input;
+  }
+  return {textContent:'',append(){}};
+}};
+const fieldset={append(){}};
+renderAnnouncementSchedule(announcement,fieldset);
+checkboxes[0].checked=false;checkboxes[0].handler();
+if(announcement.schedule.days.includes(0))throw new Error('weekday model did not update');
+if(timingRefreshes!==1)throw new Error('weekday did not refresh aggregate');
+console.log('ANNOUNCEMENT_WEEKDAY_REFRESH_PASS');
+"""
+        node = shutil.which("node")
+        assert node is not None
+        result = subprocess.run(
+            [node, "-e", harness], cwd=Path(__file__).parents[1],
+            text=True, capture_output=True, check=False,
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("ANNOUNCEMENT_WEEKDAY_REFRESH_PASS", result.stdout)
 
     @unittest.skipUnless(shutil.which("node"), "Node.js is required")
     def test_announcement_name_input_updates_the_visible_card_heading(self):
@@ -4275,6 +5316,9 @@ const control={dataset:{},listeners:{},addEventListener(type,handler){this.liste
 const label={textContent:'',append(){}};
 const document={createElement:tag=>tag==='label'?label:control,querySelector:()=>heading,querySelectorAll:()=>[]};
 const CSS={escape:value=>value};
+let announcementTimingPlan={};
+const syncPlaylistDurations=()=>{};
+const scheduleAnnouncementTiming=()=>{};
 const validateAnnouncementBoard=()=>true;
 announcementControl(announcement,'Name','name','text');
 control.value='Updated heading';control.listeners.input();
@@ -5079,6 +6123,15 @@ console.log('ANNOUNCEMENT_HEADING_SYNC_PASS');
         response = self.client.get("/")
         self.assertEqual(response.status_code, 302)
         self.assertIn("/pair", response.headers["Location"])
+
+    def test_unauthenticated_requests_are_redirected(self):
+        dashboard = self.client.get("/")
+        timing_api = self.client.post("/api/scroll-timing/weather", json={})
+
+        self.assertEqual(dashboard.status_code, 302)
+        self.assertIn("/pair", dashboard.headers["Location"])
+        self.assertEqual(timing_api.status_code, 401)
+        self.assertEqual(timing_api.get_json(), {"error": "Pairing session expired."})
 
     def test_valid_pin_unlocks_dashboard_and_updates_configuration(self):
         self.pairing.verify.return_value = True

@@ -6,6 +6,7 @@ import hashlib
 import io
 import json
 import math
+import copy
 import secrets
 import logging
 import os
@@ -15,6 +16,8 @@ import subprocess
 import sys
 import tempfile
 import threading
+import time
+import datetime as dt
 from datetime import timedelta
 from functools import wraps
 from pathlib import Path
@@ -31,6 +34,9 @@ from config_store import (
 from font_catalog import available_font_names, font_advance_catalog
 from module_options import COLOUR_HEX, LAVA_PALETTES
 from modules.weather_app import OpenMeteoClient
+from modules.scroll_timing_cache import ScrollTimingCache, TimingCacheBusy
+from modules.scroll_timing import timing_javascript
+from modules import announcement_board, weather_app, openweather_overview, openweather_forecast
 from pairing import PairedDeviceStore, PairingDurabilityError
 from secret_store import SecretDurabilityError, SecretStore
 
@@ -45,6 +51,7 @@ MEDIA_METADATA_ERRORS = (
 CONFIG_REQUEST_LIMIT = 1_048_576
 CONDITIONAL_HEADER_LIMIT = 4096
 MINIMUM_CLIENT_CONTRACT = 2
+APPLICATION_VERSION = "0.3.0-preview"
 ETAG_ITEM = re.compile(r'(?P<weak>W/)?"(?P<opaque>[\x21\x23-\x7e\x80-\xff]*)"')
 
 
@@ -109,6 +116,7 @@ def create_app(
     sanitizer_identity=None,
     device_store=None,
     openweather_secrets=None,
+    scroll_timing_cache=None,
 ):
     session_generation = session_generation or secrets.token_hex(16)
     media_root = Path(media_dir or Path(__file__).resolve().parent / "resources" / "media")
@@ -124,6 +132,20 @@ def create_app(
         config_path = getattr(config_store, "path", None)
         secret_root = Path(config_path).parent if config_path is not None else media_root.parent
         openweather_secrets = SecretStore(secret_root / "secrets" / "openweather-api-key")
+    scroll_timing_cache = scroll_timing_cache or ScrollTimingCache()
+    openweather_credential_generation = 0
+    openweather_credential_lock = threading.Lock()
+
+    def current_openweather_credential_generation():
+        with openweather_credential_lock:
+            return openweather_credential_generation
+
+    def rotate_openweather_credentials():
+        nonlocal openweather_credential_generation
+        with openweather_credential_lock:
+            openweather_credential_generation += 1
+            scroll_timing_cache.clear(provider="openweather")
+
     app = Flask(__name__, template_folder="app/templates", static_folder="app/static")
     app.extensions["media_timeline_slots"] = media_timeline_slots
     app.config.update(
@@ -600,7 +622,7 @@ def create_app(
             )
             openweather_secret_configured = False
             openweather_secret_unavailable = True
-        return render_template(
+        response = app.make_response(render_template(
             "dashboard.html",
             config=config,
             modules=sorted(ALLOWED_MODULES) + custom_names,
@@ -629,12 +651,103 @@ def create_app(
             },
             installed_fonts=available_font_names(),
             font_advances=font_advance_catalog(),
-        )
+            scroll_timing_javascript=timing_javascript(),
+            application_version=APPLICATION_VERSION,
+        ))
+        response.headers["Cache-Control"] = "no-store"
+        return response
 
     @app.get("/api/media")
     @requires_pairing
     def list_media():
         return jsonify(media_items())
+
+    @app.post("/api/scroll-timing/<module_name>")
+    @requires_pairing
+    def provider_scroll_timing(module_name):
+        deadline = time.monotonic() + 5
+        if module_name not in {"announcement_board", "weather", "openweather_overview", "openweather_forecast"}:
+            abort(404)
+        # One extra byte lets an unknown-length WSGI stream prove overflow;
+        # known lengths are rejected by the explicit check below.
+        request.max_content_length = 16 * 1024 + 1
+        if request.content_length is not None and request.content_length > 16 * 1024:
+            return jsonify({"error": "Timing draft exceeds the 16 KiB limit."}), 413
+        body = request.get_data(cache=True)
+        if len(body) > 16 * 1024:
+            return jsonify({"error": "Timing draft exceeds the 16 KiB limit."}), 413
+        payload = request.get_json(silent=True)
+        if not isinstance(payload, dict) or set(payload) - {"base_revision", "settings", "weather", "settings_correlation"}:
+            return jsonify({"error": "Timing draft is invalid."}), 400
+        correlation = payload.get("settings_correlation")
+        if correlation is not None and (
+            not isinstance(correlation, str)
+            or re.fullmatch(r"[0-9a-f]{64}", correlation) is None
+        ):
+            return jsonify({"error": "Timing draft is invalid."}), 400
+        current = config_store.get()
+        base_revision = payload.get("base_revision")
+        if isinstance(base_revision, bool) or not isinstance(base_revision, int) or base_revision != current["revision"]:
+            return jsonify({"error": "Timing draft is based on an older configuration.", "revision": current["revision"]}), 412
+        settings = payload.get("settings")
+        if not isinstance(settings, dict):
+            return jsonify({"error": "Timing draft is invalid."}), 400
+        draft = copy.deepcopy(current)
+        draft[module_name] = copy.deepcopy(settings)
+        if module_name == "announcement_board":
+            try:
+                validate_config(draft, allow_legacy_announcements=False, enforce_save_bounds=True)
+            except (KeyError, TypeError, ValueError):
+                return jsonify({"error": "Timing draft is invalid."}), 400
+            plan = announcement_board.announcement_timing_plan(
+                draft["announcement_board"]["announcements"], now=dt.datetime.now(),
+            )
+            return jsonify({**plan, "refresh_at": plan["refresh_at"].isoformat()})
+        if module_name != "weather" and "weather" in payload:
+            if not isinstance(payload["weather"], dict):
+                return jsonify({"error": "Timing draft is invalid."}), 400
+            draft["weather"] = copy.deepcopy(payload["weather"])
+        try:
+            validate_config(draft, allow_legacy_announcements=False, enforce_save_bounds=True)
+        except (KeyError, TypeError, ValueError):
+            return jsonify({"error": "Timing draft is invalid."}), 400
+        digest_source = {"module": module_name, "settings": draft[module_name]}
+        if module_name != "weather":
+            digest_source["weather"] = draft["weather"]
+        digest = hashlib.sha256(json.dumps(
+            digest_source, ensure_ascii=False, sort_keys=True, separators=(",", ":"),
+        ).encode("utf-8")).hexdigest()
+        provider = "open_meteo" if module_name == "weather" else "openweather"
+        generation = 0 if provider == "open_meteo" else current_openweather_credential_generation()
+        key = (provider, module_name, digest, generation)
+
+        def fill():
+            if time.monotonic() >= deadline:
+                raise TimeoutError("provider timing deadline exceeded")
+            if module_name == "weather":
+                plan = weather_app.prepare_ticker_plan(draft, deadline=deadline)
+            else:
+                api_key = openweather_secrets.get()
+                builder = openweather_overview.prepare_ticker_plan if module_name == "openweather_overview" else openweather_forecast.prepare_ticker_plan
+                plan = builder(draft, api_key=api_key, deadline=deadline)
+            if time.monotonic() >= deadline:
+                raise TimeoutError("provider timing deadline exceeded")
+            return plan
+        try:
+            plan = scroll_timing_cache.get_or_fill(key, fill, deadline=deadline)
+        except TimingCacheBusy:
+            response = jsonify({"error": "Timing preparation is busy.", "retryable": True})
+            response.status_code = 429
+            response.headers["Retry-After"] = "1"
+            return response
+        except Exception as exc:
+            LOGGER.info("Provider timing unavailable (%s)", type(exc).__name__)
+            return jsonify({"module": module_name, "settings_digest": digest,
+                            **({"settings_correlation": correlation} if correlation is not None else {}),
+                            "status": "unavailable", "display": "Unavailable"}), 503
+        return jsonify({"module": module_name, "settings_digest": digest,
+                        **({"settings_correlation": correlation} if correlation is not None else {}),
+                        **plan})
 
     @app.get("/api/media-timeline/<path:filename>")
     @requires_pairing
@@ -1086,6 +1199,7 @@ def create_app(
         payload = request.get_json(silent=True)
         try:
             openweather_secrets.set(payload.get("api_key") if isinstance(payload, dict) else None)
+            rotate_openweather_credentials()
             return jsonify(openweather_secrets.status())
         except ValueError as exc:
             return jsonify({"error": str(exc)}), 400
@@ -1105,6 +1219,7 @@ def create_app(
     def clear_openweather_secret():
         try:
             openweather_secrets.clear()
+            rotate_openweather_credentials()
             return jsonify(openweather_secrets.status())
         except SecretDurabilityError as exc:
             return jsonify({

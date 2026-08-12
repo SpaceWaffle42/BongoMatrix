@@ -21,6 +21,40 @@ class FakeResponse:
 
 
 class WeatherTests(unittest.TestCase):
+    def test_open_meteo_serial_transports_share_one_monotonic_deadline(self):
+        now = [10.0]
+
+        class DeadlineClient(OpenMeteoClient):
+            def __init__(self):
+                super().__init__(timeout=8, clock=lambda: now[0])
+                self.timeouts = []
+
+            def _get_json(self, base_url, params, timeout=None):
+                self.timeouts.append(timeout)
+                if len(self.timeouts) == 1:
+                    now[0] = 14.5
+                    return {"results": [{"name": "Brighton", "country_code": "GB", "latitude": 50.82, "longitude": -0.14}]}
+                return {
+                    "current": {"temperature_2m": 17, "apparent_temperature": 16, "relative_humidity_2m": 68, "weather_code": 1},
+                    "daily": {"temperature_2m_max": [20], "temperature_2m_min": [12]},
+                }
+
+        client = DeadlineClient()
+        client.fetch("Brighton, GB", deadline=15.0)
+        self.assertEqual(client.timeouts, [5.0, 0.5])
+
+        now[0] = 10.0
+        client = DeadlineClient()
+        original = client._get_json
+        def consume_deadline(*args, **kwargs):
+            result = original(*args, **kwargs)
+            now[0] = 15.0
+            return result
+        client._get_json = consume_deadline
+        with self.assertRaises(TimeoutError):
+            client.fetch("Brighton, GB", deadline=15.0)
+        self.assertEqual(len(client.timeouts), 1)
+
     @patch("modules.weather_app.urlopen")
     def test_location_is_geocoded_and_forecast_normalized(self, urlopen):
         urlopen.side_effect = [

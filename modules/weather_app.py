@@ -9,7 +9,8 @@ from dataclasses import dataclass
 from urllib.parse import urlencode
 from urllib.request import Request, urlopen
 
-from modules.scroll_timing import frame_delay_seconds
+from font_catalog import text_width
+from modules.scroll_timing import duration_milliseconds, frame_delay_seconds, scroll_frames
 
 
 @dataclass(frozen=True)
@@ -59,19 +60,28 @@ class OpenMeteoClient:
     geocoding_url = "https://geocoding-api.open-meteo.com/v1/search"
     forecast_url = "https://api.open-meteo.com/v1/forecast"
 
-    def __init__(self, timeout=8):
+    def __init__(self, timeout=8, clock=time.monotonic):
         self.timeout = timeout
+        self.clock = clock
+
+    def _remaining_timeout(self, deadline):
+        if deadline is None:
+            return self.timeout
+        remaining = deadline - self.clock()
+        if remaining <= 0:
+            raise TimeoutError("provider timing deadline exceeded")
+        return min(self.timeout, remaining)
 
     @staticmethod
     def status_for_code(code):
         return WEATHER_CODES.get(int(code), "Unknown")
 
-    def _get_json(self, base_url, params):
+    def _get_json(self, base_url, params, timeout=None):
         request = Request(
             f"{base_url}?{urlencode(params)}",
             headers={"User-Agent": "MatrixDisplay/2.0"},
         )
-        with urlopen(request, timeout=self.timeout) as response:
+        with urlopen(request, timeout=self.timeout if timeout is None else timeout) as response:
             return json.loads(response.read())
 
     def search_locations(self, query, count=6):
@@ -95,7 +105,7 @@ class OpenMeteoClient:
             })
         return suggestions
 
-    def fetch(self, location, latitude=None, longitude=None, units="celsius"):
+    def fetch(self, location, latitude=None, longitude=None, units="celsius", deadline=None):
         if latitude is not None and longitude is not None:
             place = {
                 "name": location,
@@ -109,6 +119,7 @@ class OpenMeteoClient:
             geo = self._get_json(
                 self.geocoding_url,
                 {"name": query, "count": 10, "language": "en", "format": "json"},
+                timeout=self._remaining_timeout(deadline),
             )
             results = geo.get("results") or []
             if not results:
@@ -135,6 +146,7 @@ class OpenMeteoClient:
                 "forecast_days": 1,
                 "temperature_unit": units,
             },
+            timeout=self._remaining_timeout(deadline),
         )
         current = weather["current"]
         daily = weather["daily"]
@@ -172,6 +184,27 @@ def _render_error(matrix, message, duration, stop_event):
     matrix.draw_text_with_border(matrix.font("4x6"), 2, 25, white, black, message[:15], canvas=canvas)
     matrix.swap(canvas)
     _wait(stop_event, min(duration if duration > 0 else 5, 5))
+
+
+def ticker_text(weather, units):
+    suffix = "F" if units == "fahrenheit" else "C"
+    return f"{weather.location} | {weather.status} | Feels {weather.feels_like}{suffix} | Humidity {weather.humidity}%"
+
+
+def prepare_ticker_plan(config, client=None, *, deadline=None):
+    """Fetch only normalized Open-Meteo text needed by the timing editor."""
+    settings = config["weather"]
+    client = client or OpenMeteoClient(timeout=5)
+    weather = client.fetch(
+        settings["location"], latitude=settings.get("latitude"),
+        longitude=settings.get("longitude"), units=settings["units"], deadline=deadline,
+    )
+    text = ticker_text(weather, settings["units"])
+    frames = scroll_frames(text_width("4x6", text), direction=settings["scroll_direction"])
+    milliseconds = duration_milliseconds(frames, settings["scroll_loops"], settings["scroll_speed"])
+    return {"texts": [text], "frames_per_loop": frames, "total_frames": frames * settings["scroll_loops"],
+            "loops": settings["scroll_loops"], "frame_delay": settings["scroll_speed"],
+            "milliseconds": milliseconds}
 
 
 def run(matrix, config, duration=20, stop_event=None, client=None):
@@ -215,7 +248,7 @@ def run(matrix, config, duration=20, stop_event=None, client=None):
     blue = matrix.colour_rgb(weather_config["line_colour"]) if "line_colour" in weather_config else matrix.colour("retro_aqua")
     small = matrix.font("4x6")
     main = matrix.font("5x7")
-    scroll = f"{weather.location} | {weather.status} | Feels {weather.feels_like}{unit_suffix} | Humidity {weather.humidity}%"
+    scroll = ticker_text(weather, units)
     text_width = matrix.draw_text(
         small, -10000, ticker_y, yellow, scroll, canvas=canvas
     )

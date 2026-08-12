@@ -3,9 +3,11 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+import time
 
+from font_catalog import text_width
 from modules.openweather_common import OpenWeatherClient, OpenWeatherError, composite_icon
-from modules.scroll_timing import frame_delay_seconds
+from modules.scroll_timing import duration_milliseconds, frame_delay_seconds, scroll_frames
 from modules.weather_app import _hex_rgb, _render_error, _wait
 
 
@@ -15,6 +17,35 @@ class PreparedOverview:
     icon: object = None
     error: str | None = None
     cancelled: bool = False
+
+
+def ticker_text(weather, units):
+    suffix = "F" if units == "fahrenheit" else "C"
+    return f"{weather.location} | {weather.status} | Feels like {weather.feels_like}{suffix}"
+
+
+def prepare_ticker_plan(config, *, client=None, api_key=None, deadline=None):
+    """Fetch normalized current text without downloading the display icon."""
+    if not api_key:
+        raise OpenWeatherError("OpenWeather key is not configured")
+    settings = config["openweather_overview"]
+    location = config["weather"]
+    remaining = 5 if deadline is None else deadline - time.monotonic()
+    if remaining <= 0:
+        raise TimeoutError("provider timing deadline exceeded")
+    client = client or OpenWeatherClient(timeout=min(5, remaining))
+    if client is not None and hasattr(client, "timeout"):
+        client.timeout = min(client.timeout, remaining)
+    weather = client.fetch_current(
+        api_key=api_key, location=location["location"], latitude=location.get("latitude"),
+        longitude=location.get("longitude"), units=settings["units"],
+    )
+    text = ticker_text(weather, settings["units"])
+    frames = scroll_frames(text_width("4x6", text), direction=settings["scroll_direction"])
+    return {"texts": [text], "frames_per_loop": frames,
+            "total_frames": frames * settings["scroll_loops"], "loops": settings["scroll_loops"],
+            "frame_delay": settings["scroll_speed"],
+            "milliseconds": duration_milliseconds(frames, settings["scroll_loops"], settings["scroll_speed"])}
 
 
 def prepare(config, stop_event=None, client=None, api_key=None):
@@ -78,7 +109,7 @@ def run(
     main_font = matrix.font("5x7")
     ticker_font = matrix.font("4x6")
     ticker_y = settings.get("ticker_y", 28)
-    scroll = f"{weather.location} | {weather.status} | Feels like {weather.feels_like}{suffix}"
+    scroll = ticker_text(weather, settings.get("units", "celsius"))
     direction = settings.get("scroll_direction", "left")
     text_width = matrix.draw_text(
         ticker_font, -10000, ticker_y, ticker, scroll, canvas=canvas

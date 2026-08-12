@@ -5,8 +5,12 @@ from __future__ import annotations
 import datetime as dt
 import hashlib
 import time
+from decimal import Decimal, ROUND_HALF_UP
 
 from PIL import Image
+
+from font_catalog import text_width
+from modules.scroll_timing import duration_milliseconds, format_duration_seconds, scroll_frames
 
 
 ANNOUNCEMENT_MEDIA_DECODE_TIMEOUT = 5
@@ -49,6 +53,71 @@ def active_announcements(announcements, *, now):
         if announcement.get("enabled", True)
         and is_announcement_active(announcement, now=now)
     ]
+
+
+def _next_schedule_boundary(announcements, now):
+    candidates = []
+    for announcement in announcements:
+        if not announcement.get("enabled", True):
+            continue
+        schedule = announcement["schedule"]
+        start_date, end_date, start_time, end_time = _scheduled_interval(schedule)
+        for offset in range(-1, 3):
+            owning_date = now.date() + dt.timedelta(days=offset)
+            if not start_date <= owning_date <= end_date:
+                continue
+            if owning_date.weekday() not in schedule.get("days", range(7)):
+                continue
+            start = dt.datetime.combine(owning_date, start_time)
+            end_date_for_interval = owning_date if start_time < end_time else owning_date + dt.timedelta(days=1)
+            end = dt.datetime.combine(end_date_for_interval, end_time)
+            candidates.extend(candidate for candidate in (start, end) if candidate > now)
+    return min(candidates) if candidates else None
+
+
+def announcement_timing_plan(announcements, *, now, text_width_provider=text_width, matrix_width=64):
+    """Return the fixed-clock aggregate runtime for eligible announcements."""
+    eligible = active_announcements(announcements, now=now)
+    item_milliseconds = []
+    for announcement in eligible:
+        timing = announcement["timing"]
+        if timing["mode"] == "static":
+            transition = announcement.get("transition", {"type": "cut"})
+            transition_seconds = (
+                transition.get("duration_seconds", 0)
+                if transition.get("type") != "cut"
+                else 0
+            )
+            milliseconds = (
+                Decimal(str(timing["duration_seconds"]))
+                + Decimal(str(transition_seconds))
+            ) * 1000
+            item_milliseconds.append(int(
+                milliseconds.quantize(Decimal("1"), rounding=ROUND_HALF_UP)
+            ))
+            continue
+        text = announcement["headline"]
+        if announcement.get("message"):
+            text += " - " + announcement["message"]
+        frames = scroll_frames(
+            text_width_provider(announcement["style"]["font"], text),
+            matrix_width=matrix_width,
+        )
+        item_milliseconds.append(duration_milliseconds(frames, timing["loops"], timing["frame_delay"]))
+    next_minute = now.replace(second=0, microsecond=0) + dt.timedelta(minutes=1)
+    boundary = _next_schedule_boundary(announcements, now)
+    refresh_at = min(next_minute, boundary) if boundary else next_minute
+    if not item_milliseconds:
+        return {
+            "status": "unavailable", "milliseconds": None, "display": "Unavailable",
+            "item_milliseconds": [], "refresh_at": refresh_at,
+        }
+    milliseconds = sum(item_milliseconds)
+    return {
+        "status": "fresh", "milliseconds": milliseconds,
+        "display": format_duration_seconds(milliseconds),
+        "item_milliseconds": item_milliseconds, "refresh_at": refresh_at,
+    }
 
 
 def dissolve_pixel_order(announcement_id, width, height):

@@ -7,7 +7,7 @@ from unittest.mock import Mock
 from PIL import Image
 
 import modules.announcement_board as announcement_board
-from modules.announcement_board import active_announcements, run
+from modules.announcement_board import active_announcements, announcement_timing_plan, run
 
 
 class AnnouncementBoardTests(unittest.TestCase):
@@ -173,6 +173,66 @@ class AnnouncementBoardTests(unittest.TestCase):
         self.assertEqual(draft, expected)
         matrix.swap.assert_called_once_with("canvas")
         stop.wait.assert_called_once_with(8)
+
+    def test_static_timing_plan_matches_all_physical_transition_and_hold_waits(self):
+        now = dt.datetime(2030, 1, 15, 9, 30)
+        transitions = {
+            "cut": {"type": "cut"},
+            "fade": {"type": "fade", "duration_seconds": 0.4},
+            "slide": {"type": "slide", "direction": "left", "duration_seconds": 0.4},
+            "wipe": {"type": "wipe", "direction": "right", "duration_seconds": 0.4},
+            "pixel_dissolve": {"type": "pixel_dissolve", "duration_seconds": 0.4},
+        }
+        for transition_type, transition in transitions.items():
+            with self.subTest(transition=transition_type):
+                matrix = Mock()
+                matrix.matrix.width = 64
+                matrix.matrix.height = 32
+                matrix.matrix.CreateFrameCanvas.return_value = "canvas"
+                matrix.font.side_effect = lambda name: f"font:{name}"
+                matrix.colour_rgb.side_effect = lambda value: Mock(
+                    red=int(value[1:3], 16),
+                    green=int(value[3:5], 16),
+                    blue=int(value[5:7], 16),
+                )
+                matrix.swap.return_value = "canvas"
+                stop = Mock()
+                stop.is_set.return_value = False
+                stop.wait.return_value = False
+                announcement = self.item("announcement_" + transition_type, "09:00", "17:00")
+                announcement["transition"] = transition
+
+                plan = announcement_timing_plan([announcement], now=now)
+                self.assertTrue(run(
+                    matrix,
+                    {"announcement_board": {"announcements": [announcement]}},
+                    duration=0,
+                    stop_event=stop,
+                    now_provider=lambda: now,
+                ))
+
+                executed_milliseconds = round(sum(
+                    call.args[0] for call in stop.wait.call_args_list
+                ) * 1000)
+                self.assertEqual(plan["item_milliseconds"], [executed_milliseconds])
+                self.assertEqual(plan["milliseconds"], executed_milliseconds)
+                self.assertEqual(
+                    executed_milliseconds,
+                    8000 if transition_type == "cut" else 8400,
+                )
+
+    def test_static_timing_plan_rounds_decimal_duration_and_transition_to_milliseconds(self):
+        announcement = self.item("announcement_decimal_timing", "09:00", "17:00")
+        announcement["timing"]["duration_seconds"] = 6.01
+        announcement["transition"] = {"type": "fade", "duration_seconds": 0.1}
+
+        plan = announcement_timing_plan(
+            [announcement], now=dt.datetime(2030, 1, 15, 9, 30),
+        )
+
+        self.assertEqual(plan["item_milliseconds"], [6110])
+        self.assertEqual(plan["milliseconds"], 6110)
+        self.assertEqual(plan["display"], "6.1 s")
 
     def test_active_static_text_notice_renders_one_frame_and_waits_its_own_duration(self):
         matrix = Mock()
