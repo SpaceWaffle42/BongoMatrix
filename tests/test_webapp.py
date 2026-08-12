@@ -3223,6 +3223,45 @@ api=async()=>({status:'unavailable',milliseconds:null,refresh_at:new Date(Date.n
         self.assertIn("ANNOUNCEMENT_FIRST_DRAFT_TIMING_PASS", result.stdout)
 
     @unittest.skipUnless(shutil.which("node"), "Node.js is required")
+    def test_announcement_server_timing_does_not_replace_multiple_enabled_draft_total(self):
+        self.pair_browser()
+        body = self.client.get("/").get_data(as_text=True)
+        function_start = body.index("const customFontAdvances=")
+        function_end = body.index("\nfunction playlist()", function_start)
+        load_start = body.index("async function loadAnnouncementTiming()")
+        load_end = body.index("\nlet announcementTimingDebounce", load_start)
+        harness = body[function_start:function_end] + "\n" + body[load_start:load_end] + r"""
+const announcements=[
+  {enabled:true,headline:'FIRST',message:'',style:{font:'5x7'},timing:{mode:'static',duration_seconds:8},transition:{type:'cut'}},
+  {enabled:true,headline:'SECOND',message:'',style:{font:'5x7'},timing:{mode:'static',duration_seconds:12},transition:{type:'cut'}},
+];
+const builtInSettings={};
+const matrixLoadedRevision=0;let announcementTimingRequest=null,announcementTimingGeneration=0;
+const label={childNodes:[{textContent:''}]},physical={textContent:''};let row;
+const duration={value:'',hidden:false,readOnly:false,title:'',min:'',max:'',step:'',placeholder:'',dataset:{},closest(selector){return selector==='.module-row'?row:label},removeAttribute(name){delete this[name]}};
+row={dataset:{module:'announcement_board'},querySelector(selector){return selector==='.duration'?duration:selector==='.physical-time'?physical:null}};
+global.document={activeElement:null,querySelector(){return null},querySelectorAll(selector){if(selector==='.module-row')return [row];if(selector==='.custom-module-card')return [];return []},createElement(){return {setAttribute(){}}}};
+global.setTimeout=()=>0;global.clearTimeout=()=>{};
+function customModulesFromEditor(){return []}
+function announcementsFromEditor(){return structuredClone(announcements)}
+syncPlaylistDurations();
+if(Number(duration.value)!==20||physical.textContent!=='Physical time · 20.0 s')throw new Error('multiple enabled drafts did not calculate their combined total');
+api=async()=>({status:'fresh',milliseconds:8000,refresh_at:new Date(Date.now()+60000).toISOString()});
+(async()=>{
+  await loadAnnouncementTiming();
+  if(Number(duration.value)!==20||physical.textContent!=='Physical time · 20.0 s')throw new Error('schedule-active server subset replaced multiple enabled draft total: '+JSON.stringify({value:duration.value,physical:physical.textContent}));
+  console.log('ANNOUNCEMENT_MULTIPLE_DRAFT_TOTAL_PASS');
+})().catch(error=>{console.error(error);process.exitCode=1});
+"""
+        result = subprocess.run(
+            [shutil.which("node") or "", "-e", harness],
+            cwd=Path(__file__).parents[1], text=True, capture_output=True,
+            timeout=10,
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("ANNOUNCEMENT_MULTIPLE_DRAFT_TOTAL_PASS", result.stdout)
+
+    @unittest.skipUnless(shutil.which("node"), "Node.js is required")
     def test_playlist_physical_time_readouts_synchronize_in_the_browser(self):
         self.pair_browser()
         body = self.client.get("/").get_data(as_text=True)
