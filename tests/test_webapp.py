@@ -3178,7 +3178,7 @@ async function api(){return {status:'fresh',frames_per_loop:127,settings_digest:
         self.assertIn("PROVIDER_HUNDREDTH_COMPLETION_PASS", result.stdout)
 
     @unittest.skipUnless(shutil.which("node"), "Node.js is required")
-    def test_announcement_unavailable_response_and_failure_remain_blank_in_browser(self):
+    def test_announcement_unavailable_response_and_failure_preserve_enabled_draft_timing(self):
         self.pair_browser()
         body = self.client.get("/").get_data(as_text=True)
         function_start = body.index("const customFontAdvances=")
@@ -3187,7 +3187,7 @@ async function api(){return {status:'fresh',frames_per_loop:127,settings_digest:
         load_end = body.index("\nlet announcementTimingDebounce", load_start)
         harness = body[function_start:function_end] + "\n" + body[load_start:load_end] + r"""
 const announcement={
-  enabled:true,headline:'OUTSIDE SCHEDULE',message:'',style:{font:'5x7'},
+  enabled:true,headline:'FIRST ANNOUNCEMENT',message:'',style:{font:'5x7'},
   timing:{mode:'static',duration_seconds:8},transition:{type:'cut'},
 };
 const announcements=[announcement];
@@ -3200,14 +3200,18 @@ global.document={activeElement:null,querySelector(){return null},querySelectorAl
 global.setTimeout=()=>0;global.clearTimeout=()=>{};
 function customModulesFromEditor(){return []}
 function announcementsFromEditor(){return structuredClone(announcements)}
+syncPlaylistDurations();
+if(Number(duration.value)!==8||physical.textContent!=='Physical time · 8.0 s')throw new Error('first enabled draft did not calculate before server timing');
 api=async()=>({status:'unavailable',milliseconds:null,refresh_at:new Date(Date.now()+60000).toISOString()});
 (async()=>{
   await loadAnnouncementTiming();
-  if(duration.value!==''||/\\d/.test(physical.textContent))throw new Error('explicit unavailable response was replaced by enabled-only fallback: '+JSON.stringify({value:duration.value,physical:physical.textContent}));
+  if(Number(duration.value)!==8||physical.textContent!=='Physical time · 8.0 s')throw new Error('explicit unavailable response reset first enabled draft timing: '+JSON.stringify({value:duration.value,physical:physical.textContent}));
   api=async()=>{throw new Error('offline')};
   await loadAnnouncementTiming();
-  if(duration.value!==''||/\\d/.test(physical.textContent))throw new Error('failed request was replaced by enabled-only fallback: '+JSON.stringify({value:duration.value,physical:physical.textContent}));
-  console.log('ANNOUNCEMENT_SCHEDULE_UNAVAILABLE_PASS');
+  if(Number(duration.value)!==8||physical.textContent!=='Physical time · 8.0 s')throw new Error('failed request reset first enabled draft timing: '+JSON.stringify({value:duration.value,physical:physical.textContent}));
+  announcement.enabled=false;announcementTimingPlan=null;syncPlaylistDurations();
+  if(duration.value!==''||physical.textContent!=='')throw new Error('disabled final announcement did not clear timing');
+  console.log('ANNOUNCEMENT_FIRST_DRAFT_TIMING_PASS');
 })().catch(error=>{console.error(error);process.exitCode=1});
 """
         result = subprocess.run(
@@ -3216,7 +3220,7 @@ api=async()=>({status:'unavailable',milliseconds:null,refresh_at:new Date(Date.n
             timeout=10,
         )
         self.assertEqual(result.returncode, 0, result.stderr)
-        self.assertIn("ANNOUNCEMENT_SCHEDULE_UNAVAILABLE_PASS", result.stdout)
+        self.assertIn("ANNOUNCEMENT_FIRST_DRAFT_TIMING_PASS", result.stdout)
 
     @unittest.skipUnless(shutil.which("node"), "Node.js is required")
     def test_playlist_physical_time_readouts_synchronize_in_the_browser(self):
