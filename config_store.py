@@ -14,6 +14,7 @@ from pathlib import Path
 
 from module_options import LAVA_PALETTES
 from font_catalog import available_font_names, text_width
+from modules.scroll_timing import duration_milliseconds, scroll_frames
 
 
 class ConfigDurabilityError(OSError):
@@ -47,9 +48,8 @@ def _serialize_config(config):
 def scrolling_text_duration(module, matrix_width=64):
     """Return the nominal time for every configured pixel traversal."""
     rendered_width = text_width(module["font"], module["text"])
-    frames_per_loop = matrix_width + rendered_width + 1
-    milliseconds = frames_per_loop * module["loops"] * module["speed"] * 1000
-    return math.floor(milliseconds + 0.5) / 1000
+    frames_per_loop = scroll_frames(rendered_width, matrix_width=matrix_width, direction=module["direction"])
+    return duration_milliseconds(frames_per_loop, module["loops"], module["speed"]) / 1000
 
 DEFAULT_CONFIG = {
     "revision": 0,
@@ -141,11 +141,11 @@ DEFAULT_CONFIG = {
     "custom_modules": [],
     "playlist": [
         {"module": "splash", "duration": 8, "enabled": True},
-        {"module": "weather", "duration": 0, "enabled": True},
+        {"module": "weather", "duration": 15, "enabled": True},
         {"module": "clock_lava", "duration": 300, "enabled": True},
-        {"module": "openweather_overview", "duration": 0, "enabled": False},
-        {"module": "openweather_forecast", "duration": 0, "enabled": False},
-        {"module": "announcement_board", "duration": 0, "enabled": False},
+        {"module": "openweather_overview", "duration": 15, "enabled": False},
+        {"module": "openweather_forecast", "duration": 15, "enabled": False},
+        {"module": "announcement_board", "duration": 15, "enabled": False},
     ],
 }
 
@@ -869,7 +869,9 @@ def validate_config(config, *, allow_legacy_announcements=True, enforce_save_bou
         if item["module"] in {
             "weather", "openweather_overview", "openweather_forecast", "announcement_board",
         }:
-            item["duration"] = 0
+            duration = item.get("duration")
+            if isinstance(duration, bool) or not isinstance(duration, (int, float)) or not 1 <= duration <= 3600:
+                item["duration"] = 15
         elif custom_module is not None and custom_module["type"] == "text_scroll":
             item["duration"] = scrolling_text_duration(custom_module)
         else:

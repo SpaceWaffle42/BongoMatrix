@@ -11,8 +11,8 @@ from PIL import Image
 
 from modules.openweather_common import OpenWeatherClient, OpenWeatherError
 from modules.openweather_common import OpenWeatherForecastPeriod, OpenWeatherSnapshot
-from modules.openweather_forecast import prepare as prepare_forecast, run as run_forecast
-from modules.openweather_overview import prepare as prepare_overview, run as run_overview
+from modules.openweather_forecast import PreparedForecast, prepare as prepare_forecast, prepare_ticker_plan as prepare_forecast_ticker_plan, run as run_forecast
+from modules.openweather_overview import PreparedOverview, prepare as prepare_overview, prepare_ticker_plan as prepare_overview_ticker_plan, run as run_overview
 
 
 class FakeResponse:
@@ -372,6 +372,22 @@ class OpenWeatherOverviewTests(unittest.TestCase):
             "4x6", 64, 28, "#dcd5d5", canvas=canvas, step=1, wrap=False,
         )
         stop_event.wait.assert_called_once_with(0.025)
+    @patch("modules.openweather_overview._wait", return_value=False)
+    def test_overview_prepared_plan_frames_equal_executed_waits_and_swaps(self, wait):
+        weather = OpenWeatherSnapshot(location="London", status="Clear", temperature=16,
+            feels_like=15, high=18, low=12, humidity=70, icon_code="01d")
+        config = {"weather": {"location": "London", "latitude": 1, "longitude": 2},
+                  "openweather_overview": {"units": "celsius", "scroll_direction": "right",
+                      "scroll_speed": .05, "scroll_loops": 2}}
+        client = Mock();client.timeout=5;client.fetch_current.return_value = weather
+        with patch("modules.openweather_overview.text_width", return_value=1):
+            plan = prepare_overview_ticker_plan(config, client=client, api_key="x")
+        canvas = SimpleNamespace(width=64);matrix = Mock();matrix.matrix.CreateFrameCanvas.return_value = canvas
+        matrix.colour_rgb.side_effect=lambda value:value;matrix.font.side_effect=lambda value:value
+        matrix.draw_text.return_value=1;matrix.widget_scroll.side_effect=lambda text,font,x,y,colour,canvas=None,step=1,wrap=True:(x-step,1);matrix.swap.return_value=canvas
+        self.assertTrue(run_overview(matrix, config, prepared=PreparedOverview(weather=weather, icon=Image.new("RGB", (1, 1)))))
+        self.assertEqual(wait.call_count, plan["total_frames"])
+        self.assertEqual(matrix.swap.call_count, plan["total_frames"])
 
 
 class OpenWeatherForecastTests(unittest.TestCase):
@@ -603,6 +619,23 @@ class OpenWeatherForecastTests(unittest.TestCase):
             "4x6", 64, 28, "#dcd5d5", canvas=canvas, step=1, wrap=False,
         )
         stop_event.wait.assert_called_once_with(0.05)
+    @patch("modules.openweather_forecast._wait", return_value=False)
+    def test_multicard_forecast_prepared_plan_frames_equal_executed_waits_and_swaps(self, wait):
+        periods = [OpenWeatherForecastPeriod(label=f"Tue {hour}:00", status="Rain", temperature=18,
+            feels_like=17, high=20, low=16, icon_code="10d") for hour in (15, 18, 21)]
+        config = {"weather": {"location": "London", "latitude": 1, "longitude": 2},
+                  "openweather_forecast": {"units": "celsius", "forecast_items": 3,
+                      "scroll_direction": "left", "scroll_speed": .05, "scroll_loops": 2}}
+        client=Mock();client.timeout=5;client.fetch_forecast.return_value=periods
+        with patch("modules.openweather_forecast.text_width", return_value=1):
+            plan=prepare_forecast_ticker_plan(config, client=client, api_key="x")
+        canvas=SimpleNamespace(width=64);matrix=Mock();matrix.matrix.CreateFrameCanvas.return_value=canvas
+        matrix.colour_rgb.side_effect=lambda value:value;matrix.font.side_effect=lambda value:value
+        matrix.draw_text.return_value=1;matrix.widget_scroll.side_effect=lambda text,font,x,y,colour,canvas=None,step=1,wrap=True:(x-step,1);matrix.swap.return_value=canvas
+        prepared=PreparedForecast(periods=periods, icons={"10d":Image.new("RGB", (1, 1))})
+        self.assertTrue(run_forecast(matrix, config, prepared=prepared))
+        self.assertEqual(wait.call_count, plan["total_frames"])
+        self.assertEqual(matrix.swap.call_count, plan["total_frames"])
 
 
 class OpenWeatherMissingSecretTests(unittest.TestCase):

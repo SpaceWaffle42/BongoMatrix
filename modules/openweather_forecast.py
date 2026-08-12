@@ -3,9 +3,11 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+import time
 
+from font_catalog import text_width
 from modules.openweather_common import OpenWeatherClient, OpenWeatherError, composite_icon
-from modules.scroll_timing import frame_delay_seconds
+from modules.scroll_timing import duration_milliseconds, frame_delay_seconds, scroll_frames
 from modules.weather_app import _hex_rgb, _render_error, _wait
 
 
@@ -15,6 +17,38 @@ class PreparedForecast:
     icons: object = None
     error: str | None = None
     cancelled: bool = False
+
+
+def ticker_text(location, period, units):
+    suffix = "F" if units == "fahrenheit" else "C"
+    return f"{location} | {period.status} | Feels like {period.feels_like}{suffix}"
+
+
+def prepare_ticker_plan(config, *, client=None, api_key=None, deadline=None):
+    """Fetch normalized forecast text without downloading card icons."""
+    if not api_key:
+        raise OpenWeatherError("OpenWeather key is not configured")
+    settings = config["openweather_forecast"]
+    location = config["weather"]
+    remaining = 5 if deadline is None else deadline - time.monotonic()
+    if remaining <= 0:
+        raise TimeoutError("provider timing deadline exceeded")
+    client = client or OpenWeatherClient(timeout=min(5, remaining))
+    if client is not None and hasattr(client, "timeout"):
+        client.timeout = min(client.timeout, remaining)
+    periods = client.fetch_forecast(
+        api_key=api_key, location=location["location"], latitude=location.get("latitude"),
+        longitude=location.get("longitude"), units=settings["units"],
+        max_items=settings["forecast_items"],
+    )
+    if not periods:
+        raise OpenWeatherError("OpenWeather forecast is unavailable")
+    texts = [ticker_text(location["location"], period, settings["units"]) for period in periods]
+    frames = [scroll_frames(text_width("4x6", text), direction=settings["scroll_direction"]) for text in texts]
+    total_frames = sum(frames) * settings["scroll_loops"]
+    return {"texts": texts, "frames_per_loop": frames, "total_frames": total_frames,
+            "loops": settings["scroll_loops"], "frame_delay": settings["scroll_speed"],
+            "milliseconds": duration_milliseconds(total_frames, 1, settings["scroll_speed"])}
 
 
 def prepare(config, stop_event=None, client=None, api_key=None):
@@ -101,7 +135,7 @@ def run(
     for period in periods:
         if stop_event and stop_event.is_set():
             break
-        scroll = f"{location} | {period.status} | Feels like {period.feels_like}{suffix}"
+        scroll = ticker_text(location, period, units)
         text_width = matrix.draw_text(
             small_font, -10000, ticker_y, ticker, scroll, canvas=canvas
         )

@@ -218,8 +218,8 @@ class ConfigStoreTests(unittest.TestCase):
 
             self.assertEqual(config["playlist"][:len(expected_existing)], expected_existing)
             self.assertEqual(config["playlist"][-2:], [
-                {"module": "openweather_overview", "duration": 0, "enabled": False},
-                {"module": "openweather_forecast", "duration": 0, "enabled": False},
+                {"module": "openweather_overview", "duration": 15, "enabled": False},
+                {"module": "openweather_forecast", "duration": 15, "enabled": False},
             ])
             self.assertTrue(next(item for item in config["playlist"] if item["module"] == "weather")["enabled"])
             self.assertIn("openweather_overview", config)
@@ -241,7 +241,7 @@ class ConfigStoreTests(unittest.TestCase):
 
             self.assertEqual(config["playlist"][:-1], expected_existing)
             self.assertEqual(config["playlist"][-1], {
-                "module": "announcement_board", "duration": 0, "enabled": False,
+                "module": "announcement_board", "duration": 15, "enabled": False,
             })
             self.assertEqual(config["announcement_board"], {"announcements": []})
 
@@ -698,9 +698,9 @@ class ConfigStoreTests(unittest.TestCase):
                 }
             }
             self.assertEqual(weather_durations, {
-                "weather": 0,
-                "openweather_overview": 0,
-                "openweather_forecast": 0,
+                "weather": 999,
+                "openweather_overview": 999,
+                "openweather_forecast": 999,
             })
 
     def test_weather_scroll_loops_are_bounded_in_all_weather_apps(self):
