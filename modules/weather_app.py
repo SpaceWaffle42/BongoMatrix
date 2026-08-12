@@ -81,7 +81,8 @@ class OpenMeteoClient:
             f"{base_url}?{urlencode(params)}",
             headers={"User-Agent": "MatrixDisplay/2.0"},
         )
-        with urlopen(request, timeout=self.timeout if timeout is None else timeout) as response:
+        # Provider URLs are fixed HTTPS constants; user data is URL-encoded only as query parameters.
+        with urlopen(request, timeout=self.timeout if timeout is None else timeout) as response:  # nosemgrep: bandit.B310-1
             return json.loads(response.read())
 
     def search_locations(self, query, count=6):
