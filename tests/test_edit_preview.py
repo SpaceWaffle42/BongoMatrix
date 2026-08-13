@@ -33,6 +33,137 @@ class Colour:
 
 
 class EditPreviewTests(unittest.TestCase):
+    def test_finite_cycle_can_restart_only_after_terminal_page(self):
+        frame_capture_patch = patch.object(frame_capture_module, "Image", Image)
+        frame_capture_patch.start()
+        self.addCleanup(frame_capture_patch.stop)
+
+        custom_options = {
+            "type": "text_scroll",
+            "text": "RESTART",
+            "font": "5x7",
+            "colour": "#ffffff",
+            "background": "#001122",
+            "y": 20,
+            "direction": "left",
+            "speed": 0.05,
+            "loops": 1,
+        }
+        announcement = {
+            "id": "announcement_restart",
+            "enabled": True,
+            "name": "Restart lifecycle",
+            "layout": "text_notice",
+            "headline": "Welcome",
+            "message": "Terminal page required",
+            "media": None,
+            "schedule": {
+                "start_date": "2030-01-15",
+                "end_date": "2030-01-15",
+                "start_time": "09:00",
+                "end_time": "17:00",
+                "days": [0, 1, 2, 3, 4, 5, 6],
+            },
+            "style": {
+                "foreground": "#ffffff",
+                "background": "#001122",
+                "font": "5x7",
+                "alignment": "left",
+                "border": "none",
+                "border_colour": "#ffffff",
+            },
+            "timing": {"mode": "static", "duration_seconds": 1.2},
+            "transition": {"type": "fade", "duration_seconds": 0.4},
+        }
+        validated = copy.deepcopy(DEFAULT_CONFIG)
+        validated["announcement_board"]["announcements"] = [announcement]
+        validate_config(validated, enforce_save_bounds=True)
+        announcement = validated["announcement_board"]["announcements"][0]
+
+        first = Image.new("RGB", (2, 2), "red")
+        second = Image.new("RGB", (2, 2), "blue")
+        with tempfile.TemporaryDirectory() as directory:
+            media_path = Path(directory) / "restart.gif"
+            first.save(
+                media_path, format="GIF", save_all=True, append_images=[second],
+                duration=[100, 200], loop=0,
+            )
+            cases = {
+                "custom_text": lambda: custom_text_preview_frames(
+                    CaptureMatrix(), custom_options,
+                ),
+                "announcement": lambda: static_announcement_preview_frames(
+                    CaptureMatrix(), announcement,
+                ),
+                "media": lambda: edit_preview.media_preview_frames(
+                    CaptureMatrix(), media_path, 0.32,
+                    settings={
+                        "x": 0, "y": 0, "width": 64, "height": 32,
+                        "keep_aspect": True, "gif_speed_percent": 200,
+                    },
+                ),
+            }
+
+            for name, iterator_factory in cases.items():
+                with self.subTest(iterator=name):
+                    session = PreviewSession(iterator_factory())
+                    session.MAX_FRAMES = 2
+                    first_page = session.page()
+                    self.assertFalse(first_page["complete"])
+                    first_token = first_page["next_token"]
+
+                    with self.assertRaises(RuntimeError):
+                        session.restart(iterator_factory)
+                    with self.assertRaises(ValueError):
+                        session.page("out-of-order-token")
+
+                    pages = [first_page]
+                    token = first_token
+                    while True:
+                        page = session.page(token)
+                        pages.append(page)
+                        if page["complete"]:
+                            break
+                        if len(pages) == 2:
+                            with self.assertRaises(ValueError):
+                                session.page(first_token)
+                        token = page["next_token"]
+
+                    self.assertEqual(
+                        [page["page"] for page in pages], list(range(len(pages))),
+                    )
+                    continuation_tokens = [
+                        page["next_token"] for page in pages[:-1]
+                    ]
+                    self.assertEqual(
+                        len(continuation_tokens), len(set(continuation_tokens)),
+                    )
+                    self.assertIsNone(pages[-1]["next_token"])
+                    with self.assertRaises(StopIteration):
+                        session.page(token)
+
+                    restarted = session.restart(iterator_factory)
+                    restarted.MAX_FRAMES = 2
+                    restarted_pages = []
+                    restarted_token = None
+                    while True:
+                        restarted_page = restarted.page(restarted_token)
+                        restarted_pages.append(restarted_page)
+                        if restarted_page["complete"]:
+                            break
+                        restarted_token = restarted_page["next_token"]
+
+                    self.assertIsNot(restarted, session)
+                    self.assertEqual(restarted_pages[0]["page"], 0)
+                    self.assertEqual(
+                        restarted_pages[0]["frames"][0], first_page["frames"][0],
+                    )
+                    self.assertEqual(
+                        [frame for page in restarted_pages for frame in page["frames"]],
+                        [frame for page in pages for frame in page["frames"]],
+                    )
+                    self.assertTrue(restarted_pages[-1]["complete"])
+
     def test_media_timing_and_loops_complete_before_terminal_page(self):
         frame_capture_patch = patch.object(frame_capture_module, "Image", Image)
         frame_capture_patch.start()

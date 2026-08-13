@@ -220,6 +220,12 @@ class PreviewSession:
     def retained_frame_count(self):
         return len(self._current) + (self._lookahead is not None)
 
+    def restart(self, iterator_factory):
+        """Create a new page-zero session only after this cycle is terminal."""
+        if not self._complete:
+            raise RuntimeError("a finite cycle can restart only after its terminal page")
+        return type(self)(iterator_factory())
+
     def _next_frame(self):
         if self._lookahead is not None:
             frame, self._lookahead = self._lookahead, None
