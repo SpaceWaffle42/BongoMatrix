@@ -28,6 +28,80 @@ class ConfigStoreTests(unittest.TestCase):
             without_revision.pop("revision")
             self.assertEqual(without_revision, legacy)
 
+    def test_read_only_preview_candidate_is_strict_bounded_and_does_not_change_store(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "config.json"
+            store = ConfigStore(path)
+            saved = store.update({
+                "device": {"name": "Saved sentinel"},
+                "media": {"splash": "missing-preview-only.gif"},
+            }, base_revision=0)
+            original_bytes = path.read_bytes()
+            original = store.get()
+            changes = json.loads(json.dumps(original))
+            changes.pop("revision")
+            changes["device"]["name"] = "Unsaved preview"
+            changes["display"]["day_brightness"] = 37
+
+            candidate = store.validate_candidate(changes)
+
+            self.assertEqual(candidate["revision"], saved["revision"])
+            self.assertEqual(candidate["device"]["name"], "Unsaved preview")
+            self.assertEqual(candidate["display"]["day_brightness"], 37)
+            self.assertEqual(candidate["media"]["splash"], "missing-preview-only.gif")
+            candidate["device"]["name"] = "Mutated return value"
+            self.assertEqual(store.get(), original)
+            self.assertEqual(path.read_bytes(), original_bytes)
+
+            invalid_cases = [
+                ({"revision": saved["revision"]}, "server-owned"),
+                ({"device": {"unknown": "value"}}, "Unknown configuration key"),
+                ({"display": {"day_brightness": True}}, "brightness"),
+                ({"media": {"splash": "../escape.gif"}}, "media reference"),
+                ({"playlist": [{"module": "splash", "enabled": True}]}, "duration"),
+                ({"playlist": [
+                    {"module": "splash", "duration": 1, "enabled": True}
+                ] * 257}, "at most 256"),
+            ]
+            for invalid, message in invalid_cases:
+                with self.subTest(invalid=invalid), self.assertRaisesRegex(ValueError, message):
+                    store.validate_candidate(invalid)
+                self.assertEqual(store.get(), original)
+                self.assertEqual(path.read_bytes(), original_bytes)
+
+            modules = []
+            for module_index in range(8):
+                layers = []
+                for layer_index in range(64):
+                    layers.append({
+                        "id": f"layer_{module_index}_{layer_index}",
+                        "name": "Large preview layer",
+                        "type": "text",
+                        "visible": True,
+                        "properties": {
+                            "x": 0, "y": 7, "text": "X" * 200,
+                            "font": "5x7", "colour": "#ffffff",
+                        },
+                        "keyframes": [
+                            {
+                                "frame": frame,
+                                "easing": "linear",
+                                "properties": {"text": "Y" * 200},
+                            }
+                            for frame in range(8)
+                        ],
+                    })
+                modules.append(self.advanced_module(
+                    id=f"custom_preview_large_{module_index}",
+                    name=f"Preview large {module_index}",
+                    layers=layers,
+                    overrides=[],
+                ))
+            with self.assertRaisesRegex(ValueError, "1 MiB"):
+                store.validate_candidate({"custom_modules": modules})
+            self.assertEqual(store.get(), original)
+            self.assertEqual(path.read_bytes(), original_bytes)
+
     def test_atomic_update_increments_revision_once_with_dependent_records(self):
         with tempfile.TemporaryDirectory() as directory:
             store = ConfigStore(Path(directory) / "config.json")
