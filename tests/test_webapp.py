@@ -1288,6 +1288,315 @@ globalThis.document=document;globalThis.window=window;globalThis.fetch=fetch;
         self.assertEqual(response_sizes, [0] * 10)
         self.assertLess(elapsed, 5.0)
 
+    def _run_dashboard_chromium_probe(self, body, probe, timeout=30):
+        chromium = os.environ["MATRIX_CHROMIUM"]
+        node = shutil.which("node")
+        assert node is not None
+        with tempfile.TemporaryDirectory(prefix="matrix-sticky-preview-") as directory:
+            page = Path(directory) / "dashboard.html"
+            page.write_text(body)
+            profile = Path(directory) / "profile"
+            browser = subprocess.Popen(
+                [
+                    chromium, "--headless", "--no-sandbox", "--disable-gpu",
+                    "--remote-debugging-port=0", f"--user-data-dir={profile}", "about:blank",
+                ],
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+            )
+            try:
+                active_port = profile / "DevToolsActivePort"
+                for _attempt in range(50):
+                    if active_port.is_file():
+                        break
+                    if browser.poll() is not None:
+                        self.fail("Chromium exited before publishing its DevTools port")
+                    time.sleep(0.1)
+                self.assertTrue(active_port.is_file(), "Chromium DevTools port unavailable")
+                completed = subprocess.run(
+                    [node, "-e", probe, active_port.read_text().splitlines()[0], str(page)],
+                    capture_output=True,
+                    text=True,
+                    timeout=timeout,
+                )
+            finally:
+                browser.terminate()
+                try:
+                    browser.wait(timeout=5)
+                except subprocess.TimeoutExpired:
+                    browser.kill()
+                    browser.wait(timeout=5)
+                for cleanup_attempt in range(20):
+                    try:
+                        shutil.rmtree(profile)
+                        break
+                    except FileNotFoundError:
+                        break
+                    except OSError:
+                        if cleanup_attempt == 19:
+                            raise
+                        time.sleep(0.05)
+        self.assertEqual(completed.returncode, 0, completed.stderr)
+        return json.loads(completed.stdout.strip().splitlines()[-1])
+
+    @unittest.skipUnless(shutil.which("node"), "Node.js is required")
+    @unittest.skipUnless(
+        os.environ.get("MATRIX_CHROMIUM")
+        and Path(os.environ.get("MATRIX_CHROMIUM", "")).is_file()
+        and os.access(os.environ.get("MATRIX_CHROMIUM", ""), os.X_OK),
+        "MATRIX_CHROMIUM browser is required",
+    )
+    def test_matrix_preview_matches_original_at_top_and_pops_out_after_scroll(self):
+        self.pair_browser()
+        body = self.client.get("/").get_data(as_text=True)
+        probe = r"""
+const port=process.argv[1],pagePath=process.argv[2];let endpoint;
+for(let attempt=0;attempt<50;attempt++){try{endpoint=await fetch(`http://127.0.0.1:${port}/json/new`,{method:'PUT'}).then(r=>r.json());break}catch(_){await new Promise(r=>setTimeout(r,100))}}
+if(!endpoint)throw new Error('Chromium DevTools endpoint unavailable');
+const socket=new WebSocket(endpoint.webSocketDebuggerUrl),pending=new Map();let nextId=1,loadResolve,loaded=new Promise(resolve=>loadResolve=resolve);
+socket.onmessage=event=>{const message=JSON.parse(event.data);if(message.id&&pending.has(message.id)){const request=pending.get(message.id);pending.delete(message.id);message.error?request.reject(new Error(JSON.stringify(message.error))):request.resolve(message.result)}else if(message.method==='Page.loadEventFired')loadResolve()};
+await new Promise((resolve,reject)=>{socket.onopen=resolve;socket.onerror=reject});
+const send=(method,params={})=>{const id=nextId++;socket.send(JSON.stringify({id,method,params}));return new Promise((resolve,reject)=>pending.set(id,{resolve,reject}))};
+const evaluate=async expression=>{const result=await send('Runtime.evaluate',{expression,returnByValue:true,awaitPromise:true});if(result.exceptionDetails)throw new Error(JSON.stringify(result.exceptionDetails));return result.result.value};
+try{
+ await send('Runtime.enable');await send('Page.enable');await send('Emulation.setDeviceMetricsOverride',{width:1280,height:720,deviceScaleFactor:1,mobile:false});loaded=new Promise(resolve=>loadResolve=resolve);await send('Page.navigate',{url:'file://'+pagePath});await Promise.race([loaded,new Promise((_,reject)=>setTimeout(()=>reject(new Error('load timeout')),5000))]);
+ const top=await evaluate(`(()=>{const live=document.querySelector('.preview-live'),card=document.querySelector('.preview-card'),quick=document.querySelector('.quick-card'),canvas=document.querySelector('#matrix-preview'),r=live?.getBoundingClientRect(),cr=card?.getBoundingClientRect(),qr=quick?.getBoundingClientRect(),cn=canvas?.getBoundingClientRect();return {popped:live?.classList.contains('is-popped')||false,position:live?getComputedStyle(live).position:null,parent:live?.parentElement?.className||null,card:[cr?.left,cr?.right,cr?.width,cr?.height],quick:[qr?.left,qr?.right,qr?.width,qr?.height],minHeight:getComputedStyle(card).minHeight,inlineHeight:card.style.height,sameRow:Boolean(cr&&qr)&&Math.abs(cr.top-qr.top)<2,canvas:[cn?.width,cn?.height],intrinsic:[canvas?.width,canvas?.height],counts:document.querySelectorAll('#matrix-preview').length}})()`);
+ await evaluate(`document.documentElement.style.scrollBehavior='auto';scrollTo(0,document.documentElement.scrollHeight)`);await new Promise(r=>setTimeout(r,100));
+ const popped=await evaluate(`(()=>{const live=document.querySelector('.preview-live'),topbar=document.querySelector('.topbar').getBoundingClientRect(),quick=document.querySelector('.quick-card').getBoundingClientRect(),canvas=document.querySelector('#matrix-preview'),r=live?.getBoundingClientRect(),cn=canvas?.getBoundingClientRect();return {popped:live?.classList.contains('is-popped')||false,position:live?getComputedStyle(live).position:null,top:r?.top,topbarBottom:topbar.bottom,width:r?.width,canvas:[cn?.width,cn?.height],animationName:getComputedStyle(live).animationName,quickScrolled:quick.bottom<0,intrinsic:[canvas?.width,canvas?.height],counts:document.querySelectorAll('#matrix-preview').length}})()`);
+ await evaluate(`scrollTo(0,0);syncPreviewPopout()`);await new Promise(r=>setTimeout(r,100));
+ const restored=await evaluate(`(()=>{const live=document.querySelector('.preview-live'),card=document.querySelector('.preview-card');return {popped:live?.classList.contains('is-popped')||false,position:live?getComputedStyle(live).position:null,parent:live?.parentElement===card,scrollY,threshold:card.offsetTop}})()`);
+ console.log(JSON.stringify({top,popped,restored}));
+}finally{socket.close()}
+"""
+        report = self._run_dashboard_chromium_probe(body, probe)
+        self.assertFalse(report["top"]["popped"], report)
+        self.assertEqual(report["top"]["position"], "static", report)
+        self.assertIn("preview-card", report["top"]["parent"])
+        self.assertTrue(report["top"]["sameRow"], report)
+        self.assertEqual(report["top"]["minHeight"], "auto", report)
+        self.assertEqual(report["top"]["inlineHeight"], "", report)
+        self.assertAlmostEqual(report["top"]["card"][3], report["top"]["quick"][3], delta=1)
+        self.assertLess(report["top"]["card"][1], report["top"]["quick"][0])
+        self.assertGreater(report["top"]["card"][2], report["top"]["quick"][2])
+        self.assertAlmostEqual(report["top"]["canvas"][0] / report["top"]["canvas"][1], 2, places=2)
+        self.assertEqual(report["top"]["intrinsic"], [64, 32])
+        self.assertEqual(report["top"]["counts"], 1)
+        self.assertTrue(report["popped"]["popped"], report)
+        self.assertEqual(report["popped"]["position"], "fixed", report)
+        self.assertEqual(report["popped"]["animationName"], "preview-pop-out", report)
+        self.assertAlmostEqual(report["popped"]["top"], report["popped"]["topbarBottom"], delta=1)
+        self.assertEqual([round(value) for value in report["popped"]["canvas"]], [256, 128])
+        self.assertTrue(report["popped"]["quickScrolled"], report)
+        self.assertEqual(report["popped"]["intrinsic"], [64, 32])
+        self.assertEqual(report["popped"]["counts"], 1)
+        self.assertFalse(report["restored"]["popped"], report)
+        self.assertEqual(report["restored"]["position"], "static", report)
+        self.assertTrue(report["restored"]["parent"], report)
+        self.assertEqual(report["restored"]["scrollY"], 0, report)
+        self.assertGreater(report["restored"]["threshold"], 0, report)
+
+    @unittest.skipUnless(shutil.which("node"), "Node.js is required")
+    @unittest.skipUnless(
+        os.environ.get("MATRIX_CHROMIUM")
+        and Path(os.environ.get("MATRIX_CHROMIUM", "")).is_file()
+        and os.access(os.environ.get("MATRIX_CHROMIUM", ""), os.X_OK),
+        "MATRIX_CHROMIUM browser is required",
+    )
+    def test_matrix_preview_popout_preserves_mobile_document_flow(self):
+        self.pair_browser()
+        body = self.client.get("/").get_data(as_text=True)
+        probe = r"""
+const port=process.argv[1],pagePath=process.argv[2];let endpoint;
+for(let attempt=0;attempt<50;attempt++){try{endpoint=await fetch(`http://127.0.0.1:${port}/json/new`,{method:'PUT'}).then(r=>r.json());break}catch(_){await new Promise(r=>setTimeout(r,100))}}
+if(!endpoint)throw new Error('Chromium DevTools endpoint unavailable');
+const socket=new WebSocket(endpoint.webSocketDebuggerUrl),pending=new Map();let nextId=1,loadResolve,loaded=new Promise(resolve=>loadResolve=resolve);
+socket.onmessage=event=>{const message=JSON.parse(event.data);if(message.id&&pending.has(message.id)){const request=pending.get(message.id);pending.delete(message.id);message.error?request.reject(new Error(JSON.stringify(message.error))):request.resolve(message.result)}else if(message.method==='Page.loadEventFired')loadResolve()};
+await new Promise((resolve,reject)=>{socket.onopen=resolve;socket.onerror=reject});
+const send=(method,params={})=>{const id=nextId++;socket.send(JSON.stringify({id,method,params}));return new Promise((resolve,reject)=>pending.set(id,{resolve,reject}))};
+const evaluate=async expression=>{const result=await send('Runtime.evaluate',{expression,returnByValue:true,awaitPromise:true});if(result.exceptionDetails)throw new Error(JSON.stringify(result.exceptionDetails));return result.result.value};
+try{
+ await send('Runtime.enable');await send('Page.enable');await send('Emulation.setDeviceMetricsOverride',{width:390,height:844,deviceScaleFactor:1,mobile:false});loaded=new Promise(resolve=>loadResolve=resolve);await send('Page.navigate',{url:'file://'+pagePath});await Promise.race([loaded,new Promise((_,reject)=>setTimeout(()=>reject(new Error('load timeout')),5000))]);
+ const before=await evaluate(`(()=>{const card=document.querySelector('.preview-card'),quick=document.querySelector('.quick-card');return {cardHeight:card.getBoundingClientRect().height,quickTop:quick.offsetTop,documentHeight:document.documentElement.scrollHeight,threshold:card.offsetTop,inlineHeight:card.style.height}})()`);
+ await evaluate(`scrollTo(0,document.querySelector('.preview-card').offsetTop+1);syncPreviewPopout()`);
+ const after=await evaluate(`(()=>{const card=document.querySelector('.preview-card'),quick=document.querySelector('.quick-card'),live=document.querySelector('.preview-live');return {popped:live.classList.contains('is-popped'),cardHeight:card.getBoundingClientRect().height,quickTop:quick.offsetTop,documentHeight:document.documentElement.scrollHeight,inlineHeight:card.style.height}})()`);
+ console.log(JSON.stringify({before,after}));
+}finally{socket.close()}
+"""
+        report = self._run_dashboard_chromium_probe(body, probe)
+        self.assertEqual(report["before"]["inlineHeight"], "", report)
+        self.assertTrue(report["after"]["popped"], report)
+        self.assertNotEqual(report["after"]["inlineHeight"], "", report)
+        self.assertAlmostEqual(report["after"]["cardHeight"], report["before"]["cardHeight"], delta=1)
+        self.assertAlmostEqual(report["after"]["quickTop"], report["before"]["quickTop"], delta=1)
+        self.assertAlmostEqual(report["after"]["documentHeight"], report["before"]["documentHeight"], delta=1)
+
+    @unittest.skipUnless(shutil.which("node"), "Node.js is required")
+    @unittest.skipUnless(
+        os.environ.get("MATRIX_CHROMIUM")
+        and Path(os.environ.get("MATRIX_CHROMIUM", "")).is_file()
+        and os.access(os.environ.get("MATRIX_CHROMIUM", ""), os.X_OK),
+        "MATRIX_CHROMIUM browser is required",
+    )
+    def test_matrix_preview_popout_remeasures_placeholder_across_breakpoints(self):
+        self.pair_browser()
+        body = self.client.get("/").get_data(as_text=True)
+        probe = r"""
+const port=process.argv[1],pagePath=process.argv[2];let endpoint;
+for(let attempt=0;attempt<50;attempt++){try{endpoint=await fetch(`http://127.0.0.1:${port}/json/new`,{method:'PUT'}).then(r=>r.json());break}catch(_){await new Promise(r=>setTimeout(r,100))}}
+if(!endpoint)throw new Error('Chromium DevTools endpoint unavailable');
+const socket=new WebSocket(endpoint.webSocketDebuggerUrl),pending=new Map();let nextId=1,loadResolve,loaded=new Promise(resolve=>loadResolve=resolve);
+socket.onmessage=event=>{const message=JSON.parse(event.data);if(message.id&&pending.has(message.id)){const request=pending.get(message.id);pending.delete(message.id);message.error?request.reject(new Error(JSON.stringify(message.error))):request.resolve(message.result)}else if(message.method==='Page.loadEventFired')loadResolve()};
+await new Promise((resolve,reject)=>{socket.onopen=resolve;socket.onerror=reject});
+const send=(method,params={})=>{const id=nextId++;socket.send(JSON.stringify({id,method,params}));return new Promise((resolve,reject)=>pending.set(id,{resolve,reject}))};
+const evaluate=async expression=>{const result=await send('Runtime.evaluate',{expression,returnByValue:true,awaitPromise:true});if(result.exceptionDetails)throw new Error(JSON.stringify(result.exceptionDetails));return result.result.value};
+try{
+ await send('Runtime.enable');await send('Page.enable');await send('Emulation.setDeviceMetricsOverride',{width:1280,height:720,deviceScaleFactor:1,mobile:false});loaded=new Promise(resolve=>loadResolve=resolve);await send('Page.navigate',{url:'file://'+pagePath});await Promise.race([loaded,new Promise((_,reject)=>setTimeout(()=>reject(new Error('load timeout')),5000))]);
+ await evaluate(`document.documentElement.style.scrollBehavior='auto';scrollTo(0,document.documentElement.scrollHeight)`);await new Promise(r=>setTimeout(r,50));await evaluate(`syncPreviewPopout()`);
+ const desktop=await evaluate(`(()=>{const card=document.querySelector('.preview-card'),live=document.querySelector('.preview-live');return {popped:live.classList.contains('is-popped'),height:card.getBoundingClientRect().height,inlineHeight:card.style.height,animationName:getComputedStyle(live).animationName}})()`);
+ await send('Emulation.setDeviceMetricsOverride',{width:390,height:844,deviceScaleFactor:1,mobile:false});await evaluate(`resizePreviewPopout()`);
+ const resized=await evaluate(`(()=>{const card=document.querySelector('.preview-card'),quick=document.querySelector('.quick-card'),live=document.querySelector('.preview-live');return {popped:live.classList.contains('is-popped'),height:card.getBoundingClientRect().height,inlineHeight:card.style.height,quickTop:quick.offsetTop,documentHeight:document.documentElement.scrollHeight,animationName:getComputedStyle(live).animationName,opacity:getComputedStyle(live).opacity}})()`);
+ await evaluate(`scrollTo(0,0);syncPreviewPopout()`);
+ const natural=await evaluate(`(()=>{const card=document.querySelector('.preview-card'),quick=document.querySelector('.quick-card');return {popped:document.querySelector('.preview-live').classList.contains('is-popped'),height:card.getBoundingClientRect().height,inlineHeight:card.style.height,quickTop:quick.offsetTop,documentHeight:document.documentElement.scrollHeight}})()`);
+ console.log(JSON.stringify({desktop,resized,natural}));
+}finally{socket.close()}
+"""
+        report = self._run_dashboard_chromium_probe(body, probe)
+        self.assertTrue(report["desktop"]["popped"], report)
+        self.assertEqual(report["desktop"]["animationName"], "preview-pop-out", report)
+        self.assertTrue(report["resized"]["popped"], report)
+        self.assertEqual(report["resized"]["animationName"], "none", report)
+        self.assertEqual(report["resized"]["opacity"], "1", report)
+        self.assertFalse(report["natural"]["popped"], report)
+        self.assertNotEqual(report["desktop"]["height"], report["natural"]["height"], report)
+        self.assertNotEqual(report["resized"]["inlineHeight"], report["desktop"]["inlineHeight"], report)
+        self.assertAlmostEqual(report["resized"]["height"], report["natural"]["height"], delta=1)
+        self.assertAlmostEqual(report["resized"]["quickTop"], report["natural"]["quickTop"], delta=1)
+        self.assertAlmostEqual(report["resized"]["documentHeight"], report["natural"]["documentHeight"], delta=1)
+
+    @unittest.skipUnless(shutil.which("node"), "Node.js is required")
+    @unittest.skipUnless(
+        os.environ.get("MATRIX_CHROMIUM")
+        and Path(os.environ.get("MATRIX_CHROMIUM", "")).is_file()
+        and os.access(os.environ.get("MATRIX_CHROMIUM", ""), os.X_OK),
+        "MATRIX_CHROMIUM browser is required",
+    )
+    def test_matrix_preview_stays_below_topbar_while_desktop_editors_scroll(self):
+        self.pair_browser()
+        body = self.client.get("/").get_data(as_text=True)
+        probe = r"""
+const port=process.argv[1],pagePath=process.argv[2];let endpoint;
+for(let attempt=0;attempt<50;attempt++){try{endpoint=await fetch(`http://127.0.0.1:${port}/json/new`,{method:'PUT'}).then(r=>r.json());break}catch(_){await new Promise(r=>setTimeout(r,100))}}
+if(!endpoint)throw new Error('Chromium DevTools endpoint unavailable');
+const socket=new WebSocket(endpoint.webSocketDebuggerUrl),pending=new Map();let nextId=1,loadResolve,loaded=new Promise(resolve=>loadResolve=resolve);
+socket.onmessage=event=>{const message=JSON.parse(event.data);if(message.id&&pending.has(message.id)){const request=pending.get(message.id);pending.delete(message.id);message.error?request.reject(new Error(JSON.stringify(message.error))):request.resolve(message.result)}else if(message.method==='Page.loadEventFired')loadResolve()};
+await new Promise((resolve,reject)=>{socket.onopen=resolve;socket.onerror=reject});
+const send=(method,params={})=>{const id=nextId++;socket.send(JSON.stringify({id,method,params}));return new Promise((resolve,reject)=>pending.set(id,{resolve,reject}))};
+const evaluate=async expression=>{const result=await send('Runtime.evaluate',{expression,returnByValue:true,awaitPromise:true});if(result.exceptionDetails)throw new Error(JSON.stringify(result.exceptionDetails));return result.result.value};
+try{
+ await send('Runtime.enable');await send('Page.enable');
+ loaded=new Promise(resolve=>loadResolve=resolve);await send('Page.navigate',{url:'file://'+pagePath});await Promise.race([loaded,new Promise((_,reject)=>setTimeout(()=>reject(new Error('load timeout')),5000))]);
+ const results=[];await evaluate(`document.documentElement.style.scrollBehavior='auto'`);
+ for(const [width,height] of [[1024,768],[1280,720],[1440,900]]){
+  await send('Emulation.setDeviceMetricsOverride',{width,height,deviceScaleFactor:1,mobile:false});
+  results.push(await evaluate(`(()=>{const main=document.querySelector('main'),topbar=document.querySelector('.topbar'),strip=document.querySelector('.preview-live'),canvas=document.querySelector('#matrix-preview'),hardware=document.querySelector('.quick-card'),save=document.querySelector('.sticky-save');const direct=strip?.parentElement?.classList.contains('preview-card');const controls=['#weather-location','#day-brightness','#media-upload','#max-paired-devices'],checks=[];for(const selector of controls){const control=document.querySelector(selector);control.scrollIntoView({block:'nearest'});control.focus();syncPreviewPopout();control.scrollIntoView({block:'nearest'});if(control.type==='text'){control.value='unsaved sticky draft';control.setSelectionRange(2,8)}else if(control.type==='number')control.value=selector==='#day-brightness'?'73':'7';const rect=control.getBoundingClientRect(),stripRect=strip?.getBoundingClientRect(),saveRect=save.getBoundingClientRect(),point=document.elementFromPoint(Math.max(rect.left+1,Math.min(rect.right-1,rect.left+rect.width/2)),Math.max(rect.top+1,Math.min(rect.bottom-1,rect.top+rect.height/2)));checks.push({selector,below:Boolean(stripRect)&&rect.top>=stripRect.bottom-1,above:rect.bottom<=saveRect.top+1,hit:point===control||control.contains(point),focused:document.activeElement===control,value:control.value,selection:control.type==='text'?[control.selectionStart,control.selectionEnd]:null,visible:Boolean(stripRect)&&stripRect.bottom>0&&stripRect.top<innerHeight});}scrollTo(0,document.documentElement.scrollHeight);syncPreviewPopout();const stripRect=strip?.getBoundingClientRect(),topRect=topbar.getBoundingClientRect(),mainRect=main.getBoundingClientRect(),canvasRect=canvas.getBoundingClientRect(),hardwareRect=hardware.getBoundingClientRect();return {width:innerWidth,height:innerHeight,direct,position:strip?getComputedStyle(strip).position:null,top:stripRect?.top,topbarBottom:topRect.bottom,stripHeight:stripRect?.height,stripWidth:stripRect?.width,mainWidth:mainRect.width,canvasWidth:canvasRect.width,canvasHeight:canvasRect.height,canvasIntrinsic:[canvas.width,canvas.height],visible:stripRect?.bottom>0&&stripRect?.top<innerHeight,overflow:document.documentElement.scrollWidth-document.documentElement.clientWidth,hardwareScrolled:hardwareRect.bottom<0,checks,counts:{canvas:document.querySelectorAll('#matrix-preview').length,module:document.querySelectorAll('#preview-module').length,frame:document.querySelectorAll('#preview-frame').length}}})()`));
+ }
+ const poll=await evaluate(`(()=>{const source=[...document.scripts].map(script=>script.textContent).join(' '),matches=source.match(/setTimeout\\(refreshDisplayFrame,100\\)/g)||[];return {matches:matches.length,timerDeclared:(source.match(/matrixFrameTimer/g)||[]).length>0}})()`);
+ console.log(JSON.stringify({results,poll}));
+}finally{socket.close()}
+"""
+        payload = self._run_dashboard_chromium_probe(body, probe)
+        report = payload["results"]
+        self.assertEqual(payload["poll"], {"matches": 1, "timerDeclared": True})
+        self.assertEqual([item["width"] for item in report], [1024, 1280, 1440])
+        for item in report:
+            self.assertTrue(item["direct"], item)
+            self.assertEqual(item["position"], "fixed", item)
+            self.assertAlmostEqual(item["top"], item["topbarBottom"], delta=1)
+            self.assertAlmostEqual(item["stripHeight"], 160, delta=1)
+            self.assertAlmostEqual(item["stripWidth"], item["mainWidth"], delta=1)
+            self.assertAlmostEqual(item["canvasWidth"], 256, delta=1)
+            self.assertAlmostEqual(item["canvasHeight"], 128, delta=1)
+            self.assertEqual(item["canvasIntrinsic"], [64, 32])
+            self.assertTrue(item["visible"], item)
+            self.assertLessEqual(item["overflow"], 1, item)
+            self.assertTrue(item["hardwareScrolled"], item)
+            self.assertEqual(item["counts"], {"canvas": 1, "module": 1, "frame": 1})
+            for check in item["checks"]:
+                self.assertTrue(check["below"], check)
+                self.assertTrue(check["above"], check)
+                self.assertTrue(check["hit"], check)
+                self.assertTrue(check["focused"], check)
+                self.assertTrue(check["visible"], check)
+        self.assertIn("Live physical output", body)
+        self.assertIn("/api/display-frame", body)
+
+
+    @unittest.skipUnless(shutil.which("node"), "Node.js is required")
+    @unittest.skipUnless(
+        os.environ.get("MATRIX_CHROMIUM")
+        and Path(os.environ.get("MATRIX_CHROMIUM", "")).is_file()
+        and os.access(os.environ.get("MATRIX_CHROMIUM", ""), os.X_OK),
+        "MATRIX_CHROMIUM browser is required",
+    )
+    def test_matrix_preview_remains_compact_reachable_and_sticky_across_responsive_matrix(self):
+        self.pair_browser()
+        body = self.client.get("/").get_data(as_text=True)
+        probe = r"""
+const port=process.argv[1],pagePath=process.argv[2];let endpoint;
+for(let attempt=0;attempt<50;attempt++){try{endpoint=await fetch(`http://127.0.0.1:${port}/json/new`,{method:'PUT'}).then(r=>r.json());break}catch(_){await new Promise(r=>setTimeout(r,100))}}
+if(!endpoint)throw new Error('Chromium DevTools endpoint unavailable');
+const socket=new WebSocket(endpoint.webSocketDebuggerUrl),pending=new Map();let nextId=1,loadResolve,loaded=new Promise(resolve=>loadResolve=resolve);
+socket.onmessage=event=>{const message=JSON.parse(event.data);if(message.id&&pending.has(message.id)){const request=pending.get(message.id);pending.delete(message.id);message.error?request.reject(new Error(JSON.stringify(message.error))):request.resolve(message.result)}else if(message.method==='Page.loadEventFired')loadResolve()};
+await new Promise((resolve,reject)=>{socket.onopen=resolve;socket.onerror=reject});
+const send=(method,params={})=>{const id=nextId++;socket.send(JSON.stringify({id,method,params}));return new Promise((resolve,reject)=>pending.set(id,{resolve,reject}))};
+const evaluate=async expression=>{const result=await send('Runtime.evaluate',{expression,returnByValue:true,awaitPromise:true});if(result.exceptionDetails)throw new Error(JSON.stringify(result.exceptionDetails));return result.result.value};
+const metrics=(width,height,dpr=1)=>send('Emulation.setDeviceMetricsOverride',{width,height,deviceScaleFactor:dpr,mobile:false,screenOrientation:{type:width>height?'landscapePrimary':'portraitPrimary',angle:width>height?90:0}});
+try{
+ await send('Runtime.enable');await send('Page.enable');loaded=new Promise(resolve=>loadResolve=resolve);await send('Page.navigate',{url:'file://'+pagePath});await Promise.race([loaded,new Promise((_,reject)=>setTimeout(()=>reject(new Error('load timeout')),5000))]);await evaluate(`document.documentElement.style.scrollBehavior='auto'`);
+ const states=[];
+ for(const [width,height,dpr] of [[320,568,1],[360,800,2],[390,844,3],[412,915,1],[768,1024,2],[820,1180,1],[1024,768,1],[1280,720,1],[1440,900,1],[844,390,2],[599,700,1],[600,700,1],[601,700,1],[899,700,1],[900,700,1],[901,700,1]]){
+  await metrics(width,height,dpr);states.push(await evaluate(`(()=>{const strip=document.querySelector('.preview-live'),canvas=document.querySelector('#matrix-preview'),meta=document.querySelector('.preview-meta'),save=document.querySelector('.sticky-save'),field=document.querySelector('#device-name');scrollTo(0,0);syncPreviewPopout();field.value='draft-'+innerWidth;field.focus();field.setSelectionRange(2,6);field.scrollIntoView({block:'center'});syncPreviewPopout();field.scrollIntoView({block:'nearest'});const stripRect=strip.getBoundingClientRect(),canvasRect=canvas.getBoundingClientRect(),fieldRect=field.getBoundingClientRect(),saveRect=save.getBoundingClientRect(),style=getComputedStyle(canvas);return {width:innerWidth,height:innerHeight,dpr:devicePixelRatio,position:getComputedStyle(strip).position,top:stripRect.top,stripHeight:stripRect.height,canvas:[canvasRect.width,canvasRect.height],intrinsic:[canvas.width,canvas.height],ratio:canvasRect.width/canvasRect.height,pixelated:['pixelated','crisp-edges'].includes(style.imageRendering),visible:stripRect.bottom>0&&stripRect.top<innerHeight,editingSpace:saveRect.top-stripRect.bottom,inside:stripRect.left>=-.5&&stripRect.right<=innerWidth+.5,overflow:document.documentElement.scrollWidth-document.documentElement.clientWidth,fieldBelow:fieldRect.top>=stripRect.bottom-1,fieldAbove:fieldRect.bottom<=saveRect.top+1,focused:document.activeElement===field,value:field.value,selection:[field.selectionStart,field.selectionEnd],metaReadable:meta.getBoundingClientRect().width>0&&meta.getBoundingClientRect().height>0}})()`));
+ }
+ await metrics(390,844);const before=await evaluate(`(()=>{const f=document.querySelector('#device-name');f.value='survives resize';f.focus();f.setSelectionRange(2,8);scrollTo(0,600);syncPreviewPopout();return {value:f.value,selection:[f.selectionStart,f.selectionEnd],focused:document.activeElement===f,scroll:scrollY}})()`);await metrics(390,500);const dynamic=await evaluate(`(()=>{const f=document.querySelector('#device-name'),s=document.querySelector('.preview-live').getBoundingClientRect(),c=document.querySelector('#matrix-preview').getBoundingClientRect();return {value:f.value,selection:[f.selectionStart,f.selectionEnd],focused:document.activeElement===f,scroll:scrollY,strip:s.height,canvas:[c.width,c.height],position:getComputedStyle(document.querySelector('.preview-live')).position}})()`);
+ await metrics(320,568);await send('Emulation.setPageScaleFactor',{pageScaleFactor:2});const zoom=await evaluate(`(()=>{scrollTo(0,0);const strip=document.querySelector('.preview-live').getBoundingClientRect(),initialViewport={top:visualViewport.offsetTop,bottom:visualViewport.offsetTop+visualViewport.height},previewVisible=strip.bottom>initialViewport.top&&strip.top<initialViewport.bottom,save=document.querySelector('.sticky-save'),field=document.querySelector('#max-paired-devices');field.scrollIntoView({block:'center'});field.focus();const r=field.getBoundingClientRect(),fieldViewport={top:visualViewport.offsetTop,bottom:visualViewport.offsetTop+visualViewport.height};const fieldVisible=r.top>=fieldViewport.top&&r.bottom<=fieldViewport.bottom;save.scrollIntoView({block:'end'});const saveRect=save.getBoundingClientRect(),saveViewport={top:visualViewport.offsetTop,bottom:visualViewport.offsetTop+visualViewport.height},saveVisible=saveRect.top<saveViewport.bottom&&saveRect.bottom>saveViewport.top;return {scale:visualViewport.scale,visible:previewVisible,reachable:fieldVisible,saveVisible}})()`);await send('Emulation.resetPageScaleFactor');
+ await send('Emulation.setEmulatedMedia',{media:'screen',features:[{name:'prefers-reduced-motion',value:'reduce'}]});const reduced=await evaluate(`({matches:matchMedia('(prefers-reduced-motion: reduce)').matches,position:getComputedStyle(document.querySelector('.preview-live')).position})`);
+ console.log(JSON.stringify({states,before,dynamic,zoom,reduced}));
+}finally{socket.close()}
+"""
+        report = self._run_dashboard_chromium_probe(body, probe, timeout=45)
+        self.assertEqual(len(report["states"]), 16)
+        for item in report["states"]:
+            self.assertEqual(item["position"], "fixed", item)
+            self.assertAlmostEqual(item["top"], 64, delta=1)
+            expected_height = 88 if item["height"] <= 500 else (112 if item["width"] <= 600 else (152 if item["width"] <= 900 else 160))
+            expected_canvas = [128, 64] if item["height"] <= 500 else ([160, 80] if item["width"] <= 600 else ([240, 120] if item["width"] <= 900 else [256, 128]))
+            self.assertAlmostEqual(item["stripHeight"], expected_height, delta=1, msg=item)
+            self.assertEqual([round(value) for value in item["canvas"]], expected_canvas, item)
+            self.assertEqual(item["intrinsic"], [64, 32])
+            self.assertAlmostEqual(item["ratio"], 2, places=2)
+            self.assertTrue(item["pixelated"], item)
+            self.assertTrue(item["visible"], item)
+            self.assertTrue(item["inside"], item)
+            self.assertLessEqual(item["overflow"], 1, item)
+            self.assertTrue(item["fieldBelow"], item)
+            self.assertTrue(item["fieldAbove"], item)
+            self.assertTrue(item["focused"], item)
+            self.assertTrue(item["metaReadable"], item)
+            if item["height"] <= 568:
+                self.assertGreaterEqual(item["editingSpace"], 160, item)
+        for key in ("value", "selection", "focused"):
+            self.assertEqual(report["before"][key], report["dynamic"][key])
+        self.assertGreaterEqual(report["before"]["scroll"], 600)
+        self.assertGreaterEqual(report["dynamic"]["scroll"], 600)
+        self.assertEqual(report["dynamic"]["strip"], 88)
+        self.assertEqual([round(value) for value in report["dynamic"]["canvas"]], [128, 64])
+        self.assertEqual(report["dynamic"]["position"], "fixed")
+        self.assertAlmostEqual(report["zoom"]["scale"], 2, places=2)
+        self.assertTrue(report["zoom"]["visible"])
+        self.assertTrue(report["zoom"]["reachable"])
+        self.assertTrue(report["zoom"]["saveVisible"])
+        self.assertEqual(report["reduced"], {"matches": True, "position": "fixed"})
+
     @unittest.skipUnless(shutil.which("node"), "Node.js is required")
     @unittest.skipUnless(
         os.environ.get("MATRIX_CHROMIUM")
