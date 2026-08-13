@@ -327,6 +327,16 @@ def advance_left_scroll(position, text_width, canvas_width, completed_loops, loo
 
 def left_scroll_positions(canvas_width, text_width, loops):
     """Yield every physical left-ticker position through natural loop exhaustion."""
+    yield from scroll_positions(canvas_width, text_width, loops, direction="left")
+
+
+def scroll_positions(canvas_width, text_width, loops, direction="left"):
+    """Yield every physical ticker position through natural loop exhaustion."""
+    if direction == "right":
+        for _ in range(loops):
+            yield from range(-text_width, canvas_width + 1)
+        return
+
     position = canvas_width
     completed_loops = 0
     while completed_loops < loops:
@@ -365,11 +375,15 @@ def run(matrix, config, duration=15, stop_event=None, module_config=None):
     if direction == "left":
         position = matrix.matrix.width
         text_width = None
+        positions = None
     else:
         measure_canvas = matrix.matrix.CreateFrameCanvas()
         matrix.clear(measure_canvas)
         text_width = matrix.draw_text(font, 0, y, foreground, text, canvas=measure_canvas)
-        position = -text_width
+        positions = iter(scroll_positions(
+            matrix.matrix.width, text_width, module_config.get("loops", 1), direction,
+        ))
+        position = next(positions)
 
     completed_loops = 0
     loop_limit = module_config.get("loops", 1)
@@ -391,12 +405,11 @@ def run(matrix, config, duration=15, stop_event=None, module_config=None):
             )
             loop_finished = completed_loops >= loop_limit
         else:
-            position += 1
-            if position > matrix.matrix.width:
-                completed_loops += 1
-                loop_finished = completed_loops >= loop_limit
-                if not loop_finished:
-                    position = -text_width
+            try:
+                position = next(positions)
+            except StopIteration:
+                completed_loops = loop_limit
+                loop_finished = True
         if _wait(stop_event, module_config["speed"]) or loop_finished:
             break
     return rendered

@@ -142,8 +142,8 @@ def _png_frame(image, delay_ms):
 
 
 def custom_text_preview_frames(matrix, module_config):
-    """Yield exact left-ticker capture frames using physical scroll positions."""
-    from modules.custom_text import left_scroll_positions
+    """Yield exact ticker capture frames using physical scroll positions."""
+    from modules.custom_text import scroll_positions
 
     font = matrix.font(module_config["font"])
     foreground = matrix.colour_rgb(module_config["colour"])
@@ -155,8 +155,9 @@ def custom_text_preview_frames(matrix, module_config):
         canvas=measure_canvas,
     )
     canvas = matrix.matrix.CreateFrameCanvas()
-    for position in left_scroll_positions(
+    for position in scroll_positions(
         matrix.width, text_width, module_config.get("loops", 1),
+        module_config.get("direction", "left"),
     ):
         matrix.fill(background.red, background.green, background.blue, canvas=canvas)
         matrix.draw_text(
