@@ -5,10 +5,12 @@ import gc
 import io
 import json
 import importlib
+import os
 import random
 import sys
 import tempfile
 import threading
+import time
 import types
 import unittest
 import weakref
@@ -266,6 +268,105 @@ class EditPreviewTests(unittest.TestCase):
         self.assertEqual(matrix.submissions, [])
         self.assertEqual(session.retained_frame_count, 0)
         self.assertIsNone(getattr(lava, "gi_frame"))
+        with self.assertRaisesRegex(
+            StopIteration, "explicit new session is required to restart",
+        ):
+            session.page()
+
+    def test_media_decode_cancel_closes_decoder_within_250_ms(self):
+        class RecordingMatrix(CaptureMatrix):
+            def __init__(self):
+                super().__init__()
+                self.submissions = []
+
+            def swap(self, canvas=None):
+                self.submissions.append(self.snapshot(canvas))
+                return super().swap(canvas)
+
+        class BlockedDecoder:
+            def __init__(self):
+                self.started = threading.Event()
+                self.stop_observed = threading.Event()
+                self.released = threading.Event()
+                self.close_calls = 0
+                self.read_fd, self.write_fd = os.pipe()
+                self.stop_event = None
+
+            def __call__(self, _path, _settings, *, stop_event=None):
+                self.stop_event = stop_event
+                return self
+
+            def __iter__(self):
+                return self
+
+            def __next__(self):
+                self.started.set()
+                while not self.released.wait(0.01):
+                    if self.stop_event is not None and self.stop_event.is_set():
+                        self.stop_observed.set()
+                        raise StopIteration
+                raise AssertionError("blocked decoder required emergency release")
+
+            def close(self):
+                self.close_calls += 1
+                os.close(self.read_fd)
+                os.close(self.write_fd)
+
+        matrix = RecordingMatrix()
+        decoder = BlockedDecoder()
+        cancelled = threading.Event()
+        result = {}
+        failure = []
+        session = PreviewSession(
+            edit_preview.media_preview_frames(
+                matrix, "blocked.mp4", 10,
+                settings={
+                    "x": 0, "y": 0, "width": 64, "height": 32,
+                    "keep_aspect": True, "video_fps": 20,
+                },
+                video_decoder=decoder,
+                stop_event=cancelled,
+            ),
+            stop_event=cancelled,
+        )
+
+        def page_in_background():
+            try:
+                result.update(session.page())
+            except BaseException as exc:
+                failure.append(exc)
+
+        page_thread = threading.Thread(
+            target=page_in_background, name="blocked-preview-page",
+        )
+        page_thread.start()
+        try:
+            self.assertTrue(decoder.started.wait(1), "media decode did not block")
+            started = time.monotonic()
+            session.cancel()
+            page_thread.join(0.25)
+            elapsed = time.monotonic() - started
+        finally:
+            decoder.released.set()
+            page_thread.join(1)
+
+        self.assertLess(elapsed, 0.25)
+        self.assertFalse(page_thread.is_alive(), "preview page did not settle within 250 ms")
+        self.assertTrue(cancelled.is_set())
+        self.assertTrue(decoder.stop_observed.is_set())
+        self.assertEqual(failure, [])
+        self.assertEqual(result["frames"], [])
+        self.assertTrue(result["complete"])
+        self.assertIsNone(result["next_token"])
+        self.assertEqual(matrix.submissions, [])
+        self.assertEqual(session.retained_frame_count, 0)
+        self.assertEqual(decoder.close_calls, 1)
+        for descriptor in (decoder.read_fd, decoder.write_fd):
+            with self.assertRaises(OSError):
+                os.fstat(descriptor)
+        self.assertNotIn(page_thread, threading.enumerate())
+        session.cancel()
+        self.assertEqual(decoder.close_calls, 1)
         with self.assertRaisesRegex(
             StopIteration, "explicit new session is required to restart",
         ):

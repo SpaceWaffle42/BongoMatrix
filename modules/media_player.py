@@ -65,20 +65,26 @@ def video_media_frames(
     completed = 0
     while loops == 0 or completed < loops:
         decoded_frame = False
-        for frame in frame_decoder():
-            decoded_frame = True
-            if stop_event is not None and stop_event.is_set():
-                return
-            elapsed = elapsed_delays
-            if monotonic is not None:
-                elapsed = max(elapsed, monotonic() - started)
-            if max_duration is not None and elapsed >= max_duration:
-                return
-            delay = frame_delay
-            if max_duration is not None:
-                delay = min(delay, max_duration - elapsed)
-            yield frame, delay
-            elapsed_delays += delay
+        decoder = iter(frame_decoder())
+        try:
+            for frame in decoder:
+                decoded_frame = True
+                if stop_event is not None and stop_event.is_set():
+                    return
+                elapsed = elapsed_delays
+                if monotonic is not None:
+                    elapsed = max(elapsed, monotonic() - started)
+                if max_duration is not None and elapsed >= max_duration:
+                    return
+                delay = frame_delay
+                if max_duration is not None:
+                    delay = min(delay, max_duration - elapsed)
+                yield frame, delay
+                elapsed_delays += delay
+        finally:
+            close = getattr(decoder, "close", None)
+            if close is not None:
+                close()
         if not decoded_frame:
             return
         completed += 1

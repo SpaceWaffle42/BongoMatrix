@@ -152,6 +152,7 @@ def static_media_frames(
 
 def media_preview_frames(
     matrix, filename, duration, settings=None, *, video_decoder=None,
+    stop_event=None,
 ):
     """Render the shared production animated-media timeline into PNG frames."""
     from PIL import Image, ImageSequence
@@ -175,9 +176,9 @@ def media_preview_frames(
         if video_decoder is None:
             raise ValueError("MP4 preview requires the production video decoder seam")
         timeline = video_media_frames(
-            lambda: video_decoder(path, settings),
+            lambda: video_decoder(path, settings, stop_event=stop_event),
             fps=settings.get("video_fps", 20), loops=0,
-            max_duration=duration,
+            stop_event=stop_event, max_duration=duration,
         )
     else:
         raise ValueError("animated preview media must be GIF or MP4")
@@ -404,7 +405,11 @@ class PreviewSession:
         self._current = []
         close = getattr(self._iterator, "close", None)
         if close is not None:
-            close()
+            try:
+                close()
+            except ValueError as error:
+                if str(error) != "generator already executing":
+                    raise
 
     def _next_frame(self):
         if self._lookahead is not None:
