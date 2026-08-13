@@ -110,14 +110,9 @@ Every scrolling-text module should display its calculated runtime in seconds, co
 
 Begin these after Priority 0 is clear. They improve existing editing, preview, media, and composition workflows without introducing an unrelated provider-backed module.
 
-### 1.1 Keep the Matrix preview sticky
+### ~~1.1 Keep the Matrix preview sticky~~ — Completed
 
-Keep the Matrix preview visible while the user scrolls through module controls, similar to the sticky navigation bar.
-
-- On desktop, use a full-width sticky strip directly beneath the navigation bar.
-- On mobile, keep a compact preview visible at all times rather than collapsing or disabling sticky behavior.
-- The user should be able to adjust positions, colours, tickers, icons, and other settings without losing sight of the preview.
-- The sticky behavior must not hide editor controls or prevent keyboard and touch interaction.
+**Completed 2026-08-13:** implemented as the original full preview at the top with the same live preview popping into a compact fixed strip only after scrolling beyond it. Responsive flow, focus, reduced motion, one 64×32 canvas, and one framebuffer polling lifecycle were tested in real Chromium. The exact artifact was independently approved, accepted on the physical Matrix, merged through MR !50, deployed, and verified against the live device.
 
 ### 1.2 Add Live and Edit Preview modes
 
