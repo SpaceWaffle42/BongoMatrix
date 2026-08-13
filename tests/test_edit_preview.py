@@ -93,6 +93,101 @@ class EditPreviewTests(unittest.TestCase):
         ):
             session.page(page["next_token"])
 
+    def test_cancel_between_pages_closes_iterator_and_invalidates_token(self):
+        class RecordingMatrix(CaptureMatrix):
+            def __init__(self):
+                super().__init__()
+                self.swaps = 0
+                self.submissions = []
+
+            def swap(self, canvas=None):
+                self.swaps += 1
+                self.submissions.append(self.snapshot(canvas))
+                return super().swap(canvas)
+
+        class CloseCountingIterator:
+            def __init__(self, iterator):
+                self.iterator = iterator
+                self.next_calls = 0
+                self.close_calls = 0
+
+            def __iter__(self):
+                return self
+
+            def __next__(self):
+                self.next_calls += 1
+                return next(self.iterator)
+
+            def close(self):
+                self.close_calls += 1
+                self.iterator.close()
+
+        candidate = copy.deepcopy(DEFAULT_CONFIG)
+        candidate["lava"].update({
+            "show_time": False,
+            "show_date": False,
+            "blur_radius": 0,
+            "blob_count": 2,
+        })
+        original_candidate = copy.deepcopy(candidate)
+        matrix = RecordingMatrix()
+        cancelled = threading.Event()
+        lava = edit_preview.continuous_lava_preview_frames(
+            matrix, candidate, {"kind": "built_in", "id": "fire_burst"},
+            stop_event=cancelled,
+        )
+        guarded = CloseCountingIterator(lava)
+        session = PreviewSession(guarded, stop_event=cancelled)
+        session.MAX_FRAMES = 2
+
+        with patch.object(
+            clock_lava, "render_lava_frame", wraps=clock_lava.render_lava_frame,
+        ) as render:
+            page = session.page()
+            token = page["next_token"]
+            before_cancel = {
+                "next_calls": guarded.next_calls,
+                "renders": render.call_count,
+                "swaps": matrix.swaps,
+                "submissions": [image.tobytes() for image in matrix.submissions],
+                "renderer": matrix.snapshot().tobytes(),
+            }
+
+            self.assertEqual(page["page"], 0)
+            self.assertEqual(len(page["frames"]), 2)
+            self.assertFalse(page["complete"])
+            self.assertIsNotNone(token)
+            self.assertEqual(session.retained_frame_count, 1)
+
+            session.cancel()
+            self.assertTrue(cancelled.is_set())
+            self.assertEqual(guarded.close_calls, 1)
+            self.assertEqual(session.retained_frame_count, 0)
+            self.assertIsNone(getattr(lava, "gi_frame"))
+
+            for stale_token in (token, None):
+                with self.subTest(token=stale_token):
+                    with self.assertRaisesRegex(
+                        StopIteration,
+                        "explicit new session is required to restart",
+                    ):
+                        session.page(stale_token)
+
+            session.cancel()
+            self.assertEqual(guarded.close_calls, 1)
+            self.assertEqual(
+                {
+                    "next_calls": guarded.next_calls,
+                    "renders": render.call_count,
+                    "swaps": matrix.swaps,
+                    "submissions": [image.tobytes() for image in matrix.submissions],
+                    "renderer": matrix.snapshot().tobytes(),
+                },
+                before_cancel,
+            )
+
+        self.assertEqual(candidate, original_candidate)
+
     def test_duplicate_disabled_and_missing_playlist_rows_choose_documented_duration(self):
         candidate = copy.deepcopy(DEFAULT_CONFIG)
         candidate["custom_modules"] = [

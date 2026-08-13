@@ -397,6 +397,8 @@ class PreviewSession:
         if self._complete:
             return
         self._complete = True
+        if self._stop_event is not None:
+            self._stop_event.set()
         self._token = None
         self._lookahead = None
         self._current = []
