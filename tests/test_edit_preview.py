@@ -3,19 +3,26 @@ import copy
 import gc
 import io
 import json
+import importlib
+import sys
+import tempfile
+import types
 import unittest
 import weakref
 from pathlib import Path
+from unittest.mock import Mock, patch
 
-from PIL import Image
+from PIL import Image, ImageSequence
 
 from config_store import DEFAULT_CONFIG, validate_config
+import frame_capture as frame_capture_module
 from edit_preview import (
     CaptureMatrix, PreviewSession, custom_text_preview_frames, preview_frames,
     static_announcement_preview_frames, static_media_frames,
 )
 from frame_capture import BdfFont, FrameCapture
 from modules.media_player import play_media
+import edit_preview
 
 
 class Colour:
@@ -26,6 +33,138 @@ class Colour:
 
 
 class EditPreviewTests(unittest.TestCase):
+    def test_media_timing_and_loops_complete_before_terminal_page(self):
+        frame_capture_patch = patch.object(frame_capture_module, "Image", Image)
+        frame_capture_patch.start()
+        self.addCleanup(frame_capture_patch.stop)
+
+        first = Image.new("RGB", (2, 2), "red")
+        second = Image.new("RGB", (2, 2), "blue")
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "timeline.gif"
+            first.save(
+                path, format="GIF", save_all=True, append_images=[second],
+                duration=[100, 200], loop=0,
+            )
+
+            fake_graphics = types.SimpleNamespace(
+                Color=lambda *rgb: types.SimpleNamespace(
+                    red=rgb[0], green=rgb[1], blue=rgb[2],
+                ),
+                Font=Mock,
+            )
+            fake_rgb = types.SimpleNamespace(
+                RGBMatrix=Mock,
+                RGBMatrixOptions=Mock,
+                graphics=fake_graphics,
+            )
+            previous = sys.modules.get("rgbmatrix")
+            sys.modules["rgbmatrix"] = fake_rgb
+            try:
+                framework = importlib.import_module("matrix_framework")
+            finally:
+                if previous is None:
+                    sys.modules.pop("rgbmatrix", None)
+                else:
+                    sys.modules["rgbmatrix"] = previous
+
+            class Canvas:
+                def SetImage(self, image, x, y):
+                    pass
+
+                def Clear(self):
+                    pass
+
+            class PhysicalMatrix(framework.Matrix):
+                def __init__(self):
+                    self.matrix = types.SimpleNamespace(width=64, height=32)
+                    self.canvas = Canvas()
+                    self._frame_capture = FrameCapture(64, 32)
+                    self._frame_capture.register(self.canvas)
+                    self.submissions = []
+
+                def _media_file(self, filename):
+                    return path
+
+                def swap(self, canvas=None):
+                    self.submissions.append(self._frame_capture.snapshot(self.canvas))
+                    return self.canvas
+
+            class AdvancingStop:
+                def __init__(self):
+                    self.elapsed = 0.0
+                    self.waits = []
+
+                def is_set(self):
+                    return False
+
+                def wait(self, delay):
+                    self.waits.append(delay)
+                    self.elapsed += delay
+                    return False
+
+            physical = PhysicalMatrix()
+            stop = AdvancingStop()
+            with patch.object(
+                framework.time, "monotonic", side_effect=lambda: stop.elapsed,
+            ), patch.object(
+                framework.Image, "open", side_effect=Image.open,
+            ), patch.object(
+                framework.ImageSequence, "Iterator", side_effect=ImageSequence.Iterator,
+            ):
+                self.assertTrue(
+                    play_media(
+                        physical, str(path), 0.32, stop_event=stop,
+                        settings={
+                            "x": 0, "y": 0, "width": 64, "height": 32,
+                            "keep_aspect": True, "gif_speed_percent": 200,
+                            "video_fps": 20,
+                        },
+                    )
+                )
+
+            session = PreviewSession(
+                edit_preview.media_preview_frames(
+                    CaptureMatrix(), str(path), 0.32,
+                    settings={
+                        "x": 0, "y": 0, "width": 64, "height": 32,
+                        "keep_aspect": True, "gif_speed_percent": 200,
+                        "video_fps": 20,
+                    },
+                )
+            )
+            session.MAX_FRAMES = 2
+            pages = []
+            token = None
+            while True:
+                page = session.page(token)
+                pages.append(page)
+                if page["complete"]:
+                    break
+                token = page["next_token"]
+
+        frames = [frame for page in pages for frame in page["frames"]]
+        preview_images = [
+            Image.open(io.BytesIO(base64.b64decode(frame["png"]))).copy()
+            for frame in frames
+        ]
+        self.assertEqual([page["page"] for page in pages], [0, 1, 2])
+        self.assertTrue(all(not page["complete"] for page in pages[:-1]))
+        self.assertTrue(pages[-1]["complete"])
+        self.assertIsNone(pages[-1]["next_token"])
+        self.assertEqual([frame["delay_ms"] for frame in frames], [50, 100, 50, 100, 20])
+        self.assertAlmostEqual(sum(stop.waits), 0.32)
+        self.assertEqual(
+            [image.tobytes() for image in preview_images],
+            [image.tobytes() for image in physical.submissions],
+        )
+        self.assertEqual(
+            [image.getpixel((0, 0)) for image in preview_images],
+            [(255, 0, 0), (0, 0, 255), (255, 0, 0), (0, 0, 255), (255, 0, 0)],
+        )
+        with self.assertRaises(StopIteration):
+            session.page()
+
     def test_capture_adapter_matches_physical_capture_for_64_by_32_primitives(self):
         font_path = Path(__file__).parents[1] / "resources" / "fonts" / "5x7.bdf"
         font = BdfFont(font_path)

@@ -127,6 +127,32 @@ def static_media_frames(filename, duration, settings=None):
     yield filename, max(0.0, float(duration)) * 1000, geometry
 
 
+def media_preview_frames(matrix, filename, duration, settings=None):
+    """Render the shared production GIF timeline into capture-only PNG frames."""
+    from PIL import Image, ImageSequence
+
+    from modules.media_player import gif_media_frames
+
+    settings = settings or {}
+    path = Path(filename)
+    if not path.is_absolute():
+        path = Path(__file__).parent / "resources" / "media" / path
+    playback_rate = settings.get("gif_speed_percent", 100) / 100.0
+    for image, delay in gif_media_frames(
+        path, loops=0, playback_rate=playback_rate, max_duration=duration,
+        image_open=Image.open, image_iterator=ImageSequence.Iterator,
+    ):
+        matrix.clear()
+        matrix.draw_image(
+            image,
+            x=settings.get("x", 0), y=settings.get("y", 0),
+            width=settings.get("width"), height=settings.get("height"),
+            keep_aspect=settings.get("keep_aspect", True),
+        )
+        yield _png_frame(matrix.snapshot(), round(delay * 1000, 9))
+        matrix.swap()
+
+
 def preview_frames(iterator):
     """Consume the same resumable frame iterator as physical wrappers."""
     yield from iterator

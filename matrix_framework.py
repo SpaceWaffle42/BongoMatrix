@@ -638,6 +638,9 @@ class Matrix:
         max_duration=None,
     ):
         """Display an animated GIF, optionally bounded or interruptible."""
+        from modules.media_player import gif_media_frames
+
+        # Validate before media lookup to preserve the public fail-fast contract.
         if (
             isinstance(playback_rate, bool)
             or not isinstance(playback_rate, (int, float))
@@ -645,55 +648,29 @@ class Matrix:
             or not 0.25 <= playback_rate <= 4.0
         ):
             raise ValueError("GIF playback rate must be between 0.25 and 4.0")
-        playback_rate = float(playback_rate)
         path = self._media_file(filename)
         if path is None:
             return False
 
-        gif = Image.open(path)
-        completed = 0
-        started = time.monotonic()
-        try:
-            while loops == 0 or completed < loops:
-                rendered_frame = False
-                for frame in ImageSequence.Iterator(gif):
-                    rendered_frame = True
-                    if stop_event is not None and stop_event.is_set():
-                        return True
-                    if max_duration is not None and time.monotonic() - started >= max_duration:
-                        return True
-                    self.clear()
-
-                    image = frame.copy()
-                    image = self._prepare_image(
-                        image, width=width, height=height, keep_aspect=keep_aspect
-                    )
-
-                    self.canvas.SetImage(image, x, y)
-                    self._frame_capture.set_image(self.canvas, image, x, y)
-                    self.swap()
-
-                    frame_delay = max(
-                        0.01, frame.info.get("duration", 100) / 1000.0 / playback_rate
-                    )
-                    if max_duration is not None:
-                        remaining = max_duration - (time.monotonic() - started)
-                        if remaining <= 0:
-                            return True
-                        frame_delay = min(frame_delay, remaining)
-                    if stop_event is not None:
-                        if stop_event.wait(frame_delay):
-                            return True
-                    else:
-                        time.sleep(frame_delay)
-
-                if not rendered_frame:
-                    return False
-                completed += 1
-
-            return True
-        finally:
-            gif.close()
+        shown = False
+        for image, frame_delay in gif_media_frames(
+            path, loops=loops, playback_rate=playback_rate, stop_event=stop_event,
+            max_duration=max_duration, monotonic=time.monotonic,
+            image_open=Image.open, image_iterator=ImageSequence.Iterator,
+        ):
+            self.clear()
+            self.draw_image(
+                image, x=x, y=y, width=width, height=height,
+                keep_aspect=keep_aspect,
+            )
+            self.swap()
+            shown = True
+            if stop_event is not None:
+                if stop_event.wait(frame_delay):
+                    return True
+            else:
+                time.sleep(frame_delay)
+        return shown or stop_event is not None and stop_event.is_set()
 
     def show_video(
         self,
