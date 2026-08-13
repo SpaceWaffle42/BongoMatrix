@@ -15,7 +15,9 @@ from frame_capture import BdfFont, FrameCapture
 
 
 class _Canvas:
-    pass
+    def __init__(self, width, height):
+        self.width = width
+        self.height = height
 
 
 class CaptureMatrix:
@@ -24,7 +26,7 @@ class CaptureMatrix:
     def __init__(self, width=64, height=32):
         self.width = int(width)
         self.height = int(height)
-        self.canvas = _Canvas()
+        self.canvas = _Canvas(self.width, self.height)
         self.matrix = SimpleNamespace(
             width=self.width, height=self.height, CreateFrameCanvas=self._new_canvas,
         )
@@ -32,7 +34,7 @@ class CaptureMatrix:
         self._capture.register(self.canvas)
 
     def _new_canvas(self):
-        canvas = _Canvas()
+        canvas = _Canvas(self.width, self.height)
         self._capture.register(canvas)
         return canvas
 
@@ -258,6 +260,38 @@ def custom_text_preview_frames(matrix, module_config):
         )
         yield _png_frame(matrix.snapshot(canvas), module_config["speed"] * 1000)
         canvas = matrix.swap(canvas)
+
+
+def _weather_preview_frames(matrix, iterator):
+    for canvas, delay in iterator:
+        yield _png_frame(matrix.snapshot(canvas), round(delay * 1000, 9))
+
+
+def weather_preview_frames(matrix, config, prepared, stop_event=None):
+    """Encode the shared prepared Open-Meteo physical frame iterator."""
+    from modules.weather_app import weather_frames
+
+    yield from _weather_preview_frames(
+        matrix, weather_frames(matrix, config, prepared, stop_event),
+    )
+
+
+def openweather_overview_preview_frames(matrix, config, prepared, stop_event=None):
+    """Encode the shared prepared OpenWeather overview frame iterator."""
+    from modules.openweather_overview import overview_frames
+
+    yield from _weather_preview_frames(
+        matrix, overview_frames(matrix, config, prepared, stop_event),
+    )
+
+
+def openweather_forecast_preview_frames(matrix, config, prepared, stop_event=None):
+    """Encode the shared prepared OpenWeather forecast frame iterator."""
+    from modules.openweather_forecast import forecast_frames
+
+    yield from _weather_preview_frames(
+        matrix, forecast_frames(matrix, config, prepared, stop_event),
+    )
 
 
 def static_announcement_preview_frames(matrix, announcement):

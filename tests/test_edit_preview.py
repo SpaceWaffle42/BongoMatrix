@@ -755,6 +755,195 @@ class EditPreviewTests(unittest.TestCase):
         self.assertEqual(matrix.shown, [(filename, None, settings)])
         self.assertEqual(stop_event.waits, [expected[0][1] / 1000])
 
+    def test_weather_variants_preserve_direction_loop_count_and_forecast_cards(self):
+        from modules.openweather_common import (
+            OpenWeatherForecastPeriod, OpenWeatherSnapshot,
+        )
+        from modules.openweather_forecast import PreparedForecast
+        from modules.openweather_overview import PreparedOverview
+        from modules.weather_app import WeatherSnapshot
+        from modules import openweather_forecast, openweather_overview, weather_app
+
+        class RecordingMatrix(CaptureMatrix):
+            def __init__(self):
+                super().__init__()
+                self.positions = []
+                self.labels = []
+                self.measurements = []
+                self.submissions = []
+
+            def colour(self, name):
+                colours = {
+                    "retro_soft_grey": "#dcd5d5", "black": "#000000",
+                    "vapor_pink": "#ff71ce", "vapor_cyan": "#01cdfe",
+                    "neon_yellow": "#ffb300", "retro_aqua": "#00ffff",
+                }
+                return self.colour_rgb(colours[name])
+
+            def draw_text_with_border(
+                self, font, x, y, fill, border, text, width=1, canvas=None,
+            ):
+                for dx in range(-width, width + 1):
+                    for dy in range(-width, width + 1):
+                        if dx or dy:
+                            self.draw_text(font, x + dx, y + dy, border, text, canvas=canvas)
+                self.labels.append(text)
+                return self.draw_text(font, x, y, fill, text, canvas=canvas)
+
+            def draw_text(self, font, x, y, colour, text, canvas=None, rotation=0):
+                result = super().draw_text(font, x, y, colour, text, canvas=canvas, rotation=rotation)
+                if x == -10000:
+                    self.measurements.append(result - x)
+                return result
+
+            def widget_scroll(
+                self, text, font, x, y, colour, canvas=None, step=1, wrap=True,
+            ):
+                self.positions.append(x)
+                text_end = self.draw_text(font, x, y, colour, text, canvas=canvas)
+                return x - step, text_end - x
+
+            def swap(self, canvas=None):
+                self.submissions.append(self.snapshot(canvas))
+                return super().swap(canvas)
+
+        class RecordingStop:
+            def __init__(self):
+                self.waits = []
+
+            def is_set(self):
+                return False
+
+            def wait(self, delay):
+                self.waits.append(delay)
+                return False
+
+        weather = WeatherSnapshot(
+            location="Hove", status="Clear", temperature=16, feels_like=15,
+            high=18, low=12, humidity=70,
+        )
+        current = OpenWeatherSnapshot(
+            location="Hove", status="Cloudy", temperature=17, feels_like=16,
+            high=19, low=13, humidity=68, icon_code="04d",
+        )
+        periods = tuple(
+            OpenWeatherForecastPeriod(
+                label=f"Tue {hour}:00", status=status, temperature=temperature,
+                feels_like=temperature - 1, high=temperature + 2,
+                low=temperature - 3, icon_code=icon_code,
+            )
+            for hour, status, temperature, icon_code in (
+                ("15", "Rain", 18, "10d"),
+                ("18", "Clear", 16, "01n"),
+            )
+        )
+        icon = Image.new("RGB", (20, 20), "blue")
+
+        class PreparedWeatherClient:
+            def fetch(self, *_args, **_kwargs):
+                return weather
+
+        cases = (
+            (
+                "weather", weather_app.run, edit_preview.weather_preview_frames,
+                {"weather": {"scroll_direction": "right", "scroll_speed": 0.075,
+                             "scroll_loops": 2}}, weather,
+                {"client": PreparedWeatherClient()},
+            ),
+            (
+                "overview", openweather_overview.run,
+                edit_preview.openweather_overview_preview_frames,
+                {"weather": {"location": "Hove"},
+                 "openweather_overview": {"scroll_direction": "left",
+                     "scroll_speed": 0.05, "scroll_loops": 2}},
+                PreparedOverview(weather=current, icon=icon), {"prepared": PreparedOverview(weather=current, icon=icon)},
+            ),
+            (
+                "forecast", openweather_forecast.run,
+                edit_preview.openweather_forecast_preview_frames,
+                {"weather": {"location": "Hove"},
+                 "openweather_forecast": {"scroll_direction": "right",
+                     "scroll_speed": 0.025, "scroll_loops": 2}},
+                PreparedForecast(
+                    periods=periods,
+                    icons={period.icon_code: icon for period in periods},
+                ),
+                {"prepared": PreparedForecast(
+                    periods=periods,
+                    icons={period.icon_code: icon for period in periods},
+                )},
+            ),
+        )
+
+        for name, physical_run, preview_factory, config, prepared, physical_options in cases:
+            with self.subTest(variant=name):
+                physical = RecordingMatrix()
+                stop = RecordingStop()
+                self.assertTrue(physical_run(
+                    physical, config, duration=999, stop_event=stop,
+                    **physical_options,
+                ))
+
+                preview = RecordingMatrix()
+                session = PreviewSession(preview_factory(preview, config, prepared))
+                session.MAX_FRAMES = 7
+                pages = []
+                token = None
+                while True:
+                    page = session.page(token)
+                    pages.append(page)
+                    if page["complete"]:
+                        break
+                    token = page["next_token"]
+
+                frames = [frame for page in pages for frame in page["frames"]]
+                preview_images = [
+                    Image.open(io.BytesIO(base64.b64decode(frame["png"]))).copy()
+                    for frame in frames
+                ]
+                direction = config[
+                    "weather" if name == "weather" else f"openweather_{name}"
+                ]["scroll_direction"]
+                loops = config[
+                    "weather" if name == "weather" else f"openweather_{name}"
+                ]["scroll_loops"]
+                expected_positions = []
+                for text_width in preview.measurements:
+                    one_loop = (
+                        list(range(-text_width, preview.width + 1))
+                        if direction == "right"
+                        else list(range(preview.width, -text_width - 1, -1))
+                    )
+                    expected_positions.extend(one_loop * loops)
+
+                self.assertEqual(preview.positions, expected_positions)
+                self.assertEqual(physical.positions, expected_positions)
+                self.assertEqual(len(frames), len(expected_positions))
+                self.assertEqual(
+                    [image.tobytes() for image in preview_images],
+                    [image.tobytes() for image in physical.submissions],
+                )
+                self.assertEqual(
+                    [frame["delay_ms"] for frame in frames],
+                    [delay * 1000 for delay in stop.waits],
+                )
+                self.assertTrue(pages[-1]["complete"])
+                self.assertIsNone(pages[-1]["next_token"])
+                self.assertTrue(all(not page["complete"] for page in pages[:-1]))
+                if name == "forecast":
+                    rendered_labels = [
+                        label for label in physical.labels if label.startswith("Tue ")
+                    ]
+                    expected_labels = []
+                    for period, text_width in zip(periods, preview.measurements):
+                        card_frames = (preview.width + text_width + 1) * loops
+                        expected_labels.extend([period.label] * card_frames)
+                    self.assertEqual(rendered_labels, expected_labels)
+
+        self.assertEqual(weather_app.run.__defaults__, (20, None, None))
+        self.assertEqual(openweather_overview.run.__defaults__, (20, None, None, None, None))
+        self.assertEqual(openweather_forecast.run.__defaults__, (30, None, None, None, None))
+
     def test_static_hold_delay_is_clipped_to_invocation_deadline(self):
         class Clock:
             def __init__(self):
