@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import base64
+import copy
 import io
 import json
 import math
@@ -43,6 +44,12 @@ class CaptureMatrix:
         return SimpleNamespace(
             red=int(value[1:3], 16), green=int(value[3:5], 16), blue=int(value[5:7], 16),
         )
+
+    @staticmethod
+    def colour(name):
+        from module_options import COLOUR_HEX
+
+        return CaptureMatrix.colour_rgb(COLOUR_HEX[name])
 
     @staticmethod
     def font(name):
@@ -220,6 +227,42 @@ def lava_preview_frames(matrix, config):
         canvas = matrix.swap(canvas)
 
 
+def continuous_lava_preview_frames(matrix, config, selected_palette, stop_event=None):
+    """Yield continuous physical Lava frames for one inspected palette."""
+    from modules import clock_lava
+
+    lava = copy.deepcopy(config["lava"])
+    kind = selected_palette["kind"]
+    palette_id = selected_palette["id"]
+    lava["custom_enabled"] = False
+    if kind == "built_in":
+        lava["enabled_palettes"] = [palette_id]
+        for palette in lava.get("custom_palettes", []):
+            palette["enabled"] = False
+    elif kind == "custom":
+        lava["enabled_palettes"] = []
+        matched = False
+        for palette in lava.get("custom_palettes", []):
+            palette["enabled"] = palette["id"] == palette_id
+            if palette["enabled"]:
+                palette["colours"] = copy.deepcopy(selected_palette["colours"])
+                matched = True
+        if not matched:
+            raise ValueError("selected custom Lava palette is not in the candidate")
+    else:
+        raise ValueError("selected Lava palette kind is invalid")
+
+    state = clock_lava.prepare_lava_frame_state(matrix, lava)
+    canvas = matrix.matrix.CreateFrameCanvas()
+    temp_canvas = matrix.matrix.CreateFrameCanvas()
+    while not (stop_event and stop_event.is_set()):
+        clock_lava.render_lava_frame(matrix, state, canvas, temp_canvas)
+        if stop_event and stop_event.is_set():
+            return
+        yield _png_frame(matrix.snapshot(canvas), clock_lava.FRAME_DELAY * 1000)
+        canvas = matrix.swap(canvas)
+
+
 def _png_frame(image, delay_ms):
     output = io.BytesIO()
     image.save(output, format="PNG")
@@ -347,6 +390,18 @@ class PreviewSession:
         if not self._complete:
             raise RuntimeError("a finite cycle can restart only after its terminal page")
         return type(self)(iterator_factory())
+
+    def cancel(self):
+        """Invalidate paging and close the iterator without publishing lookahead."""
+        if self._complete:
+            return
+        self._complete = True
+        self._token = None
+        self._lookahead = None
+        self._current = []
+        close = getattr(self._iterator, "close", None)
+        if close is not None:
+            close()
 
     def _next_frame(self):
         if self._lookahead is not None:

@@ -5,6 +5,7 @@ import gc
 import io
 import json
 import importlib
+import random
 import sys
 import tempfile
 import types
@@ -78,6 +79,86 @@ class EditPreviewTests(unittest.TestCase):
         self.assertTrue(candidate["playlist"][1]["enabled"])
         self.assertTrue(candidate["playlist"][2]["enabled"])
         self.assertFalse(candidate["playlist"][-1]["enabled"])
+
+    def test_lava_preview_pages_only_selected_palette_until_cancelled(self):
+        class FixedDateTime(datetime.datetime):
+            @classmethod
+            def now(cls, tz=None):
+                return cls(2030, 1, 15, 9, 30, tzinfo=tz)
+
+        cases = (
+            (
+                "disabled built-in",
+                {"kind": "built_in", "id": "fire_burst"},
+                {"#000000", "#ff0000", "#ffff00"},
+            ),
+            (
+                "disabled custom with edited colours",
+                {
+                    "kind": "custom", "id": "palette_inspected",
+                    "colours": ["#102030", "#405060", "#90a0b0"],
+                },
+                {"#102030", "#405060", "#90a0b0"},
+            ),
+        )
+        for label, descriptor, expected_colours in cases:
+            with self.subTest(case=label):
+                candidate = copy.deepcopy(DEFAULT_CONFIG)
+                candidate["lava"].update({
+                    "enabled_palettes": ["ocean_wave"],
+                    "custom_enabled": False,
+                    "custom_palettes": [{
+                        "id": "palette_inspected", "name": "Inspected",
+                        "colours": ["#102030", "#405060", "#90a0b0"],
+                        "enabled": False,
+                    }],
+                    "blur_radius": 0,
+                    "show_time": False,
+                    "show_date": False,
+                    "blob_count": 3,
+                    "blob_speed": 0.5,
+                })
+                original = copy.deepcopy(candidate)
+
+                with patch.object(frame_capture_module, "Image", Image), \
+                     patch("modules.clock_lava.datetime.datetime", FixedDateTime), \
+                     patch("modules.clock_lava.random.uniform", side_effect=random.Random(17).uniform):
+                    iterator = edit_preview.continuous_lava_preview_frames(
+                        CaptureMatrix(), candidate, descriptor,
+                    )
+                    session = PreviewSession(iterator)
+                    session.MAX_FRAMES = 2
+                    first = session.page()
+                    second = session.page(first["next_token"])
+
+                pages = (first, second)
+                frames = [frame for page in pages for frame in page["frames"]]
+                self.assertEqual([page["page"] for page in pages], [0, 1])
+                self.assertTrue(all(not page["complete"] for page in pages))
+                self.assertTrue(all(page["next_token"] for page in pages))
+                self.assertEqual([frame["delay_ms"] for frame in frames], [30] * 4)
+                decoded = [
+                    Image.open(io.BytesIO(base64.b64decode(frame["png"]))).convert("RGB")
+                    for frame in frames
+                ]
+                self.assertTrue(all(image.size == (64, 32) for image in decoded))
+                self.assertEqual(len({image.tobytes() for image in decoded}), len(decoded))
+                observed = {
+                    "#%02x%02x%02x" % image.getpixel((x, y))
+                    for image in decoded
+                    for y in range(image.height)
+                    for x in range(image.width)
+                }
+                self.assertTrue(observed <= expected_colours)
+                self.assertGreaterEqual(len(observed), 2)
+                self.assertEqual(candidate, original)
+
+                token = second["next_token"]
+                session.cancel()
+                with self.assertRaises(StopIteration):
+                    session.page(token)
+                self.assertIsNone(getattr(iterator, "gi_frame"))
+                self.assertEqual(session.retained_frame_count, 0)
 
     def test_lava_playlist_duration_and_default_preserve_physical_wrapper_semantics(self):
         class FixedDateTime(datetime.datetime):
