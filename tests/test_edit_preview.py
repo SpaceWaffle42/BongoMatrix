@@ -35,6 +35,50 @@ class Colour:
 
 
 class EditPreviewTests(unittest.TestCase):
+    def test_duplicate_disabled_and_missing_playlist_rows_choose_documented_duration(self):
+        candidate = copy.deepcopy(DEFAULT_CONFIG)
+        candidate["custom_modules"] = [
+            {"id": "custom_simple", "type": "text_scroll"},
+            {"id": "custom_canvas", "type": "advanced_canvas"},
+        ]
+        candidate["playlist"] = [
+            {"module": "weather", "duration": 91, "enabled": False},
+            {"module": "weather", "duration": 0, "enabled": True},
+            {"module": "weather", "duration": 92, "enabled": True},
+            {"module": "clock_lava", "duration": 93, "enabled": False},
+            {"module": "custom_simple", "duration": 7, "enabled": True},
+            {"module": "custom_simple", "duration": 8, "enabled": True},
+            {"module": "announcement_board", "duration": 9, "enabled": True},
+            {"module": "media:example.gif", "duration": 10, "enabled": False},
+        ]
+        original = copy.deepcopy(candidate)
+
+        expected = {
+            # First enabled duplicate wins and zero remains a real physical duration.
+            "weather": 0,
+            "custom_simple": 7,
+            "announcement_board": 9,
+            # Disabled-only and missing rows use current physical module defaults.
+            "clock_lava": 300,
+            "openweather_overview": 20,
+            "openweather_forecast": 30,
+            "custom_canvas": 15,
+            "splash": 8,
+            "sleep": 60,
+            "media:example.gif": 15,
+        }
+        for module_name, duration in expected.items():
+            with self.subTest(module=module_name):
+                self.assertEqual(
+                    edit_preview.preview_duration(candidate, module_name), duration,
+                )
+
+        self.assertEqual(candidate, original)
+        self.assertFalse(candidate["playlist"][0]["enabled"])
+        self.assertTrue(candidate["playlist"][1]["enabled"])
+        self.assertTrue(candidate["playlist"][2]["enabled"])
+        self.assertFalse(candidate["playlist"][-1]["enabled"])
+
     def test_lava_playlist_duration_and_default_preserve_physical_wrapper_semantics(self):
         class FixedDateTime(datetime.datetime):
             @classmethod

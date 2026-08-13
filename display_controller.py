@@ -23,6 +23,26 @@ MODULES = {
     "sleep": "modules.sleep_screen",
 }
 
+# One physical invocation when no enabled playlist row supplies a duration.
+# These preserve the existing module wrapper defaults and dispatcher defaults.
+MODULE_DEFAULT_DURATIONS = {
+    "announcement_board": 15,
+    "clock_lava": 300,
+    "weather": 20,
+    "openweather_overview": 20,
+    "openweather_forecast": 30,
+    "splash": 8,
+    "sleep": 60,
+}
+ONE_OFF_PREVIEW_DURATION = 15
+
+
+def invocation_default_duration(module_name):
+    """Return the current physical dispatcher/module invocation default."""
+    if module_name.startswith("media:"):
+        return ONE_OFF_PREVIEW_DURATION
+    return MODULE_DEFAULT_DURATIONS.get(module_name, ONE_OFF_PREVIEW_DURATION)
+
 
 def custom_module(config, module_name):
     return next(
@@ -544,12 +564,14 @@ class DisplayController:
                 continue
             media_preview = self._take_media_preview()
             if media_preview:
-                self._execute_media(media_preview, 15)
+                self._execute_media(
+                    media_preview, invocation_default_duration(f"media:{media_preview}")
+                )
                 self._mark_scheduler_healthy()
                 continue
             preview = self._take_preview()
             if preview:
-                self._execute(preview, config, 15)
+                self._execute(preview, config, invocation_default_duration(preview))
                 self._mark_scheduler_healthy()
                 continue
 
@@ -568,7 +590,7 @@ class DisplayController:
                     continue
                 self.matrix.set_brightness(brightness)
             if not active:
-                self._execute("sleep", config, 60)
+                self._execute("sleep", config, invocation_default_duration("sleep"))
                 self._mark_scheduler_healthy()
                 continue
 
@@ -595,13 +617,18 @@ class DisplayController:
                 media_preview = self._take_media_preview()
                 if media_preview:
                     cycle_rendered = bool(
-                        self._execute_media(media_preview, 15)
+                        self._execute_media(
+                            media_preview,
+                            invocation_default_duration(f"media:{media_preview}"),
+                        )
                     ) or cycle_rendered
                     break
                 preview = self._take_preview()
                 if preview:
                     cycle_rendered = bool(
-                        self._execute(preview, config, 15)
+                        self._execute(
+                            preview, config, invocation_default_duration(preview)
+                        )
                     ) or cycle_rendered
                     break
                 cycle_rendered = bool(

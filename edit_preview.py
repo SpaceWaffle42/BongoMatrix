@@ -191,12 +191,16 @@ def preview_frames(iterator):
     yield from iterator
 
 
-def preview_duration(config, module_name, default=300):
-    """Resolve one invocation from the first enabled playlist match."""
+def preview_duration(config, module_name, default=None):
+    """Resolve the first enabled playlist match or its physical default."""
     for item in config.get("playlist", []):
         if item.get("enabled") and item.get("module") == module_name:
             return item["duration"]
-    return default
+    if default is not None:
+        return default
+    from display_controller import invocation_default_duration
+
+    return invocation_default_duration(module_name)
 
 
 def lava_preview_frames(matrix, config):
