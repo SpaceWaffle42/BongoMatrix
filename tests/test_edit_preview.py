@@ -12,7 +12,7 @@ from PIL import Image
 from config_store import DEFAULT_CONFIG, validate_config
 from edit_preview import (
     CaptureMatrix, PreviewSession, custom_text_preview_frames, preview_frames,
-    static_media_frames,
+    static_announcement_preview_frames, static_media_frames,
 )
 from frame_capture import BdfFont, FrameCapture
 from modules.media_player import play_media
@@ -103,6 +103,104 @@ class EditPreviewTests(unittest.TestCase):
         self.assertTrue(rendered)
         self.assertEqual(matrix.shown, [(filename, None, settings)])
         self.assertEqual(stop_event.waits, [expected[0][1] / 1000])
+
+    def test_announcement_transition_and_hold_complete_before_terminal_page(self):
+        import modules.announcement_board as announcement_board
+
+        class RecordingCaptureMatrix(CaptureMatrix):
+            def __init__(self):
+                super().__init__()
+                self.submissions = []
+
+            def swap(self, canvas=None):
+                self.submissions.append(self.snapshot(canvas))
+                return super().swap(canvas)
+
+        class RecordingStopEvent:
+            def __init__(self):
+                self.waits = []
+
+            def is_set(self):
+                return False
+
+            def wait(self, delay):
+                self.waits.append(delay)
+                return False
+
+        announcement = {
+            "id": "announcement_preview_fade",
+            "enabled": True,
+            "name": "Preview fade",
+            "layout": "text_notice",
+            "headline": "Welcome",
+            "message": "Front desk closes at 5 PM",
+            "media": None,
+            "schedule": {
+                "start_date": "2030-01-15",
+                "end_date": "2030-01-15",
+                "start_time": "09:00",
+                "end_time": "17:00",
+                "days": [0, 1, 2, 3, 4, 5, 6],
+            },
+            "style": {
+                "foreground": "#ffffff",
+                "background": "#001122",
+                "font": "5x7",
+                "alignment": "left",
+                "border": "none",
+                "border_colour": "#ffffff",
+            },
+            "timing": {"mode": "static", "duration_seconds": 1.2},
+            "transition": {"type": "fade", "duration_seconds": 0.4},
+        }
+        validated = copy.deepcopy(DEFAULT_CONFIG)
+        validated["announcement_board"]["announcements"] = [announcement]
+        validate_config(validated, enforce_save_bounds=True)
+        announcement = validated["announcement_board"]["announcements"][0]
+
+        physical = RecordingCaptureMatrix()
+        stop_event = RecordingStopEvent()
+        self.assertTrue(
+            announcement_board.run_preview(physical, announcement, stop_event=stop_event)
+        )
+
+        preview_matrix = CaptureMatrix()
+        session = PreviewSession(
+            static_announcement_preview_frames(preview_matrix, announcement)
+        )
+        session.MAX_FRAMES = int(4)
+        transition_page = session.page()
+        self.assertFalse(transition_page["complete"])
+        self.assertIsNotNone(transition_page["next_token"])
+        terminal_page = session.page(transition_page["next_token"])
+
+        pages = [transition_page, terminal_page]
+        frames = [frame for page in pages for frame in page["frames"]]
+        preview_images = [
+            Image.open(io.BytesIO(base64.b64decode(frame["png"]))).copy()
+            for frame in frames
+        ]
+        self.assertEqual([len(page["frames"]) for page in pages], [4, 1])
+        self.assertTrue(terminal_page["complete"])
+        self.assertIsNone(terminal_page["next_token"])
+        self.assertEqual([page["page"] for page in pages], [0, 1])
+        self.assertTrue(all(len(page["frames"]) <= session.MAX_FRAMES for page in pages))
+        self.assertEqual(
+            [image.tobytes() for image in preview_images],
+            [image.tobytes() for image in physical.submissions],
+        )
+        self.assertEqual(
+            [frame["delay_ms"] for frame in frames],
+            [delay * 1000 for delay in stop_event.waits],
+        )
+        self.assertEqual([frame["delay_ms"] for frame in frames], [100, 100, 100, 100, 1200])
+        self.assertEqual(sum(frame["delay_ms"] for frame in frames), 1600)
+        self.assertEqual(
+            preview_images[-1].tobytes(), preview_images[-2].tobytes(),
+            "the single hold frame must retain the completed transition image",
+        )
+        with self.assertRaises(StopIteration):
+            session.page()
 
     def test_long_left_ticker_pages_complete_every_configured_loop_and_reset(self):
         options = {

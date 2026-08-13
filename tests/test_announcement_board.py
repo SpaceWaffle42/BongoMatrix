@@ -691,7 +691,7 @@ class AnnouncementBoardTests(unittest.TestCase):
             [call.args[3].red for call in matrix.draw_text.call_args_list],
             [64, 128, 191, 255],
         )
-        self.assertEqual(matrix.swap.call_count, 4)
+        self.assertEqual(matrix.swap.call_count, 5)
         self.assertEqual(
             [call.args[0] for call in stop.wait.call_args_list],
             [0.1, 0.1, 0.1, 0.1, 8],

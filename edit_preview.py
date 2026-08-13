@@ -168,6 +168,14 @@ def custom_text_preview_frames(matrix, module_config):
         canvas = matrix.swap(canvas)
 
 
+def static_announcement_preview_frames(matrix, announcement):
+    """Encode the shared physical static-announcement frame sequence."""
+    from modules.announcement_board import static_announcement_frames
+
+    for canvas, delay_ms in static_announcement_frames(matrix, announcement):
+        yield _png_frame(matrix.snapshot(canvas), delay_ms)
+
+
 class PreviewSession:
     """Pull one finite iterator in bounded pages without retaining frame history."""
 

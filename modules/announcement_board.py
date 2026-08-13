@@ -449,6 +449,52 @@ def _render_fade(matrix, canvas, announcement, stop_event, media_frame=None):
     return canvas, False, submitted
 
 
+def static_announcement_frames(matrix, announcement, stop_event=None):
+    """Yield rendered fade frames and one final static hold frame for text notices."""
+    transition_delay_ms = announcement["transition"]["duration_seconds"] * 1000 / 4
+    canvas = None
+    for step in range(1, 5):
+        if stop_event is not None and stop_event.is_set():
+            return
+        factor = step / 4
+        faded = {
+            **announcement,
+            "style": {
+                **announcement["style"],
+                "foreground": _scaled_colour(announcement["style"]["foreground"], factor),
+                "background": _scaled_colour(announcement["style"]["background"], factor),
+                "border_colour": _scaled_colour(
+                    announcement["style"]["border_colour"], factor,
+                ),
+            },
+        }
+        canvas = matrix.matrix.CreateFrameCanvas()
+        _render_static_layout(matrix, canvas, faded, stop_event=stop_event)
+        if stop_event is not None and stop_event.is_set():
+            return
+        yield canvas, transition_delay_ms
+
+    # The completed transition canvas is submitted once more as the sole hold
+    # frame; its hold delay represents the configured static duration.
+    yield canvas, announcement["timing"]["duration_seconds"] * 1000
+
+
+def _render_static_announcement_frames(matrix, announcement, stop_event):
+    submitted = False
+    canvas = None
+    for canvas, delay_ms in static_announcement_frames(matrix, announcement, stop_event):
+        canvas = matrix.swap(canvas)
+        submitted = True
+        delay = delay_ms / 1000
+        if stop_event is not None:
+            if stop_event.wait(delay):
+                return canvas, True, submitted
+        else:
+            time.sleep(delay)
+    interrupted = stop_event is not None and stop_event.is_set()
+    return canvas, interrupted, submitted
+
+
 def _render_slide(matrix, canvas, announcement, stop_event, media_frame=None):
     delay = announcement["transition"]["duration_seconds"] / 4
     direction = announcement["transition"]["direction"]
@@ -579,6 +625,17 @@ def _run_announcements(matrix, announcements, stop_event=None, eligibility=None)
             if interrupted:
                 break
         else:
+            if (
+                announcement["layout"] == "text_notice"
+                and announcement["transition"]["type"] == "fade"
+            ):
+                canvas, interrupted, submitted = _render_static_announcement_frames(
+                    matrix, announcement, stop_event,
+                )
+                rendered = rendered or submitted
+                if interrupted:
+                    break
+                continue
             if announcement["transition"]["type"] == "fade":
                 canvas, interrupted, submitted = _render_fade(
                     matrix, canvas, announcement, stop_event, media_frame,
