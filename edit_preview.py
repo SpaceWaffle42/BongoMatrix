@@ -662,6 +662,8 @@ class PreviewSession:
         self._iterator_closed = False
         self._on_close = on_close
         self._on_activity = on_activity
+        self._state_lock = threading.Lock()
+        self._page_in_progress = False
 
     @property
     def retained_frame_count(self):
@@ -675,14 +677,15 @@ class PreviewSession:
 
     def cancel(self):
         """Invalidate paging and close the iterator without publishing lookahead."""
-        if self._complete:
-            return
-        self._complete = True
-        if self._stop_event is not None:
-            self._stop_event.set()
-        self._token = None
-        self._lookahead = None
-        self._current = []
+        with self._state_lock:
+            if self._complete:
+                return
+            self._complete = True
+            if self._stop_event is not None:
+                self._stop_event.set()
+            self._token = None
+            self._lookahead = None
+            self._current = []
         self._close_iterator()
 
     def _close_iterator(self):
@@ -719,14 +722,34 @@ class PreviewSession:
         }
 
     def page(self, token=None):
-        if self._complete:
-            raise StopIteration("an explicit new session is required to restart")
-        if self._stop_event is not None and self._stop_event.is_set():
-            return self._cancelled_page(self._page + 1)
-        if self._page >= 0 and token != self._token:
-            raise ValueError("invalid or already consumed continuation token")
+        with self._state_lock:
+            if self._complete:
+                raise StopIteration("an explicit new session is required to restart")
+            if self._stop_event is not None and self._stop_event.is_set():
+                cancelled_page = self._page + 1
+            else:
+                cancelled_page = None
+            if cancelled_page is None and (
+                self._page_in_progress or (self._page >= 0 and token != self._token)
+            ):
+                raise ValueError("invalid or already consumed continuation token")
+            if cancelled_page is None:
+                # Claim and consume the token before iterator work.  The lifecycle
+                # lock is released immediately so cancellation can still signal a
+                # decoder blocked by the winning page operation.
+                self._page_in_progress = True
+                self._token = None
+                self._page += 1
+        if cancelled_page is not None:
+            return self._cancelled_page(cancelled_page)
 
-        self._page += 1
+        try:
+            return self._page_after_claim()
+        finally:
+            with self._state_lock:
+                self._page_in_progress = False
+
+    def _page_after_claim(self):
         self._current = []
         exhausted = False
         while len(self._current) < self.MAX_FRAMES:

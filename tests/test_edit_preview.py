@@ -39,6 +39,102 @@ class Colour:
 
 
 class EditPreviewTests(unittest.TestCase):
+    def test_simultaneous_page_requests_allow_exactly_one_token_claim(self):
+        class CoordinatedIterator:
+            def __init__(self):
+                self.calls = 0
+                self.active = 0
+                self.max_active = 0
+                self.lock = threading.Lock()
+                self.continuation_entered = threading.Event()
+                self.release_continuation = threading.Event()
+
+            def __iter__(self):
+                return self
+
+            def __next__(self):
+                with self.lock:
+                    self.calls += 1
+                    call = self.calls
+                    self.active += 1
+                    self.max_active = max(self.max_active, self.active)
+                try:
+                    # Page zero consumes call 1 and retains call 2 as lookahead.
+                    # The first continuation caller consumes that lookahead, then
+                    # pauses on call 3 so its simultaneous peer can try the token.
+                    if call == 3:
+                        self.continuation_entered.set()
+                        if not self.release_continuation.wait(2):
+                            raise AssertionError("continuation barrier was not released")
+                    return {"png": f"frame-{call}", "delay_ms": call}
+                finally:
+                    with self.lock:
+                        self.active -= 1
+
+        iterator = CoordinatedIterator()
+        session = PreviewSession(iterator)
+        session.MAX_FRAMES = 1
+        first = session.page()
+        token = first["next_token"]
+        self.assertEqual(first["frames"], [{"png": "frame-1", "delay_ms": 1}])
+
+        launch = threading.Barrier(3)
+        outcome_before_release = threading.Event()
+        results = []
+        failures = []
+
+        def request_page():
+            launch.wait()
+            try:
+                results.append(session.page(token))
+            except BaseException as error:
+                failures.append(error)
+            finally:
+                outcome_before_release.set()
+
+        threads = [threading.Thread(target=request_page) for _ in range(2)]
+        for thread in threads:
+            thread.start()
+        try:
+            launch.wait()
+            self.assertTrue(iterator.continuation_entered.wait(1))
+            loser_failed_before_winner_advanced = outcome_before_release.wait(1)
+        finally:
+            iterator.release_continuation.set()
+            for thread in threads:
+                thread.join(2)
+
+        self.assertTrue(loser_failed_before_winner_advanced)
+        self.assertTrue(all(not thread.is_alive() for thread in threads))
+        self.assertEqual(len(results), 1)
+        self.assertEqual(len(failures), 1)
+        self.assertIsInstance(failures[0], ValueError)
+        self.assertEqual(
+            str(failures[0]), "invalid or already consumed continuation token"
+        )
+        winning_page = results[0]
+        self.assertEqual(winning_page["page"], 1)
+        self.assertEqual(
+            winning_page["frames"], [{"png": "frame-2", "delay_ms": 2}]
+        )
+        self.assertFalse(winning_page["complete"])
+        self.assertIsNotNone(winning_page["next_token"])
+        self.assertEqual(iterator.calls, 3)
+        self.assertEqual(iterator.max_active, 1)
+
+        next_token = winning_page["next_token"]
+        later_page = session.page(next_token)
+        self.assertEqual(later_page["page"], 2)
+        self.assertEqual(
+            later_page["frames"], [{"png": "frame-3", "delay_ms": 3}]
+        )
+        self.assertEqual(iterator.calls, 4)
+        with self.assertRaisesRegex(
+            ValueError, "invalid or already consumed continuation token"
+        ):
+            session.page(next_token)
+        self.assertEqual(iterator.calls, 4)
+
     def test_registry_shutdown_closes_every_iterator_and_decoder(self):
         class CountingIterator:
             def __init__(self, iterator, on_close=None):
