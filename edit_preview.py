@@ -374,6 +374,119 @@ class PreviewCapacityError(RuntimeError):
     """Raised when bounded preview-session admission cannot obtain a slot."""
 
 
+class PreviewInstanceCapacityError(RuntimeError):
+    """Raised when a paired device or process has too many live instances."""
+
+
+class PreviewInstanceRegistry:
+    """Own opaque, non-rendering page instances within process-local bounds."""
+
+    MAX_PER_DEVICE = 4
+    MAX_TOTAL = 8
+
+    def __init__(self, *, capacity=None):
+        self._capacity = capacity or PreviewSessionCapacity()
+        self._lock = threading.Lock()
+        self._instances = {}
+        self._device_counts = {}
+
+    @property
+    def total_count(self):
+        with self._lock:
+            return len(self._instances)
+
+    @property
+    def counts_by_device(self):
+        with self._lock:
+            return dict(self._device_counts)
+
+    def count_for_device(self, device_identity):
+        with self._lock:
+            return self._device_counts.get(device_identity, 0)
+
+    def register(self, device_identity, iterator_factory, stop_event=None):
+        with self._lock:
+            device_count = self._device_counts.get(device_identity, 0)
+            if device_count >= self.MAX_PER_DEVICE:
+                raise PreviewInstanceCapacityError(
+                    "paired device already has 4 live preview instances"
+                )
+            if len(self._instances) >= self.MAX_TOTAL:
+                raise PreviewInstanceCapacityError(
+                    "process already has 8 live preview instances"
+                )
+            instance_id = secrets.token_hex(16)
+            while instance_id in self._instances:
+                instance_id = secrets.token_hex(16)
+            instance = PreviewInstance(
+                instance_id, iterator_factory, self._capacity,
+                stop_event=stop_event, on_close=self._unregister,
+            )
+            self._instances[instance_id] = (device_identity, instance)
+            self._device_counts[device_identity] = device_count + 1
+            return instance
+
+    def _unregister(self, instance_id):
+        with self._lock:
+            entry = self._instances.pop(instance_id, None)
+            if entry is None:
+                return
+            device_identity, _instance = entry
+            remaining = self._device_counts[device_identity] - 1
+            if remaining:
+                self._device_counts[device_identity] = remaining
+            else:
+                del self._device_counts[device_identity]
+
+
+class PreviewInstance:
+    """A registered page identity that lazily acquires one renderer session."""
+
+    def __init__(
+        self, instance_id, iterator_factory, capacity, *, stop_event=None,
+        on_close=None,
+    ):
+        self.instance_id = instance_id
+        self._iterator_factory = iterator_factory
+        self._capacity = capacity
+        self._stop_event = stop_event
+        self._on_close = on_close
+        self._session = None
+        self._closed = False
+        self._lock = threading.RLock()
+
+    def admit(self):
+        with self._lock:
+            if self._closed:
+                raise RuntimeError("preview instance is closed")
+            if self._session is None:
+                self._session = self._capacity.admit(
+                    self._iterator_factory,
+                    stop_event=self._stop_event,
+                    on_close=self._release_registration,
+                )
+            return self._session
+
+    def close(self):
+        with self._lock:
+            if self._closed:
+                return
+            self._closed = True
+            session = self._session
+        if session is None:
+            self._release_registration()
+        else:
+            session.cancel()
+
+    def _release_registration(self):
+        with self._lock:
+            if not self._closed:
+                self._closed = True
+            release, self._on_close = self._on_close, None
+        if release is not None:
+            release(self.instance_id)
+
+
 class PreviewSessionCapacity:
     """FIFO admission gate for the two process-local active renderer slots."""
 
@@ -404,7 +517,7 @@ class PreviewSessionCapacity:
         with self._condition:
             return len(self._waiters)
 
-    def admit(self, iterator_factory, stop_event=None):
+    def admit(self, iterator_factory, stop_event=None, *, on_close=None):
         ticket = object()
         deadline = self._monotonic() + self.ACQUIRE_TIMEOUT
         with self._condition:
@@ -422,14 +535,25 @@ class PreviewSessionCapacity:
             self._active += 1
 
         try:
+            def release(session):
+                try:
+                    self._release(session)
+                finally:
+                    if on_close is not None:
+                        on_close()
+
             session = PreviewSession(
                 iterator_factory(),
                 stop_event=stop_event,
-                on_close=self._release,
+                on_close=release,
                 on_activity=self._record_activity,
             )
         except BaseException:
-            self._release_reservation()
+            try:
+                self._release_reservation()
+            finally:
+                if on_close is not None:
+                    on_close()
             raise
 
         with self._condition:

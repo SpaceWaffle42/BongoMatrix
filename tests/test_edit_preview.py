@@ -39,6 +39,113 @@ class Colour:
 
 
 class EditPreviewTests(unittest.TestCase):
+    def test_registry_bounds_instances_per_device_and_globally(self):
+        factories = []
+
+        def finite_renderer(name):
+            factories.append(name)
+            return iter(({"png": name, "delay_ms": 30},))
+
+        capacity = edit_preview.PreviewSessionCapacity()
+        registry = edit_preview.PreviewInstanceRegistry(capacity=capacity)
+        instances = []
+        try:
+            device_a = [
+                registry.register("paired-device-a", lambda index=index: finite_renderer(f"a-{index}"))
+                for index in range(4)
+            ]
+            instances.extend(device_a)
+            self.assertEqual(registry.total_count, 4)
+            self.assertEqual(registry.count_for_device("paired-device-a"), 4)
+            with self.assertRaisesRegex(
+                edit_preview.PreviewInstanceCapacityError,
+                "paired device already has 4 live preview instances",
+            ):
+                registry.register(
+                    "paired-device-a", lambda: finite_renderer("ghost-device"),
+                )
+            self.assertEqual(registry.total_count, 4)
+            self.assertEqual(factories, [])
+
+            other_devices = []
+            for name in ("b", "c", "d", "e"):
+                instance = registry.register(
+                    f"paired-device-{name}",
+                    lambda name=name: finite_renderer(name),
+                )
+                other_devices.append(instance)
+                instances.append(instance)
+            self.assertEqual(registry.total_count, 8)
+            self.assertEqual(registry.count_for_device("paired-device-b"), 1)
+            self.assertEqual(registry.count_for_device("paired-device-a"), 4)
+            self.assertEqual(factories, [])
+
+            ids = [instance.instance_id for instance in instances]
+            self.assertEqual(len(ids), len(set(ids)))
+            self.assertTrue(all(len(instance_id) == 32 for instance_id in ids))
+            self.assertTrue(all(
+                all(fragment not in instance_id for fragment in ("paired", "device", "a-"))
+                for instance_id in ids
+            ))
+            with self.assertRaisesRegex(
+                edit_preview.PreviewInstanceCapacityError,
+                "process already has 8 live preview instances",
+            ):
+                registry.register(
+                    "paired-device-f", lambda: finite_renderer("ghost-global"),
+                )
+            self.assertEqual(registry.total_count, 8)
+            self.assertEqual(registry.count_for_device("paired-device-f"), 0)
+            self.assertEqual(factories, [])
+
+            first_session = device_a[0].admit()
+            second_session = other_devices[0].admit()
+            self.assertEqual(capacity.active_count, 2)
+            self.assertEqual(factories, ["a-0", "b"])
+            self.assertIs(device_a[0].admit(), first_session)
+            self.assertEqual(factories, ["a-0", "b"])
+
+            first_page = first_session.page()
+            self.assertTrue(first_page["complete"])
+            self.assertEqual(registry.total_count, 7)
+            self.assertEqual(registry.count_for_device("paired-device-a"), 3)
+            first_session.cancel()
+            first_session.cancel()
+            self.assertEqual(registry.total_count, 7)
+
+            replacement = registry.register(
+                "paired-device-a", lambda: finite_renderer("replacement"),
+            )
+            instances.append(replacement)
+            self.assertEqual(registry.total_count, 8)
+            self.assertEqual(registry.count_for_device("paired-device-a"), 4)
+
+            second_session.cancel()
+            second_session.cancel()
+            self.assertEqual(registry.total_count, 7)
+            self.assertEqual(registry.count_for_device("paired-device-b"), 0)
+            self.assertEqual(capacity.active_count, 0)
+        finally:
+            for instance in instances:
+                instance.close()
+                instance.close()
+
+        self.assertEqual(registry.total_count, 0)
+        self.assertEqual(registry.counts_by_device, {})
+        self.assertEqual(capacity.active_count, 0)
+
+        failed = registry.register(
+            "paired-device-failure",
+            lambda: (_ for _ in ()).throw(RuntimeError("renderer construction failed")),
+        )
+        with self.assertRaisesRegex(RuntimeError, "renderer construction failed"):
+            failed.admit()
+        self.assertEqual(registry.total_count, 0)
+        self.assertEqual(registry.count_for_device("paired-device-failure"), 0)
+        self.assertEqual(capacity.active_count, 0)
+        self.assertNotIn("ghost-device", factories)
+        self.assertNotIn("ghost-global", factories)
+
     def test_two_active_sessions_saturate_capacity_and_queue_times_out(self):
         class Clock:
             def __init__(self):
