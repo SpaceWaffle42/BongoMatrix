@@ -107,6 +107,130 @@ class EditPreviewTests(unittest.TestCase):
         self.assertCountEqual(closed, ["first", "second", "recovered"])
         self.assertNotIn("timed-out", closed)
 
+    def test_expired_session_closes_iterator_and_releases_slot(self):
+        class Clock:
+            now = 100.0
+
+            def monotonic(self):
+                return self.now
+
+        class RecordingMatrix(CaptureMatrix):
+            def __init__(self):
+                super().__init__()
+                self.swaps = 0
+
+            def swap(self, canvas=None):
+                self.swaps += 1
+                return super().swap(canvas)
+
+        class CloseCountingIterator:
+            def __init__(self, iterator):
+                self.iterator = iterator
+                self.next_calls = 0
+                self.close_calls = 0
+
+            def __iter__(self):
+                return self
+
+            def __next__(self):
+                self.next_calls += 1
+                return next(self.iterator)
+
+            def close(self):
+                self.close_calls += 1
+                self.iterator.close()
+
+        candidate = copy.deepcopy(DEFAULT_CONFIG)
+        candidate["lava"].update({
+            "show_time": False,
+            "show_date": False,
+            "blur_radius": 0,
+            "blob_count": 2,
+        })
+        clock = Clock()
+        capacity = edit_preview.PreviewSessionCapacity(monotonic=clock.monotonic)
+        expired_stop = threading.Event()
+        active_stop = threading.Event()
+        expired_matrix = RecordingMatrix()
+        active_matrix = RecordingMatrix()
+        expired_lava = edit_preview.continuous_lava_preview_frames(
+            expired_matrix, candidate,
+            {"kind": "built_in", "id": "fire_burst"},
+            stop_event=expired_stop,
+        )
+        active_lava = edit_preview.continuous_lava_preview_frames(
+            active_matrix, candidate,
+            {"kind": "built_in", "id": "fire_burst"},
+            stop_event=active_stop,
+        )
+        expired_iterator = CloseCountingIterator(expired_lava)
+        active_iterator = CloseCountingIterator(active_lava)
+        expired = capacity.admit(
+            lambda: expired_iterator, stop_event=expired_stop,
+        )
+        active = capacity.admit(lambda: active_iterator, stop_event=active_stop)
+        expired.MAX_FRAMES = active.MAX_FRAMES = 2
+
+        expired_page = expired.page()
+        active_page = active.page()
+        stale_token = expired_page["next_token"]
+        expired_before_reap = (
+            expired_iterator.next_calls, expired_matrix.swaps,
+        )
+        self.assertFalse(expired_page["complete"])
+        self.assertIsNotNone(stale_token)
+        self.assertEqual(expired.retained_frame_count, 1)
+        self.assertEqual(capacity.active_count, 2)
+
+        clock.now += capacity.IDLE_TTL
+        self.assertEqual(capacity.reap_expired(), 0)
+        active_page = active.page(active_page["next_token"])
+        active_before_reap = (active_iterator.next_calls, active_matrix.swaps)
+        clock.now += 0.001
+
+        self.assertEqual(capacity.reap_expired(), 1)
+        self.assertTrue(expired_stop.is_set())
+        self.assertFalse(active_stop.is_set())
+        self.assertEqual(expired_iterator.close_calls, 1)
+        self.assertEqual(expired.retained_frame_count, 0)
+        self.assertIsNone(getattr(expired_lava, "gi_frame"))
+        self.assertEqual(capacity.active_count, 1)
+        self.assertEqual(capacity.available_slots, 1)
+        with self.assertRaisesRegex(
+            StopIteration, "explicit new session is required to restart",
+        ):
+            expired.page(stale_token)
+        self.assertEqual(
+            (expired_iterator.next_calls, expired_matrix.swaps),
+            expired_before_reap,
+        )
+
+        replacement_stop = threading.Event()
+        replacement_lava = edit_preview.continuous_lava_preview_frames(
+            RecordingMatrix(), candidate,
+            {"kind": "built_in", "id": "fire_burst"},
+            stop_event=replacement_stop,
+        )
+        replacement_iterator = CloseCountingIterator(replacement_lava)
+        replacement = capacity.admit(
+            lambda: replacement_iterator, stop_event=replacement_stop,
+        )
+        self.assertEqual(capacity.active_count, 2)
+        self.assertEqual(capacity.reap_expired(), 0)
+        expired.cancel()
+        self.assertEqual(expired_iterator.close_calls, 1)
+        self.assertEqual(capacity.active_count, 2)
+        self.assertEqual(
+            (active_iterator.next_calls, active_matrix.swaps), active_before_reap,
+        )
+
+        active.cancel()
+        replacement.cancel()
+        self.assertEqual(active_iterator.close_calls, 1)
+        self.assertEqual(replacement_iterator.close_calls, 1)
+        self.assertEqual(capacity.active_count, 0)
+        self.assertEqual(capacity.available_slots, 2)
+
     def test_cancel_before_first_frame_publishes_nothing(self):
         class RecordingMatrix(CaptureMatrix):
             def __init__(self):

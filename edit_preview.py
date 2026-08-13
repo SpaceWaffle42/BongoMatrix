@@ -379,6 +379,7 @@ class PreviewSessionCapacity:
 
     MAX_ACTIVE = 2
     ACQUIRE_TIMEOUT = 2.0
+    IDLE_TTL = 60.0
 
     def __init__(self, *, monotonic=time.monotonic, wait=None):
         self._monotonic = monotonic
@@ -386,6 +387,7 @@ class PreviewSessionCapacity:
         self._wait = wait or (lambda condition, timeout: condition.wait(timeout))
         self._active = 0
         self._waiters = deque()
+        self._sessions = {}
 
     @property
     def active_count(self):
@@ -402,7 +404,7 @@ class PreviewSessionCapacity:
         with self._condition:
             return len(self._waiters)
 
-    def admit(self, iterator_factory):
+    def admit(self, iterator_factory, stop_event=None):
         ticket = object()
         deadline = self._monotonic() + self.ACQUIRE_TIMEOUT
         with self._condition:
@@ -420,12 +422,45 @@ class PreviewSessionCapacity:
             self._active += 1
 
         try:
-            return PreviewSession(iterator_factory(), on_close=self._release)
+            session = PreviewSession(
+                iterator_factory(),
+                stop_event=stop_event,
+                on_close=self._release,
+                on_activity=self._record_activity,
+            )
         except BaseException:
-            self._release()
+            self._release_reservation()
             raise
 
-    def _release(self):
+        with self._condition:
+            self._sessions[session] = self._monotonic()
+        return session
+
+    def reap_expired(self):
+        """Synchronously expire sessions idle for more than the 60-second TTL."""
+        now = self._monotonic()
+        with self._condition:
+            expired = [
+                session for session, last_activity in self._sessions.items()
+                if now - last_activity > self.IDLE_TTL
+            ]
+        for session in expired:
+            session.cancel()
+        return len(expired)
+
+    def _record_activity(self, session):
+        with self._condition:
+            if session in self._sessions:
+                self._sessions[session] = self._monotonic()
+
+    def _release(self, session):
+        with self._condition:
+            if self._sessions.pop(session, None) is None:
+                return
+            self._active -= 1
+            self._condition.notify_all()
+
+    def _release_reservation(self):
         with self._condition:
             if self._active <= 0:
                 return
@@ -439,7 +474,9 @@ class PreviewSession:
     MAX_FRAMES = 32
     MAX_BYTES = 512 * 1024
 
-    def __init__(self, iterator, stop_event=None, *, on_close=None):
+    def __init__(
+        self, iterator, stop_event=None, *, on_close=None, on_activity=None,
+    ):
         self._iterator = iter(iterator)
         self._stop_event = stop_event
         self._page = -1
@@ -449,6 +486,7 @@ class PreviewSession:
         self._complete = False
         self._iterator_closed = False
         self._on_close = on_close
+        self._on_activity = on_activity
 
     @property
     def retained_frame_count(self):
@@ -488,7 +526,7 @@ class PreviewSession:
         finally:
             if self._on_close is not None:
                 release, self._on_close = self._on_close, None
-                release()
+                release(self)
 
     def _next_frame(self):
         if self._lookahead is not None:
@@ -560,4 +598,6 @@ class PreviewSession:
             "complete": exhausted,
         }
         self._current = []
+        if self._on_activity is not None:
+            self._on_activity(self)
         return page
