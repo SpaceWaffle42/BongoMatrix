@@ -39,6 +39,178 @@ class Colour:
 
 
 class EditPreviewTests(unittest.TestCase):
+    def test_registry_shutdown_closes_every_iterator_and_decoder(self):
+        class CountingIterator:
+            def __init__(self, iterator, on_close=None):
+                self.iterator = iter(iterator)
+                self.on_close = on_close
+                self.close_calls = 0
+
+            def __iter__(self):
+                return self
+
+            def __next__(self):
+                return next(self.iterator)
+
+            def close(self):
+                self.close_calls += 1
+                close = getattr(self.iterator, "close", None)
+                if close is not None:
+                    close()
+                if self.on_close is not None:
+                    self.on_close()
+
+        class BlockedDecoder:
+            def __init__(self):
+                self.started = threading.Event()
+                self.stop_observed = threading.Event()
+                self.emergency_release = threading.Event()
+                self.close_calls = 0
+                self.stop_event = None
+                self.read_fd, self.write_fd = os.pipe()
+
+            def __call__(self, _path, _settings, *, stop_event=None):
+                self.stop_event = stop_event
+                return self
+
+            def __iter__(self):
+                return self
+
+            def __next__(self):
+                self.started.set()
+                while not self.emergency_release.wait(0.01):
+                    if self.stop_event is not None and self.stop_event.is_set():
+                        self.stop_observed.set()
+                        raise StopIteration
+                raise AssertionError("registry shutdown required emergency decoder release")
+
+            def close(self):
+                self.close_calls += 1
+                os.close(self.read_fd)
+                os.close(self.write_fd)
+
+        capacity = edit_preview.PreviewSessionCapacity()
+        registry = edit_preview.PreviewInstanceRegistry(capacity=capacity)
+        lava_stop = threading.Event()
+        media_stop = threading.Event()
+        decoder = BlockedDecoder()
+        lava_iterator = None
+        page_result = {}
+        page_failures = []
+        page_thread = None
+        non_admitted_factory_calls = []
+        non_admitted_stop = threading.Event()
+
+        candidate = copy.deepcopy(DEFAULT_CONFIG)
+        candidate["lava"].update({
+            "show_time": False, "show_date": False, "blur_radius": 0,
+            "blob_count": 2,
+        })
+        lava_matrix = CaptureMatrix()
+        media_matrix = CaptureMatrix()
+
+        def lava_factory():
+            nonlocal lava_iterator
+            lava_iterator = CountingIterator(
+                edit_preview.continuous_lava_preview_frames(
+                    lava_matrix, candidate,
+                    {"kind": "built_in", "id": "fire_burst"},
+                    stop_event=lava_stop,
+                ),
+                # A close callback that re-enters the registry proves shutdown
+                # never invokes resource callbacks while holding its lock.
+                on_close=lambda: registry.total_count,
+            )
+            return lava_iterator
+
+        lava_instance = registry.register(
+            "paired-device", lava_factory, stop_event=lava_stop,
+        )
+        media_instance = registry.register(
+            "paired-device",
+            lambda: edit_preview.media_preview_frames(
+                media_matrix, "blocked.mp4", 10,
+                settings={
+                    "x": 0, "y": 0, "width": 64, "height": 32,
+                    "keep_aspect": True, "video_fps": 20,
+                },
+                video_decoder=decoder, stop_event=media_stop,
+            ),
+            stop_event=media_stop,
+        )
+        non_admitted = registry.register(
+            "paired-device",
+            lambda: non_admitted_factory_calls.append(True) or iter(()),
+            stop_event=non_admitted_stop,
+        )
+        lava_session = lava_instance.admit()
+        media_session = media_instance.admit()
+        lava_page = lava_session.page()
+        self.assertFalse(lava_page["complete"])
+        stale_lava_token = lava_page["next_token"]
+
+        def page_media():
+            try:
+                page_result.update(media_session.page())
+            except BaseException as error:
+                page_failures.append(error)
+
+        page_thread = threading.Thread(target=page_media, name="registry-blocked-media-page")
+        page_thread.start()
+        try:
+            self.assertTrue(decoder.started.wait(1), "media decoder did not block")
+            self.assertEqual(registry.total_count, 3)
+            self.assertEqual(capacity.active_count, 2)
+
+            started = time.monotonic()
+            registry.close()
+            page_thread.join(0.25)
+            elapsed = time.monotonic() - started
+        finally:
+            decoder.emergency_release.set()
+            if page_thread is not None:
+                page_thread.join(1)
+
+        self.assertLess(elapsed, 0.25)
+        self.assertFalse(page_thread.is_alive(), "registry shutdown cleanup hung")
+        self.assertEqual(page_failures, [])
+        self.assertEqual(page_result["frames"], [])
+        self.assertTrue(page_result["complete"])
+        self.assertIsNone(page_result["next_token"])
+        self.assertTrue(lava_stop.is_set())
+        self.assertTrue(media_stop.is_set())
+        self.assertTrue(non_admitted_stop.is_set())
+        self.assertTrue(decoder.stop_observed.is_set())
+        self.assertEqual(lava_iterator.close_calls, 1)
+        self.assertEqual(decoder.close_calls, 1)
+        self.assertEqual(non_admitted_factory_calls, [])
+        for descriptor in (decoder.read_fd, decoder.write_fd):
+            with self.assertRaises(OSError):
+                os.fstat(descriptor)
+
+        self.assertEqual(registry.total_count, 0)
+        self.assertEqual(registry.counts_by_device, {})
+        self.assertEqual(capacity.active_count, 0)
+        self.assertEqual(capacity.waiting_count, 0)
+        self.assertNotIn(page_thread, threading.enumerate())
+        self.assertEqual(lava_session.retained_frame_count, 0)
+        self.assertEqual(media_session.retained_frame_count, 0)
+
+        registry.close()
+        lava_instance.close()
+        media_instance.close()
+        non_admitted.close()
+        self.assertEqual(lava_iterator.close_calls, 1)
+        self.assertEqual(decoder.close_calls, 1)
+        with self.assertRaisesRegex(RuntimeError, "preview registry is closed"):
+            registry.register("late-device", lambda: iter(()))
+        with self.assertRaisesRegex(RuntimeError, "preview instance is closed"):
+            non_admitted.admit()
+        with self.assertRaisesRegex(
+            StopIteration, "explicit new session is required to restart",
+        ):
+            lava_session.page(stale_lava_token)
+
     def test_registry_bounds_instances_per_device_and_globally(self):
         factories = []
 

@@ -389,6 +389,8 @@ class PreviewInstanceRegistry:
         self._lock = threading.Lock()
         self._instances = {}
         self._device_counts = {}
+        self._closed = False
+        self._shutdown = threading.Event()
 
     @property
     def total_count(self):
@@ -406,6 +408,8 @@ class PreviewInstanceRegistry:
 
     def register(self, device_identity, iterator_factory, stop_event=None):
         with self._lock:
+            if self._closed:
+                raise RuntimeError("preview registry is closed")
             device_count = self._device_counts.get(device_identity, 0)
             if device_count >= self.MAX_PER_DEVICE:
                 raise PreviewInstanceCapacityError(
@@ -421,6 +425,7 @@ class PreviewInstanceRegistry:
             instance = PreviewInstance(
                 instance_id, iterator_factory, self._capacity,
                 stop_event=stop_event, on_close=self._unregister,
+                registry_shutdown=self._shutdown,
             )
             self._instances[instance_id] = (device_identity, instance)
             self._device_counts[device_identity] = device_count + 1
@@ -438,26 +443,44 @@ class PreviewInstanceRegistry:
             else:
                 del self._device_counts[device_identity]
 
+    def close(self):
+        """Reject new work and close every registered preview resource once."""
+        with self._lock:
+            if self._closed:
+                return
+            self._closed = True
+            self._shutdown.set()
+            instances = [instance for _device, instance in self._instances.values()]
+
+        # Closures call back into _unregister; never hold the registry lock.
+        self._capacity.close()
+        for instance in instances:
+            instance.close()
+
 
 class PreviewInstance:
     """A registered page identity that lazily acquires one renderer session."""
 
     def __init__(
         self, instance_id, iterator_factory, capacity, *, stop_event=None,
-        on_close=None,
+        on_close=None, registry_shutdown=None,
     ):
         self.instance_id = instance_id
         self._iterator_factory = iterator_factory
         self._capacity = capacity
         self._stop_event = stop_event
         self._on_close = on_close
+        self._registry_shutdown = registry_shutdown
         self._session = None
         self._closed = False
         self._lock = threading.RLock()
 
     def admit(self):
         with self._lock:
-            if self._closed:
+            if self._closed or (
+                self._registry_shutdown is not None
+                and self._registry_shutdown.is_set()
+            ):
                 raise RuntimeError("preview instance is closed")
             if self._session is None:
                 self._session = self._capacity.admit(
@@ -472,6 +495,8 @@ class PreviewInstance:
             if self._closed:
                 return
             self._closed = True
+            if self._stop_event is not None:
+                self._stop_event.set()
             session = self._session
         if session is None:
             self._release_registration()
@@ -501,6 +526,7 @@ class PreviewSessionCapacity:
         self._active = 0
         self._waiters = deque()
         self._sessions = {}
+        self._closed = False
 
     @property
     def active_count(self):
@@ -521,8 +547,13 @@ class PreviewSessionCapacity:
         ticket = object()
         deadline = self._monotonic() + self.ACQUIRE_TIMEOUT
         with self._condition:
+            if self._closed:
+                raise RuntimeError("preview session capacity is closed")
             self._waiters.append(ticket)
-            while self._waiters[0] is not ticket or self._active >= self.MAX_ACTIVE:
+            while (
+                not self._closed
+                and (self._waiters[0] is not ticket or self._active >= self.MAX_ACTIVE)
+            ):
                 remaining = deadline - self._monotonic()
                 if remaining <= 0:
                     self._waiters.remove(ticket)
@@ -531,6 +562,11 @@ class PreviewSessionCapacity:
                         "preview session capacity acquisition timed out after 2 seconds"
                     )
                 self._wait(self._condition, remaining)
+            if self._closed:
+                if ticket in self._waiters:
+                    self._waiters.remove(ticket)
+                self._condition.notify_all()
+                raise RuntimeError("preview session capacity is closed")
             self._waiters.popleft()
             self._active += 1
 
@@ -558,7 +594,22 @@ class PreviewSessionCapacity:
 
         with self._condition:
             self._sessions[session] = self._monotonic()
+            closed = self._closed
+        if closed:
+            session.cancel()
+            raise RuntimeError("preview session capacity is closed")
         return session
+
+    def close(self):
+        """Stop admissions and cancel all constructed renderer sessions."""
+        with self._condition:
+            if self._closed:
+                return
+            self._closed = True
+            sessions = list(self._sessions)
+            self._condition.notify_all()
+        for session in sessions:
+            session.cancel()
 
     def reap_expired(self):
         """Synchronously expire sessions idle for more than the 60-second TTL."""
