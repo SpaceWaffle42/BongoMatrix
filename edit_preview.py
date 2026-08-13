@@ -412,17 +412,20 @@ class PreviewSession:
             return frame
         return next(self._iterator)
 
+    def _cancelled_page(self, page_number):
+        self.cancel()
+        return {
+            "page": page_number,
+            "frames": [],
+            "next_token": None,
+            "complete": True,
+        }
+
     def page(self, token=None):
         if self._complete:
             raise StopIteration("an explicit new session is required to restart")
         if self._stop_event is not None and self._stop_event.is_set():
-            self.cancel()
-            return {
-                "page": self._page + 1,
-                "frames": [],
-                "next_token": None,
-                "complete": True,
-            }
+            return self._cancelled_page(self._page + 1)
         if self._page >= 0 and token != self._token:
             raise ValueError("invalid or already consumed continuation token")
 
@@ -435,6 +438,8 @@ class PreviewSession:
             except StopIteration:
                 exhausted = True
                 break
+            if self._stop_event is not None and self._stop_event.is_set():
+                return self._cancelled_page(self._page)
             candidate = self._current + [frame]
             probe = {
                 "page": self._page, "frames": candidate, "next_token": "0" * 64,
@@ -452,6 +457,10 @@ class PreviewSession:
                 self._lookahead = next(self._iterator)
             except StopIteration:
                 exhausted = True
+            if self._stop_event is not None and self._stop_event.is_set():
+                return self._cancelled_page(self._page)
+        if self._stop_event is not None and self._stop_event.is_set():
+            return self._cancelled_page(self._page)
         self._complete = exhausted
         self._token = None if exhausted else secrets.token_hex(32)
         page = {

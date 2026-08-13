@@ -188,6 +188,89 @@ class EditPreviewTests(unittest.TestCase):
 
         self.assertEqual(candidate, original_candidate)
 
+    def test_cancel_after_decode_before_publication_publishes_nothing(self):
+        class RecordingMatrix(CaptureMatrix):
+            def __init__(self):
+                super().__init__()
+                self.submissions = []
+
+            def swap(self, canvas=None):
+                self.submissions.append(self.snapshot(canvas))
+                return super().swap(canvas)
+
+        class DecodeBarrierIterator:
+            def __init__(self, iterator):
+                self.iterator = iterator
+                self.decoded = threading.Event()
+                self.release = threading.Event()
+                self.close_requested = False
+                self.next_calls = 0
+                self.close_calls = 0
+
+            def __iter__(self):
+                return self
+
+            def __next__(self):
+                self.next_calls += 1
+                frame = next(self.iterator)
+                self.decoded.set()
+                if not self.release.wait(1):
+                    raise AssertionError("decode barrier was not released")
+                if self.close_requested:
+                    self.iterator.close()
+                return frame
+
+            def close(self):
+                self.close_calls += 1
+                self.close_requested = True
+
+        candidate = copy.deepcopy(DEFAULT_CONFIG)
+        candidate["lava"].update({
+            "show_time": False,
+            "show_date": False,
+            "blur_radius": 0,
+            "blob_count": 2,
+        })
+        matrix = RecordingMatrix()
+        cancelled = threading.Event()
+        lava = edit_preview.continuous_lava_preview_frames(
+            matrix, candidate, {"kind": "built_in", "id": "fire_burst"},
+            stop_event=cancelled,
+        )
+        guarded = DecodeBarrierIterator(lava)
+        session = PreviewSession(guarded, stop_event=cancelled)
+        result = {}
+        failure = []
+
+        def page_in_background():
+            try:
+                result.update(session.page())
+            except BaseException as exc:
+                failure.append(exc)
+
+        page_thread = threading.Thread(target=page_in_background)
+        page_thread.start()
+        self.assertTrue(guarded.decoded.wait(1), "production decode did not reach barrier")
+        session.cancel()
+        self.assertTrue(cancelled.is_set())
+        guarded.release.set()
+        page_thread.join(0.25)
+
+        self.assertFalse(page_thread.is_alive(), "cancellation was not acknowledged promptly")
+        self.assertEqual(failure, [])
+        self.assertEqual(result["frames"], [])
+        self.assertTrue(result["complete"])
+        self.assertIsNone(result["next_token"])
+        self.assertEqual(guarded.next_calls, 1)
+        self.assertEqual(guarded.close_calls, 1)
+        self.assertEqual(matrix.submissions, [])
+        self.assertEqual(session.retained_frame_count, 0)
+        self.assertIsNone(getattr(lava, "gi_frame"))
+        with self.assertRaisesRegex(
+            StopIteration, "explicit new session is required to restart",
+        ):
+            session.page()
+
     def test_duplicate_disabled_and_missing_playlist_rows_choose_documented_duration(self):
         candidate = copy.deepcopy(DEFAULT_CONFIG)
         candidate["custom_modules"] = [
