@@ -23,7 +23,7 @@ from edit_preview import (
 )
 from frame_capture import BdfFont, FrameCapture
 from modules.media_player import play_media
-from modules import clock_lava
+from modules import clock_lava, custom_text
 import edit_preview
 
 
@@ -536,6 +536,143 @@ class EditPreviewTests(unittest.TestCase):
                     self.assertIsNone(pages[-1]["next_token"])
                     with self.assertRaises(StopIteration):
                         session.page()
+
+    def test_advanced_canvas_hold_repeat_and_ping_pong_match_physical_invocation(self):
+        frame_capture_patch = patch.object(frame_capture_module, "Image", Image)
+        frame_capture_patch.start()
+        self.addCleanup(frame_capture_patch.stop)
+
+        media_frames = [
+            Image.new("RGB", (64, 32), colour)
+            for colour in ("#220000", "#002200", "#000022")
+        ]
+        layer = {
+            "id": "layer_media", "name": "Media", "type": "media", "visible": True,
+            "properties": {
+                "source": "timeline.gif", "x": 0, "y": 0, "width": 64,
+                "height": 32, "rotation": 0, "keep_aspect": False,
+            },
+            "keyframes": [],
+        }
+        keyframed = {
+            "id": "layer_keyframed", "name": "Keyframed", "type": "rectangle",
+            "visible": True,
+            "properties": {
+                "x": 0, "y": 0, "width": 2, "height": 2, "rotation": 0,
+                "colour": "#ff0000", "filled": True,
+            },
+            "keyframes": [
+                {"frame": 0, "easing": "linear", "properties": {"x": 0, "colour": "#ff0000"}},
+                {"frame": 2, "easing": "linear", "properties": {"x": 4, "colour": "#0000ff"}},
+            ],
+        }
+
+        class RecordingMatrix(CaptureMatrix):
+            def __init__(self):
+                super().__init__()
+                self.submissions = []
+                self.decode_calls = []
+
+            def media_frames(self, source, frame_count, fps, **kwargs):
+                self.decode_calls.append((source, frame_count, fps, kwargs))
+                return [image.copy() for image in media_frames]
+
+            def swap(self, canvas=None):
+                self.submissions.append(self.snapshot(canvas))
+                return super().swap(canvas)
+
+        class AdvancingStop:
+            def __init__(self):
+                self.elapsed = 0.0
+                self.waits = []
+
+            def is_set(self):
+                return False
+
+            def wait(self, delay):
+                self.waits.append(delay)
+                self.elapsed += delay
+                return False
+
+        for playback, duration, expected_indices in (
+            ("hold", 1.1, [0, 1, 2, 2, 2]),
+            ("loop", 1.85, [0, 1, 2, 0, 1, 2, 0, 1]),
+            ("ping_pong", 2.1, [0, 1, 2, 1, 0, 1, 2, 1, 0]),
+        ):
+            with self.subTest(playback=playback):
+                module = {
+                    "id": "custom_canvas_timeline", "name": "Canvas timeline",
+                    "type": "canvas", "background": "#000000", "frame_count": 3,
+                    "fps": 4, "playback": playback, "layers": [layer, keyframed],
+                    "overrides": [{
+                        "frame": 1, "layer_id": "layer_keyframed",
+                        "properties": {"y": 3},
+                    }],
+                }
+                candidate = copy.deepcopy(DEFAULT_CONFIG)
+                candidate["custom_modules"] = [copy.deepcopy(module)]
+                candidate["playlist"] = [{
+                    "module": module["id"], "duration": duration, "enabled": True,
+                }]
+                validate_config(candidate, enforce_save_bounds=True)
+                module = candidate["custom_modules"][0]
+
+                physical = RecordingMatrix()
+                stop = AdvancingStop()
+                with patch(
+                    "modules.custom_text.time.monotonic", side_effect=lambda: stop.elapsed,
+                ):
+                    self.assertTrue(custom_text.run(
+                        physical, candidate, duration=duration, stop_event=stop,
+                        module_config=module,
+                    ))
+
+                preview = RecordingMatrix()
+                session = PreviewSession(edit_preview.advanced_canvas_preview_frames(
+                    preview, module, duration,
+                ))
+                session.MAX_FRAMES = 2
+                pages = []
+                token = None
+                while True:
+                    page = session.page(token)
+                    pages.append(page)
+                    if page["complete"]:
+                        break
+                    token = page["next_token"]
+
+                frames = [frame for page in pages for frame in page["frames"]]
+                preview_images = [
+                    Image.open(io.BytesIO(base64.b64decode(frame["png"]))).copy()
+                    for frame in frames
+                ]
+                expected_delays = [250] * (len(expected_indices) - 1) + [
+                    round((duration - 0.25 * (len(expected_indices) - 1)) * 1000, 9)
+                ]
+                self.assertEqual([frame["delay_ms"] for frame in frames], expected_delays)
+                self.assertEqual(
+                    [round(delay * 1000, 9) for delay in stop.waits], expected_delays,
+                )
+                self.assertAlmostEqual(sum(stop.waits), duration)
+                self.assertEqual(
+                    [image.tobytes() for image in preview_images],
+                    [image.tobytes() for image in physical.submissions],
+                )
+                signatures = [preview_images[index].tobytes() for index in range(3)]
+                self.assertEqual(
+                    [signatures.index(image.tobytes()) for image in preview_images],
+                    expected_indices,
+                )
+                self.assertTrue(all(not page["complete"] for page in pages[:-1]))
+                self.assertTrue(pages[-1]["complete"])
+                self.assertIsNone(pages[-1]["next_token"])
+                self.assertEqual(len(physical.decode_calls), 1)
+                self.assertEqual(len(preview.decode_calls), 1)
+                self.assertEqual(physical.decode_calls[0][:3], ("timeline.gif", 3, 4))
+                with self.assertRaises(StopIteration):
+                    session.page()
+
+        self.assertEqual(custom_text.run.__defaults__, (15, None, None))
 
     def test_capture_adapter_matches_physical_capture_for_64_by_32_primitives(self):
         font_path = Path(__file__).parents[1] / "resources" / "fonts" / "5x7.bdf"

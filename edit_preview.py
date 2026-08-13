@@ -223,6 +223,16 @@ def _png_frame(image, delay_ms):
     }
 
 
+def advanced_canvas_preview_frames(matrix, module_config, duration, stop_event=None):
+    """Encode the shared Advanced Canvas invocation timeline without sleeping."""
+    from modules.custom_text import canvas_timeline_frames
+
+    for canvas, delay in canvas_timeline_frames(
+        matrix, duration, stop_event, module_config,
+    ):
+        yield _png_frame(matrix.snapshot(canvas), round(delay * 1000, 9))
+
+
 def custom_text_preview_frames(matrix, module_config):
     """Yield exact ticker capture frames using physical scroll positions."""
     from modules.custom_text import scroll_positions

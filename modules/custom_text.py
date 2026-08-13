@@ -231,14 +231,7 @@ def _draw_layer(matrix, canvas, layer, properties, *, media_cache=None, frame=0)
         _draw_polygon(matrix, canvas, _ellipse_points(properties), colour, properties["filled"])
 
 
-def _run_canvas(matrix, duration, stop_event, module_config):
-    if stop_event is not None and stop_event.is_set() is True:
-        return False
-    canvas = matrix.matrix.CreateFrameCanvas()
-    background = matrix.colour_rgb(module_config["background"])
-    sequence = frame_sequence(module_config["frame_count"], module_config["playback"])
-    delay = 1 / module_config["fps"]
-    cycle_index = 0
+def _canvas_media_cache(matrix, stop_event, module_config):
     media_sources = set()
     for layer in module_config["layers"]:
         if layer["type"] != "media":
@@ -251,6 +244,7 @@ def _run_canvas(matrix, duration, stop_event, module_config):
         for override in module_config["overrides"]:
             if override["layer_id"] == layer["id"] and "source" in override["properties"]:
                 media_sources.add(override["properties"]["source"])
+
     media_cache = {}
     media_cache_bytes = 0
     prepare_deadline = (
@@ -260,7 +254,7 @@ def _run_canvas(matrix, duration, stop_event, module_config):
     for index, source in enumerate(sorted_media_sources):
         assert prepare_deadline is not None
         if stop_event is not None and stop_event.is_set() is True:
-            return False
+            return None
         remaining = prepare_deadline - time.monotonic()
         if remaining <= 0:
             media_cache[source] = []
@@ -278,7 +272,7 @@ def _run_canvas(matrix, duration, stop_event, module_config):
         except (OSError, ValueError):
             frames = []
         if stop_event is not None and stop_event.is_set() is True:
-            return False
+            return None
         media_cache_bytes += sum(
             image.width * image.height * 3
             for image in {id(frame): frame for frame in frames}.values()
@@ -287,31 +281,60 @@ def _run_canvas(matrix, duration, stop_event, module_config):
         if media_cache_bytes > CANVAS_MEDIA_CACHE_BYTES:
             raise ValueError("canvas media cache exceeds its aggregate memory budget")
         media_cache[source] = frames
-    if stop_event is not None and stop_event.is_set() is True:
-        return False
-    started = time.monotonic()
-    rendered = False
-    while time.monotonic() - started < duration:
+    return media_cache
+
+
+def canvas_timeline_frames(
+    matrix, duration, stop_event, module_config, *, monotonic=None,
+):
+    """Yield rendered Advanced Canvas frames and deadline-clipped delays."""
+    duration = max(0.0, float(duration))
+    if duration == 0 or (stop_event is not None and stop_event.is_set() is True):
+        return
+    media_cache = _canvas_media_cache(matrix, stop_event, module_config)
+    if media_cache is None or (stop_event is not None and stop_event.is_set() is True):
+        return
+
+    background = matrix.colour_rgb(module_config["background"])
+    sequence = frame_sequence(module_config["frame_count"], module_config["playback"])
+    normal_delay = 1 / module_config["fps"]
+    cycle_index = 0
+    elapsed = 0.0
+    started = monotonic() if monotonic is not None else None
+    while True:
+        clock_elapsed = 0.0 if monotonic is None else monotonic() - started
+        remaining = duration - max(elapsed, clock_elapsed)
+        if remaining <= 0 or (stop_event is not None and stop_event.is_set() is True):
+            return
         frame = sequence[min(cycle_index, len(sequence) - 1)]
+        canvas = matrix.matrix.CreateFrameCanvas()
         _fill_background(matrix, canvas, background)
         for layer, properties in ordered_layers_for_frame(module_config, frame):
-            if not layer["visible"]:
-                continue
-            if properties.get("present", True):
+            if layer["visible"] and properties.get("present", True):
                 _draw_layer(
                     matrix, canvas, layer, properties,
                     media_cache=media_cache, frame=frame,
                 )
         if stop_event is not None and stop_event.is_set() is True:
-            return rendered
-        canvas = matrix.swap(canvas)
-        rendered = True
-        if _wait(stop_event, delay):
-            break
+            return
+        delay = min(normal_delay, remaining)
+        yield canvas, delay
+        elapsed += delay
         if module_config["playback"] == "hold":
             cycle_index = min(cycle_index + 1, len(sequence) - 1)
         else:
             cycle_index = (cycle_index + 1) % len(sequence)
+
+
+def _run_canvas(matrix, duration, stop_event, module_config):
+    rendered = False
+    for canvas, delay in canvas_timeline_frames(
+        matrix, duration, stop_event, module_config, monotonic=time.monotonic,
+    ):
+        matrix.swap(canvas)
+        rendered = True
+        if _wait(stop_event, delay):
+            break
     return rendered
 
 
