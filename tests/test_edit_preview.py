@@ -39,6 +39,74 @@ class Colour:
 
 
 class EditPreviewTests(unittest.TestCase):
+    def test_two_active_sessions_saturate_capacity_and_queue_times_out(self):
+        class Clock:
+            def __init__(self):
+                self.now = 100.0
+                self.waits = []
+
+            def monotonic(self):
+                return self.now
+
+            def wait(self, condition, timeout):
+                self.waits.append(timeout)
+                self.now += timeout
+                return False
+
+        closed = []
+
+        def renderer(name):
+            try:
+                for frame_number in range(100):
+                    yield {"png": f"{name}-{frame_number}", "delay_ms": 30}
+            finally:
+                closed.append(name)
+
+        clock = Clock()
+        capacity = edit_preview.PreviewSessionCapacity(
+            monotonic=clock.monotonic, wait=clock.wait,
+        )
+        first = capacity.admit(lambda: renderer("first"))
+        second = capacity.admit(lambda: renderer("second"))
+
+        first_page = first.page()
+        second_page = second.page()
+        self.assertFalse(first_page["complete"])
+        self.assertFalse(second_page["complete"])
+        self.assertEqual(capacity.active_count, 2)
+        self.assertEqual(capacity.available_slots, 0)
+
+        third_factory_calls = []
+        with self.assertRaisesRegex(
+            edit_preview.PreviewCapacityError,
+            r"preview session capacity acquisition timed out after 2 seconds",
+        ):
+            capacity.admit(
+                lambda: third_factory_calls.append(True) or renderer("timed-out"),
+            )
+
+        self.assertEqual(clock.waits, [2.0])
+        self.assertEqual(third_factory_calls, [])
+        self.assertEqual(capacity.active_count, 2)
+        self.assertEqual(capacity.waiting_count, 0)
+        self.assertFalse(first_page["complete"])
+        self.assertFalse(second_page["complete"])
+
+        first.cancel()
+        first.cancel()
+        self.assertEqual(capacity.active_count, 1)
+        recovered = capacity.admit(lambda: renderer("recovered"))
+        self.assertEqual(capacity.active_count, 2)
+        self.assertFalse(recovered.page()["complete"])
+
+        second.cancel()
+        recovered.cancel()
+        self.assertEqual(capacity.active_count, 0)
+        self.assertEqual(capacity.available_slots, 2)
+        self.assertEqual(capacity.waiting_count, 0)
+        self.assertCountEqual(closed, ["first", "second", "recovered"])
+        self.assertNotIn("timed-out", closed)
+
     def test_cancel_before_first_frame_publishes_nothing(self):
         class RecordingMatrix(CaptureMatrix):
             def __init__(self):

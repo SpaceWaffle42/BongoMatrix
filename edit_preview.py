@@ -8,7 +8,9 @@ import io
 import json
 import math
 import secrets
+import threading
 import time
+from collections import deque
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -368,13 +370,76 @@ def announcement_preview_frames(matrix, announcements, duration=None, stop_event
         clock.elapsed += delay_ms / 1000
 
 
+class PreviewCapacityError(RuntimeError):
+    """Raised when bounded preview-session admission cannot obtain a slot."""
+
+
+class PreviewSessionCapacity:
+    """FIFO admission gate for the two process-local active renderer slots."""
+
+    MAX_ACTIVE = 2
+    ACQUIRE_TIMEOUT = 2.0
+
+    def __init__(self, *, monotonic=time.monotonic, wait=None):
+        self._monotonic = monotonic
+        self._condition = threading.Condition()
+        self._wait = wait or (lambda condition, timeout: condition.wait(timeout))
+        self._active = 0
+        self._waiters = deque()
+
+    @property
+    def active_count(self):
+        with self._condition:
+            return self._active
+
+    @property
+    def available_slots(self):
+        with self._condition:
+            return self.MAX_ACTIVE - self._active
+
+    @property
+    def waiting_count(self):
+        with self._condition:
+            return len(self._waiters)
+
+    def admit(self, iterator_factory):
+        ticket = object()
+        deadline = self._monotonic() + self.ACQUIRE_TIMEOUT
+        with self._condition:
+            self._waiters.append(ticket)
+            while self._waiters[0] is not ticket or self._active >= self.MAX_ACTIVE:
+                remaining = deadline - self._monotonic()
+                if remaining <= 0:
+                    self._waiters.remove(ticket)
+                    self._condition.notify_all()
+                    raise PreviewCapacityError(
+                        "preview session capacity acquisition timed out after 2 seconds"
+                    )
+                self._wait(self._condition, remaining)
+            self._waiters.popleft()
+            self._active += 1
+
+        try:
+            return PreviewSession(iterator_factory(), on_close=self._release)
+        except BaseException:
+            self._release()
+            raise
+
+    def _release(self):
+        with self._condition:
+            if self._active <= 0:
+                return
+            self._active -= 1
+            self._condition.notify_all()
+
+
 class PreviewSession:
     """Pull one finite iterator in bounded pages without retaining frame history."""
 
     MAX_FRAMES = 32
     MAX_BYTES = 512 * 1024
 
-    def __init__(self, iterator, stop_event=None):
+    def __init__(self, iterator, stop_event=None, *, on_close=None):
         self._iterator = iter(iterator)
         self._stop_event = stop_event
         self._page = -1
@@ -383,6 +448,7 @@ class PreviewSession:
         self._current = []
         self._complete = False
         self._iterator_closed = False
+        self._on_close = on_close
 
     @property
     def retained_frame_count(self):
@@ -411,13 +477,18 @@ class PreviewSession:
         if self._iterator_closed:
             return
         self._iterator_closed = True
-        close = getattr(self._iterator, "close", None)
-        if close is not None:
-            try:
-                close()
-            except ValueError as error:
-                if str(error) != "generator already executing":
-                    raise
+        try:
+            close = getattr(self._iterator, "close", None)
+            if close is not None:
+                try:
+                    close()
+                except ValueError as error:
+                    if str(error) != "generator already executing":
+                        raise
+        finally:
+            if self._on_close is not None:
+                release, self._on_close = self._on_close, None
+                release()
 
     def _next_frame(self):
         if self._lookahead is not None:
