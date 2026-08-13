@@ -672,6 +672,63 @@ class Matrix:
                 time.sleep(frame_delay)
         return shown or stop_event is not None and stop_event.is_set()
 
+    def _video_frame_timeline(
+        self, path, frame_width, frame_height, keep_aspect, stop_event=None,
+        deadline=None,
+    ):
+        """Decode one MP4 timeline for shared physical/preview repetition."""
+        frame_size = frame_width * frame_height * 3
+        identity = {}
+        if os.geteuid() == 0:
+            nobody = pwd.getpwnam("nobody")
+            identity = {
+                "user": nobody.pw_uid,
+                "group": nobody.pw_gid,
+                "extra_groups": [],
+            }
+        video_filter = f"scale={frame_width}:{frame_height}"
+        if keep_aspect:
+            video_filter += (
+                ":force_original_aspect_ratio=decrease,"
+                f"pad={frame_width}:{frame_height}:(ow-iw)/2:(oh-ih)/2:black"
+            )
+        input_fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW)
+        process = None
+        try:
+            process = subprocess.Popen(
+                [
+                    "/usr/bin/ffmpeg", "-nostdin", "-v", "error", "-threads", "1",
+                    "-i", f"pipe:{input_fd}", "-map", "0:v:0", "-an", "-sn", "-dn",
+                    "-vf", video_filter,
+                    "-pix_fmt", "rgb24", "-f", "rawvideo", "pipe:1",
+                ],
+                stdin=subprocess.DEVNULL,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.DEVNULL,
+                pass_fds=(input_fd,),
+                **identity,
+            )
+            while True:
+                frame = _read_exact_interruptibly(
+                    process.stdout, frame_size, stop_event=stop_event,
+                    deadline=deadline,
+                )
+                if stop_event is not None and stop_event.is_set():
+                    return
+                if len(frame) != frame_size:
+                    break
+                yield Image.frombytes("RGB", (frame_width, frame_height), frame)
+        finally:
+            if process is not None:
+                if process.poll() is None:
+                    process.terminate()
+                try:
+                    process.wait(timeout=2)
+                except subprocess.TimeoutExpired:
+                    process.kill()
+                    process.wait(timeout=2)
+            os.close(input_fd)
+
     def show_video(
         self,
         filename,
@@ -686,6 +743,8 @@ class Matrix:
         max_duration=None,
     ):
         """Decode a sanitized MP4 with FFmpeg, bounded and interruptible."""
+        from modules.media_player import video_media_frames
+
         path = self._media_file(filename)
         if path is None or path.suffix.lower() != ".mp4":
             return False
@@ -695,89 +754,30 @@ class Matrix:
         if frame_width < 1 or frame_height < 1:
             return False
         fps = max(1.0, min(60.0, float(fps_override or 20)))
-        frame_delay = 1.0 / fps
-        frame_size = frame_width * frame_height * 3
         started = time.monotonic()
         deadline = started + max_duration if max_duration is not None else None
-        completed = 0
+
+        def decode():
+            return self._video_frame_timeline(
+                path, frame_width, frame_height, keep_aspect,
+                stop_event=stop_event, deadline=deadline,
+            )
+
         shown = False
-        input_fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW)
-
-        try:
-            while loops == 0 or completed < loops:
-                if stop_event is not None and stop_event.is_set():
+        for image, frame_delay in video_media_frames(
+            decode, fps=fps, loops=loops, stop_event=stop_event,
+            max_duration=max_duration, monotonic=time.monotonic,
+        ):
+            self.clear()
+            self.canvas.SetImage(image, x, y)
+            self._frame_capture.set_image(self.canvas, image, x, y)
+            self.swap()
+            shown = True
+            if stop_event is not None:
+                if stop_event.wait(frame_delay):
                     return shown
-                if max_duration is not None and time.monotonic() - started >= max_duration:
-                    return shown
-                os.lseek(input_fd, 0, os.SEEK_SET)
-                identity = {}
-                if os.geteuid() == 0:
-                    nobody = pwd.getpwnam("nobody")
-                    identity = {
-                        "user": nobody.pw_uid,
-                        "group": nobody.pw_gid,
-                        "extra_groups": [],
-                    }
-                video_filter = f"scale={frame_width}:{frame_height}"
-                if keep_aspect:
-                    video_filter += (
-                        ":force_original_aspect_ratio=decrease,"
-                        f"pad={frame_width}:{frame_height}:(ow-iw)/2:(oh-ih)/2:black"
-                    )
-                process = subprocess.Popen(
-                    [
-                        "/usr/bin/ffmpeg", "-nostdin", "-v", "error", "-threads", "1",
-                        "-i", f"pipe:{input_fd}", "-map", "0:v:0", "-an", "-sn", "-dn",
-                        "-vf", video_filter,
-                        "-pix_fmt", "rgb24", "-f", "rawvideo", "pipe:1",
-                    ],
-                    stdin=subprocess.DEVNULL,
-                    stdout=subprocess.PIPE,
-                    stderr=subprocess.DEVNULL,
-                    pass_fds=(input_fd,),
-                    **identity,
-                )
-                try:
-                    while True:
-                        if stop_event is not None and stop_event.is_set():
-                            return shown
-                        if max_duration is not None and time.monotonic() - started >= max_duration:
-                            return shown
-                        frame = _read_exact_interruptibly(
-                            process.stdout,
-                            frame_size,
-                            stop_event=stop_event,
-                            deadline=deadline,
-                        )
-                        if stop_event is not None and stop_event.is_set():
-                            return shown
-                        if deadline is not None and time.monotonic() >= deadline:
-                            return shown
-                        if len(frame) != frame_size:
-                            break
-                        image = Image.frombytes("RGB", (frame_width, frame_height), frame)
-                        self.clear()
-                        self.canvas.SetImage(image, x, y)
-                        self._frame_capture.set_image(self.canvas, image, x, y)
-                        self.swap()
-                        shown = True
-                        if stop_event is not None:
-                            if stop_event.wait(frame_delay):
-                                return shown
-                        else:
-                            time.sleep(frame_delay)
-                finally:
-                    if process.poll() is None:
-                        process.terminate()
-                    try:
-                        process.wait(timeout=2)
-                    except subprocess.TimeoutExpired:
-                        process.kill()
-                        process.wait(timeout=2)
-                completed += 1
-        finally:
-            os.close(input_fd)
-
+            else:
+                time.sleep(frame_delay)
         return shown
 
     def border_test(self):

@@ -362,6 +362,181 @@ class EditPreviewTests(unittest.TestCase):
         with self.assertRaises(StopIteration):
             session.page()
 
+    def test_gif_and_mp4_speed_repeat_and_final_delay_match_physical_invocation(self):
+        frame_capture_patch = patch.object(frame_capture_module, "Image", Image)
+        frame_capture_patch.start()
+        self.addCleanup(frame_capture_patch.stop)
+
+        fake_graphics = types.SimpleNamespace(
+            Color=lambda *rgb: types.SimpleNamespace(
+                red=rgb[0], green=rgb[1], blue=rgb[2],
+            ),
+            Font=Mock,
+        )
+        fake_rgb = types.SimpleNamespace(
+            RGBMatrix=Mock, RGBMatrixOptions=Mock, graphics=fake_graphics,
+        )
+        previous = sys.modules.get("rgbmatrix")
+        sys.modules["rgbmatrix"] = fake_rgb
+        try:
+            framework = importlib.import_module("matrix_framework")
+        finally:
+            if previous is None:
+                sys.modules.pop("rgbmatrix", None)
+            else:
+                sys.modules["rgbmatrix"] = previous
+
+        class Canvas:
+            def SetImage(self, image, x, y):
+                pass
+
+            def Clear(self):
+                pass
+
+        class PhysicalMatrix(framework.Matrix):
+            def __init__(self, paths, video_frames):
+                self.paths = paths
+                self.video_frames = video_frames
+                self.video_decode_calls = 0
+                self.matrix = types.SimpleNamespace(width=64, height=32)
+                self.canvas = Canvas()
+                self._frame_capture = FrameCapture(64, 32)
+                self._frame_capture.register(self.canvas)
+                self.submissions = []
+
+            def _media_file(self, filename):
+                return self.paths[filename]
+
+            def _video_frame_timeline(self, *args, **kwargs):
+                self.video_decode_calls += 1
+                return iter(frame.copy() for frame in self.video_frames)
+
+            def swap(self, canvas=None):
+                self.submissions.append(self._frame_capture.snapshot(self.canvas))
+                return self.canvas
+
+        class AdvancingStop:
+            def __init__(self):
+                self.elapsed = 0.0
+                self.waits = []
+
+            def is_set(self):
+                return False
+
+            def wait(self, delay):
+                self.waits.append(delay)
+                self.elapsed += delay
+                return False
+
+        settings = {
+            "x": 0, "y": 0, "width": 64, "height": 32,
+            "keep_aspect": False, "gif_speed_percent": 200,
+            "video_fps": 20,
+        }
+        red = Image.new("RGB", (64, 32), "red")
+        blue = Image.new("RGB", (64, 32), "blue")
+        with tempfile.TemporaryDirectory() as directory:
+            gif_path = Path(directory) / "timeline.gif"
+            mp4_path = Path(directory) / "timeline.mp4"
+            red.save(
+                gif_path, format="GIF", save_all=True, append_images=[blue],
+                duration=[100, 200], loop=0,
+            )
+            mp4_path.write_bytes(b"deterministic injected decoder input")
+
+            for filename, duration, expected_delays, decoded in (
+                ("timeline.gif", 0.32, [50, 100, 50, 100, 20], []),
+                ("timeline.mp4", 0.23, [50, 50, 50, 50, 30], [red, blue]),
+            ):
+                with self.subTest(media=filename):
+                    physical = PhysicalMatrix(
+                        {filename: gif_path if filename.endswith(".gif") else mp4_path},
+                        decoded,
+                    )
+                    stop = AdvancingStop()
+                    playback_patches = [
+                        patch.object(
+                            framework.time, "monotonic",
+                            side_effect=lambda: stop.elapsed,
+                        ),
+                        patch.object(framework.Image, "open", side_effect=Image.open),
+                        patch.object(
+                            framework.ImageSequence, "Iterator",
+                            side_effect=ImageSequence.Iterator,
+                        ),
+                    ]
+                    if filename.endswith(".mp4"):
+                        playback_patches.append(patch.object(
+                            framework.subprocess, "Popen",
+                            side_effect=AssertionError(
+                                "shared injected video decoder seam was not consumed"
+                            ),
+                        ))
+                    with playback_patches[0], playback_patches[1], playback_patches[2]:
+                        if len(playback_patches) == 4:
+                            playback_patches[3].start()
+                        try:
+                            self.assertTrue(play_media(
+                                physical, filename, duration, stop_event=stop,
+                                settings=settings,
+                            ))
+                        finally:
+                            if len(playback_patches) == 4:
+                                playback_patches[3].stop()
+
+                    preview = CaptureMatrix()
+                    preview_decode_calls = [0]
+
+                    def preview_video_decoder(*_args, **_kwargs):
+                        preview_decode_calls[0] += 1
+                        return iter(frame.copy() for frame in decoded)
+
+                    session = PreviewSession(edit_preview.media_preview_frames(
+                        preview,
+                        gif_path if filename.endswith(".gif") else mp4_path,
+                        duration,
+                        settings=settings,
+                        video_decoder=(
+                            None if filename.endswith(".gif") else
+                            preview_video_decoder
+                        ),
+                    ))
+                    session.MAX_FRAMES = 2
+                    pages = []
+                    token = None
+                    while True:
+                        page = session.page(token)
+                        pages.append(page)
+                        if page["complete"]:
+                            break
+                        token = page["next_token"]
+
+                    frames = [frame for page in pages for frame in page["frames"]]
+                    preview_images = [
+                        Image.open(io.BytesIO(base64.b64decode(frame["png"]))).copy()
+                        for frame in frames
+                    ]
+                    self.assertEqual(
+                        [frame["delay_ms"] for frame in frames], expected_delays,
+                    )
+                    self.assertEqual(
+                        [round(delay * 1000, 9) for delay in stop.waits],
+                        expected_delays,
+                    )
+                    self.assertAlmostEqual(sum(stop.waits), duration)
+                    if filename.endswith(".mp4"):
+                        self.assertEqual(physical.video_decode_calls, 3)
+                        self.assertEqual(preview_decode_calls[0], 3)
+                    self.assertEqual(
+                        [image.tobytes() for image in preview_images],
+                        [image.tobytes() for image in physical.submissions],
+                    )
+                    self.assertTrue(all(not page["complete"] for page in pages[:-1]))
+                    self.assertTrue(pages[-1]["complete"])
+                    self.assertIsNone(pages[-1]["next_token"])
+                    with self.assertRaises(StopIteration):
+                        session.page()
+
     def test_capture_adapter_matches_physical_capture_for_64_by_32_primitives(self):
         font_path = Path(__file__).parents[1] / "resources" / "fonts" / "5x7.bdf"
         font = BdfFont(font_path)

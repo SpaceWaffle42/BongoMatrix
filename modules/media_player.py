@@ -53,6 +53,37 @@ def gif_media_frames(
         gif.close()
 
 
+def video_media_frames(
+    frame_decoder, fps=20, loops=1, stop_event=None, max_duration=None,
+    monotonic=None,
+):
+    """Yield one decoded video timeline repeatedly with deadline-clipped waits."""
+    fps = max(1.0, min(60.0, float(fps)))
+    frame_delay = 1.0 / fps
+    started = monotonic() if monotonic is not None else 0.0
+    elapsed_delays = 0.0
+    completed = 0
+    while loops == 0 or completed < loops:
+        decoded_frame = False
+        for frame in frame_decoder():
+            decoded_frame = True
+            if stop_event is not None and stop_event.is_set():
+                return
+            elapsed = elapsed_delays
+            if monotonic is not None:
+                elapsed = max(elapsed, monotonic() - started)
+            if max_duration is not None and elapsed >= max_duration:
+                return
+            delay = frame_delay
+            if max_duration is not None:
+                delay = min(delay, max_duration - elapsed)
+            yield frame, delay
+            elapsed_delays += delay
+        if not decoded_frame:
+            return
+        completed += 1
+
+
 def play_media(matrix, filename, duration, stop_event=None, settings=None):
     geometry = {}
     if settings:

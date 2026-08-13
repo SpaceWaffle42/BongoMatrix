@@ -141,21 +141,38 @@ def static_media_frames(
         yield filename, remaining * 1000, geometry
 
 
-def media_preview_frames(matrix, filename, duration, settings=None):
-    """Render the shared production GIF timeline into capture-only PNG frames."""
+def media_preview_frames(
+    matrix, filename, duration, settings=None, *, video_decoder=None,
+):
+    """Render the shared production animated-media timeline into PNG frames."""
     from PIL import Image, ImageSequence
 
-    from modules.media_player import gif_media_frames
+    from modules.media_player import gif_media_frames, video_media_frames
 
     settings = settings or {}
     path = Path(filename)
     if not path.is_absolute():
         path = Path(__file__).parent / "resources" / "media" / path
-    playback_rate = settings.get("gif_speed_percent", 100) / 100.0
-    for image, delay in gif_media_frames(
-        path, loops=0, playback_rate=playback_rate, max_duration=duration,
-        image_open=Image.open, image_iterator=ImageSequence.Iterator,
-    ):
+    if path.suffix.lower() == ".gif":
+        timeline = gif_media_frames(
+            path, loops=0,
+            playback_rate=settings.get("gif_speed_percent", 100) / 100.0,
+            max_duration=duration, image_open=Image.open,
+            image_iterator=ImageSequence.Iterator,
+        )
+    elif path.suffix.lower() == ".mp4":
+        if video_decoder is None:
+            video_decoder = getattr(matrix, "_video_frame_timeline", None)
+        if video_decoder is None:
+            raise ValueError("MP4 preview requires the production video decoder seam")
+        timeline = video_media_frames(
+            lambda: video_decoder(path, settings),
+            fps=settings.get("video_fps", 20), loops=0,
+            max_duration=duration,
+        )
+    else:
+        raise ValueError("animated preview media must be GIF or MP4")
+    for image, delay in timeline:
         matrix.clear()
         matrix.draw_image(
             image,
