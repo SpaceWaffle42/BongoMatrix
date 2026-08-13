@@ -373,8 +373,9 @@ class PreviewSession:
     MAX_FRAMES = 32
     MAX_BYTES = 512 * 1024
 
-    def __init__(self, iterator):
+    def __init__(self, iterator, stop_event=None):
         self._iterator = iter(iterator)
+        self._stop_event = stop_event
         self._page = -1
         self._token = None
         self._lookahead = None
@@ -412,6 +413,14 @@ class PreviewSession:
     def page(self, token=None):
         if self._complete:
             raise StopIteration("an explicit new session is required to restart")
+        if self._stop_event is not None and self._stop_event.is_set():
+            self.cancel()
+            return {
+                "page": self._page + 1,
+                "frames": [],
+                "next_token": None,
+                "complete": True,
+            }
         if self._page >= 0 and token != self._token:
             raise ValueError("invalid or already consumed continuation token")
 

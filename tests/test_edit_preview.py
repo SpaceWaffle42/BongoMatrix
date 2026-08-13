@@ -8,6 +8,7 @@ import importlib
 import random
 import sys
 import tempfile
+import threading
 import types
 import unittest
 import weakref
@@ -36,6 +37,62 @@ class Colour:
 
 
 class EditPreviewTests(unittest.TestCase):
+    def test_cancel_before_first_frame_publishes_nothing(self):
+        class RecordingMatrix(CaptureMatrix):
+            def __init__(self):
+                super().__init__()
+                self.submissions = []
+
+            def swap(self, canvas=None):
+                self.submissions.append(self.snapshot(canvas))
+                return super().swap(canvas)
+
+        class GuardedIterator:
+            def __init__(self, iterator):
+                self.iterator = iterator
+                self.next_calls = 0
+                self.close_calls = 0
+
+            def __iter__(self):
+                return self
+
+            def __next__(self):
+                self.next_calls += 1
+                raise AssertionError("a pre-cancelled session advanced its renderer")
+
+            def close(self):
+                self.close_calls += 1
+                self.iterator.close()
+
+        candidate = copy.deepcopy(DEFAULT_CONFIG)
+        candidate["lava"]["show_time"] = False
+        candidate["lava"]["show_date"] = False
+        matrix = RecordingMatrix()
+        lava = edit_preview.continuous_lava_preview_frames(
+            matrix, candidate, {"kind": "built_in", "id": "fire_burst"},
+        )
+        guarded = GuardedIterator(lava)
+        cancelled = threading.Event()
+        cancelled.set()
+        session = PreviewSession(guarded, stop_event=cancelled)
+
+        page = session.page()
+        session.cancel()
+        session.cancel()
+
+        self.assertEqual(page["frames"], [])
+        self.assertTrue(page["complete"])
+        self.assertIsNone(page["next_token"])
+        self.assertEqual(guarded.next_calls, 0)
+        self.assertEqual(guarded.close_calls, 1)
+        self.assertEqual(matrix.submissions, [])
+        self.assertEqual(session.retained_frame_count, 0)
+        self.assertIsNone(getattr(lava, "gi_frame"))
+        with self.assertRaisesRegex(
+            StopIteration, "explicit new session is required to restart",
+        ):
+            session.page(page["next_token"])
+
     def test_duplicate_disabled_and_missing_playlist_rows_choose_documented_duration(self):
         candidate = copy.deepcopy(DEFAULT_CONFIG)
         candidate["custom_modules"] = [
