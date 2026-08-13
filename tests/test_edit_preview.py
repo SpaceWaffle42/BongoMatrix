@@ -1025,6 +1025,149 @@ class EditPreviewTests(unittest.TestCase):
             )
             self.assertEqual(exhausted.submissions, [])
 
+    def test_announcement_static_scroll_transition_and_final_delay_match_physical_invocation(self):
+        import modules.announcement_board as announcement_board
+
+        frame_capture_patch = patch.object(frame_capture_module, "Image", Image)
+        frame_capture_patch.start()
+        self.addCleanup(frame_capture_patch.stop)
+
+        class RecordingCaptureMatrix(CaptureMatrix):
+            def __init__(self):
+                super().__init__()
+                self.submissions = []
+
+            def swap(self, canvas=None):
+                self.submissions.append(self.snapshot(canvas))
+                return super().swap(canvas)
+
+        class AdvancingStop:
+            def __init__(self):
+                self.elapsed = 0.0
+                self.waits = []
+                self.cancelled = False
+
+            def is_set(self):
+                return self.cancelled
+
+            def wait(self, delay):
+                self.waits.append(delay)
+                self.elapsed += delay
+                return self.cancelled
+
+        def item(item_id, headline, timing, transition):
+            return {
+                "id": item_id,
+                "enabled": True,
+                "name": headline,
+                "layout": "text_notice",
+                "headline": headline,
+                "message": "",
+                "media": None,
+                "schedule": {
+                    "start_date": "2030-01-15",
+                    "end_date": "2030-01-15",
+                    "start_time": "09:00",
+                    "end_time": "17:00",
+                    "days": [0, 1, 2, 3, 4, 5, 6],
+                },
+                "style": {
+                    "foreground": "#ffffff",
+                    "background": "#001122",
+                    "font": "5x7",
+                    "alignment": "left",
+                    "border": "none",
+                    "border_colour": "#ffffff",
+                },
+                "timing": timing,
+                "transition": transition,
+            }
+
+        announcements = [
+            item(
+                "announcement_static", "HELD",
+                {"mode": "static", "duration_seconds": 1}, {"type": "cut"},
+            ),
+            item(
+                "announcement_scroll", "A",
+                {"mode": "scroll", "loops": 2, "frame_delay": 0.01},
+                {"type": "cut"},
+            ),
+            item(
+                "announcement_fade", "FINAL",
+                {"mode": "static", "duration_seconds": 1},
+                {"type": "fade", "duration_seconds": 0.4},
+            ),
+        ]
+        validated = copy.deepcopy(DEFAULT_CONFIG)
+        validated["announcement_board"]["announcements"] = announcements
+        validate_config(validated, enforce_save_bounds=True)
+        announcements = validated["announcement_board"]["announcements"]
+
+        physical = RecordingCaptureMatrix()
+        stop = AdvancingStop()
+        now = datetime.datetime(2030, 1, 15, 12, 0)
+        with patch("modules.announcement_board.time.monotonic", side_effect=lambda: stop.elapsed):
+            self.assertTrue(announcement_board.run(
+                physical,
+                {"announcement_board": {"announcements": announcements}},
+                duration=3,
+                stop_event=stop,
+                now_provider=lambda: now,
+            ))
+
+        preview = CaptureMatrix()
+        frames = list(edit_preview.announcement_preview_frames(
+            preview, announcements, duration=3,
+        ))
+        preview_images = [
+            Image.open(io.BytesIO(base64.b64decode(frame["png"]))).copy()
+            for frame in frames
+        ]
+        physical_bytes = [image.tobytes() for image in physical.submissions]
+        preview_bytes = [image.tobytes() for image in preview_images]
+        preview_delays = [frame["delay_ms"] for frame in frames]
+        physical_delays = [delay * 1000 for delay in stop.waits]
+
+        font = BdfFont(Path(__file__).parents[1] / "resources" / "fonts" / "5x7.bdf")
+        text_width = font.text_pixels(0, 20, "A")[0]
+        scroll_frames_per_loop = 64 + text_width + 1
+        transition_start = 1 + scroll_frames_per_loop * 2
+        self.assertEqual(len(frames), transition_start + 5)
+        self.assertEqual(preview_bytes, physical_bytes)
+        self.assertEqual(preview_delays, physical_delays)
+        self.assertEqual(preview_delays[:1], [1000])
+        self.assertEqual(
+            preview_delays[1:transition_start], [10] * (scroll_frames_per_loop * 2),
+        )
+        self.assertEqual(
+            [round(delay, 9) for delay in preview_delays[transition_start:]],
+            [100, 100, 100, 100, 200],
+        )
+        self.assertAlmostEqual(sum(preview_delays), 3000)
+        self.assertEqual(
+            preview_bytes[1], preview_bytes[1 + scroll_frames_per_loop],
+            "each saved leftward traversal must reset to the exact first position",
+        )
+        self.assertEqual(
+            preview_bytes[-1], preview_bytes[-2],
+            "the terminal page must be the one explicit hold submission",
+        )
+        self.assertEqual(len(physical.submissions), 146)
+
+        cancelled = RecordingCaptureMatrix()
+        cancelled_stop = AdvancingStop()
+        cancelled_stop.cancelled = True
+        self.assertFalse(announcement_board.run(
+            cancelled,
+            {"announcement_board": {"announcements": announcements}},
+            duration=3,
+            stop_event=cancelled_stop,
+            now_provider=lambda: now,
+        ))
+        self.assertEqual(cancelled.submissions, [])
+        self.assertEqual(announcement_board.run_preview.__defaults__, (None,))
+
     def test_announcement_transition_and_hold_complete_before_terminal_page(self):
         import modules.announcement_board as announcement_board
 

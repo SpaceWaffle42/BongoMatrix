@@ -302,6 +302,24 @@ def static_announcement_preview_frames(matrix, announcement):
         yield _png_frame(matrix.snapshot(canvas), delay_ms)
 
 
+def announcement_preview_frames(matrix, announcements, duration=None, stop_event=None):
+    """Encode the complete shared physical announcement invocation."""
+    from modules.announcement_board import announcement_frames
+
+    class LogicalClock:
+        elapsed = 0.0
+
+        def monotonic(self):
+            return self.elapsed
+
+    clock = LogicalClock()
+    for canvas, delay_ms in announcement_frames(
+        matrix, announcements, duration, stop_event, monotonic=clock.monotonic,
+    ):
+        yield _png_frame(matrix.snapshot(canvas), delay_ms)
+        clock.elapsed += delay_ms / 1000
+
+
 class PreviewSession:
     """Pull one finite iterator in bounded pages without retaining frame history."""
 
