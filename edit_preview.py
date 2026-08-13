@@ -226,9 +226,11 @@ class PreviewSession:
                 exhausted = True
         self._complete = exhausted
         self._token = None if exhausted else secrets.token_hex(32)
-        return {
+        page = {
             "page": self._page,
             "frames": list(self._current),
             "next_token": self._token,
             "complete": exhausted,
         }
+        self._current = []
+        return page

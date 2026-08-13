@@ -1,11 +1,15 @@
 import base64
+import copy
+import gc
 import io
 import json
 import unittest
+import weakref
 from pathlib import Path
 
 from PIL import Image
 
+from config_store import DEFAULT_CONFIG, validate_config
 from edit_preview import (
     CaptureMatrix, PreviewSession, custom_text_preview_frames, preview_frames,
     static_media_frames,
@@ -210,6 +214,96 @@ class EditPreviewTests(unittest.TestCase):
         restarted = PreviewSession(custom_text_preview_frames(CaptureMatrix(), options))
         restarted_first = image(restarted.page()["frames"][0])
         self.assertEqual(restarted_first.tobytes(), first.tobytes())
+
+    def test_maximum_width_custom_text_ten_loops_completes_without_history_growth(self):
+        class WeakFrame(dict):
+            pass
+
+        options = {
+            "type": "text_scroll",
+            "text": "@" * 200,
+            "font": "helvR12",
+            "colour": "#ffffff",
+            "background": "#000000",
+            "y": 31,
+            "direction": "left",
+            "speed": 0.01,
+            "loops": 10,
+        }
+        validated = copy.deepcopy(DEFAULT_CONFIG)
+        validated["custom_modules"] = [{
+            "id": "custom_maximum", "name": "Maximum ticker", "x": 0, **options,
+        }]
+        validated["playlist"] = [{
+            "module": "custom_maximum", "duration": 1, "enabled": True,
+        }]
+        validate_config(validated, enforce_save_bounds=True)
+
+        font = BdfFont(
+            Path(__file__).parents[1] / "resources" / "fonts" / f"{options['font']}.bdf"
+        )
+        text_width = font.text_pixels(0, options["y"], options["text"])[0]
+        frames_per_loop = 64 + text_width + 1
+        expected_frames = frames_per_loop * options["loops"]
+        source = (
+            WeakFrame(frame)
+            for frame in custom_text_preview_frames(CaptureMatrix(), options)
+        )
+        session = PreviewSession(source)
+        token = None
+        page_number = 0
+        frame_count = 0
+        delay_total = 0
+        tokens = []
+        first_loop = []
+        prior_frame_refs = []
+
+        while True:
+            page = session.page(token)
+            gc.collect()
+            self.assertTrue(all(reference() is None for reference in prior_frame_refs))
+            self.assertEqual(page["page"], page_number)
+            self.assertLessEqual(len(page["frames"]), 32)
+            self.assertLessEqual(
+                len(json.dumps(page, separators=(",", ":")).encode()), 512 * 1024,
+            )
+            self.assertLessEqual(session.retained_frame_count, 33)
+
+            for frame in page["frames"]:
+                loop_offset = frame_count % frames_per_loop
+                signature = frame["png"]
+                if frame_count < frames_per_loop:
+                    first_loop.append(signature)
+                else:
+                    self.assertEqual(signature, first_loop[loop_offset])
+                frame_count += 1
+                delay_total += frame["delay_ms"]
+
+            if page["complete"]:
+                self.assertIsNone(page["next_token"])
+                terminal_frame_refs = [weakref.ref(frame) for frame in page["frames"]]
+                del frame
+                del page
+                gc.collect()
+                self.assertTrue(
+                    all(reference() is None for reference in terminal_frame_refs)
+                )
+                break
+            self.assertIsInstance(page["next_token"], str)
+            self.assertNotIn(page["next_token"], tokens)
+            tokens.append(page["next_token"])
+            token = page["next_token"]
+            prior_frame_refs = [weakref.ref(frame) for frame in page["frames"]]
+            del frame
+            del page
+            page_number += 1
+
+        self.assertEqual(frame_count, expected_frames)
+        self.assertEqual(delay_total, expected_frames * 10)
+        self.assertGreater(len(set(first_loop)), 64)
+        self.assertEqual(len(tokens), page_number)
+        with self.assertRaises(StopIteration):
+            session.page()
 
 
 if __name__ == "__main__":
