@@ -3,6 +3,8 @@
 from pathlib import Path
 import threading
 
+from edit_preview import static_media_frames
+
 
 def play_media(matrix, filename, duration, stop_event=None, settings=None):
     geometry = {}
@@ -37,9 +39,11 @@ def play_media(matrix, filename, duration, stop_event=None, settings=None):
             max_duration=duration,
         )
 
-    shown = matrix.show_image(filename, delay=None, **geometry)
+    frame_iterator = static_media_frames(filename, duration, settings)
+    frame_filename, delay_ms, geometry = next(frame_iterator)
+    shown = matrix.show_image(frame_filename, delay=None, **geometry)
     if not shown:
         return False
     waiter = stop_event or threading.Event()
-    waiter.wait(max(0, float(duration)))
+    waiter.wait(delay_ms / 1000)
     return True

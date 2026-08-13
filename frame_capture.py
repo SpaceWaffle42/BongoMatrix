@@ -172,6 +172,11 @@ class FrameCapture:
             self._revision += 1
             return self._revision
 
+    def snapshot(self, canvas):
+        """Return an isolated copy of a draw buffer without publishing it."""
+        with self._lock:
+            return self._buffer(canvas).copy()
+
     def png(self):
         with self._lock:
             output = io.BytesIO()
