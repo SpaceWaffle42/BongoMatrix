@@ -315,6 +315,27 @@ def _run_canvas(matrix, duration, stop_event, module_config):
     return rendered
 
 
+def advance_left_scroll(position, text_width, canvas_width, completed_loops, loop_limit):
+    """Advance one frame while preserving the physical ticker reset boundary."""
+    position -= 1
+    if position + text_width < 0:
+        completed_loops += 1
+        if completed_loops < loop_limit:
+            position = canvas_width
+    return position, completed_loops
+
+
+def left_scroll_positions(canvas_width, text_width, loops):
+    """Yield every physical left-ticker position through natural loop exhaustion."""
+    position = canvas_width
+    completed_loops = 0
+    while completed_loops < loops:
+        yield position
+        position, completed_loops = advance_left_scroll(
+            position, text_width, canvas_width, completed_loops, loops,
+        )
+
+
 def run(matrix, config, duration=15, stop_event=None, module_config=None):
     """Render one validated custom definition using capture-aware Matrix calls."""
     if module_config is None:
@@ -365,12 +386,10 @@ def run(matrix, config, duration=15, stop_event=None, module_config=None):
         text_width = text_width or drawn_width
         loop_finished = False
         if direction == "left":
-            position -= 1
-            if position + text_width < 0:
-                completed_loops += 1
-                loop_finished = completed_loops >= loop_limit
-                if not loop_finished:
-                    position = matrix.matrix.width
+            position, completed_loops = advance_left_scroll(
+                position, text_width, matrix.matrix.width, completed_loops, loop_limit,
+            )
+            loop_finished = completed_loops >= loop_limit
         else:
             position += 1
             if position > matrix.matrix.width:

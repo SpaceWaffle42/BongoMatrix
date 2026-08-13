@@ -2,9 +2,15 @@
 
 from __future__ import annotations
 
+import base64
+import io
+import json
 import math
+import secrets
+from pathlib import Path
+from types import SimpleNamespace
 
-from frame_capture import FrameCapture
+from frame_capture import BdfFont, FrameCapture
 
 
 class _Canvas:
@@ -18,8 +24,26 @@ class CaptureMatrix:
         self.width = int(width)
         self.height = int(height)
         self.canvas = _Canvas()
+        self.matrix = SimpleNamespace(
+            width=self.width, height=self.height, CreateFrameCanvas=self._new_canvas,
+        )
         self._capture = FrameCapture(self.width, self.height)
         self._capture.register(self.canvas)
+
+    def _new_canvas(self):
+        canvas = _Canvas()
+        self._capture.register(canvas)
+        return canvas
+
+    @staticmethod
+    def colour_rgb(value):
+        return SimpleNamespace(
+            red=int(value[1:3], 16), green=int(value[3:5], 16), blue=int(value[5:7], 16),
+        )
+
+    @staticmethod
+    def font(name):
+        return BdfFont(Path(__file__).parent / "resources" / "fonts" / f"{name}.bdf")
 
     def clear(self, canvas=None):
         self._capture.clear(canvas or self.canvas)
@@ -78,9 +102,15 @@ class CaptureMatrix:
             )
         return int(x) + advance
 
-    def snapshot(self):
+    def snapshot(self, canvas=None):
         """Return an isolated copy without changing publication or revision state."""
-        return self._capture.snapshot(self.canvas)
+        return self._capture.snapshot(canvas or self.canvas)
+
+    def swap(self, canvas=None):
+        """Capture a submitted preview canvas and return a fresh drawing canvas."""
+        submitted = canvas or self.canvas
+        self.canvas = self._new_canvas()
+        return self.canvas
 
 
 def static_media_frames(filename, duration, settings=None):
@@ -100,3 +130,104 @@ def static_media_frames(filename, duration, settings=None):
 def preview_frames(iterator):
     """Consume the same resumable frame iterator as physical wrappers."""
     yield from iterator
+
+
+def _png_frame(image, delay_ms):
+    output = io.BytesIO()
+    image.save(output, format="PNG")
+    return {
+        "png": base64.b64encode(output.getvalue()).decode("ascii"),
+        "delay_ms": delay_ms,
+    }
+
+
+def custom_text_preview_frames(matrix, module_config):
+    """Yield exact left-ticker capture frames using physical scroll positions."""
+    from modules.custom_text import left_scroll_positions
+
+    font = matrix.font(module_config["font"])
+    foreground = matrix.colour_rgb(module_config["colour"])
+    background = matrix.colour_rgb(module_config["background"])
+    measure_canvas = matrix.matrix.CreateFrameCanvas()
+    matrix.clear(measure_canvas)
+    text_width = matrix.draw_text(
+        font, 0, module_config["y"], foreground, module_config["text"],
+        canvas=measure_canvas,
+    )
+    canvas = matrix.matrix.CreateFrameCanvas()
+    for position in left_scroll_positions(
+        matrix.width, text_width, module_config.get("loops", 1),
+    ):
+        matrix.fill(background.red, background.green, background.blue, canvas=canvas)
+        matrix.draw_text(
+            font, position, module_config["y"], foreground, module_config["text"],
+            canvas=canvas,
+        )
+        yield _png_frame(matrix.snapshot(canvas), module_config["speed"] * 1000)
+        canvas = matrix.swap(canvas)
+
+
+class PreviewSession:
+    """Pull one finite iterator in bounded pages without retaining frame history."""
+
+    MAX_FRAMES = 32
+    MAX_BYTES = 512 * 1024
+
+    def __init__(self, iterator):
+        self._iterator = iter(iterator)
+        self._page = -1
+        self._token = None
+        self._lookahead = None
+        self._current = []
+        self._complete = False
+
+    @property
+    def retained_frame_count(self):
+        return len(self._current) + (self._lookahead is not None)
+
+    def _next_frame(self):
+        if self._lookahead is not None:
+            frame, self._lookahead = self._lookahead, None
+            return frame
+        return next(self._iterator)
+
+    def page(self, token=None):
+        if self._complete:
+            raise StopIteration("an explicit new session is required to restart")
+        if self._page >= 0 and token != self._token:
+            raise ValueError("invalid or already consumed continuation token")
+
+        self._page += 1
+        self._current = []
+        exhausted = False
+        while len(self._current) < self.MAX_FRAMES:
+            try:
+                frame = self._next_frame()
+            except StopIteration:
+                exhausted = True
+                break
+            candidate = self._current + [frame]
+            probe = {
+                "page": self._page, "frames": candidate, "next_token": "0" * 64,
+                "complete": False,
+            }
+            if len(json.dumps(probe, separators=(",", ":")).encode()) > self.MAX_BYTES:
+                if not self._current:
+                    raise ValueError("one encoded frame exceeds the page byte limit")
+                self._lookahead = frame
+                break
+            self._current.append(frame)
+
+        if not exhausted and self._lookahead is None:
+            try:
+                self._lookahead = next(self._iterator)
+            except StopIteration:
+                exhausted = True
+        self._complete = exhausted
+        self._token = None if exhausted else secrets.token_hex(32)
+        return {
+            "page": self._page,
+            "frames": list(self._current),
+            "next_token": self._token,
+            "complete": exhausted,
+        }
