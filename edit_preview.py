@@ -158,6 +158,31 @@ def preview_frames(iterator):
     yield from iterator
 
 
+def preview_duration(config, module_name, default=300):
+    """Resolve one invocation from the first enabled playlist match."""
+    for item in config.get("playlist", []):
+        if item.get("enabled") and item.get("module") == module_name:
+            return item["duration"]
+    return default
+
+
+def lava_preview_frames(matrix, config):
+    """Render one finite Lava invocation through the physical frame seam."""
+    from modules import clock_lava
+
+    duration = max(0.0, float(preview_duration(config, "clock_lava")))
+    state = clock_lava.prepare_lava_frame_state(matrix, config.get("lava"))
+    canvas = matrix.matrix.CreateFrameCanvas()
+    temp_canvas = matrix.matrix.CreateFrameCanvas()
+    elapsed = 0.0
+    while elapsed < duration:
+        clock_lava.render_lava_frame(matrix, state, canvas, temp_canvas)
+        delay = min(clock_lava.FRAME_DELAY, duration - elapsed)
+        yield _png_frame(matrix.snapshot(canvas), round(delay * 1000, 9))
+        elapsed += delay
+        canvas = matrix.swap(canvas)
+
+
 def _png_frame(image, delay_ms):
     output = io.BytesIO()
     image.save(output, format="PNG")

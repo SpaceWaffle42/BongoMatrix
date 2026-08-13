@@ -1,5 +1,6 @@
 import base64
 import copy
+import datetime
 import gc
 import io
 import json
@@ -22,6 +23,7 @@ from edit_preview import (
 )
 from frame_capture import BdfFont, FrameCapture
 from modules.media_player import play_media
+from modules import clock_lava
 import edit_preview
 
 
@@ -33,6 +35,70 @@ class Colour:
 
 
 class EditPreviewTests(unittest.TestCase):
+    def test_lava_playlist_duration_and_default_preserve_physical_wrapper_semantics(self):
+        class FixedDateTime(datetime.datetime):
+            @classmethod
+            def now(cls, tz=None):
+                return cls(2030, 1, 15, 9, 30, tzinfo=tz)
+
+        config = copy.deepcopy(DEFAULT_CONFIG)
+        config["lava"].update({
+            "enabled_palettes": [],
+            "custom_enabled": True,
+            "custom_colours": ["#001122", "#ff5500", "#ffee00"],
+            "show_time": False,
+            "show_date": False,
+            "text_colour": "#ffffff",
+            "border_colour": "#000000",
+            "blob_count": 2,
+        })
+        config["playlist"] = [
+            {"module": "clock_lava", "duration": 0.05, "enabled": True},
+            {"module": "clock_lava", "duration": 0.09, "enabled": True},
+        ]
+        original_lava = copy.deepcopy(config["lava"])
+        original_playlist = copy.deepcopy(config["playlist"])
+
+        with patch("modules.clock_lava.datetime.datetime", FixedDateTime), \
+             patch("modules.clock_lava.random.uniform", side_effect=lambda low, high: (low + high) / 2):
+            frames = list(edit_preview.lava_preview_frames(CaptureMatrix(), config))
+
+        self.assertEqual([frame["delay_ms"] for frame in frames], [30, 20])
+        self.assertEqual(config["lava"], original_lava)
+        self.assertEqual(config["playlist"], original_playlist)
+
+        disabled = copy.deepcopy(config)
+        disabled["playlist"] = [
+            {"module": "clock_lava", "duration": 1, "enabled": False},
+        ]
+        self.assertEqual(
+            edit_preview.preview_duration(disabled, "clock_lava"), 300,
+        )
+        self.assertFalse(disabled["playlist"][0]["enabled"])
+
+        with patch.object(clock_lava, "FRAME_DELAY", 100), \
+             patch("modules.clock_lava.datetime.datetime", FixedDateTime), \
+             patch("modules.clock_lava.random.uniform", side_effect=lambda low, high: (low + high) / 2):
+            default_frames = list(edit_preview.lava_preview_frames(CaptureMatrix(), disabled))
+        self.assertEqual([frame["delay_ms"] for frame in default_frames], [100000, 100000, 100000])
+        self.assertFalse(disabled["playlist"][0]["enabled"])
+
+        physical_matrix = CaptureMatrix()
+        stop = Mock()
+        stop.is_set.return_value = False
+        stop.wait.return_value = True
+        with patch.object(clock_lava, "render_lava_frame", wraps=clock_lava.render_lava_frame) as shared, \
+             patch("modules.clock_lava.datetime.datetime", FixedDateTime), \
+             patch("modules.clock_lava.random.uniform", side_effect=lambda low, high: (low + high) / 2), \
+             patch("modules.clock_lava.time.time", side_effect=[0, 0]):
+            clock_lava.clock(
+                duration=1, matrix=physical_matrix, stop_event=stop,
+                lava_config=config["lava"],
+            )
+        self.assertEqual(shared.call_count, 1)
+        self.assertEqual(clock_lava.clock.__defaults__, (300, None, None, None))
+        self.assertEqual(clock_lava.run.__defaults__, (300, None))
+
     def test_finite_cycle_can_restart_only_after_terminal_page(self):
         frame_capture_patch = patch.object(frame_capture_module, "Image", Image)
         frame_capture_patch.start()
