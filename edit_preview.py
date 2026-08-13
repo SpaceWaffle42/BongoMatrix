@@ -382,6 +382,7 @@ class PreviewSession:
         self._lookahead = None
         self._current = []
         self._complete = False
+        self._iterator_closed = False
 
     @property
     def retained_frame_count(self):
@@ -403,6 +404,13 @@ class PreviewSession:
         self._token = None
         self._lookahead = None
         self._current = []
+        self._close_iterator()
+
+    def _close_iterator(self):
+        """Release the finite renderer exactly once on cancel or exhaustion."""
+        if self._iterator_closed:
+            return
+        self._iterator_closed = True
         close = getattr(self._iterator, "close", None)
         if close is not None:
             try:
@@ -452,10 +460,14 @@ class PreviewSession:
             }
             if len(json.dumps(probe, separators=(",", ":")).encode()) > self.MAX_BYTES:
                 if not self._current:
-                    raise ValueError("one encoded frame exceeds the page byte limit")
-                self._lookahead = frame
+                    # A valid frame is indivisible: preserve the finite cycle by
+                    # publishing a lone oversize frame rather than truncating it.
+                    self._current.append(frame)
+                else:
+                    self._lookahead = frame
                 break
-            self._current.append(frame)
+            else:
+                self._current.append(frame)
 
         if not exhausted and self._lookahead is None:
             try:
@@ -467,6 +479,8 @@ class PreviewSession:
         if self._stop_event is not None and self._stop_event.is_set():
             return self._cancelled_page(self._page)
         self._complete = exhausted
+        if exhausted:
+            self._close_iterator()
         self._token = None if exhausted else secrets.token_hex(32)
         page = {
             "page": self._page,

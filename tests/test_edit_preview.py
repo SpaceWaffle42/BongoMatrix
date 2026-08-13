@@ -1838,6 +1838,120 @@ class EditPreviewTests(unittest.TestCase):
         restarted_first = image(restarted.page()["frames"][0])
         self.assertEqual(restarted_first.tobytes(), first.tobytes())
 
+    def test_page_frame_and_byte_bounds_do_not_truncate_cycle(self):
+        class ClosingIterator:
+            def __init__(self, iterator):
+                self.iterator = iter(iterator)
+                self.close_calls = 0
+
+            def __iter__(self):
+                return self
+
+            def __next__(self):
+                return next(self.iterator)
+
+            def close(self):
+                self.close_calls += 1
+                close = getattr(self.iterator, "close", None)
+                if close is not None:
+                    close()
+
+        options = {
+            "type": "text_scroll",
+            "text": "W" * 24,
+            "font": "helvR12",
+            "colour": "#ffffff",
+            "background": "#001122",
+            "y": 20,
+            "direction": "left",
+            "speed": 0.037,
+            "loops": 2,
+        }
+        with patch.object(frame_capture_module, "Image", Image):
+            expected = list(custom_text_preview_frames(CaptureMatrix(), options))
+
+        self.assertGreater(len(expected), 32)
+
+        def serialized(page):
+            return json.dumps(page, separators=(",", ":")).encode("utf-8")
+
+        # A one-frame nonterminal response is the byte-bound unit because the
+        # actual response contract includes JSON, UTF-8, base64, and the token.
+        token = "0" * 64
+        largest_single = max(
+            len(serialized({
+                "page": page_number,
+                "frames": [frame],
+                "next_token": token,
+                "complete": False,
+            }))
+            for page_number, frame in enumerate(expected)
+        )
+        smallest_pair = min(
+            len(serialized({
+                "page": page_number,
+                "frames": expected[index:index + 2],
+                "next_token": token,
+                "complete": False,
+            }))
+            for page_number, index in enumerate(range(len(expected) - 1))
+        )
+        self.assertLess(largest_single, smallest_pair)
+
+        policies = (
+            ("frame", 3, 10 * 1024 * 1024, 3, False),
+            ("byte", len(expected), smallest_pair - 1, 1, False),
+            # Complete-cycle preservation wins when one valid frame cannot fit:
+            # that frame is returned alone as the documented oversize exception.
+            ("single_oversize", len(expected), 1, 1, True),
+        )
+        for name, max_frames, max_bytes, expected_page_max, oversize in policies:
+            with self.subTest(bound=name), patch.object(frame_capture_module, "Image", Image):
+                guarded = ClosingIterator(
+                    custom_text_preview_frames(CaptureMatrix(), options)
+                )
+                session = PreviewSession(guarded)
+                session.MAX_FRAMES = max_frames
+                session.MAX_BYTES = max_bytes
+                pages = []
+                token = None
+                consumed_tokens = []
+                while True:
+                    page = session.page(token)
+                    pages.append(page)
+                    self.assertLessEqual(len(page["frames"]), expected_page_max)
+                    page_bytes = len(serialized(page))
+                    if oversize and page_bytes > max_bytes:
+                        self.assertEqual(len(page["frames"]), 1)
+                    else:
+                        self.assertLessEqual(page_bytes, max_bytes)
+                    self.assertLessEqual(session.retained_frame_count, 1)
+                    if page["complete"]:
+                        self.assertIsNone(page["next_token"])
+                        break
+                    self.assertIsNotNone(page["next_token"])
+                    consumed_tokens.append(page["next_token"])
+                    token = page["next_token"]
+
+                actual = [frame for page in pages for frame in page["frames"]]
+                self.assertEqual(actual, expected)
+                self.assertEqual(
+                    [frame["delay_ms"] for frame in actual],
+                    [frame["delay_ms"] for frame in expected],
+                )
+                self.assertEqual(
+                    [page["page"] for page in pages], list(range(len(pages)))
+                )
+                self.assertTrue(all(not page["complete"] for page in pages[:-1]))
+                self.assertTrue(pages[-1]["complete"])
+                self.assertEqual(guarded.close_calls, 1)
+                self.assertEqual(session.retained_frame_count, 0)
+                with self.assertRaises(StopIteration):
+                    session.page(token)
+                if consumed_tokens:
+                    with self.assertRaises(StopIteration):
+                        session.page(consumed_tokens[0])
+
     def test_maximum_width_custom_text_ten_loops_completes_without_history_growth(self):
         class WeakFrame(dict):
             pass
