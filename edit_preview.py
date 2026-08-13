@@ -660,6 +660,7 @@ class PreviewSession:
         self._current = []
         self._complete = False
         self._iterator_closed = False
+        self._iterator_close_started = False
         self._on_close = on_close
         self._on_activity = on_activity
         self._state_lock = threading.Lock()
@@ -676,32 +677,33 @@ class PreviewSession:
         return type(self)(iterator_factory())
 
     def cancel(self):
-        """Invalidate paging and close the iterator without publishing lookahead."""
+        """Signal terminal state promptly and defer active-page cleanup."""
         with self._state_lock:
-            if self._complete:
-                return
             self._complete = True
             if self._stop_event is not None:
                 self._stop_event.set()
+            # Clear again on repeated cancellation because an active page may have
+            # obtained lookahead after the first cancellation released this lock.
             self._token = None
             self._lookahead = None
             self._current = []
-        self._close_iterator()
+            close_now = not self._page_in_progress
+        if close_now:
+            self._close_iterator()
 
     def _close_iterator(self):
         """Release the finite renderer exactly once on cancel or exhaustion."""
-        if self._iterator_closed:
-            return
-        self._iterator_closed = True
+        with self._state_lock:
+            if self._iterator_close_started:
+                return
+            self._iterator_close_started = True
         try:
             close = getattr(self._iterator, "close", None)
             if close is not None:
-                try:
-                    close()
-                except ValueError as error:
-                    if str(error) != "generator already executing":
-                        raise
+                close()
         finally:
+            with self._state_lock:
+                self._iterator_closed = True
             if self._on_close is not None:
                 release, self._on_close = self._on_close, None
                 release(self)
@@ -748,6 +750,9 @@ class PreviewSession:
         finally:
             with self._state_lock:
                 self._page_in_progress = False
+                close_after_page = self._complete and not self._iterator_close_started
+            if close_after_page:
+                self._close_iterator()
 
     def _page_after_claim(self):
         self._current = []
@@ -783,19 +788,25 @@ class PreviewSession:
                 exhausted = True
             if self._stop_event is not None and self._stop_event.is_set():
                 return self._cancelled_page(self._page)
-        if self._stop_event is not None and self._stop_event.is_set():
+        page = None
+        with self._state_lock:
+            cancelled = self._complete or (
+                self._stop_event is not None and self._stop_event.is_set()
+            )
+            if not cancelled:
+                self._complete = exhausted
+                self._token = None if exhausted else secrets.token_hex(32)
+                page = {
+                    "page": self._page,
+                    "frames": list(self._current),
+                    "next_token": self._token,
+                    "complete": exhausted,
+                }
+                self._current = []
+        if cancelled:
             return self._cancelled_page(self._page)
-        self._complete = exhausted
         if exhausted:
             self._close_iterator()
-        self._token = None if exhausted else secrets.token_hex(32)
-        page = {
-            "page": self._page,
-            "frames": list(self._current),
-            "next_token": self._token,
-            "complete": exhausted,
-        }
-        self._current = []
         if self._on_activity is not None:
             self._on_activity(self)
         return page

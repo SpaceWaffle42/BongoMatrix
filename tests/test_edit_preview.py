@@ -39,6 +39,140 @@ class Colour:
 
 
 class EditPreviewTests(unittest.TestCase):
+    def test_page_cancel_race_drops_uncommitted_output_and_closes(self):
+        class CommitBarrierIterator:
+            def __init__(self, iterator, cancelled):
+                self.iterator = iterator
+                self.cancelled = cancelled
+                self.calls = 0
+                self.active = False
+                self.commit_barrier = threading.Event()
+                self.release_commit = threading.Event()
+                self.close_calls = 0
+                self.concurrent_close_calls = 0
+                self.advanced_after_cancel = 0
+
+            def __iter__(self):
+                return self
+
+            def __next__(self):
+                if self.cancelled.is_set():
+                    self.advanced_after_cancel += 1
+                self.calls += 1
+                self.active = True
+                try:
+                    frame = next(self.iterator)
+                    # Page zero consumes calls 1 and 2.  The continuation consumes
+                    # retained call 2, then pauses with valid call 3 generated as
+                    # its lookahead but not yet committed to a page response.
+                    if self.calls == 3:
+                        self.commit_barrier.set()
+                        if not self.release_commit.wait(2):
+                            raise AssertionError("page commit barrier was not released")
+                    return frame
+                finally:
+                    self.active = False
+
+            def close(self):
+                if self.active:
+                    self.concurrent_close_calls += 1
+                    raise ValueError("generator already executing")
+                self.close_calls += 1
+                self.iterator.close()
+
+        candidate = copy.deepcopy(DEFAULT_CONFIG)
+        candidate["lava"].update({
+            "show_time": False,
+            "show_date": False,
+            "blur_radius": 0,
+            "blob_count": 2,
+        })
+        cancelled = threading.Event()
+        matrix = CaptureMatrix()
+        lava = edit_preview.continuous_lava_preview_frames(
+            matrix, candidate, {"kind": "built_in", "id": "fire_burst"},
+            stop_event=cancelled,
+        )
+        iterator = CommitBarrierIterator(lava, cancelled)
+        capacity = edit_preview.PreviewSessionCapacity()
+        registry = edit_preview.PreviewInstanceRegistry(capacity=capacity)
+        instance = registry.register(
+            "paired-device", lambda: iterator, stop_event=cancelled,
+        )
+        session = instance.admit()
+        session.MAX_FRAMES = 1
+        first = session.page()
+        stale_token = first["next_token"]
+        result = {}
+        failures = []
+
+        def page_in_background():
+            try:
+                result.update(session.page(stale_token))
+            except BaseException as error:
+                failures.append(error)
+
+        cancel_elapsed = []
+
+        def cancel_in_background():
+            started = time.monotonic()
+            session.cancel()
+            session.cancel()
+            cancel_elapsed.append(time.monotonic() - started)
+
+        page_thread = threading.Thread(target=page_in_background, name="raced-page")
+        cancel_thread = threading.Thread(target=cancel_in_background, name="raced-cancel")
+        page_thread.start()
+        self.assertTrue(
+            iterator.commit_barrier.wait(1), "page did not reach pre-commit barrier",
+        )
+        cancel_thread.start()
+        cancel_thread.join(0.25)
+        try:
+            self.assertFalse(
+                cancel_thread.is_alive(), "cancel waited on the page-operation lock",
+            )
+            self.assertTrue(cancelled.is_set())
+            self.assertLess(cancel_elapsed[0], 0.25)
+            # Ownership cannot be released while the page still executes; cleanup
+            # is deferred to that page's unwind instead of closing it concurrently.
+            self.assertEqual(capacity.active_count, 1)
+            self.assertEqual(registry.total_count, 1)
+        finally:
+            released = time.monotonic()
+            iterator.release_commit.set()
+            page_thread.join(0.25)
+            cancel_thread.join(0.25)
+            settle_elapsed = time.monotonic() - released
+            if page_thread.is_alive():
+                iterator.release_commit.set()
+                page_thread.join(1)
+
+        self.assertLess(settle_elapsed, 0.25)
+        self.assertFalse(page_thread.is_alive())
+        self.assertFalse(cancel_thread.is_alive())
+        self.assertEqual(failures, [])
+        self.assertEqual(result, {
+            "page": 1, "frames": [], "next_token": None, "complete": True,
+        })
+        self.assertEqual(iterator.calls, 3)
+        self.assertEqual(iterator.advanced_after_cancel, 0)
+        self.assertEqual(iterator.concurrent_close_calls, 0)
+        self.assertEqual(iterator.close_calls, 1)
+        self.assertEqual(session.retained_frame_count, 0)
+        self.assertIsNone(getattr(lava, "gi_frame"))
+        self.assertEqual(capacity.active_count, 0)
+        self.assertEqual(capacity.available_slots, 2)
+        self.assertEqual(registry.total_count, 0)
+        self.assertEqual(registry.counts_by_device, {})
+        with self.assertRaisesRegex(
+            StopIteration, "explicit new session is required to restart",
+        ):
+            session.page(stale_token)
+        self.assertEqual(iterator.calls, 3)
+        session.cancel()
+        self.assertEqual(iterator.close_calls, 1)
+
     def test_simultaneous_page_requests_allow_exactly_one_token_claim(self):
         class CoordinatedIterator:
             def __init__(self):
@@ -775,23 +909,30 @@ class EditPreviewTests(unittest.TestCase):
                 self.close_requested = False
                 self.next_calls = 0
                 self.close_calls = 0
+                self.active = False
 
             def __iter__(self):
                 return self
 
             def __next__(self):
                 self.next_calls += 1
-                frame = next(self.iterator)
-                self.decoded.set()
-                if not self.release.wait(1):
-                    raise AssertionError("decode barrier was not released")
-                if self.close_requested:
-                    self.iterator.close()
-                return frame
+                self.active = True
+                try:
+                    frame = next(self.iterator)
+                    self.decoded.set()
+                    if not self.release.wait(1):
+                        raise AssertionError("decode barrier was not released")
+                    if self.close_requested:
+                        self.iterator.close()
+                    return frame
+                finally:
+                    self.active = False
 
             def close(self):
                 self.close_calls += 1
                 self.close_requested = True
+                if not self.active:
+                    self.iterator.close()
 
         candidate = copy.deepcopy(DEFAULT_CONFIG)
         candidate["lava"].update({
