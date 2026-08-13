@@ -433,12 +433,96 @@ class EditPreviewTests(unittest.TestCase):
         matrix = FakeMatrix()
         stop_event = FakeStopEvent()
 
-        rendered = play_media(matrix, filename, 1.25, stop_event=stop_event, settings=settings)
+        with patch("modules.media_player.time.monotonic", return_value=0.0):
+            rendered = play_media(
+                matrix, filename, 1.25, stop_event=stop_event, settings=settings,
+            )
 
         self.assertEqual(expected, [(filename, 1250.0, settings)])
         self.assertTrue(rendered)
         self.assertEqual(matrix.shown, [(filename, None, settings)])
         self.assertEqual(stop_event.waits, [expected[0][1] / 1000])
+
+    def test_static_hold_delay_is_clipped_to_invocation_deadline(self):
+        class Clock:
+            def __init__(self):
+                self.elapsed = 0.0
+
+            def monotonic(self):
+                return self.elapsed
+
+        class PhysicalCaptureMatrix(CaptureMatrix):
+            def __init__(self, path, clock):
+                super().__init__()
+                self.path = path
+                self.clock = clock
+                self.submissions = []
+
+            def show_image(self, filename, delay=None, **geometry):
+                self.clock.elapsed += 0.03
+                with Image.open(self.path) as image:
+                    self.clear()
+                    self.draw_image(image, **geometry)
+                self.submissions.append(self.snapshot())
+                return True
+
+        class AdvancingStop:
+            def __init__(self, clock):
+                self.clock = clock
+                self.waits = []
+
+            def wait(self, delay):
+                self.waits.append(delay)
+                self.clock.elapsed += delay
+                return False
+
+        settings = {
+            "x": 0, "y": 0, "width": 64, "height": 32,
+            "keep_aspect": False,
+        }
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "still.png"
+            Image.new("RGB", (64, 32), "purple").save(path)
+
+            physical_clock = Clock()
+            physical = PhysicalCaptureMatrix(path, physical_clock)
+            stop = AdvancingStop(physical_clock)
+            with patch(
+                "modules.media_player.time.monotonic", side_effect=physical_clock.monotonic,
+            ):
+                self.assertTrue(play_media(
+                    physical, str(path), 0.05, stop_event=stop, settings=settings,
+                ))
+
+            preview_clock = Clock()
+            preview = PhysicalCaptureMatrix(path, preview_clock)
+            frames = list(static_media_frames(
+                str(path), 0.05, settings,
+                render=lambda filename, geometry: preview.show_image(
+                    filename, delay=None, **geometry,
+                ),
+                monotonic=preview_clock.monotonic,
+            ))
+
+            self.assertEqual(len(frames), 1)
+            self.assertAlmostEqual(frames[0][1], 20.0)
+            self.assertEqual(stop.waits, [frames[0][1] / 1000])
+            self.assertAlmostEqual(sum(stop.waits), 0.02)
+            self.assertEqual(
+                physical.submissions[0].tobytes(), preview.submissions[0].tobytes(),
+            )
+
+            exhausted = PhysicalCaptureMatrix(path, Clock())
+            self.assertEqual(
+                list(static_media_frames(
+                    str(path), 0, settings,
+                    render=lambda filename, geometry: exhausted.show_image(
+                        filename, delay=None, **geometry,
+                    ),
+                )),
+                [],
+            )
+            self.assertEqual(exhausted.submissions, [])
 
     def test_announcement_transition_and_hold_complete_before_terminal_page(self):
         import modules.announcement_board as announcement_board

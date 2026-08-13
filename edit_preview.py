@@ -7,6 +7,7 @@ import io
 import json
 import math
 import secrets
+import time
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -113,8 +114,10 @@ class CaptureMatrix:
         return self.canvas
 
 
-def static_media_frames(filename, duration, settings=None):
-    """Yield the physical still-image operation and its complete hold delay."""
+def static_media_frames(
+    filename, duration, settings=None, *, render=None, monotonic=time.monotonic,
+):
+    """Yield one rendered still and its hold clipped to the invocation deadline."""
     geometry = {}
     if settings:
         geometry = {
@@ -124,7 +127,18 @@ def static_media_frames(filename, duration, settings=None):
             "height": settings["height"],
             "keep_aspect": settings["keep_aspect"],
         }
-    yield filename, max(0.0, float(duration)) * 1000, geometry
+    duration = max(0.0, float(duration))
+    if duration == 0:
+        return
+    if render is None:
+        yield filename, duration * 1000, geometry
+        return
+    started = monotonic()
+    if not render(filename, geometry):
+        return
+    remaining = max(0.0, duration - (monotonic() - started))
+    if remaining > 0:
+        yield filename, remaining * 1000, geometry
 
 
 def media_preview_frames(matrix, filename, duration, settings=None):

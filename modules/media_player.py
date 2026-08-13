@@ -3,6 +3,7 @@
 from pathlib import Path
 import math
 import threading
+import time
 
 from PIL import Image, ImageSequence
 
@@ -87,10 +88,16 @@ def play_media(matrix, filename, duration, stop_event=None, settings=None):
 
     from edit_preview import static_media_frames
 
-    frame_iterator = static_media_frames(filename, duration, settings)
-    frame_filename, delay_ms, geometry = next(frame_iterator)
-    shown = matrix.show_image(frame_filename, delay=None, **geometry)
-    if not shown:
+    frame_iterator = static_media_frames(
+        filename, duration, settings,
+        render=lambda frame_filename, frame_geometry: matrix.show_image(
+            frame_filename, delay=None, **frame_geometry,
+        ),
+        monotonic=time.monotonic,
+    )
+    try:
+        _, delay_ms, _ = next(frame_iterator)
+    except StopIteration:
         return False
     waiter = stop_event or threading.Event()
     waiter.wait(delay_ms / 1000)
