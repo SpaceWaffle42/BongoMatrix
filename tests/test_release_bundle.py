@@ -1,9 +1,11 @@
 import hashlib
 import json
+import os
 import tempfile
 import unittest
 from pathlib import Path
 
+import deploy.release_bundle as release_bundle
 from deploy.release_bundle import (
     ReleaseManifestError,
     create_backup_manifest,
@@ -210,4 +212,98 @@ class ReleaseBundleTests(unittest.TestCase):
                     root / "unsafe-path-bundle",
                     unsafe_release_manifest,
                     root / "unsafe-path-bundle/backup-manifest.json",
+                )
+
+    def test_staged_tool_and_release_root_hashes_must_match_release_manifest(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            release_root = root / "release"
+            release_root.mkdir()
+            sources = {
+                "deploy/release_bundle.py": b"approved release tool bytes\n",
+                "webapp.py": b"approved application bytes\n",
+            }
+            entries = []
+            for relative_path, source_bytes in sources.items():
+                source = release_root / relative_path
+                source.parent.mkdir(parents=True, exist_ok=True)
+                source.write_bytes(source_bytes)
+                entries.append(
+                    {
+                        "path": relative_path,
+                        "sha256": hashlib.sha256(source_bytes).hexdigest(),
+                        "uid": 0,
+                        "gid": 0,
+                        "mode": "0644",
+                    }
+                )
+
+            manifest = {"version": 1, "files": entries}
+            manifest_path = root / "release-manifest.json"
+            manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+            staged_tool = root / "release_bundle.py"
+            staged_tool.write_bytes(sources["deploy/release_bundle.py"])
+
+            self.assertEqual(
+                release_bundle.verify_staged_release(
+                    staged_tool, release_root, manifest_path
+                ),
+                manifest,
+            )
+
+            staged_tool.write_bytes(b"substituted staged tool bytes\n")
+            with self.assertRaises(ReleaseManifestError):
+                release_bundle.verify_staged_release(
+                    staged_tool, release_root, manifest_path
+                )
+            staged_tool.write_bytes(sources["deploy/release_bundle.py"])
+
+            changed_source = release_root / "webapp.py"
+            changed_source.write_bytes(b"changed application bytes\n")
+            with self.assertRaises(ReleaseManifestError):
+                release_bundle.verify_staged_release(
+                    staged_tool, release_root, manifest_path
+                )
+            changed_source.write_bytes(sources["webapp.py"])
+
+            changed_source.unlink()
+            with self.assertRaises(ReleaseManifestError):
+                release_bundle.verify_staged_release(
+                    staged_tool, release_root, manifest_path
+                )
+            changed_source.write_bytes(sources["webapp.py"])
+
+            extra_source = release_root / "unexpected.py"
+            extra_source.write_bytes(b"unexpected bytes\n")
+            with self.assertRaises(ReleaseManifestError):
+                release_bundle.verify_staged_release(
+                    staged_tool, release_root, manifest_path
+                )
+            extra_source.unlink()
+
+            changed_source.unlink()
+            changed_source.symlink_to(release_root / "deploy/release_bundle.py")
+            with self.assertRaises(ReleaseManifestError):
+                release_bundle.verify_staged_release(
+                    staged_tool, release_root, manifest_path
+                )
+            changed_source.unlink()
+            changed_source.write_bytes(sources["webapp.py"])
+
+            nonregular_source = release_root / "nonregular"
+            os.mkfifo(nonregular_source)
+            with self.assertRaises(ReleaseManifestError):
+                release_bundle.verify_staged_release(
+                    staged_tool, release_root, manifest_path
+                )
+            nonregular_source.unlink()
+
+            mismatched_manifest = json.loads(json.dumps(manifest))
+            mismatched_manifest["files"][1]["sha256"] = "0" * 64
+            manifest_path.write_text(
+                json.dumps(mismatched_manifest), encoding="utf-8"
+            )
+            with self.assertRaises(ReleaseManifestError):
+                release_bundle.verify_staged_release(
+                    staged_tool, release_root, manifest_path
                 )

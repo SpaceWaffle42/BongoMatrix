@@ -123,6 +123,57 @@ def validate_release_manifest(
     return manifest
 
 
+def verify_staged_release(
+    staged_tool: str | os.PathLike[str],
+    release_root: str | os.PathLike[str],
+    manifest_path: str | os.PathLike[str],
+) -> dict[str, object]:
+    """Verify the staged verifier and exact release tree before any action."""
+
+    manifest = validate_release_manifest(release_root, manifest_path)
+    entries = manifest["files"]
+    if not isinstance(entries, list):
+        _reject("release manifest is not validated")
+    tool_entry = next(
+        (
+            entry
+            for entry in entries
+            if isinstance(entry, dict)
+            and entry.get("path") == "deploy/release_bundle.py"
+        ),
+        None,
+    )
+    if tool_entry is None:
+        _reject("release manifest does not protect the staged release tool")
+
+    tool_path = Path(staged_tool)
+    try:
+        tool_stat = tool_path.lstat()
+    except OSError as error:
+        raise ReleaseManifestError("staged release tool is unreadable") from error
+    if not stat.S_ISREG(tool_stat.st_mode) or stat.S_ISLNK(tool_stat.st_mode):
+        _reject("staged release tool must be a regular file")
+    try:
+        descriptor = os.open(
+            tool_path, os.O_RDONLY | os.O_NONBLOCK | os.O_NOFOLLOW | os.O_CLOEXEC
+        )
+    except OSError as error:
+        raise ReleaseManifestError("staged release tool is unreadable") from error
+    try:
+        opened_stat = os.fstat(descriptor)
+        if not stat.S_ISREG(opened_stat.st_mode):
+            _reject("staged release tool must be a regular file")
+        digest = hashlib.sha256()
+        while chunk := os.read(descriptor, 1024 * 1024):
+            digest.update(chunk)
+    finally:
+        os.close(descriptor)
+
+    if digest.hexdigest() != tool_entry["sha256"]:
+        _reject("staged release tool hash does not match approved manifest")
+    return manifest
+
+
 def _read_prior_destination(
     destination_root: Path, relative_path: str
 ) -> tuple[bytes, os.stat_result] | None:
