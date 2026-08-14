@@ -8728,6 +8728,250 @@ console.log('ANNOUNCEMENT_HEADING_SYNC_PASS');
         self.assertEqual(self.controller.method_calls, [])
         self.assertEqual(pin_enters, pin_exits)
 
+    def test_preview_service_restart_cleans_registry_workers_and_descriptors(self):
+        """Restart keeps the broad lifecycle contract and closes pinned decode FDs."""
+        from contextlib import contextmanager
+        import multiprocessing
+        from edit_preview import PreviewInstanceRegistry, PreviewSessionCapacity
+
+        # Keep the exact restart node tied to the already accepted real-route
+        # singleton, concurrent replacement, blocked-provider, stale-session,
+        # sanitized-error, teardown, and immutable-state contract.
+        self.test_preview_services_restart_after_close_and_failed_init()
+
+        before_children = {child.pid for child in multiprocessing.active_children()}
+        before_threads = {(thread.ident, thread.name) for thread in threading.enumerate()}
+        before_fds = len(list(Path("/proc/self/fd").iterdir()))
+        before_config = Path(self.store.path).read_bytes()
+        before_devices = Path(self.device_store.path).read_bytes()
+        before_media = sorted(
+            (path.relative_to(self.media_dir).as_posix(), path.read_bytes())
+            for path in self.media_dir.rglob("*") if path.is_file()
+        )
+        self.controller.reset_mock()
+
+        registries = []
+        providers = []
+        pins = []
+        iterators = []
+        decoder_blocked = threading.Event()
+        response = {}
+        failures = []
+
+        class TrackedRegistry(PreviewInstanceRegistry):
+            def __init__(self):
+                capacity = PreviewSessionCapacity()
+                super().__init__(capacity=capacity)
+                self.capacity = capacity
+                self.close_calls = 0
+                registries.append(self)
+
+            def close(self):
+                was_closed = self.is_closed
+                super().close()
+                if not was_closed:
+                    self.close_calls += 1
+
+        class TrackedProvider:
+            MAX_WORKERS = 2
+
+            def __init__(self):
+                self.is_closed = False
+                self.close_calls = 0
+                self.prepare_calls = 0
+                providers.append(self)
+
+            @property
+            def active_child_count(self):
+                return 0
+
+            @property
+            def active_worker_count(self):
+                return 0
+
+            @property
+            def available_worker_slots(self):
+                return self.MAX_WORKERS
+
+            def prepare(self, provider, *, settings, credentials, cancel_event,
+                        request_deadline):
+                if self.is_closed:
+                    raise RuntimeError("closed provider attempted to serve")
+                self.prepare_calls += 1
+                return (
+                    ("feels_like", 19), ("high", 23), ("humidity", 50),
+                    ("location", settings["weather"]["location"]), ("low", 12),
+                    ("status", "Clear sky"), ("temperature", 20),
+                )
+
+            def shutdown(self):
+                if not self.is_closed:
+                    self.is_closed = True
+                    self.close_calls += 1
+
+        class BlockedDecoderIterator:
+            def __init__(self, stop_event):
+                self.stop_event = stop_event
+                self.close_calls = 0
+                self.read_fd, self.write_fd = os.pipe()
+                self.fd_close_calls = {self.read_fd: 0, self.write_fd: 0}
+                iterators.append(self)
+
+            def __iter__(self):
+                return self
+
+            def __next__(self):
+                decoder_blocked.set()
+                while not self.stop_event.wait(0.005):
+                    pass
+                raise StopIteration
+
+            def close(self):
+                self.close_calls += 1
+                if self.close_calls > 1:
+                    raise AssertionError("decoder iterator closed more than once")
+                for descriptor in (self.read_fd, self.write_fd):
+                    os.close(descriptor)
+                    self.fd_close_calls[descriptor] += 1
+
+        @contextmanager
+        def pinned(candidate, media_root, *, allow_missing=()):
+            read_fd, write_fd = os.pipe()
+            record = {
+                "fds": (read_fd, write_fd),
+                "fd_close_calls": {read_fd: 0, write_fd: 0},
+                "close_calls": 0,
+            }
+            pins.append(record)
+            try:
+                yield {"weather": "pinned"}
+            finally:
+                record["close_calls"] += 1
+                if record["close_calls"] > 1:
+                    raise AssertionError("pinned descriptors closed more than once")
+                for descriptor in record["fds"]:
+                    os.close(descriptor)
+                    record["fd_close_calls"][descriptor] += 1
+
+        def iterator(module_name, candidate, selected_palette, pinned_media, prepared,
+                     stop_event):
+            resource = BlockedDecoderIterator(stop_event)
+
+            def owned_decoder():
+                try:
+                    yield from resource
+                finally:
+                    resource.close()
+
+            return owned_decoder()
+
+        candidate = copy.deepcopy(self.store.get())
+        candidate.pop("revision")
+        candidate["weather"]["location"] = "blocked-decoder-private"
+        payload = {
+            "config": candidate,
+            "generation": 100,
+            "preview_instance": "abababababababababababababababab",
+        }
+        with self.client.session_transaction() as paired:
+            browser_session = dict(paired)
+
+        def blocked_start():
+            try:
+                client = self.app.test_client()
+                with client.session_transaction() as session:
+                    session.update(browser_session)
+                response["value"] = client.post(
+                    "/api/edit-preview/weather", json=payload,
+                )
+            except BaseException as error:
+                failures.append(error)
+
+        factory_patch = patch.multiple(
+            "webapp", PreviewInstanceRegistry=TrackedRegistry,
+            PreviewProvider=TrackedProvider, pin_candidate_media=pinned,
+            _edit_preview_iterator=iterator,
+        )
+        blocked_thread = threading.Thread(
+            target=blocked_start, name="preview-restart-blocked-decoder",
+        )
+        try:
+            with factory_patch:
+                blocked_thread.start()
+                self.assertTrue(decoder_blocked.wait(1))
+                registry = self.app.extensions["edit_preview_registry"]
+                provider = self.app.extensions["edit_preview_provider"]
+                self.assertIs(self.app.extensions["get_edit_preview_services"]()[0], registry)
+                self.assertIs(self.app.extensions["get_edit_preview_services"]()[1], provider)
+                with self.app.app_context():
+                    pass
+                self.assertFalse(registry.is_closed)
+                self.assertFalse(provider.is_closed)
+
+                closed_at = time.monotonic()
+                self.app.extensions["close_edit_preview_services"]()
+                self.assertLess(time.monotonic() - closed_at, 0.25)
+                blocked_thread.join(1)
+                self.assertFalse(blocked_thread.is_alive())
+                self.assertEqual(failures, [])
+                self.assertEqual(response["value"].status_code, 200)
+                self.assertEqual(response["value"].headers.get("Cache-Control"), "no-store")
+                self.assertNotIn("blocked-decoder-private", response["value"].get_data(as_text=True))
+                self.assertTrue(registry.is_closed)
+                self.assertTrue(provider.is_closed)
+                self.assertEqual((registry.close_calls, provider.close_calls), (1, 1))
+                self.assertEqual(registry.reaper_join_count, 1)
+                self.assertFalse(registry.reaper_alive)
+                self.assertEqual((registry.total_count, registry.expired_count), (0, 0))
+                self.assertEqual(
+                    (registry.capacity.active_count, registry.capacity.waiting_count),
+                    (0, 0),
+                )
+                self.assertEqual((provider.active_worker_count, provider.active_child_count), (0, 0))
+                with self.assertRaisesRegex(RuntimeError, "closed"):
+                    registry.register(("closed", "closed"), lambda: iter(()))
+                with self.assertRaisesRegex(RuntimeError, "closed provider"):
+                    provider.prepare(
+                        None, settings={"weather": {"location": "closed"}},
+                        credentials=None, cancel_event=threading.Event(),
+                        request_deadline=1,
+                    )
+        finally:
+            blocked_thread.join(1)
+            for registry in registries:
+                registry.close()
+            for provider in providers:
+                provider.shutdown()
+
+        self.assertEqual((len(registries), len(providers)), (1, 1))
+        self.assertEqual((len(pins), len(iterators)), (1, 1))
+        for resource in iterators:
+            self.assertEqual(resource.close_calls, 1)
+            self.assertEqual(set(resource.fd_close_calls.values()), {1})
+            for descriptor in resource.fd_close_calls:
+                with self.assertRaises(OSError):
+                    os.fstat(descriptor)
+        for resource in pins:
+            self.assertEqual(resource["close_calls"], 1)
+            self.assertEqual(set(resource["fd_close_calls"].values()), {1})
+            for descriptor in resource["fd_close_calls"]:
+                with self.assertRaises(OSError):
+                    os.fstat(descriptor)
+        self.assertEqual(Path(self.store.path).read_bytes(), before_config)
+        self.assertEqual(Path(self.device_store.path).read_bytes(), before_devices)
+        self.assertEqual(sorted(
+            (path.relative_to(self.media_dir).as_posix(), path.read_bytes())
+            for path in self.media_dir.rglob("*") if path.is_file()
+        ), before_media)
+        self.assertEqual(self.controller.method_calls, [])
+        self.assertEqual(
+            {child.pid for child in multiprocessing.active_children()}, before_children,
+        )
+        self.assertEqual(
+            {(thread.ident, thread.name) for thread in threading.enumerate()}, before_threads,
+        )
+        self.assertEqual(len(list(Path("/proc/self/fd").iterdir())), before_fds)
+
     def test_preview_instance_registry_is_bounded_and_expires(self):
         from contextlib import contextmanager
         import multiprocessing
