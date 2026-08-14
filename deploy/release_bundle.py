@@ -14,6 +14,18 @@ _SHA256_RE = re.compile(r"[0-9a-f]{64}\Z")
 _MODE_RE = re.compile(r"0[0-7]{3}\Z")
 _MANIFEST_KEYS = {"version", "files"}
 _FILE_KEYS = {"path", "sha256", "uid", "gid", "mode"}
+_BACKUP_ABSENT_KEYS = {"path", "present_before"}
+_BACKUP_PRESENT_KEYS = _BACKUP_ABSENT_KEYS | {"sha256", "uid", "gid", "mode"}
+_FORBIDDEN_DIRECTORY_PARTS = {
+    "data",
+    "secrets",
+    "credentials",
+    "venv",
+    ".venv",
+    "__pycache__",
+    "cache",
+    ".cache",
+}
 
 
 class ReleaseManifestError(ValueError):
@@ -287,3 +299,219 @@ def create_backup_manifest(
         encoding="utf-8",
     )
     return backup_manifest
+
+
+def _read_confined_regular(
+    root: Path, relative_path: str, *, missing_ok: bool
+) -> tuple[bytes, os.stat_result] | None:
+    """Read a regular file without following any path component symlink."""
+
+    relative_path = _validate_relative_path(relative_path)
+    try:
+        root_stat = root.lstat()
+    except OSError as error:
+        raise ReleaseManifestError("confined root is unavailable") from error
+    if not stat.S_ISDIR(root_stat.st_mode) or stat.S_ISLNK(root_stat.st_mode):
+        _reject("confined root must be a real directory")
+
+    directory_flags = os.O_RDONLY | os.O_DIRECTORY | os.O_CLOEXEC | os.O_NOFOLLOW
+    try:
+        directory_fd = os.open(root, directory_flags)
+    except OSError as error:
+        raise ReleaseManifestError("confined root is unsafe") from error
+    try:
+        parts = PurePosixPath(relative_path).parts
+        for part in parts[:-1]:
+            try:
+                next_fd = os.open(part, directory_flags, dir_fd=directory_fd)
+            except FileNotFoundError:
+                if missing_ok:
+                    return None
+                raise ReleaseManifestError("required confined path is missing")
+            except OSError as error:
+                raise ReleaseManifestError(
+                    "confined path traversal is unsafe"
+                ) from error
+            os.close(directory_fd)
+            directory_fd = next_fd
+        try:
+            file_fd = os.open(
+                parts[-1],
+                os.O_RDONLY | os.O_NONBLOCK | os.O_CLOEXEC | os.O_NOFOLLOW,
+                dir_fd=directory_fd,
+            )
+        except FileNotFoundError:
+            if missing_ok:
+                return None
+            raise ReleaseManifestError("required confined file is missing")
+        except OSError as error:
+            raise ReleaseManifestError("confined file is unsafe") from error
+        try:
+            opened_stat = os.fstat(file_fd)
+            if not stat.S_ISREG(opened_stat.st_mode):
+                _reject("confined content must be a regular file")
+            chunks = []
+            while chunk := os.read(file_fd, 1024 * 1024):
+                chunks.append(chunk)
+            return b"".join(chunks), opened_stat
+        finally:
+            os.close(file_fd)
+    finally:
+        os.close(directory_fd)
+
+
+def _reject_forbidden_release_path(relative_path: str) -> None:
+    path = PurePosixPath(relative_path)
+    lower_parts = tuple(part.lower() for part in path.parts)
+    lower_path = "/".join(lower_parts)
+    name = lower_parts[-1]
+    stem = PurePosixPath(name).stem
+    if any(part in _FORBIDDEN_DIRECTORY_PARTS for part in lower_parts):
+        _reject("release path targets mutable state, secrets, venv, or cache")
+    if lower_path.startswith("resources/media/"):
+        _reject("release path targets user media")
+    if (
+        name == ".env"
+        or name.endswith((".key", ".pem"))
+        or "credential" in name
+        or "secret" in name
+    ):
+        _reject("release path targets secrets or credentials")
+    if "paired_device" in name or "paired-device" in name:
+        _reject("release path targets the paired-device registry")
+    if (
+        name == "config.json"
+        or stem in {"state", "revision"}
+        or "runtime-state" in name
+    ):
+        _reject("release path targets mutable configuration or revision state")
+    if name.endswith((".service", ".socket", ".timer")):
+        _reject("release path targets a systemd unit")
+
+
+def _load_backup_manifest(
+    bundle: Path,
+    backup_manifest_path: str | os.PathLike[str],
+) -> dict[str, object]:
+    manifest_path = Path(backup_manifest_path)
+    try:
+        relative_path = (
+            manifest_path.absolute().relative_to(bundle.absolute()).as_posix()
+        )
+    except ValueError:
+        _reject("backup manifest must be inside the bundle")
+    manifest_data = _read_confined_regular(bundle, relative_path, missing_ok=False)
+    if manifest_data is None:
+        _reject("backup manifest is missing")
+    try:
+        manifest = json.loads(
+            manifest_data[0].decode("utf-8"), object_pairs_hook=_json_object
+        )
+    except (UnicodeError, json.JSONDecodeError) as error:
+        raise ReleaseManifestError("backup manifest is unreadable") from error
+    if not isinstance(manifest, dict) or set(manifest) != _MANIFEST_KEYS:
+        _reject("backup manifest fields are not exact")
+    if type(manifest["version"]) is not int or manifest["version"] != 1:
+        _reject("unsupported backup manifest version")
+    if not isinstance(manifest["files"], list):
+        _reject("backup manifest files must be a list")
+    return manifest
+
+
+def preflight_release(
+    staged_tool: str | os.PathLike[str],
+    release_root: str | os.PathLike[str],
+    destination_root: str | os.PathLike[str],
+    bundle: str | os.PathLike[str],
+    release_manifest_path: str | os.PathLike[str],
+    backup_manifest_path: str | os.PathLike[str],
+) -> tuple[dict[str, object], dict[str, object]]:
+    """Read-only, fail-closed verification before any release action."""
+
+    release_manifest = verify_staged_release(
+        staged_tool, release_root, release_manifest_path
+    )
+    release_entries = release_manifest["files"]
+    if not isinstance(release_entries, list):
+        _reject("release manifest is not validated")
+    for entry in release_entries:
+        if not isinstance(entry, dict):
+            _reject("release manifest is not validated")
+        _reject_forbidden_release_path(_validate_relative_path(entry.get("path")))
+
+    destination = Path(destination_root)
+    if not destination.is_dir() or destination.is_symlink():
+        _reject("destination root must be a real directory")
+    bundle_path = Path(bundle)
+    if not bundle_path.is_dir() or bundle_path.is_symlink():
+        _reject("bundle must be a real directory")
+    backup_manifest = _load_backup_manifest(bundle_path, backup_manifest_path)
+    backup_entries = backup_manifest["files"]
+    if not isinstance(backup_entries, list) or len(backup_entries) != len(
+        release_entries
+    ):
+        _reject("backup manifest scope does not match release manifest")
+
+    archived_paths: set[str] = set()
+    for release_entry, backup_entry in zip(
+        release_entries, backup_entries, strict=True
+    ):
+        if not isinstance(release_entry, dict) or not isinstance(backup_entry, dict):
+            _reject("backup file record is invalid")
+        relative_path = _validate_relative_path(backup_entry.get("path"))
+        if relative_path != release_entry.get("path"):
+            _reject("backup manifest scope does not match release manifest")
+        present = backup_entry.get("present_before")
+        if type(present) is not bool:
+            _reject("backup present_before must be Boolean")
+
+        current = _read_confined_regular(destination, relative_path, missing_ok=True)
+        if not present:
+            if set(backup_entry) != _BACKUP_ABSENT_KEYS:
+                _reject("absent backup record must not contain prior metadata")
+            if current is not None:
+                _reject("absent-before destination appeared after backup")
+            archive = _read_confined_regular(
+                bundle_path, f"archive/{relative_path}", missing_ok=True
+            )
+            if archive is not None:
+                _reject("absent-before record must not have an archive")
+            continue
+
+        if set(backup_entry) != _BACKUP_PRESENT_KEYS:
+            _reject("present backup record metadata is not exact")
+        prior_hash = backup_entry["sha256"]
+        prior_mode = backup_entry["mode"]
+        if not isinstance(prior_hash, str) or not _SHA256_RE.fullmatch(prior_hash):
+            _reject("backup hash must be lowercase SHA-256")
+        if not isinstance(prior_mode, str) or not _MODE_RE.fullmatch(prior_mode):
+            _reject("backup mode must be four-digit octal")
+        for field in ("uid", "gid"):
+            if type(backup_entry[field]) is not int or backup_entry[field] < 0:
+                _reject(f"backup {field} must be a non-negative integer")
+        archive = _read_confined_regular(
+            bundle_path, f"archive/{relative_path}", missing_ok=False
+        )
+        if archive is None or hashlib.sha256(archive[0]).hexdigest() != prior_hash:
+            _reject("archived prior bytes do not match backup manifest")
+        archived_paths.add(relative_path)
+        if current is None:
+            _reject("present-before destination disappeared after backup")
+        current_bytes, current_stat = current
+        if (
+            hashlib.sha256(current_bytes).hexdigest() != prior_hash
+            or current_stat.st_uid != backup_entry["uid"]
+            or current_stat.st_gid != backup_entry["gid"]
+            or f"{stat.S_IMODE(current_stat.st_mode):04o}" != prior_mode
+        ):
+            _reject("destination no longer matches recorded pre-backup state")
+
+    archive_root = bundle_path / "archive"
+    if archive_root.exists():
+        if archive_root.is_symlink() or not archive_root.is_dir():
+            _reject("archive root must be a real directory")
+        if _release_files(archive_root) != archived_paths:
+            _reject("archive scope does not match present-before records")
+    elif archived_paths:
+        _reject("required backup archive is missing")
+    return release_manifest, backup_manifest

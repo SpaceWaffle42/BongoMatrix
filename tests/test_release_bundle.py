@@ -1,6 +1,7 @@
 import hashlib
 import json
 import os
+import stat
 import tempfile
 import unittest
 from pathlib import Path
@@ -307,3 +308,195 @@ class ReleaseBundleTests(unittest.TestCase):
                 release_bundle.verify_staged_release(
                     staged_tool, release_root, manifest_path
                 )
+
+    def test_preflight_rejects_tampered_archive_destination_or_forbidden_mutable_path(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+
+            def prepare(relative_paths=("deploy/release_bundle.py", "webapp.py")):
+                case = root / f"case-{len(tuple(root.iterdir()))}"
+                release_root = case / "release"
+                destination_root = case / "destination"
+                bundle = case / "bundle"
+                release_root.mkdir(parents=True)
+                destination_root.mkdir()
+                sources = {}
+                entries = []
+                for relative_path in relative_paths:
+                    source_bytes = f"approved {relative_path}\n".encode()
+                    sources[relative_path] = source_bytes
+                    source = release_root / relative_path
+                    source.parent.mkdir(parents=True, exist_ok=True)
+                    source.write_bytes(source_bytes)
+                    entries.append({
+                        "path": relative_path,
+                        "sha256": hashlib.sha256(source_bytes).hexdigest(),
+                        "uid": os.getuid(), "gid": os.getgid(), "mode": "0644",
+                    })
+                release_manifest_path = case / "release-manifest.json"
+                release_manifest_path.write_text(
+                    json.dumps({"version": 1, "files": entries}), encoding="utf-8"
+                )
+                prior_bytes = b"installed application bytes\n"
+                if "webapp.py" in relative_paths:
+                    destination = destination_root / "webapp.py"
+                    destination.write_bytes(prior_bytes)
+                    destination.chmod(0o640)
+                validated_release = validate_release_manifest(
+                    release_root, release_manifest_path
+                )
+                backup_manifest_path = bundle / "backup-manifest.json"
+                backup_manifest = create_backup_manifest(
+                    destination_root, bundle, validated_release, backup_manifest_path
+                )
+                staged_tool = case / "release_bundle.py"
+                staged_tool.write_bytes(sources["deploy/release_bundle.py"])
+                return {
+                    "release_root": release_root,
+                    "destination_root": destination_root,
+                    "bundle": bundle,
+                    "release_manifest_path": release_manifest_path,
+                    "backup_manifest_path": backup_manifest_path,
+                    "release_manifest": validated_release,
+                    "backup_manifest": backup_manifest,
+                    "staged_tool": staged_tool,
+                }
+
+            def preflight(case):
+                return release_bundle.preflight_release(
+                    case["staged_tool"], case["release_root"],
+                    case["destination_root"], case["bundle"],
+                    case["release_manifest_path"], case["backup_manifest_path"],
+                )
+
+            valid = prepare()
+            before = {
+                path.relative_to(root).as_posix(): (
+                    path.read_bytes() if path.is_file() else None,
+                    stat.S_IMODE(path.lstat().st_mode),
+                )
+                for path in root.rglob("*")
+            }
+            self.assertEqual(
+                preflight(valid),
+                (valid["release_manifest"], valid["backup_manifest"]),
+            )
+            after = {
+                path.relative_to(root).as_posix(): (
+                    path.read_bytes() if path.is_file() else None,
+                    stat.S_IMODE(path.lstat().st_mode),
+                )
+                for path in root.rglob("*")
+            }
+            self.assertEqual(after, before)
+
+            tampered_archive = prepare()
+            (tampered_archive["bundle"] / "archive/webapp.py").write_bytes(
+                b"tampered archive bytes\n"
+            )
+            with self.assertRaises(ReleaseManifestError):
+                preflight(tampered_archive)
+
+            changed_destination = prepare()
+            (changed_destination["destination_root"] / "webapp.py").write_bytes(
+                b"changed after backup\n"
+            )
+            with self.assertRaises(ReleaseManifestError):
+                preflight(changed_destination)
+
+            changed_mode = prepare()
+            (changed_mode["destination_root"] / "webapp.py").chmod(0o600)
+            with self.assertRaises(ReleaseManifestError):
+                preflight(changed_mode)
+
+            created_after_backup = prepare()
+            new_destination = (
+                created_after_backup["destination_root"]
+                / "deploy/release_bundle.py"
+            )
+            new_destination.parent.mkdir()
+            new_destination.write_bytes(b"appeared after backup\n")
+            with self.assertRaises(ReleaseManifestError):
+                preflight(created_after_backup)
+
+            removed_after_backup = prepare()
+            (removed_after_backup["destination_root"] / "webapp.py").unlink()
+            with self.assertRaises(ReleaseManifestError):
+                preflight(removed_after_backup)
+
+            for label, mutate in (
+                (
+                    "extra top-level field",
+                    lambda manifest: manifest.update({"unexpected": True}),
+                ),
+                ("wrong scope", lambda manifest: manifest["files"].pop()),
+                (
+                    "present record missing metadata",
+                    lambda manifest: manifest["files"][1].pop("sha256"),
+                ),
+                (
+                    "absent record has prior metadata",
+                    lambda manifest: manifest["files"][0].update(
+                        {"sha256": "0" * 64}
+                    ),
+                ),
+            ):
+                with self.subTest(backup_manifest=label):
+                    malformed = prepare()
+                    manifest = json.loads(
+                        malformed["backup_manifest_path"].read_text(
+                            encoding="utf-8"
+                        )
+                    )
+                    mutate(manifest)
+                    malformed["backup_manifest_path"].write_text(
+                        json.dumps(manifest), encoding="utf-8"
+                    )
+                    with self.assertRaises(ReleaseManifestError):
+                        preflight(malformed)
+
+            absent_archive = prepare()
+            absent_placeholder = (
+                absent_archive["bundle"] / "archive/deploy/release_bundle.py"
+            )
+            absent_placeholder.parent.mkdir(parents=True, exist_ok=True)
+            absent_placeholder.write_bytes(b"must not exist\n")
+            with self.assertRaises(ReleaseManifestError):
+                preflight(absent_archive)
+
+            archive_symlink = prepare()
+            archive_file = archive_symlink["bundle"] / "archive/webapp.py"
+            outside = archive_symlink["bundle"] / "outside"
+            outside.write_bytes(archive_file.read_bytes())
+            archive_file.unlink()
+            archive_file.symlink_to(outside)
+            with self.assertRaises(ReleaseManifestError):
+                preflight(archive_symlink)
+
+            destination_symlink = prepare()
+            destination_file = destination_symlink["destination_root"] / "webapp.py"
+            outside_destination = destination_symlink["destination_root"] / "outside"
+            outside_destination.write_bytes(destination_file.read_bytes())
+            destination_file.unlink()
+            destination_file.symlink_to(outside_destination)
+            with self.assertRaises(ReleaseManifestError):
+                preflight(destination_symlink)
+
+            forbidden_paths = (
+                "config.json",
+                "data/runtime-state.json",
+                "data/paired_devices.json",
+                "resources/media/user.png",
+                ".env",
+                "provider-credentials.json",
+                "secrets/provider-token",
+                "venv/bin/python",
+                "app/__pycache__/webapp.pyc",
+                "deploy/matrix-web.service",
+                "REVISION",
+            )
+            for forbidden_path in forbidden_paths:
+                with self.subTest(forbidden_path=forbidden_path):
+                    forbidden = prepare(("deploy/release_bundle.py", forbidden_path))
+                    with self.assertRaises(ReleaseManifestError):
+                        preflight(forbidden)
