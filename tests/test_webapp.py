@@ -350,14 +350,14 @@ class WebAppTests(unittest.TestCase):
         body = self.client.get("/").get_data(as_text=True)
 
         application_version = getattr(webapp, "APPLICATION_VERSION", None)
-        self.assertEqual(application_version, "0.3.42-preview")
+        self.assertEqual(application_version, "0.3.47-preview")
         self.assertEqual(body.count(f"Version {application_version}"), 1)
         self.assertRegex(
             body,
             rf"LAN CONTROL</span><br><span[^>]*>Version {re.escape(application_version)}</span>",
         )
         template = (Path(__file__).parents[1] / "app" / "templates" / "dashboard.html").read_text()
-        self.assertNotIn("0.3.42-preview", template)
+        self.assertNotIn("0.3.47-preview", template)
 
     def test_control_stop_reports_timeout_without_claiming_success(self):
         self.pair_browser()
@@ -607,11 +607,11 @@ if(PRELOAD_EDIT){
 }
 """
         harness = r"""
-const vm=require('node:vm');
+const vm=require('node:vm'),crypto=require('node:crypto').webcrypto;
 const scenario=SCENARIO_SOURCE;
 const run=preloadEdit=>vm.runInNewContext(
   '(async()=>{'+scenario.replaceAll('PRELOAD_EDIT',preloadEdit?'true':'false')+'})()',
-  {console,AbortController,structuredClone,setImmediate},
+  {console,AbortController,structuredClone,setImmediate,crypto},
 );
 (async()=>{
  await run(true);
@@ -1035,7 +1035,7 @@ async function api(path,options){request={path,options};const error=new Error('C
             "window.addEventListener('online',matrixCheckForNewerConfig)",
             "document.visibilityState==='visible'",
             "clearInterval(matrixStatusTimer)",
-            "if(!matrixSyncStopped)matrixFrameTimer=setTimeout",
+            "if(!matrixSyncStopped&&previewMode==='live'&&matrixFrameTimer===null&&matrixFrameController===null)matrixFrameTimer=setTimeout",
             "Reload latest saved state",
             "Remain with unsaved draft",
         )
@@ -1081,6 +1081,7 @@ function configBody(){return structuredClone(configState)}
 function setMessage(text){message.textContent=text}
 function setInterval(){return nextTimer++} function clearInterval(id){clearedIntervals.push(id)}
 function setTimeout(){return nextTimer++} function clearTimeout(id){clearedTimeouts.push(id)}
+function cancelEditPreview(){}
 const responses=[];
 function response(status,revision=null,data=null){return {status,statusText:'failed',redirected:false,ok:status>=200&&status<300,headers:{get(name){return name==='X-Matrix-Minimum-Client-Contract'?'2':null}},json:async()=>(data??{revision})}}
 async function fetch(){const item=responses.shift();return await item}
@@ -1347,6 +1348,420 @@ globalThis.document=document;globalThis.window=window;globalThis.fetch=fetch;
         and os.access(os.environ.get("MATRIX_CHROMIUM", ""), os.X_OK),
         "MATRIX_CHROMIUM browser is required",
     )
+    def test_live_edit_segmented_control_updates_unsaved_preview_without_saving(self):
+        self.pair_browser()
+        before_config = Path(self.store.path).read_bytes()
+        body = self.client.get("/").get_data(as_text=True)
+        self.controller.reset_mock()
+        probe = r"""
+const port=process.argv[1],pagePath=process.argv[2];let endpoint;
+for(let attempt=0;attempt<50;attempt++){try{endpoint=await fetch(`http://127.0.0.1:${port}/json/new`,{method:'PUT'}).then(r=>r.json());break}catch(_){await new Promise(r=>setTimeout(r,100))}}
+if(!endpoint)throw new Error('Chromium DevTools endpoint unavailable');
+const socket=new WebSocket(endpoint.webSocketDebuggerUrl),pending=new Map();let nextId=1,loadResolve,loaded=new Promise(resolve=>loadResolve=resolve);
+socket.onmessage=event=>{const message=JSON.parse(event.data);if(message.id&&pending.has(message.id)){const request=pending.get(message.id);pending.delete(message.id);message.error?request.reject(new Error(JSON.stringify(message.error))):request.resolve(message.result)}else if(message.method==='Page.loadEventFired')loadResolve()};
+await new Promise((resolve,reject)=>{socket.onopen=resolve;socket.onerror=reject});
+const send=(method,params={})=>{const id=nextId++;socket.send(JSON.stringify({id,method,params}));return new Promise((resolve,reject)=>pending.set(id,{resolve,reject}))};
+const evaluate=async expression=>{const result=await send('Runtime.evaluate',{expression,returnByValue:true,awaitPromise:true});if(result.exceptionDetails)throw new Error(JSON.stringify(result.exceptionDetails));return result.result.value};
+const waitFor=async expression=>{for(let attempt=0;attempt<100;attempt++){if(await evaluate(expression))return;await new Promise(r=>setTimeout(r,25))}throw new Error('waitFor timed out: '+expression)};
+try{
+ await send('Runtime.enable');await send('Page.enable');await send('Emulation.setDeviceMetricsOverride',{width:390,height:844,deviceScaleFactor:1,mobile:true});
+ await send('Page.addScriptToEvaluateOnNewDocument',{source:`
+  globalThis.__requests=[];globalThis.__displayActive=0;globalThis.__displayMaxActive=0;
+  const red='iVBORw0KGgoAAAANSUhEUgAAAEAAAAAgCAIAAAAt/+nTAAAAT0lEQVR4nO3PUQkAIBTAwFfBClawfzdD+HEIgwW4zdrn64YLGtCCBrSgAS1oQAsa0IIGtKABLWhACxrQgga0oAEtaEALGtCCBrSgAS147AJI7DAuPOp5lgAAAABJRU5ErkJggg==';
+  const green='iVBORw0KGgoAAAANSUhEUgAAAEAAAAAgCAIAAAAt/+nTAAAAT0lEQVR4nO3PUQkAIBTAwBfOClawfwRD+HEIgwW4zdrn64YLGtCCBrSgAS1oQAsa0IIGtKABLWhACxrQgga0oAEtaEALGtCCBrSgAS147AIqPPhqwA8fegAAAABJRU5ErkJggg==';
+  const blue='iVBORw0KGgoAAAANSUhEUgAAAEAAAAAgCAIAAAAt/+nTAAAAT0lEQVR4nO3PUQkAIBTAwNc/ihWsYChD+HEIgwW4zdrn64YLGtCCBrSgAS1oQAsa0IIGtKABLWhACxrQgga0oAEtaEALGtCCBrSgAS147ALszYkAB9CYOQAAAABJRU5ErkJggg==';
+  const bytes=value=>Uint8Array.from(atob(value),character=>character.charCodeAt(0));
+  globalThis.fetch=async(input,options={})=>{const url=String(input),method=options.method||'GET',record={url,method,body:options.body||null,time:performance.now()};__requests.push(record);
+   if(url.startsWith('/api/display-frame')){__displayActive++;__displayMaxActive=Math.max(__displayMaxActive,__displayActive);try{if(__requests.filter(item=>item.url.startsWith('/api/display-frame')).length===1)await new Promise((resolve,reject)=>{const timer=setTimeout(resolve,3000);options.signal?.addEventListener('abort',()=>{clearTimeout(timer);reject(new DOMException('Aborted','AbortError'))},{once:true})});return new Response(new Blob([bytes(red)],{type:'image/png'}),{status:200,headers:{'X-Matrix-Frame':'live'}})}finally{__displayActive--}}
+   if(url==='/api/config')return new Response(null,{status:304,headers:{'X-Matrix-Minimum-Client-Contract':'2'}});
+   if(url.startsWith('/api/status'))return new Response(JSON.stringify({running:true,current_module:'weather',minimum_client_contract:2}),{status:200,headers:{'Content-Type':'application/json'}});
+   if(url.startsWith('/api/edit-preview/')&&url!='/api/edit-preview/page'&&url!='/api/edit-preview/cancel'){const payload=JSON.parse(options.body);record.payload=payload;return new Response(JSON.stringify({session:String(payload.generation).padStart(32,'0'),generation:payload.generation,page:0,frames:[{png:green,delay_ms:60}],next_token:'a'.repeat(64),complete:false}),{status:200,headers:{'Content-Type':'application/json'}})}
+   if(url==='/api/edit-preview/page'){const payload=JSON.parse(options.body),generation=Number(payload.session);record.payload=payload;return new Response(JSON.stringify({session:payload.session,generation,page:1,frames:[{png:blue,delay_ms:500}],next_token:null,complete:true}),{status:200,headers:{'Content-Type':'application/json'}})}
+   if(url==='/api/edit-preview/cancel')return new Response(JSON.stringify({cancelled:true}),{status:200,headers:{'Content-Type':'application/json'}});
+   return new Response(JSON.stringify({error:'fixture endpoint unavailable'}),{status:503,headers:{'Content-Type':'application/json'}})
+  };
+ `});
+ loaded=new Promise(resolve=>loadResolve=resolve);await send('Page.navigate',{url:'file://'+pagePath});await Promise.race([loaded,new Promise((_,reject)=>setTimeout(()=>reject(new Error('load timeout')),5000))]);
+ const initial=await evaluate(`(()=>{const group=document.querySelector('[role="radiogroup"]'),live=document.querySelector('#preview-mode-live'),edit=document.querySelector('#preview-mode-edit'),canvas=document.querySelector('#matrix-preview');return {canvasCount:document.querySelectorAll('#matrix-preview').length,groupBelow:Boolean(group)&&group.getBoundingClientRect().top>=canvas.getBoundingClientRect().bottom,labels:[live?.labels?.[0]?.textContent.trim()||null,edit?.labels?.[0]?.textContent.trim()||null],liveChecked:live?.checked??null,editChecked:edit?.checked??null,frame:document.querySelector('#preview-frame')?.textContent||null}})()`);
+ await evaluate(`(()=>{addCustomModule();const selected=document.querySelector('#preview-select');selected.value='weather';selected.dispatchEvent(new Event('change',{bubbles:true}))})()`);
+ const editPoint=await evaluate(`(()=>{const r=document.querySelector('label[for="preview-mode-edit"]')?.getBoundingClientRect();return r?{x:r.left+r.width/2,y:r.top+r.height/2}:null})()`);
+ if(editPoint){await send('Input.dispatchTouchEvent',{type:'touchStart',touchPoints:[editPoint]});await send('Input.dispatchTouchEvent',{type:'touchEnd',touchPoints:[]})}
+ await waitFor(`__requests.some(item=>item.url.startsWith('/api/edit-preview/weather'))`);
+ await evaluate(`(()=>{const set=(selector,value)=>{const control=document.querySelector(selector);control.value=value;control.dispatchEvent(new Event('input',{bubbles:true}))};set('[data-built-in-module="weather"][data-setting="now_x"]','9');set('[data-built-in-module="weather"][data-setting="text_colour"]','#123456');set('#weather-scroll-speed','0.123');const text=document.querySelector('.custom-module-card [data-field="text"]');if(text){text.value='UNSAVED TEST';text.dispatchEvent(new Event('input',{bubbles:true}))}})()`);
+ await waitFor(`__requests.filter(item=>item.url.startsWith('/api/edit-preview/weather')).length>=2`);
+ await new Promise(r=>setTimeout(r,25));
+ const firstEditPixel=await evaluate(`[...document.querySelector('#matrix-preview').getContext('2d').getImageData(0,0,1,1).data]`);
+ await new Promise(r=>setTimeout(r,70));
+ const edited=await evaluate(`(()=>{const requests=__requests.filter(item=>item.url.startsWith('/api/edit-preview/weather')),pageRequests=__requests.filter(item=>item.url==='/api/edit-preview/page'),latest=requests.at(-1).payload,pixel=[...document.querySelector('#matrix-preview').getContext('2d').getImageData(0,0,1,1).data],forbidden=__requests.filter(item=>item.method==='POST'&&(item.url==='/api/config'||item.url.startsWith('/api/preview/')||item.url.includes('/api/media/')&&item.url.endsWith('/preview')||item.url.startsWith('/api/control/')));return {instance:latest?.preview_instance||null,generations:requests.map(item=>item.payload.generation),modulePaths:requests.map(item=>item.url),pagePayloads:pageRequests.map(item=>item.payload),latest,pixel,label:document.querySelector('#preview-module').textContent,forbidden:forbidden.map(item=>item.url),canvasCount:document.querySelectorAll('#matrix-preview').length}})()`);
+ edited.firstPixel=firstEditPixel;
+ await evaluate(`document.documentElement.style.scrollBehavior='auto';scrollTo(0,document.documentElement.scrollHeight);syncPreviewPopout()`);await new Promise(r=>setTimeout(r,50));
+ const poppedLabel=await evaluate(`document.querySelector('#preview-module').textContent`);
+ const livePoint=await evaluate(`(()=>{const r=document.querySelector('label[for="preview-mode-live"]').getBoundingClientRect();return {x:r.left+r.width/2,y:r.top+r.height/2}})()`);
+ await send('Input.dispatchTouchEvent',{type:'touchStart',touchPoints:[livePoint]});await send('Input.dispatchTouchEvent',{type:'touchEnd',touchPoints:[]});
+ await waitFor(`document.querySelector('.edit-preview-switch-dialog')?.open`);await evaluate(`document.querySelector('.edit-preview-switch-dialog button').click();matrixDirty=false;matrixSavedSnapshot=matrixCurrentSnapshot();document.querySelector('#preview-mode-live').click()`);
+ await waitFor(`__requests.filter(item=>item.url.startsWith('/api/display-frame')).length>=2`);await new Promise(r=>setTimeout(r,180));
+ const restored=await evaluate(`(()=>({live:document.querySelector('#preview-mode-live').checked,label:document.querySelector('#preview-module').textContent,cancels:__requests.filter(item=>item.url==='/api/edit-preview/cancel').length,displayRequests:__requests.filter(item=>item.url.startsWith('/api/display-frame')).length,maxDisplayActive:__displayMaxActive,editTimers:globalThis.editPreviewAnimationTimer??null,canvasCount:document.querySelectorAll('#matrix-preview').length}))()`);
+ console.log(JSON.stringify({initial,edited,poppedLabel,restored}));
+}finally{socket.close()}
+"""
+        report = self._run_dashboard_chromium_probe(body, probe)
+        self.assertEqual(report["initial"]["canvasCount"], 1, report)
+        self.assertTrue(report["initial"]["groupBelow"], report)
+        self.assertEqual(report["initial"]["labels"], ["Live", "Edit Preview"], report)
+        self.assertTrue(report["initial"]["liveChecked"], report)
+        self.assertFalse(report["initial"]["editChecked"], report)
+        self.assertIn("Live", report["initial"]["frame"])
+        self.assertRegex(report["edited"]["instance"], r"^[0-9a-f]{32}$")
+        self.assertGreaterEqual(len(report["edited"]["generations"]), 2, report)
+        self.assertEqual(report["edited"]["generations"], sorted(set(report["edited"]["generations"])), report)
+        self.assertGreaterEqual(len(report["edited"]["pagePayloads"]), 2, report)
+        self.assertTrue(all(set(payload) == {"session", "preview_instance", "token"} for payload in report["edited"]["pagePayloads"]), report)
+        latest = report["edited"]["latest"]
+        self.assertEqual(latest["config"]["weather"]["now_x"], 9)
+        self.assertEqual(latest["config"]["weather"]["text_colour"], "#123456")
+        self.assertEqual(latest["config"]["weather"]["scroll_speed"], 0.123)
+        self.assertEqual(latest["config"]["custom_modules"][0]["text"], "UNSAVED TEST")
+        self.assertEqual(report["edited"]["firstPixel"], [68, 85, 102, 255], report)
+        self.assertEqual(report["edited"]["pixel"], [170, 187, 204, 255], report)
+        self.assertIn("Unsaved draft · weather", report["edited"]["label"])
+        self.assertIn("Unsaved draft · weather", report["poppedLabel"])
+        self.assertEqual(report["edited"]["forbidden"], [], report)
+        self.assertEqual(report["edited"]["canvasCount"], 1, report)
+        self.assertTrue(report["restored"]["live"], report)
+        self.assertIn("Live", report["restored"]["label"])
+        self.assertGreaterEqual(report["restored"]["cancels"], 1, report)
+        self.assertLessEqual(report["restored"]["maxDisplayActive"], 1, report)
+        self.assertIsNone(report["restored"]["editTimers"], report)
+        self.assertEqual(report["restored"]["canvasCount"], 1, report)
+        self.assertEqual(Path(self.store.path).read_bytes(), before_config)
+        self.assertEqual(self.controller.method_calls, [])
+
+    @unittest.skipUnless(shutil.which("node"), "Node.js is required")
+    @unittest.skipUnless(
+        os.environ.get("MATRIX_CHROMIUM")
+        and Path(os.environ.get("MATRIX_CHROMIUM", "")).is_file()
+        and os.access(os.environ.get("MATRIX_CHROMIUM", ""), os.X_OK),
+        "MATRIX_CHROMIUM browser is required",
+    )
+    def test_edit_preview_last_request_wins_and_renders_one_selected_lava_palette(self):
+        self.store.update({"lava": {
+            "enabled_palettes": ["fire_burst"],
+            "custom_palettes": [{
+                "id": "palette_sunset",
+                "name": "Saved sunset",
+                "colours": ["#101020", "#ff6600", "#ffee99"],
+                "enabled": True,
+            }],
+        }})
+        self.pair_browser()
+        before_config = Path(self.store.path).read_bytes()
+        body = self.client.get("/").get_data(as_text=True)
+        self.controller.reset_mock()
+        probe = r"""
+const port=process.argv[1],pagePath=process.argv[2];let endpoint;
+for(let attempt=0;attempt<50;attempt++){try{endpoint=await fetch(`http://127.0.0.1:${port}/json/new`,{method:'PUT'}).then(r=>r.json());break}catch(_){await new Promise(r=>setTimeout(r,100))}}
+if(!endpoint)throw new Error('Chromium DevTools endpoint unavailable');
+const socket=new WebSocket(endpoint.webSocketDebuggerUrl),pending=new Map();let nextId=1,loadResolve,loaded=new Promise(resolve=>loadResolve=resolve);
+socket.onmessage=event=>{const message=JSON.parse(event.data);if(message.id&&pending.has(message.id)){const request=pending.get(message.id);pending.delete(message.id);message.error?request.reject(new Error(JSON.stringify(message.error))):request.resolve(message.result)}else if(message.method==='Page.loadEventFired')loadResolve()};
+await new Promise((resolve,reject)=>{socket.onopen=resolve;socket.onerror=reject});
+const send=(method,params={})=>{const id=nextId++;socket.send(JSON.stringify({id,method,params}));return new Promise((resolve,reject)=>pending.set(id,{resolve,reject}))};
+const evaluate=async expression=>{const result=await send('Runtime.evaluate',{expression,returnByValue:true,awaitPromise:true});if(result.exceptionDetails)throw new Error(JSON.stringify(result.exceptionDetails));return result.result.value};
+const waitFor=async expression=>{for(let attempt=0;attempt<160;attempt++){if(await evaluate(expression))return;await new Promise(r=>setTimeout(r,25))}throw new Error('waitFor timed out: '+expression)};
+try{
+ await send('Runtime.enable');await send('Page.enable');
+ await send('Page.addScriptToEvaluateOnNewDocument',{source:`
+  globalThis.__requests=[];globalThis.__aborted=[];globalThis.__errors=[];
+  addEventListener('error',event=>__errors.push(String(event.error||event.message)));addEventListener('unhandledrejection',event=>__errors.push(String(event.reason)));
+  const red='iVBORw0KGgoAAAANSUhEUgAAAEAAAAAgCAIAAAAt/+nTAAAAT0lEQVR4nO3PUQkAIBTAwFfBClawfzdD+HEIgwW4zdrn64YLGtCCBrSgAS1oQAsa0IIGtKABLWhACxrQgga0oAEtaEALGtCCBrSgAS147AJI7DAuPOp5lgAAAABJRU5ErkJggg==';
+  const green='iVBORw0KGgoAAAANSUhEUgAAAEAAAAAgCAIAAAAt/+nTAAAAT0lEQVR4nO3PUQkAIBTAwBfOClawfwRD+HEIgwW4zdrn64YLGtCCBrSgAS1oQAsa0IIGtKABLWhACxrQgga0oAEtaEALGtCCBrSgAS147AIqPPhqwA8fegAAAABJRU5ErkJggg==';
+  const blue='iVBORw0KGgoAAAANSUhEUgAAAEAAAAAgCAIAAAAt/+nTAAAAT0lEQVR4nO3PUQkAIBTAwNc/ihWsYChD+HEIgwW4zdrn64YLGtCCBrSgAS1oQAsa0IIGtKABLWhACxrQgga0oAEtaEALGtCCBrSgAS147ALszYkAB9CYOQAAAABJRU5ErkJggg==';
+  const bytes=value=>Uint8Array.from(atob(value),character=>character.charCodeAt(0));
+  globalThis.fetch=async(input,options={})=>{const url=String(input),method=options.method||'GET',record={url,method,body:options.body||null};__requests.push(record);
+   if(url.startsWith('/api/display-frame'))return new Response(new Blob([bytes(red)],{type:'image/png'}),{status:200,headers:{'X-Matrix-Frame':'live'}});
+   if(url==='/api/config')return new Response(null,{status:304,headers:{'X-Matrix-Minimum-Client-Contract':'2'}});
+   if(url.startsWith('/api/status'))return new Response(JSON.stringify({running:true,current_module:'clock_lava',minimum_client_contract:2}),{status:200,headers:{'Content-Type':'application/json'}});
+   if(url.startsWith('/api/edit-preview/')&&url!='/api/edit-preview/page'&&url!='/api/edit-preview/cancel'){
+    const payload=JSON.parse(options.body),descriptor=payload.selected_lava_palette;record.payload=payload;
+    if(descriptor?.id==='fire_burst')await new Promise((resolve,reject)=>{const timer=setTimeout(resolve,350);options.signal?.addEventListener('abort',()=>{clearTimeout(timer);record.aborted=true;__aborted.push(descriptor.id);reject(new DOMException('Aborted','AbortError'))},{once:true})});
+    if(url.endsWith('/weather')&&payload.config.weather.now_x===13)return new Response(JSON.stringify({error:'provider unavailable'}),{status:503,headers:{'Content-Type':'application/json'}});
+    const frames=descriptor?.kind==='custom'?[{png:blue,delay_ms:35},{png:green,delay_ms:80}]:[{png:green,delay_ms:35},{png:blue,delay_ms:80}];
+    return new Response(JSON.stringify({session:String(payload.generation).padStart(32,'0'),generation:payload.generation,page:0,frames,next_token:null,complete:true}),{status:200,headers:{'Content-Type':'application/json'}})
+   }
+   if(url==='/api/edit-preview/cancel')return new Response(JSON.stringify({cancelled:true}),{status:200,headers:{'Content-Type':'application/json'}});
+   return new Response(JSON.stringify({status:'fresh',frames_per_loop:10,settings_correlation:'fixture',milliseconds:1000,refresh_at:'2099-01-01T00:00:00Z'}),{status:200,headers:{'Content-Type':'application/json'}})
+  };
+ `});
+ loaded=new Promise(resolve=>loadResolve=resolve);await send('Page.navigate',{url:'file://'+pagePath});await Promise.race([loaded,new Promise((_,reject)=>setTimeout(()=>reject(new Error('load timeout')),5000))]);
+ const initial=await evaluate(`(()=>{const radios=[...document.querySelectorAll('input[name="edit-preview-lava-palette"]')];return {count:radios.length,labels:radios.map(r=>r.labels?.[0]?.textContent.trim()),selected:radios.filter(r=>r.checked).map(r=>r.value)}})()`);
+ if(initial.count){
+  await evaluate(`(()=>{const select=document.querySelector('#preview-select');select.value='clock_lava';select.dispatchEvent(new Event('change',{bubbles:true}));const edit=document.querySelector('#preview-mode-edit');edit.checked=true;edit.dispatchEvent(new Event('change',{bubbles:true}))})()`);
+  await waitFor(`__requests.some(r=>r.payload?.selected_lava_palette?.id==='fire_burst')`);
+  const savedBefore=await evaluate(`JSON.stringify(configBody())`),dirtyBefore=await evaluate(`matrixDirty`);
+  await evaluate(`(()=>{const radio=[...document.querySelectorAll('input[name="edit-preview-lava-palette"]')].find(r=>r.value==='built_in:ember_glow');radio.focus();radio.checked=true;radio.dispatchEvent(new Event('change',{bubbles:true}))})()`);
+  await waitFor(`__requests.some(r=>r.payload?.selected_lava_palette?.id==='ember_glow')`);await new Promise(r=>setTimeout(r,120));
+  const builtIn=await evaluate(`(()=>{const requests=__requests.filter(r=>r.payload?.selected_lava_palette),latest=requests.at(-1);return {descriptor:latest.payload.selected_lava_palette,enabled:document.querySelector('.lava-palette[value="ember_glow"]').checked,savedSame:JSON.stringify(configBody())===${JSON.stringify(savedBefore)},dirtySame:matrixDirty===${JSON.stringify(dirtyBefore)},pixel:[...document.querySelector('#matrix-preview').getContext('2d').getImageData(0,0,1,1).data],selected:[...document.querySelectorAll('input[name="edit-preview-lava-palette"]:checked')].map(r=>r.value),aborted:[...__aborted]}})()`);
+  await evaluate(`(()=>{const radio=[...document.querySelectorAll('input[name="edit-preview-lava-palette"]')].find(r=>r.value==='custom:palette_sunset');radio.checked=true;radio.dispatchEvent(new Event('change',{bubbles:true}));const colours=['#112233','#445566','#778899'];document.querySelectorAll('.custom-lava-card[data-id="palette_sunset"] [data-colour]').forEach((input,index)=>{input.value=colours[index];input.dispatchEvent(new Event('input',{bubbles:true}))})})()`);
+  await waitFor(`__requests.some(r=>JSON.stringify(r.payload?.selected_lava_palette?.colours)==='["#112233","#445566","#778899"]')`);await new Promise(r=>setTimeout(r,45));
+  const customPixels=[];for(let sample=0;sample<30;sample++){customPixels.push(await evaluate(`[...document.querySelector('#matrix-preview').getContext('2d').getImageData(0,0,1,1).data]`));await new Promise(r=>setTimeout(r,15))}
+  const custom=await evaluate(`(()=>{const request=__requests.filter(r=>r.payload?.selected_lava_palette?.kind==='custom').at(-1),radio=document.querySelector('input[name="edit-preview-lava-palette"]:checked');radio.focus();renderCustomLavaPalettes();const rerendered=document.querySelector('input[name="edit-preview-lava-palette"]:checked');return {descriptor:request.payload.selected_lava_palette,pixels:${JSON.stringify(customPixels)},selected:rerendered?.value,focus:document.activeElement===rerendered,configHasDescriptor:Object.hasOwn(configBody(),'selected_lava_palette')}})()`);
+  const modules=['weather','openweather_overview','openweather_forecast','splash','sleep','announcement_board'];
+  for(const module of modules){await evaluate(`(()=>{const select=document.querySelector('#preview-select');select.value='${module}';select.dispatchEvent(new Event('change',{bubbles:true}))})()`);await waitFor(`__requests.some(r=>r.url.endsWith('/${module}')&&r.payload)`)}
+  await evaluate(`(()=>{const select=document.querySelector('#preview-select');select.value='weather';select.dispatchEvent(new Event('change',{bubbles:true}))})()`);await waitFor(`__requests.filter(r=>r.url.endsWith('/weather')&&r.payload).length>=2`);await new Promise(r=>setTimeout(r,45));
+  const validPixel=await evaluate(`[...document.querySelector('#matrix-preview').getContext('2d').getImageData(0,0,1,1).data]`);
+  await evaluate(`(()=>{const x=document.querySelector('[data-built-in-module="weather"][data-setting="now_x"]');x.value='13';x.dispatchEvent(new Event('input',{bubbles:true}))})()`);await waitFor(`document.querySelector('#preview-frame').textContent.includes('Draft error')`);
+  const errorPixel=await evaluate(`[...document.querySelector('#matrix-preview').getContext('2d').getImageData(0,0,1,1).data]`),errorAccessible=await evaluate(`document.querySelector('#preview-frame').getAttribute('role')==='alert'`);
+  await evaluate(`(()=>{const x=document.querySelector('[data-built-in-module="weather"][data-setting="now_x"]');x.value='14';x.dispatchEvent(new Event('input',{bubbles:true}))})()`);await waitFor(`document.querySelector('#preview-frame').textContent.includes('Unsaved draft frame')`);
+  const final=await evaluate(`(()=>({validPixel:${JSON.stringify(validPixel)},errorPixel:${JSON.stringify(errorPixel)},recoveredPixel:[...document.querySelector('#matrix-preview').getContext('2d').getImageData(0,0,1,1).data],errorAccessible:${JSON.stringify(errorAccessible)},paths:[...new Set(__requests.filter(r=>r.payload).map(r=>r.url))],forbidden:__requests.filter(r=>r.method==='POST'&&(r.url==='/api/config'||r.url.startsWith('/api/preview/')||r.url.startsWith('/api/control/')||r.url.includes('/preview'))&&!r.url.startsWith('/api/edit-preview/')).map(r=>r.url),errors:[...__errors],canvasCount:document.querySelectorAll('#matrix-preview').length}))()`);
+  console.log(JSON.stringify({initial,builtIn,custom,final}));
+ }else console.log(JSON.stringify({initial}));
+}finally{socket.close()}
+"""
+        report = self._run_dashboard_chromium_probe(body, probe)
+        self.assertGreater(report["initial"]["count"], 1, report)
+        self.assertIn("Inspect fire burst in Edit Preview", report["initial"]["labels"])
+        self.assertIn("Inspect Saved sunset in Edit Preview", report["initial"]["labels"])
+        self.assertEqual(report["initial"]["selected"], [], report)
+        self.assertEqual(report["builtIn"]["descriptor"], {"kind": "built_in", "id": "ember_glow"})
+        self.assertFalse(report["builtIn"]["enabled"], report)
+        self.assertTrue(report["builtIn"]["savedSame"], report)
+        self.assertTrue(report["builtIn"]["dirtySame"], report)
+        self.assertEqual(report["builtIn"]["selected"], ["built_in:ember_glow"], report)
+        self.assertIn("fire_burst", report["builtIn"]["aborted"], report)
+        self.assertEqual(report["custom"]["descriptor"], {
+            "kind": "custom", "id": "palette_sunset",
+            "colours": ["#112233", "#445566", "#778899"],
+        })
+        self.assertGreater(len({tuple(pixel) for pixel in report["custom"]["pixels"]}), 1, report)
+        self.assertEqual(report["custom"]["selected"], "custom:palette_sunset", report)
+        self.assertTrue(report["custom"]["focus"], report)
+        self.assertFalse(report["custom"]["configHasDescriptor"], report)
+        self.assertEqual(report["final"]["validPixel"], report["final"]["errorPixel"], report)
+        self.assertNotEqual(report["final"]["errorPixel"], report["final"]["recoveredPixel"], report)
+        self.assertTrue(report["final"]["errorAccessible"], report)
+        for module in ("weather", "openweather_overview", "openweather_forecast", "splash", "sleep", "announcement_board"):
+            self.assertIn(f"/api/edit-preview/{module}", report["final"]["paths"], report)
+        self.assertEqual(report["final"]["forbidden"], [], report)
+        self.assertEqual(report["final"]["errors"], [], report)
+        self.assertEqual(report["final"]["canvasCount"], 1, report)
+        self.assertEqual(Path(self.store.path).read_bytes(), before_config)
+        self.assertEqual(self.controller.method_calls, [])
+
+    @unittest.skipUnless(shutil.which("node"), "Node.js is required")
+    @unittest.skipUnless(
+        os.environ.get("MATRIX_CHROMIUM")
+        and Path(os.environ.get("MATRIX_CHROMIUM", "")).is_file()
+        and os.access(os.environ.get("MATRIX_CHROMIUM", ""), os.X_OK),
+        "MATRIX_CHROMIUM browser is required",
+    )
+    def test_malformed_edit_preview_continuation_cancels_session_and_recovers(self):
+        self.pair_browser()
+        before_config = Path(self.store.path).read_bytes()
+        body = self.client.get("/").get_data(as_text=True)
+        self.controller.reset_mock()
+        probe = r"""
+const port=process.argv[1],pagePath=process.argv[2];let endpoint;
+for(let attempt=0;attempt<50;attempt++){try{endpoint=await fetch(`http://127.0.0.1:${port}/json/new`,{method:'PUT'}).then(r=>r.json());break}catch(_){await new Promise(r=>setTimeout(r,50))}}
+if(!endpoint)throw new Error('Chromium DevTools endpoint unavailable');
+const socket=new WebSocket(endpoint.webSocketDebuggerUrl),pending=new Map();let nextId=1,resolveLoad,loaded=new Promise(resolve=>resolveLoad=resolve);
+socket.onmessage=event=>{const message=JSON.parse(event.data);if(message.id&&pending.has(message.id)){const request=pending.get(message.id);pending.delete(message.id);message.error?request.reject(new Error(JSON.stringify(message.error))):request.resolve(message.result)}else if(message.method==='Page.loadEventFired')resolveLoad()};
+await new Promise((resolve,reject)=>{socket.onopen=resolve;socket.onerror=reject});
+const send=(method,params={})=>{const id=nextId++;socket.send(JSON.stringify({id,method,params}));return new Promise((resolve,reject)=>pending.set(id,{resolve,reject}))};
+const evaluate=async expression=>{const result=await send('Runtime.evaluate',{expression,returnByValue:true,awaitPromise:true});if(result.exceptionDetails)throw new Error(JSON.stringify(result.exceptionDetails));return result.result.value};
+const waitFor=async expression=>{for(let attempt=0;attempt<160;attempt++){if(await evaluate(expression))return;await new Promise(resolve=>setTimeout(resolve,25))}throw new Error('waitFor timed out: '+expression)};
+try{
+ await send('Runtime.enable');await send('Page.enable');await send('Emulation.setDeviceMetricsOverride',{width:390,height:844,deviceScaleFactor:1,mobile:true});
+ await send('Page.addScriptToEvaluateOnNewDocument',{source:`
+  globalThis.__requests=[];globalThis.__errors=[];globalThis.__starts=0;globalThis.__variant='base64';globalThis.__session=null;
+  addEventListener('error',event=>__errors.push(String(event.error||event.message)));addEventListener('unhandledrejection',event=>__errors.push(String(event.reason)));
+  const png='iVBORw0KGgoAAAANSUhEUgAAAEAAAAAgCAIAAAAt/+nTAAAAT0lEQVR4nO3PUQkAIBTAwBfOClawfwRD+HEIgwW4zdrn64YLGtCCBrSgAS1oQAsa0IIGtKABLWhACxrQgga0oAEtaEALGtCCBrSgAS147AIqPPhqwA8fegAAAABJRU5ErkJggg==',bytes=Uint8Array.from(atob(png),c=>c.charCodeAt(0));
+  globalThis.fetch=async(input,options={})=>{const url=String(input),method=options.method||'GET',payload=options.body?JSON.parse(options.body):null;__requests.push({url,method,payload});
+   if(url.startsWith('/api/display-frame'))return new Response(new Blob([bytes],{type:'image/png'}));
+   if(url==='/api/edit-preview/cancel')return new Response(JSON.stringify({cancelled:true}),{headers:{'Content-Type':'application/json'}});
+   if(url==='/api/edit-preview/page'){let page;if(__variant==='page')page={session:__session,generation:payload.generation??__starts,page:1,frames:null,next_token:7,complete:false};else if(__variant==='contract')page={session:__session,generation:payload.generation??__starts,page:'not-an-integer',frames:[{png,delay_ms:20}],next_token:7,complete:true};else page={session:__session,generation:payload.generation??__starts,page:1,frames:[{png:__variant==='base64'?'%%% malformed base64 %%%':'bm90IGEgcG5n',delay_ms:20}],next_token:'b'.repeat(64),complete:false};return new Response(JSON.stringify(page),{headers:{'Content-Type':'application/json'}})}
+   if(url.startsWith('/api/edit-preview/')){__starts++;const generation=payload.generation,fails=__variant!=='valid';__session=(__starts%10).toString().repeat(32);return new Response(JSON.stringify({session:__session,generation,page:0,frames:[{png,delay_ms:10000}],next_token:fails?'a'.repeat(64):null,complete:!fails}),{headers:{'Content-Type':'application/json'}})}
+   if(url==='/api/config')return new Response(null,{status:304,headers:{'X-Matrix-Minimum-Client-Contract':'2'}});
+   return new Response(JSON.stringify({running:true,current_module:'weather',minimum_client_contract:2}),{headers:{'Content-Type':'application/json'}})
+  };
+ `});
+ loaded=new Promise(resolve=>resolveLoad=resolve);await send('Page.navigate',{url:'file://'+pagePath});await loaded;
+ await evaluate(`document.querySelector('#preview-mode-edit').click()`);await waitFor(`document.querySelector('#preview-frame').textContent.includes('Draft error')`);await waitFor(`__requests.filter(request=>request.url==='/api/edit-preview/cancel').length===1`);
+ const captureFailure=()=>evaluate(`({session:editPreviewSession,token:editPreviewToken,timerActive:editPreviewAnimationTimer!==null,cancelSessions:__requests.filter(request=>request.url==='/api/edit-preview/cancel').map(request=>request.payload.session),pageRequests:__requests.filter(request=>request.url==='/api/edit-preview/page').length,pixel:[...document.querySelector('#matrix-preview').getContext('2d').getImageData(0,0,1,1).data],mode:previewMode,status:document.querySelector('#preview-frame').textContent})`);
+ const failures=[await captureFailure()];
+ await evaluate(`__variant='valid';startEditPreview()`);await waitFor(`__starts>=2&&document.querySelector('#preview-frame').textContent.includes('Unsaved draft frame')`);
+ await evaluate(`__variant='png';startEditPreview()`);await waitFor(`document.querySelector('#preview-frame').textContent.includes('Draft error')&&__requests.filter(request=>request.url==='/api/edit-preview/cancel'&&request.payload.session==='3'.repeat(32)).length===1`);failures.push(await captureFailure());
+ await evaluate(`__variant='valid';startEditPreview()`);await waitFor(`__starts>=4&&document.querySelector('#preview-frame').textContent.includes('Unsaved draft frame')`);
+ await evaluate(`__variant='page';startEditPreview()`);await waitFor(`document.querySelector('#preview-frame').textContent.includes('Draft error')&&__requests.filter(request=>request.url==='/api/edit-preview/cancel'&&request.payload.session==='5'.repeat(32)).length===1`);failures.push(await captureFailure());
+ await evaluate(`__variant='valid';startEditPreview()`);await waitFor(`__starts>=6&&document.querySelector('#preview-frame').textContent.includes('Unsaved draft frame')`);
+ await evaluate(`__variant='contract';startEditPreview()`);await waitFor(`document.querySelector('#preview-frame').textContent.includes('Draft error')&&__requests.filter(request=>request.url==='/api/edit-preview/cancel'&&request.payload.session==='7'.repeat(32)).length===1`);failures.push(await captureFailure());
+ await evaluate(`__variant='valid';startEditPreview()`);await waitFor(`__starts>=8&&document.querySelector('#preview-frame').textContent.includes('Unsaved draft frame')`);
+ const recovered=await evaluate(`({starts:__starts,session:editPreviewSession,status:document.querySelector('#preview-frame').textContent,errors:[...__errors],canvasCount:document.querySelectorAll('#matrix-preview').length})`);
+ console.log(JSON.stringify({failures,recovered}));
+}finally{socket.close()}
+"""
+        report = self._run_dashboard_chromium_probe(body, probe)
+        self.assertEqual(len(report["failures"]), 4, report)
+        for index, failed in enumerate(report["failures"]):
+            self.assertEqual(failed["session"], None, report)
+            self.assertEqual(failed["token"], None, report)
+            self.assertFalse(failed["timerActive"], report)
+            self.assertEqual(failed["pageRequests"], index + 1, report)
+            self.assertEqual(failed["mode"], "edit", report)
+            self.assertIn("Draft error", failed["status"])
+            self.assertGreater(failed["pixel"][3], 0, report)
+            self.assertIn(str(index * 2 + 1) * 32, failed["cancelSessions"], report)
+        self.assertEqual(report["recovered"]["starts"], 8, report)
+        self.assertEqual(report["recovered"]["session"], "8" * 32, report)
+        self.assertIn("Unsaved draft frame", report["recovered"]["status"])
+        self.assertEqual(report["recovered"]["errors"], [], report)
+        self.assertEqual(report["recovered"]["canvasCount"], 1, report)
+        self.assertEqual(Path(self.store.path).read_bytes(), before_config)
+        self.assertEqual(self.controller.method_calls, [])
+
+    @unittest.skipUnless(shutil.which("node"), "Node.js is required")
+    @unittest.skipUnless(
+        os.environ.get("MATRIX_CHROMIUM")
+        and Path(os.environ.get("MATRIX_CHROMIUM", "")).is_file()
+        and os.access(os.environ.get("MATRIX_CHROMIUM", ""), os.X_OK),
+        "MATRIX_CHROMIUM browser is required",
+    )
+    def test_edit_preview_switch_away_requires_exact_unsaved_choice(self):
+        self.pair_browser()
+        before_config = Path(self.store.path).read_bytes()
+        body = self.client.get("/").get_data(as_text=True)
+        self.controller.reset_mock()
+        probe = r"""
+const port=process.argv[1],pagePath=process.argv[2];let endpoint;
+for(let attempt=0;attempt<50;attempt++){try{endpoint=await fetch(`http://127.0.0.1:${port}/json/new`,{method:'PUT'}).then(r=>r.json());break}catch(_){await new Promise(r=>setTimeout(r,100))}}
+if(!endpoint)throw new Error('Chromium DevTools endpoint unavailable');
+const socket=new WebSocket(endpoint.webSocketDebuggerUrl),pending=new Map();let nextId=1,loadCount=0;
+socket.onmessage=event=>{const message=JSON.parse(event.data);if(message.id&&pending.has(message.id)){const request=pending.get(message.id);pending.delete(message.id);message.error?request.reject(new Error(JSON.stringify(message.error))):request.resolve(message.result)}else if(message.method==='Page.loadEventFired')loadCount++};
+await new Promise((resolve,reject)=>{socket.onopen=resolve;socket.onerror=reject});
+const send=(method,params={})=>{const id=nextId++;socket.send(JSON.stringify({id,method,params}));return new Promise((resolve,reject)=>pending.set(id,{resolve,reject}))};
+const evaluate=async expression=>{const result=await send('Runtime.evaluate',{expression,returnByValue:true,awaitPromise:true});if(result.exceptionDetails)throw new Error(JSON.stringify(result.exceptionDetails));return result.result.value};
+const waitFor=async expression=>{for(let attempt=0;attempt<120;attempt++){if(await evaluate(expression))return;await new Promise(r=>setTimeout(r,25))}throw new Error('waitFor timed out: '+expression)};
+try{
+ await send('Runtime.enable');await send('Page.enable');await send('Emulation.setDeviceMetricsOverride',{width:390,height:844,deviceScaleFactor:1,mobile:true});
+ await send('Page.addScriptToEvaluateOnNewDocument',{source:`
+  globalThis.__requests=[];globalThis.__errors=[];
+  addEventListener('error',event=>__errors.push(String(event.error||event.message)));addEventListener('unhandledrejection',event=>__errors.push(String(event.reason)));
+  const png='iVBORw0KGgoAAAANSUhEUgAAAEAAAAAgCAIAAAAt/+nTAAAAT0lEQVR4nO3PUQkAIBTAwBfOClawfwRD+HEIgwW4zdrn64YLGtCCBrSgAS1oQAsa0IIGtKABLWhACxrQgga0oAEtaEALGtCCBrSgAS147AIqPPhqwA8fegAAAABJRU5ErkJggg==';
+  const bytes=Uint8Array.from(atob(png),c=>c.charCodeAt(0));
+  globalThis.fetch=async(input,options={})=>{const url=String(input),method=options.method||'GET';__requests.push({url,method});
+   if(url.startsWith('/api/display-frame'))return new Response(new Blob([bytes],{type:'image/png'}),{status:200,headers:{'X-Matrix-Frame':'saved'}});
+   if(url.startsWith('/api/edit-preview/')&&url!='/api/edit-preview/cancel')return new Response(JSON.stringify({session:'1'.repeat(32),generation:1,page:0,frames:[{png,delay_ms:1000}],next_token:null,complete:true}),{status:200,headers:{'Content-Type':'application/json'}});
+   if(url==='/api/edit-preview/cancel')return new Response(JSON.stringify({cancelled:true}),{status:200,headers:{'Content-Type':'application/json'}});
+   if(url==='/api/config')return new Response(null,{status:304,headers:{'X-Matrix-Minimum-Client-Contract':'2'}});
+   return new Response(JSON.stringify({running:true,current_module:'weather',minimum_client_contract:2}),{status:200,headers:{'Content-Type':'application/json'}})
+  };
+ `});
+ await send('Page.navigate',{url:'file://'+pagePath});await waitFor(`document.readyState==='complete'`);
+ await evaluate(`document.querySelector('#preview-mode-edit').click()`);await waitFor(`previewMode==='edit'`);await evaluate(`document.querySelector('#preview-mode-live').click()`);
+ const clean=await evaluate(`({mode:previewMode,live:document.querySelector('#preview-mode-live').checked,dialogs:document.querySelectorAll('dialog[open]').length})`);
+ await evaluate(`document.querySelector('#preview-mode-edit').click();(()=>{const input=document.querySelector('#device-name');input.value='UNSAVED SWITCH SENTINEL';input.dispatchEvent(new Event('input',{bubbles:true}));input.focus();input.setSelectionRange(2,8);document.querySelector('.palette-grid').scrollTop=31;const palette=document.querySelector('input[name="edit-preview-lava-palette"]');if(palette){palette.checked=true;palette.dispatchEvent(new Event('change',{bubbles:true}))}document.querySelector('#preview-mode-live').click()})()`);
+ const opened=await evaluate(`(()=>{const dialog=document.querySelector('.edit-preview-switch-dialog');return {mode:previewMode,edit:document.querySelector('#preview-mode-edit').checked,buttons:[...dialog?.querySelectorAll('button')||[]].map(b=>b.textContent),count:document.querySelectorAll('.edit-preview-switch-dialog').length,open:dialog?.open||false}})()`);
+ if(opened.open){
+ await send('Input.dispatchKeyEvent',{type:'keyDown',key:'Escape',code:'Escape'});await send('Input.dispatchKeyEvent',{type:'keyUp',key:'Escape',code:'Escape'});
+ const escaped=await evaluate(`document.querySelector('.edit-preview-switch-dialog')?.open||false`);
+ await evaluate(`(()=>{const buttons=[...document.querySelectorAll('.edit-preview-switch-dialog button')];buttons.at(-1).focus()})()`);await send('Input.dispatchKeyEvent',{type:'keyDown',key:'Tab',code:'Tab'});await send('Input.dispatchKeyEvent',{type:'keyUp',key:'Tab',code:'Tab'});
+ const trapped=await evaluate(`document.activeElement===document.querySelector('.edit-preview-switch-dialog button')`);
+ await evaluate(`document.querySelector('.edit-preview-switch-dialog button').click()`);
+ const stayed=await evaluate(`(()=>{const input=document.querySelector('#device-name'),palette=document.querySelector('input[name="edit-preview-lava-palette"]:checked');return {mode:previewMode,value:input.value,focus:document.activeElement===input,selection:[input.selectionStart,input.selectionEnd],palette:palette?.value||null,scroll:document.querySelector('.palette-grid').scrollTop,dialog:Boolean(document.querySelector('.edit-preview-switch-dialog'))}})()`);
+ await evaluate(`showMatrixRevisionDialog(matrixLoadedRevision+1);document.querySelector('#preview-mode-live').click()`);
+ const barrier=await evaluate(`({revision:document.querySelectorAll('.config-revision-dialog[open]').length,switches:document.querySelectorAll('.edit-preview-switch-dialog').length,saveDisabled:document.querySelector('#save-config').disabled,mode:previewMode})`);
+ await evaluate(`document.querySelector('.config-revision-dialog .config-upgrade-actions button:last-child').click();document.querySelector('#preview-mode-live').click()`);
+ await waitFor(`document.querySelector('.edit-preview-switch-dialog')?.open`);
+ const beforeReload=loadCount;await evaluate(`document.querySelector('.edit-preview-switch-dialog .discard-edit-preview').click()`);
+ for(let attempt=0;attempt<120&&loadCount===beforeReload;attempt++)await new Promise(r=>setTimeout(r,25));
+ await waitFor(`document.readyState==='complete'&&typeof previewMode==='string'`);
+ const discarded=await evaluate(`({mode:previewMode,live:document.querySelector('#preview-mode-live').checked,value:document.querySelector('#device-name').value,canvasCount:document.querySelectorAll('#matrix-preview').length,forbidden:__requests.filter(r=>r.method==='POST'&&(r.url==='/api/config'||r.url.startsWith('/api/preview/')||r.url.startsWith('/api/control/'))).map(r=>r.url),errors:[...__errors]})`);
+ console.log(JSON.stringify({clean,opened,escaped,trapped,stayed,barrier,discarded,reloaded:loadCount>beforeReload}));
+ }else console.log(JSON.stringify({clean,opened}));
+}finally{socket.close()}
+"""
+        report = self._run_dashboard_chromium_probe(body, probe)
+        self.assertEqual(report["clean"], {"mode": "live", "live": True, "dialogs": 0}, report)
+        self.assertEqual(report["opened"]["buttons"], ["Stay Editing", "Discard Draft and switch to Live"], report)
+        self.assertEqual(report["opened"]["count"], 1, report)
+        self.assertTrue(report["opened"]["open"], report)
+        self.assertEqual(report["opened"]["mode"], "edit", report)
+        self.assertTrue(report["opened"]["edit"], report)
+        self.assertTrue(report["escaped"], report)
+        self.assertTrue(report["trapped"], report)
+        self.assertEqual(report["stayed"]["mode"], "edit", report)
+        self.assertEqual(report["stayed"]["value"], "UNSAVED SWITCH SENTINEL", report)
+        self.assertTrue(report["stayed"]["focus"], report)
+        self.assertEqual(report["stayed"]["selection"], [2, 8], report)
+        self.assertGreater(report["stayed"]["scroll"], 0, report)
+        self.assertFalse(report["stayed"]["dialog"], report)
+        self.assertEqual(report["barrier"], {"revision": 1, "switches": 0, "saveDisabled": True, "mode": "edit"}, report)
+        self.assertTrue(report["reloaded"], report)
+        self.assertEqual(report["discarded"]["mode"], "live", report)
+        self.assertTrue(report["discarded"]["live"], report)
+        self.assertNotEqual(report["discarded"]["value"], "UNSAVED SWITCH SENTINEL", report)
+        self.assertEqual(report["discarded"]["canvasCount"], 1, report)
+        self.assertEqual(report["discarded"]["forbidden"], [], report)
+        self.assertEqual(report["discarded"]["errors"], [], report)
+        self.assertEqual(Path(self.store.path).read_bytes(), before_config)
+        self.assertEqual(self.controller.method_calls, [])
+
+    @unittest.skipUnless(shutil.which("node"), "Node.js is required")
+    @unittest.skipUnless(
+        os.environ.get("MATRIX_CHROMIUM")
+        and Path(os.environ.get("MATRIX_CHROMIUM", "")).is_file()
+        and os.access(os.environ.get("MATRIX_CHROMIUM", ""), os.X_OK),
+        "MATRIX_CHROMIUM browser is required",
+    )
+    def test_live_edit_preview_is_responsive_accessible_and_preserves_sticky_preview(self):
+        self.pair_browser()
+        before_config = Path(self.store.path).read_bytes()
+        body = self.client.get("/").get_data(as_text=True)
+        self.controller.reset_mock()
+        probe = r"""
+const port=process.argv[1],path=process.argv[2];let target;
+for(let n=0;n<50;n++){try{target=await fetch(`http://127.0.0.1:${port}/json/new`,{method:'PUT'}).then(r=>r.json());break}catch(_){await new Promise(r=>setTimeout(r,50))}}
+const ws=new WebSocket(target.webSocketDebuggerUrl),pending=new Map();let id=0,resolveLoad,loaded=new Promise(r=>resolveLoad=r);ws.onmessage=e=>{const m=JSON.parse(e.data);if(m.id&&pending.has(m.id)){const p=pending.get(m.id);pending.delete(m.id);m.error?p.reject(m.error):p.resolve(m.result)}else if(m.method==='Page.loadEventFired')resolveLoad()};await new Promise((r,j)=>{ws.onopen=r;ws.onerror=j});const send=(method,params={})=>new Promise((resolve,reject)=>{const key=++id;pending.set(key,{resolve,reject});ws.send(JSON.stringify({id:key,method,params}))});const ev=async expression=>{const r=await send('Runtime.evaluate',{expression,returnByValue:true,awaitPromise:true});if(r.exceptionDetails)throw Error(JSON.stringify(r.exceptionDetails));return r.result.value};
+try{await send('Runtime.enable');await send('Page.enable');await send('Emulation.setDeviceMetricsOverride',{width:390,height:844,deviceScaleFactor:1,mobile:true});await send('Page.addScriptToEvaluateOnNewDocument',{source:`globalThis.__errors=[];addEventListener('error',e=>__errors.push(String(e.message)));addEventListener('unhandledrejection',e=>__errors.push(String(e.reason)));const png='iVBORw0KGgoAAAANSUhEUgAAAEAAAAAgCAIAAAAt/+nTAAAAT0lEQVR4nO3PUQkAIBTAwBfOClawfwRD+HEIgwW4zdrn64YLGtCCBrSgAS1oQAsa0IIGtKABLWhACxrQgga0oAEtaEALGtCCBrSgAS147AIqPPhqwA8fegAAAABJRU5ErkJggg==',bytes=Uint8Array.from(atob(png),c=>c.charCodeAt(0));globalThis.fetch=async(u,o={})=>String(u).startsWith('/api/display-frame')?new Response(new Blob([bytes],{type:'image/png'})):String(u).startsWith('/api/edit-preview/')?new Response(JSON.stringify({session:'2'.repeat(32),generation:1,page:0,frames:[{png,delay_ms:999}],next_token:null,complete:true}),{headers:{'Content-Type':'application/json'}}):String(u)==='/api/config'?new Response(null,{status:304,headers:{'X-Matrix-Minimum-Client-Contract':'2'}}):new Response(JSON.stringify({running:true,current_module:'clock_lava',minimum_client_contract:2}),{headers:{'Content-Type':'application/json'}})`});loaded=new Promise(r=>resolveLoad=r);await send('Page.navigate',{url:'file://'+path});await loaded;
+const edit=await ev(`(()=>{const r=document.querySelector('label[for="preview-mode-edit"]').getBoundingClientRect();return{x:r.x+r.width/2,y:r.y+r.height/2}})()`);await send('Input.dispatchTouchEvent',{type:'touchStart',touchPoints:[edit]});await send('Input.dispatchTouchEvent',{type:'touchEnd',touchPoints:[]});await ev(`(()=>{const i=document.querySelector('#device-name');i.value='RESPONSIVE DRAFT';i.dispatchEvent(new Event('input',{bubbles:true}));i.focus();i.setSelectionRange(3,9);document.querySelector('.palette-grid').scrollTop=37})()`);
+const sizes=[[320,568],[360,800],[390,844],[412,915],[768,1024],[820,1180],[1024,768],[1280,720],[1440,900],[844,390],[599,800],[600,800],[601,800],[899,800],[900,800],[901,800]],geometry=[];for(const [width,height]of sizes){await send('Emulation.setDeviceMetricsOverride',{width,height,deviceScaleFactor:1,mobile:width<1024});await ev(`scrollTo(0,document.documentElement.scrollHeight);resizePreviewPopout()`);geometry.push(await ev(`(()=>{const i=document.querySelector('#device-name'),g=document.querySelector('.palette-grid'),c=document.querySelector('#matrix-preview'),live=document.querySelector('.preview-live'),details=document.querySelector('.preview-details'),modes=document.querySelector('.preview-modes'),inner=document.querySelector('.preview-live-inner'),lr=live.getBoundingClientRect(),dr=details.getBoundingClientRect(),mr=modes.getBoundingClientRect(),ir=inner.getBoundingClientRect(),below=document.elementFromPoint(Math.max(1,lr.left+1),Math.min(innerHeight-1,lr.bottom+2));return{viewport:[innerWidth,innerHeight],overflow:document.documentElement.scrollWidth-document.documentElement.clientWidth,targets:[...document.querySelectorAll('.preview-modes label')].map(e=>{const r=e.getBoundingClientRect();return[r.width,r.height]}),lavaTargets:[...document.querySelectorAll('.palette-inspect')].map(e=>{const r=e.getBoundingClientRect();return[r.width,r.height]}),containment:[dr.bottom-lr.bottom,mr.bottom-lr.bottom,ir.bottom-lr.bottom],interceptsBelow:live.contains(below),stack:[parseFloat(getComputedStyle(i).scrollMarginTop),lr.bottom],canvas:[document.querySelectorAll('#matrix-preview').length,c.width,c.height],draft:i.value,selection:[i.selectionStart,i.selectionEnd],scroll:g.scrollTop,focus:document.activeElement===i}})()`))}
+const dprs=[];for(const dpr of[1,2,3]){await send('Emulation.setDeviceMetricsOverride',{width:390,height:844,deviceScaleFactor:dpr,mobile:true});dprs.push(await ev(`devicePixelRatio`))}await send('Emulation.setEmulatedMedia',{features:[{name:'prefers-reduced-motion',value:'reduce'}]});const reduced=await ev(`getComputedStyle(document.querySelector('.preview-live')).animationDuration`);await send('Emulation.setPageScaleFactor',{pageScaleFactor:2});const zoom=await ev(`(()=>{resizePreviewPopout();scrollTo(0,document.documentElement.scrollHeight);syncPreviewPopout();const live=document.querySelector('.preview-live'),inner=document.querySelector('.preview-live-inner'),details=document.querySelector('.preview-details'),modes=document.querySelector('.preview-modes'),edit=document.querySelector('label[for="preview-mode-edit"]'),input=document.querySelector('#preview-mode-edit'),field=document.querySelector('#device-name'),lr=live.getBoundingClientRect(),rects=[inner,details,modes,edit].map(node=>{const r=node.getBoundingClientRect();return[r.left,r.right,r.top,r.bottom]}),left=visualViewport.offsetLeft,right=left+visualViewport.width,below=document.elementFromPoint(Math.max(left+1,lr.left+1),Math.min(visualViewport.offsetTop+visualViewport.height-1,lr.bottom+2));input.focus({preventScroll:false});const focused=input.getBoundingClientRect();return{scale:visualViewport.scale,visual:[left,right,visualViewport.width],layout:innerWidth,overflow:document.documentElement.scrollWidth-document.documentElement.clientWidth,live:[lr.left,lr.right,lr.top,lr.bottom],children:rects,contained:rects.every(r=>r[0]>=left-1&&r[1]<=right+1&&r[0]>=lr.left-1&&r[1]<=lr.right+1&&r[2]>=lr.top-1&&r[3]<=lr.bottom+1),interceptsBelow:live.contains(below),focus:document.activeElement===input&&focused.left>=left-1&&focused.right<=right+1,stack:[parseFloat(getComputedStyle(field).scrollMarginTop),lr.bottom]}})()`);await send('Emulation.setPageScaleFactor',{pageScaleFactor:1});const heights=[];for(const height of[430,844]){await send('Emulation.setDeviceMetricsOverride',{width:390,height,deviceScaleFactor:1,mobile:true});heights.push(await ev(`({height:innerHeight,draft:document.querySelector('#device-name').value,scroll:document.querySelector('.palette-grid').scrollTop})`))}await ev(`scrollTo(0,document.documentElement.scrollHeight);syncPreviewPopout()`);const popped=await ev(`({active:document.querySelector('.preview-live').classList.contains('is-popped'),count:document.querySelectorAll('#matrix-preview').length,overflow:document.documentElement.scrollWidth-document.documentElement.clientWidth})`);const live=await ev(`(()=>{const r=document.querySelector('label[for="preview-mode-live"]').getBoundingClientRect();return{x:r.x+r.width/2,y:r.y+r.height/2}})()`);await send('Input.dispatchMouseEvent',{type:'mousePressed',x:live.x,y:live.y,button:'left',clickCount:1});await send('Input.dispatchMouseEvent',{type:'mouseReleased',x:live.x,y:live.y,button:'left',clickCount:1});const modal=await ev(`(()=>{const d=document.querySelector('.edit-preview-switch-dialog');return{names:[...d.querySelectorAll('button')].map(b=>b.textContent),targets:[...d.querySelectorAll('button')].map(b=>{const r=b.getBoundingClientRect();return[r.width,r.height]})}})()`);await send('Input.dispatchKeyEvent',{type:'keyDown',key:'Tab',code:'Tab'});await send('Input.dispatchKeyEvent',{type:'keyUp',key:'Tab',code:'Tab'});await send('Input.dispatchKeyEvent',{type:'keyDown',key:'Tab',code:'Tab',modifiers:8});await send('Input.dispatchKeyEvent',{type:'keyUp',key:'Tab',code:'Tab',modifiers:8});await send('Input.dispatchKeyEvent',{type:'keyDown',key:'Enter',code:'Enter'});await send('Input.dispatchKeyEvent',{type:'keyUp',key:'Enter',code:'Enter'});await ev(`document.querySelector('#preview-mode-edit').focus()`);await send('Input.dispatchKeyEvent',{type:'keyDown',key:' ',code:'Space'});await send('Input.dispatchKeyEvent',{type:'keyUp',key:' ',code:'Space'});const final=await ev(`(()=>{const i=document.querySelector('#device-name');return{mode:document.querySelector('#preview-mode-edit').checked?'edit':'live',draft:i.value,selection:[i.selectionStart,i.selectionEnd],scroll:document.querySelector('.palette-grid').scrollTop,count:document.querySelectorAll('#matrix-preview').length,errors:__errors}})()`);console.log(JSON.stringify({geometry,dprs,reduced,zoom,heights,popped,modal,final}))}finally{ws.close()}
+"""
+        report = self._run_dashboard_chromium_probe(body, probe, timeout=60)
+        expected = [[320, 568], [360, 800], [390, 844], [412, 915], [768, 1024], [820, 1180], [1024, 768], [1280, 720], [1440, 900], [844, 390], [599, 800], [600, 800], [601, 800], [899, 800], [900, 800], [901, 800]]
+        self.assertEqual([item["viewport"] for item in report["geometry"]], expected, report)
+        for item in report["geometry"]:
+            self.assertLessEqual(item["overflow"], 1, report)
+            self.assertTrue(all(width >= 44 and height >= 44 for width, height in item["targets"]), report)
+            self.assertTrue(item["lavaTargets"], report)
+            self.assertTrue(all(width >= 44 and height >= 44 for width, height in item["lavaTargets"]), report)
+            self.assertTrue(all(delta <= 1 for delta in item["containment"]), report)
+            self.assertFalse(item["interceptsBelow"], report)
+            self.assertAlmostEqual(item["stack"][0], item["stack"][1], delta=1)
+            self.assertEqual(item["canvas"], [1, 64, 32], report)
+            self.assertEqual((item["draft"], item["selection"], item["scroll"], item["focus"]), ("RESPONSIVE DRAFT", [3, 9], 37, True), report)
+        self.assertEqual(report["dprs"], [1, 2, 3], report)
+        self.assertIn(report["reduced"], {"0.01ms", "1e-05s"}, report)
+        self.assertEqual(report["zoom"]["scale"], 2, report)
+        self.assertLess(report["zoom"]["visual"][2], report["zoom"]["layout"], report)
+        self.assertLessEqual(report["zoom"]["overflow"], 1, report)
+        self.assertTrue(report["zoom"]["contained"], report)
+        self.assertFalse(report["zoom"]["interceptsBelow"], report)
+        self.assertTrue(report["zoom"]["focus"], report)
+        self.assertAlmostEqual(report["zoom"]["stack"][0], report["zoom"]["stack"][1], delta=1)
+        self.assertEqual(report["heights"], [{"height": 430, "draft": "RESPONSIVE DRAFT", "scroll": 37}, {"height": 844, "draft": "RESPONSIVE DRAFT", "scroll": 37}], report)
+        self.assertEqual(report["popped"], {"active": True, "count": 1, "overflow": 0}, report)
+        self.assertEqual(report["modal"]["names"], ["Stay Editing", "Discard Draft and switch to Live"], report)
+        self.assertTrue(all(width >= 44 and height >= 44 for width, height in report["modal"]["targets"]), report)
+        self.assertEqual(report["final"], {"mode": "edit", "draft": "RESPONSIVE DRAFT", "selection": [3, 9], "scroll": 37, "count": 1, "errors": []}, report)
+        self.assertEqual(Path(self.store.path).read_bytes(), before_config)
+        self.assertEqual(self.controller.method_calls, [])
+
+    @unittest.skipUnless(shutil.which("node"), "Node.js is required")
+    @unittest.skipUnless(
+        os.environ.get("MATRIX_CHROMIUM")
+        and Path(os.environ.get("MATRIX_CHROMIUM", "")).is_file()
+        and os.access(os.environ.get("MATRIX_CHROMIUM", ""), os.X_OK),
+        "MATRIX_CHROMIUM browser is required",
+    )
     def test_matrix_preview_matches_original_at_top_and_pops_out_after_scroll(self):
         self.pair_browser()
         body = self.client.get("/").get_data(as_text=True)
@@ -1569,8 +1984,8 @@ try{
         for item in report["states"]:
             self.assertEqual(item["position"], "fixed", item)
             self.assertAlmostEqual(item["top"], 64, delta=1)
-            expected_height = 88 if item["height"] <= 500 else (112 if item["width"] <= 600 else (152 if item["width"] <= 900 else 160))
-            expected_canvas = [128, 64] if item["height"] <= 500 else ([160, 80] if item["width"] <= 600 else ([240, 120] if item["width"] <= 900 else [256, 128]))
+            expected_height = 88 if item["height"] <= 500 else (132 if item["width"] <= 600 else (152 if item["width"] <= 900 else 160))
+            expected_canvas = [128, 64] if item["height"] <= 500 or item["width"] <= 360 else ([160, 80] if item["width"] <= 600 else ([240, 120] if item["width"] <= 900 else [256, 128]))
             self.assertAlmostEqual(item["stripHeight"], expected_height, delta=1, msg=item)
             self.assertEqual([round(value) for value in item["canvas"]], expected_canvas, item)
             self.assertEqual(item["intrinsic"], [64, 32])
