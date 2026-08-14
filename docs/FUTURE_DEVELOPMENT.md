@@ -1,6 +1,6 @@
 # Future development notes
 
-Last updated: 2026-08-12
+Last updated: 2026-08-14
 
 This file records requested Matrix features that are intentionally deferred. They are product requirements and design notes, not descriptions of current behavior. Do not treat an item as implemented until its code, tests, review, merge, deployment, and physical-device verification are complete.
 
@@ -42,6 +42,17 @@ Use Advanced Canvas for text over GIFs or videos, multiple layers, overlays, and
 - Advanced Canvas controls and examples must be runnable on the physical Matrix.
 - Browser previews must match physical rendering.
 - Do not expose browser-only controls or examples that cannot run on the device.
+
+### Physical playlist navigation versus draft preview
+
+Treat **Show on physical Matrix** and **Cycle physical module** as playlist navigation, not temporary preview actions.
+
+- **Show on physical Matrix** must let the user explicitly select a currently playable saved playlist item, interrupt the current item, and move the active playlist cursor directly to that selection, skipping intervening items.
+- Run the selected item with its saved configuration and normal playlist duration, then continue with the following enabled item in normal order, wrapping at the end.
+- **Cycle physical module** must use the same playlist-skip path, targeting the next enabled item rather than creating a separate one-off preview.
+- Do not autosave or send unsaved editor values, apply a preview-only duration, enqueue a temporary preview, or return to the old cursor after the selected item finishes.
+- Reject a stale, missing, disabled, or otherwise non-playable selection without running unrelated content.
+- Unsaved edits may reach the physical Matrix only through the separate, explicit **Preview edits on device** opt-in described in Priority 1.3.
 
 ### Provider cost and access policy
 
