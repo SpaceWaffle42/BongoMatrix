@@ -275,12 +275,14 @@ def _png_frame(image, delay_ms):
     }
 
 
-def advanced_canvas_preview_frames(matrix, module_config, duration, stop_event=None):
+def advanced_canvas_preview_frames(
+    matrix, module_config, duration, stop_event=None, *, pinned_handles=None,
+):
     """Encode the shared Advanced Canvas invocation timeline without sleeping."""
     from modules.custom_text import canvas_timeline_frames
 
     for canvas, delay in canvas_timeline_frames(
-        matrix, duration, stop_event, module_config,
+        matrix, duration, stop_event, module_config, pinned_handles=pinned_handles,
     ):
         yield _png_frame(matrix.snapshot(canvas), round(delay * 1000, 9))
 
@@ -352,7 +354,9 @@ def static_announcement_preview_frames(matrix, announcement):
         yield _png_frame(matrix.snapshot(canvas), delay_ms)
 
 
-def announcement_preview_frames(matrix, announcements, duration=None, stop_event=None):
+def announcement_preview_frames(
+    matrix, announcements, duration=None, stop_event=None, *, pinned_handles=None,
+):
     """Encode the complete shared physical announcement invocation."""
     from modules.announcement_board import announcement_frames
 
@@ -365,6 +369,7 @@ def announcement_preview_frames(matrix, announcements, duration=None, stop_event
     clock = LogicalClock()
     for canvas, delay_ms in announcement_frames(
         matrix, announcements, duration, stop_event, monotonic=clock.monotonic,
+        pinned_handles=pinned_handles,
     ):
         yield _png_frame(matrix.snapshot(canvas), delay_ms)
         clock.elapsed += delay_ms / 1000
@@ -376,6 +381,10 @@ class PreviewCapacityError(RuntimeError):
 
 class PreviewInstanceCapacityError(RuntimeError):
     """Raised when a paired device or process has too many live instances."""
+
+
+class PreviewSessionExpiredError(RuntimeError):
+    """Raised when a continuation belongs to an expired preview session."""
 
 
 class PreviewInstanceRegistry:
@@ -462,7 +471,7 @@ class PreviewInstanceRegistry:
             instance = PreviewInstance(
                 instance_id, iterator_factory, self._capacity,
                 stop_event=stop_event, on_close=self._unregister,
-                registry_shutdown=self._shutdown,
+                registry_shutdown=self._shutdown, generation=generation,
             )
             self._instances[instance_id] = (device_identity, instance)
             self._device_counts[device_identity] = device_count + 1
@@ -473,6 +482,14 @@ class PreviewInstanceRegistry:
         if superseded is not None:
             superseded.close()
         return instance
+
+    def lookup(self, instance_id, device_identity):
+        """Return only an instance owned by the requesting paired page identity."""
+        with self._lock:
+            entry = self._instances.get(instance_id)
+            if entry is None or entry[0] != device_identity:
+                raise KeyError("unknown preview session")
+            return entry[1]
 
     def _unregister(self, instance_id):
         with self._lock:
@@ -528,9 +545,10 @@ class PreviewInstance:
 
     def __init__(
         self, instance_id, iterator_factory, capacity, *, stop_event=None,
-        on_close=None, registry_shutdown=None,
+        on_close=None, registry_shutdown=None, generation=None,
     ):
         self.instance_id = instance_id
+        self.generation = generation
         self._iterator_factory = iterator_factory
         self._capacity = capacity
         self._stop_event = stop_event

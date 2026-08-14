@@ -6642,6 +6642,173 @@ console.log('ANNOUNCEMENT_HEADING_SYNC_PASS');
         self.assertEqual(response.get_json()["weather"]["location"], "London, GB")
         self.controller.reload.assert_called_once()
 
+    def test_edit_preview_endpoint_is_paired_strict_no_store_and_never_calls_controller(self):
+        from contextlib import contextmanager
+        from edit_preview import PreviewInstanceCapacityError, PreviewSessionExpiredError
+
+        start_path = "/api/edit-preview/clock_lava"
+        page_path = "/api/edit-preview/page"
+        cancel_path = "/api/edit-preview/cancel"
+        preview_instance = "0123456789abcdef0123456789abcdef"
+        candidate = copy.deepcopy(self.store.get())
+        candidate.pop("revision")
+        start_payload = {
+            "config": candidate,
+            "generation": 1,
+            "preview_instance": preview_instance,
+        }
+
+        def assert_response(response, status):
+            self.assertEqual(response.status_code, status, response.get_data(as_text=True))
+            self.assertEqual(response.headers.get("Cache-Control"), "no-store")
+            self.assertNotIn("ETag", response.headers)
+            body = response.get_json()
+            self.assertIsInstance(body, dict)
+            self.assertNotIn("revision", body)
+            self.assertNotIn("device_id", json.dumps(body))
+            return body
+
+        assert_response(self.client.post(start_path, json=start_payload), 401)
+        assert_response(self.client.post(page_path, json={}), 401)
+        assert_response(self.client.post(cancel_path, json={}), 401)
+
+        self.pair_browser()
+        before_config = Path(self.store.path).read_bytes()
+        before_devices = Path(self.device_store.path).read_bytes()
+        before_media = sorted(
+            (path.relative_to(self.media_dir).as_posix(), path.read_bytes())
+            for path in self.media_dir.rglob("*") if path.is_file()
+        )
+
+        oversized = b'{"config":"' + (b"x" * 1_048_576) + b'"}'
+        assert_response(self.client.post(
+            start_path, data=oversized, content_type="application/json",
+        ), 413)
+        malformed_payloads = [
+            {},
+            {**start_payload, "extra": True},
+            {**start_payload, "generation": True},
+            {**start_payload, "preview_instance": "ABC"},
+        ]
+        for payload in malformed_payloads:
+            with self.subTest(payload=payload):
+                assert_response(self.client.post(start_path, json=payload), 400)
+        assert_response(
+            self.client.post("/api/edit-preview/not-a-module", json=start_payload), 404,
+        )
+
+        lifecycle = []
+
+        @contextmanager
+        def pinned(candidate_value, media_root, *, allow_missing=()):
+            lifecycle.append("pin-enter")
+            handles = {"draft.png": object()}
+            yield handles
+            lifecycle.append("pin-exit")
+
+        def prepare(module_name, candidate_value, stop_event):
+            self.assertEqual(lifecycle[-1:], ["pin-enter"])
+            lifecycle.append("provider")
+            return {"prepared": module_name}
+
+        def iterator(module_name, candidate_value, selected_palette, pinned_media, prepared, stop_event):
+            self.assertEqual(lifecycle[-2:], ["pin-enter", "provider"])
+            self.assertEqual(pinned_media, {"draft.png": pinned_media["draft.png"]})
+            self.assertEqual(prepared, {"prepared": "clock_lava"})
+            lifecycle.append("render")
+            for index in range(34):
+                yield {"png": f"frame-{index}", "delay_ms": index + 1}
+
+        with patch("webapp.pin_candidate_media", pinned), patch(
+            "webapp._prepare_edit_preview_provider", prepare, create=True,
+        ), patch("webapp._edit_preview_iterator", iterator, create=True):
+            response = self.client.post(start_path, json=start_payload)
+            first = assert_response(response, 200)
+            self.assertEqual(
+                set(first),
+                {"session", "generation", "page", "frames", "next_token", "complete"},
+            )
+            self.assertRegex(first["session"], r"^[0-9a-f]{32}$")
+            self.assertEqual(first["generation"], 1)
+            self.assertEqual(first["page"], 0)
+            self.assertEqual(len(first["frames"]), 32)
+            self.assertFalse(first["complete"])
+            self.assertRegex(first["next_token"], r"^[0-9a-f]{64}$")
+            self.assertEqual(lifecycle, ["pin-enter", "provider", "render"])
+
+            continuation = {
+                "session": first["session"],
+                "preview_instance": preview_instance,
+                "token": first["next_token"],
+            }
+            second = assert_response(self.client.post(page_path, json=continuation), 200)
+            self.assertEqual(
+                set(second),
+                {"session", "generation", "page", "frames", "next_token", "complete"},
+            )
+            self.assertEqual(second["generation"], 1)
+            self.assertEqual(second["page"], 1)
+            self.assertEqual(len(second["frames"]), 2)
+            self.assertTrue(second["complete"])
+            self.assertIsNone(second["next_token"])
+            self.assertEqual(lifecycle, ["pin-enter", "provider", "render", "pin-exit"])
+
+            assert_response(self.client.post(page_path, json=continuation), 409)
+
+            second_payload = {**start_payload, "generation": 2}
+            with patch("webapp._edit_preview_iterator", side_effect=RuntimeError("decode detail"), create=True):
+                assert_response(self.client.post(start_path, json=second_payload), 503)
+
+            registry = self.app.extensions["edit_preview_registry"]
+            with patch.object(
+                registry, "lookup", side_effect=PreviewSessionExpiredError("private expiry"),
+            ):
+                expired = self.client.post(page_path, json={
+                    "session": "1" * 32,
+                    "preview_instance": preview_instance,
+                    "token": "2" * 64,
+                })
+            assert_response(expired, 410)
+            with patch.object(
+                registry, "register", side_effect=PreviewInstanceCapacityError("private capacity"),
+            ):
+                limited = self.client.post(
+                    start_path, json={**start_payload, "generation": 3},
+                )
+            assert_response(limited, 429)
+            self.assertEqual(limited.headers.get("Retry-After"), "2")
+
+            def active_iterator(*args):
+                yield from (
+                    {"png": f"active-{index}", "delay_ms": 1}
+                    for index in range(40)
+                )
+
+            with patch("webapp._edit_preview_iterator", active_iterator, create=True):
+                active = self.client.post(
+                    start_path, json={**start_payload, "generation": 4},
+                )
+            active_body = assert_response(active, 200)
+            cancel = assert_response(self.client.post(cancel_path, json={
+                "session": active_body["session"],
+                "preview_instance": preview_instance,
+            }), 200)
+            self.assertEqual(cancel, {"cancelled": True})
+            assert_response(self.client.post(cancel_path, json={
+                "session": active_body["session"],
+                "preview_instance": preview_instance,
+            }), 409)
+
+        self.assertEqual(Path(self.store.path).read_bytes(), before_config)
+        self.assertEqual(Path(self.device_store.path).read_bytes(), before_devices)
+        self.assertEqual([
+            (path.relative_to(self.media_dir).as_posix(), path.read_bytes())
+            for path in self.media_dir.rglob("*") if path.is_file()
+        ], before_media)
+        self.controller.assert_not_called()
+        registry.close()
+        self.assertFalse(registry.reaper_alive)
+
     def test_unsaved_announcement_preview_validates_without_mutating_config(self):
         self.pair_browser()
         before = self.store.get()

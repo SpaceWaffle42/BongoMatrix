@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import base64
 import hashlib
 import io
 import json
@@ -18,6 +19,7 @@ import tempfile
 import threading
 import time
 import datetime as dt
+from contextlib import ExitStack
 from datetime import timedelta
 from functools import wraps
 from pathlib import Path
@@ -40,6 +42,11 @@ from modules import announcement_board, weather_app, openweather_overview, openw
 from media_resolver import MediaResolutionError, pin_candidate_media
 from pairing import PairedDeviceStore, PairingDurabilityError
 from secret_store import SecretDurabilityError, SecretStore
+from edit_preview import (
+    CaptureMatrix, PreviewCapacityError, PreviewInstanceCapacityError,
+    PreviewInstanceRegistry, PreviewSessionExpiredError,
+)
+from preview_provider import PreviewProvider
 
 MEDIA_EXTENSIONS = {".gif", ".png", ".jpg", ".jpeg", ".webp", ".mp4"}
 Image.MAX_IMAGE_PIXELS = 1_000_000
@@ -54,6 +61,154 @@ CONDITIONAL_HEADER_LIMIT = 4096
 MINIMUM_CLIENT_CONTRACT = 2
 APPLICATION_VERSION = "0.3.0-preview"
 ETAG_ITEM = re.compile(r'(?P<weak>W/)?"(?P<opaque>[\x21\x23-\x7e\x80-\xff]*)"')
+EDIT_PREVIEW_INSTANCE = re.compile(r"[0-9a-f]{32}")
+EDIT_PREVIEW_SESSION = re.compile(r"[0-9a-f]{32}")
+EDIT_PREVIEW_TOKEN = re.compile(r"[0-9a-f]{64}")
+
+
+class EditPreviewRenderError(RuntimeError):
+    """Sanitized boundary for provider, decode, or render failures."""
+
+
+def _provider_image(image):
+    output = io.BytesIO()
+    image.save(output, format="PNG")
+    return base64.b64encode(output.getvalue()).decode("ascii")
+
+
+def _edit_preview_provider_child(candidate, _credentials, timeout):
+    """Fetch and serialize normalized provider data in the bounded child."""
+    module_name = candidate.pop("_preview_provider_module")
+    if module_name == "weather":
+        settings = candidate["weather"]
+        weather = OpenMeteoClient(timeout=timeout).fetch(
+            settings["location"], latitude=settings.get("latitude"),
+            longitude=settings.get("longitude"), units=settings["units"],
+            deadline=time.monotonic() + timeout,
+        )
+        return vars(weather)
+
+    api_key = candidate.pop("_preview_openweather_key", None)
+    if not api_key:
+        raise RuntimeError("OpenWeather preview is unavailable")
+    if module_name == "openweather_overview":
+        prepared = openweather_overview.prepare(candidate, api_key=api_key)
+        if prepared.error or prepared.cancelled:
+            raise RuntimeError("OpenWeather preview is unavailable")
+        return {
+            "weather": vars(prepared.weather),
+            "icon": _provider_image(prepared.icon),
+        }
+    prepared = openweather_forecast.prepare(candidate, api_key=api_key)
+    if prepared.error or prepared.cancelled:
+        raise RuntimeError("OpenWeather preview is unavailable")
+    return {
+        "periods": [vars(period) for period in prepared.periods],
+        "icons": {
+            icon_code: _provider_image(image)
+            for icon_code, image in prepared.icons.items()
+        },
+    }
+
+
+def _provider_value(value):
+    """Thaw immutable provider transport into renderer model inputs."""
+    if isinstance(value, tuple):
+        if all(
+            isinstance(item, tuple) and len(item) == 2 and isinstance(item[0], str)
+            for item in value
+        ):
+            return {key: _provider_value(item) for key, item in value}
+        return [_provider_value(item) for item in value]
+    return value
+
+
+def _prepare_edit_preview_provider(module_name, candidate, stop_event):
+    """Prepare provider data through the existing process-global bounded seam."""
+    if module_name not in {"weather", "openweather_overview", "openweather_forecast"}:
+        return None
+    provider_candidate = copy.deepcopy(candidate)
+    provider_candidate["_preview_provider_module"] = module_name
+    provider = PreviewProvider()
+    try:
+        transported = provider.prepare(
+            _edit_preview_provider_child,
+            settings=provider_candidate, credentials=None,
+            cancel_event=stop_event, request_deadline=3.0,
+        )
+    finally:
+        provider.shutdown()
+    prepared = _provider_value(transported)
+    if module_name == "weather":
+        from modules.weather_app import WeatherSnapshot
+        return WeatherSnapshot(**prepared)
+    if module_name == "openweather_overview":
+        from modules.openweather_common import OpenWeatherSnapshot
+        icon = Image.open(io.BytesIO(base64.b64decode(prepared["icon"])))
+        icon.load()
+        return openweather_overview.PreparedOverview(
+            weather=OpenWeatherSnapshot(**prepared["weather"]), icon=icon,
+        )
+    from modules.openweather_common import OpenWeatherForecastPeriod
+    icons = {}
+    for icon_code, encoded in prepared["icons"].items():
+        icon = Image.open(io.BytesIO(base64.b64decode(encoded)))
+        icon.load()
+        icons[icon_code] = icon
+    return openweather_forecast.PreparedForecast(
+        periods=[OpenWeatherForecastPeriod(**period) for period in prepared["periods"]],
+        icons=icons,
+    )
+
+
+def _edit_preview_iterator(
+    module_name, candidate, selected_palette, pinned_media, prepared, stop_event,
+):
+    """Construct a capture-only iterator without touching display-controller state."""
+    from edit_preview import (
+        advanced_canvas_preview_frames, announcement_preview_frames,
+        continuous_lava_preview_frames, custom_text_preview_frames,
+        lava_preview_frames, openweather_forecast_preview_frames,
+        openweather_overview_preview_frames, preview_duration,
+        weather_preview_frames,
+    )
+
+    matrix = CaptureMatrix()
+    if module_name == "clock_lava":
+        if selected_palette is not None:
+            return continuous_lava_preview_frames(
+                matrix, candidate, selected_palette, stop_event,
+            )
+        return lava_preview_frames(matrix, candidate)
+    if module_name == "weather":
+        return weather_preview_frames(matrix, candidate, prepared, stop_event)
+    if module_name == "openweather_overview":
+        return openweather_overview_preview_frames(
+            matrix, candidate, prepared, stop_event,
+        )
+    if module_name == "openweather_forecast":
+        return openweather_forecast_preview_frames(
+            matrix, candidate, prepared, stop_event,
+        )
+    if module_name == "announcement_board":
+        settings = candidate["announcement_board"]
+        return announcement_preview_frames(
+            matrix, settings["announcements"],
+            preview_duration(candidate, module_name), stop_event,
+            pinned_handles=pinned_media,
+        )
+    custom = next(
+        (item for item in candidate["custom_modules"] if item["id"] == module_name),
+        None,
+    )
+    if custom is None:
+        raise ValueError("preview module is unavailable")
+    if custom["type"] == "canvas":
+        return advanced_canvas_preview_frames(
+            matrix, custom, preview_duration(candidate, module_name), stop_event,
+            pinned_handles=pinned_media,
+        )
+    return custom_text_preview_frames(matrix, custom)
 
 
 def _revision_etag(revision):
@@ -137,6 +292,16 @@ def create_app(
     default_built_in_media = frozenset(DEFAULT_CONFIG["media"].values())
     openweather_credential_generation = 0
     openweather_credential_lock = threading.Lock()
+    edit_preview_registry = None
+    edit_preview_registry_lock = threading.Lock()
+
+    def get_edit_preview_registry():
+        nonlocal edit_preview_registry
+        with edit_preview_registry_lock:
+            if edit_preview_registry is None:
+                edit_preview_registry = PreviewInstanceRegistry()
+                app.extensions["edit_preview_registry"] = edit_preview_registry
+            return edit_preview_registry
 
     def current_openweather_credential_generation():
         with openweather_credential_lock:
@@ -162,6 +327,9 @@ def create_app(
     def advertise_client_contract(response):
         if request.path == "/api/config":
             response.headers["X-Matrix-Minimum-Client-Contract"] = str(MINIMUM_CLIENT_CONTRACT)
+        if request.path.startswith("/api/edit-preview"):
+            response.headers["Cache-Control"] = "no-store"
+            response.headers.pop("ETag", None)
         return response
 
     def sync_media_directory():
@@ -1247,6 +1415,191 @@ def create_app(
                 "OpenWeather secret removal unavailable (%s)", type(exc).__name__
             )
             return jsonify({"error": "Secret storage is unavailable."}), 503
+
+    def edit_preview_error(message, status, *, retry_after=None):
+        response = jsonify({"error": message})
+        response.status_code = status
+        if retry_after is not None:
+            response.headers["Retry-After"] = str(retry_after)
+        return response
+
+    def edit_preview_json(required_keys):
+        if request.content_length is not None and request.content_length > CONFIG_REQUEST_LIMIT:
+            raise RequestEntityTooLarge()
+        if not request.is_json:
+            raise ValueError("request must be JSON")
+        payload = request.get_json(silent=True)
+        if not isinstance(payload, dict) or set(payload) != set(required_keys):
+            raise ValueError("request payload has invalid fields")
+        return payload
+
+    def edit_preview_identity(payload):
+        value = payload.get("preview_instance")
+        if not isinstance(value, str) or EDIT_PREVIEW_INSTANCE.fullmatch(value) is None:
+            raise ValueError("preview_instance is invalid")
+        return (session["device_id"], value)
+
+    @app.post("/api/edit-preview/<module_name>")
+    @requires_pairing
+    def start_edit_preview(module_name):
+        stack = ExitStack()
+        instance = None
+        try:
+            if request.content_length is not None and request.content_length > CONFIG_REQUEST_LIMIT:
+                raise RequestEntityTooLarge()
+            if not request.is_json:
+                raise ValueError("request must be JSON")
+            payload = request.get_json(silent=True)
+            if not isinstance(payload, dict):
+                raise ValueError("request payload has invalid fields")
+            required = {"config", "generation", "preview_instance"}
+            if set(payload) not in (required, required | {"selected_lava_palette"}):
+                raise ValueError("request payload has invalid fields")
+            generation = payload["generation"]
+            if (
+                isinstance(generation, bool) or not isinstance(generation, int)
+                or generation < 0
+            ):
+                raise ValueError("generation is invalid")
+            identity = edit_preview_identity(payload)
+            selected_palette = payload.get("selected_lava_palette")
+            if selected_palette is not None and not isinstance(selected_palette, dict):
+                raise ValueError("selected_lava_palette is invalid")
+            candidate = config_store.validate_candidate(payload["config"])
+            custom_ids = {item["id"] for item in candidate["custom_modules"]}
+            if module_name not in ALLOWED_MODULES and module_name not in custom_ids:
+                stack.close()
+                return edit_preview_error("Preview module was not found.", 404)
+            stop_event = threading.Event()
+            with media_lock:
+                pinned_media = stack.enter_context(pin_candidate_media(
+                    candidate, media_root, allow_missing=default_built_in_media,
+                ))
+            provider_candidate = candidate
+            if module_name in {"openweather_overview", "openweather_forecast"}:
+                provider_candidate = copy.deepcopy(candidate)
+                provider_candidate["_preview_openweather_key"] = openweather_secrets.get()
+            prepared = _prepare_edit_preview_provider(
+                module_name, provider_candidate, stop_event,
+            )
+
+            def iterator_factory():
+                def owned_iterator():
+                    try:
+                        try:
+                            yield from _edit_preview_iterator(
+                                module_name, candidate, selected_palette, pinned_media,
+                                prepared, stop_event,
+                            )
+                        except Exception:
+                            raise EditPreviewRenderError(
+                                "preview rendering is unavailable"
+                            ) from None
+                    finally:
+                        stack.close()
+                return owned_iterator()
+
+            registry = get_edit_preview_registry()
+            instance = registry.register(
+                identity, iterator_factory, stop_event=stop_event,
+                generation=generation,
+            )
+            preview_session = instance.admit()
+            page = preview_session.page()
+            return jsonify({
+                "session": instance.instance_id,
+                "generation": generation,
+                **page,
+            })
+        except RequestEntityTooLarge:
+            stack.close()
+            return edit_preview_error("Preview request exceeds 1 MiB.", 413)
+        except PreviewSessionExpiredError:
+            stack.close()
+            return edit_preview_error("Preview session expired.", 410)
+        except (PreviewInstanceCapacityError, PreviewCapacityError):
+            stack.close()
+            return edit_preview_error(
+                "Preview capacity is temporarily exhausted.", 429, retry_after=2,
+            )
+        except RuntimeError as error:
+            stack.close()
+            if instance is not None:
+                instance.close()
+            if "capacity exhausted" in str(error):
+                return edit_preview_error(
+                    "Preview capacity is temporarily exhausted.", 429, retry_after=2,
+                )
+            return edit_preview_error("Preview is temporarily unavailable.", 503)
+        except (KeyError, TypeError, ValueError) as error:
+            stack.close()
+            if instance is not None:
+                instance.close()
+            return edit_preview_error(str(error) or "Preview request is invalid.", 400)
+        except Exception:
+            stack.close()
+            if instance is not None:
+                instance.close()
+            return edit_preview_error("Preview is temporarily unavailable.", 503)
+
+    @app.post("/api/edit-preview/page")
+    @requires_pairing
+    def page_edit_preview():
+        try:
+            payload = edit_preview_json({"session", "preview_instance", "token"})
+            identity = edit_preview_identity(payload)
+            session_id = payload["session"]
+            token = payload["token"]
+            if (
+                not isinstance(session_id, str)
+                or EDIT_PREVIEW_SESSION.fullmatch(session_id) is None
+                or not isinstance(token, str)
+                or EDIT_PREVIEW_TOKEN.fullmatch(token) is None
+            ):
+                raise ValueError("preview continuation is invalid")
+            instance = get_edit_preview_registry().lookup(session_id, identity)
+            page = instance.admit().page(token)
+            return jsonify({
+                "session": session_id, "generation": instance.generation, **page,
+            })
+        except RequestEntityTooLarge:
+            return edit_preview_error("Preview request exceeds 1 MiB.", 413)
+        except PreviewSessionExpiredError:
+            return edit_preview_error("Preview session expired.", 410)
+        except (KeyError, StopIteration):
+            return edit_preview_error("Preview session is no longer active.", 409)
+        except ValueError as error:
+            if "continuation token" in str(error):
+                return edit_preview_error("Preview continuation was already used.", 409)
+            return edit_preview_error(str(error) or "Preview request is invalid.", 400)
+        except Exception:
+            return edit_preview_error("Preview is temporarily unavailable.", 503)
+
+    @app.post("/api/edit-preview/cancel")
+    @requires_pairing
+    def cancel_edit_preview():
+        try:
+            payload = edit_preview_json({"session", "preview_instance"})
+            identity = edit_preview_identity(payload)
+            session_id = payload["session"]
+            if (
+                not isinstance(session_id, str)
+                or EDIT_PREVIEW_SESSION.fullmatch(session_id) is None
+            ):
+                raise ValueError("preview session is invalid")
+            instance = get_edit_preview_registry().lookup(session_id, identity)
+            instance.close()
+            return jsonify({"cancelled": True})
+        except RequestEntityTooLarge:
+            return edit_preview_error("Preview request exceeds 1 MiB.", 413)
+        except PreviewSessionExpiredError:
+            return edit_preview_error("Preview session expired.", 410)
+        except KeyError:
+            return edit_preview_error("Preview session is no longer active.", 409)
+        except ValueError as error:
+            return edit_preview_error(str(error) or "Preview request is invalid.", 400)
+        except Exception:
+            return edit_preview_error("Preview is temporarily unavailable.", 503)
 
     @app.post("/api/preview/announcement")
     @requires_pairing
