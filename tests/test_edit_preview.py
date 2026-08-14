@@ -756,6 +756,187 @@ class EditPreviewTests(unittest.TestCase):
         self.assertCountEqual(closed, ["first", "second", "recovered"])
         self.assertNotIn("timed-out", closed)
 
+    def test_expiry_during_page_marks_closing_and_releases_after_page_returns(self):
+        class Clock:
+            now = 100.0
+
+            def monotonic(self):
+                return self.now
+
+        class CommitBarrierIterator:
+            def __init__(self, iterator):
+                self.iterator = iterator
+                self.calls = 0
+                self.active = False
+                self.commit_barrier = threading.Event()
+                self.release_commit = threading.Event()
+                self.close_calls = 0
+                self.concurrent_close_calls = 0
+
+            def __iter__(self):
+                return self
+
+            def __next__(self):
+                self.calls += 1
+                self.active = True
+                try:
+                    frame = next(self.iterator)
+                    if self.calls == 3:
+                        self.commit_barrier.set()
+                        if not self.release_commit.wait(2):
+                            raise AssertionError("expiry commit barrier was not released")
+                    return frame
+                finally:
+                    self.active = False
+
+            def close(self):
+                if self.active:
+                    self.concurrent_close_calls += 1
+                    raise ValueError("generator already executing")
+                self.close_calls += 1
+                self.iterator.close()
+
+        candidate = copy.deepcopy(DEFAULT_CONFIG)
+        candidate["lava"].update({
+            "show_time": False, "show_date": False, "blur_radius": 0,
+            "blob_count": 2,
+        })
+        clock = Clock()
+        capacity = edit_preview.PreviewSessionCapacity(monotonic=clock.monotonic)
+        registry = edit_preview.PreviewInstanceRegistry(capacity=capacity)
+        expired_stop = threading.Event()
+        control_stop = threading.Event()
+        lava = edit_preview.continuous_lava_preview_frames(
+            CaptureMatrix(), candidate,
+            {"kind": "built_in", "id": "fire_burst"},
+            stop_event=expired_stop,
+        )
+        iterator = CommitBarrierIterator(lava)
+        expired_instance = registry.register(
+            "expired-device", lambda: iterator, stop_event=expired_stop,
+        )
+        control_instance = registry.register(
+            "control-device", lambda: iter((
+                {"png": "control-1", "delay_ms": 1},
+                {"png": "control-2", "delay_ms": 1},
+                {"png": "control-3", "delay_ms": 1},
+            )), stop_event=control_stop,
+        )
+        waiter_factory_calls = []
+        waiter_instance = registry.register(
+            "waiting-device",
+            lambda: waiter_factory_calls.append(True) or iter((
+                {"png": "waiter", "delay_ms": 1},
+            )),
+        )
+        expired_session = expired_instance.admit()
+        control_session = control_instance.admit()
+        expired_session.MAX_FRAMES = control_session.MAX_FRAMES = 1
+        first = expired_session.page()
+        stale_token = first["next_token"]
+        control_first = control_session.page()
+        page_result = {}
+        page_failures = []
+        waiter_result = []
+        waiter_failures = []
+
+        def blocked_page():
+            try:
+                page_result.update(expired_session.page(stale_token))
+            except BaseException as error:
+                page_failures.append(error)
+
+        def wait_for_slot():
+            try:
+                waiter_result.append(waiter_instance.admit())
+            except BaseException as error:
+                waiter_failures.append(error)
+
+        page_thread = threading.Thread(target=blocked_page, name="expiring-preview-page")
+        waiter_thread = threading.Thread(target=wait_for_slot, name="expiry-slot-waiter")
+        page_thread.start()
+        self.assertTrue(iterator.commit_barrier.wait(1))
+        waiter_thread.start()
+        deadline = time.monotonic() + 1
+        while capacity.waiting_count != 1 and time.monotonic() < deadline:
+            time.sleep(0.001)
+
+        try:
+            self.assertEqual(capacity.waiting_count, 1)
+            clock.now += capacity.IDLE_TTL + 0.001
+            control_second = control_session.page(control_first["next_token"])
+            control_calls_before_reap = control_second["frames"]
+            reaped_started = time.monotonic()
+            self.assertEqual(capacity.reap_expired(), 1)
+            reaped_elapsed = time.monotonic() - reaped_started
+            self.assertLess(reaped_elapsed, 0.25)
+            self.assertEqual(expired_session.state, "CLOSING")
+            self.assertEqual(expired_instance.state, "CLOSING")
+            self.assertTrue(expired_stop.is_set())
+            self.assertIsNone(expired_session._token)
+            self.assertEqual(iterator.close_calls, 0)
+            self.assertEqual(iterator.concurrent_close_calls, 0)
+            self.assertEqual(capacity.reap_expired(), 0)
+            expired_session.cancel()
+            capacity._record_activity(expired_session)
+            self.assertEqual(expired_session.state, "CLOSING")
+            self.assertEqual(iterator.close_calls, 0)
+            self.assertEqual(capacity.active_count, 2)
+            self.assertEqual(registry.total_count, 3)
+            self.assertTrue(waiter_thread.is_alive())
+            self.assertEqual(waiter_factory_calls, [])
+            self.assertFalse(control_stop.is_set())
+            self.assertEqual(control_second["frames"], control_calls_before_reap)
+        finally:
+            released = time.monotonic()
+            iterator.release_commit.set()
+            page_thread.join(0.25)
+            waiter_thread.join(0.25)
+            settle_elapsed = time.monotonic() - released
+            if page_thread.is_alive() or waiter_thread.is_alive():
+                expired_session.cancel()
+                control_session.cancel()
+                iterator.release_commit.set()
+                page_thread.join(1)
+                waiter_thread.join(1)
+
+        self.assertLess(settle_elapsed, 0.25)
+        self.assertFalse(page_thread.is_alive())
+        self.assertFalse(waiter_thread.is_alive())
+        self.assertEqual(page_failures, [])
+        self.assertEqual(waiter_failures, [])
+        self.assertEqual(page_result, {
+            "page": 1, "frames": [], "next_token": None, "complete": True,
+        })
+        self.assertEqual(iterator.calls, 3)
+        self.assertEqual(iterator.concurrent_close_calls, 0)
+        self.assertEqual(iterator.close_calls, 1)
+        self.assertIsNone(lava.gi_frame)
+        self.assertEqual(expired_session.state, "CLOSED")
+        self.assertEqual(expired_instance.state, "CLOSED")
+        self.assertEqual(expired_session.retained_frame_count, 0)
+        self.assertEqual(capacity.active_count, 2)
+        self.assertEqual(registry.total_count, 2)
+        self.assertEqual(len(waiter_result), 1)
+        self.assertEqual(waiter_factory_calls, [True])
+        self.assertEqual(capacity.reap_expired(), 0)
+        expired_session.cancel()
+        capacity._record_activity(expired_session)
+        self.assertEqual(expired_session.state, "CLOSED")
+        with self.assertRaisesRegex(
+            StopIteration, "explicit new session is required to restart",
+        ):
+            expired_session.page(stale_token)
+
+        waiter_result[0].cancel()
+        control_session.cancel()
+        control_instance.close()
+        waiter_instance.close()
+        self.assertEqual(capacity.active_count, 0)
+        self.assertEqual(capacity.available_slots, 2)
+        self.assertEqual(registry.total_count, 0)
+        self.assertEqual(registry.counts_by_device, {})
+
     def test_expired_session_closes_iterator_and_releases_slot(self):
         class Clock:
             now = 100.0

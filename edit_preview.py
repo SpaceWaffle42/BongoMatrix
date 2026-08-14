@@ -495,6 +495,14 @@ class PreviewInstance:
         self._closed = False
         self._lock = threading.RLock()
 
+    @property
+    def state(self):
+        """Expose renderer ownership without allowing callers to mutate it."""
+        with self._lock:
+            if self._session is not None:
+                return self._session.state
+            return "CLOSED" if self._closed else "ACTIVE"
+
     def admit(self):
         with self._lock:
             if self._closed or (
@@ -637,7 +645,8 @@ class PreviewSessionCapacity:
         with self._condition:
             expired = [
                 session for session, last_activity in self._sessions.items()
-                if now - last_activity > self.IDLE_TTL
+                if session.state == "ACTIVE"
+                and now - last_activity > self.IDLE_TTL
             ]
         for session in expired:
             session.cancel()
@@ -645,7 +654,7 @@ class PreviewSessionCapacity:
 
     def _record_activity(self, session):
         with self._condition:
-            if session in self._sessions:
+            if session in self._sessions and session.state == "ACTIVE":
                 self._sessions[session] = self._monotonic()
 
     def _release(self, session):
@@ -685,6 +694,12 @@ class PreviewSession:
         self._on_activity = on_activity
         self._state_lock = threading.Lock()
         self._page_in_progress = False
+        self._state = "ACTIVE"
+
+    @property
+    def state(self):
+        with self._state_lock:
+            return self._state
 
     @property
     def retained_frame_count(self):
@@ -700,6 +715,8 @@ class PreviewSession:
         """Signal terminal state promptly and defer active-page cleanup."""
         with self._state_lock:
             self._complete = True
+            if self._state != "CLOSED":
+                self._state = "CLOSING"
             if self._stop_event is not None:
                 self._stop_event.set()
             # Clear again on repeated cancellation because an active page may have
@@ -724,6 +741,7 @@ class PreviewSession:
         finally:
             with self._state_lock:
                 self._iterator_closed = True
+                self._state = "CLOSED"
             if self._on_close is not None:
                 release, self._on_close = self._on_close, None
                 release(self)
