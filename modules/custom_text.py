@@ -231,7 +231,7 @@ def _draw_layer(matrix, canvas, layer, properties, *, media_cache=None, frame=0)
         _draw_polygon(matrix, canvas, _ellipse_points(properties), colour, properties["filled"])
 
 
-def _canvas_media_cache(matrix, stop_event, module_config):
+def _canvas_media_cache(matrix, stop_event, module_config, pinned_handles=None):
     media_sources = set()
     for layer in module_config["layers"]:
         if layer["type"] != "media":
@@ -261,13 +261,20 @@ def _canvas_media_cache(matrix, stop_event, module_config):
             continue
         remaining_source_count = len(sorted_media_sources) - index
         try:
-            frames = matrix.media_frames(
-                source, module_config["frame_count"], module_config["fps"],
-                stop_event=stop_event, preserve_size=True,
-                decode_timeout=min(
+            media_options = {
+                "stop_event": stop_event,
+                "preserve_size": True,
+                "decode_timeout": min(
                     CANVAS_MEDIA_PREPARE_TIMEOUT,
                     remaining / remaining_source_count,
                 ),
+            }
+            pinned_handle = (pinned_handles or {}).get(source)
+            if pinned_handle is not None:
+                media_options["pinned_handle"] = pinned_handle
+            frames = matrix.media_frames(
+                source, module_config["frame_count"], module_config["fps"],
+                **media_options,
             )
         except (OSError, ValueError):
             frames = []
@@ -286,12 +293,15 @@ def _canvas_media_cache(matrix, stop_event, module_config):
 
 def canvas_timeline_frames(
     matrix, duration, stop_event, module_config, *, monotonic=None,
+    pinned_handles=None,
 ):
     """Yield rendered Advanced Canvas frames and deadline-clipped delays."""
     duration = max(0.0, float(duration))
     if duration == 0 or (stop_event is not None and stop_event.is_set() is True):
         return
-    media_cache = _canvas_media_cache(matrix, stop_event, module_config)
+    media_cache = _canvas_media_cache(
+        matrix, stop_event, module_config, pinned_handles=pinned_handles,
+    )
     if media_cache is None or (stop_event is not None and stop_event.is_set() is True):
         return
 
@@ -326,10 +336,11 @@ def canvas_timeline_frames(
             cycle_index = (cycle_index + 1) % len(sequence)
 
 
-def _run_canvas(matrix, duration, stop_event, module_config):
+def _run_canvas(matrix, duration, stop_event, module_config, pinned_handles=None):
     rendered = False
     for canvas, delay in canvas_timeline_frames(
         matrix, duration, stop_event, module_config, monotonic=time.monotonic,
+        pinned_handles=pinned_handles,
     ):
         matrix.swap(canvas)
         rendered = True
@@ -369,14 +380,20 @@ def scroll_positions(canvas_width, text_width, loops, direction="left"):
         )
 
 
-def run(matrix, config, duration=15, stop_event=None, module_config=None):
+def run(
+    matrix, config, duration=15, stop_event=None, module_config=None,
+    *, pinned_handles=None,
+):
     """Render one validated custom definition using capture-aware Matrix calls."""
     if module_config is None:
         raise ValueError("custom module configuration is required")
     if stop_event is not None and stop_event.is_set() is True:
         return False
     if module_config["type"] == "canvas":
-        return _run_canvas(matrix, duration, stop_event, module_config)
+        return _run_canvas(
+            matrix, duration, stop_event, module_config,
+            pinned_handles=pinned_handles,
+        )
 
     font = matrix.font(module_config["font"])
     foreground = matrix.colour_rgb(module_config["colour"])

@@ -573,7 +573,7 @@ def _static_transition_frames(matrix, announcement, stop_event, media_frame):
 
 def announcement_frames(
     matrix, announcements, duration=None, stop_event=None, eligibility=None,
-    monotonic=None,
+    monotonic=None, *, pinned_handles=None,
 ):
     """Yield one physical announcement invocation as canvases and delays.
 
@@ -598,10 +598,16 @@ def announcement_frames(
         media_frame = None
         if announcement["layout"] != "text_notice":
             try:
+                media_options = {
+                    "stop_event": stop_event,
+                    "preserve_size": True,
+                    "decode_timeout": ANNOUNCEMENT_MEDIA_DECODE_TIMEOUT,
+                }
+                pinned_handle = (pinned_handles or {}).get(announcement["media"])
+                if pinned_handle is not None:
+                    media_options["pinned_handle"] = pinned_handle
                 frames = matrix.media_frames(
-                    announcement["media"], 1, 1, stop_event=stop_event,
-                    preserve_size=True,
-                    decode_timeout=ANNOUNCEMENT_MEDIA_DECODE_TIMEOUT,
+                    announcement["media"], 1, 1, **media_options,
                 )
             except (OSError, ValueError):
                 frames = []
@@ -769,12 +775,14 @@ def _render_pixel_dissolve(matrix, canvas, announcement, stop_event, media_frame
 
 def _run_announcements(
     matrix, announcements, duration=None, stop_event=None, eligibility=None,
+    *, pinned_handles=None,
 ):
     if stop_event is not None and stop_event.is_set():
         return False
     rendered = False
     for canvas, delay_ms in announcement_frames(
         matrix, announcements, duration, stop_event, eligibility,
+        pinned_handles=pinned_handles,
     ):
         matrix.swap(canvas)
         rendered = True
@@ -787,12 +795,18 @@ def _run_announcements(
     return rendered
 
 
-def run_preview(matrix, announcement, stop_event=None):
+def run_preview(matrix, announcement, stop_event=None, *, pinned_handles=None):
     """Render one validated draft regardless of enabled or schedule state."""
-    return _run_announcements(matrix, [announcement], stop_event=stop_event)
+    return _run_announcements(
+        matrix, [announcement], stop_event=stop_event,
+        pinned_handles=pinned_handles,
+    )
 
 
-def run(matrix, config, duration, stop_event=None, now_provider=dt.datetime.now):
+def run(
+    matrix, config, duration, stop_event=None, now_provider=dt.datetime.now,
+    *, pinned_handles=None,
+):
     """Render each eligible announcement once in configured order, rechecking at start."""
     announcements = config["announcement_board"]["announcements"]
     return _run_announcements(
@@ -800,6 +814,7 @@ def run(matrix, config, duration, stop_event=None, now_provider=dt.datetime.now)
         announcements,
         duration=duration,
         stop_event=stop_event,
+        pinned_handles=pinned_handles,
         eligibility=lambda announcement: (
             announcement.get("enabled", True)
             and is_announcement_active(announcement, now=now_provider())

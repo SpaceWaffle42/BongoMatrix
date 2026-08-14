@@ -1,7 +1,11 @@
+import copy
 import fcntl
+import importlib
 import os
 import subprocess
+import sys
 import tempfile
+import types
 import unittest
 from pathlib import Path
 from unittest.mock import patch
@@ -9,7 +13,10 @@ from unittest.mock import patch
 from PIL import Image
 
 import media_resolver
+from config_store import DEFAULT_CONFIG, validate_config
+from edit_preview import CaptureMatrix
 from media_resolver import MediaResolutionError, MediaResolver
+from modules import announcement_board, custom_text, sleep_screen, splash_screen
 
 
 class MediaResolverTests(unittest.TestCase):
@@ -602,6 +609,223 @@ class MediaResolverTests(unittest.TestCase):
             self.assertTrue(handle.closed)
             with self.assertRaises(OSError):
                 os.fstat(original_descriptor)
+            self.assertEqual(set(os.listdir("/proc/self/fd")), descriptors_before)
+
+
+    def test_splash_sleep_announcement_and_canvas_use_pinned_handles_after_unlink(self):
+        with tempfile.TemporaryDirectory() as directory:
+            media_root = Path(directory) / "media"
+            media_root.mkdir()
+            originals = {
+                "splash.gif": ("GIF", (213, 17, 31)),
+                "sleep.gif": ("GIF", (19, 211, 37)),
+                "announcement.png": ("PNG", (23, 43, 227)),
+                "canvas.png": ("PNG", (239, 193, 29)),
+            }
+            replacements = {
+                "splash.gif": (3, 5, 7),
+                "sleep.gif": (11, 13, 17),
+                "announcement.png": (19, 23, 29),
+                "canvas.png": (31, 37, 41),
+            }
+            for reference, (image_format, colour) in originals.items():
+                first = Image.new("RGB", (64, 32), colour)
+                if image_format == "GIF":
+                    second = Image.new("RGB", (64, 32), tuple(reversed(colour)))
+                    first.save(
+                        media_root / reference, format=image_format, save_all=True,
+                        append_images=[second], duration=[100, 100], loop=0,
+                    )
+                else:
+                    first.save(media_root / reference, format=image_format)
+
+            descriptors_before = set(os.listdir("/proc/self/fd"))
+            resolver = MediaResolver(media_root)
+            handles = {
+                reference: resolver.resolve(reference) for reference in originals
+            }
+            identities = {
+                reference: (os.fstat(handle.fileno()).st_dev, os.fstat(handle.fileno()).st_ino)
+                for reference, handle in handles.items()
+            }
+            for reference, replacement_colour in replacements.items():
+                replacement = media_root / f"replacement-{reference}"
+                Image.new("RGB", (64, 32), replacement_colour).save(
+                    replacement, format=originals[reference][0],
+                )
+                os.replace(replacement, media_root / reference)
+                self.assertNotEqual(
+                    (os.stat(media_root / reference).st_dev, os.stat(media_root / reference).st_ino),
+                    identities[reference],
+                )
+
+            fake_graphics = types.SimpleNamespace(
+                Color=lambda red, green, blue: types.SimpleNamespace(
+                    red=red, green=green, blue=blue,
+                ),
+                Font=object,
+            )
+            fake_rgbmatrix = types.SimpleNamespace(
+                RGBMatrix=object, RGBMatrixOptions=object, graphics=fake_graphics,
+            )
+            previous_rgbmatrix = sys.modules.get("rgbmatrix")
+            sys.modules["rgbmatrix"] = fake_rgbmatrix
+            try:
+                framework = importlib.import_module("matrix_framework")
+            finally:
+                if previous_rgbmatrix is None:
+                    sys.modules.pop("rgbmatrix", None)
+                else:
+                    sys.modules["rgbmatrix"] = previous_rgbmatrix
+
+            class RecordingMatrix(CaptureMatrix):
+                def __init__(self):
+                    super().__init__()
+                    self.submissions = []
+
+                def swap(self, canvas=None):
+                    self.submissions.append(self.snapshot(canvas))
+                    return super().swap(canvas)
+
+            class RecordingStop:
+                def __init__(self):
+                    self.waits = []
+                    self.elapsed = 0.0
+
+                def is_set(self):
+                    return False
+
+                def wait(self, delay):
+                    self.waits.append(delay)
+                    self.elapsed += delay
+                    return False
+
+            def matrix_with_physical_media_seams():
+                matrix = RecordingMatrix()
+                matrix.show_gif = types.MethodType(framework.Matrix.show_gif, matrix)
+                matrix.media_frames = types.MethodType(framework.Matrix.media_frames, matrix)
+                matrix._media_file = lambda _reference: (_ for _ in ()).throw(
+                    AssertionError("consumer reopened a media pathname")
+                )
+                return matrix
+
+            config = copy.deepcopy(DEFAULT_CONFIG)
+            config["media"]["splash"] = "splash.gif"
+            config["media"]["sleep"] = "sleep.gif"
+            announcement = {
+                "id": "announcement_pinned", "enabled": True, "name": "Pinned",
+                "layout": "full_image_notice", "headline": "PINNED", "message": "",
+                "media": "announcement.png",
+                "schedule": {
+                    "start_date": "2030-01-15", "end_date": "2030-01-15",
+                    "start_time": "09:00", "end_time": "17:00",
+                    "days": [0, 1, 2, 3, 4, 5, 6],
+                },
+                "style": {
+                    "foreground": "#ffffff", "background": "#000000", "font": "5x7",
+                    "alignment": "left", "border": "none", "border_colour": "#ffffff",
+                },
+                "timing": {"mode": "static", "duration_seconds": 1},
+                "transition": {"type": "cut"},
+            }
+            canvas_module = {
+                "id": "custom_canvas_pinned", "name": "Pinned canvas", "type": "canvas",
+                "background": "#000000", "frame_count": 1, "fps": 5,
+                "playback": "hold", "overrides": [],
+                "layers": [{
+                    "id": "layer_media", "name": "Media", "type": "media", "visible": True,
+                    "properties": {
+                        "source": "canvas.png", "x": 0, "y": 0, "width": 64,
+                        "height": 32, "rotation": 0, "keep_aspect": False,
+                    },
+                    "keyframes": [],
+                }],
+            }
+            config["announcement_board"]["announcements"] = [announcement]
+            config["custom_modules"] = [canvas_module]
+            config["playlist"] = [
+                {"module": "announcement_board", "duration": 1, "enabled": True},
+                {"module": canvas_module["id"], "duration": 1, "enabled": True},
+            ]
+            validate_config(config, enforce_save_bounds=True)
+            expected_config = copy.deepcopy(config)
+
+            observed = {}
+            try:
+                with self.subTest(consumer="splash"):
+                    matrix, stop = matrix_with_physical_media_seams(), RecordingStop()
+                    self.assertTrue(splash_screen.run(
+                        matrix, config, duration=0.2, stop_event=stop,
+                        pinned_handle=handles["splash.gif"],
+                    ))
+                    observed["splash"] = (matrix.submissions, stop.waits)
+                with self.subTest(consumer="sleep"):
+                    matrix, stop = matrix_with_physical_media_seams(), RecordingStop()
+                    self.assertTrue(sleep_screen.run(
+                        matrix, config, duration=0.2, stop_event=stop,
+                        pinned_handle=handles["sleep.gif"],
+                    ))
+                    observed["sleep"] = (matrix.submissions, stop.waits)
+                with self.subTest(consumer="announcement"):
+                    matrix, stop = matrix_with_physical_media_seams(), RecordingStop()
+                    self.assertTrue(announcement_board.run_preview(
+                        matrix, announcement, stop_event=stop,
+                        pinned_handles={"announcement.png": handles["announcement.png"]},
+                    ))
+                    observed["announcement"] = (matrix.submissions, stop.waits)
+                with self.subTest(consumer="advanced_canvas"):
+                    matrix, stop = matrix_with_physical_media_seams(), RecordingStop()
+                    with patch(
+                        "modules.custom_text.time.monotonic",
+                        side_effect=lambda: stop.elapsed,
+                    ):
+                        self.assertTrue(custom_text.run(
+                            matrix, config, duration=0.2, stop_event=stop,
+                            module_config=canvas_module,
+                            pinned_handles={"canvas.png": handles["canvas.png"]},
+                        ))
+                    observed["advanced_canvas"] = (matrix.submissions, stop.waits)
+
+                if len(observed) != 4:
+                    return
+                self.assertEqual([round(delay, 9) for delay in observed["splash"][1]], [0.1, 0.1])
+                self.assertEqual([round(delay, 9) for delay in observed["sleep"][1]], [0.1, 0.1])
+                self.assertEqual(observed["announcement"][1], [1.0])
+                self.assertEqual(observed["advanced_canvas"][1], [0.2])
+                for frames, _delays in observed.values():
+                    self.assertTrue(frames)
+                    self.assertTrue(all(frame.size == (64, 32) for frame in frames))
+                self.assertEqual(
+                    observed["splash"][0][0].getpixel((0, 0)), originals["splash.gif"][1]
+                )
+                self.assertEqual(
+                    observed["sleep"][0][0].getpixel((0, 0)), originals["sleep.gif"][1]
+                )
+                self.assertEqual(
+                    observed["announcement"][0][0].getpixel((0, 0)),
+                    originals["announcement.png"][1],
+                )
+                self.assertEqual(
+                    observed["advanced_canvas"][0][0].getpixel((0, 0)),
+                    originals["canvas.png"][1],
+                )
+                self.assertEqual(config, expected_config)
+                for reference, replacement_colour in replacements.items():
+                    with Image.open(media_root / reference) as replacement:
+                        self.assertEqual(
+                            replacement.convert("RGB").getpixel((0, 0)),
+                            replacement_colour,
+                        )
+                for reference, handle in handles.items():
+                    self.assertEqual(
+                        (os.fstat(handle.fileno()).st_dev, os.fstat(handle.fileno()).st_ino),
+                        identities[reference],
+                    )
+            finally:
+                resolver.close()
+                resolver.close()
+
+            self.assertTrue(all(handle.closed for handle in handles.values()))
             self.assertEqual(set(os.listdir("/proc/self/fd")), descriptors_before)
 
 

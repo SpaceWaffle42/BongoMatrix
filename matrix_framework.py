@@ -474,7 +474,7 @@ class Matrix:
 
     def media_frames(
         self, filename, frame_count, fps, stop_event=None, decode_timeout=45,
-        preserve_size=False, resolved_path=None,
+        preserve_size=False, resolved_path=None, *, pinned_handle=None,
     ):
         """Decode a bounded media timeline while observing cancellation/deadlines."""
         if (
@@ -492,11 +492,15 @@ class Matrix:
         if stop_event is not None and stop_event.is_set():
             return []
         deadline = time.monotonic() + decode_timeout
-        path = pathlib.Path(resolved_path) if resolved_path is not None else self._media_file(filename)
-        if path is None:
-            return []
-        input_fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW)
-        if resolved_path is not None:
+        path = None
+        if pinned_handle is None:
+            path = pathlib.Path(resolved_path) if resolved_path is not None else self._media_file(filename)
+            if path is None:
+                return []
+            input_fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW)
+        else:
+            input_fd = pinned_handle.dup_fd()
+        if resolved_path is not None or pinned_handle is not None:
             try:
                 is_regular = stat.S_ISREG(os.fstat(input_fd).st_mode)
             except OSError:
@@ -601,10 +605,12 @@ class Matrix:
                     os.close(input_fd)
 
     def show_image(
-        self, filename, x=0, y=0, delay=3, width=None, height=None, keep_aspect=True
+        self, filename, x=0, y=0, delay=3, width=None, height=None, keep_aspect=True,
+        *, pinned_handle=None,
     ):
         image = self.load_image(
-            filename, width=width, height=height, keep_aspect=keep_aspect
+            filename, width=width, height=height, keep_aspect=keep_aspect,
+            pinned_handle=pinned_handle,
         )
         if image is None:
             return False
@@ -614,7 +620,15 @@ class Matrix:
         self.show(delay)
         return True
 
-    def load_image(self, filename, width=None, height=None, keep_aspect=True):
+    def load_image(
+        self, filename, width=None, height=None, keep_aspect=True, *, pinned_handle=None,
+    ):
+        if pinned_handle is not None:
+            with pinned_handle.dup_file() as media_file:
+                with Image.open(media_file) as image:
+                    return self._prepare_image(
+                        image, width=width, height=height, keep_aspect=keep_aspect
+                    )
         path = self._media_file(filename)
         if path is None:
             return None
@@ -636,6 +650,8 @@ class Matrix:
         playback_rate=1.0,
         stop_event=None,
         max_duration=None,
+        *,
+        pinned_handle=None,
     ):
         """Display an animated GIF, optionally bounded or interruptible."""
         from modules.media_player import gif_media_frames
@@ -648,15 +664,27 @@ class Matrix:
             or not 0.25 <= playback_rate <= 4.0
         ):
             raise ValueError("GIF playback rate must be between 0.25 and 4.0")
-        path = self._media_file(filename)
-        if path is None:
-            return False
+        image_open = Image.open
+        if pinned_handle is None:
+            path = self._media_file(filename)
+            if path is None:
+                return False
+        else:
+            path = pinned_handle
+
+            def image_open(handle):
+                media_file = handle.dup_file()
+                try:
+                    return Image.open(media_file)
+                except BaseException:
+                    media_file.close()
+                    raise
 
         shown = False
         for image, frame_delay in gif_media_frames(
             path, loops=loops, playback_rate=playback_rate, stop_event=stop_event,
             max_duration=max_duration, monotonic=time.monotonic,
-            image_open=Image.open, image_iterator=ImageSequence.Iterator,
+            image_open=image_open, image_iterator=ImageSequence.Iterator,
         ):
             self.clear()
             self.draw_image(
