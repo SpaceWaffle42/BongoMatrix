@@ -502,7 +502,7 @@ class ReleaseBundleTests(unittest.TestCase):
                     with self.assertRaises(ReleaseManifestError):
                         preflight(forbidden)
 
-    def test_deploy_failure_rolls_back_touched_paths_and_recovers_service_state(self):
+    def test_rollback_restores_present_files_and_deletes_only_absent_before_files(self):
         class FakeService:
             def __init__(self, active):
                 self.active = active
