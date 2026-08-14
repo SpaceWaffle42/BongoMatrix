@@ -5,6 +5,8 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
+from PIL import Image
+
 import media_resolver
 from media_resolver import MediaResolutionError, MediaResolver
 
@@ -285,6 +287,131 @@ class MediaResolverTests(unittest.TestCase):
 
             for reference, content in media.items():
                 self.assertEqual(media_root.joinpath(reference).read_bytes(), content)
+            self.assertEqual(set(os.listdir("/proc/self/fd")), descriptors_before)
+
+    def test_pillow_png_jpeg_webp_gif_decode_uses_pinned_file_object(self):
+        with tempfile.TemporaryDirectory() as directory:
+            media_root = Path(directory) / "media"
+            media_root.mkdir()
+            fixtures = {
+                "original.png": ("PNG", (3, 2), (241, 17, 31)),
+                "original.jpg": ("JPEG", (4, 3), (29, 197, 61)),
+                "original.webp": ("WEBP", (5, 4), (13, 47, 229)),
+            }
+            for reference, (image_format, size, colour) in fixtures.items():
+                save_options = {"lossless": True} if image_format == "WEBP" else {}
+                Image.new("RGB", size, colour).save(
+                    media_root / reference,
+                    format=image_format,
+                    **save_options,
+                )
+
+            gif_frames = [
+                Image.new("RGB", (6, 5), (223, 11, 19)),
+                Image.new("RGB", (6, 5), (7, 211, 37)),
+            ]
+            gif_frames[0].save(
+                media_root / "original.gif",
+                format="GIF",
+                save_all=True,
+                append_images=gif_frames[1:],
+                duration=[40, 90],
+                loop=0,
+            )
+            fixtures["original.gif"] = ("GIF", (6, 5), (223, 11, 19))
+
+            descriptors_before = set(os.listdir("/proc/self/fd"))
+            resolver = MediaResolver(media_root)
+            handles = {
+                reference: resolver.resolve(reference) for reference in fixtures
+            }
+            try:
+                for reference in fixtures:
+                    replacement = media_root / f"replacement-{reference}"
+                    Image.new("RGB", (1, 1), (0, 0, 0)).save(
+                        replacement,
+                        format=fixtures[reference][0],
+                    )
+                    os.replace(replacement, media_root / reference)
+
+                for reference, (expected_format, expected_size, expected_colour) in fixtures.items():
+                    with self.subTest(reference=reference):
+                        handle = handles[reference]
+                        original_descriptor = handle.fileno()
+
+                        first_duplicate = handle.dup_file()
+                        first_descriptor = first_duplicate.fileno()
+                        self.assertEqual(first_duplicate.mode, "rb")
+                        self.assertEqual(first_duplicate.tell(), 0)
+                        self.assertTrue(first_duplicate.read(1))
+                        first_duplicate.close()
+                        first_duplicate.close()
+                        with self.assertRaises(OSError):
+                            os.fstat(first_descriptor)
+                        self.assertEqual(handle.fileno(), original_descriptor)
+                        os.fstat(original_descriptor)
+
+                        with handle.dup_file() as image_file:
+                            duplicate_descriptor = image_file.fileno()
+                            self.assertEqual(image_file.tell(), 0)
+                            self.assertEqual(
+                                fcntl.fcntl(duplicate_descriptor, fcntl.F_GETFD)
+                                & fcntl.FD_CLOEXEC,
+                                fcntl.FD_CLOEXEC,
+                            )
+                            with patch(
+                                "builtins.open",
+                                side_effect=AssertionError(
+                                    "Pillow reopened a media pathname"
+                                ),
+                            ):
+                                decoded = Image.open(image_file)
+                                self.assertIs(decoded.fp, image_file)
+                                self.assertEqual(decoded.format, expected_format)
+                                self.assertEqual(decoded.size, expected_size)
+                                decoded.load()
+                                if expected_format == "GIF":
+                                    self.assertEqual(decoded.n_frames, 2)
+                                    self.assertEqual(
+                                        decoded.convert("RGB").getpixel((0, 0)),
+                                        expected_colour,
+                                    )
+                                    decoded.seek(1)
+                                    decoded.load()
+                                    self.assertEqual(
+                                        decoded.convert("RGB").getpixel((0, 0)),
+                                        (7, 211, 37),
+                                    )
+                                elif expected_format == "JPEG":
+                                    actual = decoded.convert("RGB").getpixel((0, 0))
+                                    self.assertTrue(
+                                        all(
+                                            abs(channel - expected) <= 3
+                                            for channel, expected in zip(
+                                                actual, expected_colour
+                                            )
+                                        )
+                                    )
+                                else:
+                                    self.assertEqual(
+                                        decoded.convert("RGB").getpixel((0, 0)),
+                                        expected_colour,
+                                    )
+                                decoded.close()
+
+                        with self.assertRaises(OSError):
+                            os.fstat(duplicate_descriptor)
+                        self.assertFalse(handle.closed)
+                        self.assertEqual(handle.fileno(), original_descriptor)
+                        os.fstat(original_descriptor)
+            finally:
+                for handle in handles.values():
+                    handle.close()
+                    handle.close()
+                resolver.close()
+                resolver.close()
+
+            self.assertTrue(all(handle.closed for handle in handles.values()))
             self.assertEqual(set(os.listdir("/proc/self/fd")), descriptors_before)
 
 

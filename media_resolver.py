@@ -50,6 +50,22 @@ class PinnedMediaHandle:
                 raise ValueError("media handle is closed")
             return self._descriptor
 
+    def dup_file(self):
+        """Return a consumer-owned binary file at the start of the pinned bytes."""
+        duplicate = None
+        with self._lock:
+            if self._descriptor is None:
+                raise ValueError("media handle is closed")
+            os.lseek(self._descriptor, 0, os.SEEK_SET)
+            duplicate = os.dup(self._descriptor)
+        try:
+            duplicate_file = os.fdopen(duplicate, "rb")
+            duplicate = None
+            return duplicate_file
+        finally:
+            if duplicate is not None:
+                os.close(duplicate)
+
     def close(self) -> None:
         with self._lock:
             descriptor = self._descriptor
