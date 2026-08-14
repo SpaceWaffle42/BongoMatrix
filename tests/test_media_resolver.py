@@ -144,6 +144,98 @@ class MediaResolverTests(unittest.TestCase):
                 self.assertEqual(flags & required_flags, required_flags)
             self.assertEqual(set(os.listdir("/proc/self/fd")), descriptors_before)
 
+    def test_replace_or_remove_after_validation_cannot_change_pinned_decode_bytes(self):
+        with tempfile.TemporaryDirectory() as directory:
+            temporary_root = Path(directory)
+            media_root = temporary_root / "media"
+            media_root.mkdir()
+            outside_file = temporary_root / "outside.png"
+            outside_bytes = b"outside target bytes"
+            outside_file.write_bytes(outside_bytes)
+            originals = {
+                "replaced.png": b"original atomically replaced bytes",
+                "removed.png": b"original unlinked bytes",
+                "linked.png": b"original symlink-substituted bytes",
+            }
+            for reference, content in originals.items():
+                media_root.joinpath(reference).write_bytes(content)
+
+            resolver = MediaResolver(media_root)
+            descriptors_before = set(os.listdir("/proc/self/fd"))
+            handles = {
+                reference: resolver.resolve(reference) for reference in originals
+            }
+            pinned_identities = {
+                reference: (
+                    os.fstat(handle.fileno()).st_dev,
+                    os.fstat(handle.fileno()).st_ino,
+                )
+                for reference, handle in handles.items()
+            }
+
+            try:
+                replacement_path = media_root / "replacement.tmp"
+                replacement_bytes = b"current replacement bytes"
+                replacement_path.write_bytes(replacement_bytes)
+                os.replace(replacement_path, media_root / "replaced.png")
+                (media_root / "removed.png").unlink()
+                (media_root / "linked.png").unlink()
+                (media_root / "linked.png").symlink_to(outside_file)
+
+                for reference, expected_bytes in originals.items():
+                    with self.subTest(reference=reference):
+                        descriptor = handles[reference].fileno()
+                        proc_descriptor = f"/proc/self/fd/{descriptor}"
+                        descriptor_status = os.stat(proc_descriptor)
+                        self.assertEqual(
+                            (descriptor_status.st_dev, descriptor_status.st_ino),
+                            pinned_identities[reference],
+                        )
+                        with patch(
+                            "os.open",
+                            side_effect=AssertionError("pinned handle reopened pathname"),
+                        ):
+                            self.assertEqual(
+                                os.pread(descriptor, len(expected_bytes), 0),
+                                expected_bytes,
+                            )
+
+                with resolver.resolve("replaced.png") as fresh_handle:
+                    self.assertEqual(
+                        os.pread(fresh_handle.fileno(), len(replacement_bytes), 0),
+                        replacement_bytes,
+                    )
+                    self.assertNotEqual(
+                        (
+                            os.fstat(fresh_handle.fileno()).st_dev,
+                            os.fstat(fresh_handle.fileno()).st_ino,
+                        ),
+                        pinned_identities["replaced.png"],
+                    )
+                with self.assertRaises(MediaResolutionError) as removed:
+                    resolver.resolve("removed.png")
+                self.assertEqual(removed.exception.code, "not_found")
+                with self.assertRaises(MediaResolutionError) as linked:
+                    resolver.resolve("linked.png")
+                self.assertEqual(linked.exception.code, "unsafe_path")
+
+                self.assertEqual(
+                    (media_root / "replaced.png").read_bytes(), replacement_bytes
+                )
+                self.assertEqual(outside_file.read_bytes(), outside_bytes)
+                self.assertFalse(replacement_path.exists())
+            finally:
+                descriptors = [handle.fileno() for handle in handles.values()]
+                for handle in handles.values():
+                    handle.close()
+                    handle.close()
+                    self.assertTrue(handle.closed)
+                for descriptor in descriptors:
+                    with self.assertRaises(OSError):
+                        os.fstat(descriptor)
+
+            self.assertEqual(set(os.listdir("/proc/self/fd")), descriptors_before)
+
 
 if __name__ == "__main__":
     unittest.main()
