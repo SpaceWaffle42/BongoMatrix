@@ -7140,6 +7140,387 @@ console.log('ANNOUNCEMENT_HEADING_SYNC_PASS');
         )
         self.assertEqual(len(os.listdir("/proc/self/fd")), baseline_fds)
 
+    def test_preview_service_init_failure_cleans_partial_workers_and_descriptors(self):
+        """Failed service factories clean partial resources before one atomic retry."""
+        from contextlib import contextmanager
+        import multiprocessing
+        import subprocess
+
+        from edit_preview import PreviewInstanceRegistry, PreviewSessionCapacity
+
+        self.pair_browser()
+        with self.client.session_transaction() as paired:
+            browser_session = dict(paired)
+            device_id = paired["device_id"]
+        self.controller.reset_mock()
+
+        before_children = {child.pid for child in multiprocessing.active_children()}
+        before_threads = {(thread.ident, thread.name) for thread in threading.enumerate()}
+        before_fds = len(list(Path("/proc/self/fd").iterdir()))
+        before_config = Path(self.store.path).read_bytes()
+        before_devices = Path(self.device_store.path).read_bytes()
+        before_media = sorted(
+            (path.relative_to(self.media_dir).as_posix(), path.read_bytes())
+            for path in self.media_dir.rglob("*") if path.is_file()
+        )
+
+        phase = {"failure": "registry"}
+        close_services = self.app.extensions["close_edit_preview_services"]
+        factory_started = threading.Event()
+        release_factory = threading.Event()
+        registries = []
+        providers = []
+        failures = []
+        serial = iter(range(1, 100))
+
+        class TrackedRegistry(PreviewInstanceRegistry):
+            def __init__(self):
+                self.capacity = PreviewSessionCapacity()
+                super().__init__(capacity=self.capacity)
+                self.read_fd, self.write_fd = os.pipe()
+                self.fd_close_calls = {self.read_fd: 0, self.write_fd: 0}
+                self.close_calls = 0
+                self.lock_probe_calls = 0
+                self.probe_service_lock = False
+                self._tracked_closed = False
+                registries.append(self)
+
+            def close(self):
+                if not self._tracked_closed:
+                    self._tracked_closed = True
+                    if self.probe_service_lock:
+                        callback = threading.Thread(
+                            target=close_services,
+                            name="preview-partial-registry-lock-probe",
+                        )
+                        callback.start()
+                        callback.join(0.25)
+                        if callback.is_alive():
+                            raise AssertionError("registry cleanup held app service lock")
+                        self.lock_probe_calls += 1
+                    super().close()
+                    for descriptor in (self.read_fd, self.write_fd):
+                        os.close(descriptor)
+                        self.fd_close_calls[descriptor] += 1
+                    self.close_calls += 1
+
+        class TrackedProvider:
+            MAX_WORKERS = 2
+
+            def __init__(self):
+                self._closed = False
+                self.close_calls = 0
+                self.worker_join_calls = 0
+                self.child_reap_calls = 0
+                self.child_handle_close_calls = 0
+                self.lock_probe_calls = 0
+                self.probe_service_lock = False
+                self.read_fd, self.write_fd = os.pipe()
+                self.fd_close_calls = {self.read_fd: 0, self.write_fd: 0}
+                self.stop = threading.Event()
+                self.worker = threading.Thread(
+                    target=self.stop.wait,
+                    name=f"preview-init-worker-{next(serial)}",
+                    daemon=True,
+                )
+                self.worker.start()
+                self.child = subprocess.Popen(
+                    [sys.executable, "-c", "import time; time.sleep(60)"],
+                    stdin=subprocess.DEVNULL,
+                    stdout=subprocess.DEVNULL,
+                    stderr=subprocess.DEVNULL,
+                )
+                providers.append(self)
+
+            @property
+            def is_closed(self):
+                return self._closed
+
+            @property
+            def active_worker_count(self):
+                return int(self.worker.is_alive())
+
+            @property
+            def active_child_count(self):
+                return int(self.child.poll() is None)
+
+            @property
+            def available_worker_slots(self):
+                return self.MAX_WORKERS - self.active_worker_count
+
+            def prepare(self, provider, *, settings, credentials, cancel_event,
+                        request_deadline):
+                raise AssertionError("clock preview must not invoke provider preparation")
+
+            def shutdown(self):
+                if self._closed:
+                    return
+                self._closed = True
+                if self.probe_service_lock:
+                    callback = threading.Thread(
+                        target=close_services,
+                        name="preview-partial-provider-lock-probe",
+                    )
+                    callback.start()
+                    callback.join(0.25)
+                    if callback.is_alive():
+                        raise AssertionError("provider cleanup held app service lock")
+                    self.lock_probe_calls += 1
+                self.stop.set()
+                self.worker.join(1)
+                self.worker_join_calls += 1
+                if self.child.poll() is None:
+                    self.child.terminate()
+                self.child.wait(timeout=1)
+                self.child_reap_calls += 1
+                self.child_handle_close_calls += 1
+                for descriptor in (self.read_fd, self.write_fd):
+                    os.close(descriptor)
+                    self.fd_close_calls[descriptor] += 1
+                self.close_calls += 1
+
+        def registry_factory():
+            registry = TrackedRegistry()
+            if phase["failure"] == "registry":
+                phase["failure"] = None
+                factory_started.set()
+                if not release_factory.wait(1):
+                    raise AssertionError("registry factory release timed out")
+                registry.probe_service_lock = True
+                registry.close()
+                raise RuntimeError("private registry init worker/fd identifier")
+            return registry
+
+        def provider_factory():
+            provider = TrackedProvider()
+            if phase["failure"] == "provider":
+                phase["failure"] = None
+                factory_started.set()
+                if not release_factory.wait(1):
+                    raise AssertionError("provider factory release timed out")
+                provider.probe_service_lock = True
+                provider.shutdown()
+                raise RuntimeError(
+                    f"private provider child {provider.child.pid} fd {provider.read_fd}"
+                )
+            return provider
+
+        @contextmanager
+        def pinned(candidate, media_root, *, allow_missing=()):
+            yield {}
+
+        def iterator(module_name, candidate, selected_palette, pinned_media, prepared,
+                     stop_event):
+            for index in range(40):
+                yield {"png": f"safe-frame-{index}", "delay_ms": 1}
+
+        def paired_client():
+            client = self.app.test_client()
+            with client.session_transaction() as session:
+                session.update(browser_session)
+            return client
+
+        def payload(index):
+            candidate = copy.deepcopy(self.store.get())
+            candidate.pop("revision")
+            return {
+                "config": candidate,
+                "generation": index,
+                "preview_instance": f"{index:032x}",
+            }
+
+        def assert_transport(response, status):
+            self.assertEqual(response.status_code, status, response.get_data(as_text=True))
+            self.assertEqual(response.headers.get("Cache-Control"), "no-store")
+            self.assertNotIn("ETag", response.headers)
+            body = response.get_json()
+            serialized = json.dumps(body)
+            self.assertNotIn("revision", body)
+            self.assertNotIn("device_id", serialized)
+            self.assertNotIn(device_id, serialized)
+            self.assertNotIn("private", serialized)
+            return body
+
+        def exercise_failed_boundary(boundary, base_index):
+            phase["failure"] = boundary
+            factory_started.clear()
+            release_factory.clear()
+            owner_result = {}
+            waiter_results = []
+            boundary_failures = []
+
+            def request(index, destination):
+                try:
+                    destination.append((index, paired_client().post(
+                        "/api/edit-preview/clock_lava", json=payload(index),
+                    )))
+                except BaseException as error:
+                    boundary_failures.append(error)
+
+            owner_values = []
+            owner = threading.Thread(
+                target=request, args=(base_index, owner_values),
+                name=f"preview-{boundary}-failure-owner",
+            )
+            owner.start()
+            self.assertTrue(factory_started.wait(1))
+            partial_registry = registries[-1]
+            partial_provider = providers[-1] if boundary == "provider" else None
+            self.assertIsNot(
+                self.app.extensions.get("edit_preview_registry"), partial_registry,
+            )
+            if partial_provider is not None:
+                self.assertIsNot(
+                    self.app.extensions.get("edit_preview_provider"), partial_provider,
+                )
+
+            waiters = [
+                threading.Thread(
+                    target=request, args=(base_index + offset, waiter_results),
+                    name=f"preview-{boundary}-waiter-{offset}",
+                )
+                for offset in (1, 2)
+            ]
+            for waiter in waiters:
+                waiter.start()
+            release_factory.set()
+            owner.join(1)
+            for waiter in waiters:
+                waiter.join(1)
+            self.assertFalse(owner.is_alive())
+            self.assertFalse(any(waiter.is_alive() for waiter in waiters))
+            self.assertEqual(boundary_failures, [])
+            self.assertEqual(len(owner_values), 1)
+            owner_result["body"] = assert_transport(owner_values[0][1], 503)
+            self.assertEqual(
+                owner_result["body"],
+                {"error": "Preview is temporarily unavailable."},
+            )
+            self.assertEqual(len(waiter_results), 2)
+            healthy_registry = self.app.extensions["edit_preview_registry"]
+            healthy_provider = self.app.extensions["edit_preview_provider"]
+            self.assertIsNot(healthy_registry, partial_registry)
+            self.assertIsNot(healthy_provider, partial_provider)
+            sessions = []
+            for index, response in waiter_results:
+                body = assert_transport(response, 200)
+                sessions.append((index, body["session"]))
+            self.assertIs(
+                self.app.extensions["get_edit_preview_services"]()[0], healthy_registry,
+            )
+            self.assertIs(
+                self.app.extensions["get_edit_preview_services"]()[1], healthy_provider,
+            )
+            first_index, first_session = sessions.pop(0)
+            cancelled = assert_transport(paired_client().post(
+                "/api/edit-preview/cancel", json={
+                    "session": first_session,
+                    "preview_instance": f"{first_index:032x}",
+                },
+            ), 200)
+            self.assertEqual(cancelled, {"cancelled": True})
+            reused = assert_transport(paired_client().post(
+                "/api/edit-preview/clock_lava", json=payload(base_index + 3),
+            ), 200)
+            sessions.append((base_index + 3, reused["session"]))
+            self.assertIs(self.app.extensions["edit_preview_registry"], healthy_registry)
+            self.assertIs(self.app.extensions["edit_preview_provider"], healthy_provider)
+            for index, session_id in sessions:
+                cancelled = assert_transport(paired_client().post(
+                    "/api/edit-preview/cancel", json={
+                        "session": session_id,
+                        "preview_instance": f"{index:032x}",
+                    },
+                ), 200)
+                self.assertEqual(cancelled, {"cancelled": True})
+            self.assertEqual(
+                (healthy_registry.total_count, healthy_registry.expired_count), (0, 0),
+            )
+            self.assertEqual(
+                (healthy_registry.capacity.active_count,
+                 healthy_registry.capacity.waiting_count),
+                (0, 0),
+            )
+            return partial_registry, partial_provider, healthy_registry, healthy_provider
+
+        factory_patch = patch.multiple(
+            "webapp", PreviewInstanceRegistry=registry_factory,
+            PreviewProvider=provider_factory, pin_candidate_media=pinned,
+            _edit_preview_iterator=iterator,
+        )
+        try:
+            with factory_patch:
+                registry_partial, _provider_partial, first_registry, first_provider = (
+                    exercise_failed_boundary("registry", 101)
+                )
+                self.assertTrue(registry_partial.is_closed)
+                self.assertEqual(registry_partial.close_calls, 1)
+                self.assertEqual(registry_partial.lock_probe_calls, 1)
+                self.assertEqual(registry_partial.reaper_join_count, 1)
+                self.assertFalse(registry_partial.reaper_alive)
+
+                self.app.extensions["close_edit_preview_services"]()
+                provider_registry, provider_partial, second_registry, second_provider = (
+                    exercise_failed_boundary("provider", 201)
+                )
+                self.assertTrue(provider_registry.is_closed)
+                self.assertEqual(provider_registry.close_calls, 1)
+                self.assertEqual(provider_registry.reaper_join_count, 1)
+                self.assertFalse(provider_registry.reaper_alive)
+                self.assertTrue(provider_partial.is_closed)
+                self.assertEqual(
+                    (provider_partial.close_calls, provider_partial.worker_join_calls,
+                     provider_partial.child_reap_calls,
+                     provider_partial.child_handle_close_calls,
+                     provider_partial.lock_probe_calls),
+                    (1, 1, 1, 1, 1),
+                )
+                self.assertEqual(set(provider_partial.fd_close_calls.values()), {1})
+                self.app.extensions["close_edit_preview_services"]()
+                self.app.extensions["close_edit_preview_services"]()
+        finally:
+            release_factory.set()
+            for registry in registries:
+                registry.close()
+            for provider in providers:
+                provider.shutdown()
+
+        self.assertEqual(len(registries), 4)
+        self.assertEqual(len(providers), 3)
+        self.assertTrue(all(registry.is_closed for registry in registries))
+        self.assertTrue(all(registry.close_calls == 1 for registry in registries))
+        self.assertTrue(all(registry.reaper_join_count == 1 for registry in registries))
+        self.assertTrue(all(not registry.reaper_alive for registry in registries))
+        self.assertTrue(all(registry.total_count == 0 for registry in registries))
+        self.assertTrue(all(registry.expired_count == 0 for registry in registries))
+        self.assertTrue(all(registry.capacity.active_count == 0 for registry in registries))
+        self.assertTrue(all(registry.capacity.waiting_count == 0 for registry in registries))
+        self.assertTrue(all(set(registry.fd_close_calls.values()) == {1}
+                            for registry in registries))
+        self.assertTrue(all(provider.is_closed for provider in providers))
+        self.assertTrue(all(provider.close_calls == 1 for provider in providers))
+        self.assertTrue(all(provider.worker_join_calls == 1 for provider in providers))
+        self.assertTrue(all(provider.child_reap_calls == 1 for provider in providers))
+        self.assertTrue(all(provider.child_handle_close_calls == 1 for provider in providers))
+        self.assertTrue(all(set(provider.fd_close_calls.values()) == {1}
+                            for provider in providers))
+        self.assertTrue(all(provider.active_worker_count == 0 for provider in providers))
+        self.assertTrue(all(provider.active_child_count == 0 for provider in providers))
+        self.assertEqual(Path(self.store.path).read_bytes(), before_config)
+        self.assertEqual(Path(self.device_store.path).read_bytes(), before_devices)
+        self.assertEqual(sorted(
+            (path.relative_to(self.media_dir).as_posix(), path.read_bytes())
+            for path in self.media_dir.rglob("*") if path.is_file()
+        ), before_media)
+        self.assertEqual(self.controller.method_calls, [])
+        self.assertEqual(
+            {child.pid for child in multiprocessing.active_children()}, before_children,
+        )
+        self.assertEqual(
+            {(thread.ident, thread.name) for thread in threading.enumerate()}, before_threads,
+        )
+        self.assertEqual(len(list(Path("/proc/self/fd").iterdir())), before_fds)
+
     def test_same_page_slow_generation_is_superseded_by_newer_generation(self):
         from contextlib import contextmanager
 
