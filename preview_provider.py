@@ -67,6 +67,9 @@ class PreviewProvider:
 
     def __init__(self):
         self._context = multiprocessing.get_context("spawn")
+        self._lifecycle = threading.Condition()
+        self._shutdown = False
+        self._preparations = set()
 
     @property
     def active_child_count(self):
@@ -97,6 +100,15 @@ class PreviewProvider:
     def _before_publication(self, _prepared):
         """Parent-side seam immediately before a prepared result is returned."""
 
+    def shutdown(self):
+        """Stop admitting work and wait for this instance's owners to reap it."""
+        with self._lifecycle:
+            self._shutdown = True
+            for shutdown_event in self._preparations:
+                shutdown_event.set()
+            while self._preparations:
+                self._lifecycle.wait()
+
     def prepare(
         self, provider, *, settings, credentials, cancel_event, request_deadline
     ):
@@ -104,17 +116,29 @@ class PreviewProvider:
         if cancel_event.is_set():
             raise PreviewProviderCancelled("preview provider preparation cancelled")
 
-        if not self._worker_slots.acquire(blocking=False):
-            raise RuntimeError("preview provider worker capacity exhausted")
-
         effective_timeout = min(3.0, float(request_deadline))
         deadline = time.monotonic() + effective_timeout
+        shutdown_event = threading.Event()
+        with self._lifecycle:
+            if self._shutdown:
+                raise RuntimeError("preview provider is shut down")
+            self._preparations.add(shutdown_event)
+
+        slot_acquired = False
         worker_accounted = False
         child_accounted = False
         child = None
         result_receiver = None
         result_sender = None
         try:
+            if not self._worker_slots.acquire(blocking=False):
+                raise RuntimeError("preview provider worker capacity exhausted")
+            slot_acquired = True
+            if cancel_event.is_set() or shutdown_event.is_set():
+                raise PreviewProviderCancelled(
+                    "preview provider preparation cancelled"
+                )
+
             with type(self)._accounting_lock:
                 type(self)._active_workers += 1
                 worker_accounted = True
@@ -138,7 +162,7 @@ class PreviewProvider:
                 child_accounted = True
 
             while True:
-                if cancel_event.is_set():
+                if cancel_event.is_set() or shutdown_event.is_set():
                     result_receiver.close()
                     result_receiver = None
                     self._terminate_and_reap(child)
@@ -156,7 +180,7 @@ class PreviewProvider:
                     message = result_receiver.recv()
                     result_receiver.close()
                     result_receiver = None
-                    if cancel_event.is_set():
+                    if cancel_event.is_set() or shutdown_event.is_set():
                         self._terminate_and_reap(child)
                         raise PreviewProviderCancelled(
                             "preview provider preparation cancelled"
@@ -166,7 +190,7 @@ class PreviewProvider:
                         raise RuntimeError("preview provider preparation failed")
                     prepared = message[1]
                     self._before_publication(prepared)
-                    if cancel_event.is_set():
+                    if cancel_event.is_set() or shutdown_event.is_set():
                         raise PreviewProviderCancelled(
                             "preview provider preparation cancelled"
                         )
@@ -189,4 +213,8 @@ class PreviewProvider:
             if worker_accounted:
                 with type(self)._accounting_lock:
                     type(self)._active_workers -= 1
-            self._worker_slots.release()
+            if slot_acquired:
+                self._worker_slots.release()
+            with self._lifecycle:
+                self._preparations.remove(shutdown_event)
+                self._lifecycle.notify_all()

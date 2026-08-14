@@ -3,6 +3,8 @@ import os
 import threading
 import time
 import unittest
+from multiprocessing.connection import Connection
+from multiprocessing.process import BaseProcess
 from unittest.mock import patch
 
 from preview_provider import (
@@ -505,3 +507,172 @@ class PreviewProviderTests(unittest.TestCase):
                 cancellation.set()
                 release_publication.set()
                 prepare_thread.join(1.0)
+
+    def test_shutdown_reaps_all_provider_children(self):
+        context = multiprocessing.get_context("spawn")
+        connect_started = context.Event()
+        connect_completed = context.Event()
+        response_read_started = context.Event()
+        connect_cancel = threading.Event()
+        response_cancel = threading.Event()
+        connect_provider = PreviewProvider()
+        response_provider = PreviewProvider()
+        children_before = {child.pid for child in multiprocessing.active_children()}
+        threads_before = {thread.ident for thread in threading.enumerate()}
+        descriptors_before = set(os.listdir("/proc/self/fd"))
+        response_reader, response_writer = context.Pipe(duplex=False)
+        created_pipes = []
+        created_children = []
+        close_counts = {}
+        outcomes = {}
+        real_pipe = connect_provider._context.Pipe
+        real_process = connect_provider._context.Process
+        real_connection_close = Connection.close
+        real_process_close = BaseProcess.close
+
+        def tracked_pipe(*args, **kwargs):
+            connections = real_pipe(*args, **kwargs)
+            created_pipes.extend(connections)
+            close_counts.update((id(connection), 0) for connection in connections)
+            return connections
+
+        def tracked_process(*args, **kwargs):
+            child = real_process(*args, **kwargs)
+            created_children.append(child)
+            close_counts[id(child)] = 0
+            return child
+
+        def tracked_connection_close(connection):
+            if id(connection) in close_counts:
+                close_counts[id(connection)] += 1
+            return real_connection_close(connection)
+
+        def tracked_process_close(child):
+            if id(child) in close_counts:
+                close_counts[id(child)] += 1
+            return real_process_close(child)
+
+        def prepare(name, provider, callable_, settings, cancel_event):
+            try:
+                provider.prepare(
+                    callable_,
+                    settings=settings,
+                    credentials={"api_key": f"{name}-secret"},
+                    cancel_event=cancel_event,
+                    request_deadline=3.0,
+                )
+            except BaseException as error:
+                outcomes[name] = error
+
+        connect_thread = threading.Thread(
+            target=prepare,
+            args=(
+                "connect",
+                connect_provider,
+                provider_blocked_during_connect,
+                {"connect_started": connect_started},
+                connect_cancel,
+            ),
+        )
+        response_thread = threading.Thread(
+            target=prepare,
+            args=(
+                "response",
+                response_provider,
+                provider_blocked_during_response_read,
+                {
+                    "connect_completed": connect_completed,
+                    "response_read_started": response_read_started,
+                    "response_reader": response_reader,
+                },
+                response_cancel,
+            ),
+        )
+
+        with patch.object(
+            connect_provider._context, "Pipe", side_effect=tracked_pipe
+        ), patch.object(
+            connect_provider._context, "Process", side_effect=tracked_process
+        ), patch.object(
+            Connection, "close", new=tracked_connection_close
+        ), patch.object(
+            BaseProcess, "close", new=tracked_process_close
+        ):
+            connect_thread.start()
+            response_thread.start()
+            try:
+                self.assertTrue(connect_started.wait(2.0), outcomes.get("connect"))
+                self.assertTrue(
+                    response_read_started.wait(2.0), outcomes.get("response")
+                )
+                self.assertTrue(connect_completed.is_set())
+                response_reader.close()
+
+                self.assertEqual(connect_provider.active_child_count, 2)
+                self.assertEqual(connect_provider.active_worker_count, 2)
+                self.assertEqual(connect_provider.available_worker_slots, 0)
+                self.assertEqual(len(created_children), 2)
+
+                shutdown_started = time.monotonic()
+                shutdown_threads = [
+                    threading.Thread(target=connect_provider.shutdown),
+                    threading.Thread(target=response_provider.shutdown),
+                ]
+                for thread in shutdown_threads:
+                    thread.start()
+                for thread in shutdown_threads:
+                    thread.join(1.0)
+                shutdown_elapsed = time.monotonic() - shutdown_started
+
+                self.assertTrue(all(not thread.is_alive() for thread in shutdown_threads))
+                self.assertLessEqual(shutdown_elapsed, 0.250)
+                connect_thread.join(1.0)
+                response_thread.join(1.0)
+                self.assertFalse(connect_thread.is_alive())
+                self.assertFalse(response_thread.is_alive())
+                response_writer.close()
+                self.assertIsInstance(outcomes.get("connect"), PreviewProviderCancelled)
+                self.assertIsInstance(outcomes.get("response"), PreviewProviderCancelled)
+
+                connect_provider.shutdown()
+                response_provider.shutdown()
+                process_count = len(created_children)
+                pipe_count = len(created_pipes)
+                with self.assertRaisesRegex(RuntimeError, "preview provider is shut down"):
+                    connect_provider.prepare(
+                        provider_work_that_must_not_start,
+                        settings={"location": "after-shutdown"},
+                        credentials={"api_key": "must-not-spawn"},
+                        cancel_event=threading.Event(),
+                        request_deadline=3.0,
+                    )
+                self.assertEqual(len(created_children), process_count)
+                self.assertEqual(len(created_pipes), pipe_count)
+
+                self.assertTrue(all(resource.closed for resource in created_pipes))
+                self.assertTrue(all(child._closed for child in created_children))
+                self.assertTrue(all(count == 1 for count in close_counts.values()))
+                self.assertEqual(connect_provider.active_child_count, 0)
+                self.assertEqual(connect_provider.active_worker_count, 0)
+                self.assertEqual(connect_provider.available_worker_slots, 2)
+                self.assertEqual(
+                    {child.pid for child in multiprocessing.active_children()},
+                    children_before,
+                )
+                self.assertEqual(
+                    {thread.ident for thread in threading.enumerate()}, threads_before
+                )
+                self.assertEqual(set(os.listdir("/proc/self/fd")), descriptors_before)
+            finally:
+                connect_cancel.set()
+                response_cancel.set()
+                for provider in (connect_provider, response_provider):
+                    shutdown = getattr(provider, "shutdown", None)
+                    if shutdown is not None:
+                        shutdown()
+                if not response_reader.closed:
+                    response_reader.close()
+                if not response_writer.closed:
+                    response_writer.close()
+                connect_thread.join(1.0)
+                response_thread.join(1.0)
