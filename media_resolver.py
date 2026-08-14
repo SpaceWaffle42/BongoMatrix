@@ -6,6 +6,7 @@ import errno
 import os
 import re
 import stat
+import threading
 from pathlib import Path, PurePosixPath
 
 
@@ -16,6 +17,7 @@ _ERROR_MESSAGES = {
     "not_found": "media resource was not found",
     "not_regular": "media resource is not a regular file",
     "unsafe_path": "media resource path is unsafe",
+    "resolver_closed": "media resolver is closed",
 }
 
 
@@ -30,26 +32,34 @@ class MediaResolutionError(RuntimeError):
 class PinnedMediaHandle:
     """Own one read-only descriptor for a resolved regular media file."""
 
-    __slots__ = ("_descriptor",)
+    __slots__ = ("_descriptor", "_lock", "_on_close")
 
-    def __init__(self, descriptor: int):
+    def __init__(self, descriptor: int, on_close):
         self._descriptor = descriptor
+        self._lock = threading.Lock()
+        self._on_close = on_close
 
     @property
     def closed(self) -> bool:
-        return self._descriptor is None
+        with self._lock:
+            return self._descriptor is None
 
     def fileno(self) -> int:
-        if self._descriptor is None:
-            raise ValueError("media handle is closed")
-        return self._descriptor
+        with self._lock:
+            if self._descriptor is None:
+                raise ValueError("media handle is closed")
+            return self._descriptor
 
     def close(self) -> None:
-        descriptor = self._descriptor
-        if descriptor is None:
-            return
-        self._descriptor = None
-        os.close(descriptor)
+        with self._lock:
+            descriptor = self._descriptor
+            if descriptor is None:
+                return
+            self._descriptor = None
+        try:
+            os.close(descriptor)
+        finally:
+            self._on_close(self)
 
     def __enter__(self):
         self.fileno()
@@ -68,6 +78,23 @@ class MediaResolver:
         if not root.is_dir():
             raise ValueError("media root must be a directory")
         self._root = root
+        self._lock = threading.Lock()
+        self._handles = set()
+        self._closed = False
+
+    def _release_handle(self, handle: PinnedMediaHandle) -> None:
+        with self._lock:
+            self._handles.discard(handle)
+
+    def close(self) -> None:
+        with self._lock:
+            if self._closed:
+                return
+            self._closed = True
+            handles = tuple(self._handles)
+            self._handles.clear()
+        for handle in handles:
+            handle.close()
 
     @staticmethod
     def _normalize(reference: str) -> tuple[str, ...]:
@@ -99,6 +126,9 @@ class MediaResolver:
 
     def resolve(self, reference: str) -> PinnedMediaHandle:
         """Open and return one confined regular file descriptor."""
+        with self._lock:
+            if self._closed:
+                raise MediaResolutionError("resolver_closed")
         parts = self._normalize(reference)
         candidate = self._root.joinpath(*parts)
 
@@ -136,9 +166,13 @@ class MediaResolver:
             proc_target = Path(f"/proc/self/fd/{descriptor}").resolve(strict=True)
             if not proc_target.is_relative_to(self._root):
                 raise MediaResolutionError("unsafe_path")
-            handle = PinnedMediaHandle(descriptor)
-            descriptor = None
-            return handle
+            with self._lock:
+                if self._closed:
+                    raise MediaResolutionError("resolver_closed")
+                handle = PinnedMediaHandle(descriptor, self._release_handle)
+                self._handles.add(handle)
+                descriptor = None
+                return handle
         except MediaResolutionError:
             raise
         except FileNotFoundError:

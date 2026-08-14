@@ -236,6 +236,57 @@ class MediaResolverTests(unittest.TestCase):
 
             self.assertEqual(set(os.listdir("/proc/self/fd")), descriptors_before)
 
+    def test_resolver_close_releases_every_descriptor(self):
+        with tempfile.TemporaryDirectory() as directory:
+            media_root = Path(directory) / "media"
+            media_root.mkdir()
+            (media_root / "built-in").mkdir()
+            media = {
+                "first.png": b"first regular bytes",
+                "second.gif": b"second regular bytes",
+                "built-in/third.jpg": b"third built-in bytes",
+                "built-in/fourth.webp": b"fourth built-in bytes",
+            }
+            for reference, content in media.items():
+                media_root.joinpath(reference).write_bytes(content)
+
+            resolver = MediaResolver(media_root)
+            descriptors_before = set(os.listdir("/proc/self/fd"))
+            handles = [resolver.resolve(reference) for reference in media]
+            descriptors = [handle.fileno() for handle in handles]
+            real_close = os.close
+            close_counts = {descriptor: 0 for descriptor in descriptors}
+
+            def recording_close(descriptor):
+                if descriptor in close_counts:
+                    close_counts[descriptor] += 1
+                return real_close(descriptor)
+
+            with patch("os.close", side_effect=recording_close):
+                handles[0].close()
+                resolver.close()
+                resolver.close()
+                for handle in handles:
+                    handle.close()
+                    handle.close()
+
+            self.assertTrue(all(handle.closed for handle in handles))
+            self.assertEqual(close_counts, dict.fromkeys(descriptors, 1))
+            for descriptor in descriptors:
+                with self.assertRaises(OSError):
+                    os.fstat(descriptor)
+
+            with patch("os.open", side_effect=AssertionError("closed resolver opened media")):
+                with self.assertRaises(MediaResolutionError) as raised:
+                    resolver.resolve("first.png")
+            self.assertEqual(raised.exception.code, "resolver_closed")
+            self.assertEqual(str(raised.exception), "media resolver is closed")
+            self.assertNotIn(str(media_root), str(raised.exception))
+
+            for reference, content in media.items():
+                self.assertEqual(media_root.joinpath(reference).read_bytes(), content)
+            self.assertEqual(set(os.listdir("/proc/self/fd")), descriptors_before)
+
 
 if __name__ == "__main__":
     unittest.main()
