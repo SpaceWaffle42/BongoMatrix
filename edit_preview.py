@@ -761,7 +761,13 @@ class PreviewSession:
             "complete": True,
         }
 
-    def page(self, token=None):
+    def page(self, token=None, *, publish=None):
+        """Generate one page and optionally acknowledge its response publication.
+
+        A claimed continuation token is never restored.  If the injected response
+        boundary raises, the generated page and any replacement token are
+        ambiguous, so the whole session fails closed instead of allowing replay.
+        """
         with self._state_lock:
             if self._complete:
                 raise StopIteration("an explicit new session is required to restart")
@@ -786,7 +792,14 @@ class PreviewSession:
             return self._cancelled_page(cancelled_page)
 
         try:
-            return self._page_after_claim()
+            page = self._page_after_claim()
+            if publish is not None:
+                try:
+                    publish(page)
+                except BaseException:
+                    self.cancel()
+                    raise
+            return page
         finally:
             with self._state_lock:
                 self._page_in_progress = False

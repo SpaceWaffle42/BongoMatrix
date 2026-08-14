@@ -756,6 +756,122 @@ class EditPreviewTests(unittest.TestCase):
         self.assertCountEqual(closed, ["first", "second", "recovered"])
         self.assertNotIn("timed-out", closed)
 
+    def test_response_failure_after_token_claim_closes_without_replay(self):
+        class Clock:
+            now = 100.0
+
+            def monotonic(self):
+                return self.now
+
+        class CountingIterator:
+            def __init__(self, iterator):
+                self.iterator = iterator
+                self.calls = 0
+                self.active = False
+                self.close_calls = 0
+                self.concurrent_close_calls = 0
+
+            def __iter__(self):
+                return self
+
+            def __next__(self):
+                self.calls += 1
+                self.active = True
+                try:
+                    return next(self.iterator)
+                finally:
+                    self.active = False
+
+            def close(self):
+                if self.active:
+                    self.concurrent_close_calls += 1
+                    raise ValueError("generator already executing")
+                self.close_calls += 1
+                self.iterator.close()
+
+        candidate = copy.deepcopy(DEFAULT_CONFIG)
+        candidate["lava"].update({
+            "show_time": False, "show_date": False, "blur_radius": 0,
+            "blob_count": 2,
+        })
+        stop_event = threading.Event()
+        lava = edit_preview.continuous_lava_preview_frames(
+            CaptureMatrix(), candidate,
+            {"kind": "built_in", "id": "fire_burst"},
+            stop_event=stop_event,
+        )
+        iterator = CountingIterator(lava)
+        clock = Clock()
+        capacity = edit_preview.PreviewSessionCapacity(monotonic=clock.monotonic)
+        registry = edit_preview.PreviewInstanceRegistry(capacity=capacity)
+        instance = registry.register(
+            "paired-device", lambda: iterator, stop_event=stop_event,
+        )
+        session = instance.admit()
+        session.MAX_FRAMES = 1
+        acknowledged_pages = []
+        first = session.page(
+            publish=lambda page: acknowledged_pages.append(
+                json.dumps(page, separators=(",", ":")),
+            ),
+        )
+        self.assertEqual(len(acknowledged_pages), 1)
+        claimed_token = first["next_token"]
+        failed_pages = []
+
+        def fail_after_serialization(page):
+            json.dumps(page, separators=(",", ":"))
+            failed_pages.append(copy.deepcopy(page))
+            raise OSError("deterministic response delivery failure")
+
+        with self.assertRaisesRegex(OSError, "deterministic response delivery failure"):
+            session.page(claimed_token, publish=fail_after_serialization)
+
+        self.assertEqual(len(failed_pages), 1)
+        replacement_token = failed_pages[0]["next_token"]
+        self.assertIsNotNone(replacement_token)
+        self.assertNotEqual(replacement_token, claimed_token)
+        self.assertEqual(failed_pages[0]["page"], 1)
+        self.assertEqual(iterator.calls, 3)
+        self.assertTrue(stop_event.is_set())
+        self.assertEqual(session.state, "CLOSED")
+        self.assertEqual(session.retained_frame_count, 0)
+        self.assertEqual(iterator.concurrent_close_calls, 0)
+        self.assertEqual(iterator.close_calls, 1)
+        self.assertIsNone(lava.gi_frame)
+        self.assertEqual(capacity.active_count, 0)
+        self.assertEqual(capacity.available_slots, 2)
+        self.assertEqual(registry.total_count, 0)
+        self.assertEqual(registry.counts_by_device, {})
+
+        for token in (claimed_token, replacement_token):
+            with self.assertRaisesRegex(
+                StopIteration, "explicit new session is required to restart",
+            ):
+                session.page(token)
+        self.assertEqual(iterator.calls, 3)
+        clock.now += capacity.IDLE_TTL + 1
+        self.assertEqual(capacity.reap_expired(), 0)
+
+        session.cancel()
+        session.cancel()
+        instance.close()
+        self.assertEqual(iterator.close_calls, 1)
+
+        replacement = registry.register(
+            "paired-device", lambda: iter((
+                {"png": "replacement", "delay_ms": 1},
+            )),
+        )
+        replacement_page = replacement.admit().page()
+        self.assertEqual(
+            replacement_page["frames"],
+            [{"png": "replacement", "delay_ms": 1}],
+        )
+        self.assertTrue(replacement_page["complete"])
+        self.assertEqual(capacity.active_count, 0)
+        self.assertEqual(registry.total_count, 0)
+
     def test_expiry_during_page_marks_closing_and_releases_after_page_returns(self):
         class Clock:
             now = 100.0
