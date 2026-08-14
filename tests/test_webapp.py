@@ -6810,6 +6810,239 @@ console.log('ANNOUNCEMENT_HEADING_SYNC_PASS');
         registry.close()
         self.assertFalse(registry.reaper_alive)
 
+    def test_two_devices_and_two_tabs_are_isolated_and_same_instance_generation_supersedes(self):
+        from contextlib import contextmanager
+
+        start_path = "/api/edit-preview/clock_lava"
+        page_path = "/api/edit-preview/page"
+        cancel_path = "/api/edit-preview/cancel"
+        tab_one = "11111111111111111111111111111111"
+        tab_two = "22222222222222222222222222222222"
+        device_two_tab = "33333333333333333333333333333333"
+
+        device_one = self.client
+        device_two = self.app.test_client()
+        self.pairing.verify.return_value = True
+        device_one.post(
+            "/pair", data={"pin": "123456", "device_name": "First device"},
+        )
+        device_two.post(
+            "/pair", data={"pin": "123456", "device_name": "Second device"},
+        )
+        with device_one.session_transaction() as device_one_session:
+            device_one_id = device_one_session["device_id"]
+        with device_two.session_transaction() as device_two_session:
+            device_two_id = device_two_session["device_id"]
+        self.assertNotEqual(device_one_id, device_two_id)
+
+        self.controller.reset_mock()
+        before_config = Path(self.store.path).read_bytes()
+        before_devices = Path(self.device_store.path).read_bytes()
+        before_media = sorted(
+            (path.relative_to(self.media_dir).as_posix(), path.read_bytes())
+            for path in self.media_dir.rglob("*") if path.is_file()
+        )
+        iterators = {}
+        stop_events = {}
+        pin_enters = []
+        pin_exits = []
+
+        class CountingIterator:
+            def __init__(self, label):
+                self.label = label
+                self.next_calls = 0
+                self.close_calls = 0
+
+            def __iter__(self):
+                return self
+
+            def __next__(self):
+                self.next_calls += 1
+                if self.next_calls > 40:
+                    raise StopIteration
+                return {
+                    "png": f"{self.label}-frame-{self.next_calls}",
+                    "delay_ms": self.next_calls,
+                }
+
+            def close(self):
+                self.close_calls += 1
+                if self.close_calls > 1:
+                    raise AssertionError(f"{self.label} iterator closed more than once")
+
+        @contextmanager
+        def pinned(candidate, media_root, *, allow_missing=()):
+            label = candidate["weather"]["location"]
+            pin_enters.append(label)
+            try:
+                yield {}
+            finally:
+                pin_exits.append(label)
+
+        def prepare(module_name, candidate, stop_event):
+            label = candidate["weather"]["location"]
+            stop_events[label] = stop_event
+            return {"label": label, "stop": stop_event}
+
+        def iterator(module_name, candidate, selected_palette, pinned_media, prepared, stop_event):
+            label = prepared["label"]
+            self.assertIs(prepared["stop"], stop_event)
+            current = CountingIterator(label)
+            iterators[label] = current
+            return current
+
+        def payload(label, generation, preview_instance):
+            candidate = copy.deepcopy(self.store.get())
+            candidate.pop("revision")
+            candidate["weather"]["location"] = label
+            return {
+                "config": candidate,
+                "generation": generation,
+                "preview_instance": preview_instance,
+            }
+
+        def assert_response(response, status):
+            self.assertEqual(response.status_code, status, response.get_data(as_text=True))
+            self.assertEqual(response.headers.get("Cache-Control"), "no-store")
+            self.assertNotIn("ETag", response.headers)
+            body = response.get_json()
+            self.assertIsInstance(body, dict)
+            serialized = json.dumps(body)
+            self.assertNotIn("device_id", serialized)
+            self.assertNotIn(device_one_id, serialized)
+            self.assertNotIn(device_two_id, serialized)
+            return body
+
+        def start(client, label, generation, preview_instance):
+            body = assert_response(client.post(
+                start_path, json=payload(label, generation, preview_instance),
+            ), 200)
+            self.assertEqual(body["generation"], generation)
+            self.assertEqual(body["page"], 0)
+            self.assertEqual(len(body["frames"]), 32)
+            self.assertFalse(body["complete"])
+            self.assertRegex(body["next_token"], r"^[0-9a-f]{64}$")
+            return body
+
+        def continuation(body, preview_instance):
+            return {
+                "session": body["session"],
+                "preview_instance": preview_instance,
+                "token": body["next_token"],
+            }
+
+        registry = None
+        with patch("webapp.pin_candidate_media", pinned), patch(
+            "webapp._prepare_edit_preview_provider", prepare, create=True,
+        ), patch("webapp._edit_preview_iterator", iterator, create=True), patch(
+            "edit_preview.PreviewSessionCapacity.MAX_ACTIVE", 4,
+        ):
+            first_tab_old = start(device_one, "first-tab-old", 7, tab_one)
+            second_tab = start(device_one, "second-tab", 3, tab_two)
+            other_device = start(device_two, "other-device", 7, device_two_tab)
+            registry = self.app.extensions["edit_preview_registry"]
+
+            self.assertEqual(registry.total_count, 3)
+            self.assertEqual(registry.count_for_device((device_one_id, tab_one)), 1)
+            self.assertEqual(registry.count_for_device((device_one_id, tab_two)), 1)
+            self.assertEqual(registry.count_for_device((device_two_id, device_two_tab)), 1)
+            baseline_advances = {
+                label: current.next_calls for label, current in iterators.items()
+            }
+
+            assert_response(device_one.post(page_path, json={
+                **continuation(first_tab_old, tab_one),
+                "preview_instance": tab_two,
+            }), 409)
+            assert_response(device_two.post(
+                page_path, json=continuation(first_tab_old, tab_one),
+            ), 409)
+            assert_response(device_one.post(
+                cancel_path,
+                json={
+                    "session": other_device["session"],
+                    "preview_instance": device_two_tab,
+                },
+            ), 409)
+            self.assertEqual(
+                {label: current.next_calls for label, current in iterators.items()},
+                baseline_advances,
+            )
+
+            first_tab_new = start(device_one, "first-tab-new", 8, tab_one)
+            self.assertTrue(stop_events["first-tab-old"].is_set())
+            self.assertFalse(stop_events["first-tab-new"].is_set())
+            self.assertFalse(stop_events["second-tab"].is_set())
+            self.assertFalse(stop_events["other-device"].is_set())
+            self.assertEqual(iterators["first-tab-old"].close_calls, 1)
+            self.assertEqual(pin_exits.count("first-tab-old"), 1)
+            self.assertEqual(registry.total_count, 3)
+            self.assertEqual(iterators["second-tab"].next_calls, baseline_advances["second-tab"])
+            self.assertEqual(iterators["other-device"].next_calls, baseline_advances["other-device"])
+            self.assertEqual(iterators["second-tab"].close_calls, 0)
+            self.assertEqual(iterators["other-device"].close_calls, 0)
+
+            assert_response(device_one.post(
+                page_path, json=continuation(first_tab_old, tab_one),
+            ), 409)
+            assert_response(device_one.post(cancel_path, json={
+                "session": first_tab_old["session"], "preview_instance": tab_one,
+            }), 409)
+
+            constructed = set(iterators)
+            advances = sum(current.next_calls for current in iterators.values())
+            for generation in (8, 7):
+                with self.subTest(rejected_generation=generation):
+                    assert_response(device_one.post(
+                        start_path,
+                        json=payload(f"rejected-{generation}", generation, tab_one),
+                    ), 400)
+                    self.assertEqual(set(iterators), constructed)
+                    self.assertEqual(
+                        sum(current.next_calls for current in iterators.values()), advances,
+                    )
+
+            second_page = assert_response(device_one.post(
+                page_path, json=continuation(second_tab, tab_two),
+            ), 200)
+            other_page = assert_response(device_two.post(
+                page_path, json=continuation(other_device, device_two_tab),
+            ), 200)
+            self.assertTrue(second_page["complete"])
+            self.assertTrue(other_page["complete"])
+            self.assertEqual(iterators["second-tab"].next_calls, 41)
+            self.assertEqual(iterators["other-device"].next_calls, 41)
+            self.assertEqual(iterators["second-tab"].close_calls, 0)
+            self.assertEqual(iterators["other-device"].close_calls, 0)
+            self.assertEqual(pin_exits.count("second-tab"), 1)
+            self.assertEqual(pin_exits.count("other-device"), 1)
+
+            cancelled = assert_response(device_one.post(cancel_path, json={
+                "session": first_tab_new["session"], "preview_instance": tab_one,
+            }), 200)
+            self.assertEqual(cancelled, {"cancelled": True})
+            self.assertEqual(iterators["first-tab-new"].close_calls, 1)
+            self.assertEqual(pin_exits.count("first-tab-new"), 1)
+            self.assertEqual(registry.total_count, 0)
+
+        self.assertCountEqual(
+            pin_enters,
+            [
+                "first-tab-old", "second-tab", "other-device", "first-tab-new",
+                "rejected-8", "rejected-7",
+            ],
+        )
+        self.assertCountEqual(pin_exits, pin_enters)
+        self.assertEqual(Path(self.store.path).read_bytes(), before_config)
+        self.assertEqual(Path(self.device_store.path).read_bytes(), before_devices)
+        self.assertEqual(sorted(
+            (path.relative_to(self.media_dir).as_posix(), path.read_bytes())
+            for path in self.media_dir.rglob("*") if path.is_file()
+        ), before_media)
+        self.assertEqual(self.controller.method_calls, [])
+        registry.close()
+        self.assertFalse(registry.reaper_alive)
+
     def test_unsaved_announcement_preview_validates_without_mutating_config(self):
         self.pair_browser()
         before = self.store.get()
