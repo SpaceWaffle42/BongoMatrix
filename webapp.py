@@ -1626,6 +1626,8 @@ def create_app(
             registry, _provider = get_edit_preview_services()
             instance = registry.lookup(session_id, identity)
             page = instance.admit().page(token, raise_on_superseded=True)
+            if registry.is_closed:
+                return edit_preview_error("Preview is temporarily unavailable.", 503)
             return jsonify({
                 "session": session_id, "generation": instance.generation, **page,
             })
