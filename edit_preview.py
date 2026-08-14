@@ -460,9 +460,18 @@ class PreviewInstanceRegistry:
         with self._lock:
             return dict(self._device_counts)
 
+    @staticmethod
+    def _accounting_identity(device_identity):
+        """Count route identities by paired device while preserving generic keys."""
+        if isinstance(device_identity, tuple) and device_identity:
+            return device_identity[0]
+        return device_identity
+
     def count_for_device(self, device_identity):
         with self._lock:
-            return self._device_counts.get(device_identity, 0)
+            return self._device_counts.get(
+                self._accounting_identity(device_identity), 0,
+            )
 
     def register(
         self, device_identity, iterator_factory, stop_event=None, *, generation=None,
@@ -471,7 +480,8 @@ class PreviewInstanceRegistry:
         with self._lock:
             if self._closed:
                 raise RuntimeError("preview registry is closed")
-            device_count = self._device_counts.get(device_identity, 0)
+            accounting_identity = self._accounting_identity(device_identity)
+            device_count = self._device_counts.get(accounting_identity, 0)
             if device_count >= self.MAX_PER_DEVICE:
                 raise PreviewInstanceCapacityError(
                     "paired device already has 4 live preview instances"
@@ -496,7 +506,7 @@ class PreviewInstanceRegistry:
                 registry_shutdown=self._shutdown, generation=generation,
             )
             self._instances[instance_id] = (device_identity, instance)
-            self._device_counts[device_identity] = device_count + 1
+            self._device_counts[accounting_identity] = device_count + 1
             if generation is not None:
                 self._generations[device_identity] = (generation, instance_id)
         # Never wait for or signal an old page while holding the registry lock;
@@ -528,6 +538,7 @@ class PreviewInstanceRegistry:
             if entry is None:
                 return
             device_identity, _instance = entry
+            accounting_identity = self._accounting_identity(device_identity)
             self._prune_expired_locked()
             if expired:
                 key = (instance_id, device_identity)
@@ -538,11 +549,11 @@ class PreviewInstanceRegistry:
             authoritative = self._generations.get(device_identity)
             if authoritative is not None and authoritative[1] == instance_id:
                 del self._generations[device_identity]
-            remaining = self._device_counts[device_identity] - 1
+            remaining = self._device_counts[accounting_identity] - 1
             if remaining:
-                self._device_counts[device_identity] = remaining
+                self._device_counts[accounting_identity] = remaining
             else:
-                del self._device_counts[device_identity]
+                del self._device_counts[accounting_identity]
             self._lock.notify_all()
 
     def close(self):

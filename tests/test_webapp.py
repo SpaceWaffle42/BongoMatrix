@@ -7042,7 +7042,7 @@ console.log('ANNOUNCEMENT_HEADING_SYNC_PASS');
             self.assertEqual(registry.total_count, 0)
 
         self.assertCountEqual(
-            pin_enters, ["old-slow", "new-fast", "equal-rejected", "older-rejected"],
+            pin_enters, ["old-slow", "new-fast"],
         )
         self.assertCountEqual(pin_exits, pin_enters)
         self.assertEqual(Path(self.store.path).read_bytes(), before_config)
@@ -7172,8 +7172,7 @@ console.log('ANNOUNCEMENT_HEADING_SYNC_PASS');
             ), 200)
             registry = self.app.extensions["edit_preview_registry"]
             self.assertEqual(registry.total_count, 2)
-            self.assertEqual(registry.count_for_device((device_id, tab_a_instance)), 1)
-            self.assertEqual(registry.count_for_device((device_id, tab_b_instance)), 1)
+            self.assertEqual(registry.count_for_device(device_id), 2)
             self.assertNotEqual(tab_a["session"], tab_b["session"])
             self.assertNotEqual(tab_a["next_token"], tab_b["next_token"])
             self.assertEqual(iterators["tab-a"].next_calls, 33)
@@ -7613,9 +7612,8 @@ console.log('ANNOUNCEMENT_HEADING_SYNC_PASS');
             registry = self.app.extensions["edit_preview_registry"]
 
             self.assertEqual(registry.total_count, 3)
-            self.assertEqual(registry.count_for_device((device_one_id, tab_one)), 1)
-            self.assertEqual(registry.count_for_device((device_one_id, tab_two)), 1)
-            self.assertEqual(registry.count_for_device((device_two_id, device_two_tab)), 1)
+            self.assertEqual(registry.count_for_device(device_one_id), 2)
+            self.assertEqual(registry.count_for_device(device_two_id), 1)
             baseline_advances = {
                 label: current.next_calls for label, current in iterators.items()
             }
@@ -7699,7 +7697,6 @@ console.log('ANNOUNCEMENT_HEADING_SYNC_PASS');
             pin_enters,
             [
                 "first-tab-old", "second-tab", "other-device", "first-tab-new",
-                "rejected-8", "rejected-7",
             ],
         )
         self.assertCountEqual(pin_exits, pin_enters)
@@ -7796,6 +7793,328 @@ console.log('ANNOUNCEMENT_HEADING_SYNC_PASS');
 
         self.assertEqual(response.status_code, 202)
         self.controller.preview.assert_called_once_with("custom_welcome")
+
+    def test_capacity_and_provider_failures_are_bounded_and_sanitized(self):
+        from contextlib import contextmanager
+
+        from edit_preview import PreviewInstanceRegistry, PreviewSessionCapacity
+
+        start_path = "/api/edit-preview/clock_lava"
+        page_path = "/api/edit-preview/page"
+        cancel_path = "/api/edit-preview/cancel"
+        private = f"{self.temp.name}/provider?credential=https://secret.invalid/token"
+
+        device_a = self.client
+        device_b = self.app.test_client()
+        self.pairing.verify.return_value = True
+        device_a.post("/pair", data={"pin": "123456", "device_name": "Capacity A"})
+        device_b.post("/pair", data={"pin": "123456", "device_name": "Capacity B"})
+        with device_a.session_transaction() as state_a:
+            identity_a = dict(state_a)
+            device_a_id = state_a["device_id"]
+        with device_b.session_transaction() as state_b:
+            identity_b = dict(state_b)
+            device_b_id = state_b["device_id"]
+
+        def tab_client(identity):
+            client = self.app.test_client()
+            with client.session_transaction() as tab:
+                tab.update(identity)
+            return client
+
+        tabs_a = [tab_client(identity_a) for _ in range(6)]
+        tabs_b = [tab_client(identity_b) for _ in range(6)]
+        candidate = copy.deepcopy(self.store.get())
+        candidate.pop("revision")
+        candidate["weather"]["location"] = private
+
+        def payload(instance, generation=1):
+            return {
+                "config": copy.deepcopy(candidate),
+                "generation": generation,
+                "preview_instance": instance,
+            }
+
+        forbidden = (
+            private, self.temp.name, "secret.invalid", "credential", "https://",
+            device_a_id, device_b_id, "frames", "next_token", "session", "revision",
+            "etag", "token",
+        )
+
+        def assert_error(response, status, message):
+            self.assertEqual(response.status_code, status, response.get_data(as_text=True))
+            self.assertEqual(response.headers.get("Cache-Control"), "no-store")
+            self.assertNotIn("ETag", response.headers)
+            self.assertEqual(response.get_json(), {"error": message})
+            wire = response.get_data(as_text=True).lower()
+            for value in forbidden:
+                self.assertNotIn(value.lower(), wire)
+            if status == 429:
+                self.assertEqual(response.headers.get("Retry-After"), "2")
+
+        pin_enters = []
+        pin_exits = []
+        provider_calls = []
+        renderers = []
+
+        class EndlessIterator:
+            def __init__(self, label):
+                self.label = label
+                self.next_calls = 0
+                self.close_calls = 0
+
+            def __iter__(self):
+                return self
+
+            def __next__(self):
+                self.next_calls += 1
+                return {"png": f"{self.label}-{self.next_calls}", "delay_ms": 1}
+
+            def close(self):
+                self.close_calls += 1
+                if self.close_calls > 1:
+                    raise AssertionError("renderer closed more than once")
+
+        @contextmanager
+        def pinned(candidate_value, media_root, *, allow_missing=()):
+            label = candidate_value["weather"]["location"]
+            pin_enters.append(label)
+            try:
+                yield {}
+            finally:
+                pin_exits.append(label)
+
+        def prepare(module_name, candidate_value, stop_event):
+            provider_calls.append(candidate_value["weather"]["location"])
+            return None
+
+        def renderer(module_name, candidate_value, selected_palette, pinned_media,
+                     prepared, stop_event):
+            current = EndlessIterator(candidate_value["weather"]["location"])
+            renderers.append(current)
+            return current
+
+        self.controller.reset_mock()
+        before_config = Path(self.store.path).read_bytes()
+        before_devices = Path(self.device_store.path).read_bytes()
+        before_media = sorted(
+            (path.relative_to(self.media_dir).as_posix(), path.read_bytes())
+            for path in self.media_dir.rglob("*") if path.is_file()
+        )
+        registry = None
+        sessions = []
+        try:
+            with patch("webapp.pin_candidate_media", pinned), patch(
+                "webapp._prepare_edit_preview_provider", prepare,
+            ), patch("webapp._edit_preview_iterator", renderer), patch(
+                "edit_preview.PreviewSessionCapacity.MAX_ACTIVE", 8,
+            ):
+                for index in range(4):
+                    response = tabs_a[index].post(
+                        start_path, json=payload(f"{index + 1:032x}"),
+                    )
+                    self.assertEqual(response.status_code, 200, response.get_data(as_text=True))
+                    sessions.append((tabs_a[index], f"{index + 1:032x}", response.get_json()))
+                registry = self.app.extensions["edit_preview_registry"]
+                self.assertEqual(registry.total_count, 4)
+                self.assertEqual(registry.count_for_device(device_a_id), 4)
+
+                before_rejected = (
+                    len(pin_enters), len(provider_calls), len(renderers),
+                    [item.next_calls for item in renderers], registry.total_count,
+                )
+                assert_error(
+                    tabs_a[4].post(start_path, json=payload("5" * 32)), 429,
+                    "Preview capacity is temporarily exhausted.",
+                )
+                self.assertEqual(
+                    (
+                        len(pin_enters), len(provider_calls), len(renderers),
+                        [item.next_calls for item in renderers], registry.total_count,
+                    ),
+                    before_rejected,
+                )
+                self.assertTrue(all(not item[2]["complete"] for item in sessions))
+
+                for index in range(4):
+                    instance = f"{index + 9:032x}"
+                    response = tabs_b[index].post(start_path, json=payload(instance))
+                    self.assertEqual(response.status_code, 200, response.get_data(as_text=True))
+                    sessions.append((tabs_b[index], instance, response.get_json()))
+                self.assertEqual(registry.total_count, 8)
+                self.assertEqual(registry.count_for_device(device_a_id), 4)
+                self.assertEqual(registry.count_for_device(device_b_id), 4)
+                before_rejected = (len(pin_enters), len(provider_calls), len(renderers))
+                assert_error(
+                    tabs_b[4].post(start_path, json=payload("e" * 32)), 429,
+                    "Preview capacity is temporarily exhausted.",
+                )
+                self.assertEqual(
+                    (len(pin_enters), len(provider_calls), len(renderers)), before_rejected,
+                )
+                self.assertEqual(registry.total_count, 8)
+
+                released_client, released_instance, released = sessions.pop(0)
+                cancelled = released_client.post(cancel_path, json={
+                    "session": released["session"],
+                    "preview_instance": released_instance,
+                })
+                self.assertEqual(cancelled.status_code, 200, cancelled.get_data(as_text=True))
+                self.assertEqual(registry.total_count, 7)
+                retry_instance = "f" * 32
+                retry = tabs_a[5].post(
+                    start_path, json=payload(retry_instance, generation=2),
+                )
+                self.assertEqual(retry.status_code, 200, retry.get_data(as_text=True))
+                sessions.append((tabs_a[5], retry_instance, retry.get_json()))
+                self.assertEqual(registry.total_count, 8)
+
+                survivor_client, survivor_instance, survivor = sessions[0]
+                page = survivor_client.post(page_path, json={
+                    "session": survivor["session"],
+                    "preview_instance": survivor_instance,
+                    "token": survivor["next_token"],
+                })
+                self.assertEqual(page.status_code, 200, page.get_data(as_text=True))
+                self.assertEqual(page.get_json()["page"], 1)
+
+                for client, instance, body in list(sessions):
+                    response = client.post(cancel_path, json={
+                        "session": body["session"], "preview_instance": instance,
+                    })
+                    self.assertEqual(response.status_code, 200, response.get_data(as_text=True))
+                sessions.clear()
+                self.assertEqual(registry.total_count, 0)
+                self.assertEqual(registry.counts_by_device, {})
+                self.assertEqual(registry._capacity.active_count, 0)
+        finally:
+            for client, instance, body in list(sessions):
+                client.post(cancel_path, json={
+                    "session": body["session"], "preview_instance": instance,
+                })
+
+        class Clock:
+            now = 100.0
+
+            def monotonic(self):
+                return self.now
+
+            def wait(self, condition, timeout):
+                self.now += timeout
+                return False
+
+        clock = Clock()
+        capacity = registry._capacity
+        capacity._monotonic = clock.monotonic
+        capacity._wait = clock.wait
+        pin_enters.clear()
+        pin_exits.clear()
+        provider_calls.clear()
+        renderers.clear()
+        active = []
+        try:
+            with patch("webapp.pin_candidate_media", pinned), patch(
+                "webapp._prepare_edit_preview_provider", prepare,
+            ), patch("webapp._edit_preview_iterator", renderer):
+                for index in range(2):
+                    instance = f"{index + 20:032x}"
+                    response = tabs_a[index].post(start_path, json=payload(instance))
+                    self.assertEqual(response.status_code, 200, response.get_data(as_text=True))
+                    active.append((tabs_a[index], instance, response.get_json()))
+                before_third = (len(pin_enters), len(provider_calls), len(renderers))
+                assert_error(
+                    tabs_b[0].post(start_path, json=payload("d" * 32)), 429,
+                    "Preview capacity is temporarily exhausted.",
+                )
+                self.assertEqual(
+                    (len(pin_enters), len(provider_calls), len(renderers)), before_third,
+                )
+                self.assertEqual(capacity.active_count, 2)
+                self.assertEqual(capacity.waiting_count, 0)
+                self.assertEqual(registry.total_count, 2)
+
+                client, instance, body = active.pop(0)
+                self.assertEqual(client.post(cancel_path, json={
+                    "session": body["session"], "preview_instance": instance,
+                }).status_code, 200)
+                recovered_instance = "c" * 32
+                recovered = tabs_b[0].post(
+                    start_path, json=payload(recovered_instance, generation=2),
+                )
+                self.assertEqual(recovered.status_code, 200, recovered.get_data(as_text=True))
+                active.append((tabs_b[0], recovered_instance, recovered.get_json()))
+                for client, instance, body in active:
+                    self.assertEqual(client.post(cancel_path, json={
+                        "session": body["session"], "preview_instance": instance,
+                    }).status_code, 200)
+                self.assertEqual((capacity.active_count, capacity.waiting_count), (0, 0))
+                self.assertEqual(registry.total_count, 0)
+        finally:
+            for client, instance, body in active:
+                client.post(cancel_path, json={
+                    "session": body["session"], "preview_instance": instance,
+                })
+
+        from preview_provider import (
+            PreviewProviderCapacityError, PreviewProviderTimeout,
+            PreviewProviderUnavailable,
+        )
+
+        failure_cases = (
+            (PreviewProviderTimeout(private), "provider-timeout"),
+            (PreviewProviderUnavailable(private), "provider-unavailable"),
+            (webapp.EditPreviewDecodeError(private), "decode"),
+            (webapp.EditPreviewRenderError(private), "render"),
+        )
+        pin_enters.clear()
+        pin_exits.clear()
+        provider_calls.clear()
+        renderers.clear()
+        try:
+            for index, (failure, phase) in enumerate(failure_cases):
+                instance = f"{index + 30:032x}"
+                if phase.startswith("provider"):
+                    provider_patch = patch(
+                        "webapp._prepare_edit_preview_provider", side_effect=failure,
+                    )
+                    renderer_patch = patch("webapp._edit_preview_iterator", renderer)
+                else:
+                    provider_patch = patch(
+                        "webapp._prepare_edit_preview_provider", prepare,
+                    )
+                    renderer_patch = patch(
+                        "webapp._edit_preview_iterator", side_effect=failure,
+                    )
+                with patch("webapp.pin_candidate_media", pinned), provider_patch, renderer_patch:
+                    response = tabs_a[index].post(start_path, json=payload(instance))
+                assert_error(response, 503, "Preview is temporarily unavailable.")
+                self.assertEqual(registry.total_count, 0)
+                self.assertEqual(capacity.active_count, 0)
+                self.assertEqual(capacity.waiting_count, 0)
+                self.assertEqual(len(pin_enters), len(pin_exits))
+
+            with patch("webapp.pin_candidate_media", pinned), patch(
+                "webapp._prepare_edit_preview_provider",
+                side_effect=PreviewProviderCapacityError(private),
+            ), patch("webapp._edit_preview_iterator", renderer):
+                response = tabs_a[5].post(start_path, json=payload("b" * 32))
+            assert_error(
+                response, 429, "Preview capacity is temporarily exhausted.",
+            )
+            self.assertEqual(registry.total_count, 0)
+            self.assertEqual(capacity.active_count, 0)
+        finally:
+            registry.close()
+            self.app.extensions.pop("edit_preview_registry", None)
+
+        self.assertEqual(Path(self.store.path).read_bytes(), before_config)
+        self.assertEqual(Path(self.device_store.path).read_bytes(), before_devices)
+        self.assertEqual(sorted(
+            (path.relative_to(self.media_dir).as_posix(), path.read_bytes())
+            for path in self.media_dir.rglob("*") if path.is_file()
+        ), before_media)
+        self.assertEqual(self.controller.method_calls, [])
+        self.assertEqual(pin_enters, pin_exits)
 
     def test_malformed_tokens_and_expired_sessions_have_stable_errors(self):
         from contextlib import contextmanager

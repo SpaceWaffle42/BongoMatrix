@@ -47,7 +47,10 @@ from edit_preview import (
     PreviewInstanceRegistry, PreviewPageSupersededError, PreviewSessionConflictError,
     PreviewSessionExpiredError, PreviewTokenConsumedError,
 )
-from preview_provider import PreviewProvider
+from preview_provider import (
+    PreviewProvider, PreviewProviderCancelled, PreviewProviderCapacityError,
+    PreviewProviderTimeout, PreviewProviderUnavailable,
+)
 
 MEDIA_EXTENSIONS = {".gif", ".png", ".jpg", ".jpeg", ".webp", ".mp4"}
 Image.MAX_IMAGE_PIXELS = 1_000_000
@@ -69,6 +72,10 @@ EDIT_PREVIEW_TOKEN = re.compile(r"[0-9a-f]{64}")
 
 class EditPreviewRenderError(RuntimeError):
     """Sanitized boundary for provider, decode, or render failures."""
+
+
+class EditPreviewDecodeError(RuntimeError):
+    """Preview frame decoding failed without exposing media details."""
 
 
 def _provider_image(image):
@@ -1472,19 +1479,20 @@ def create_app(
                 stack.close()
                 return edit_preview_error("Preview module was not found.", 404)
             stop_event = threading.Event()
-            with media_lock:
-                pinned_media = stack.enter_context(pin_candidate_media(
-                    candidate, media_root, allow_missing=default_built_in_media,
-                ))
-            provider_candidate = candidate
-            if module_name in {"openweather_overview", "openweather_forecast"}:
-                provider_candidate = copy.deepcopy(candidate)
-                provider_candidate["_preview_openweather_key"] = openweather_secrets.get()
-            prepared = _prepare_edit_preview_provider(
-                module_name, provider_candidate, stop_event,
-            )
 
             def iterator_factory():
+                with media_lock:
+                    pinned_media = stack.enter_context(pin_candidate_media(
+                        candidate, media_root, allow_missing=default_built_in_media,
+                    ))
+                provider_candidate = candidate
+                if module_name in {"openweather_overview", "openweather_forecast"}:
+                    provider_candidate = copy.deepcopy(candidate)
+                    provider_candidate["_preview_openweather_key"] = openweather_secrets.get()
+                prepared = _prepare_edit_preview_provider(
+                    module_name, provider_candidate, stop_event,
+                )
+
                 def owned_iterator():
                     try:
                         try:
@@ -1521,19 +1529,29 @@ def create_app(
         except PreviewPageSupersededError:
             stack.close()
             return edit_preview_error("Preview generation was superseded.", 409)
-        except (PreviewInstanceCapacityError, PreviewCapacityError):
-            stack.close()
-            return edit_preview_error(
-                "Preview capacity is temporarily exhausted.", 429, retry_after=2,
-            )
-        except RuntimeError as error:
+        except (
+            PreviewInstanceCapacityError, PreviewCapacityError,
+            PreviewProviderCapacityError,
+        ):
             stack.close()
             if instance is not None:
                 instance.close()
-            if "capacity exhausted" in str(error):
-                return edit_preview_error(
-                    "Preview capacity is temporarily exhausted.", 429, retry_after=2,
-                )
+            return edit_preview_error(
+                "Preview capacity is temporarily exhausted.", 429, retry_after=2,
+            )
+        except (
+            PreviewProviderCancelled, PreviewProviderTimeout,
+            PreviewProviderUnavailable, EditPreviewDecodeError,
+            EditPreviewRenderError,
+        ):
+            stack.close()
+            if instance is not None:
+                instance.close()
+            return edit_preview_error("Preview is temporarily unavailable.", 503)
+        except RuntimeError:
+            stack.close()
+            if instance is not None:
+                instance.close()
             return edit_preview_error("Preview is temporarily unavailable.", 503)
         except (KeyError, TypeError, ValueError):
             stack.close()

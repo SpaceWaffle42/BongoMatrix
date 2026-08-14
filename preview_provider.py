@@ -51,6 +51,14 @@ class PreviewProviderTimeout(RuntimeError):
     """Provider preparation exceeded its effective hard deadline."""
 
 
+class PreviewProviderCapacityError(RuntimeError):
+    """No bounded provider worker is available for this preparation."""
+
+
+class PreviewProviderUnavailable(RuntimeError):
+    """Provider preparation failed without exposing private child details."""
+
+
 class PreviewProvider:
     """Fail-closed entry point for provider preparation.
 
@@ -132,7 +140,9 @@ class PreviewProvider:
         result_sender = None
         try:
             if not self._worker_slots.acquire(blocking=False):
-                raise RuntimeError("preview provider worker capacity exhausted")
+                raise PreviewProviderCapacityError(
+                    "preview provider worker capacity exhausted"
+                )
             slot_acquired = True
             if cancel_event.is_set() or shutdown_event.is_set():
                 raise PreviewProviderCancelled(
@@ -187,7 +197,9 @@ class PreviewProvider:
                         )
                     child.join()
                     if message[0] != "returned":
-                        raise RuntimeError("preview provider preparation failed")
+                        raise PreviewProviderUnavailable(
+                            "preview provider preparation failed"
+                        )
                     prepared = message[1]
                     self._before_publication(prepared)
                     if cancel_event.is_set() or shutdown_event.is_set():
@@ -197,7 +209,9 @@ class PreviewProvider:
                     return prepared
                 if not child.is_alive():
                     child.join()
-                    raise RuntimeError("preview provider child exited without a result")
+                    raise PreviewProviderUnavailable(
+                        "preview provider child exited without a result"
+                    )
                 cancel_event.wait(_CANCEL_POLL_SECONDS)
         finally:
             if result_receiver is not None:
