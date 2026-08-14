@@ -44,7 +44,8 @@ from pairing import PairedDeviceStore, PairingDurabilityError
 from secret_store import SecretDurabilityError, SecretStore
 from edit_preview import (
     CaptureMatrix, PreviewCapacityError, PreviewInstanceCapacityError,
-    PreviewInstanceRegistry, PreviewPageSupersededError, PreviewSessionExpiredError,
+    PreviewInstanceRegistry, PreviewPageSupersededError, PreviewSessionConflictError,
+    PreviewSessionExpiredError, PreviewTokenConsumedError,
 )
 from preview_provider import PreviewProvider
 
@@ -1534,11 +1535,11 @@ def create_app(
                     "Preview capacity is temporarily exhausted.", 429, retry_after=2,
                 )
             return edit_preview_error("Preview is temporarily unavailable.", 503)
-        except (KeyError, TypeError, ValueError) as error:
+        except (KeyError, TypeError, ValueError):
             stack.close()
             if instance is not None:
                 instance.close()
-            return edit_preview_error(str(error) or "Preview request is invalid.", 400)
+            return edit_preview_error("Preview request is invalid.", 400)
         except Exception:
             stack.close()
             if instance is not None:
@@ -1571,12 +1572,12 @@ def create_app(
             return edit_preview_error("Preview session expired.", 410)
         except PreviewPageSupersededError:
             return edit_preview_error("Preview generation was superseded.", 409)
-        except (KeyError, StopIteration):
+        except PreviewTokenConsumedError:
+            return edit_preview_error("Preview continuation was already used.", 409)
+        except (PreviewSessionConflictError, StopIteration):
             return edit_preview_error("Preview session is no longer active.", 409)
-        except ValueError as error:
-            if "continuation token" in str(error):
-                return edit_preview_error("Preview continuation was already used.", 409)
-            return edit_preview_error(str(error) or "Preview request is invalid.", 400)
+        except (KeyError, TypeError, ValueError):
+            return edit_preview_error("Preview request is invalid.", 400)
         except Exception:
             return edit_preview_error("Preview is temporarily unavailable.", 503)
 
@@ -1599,10 +1600,10 @@ def create_app(
             return edit_preview_error("Preview request exceeds 1 MiB.", 413)
         except PreviewSessionExpiredError:
             return edit_preview_error("Preview session expired.", 410)
-        except KeyError:
+        except PreviewSessionConflictError:
             return edit_preview_error("Preview session is no longer active.", 409)
-        except ValueError as error:
-            return edit_preview_error(str(error) or "Preview request is invalid.", 400)
+        except (KeyError, TypeError, ValueError):
+            return edit_preview_error("Preview request is invalid.", 400)
         except Exception:
             return edit_preview_error("Preview is temporarily unavailable.", 503)
 

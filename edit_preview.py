@@ -10,7 +10,7 @@ import math
 import secrets
 import threading
 import time
-from collections import deque
+from collections import OrderedDict, deque
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -387,6 +387,14 @@ class PreviewSessionExpiredError(RuntimeError):
     """Raised when a continuation belongs to an expired preview session."""
 
 
+class PreviewSessionConflictError(KeyError):
+    """Raised when a session is absent or belongs to another identity."""
+
+
+class PreviewTokenConsumedError(ValueError):
+    """Raised when a well-formed continuation token cannot be claimed."""
+
+
 class PreviewPageSupersededError(RuntimeError):
     """Raised when a newer generation wins an in-flight page publication."""
 
@@ -396,13 +404,17 @@ class PreviewInstanceRegistry:
 
     MAX_PER_DEVICE = 4
     MAX_TOTAL = 8
+    MAX_EXPIRED_TOMBSTONES = MAX_TOTAL
+    EXPIRED_TOMBSTONE_TTL = 60.0
 
     def __init__(self, *, capacity=None):
         self._capacity = capacity or PreviewSessionCapacity()
+        self._monotonic = self._capacity.monotonic
         self._lock = threading.Condition()
         self._instances = {}
         self._device_counts = {}
         self._generations = {}
+        self._expired = OrderedDict()
         self._closed = False
         self._lifecycle_state = "ACTIVE"
         self._shutdown = threading.Event()
@@ -436,6 +448,12 @@ class PreviewInstanceRegistry:
     def total_count(self):
         with self._lock:
             return len(self._instances)
+
+    @property
+    def expired_count(self):
+        with self._lock:
+            self._prune_expired_locked()
+            return len(self._expired)
 
     @property
     def counts_by_device(self):
@@ -490,17 +508,33 @@ class PreviewInstanceRegistry:
     def lookup(self, instance_id, device_identity):
         """Return only an instance owned by the requesting paired page identity."""
         with self._lock:
+            self._prune_expired_locked()
             entry = self._instances.get(instance_id)
             if entry is None or entry[0] != device_identity:
-                raise KeyError("unknown preview session")
+                if (instance_id, device_identity) in self._expired:
+                    raise PreviewSessionExpiredError("preview session expired")
+                raise PreviewSessionConflictError("unknown preview session")
             return entry[1]
 
-    def _unregister(self, instance_id):
+    def _prune_expired_locked(self):
+        now = self._monotonic()
+        stale = [key for key, deadline in self._expired.items() if deadline <= now]
+        for key in stale:
+            del self._expired[key]
+
+    def _unregister(self, instance_id, *, expired=False):
         with self._lock:
             entry = self._instances.pop(instance_id, None)
             if entry is None:
                 return
             device_identity, _instance = entry
+            self._prune_expired_locked()
+            if expired:
+                key = (instance_id, device_identity)
+                self._expired[key] = self._monotonic() + self.EXPIRED_TOMBSTONE_TTL
+                self._expired.move_to_end(key)
+                while len(self._expired) > self.MAX_EXPIRED_TOMBSTONES:
+                    self._expired.popitem(last=False)
             authoritative = self._generations.get(device_identity)
             if authoritative is not None and authoritative[1] == instance_id:
                 del self._generations[device_identity]
@@ -523,6 +557,7 @@ class PreviewInstanceRegistry:
             self._lifecycle_state = "CLOSING"
             self._closed = True
             self._shutdown.set()
+            self._expired.clear()
             instances = [instance for _device, instance in self._instances.values()]
 
         # Closures call back into _unregister; never hold the registry lock.
@@ -539,6 +574,7 @@ class PreviewInstanceRegistry:
         if self._reaper.is_alive():
             raise RuntimeError("preview expiry reaper did not stop within 250 ms")
         with self._lock:
+            self._expired.clear()
             self._reaper_join_count += 1
             self._lifecycle_state = "CLOSED"
             self._lock.notify_all()
@@ -607,13 +643,18 @@ class PreviewInstance:
         else:
             session.cancel()
 
-    def _release_registration(self):
+    def _release_registration(self, preview_session=None):
         with self._lock:
             if not self._closed:
                 self._closed = True
             release, self._on_close = self._on_close, None
         if release is not None:
-            release(self.instance_id)
+            release(
+                self.instance_id,
+                expired=(
+                    preview_session is not None and preview_session.expired
+                ),
+            )
 
 
 class PreviewSessionCapacity:
@@ -631,6 +672,10 @@ class PreviewSessionCapacity:
         self._waiters = deque()
         self._sessions = {}
         self._closed = False
+
+    @property
+    def monotonic(self):
+        return self._monotonic
 
     @property
     def active_count(self):
@@ -680,7 +725,7 @@ class PreviewSessionCapacity:
                     self._release(session)
                 finally:
                     if on_close is not None:
-                        on_close()
+                        on_close(session)
 
             session = PreviewSession(
                 iterator_factory(),
@@ -693,7 +738,7 @@ class PreviewSessionCapacity:
                 self._release_reservation()
             finally:
                 if on_close is not None:
-                    on_close()
+                    on_close(None)
             raise
 
         with self._condition:
@@ -742,7 +787,7 @@ class PreviewSessionCapacity:
                     self._condition.wait(timeout)
                     continue
             for session in expired:
-                session.cancel()
+                session.expire()
 
     def reap_expired(self):
         """Synchronously expire sessions idle for more than the 60-second TTL."""
@@ -754,7 +799,7 @@ class PreviewSessionCapacity:
                 and now - last_activity > self.IDLE_TTL
             ]
         for session in expired:
-            session.cancel()
+            session.expire()
         return len(expired)
 
     def _record_activity(self, session):
@@ -802,6 +847,7 @@ class PreviewSession:
         self._page_in_progress = False
         self._state = "ACTIVE"
         self._superseded = False
+        self._expired = False
 
     @property
     def state(self):
@@ -811,6 +857,11 @@ class PreviewSession:
     @property
     def retained_frame_count(self):
         return len(self._current) + (self._lookahead is not None)
+
+    @property
+    def expired(self):
+        with self._state_lock:
+            return self._expired
 
     def restart(self, iterator_factory):
         """Create a new page-zero session only after this cycle is terminal."""
@@ -834,6 +885,12 @@ class PreviewSession:
             close_now = not self._page_in_progress
         if close_now:
             self._close_iterator()
+
+    def expire(self):
+        """Terminate with a typed expiry outcome for registry transport mapping."""
+        with self._state_lock:
+            self._expired = True
+        self.cancel()
 
     def supersede(self):
         """Cancel while preserving the typed reason an active page lost publication."""
@@ -897,7 +954,9 @@ class PreviewSession:
                 or (self._page < 0 and token is not None)
                 or (self._page >= 0 and token != self._token)
             ):
-                raise ValueError("invalid or already consumed continuation token")
+                raise PreviewTokenConsumedError(
+                    "invalid or already consumed continuation token"
+                )
             if cancelled_page is None:
                 # Claim and consume the token before iterator work.  The lifecycle
                 # lock is released immediately so cancellation can still signal a

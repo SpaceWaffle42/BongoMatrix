@@ -7797,6 +7797,267 @@ console.log('ANNOUNCEMENT_HEADING_SYNC_PASS');
         self.assertEqual(response.status_code, 202)
         self.controller.preview.assert_called_once_with("custom_welcome")
 
+    def test_malformed_tokens_and_expired_sessions_have_stable_errors(self):
+        from contextlib import contextmanager
+
+        from edit_preview import PreviewInstanceRegistry, PreviewSessionCapacity
+
+        class Clock:
+            now = 100.0
+
+            def monotonic(self):
+                return self.now
+
+        class CountingIterator:
+            def __init__(self, count):
+                self._remaining = iter(range(count))
+                self.next_calls = 0
+                self.close_calls = 0
+
+            def __iter__(self):
+                return self
+
+            def __next__(self):
+                self.next_calls += 1
+                index = next(self._remaining)
+                return {"png": f"stable-frame-{index}", "delay_ms": 1}
+
+            def close(self):
+                self.close_calls += 1
+
+        start_path = "/api/edit-preview/clock_lava"
+        page_path = "/api/edit-preview/page"
+        cancel_path = "/api/edit-preview/cancel"
+        preview_instance = "a" * 32
+        cancel_instance = "b" * 32
+        expired_instance = "c" * 32
+        wrong_instance = "d" * 32
+        private_sentinel = f"{self.temp.name}/private?credential=https://secret.invalid/key"
+        candidate = copy.deepcopy(self.store.get())
+        candidate.pop("revision")
+        candidate["weather"]["location"] = private_sentinel
+
+        self.pair_browser()
+        self.controller.reset_mock()
+        before_config = Path(self.store.path).read_bytes()
+        before_devices = Path(self.device_store.path).read_bytes()
+        before_media = sorted(
+            (path.relative_to(self.media_dir).as_posix(), path.read_bytes())
+            for path in self.media_dir.rglob("*") if path.is_file()
+        )
+        clock = Clock()
+        capacity = PreviewSessionCapacity(monotonic=clock.monotonic)
+        registry = PreviewInstanceRegistry(capacity=capacity)
+        provider_calls = []
+        iterators = []
+        pin_enters = []
+        pin_exits = []
+
+        def assert_error(response, status, message):
+            self.assertEqual(response.status_code, status, response.get_data(as_text=True))
+            self.assertEqual(response.headers.get("Cache-Control"), "no-store")
+            self.assertNotIn("ETag", response.headers)
+            self.assertEqual(response.get_json(), {"error": message})
+            wire = response.get_data(as_text=True)
+            for forbidden in (
+                "revision", "device_id", private_sentinel, self.temp.name,
+                "secret.invalid", "credential", "https://",
+            ):
+                self.assertNotIn(forbidden, wire)
+
+        @contextmanager
+        def pinned(*args, **kwargs):
+            pin_enters.append(object())
+            try:
+                yield {}
+            finally:
+                pin_exits.append(object())
+
+        def prepare(*args):
+            provider_calls.append(args[0])
+            return None
+
+        def renderer(*args):
+            count = (70, 100, 100)[len(iterators)]
+            iterator = CountingIterator(count)
+            iterators.append(iterator)
+            return iterator
+
+        start_payload = {
+            "config": candidate,
+            "generation": 1,
+            "preview_instance": preview_instance,
+        }
+        bad_start_requests = [
+            {"data": "not-json", "content_type": "application/json"},
+            {"data": "{}", "content_type": "text/plain"},
+            {"json": []},
+            {"json": {}},
+            {"json": {**start_payload, "extra": True}},
+            {"json": {**start_payload, "preview_instance": "A" * 32}},
+        ]
+
+        try:
+            with patch("webapp.PreviewInstanceRegistry", return_value=registry), patch(
+                "webapp.pin_candidate_media", pinned,
+            ), patch(
+                "webapp._prepare_edit_preview_provider", prepare, create=True,
+            ), patch("webapp._edit_preview_iterator", renderer, create=True):
+                for request_args in bad_start_requests:
+                    with self.subTest(start_request=request_args):
+                        assert_error(
+                            self.client.post(start_path, **request_args), 400,
+                            "Preview request is invalid.",
+                        )
+                self.assertEqual(provider_calls, [])
+                self.assertEqual(iterators, [])
+                self.assertEqual(pin_enters, [])
+
+                first_response = self.client.post(start_path, json=start_payload)
+                self.assertEqual(first_response.status_code, 200)
+                first = first_response.get_json()
+                self.assertFalse(first["complete"])
+                first_token = first["next_token"]
+                self.assertRegex(first_token, r"^[0-9a-f]{64}$")
+                self.assertEqual(len(provider_calls), 1)
+                self.assertEqual(len(iterators), 1)
+                valid_iterator = iterators[0]
+
+                continuation = {
+                    "session": first["session"],
+                    "preview_instance": preview_instance,
+                    "token": first_token,
+                }
+                bad_page_requests = [
+                    {"data": "{", "content_type": "application/json"},
+                    {"data": json.dumps(continuation), "content_type": "text/plain"},
+                    {"json": []},
+                    {"json": {key: value for key, value in continuation.items() if key != "token"}},
+                    {"json": {**continuation, "extra": True}},
+                    {"json": {**continuation, "session": "A" * 32}},
+                    {"json": {**continuation, "preview_instance": "bad"}},
+                    {"json": {**continuation, "token": "z" * 64}},
+                ]
+                calls_before_bad_pages = valid_iterator.next_calls
+                for request_args in bad_page_requests:
+                    with self.subTest(page_request=request_args):
+                        assert_error(
+                            self.client.post(page_path, **request_args), 400,
+                            "Preview request is invalid.",
+                        )
+                self.assertEqual(valid_iterator.next_calls, calls_before_bad_pages)
+                self.assertEqual(len(provider_calls), 1)
+                self.assertEqual(len(iterators), 1)
+
+                second_response = self.client.post(page_path, json=continuation)
+                self.assertEqual(second_response.status_code, 200)
+                second = second_response.get_json()
+                self.assertFalse(second["complete"])
+                calls_after_consumption = valid_iterator.next_calls
+                assert_error(
+                    self.client.post(page_path, json=continuation), 409,
+                    "Preview continuation was already used.",
+                )
+                self.assertEqual(valid_iterator.next_calls, calls_after_consumption)
+
+                current = {**continuation, "token": second["next_token"]}
+                unknown = {**current, "session": "f" * 32}
+                wrong_identity = {**current, "preview_instance": wrong_instance}
+                for payload in (unknown, wrong_identity):
+                    assert_error(
+                        self.client.post(page_path, json=payload), 409,
+                        "Preview session is no longer active.",
+                    )
+                self.assertEqual(valid_iterator.next_calls, calls_after_consumption)
+
+                terminal_response = self.client.post(page_path, json=current)
+                self.assertEqual(terminal_response.status_code, 200)
+                self.assertTrue(terminal_response.get_json()["complete"])
+                self.assertEqual(len(pin_exits), 1)
+
+                cancelled = self.client.post(start_path, json={
+                    **start_payload,
+                    "generation": 1,
+                    "preview_instance": cancel_instance,
+                }).get_json()
+                cancel_iterator = iterators[-1]
+                ordinary_cancel = self.client.post(cancel_path, json={
+                    "session": cancelled["session"],
+                    "preview_instance": cancel_instance,
+                })
+                self.assertEqual(ordinary_cancel.status_code, 200)
+                self.assertEqual(ordinary_cancel.get_json(), {"cancelled": True})
+                self.assertEqual(cancel_iterator.close_calls, 1)
+
+                expiring = self.client.post(start_path, json={
+                    **start_payload,
+                    "generation": 1,
+                    "preview_instance": expired_instance,
+                }).get_json()
+                expired_iterator = iterators[-1]
+                expired_token = expiring["next_token"]
+                expired_calls = expired_iterator.next_calls
+                self.assertEqual(capacity.active_count, 1)
+                clock.now += capacity.IDLE_TTL + 0.001
+                self.assertEqual(capacity.reap_expired(), 1)
+                self.assertEqual(expired_iterator.close_calls, 1)
+                self.assertEqual(expired_iterator.next_calls, expired_calls)
+                self.assertEqual(capacity.active_count, 0)
+                self.assertEqual(capacity.available_slots, capacity.MAX_ACTIVE)
+                self.assertEqual(registry.total_count, 0)
+                self.assertEqual(registry.expired_count, 1)
+                self.assertLessEqual(
+                    registry.expired_count, registry.MAX_EXPIRED_TOMBSTONES,
+                )
+
+                expired_page = {
+                    "session": expiring["session"],
+                    "preview_instance": expired_instance,
+                    "token": expired_token,
+                }
+                expired_cancel = {
+                    "session": expiring["session"],
+                    "preview_instance": expired_instance,
+                }
+                assert_error(
+                    self.client.post(page_path, json=expired_page), 410,
+                    "Preview session expired.",
+                )
+                assert_error(
+                    self.client.post(cancel_path, json=expired_cancel), 410,
+                    "Preview session expired.",
+                )
+                assert_error(
+                    self.client.post(cancel_path, json={
+                        **expired_cancel, "preview_instance": wrong_instance,
+                    }), 409, "Preview session is no longer active.",
+                )
+                self.assertEqual(expired_iterator.next_calls, expired_calls)
+                self.assertEqual(expired_iterator.close_calls, 1)
+
+                clock.now += registry.EXPIRED_TOMBSTONE_TTL + 0.001
+                assert_error(
+                    self.client.post(cancel_path, json=expired_cancel), 409,
+                    "Preview session is no longer active.",
+                )
+                self.assertEqual(registry.expired_count, 0)
+
+            self.assertEqual(Path(self.store.path).read_bytes(), before_config)
+            self.assertEqual(Path(self.device_store.path).read_bytes(), before_devices)
+            self.assertEqual(sorted(
+                (path.relative_to(self.media_dir).as_posix(), path.read_bytes())
+                for path in self.media_dir.rglob("*") if path.is_file()
+            ), before_media)
+            self.assertEqual(self.controller.method_calls, [])
+            self.assertEqual(len(provider_calls), 3)
+            self.assertEqual(len(iterators), 3)
+            self.assertEqual(len(pin_enters), 3)
+            self.assertEqual(len(pin_exits), 3)
+        finally:
+            registry.close()
+        self.assertEqual(registry.expired_count, 0)
+        self.assertFalse(registry.reaper_alive)
+
     def test_stale_session_generation_is_rejected(self):
         with self.client.session_transaction() as browser_session:
             browser_session["paired"] = True
