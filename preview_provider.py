@@ -94,6 +94,12 @@ class PreviewProvider:
         with type(self)._accounting_lock:
             return self.MAX_WORKERS - type(self)._active_workers
 
+    @property
+    def is_closed(self):
+        """Return whether this provider permanently rejects new preparation."""
+        with self._lifecycle:
+            return self._shutdown
+
     @staticmethod
     def _terminate_and_reap(child):
         if child.is_alive():

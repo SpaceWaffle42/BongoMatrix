@@ -6707,7 +6707,7 @@ console.log('ANNOUNCEMENT_HEADING_SYNC_PASS');
             yield handles
             lifecycle.append("pin-exit")
 
-        def prepare(module_name, candidate_value, stop_event):
+        def prepare(_provider, module_name, candidate_value, stop_event):
             self.assertEqual(lifecycle[-1:], ["pin-enter"])
             lifecycle.append("provider")
             return {"prepared": module_name}
@@ -6810,6 +6810,303 @@ console.log('ANNOUNCEMENT_HEADING_SYNC_PASS');
         registry.close()
         self.assertFalse(registry.reaper_alive)
 
+    def test_preview_services_restart_after_close_and_failed_init(self):
+        """Process preview services restart atomically without leaking stale work."""
+        from contextlib import contextmanager
+        from edit_preview import PreviewInstanceRegistry
+        from preview_provider import PreviewProviderCancelled
+
+        start_path = "/api/edit-preview/clock_lava"
+        weather_path = "/api/edit-preview/weather"
+        cancel_path = "/api/edit-preview/cancel"
+        preview_instance = "51515151515151515151515151515151"
+        self.pair_browser()
+        with self.client.session_transaction() as paired_session:
+            browser_session = dict(paired_session)
+        self.controller.reset_mock()
+
+        before_config = Path(self.store.path).read_bytes()
+        before_devices = Path(self.device_store.path).read_bytes()
+        before_media = sorted(
+            (path.relative_to(self.media_dir).as_posix(), path.read_bytes())
+            for path in self.media_dir.rglob("*") if path.is_file()
+        )
+        baseline_threads = {thread.ident for thread in threading.enumerate()}
+        baseline_fds = len(os.listdir("/proc/self/fd"))
+        registries = []
+        providers = []
+        fail_provider_init = threading.Event()
+        provider_prepare_started = threading.Event()
+
+        class TrackedRegistry(PreviewInstanceRegistry):
+            def __init__(self):
+                super().__init__()
+                self.close_calls = 0
+                registries.append(self)
+
+            def close(self):
+                was_closed = self.is_closed
+                super().close()
+                if not was_closed:
+                    self.close_calls += 1
+
+        class TrackedProvider:
+            MAX_WORKERS = 2
+
+            def __init__(self):
+                if fail_provider_init.is_set():
+                    fail_provider_init.clear()
+                    raise RuntimeError("private provider factory detail")
+                self._condition = threading.Condition()
+                self._closed = False
+                self._active = set()
+                self.close_calls = 0
+                self.prepare_calls = 0
+                providers.append(self)
+
+            @property
+            def is_closed(self):
+                with self._condition:
+                    return self._closed
+
+            @property
+            def active_child_count(self):
+                return 0
+
+            @property
+            def active_worker_count(self):
+                with self._condition:
+                    return len(self._active)
+
+            @property
+            def available_worker_slots(self):
+                return self.MAX_WORKERS - self.active_worker_count
+
+            def prepare(self, provider, *, settings, credentials, cancel_event,
+                        request_deadline):
+                location = settings["weather"]["location"]
+                owner_stop = threading.Event()
+                with self._condition:
+                    if self._closed:
+                        raise RuntimeError("closed provider must not serve")
+                    self.prepare_calls += 1
+                    self._active.add(owner_stop)
+                try:
+                    if location == "blocked-old":
+                        provider_prepare_started.set()
+                        while not (cancel_event.is_set() or owner_stop.wait(0.005)):
+                            pass
+                        raise PreviewProviderCancelled("private cancellation detail")
+                    return (
+                        ("feels_like", 19), ("high", 23), ("humidity", 50),
+                        ("location", location), ("low", 12),
+                        ("status", "Clear sky"), ("temperature", 20),
+                    )
+                finally:
+                    with self._condition:
+                        self._active.remove(owner_stop)
+                        self._condition.notify_all()
+
+            def shutdown(self):
+                with self._condition:
+                    if not self._closed:
+                        self._closed = True
+                        self.close_calls += 1
+                    for owner_stop in self._active:
+                        owner_stop.set()
+                    while self._active:
+                        self._condition.wait(0.25)
+
+        @contextmanager
+        def pinned(candidate, media_root, *, allow_missing=()):
+            yield {}
+
+        def iterator(module_name, candidate, selected_palette, pinned_media, prepared,
+                     stop_event):
+            for index in range(40):
+                yield {"png": f"{candidate['weather']['location']}-{index}", "delay_ms": 1}
+
+        def payload(generation, *, location="singleton"):
+            candidate = copy.deepcopy(self.store.get())
+            candidate.pop("revision")
+            candidate["weather"]["location"] = location
+            return {
+                "config": candidate,
+                "generation": generation,
+                "preview_instance": preview_instance,
+            }
+
+        def paired_client():
+            client = self.app.test_client()
+            with client.session_transaction() as client_session:
+                client_session.update(browser_session)
+            return client
+
+        def assert_response(response, status):
+            self.assertEqual(response.status_code, status, response.get_data(as_text=True))
+            self.assertEqual(response.headers.get("Cache-Control"), "no-store")
+            self.assertNotIn("ETag", response.headers)
+            body = response.get_json()
+            self.assertNotIn("revision", body)
+            self.assertNotIn("device_id", json.dumps(body))
+            return body
+
+        factory_patch = patch.multiple(
+            "webapp", PreviewInstanceRegistry=TrackedRegistry,
+            PreviewProvider=TrackedProvider, pin_candidate_media=pinned,
+            _edit_preview_iterator=iterator,
+        )
+        with factory_patch:
+            # Lazy creation is one registry/provider pair, shared by successful
+            # requests and independent Flask clients. Request teardown owns neither.
+            self.assertNotIn("edit_preview_registry", self.app.extensions)
+            first = assert_response(self.client.post(start_path, json=payload(1)), 200)
+            first_registry = self.app.extensions["edit_preview_registry"]
+            first_provider = self.app.extensions["edit_preview_provider"]
+            self.assertEqual((len(registries), len(providers)), (1, 1))
+            second = assert_response(paired_client().post(
+                cancel_path, json={
+                    "session": first["session"],
+                    "preview_instance": preview_instance,
+                },
+            ), 200)
+            self.assertEqual(second, {"cancelled": True})
+            again = assert_response(paired_client().post(
+                start_path, json=payload(2),
+            ), 200)
+            self.assertIs(self.app.extensions["edit_preview_registry"], first_registry)
+            self.assertIs(self.app.extensions["edit_preview_provider"], first_provider)
+            self.assertEqual((len(registries), len(providers)), (1, 1))
+            assert_response(self.client.post(cancel_path, json={
+                "session": again["session"], "preview_instance": preview_instance,
+            }), 200)
+
+            # Explicit close replaces both closed services. Concurrent first use
+            # after close must publish exactly one replacement pair.
+            self.app.extensions["close_edit_preview_services"]()
+            self.assertTrue(first_registry.is_closed)
+            self.assertTrue(first_provider.is_closed)
+            self.assertEqual((first_registry.close_calls, first_provider.close_calls), (1, 1))
+            results = []
+            failures = []
+            barrier = threading.Barrier(3)
+
+            def concurrent_start(index):
+                try:
+                    barrier.wait()
+                    results.append((index, paired_client().post(
+                        start_path,
+                        json={**payload(index + 3), "preview_instance": f"{index + 1:032x}"},
+                    )))
+                except BaseException as error:
+                    failures.append(error)
+
+            threads = [
+                threading.Thread(target=concurrent_start, args=(index,),
+                                 name=f"preview-restart-{index}")
+                for index in range(2)
+            ]
+            for thread in threads:
+                thread.start()
+            barrier.wait()
+            for thread in threads:
+                thread.join(1)
+            self.assertFalse(any(thread.is_alive() for thread in threads))
+            self.assertEqual(failures, [])
+            self.assertEqual([response.status_code for _index, response in results], [200, 200])
+            self.assertEqual((len(registries), len(providers)), (2, 2))
+            replacement_registry = self.app.extensions["edit_preview_registry"]
+            replacement_provider = self.app.extensions["edit_preview_provider"]
+            self.assertIsNot(replacement_registry, first_registry)
+            self.assertIsNot(replacement_provider, first_provider)
+            for index, response in results:
+                body = assert_response(response, 200)
+                assert_response(paired_client().post(cancel_path, json={
+                    "session": body["session"],
+                    "preview_instance": f"{index + 1:032x}",
+                }), 200)
+
+            # A failed pair construction is sanitized and never cached. The
+            # partially-created registry is closed exactly once, then retried.
+            self.app.extensions["close_edit_preview_services"]()
+            fail_provider_init.set()
+            failed = assert_response(self.client.post(
+                start_path, json=payload(20),
+            ), 503)
+            self.assertEqual(failed, {"error": "Preview is temporarily unavailable."})
+            partial_registry = registries[-1]
+            self.assertTrue(partial_registry.is_closed)
+            self.assertEqual(partial_registry.close_calls, 1)
+            self.assertIs(self.app.extensions.get("edit_preview_registry"), replacement_registry)
+            recovered = assert_response(self.client.post(
+                start_path, json=payload(21),
+            ), 200)
+            healthy_registry = self.app.extensions["edit_preview_registry"]
+            healthy_provider = self.app.extensions["edit_preview_provider"]
+            self.assertIsNot(healthy_registry, partial_registry)
+            self.assertFalse(healthy_registry.is_closed)
+            self.assertFalse(healthy_provider.is_closed)
+            self.assertEqual((len(registries), len(providers)), (4, 3))
+            assert_response(self.client.post(cancel_path, json={
+                "session": recovered["session"],
+                "preview_instance": preview_instance,
+            }), 200)
+
+            # Closing during pre-session provider preparation signals promptly.
+            # A newer service generation for the same identity is not blocked by
+            # the old PreviewInstance admission lock and stale work publishes none.
+            old_result = {}
+            old_client = paired_client()
+
+            def blocked_start():
+                old_result["response"] = old_client.post(
+                    weather_path, json=payload(30, location="blocked-old"),
+                )
+
+            old_thread = threading.Thread(
+                target=blocked_start, name="preview-blocked-provider-init",
+            )
+            old_thread.start()
+            self.assertTrue(provider_prepare_started.wait(1))
+            closed_at = time.monotonic()
+            self.app.extensions["close_edit_preview_services"]()
+            self.assertLess(time.monotonic() - closed_at, 0.25)
+            newer = assert_response(paired_client().post(
+                weather_path, json=payload(31, location="new-healthy"),
+            ), 200)
+            old_thread.join(0.25)
+            self.assertFalse(old_thread.is_alive())
+            stale = assert_response(old_result["response"], 503)
+            self.assertEqual(stale, {"error": "Preview is temporarily unavailable."})
+            self.assertNotIn("frames", stale)
+            assert_response(paired_client().post(cancel_path, json={
+                "session": newer["session"], "preview_instance": preview_instance,
+            }), 200)
+
+            self.app.extensions["close_edit_preview_services"]()
+            self.app.extensions["close_edit_preview_services"]()
+
+        self.assertTrue(all(registry.is_closed for registry in registries))
+        self.assertTrue(all(registry.total_count == 0 for registry in registries))
+        self.assertTrue(all(registry.expired_count == 0 for registry in registries))
+        self.assertTrue(all(not registry.reaper_alive for registry in registries))
+        self.assertTrue(all(registry.close_calls == 1 for registry in registries))
+        self.assertTrue(all(provider.is_closed for provider in providers))
+        self.assertTrue(all(provider.close_calls == 1 for provider in providers))
+        self.assertTrue(all(provider.active_worker_count == 0 for provider in providers))
+        self.assertTrue(all(provider.available_worker_slots == 2 for provider in providers))
+        self.assertEqual(Path(self.store.path).read_bytes(), before_config)
+        self.assertEqual(Path(self.device_store.path).read_bytes(), before_devices)
+        self.assertEqual(sorted(
+            (path.relative_to(self.media_dir).as_posix(), path.read_bytes())
+            for path in self.media_dir.rglob("*") if path.is_file()
+        ), before_media)
+        self.assertEqual(self.controller.method_calls, [])
+        self.assertEqual(
+            {thread.ident for thread in threading.enumerate()} - baseline_threads, set(),
+        )
+        self.assertEqual(len(os.listdir("/proc/self/fd")), baseline_fds)
+
     def test_same_page_slow_generation_is_superseded_by_newer_generation(self):
         from contextlib import contextmanager
 
@@ -6890,7 +7187,7 @@ console.log('ANNOUNCEMENT_HEADING_SYNC_PASS');
             finally:
                 pin_exits.append(label)
 
-        def prepare(module_name, candidate, stop_event):
+        def prepare(_provider, module_name, candidate, stop_event):
             label = candidate["weather"]["location"]
             stop_events[label] = stop_event
             return {"label": label}
@@ -7119,7 +7416,7 @@ console.log('ANNOUNCEMENT_HEADING_SYNC_PASS');
             finally:
                 pin_exits.append(label)
 
-        def prepare(module_name, candidate, stop_event):
+        def prepare(_provider, module_name, candidate, stop_event):
             label = candidate["weather"]["location"]
             stop_events[label] = stop_event
             return {"label": label}
@@ -7325,7 +7622,7 @@ console.log('ANNOUNCEMENT_HEADING_SYNC_PASS');
             finally:
                 pin_exits.append(label)
 
-        def prepare(module_name, candidate, stop_event):
+        def prepare(_provider, module_name, candidate, stop_event):
             label = candidate["weather"]["location"]
             stop_events[label] = stop_event
             return {"label": label}
@@ -7548,7 +7845,7 @@ console.log('ANNOUNCEMENT_HEADING_SYNC_PASS');
             finally:
                 pin_exits.append(label)
 
-        def prepare(module_name, candidate, stop_event):
+        def prepare(_provider, module_name, candidate, stop_event):
             label = candidate["weather"]["location"]
             stop_events[label] = stop_event
             return {"label": label, "stop": stop_event}
@@ -7884,7 +8181,7 @@ console.log('ANNOUNCEMENT_HEADING_SYNC_PASS');
             finally:
                 pin_exits.append(label)
 
-        def prepare(module_name, candidate_value, stop_event):
+        def prepare(_provider, module_name, candidate_value, stop_event):
             provider_calls.append(candidate_value["weather"]["location"])
             return None
 

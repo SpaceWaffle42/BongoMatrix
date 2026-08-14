@@ -131,21 +131,17 @@ def _provider_value(value):
     return value
 
 
-def _prepare_edit_preview_provider(module_name, candidate, stop_event):
-    """Prepare provider data through the existing process-global bounded seam."""
+def _prepare_edit_preview_provider(provider, module_name, candidate, stop_event):
+    """Prepare provider data through the app-owned process-global bounded seam."""
     if module_name not in {"weather", "openweather_overview", "openweather_forecast"}:
         return None
     provider_candidate = copy.deepcopy(candidate)
     provider_candidate["_preview_provider_module"] = module_name
-    provider = PreviewProvider()
-    try:
-        transported = provider.prepare(
-            _edit_preview_provider_child,
-            settings=provider_candidate, credentials=None,
-            cancel_event=stop_event, request_deadline=3.0,
-        )
-    finally:
-        provider.shutdown()
+    transported = provider.prepare(
+        _edit_preview_provider_child,
+        settings=provider_candidate, credentials=None,
+        cancel_event=stop_event, request_deadline=3.0,
+    )
     prepared = _provider_value(transported)
     if module_name == "weather":
         from modules.weather_app import WeatherSnapshot
@@ -301,15 +297,61 @@ def create_app(
     openweather_credential_generation = 0
     openweather_credential_lock = threading.Lock()
     edit_preview_registry = None
-    edit_preview_registry_lock = threading.Lock()
+    edit_preview_provider = None
+    edit_preview_services_lock = threading.Condition()
+    edit_preview_services_initializing = False
 
-    def get_edit_preview_registry():
-        nonlocal edit_preview_registry
-        with edit_preview_registry_lock:
-            if edit_preview_registry is None:
-                edit_preview_registry = PreviewInstanceRegistry()
-                app.extensions["edit_preview_registry"] = edit_preview_registry
-            return edit_preview_registry
+    def get_edit_preview_services():
+        """Lazily publish one healthy registry/provider pair per app process."""
+        nonlocal edit_preview_registry, edit_preview_provider
+        nonlocal edit_preview_services_initializing
+        with edit_preview_services_lock:
+            while edit_preview_services_initializing:
+                edit_preview_services_lock.wait()
+            if (
+                edit_preview_registry is not None
+                and edit_preview_provider is not None
+                and not edit_preview_registry.is_closed
+                and not edit_preview_provider.is_closed
+            ):
+                return edit_preview_registry, edit_preview_provider
+            edit_preview_services_initializing = True
+
+        registry = None
+        provider = None
+        try:
+            registry = PreviewInstanceRegistry()
+            provider = PreviewProvider()
+        except BaseException:
+            # Constructors and cleanup are outside the lifecycle lock.
+            if provider is not None:
+                provider.shutdown()
+            if registry is not None:
+                registry.close()
+            with edit_preview_services_lock:
+                edit_preview_services_initializing = False
+                edit_preview_services_lock.notify_all()
+            raise
+
+        with edit_preview_services_lock:
+            edit_preview_registry = registry
+            edit_preview_provider = provider
+            app.extensions["edit_preview_registry"] = registry
+            app.extensions["edit_preview_provider"] = provider
+            edit_preview_services_initializing = False
+            edit_preview_services_lock.notify_all()
+            return registry, provider
+
+    def close_edit_preview_services():
+        """Close the published pair without preventing a later lazy restart."""
+        with edit_preview_services_lock:
+            registry = edit_preview_registry
+            provider = edit_preview_provider
+        # Never hold the pair lock during callbacks, provider work, or joins.
+        if registry is not None:
+            registry.close()
+        if provider is not None:
+            provider.shutdown()
 
     def current_openweather_credential_generation():
         with openweather_credential_lock:
@@ -322,6 +364,8 @@ def create_app(
             scroll_timing_cache.clear(provider="openweather")
 
     app = Flask(__name__, template_folder="app/templates", static_folder="app/static")
+    app.extensions["get_edit_preview_services"] = get_edit_preview_services
+    app.extensions["close_edit_preview_services"] = close_edit_preview_services
     app.extensions["media_timeline_slots"] = media_timeline_slots
     app.config.update(
         SECRET_KEY=secret_key,
@@ -1490,7 +1534,7 @@ def create_app(
                     provider_candidate = copy.deepcopy(candidate)
                     provider_candidate["_preview_openweather_key"] = openweather_secrets.get()
                 prepared = _prepare_edit_preview_provider(
-                    module_name, provider_candidate, stop_event,
+                    provider, module_name, provider_candidate, stop_event,
                 )
 
                 def owned_iterator():
@@ -1508,7 +1552,7 @@ def create_app(
                         stack.close()
                 return owned_iterator()
 
-            registry = get_edit_preview_registry()
+            registry, provider = get_edit_preview_services()
             instance = registry.register(
                 identity, iterator_factory, stop_event=stop_event,
                 generation=generation,
@@ -1579,7 +1623,8 @@ def create_app(
                 or EDIT_PREVIEW_TOKEN.fullmatch(token) is None
             ):
                 raise ValueError("preview continuation is invalid")
-            instance = get_edit_preview_registry().lookup(session_id, identity)
+            registry, _provider = get_edit_preview_services()
+            instance = registry.lookup(session_id, identity)
             page = instance.admit().page(token, raise_on_superseded=True)
             return jsonify({
                 "session": session_id, "generation": instance.generation, **page,
@@ -1611,7 +1656,8 @@ def create_app(
                 or EDIT_PREVIEW_SESSION.fullmatch(session_id) is None
             ):
                 raise ValueError("preview session is invalid")
-            instance = get_edit_preview_registry().lookup(session_id, identity)
+            registry, _provider = get_edit_preview_services()
+            instance = registry.lookup(session_id, identity)
             instance.close()
             return jsonify({"cancelled": True})
         except RequestEntityTooLarge:

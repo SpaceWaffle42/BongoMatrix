@@ -432,6 +432,12 @@ class PreviewInstanceRegistry:
             return self._lifecycle_state
 
     @property
+    def is_closed(self):
+        """Return whether this registry no longer admits process work."""
+        with self._lock:
+            return self._lifecycle_state != "ACTIVE"
+
+    @property
     def reaper_alive(self):
         return self._reaper.is_alive()
 
@@ -607,7 +613,9 @@ class PreviewInstance:
         self._registry_shutdown = registry_shutdown
         self._session = None
         self._closed = False
-        self._lock = threading.RLock()
+        self._lock = threading.Condition(threading.RLock())
+        self._initializing = False
+        self._superseded = False
 
     @property
     def state(self):
@@ -624,13 +632,49 @@ class PreviewInstance:
                 and self._registry_shutdown.is_set()
             ):
                 raise RuntimeError("preview instance is closed")
-            if self._session is None:
-                self._session = self._capacity.admit(
-                    self._iterator_factory,
-                    stop_event=self._stop_event,
-                    on_close=self._release_registration,
+            while self._initializing:
+                self._lock.wait()
+                if self._closed:
+                    if self._superseded:
+                        raise PreviewPageSupersededError(
+                            "preview generation was superseded"
+                        )
+                    raise RuntimeError("preview instance is closed")
+                if self._session is not None:
+                    return self._session
+            if self._session is not None:
+                return self._session
+            self._initializing = True
+
+        # Provider/media preparation can block. Lifecycle signalling must never
+        # wait behind the lazy iterator factory on this instance lock.
+        try:
+            session = self._capacity.admit(
+                self._iterator_factory,
+                stop_event=self._stop_event,
+                on_close=self._release_registration,
+            )
+        except BaseException:
+            with self._lock:
+                self._initializing = False
+                self._lock.notify_all()
+            raise
+
+        with self._lock:
+            self._initializing = False
+            closed = self._closed
+            superseded = self._superseded
+            if not closed:
+                self._session = session
+            self._lock.notify_all()
+        if closed:
+            session.cancel()
+            if superseded:
+                raise PreviewPageSupersededError(
+                    "preview generation was superseded"
                 )
-            return self._session
+            raise RuntimeError("preview instance is closed")
+        return session
 
     def close(self):
         self._terminate(superseded=False)
@@ -644,9 +688,16 @@ class PreviewInstance:
             if self._closed:
                 return
             self._closed = True
+            self._superseded = superseded
             if self._stop_event is not None:
                 self._stop_event.set()
             session = self._session
+            initializing = self._initializing
+            self._lock.notify_all()
+        if initializing:
+            # The admission owner cancels any constructed session and releases
+            # registration exactly once when preparation settles.
+            return
         if session is None:
             self._release_registration()
         elif superseded:
