@@ -124,6 +124,26 @@ class CaptureMatrix:
         self.canvas = self._new_canvas()
         return self.canvas
 
+    def media_frames(self, filename, frame_count, fps, **options):
+        """Use the production bounded decoder against the capture framebuffer."""
+        from matrix_framework import Matrix
+
+        return Matrix.media_frames(self, filename, frame_count, fps, **options)
+
+    def _video_frame_timeline(
+        self, path, settings, stop_event=None, *, pinned_handle=None,
+    ):
+        """Use the physical MP4 decoder while publishing only capture frames."""
+        from matrix_framework import Matrix
+
+        return Matrix._video_frame_timeline(
+            self, path,
+            int(settings.get("width") or self.width),
+            int(settings.get("height") or self.height),
+            settings.get("keep_aspect", True), stop_event=stop_event,
+            pinned_handle=pinned_handle,
+        )
+
 
 def static_media_frames(
     filename, duration, settings=None, *, render=None, monotonic=time.monotonic,
@@ -154,7 +174,7 @@ def static_media_frames(
 
 def media_preview_frames(
     matrix, filename, duration, settings=None, *, video_decoder=None,
-    stop_event=None,
+    stop_event=None, pinned_handle=None,
 ):
     """Render the shared production animated-media timeline into PNG frames."""
     from PIL import Image, ImageSequence
@@ -166,10 +186,22 @@ def media_preview_frames(
     if not path.is_absolute():
         path = Path(__file__).parent / "resources" / "media" / path
     if path.suffix.lower() == ".gif":
+        source = path
+        image_open = Image.open
+        if pinned_handle is not None:
+            source = pinned_handle
+
+            def image_open(handle):
+                media_file = handle.dup_file()
+                try:
+                    return Image.open(media_file)
+                except BaseException:
+                    media_file.close()
+                    raise
         timeline = gif_media_frames(
-            path, loops=0,
+            source, loops=0,
             playback_rate=settings.get("gif_speed_percent", 100) / 100.0,
-            max_duration=duration, image_open=Image.open,
+            max_duration=duration, image_open=image_open,
             image_iterator=ImageSequence.Iterator,
         )
     elif path.suffix.lower() == ".mp4":
@@ -177,13 +209,31 @@ def media_preview_frames(
             video_decoder = getattr(matrix, "_video_frame_timeline", None)
         if video_decoder is None:
             raise ValueError("MP4 preview requires the production video decoder seam")
+        decoder_options = {"stop_event": stop_event}
+        if pinned_handle is not None:
+            decoder_options["pinned_handle"] = pinned_handle
         timeline = video_media_frames(
-            lambda: video_decoder(path, settings, stop_event=stop_event),
+            lambda: video_decoder(path, settings, **decoder_options),
             fps=settings.get("video_fps", 20), loops=0,
             stop_event=stop_event, max_duration=duration,
         )
     else:
-        raise ValueError("animated preview media must be GIF or MP4")
+        if pinned_handle is not None:
+            with pinned_handle.dup_file() as media_file, Image.open(media_file) as opened:
+                image = opened.copy()
+        else:
+            with Image.open(path) as opened:
+                image = opened.copy()
+        matrix.clear()
+        matrix.draw_image(
+            image,
+            x=settings.get("x", 0), y=settings.get("y", 0),
+            width=settings.get("width"), height=settings.get("height"),
+            keep_aspect=settings.get("keep_aspect", True),
+        )
+        if duration > 0:
+            yield _png_frame(matrix.snapshot(), round(duration * 1000, 9))
+        return
     for image, delay in timeline:
         matrix.clear()
         matrix.draw_image(

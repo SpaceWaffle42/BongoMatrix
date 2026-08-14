@@ -1,14 +1,33 @@
 import math
 import os
 import pwd
+import queue
 import select
 import stat
 import subprocess
+import sys
 import threading
 import time
 import datetime
 import pathlib
-from rgbmatrix import RGBMatrix, RGBMatrixOptions, graphics
+from types import SimpleNamespace
+try:
+    from rgbmatrix import RGBMatrix, RGBMatrixOptions, graphics
+except ModuleNotFoundError as error:
+    if error.name != "rgbmatrix":
+        raise
+
+    class _UnavailableRGBMatrix:
+        def __init__(self, *_args, **_kwargs):
+            raise RuntimeError("RGB Matrix hardware bindings are unavailable")
+
+    RGBMatrix = RGBMatrixOptions = _UnavailableRGBMatrix
+    graphics = SimpleNamespace(
+        Color=lambda red, green, blue: SimpleNamespace(
+            red=red, green=green, blue=blue,
+        ),
+        Font=_UnavailableRGBMatrix,
+    )
 from PIL import Image, ImageSequence
 
 from font_catalog import FONT_DIR, font_key
@@ -102,6 +121,158 @@ def _reap_decoder(process):
         process.wait()
     except OSError:
         pass
+
+
+_DECODER_REAPER_STOP = object()
+_decoder_reaper_lock = threading.Lock()
+_decoder_reaper_owner = None
+# Compatibility/debug mirrors: they always identify the currently reachable owner.
+_decoder_reaper_queue = None
+_decoder_reaper_thread = None
+_decoder_reaper_leases = 0
+_decoder_reaper_had_deferred = False
+
+
+class _DecoderReaperLease:
+    """A handoff slot allocated before its decoder child can be spawned."""
+
+    def __init__(self, owner):
+        self.owner = owner
+        self.process = None
+        self.released = False
+        self.claimed = False
+
+
+class _DecoderReaperOwner:
+    def __init__(self):
+        self.condition = threading.Condition()
+        self.leases = []
+        self.active_leases = 0
+        self.shutdown_requested = False
+        self.had_deferred = False
+        self.thread = None
+
+
+def _decoder_reaper_main(owner):
+    while True:
+        with owner.condition:
+            claimed = None
+            while claimed is None:
+                for lease in owner.leases:
+                    if lease.released and not lease.claimed:
+                        lease.claimed = True
+                        claimed = lease
+                        break
+                if claimed is not None:
+                    break
+                if owner.shutdown_requested:
+                    return
+                owner.condition.wait()
+        if claimed.process is not None:
+            _reap_decoder(claimed.process)
+
+
+def _set_decoder_reaper_owner(owner):
+    """Update all global owner mirrors while the global lock is held."""
+    global _decoder_reaper_owner, _decoder_reaper_queue, _decoder_reaper_thread
+    global _decoder_reaper_leases, _decoder_reaper_had_deferred
+    _decoder_reaper_owner = owner
+    _decoder_reaper_queue = owner
+    _decoder_reaper_thread = None if owner is None else owner.thread
+    _decoder_reaper_leases = 0 if owner is None else owner.active_leases
+    _decoder_reaper_had_deferred = False if owner is None else owner.had_deferred
+
+
+def _ensure_decoder_reaper():
+    """Reserve a handoff slot and verified daemon before decoder Popen."""
+    with _decoder_reaper_lock:
+        owner = _decoder_reaper_owner
+        if owner is not None and not owner.thread.is_alive():
+            _set_decoder_reaper_owner(None)
+            owner = None
+        if owner is not None:
+            if owner.shutdown_requested:
+                raise RuntimeError("decoder reaper is shutting down")
+            lease = _DecoderReaperLease(owner)
+            with owner.condition:
+                owner.leases.append(lease)
+                owner.active_leases += 1
+            _set_decoder_reaper_owner(owner)
+            return lease
+
+        owner = _DecoderReaperOwner()
+        lease = _DecoderReaperLease(owner)
+        owner.leases.append(lease)
+        owner.active_leases = 1
+        reaper = threading.Thread(
+            target=_decoder_reaper_main,
+            args=(owner,),
+            name="matrix-decoder-reaper",
+            daemon=True,
+        )
+        owner.thread = reaper
+        reaper.start()
+        if not reaper.is_alive():
+            raise RuntimeError("decoder reaper failed to start")
+        _set_decoder_reaper_owner(owner)
+        return lease
+
+
+def _release_decoder_reaper(lease, deferred_process=None, join_timeout=0.25):
+    """Publish into a reserved slot; never detach a worker that may own a child."""
+    with _decoder_reaper_lock:
+        owner = _decoder_reaper_owner
+        if (
+            not isinstance(lease, _DecoderReaperLease)
+            or lease.owner is not owner
+            or lease.released
+            or owner.active_leases <= 0
+        ):
+            raise RuntimeError("decoder reaper lease is not active")
+        with owner.condition:
+            # Both objects already exist before Popen. This publication performs no
+            # queue insertion and cannot strand a spawned child on put() failure.
+            lease.process = deferred_process
+            lease.released = True
+            if deferred_process is not None:
+                owner.had_deferred = True
+            owner.active_leases -= 1
+            final_release = owner.active_leases == 0
+            if final_release:
+                owner.shutdown_requested = True
+            owner.condition.notify_all()
+        _set_decoder_reaper_owner(owner)
+        reaper = owner.thread
+        had_deferred = owner.had_deferred
+
+    if final_release and not had_deferred:
+        reaper.join(join_timeout)
+        with _decoder_reaper_lock:
+            if _decoder_reaper_owner is owner and not reaper.is_alive():
+                _set_decoder_reaper_owner(None)
+
+
+def _reset_decoder_reaper_for_tests(timeout=1):
+    """Stop the shared owner without making a live worker unreachable."""
+    with _decoder_reaper_lock:
+        owner = _decoder_reaper_owner
+        if owner is None:
+            return
+        with owner.condition:
+            for lease in owner.leases:
+                if not lease.released:
+                    lease.released = True
+            owner.active_leases = 0
+            owner.shutdown_requested = True
+            owner.condition.notify_all()
+        _set_decoder_reaper_owner(owner)
+        reaper = owner.thread
+    reaper.join(timeout)
+    if reaper.is_alive():
+        raise RuntimeError("decoder reaper did not stop")
+    with _decoder_reaper_lock:
+        if _decoder_reaper_owner is owner:
+            _set_decoder_reaper_owner(None)
 
 
 class Matrix:
@@ -514,7 +685,10 @@ class Matrix:
             nobody = pwd.getpwnam("nobody")
             identity = {"user": nobody.pw_uid, "group": nobody.pw_gid, "extra_groups": []}
         process = None
+        reaper_queue = None
+        deferred_process = None
         try:
+            reaper_queue = _ensure_decoder_reaper()
             command = [
                     "/usr/bin/ffmpeg", "-nostdin", "-v", "error", "-threads", "1",
                     "-i", "pipe:0",
@@ -577,32 +751,67 @@ class Matrix:
                 raise ValueError("media could not be decoded for the custom module timeline")
             return [frames[index % len(frames)] for index in range(frame_count)]
         finally:
-            try:
-                if process is not None and process.stdout is not None:
-                    process.stdout.close()
-            finally:
+            primary_error = sys.exception()
+            cleanup_error = None
+
+            def remember_cleanup_error(error):
+                nonlocal cleanup_error
+                if cleanup_error is None:
+                    cleanup_error = error
+
+            if process is not None and process.stdout is not None:
                 try:
-                    if process is not None and process.poll() is None:
+                    process.stdout.close()
+                except Exception as error:
+                    remember_cleanup_error(error)
+
+            if process is not None:
+                assert reaper_queue is not None
+                running = False
+                try:
+                    running = process.poll() is None
+                except ProcessLookupError:
+                    pass
+                except OSError as error:
+                    remember_cleanup_error(error)
+                    running = True
+                if running:
+                    try:
+                        process.kill()
+                    except ProcessLookupError:
+                        pass
+                    except OSError as error:
+                        remember_cleanup_error(error)
+                    cleanup_remaining = deadline - time.monotonic()
+                    reap_in_background = cleanup_remaining <= 0
+                    if not reap_in_background:
                         try:
-                            process.kill()
+                            process.wait(timeout=min(0.25, cleanup_remaining))
                         except ProcessLookupError:
                             pass
-                        cleanup_remaining = deadline - time.monotonic()
-                        reap_in_background = cleanup_remaining <= 0
-                        if not reap_in_background:
-                            try:
-                                process.wait(timeout=min(0.25, cleanup_remaining))
-                            except subprocess.TimeoutExpired:
-                                reap_in_background = True
-                        if reap_in_background:
-                            threading.Thread(
-                                target=_reap_decoder,
-                                args=(process,),
-                                name="matrix-media-reaper",
-                                daemon=True,
-                            ).start()
-                finally:
-                    os.close(input_fd)
+                        except subprocess.TimeoutExpired:
+                            reap_in_background = True
+                        except OSError as error:
+                            remember_cleanup_error(error)
+                            reap_in_background = True
+                    if reap_in_background:
+                        deferred_process = process
+
+            try:
+                os.close(input_fd)
+            except OSError as error:
+                remember_cleanup_error(error)
+
+            if reaper_queue is not None:
+                try:
+                    _release_decoder_reaper(
+                        reaper_queue, deferred_process=deferred_process,
+                    )
+                except Exception as error:
+                    remember_cleanup_error(error)
+
+            if primary_error is None and cleanup_error is not None:
+                raise cleanup_error
 
     def show_image(
         self, filename, x=0, y=0, delay=3, width=None, height=None, keep_aspect=True,
@@ -702,7 +911,7 @@ class Matrix:
 
     def _video_frame_timeline(
         self, path, frame_width, frame_height, keep_aspect, stop_event=None,
-        deadline=None,
+        deadline=None, *, pinned_handle=None,
     ):
         """Decode one MP4 timeline for shared physical/preview repetition."""
         frame_size = frame_width * frame_height * 3
@@ -720,9 +929,15 @@ class Matrix:
                 ":force_original_aspect_ratio=decrease,"
                 f"pad={frame_width}:{frame_height}:(ow-iw)/2:(oh-ih)/2:black"
             )
-        input_fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW)
+        input_fd = (
+            pinned_handle.dup_fd() if pinned_handle is not None
+            else os.open(path, os.O_RDONLY | os.O_NOFOLLOW)
+        )
         process = None
+        reaper_queue = None
+        deferred_process = None
         try:
+            reaper_queue = _ensure_decoder_reaper()
             process = subprocess.Popen(
                 [
                     "/usr/bin/ffmpeg", "-nostdin", "-v", "error", "-threads", "1",
@@ -736,6 +951,14 @@ class Matrix:
                 pass_fds=(input_fd,),
                 **identity,
             )
+            parent_input_fd = input_fd
+            # close(2) errors leave numeric-fd ownership ambiguous: Linux can
+            # release the descriptor before reporting an error and POSIX does
+            # not make EINTR retry-safe.  Consume our ownership before the
+            # call, surface any failure, and never retry a potentially reused
+            # descriptor number during outer cleanup.
+            input_fd = None
+            os.close(parent_input_fd)
             while True:
                 frame = _read_exact_interruptibly(
                     process.stdout, frame_size, stop_event=stop_event,
@@ -747,15 +970,76 @@ class Matrix:
                     break
                 yield Image.frombytes("RGB", (frame_width, frame_height), frame)
         finally:
-            if process is not None:
-                if process.poll() is None:
-                    process.terminate()
-                try:
-                    process.wait(timeout=2)
-                except subprocess.TimeoutExpired:
-                    process.kill()
-                    process.wait(timeout=2)
-            os.close(input_fd)
+            primary_error = sys.exception()
+            cleanup_error = None
+
+            def remember_cleanup_error(error):
+                nonlocal cleanup_error
+                if cleanup_error is None:
+                    cleanup_error = error
+
+            try:
+                if process is not None and process.stdout is not None:
+                    try:
+                        process.stdout.close()
+                    except Exception as error:
+                        remember_cleanup_error(error)
+
+                if process is not None:
+                    assert reaper_queue is not None
+                    running = False
+                    try:
+                        running = process.poll() is None
+                    except ProcessLookupError:
+                        pass
+                    except OSError as error:
+                        remember_cleanup_error(error)
+                    if running:
+                        try:
+                            process.terminate()
+                        except ProcessLookupError:
+                            pass
+                        except OSError as error:
+                            remember_cleanup_error(error)
+                    try:
+                        process.wait(timeout=2)
+                    except ProcessLookupError:
+                        pass
+                    except subprocess.TimeoutExpired:
+                        try:
+                            process.kill()
+                        except ProcessLookupError:
+                            pass
+                        except OSError as error:
+                            remember_cleanup_error(error)
+                        try:
+                            process.wait(timeout=0.25)
+                        except ProcessLookupError:
+                            pass
+                        except subprocess.TimeoutExpired:
+                            deferred_process = process
+                        except OSError as error:
+                            remember_cleanup_error(error)
+                            deferred_process = process
+                    except OSError as error:
+                        remember_cleanup_error(error)
+                        deferred_process = process
+            finally:
+                if input_fd is not None:
+                    try:
+                        os.close(input_fd)
+                    except OSError as error:
+                        remember_cleanup_error(error)
+                if reaper_queue is not None:
+                    try:
+                        _release_decoder_reaper(
+                            reaper_queue, deferred_process=deferred_process,
+                        )
+                    except Exception as error:
+                        remember_cleanup_error(error)
+
+            if primary_error is None and cleanup_error is not None:
+                raise cleanup_error
 
     def show_video(
         self,
@@ -769,12 +1053,17 @@ class Matrix:
         keep_aspect=True,
         stop_event=None,
         max_duration=None,
+        *,
+        pinned_handle=None,
     ):
         """Decode a sanitized MP4 with FFmpeg, bounded and interruptible."""
         from modules.media_player import video_media_frames
 
-        path = self._media_file(filename)
-        if path is None or path.suffix.lower() != ".mp4":
+        path = None if pinned_handle is not None else self._media_file(filename)
+        if (
+            path is None and pinned_handle is None
+            or pathlib.Path(filename).suffix.lower() != ".mp4"
+        ):
             return False
 
         frame_width = int(width or self.matrix.width)
@@ -789,6 +1078,7 @@ class Matrix:
             return self._video_frame_timeline(
                 path, frame_width, frame_height, keep_aspect,
                 stop_event=stop_event, deadline=deadline,
+                pinned_handle=pinned_handle,
             )
 
         shown = False

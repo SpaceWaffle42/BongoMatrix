@@ -172,12 +172,19 @@ def _edit_preview_iterator(
     from edit_preview import (
         advanced_canvas_preview_frames, announcement_preview_frames,
         continuous_lava_preview_frames, custom_text_preview_frames,
-        lava_preview_frames, openweather_forecast_preview_frames,
+        lava_preview_frames, media_preview_frames, openweather_forecast_preview_frames,
         openweather_overview_preview_frames, preview_duration,
         weather_preview_frames,
     )
 
     matrix = CaptureMatrix()
+    if module_name in {"splash", "sleep"}:
+        filename = candidate["media"][module_name]
+        return media_preview_frames(
+            matrix, filename, preview_duration(candidate, module_name),
+            candidate.get("media_layout", {}).get(module_name),
+            stop_event=stop_event, pinned_handle=pinned_media.get(filename),
+        )
     if module_name == "clock_lava":
         if selected_palette is not None:
             return continuous_lava_preview_frames(
@@ -1475,13 +1482,26 @@ def create_app(
             response.headers["Retry-After"] = str(retry_after)
         return response
 
-    def edit_preview_json(required_keys):
+    def edit_preview_json(required_keys, optional_keys=()):
         if request.content_length is not None and request.content_length > CONFIG_REQUEST_LIMIT:
             raise RequestEntityTooLarge()
         if not request.is_json:
             raise ValueError("request must be JSON")
-        payload = request.get_json(silent=True)
-        if not isinstance(payload, dict) or set(payload) != set(required_keys):
+        body = request.stream.read(CONFIG_REQUEST_LIMIT + 1)
+        if len(body) > CONFIG_REQUEST_LIMIT:
+            raise RequestEntityTooLarge()
+        try:
+            payload = json.loads(body)
+        except (TypeError, ValueError):
+            raise ValueError("request payload has invalid JSON") from None
+        keys = set(payload) if isinstance(payload, dict) else set()
+        required = set(required_keys)
+        optional = set(optional_keys)
+        if (
+            not isinstance(payload, dict)
+            or not required <= keys
+            or keys - required - optional
+        ):
             raise ValueError("request payload has invalid fields")
         return payload
 
@@ -1497,16 +1517,8 @@ def create_app(
         stack = ExitStack()
         instance = None
         try:
-            if request.content_length is not None and request.content_length > CONFIG_REQUEST_LIMIT:
-                raise RequestEntityTooLarge()
-            if not request.is_json:
-                raise ValueError("request must be JSON")
-            payload = request.get_json(silent=True)
-            if not isinstance(payload, dict):
-                raise ValueError("request payload has invalid fields")
             required = {"config", "generation", "preview_instance"}
-            if set(payload) not in (required, required | {"selected_lava_palette"}):
-                raise ValueError("request payload has invalid fields")
+            payload = edit_preview_json(required, {"selected_lava_palette"})
             generation = payload["generation"]
             if (
                 isinstance(generation, bool) or not isinstance(generation, int)

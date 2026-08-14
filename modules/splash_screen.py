@@ -23,6 +23,11 @@ class _PinnedMediaMatrix:
             filename, pinned_handle=self._pinned_handle, **options,
         )
 
+    def show_video(self, filename, **options):
+        return self._matrix.show_video(
+            filename, pinned_handle=self._pinned_handle, **options,
+        )
+
 
 def run(matrix, config, duration=8, stop_event=None, *, pinned_handle=None):
     filename = config.get("media", {}).get("splash", "squares_tb.gif")

@@ -6810,6 +6810,176 @@ console.log('ANNOUNCEMENT_HEADING_SYNC_PASS');
         registry.close()
         self.assertFalse(registry.reaper_alive)
 
+    def test_edit_preview_routes_render_splash_sleep_and_media_consumers(self):
+        self.pair_browser()
+        self.controller.reset_mock()
+        before_config = Path(self.store.path).read_bytes()
+        before_devices = Path(self.device_store.path).read_bytes()
+
+        red = Image.new("RGB", (8, 8), "red")
+        blue = Image.new("RGB", (8, 8), "blue")
+        for filename in ("splash.gif", "sleep.gif"):
+            red.save(
+                self.media_dir / filename, format="GIF", save_all=True,
+                append_images=[blue], duration=[100, 100], loop=0,
+            )
+        for filename in ("announcement.png", "layer.png", "layer.gif", "layer.mp4"):
+            red.save(self.media_dir / filename, format="PNG")
+
+        base = copy.deepcopy(self.store.get())
+        base.pop("revision")
+        base["media"] = {"splash": "splash.gif", "sleep": "sleep.gif"}
+        base["playlist"] = [
+            {"module": "splash", "duration": 1, "enabled": True},
+            {"module": "sleep", "duration": 1, "enabled": True},
+        ]
+        preview_index = 0
+
+        def start(module_name, candidate):
+            nonlocal preview_index
+            preview_index += 1
+            instance = f"{preview_index:032x}"
+            response = self.client.post(f"/api/edit-preview/{module_name}", json={
+                "config": candidate,
+                "generation": preview_index,
+                "preview_instance": instance,
+            })
+            self.assertEqual(response.status_code, 200, response.get_data(as_text=True))
+            self.assertEqual(response.headers.get("Cache-Control"), "no-store")
+            body = response.get_json()
+            self.assertGreater(len(body["frames"]), 0)
+            if not body["complete"]:
+                cancelled = self.client.post("/api/edit-preview/cancel", json={
+                    "session": body["session"], "preview_instance": instance,
+                })
+                self.assertEqual(cancelled.status_code, 200)
+            return body
+
+        for module_name in ("splash", "sleep"):
+            with self.subTest(module=module_name):
+                start(module_name, copy.deepcopy(base))
+        video_splash = copy.deepcopy(base)
+        video_splash["media"]["splash"] = "layer.mp4"
+        with self.subTest(module="splash_mp4"):
+            import warnings
+            with warnings.catch_warnings(record=True) as caught:
+                warnings.simplefilter("always", ResourceWarning)
+                start("splash", video_splash)
+            self.assertFalse([
+                warning for warning in caught
+                if issubclass(warning.category, ResourceWarning)
+            ], caught)
+
+        announcements = copy.deepcopy(base)
+        static = test_config_store.ConfigStoreTests.announcement(
+            id="announcement_static_media", layout="full_image_notice",
+            headline="STATIC", message="", media="announcement.png",
+            timing={"mode": "static", "duration_seconds": 1},
+        )
+        scrolling = test_config_store.ConfigStoreTests.announcement(
+            id="announcement_scroll_media", layout="text_notice",
+            headline="A", message="", media=None,
+            timing={"mode": "scroll", "loops": 1, "frame_delay": 0.05},
+        )
+        announcements["announcement_board"] = {"announcements": [static, scrolling]}
+        announcements["playlist"] = [
+            {"module": "announcement_board", "duration": 2, "enabled": True},
+        ]
+        with self.subTest(module="announcement_board"):
+            start("announcement_board", announcements)
+
+        canvas = copy.deepcopy(base)
+        layers = []
+        for index, source in enumerate(("layer.png", "layer.gif", "layer.mp4")):
+            layers.append({
+                "id": f"layer_media_{index}", "name": source, "type": "media",
+                "visible": True,
+                "properties": {
+                    "source": source, "x": index, "y": index, "width": 8,
+                    "height": 8, "rotation": 0, "keep_aspect": True,
+                },
+                "keyframes": [],
+            })
+        module = test_config_store.ConfigStoreTests.advanced_module(
+            id="custom_media_layers", name="Media layers", frame_count=2, fps=2,
+            playback="hold", layers=layers, overrides=[],
+        )
+        canvas["custom_modules"] = [module]
+        canvas["playlist"] = [
+            {"module": module["id"], "duration": 1, "enabled": True},
+        ]
+        with self.subTest(module=module["id"]):
+            start(module["id"], canvas)
+
+        self.assertEqual(Path(self.store.path).read_bytes(), before_config)
+        self.assertEqual(Path(self.device_store.path).read_bytes(), before_devices)
+        self.assertEqual(self.controller.method_calls, [])
+        registry = self.app.extensions.get("edit_preview_registry")
+        if registry is not None:
+            registry.close()
+
+    def test_edit_preview_routes_bound_unknown_length_json_before_rendering(self):
+        self.pair_browser()
+        instance = "a" * 32
+        candidate = copy.deepcopy(self.store.get())
+        candidate.pop("revision")
+        payload = json.dumps({
+            "config": candidate,
+            "generation": 1,
+            "preview_instance": instance,
+        }, separators=(",", ":")).encode("utf-8")
+        self.assertLess(len(payload), 1_048_576)
+
+        def unknown_length(path, body):
+            return self.client.open(
+                path, method="POST", input_stream=io.BytesIO(body),
+                content_type="application/json",
+                environ_overrides={
+                    "CONTENT_LENGTH": "", "wsgi.input_terminated": True,
+                },
+            )
+
+        with patch.object(
+            webapp, "_edit_preview_iterator",
+            side_effect=AssertionError("oversized request reached renderer"),
+        ) as renderer:
+            oversized = unknown_length(
+                "/api/edit-preview/clock_lava", b"{" + b" " * 1_048_576,
+            )
+            self.assertEqual(oversized.status_code, 413, oversized.get_data(as_text=True))
+            self.assertEqual(oversized.get_json(), {"error": "Preview request exceeds 1 MiB."})
+            self.assertEqual(oversized.headers.get("Cache-Control"), "no-store")
+            renderer.assert_not_called()
+
+        exact_valid = payload + b" " * (1_048_576 - len(payload))
+        with patch.object(
+            webapp, "_edit_preview_iterator",
+            return_value=iter([{"png": "frame", "delay_ms": 1}]),
+        ):
+            accepted = unknown_length("/api/edit-preview/clock_lava", exact_valid)
+        self.assertEqual(accepted.status_code, 200, accepted.get_data(as_text=True))
+        self.assertEqual(accepted.headers.get("Cache-Control"), "no-store")
+        accepted_body = accepted.get_json()
+        if not accepted_body["complete"]:
+            self.client.post("/api/edit-preview/cancel", json={
+                "session": accepted_body["session"], "preview_instance": instance,
+            })
+
+        exact_malformed = unknown_length(
+            "/api/edit-preview/clock_lava", b"{" + b" " * 1_048_575,
+        )
+        self.assertEqual(exact_malformed.status_code, 400)
+        self.assertEqual(exact_malformed.get_json(), {"error": "Preview request is invalid."})
+        self.assertEqual(exact_malformed.headers.get("Cache-Control"), "no-store")
+
+        oversized_control = b"{" + b" " * 1_048_576
+        for path in ("/api/edit-preview/page", "/api/edit-preview/cancel"):
+            with self.subTest(path=path):
+                response = unknown_length(path, oversized_control)
+                self.assertEqual(response.status_code, 413, response.get_data(as_text=True))
+                self.assertEqual(response.get_json(), {"error": "Preview request exceeds 1 MiB."})
+                self.assertEqual(response.headers.get("Cache-Control"), "no-store")
+
     def test_preview_services_restart_after_close_and_failed_init(self):
         """Process preview services restart atomically without leaking stale work."""
         from contextlib import contextmanager
