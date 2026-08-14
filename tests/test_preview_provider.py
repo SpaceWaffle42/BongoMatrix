@@ -17,6 +17,12 @@ def provider_blocked_during_connect(settings, _credentials, _timeout):
     time.sleep(60.0)
 
 
+def provider_blocked_during_response_read(settings, _credentials, _timeout):
+    settings["connect_completed"].set()
+    settings["response_read_started"].set()
+    settings["response_reader"].recv_bytes()
+
+
 class PreviewProviderTests(unittest.TestCase):
     def test_cancel_before_dns_starts_no_child(self):
         cancellation = threading.Event()
@@ -119,4 +125,79 @@ class PreviewProviderTests(unittest.TestCase):
             self.assertEqual(set(os.listdir("/proc/self/fd")), descriptors_before)
         finally:
             cancellation.set()
+            prepare_thread.join(1.0)
+
+    def test_cancel_during_response_read_terminates_child_within_250_ms(self):
+        context = multiprocessing.get_context("spawn")
+        connect_completed = context.Event()
+        response_read_started = context.Event()
+        cancellation = threading.Event()
+        provider = PreviewProvider()
+        children_before = {child.pid for child in multiprocessing.active_children()}
+        threads_before = {thread.ident for thread in threading.enumerate()}
+        descriptors_before = set(os.listdir("/proc/self/fd"))
+        response_reader, response_writer = context.Pipe(duplex=False)
+        outcome = {}
+
+        def prepare():
+            try:
+                provider.prepare(
+                    provider_blocked_during_response_read,
+                    settings={
+                        "location": "blocked-during-response-read",
+                        "connect_completed": connect_completed,
+                        "response_read_started": response_read_started,
+                        "response_reader": response_reader,
+                    },
+                    credentials={"api_key": "server-held"},
+                    cancel_event=cancellation,
+                    request_deadline=3.0,
+                )
+            except BaseException as error:
+                outcome["error"] = error
+
+        prepare_thread = threading.Thread(target=prepare)
+        prepare_thread.start()
+        try:
+            if not response_read_started.wait(2.0):
+                if "error" in outcome:
+                    raise outcome["error"]
+                self.fail("provider never entered response read")
+            self.assertTrue(connect_completed.is_set())
+            self.assertEqual(provider.active_child_count, 1)
+            self.assertEqual(provider.active_worker_count, 1)
+            self.assertEqual(provider.available_worker_slots, 1)
+
+            response_reader.close()
+            cancelled_at = time.monotonic()
+            cancellation.set()
+            prepare_thread.join(1.0)
+            cancellation_latency = time.monotonic() - cancelled_at
+            response_writer.close()
+
+            self.assertFalse(prepare_thread.is_alive(), "prepare did not settle")
+            self.assertLessEqual(cancellation_latency, 0.250)
+            self.assertIsInstance(outcome.get("error"), PreviewProviderCancelled)
+            self.assertEqual(
+                str(outcome["error"]),
+                "preview provider preparation cancelled",
+            )
+            self.assertTrue(response_reader.closed)
+            self.assertTrue(response_writer.closed)
+            self.assertEqual(provider.active_child_count, 0)
+            self.assertEqual(provider.active_worker_count, 0)
+            self.assertEqual(provider.available_worker_slots, 2)
+            self.assertEqual(
+                {child.pid for child in multiprocessing.active_children()},
+                children_before,
+            )
+            self.assertEqual(
+                {thread.ident for thread in threading.enumerate()},
+                threads_before,
+            )
+            self.assertEqual(set(os.listdir("/proc/self/fd")), descriptors_before)
+        finally:
+            cancellation.set()
+            response_reader.close()
+            response_writer.close()
             prepare_thread.join(1.0)
