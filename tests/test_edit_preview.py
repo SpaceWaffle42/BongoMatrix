@@ -1187,6 +1187,201 @@ class EditPreviewTests(unittest.TestCase):
         self.assertEqual(registry.total_count, 0)
         self.assertEqual(registry.counts_by_device, {})
 
+    def test_abandoned_session_expires_without_another_api_request(self):
+        class Clock:
+            def __init__(self):
+                self.now = 100.0
+                self.capacity = None
+
+            def monotonic(self):
+                return self.now
+
+            def wake(self):
+                if self.capacity is None:
+                    raise AssertionError("clock capacity was not connected")
+                with self.capacity._condition:
+                    self.capacity._condition.notify_all()
+
+            def advance(self, seconds):
+                self.now += seconds
+                # Advancing the injected monotonic clock is the test's only wake;
+                # no page/reap/cancel/close call drives expiry.
+                self.wake()
+
+        class CloseCountingIterator:
+            def __init__(self, iterator):
+                self.iterator = iterator
+                self.next_calls = 0
+                self.close_calls = 0
+                self.close_started = threading.Event()
+                self.release_close = threading.Event()
+
+            def __iter__(self):
+                return self
+
+            def __next__(self):
+                self.next_calls += 1
+                return next(self.iterator)
+
+            def close(self):
+                self.close_calls += 1
+                self.close_started.set()
+                if not self.release_close.wait(2):
+                    raise AssertionError("abandoned iterator close was not released")
+                self.iterator.close()
+
+        candidate = copy.deepcopy(DEFAULT_CONFIG)
+        candidate["lava"].update({
+            "show_time": False, "show_date": False, "blur_radius": 0,
+            "blob_count": 2,
+        })
+        clock = Clock()
+        capacity = edit_preview.PreviewSessionCapacity(monotonic=clock.monotonic)
+        clock.capacity = capacity
+        reapers_before = [
+            thread for thread in threading.enumerate()
+            if thread.name == "edit-preview-expiry-reaper"
+        ]
+        registry = edit_preview.PreviewInstanceRegistry(capacity=capacity)
+        abandoned_stop = threading.Event()
+        control_stop = threading.Event()
+        lava = edit_preview.continuous_lava_preview_frames(
+            CaptureMatrix(), candidate,
+            {"kind": "built_in", "id": "fire_burst"},
+            stop_event=abandoned_stop,
+        )
+        iterator = CloseCountingIterator(lava)
+        waiter_factory_calls = []
+        waiter_result = []
+        waiter_failures = []
+        waiter_thread = None
+
+        try:
+            abandoned_instance = registry.register(
+                "abandoned-device", lambda: iterator, stop_event=abandoned_stop,
+            )
+            control_instance = registry.register(
+                "control-device", lambda: iter((
+                    {"png": "control-1", "delay_ms": 1},
+                    {"png": "control-2", "delay_ms": 1},
+                    {"png": "control-3", "delay_ms": 1},
+                )), stop_event=control_stop,
+            )
+            waiter_instance = registry.register(
+                "waiting-device",
+                lambda: waiter_factory_calls.append(True) or iter((
+                    {"png": "waiting", "delay_ms": 1},
+                )),
+            )
+            abandoned_session = abandoned_instance.admit()
+            control_session = control_instance.admit()
+            abandoned_session.MAX_FRAMES = control_session.MAX_FRAMES = 1
+            abandoned_page = abandoned_session.page()
+            stale_token = abandoned_page["next_token"]
+            control_page = control_session.page()
+            self.assertFalse(abandoned_page["complete"])
+            self.assertEqual(abandoned_session.retained_frame_count, 1)
+            self.assertIsNotNone(stale_token)
+
+            named_reapers = [
+                thread for thread in threading.enumerate()
+                if thread.name == "edit-preview-expiry-reaper"
+                and thread not in reapers_before
+            ]
+            self.assertEqual(named_reapers, [registry._reaper])
+            self.assertTrue(registry.reaper_is_daemon)
+            self.assertFalse(any(
+                thread.name.startswith("edit-preview-session-")
+                for thread in threading.enumerate()
+            ))
+
+            clock.advance(capacity.IDLE_TTL - 1)
+            control_page = control_session.page(control_page["next_token"])
+
+            def wait_for_slot():
+                try:
+                    waiter_result.append(waiter_instance.admit())
+                except BaseException as error:
+                    waiter_failures.append(error)
+
+            waiter_thread = threading.Thread(
+                target=wait_for_slot, name="abandoned-expiry-slot-waiter",
+            )
+            waiter_thread.start()
+            deadline = time.monotonic() + 1
+            while capacity.waiting_count != 1 and time.monotonic() < deadline:
+                time.sleep(0.001)
+            self.assertEqual(capacity.waiting_count, 1)
+
+            # The documented contract is strictly after 60 seconds.  Activity on
+            # the control session above must also move its nearest deadline.
+            clock.advance(1)
+            time.sleep(0.01)
+            self.assertEqual(abandoned_session.state, "ACTIVE")
+            self.assertFalse(abandoned_stop.is_set())
+            self.assertTrue(waiter_thread.is_alive())
+            self.assertFalse(control_stop.is_set())
+
+            clock.advance(0.001)
+            self.assertTrue(iterator.close_started.wait(0.25))
+            self.assertEqual(abandoned_session.state, "CLOSING")
+            self.assertEqual(abandoned_instance.state, "CLOSING")
+            self.assertTrue(abandoned_stop.is_set())
+            self.assertIsNone(abandoned_session._token)
+            self.assertEqual(abandoned_session.retained_frame_count, 0)
+            self.assertEqual(iterator.close_calls, 1)
+            self.assertTrue(waiter_thread.is_alive())
+            clock.wake()
+            time.sleep(0.01)
+            self.assertEqual(iterator.close_calls, 1)
+            iterator.release_close.set()
+            expiry_deadline = time.monotonic() + 0.25
+            while abandoned_session.state != "CLOSED" and time.monotonic() < expiry_deadline:
+                time.sleep(0.001)
+            waiter_thread.join(0.25)
+
+            self.assertEqual(abandoned_session.state, "CLOSED")
+            self.assertEqual(abandoned_instance.state, "CLOSED")
+            self.assertEqual(iterator.close_calls, 1)
+            self.assertIsNone(getattr(lava, "gi_frame"))
+            self.assertFalse(waiter_thread.is_alive())
+            self.assertEqual(waiter_failures, [])
+            self.assertEqual(len(waiter_result), 1)
+            self.assertEqual(waiter_factory_calls, [True])
+            self.assertEqual(capacity.active_count, 2)
+            self.assertEqual(capacity.waiting_count, 0)
+            self.assertEqual(registry.total_count, 2)
+            self.assertEqual(registry.counts_by_device, {
+                "control-device": 1, "waiting-device": 1,
+            })
+            self.assertFalse(control_stop.is_set())
+
+            with self.assertRaisesRegex(
+                StopIteration, "explicit new session is required to restart",
+            ):
+                abandoned_session.page(stale_token)
+            calls_after_expiry = iterator.next_calls
+            clock.advance(1)
+            time.sleep(0.01)
+            self.assertEqual(iterator.next_calls, calls_after_expiry)
+            self.assertEqual(iterator.close_calls, 1)
+        finally:
+            iterator.release_close.set()
+            registry.close()
+            if waiter_thread is not None:
+                waiter_thread.join(1)
+
+        registry.close()
+        self.assertEqual(registry.lifecycle_state, "CLOSED")
+        self.assertFalse(registry.reaper_alive)
+        self.assertEqual(registry.reaper_join_count, 1)
+        self.assertEqual(capacity.active_count, 0)
+        self.assertEqual(capacity.available_slots, 2)
+        self.assertEqual(capacity.waiting_count, 0)
+        self.assertEqual(registry.total_count, 0)
+        self.assertEqual(registry.counts_by_device, {})
+        self.assertNotIn(registry._reaper, threading.enumerate())
+
     def test_expired_session_closes_iterator_and_releases_slot(self):
         class Clock:
             now = 100.0
