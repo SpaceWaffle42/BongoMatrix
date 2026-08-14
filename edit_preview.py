@@ -386,12 +386,38 @@ class PreviewInstanceRegistry:
 
     def __init__(self, *, capacity=None):
         self._capacity = capacity or PreviewSessionCapacity()
-        self._lock = threading.Lock()
+        self._lock = threading.Condition()
         self._instances = {}
         self._device_counts = {}
         self._generations = {}
         self._closed = False
+        self._lifecycle_state = "ACTIVE"
         self._shutdown = threading.Event()
+        self._reaper_join_count = 0
+        self._reaper = threading.Thread(
+            target=self._capacity.run_expiry_reaper,
+            name="edit-preview-expiry-reaper",
+            daemon=True,
+        )
+        self._reaper.start()
+
+    @property
+    def lifecycle_state(self):
+        with self._lock:
+            return self._lifecycle_state
+
+    @property
+    def reaper_alive(self):
+        return self._reaper.is_alive()
+
+    @property
+    def reaper_is_daemon(self):
+        return self._reaper.daemon
+
+    @property
+    def reaper_join_count(self):
+        with self._lock:
+            return self._reaper_join_count
 
     @property
     def total_count(self):
@@ -462,12 +488,18 @@ class PreviewInstanceRegistry:
                 self._device_counts[device_identity] = remaining
             else:
                 del self._device_counts[device_identity]
+            self._lock.notify_all()
 
     def close(self):
         """Reject new work and close every registered preview resource once."""
         with self._lock:
-            if self._closed:
+            if self._lifecycle_state == "CLOSED":
                 return
+            if self._lifecycle_state == "CLOSING":
+                while self._lifecycle_state != "CLOSED":
+                    self._lock.wait()
+                return
+            self._lifecycle_state = "CLOSING"
             self._closed = True
             self._shutdown.set()
             instances = [instance for _device, instance in self._instances.values()]
@@ -476,6 +508,19 @@ class PreviewInstanceRegistry:
         self._capacity.close()
         for instance in instances:
             instance.close()
+        with self._lock:
+            while self._instances:
+                self._lock.wait()
+
+        # The capacity condition is already awake.  Join only after active page
+        # callbacks have released registry/session ownership.
+        self._reaper.join(0.25)
+        if self._reaper.is_alive():
+            raise RuntimeError("preview expiry reaper did not stop within 250 ms")
+        with self._lock:
+            self._reaper_join_count += 1
+            self._lifecycle_state = "CLOSED"
+            self._lock.notify_all()
 
 
 class PreviewInstance:
@@ -623,6 +668,7 @@ class PreviewSessionCapacity:
         with self._condition:
             self._sessions[session] = self._monotonic()
             closed = self._closed
+            self._condition.notify_all()
         if closed:
             session.cancel()
             raise RuntimeError("preview session capacity is closed")
@@ -638,6 +684,34 @@ class PreviewSessionCapacity:
             self._condition.notify_all()
         for session in sessions:
             session.cancel()
+
+    def run_expiry_reaper(self):
+        """Expire idle sessions from one interruptible daemon per registry."""
+        while True:
+            now = self._monotonic()
+            with self._condition:
+                if self._closed:
+                    return
+                expired = [
+                    session for session, last_activity in self._sessions.items()
+                    if session.state == "ACTIVE"
+                    and now - last_activity > self.IDLE_TTL
+                ]
+                if expired:
+                    timeout = 0
+                else:
+                    deadlines = [
+                        last_activity + self.IDLE_TTL
+                        for session, last_activity in self._sessions.items()
+                        if session.state == "ACTIVE"
+                    ]
+                    timeout = None if not deadlines else max(
+                        0.000001, min(deadlines) - now,
+                    )
+                    self._condition.wait(timeout)
+                    continue
+            for session in expired:
+                session.cancel()
 
     def reap_expired(self):
         """Synchronously expire sessions idle for more than the 60-second TTL."""
@@ -656,6 +730,7 @@ class PreviewSessionCapacity:
         with self._condition:
             if session in self._sessions and session.state == "ACTIVE":
                 self._sessions[session] = self._monotonic()
+                self._condition.notify_all()
 
     def _release(self, session):
         with self._condition:

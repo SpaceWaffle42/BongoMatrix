@@ -872,6 +872,136 @@ class EditPreviewTests(unittest.TestCase):
         self.assertEqual(capacity.active_count, 0)
         self.assertEqual(registry.total_count, 0)
 
+    def test_close_during_page_is_idempotent_and_joins_reaper(self):
+        class CommitBarrierIterator:
+            def __init__(self):
+                self.calls = 0
+                self.active = False
+                self.blocked = threading.Event()
+                self.release = threading.Event()
+                self.close_calls = 0
+                self.concurrent_close_calls = 0
+
+            def __iter__(self):
+                return self
+
+            def __next__(self):
+                self.calls += 1
+                self.active = True
+                try:
+                    if self.calls == 3:
+                        self.blocked.set()
+                        if not self.release.wait(2):
+                            raise AssertionError("close-during-page barrier was not released")
+                    return {"png": f"frame-{self.calls}", "delay_ms": 1}
+                finally:
+                    self.active = False
+
+            def close(self):
+                if self.active:
+                    self.concurrent_close_calls += 1
+                    raise ValueError("iterator closed while executing")
+                self.close_calls += 1
+
+        capacity = edit_preview.PreviewSessionCapacity()
+        registry = edit_preview.PreviewInstanceRegistry(capacity=capacity)
+        stop_event = threading.Event()
+        iterator = CommitBarrierIterator()
+        instance = registry.register(
+            "paired-device", lambda: iterator, stop_event=stop_event,
+        )
+        session = instance.admit()
+        session.MAX_FRAMES = 1
+        first = session.page()
+        stale_token = first["next_token"]
+        page_result = {}
+        page_failures = []
+        close_failures = []
+
+        def page():
+            try:
+                page_result.update(session.page(stale_token))
+            except BaseException as error:
+                page_failures.append(error)
+
+        def close_registry():
+            try:
+                registry.close()
+            except BaseException as error:
+                close_failures.append(error)
+
+        page_thread = threading.Thread(target=page, name="close-active-preview-page")
+        close_threads = [
+            threading.Thread(target=close_registry, name=f"preview-close-{index}")
+            for index in range(3)
+        ]
+        page_thread.start()
+        self.assertTrue(iterator.blocked.wait(1), "page did not reach commit barrier")
+        for thread in close_threads:
+            thread.start()
+        try:
+            deadline = time.monotonic() + 1
+            while not stop_event.is_set() and time.monotonic() < deadline:
+                time.sleep(0.001)
+            self.assertTrue(stop_event.is_set())
+            self.assertEqual(registry.lifecycle_state, "CLOSING")
+            self.assertEqual(session.state, "CLOSING")
+            self.assertTrue(registry.reaper_is_daemon)
+            self.assertEqual(registry.reaper_join_count, 0)
+            self.assertTrue(all(thread.is_alive() for thread in close_threads))
+            self.assertEqual(iterator.close_calls, 0)
+            self.assertEqual(iterator.concurrent_close_calls, 0)
+            self.assertEqual(capacity.active_count, 1)
+            self.assertEqual(registry.total_count, 1)
+        finally:
+            settled_started = time.monotonic()
+            iterator.release.set()
+            page_thread.join(0.25)
+            for thread in close_threads:
+                thread.join(0.25)
+            settled_elapsed = time.monotonic() - settled_started
+            if page_thread.is_alive() or any(thread.is_alive() for thread in close_threads):
+                session.cancel()
+                iterator.release.set()
+                page_thread.join(1)
+                for thread in close_threads:
+                    thread.join(1)
+
+        self.assertLess(settled_elapsed, 0.25)
+        self.assertFalse(page_thread.is_alive())
+        self.assertTrue(all(not thread.is_alive() for thread in close_threads))
+        self.assertEqual(page_failures, [])
+        self.assertEqual(close_failures, [])
+        self.assertEqual(page_result, {
+            "page": 1, "frames": [], "next_token": None, "complete": True,
+        })
+        self.assertEqual(iterator.concurrent_close_calls, 0)
+        self.assertEqual(iterator.close_calls, 1)
+        self.assertEqual(registry.lifecycle_state, "CLOSED")
+        self.assertFalse(registry.reaper_alive)
+        self.assertEqual(registry.reaper_join_count, 1)
+        self.assertEqual(session.state, "CLOSED")
+        self.assertEqual(session.retained_frame_count, 0)
+        self.assertEqual(capacity.active_count, 0)
+        self.assertEqual(capacity.waiting_count, 0)
+        self.assertEqual(registry.total_count, 0)
+        self.assertEqual(registry.counts_by_device, {})
+
+        registry.close()
+        registry.close()
+        instance.close()
+        session.cancel()
+        self.assertEqual(registry.reaper_join_count, 1)
+        self.assertEqual(iterator.close_calls, 1)
+        with self.assertRaisesRegex(RuntimeError, "preview registry is closed"):
+            registry.register("late-device", lambda: iter(()))
+        with self.assertRaisesRegex(RuntimeError, "preview instance is closed"):
+            instance.admit()
+        with self.assertRaisesRegex(
+            StopIteration, "explicit new session is required to restart",
+        ):
+            session.page(stale_token)
+
     def test_expiry_during_page_marks_closing_and_releases_after_page_returns(self):
         class Clock:
             now = 100.0
@@ -972,6 +1102,13 @@ class EditPreviewTests(unittest.TestCase):
         waiter_thread = threading.Thread(target=wait_for_slot, name="expiry-slot-waiter")
         page_thread.start()
         self.assertTrue(iterator.commit_barrier.wait(1))
+        clock.now += capacity.IDLE_TTL + 0.001
+        control_second = control_session.page(control_first["next_token"])
+        control_calls_before_reap = control_second["frames"]
+        expiry_deadline = time.monotonic() + 0.25
+        while expired_session.state == "ACTIVE" and time.monotonic() < expiry_deadline:
+            time.sleep(0.001)
+        self.assertEqual(expired_session.state, "CLOSING")
         waiter_thread.start()
         deadline = time.monotonic() + 1
         while capacity.waiting_count != 1 and time.monotonic() < deadline:
@@ -979,11 +1116,8 @@ class EditPreviewTests(unittest.TestCase):
 
         try:
             self.assertEqual(capacity.waiting_count, 1)
-            clock.now += capacity.IDLE_TTL + 0.001
-            control_second = control_session.page(control_first["next_token"])
-            control_calls_before_reap = control_second["frames"]
             reaped_started = time.monotonic()
-            self.assertEqual(capacity.reap_expired(), 1)
+            self.assertEqual(capacity.reap_expired(), 0)
             reaped_elapsed = time.monotonic() - reaped_started
             self.assertLess(reaped_elapsed, 0.25)
             self.assertEqual(expired_session.state, "CLOSING")
