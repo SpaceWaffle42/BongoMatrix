@@ -2,12 +2,15 @@
 
 from __future__ import annotations
 
+import argparse
 import hashlib
 import json
 import os
 import re
 import secrets
 import stat
+import subprocess
+import sys
 from collections.abc import Callable
 from pathlib import Path, PurePosixPath
 from typing import NoReturn, Protocol
@@ -757,3 +760,312 @@ def deploy_release(
                     raise ReleaseManifestError(
                         f"service recovery failed; run: {instructions}"
                     ) from error
+
+
+def _dry_run_lines(
+    release_manifest: dict[str, object], backup_manifest: dict[str, object]
+) -> list[str]:
+    """Return deterministic, manifest-ordered preflight/action output."""
+
+    release_entries = release_manifest.get("files")
+    backup_entries = backup_manifest.get("files")
+    if not isinstance(release_entries, list) or not isinstance(backup_entries, list):
+        _reject("validated manifest scope is unavailable")
+    lines: list[str] = []
+    for release_entry, backup_entry in zip(
+        release_entries, backup_entries, strict=True
+    ):
+        if not isinstance(release_entry, dict) or not isinstance(backup_entry, dict):
+            _reject("validated manifest record is unavailable")
+        relative_path = _validate_relative_path(release_entry.get("path"))
+        present = backup_entry.get("present_before")
+        if type(present) is not bool or backup_entry.get("path") != relative_path:
+            _reject("validated manifest scopes do not match")
+        preflight = (
+            f"PREFLIGHT path={relative_path} "
+            f"source_sha256={release_entry['sha256']} "
+            f"present_before={'true' if present else 'false'}"
+        )
+        if present:
+            preflight += f" backup_sha256={backup_entry['sha256']}"
+        lines.append(preflight)
+        lines.append(
+            f"DEPLOY path={relative_path} sha256={release_entry['sha256']} "
+            f"uid={release_entry['uid']} gid={release_entry['gid']} "
+            f"mode={release_entry['mode']}"
+        )
+        if present:
+            lines.append(
+                f"ROLLBACK path={relative_path} action=restore "
+                f"present_before=true sha256={backup_entry['sha256']} "
+                f"uid={backup_entry['uid']} gid={backup_entry['gid']} "
+                f"mode={backup_entry['mode']}"
+            )
+        else:
+            lines.append(
+                f"ROLLBACK path={relative_path} action=delete present_before=false"
+            )
+    return lines
+
+
+class _SystemdServiceControl:
+    def __init__(self, name: str):
+        self.name = _validate_service_name(name)
+
+    def _run(self, *arguments: str, check: bool = True) -> subprocess.CompletedProcess[str]:
+        return subprocess.run(
+            ("systemctl", *arguments, self.name),
+            check=check,
+            text=True,
+            capture_output=True,
+        )
+
+    def is_active(self) -> bool:
+        result = self._run("is-active", "--quiet", check=False)
+        if result.returncode not in (0, 3):
+            _reject("service active-state check failed")
+        return result.returncode == 0
+
+    def stop(self) -> None:
+        self._run("stop")
+
+    def daemon_reload_needed(self) -> bool:
+        return True
+
+    def daemon_reload(self) -> None:
+        subprocess.run(
+            ("systemctl", "daemon-reload"), check=True, text=True, capture_output=True
+        )
+
+    def start(self) -> None:
+        self._run("start")
+
+    def run_health_checks(self) -> None:
+        if self._run("is-active", "--quiet", check=False).returncode != 0:
+            _reject("service health check failed")
+
+    def recovery_commands(self) -> tuple[str, ...]:
+        return (
+            f"systemctl start {self.name}",
+            f"systemctl is-active --quiet {self.name}",
+        )
+
+
+class _NoServiceControl:
+    def is_active(self) -> bool:
+        return False
+
+    def stop(self) -> None:
+        return None
+
+    def daemon_reload_needed(self) -> bool:
+        return False
+
+    def daemon_reload(self) -> None:
+        return None
+
+    def start(self) -> None:
+        return None
+
+    def run_health_checks(self) -> None:
+        return None
+
+    def recovery_commands(self) -> tuple[str, ...]:
+        return ()
+
+
+def _service_control(name: str | None) -> ServiceControl:
+    return _SystemdServiceControl(name) if name is not None else _NoServiceControl()
+
+
+def _validate_service_name(name: str) -> str:
+    if not name or name.startswith("-") or any(
+        character.isspace() for character in name
+    ):
+        _reject("service name is invalid")
+    return name
+
+
+def _verify_deployed(
+    release_root: Path,
+    destination_root: Path,
+    release_manifest_path: Path,
+) -> dict[str, object]:
+    manifest = validate_release_manifest(release_root, release_manifest_path)
+    entries = manifest.get("files")
+    if not isinstance(entries, list):
+        _reject("release manifest is not validated")
+    for entry in entries:
+        if not isinstance(entry, dict):
+            _reject("release manifest is not validated")
+        relative_path = _validate_relative_path(entry.get("path"))
+        _reject_forbidden_release_path(relative_path)
+        deployed = _read_confined_regular(destination_root, relative_path, missing_ok=False)
+        if deployed is None:
+            _reject("deployed release file is missing")
+        content, metadata = deployed
+        if (
+            hashlib.sha256(content).hexdigest() != entry["sha256"]
+            or metadata.st_uid != entry["uid"]
+            or metadata.st_gid != entry["gid"]
+            or f"{stat.S_IMODE(metadata.st_mode):04o}" != entry["mode"]
+        ):
+            _reject("deployed release does not match intended bytes and metadata")
+    return manifest
+
+
+def rollback_release(
+    release_root: str | os.PathLike[str],
+    destination_root: str | os.PathLike[str],
+    bundle: str | os.PathLike[str],
+    release_manifest_path: str | os.PathLike[str],
+    backup_manifest_path: str | os.PathLike[str],
+    *,
+    service: ServiceControl,
+) -> None:
+    """Restore exactly the release scope from a previously verified bundle."""
+
+    release = Path(release_root)
+    destination = Path(destination_root)
+    bundle_path = Path(bundle)
+    release_manifest = _verify_deployed(
+        release, destination, Path(release_manifest_path)
+    )
+    backup_manifest = _load_backup_manifest(bundle_path, backup_manifest_path)
+    release_entries = release_manifest.get("files")
+    backup_entries = backup_manifest.get("files")
+    if not isinstance(release_entries, list) or not isinstance(backup_entries, list):
+        _reject("validated manifest scope is unavailable")
+    # Verify archive shape and metadata without requiring the destination's prior state.
+    if len(release_entries) != len(backup_entries):
+        _reject("backup manifest scope does not match release manifest")
+    for release_entry, backup_entry in zip(release_entries, backup_entries, strict=True):
+        if not isinstance(release_entry, dict) or not isinstance(backup_entry, dict):
+            _reject("backup file record is invalid")
+        if release_entry.get("path") != backup_entry.get("path"):
+            _reject("backup manifest scope does not match release manifest")
+        if backup_entry.get("present_before") is True:
+            archive = _read_confined_regular(
+                bundle_path, f"archive/{backup_entry['path']}", missing_ok=False
+            )
+            if archive is None or hashlib.sha256(archive[0]).hexdigest() != backup_entry.get("sha256"):
+                _reject("archived prior bytes do not match backup manifest")
+        elif backup_entry.get("present_before") is not False:
+            _reject("backup present_before must be Boolean")
+
+    initially_active = bool(service.is_active())
+    if initially_active:
+        service.stop()
+    for backup_entry in backup_entries:
+        if not isinstance(backup_entry, dict):
+            _reject("backup file record is invalid")
+        relative_path = _validate_relative_path(backup_entry["path"])
+        if backup_entry["present_before"]:
+            archive = _read_confined_regular(
+                bundle_path, f"archive/{relative_path}", missing_ok=False
+            )
+            if archive is None:
+                _reject("required rollback archive is missing")
+            _atomic_replace_confined(
+                destination, relative_path, archive[0], backup_entry["uid"],
+                backup_entry["gid"], backup_entry["mode"]
+            )
+        else:
+            _remove_confined(destination, relative_path)
+        _verify_backup_record(destination, bundle_path, backup_entry)
+    if service.daemon_reload_needed():
+        service.daemon_reload()
+    if initially_active:
+        service.start()
+        service.run_health_checks()
+
+
+def build_parser() -> argparse.ArgumentParser:
+    options = (
+        "required flags: --release-root --destination-root --bundle "
+        "--release-manifest --backup-manifest; optional: --service --dry-run"
+    )
+    parser = argparse.ArgumentParser(
+        description="Verify and apply an exact approved Matrix release bundle.",
+        epilog=options,
+    )
+    subparsers = parser.add_subparsers(dest="command", required=True)
+    for command in ("backup", "preflight", "deploy", "rollback", "verify"):
+        subparser = subparsers.add_parser(command, description=options)
+        subparser.add_argument("--release-root", required=True)
+        subparser.add_argument("--destination-root", required=True)
+        subparser.add_argument("--bundle", required=True)
+        subparser.add_argument("--release-manifest", required=True)
+        subparser.add_argument("--backup-manifest", required=True)
+        subparser.add_argument("--service")
+        subparser.add_argument("--dry-run", action="store_true")
+    return parser
+
+
+def main(argv: list[str] | None = None) -> int:
+    arguments = build_parser().parse_args(argv)
+    staged_tool = Path(__file__)
+    release_root = Path(arguments.release_root)
+    destination_root = Path(arguments.destination_root)
+    bundle = Path(arguments.bundle)
+    release_manifest_path = Path(arguments.release_manifest)
+    backup_manifest_path = Path(arguments.backup_manifest)
+    if arguments.service is not None:
+        _validate_service_name(arguments.service)
+
+    if arguments.command == "backup":
+        if arguments.dry_run:
+            _reject("backup does not support --dry-run")
+        manifest = verify_staged_release(
+            staged_tool, release_root, release_manifest_path
+        )
+        for entry in manifest["files"]:
+            _reject_forbidden_release_path(_validate_relative_path(entry["path"]))
+        create_backup_manifest(
+            destination_root, bundle, manifest, backup_manifest_path
+        )
+        return 0
+
+    if arguments.command in ("preflight", "deploy"):
+        release_manifest, backup_manifest = preflight_release(
+            staged_tool, release_root, destination_root, bundle,
+            release_manifest_path, backup_manifest_path
+        )
+        if arguments.dry_run:
+            for line in _dry_run_lines(release_manifest, backup_manifest):
+                print(line)
+            if arguments.service is not None:
+                print(f"SERVICE name={arguments.service} action=stop-if-active")
+                print(
+                    f"SERVICE name={arguments.service} "
+                    "action=start-and-health-if-initially-active"
+                )
+            return 0
+        if arguments.command == "preflight":
+            return 0
+        deploy_release(
+            staged_tool, release_root, destination_root, bundle,
+            release_manifest_path, backup_manifest_path,
+            service=_service_control(arguments.service),
+        )
+        return 0
+
+    if arguments.dry_run:
+        _reject(f"{arguments.command} does not support --dry-run")
+    if arguments.command == "rollback":
+        rollback_release(
+            release_root, destination_root, bundle, release_manifest_path,
+            backup_manifest_path, service=_service_control(arguments.service)
+        )
+        return 0
+    _verify_deployed(release_root, destination_root, release_manifest_path)
+    _load_backup_manifest(bundle, backup_manifest_path)
+    return 0
+
+
+if __name__ == "__main__":
+    try:
+        raise SystemExit(main())
+    except ReleaseManifestError as error:
+        print(f"release verification failed: {error}", file=sys.stderr)
+        raise SystemExit(2) from error

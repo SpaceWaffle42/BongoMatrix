@@ -1,9 +1,11 @@
 import hashlib
+import io
 import json
 import os
 import stat
 import tempfile
 import unittest
+from contextlib import redirect_stderr, redirect_stdout
 from pathlib import Path
 from unittest import mock
 
@@ -810,3 +812,112 @@ class ReleaseBundleTests(unittest.TestCase):
                     self.assertIn(
                         "curl --fail http://127.0.0.1:5000/health", message
                     )
+
+    def test_dry_run_changes_nothing_and_prints_exact_manifest_actions(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            release_root = root / "release"
+            destination_root = root / "destination"
+            bundle = root / "bundle"
+            release_root.mkdir()
+            destination_root.mkdir()
+            sources = {
+                "deploy/release_bundle.py": b"approved release tool bytes\n",
+                "webapp.py": b"approved application bytes\n",
+            }
+            entries = []
+            for index, (relative_path, source_bytes) in enumerate(sources.items()):
+                source = release_root / relative_path
+                source.parent.mkdir(parents=True, exist_ok=True)
+                source.write_bytes(source_bytes)
+                entries.append(
+                    {
+                        "path": relative_path,
+                        "sha256": hashlib.sha256(source_bytes).hexdigest(),
+                        "uid": os.getuid(),
+                        "gid": os.getgid(),
+                        "mode": "0600" if index == 0 else "0640",
+                    }
+                )
+            release_manifest_path = root / "release-manifest.json"
+            release_manifest_path.write_text(
+                json.dumps({"version": 1, "files": entries}), encoding="utf-8"
+            )
+            installed = destination_root / "webapp.py"
+            prior_bytes = b"installed application bytes\n"
+            installed.write_bytes(prior_bytes)
+            installed.chmod(0o644)
+            validated = validate_release_manifest(release_root, release_manifest_path)
+            backup_manifest_path = bundle / "backup-manifest.json"
+            backup_manifest = create_backup_manifest(
+                destination_root, bundle, validated, backup_manifest_path
+            )
+            staged_tool = root / "release_bundle.py"
+            staged_tool.write_bytes(sources["deploy/release_bundle.py"])
+
+            def snapshot():
+                return {
+                    path.relative_to(root).as_posix(): (
+                        path.read_bytes() if path.is_file() else None,
+                        path.lstat().st_uid,
+                        path.lstat().st_gid,
+                        stat.S_IMODE(path.lstat().st_mode),
+                        path.lstat().st_mtime_ns,
+                    )
+                    for path in root.rglob("*")
+                }
+
+            before = snapshot()
+            output = io.StringIO()
+            arguments = [
+                "deploy",
+                "--release-root", str(release_root),
+                "--destination-root", str(destination_root),
+                "--bundle", str(bundle),
+                "--release-manifest", str(release_manifest_path),
+                "--backup-manifest", str(backup_manifest_path),
+                "--service", "matrix-preview.service",
+                "--dry-run",
+            ]
+            with mock.patch.object(release_bundle, "__file__", str(staged_tool)), \
+                    mock.patch.object(
+                        release_bundle,
+                        "_service_control",
+                        side_effect=AssertionError,
+                        create=True,
+                    ), redirect_stdout(output):
+                self.assertEqual(release_bundle.main(arguments), 0)
+
+            prior = backup_manifest["files"][1]
+            self.assertEqual(
+                output.getvalue(),
+                "".join(
+                    (
+                        f"PREFLIGHT path=deploy/release_bundle.py source_sha256={entries[0]['sha256']} present_before=false\n",
+                        f"DEPLOY path=deploy/release_bundle.py sha256={entries[0]['sha256']} uid={os.getuid()} gid={os.getgid()} mode=0600\n",
+                        "ROLLBACK path=deploy/release_bundle.py action=delete present_before=false\n",
+                        f"PREFLIGHT path=webapp.py source_sha256={entries[1]['sha256']} present_before=true backup_sha256={prior['sha256']}\n",
+                        f"DEPLOY path=webapp.py sha256={entries[1]['sha256']} uid={os.getuid()} gid={os.getgid()} mode=0640\n",
+                        f"ROLLBACK path=webapp.py action=restore present_before=true sha256={prior['sha256']} uid={prior['uid']} gid={prior['gid']} mode={prior['mode']}\n",
+                        "SERVICE name=matrix-preview.service action=stop-if-active\n",
+                        "SERVICE name=matrix-preview.service action=start-and-health-if-initially-active\n",
+                    )
+                ),
+            )
+            self.assertEqual(snapshot(), before)
+
+            parser = release_bundle.build_parser()
+            help_output = parser.format_help()
+            for command in ("backup", "preflight", "deploy", "rollback", "verify"):
+                self.assertIn(command, help_output)
+            for option in (
+                "--release-root", "--destination-root", "--bundle",
+                "--release-manifest", "--backup-manifest", "--service", "--dry-run",
+            ):
+                self.assertIn(option, help_output)
+            self.assertNotIn("password", help_output.lower())
+            with redirect_stderr(io.StringIO()):
+                with self.assertRaises(SystemExit):
+                    parser.parse_args(["deploy", "--dry-run"])
+                with self.assertRaises(SystemExit):
+                    parser.parse_args(arguments + ["--unsupported"])
