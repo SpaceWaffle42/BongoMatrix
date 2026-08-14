@@ -45,6 +45,10 @@ class ServiceControl(Protocol):
 
     def start(self) -> None: ...
 
+    def run_health_checks(self) -> None: ...
+
+    def recovery_commands(self) -> tuple[str, ...]: ...
+
 
 def _reject(message: str) -> NoReturn:
     raise ReleaseManifestError(message)
@@ -685,6 +689,7 @@ def deploy_release(
         service.stop()
 
     touched: list[int] = []
+    recovery_allowed = False
     try:
         for index, entry in enumerate(release_entries):
             if not isinstance(entry, dict):
@@ -704,6 +709,7 @@ def deploy_release(
             touched.append(index)
             if after_replace is not None:
                 after_replace(relative_path)
+        recovery_allowed = True
     except BaseException:
         for index in reversed(touched):
             backup_entry = backup_entries[index]
@@ -727,9 +733,27 @@ def deploy_release(
             else:
                 _remove_confined(destination, relative_path)
             _verify_backup_record(destination, bundle_path, backup_entry)
+        recovery_allowed = True
         raise
     finally:
-        if service.daemon_reload_needed():
-            service.daemon_reload()
-        if initially_active:
-            service.start()
+        if recovery_allowed:
+            if service.daemon_reload_needed():
+                service.daemon_reload()
+            if initially_active:
+                try:
+                    service.start()
+                    health_checks = getattr(service, "run_health_checks", None)
+                    if health_checks is not None:
+                        health_checks()
+                except BaseException as error:
+                    commands_method = getattr(service, "recovery_commands", None)
+                    try:
+                        commands = tuple(commands_method()) if commands_method else ()
+                    except BaseException:
+                        commands = ()
+                    instructions = "; then run: ".join(commands)
+                    if not instructions:
+                        instructions = "start the service and run its health checks"
+                    raise ReleaseManifestError(
+                        f"service recovery failed; run: {instructions}"
+                    ) from error

@@ -662,3 +662,151 @@ class ReleaseBundleTests(unittest.TestCase):
                     if initially_active
                     else ["is-active", "daemon-reload-needed", "daemon-reload"],
                 )
+
+    def test_failed_action_runs_recovery_start_and_health_commands(self):
+        class FakeService:
+            def __init__(self, destination, *, active, fail_at=None):
+                self.destination = destination
+                self.active = active
+                self.fail_at = fail_at
+                self.calls = []
+
+            def is_active(self):
+                self.calls.append("is-active")
+                return self.active
+
+            def stop(self):
+                self.calls.append("stop")
+                self.active = False
+
+            def daemon_reload_needed(self):
+                self.calls.append("daemon-reload-needed")
+                return False
+
+            def daemon_reload(self):
+                self.calls.append("daemon-reload")
+
+            def _assert_restored(self):
+                if self.destination.read_bytes() != b"installed application bytes\n":
+                    raise AssertionError("recovery ran before rollback verification")
+
+            def start(self):
+                self.calls.append("start")
+                self._assert_restored()
+                if self.fail_at == "start":
+                    raise RuntimeError("injected start failure")
+                self.active = True
+
+            def run_health_checks(self):
+                self.calls.append("health")
+                self._assert_restored()
+                if self.fail_at == "health":
+                    raise RuntimeError("injected health failure")
+
+            def recovery_commands(self):
+                return (
+                    "systemctl start matrix-preview.service",
+                    "curl --fail http://127.0.0.1:5000/health",
+                )
+
+        for initially_active, fail_at in (
+            (True, None),
+            (False, None),
+            (True, "start"),
+            (True, "health"),
+        ):
+            with self.subTest(
+                initially_active=initially_active, fail_at=fail_at
+            ), tempfile.TemporaryDirectory() as directory:
+                root = Path(directory)
+                release_root = root / "release"
+                destination_root = root / "destination"
+                bundle = root / "bundle"
+                release_root.mkdir()
+                destination_root.mkdir()
+                (destination_root / "deploy").mkdir()
+                sources = {
+                    "deploy/release_bundle.py": b"approved release tool bytes\n",
+                    "webapp.py": b"approved application bytes\n",
+                }
+                entries = []
+                for relative_path, source_bytes in sources.items():
+                    source = release_root / relative_path
+                    source.parent.mkdir(parents=True, exist_ok=True)
+                    source.write_bytes(source_bytes)
+                    entries.append(
+                        {
+                            "path": relative_path,
+                            "sha256": hashlib.sha256(source_bytes).hexdigest(),
+                            "uid": os.getuid(),
+                            "gid": os.getgid(),
+                            "mode": "0644",
+                        }
+                    )
+                release_manifest_path = root / "release-manifest.json"
+                release_manifest = {"version": 1, "files": entries}
+                release_manifest_path.write_text(
+                    json.dumps(release_manifest), encoding="utf-8"
+                )
+                installed = destination_root / "webapp.py"
+                installed.write_bytes(b"installed application bytes\n")
+                validated = validate_release_manifest(
+                    release_root, release_manifest_path
+                )
+                backup_manifest_path = bundle / "backup-manifest.json"
+                create_backup_manifest(
+                    destination_root, bundle, validated, backup_manifest_path
+                )
+                staged_tool = root / "release_bundle.py"
+                staged_tool.write_bytes(sources["deploy/release_bundle.py"])
+                service = FakeService(
+                    installed, active=initially_active, fail_at=fail_at
+                )
+
+                def fail_action(relative_path):
+                    if relative_path == "webapp.py":
+                        raise RuntimeError("injected deploy failure")
+
+                if fail_at is None:
+                    expected_error = RuntimeError
+                    expected_message = "injected deploy failure"
+                else:
+                    expected_error = ReleaseManifestError
+                    expected_message = "service recovery failed"
+                with self.assertRaisesRegex(expected_error, expected_message) as raised:
+                    release_bundle.deploy_release(
+                        staged_tool,
+                        release_root,
+                        destination_root,
+                        bundle,
+                        release_manifest_path,
+                        backup_manifest_path,
+                        service=service,
+                        after_replace=fail_action,
+                    )
+
+                self.assertEqual(
+                    installed.read_bytes(), b"installed application bytes\n"
+                )
+                if initially_active:
+                    self.assertEqual(
+                        service.calls,
+                        [
+                            "is-active",
+                            "stop",
+                            "daemon-reload-needed",
+                            "start",
+                        ]
+                        + ([] if fail_at == "start" else ["health"]),
+                    )
+                else:
+                    self.assertEqual(
+                        service.calls, ["is-active", "daemon-reload-needed"]
+                    )
+                self.assertEqual(service.active, initially_active and fail_at != "start")
+                if fail_at is not None:
+                    message = str(raised.exception)
+                    self.assertIn("systemctl start matrix-preview.service", message)
+                    self.assertIn(
+                        "curl --fail http://127.0.0.1:5000/health", message
+                    )
