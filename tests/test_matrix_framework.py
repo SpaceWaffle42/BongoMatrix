@@ -17,7 +17,12 @@ fake_pil = types.SimpleNamespace(Image=fake_image, ImageDraw=Mock(), ImageSequen
 previous_modules = {name: sys.modules.get(name) for name in ("rgbmatrix", "PIL")}
 sys.modules["rgbmatrix"] = fake_rgb
 sys.modules["PIL"] = fake_pil
+previous_framework = sys.modules.pop("matrix_framework", None)
 framework = importlib.import_module("matrix_framework")
+if previous_framework is None:
+    sys.modules.pop("matrix_framework", None)
+else:
+    sys.modules["matrix_framework"] = previous_framework
 for name, previous in previous_modules.items():
     if previous is None:
         sys.modules.pop(name, None)
@@ -29,7 +34,10 @@ Matrix = framework.Matrix
 
 class MatrixFrameworkTests(unittest.TestCase):
     def test_colour_rgb_accepts_html_hex_values(self):
-        with patch("matrix_framework.graphics.Color", side_effect=lambda red, green, blue: (red, green, blue)):
+        with patch.object(
+            framework.graphics, "Color",
+            side_effect=lambda red, green, blue: (red, green, blue),
+        ):
             self.assertEqual(Matrix.colour_rgb("#1aB2ff"), (26, 178, 255))
         with self.assertRaises(ValueError):
             Matrix.colour_rgb("red")
@@ -827,7 +835,7 @@ class MatrixFrameworkTests(unittest.TestCase):
         matrix._frame_capture = Mock()
         matrix._capture_fonts = {id(font): "capture-font"}
 
-        with patch("matrix_framework.graphics.DrawText", return_value=18, create=True):
+        with patch.object(framework.graphics, "DrawText", return_value=18, create=True):
             position, width = matrix.widget_scroll(
                 "Brighton | Clear sky", font, 30, 31, colour, canvas=canvas
             )
@@ -846,7 +854,7 @@ class MatrixFrameworkTests(unittest.TestCase):
         matrix._frame_capture = Mock()
         matrix._capture_fonts = {id(font): "capture-font"}
 
-        with patch("matrix_framework.graphics.DrawText", return_value=18, create=True):
+        with patch.object(framework.graphics, "DrawText", return_value=18, create=True):
             position, width = matrix.widget_scroll(
                 "Weather", font, 65, 31, colour, canvas=canvas, step=-1, wrap=True
             )
