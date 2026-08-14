@@ -766,7 +766,10 @@ class Matrix:
                     remember_cleanup_error(error)
 
             if process is not None:
-                assert reaper_queue is not None
+                if reaper_queue is None:
+                    remember_cleanup_error(
+                        RuntimeError("decoder process has no reaping owner")
+                    )
                 running = False
                 try:
                     running = process.poll() is None
@@ -986,7 +989,10 @@ class Matrix:
                         remember_cleanup_error(error)
 
                 if process is not None:
-                    assert reaper_queue is not None
+                    if reaper_queue is None:
+                        remember_cleanup_error(
+                            RuntimeError("decoder process has no reaping owner")
+                        )
                     running = False
                     try:
                         running = process.poll() is None

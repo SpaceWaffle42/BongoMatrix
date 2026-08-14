@@ -252,7 +252,8 @@ def _canvas_media_cache(matrix, stop_event, module_config, pinned_handles=None):
     )
     sorted_media_sources = sorted(media_sources)
     for index, source in enumerate(sorted_media_sources):
-        assert prepare_deadline is not None
+        if prepare_deadline is None:
+            raise RuntimeError("canvas media preparation deadline is unavailable")
         if stop_event is not None and stop_event.is_set() is True:
             return None
         remaining = prepare_deadline - time.monotonic()
