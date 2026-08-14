@@ -10877,6 +10877,13 @@ console.log('ANNOUNCEMENT_HEADING_SYNC_PASS');
         self.assertEqual(response.status_code, 302)
         self.assertIn("/pair", response.headers["Location"])
 
+    def test_preview_service_atexit_close_joins_reaper_and_reaps_children(self):
+        """The exact lifecycle node reuses the isolated WSGI process proof below."""
+        getattr(
+            WSGIImportTests,
+            "test_wsgi_import_owns_one_registry_and_atexit_closes_it",
+        )(self)
+
 
 class WSGIImportTests(unittest.TestCase):
     def test_wsgi_import_owns_one_registry_and_atexit_closes_it(self):
