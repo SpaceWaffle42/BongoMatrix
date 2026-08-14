@@ -10878,5 +10878,239 @@ console.log('ANNOUNCEMENT_HEADING_SYNC_PASS');
         self.assertIn("/pair", response.headers["Location"])
 
 
+class WSGIImportTests(unittest.TestCase):
+    def test_wsgi_import_owns_one_registry_and_atexit_closes_it(self):
+        script = r'''
+import atexit
+import importlib
+import json
+import multiprocessing
+import os
+from pathlib import Path
+import shutil
+import subprocess
+import sys
+import tempfile
+import threading
+import types
+from unittest.mock import patch
+
+root = Path(sys.argv[1])
+registered = []
+atexit.register = lambda callback, *args, **kwargs: registered.append(callback) or callback
+
+# Importing the reusable factory is not a process-entrypoint side effect.
+import webapp
+real_create_app = webapp.create_app
+
+class Passive:
+    def __init__(self, *args, **kwargs):
+        self.path = kwargs.get("path")
+
+class FakeController(Passive):
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.stop_calls = 0
+        self.method_calls = []
+
+    def stop(self):
+        self.stop_calls += 1
+
+class FakeLock(Passive):
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.acquire_calls = 0
+        self.release_calls = 0
+
+    def acquire(self):
+        self.acquire_calls += 1
+
+    def release(self):
+        self.release_calls += 1
+
+class FakePairing(Passive):
+    pass
+
+class FakeDeviceStore(Passive):
+    def any_devices(self):
+        return True
+
+registries = []
+providers = []
+
+class TrackedRegistry:
+    def __init__(self):
+        self.is_closed = False
+        self.close_calls = 0
+        self.stop = threading.Event()
+        self.read_fd, self.write_fd = os.pipe()
+        self.reaper = threading.Thread(
+            target=self.stop.wait, name="tracked-preview-reaper", daemon=True,
+        )
+        self.reaper.start()
+        registries.append(self)
+
+    @property
+    def reaper_alive(self):
+        return self.reaper.is_alive()
+
+    def close(self):
+        if self.is_closed:
+            return
+        self.is_closed = True
+        self.close_calls += 1
+        self.stop.set()
+        self.reaper.join(1)
+        os.close(self.read_fd)
+        os.close(self.write_fd)
+
+class TrackedProvider:
+    def __init__(self):
+        self.is_closed = False
+        self.close_calls = 0
+        self.stop = threading.Event()
+        self.read_fd, self.write_fd = os.pipe()
+        self.worker = threading.Thread(
+            target=self.stop.wait, name="tracked-preview-worker", daemon=True,
+        )
+        self.worker.start()
+        self.child = subprocess.Popen(
+            [sys.executable, "-c", "import time; time.sleep(30)"],
+            stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL, close_fds=True,
+        )
+        providers.append(self)
+
+    def shutdown(self):
+        if self.is_closed:
+            return
+        self.is_closed = True
+        self.close_calls += 1
+        self.stop.set()
+        self.worker.join(1)
+        self.child.terminate()
+        self.child.wait(timeout=1)
+        os.close(self.read_fd)
+        os.close(self.write_fd)
+
+create_calls = []
+
+with tempfile.TemporaryDirectory() as temp:
+    temp = Path(temp)
+    package = temp / "app"
+    package.mkdir()
+    shutil.copy2(root / "app" / "__init__.py", package / "__init__.py")
+    shutil.copy2(root / "app" / "wsgi.py", package / "wsgi.py")
+
+    def tracked_create_app(*args, **kwargs):
+        create_calls.append((args, kwargs))
+        return real_create_app(
+            FakeController(), Passive(), FakePairing(), secret_key="test",
+            session_generation="wsgi-test", media_dir=temp / "media",
+            location_search=lambda query: [], device_store=FakeDeviceStore(),
+            openweather_secrets=Passive(),
+        )
+
+    # Calling create_app in a test/import context must not own process cleanup.
+    standalone = tracked_create_app()
+    create_calls.clear()
+    assert "edit_preview_registry" not in standalone.extensions
+    assert standalone.extensions["close_edit_preview_services"] not in registered
+
+    fake_modules = {}
+    for name, attributes in {
+        "config_store": {"ConfigStore": Passive},
+        "display_controller": {"DisplayController": FakeController},
+        "hardware_lock": {"DisplayOwnershipLock": FakeLock},
+        "matrix_framework": {"Matrix": Passive},
+        "pairing": {
+            "PairedDeviceStore": FakeDeviceStore,
+            "PairingManager": FakePairing,
+            "initialize_pairing_display": lambda *args: None,
+        },
+        "secret_store": {"SecretStore": Passive},
+    }.items():
+        module = types.ModuleType(name)
+        for attribute, value in attributes.items():
+            setattr(module, attribute, value)
+        fake_modules[name] = module
+
+    with patch.dict(sys.modules, fake_modules), \
+         patch.object(webapp, "create_app", tracked_create_app), \
+         patch.object(webapp, "PreviewInstanceRegistry", TrackedRegistry), \
+         patch.object(webapp, "PreviewProvider", TrackedProvider):
+        sys.path.insert(0, str(temp))
+        entry = importlib.import_module("app.wsgi")
+        sys.path.insert(0, str(package))
+        alias = importlib.import_module("wsgi")
+        importlib.reload(entry)
+        importlib.reload(alias)
+
+        assert len(create_calls) == 1, len(create_calls)
+        assert entry.app is alias.app
+        assert registries == [] and providers == []
+        preview_callbacks = [
+            callback for callback in registered
+            if callback is entry.app.extensions["close_edit_preview_services"]
+        ]
+        assert len(preview_callbacks) == 1, registered
+
+        baseline_fds = len(os.listdir("/proc/self/fd"))
+        baseline_threads = {thread.ident for thread in threading.enumerate()}
+        baseline_children = {child.pid for child in multiprocessing.active_children()}
+        registry, provider = entry.app.extensions["get_edit_preview_services"]()
+        assert (len(registries), len(providers)) == (1, 1)
+        assert entry.app.extensions["edit_preview_registry"] is registry
+        assert entry.app.extensions["edit_preview_provider"] is provider
+        assert alias.app.extensions["get_edit_preview_services"]() == (registry, provider)
+
+        with entry.app.test_request_context("/"):
+            pass
+        with entry.app.app_context():
+            pass
+        assert not registry.is_closed and not provider.is_closed
+
+        callback = preview_callbacks[0]
+        callback()
+        callback()
+        assert (registry.close_calls, provider.close_calls) == (1, 1)
+        assert registry.is_closed and provider.is_closed
+        assert not registry.reaper_alive and not provider.worker.is_alive()
+        assert provider.child.poll() is not None
+        assert len(os.listdir("/proc/self/fd")) == baseline_fds
+        assert {thread.ident for thread in threading.enumerate()} == baseline_threads
+        assert {child.pid for child in multiprocessing.active_children()} == baseline_children
+        assert entry.controller.method_calls == []
+
+print(json.dumps({
+    "create_calls": len(create_calls),
+    "preview_callbacks": len(preview_callbacks),
+    "registries": len(registries),
+    "providers": len(providers),
+    "registry_close_calls": registry.close_calls,
+    "provider_close_calls": provider.close_calls,
+    "reaper_alive": registry.reaper_alive,
+    "worker_alive": provider.worker.is_alive(),
+    "child_returncode": provider.child.returncode,
+}))
+'''
+        result = subprocess.run(
+            [sys.executable, "-c", script, str(Path(__file__).parents[1])],
+            cwd=Path(__file__).parents[1], text=True, capture_output=True, timeout=15,
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(json.loads(result.stdout), {
+            "create_calls": 1,
+            "preview_callbacks": 1,
+            "registries": 1,
+            "providers": 1,
+            "registry_close_calls": 1,
+            "provider_close_calls": 1,
+            "reaper_alive": False,
+            "worker_alive": False,
+            "child_returncode": -signal.SIGTERM,
+        })
+
+
 if __name__ == "__main__":
     unittest.main()
