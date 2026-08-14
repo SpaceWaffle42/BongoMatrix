@@ -7056,6 +7056,205 @@ console.log('ANNOUNCEMENT_HEADING_SYNC_PASS');
         self.assertFalse(registry.reaper_alive)
         self.assertNotIn(old_thread, threading.enumerate())
 
+    def test_two_tabs_on_one_paired_device_do_not_cancel_each_other(self):
+        from contextlib import contextmanager
+
+        start_path = "/api/edit-preview/clock_lava"
+        page_path = "/api/edit-preview/page"
+        cancel_path = "/api/edit-preview/cancel"
+        tab_a_instance = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+        tab_b_instance = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+
+        self.pair_browser()
+        with self.client.session_transaction() as paired_browser_session:
+            paired_identity = dict(paired_browser_session)
+            device_id = paired_browser_session["device_id"]
+        tab_a_client = self.app.test_client()
+        tab_b_client = self.app.test_client()
+        for client in (tab_a_client, tab_b_client):
+            with client.session_transaction() as tab_session:
+                tab_session.update(paired_identity)
+            with client.session_transaction() as tab_session:
+                self.assertEqual(tab_session["device_id"], device_id)
+
+        self.controller.reset_mock()
+        before_config = Path(self.store.path).read_bytes()
+        before_devices = Path(self.device_store.path).read_bytes()
+        before_media = sorted(
+            (path.relative_to(self.media_dir).as_posix(), path.read_bytes())
+            for path in self.media_dir.rglob("*") if path.is_file()
+        )
+        iterators = {}
+        stop_events = {}
+        pin_enters = []
+        pin_exits = []
+
+        class CountingIterator:
+            def __init__(self, label):
+                self.label = label
+                self.next_calls = 0
+                self.close_calls = 0
+
+            def __iter__(self):
+                return self
+
+            def __next__(self):
+                self.next_calls += 1
+                return {
+                    "png": f"{self.label}-frame-{self.next_calls}",
+                    "delay_ms": self.next_calls,
+                }
+
+            def close(self):
+                self.close_calls += 1
+                if self.close_calls > 1:
+                    raise AssertionError(f"{self.label} iterator closed more than once")
+
+        @contextmanager
+        def pinned(candidate, media_root, *, allow_missing=()):
+            label = candidate["weather"]["location"]
+            pin_enters.append(label)
+            try:
+                yield {}
+            finally:
+                pin_exits.append(label)
+
+        def prepare(module_name, candidate, stop_event):
+            label = candidate["weather"]["location"]
+            stop_events[label] = stop_event
+            return {"label": label}
+
+        def iterator(module_name, candidate, selected_palette, pinned_media, prepared,
+                     stop_event):
+            label = prepared["label"]
+            current = CountingIterator(label)
+            iterators[label] = current
+            return current
+
+        def payload(label, preview_instance):
+            candidate = copy.deepcopy(self.store.get())
+            candidate.pop("revision")
+            candidate["weather"]["location"] = label
+            return {
+                "config": candidate,
+                "generation": 1,
+                "preview_instance": preview_instance,
+            }
+
+        def assert_response(response, status):
+            self.assertEqual(response.status_code, status, response.get_data(as_text=True))
+            self.assertEqual(response.headers.get("Cache-Control"), "no-store")
+            self.assertNotIn("ETag", response.headers)
+            body = response.get_json()
+            self.assertIsInstance(body, dict)
+            serialized = json.dumps(body)
+            self.assertNotIn("revision", body)
+            self.assertNotIn("device_id", serialized)
+            self.assertNotIn(device_id, serialized)
+            return body
+
+        def continuation(page, preview_instance):
+            return {
+                "session": page["session"],
+                "preview_instance": preview_instance,
+                "token": page["next_token"],
+            }
+
+        registry = None
+        with patch("webapp.pin_candidate_media", pinned), patch(
+            "webapp._prepare_edit_preview_provider", prepare, create=True,
+        ), patch("webapp._edit_preview_iterator", iterator, create=True):
+            tab_a = assert_response(tab_a_client.post(
+                start_path, json=payload("tab-a", tab_a_instance),
+            ), 200)
+            tab_b = assert_response(tab_b_client.post(
+                start_path, json=payload("tab-b", tab_b_instance),
+            ), 200)
+            registry = self.app.extensions["edit_preview_registry"]
+            self.assertEqual(registry.total_count, 2)
+            self.assertEqual(registry.count_for_device((device_id, tab_a_instance)), 1)
+            self.assertEqual(registry.count_for_device((device_id, tab_b_instance)), 1)
+            self.assertNotEqual(tab_a["session"], tab_b["session"])
+            self.assertNotEqual(tab_a["next_token"], tab_b["next_token"])
+            self.assertEqual(iterators["tab-a"].next_calls, 33)
+            self.assertEqual(iterators["tab-b"].next_calls, 33)
+
+            baseline_advances = {
+                label: current.next_calls for label, current in iterators.items()
+            }
+            assert_response(tab_b_client.post(
+                page_path, json=continuation(tab_a, tab_b_instance),
+            ), 409)
+            assert_response(tab_a_client.post(
+                page_path, json=continuation(tab_b, tab_a_instance),
+            ), 409)
+            assert_response(tab_b_client.post(cancel_path, json={
+                "session": tab_a["session"],
+                "preview_instance": tab_b_instance,
+            }), 409)
+            assert_response(tab_a_client.post(cancel_path, json={
+                "session": tab_b["session"],
+                "preview_instance": tab_a_instance,
+            }), 409)
+            self.assertEqual(
+                {label: current.next_calls for label, current in iterators.items()},
+                baseline_advances,
+            )
+            self.assertEqual(iterators["tab-a"].close_calls, 0)
+            self.assertEqual(iterators["tab-b"].close_calls, 0)
+            self.assertEqual(pin_exits, [])
+            self.assertFalse(stop_events["tab-a"].is_set())
+            self.assertFalse(stop_events["tab-b"].is_set())
+
+            tab_a_page = assert_response(tab_a_client.post(
+                page_path, json=continuation(tab_a, tab_a_instance),
+            ), 200)
+            self.assertEqual(tab_a_page["page"], 1)
+            self.assertEqual(iterators["tab-a"].next_calls, 65)
+            self.assertEqual(iterators["tab-b"].next_calls, 33)
+
+            cancelled_a = assert_response(tab_a_client.post(cancel_path, json={
+                "session": tab_a["session"],
+                "preview_instance": tab_a_instance,
+            }), 200)
+            self.assertEqual(cancelled_a, {"cancelled": True})
+            self.assertTrue(stop_events["tab-a"].is_set())
+            self.assertFalse(stop_events["tab-b"].is_set())
+            self.assertEqual(iterators["tab-a"].close_calls, 1)
+            self.assertEqual(iterators["tab-b"].close_calls, 0)
+            self.assertEqual(pin_exits.count("tab-a"), 1)
+            self.assertEqual(pin_exits.count("tab-b"), 0)
+            self.assertEqual(registry.total_count, 1)
+
+            tab_b_page = assert_response(tab_b_client.post(
+                page_path, json=continuation(tab_b, tab_b_instance),
+            ), 200)
+            self.assertEqual(tab_b_page["page"], 1)
+            self.assertEqual(iterators["tab-b"].next_calls, 65)
+            self.assertEqual(iterators["tab-a"].next_calls, 65)
+            cancelled_b = assert_response(tab_b_client.post(cancel_path, json={
+                "session": tab_b["session"],
+                "preview_instance": tab_b_instance,
+            }), 200)
+            self.assertEqual(cancelled_b, {"cancelled": True})
+            self.assertTrue(stop_events["tab-b"].is_set())
+            self.assertEqual(iterators["tab-b"].close_calls, 1)
+            self.assertEqual(pin_exits.count("tab-b"), 1)
+            self.assertEqual(registry.total_count, 0)
+
+        self.assertCountEqual(pin_enters, ["tab-a", "tab-b"])
+        self.assertCountEqual(pin_exits, pin_enters)
+        self.assertEqual(Path(self.store.path).read_bytes(), before_config)
+        self.assertEqual(Path(self.device_store.path).read_bytes(), before_devices)
+        self.assertEqual(sorted(
+            (path.relative_to(self.media_dir).as_posix(), path.read_bytes())
+            for path in self.media_dir.rglob("*") if path.is_file()
+        ), before_media)
+        self.assertEqual(self.controller.method_calls, [])
+        registry.close()
+        self.assertEqual(registry.total_count, 0)
+        self.assertFalse(registry.reaper_alive)
+
     def test_two_devices_and_two_tabs_are_isolated_and_same_instance_generation_supersedes(self):
         from contextlib import contextmanager
 
