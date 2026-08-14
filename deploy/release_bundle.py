@@ -121,3 +121,118 @@ def validate_release_manifest(
     if manifest_paths != source_paths:
         _reject("release manifest does not contain every release source file")
     return manifest
+
+
+def _read_prior_destination(
+    destination_root: Path, relative_path: str
+) -> tuple[bytes, os.stat_result] | None:
+    current = destination_root
+    parts = PurePosixPath(relative_path).parts
+    for part in parts[:-1]:
+        current = current / part
+        try:
+            current_stat = current.lstat()
+        except FileNotFoundError:
+            return None
+        if not stat.S_ISDIR(current_stat.st_mode) or stat.S_ISLNK(current_stat.st_mode):
+            _reject("destination path traverses non-directory or symbolic link content")
+
+    destination = current / parts[-1]
+    try:
+        destination_stat = destination.lstat()
+    except FileNotFoundError:
+        return None
+    if not stat.S_ISREG(destination_stat.st_mode) or stat.S_ISLNK(
+        destination_stat.st_mode
+    ):
+        _reject("destination content must be a regular file")
+    try:
+        descriptor = os.open(
+            destination,
+            os.O_RDONLY | os.O_NONBLOCK | os.O_NOFOLLOW | os.O_CLOEXEC,
+        )
+    except FileNotFoundError as error:
+        raise ReleaseManifestError("destination content changed during backup") from error
+    except OSError as error:
+        raise ReleaseManifestError("destination content is unsafe") from error
+    try:
+        destination_stat = os.fstat(descriptor)
+        if not stat.S_ISREG(destination_stat.st_mode):
+            _reject("destination content must be a regular file")
+        with os.fdopen(descriptor, "rb", closefd=False) as destination_file:
+            prior_bytes = destination_file.read()
+        return prior_bytes, destination_stat
+    finally:
+        os.close(descriptor)
+
+
+def create_backup_manifest(
+    destination_root: str | os.PathLike[str],
+    bundle: str | os.PathLike[str],
+    release_manifest: dict[str, object],
+    backup_manifest_path: str | os.PathLike[str],
+) -> dict[str, object]:
+    """Archive destination bytes scoped exactly by a validated release manifest."""
+
+    root = Path(destination_root)
+    if not root.is_dir() or root.is_symlink():
+        _reject("destination root must be a real directory")
+    if not isinstance(release_manifest, dict):
+        _reject("release manifest is not validated")
+    entries = release_manifest.get("files")
+    if (
+        set(release_manifest) != _MANIFEST_KEYS
+        or release_manifest.get("version") != 1
+        or not isinstance(entries, list)
+    ):
+        _reject("release manifest is not validated")
+
+    records: list[dict[str, object]] = []
+    archives: list[tuple[str, bytes]] = []
+    seen_paths: set[str] = set()
+    for release_entry in entries:
+        if not isinstance(release_entry, dict) or set(release_entry) != _FILE_KEYS:
+            _reject("release manifest is not validated")
+        relative_path = _validate_relative_path(release_entry["path"])
+        if relative_path in seen_paths:
+            _reject("release manifest contains a duplicate path")
+        seen_paths.add(relative_path)
+        prior = _read_prior_destination(root, relative_path)
+        if prior is None:
+            records.append({"path": relative_path, "present_before": False})
+            continue
+
+        prior_bytes, prior_stat = prior
+        records.append(
+            {
+                "path": relative_path,
+                "present_before": True,
+                "sha256": hashlib.sha256(prior_bytes).hexdigest(),
+                "uid": prior_stat.st_uid,
+                "gid": prior_stat.st_gid,
+                "mode": f"{stat.S_IMODE(prior_stat.st_mode):04o}",
+            }
+        )
+        archives.append((relative_path, prior_bytes))
+
+    backup_manifest: dict[str, object] = {"version": 1, "files": records}
+    bundle_path = Path(bundle)
+    if bundle_path.exists() and (not bundle_path.is_dir() or bundle_path.is_symlink()):
+        _reject("bundle must be a real directory")
+    bundle_path.mkdir(parents=True, exist_ok=True)
+    for relative_path, prior_bytes in archives:
+        archive_path = bundle_path / "archive" / relative_path
+        archive_path.parent.mkdir(parents=True, exist_ok=True)
+        archive_path.write_bytes(prior_bytes)
+
+    manifest_path = Path(backup_manifest_path)
+    try:
+        manifest_path.relative_to(bundle_path)
+    except ValueError:
+        _reject("backup manifest must be inside the bundle")
+    manifest_path.parent.mkdir(parents=True, exist_ok=True)
+    manifest_path.write_text(
+        json.dumps(backup_manifest, sort_keys=True, separators=(",", ":")) + "\n",
+        encoding="utf-8",
+    )
+    return backup_manifest

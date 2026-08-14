@@ -4,7 +4,11 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from deploy.release_bundle import ReleaseManifestError, validate_release_manifest
+from deploy.release_bundle import (
+    ReleaseManifestError,
+    create_backup_manifest,
+    validate_release_manifest,
+)
 
 
 class ReleaseBundleTests(unittest.TestCase):
@@ -97,3 +101,113 @@ class ReleaseBundleTests(unittest.TestCase):
                     )
                     with self.assertRaises(ReleaseManifestError):
                         validate_release_manifest(release_root, manifest_path)
+
+    def test_backup_manifest_records_prior_metadata_only_for_present_before_files(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            release_root = root / "release"
+            destination_root = root / "destination"
+            bundle = root / "bundle"
+            release_root.mkdir()
+            destination_root.mkdir()
+
+            release_sources = {
+                "webapp.py": b"new application bytes\n",
+                "app/templates/dashboard.html": b"new dashboard bytes\n",
+            }
+            release_entries = []
+            for relative_path, source_bytes in release_sources.items():
+                source = release_root / relative_path
+                source.parent.mkdir(parents=True, exist_ok=True)
+                source.write_bytes(source_bytes)
+                release_entries.append(
+                    {
+                        "path": relative_path,
+                        "sha256": hashlib.sha256(source_bytes).hexdigest(),
+                        "uid": 123,
+                        "gid": 456,
+                        "mode": "0600",
+                    }
+                )
+
+            release_manifest_path = root / "release-manifest.json"
+            release_manifest_path.write_text(
+                json.dumps({"version": 1, "files": release_entries}),
+                encoding="utf-8",
+            )
+            release_manifest = validate_release_manifest(
+                release_root, release_manifest_path
+            )
+
+            prior_bytes = b"prior application bytes\n"
+            present_destination = destination_root / "webapp.py"
+            present_destination.write_bytes(prior_bytes)
+            present_destination.chmod(0o640)
+            prior_stat = present_destination.stat()
+
+            backup_manifest_path = bundle / "backup-manifest.json"
+            backup_manifest = create_backup_manifest(
+                destination_root,
+                bundle,
+                release_manifest,
+                backup_manifest_path,
+            )
+
+            expected_present = {
+                "path": "webapp.py",
+                "present_before": True,
+                "sha256": hashlib.sha256(prior_bytes).hexdigest(),
+                "uid": prior_stat.st_uid,
+                "gid": prior_stat.st_gid,
+                "mode": "0640",
+            }
+            expected_absent = {
+                "path": "app/templates/dashboard.html",
+                "present_before": False,
+            }
+            self.assertEqual(
+                backup_manifest,
+                {"version": 1, "files": [expected_present, expected_absent]},
+            )
+            self.assertEqual(
+                json.loads(backup_manifest_path.read_text(encoding="utf-8")),
+                backup_manifest,
+            )
+            self.assertEqual(
+                (bundle / "archive/webapp.py").read_bytes(), prior_bytes
+            )
+            self.assertFalse(
+                (bundle / "archive/app/templates/dashboard.html").exists()
+            )
+            self.assertEqual(set(expected_absent), {"path", "present_before"})
+
+            unsafe_destination = destination_root / "app/templates/dashboard.html"
+            unsafe_destination.parent.mkdir(parents=True)
+            unsafe_destination.symlink_to(present_destination)
+            with self.assertRaises(ReleaseManifestError):
+                create_backup_manifest(
+                    destination_root,
+                    root / "unsafe-bundle",
+                    release_manifest,
+                    root / "unsafe-bundle/backup-manifest.json",
+                )
+
+            unsafe_destination.unlink()
+            unsafe_destination.mkdir()
+            with self.assertRaises(ReleaseManifestError):
+                create_backup_manifest(
+                    destination_root,
+                    root / "nonregular-bundle",
+                    release_manifest,
+                    root / "nonregular-bundle/backup-manifest.json",
+                )
+
+            unsafe_release_manifest = json.loads(json.dumps(release_manifest))
+            unsafe_release_manifest["files"][0]["path"] = "../webapp.py"
+            with self.assertRaises(ReleaseManifestError):
+                create_backup_manifest(
+                    destination_root,
+                    root / "unsafe-path-bundle",
+                    unsafe_release_manifest,
+                    root / "unsafe-path-bundle/backup-manifest.json",
+                )
