@@ -6673,6 +6673,7 @@ console.log('ANNOUNCEMENT_HEADING_SYNC_PASS');
         assert_response(self.client.post(cancel_path, json={}), 401)
 
         self.pair_browser()
+        self.controller.reset_mock()
         before_config = Path(self.store.path).read_bytes()
         before_devices = Path(self.device_store.path).read_bytes()
         before_media = sorted(
@@ -6805,7 +6806,7 @@ console.log('ANNOUNCEMENT_HEADING_SYNC_PASS');
             (path.relative_to(self.media_dir).as_posix(), path.read_bytes())
             for path in self.media_dir.rglob("*") if path.is_file()
         ], before_media)
-        self.controller.assert_not_called()
+        self.assertEqual(self.controller.method_calls, [])
         registry.close()
         self.assertFalse(registry.reaper_alive)
 
