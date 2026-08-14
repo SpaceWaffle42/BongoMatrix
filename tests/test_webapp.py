@@ -7140,7 +7140,7 @@ console.log('ANNOUNCEMENT_HEADING_SYNC_PASS');
         )
         self.assertEqual(len(os.listdir("/proc/self/fd")), baseline_fds)
 
-    def test_preview_service_init_failure_cleans_partial_workers_and_descriptors(self):
+    def test_preview_service_failed_initialization_leaves_no_reaper_child_or_fd(self):
         """Failed service factories clean partial resources before one atomic retry."""
         from contextlib import contextmanager
         import multiprocessing
