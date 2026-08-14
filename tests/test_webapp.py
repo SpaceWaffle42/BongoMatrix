@@ -7584,6 +7584,288 @@ console.log('ANNOUNCEMENT_HEADING_SYNC_PASS');
         self.assertEqual(registry.total_count, 0)
         self.assertFalse(registry.reaper_alive)
 
+    def test_two_paired_devices_have_independent_preview_sessions(self):
+        from contextlib import contextmanager
+        import multiprocessing
+
+        start_path = "/api/edit-preview/clock_lava"
+        page_path = "/api/edit-preview/page"
+        cancel_path = "/api/edit-preview/cancel"
+        preview_instance = "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee"
+
+        device_a = self.client
+        device_b = self.app.test_client()
+        self.pairing.verify.return_value = True
+        device_a.post(
+            "/pair", data={"pin": "123456", "device_name": "Independent A"},
+        )
+        device_b.post(
+            "/pair", data={"pin": "123456", "device_name": "Independent B"},
+        )
+        with device_a.session_transaction() as session_a:
+            device_a_id = session_a["device_id"]
+        with device_b.session_transaction() as session_b:
+            device_b_id = session_b["device_id"]
+        self.assertNotEqual(device_a_id, device_b_id)
+
+        self.controller.reset_mock()
+        before_config = Path(self.store.path).read_bytes()
+        before_devices = Path(self.device_store.path).read_bytes()
+        before_media = sorted(
+            (path.relative_to(self.media_dir).as_posix(), path.read_bytes())
+            for path in self.media_dir.rglob("*") if path.is_file()
+        )
+        before_children = {child.pid for child in multiprocessing.active_children()}
+        before_threads = {
+            (thread.ident, thread.name) for thread in threading.enumerate()
+        }
+        before_fds = len(list(Path("/proc/self/fd").iterdir()))
+        iterators = {}
+        stop_events = {}
+        pin_enters = []
+        pin_exits = []
+
+        class CountingIterator:
+            def __init__(self, label):
+                self.label = label
+                self.next_calls = 0
+                self.close_calls = 0
+
+            def __iter__(self):
+                return self
+
+            def __next__(self):
+                self.next_calls += 1
+                return {
+                    "png": f"frame-{self.next_calls}",
+                    "delay_ms": self.next_calls,
+                }
+
+            def close(self):
+                self.close_calls += 1
+                if self.close_calls > 1:
+                    raise AssertionError(f"{self.label} iterator closed more than once")
+
+        @contextmanager
+        def pinned(candidate, media_root, *, allow_missing=()):
+            label = candidate["weather"]["location"]
+            pin_enters.append(label)
+            try:
+                yield {}
+            finally:
+                pin_exits.append(label)
+
+        def prepare(_provider, module_name, candidate, stop_event):
+            label = candidate["weather"]["location"]
+            stop_events[label] = stop_event
+            return {"label": label}
+
+        def iterator(module_name, candidate, selected_palette, pinned_media, prepared,
+                     stop_event):
+            label = prepared["label"]
+            current = CountingIterator(label)
+            iterators[label] = current
+            return current
+
+        def payload(label, generation):
+            candidate = copy.deepcopy(self.store.get())
+            candidate.pop("revision")
+            candidate["weather"]["location"] = label
+            return {
+                "config": candidate,
+                "generation": generation,
+                "preview_instance": preview_instance,
+            }
+
+        def assert_response(response, status):
+            self.assertEqual(response.status_code, status, response.get_data(as_text=True))
+            self.assertEqual(response.headers.get("Cache-Control"), "no-store")
+            self.assertNotIn("ETag", response.headers)
+            body = response.get_json()
+            self.assertIsInstance(body, dict)
+            wire = response.get_data(as_text=True)
+            self.assertNotIn("revision", body)
+            self.assertNotIn("device_id", wire)
+            self.assertNotIn(device_a_id, wire)
+            self.assertNotIn(device_b_id, wire)
+            return body
+
+        def start(client, label, generation):
+            body = assert_response(
+                client.post(start_path, json=payload(label, generation)), 200,
+            )
+            self.assertEqual(body["generation"], generation)
+            self.assertEqual(body["page"], 0)
+            self.assertEqual(len(body["frames"]), 32)
+            self.assertFalse(body["complete"])
+            self.assertRegex(body["session"], r"^[0-9a-f]{32}$")
+            self.assertRegex(body["next_token"], r"^[0-9a-f]{64}$")
+            return body
+
+        def continuation(page):
+            return {
+                "session": page["session"],
+                "preview_instance": preview_instance,
+                "token": page["next_token"],
+            }
+
+        registry = None
+        with patch("webapp.pin_candidate_media", pinned), patch(
+            "webapp._prepare_edit_preview_provider", prepare, create=True,
+        ), patch("webapp._edit_preview_iterator", iterator, create=True):
+            first_a = start(device_a, "device-a-generation-7", 7)
+            first_b = start(device_b, "device-b-generation-7", 7)
+            registry = self.app.extensions["edit_preview_registry"]
+
+            self.assertNotEqual(first_a["session"], first_b["session"])
+            self.assertNotEqual(first_a["next_token"], first_b["next_token"])
+            self.assertEqual(registry.total_count, 2)
+            self.assertEqual(registry.count_for_device(device_a_id), 1)
+            self.assertEqual(registry.count_for_device(device_b_id), 1)
+            instance_a = registry.lookup(
+                first_a["session"], (device_a_id, preview_instance),
+            )
+            instance_b = registry.lookup(
+                first_b["session"], (device_b_id, preview_instance),
+            )
+            self.assertIsNot(instance_a, instance_b)
+            self.assertEqual(instance_a.generation, 7)
+            self.assertEqual(instance_b.generation, 7)
+
+            advances_before_cross_access = {
+                label: current.next_calls for label, current in iterators.items()
+            }
+            for response in (
+                device_b.post(page_path, json=continuation(first_a)),
+                device_a.post(page_path, json=continuation(first_b)),
+                device_b.post(cancel_path, json={
+                    "session": first_a["session"],
+                    "preview_instance": preview_instance,
+                }),
+                device_a.post(cancel_path, json={
+                    "session": first_b["session"],
+                    "preview_instance": preview_instance,
+                }),
+            ):
+                self.assertEqual(
+                    assert_response(response, 409),
+                    {"error": "Preview session is no longer active."},
+                )
+            self.assertEqual(
+                {label: current.next_calls for label, current in iterators.items()},
+                advances_before_cross_access,
+            )
+            self.assertEqual(pin_exits, [])
+            self.assertEqual(iterators["device-a-generation-7"].close_calls, 0)
+            self.assertEqual(iterators["device-b-generation-7"].close_calls, 0)
+            self.assertFalse(stop_events["device-a-generation-7"].is_set())
+            self.assertFalse(stop_events["device-b-generation-7"].is_set())
+
+            page_a = assert_response(
+                device_a.post(page_path, json=continuation(first_a)), 200,
+            )
+            self.assertEqual(page_a["generation"], 7)
+            self.assertEqual(page_a["page"], 1)
+            self.assertEqual(iterators["device-a-generation-7"].next_calls, 65)
+            self.assertEqual(iterators["device-b-generation-7"].next_calls, 33)
+
+            newer_a = start(device_a, "device-a-generation-8", 8)
+            self.assertTrue(stop_events["device-a-generation-7"].is_set())
+            self.assertFalse(stop_events["device-a-generation-8"].is_set())
+            self.assertFalse(stop_events["device-b-generation-7"].is_set())
+            self.assertEqual(iterators["device-a-generation-7"].close_calls, 1)
+            self.assertEqual(pin_exits.count("device-a-generation-7"), 1)
+            self.assertEqual(iterators["device-b-generation-7"].close_calls, 0)
+            self.assertEqual(pin_exits.count("device-b-generation-7"), 0)
+            self.assertEqual(iterators["device-b-generation-7"].next_calls, 33)
+            self.assertEqual(registry.total_count, 2)
+            self.assertEqual(registry.count_for_device(device_a_id), 1)
+            self.assertEqual(registry.count_for_device(device_b_id), 1)
+            self.assertEqual(
+                registry.lookup(
+                    newer_a["session"], (device_a_id, preview_instance),
+                ).generation,
+                8,
+            )
+            self.assertIs(
+                registry.lookup(
+                    first_b["session"], (device_b_id, preview_instance),
+                ),
+                instance_b,
+            )
+            self.assertEqual(
+                assert_response(
+                    device_a.post(page_path, json=continuation(page_a)), 409,
+                ),
+                {"error": "Preview session is no longer active."},
+            )
+
+            page_newer_a = assert_response(
+                device_a.post(page_path, json=continuation(newer_a)), 200,
+            )
+            self.assertEqual((page_newer_a["generation"], page_newer_a["page"]), (8, 1))
+            self.assertEqual(iterators["device-a-generation-8"].next_calls, 65)
+            self.assertEqual(iterators["device-b-generation-7"].next_calls, 33)
+
+            page_b = assert_response(
+                device_b.post(page_path, json=continuation(first_b)), 200,
+            )
+            self.assertEqual((page_b["generation"], page_b["page"]), (7, 1))
+            self.assertEqual(iterators["device-b-generation-7"].next_calls, 65)
+            self.assertEqual(iterators["device-a-generation-8"].next_calls, 65)
+
+            self.assertEqual(
+                assert_response(device_a.post(cancel_path, json={
+                    "session": newer_a["session"],
+                    "preview_instance": preview_instance,
+                }), 200),
+                {"cancelled": True},
+            )
+            self.assertTrue(stop_events["device-a-generation-8"].is_set())
+            self.assertFalse(stop_events["device-b-generation-7"].is_set())
+            self.assertEqual(iterators["device-a-generation-8"].close_calls, 1)
+            self.assertEqual(iterators["device-b-generation-7"].close_calls, 0)
+            self.assertEqual(pin_exits.count("device-a-generation-8"), 1)
+            self.assertEqual(pin_exits.count("device-b-generation-7"), 0)
+            self.assertEqual(registry.total_count, 1)
+
+            self.assertEqual(
+                assert_response(device_b.post(cancel_path, json={
+                    "session": first_b["session"],
+                    "preview_instance": preview_instance,
+                }), 200),
+                {"cancelled": True},
+            )
+            self.assertTrue(stop_events["device-b-generation-7"].is_set())
+            self.assertEqual(iterators["device-b-generation-7"].close_calls, 1)
+            self.assertEqual(pin_exits.count("device-b-generation-7"), 1)
+            self.assertEqual(registry.total_count, 0)
+
+        self.assertCountEqual(
+            pin_enters,
+            ["device-a-generation-7", "device-b-generation-7", "device-a-generation-8"],
+        )
+        self.assertCountEqual(pin_exits, pin_enters)
+        self.assertTrue(all(current.close_calls == 1 for current in iterators.values()))
+        self.assertEqual(Path(self.store.path).read_bytes(), before_config)
+        self.assertEqual(Path(self.device_store.path).read_bytes(), before_devices)
+        self.assertEqual(sorted(
+            (path.relative_to(self.media_dir).as_posix(), path.read_bytes())
+            for path in self.media_dir.rglob("*") if path.is_file()
+        ), before_media)
+        self.assertEqual(self.controller.method_calls, [])
+        registry.close()
+        self.assertEqual(registry.total_count, 0)
+        self.assertFalse(registry.reaper_alive)
+        self.assertEqual(
+            {child.pid for child in multiprocessing.active_children()}, before_children,
+        )
+        self.assertEqual(
+            {(thread.ident, thread.name) for thread in threading.enumerate()},
+            before_threads,
+        )
+        self.assertEqual(len(list(Path("/proc/self/fd").iterdir())), before_fds)
+
     def test_two_paired_devices_cannot_cancel_or_page_each_other(self):
         from contextlib import contextmanager
         import multiprocessing
