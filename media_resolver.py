@@ -68,6 +68,24 @@ class PinnedMediaHandle:
             if duplicate is not None:
                 os.close(duplicate)
 
+    def dup_fd(self) -> int:
+        """Return a consumer-owned descriptor with an independent offset."""
+        duplicate = None
+        try:
+            with self._lock:
+                if self._descriptor is None:
+                    raise ValueError("media handle is closed")
+                duplicate = os.open(
+                    f"/proc/self/fd/{self._descriptor}",
+                    os.O_RDONLY | os.O_CLOEXEC,
+                )
+            consumer_descriptor = duplicate
+            duplicate = None
+            return consumer_descriptor
+        finally:
+            if duplicate is not None:
+                os.close(duplicate)
+
     def close(self) -> None:
         with self._lock:
             descriptor = self._descriptor

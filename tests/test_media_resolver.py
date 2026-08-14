@@ -1,5 +1,6 @@
 import fcntl
 import os
+import subprocess
 import tempfile
 import unittest
 from pathlib import Path
@@ -426,6 +427,181 @@ class MediaResolverTests(unittest.TestCase):
                 resolver.close()
 
             self.assertTrue(all(handle.closed for handle in handles.values()))
+            self.assertEqual(set(os.listdir("/proc/self/fd")), descriptors_before)
+
+    def test_ffmpeg_mp4_decode_inherits_only_duplicated_pinned_fd(self):
+        with tempfile.TemporaryDirectory() as directory:
+            media_root = Path(directory) / "media"
+            media_root.mkdir()
+            original_path = media_root / "original.mp4"
+            replacement_path = media_root / "replacement.mp4"
+
+            def generate_mp4(path, colour, size):
+                completed = subprocess.run(
+                    (
+                        "ffmpeg",
+                        "-hide_banner",
+                        "-loglevel",
+                        "error",
+                        "-f",
+                        "lavfi",
+                        "-i",
+                        f"color=c={colour}:s={size}:r=1:d=1",
+                        "-frames:v",
+                        "1",
+                        "-c:v",
+                        "mpeg4",
+                        "-q:v",
+                        "2",
+                        "-pix_fmt",
+                        "yuv420p",
+                        "-y",
+                        os.fspath(path),
+                    ),
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.PIPE,
+                    timeout=10,
+                    check=False,
+                )
+                self.assertEqual(
+                    completed.returncode,
+                    0,
+                    "ffmpeg MP4 fixture generation failed",
+                )
+
+            generate_mp4(original_path, "red", "4x2")
+            generate_mp4(replacement_path, "blue", "6x4")
+            original_bytes = original_path.read_bytes()
+            replacement_bytes = replacement_path.read_bytes()
+            self.assertNotEqual(original_bytes, replacement_bytes)
+
+            descriptors_before = set(os.listdir("/proc/self/fd"))
+            resolver = MediaResolver(media_root)
+            handle = resolver.resolve("original.mp4")
+            original_descriptor = handle.fileno()
+            original_identity = os.fstat(original_descriptor)
+            unrelated_descriptor = os.open("/dev/null", os.O_RDONLY | os.O_CLOEXEC)
+            process = None
+            child_descriptor = None
+            recorded_spawns = []
+            real_popen = subprocess.Popen
+
+            try:
+                os.replace(replacement_path, original_path)
+                original_path.unlink()
+                self.assertFalse(original_path.exists())
+
+                os.lseek(original_descriptor, 7, os.SEEK_SET)
+                original_offset = os.lseek(original_descriptor, 0, os.SEEK_CUR)
+                child_descriptor = handle.dup_fd()
+                self.assertNotEqual(child_descriptor, original_descriptor)
+                self.assertEqual(os.lseek(child_descriptor, 0, os.SEEK_CUR), 0)
+                self.assertEqual(os.read(child_descriptor, 1), original_bytes[:1])
+                self.assertEqual(
+                    os.lseek(original_descriptor, 0, os.SEEK_CUR), original_offset
+                )
+                os.lseek(child_descriptor, 0, os.SEEK_SET)
+                self.assertEqual(
+                    fcntl.fcntl(child_descriptor, fcntl.F_GETFD)
+                    & fcntl.FD_CLOEXEC,
+                    fcntl.FD_CLOEXEC,
+                )
+                self.assertEqual(
+                    fcntl.fcntl(unrelated_descriptor, fcntl.F_GETFD)
+                    & fcntl.FD_CLOEXEC,
+                    fcntl.FD_CLOEXEC,
+                )
+
+                command = (
+                    "ffmpeg",
+                    "-hide_banner",
+                    "-loglevel",
+                    "info",
+                    "-i",
+                    f"/proc/self/fd/{child_descriptor}",
+                    "-map",
+                    "0:v:0",
+                    "-frames:v",
+                    "1",
+                    "-f",
+                    "rawvideo",
+                    "-pix_fmt",
+                    "rgb24",
+                    "pipe:1",
+                )
+
+                def recording_popen(args, *popen_args, **popen_kwargs):
+                    recorded_spawns.append((tuple(args), dict(popen_kwargs)))
+                    return real_popen(args, *popen_args, **popen_kwargs)
+
+                with patch("subprocess.Popen", side_effect=recording_popen):
+                    process = subprocess.Popen(
+                        command,
+                        stdout=subprocess.PIPE,
+                        stderr=subprocess.PIPE,
+                        close_fds=True,
+                        pass_fds=(child_descriptor,),
+                    )
+                spawned_pid = process.pid
+                os.close(child_descriptor)
+                closed_child_descriptor = child_descriptor
+                child_descriptor = None
+                with self.assertRaises(OSError):
+                    os.fstat(closed_child_descriptor)
+
+                decoded_bytes, decoder_stderr = process.communicate(timeout=10)
+                self.assertEqual(
+                    process.returncode,
+                    0,
+                    "ffmpeg pinned MP4 decode failed",
+                )
+                process = None
+
+                self.assertEqual(len(recorded_spawns), 1)
+                spawned_command, spawned_kwargs = recorded_spawns[0]
+                self.assertEqual(spawned_command, command)
+                self.assertEqual(
+                    spawned_kwargs.get("pass_fds"), (closed_child_descriptor,)
+                )
+                self.assertIs(spawned_kwargs.get("close_fds"), True)
+                self.assertNotIn(unrelated_descriptor, spawned_kwargs["pass_fds"])
+                self.assertEqual(len(decoded_bytes), 4 * 2 * 3)
+                pixels = tuple(
+                    tuple(decoded_bytes[index : index + 3])
+                    for index in range(0, len(decoded_bytes), 3)
+                )
+                self.assertTrue(
+                    all(red >= 245 and green <= 10 and blue <= 10 for red, green, blue in pixels)
+                )
+                self.assertIn(b"Video: mpeg4", decoder_stderr)
+                self.assertIn(b"4x2", decoder_stderr)
+                self.assertFalse(Path(f"/proc/{spawned_pid}").exists())
+                self.assertEqual(
+                    (os.fstat(original_descriptor).st_dev, os.fstat(original_descriptor).st_ino),
+                    (original_identity.st_dev, original_identity.st_ino),
+                )
+                self.assertEqual(
+                    os.lseek(original_descriptor, 0, os.SEEK_CUR), original_offset
+                )
+                self.assertEqual(
+                    os.pread(original_descriptor, len(original_bytes), 0), original_bytes
+                )
+                self.assertFalse(handle.closed)
+            finally:
+                if process is not None:
+                    process.kill()
+                    process.communicate(timeout=10)
+                if child_descriptor is not None:
+                    os.close(child_descriptor)
+                os.close(unrelated_descriptor)
+                handle.close()
+                handle.close()
+                resolver.close()
+                resolver.close()
+
+            self.assertTrue(handle.closed)
+            with self.assertRaises(OSError):
+                os.fstat(original_descriptor)
             self.assertEqual(set(os.listdir("/proc/self/fd")), descriptors_before)
 
 
