@@ -350,14 +350,14 @@ class WebAppTests(unittest.TestCase):
         body = self.client.get("/").get_data(as_text=True)
 
         application_version = getattr(webapp, "APPLICATION_VERSION", None)
-        self.assertEqual(application_version, "0.3.42-preview")
+        self.assertEqual(application_version, "0.3.43-preview")
         self.assertEqual(body.count(f"Version {application_version}"), 1)
         self.assertRegex(
             body,
             rf"LAN CONTROL</span><br><span[^>]*>Version {re.escape(application_version)}</span>",
         )
         template = (Path(__file__).parents[1] / "app" / "templates" / "dashboard.html").read_text()
-        self.assertNotIn("0.3.42-preview", template)
+        self.assertNotIn("0.3.43-preview", template)
 
     def test_control_stop_reports_timeout_without_claiming_success(self):
         self.pair_browser()
@@ -1339,6 +1339,100 @@ globalThis.document=document;globalThis.window=window;globalThis.fetch=fetch;
                         time.sleep(0.05)
         self.assertEqual(completed.returncode, 0, completed.stderr)
         return json.loads(completed.stdout.strip().splitlines()[-1])
+
+    @unittest.skipUnless(shutil.which("node"), "Node.js is required")
+    @unittest.skipUnless(
+        os.environ.get("MATRIX_CHROMIUM")
+        and Path(os.environ.get("MATRIX_CHROMIUM", "")).is_file()
+        and os.access(os.environ.get("MATRIX_CHROMIUM", ""), os.X_OK),
+        "MATRIX_CHROMIUM browser is required",
+    )
+    def test_live_edit_segmented_control_updates_unsaved_preview_without_saving(self):
+        self.pair_browser()
+        before_config = Path(self.store.path).read_bytes()
+        body = self.client.get("/").get_data(as_text=True)
+        self.controller.reset_mock()
+        probe = r"""
+const port=process.argv[1],pagePath=process.argv[2];let endpoint;
+for(let attempt=0;attempt<50;attempt++){try{endpoint=await fetch(`http://127.0.0.1:${port}/json/new`,{method:'PUT'}).then(r=>r.json());break}catch(_){await new Promise(r=>setTimeout(r,100))}}
+if(!endpoint)throw new Error('Chromium DevTools endpoint unavailable');
+const socket=new WebSocket(endpoint.webSocketDebuggerUrl),pending=new Map();let nextId=1,loadResolve,loaded=new Promise(resolve=>loadResolve=resolve);
+socket.onmessage=event=>{const message=JSON.parse(event.data);if(message.id&&pending.has(message.id)){const request=pending.get(message.id);pending.delete(message.id);message.error?request.reject(new Error(JSON.stringify(message.error))):request.resolve(message.result)}else if(message.method==='Page.loadEventFired')loadResolve()};
+await new Promise((resolve,reject)=>{socket.onopen=resolve;socket.onerror=reject});
+const send=(method,params={})=>{const id=nextId++;socket.send(JSON.stringify({id,method,params}));return new Promise((resolve,reject)=>pending.set(id,{resolve,reject}))};
+const evaluate=async expression=>{const result=await send('Runtime.evaluate',{expression,returnByValue:true,awaitPromise:true});if(result.exceptionDetails)throw new Error(JSON.stringify(result.exceptionDetails));return result.result.value};
+const waitFor=async expression=>{for(let attempt=0;attempt<100;attempt++){if(await evaluate(expression))return;await new Promise(r=>setTimeout(r,25))}throw new Error('waitFor timed out: '+expression)};
+try{
+ await send('Runtime.enable');await send('Page.enable');await send('Emulation.setDeviceMetricsOverride',{width:390,height:844,deviceScaleFactor:1,mobile:true});
+ await send('Page.addScriptToEvaluateOnNewDocument',{source:`
+  globalThis.__requests=[];globalThis.__displayActive=0;globalThis.__displayMaxActive=0;
+  const red='iVBORw0KGgoAAAANSUhEUgAAAEAAAAAgCAIAAAAt/+nTAAAAT0lEQVR4nO3PUQkAIBTAwFfBClawfzdD+HEIgwW4zdrn64YLGtCCBrSgAS1oQAsa0IIGtKABLWhACxrQgga0oAEtaEALGtCCBrSgAS147AJI7DAuPOp5lgAAAABJRU5ErkJggg==';
+  const green='iVBORw0KGgoAAAANSUhEUgAAAEAAAAAgCAIAAAAt/+nTAAAAT0lEQVR4nO3PUQkAIBTAwBfOClawfwRD+HEIgwW4zdrn64YLGtCCBrSgAS1oQAsa0IIGtKABLWhACxrQgga0oAEtaEALGtCCBrSgAS147AIqPPhqwA8fegAAAABJRU5ErkJggg==';
+  const blue='iVBORw0KGgoAAAANSUhEUgAAAEAAAAAgCAIAAAAt/+nTAAAAT0lEQVR4nO3PUQkAIBTAwNc/ihWsYChD+HEIgwW4zdrn64YLGtCCBrSgAS1oQAsa0IIGtKABLWhACxrQgga0oAEtaEALGtCCBrSgAS147ALszYkAB9CYOQAAAABJRU5ErkJggg==';
+  const bytes=value=>Uint8Array.from(atob(value),character=>character.charCodeAt(0));
+  globalThis.fetch=async(input,options={})=>{const url=String(input),method=options.method||'GET',record={url,method,body:options.body||null,time:performance.now()};__requests.push(record);
+   if(url.startsWith('/api/display-frame')){__displayActive++;__displayMaxActive=Math.max(__displayMaxActive,__displayActive);try{if(__requests.filter(item=>item.url.startsWith('/api/display-frame')).length===1)await new Promise((resolve,reject)=>{const timer=setTimeout(resolve,3000);options.signal?.addEventListener('abort',()=>{clearTimeout(timer);reject(new DOMException('Aborted','AbortError'))},{once:true})});return new Response(new Blob([bytes(red)],{type:'image/png'}),{status:200,headers:{'X-Matrix-Frame':'live'}})}finally{__displayActive--}}
+   if(url==='/api/config')return new Response(null,{status:304,headers:{'X-Matrix-Minimum-Client-Contract':'2'}});
+   if(url.startsWith('/api/status'))return new Response(JSON.stringify({running:true,current_module:'weather',minimum_client_contract:2}),{status:200,headers:{'Content-Type':'application/json'}});
+   if(url.startsWith('/api/edit-preview/')&&url!='/api/edit-preview/page'&&url!='/api/edit-preview/cancel'){const payload=JSON.parse(options.body);record.payload=payload;return new Response(JSON.stringify({session:String(payload.generation).padStart(32,'0'),generation:payload.generation,page:0,frames:[{png:green,delay_ms:60}],next_token:'a'.repeat(64),complete:false}),{status:200,headers:{'Content-Type':'application/json'}})}
+   if(url==='/api/edit-preview/page'){const payload=JSON.parse(options.body),generation=Number(payload.session);record.payload=payload;return new Response(JSON.stringify({session:payload.session,generation,page:1,frames:[{png:blue,delay_ms:500}],next_token:null,complete:true}),{status:200,headers:{'Content-Type':'application/json'}})}
+   if(url==='/api/edit-preview/cancel')return new Response(JSON.stringify({cancelled:true}),{status:200,headers:{'Content-Type':'application/json'}});
+   return new Response(JSON.stringify({error:'fixture endpoint unavailable'}),{status:503,headers:{'Content-Type':'application/json'}})
+  };
+ `});
+ loaded=new Promise(resolve=>loadResolve=resolve);await send('Page.navigate',{url:'file://'+pagePath});await Promise.race([loaded,new Promise((_,reject)=>setTimeout(()=>reject(new Error('load timeout')),5000))]);
+ const initial=await evaluate(`(()=>{const group=document.querySelector('[role="radiogroup"]'),live=document.querySelector('#preview-mode-live'),edit=document.querySelector('#preview-mode-edit'),canvas=document.querySelector('#matrix-preview');return {canvasCount:document.querySelectorAll('#matrix-preview').length,groupBelow:Boolean(group)&&group.getBoundingClientRect().top>=canvas.getBoundingClientRect().bottom,labels:[live?.labels?.[0]?.textContent.trim()||null,edit?.labels?.[0]?.textContent.trim()||null],liveChecked:live?.checked??null,editChecked:edit?.checked??null,frame:document.querySelector('#preview-frame')?.textContent||null}})()`);
+ await evaluate(`(()=>{addCustomModule();const selected=document.querySelector('#preview-select');selected.value='weather';selected.dispatchEvent(new Event('change',{bubbles:true}))})()`);
+ const editPoint=await evaluate(`(()=>{const r=document.querySelector('label[for="preview-mode-edit"]')?.getBoundingClientRect();return r?{x:r.left+r.width/2,y:r.top+r.height/2}:null})()`);
+ if(editPoint){await send('Input.dispatchTouchEvent',{type:'touchStart',touchPoints:[editPoint]});await send('Input.dispatchTouchEvent',{type:'touchEnd',touchPoints:[]})}
+ await waitFor(`__requests.some(item=>item.url.startsWith('/api/edit-preview/weather'))`);
+ await evaluate(`(()=>{const set=(selector,value)=>{const control=document.querySelector(selector);control.value=value;control.dispatchEvent(new Event('input',{bubbles:true}))};set('[data-built-in-module="weather"][data-setting="now_x"]','9');set('[data-built-in-module="weather"][data-setting="text_colour"]','#123456');set('#weather-scroll-speed','0.123');const text=document.querySelector('.custom-module-card [data-field="text"]');if(text){text.value='UNSAVED TEST';text.dispatchEvent(new Event('input',{bubbles:true}))}})()`);
+ await waitFor(`__requests.filter(item=>item.url.startsWith('/api/edit-preview/weather')).length>=2`);
+ await new Promise(r=>setTimeout(r,25));
+ const firstEditPixel=await evaluate(`[...document.querySelector('#matrix-preview').getContext('2d').getImageData(0,0,1,1).data]`);
+ await new Promise(r=>setTimeout(r,70));
+ const edited=await evaluate(`(()=>{const requests=__requests.filter(item=>item.url.startsWith('/api/edit-preview/weather')),pageRequests=__requests.filter(item=>item.url==='/api/edit-preview/page'),latest=requests.at(-1).payload,pixel=[...document.querySelector('#matrix-preview').getContext('2d').getImageData(0,0,1,1).data],forbidden=__requests.filter(item=>item.method==='POST'&&(item.url==='/api/config'||item.url.startsWith('/api/preview/')||item.url.includes('/api/media/')&&item.url.endsWith('/preview')||item.url.startsWith('/api/control/')));return {instance:latest?.preview_instance||null,generations:requests.map(item=>item.payload.generation),modulePaths:requests.map(item=>item.url),pagePayloads:pageRequests.map(item=>item.payload),latest,pixel,label:document.querySelector('#preview-module').textContent,forbidden:forbidden.map(item=>item.url),canvasCount:document.querySelectorAll('#matrix-preview').length}})()`);
+ edited.firstPixel=firstEditPixel;
+ await evaluate(`document.documentElement.style.scrollBehavior='auto';scrollTo(0,document.documentElement.scrollHeight);syncPreviewPopout()`);await new Promise(r=>setTimeout(r,50));
+ const poppedLabel=await evaluate(`document.querySelector('#preview-module').textContent`);
+ const livePoint=await evaluate(`(()=>{const r=document.querySelector('label[for="preview-mode-live"]').getBoundingClientRect();return {x:r.left+r.width/2,y:r.top+r.height/2}})()`);
+ await send('Input.dispatchTouchEvent',{type:'touchStart',touchPoints:[livePoint]});await send('Input.dispatchTouchEvent',{type:'touchEnd',touchPoints:[]});
+ await waitFor(`__requests.filter(item=>item.url.startsWith('/api/display-frame')).length>=2`);await new Promise(r=>setTimeout(r,180));
+ const restored=await evaluate(`(()=>({live:document.querySelector('#preview-mode-live').checked,label:document.querySelector('#preview-module').textContent,cancels:__requests.filter(item=>item.url==='/api/edit-preview/cancel').length,displayRequests:__requests.filter(item=>item.url.startsWith('/api/display-frame')).length,maxDisplayActive:__displayMaxActive,editTimers:globalThis.editPreviewAnimationTimer??null,canvasCount:document.querySelectorAll('#matrix-preview').length}))()`);
+ console.log(JSON.stringify({initial,edited,poppedLabel,restored}));
+}finally{socket.close()}
+"""
+        report = self._run_dashboard_chromium_probe(body, probe)
+        self.assertEqual(report["initial"]["canvasCount"], 1, report)
+        self.assertTrue(report["initial"]["groupBelow"], report)
+        self.assertEqual(report["initial"]["labels"], ["Live", "Edit Preview"], report)
+        self.assertTrue(report["initial"]["liveChecked"], report)
+        self.assertFalse(report["initial"]["editChecked"], report)
+        self.assertIn("Live", report["initial"]["frame"])
+        self.assertRegex(report["edited"]["instance"], r"^[0-9a-f]{32}$")
+        self.assertGreaterEqual(len(report["edited"]["generations"]), 2, report)
+        self.assertEqual(report["edited"]["generations"], sorted(set(report["edited"]["generations"])), report)
+        self.assertGreaterEqual(len(report["edited"]["pagePayloads"]), 2, report)
+        self.assertTrue(all(set(payload) == {"session", "preview_instance", "token"} for payload in report["edited"]["pagePayloads"]), report)
+        latest = report["edited"]["latest"]
+        self.assertEqual(latest["config"]["weather"]["now_x"], 9)
+        self.assertEqual(latest["config"]["weather"]["text_colour"], "#123456")
+        self.assertEqual(latest["config"]["weather"]["scroll_speed"], 0.123)
+        self.assertEqual(latest["config"]["custom_modules"][0]["text"], "UNSAVED TEST")
+        self.assertEqual(report["edited"]["firstPixel"], [68, 85, 102, 255], report)
+        self.assertEqual(report["edited"]["pixel"], [170, 187, 204, 255], report)
+        self.assertIn("Unsaved draft · weather", report["edited"]["label"])
+        self.assertIn("Unsaved draft · weather", report["poppedLabel"])
+        self.assertEqual(report["edited"]["forbidden"], [], report)
+        self.assertEqual(report["edited"]["canvasCount"], 1, report)
+        self.assertTrue(report["restored"]["live"], report)
+        self.assertIn("Live", report["restored"]["label"])
+        self.assertGreaterEqual(report["restored"]["cancels"], 1, report)
+        self.assertLessEqual(report["restored"]["maxDisplayActive"], 1, report)
+        self.assertIsNone(report["restored"]["editTimers"], report)
+        self.assertEqual(report["restored"]["canvasCount"], 1, report)
+        self.assertEqual(Path(self.store.path).read_bytes(), before_config)
+        self.assertEqual(self.controller.method_calls, [])
 
     @unittest.skipUnless(shutil.which("node"), "Node.js is required")
     @unittest.skipUnless(
