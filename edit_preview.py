@@ -389,6 +389,7 @@ class PreviewInstanceRegistry:
         self._lock = threading.Lock()
         self._instances = {}
         self._device_counts = {}
+        self._generations = {}
         self._closed = False
         self._shutdown = threading.Event()
 
@@ -406,7 +407,10 @@ class PreviewInstanceRegistry:
         with self._lock:
             return self._device_counts.get(device_identity, 0)
 
-    def register(self, device_identity, iterator_factory, stop_event=None):
+    def register(
+        self, device_identity, iterator_factory, stop_event=None, *, generation=None,
+    ):
+        superseded = None
         with self._lock:
             if self._closed:
                 raise RuntimeError("preview registry is closed")
@@ -419,6 +423,13 @@ class PreviewInstanceRegistry:
                 raise PreviewInstanceCapacityError(
                     "process already has 8 live preview instances"
                 )
+            if generation is not None:
+                authoritative = self._generations.get(device_identity)
+                if authoritative is not None:
+                    active_generation, active_instance_id = authoritative
+                    if generation <= active_generation:
+                        raise ValueError("generation must be strictly newer")
+                    superseded = self._instances[active_instance_id][1]
             instance_id = secrets.token_hex(16)
             while instance_id in self._instances:
                 instance_id = secrets.token_hex(16)
@@ -429,7 +440,13 @@ class PreviewInstanceRegistry:
             )
             self._instances[instance_id] = (device_identity, instance)
             self._device_counts[device_identity] = device_count + 1
-            return instance
+            if generation is not None:
+                self._generations[device_identity] = (generation, instance_id)
+        # Never wait for or signal an old page while holding the registry lock;
+        # its unregister callback re-enters this registry during deferred cleanup.
+        if superseded is not None:
+            superseded.close()
+        return instance
 
     def _unregister(self, instance_id):
         with self._lock:
@@ -437,6 +454,9 @@ class PreviewInstanceRegistry:
             if entry is None:
                 return
             device_identity, _instance = entry
+            authoritative = self._generations.get(device_identity)
+            if authoritative is not None and authoritative[1] == instance_id:
+                del self._generations[device_identity]
             remaining = self._device_counts[device_identity] - 1
             if remaining:
                 self._device_counts[device_identity] = remaining
@@ -732,7 +752,9 @@ class PreviewSession:
             else:
                 cancelled_page = None
             if cancelled_page is None and (
-                self._page_in_progress or (self._page >= 0 and token != self._token)
+                self._page_in_progress
+                or (self._page < 0 and token is not None)
+                or (self._page >= 0 and token != self._token)
             ):
                 raise ValueError("invalid or already consumed continuation token")
             if cancelled_page is None:

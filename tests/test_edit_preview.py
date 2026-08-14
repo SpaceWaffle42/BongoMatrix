@@ -39,6 +39,146 @@ class Colour:
 
 
 class EditPreviewTests(unittest.TestCase):
+    def test_page_supersede_race_drops_old_generation_output(self):
+        class CommitBarrierIterator:
+            def __init__(self, name, *, block_on_call=None):
+                self.name = name
+                self.block_on_call = block_on_call
+                self.calls = 0
+                self.active = False
+                self.commit_barrier = threading.Event()
+                self.release_commit = threading.Event()
+                self.close_calls = 0
+                self.concurrent_close_calls = 0
+
+            def __iter__(self):
+                return self
+
+            def __next__(self):
+                self.calls += 1
+                self.active = True
+                try:
+                    frame = {
+                        "png": f"{self.name}-frame-{self.calls}",
+                        "delay_ms": self.calls,
+                    }
+                    if self.calls == self.block_on_call:
+                        self.commit_barrier.set()
+                        if not self.release_commit.wait(2):
+                            raise AssertionError("generation commit barrier was not released")
+                    return frame
+                finally:
+                    self.active = False
+
+            def close(self):
+                if self.active:
+                    self.concurrent_close_calls += 1
+                    raise ValueError("generator already executing")
+                self.close_calls += 1
+
+        capacity = edit_preview.PreviewSessionCapacity()
+        registry = edit_preview.PreviewInstanceRegistry(capacity=capacity)
+        old_stop = threading.Event()
+        new_stop = threading.Event()
+        old_iterator = CommitBarrierIterator("old", block_on_call=3)
+        new_iterator = CommitBarrierIterator("new")
+        old_instance = registry.register(
+            "paired-device", lambda: old_iterator,
+            stop_event=old_stop, generation=7,
+        )
+        old_session = old_instance.admit()
+        old_session.MAX_FRAMES = 1
+        old_first = old_session.page()
+        old_token = old_first["next_token"]
+        old_result = {}
+        old_failures = []
+
+        def page_old_generation():
+            try:
+                old_result.update(old_session.page(old_token))
+            except BaseException as error:
+                old_failures.append(error)
+
+        old_thread = threading.Thread(
+            target=page_old_generation, name="superseded-preview-page",
+        )
+        old_thread.start()
+        self.assertTrue(
+            old_iterator.commit_barrier.wait(1),
+            "old generation did not reach pre-commit barrier",
+        )
+
+        supersede_started = time.monotonic()
+        new_instance = registry.register(
+            "paired-device", lambda: new_iterator,
+            stop_event=new_stop, generation=8,
+        )
+        supersede_elapsed = time.monotonic() - supersede_started
+        self.assertLess(supersede_elapsed, 0.25)
+        self.assertTrue(old_stop.is_set())
+        self.assertFalse(new_stop.is_set())
+        self.assertEqual(capacity.active_count, 1)
+        self.assertEqual(registry.total_count, 2)
+
+        new_session = new_instance.admit()
+        new_session.MAX_FRAMES = 1
+        with self.assertRaisesRegex(
+            ValueError, "invalid or already consumed continuation token",
+        ):
+            new_session.page(old_token)
+        new_first = new_session.page()
+        self.assertEqual(
+            new_first["frames"], [{"png": "new-frame-1", "delay_ms": 1}],
+        )
+        self.assertFalse(new_first["complete"])
+        self.assertIsNotNone(new_first["next_token"])
+        with self.assertRaisesRegex(ValueError, "generation must be strictly newer"):
+            registry.register(
+                "paired-device", lambda: iter(()), generation=8,
+            )
+        with self.assertRaisesRegex(ValueError, "generation must be strictly newer"):
+            registry.register(
+                "paired-device", lambda: iter(()), generation=6,
+            )
+
+        released = time.monotonic()
+        old_iterator.release_commit.set()
+        old_thread.join(0.25)
+        settle_elapsed = time.monotonic() - released
+
+        self.assertLess(settle_elapsed, 0.25)
+        self.assertFalse(old_thread.is_alive())
+        self.assertEqual(old_failures, [])
+        self.assertEqual(old_result, {
+            "page": 1, "frames": [], "next_token": None, "complete": True,
+        })
+        self.assertEqual(old_iterator.calls, 3)
+        self.assertEqual(old_iterator.concurrent_close_calls, 0)
+        self.assertEqual(old_iterator.close_calls, 1)
+        self.assertEqual(old_session.retained_frame_count, 0)
+        self.assertEqual(registry.total_count, 1)
+        self.assertEqual(capacity.active_count, 1)
+        with self.assertRaisesRegex(
+            StopIteration, "explicit new session is required to restart",
+        ):
+            old_session.page(old_token)
+
+        new_second = new_session.page(new_first["next_token"])
+        self.assertEqual(
+            new_second["frames"], [{"png": "new-frame-2", "delay_ms": 2}],
+        )
+        self.assertFalse(new_stop.is_set())
+        self.assertEqual(new_iterator.close_calls, 0)
+        new_instance.close()
+        new_instance.close()
+        self.assertEqual(new_iterator.close_calls, 1)
+        self.assertEqual(new_iterator.concurrent_close_calls, 0)
+        self.assertEqual(capacity.active_count, 0)
+        self.assertEqual(capacity.available_slots, 2)
+        self.assertEqual(registry.total_count, 0)
+        self.assertEqual(registry.counts_by_device, {})
+        self.assertNotIn(old_thread, threading.enumerate())
+
     def test_page_cancel_race_drops_uncommitted_output_and_closes(self):
         class CommitBarrierIterator:
             def __init__(self, iterator, cancelled):
