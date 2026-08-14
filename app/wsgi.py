@@ -10,12 +10,11 @@ import stat
 import sys
 from pathlib import Path
 
-import app as _entrypoint_owner
-
 ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
+import app as _entrypoint_owner
 from config_store import ConfigStore
 from display_controller import DisplayController
 from hardware_lock import DisplayOwnershipLock
