@@ -8728,6 +8728,477 @@ console.log('ANNOUNCEMENT_HEADING_SYNC_PASS');
         self.assertEqual(self.controller.method_calls, [])
         self.assertEqual(pin_enters, pin_exits)
 
+    def test_preview_instance_registry_is_bounded_and_expires(self):
+        from contextlib import contextmanager
+        import multiprocessing
+
+        from edit_preview import PreviewInstanceRegistry, PreviewSessionCapacity
+
+        class Clock:
+            def __init__(self):
+                self.now = 1000.0
+                self.capacity = None
+
+            def monotonic(self):
+                return self.now
+
+            def advance(self, seconds):
+                capacity = self.capacity
+                with capacity._condition:
+                    self.now += seconds
+                capacity.request_reap()
+
+            def timeout_wait(self, condition, timeout):
+                self.now += timeout
+                return False
+
+        class DeterministicCapacity(PreviewSessionCapacity):
+            def __init__(self, **kwargs):
+                self._reap_requested = threading.Semaphore(0)
+                self.reap_completed = threading.Event()
+                super().__init__(**kwargs)
+
+            def request_reap(self):
+                self.reap_completed.clear()
+                self._reap_requested.release()
+
+            def run_expiry_reaper(self):
+                while True:
+                    self._reap_requested.acquire()
+                    with self._condition:
+                        if self._closed:
+                            return
+                    self.last_reaped = self.reap_expired()
+                    self.reap_completed.set()
+
+            def close(self):
+                super().close()
+                self._reap_requested.release()
+
+        class CountingIterator:
+            def __init__(self, label, stop_event, *, block_on=None):
+                self.label = label
+                self.stop_event = stop_event
+                self.block_on = block_on
+                self.next_calls = 0
+                self.close_calls = 0
+                self.blocked = threading.Event()
+                self.closed = threading.Event()
+
+            def __iter__(self):
+                return self
+
+            def __next__(self):
+                self.next_calls += 1
+                if self.next_calls == self.block_on:
+                    self.blocked.set()
+                    if not self.stop_event.wait(1):
+                        raise AssertionError("active iterator was not stopped by expiry")
+                    return {"png": f"{self.label}-{self.next_calls}", "delay_ms": 1}
+                if self.stop_event.is_set():
+                    raise StopIteration
+                return {"png": f"{self.label}-{self.next_calls}", "delay_ms": 1}
+
+            def close(self):
+                self.close_calls += 1
+                if self.close_calls > 1:
+                    raise AssertionError(f"{self.label} iterator closed more than once")
+                self.closed.set()
+
+        class LightweightProvider:
+            MAX_WORKERS = 2
+
+            def __init__(self):
+                self.is_closed = False
+                self.close_calls = 0
+
+            @property
+            def active_child_count(self):
+                return 0
+
+            @property
+            def active_worker_count(self):
+                return 0
+
+            @property
+            def available_worker_slots(self):
+                return self.MAX_WORKERS
+
+            def shutdown(self):
+                if not self.is_closed:
+                    self.is_closed = True
+                    self.close_calls += 1
+
+        start_path = "/api/edit-preview/clock_lava"
+        page_path = "/api/edit-preview/page"
+        cancel_path = "/api/edit-preview/cancel"
+        private = f"{self.temp.name}/private?credential=https://secret.invalid/key"
+
+        devices = [self.client, self.app.test_client(), self.app.test_client()]
+        self.pairing.verify.return_value = True
+        identities = []
+        device_ids = []
+        for index, client in enumerate(devices):
+            client.post(
+                "/pair", data={"pin": "123456", "device_name": f"Bounded {index}"},
+            )
+            with client.session_transaction() as paired:
+                identities.append(dict(paired))
+                device_ids.append(paired["device_id"])
+        self.assertEqual(len(set(device_ids)), 3)
+
+        def tab(device_index):
+            client = self.app.test_client()
+            with client.session_transaction() as paired:
+                paired.update(identities[device_index])
+            return client
+
+        tabs = [[tab(device) for _ in range(6)] for device in range(3)]
+        candidate = copy.deepcopy(self.store.get())
+        candidate.pop("revision")
+
+        def payload(label, instance, generation=1):
+            value = copy.deepcopy(candidate)
+            value["weather"]["location"] = f"{private}-{label}"
+            return {
+                "config": value,
+                "generation": generation,
+                "preview_instance": instance,
+            }
+
+        def assert_error(response, status, message):
+            self.assertEqual(response.status_code, status, response.get_data(as_text=True))
+            self.assertEqual(response.headers.get("Cache-Control"), "no-store")
+            self.assertNotIn("ETag", response.headers)
+            self.assertEqual(response.get_json(), {"error": message})
+            wire = response.get_data(as_text=True).lower()
+            for forbidden in (
+                private, self.temp.name, "secret.invalid", "credential", "https://",
+                *device_ids, "revision", "frame", "next_token",
+            ):
+                self.assertNotIn(forbidden.lower(), wire)
+            if status == 429:
+                self.assertEqual(response.headers.get("Retry-After"), "2")
+
+        def assert_success(response):
+            self.assertEqual(response.status_code, 200, response.get_data(as_text=True))
+            self.assertEqual(response.headers.get("Cache-Control"), "no-store")
+            self.assertNotIn("ETag", response.headers)
+            return response.get_json()
+
+        pin_enters = []
+        pin_exits = []
+        provider_calls = []
+        renderer_calls = []
+        iterators = []
+        block_next = False
+
+        @contextmanager
+        def pinned(candidate_value, media_root, *, allow_missing=()):
+            label = candidate_value["weather"]["location"]
+            pin_enters.append(label)
+            try:
+                yield {}
+            finally:
+                pin_exits.append(label)
+
+        def prepare(provider_value, module_name, candidate_value, stop_event):
+            provider_calls.append(candidate_value["weather"]["location"])
+            return None
+
+        def renderer(module_name, candidate_value, selected_palette, pinned_media,
+                     prepared, stop_event):
+            nonlocal block_next
+            label = candidate_value["weather"]["location"]
+            renderer_calls.append(label)
+            current = CountingIterator(
+                label, stop_event, block_on=34 if block_next else None,
+            )
+            block_next = False
+            iterators.append(current)
+            return current
+
+        self.controller.reset_mock()
+        before_config = Path(self.store.path).read_bytes()
+        before_devices = Path(self.device_store.path).read_bytes()
+        before_media = sorted(
+            (path.relative_to(self.media_dir).as_posix(), path.read_bytes())
+            for path in self.media_dir.rglob("*") if path.is_file()
+        )
+        before_children = {child.pid for child in multiprocessing.active_children()}
+        before_threads = {(thread.ident, thread.name) for thread in threading.enumerate()}
+        before_fds = len(list(Path("/proc/self/fd").iterdir()))
+
+        clock = Clock()
+        capacity = DeterministicCapacity(
+            monotonic=clock.monotonic, wait=clock.timeout_wait,
+        )
+        clock.capacity = capacity
+        capacity.IDLE_TTL = 1.0
+        registry = PreviewInstanceRegistry(capacity=capacity)
+        registry.EXPIRED_TOMBSTONE_TTL = 100.0
+        provider = LightweightProvider()
+        registry_factory = Mock(return_value=registry)
+        provider_factory = Mock(return_value=provider)
+        sessions = []
+
+        def await_reaper(event, message):
+            for _attempt in range(20):
+                if event.wait(0.05):
+                    return
+                with capacity._condition:
+                    capacity._condition.notify_all()
+            self.fail(message)
+
+        reaper_names = [
+            thread.name for thread in threading.enumerate()
+            if thread.name == "edit-preview-expiry-reaper"
+        ]
+        baseline_reapers = sum(
+            name == "edit-preview-expiry-reaper" for _ident, name in before_threads
+        )
+        self.assertEqual(len(reaper_names), baseline_reapers + 1)
+        self.assertTrue(registry.reaper_alive)
+        self.assertTrue(registry.reaper_is_daemon)
+
+        try:
+            with patch("webapp.PreviewInstanceRegistry", registry_factory), patch(
+                "webapp.PreviewProvider", provider_factory,
+            ), patch("webapp.pin_candidate_media", pinned), patch(
+                "webapp._prepare_edit_preview_provider", prepare, create=True,
+            ), patch("webapp._edit_preview_iterator", renderer, create=True):
+                # Retained instances are bounded to four per paired device and
+                # eight process-wide, even when each tab has a distinct identity.
+                capacity.MAX_ACTIVE = 8
+                for device in range(2):
+                    for index in range(4):
+                        instance = f"{device * 8 + index + 1:032x}"
+                        body = assert_success(tabs[device][index].post(
+                            start_path,
+                            json=payload(f"retained-{device}-{index}", instance),
+                        ))
+                        sessions.append((tabs[device][index], instance, body))
+                self.assertEqual(registry.total_count, 8)
+                self.assertEqual(registry.count_for_device(device_ids[0]), 4)
+                self.assertEqual(registry.count_for_device(device_ids[1]), 4)
+                self.assertEqual(capacity.active_count, 8)
+
+                constructions = (
+                    len(pin_enters), len(provider_calls), len(renderer_calls), len(iterators),
+                )
+                assert_error(
+                    tabs[0][4].post(
+                        start_path, json=payload("per-device-rejected", "a" * 32),
+                    ),
+                    429, "Preview capacity is temporarily exhausted.",
+                )
+                assert_error(
+                    tabs[2][0].post(
+                        start_path, json=payload("process-rejected", "b" * 32),
+                    ),
+                    429, "Preview capacity is temporarily exhausted.",
+                )
+                self.assertEqual(
+                    (len(pin_enters), len(provider_calls), len(renderer_calls), len(iterators)),
+                    constructions,
+                )
+                self.assertEqual(registry.total_count, 8)
+
+                for client, instance, body in sessions:
+                    self.assertEqual(assert_success(client.post(cancel_path, json={
+                        "session": body["session"], "preview_instance": instance,
+                    })), {"cancelled": True})
+                sessions.clear()
+                self.assertEqual((registry.total_count, capacity.active_count), (0, 0))
+
+                # Only two renderer sessions are active. A rejected third start
+                # reaches no pin, provider, or renderer construction.
+                capacity.MAX_ACTIVE = 2
+                for index in range(2):
+                    instance = f"{index + 40:032x}"
+                    body = assert_success(tabs[index][0].post(
+                        start_path, json=payload(f"active-{index}", instance, 2),
+                    ))
+                    sessions.append((tabs[index][0], instance, body))
+                constructions = (
+                    len(pin_enters), len(provider_calls), len(renderer_calls), len(iterators),
+                )
+                capacity.ACQUIRE_TIMEOUT = 0
+                assert_error(
+                    tabs[2][0].post(
+                        start_path, json=payload("active-rejected", "c" * 32, 2),
+                    ),
+                    429, "Preview capacity is temporarily exhausted.",
+                )
+                capacity.ACQUIRE_TIMEOUT = 2.0
+                self.assertEqual(
+                    (len(pin_enters), len(provider_calls), len(renderer_calls), len(iterators)),
+                    constructions,
+                )
+                self.assertEqual((capacity.active_count, registry.total_count), (2, 2))
+
+                # The daemon expires retained idle sessions without another request,
+                # releases both resource layers once, and leaves identity tombstones.
+                expired_idle = list(sessions)
+                sessions.clear()
+                clock.advance(capacity.IDLE_TTL + 0.001)
+                for iterator in iterators[-2:]:
+                    await_reaper(iterator.closed, "idle expiry did not close")
+                    self.assertEqual(iterator.close_calls, 1)
+                self.assertEqual((capacity.active_count, registry.total_count), (0, 0))
+                self.assertEqual(registry.expired_count, 2)
+                self.assertEqual(pin_exits[-2:], pin_enters[-2:])
+
+                owner, expired_instance, expired = expired_idle[0]
+                expired_page = {
+                    "session": expired["session"],
+                    "preview_instance": expired_instance,
+                    "token": expired["next_token"],
+                }
+                expired_cancel = {
+                    "session": expired["session"],
+                    "preview_instance": expired_instance,
+                }
+                assert_error(
+                    owner.post(page_path, json=expired_page), 410,
+                    "Preview session expired.",
+                )
+                assert_error(
+                    owner.post(cancel_path, json=expired_cancel), 410,
+                    "Preview session expired.",
+                )
+                assert_error(
+                    tabs[2][0].post(page_path, json=expired_page), 409,
+                    "Preview session is no longer active.",
+                )
+
+                retry_instance = "d" * 32
+                retry = assert_success(tabs[2][0].post(
+                    start_path, json=payload("retry-after-expiry", retry_instance, 3),
+                ))
+                self.assertEqual(capacity.active_count, 1)
+                self.assertEqual(assert_success(tabs[2][0].post(cancel_path, json={
+                    "session": retry["session"], "preview_instance": retry_instance,
+                })), {"cancelled": True})
+
+                # Expiry during a page signals active work, then closes and releases
+                # ownership exactly once after that page leaves the iterator.
+                active_instance = "e" * 32
+                block_next = True
+                active = assert_success(tabs[0][0].post(
+                    start_path, json=payload("expire-active-page", active_instance, 4),
+                ))
+                active_iterator = iterators[-1]
+                active_result = {}
+                active_failures = []
+
+                def continue_active():
+                    try:
+                        active_result["response"] = tabs[0][0].post(page_path, json={
+                            "session": active["session"],
+                            "preview_instance": active_instance,
+                            "token": active["next_token"],
+                        })
+                    except BaseException as error:
+                        active_failures.append(error)
+
+                active_thread = threading.Thread(
+                    target=continue_active, name="preview-active-expiry-page",
+                )
+                active_thread.start()
+                self.assertTrue(active_iterator.blocked.wait(1))
+                with capacity._condition:
+                    self.assertEqual(len(capacity._sessions), 1)
+                    active_last_activity = next(iter(capacity._sessions.values()))
+                clock.advance(
+                    active_last_activity + capacity.IDLE_TTL + 0.001 - clock.now,
+                )
+                await_reaper(capacity.reap_completed, "active reaper did not run")
+                self.assertEqual(capacity.last_reaped, 1)
+                await_reaper(active_iterator.closed, "active expiry did not close")
+                active_thread.join(1)
+                self.assertFalse(active_thread.is_alive())
+                self.assertEqual(active_failures, [])
+                self.assertEqual(active_result["response"].status_code, 200)
+                self.assertEqual(active_iterator.close_calls, 1)
+                self.assertEqual((capacity.active_count, registry.total_count), (0, 0))
+                assert_error(
+                    tabs[0][0].post(cancel_path, json={
+                        "session": active["session"],
+                        "preview_instance": active_instance,
+                    }), 410, "Preview session expired.",
+                )
+
+                # Expiry tombstones retain only the eight newest identities, and
+                # disappear after their own TTL so old expiry degrades to generic 409.
+                oldest = None
+                for index in range(9):
+                    instance = f"{index + 100:032x}"
+                    body = assert_success(tabs[index % 3][0].post(
+                        start_path, json=payload(f"tombstone-{index}", instance, index + 10),
+                    ))
+                    if oldest is None:
+                        oldest = (tabs[index % 3][0], instance, body)
+                    current_iterator = iterators[-1]
+                    clock.advance(capacity.IDLE_TTL + 0.001)
+                    await_reaper(current_iterator.closed, "tombstone expiry did not close")
+                    self.assertEqual(current_iterator.close_calls, 1)
+                self.assertEqual(registry.expired_count, 8)
+                self.assertLessEqual(
+                    registry.expired_count, registry.MAX_EXPIRED_TOMBSTONES,
+                )
+                old_client, old_instance, old_body = oldest
+                assert_error(old_client.post(cancel_path, json={
+                    "session": old_body["session"],
+                    "preview_instance": old_instance,
+                }), 409, "Preview session is no longer active.")
+
+                newest_instance = f"{108:032x}"
+                newest_body = body
+                assert_error(tabs[2][0].post(cancel_path, json={
+                    "session": newest_body["session"],
+                    "preview_instance": newest_instance,
+                }), 410, "Preview session expired.")
+                clock.advance(registry.EXPIRED_TOMBSTONE_TTL + 0.001)
+                assert_error(tabs[2][0].post(cancel_path, json={
+                    "session": newest_body["session"],
+                    "preview_instance": newest_instance,
+                }), 409, "Preview session is no longer active.")
+                self.assertEqual(registry.expired_count, 0)
+
+                self.app.extensions["close_edit_preview_services"]()
+
+            self.assertEqual((registry_factory.call_count, provider_factory.call_count), (1, 1))
+            self.assertEqual(registry.reaper_join_count, 1)
+            self.assertFalse(registry.reaper_alive)
+            self.assertTrue(provider.is_closed)
+            self.assertEqual(provider.close_calls, 1)
+            self.assertEqual(provider.active_child_count, 0)
+            self.assertEqual(provider.active_worker_count, 0)
+            self.assertEqual(provider.available_worker_slots, provider.MAX_WORKERS)
+            self.assertEqual((registry.total_count, registry.expired_count), (0, 0))
+            self.assertEqual((capacity.active_count, capacity.waiting_count), (0, 0))
+            self.assertEqual(pin_enters, pin_exits)
+            self.assertTrue(all(iterator.close_calls == 1 for iterator in iterators))
+            self.assertEqual(Path(self.store.path).read_bytes(), before_config)
+            self.assertEqual(Path(self.device_store.path).read_bytes(), before_devices)
+            self.assertEqual(sorted(
+                (path.relative_to(self.media_dir).as_posix(), path.read_bytes())
+                for path in self.media_dir.rglob("*") if path.is_file()
+            ), before_media)
+            self.assertEqual(self.controller.method_calls, [])
+        finally:
+            registry.close()
+            provider.shutdown()
+
+        self.assertEqual(
+            {child.pid for child in multiprocessing.active_children()}, before_children,
+        )
+        self.assertEqual(
+            {(thread.ident, thread.name) for thread in threading.enumerate()}, before_threads,
+        )
+        self.assertEqual(len(list(Path("/proc/self/fd").iterdir())), before_fds)
+
     def test_malformed_or_reused_preview_instance_and_tokens_fail_closed(self):
         from contextlib import contextmanager
         import multiprocessing
