@@ -8728,6 +8728,386 @@ console.log('ANNOUNCEMENT_HEADING_SYNC_PASS');
         self.assertEqual(self.controller.method_calls, [])
         self.assertEqual(pin_enters, pin_exits)
 
+    def test_malformed_or_reused_preview_instance_and_tokens_fail_closed(self):
+        from contextlib import contextmanager
+        import multiprocessing
+
+        from edit_preview import PreviewInstanceRegistry, PreviewSessionCapacity
+
+        class Clock:
+            now = 500.0
+
+            def monotonic(self):
+                return self.now
+
+        class CountingIterator:
+            def __init__(self, label):
+                self.label = label
+                self.next_calls = 0
+                self.close_calls = 0
+
+            def __iter__(self):
+                return self
+
+            def __next__(self):
+                self.next_calls += 1
+                return {"png": f"frame-{self.label}-{self.next_calls}", "delay_ms": 1}
+
+            def close(self):
+                self.close_calls += 1
+                if self.close_calls > 1:
+                    raise AssertionError(f"iterator {self.label} closed more than once")
+
+        class LightweightProvider:
+            MAX_WORKERS = 2
+
+            def __init__(self):
+                self.prepare_calls = 0
+                self.close_calls = 0
+                self.is_closed = False
+
+            @property
+            def active_child_count(self):
+                return 0
+
+            @property
+            def active_worker_count(self):
+                return 0
+
+            @property
+            def available_worker_slots(self):
+                return self.MAX_WORKERS
+
+            def shutdown(self):
+                if not self.is_closed:
+                    self.is_closed = True
+                    self.close_calls += 1
+
+        start_path = "/api/edit-preview/clock_lava"
+        page_path = "/api/edit-preview/page"
+        cancel_path = "/api/edit-preview/cancel"
+        owner_instance = "1" * 32
+        wrong_instance = "2" * 32
+        expired_instance = "3" * 32
+        private_values = (
+            str(Path(self.temp.name) / "private-preview.png"),
+            "https://secret.invalid/preview?credential=private-token",
+        )
+
+        owner = self.client
+        attacker = self.app.test_client()
+        self.pairing.verify.return_value = True
+        owner.post("/pair", data={"pin": "123456", "device_name": "Token owner"})
+        attacker.post("/pair", data={"pin": "123456", "device_name": "Token attacker"})
+        with owner.session_transaction() as owner_session:
+            owner_device = owner_session["device_id"]
+        with attacker.session_transaction() as attacker_session:
+            attacker_device = attacker_session["device_id"]
+        self.assertNotEqual(owner_device, attacker_device)
+
+        candidate = copy.deepcopy(self.store.get())
+        candidate.pop("revision")
+        candidate["weather"]["location"] = private_values[1]
+        start_payload = {
+            "config": candidate,
+            "generation": 1,
+            "preview_instance": owner_instance,
+        }
+        self.controller.reset_mock()
+        before_config = Path(self.store.path).read_bytes()
+        before_devices = Path(self.device_store.path).read_bytes()
+        before_media = sorted(
+            (path.relative_to(self.media_dir).as_posix(), path.read_bytes())
+            for path in self.media_dir.rglob("*") if path.is_file()
+        )
+        before_children = {child.pid for child in multiprocessing.active_children()}
+        before_threads = {(thread.ident, thread.name) for thread in threading.enumerate()}
+        before_fds = len(list(Path("/proc/self/fd").iterdir()))
+
+        clock = Clock()
+        capacity = PreviewSessionCapacity(monotonic=clock.monotonic)
+        registry = PreviewInstanceRegistry(capacity=capacity)
+        provider = LightweightProvider()
+        iterators = []
+        pin_enters = []
+        pin_exits = []
+        provider_calls = []
+        renderer_calls = []
+
+        def assert_error(response, status, message):
+            self.assertEqual(response.status_code, status, response.get_data(as_text=True))
+            self.assertEqual(response.headers.get("Cache-Control"), "no-store")
+            self.assertNotIn("ETag", response.headers)
+            self.assertEqual(response.get_json(), {"error": message})
+            wire = response.get_data(as_text=True)
+            for forbidden in (
+                "revision", "generation", "frame", "preview_instance", "path", "url",
+                owner_device, attacker_device, *private_values,
+            ):
+                self.assertNotIn(forbidden.lower(), wire.lower())
+
+        def assert_success(response):
+            self.assertEqual(response.status_code, 200, response.get_data(as_text=True))
+            self.assertEqual(response.headers.get("Cache-Control"), "no-store")
+            self.assertNotIn("ETag", response.headers)
+            return response.get_json()
+
+        @contextmanager
+        def pinned(candidate_value, media_root, *, allow_missing=()):
+            label = candidate_value["weather"]["location"]
+            pin_enters.append(label)
+            try:
+                yield {}
+            finally:
+                pin_exits.append(label)
+
+        def prepare(provider_value, module_name, candidate_value, stop_event):
+            provider_calls.append((provider_value, module_name))
+            provider_value.prepare_calls += 1
+            return None
+
+        def renderer(module_name, candidate_value, selected_palette, pinned_media,
+                     prepared, stop_event):
+            label = f"session-{len(iterators)}"
+            renderer_calls.append((module_name, label))
+            current = CountingIterator(label)
+            iterators.append(current)
+            return current
+
+        malformed_instances = [
+            None, True, 1, [], {}, "", "1" * 31, "1" * 33,
+            "A" * 32, "g" * 32,
+        ]
+        malformed_start_requests = [
+            {"data": "{", "content_type": "application/json"},
+            {"data": "{}", "content_type": "text/plain"},
+            {"data": "null", "content_type": "application/json"},
+            {"json": []},
+            {"json": "not-an-object"},
+            {"json": {}},
+            {"json": {key: value for key, value in start_payload.items()
+                      if key != "preview_instance"}},
+            {"json": {**start_payload, "extra": "must-fail"}},
+            *({"json": {**start_payload, "preview_instance": value}}
+              for value in malformed_instances),
+        ]
+
+        registry_factory = Mock(return_value=registry)
+        provider_factory = Mock(return_value=provider)
+        try:
+            with patch("webapp.PreviewInstanceRegistry", registry_factory), patch(
+                "webapp.PreviewProvider", provider_factory,
+            ), patch("webapp.pin_candidate_media", pinned), patch(
+                "webapp._prepare_edit_preview_provider", prepare, create=True,
+            ), patch("webapp._edit_preview_iterator", renderer, create=True):
+                for request_args in malformed_start_requests:
+                    with self.subTest(start_request=request_args):
+                        assert_error(
+                            owner.post(start_path, **request_args), 400,
+                            "Preview request is invalid.",
+                        )
+                self.assertEqual(registry_factory.call_count, 0)
+                self.assertEqual(provider_factory.call_count, 0)
+                self.assertEqual(capacity.active_count, 0)
+                self.assertEqual(registry.total_count, 0)
+                self.assertEqual(pin_enters, [])
+                self.assertEqual(provider_calls, [])
+                self.assertEqual(renderer_calls, [])
+
+                first = assert_success(owner.post(start_path, json=start_payload))
+                self.assertRegex(first["session"], r"^[0-9a-f]{32}$")
+                self.assertRegex(first["next_token"], r"^[0-9a-f]{64}$")
+                self.assertEqual((registry_factory.call_count, provider_factory.call_count), (1, 1))
+                self.assertEqual((len(pin_enters), len(provider_calls), len(iterators)), (1, 1, 1))
+                owner_iterator = iterators[0]
+                continuation = {
+                    "session": first["session"],
+                    "preview_instance": owner_instance,
+                    "token": first["next_token"],
+                }
+
+                malformed_session_values = [
+                    None, True, 1, [], {}, "", "a" * 31, "a" * 33,
+                    "A" * 32, "g" * 32,
+                ]
+                malformed_token_values = [
+                    None, True, 1, [], {}, "", "b" * 63, "b" * 65,
+                    "B" * 64, "g" * 64,
+                ]
+                malformed_page_requests = [
+                    {"data": "{", "content_type": "application/json"},
+                    {"data": json.dumps(continuation), "content_type": "text/plain"},
+                    {"data": "null", "content_type": "application/json"},
+                    {"json": []},
+                    {"json": "not-an-object"},
+                    {"json": {}},
+                    *({"json": {key: value for key, value in continuation.items() if key != missing}}
+                      for missing in continuation),
+                    {"json": {**continuation, "extra": "must-fail"}},
+                    *({"json": {**continuation, "session": value}}
+                      for value in malformed_session_values),
+                    *({"json": {**continuation, "preview_instance": value}}
+                      for value in malformed_instances),
+                    *({"json": {**continuation, "token": value}}
+                      for value in malformed_token_values),
+                ]
+                calls_before_malformed = owner_iterator.next_calls
+                for request_args in malformed_page_requests:
+                    with self.subTest(page_request=request_args):
+                        assert_error(
+                            owner.post(page_path, **request_args), 400,
+                            "Preview request is invalid.",
+                        )
+                self.assertEqual(owner_iterator.next_calls, calls_before_malformed)
+
+                cancel_payload = {
+                    "session": first["session"],
+                    "preview_instance": owner_instance,
+                }
+                malformed_cancel_requests = [
+                    {"data": "{", "content_type": "application/json"},
+                    {"data": json.dumps(cancel_payload), "content_type": "text/plain"},
+                    {"data": "null", "content_type": "application/json"},
+                    {"json": []},
+                    {"json": {}},
+                    *({"json": {key: value for key, value in cancel_payload.items()
+                                if key != missing}}
+                      for missing in cancel_payload),
+                    {"json": {**cancel_payload, "extra": "must-fail"}},
+                    *({"json": {**cancel_payload, "session": value}}
+                      for value in malformed_session_values),
+                    *({"json": {**cancel_payload, "preview_instance": value}}
+                      for value in malformed_instances),
+                ]
+                for request_args in malformed_cancel_requests:
+                    with self.subTest(cancel_request=request_args):
+                        assert_error(
+                            owner.post(cancel_path, **request_args), 400,
+                            "Preview request is invalid.",
+                        )
+                self.assertEqual(owner_iterator.next_calls, calls_before_malformed)
+                self.assertEqual(owner_iterator.close_calls, 0)
+
+                unknown_session = {**continuation, "session": "f" * 32}
+                unknown_token = {**continuation, "token": "e" * 64}
+                wrong_instance_page = {**continuation, "preview_instance": wrong_instance}
+                conflict_attempts = [
+                    (owner, page_path, unknown_session),
+                    (owner, page_path, unknown_token),
+                    (owner, page_path, wrong_instance_page),
+                    (attacker, page_path, continuation),
+                    (owner, cancel_path, {
+                        "session": "f" * 32, "preview_instance": owner_instance,
+                    }),
+                    (owner, cancel_path, {
+                        "session": first["session"], "preview_instance": wrong_instance,
+                    }),
+                    (attacker, cancel_path, cancel_payload),
+                ]
+                for client, path, payload in conflict_attempts:
+                    with self.subTest(conflict_path=path, payload=payload):
+                        message = (
+                            "Preview continuation was already used."
+                            if payload is unknown_token
+                            else "Preview session is no longer active."
+                        )
+                        assert_error(client.post(path, json=payload), 409, message)
+                self.assertEqual(owner_iterator.next_calls, calls_before_malformed)
+                self.assertEqual(owner_iterator.close_calls, 0)
+
+                second = assert_success(owner.post(page_path, json=continuation))
+                calls_after_valid_claim = owner_iterator.next_calls
+                self.assertGreater(calls_after_valid_claim, calls_before_malformed)
+                assert_error(
+                    owner.post(page_path, json=continuation), 409,
+                    "Preview continuation was already used.",
+                )
+                self.assertEqual(owner_iterator.next_calls, calls_after_valid_claim)
+
+                current = {**continuation, "token": second["next_token"]}
+                third = assert_success(owner.post(page_path, json=current))
+                self.assertEqual(third["page"], second["page"] + 1)
+                owner_cancel = assert_success(owner.post(cancel_path, json=cancel_payload))
+                self.assertEqual(owner_cancel, {"cancelled": True})
+                owner_calls_after_cancel = owner_iterator.next_calls
+                self.assertEqual(owner_iterator.close_calls, 1)
+                assert_error(
+                    owner.post(cancel_path, json=cancel_payload), 409,
+                    "Preview session is no longer active.",
+                )
+                self.assertEqual(owner_iterator.next_calls, owner_calls_after_cancel)
+
+                expiring = assert_success(owner.post(start_path, json={
+                    **start_payload,
+                    "preview_instance": expired_instance,
+                }))
+                expired_iterator = iterators[-1]
+                expired_calls = expired_iterator.next_calls
+                expired_page = {
+                    "session": expiring["session"],
+                    "preview_instance": expired_instance,
+                    "token": expiring["next_token"],
+                }
+                expired_cancel = {
+                    "session": expiring["session"],
+                    "preview_instance": expired_instance,
+                }
+                clock.now += capacity.IDLE_TTL + 0.001
+                self.assertEqual(capacity.reap_expired(), 1)
+                self.assertEqual(expired_iterator.close_calls, 1)
+                self.assertEqual(expired_iterator.next_calls, expired_calls)
+                self.assertEqual(capacity.active_count, 0)
+                self.assertEqual(capacity.available_slots, capacity.MAX_ACTIVE)
+                self.assertEqual(registry.total_count, 0)
+                self.assertEqual(registry.expired_count, 1)
+                assert_error(
+                    owner.post(page_path, json=expired_page), 410,
+                    "Preview session expired.",
+                )
+                assert_error(
+                    owner.post(cancel_path, json=expired_cancel), 410,
+                    "Preview session expired.",
+                )
+                assert_error(
+                    attacker.post(page_path, json=expired_page), 409,
+                    "Preview session is no longer active.",
+                )
+                self.assertEqual(expired_iterator.next_calls, expired_calls)
+
+                self.app.extensions["close_edit_preview_services"]()
+
+            self.assertEqual(Path(self.store.path).read_bytes(), before_config)
+            self.assertEqual(Path(self.device_store.path).read_bytes(), before_devices)
+            self.assertEqual(sorted(
+                (path.relative_to(self.media_dir).as_posix(), path.read_bytes())
+                for path in self.media_dir.rglob("*") if path.is_file()
+            ), before_media)
+            self.assertEqual(self.controller.method_calls, [])
+            self.assertEqual(len(pin_enters), 2)
+            self.assertEqual(pin_exits, pin_enters)
+            self.assertEqual(len(provider_calls), 2)
+            self.assertEqual(len(renderer_calls), 2)
+            self.assertTrue(all(iterator.close_calls == 1 for iterator in iterators))
+            self.assertEqual(registry.total_count, 0)
+            self.assertEqual(registry.expired_count, 0)
+            self.assertFalse(registry.reaper_alive)
+            self.assertTrue(provider.is_closed)
+            self.assertEqual(provider.close_calls, 1)
+            self.assertEqual(provider.active_child_count, 0)
+            self.assertEqual(provider.active_worker_count, 0)
+            self.assertEqual(provider.available_worker_slots, provider.MAX_WORKERS)
+        finally:
+            registry.close()
+            provider.shutdown()
+
+        self.assertEqual(
+            {child.pid for child in multiprocessing.active_children()}, before_children,
+        )
+        self.assertEqual(
+            {(thread.ident, thread.name) for thread in threading.enumerate()}, before_threads,
+        )
+        self.assertEqual(len(list(Path("/proc/self/fd").iterdir())), before_fds)
+
     def test_malformed_tokens_and_expired_sessions_have_stable_errors(self):
         from contextlib import contextmanager
 
