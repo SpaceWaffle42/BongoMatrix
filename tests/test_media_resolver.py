@@ -5,6 +5,8 @@ import os
 import subprocess
 import sys
 import tempfile
+import threading
+import time
 import types
 import unittest
 from pathlib import Path
@@ -827,6 +829,286 @@ class MediaResolverTests(unittest.TestCase):
 
             self.assertTrue(all(handle.closed for handle in handles.values()))
             self.assertEqual(set(os.listdir("/proc/self/fd")), descriptors_before)
+
+    def test_cancel_error_and_complete_close_original_and_duplicate_fds_once(self):
+        with tempfile.TemporaryDirectory() as directory:
+            temporary_root = Path(directory)
+            media_root = temporary_root / "media"
+            media_root.mkdir()
+            outside = temporary_root / "outside.gif"
+            outside_colour = (3, 5, 7)
+            Image.new("RGB", (64, 32), outside_colour).save(outside, format="GIF")
+            outside_bytes = outside.read_bytes()
+
+            complete_path = media_root / "complete.gif"
+            first_colour = (211, 17, 31)
+            first = Image.new("RGB", (64, 32), first_colour)
+            second = Image.new("RGB", (64, 32), (19, 197, 37))
+            first.save(
+                complete_path, format="GIF", save_all=True, append_images=[second],
+                duration=[10, 10], loop=0,
+            )
+            (media_root / "error.gif").write_bytes(b"not a decodable image")
+            (media_root / "cancel.mp4").write_bytes(b"pinned decoder input")
+
+            descriptors_before = set(os.listdir("/proc/self/fd"))
+            threads_before = {thread.ident for thread in threading.enumerate()}
+            resolver = MediaResolver(media_root)
+            handles = {
+                reference: resolver.resolve(reference)
+                for reference in ("complete.gif", "error.gif", "cancel.mp4")
+            }
+            original_descriptors = {
+                reference: handle.fileno() for reference, handle in handles.items()
+            }
+            original_identities = {
+                reference: (
+                    os.fstat(descriptor).st_dev,
+                    os.fstat(descriptor).st_ino,
+                )
+                for reference, descriptor in original_descriptors.items()
+            }
+            original_close_counts = dict.fromkeys(handles, 0)
+            for reference, handle in handles.items():
+                release = handle._on_close
+
+                def record_original_close(closed_handle, *, name=reference, callback=release):
+                    original_close_counts[name] += 1
+                    callback(closed_handle)
+
+                handle._on_close = record_original_close
+
+            duplicate_files = []
+            duplicate_descriptors = {}
+
+            class CountedFile:
+                def __init__(self, media_file):
+                    self._file = media_file
+                    self.descriptor = media_file.fileno()
+                    status = os.fstat(self.descriptor)
+                    self.identity = (status.st_dev, status.st_ino)
+                    self.close_calls = 0
+
+                def __getattr__(self, name):
+                    return getattr(self._file, name)
+
+                def close(self):
+                    self.close_calls += 1
+                    self._file.close()
+
+            class CountedHandle:
+                def __init__(self, handle):
+                    self._handle = handle
+
+                def dup_file(self):
+                    counted = CountedFile(self._handle.dup_file())
+                    duplicate_files.append(counted)
+                    return counted
+
+                def dup_fd(self):
+                    descriptor = self._handle.dup_fd()
+                    status = os.fstat(descriptor)
+                    duplicate_descriptors[descriptor] = {
+                        "identity": (status.st_dev, status.st_ino),
+                        "close_calls": 0,
+                    }
+                    return descriptor
+
+            for reference in handles:
+                path = media_root / reference
+                path.unlink()
+                path.symlink_to(outside)
+
+            fake_graphics = types.SimpleNamespace(
+                Color=lambda red, green, blue: types.SimpleNamespace(
+                    red=red, green=green, blue=blue,
+                ),
+                Font=object,
+            )
+            fake_rgbmatrix = types.SimpleNamespace(
+                RGBMatrix=object, RGBMatrixOptions=object, graphics=fake_graphics,
+            )
+            previous_rgbmatrix = sys.modules.get("rgbmatrix")
+            sys.modules["rgbmatrix"] = fake_rgbmatrix
+            try:
+                framework = importlib.import_module("matrix_framework")
+            finally:
+                if previous_rgbmatrix is None:
+                    sys.modules.pop("rgbmatrix", None)
+                else:
+                    sys.modules["rgbmatrix"] = previous_rgbmatrix
+
+            class RecordingMatrix(CaptureMatrix):
+                def __init__(self):
+                    super().__init__()
+                    self.submissions = []
+
+                def swap(self, canvas=None):
+                    self.submissions.append(self.snapshot(canvas))
+                    return super().swap(canvas)
+
+            def production_matrix():
+                matrix = RecordingMatrix()
+                matrix.show_gif = types.MethodType(framework.Matrix.show_gif, matrix)
+                matrix.media_frames = types.MethodType(framework.Matrix.media_frames, matrix)
+                matrix._media_file = lambda _reference: (_ for _ in ()).throw(
+                    AssertionError("consumer reopened a media pathname")
+                )
+                return matrix
+
+            processes = []
+            child_started = threading.Event()
+            real_popen = subprocess.Popen
+            real_close = os.close
+
+            def blocking_decoder(_command, *args, **kwargs):
+                process = real_popen(
+                    [sys.executable, "-c", "import time; time.sleep(30)"],
+                    stdin=kwargs.get("stdin"), stdout=subprocess.PIPE,
+                    stderr=subprocess.DEVNULL,
+                )
+                processes.append(process)
+                child_started.set()
+                return process
+
+            def recording_close(descriptor):
+                ownership = duplicate_descriptors.get(descriptor)
+                if ownership is not None:
+                    try:
+                        status = os.fstat(descriptor)
+                    except OSError:
+                        status = None
+                    if status is not None and (
+                        status.st_dev, status.st_ino
+                    ) == ownership["identity"]:
+                        ownership["close_calls"] += 1
+                return real_close(descriptor)
+
+            cancel_stop = threading.Event()
+            cancel_result = []
+            cancel_errors = []
+
+            def cancel_decode():
+                try:
+                    cancel_result.append(
+                        production_matrix().media_frames(
+                            "cancel.mp4", 1, 1, stop_event=cancel_stop,
+                            decode_timeout=5,
+                            pinned_handle=CountedHandle(handles["cancel.mp4"]),
+                        )
+                    )
+                except BaseException as error:
+                    cancel_errors.append(error)
+
+            worker = None
+            cancellation_elapsed = None
+            try:
+                completion_matrix = production_matrix()
+                self.assertTrue(
+                    completion_matrix.show_gif(
+                        "complete.gif", loops=1,
+                        pinned_handle=CountedHandle(handles["complete.gif"]),
+                    )
+                )
+                self.assertEqual(len(completion_matrix.submissions), 2)
+                self.assertEqual(
+                    completion_matrix.submissions[0].getpixel((0, 0)), first_colour
+                )
+
+                with self.assertRaises(OSError) as decoder_error:
+                    production_matrix().show_gif(
+                        "error.gif", loops=1,
+                        pinned_handle=CountedHandle(handles["error.gif"]),
+                    )
+                self.assertNotIn(str(temporary_root), str(decoder_error.exception))
+
+                with (
+                    patch.object(framework.subprocess, "Popen", side_effect=blocking_decoder),
+                    patch.object(framework.os, "close", side_effect=recording_close),
+                ):
+                    worker = threading.Thread(
+                        target=cancel_decode, name="pinned-media-cancel-decode"
+                    )
+                    worker.start()
+                    self.assertTrue(child_started.wait(1), "decoder child did not start")
+                    started = time.monotonic()
+                    cancel_stop.set()
+                    worker.join(0.25)
+                    cancellation_elapsed = time.monotonic() - started
+                    self.assertFalse(worker.is_alive(), "cancellation exceeded 250 ms")
+
+                self.assertLessEqual(cancellation_elapsed, 0.25)
+                self.assertEqual(cancel_result, [[]])
+                self.assertEqual(cancel_errors, [])
+                self.assertEqual(len(processes), 1)
+                self.assertIsNotNone(processes[0].poll())
+                self.assertFalse(Path(f"/proc/{processes[0].pid}").exists())
+            finally:
+                cancel_stop.set()
+                if worker is not None:
+                    worker.join(1)
+                for process in processes:
+                    if process.poll() is None:
+                        process.kill()
+                        process.wait(timeout=2)
+                resolver.close()
+                resolver.close()
+                for handle in handles.values():
+                    handle.close()
+                    handle.close()
+
+            self.assertEqual(len(duplicate_files), 2)
+            self.assertEqual([item.close_calls for item in duplicate_files], [1, 1])
+            self.assertEqual(
+                [item.identity for item in duplicate_files],
+                [original_identities["complete.gif"], original_identities["error.gif"]],
+            )
+            for item in duplicate_files:
+                self.assertTrue(item._file.closed)
+                with self.assertRaises(OSError):
+                    os.fstat(item.descriptor)
+            self.assertEqual(len(duplicate_descriptors), 1)
+            self.assertEqual(
+                [item["close_calls"] for item in duplicate_descriptors.values()], [1]
+            )
+            self.assertEqual(
+                [item["identity"] for item in duplicate_descriptors.values()],
+                [original_identities["cancel.mp4"]],
+            )
+            for descriptor in duplicate_descriptors:
+                with self.assertRaises(OSError):
+                    os.fstat(descriptor)
+
+            self.assertEqual(
+                original_close_counts,
+                {"complete.gif": 1, "error.gif": 1, "cancel.mp4": 1},
+            )
+            for reference, descriptor in original_descriptors.items():
+                self.assertTrue(handles[reference].closed)
+                with self.assertRaises(OSError):
+                    os.fstat(descriptor)
+            self.assertEqual(outside.read_bytes(), outside_bytes)
+            descriptors_after = set(os.listdir("/proc/self/fd"))
+            fd_delta = descriptors_after.symmetric_difference(descriptors_before)
+            thread_delta = {
+                thread.ident for thread in threading.enumerate()
+            } - threads_before
+            self.assertEqual(descriptors_after, descriptors_before)
+            self.assertEqual(thread_delta, set())
+            self.lifecycle_evidence = {
+                "cancellation_ms": round(cancellation_elapsed * 1000, 3),
+                "original_close_counts": dict(original_close_counts),
+                "duplicate_file_close_counts": [
+                    item.close_calls for item in duplicate_files
+                ],
+                "duplicate_fd_close_counts": [
+                    item["close_calls"] for item in duplicate_descriptors.values()
+                ],
+                "children_reaped": all(process.poll() is not None for process in processes),
+                "fd_delta": len(fd_delta),
+                "thread_delta": len(thread_delta),
+                "outside_bytes_unchanged": outside.read_bytes() == outside_bytes,
+            }
 
 
 if __name__ == "__main__":
