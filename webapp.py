@@ -37,6 +37,7 @@ from modules.weather_app import OpenMeteoClient
 from modules.scroll_timing_cache import ScrollTimingCache, TimingCacheBusy
 from modules.scroll_timing import timing_javascript
 from modules import announcement_board, weather_app, openweather_overview, openweather_forecast
+from media_resolver import MediaResolutionError, pin_candidate_media
 from pairing import PairedDeviceStore, PairingDurabilityError
 from secret_store import SecretDurabilityError, SecretStore
 
@@ -133,6 +134,7 @@ def create_app(
         secret_root = Path(config_path).parent if config_path is not None else media_root.parent
         openweather_secrets = SecretStore(secret_root / "secrets" / "openweather-api-key")
     scroll_timing_cache = scroll_timing_cache or ScrollTimingCache()
+    default_built_in_media = frozenset(DEFAULT_CONFIG["media"].values())
     openweather_credential_generation = 0
     openweather_credential_lock = threading.Lock()
 
@@ -1101,11 +1103,25 @@ def create_app(
                         if not isinstance(media_changes, dict):
                             raise ValueError("media must be an object")
                         for filename in media_changes.values():
-                            ensure_media_file(filename)
-                    if isinstance(changes, dict) and isinstance(changes.get("custom_modules"), list):
-                        for reference in canvas_media_references(changes["custom_modules"]):
-                            ensure_media_file(reference)
-                    config = config_store.update(changes, base_revision=base_revision)
+                            if safe_media_reference(filename) is None:
+                                raise ValueError("media filename is invalid")
+                    candidate = config_store.validate_candidate(changes)
+                    try:
+                        with pin_candidate_media(
+                            candidate, media_root, allow_missing=default_built_in_media,
+                        ):
+                            config = config_store.update(changes, base_revision=base_revision)
+                    except MediaResolutionError as error:
+                        reference = error.reference
+                        if error.code == "not_regular":
+                            raise ValueError(
+                                f"media file is not regular: {reference}"
+                            ) from None
+                        if error.code == "not_found":
+                            raise ValueError(
+                                f"media file does not exist: {reference}"
+                            ) from None
+                        raise ValueError("media filename is invalid") from None
         except ConfigDurabilityError as exc:
             config = exc.config
             durability_uncertain = True

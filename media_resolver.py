@@ -7,6 +7,7 @@ import os
 import re
 import stat
 import threading
+from contextlib import contextmanager
 from pathlib import Path, PurePosixPath
 
 
@@ -24,8 +25,9 @@ _ERROR_MESSAGES = {
 class MediaResolutionError(RuntimeError):
     """A deterministic media lookup failure safe to expose to callers."""
 
-    def __init__(self, code: str):
+    def __init__(self, code: str, *, reference: str | None = None):
         self.code = code
+        self.reference = reference
         super().__init__(_ERROR_MESSAGES[code])
 
 
@@ -222,3 +224,60 @@ class MediaResolver:
         finally:
             if descriptor is not None:
                 os.close(descriptor)
+
+
+def candidate_media_references(candidate) -> tuple[str, ...]:
+    """Return every selected media reference from a validated candidate."""
+    references = []
+
+    def add(reference):
+        if reference and reference not in references:
+            references.append(reference)
+
+    for reference in candidate.get("media", {}).values():
+        add(reference)
+    for announcement in candidate.get("announcement_board", {}).get("announcements", []):
+        if isinstance(announcement, dict):
+            add(announcement.get("media"))
+    for module in candidate.get("custom_modules", []):
+        if not isinstance(module, dict) or module.get("type") != "canvas":
+            continue
+        media_layer_ids = set()
+        for layer in module.get("layers", []):
+            if not isinstance(layer, dict) or layer.get("type") != "media":
+                continue
+            media_layer_ids.add(layer.get("id"))
+            property_sets = [layer.get("properties", {})]
+            property_sets.extend(
+                keyframe.get("properties", {})
+                for keyframe in layer.get("keyframes", [])
+                if isinstance(keyframe, dict)
+            )
+            for properties in property_sets:
+                if isinstance(properties, dict):
+                    add(properties.get("source"))
+        for override in module.get("overrides", []):
+            if not isinstance(override, dict) or override.get("layer_id") not in media_layer_ids:
+                continue
+            properties = override.get("properties", {})
+            if isinstance(properties, dict):
+                add(properties.get("source"))
+    return tuple(references)
+
+
+@contextmanager
+def pin_candidate_media(candidate, media_root, *, allow_missing=()):
+    """Own pinned handles for all selected candidate media until context exit."""
+    resolver = MediaResolver(media_root)
+    handles = {}
+    try:
+        for reference in candidate_media_references(candidate):
+            try:
+                handles[reference] = resolver.resolve(reference)
+            except MediaResolutionError as error:
+                if error.code == "not_found" and reference in allow_missing:
+                    continue
+                raise MediaResolutionError(error.code, reference=reference) from None
+        yield handles
+    finally:
+        resolver.close()

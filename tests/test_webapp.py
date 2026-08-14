@@ -28,6 +28,7 @@ from secret_store import SecretDurabilityError, SecretStore
 from modules.scroll_timing_cache import ScrollTimingCache, TimingCacheBusy
 from modules.scroll_timing import frame_delay_for_seconds
 from tests import test_config_store
+import media_resolver
 import webapp
 from webapp import create_app
 
@@ -5811,6 +5812,149 @@ console.log('ANNOUNCEMENT_HEADING_SYNC_PASS');
         self.pair_browser()
         self.assertEqual(self.client.get("/api/locations?q=B").status_code, 400)
         self.assertEqual(self.client.get("/api/locations?q=" + "x" * 101).status_code, 400)
+
+    def test_save_shared_media_resolver_preserves_existing_contract(self):
+        self.pair_browser()
+        outside = Path(self.temp.name) / "outside.png"
+        outside.write_bytes(b"outside sentinel")
+        selected = {
+            "splash.gif": b"splash sentinel",
+            "sleep.png": b"sleep sentinel",
+            "announcement.jpg": b"announcement sentinel",
+            "canvas.webp": b"canvas sentinel",
+        }
+        for reference, content in selected.items():
+            (self.media_dir / reference).write_bytes(content)
+        (self.media_dir / "directory.png").mkdir()
+        (self.media_dir / "linked.png").symlink_to(outside)
+
+        config_path = self.store.path
+        real_resolve = media_resolver.MediaResolver.resolve
+        error_handles = []
+        error_attempts = []
+
+        def observe_error_resolve(resolver, reference):
+            error_attempts.append(reference)
+            handle = real_resolve(resolver, reference)
+            error_handles.append((handle, handle.fileno()))
+            return handle
+
+        rejected = (
+            ({"media": {"splash": "missing.gif"}}, "media file does not exist: missing.gif", 0),
+            ({"media": {"splash": "../outside.png"}}, "media filename is invalid", 0),
+            ({"media": {"splash": "directory.png"}}, "media file is not regular: directory.png", 0),
+            ({"media": {"splash": "linked.png"}}, "media filename is invalid", 0),
+            (
+                {
+                    "media": {"splash": "splash.gif", "sleep": "sleep.png"},
+                    "announcement_board": {"announcements": [
+                        test_config_store.ConfigStoreTests.announcement(media="missing.gif")
+                    ]},
+                },
+                "media file does not exist: missing.gif",
+                2,
+            ),
+        )
+        for changes, expected_error, expected_opened in rejected:
+            with self.subTest(rejected=changes):
+                before_config = self.store.get()
+                before_bytes = config_path.read_bytes()
+                before_media = {
+                    path.relative_to(self.media_dir).as_posix(): (
+                        path.read_bytes() if path.is_file() and not path.is_symlink() else None
+                    )
+                    for path in self.media_dir.iterdir()
+                }
+                opened_before = len(error_handles)
+                with patch.object(
+                    media_resolver.MediaResolver, "resolve", autospec=True,
+                    side_effect=observe_error_resolve,
+                ):
+                    response = self.post_config(json=changes)
+                self.assertEqual(response.status_code, 400, response.get_data(as_text=True))
+                self.assertEqual(response.get_json(), {"error": expected_error})
+                self.assertEqual(self.store.get(), before_config)
+                self.assertEqual(config_path.read_bytes(), before_bytes)
+                self.assertEqual(
+                    {
+                        path.relative_to(self.media_dir).as_posix(): (
+                            path.read_bytes() if path.is_file() and not path.is_symlink() else None
+                        )
+                        for path in self.media_dir.iterdir()
+                    },
+                    before_media,
+                )
+                self.assertEqual(outside.read_bytes(), b"outside sentinel")
+                self.controller.reload.assert_not_called()
+                opened = error_handles[opened_before:]
+                self.assertEqual(
+                    len(opened), expected_opened,
+                    f"resolver attempts were {error_attempts}",
+                )
+                for handle, descriptor in opened:
+                    self.assertTrue(handle.closed)
+                    with self.assertRaises(OSError):
+                        os.fstat(descriptor)
+
+        announcement = test_config_store.ConfigStoreTests.announcement(
+            media="announcement.jpg"
+        )
+        canvas = test_config_store.ConfigStoreTests.advanced_module(
+            id="custom_media",
+            name="Pinned canvas",
+            frame_count=1,
+            fps=10,
+            playback="hold",
+            layers=[{
+                "id": "layer_media", "name": "Media", "type": "media", "visible": True,
+                "properties": {
+                    "x": 0, "y": 0, "width": 64, "height": 32, "rotation": 0,
+                    "source": "canvas.webp", "keep_aspect": True,
+                },
+                "keyframes": [],
+            }],
+            overrides=[],
+        )
+        changes = {
+            "device": {"name": "Pinned Save"},
+            "media": {"splash": "splash.gif", "sleep": "sleep.png"},
+            "announcement_board": {"announcements": [announcement]},
+            "custom_modules": [canvas],
+        }
+        resolved = []
+        def observe_resolve(resolver, reference):
+            handle = real_resolve(resolver, reference)
+            descriptor = handle.fileno()
+            resolved.append((reference, handle, descriptor, os.pread(descriptor, 4096, 0)))
+            return handle
+
+        with patch.object(
+            media_resolver.MediaResolver, "resolve", autospec=True,
+            side_effect=observe_resolve,
+        ):
+            response = self.post_config(json=changes)
+
+        self.assertEqual(response.status_code, 200, response.get_data(as_text=True))
+        self.assertEqual(response.headers["ETag"], '"1"')
+        expected = self.store.get()
+        self.assertEqual(response.get_json(), expected)
+        self.assertEqual(expected["revision"], 1)
+        self.assertEqual(expected["device"]["name"], "Pinned Save")
+        self.assertEqual(
+            {reference: content for reference, _handle, _descriptor, content in resolved},
+            selected,
+        )
+        self.assertEqual(len(resolved), len(selected))
+        for _reference, handle, descriptor, _content in resolved:
+            self.assertTrue(handle.closed)
+            with self.assertRaises(OSError):
+                os.fstat(descriptor)
+        self.assertEqual(
+            {reference: (self.media_dir / reference).read_bytes() for reference in selected},
+            selected,
+        )
+        self.assertEqual(outside.read_bytes(), b"outside sentinel")
+        self.controller.reload.assert_called_once_with()
 
     def test_canvas_media_layer_rejects_a_missing_media_source(self):
         self.pair_browser()
