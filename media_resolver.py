@@ -27,6 +27,39 @@ class MediaResolutionError(RuntimeError):
         super().__init__(_ERROR_MESSAGES[code])
 
 
+class PinnedMediaHandle:
+    """Own one read-only descriptor for a resolved regular media file."""
+
+    __slots__ = ("_descriptor",)
+
+    def __init__(self, descriptor: int):
+        self._descriptor = descriptor
+
+    @property
+    def closed(self) -> bool:
+        return self._descriptor is None
+
+    def fileno(self) -> int:
+        if self._descriptor is None:
+            raise ValueError("media handle is closed")
+        return self._descriptor
+
+    def close(self) -> None:
+        descriptor = self._descriptor
+        if descriptor is None:
+            return
+        self._descriptor = None
+        os.close(descriptor)
+
+    def __enter__(self):
+        self.fileno()
+        return self
+
+    def __exit__(self, _exception_type, _exception, _traceback):
+        self.close()
+        return False
+
+
 class MediaResolver:
     """Reject unresolved or unsafe media without exposing filesystem paths."""
 
@@ -64,8 +97,8 @@ class MediaResolver:
             raise MediaResolutionError("invalid_reference")
         return parts
 
-    def resolve(self, reference: str):
-        """Validate one reference; pinned valid handles are added by the next slice."""
+    def resolve(self, reference: str) -> PinnedMediaHandle:
+        """Open and return one confined regular file descriptor."""
         parts = self._normalize(reference)
         candidate = self._root.joinpath(*parts)
 
@@ -97,11 +130,15 @@ class MediaResolver:
                 candidate,
                 os.O_RDONLY | os.O_CLOEXEC | os.O_NOFOLLOW,
             )
+            descriptor_status = os.fstat(descriptor)
+            if not stat.S_ISREG(descriptor_status.st_mode):
+                raise MediaResolutionError("not_regular")
             proc_target = Path(f"/proc/self/fd/{descriptor}").resolve(strict=True)
             if not proc_target.is_relative_to(self._root):
                 raise MediaResolutionError("unsafe_path")
-            if not stat.S_ISREG(os.fstat(descriptor).st_mode):
-                raise MediaResolutionError("not_regular")
+            handle = PinnedMediaHandle(descriptor)
+            descriptor = None
+            return handle
         except MediaResolutionError:
             raise
         except FileNotFoundError:
@@ -115,5 +152,3 @@ class MediaResolver:
         finally:
             if descriptor is not None:
                 os.close(descriptor)
-
-        return None
