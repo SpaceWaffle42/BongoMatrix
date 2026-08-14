@@ -28,6 +28,7 @@ from secret_store import SecretDurabilityError, SecretStore
 from modules.scroll_timing_cache import ScrollTimingCache, TimingCacheBusy
 from modules.scroll_timing import frame_delay_for_seconds
 from tests import test_config_store
+import media_resolver
 import webapp
 from webapp import create_app
 
@@ -349,14 +350,14 @@ class WebAppTests(unittest.TestCase):
         body = self.client.get("/").get_data(as_text=True)
 
         application_version = getattr(webapp, "APPLICATION_VERSION", None)
-        self.assertEqual(application_version, "0.3.0-preview")
+        self.assertEqual(application_version, "0.3.42-preview")
         self.assertEqual(body.count(f"Version {application_version}"), 1)
         self.assertRegex(
             body,
             rf"LAN CONTROL</span><br><span[^>]*>Version {re.escape(application_version)}</span>",
         )
         template = (Path(__file__).parents[1] / "app" / "templates" / "dashboard.html").read_text()
-        self.assertNotIn("0.3.0-preview", template)
+        self.assertNotIn("0.3.42-preview", template)
 
     def test_control_stop_reports_timeout_without_claiming_success(self):
         self.pair_browser()
@@ -5812,6 +5813,149 @@ console.log('ANNOUNCEMENT_HEADING_SYNC_PASS');
         self.assertEqual(self.client.get("/api/locations?q=B").status_code, 400)
         self.assertEqual(self.client.get("/api/locations?q=" + "x" * 101).status_code, 400)
 
+    def test_save_shared_media_resolver_preserves_existing_contract(self):
+        self.pair_browser()
+        outside = Path(self.temp.name) / "outside.png"
+        outside.write_bytes(b"outside sentinel")
+        selected = {
+            "splash.gif": b"splash sentinel",
+            "sleep.png": b"sleep sentinel",
+            "announcement.jpg": b"announcement sentinel",
+            "canvas.webp": b"canvas sentinel",
+        }
+        for reference, content in selected.items():
+            (self.media_dir / reference).write_bytes(content)
+        (self.media_dir / "directory.png").mkdir()
+        (self.media_dir / "linked.png").symlink_to(outside)
+
+        config_path = self.store.path
+        real_resolve = media_resolver.MediaResolver.resolve
+        error_handles = []
+        error_attempts = []
+
+        def observe_error_resolve(resolver, reference):
+            error_attempts.append(reference)
+            handle = real_resolve(resolver, reference)
+            error_handles.append((handle, handle.fileno()))
+            return handle
+
+        rejected = (
+            ({"media": {"splash": "missing.gif"}}, "media file does not exist: missing.gif", 0),
+            ({"media": {"splash": "../outside.png"}}, "media filename is invalid", 0),
+            ({"media": {"splash": "directory.png"}}, "media file is not regular: directory.png", 0),
+            ({"media": {"splash": "linked.png"}}, "media filename is invalid", 0),
+            (
+                {
+                    "media": {"splash": "splash.gif", "sleep": "sleep.png"},
+                    "announcement_board": {"announcements": [
+                        test_config_store.ConfigStoreTests.announcement(media="missing.gif")
+                    ]},
+                },
+                "media file does not exist: missing.gif",
+                2,
+            ),
+        )
+        for changes, expected_error, expected_opened in rejected:
+            with self.subTest(rejected=changes):
+                before_config = self.store.get()
+                before_bytes = config_path.read_bytes()
+                before_media = {
+                    path.relative_to(self.media_dir).as_posix(): (
+                        path.read_bytes() if path.is_file() and not path.is_symlink() else None
+                    )
+                    for path in self.media_dir.iterdir()
+                }
+                opened_before = len(error_handles)
+                with patch.object(
+                    media_resolver.MediaResolver, "resolve", autospec=True,
+                    side_effect=observe_error_resolve,
+                ):
+                    response = self.post_config(json=changes)
+                self.assertEqual(response.status_code, 400, response.get_data(as_text=True))
+                self.assertEqual(response.get_json(), {"error": expected_error})
+                self.assertEqual(self.store.get(), before_config)
+                self.assertEqual(config_path.read_bytes(), before_bytes)
+                self.assertEqual(
+                    {
+                        path.relative_to(self.media_dir).as_posix(): (
+                            path.read_bytes() if path.is_file() and not path.is_symlink() else None
+                        )
+                        for path in self.media_dir.iterdir()
+                    },
+                    before_media,
+                )
+                self.assertEqual(outside.read_bytes(), b"outside sentinel")
+                self.controller.reload.assert_not_called()
+                opened = error_handles[opened_before:]
+                self.assertEqual(
+                    len(opened), expected_opened,
+                    f"resolver attempts were {error_attempts}",
+                )
+                for handle, descriptor in opened:
+                    self.assertTrue(handle.closed)
+                    with self.assertRaises(OSError):
+                        os.fstat(descriptor)
+
+        announcement = test_config_store.ConfigStoreTests.announcement(
+            media="announcement.jpg"
+        )
+        canvas = test_config_store.ConfigStoreTests.advanced_module(
+            id="custom_media",
+            name="Pinned canvas",
+            frame_count=1,
+            fps=10,
+            playback="hold",
+            layers=[{
+                "id": "layer_media", "name": "Media", "type": "media", "visible": True,
+                "properties": {
+                    "x": 0, "y": 0, "width": 64, "height": 32, "rotation": 0,
+                    "source": "canvas.webp", "keep_aspect": True,
+                },
+                "keyframes": [],
+            }],
+            overrides=[],
+        )
+        changes = {
+            "device": {"name": "Pinned Save"},
+            "media": {"splash": "splash.gif", "sleep": "sleep.png"},
+            "announcement_board": {"announcements": [announcement]},
+            "custom_modules": [canvas],
+        }
+        resolved = []
+        def observe_resolve(resolver, reference):
+            handle = real_resolve(resolver, reference)
+            descriptor = handle.fileno()
+            resolved.append((reference, handle, descriptor, os.pread(descriptor, 4096, 0)))
+            return handle
+
+        with patch.object(
+            media_resolver.MediaResolver, "resolve", autospec=True,
+            side_effect=observe_resolve,
+        ):
+            response = self.post_config(json=changes)
+
+        self.assertEqual(response.status_code, 200, response.get_data(as_text=True))
+        self.assertEqual(response.headers["ETag"], '"1"')
+        expected = self.store.get()
+        self.assertEqual(response.get_json(), expected)
+        self.assertEqual(expected["revision"], 1)
+        self.assertEqual(expected["device"]["name"], "Pinned Save")
+        self.assertEqual(
+            {reference: content for reference, _handle, _descriptor, content in resolved},
+            selected,
+        )
+        self.assertEqual(len(resolved), len(selected))
+        for _reference, handle, descriptor, _content in resolved:
+            self.assertTrue(handle.closed)
+            with self.assertRaises(OSError):
+                os.fstat(descriptor)
+        self.assertEqual(
+            {reference: (self.media_dir / reference).read_bytes() for reference in selected},
+            selected,
+        )
+        self.assertEqual(outside.read_bytes(), b"outside sentinel")
+        self.controller.reload.assert_called_once_with()
+
     def test_canvas_media_layer_rejects_a_missing_media_source(self):
         self.pair_browser()
         config = self.store.get()
@@ -6498,6 +6642,2237 @@ console.log('ANNOUNCEMENT_HEADING_SYNC_PASS');
         self.assertEqual(response.get_json()["weather"]["location"], "London, GB")
         self.controller.reload.assert_called_once()
 
+    def test_edit_preview_endpoint_is_paired_strict_no_store_and_never_calls_controller(self):
+        from contextlib import contextmanager
+        from edit_preview import PreviewInstanceCapacityError, PreviewSessionExpiredError
+
+        start_path = "/api/edit-preview/clock_lava"
+        page_path = "/api/edit-preview/page"
+        cancel_path = "/api/edit-preview/cancel"
+        preview_instance = "0123456789abcdef0123456789abcdef"
+        candidate = copy.deepcopy(self.store.get())
+        candidate.pop("revision")
+        start_payload = {
+            "config": candidate,
+            "generation": 1,
+            "preview_instance": preview_instance,
+        }
+
+        def assert_response(response, status):
+            self.assertEqual(response.status_code, status, response.get_data(as_text=True))
+            self.assertEqual(response.headers.get("Cache-Control"), "no-store")
+            self.assertNotIn("ETag", response.headers)
+            body = response.get_json()
+            self.assertIsInstance(body, dict)
+            self.assertNotIn("revision", body)
+            self.assertNotIn("device_id", json.dumps(body))
+            return body
+
+        assert_response(self.client.post(start_path, json=start_payload), 401)
+        assert_response(self.client.post(page_path, json={}), 401)
+        assert_response(self.client.post(cancel_path, json={}), 401)
+
+        self.pair_browser()
+        self.controller.reset_mock()
+        before_config = Path(self.store.path).read_bytes()
+        before_devices = Path(self.device_store.path).read_bytes()
+        before_media = sorted(
+            (path.relative_to(self.media_dir).as_posix(), path.read_bytes())
+            for path in self.media_dir.rglob("*") if path.is_file()
+        )
+
+        oversized = b'{"config":"' + (b"x" * 1_048_576) + b'"}'
+        assert_response(self.client.post(
+            start_path, data=oversized, content_type="application/json",
+        ), 413)
+        malformed_payloads = [
+            {},
+            {**start_payload, "extra": True},
+            {**start_payload, "generation": True},
+            {**start_payload, "preview_instance": "ABC"},
+        ]
+        for payload in malformed_payloads:
+            with self.subTest(payload=payload):
+                assert_response(self.client.post(start_path, json=payload), 400)
+        assert_response(
+            self.client.post("/api/edit-preview/not-a-module", json=start_payload), 404,
+        )
+
+        lifecycle = []
+
+        @contextmanager
+        def pinned(candidate_value, media_root, *, allow_missing=()):
+            lifecycle.append("pin-enter")
+            handles = {"draft.png": object()}
+            yield handles
+            lifecycle.append("pin-exit")
+
+        def prepare(_provider, module_name, candidate_value, stop_event):
+            self.assertEqual(lifecycle[-1:], ["pin-enter"])
+            lifecycle.append("provider")
+            return {"prepared": module_name}
+
+        def iterator(module_name, candidate_value, selected_palette, pinned_media, prepared, stop_event):
+            self.assertEqual(lifecycle[-2:], ["pin-enter", "provider"])
+            self.assertEqual(pinned_media, {"draft.png": pinned_media["draft.png"]})
+            self.assertEqual(prepared, {"prepared": "clock_lava"})
+            lifecycle.append("render")
+            for index in range(34):
+                yield {"png": f"frame-{index}", "delay_ms": index + 1}
+
+        with patch("webapp.pin_candidate_media", pinned), patch(
+            "webapp._prepare_edit_preview_provider", prepare, create=True,
+        ), patch("webapp._edit_preview_iterator", iterator, create=True):
+            response = self.client.post(start_path, json=start_payload)
+            first = assert_response(response, 200)
+            self.assertEqual(
+                set(first),
+                {"session", "generation", "page", "frames", "next_token", "complete"},
+            )
+            self.assertRegex(first["session"], r"^[0-9a-f]{32}$")
+            self.assertEqual(first["generation"], 1)
+            self.assertEqual(first["page"], 0)
+            self.assertEqual(len(first["frames"]), 32)
+            self.assertFalse(first["complete"])
+            self.assertRegex(first["next_token"], r"^[0-9a-f]{64}$")
+            self.assertEqual(lifecycle, ["pin-enter", "provider", "render"])
+
+            continuation = {
+                "session": first["session"],
+                "preview_instance": preview_instance,
+                "token": first["next_token"],
+            }
+            second = assert_response(self.client.post(page_path, json=continuation), 200)
+            self.assertEqual(
+                set(second),
+                {"session", "generation", "page", "frames", "next_token", "complete"},
+            )
+            self.assertEqual(second["generation"], 1)
+            self.assertEqual(second["page"], 1)
+            self.assertEqual(len(second["frames"]), 2)
+            self.assertTrue(second["complete"])
+            self.assertIsNone(second["next_token"])
+            self.assertEqual(lifecycle, ["pin-enter", "provider", "render", "pin-exit"])
+
+            assert_response(self.client.post(page_path, json=continuation), 409)
+
+            second_payload = {**start_payload, "generation": 2}
+            with patch("webapp._edit_preview_iterator", side_effect=RuntimeError("decode detail"), create=True):
+                assert_response(self.client.post(start_path, json=second_payload), 503)
+
+            registry = self.app.extensions["edit_preview_registry"]
+            with patch.object(
+                registry, "lookup", side_effect=PreviewSessionExpiredError("private expiry"),
+            ):
+                expired = self.client.post(page_path, json={
+                    "session": "1" * 32,
+                    "preview_instance": preview_instance,
+                    "token": "2" * 64,
+                })
+            assert_response(expired, 410)
+            with patch.object(
+                registry, "register", side_effect=PreviewInstanceCapacityError("private capacity"),
+            ):
+                limited = self.client.post(
+                    start_path, json={**start_payload, "generation": 3},
+                )
+            assert_response(limited, 429)
+            self.assertEqual(limited.headers.get("Retry-After"), "2")
+
+            def active_iterator(*args):
+                yield from (
+                    {"png": f"active-{index}", "delay_ms": 1}
+                    for index in range(40)
+                )
+
+            with patch("webapp._edit_preview_iterator", active_iterator, create=True):
+                active = self.client.post(
+                    start_path, json={**start_payload, "generation": 4},
+                )
+            active_body = assert_response(active, 200)
+            cancel = assert_response(self.client.post(cancel_path, json={
+                "session": active_body["session"],
+                "preview_instance": preview_instance,
+            }), 200)
+            self.assertEqual(cancel, {"cancelled": True})
+            assert_response(self.client.post(cancel_path, json={
+                "session": active_body["session"],
+                "preview_instance": preview_instance,
+            }), 409)
+
+        self.assertEqual(Path(self.store.path).read_bytes(), before_config)
+        self.assertEqual(Path(self.device_store.path).read_bytes(), before_devices)
+        self.assertEqual([
+            (path.relative_to(self.media_dir).as_posix(), path.read_bytes())
+            for path in self.media_dir.rglob("*") if path.is_file()
+        ], before_media)
+        self.assertEqual(self.controller.method_calls, [])
+        registry.close()
+        self.assertFalse(registry.reaper_alive)
+
+    def test_edit_preview_routes_render_splash_sleep_and_media_consumers(self):
+        self.pair_browser()
+        self.controller.reset_mock()
+        before_config = Path(self.store.path).read_bytes()
+        before_devices = Path(self.device_store.path).read_bytes()
+
+        red = Image.new("RGB", (8, 8), "red")
+        blue = Image.new("RGB", (8, 8), "blue")
+        for filename in ("splash.gif", "sleep.gif"):
+            red.save(
+                self.media_dir / filename, format="GIF", save_all=True,
+                append_images=[blue], duration=[100, 100], loop=0,
+            )
+        for filename in ("announcement.png", "layer.png", "layer.gif", "layer.mp4"):
+            red.save(self.media_dir / filename, format="PNG")
+
+        base = copy.deepcopy(self.store.get())
+        base.pop("revision")
+        base["media"] = {"splash": "splash.gif", "sleep": "sleep.gif"}
+        base["playlist"] = [
+            {"module": "splash", "duration": 1, "enabled": True},
+            {"module": "sleep", "duration": 1, "enabled": True},
+        ]
+        preview_index = 0
+
+        def start(module_name, candidate):
+            nonlocal preview_index
+            preview_index += 1
+            instance = f"{preview_index:032x}"
+            response = self.client.post(f"/api/edit-preview/{module_name}", json={
+                "config": candidate,
+                "generation": preview_index,
+                "preview_instance": instance,
+            })
+            self.assertEqual(response.status_code, 200, response.get_data(as_text=True))
+            self.assertEqual(response.headers.get("Cache-Control"), "no-store")
+            body = response.get_json()
+            self.assertGreater(len(body["frames"]), 0)
+            if not body["complete"]:
+                cancelled = self.client.post("/api/edit-preview/cancel", json={
+                    "session": body["session"], "preview_instance": instance,
+                })
+                self.assertEqual(cancelled.status_code, 200)
+            return body
+
+        for module_name in ("splash", "sleep"):
+            with self.subTest(module=module_name):
+                start(module_name, copy.deepcopy(base))
+        video_splash = copy.deepcopy(base)
+        video_splash["media"]["splash"] = "layer.mp4"
+        with self.subTest(module="splash_mp4"):
+            import warnings
+            with warnings.catch_warnings(record=True) as caught:
+                warnings.simplefilter("always", ResourceWarning)
+                start("splash", video_splash)
+            self.assertFalse([
+                warning for warning in caught
+                if issubclass(warning.category, ResourceWarning)
+            ], caught)
+
+        announcements = copy.deepcopy(base)
+        static = test_config_store.ConfigStoreTests.announcement(
+            id="announcement_static_media", layout="full_image_notice",
+            headline="STATIC", message="", media="announcement.png",
+            timing={"mode": "static", "duration_seconds": 1},
+        )
+        scrolling = test_config_store.ConfigStoreTests.announcement(
+            id="announcement_scroll_media", layout="text_notice",
+            headline="A", message="", media=None,
+            timing={"mode": "scroll", "loops": 1, "frame_delay": 0.05},
+        )
+        announcements["announcement_board"] = {"announcements": [static, scrolling]}
+        announcements["playlist"] = [
+            {"module": "announcement_board", "duration": 2, "enabled": True},
+        ]
+        with self.subTest(module="announcement_board"):
+            start("announcement_board", announcements)
+
+        canvas = copy.deepcopy(base)
+        layers = []
+        for index, source in enumerate(("layer.png", "layer.gif", "layer.mp4")):
+            layers.append({
+                "id": f"layer_media_{index}", "name": source, "type": "media",
+                "visible": True,
+                "properties": {
+                    "source": source, "x": index, "y": index, "width": 8,
+                    "height": 8, "rotation": 0, "keep_aspect": True,
+                },
+                "keyframes": [],
+            })
+        module = test_config_store.ConfigStoreTests.advanced_module(
+            id="custom_media_layers", name="Media layers", frame_count=2, fps=2,
+            playback="hold", layers=layers, overrides=[],
+        )
+        canvas["custom_modules"] = [module]
+        canvas["playlist"] = [
+            {"module": module["id"], "duration": 1, "enabled": True},
+        ]
+        with self.subTest(module=module["id"]):
+            start(module["id"], canvas)
+
+        self.assertEqual(Path(self.store.path).read_bytes(), before_config)
+        self.assertEqual(Path(self.device_store.path).read_bytes(), before_devices)
+        self.assertEqual(self.controller.method_calls, [])
+        registry = self.app.extensions.get("edit_preview_registry")
+        if registry is not None:
+            registry.close()
+
+    def test_edit_preview_routes_bound_unknown_length_json_before_rendering(self):
+        self.pair_browser()
+        instance = "a" * 32
+        candidate = copy.deepcopy(self.store.get())
+        candidate.pop("revision")
+        payload = json.dumps({
+            "config": candidate,
+            "generation": 1,
+            "preview_instance": instance,
+        }, separators=(",", ":")).encode("utf-8")
+        self.assertLess(len(payload), 1_048_576)
+
+        def unknown_length(path, body):
+            return self.client.open(
+                path, method="POST", input_stream=io.BytesIO(body),
+                content_type="application/json",
+                environ_overrides={
+                    "CONTENT_LENGTH": "", "wsgi.input_terminated": True,
+                },
+            )
+
+        with patch.object(
+            webapp, "_edit_preview_iterator",
+            side_effect=AssertionError("oversized request reached renderer"),
+        ) as renderer:
+            oversized = unknown_length(
+                "/api/edit-preview/clock_lava", b"{" + b" " * 1_048_576,
+            )
+            self.assertEqual(oversized.status_code, 413, oversized.get_data(as_text=True))
+            self.assertEqual(oversized.get_json(), {"error": "Preview request exceeds 1 MiB."})
+            self.assertEqual(oversized.headers.get("Cache-Control"), "no-store")
+            renderer.assert_not_called()
+
+        exact_valid = payload + b" " * (1_048_576 - len(payload))
+        with patch.object(
+            webapp, "_edit_preview_iterator",
+            return_value=iter([{"png": "frame", "delay_ms": 1}]),
+        ):
+            accepted = unknown_length("/api/edit-preview/clock_lava", exact_valid)
+        self.assertEqual(accepted.status_code, 200, accepted.get_data(as_text=True))
+        self.assertEqual(accepted.headers.get("Cache-Control"), "no-store")
+        accepted_body = accepted.get_json()
+        if not accepted_body["complete"]:
+            self.client.post("/api/edit-preview/cancel", json={
+                "session": accepted_body["session"], "preview_instance": instance,
+            })
+
+        exact_malformed = unknown_length(
+            "/api/edit-preview/clock_lava", b"{" + b" " * 1_048_575,
+        )
+        self.assertEqual(exact_malformed.status_code, 400)
+        self.assertEqual(exact_malformed.get_json(), {"error": "Preview request is invalid."})
+        self.assertEqual(exact_malformed.headers.get("Cache-Control"), "no-store")
+
+        oversized_control = b"{" + b" " * 1_048_576
+        for path in ("/api/edit-preview/page", "/api/edit-preview/cancel"):
+            with self.subTest(path=path):
+                response = unknown_length(path, oversized_control)
+                self.assertEqual(response.status_code, 413, response.get_data(as_text=True))
+                self.assertEqual(response.get_json(), {"error": "Preview request exceeds 1 MiB."})
+                self.assertEqual(response.headers.get("Cache-Control"), "no-store")
+
+    def test_preview_services_restart_after_close_and_failed_init(self):
+        """Process preview services restart atomically without leaking stale work."""
+        from contextlib import contextmanager
+        from edit_preview import PreviewInstanceRegistry
+        from preview_provider import PreviewProviderCancelled
+
+        start_path = "/api/edit-preview/clock_lava"
+        weather_path = "/api/edit-preview/weather"
+        cancel_path = "/api/edit-preview/cancel"
+        preview_instance = "51515151515151515151515151515151"
+        self.pair_browser()
+        with self.client.session_transaction() as paired_session:
+            browser_session = dict(paired_session)
+        self.controller.reset_mock()
+
+        before_config = Path(self.store.path).read_bytes()
+        before_devices = Path(self.device_store.path).read_bytes()
+        before_media = sorted(
+            (path.relative_to(self.media_dir).as_posix(), path.read_bytes())
+            for path in self.media_dir.rglob("*") if path.is_file()
+        )
+        baseline_threads = {thread.ident for thread in threading.enumerate()}
+        baseline_fds = len(os.listdir("/proc/self/fd"))
+        registries = []
+        providers = []
+        fail_provider_init = threading.Event()
+        provider_prepare_started = threading.Event()
+
+        class TrackedRegistry(PreviewInstanceRegistry):
+            def __init__(self):
+                super().__init__()
+                self.close_calls = 0
+                registries.append(self)
+
+            def close(self):
+                was_closed = self.is_closed
+                super().close()
+                if not was_closed:
+                    self.close_calls += 1
+
+        class TrackedProvider:
+            MAX_WORKERS = 2
+
+            def __init__(self):
+                if fail_provider_init.is_set():
+                    fail_provider_init.clear()
+                    raise RuntimeError("private provider factory detail")
+                self._condition = threading.Condition()
+                self._closed = False
+                self._active = set()
+                self.close_calls = 0
+                self.prepare_calls = 0
+                providers.append(self)
+
+            @property
+            def is_closed(self):
+                with self._condition:
+                    return self._closed
+
+            @property
+            def active_child_count(self):
+                return 0
+
+            @property
+            def active_worker_count(self):
+                with self._condition:
+                    return len(self._active)
+
+            @property
+            def available_worker_slots(self):
+                return self.MAX_WORKERS - self.active_worker_count
+
+            def prepare(self, provider, *, settings, credentials, cancel_event,
+                        request_deadline):
+                location = settings["weather"]["location"]
+                owner_stop = threading.Event()
+                with self._condition:
+                    if self._closed:
+                        raise RuntimeError("closed provider must not serve")
+                    self.prepare_calls += 1
+                    self._active.add(owner_stop)
+                try:
+                    if location == "blocked-old":
+                        provider_prepare_started.set()
+                        while not (cancel_event.is_set() or owner_stop.wait(0.005)):
+                            pass
+                        raise PreviewProviderCancelled("private cancellation detail")
+                    return (
+                        ("feels_like", 19), ("high", 23), ("humidity", 50),
+                        ("location", location), ("low", 12),
+                        ("status", "Clear sky"), ("temperature", 20),
+                    )
+                finally:
+                    with self._condition:
+                        self._active.remove(owner_stop)
+                        self._condition.notify_all()
+
+            def shutdown(self):
+                with self._condition:
+                    if not self._closed:
+                        self._closed = True
+                        self.close_calls += 1
+                    for owner_stop in self._active:
+                        owner_stop.set()
+                    while self._active:
+                        self._condition.wait(0.25)
+
+        @contextmanager
+        def pinned(candidate, media_root, *, allow_missing=()):
+            yield {}
+
+        def iterator(module_name, candidate, selected_palette, pinned_media, prepared,
+                     stop_event):
+            for index in range(40):
+                yield {"png": f"{candidate['weather']['location']}-{index}", "delay_ms": 1}
+
+        def payload(generation, *, location="singleton"):
+            candidate = copy.deepcopy(self.store.get())
+            candidate.pop("revision")
+            candidate["weather"]["location"] = location
+            return {
+                "config": candidate,
+                "generation": generation,
+                "preview_instance": preview_instance,
+            }
+
+        def paired_client():
+            client = self.app.test_client()
+            with client.session_transaction() as client_session:
+                client_session.update(browser_session)
+            return client
+
+        def assert_response(response, status):
+            self.assertEqual(response.status_code, status, response.get_data(as_text=True))
+            self.assertEqual(response.headers.get("Cache-Control"), "no-store")
+            self.assertNotIn("ETag", response.headers)
+            body = response.get_json()
+            self.assertNotIn("revision", body)
+            self.assertNotIn("device_id", json.dumps(body))
+            return body
+
+        factory_patch = patch.multiple(
+            "webapp", PreviewInstanceRegistry=TrackedRegistry,
+            PreviewProvider=TrackedProvider, pin_candidate_media=pinned,
+            _edit_preview_iterator=iterator,
+        )
+        with factory_patch:
+            # Lazy creation is one registry/provider pair, shared by successful
+            # requests and independent Flask clients. Request teardown owns neither.
+            self.assertNotIn("edit_preview_registry", self.app.extensions)
+            first = assert_response(self.client.post(start_path, json=payload(1)), 200)
+            first_registry = self.app.extensions["edit_preview_registry"]
+            first_provider = self.app.extensions["edit_preview_provider"]
+            self.assertEqual((len(registries), len(providers)), (1, 1))
+            second = assert_response(paired_client().post(
+                cancel_path, json={
+                    "session": first["session"],
+                    "preview_instance": preview_instance,
+                },
+            ), 200)
+            self.assertEqual(second, {"cancelled": True})
+            again = assert_response(paired_client().post(
+                start_path, json=payload(2),
+            ), 200)
+            self.assertIs(self.app.extensions["edit_preview_registry"], first_registry)
+            self.assertIs(self.app.extensions["edit_preview_provider"], first_provider)
+            self.assertEqual((len(registries), len(providers)), (1, 1))
+            assert_response(self.client.post(cancel_path, json={
+                "session": again["session"], "preview_instance": preview_instance,
+            }), 200)
+
+            # Explicit close replaces both closed services. Concurrent first use
+            # after close must publish exactly one replacement pair.
+            self.app.extensions["close_edit_preview_services"]()
+            self.assertTrue(first_registry.is_closed)
+            self.assertTrue(first_provider.is_closed)
+            self.assertEqual((first_registry.close_calls, first_provider.close_calls), (1, 1))
+            results = []
+            failures = []
+            barrier = threading.Barrier(3)
+
+            def concurrent_start(index):
+                try:
+                    barrier.wait()
+                    results.append((index, paired_client().post(
+                        start_path,
+                        json={**payload(index + 3), "preview_instance": f"{index + 1:032x}"},
+                    )))
+                except BaseException as error:
+                    failures.append(error)
+
+            threads = [
+                threading.Thread(target=concurrent_start, args=(index,),
+                                 name=f"preview-restart-{index}")
+                for index in range(2)
+            ]
+            for thread in threads:
+                thread.start()
+            barrier.wait()
+            for thread in threads:
+                thread.join(1)
+            self.assertFalse(any(thread.is_alive() for thread in threads))
+            self.assertEqual(failures, [])
+            self.assertEqual([response.status_code for _index, response in results], [200, 200])
+            self.assertEqual((len(registries), len(providers)), (2, 2))
+            replacement_registry = self.app.extensions["edit_preview_registry"]
+            replacement_provider = self.app.extensions["edit_preview_provider"]
+            self.assertIsNot(replacement_registry, first_registry)
+            self.assertIsNot(replacement_provider, first_provider)
+            for index, response in results:
+                body = assert_response(response, 200)
+                assert_response(paired_client().post(cancel_path, json={
+                    "session": body["session"],
+                    "preview_instance": f"{index + 1:032x}",
+                }), 200)
+
+            # A failed pair construction is sanitized and never cached. The
+            # partially-created registry is closed exactly once, then retried.
+            self.app.extensions["close_edit_preview_services"]()
+            fail_provider_init.set()
+            failed = assert_response(self.client.post(
+                start_path, json=payload(20),
+            ), 503)
+            self.assertEqual(failed, {"error": "Preview is temporarily unavailable."})
+            partial_registry = registries[-1]
+            self.assertTrue(partial_registry.is_closed)
+            self.assertEqual(partial_registry.close_calls, 1)
+            self.assertIs(self.app.extensions.get("edit_preview_registry"), replacement_registry)
+            recovered = assert_response(self.client.post(
+                start_path, json=payload(21),
+            ), 200)
+            healthy_registry = self.app.extensions["edit_preview_registry"]
+            healthy_provider = self.app.extensions["edit_preview_provider"]
+            self.assertIsNot(healthy_registry, partial_registry)
+            self.assertFalse(healthy_registry.is_closed)
+            self.assertFalse(healthy_provider.is_closed)
+            self.assertEqual((len(registries), len(providers)), (4, 3))
+            assert_response(self.client.post(cancel_path, json={
+                "session": recovered["session"],
+                "preview_instance": preview_instance,
+            }), 200)
+
+            # A newer generation must also cancel pre-session provider work
+            # promptly and preserve the typed superseded HTTP outcome.
+            superseded_result = {}
+            superseded_client = paired_client()
+            provider_prepare_started.clear()
+
+            def superseded_start():
+                superseded_result["response"] = superseded_client.post(
+                    weather_path, json=payload(29, location="blocked-old"),
+                )
+
+            superseded_thread = threading.Thread(
+                target=superseded_start, name="preview-superseded-provider-init",
+            )
+            superseded_thread.start()
+            self.assertTrue(provider_prepare_started.wait(1))
+            newer_at = time.monotonic()
+            superseding = assert_response(paired_client().post(
+                weather_path, json=payload(30, location="new-healthy"),
+            ), 200)
+            self.assertLess(time.monotonic() - newer_at, 0.25)
+            superseded_thread.join(0.25)
+            self.assertFalse(superseded_thread.is_alive())
+            stale_generation = assert_response(superseded_result["response"], 409)
+            self.assertEqual(
+                stale_generation, {"error": "Preview generation was superseded."},
+            )
+            assert_response(paired_client().post(cancel_path, json={
+                "session": superseding["session"],
+                "preview_instance": preview_instance,
+            }), 200)
+
+            # Closing during pre-session provider preparation signals promptly.
+            # A newer service generation for the same identity is not blocked by
+            # the old PreviewInstance admission lock and stale work publishes none.
+            old_result = {}
+            old_client = paired_client()
+            provider_prepare_started.clear()
+
+            def blocked_start():
+                old_result["response"] = old_client.post(
+                    weather_path, json=payload(30, location="blocked-old"),
+                )
+
+            old_thread = threading.Thread(
+                target=blocked_start, name="preview-blocked-provider-init",
+            )
+            old_thread.start()
+            self.assertTrue(provider_prepare_started.wait(1))
+            closed_at = time.monotonic()
+            self.app.extensions["close_edit_preview_services"]()
+            self.assertLess(time.monotonic() - closed_at, 0.25)
+            newer = assert_response(paired_client().post(
+                weather_path, json=payload(31, location="new-healthy"),
+            ), 200)
+            old_thread.join(0.25)
+            self.assertFalse(old_thread.is_alive())
+            stale = assert_response(old_result["response"], 503)
+            self.assertEqual(stale, {"error": "Preview is temporarily unavailable."})
+            self.assertNotIn("frames", stale)
+            assert_response(paired_client().post(cancel_path, json={
+                "session": newer["session"], "preview_instance": preview_instance,
+            }), 200)
+
+            self.app.extensions["close_edit_preview_services"]()
+            self.app.extensions["close_edit_preview_services"]()
+
+        self.assertTrue(all(registry.is_closed for registry in registries))
+        self.assertTrue(all(registry.total_count == 0 for registry in registries))
+        self.assertTrue(all(registry.expired_count == 0 for registry in registries))
+        self.assertTrue(all(not registry.reaper_alive for registry in registries))
+        self.assertTrue(all(registry.close_calls == 1 for registry in registries))
+        self.assertTrue(all(provider.is_closed for provider in providers))
+        self.assertTrue(all(provider.close_calls == 1 for provider in providers))
+        self.assertTrue(all(provider.active_worker_count == 0 for provider in providers))
+        self.assertTrue(all(provider.available_worker_slots == 2 for provider in providers))
+        self.assertEqual(Path(self.store.path).read_bytes(), before_config)
+        self.assertEqual(Path(self.device_store.path).read_bytes(), before_devices)
+        self.assertEqual(sorted(
+            (path.relative_to(self.media_dir).as_posix(), path.read_bytes())
+            for path in self.media_dir.rglob("*") if path.is_file()
+        ), before_media)
+        self.assertEqual(self.controller.method_calls, [])
+        self.assertEqual(
+            {thread.ident for thread in threading.enumerate()} - baseline_threads, set(),
+        )
+        self.assertEqual(len(os.listdir("/proc/self/fd")), baseline_fds)
+
+    def test_preview_service_failed_initialization_leaves_no_reaper_child_or_fd(self):
+        """Failed service factories clean partial resources before one atomic retry."""
+        from contextlib import contextmanager
+        import multiprocessing
+        import subprocess
+
+        from edit_preview import PreviewInstanceRegistry, PreviewSessionCapacity
+
+        self.pair_browser()
+        with self.client.session_transaction() as paired:
+            browser_session = dict(paired)
+            device_id = paired["device_id"]
+        self.controller.reset_mock()
+
+        before_children = {child.pid for child in multiprocessing.active_children()}
+        before_threads = {(thread.ident, thread.name) for thread in threading.enumerate()}
+        before_fds = len(list(Path("/proc/self/fd").iterdir()))
+        before_config = Path(self.store.path).read_bytes()
+        before_devices = Path(self.device_store.path).read_bytes()
+        before_media = sorted(
+            (path.relative_to(self.media_dir).as_posix(), path.read_bytes())
+            for path in self.media_dir.rglob("*") if path.is_file()
+        )
+
+        phase = {"failure": "registry"}
+        close_services = self.app.extensions["close_edit_preview_services"]
+        factory_started = threading.Event()
+        release_factory = threading.Event()
+        registries = []
+        providers = []
+        failures = []
+        serial = iter(range(1, 100))
+
+        class TrackedRegistry(PreviewInstanceRegistry):
+            def __init__(self):
+                self.capacity = PreviewSessionCapacity()
+                super().__init__(capacity=self.capacity)
+                self.read_fd, self.write_fd = os.pipe()
+                self.fd_close_calls = {self.read_fd: 0, self.write_fd: 0}
+                self.close_calls = 0
+                self.lock_probe_calls = 0
+                self.probe_service_lock = False
+                self._tracked_closed = False
+                registries.append(self)
+
+            def close(self):
+                if not self._tracked_closed:
+                    self._tracked_closed = True
+                    if self.probe_service_lock:
+                        callback = threading.Thread(
+                            target=close_services,
+                            name="preview-partial-registry-lock-probe",
+                        )
+                        callback.start()
+                        callback.join(0.25)
+                        if callback.is_alive():
+                            raise AssertionError("registry cleanup held app service lock")
+                        self.lock_probe_calls += 1
+                    super().close()
+                    for descriptor in (self.read_fd, self.write_fd):
+                        os.close(descriptor)
+                        self.fd_close_calls[descriptor] += 1
+                    self.close_calls += 1
+
+        class TrackedProvider:
+            MAX_WORKERS = 2
+
+            def __init__(self):
+                self._closed = False
+                self.close_calls = 0
+                self.worker_join_calls = 0
+                self.child_reap_calls = 0
+                self.child_handle_close_calls = 0
+                self.lock_probe_calls = 0
+                self.probe_service_lock = False
+                self.read_fd, self.write_fd = os.pipe()
+                self.fd_close_calls = {self.read_fd: 0, self.write_fd: 0}
+                self.stop = threading.Event()
+                self.worker = threading.Thread(
+                    target=self.stop.wait,
+                    name=f"preview-init-worker-{next(serial)}",
+                    daemon=True,
+                )
+                self.worker.start()
+                self.child = subprocess.Popen(
+                    [sys.executable, "-c", "import time; time.sleep(60)"],
+                    stdin=subprocess.DEVNULL,
+                    stdout=subprocess.DEVNULL,
+                    stderr=subprocess.DEVNULL,
+                )
+                providers.append(self)
+
+            @property
+            def is_closed(self):
+                return self._closed
+
+            @property
+            def active_worker_count(self):
+                return int(self.worker.is_alive())
+
+            @property
+            def active_child_count(self):
+                return int(self.child.poll() is None)
+
+            @property
+            def available_worker_slots(self):
+                return self.MAX_WORKERS - self.active_worker_count
+
+            def prepare(self, provider, *, settings, credentials, cancel_event,
+                        request_deadline):
+                raise AssertionError("clock preview must not invoke provider preparation")
+
+            def shutdown(self):
+                if self._closed:
+                    return
+                self._closed = True
+                if self.probe_service_lock:
+                    callback = threading.Thread(
+                        target=close_services,
+                        name="preview-partial-provider-lock-probe",
+                    )
+                    callback.start()
+                    callback.join(0.25)
+                    if callback.is_alive():
+                        raise AssertionError("provider cleanup held app service lock")
+                    self.lock_probe_calls += 1
+                self.stop.set()
+                self.worker.join(1)
+                self.worker_join_calls += 1
+                if self.child.poll() is None:
+                    self.child.terminate()
+                self.child.wait(timeout=1)
+                self.child_reap_calls += 1
+                self.child_handle_close_calls += 1
+                for descriptor in (self.read_fd, self.write_fd):
+                    os.close(descriptor)
+                    self.fd_close_calls[descriptor] += 1
+                self.close_calls += 1
+
+        def registry_factory():
+            registry = TrackedRegistry()
+            if phase["failure"] == "registry":
+                phase["failure"] = None
+                factory_started.set()
+                if not release_factory.wait(1):
+                    raise AssertionError("registry factory release timed out")
+                registry.probe_service_lock = True
+                registry.close()
+                raise RuntimeError("private registry init worker/fd identifier")
+            return registry
+
+        def provider_factory():
+            provider = TrackedProvider()
+            if phase["failure"] == "provider":
+                phase["failure"] = None
+                factory_started.set()
+                if not release_factory.wait(1):
+                    raise AssertionError("provider factory release timed out")
+                provider.probe_service_lock = True
+                provider.shutdown()
+                raise RuntimeError(
+                    f"private provider child {provider.child.pid} fd {provider.read_fd}"
+                )
+            return provider
+
+        @contextmanager
+        def pinned(candidate, media_root, *, allow_missing=()):
+            yield {}
+
+        def iterator(module_name, candidate, selected_palette, pinned_media, prepared,
+                     stop_event):
+            for index in range(40):
+                yield {"png": f"safe-frame-{index}", "delay_ms": 1}
+
+        def paired_client():
+            client = self.app.test_client()
+            with client.session_transaction() as session:
+                session.update(browser_session)
+            return client
+
+        def payload(index):
+            candidate = copy.deepcopy(self.store.get())
+            candidate.pop("revision")
+            return {
+                "config": candidate,
+                "generation": index,
+                "preview_instance": f"{index:032x}",
+            }
+
+        def assert_transport(response, status):
+            self.assertEqual(response.status_code, status, response.get_data(as_text=True))
+            self.assertEqual(response.headers.get("Cache-Control"), "no-store")
+            self.assertNotIn("ETag", response.headers)
+            body = response.get_json()
+            serialized = json.dumps(body)
+            self.assertNotIn("revision", body)
+            self.assertNotIn("device_id", serialized)
+            self.assertNotIn(device_id, serialized)
+            self.assertNotIn("private", serialized)
+            return body
+
+        def exercise_failed_boundary(boundary, base_index):
+            phase["failure"] = boundary
+            factory_started.clear()
+            release_factory.clear()
+            owner_result = {}
+            waiter_results = []
+            boundary_failures = []
+
+            def request(index, destination):
+                try:
+                    destination.append((index, paired_client().post(
+                        "/api/edit-preview/clock_lava", json=payload(index),
+                    )))
+                except BaseException as error:
+                    boundary_failures.append(error)
+
+            owner_values = []
+            owner = threading.Thread(
+                target=request, args=(base_index, owner_values),
+                name=f"preview-{boundary}-failure-owner",
+            )
+            owner.start()
+            self.assertTrue(factory_started.wait(1))
+            partial_registry = registries[-1]
+            partial_provider = providers[-1] if boundary == "provider" else None
+            self.assertIsNot(
+                self.app.extensions.get("edit_preview_registry"), partial_registry,
+            )
+            if partial_provider is not None:
+                self.assertIsNot(
+                    self.app.extensions.get("edit_preview_provider"), partial_provider,
+                )
+
+            waiters = [
+                threading.Thread(
+                    target=request, args=(base_index + offset, waiter_results),
+                    name=f"preview-{boundary}-waiter-{offset}",
+                )
+                for offset in (1, 2)
+            ]
+            for waiter in waiters:
+                waiter.start()
+            release_factory.set()
+            owner.join(1)
+            for waiter in waiters:
+                waiter.join(1)
+            self.assertFalse(owner.is_alive())
+            self.assertFalse(any(waiter.is_alive() for waiter in waiters))
+            self.assertEqual(boundary_failures, [])
+            self.assertEqual(len(owner_values), 1)
+            owner_result["body"] = assert_transport(owner_values[0][1], 503)
+            self.assertEqual(
+                owner_result["body"],
+                {"error": "Preview is temporarily unavailable."},
+            )
+            self.assertEqual(len(waiter_results), 2)
+            healthy_registry = self.app.extensions["edit_preview_registry"]
+            healthy_provider = self.app.extensions["edit_preview_provider"]
+            self.assertIsNot(healthy_registry, partial_registry)
+            self.assertIsNot(healthy_provider, partial_provider)
+            sessions = []
+            for index, response in waiter_results:
+                body = assert_transport(response, 200)
+                sessions.append((index, body["session"]))
+            self.assertIs(
+                self.app.extensions["get_edit_preview_services"]()[0], healthy_registry,
+            )
+            self.assertIs(
+                self.app.extensions["get_edit_preview_services"]()[1], healthy_provider,
+            )
+            first_index, first_session = sessions.pop(0)
+            cancelled = assert_transport(paired_client().post(
+                "/api/edit-preview/cancel", json={
+                    "session": first_session,
+                    "preview_instance": f"{first_index:032x}",
+                },
+            ), 200)
+            self.assertEqual(cancelled, {"cancelled": True})
+            reused = assert_transport(paired_client().post(
+                "/api/edit-preview/clock_lava", json=payload(base_index + 3),
+            ), 200)
+            sessions.append((base_index + 3, reused["session"]))
+            self.assertIs(self.app.extensions["edit_preview_registry"], healthy_registry)
+            self.assertIs(self.app.extensions["edit_preview_provider"], healthy_provider)
+            for index, session_id in sessions:
+                cancelled = assert_transport(paired_client().post(
+                    "/api/edit-preview/cancel", json={
+                        "session": session_id,
+                        "preview_instance": f"{index:032x}",
+                    },
+                ), 200)
+                self.assertEqual(cancelled, {"cancelled": True})
+            self.assertEqual(
+                (healthy_registry.total_count, healthy_registry.expired_count), (0, 0),
+            )
+            self.assertEqual(
+                (healthy_registry.capacity.active_count,
+                 healthy_registry.capacity.waiting_count),
+                (0, 0),
+            )
+            return partial_registry, partial_provider, healthy_registry, healthy_provider
+
+        factory_patch = patch.multiple(
+            "webapp", PreviewInstanceRegistry=registry_factory,
+            PreviewProvider=provider_factory, pin_candidate_media=pinned,
+            _edit_preview_iterator=iterator,
+        )
+        try:
+            with factory_patch:
+                registry_partial, _provider_partial, first_registry, first_provider = (
+                    exercise_failed_boundary("registry", 101)
+                )
+                self.assertTrue(registry_partial.is_closed)
+                self.assertEqual(registry_partial.close_calls, 1)
+                self.assertEqual(registry_partial.lock_probe_calls, 1)
+                self.assertEqual(registry_partial.reaper_join_count, 1)
+                self.assertFalse(registry_partial.reaper_alive)
+
+                self.app.extensions["close_edit_preview_services"]()
+                provider_registry, provider_partial, second_registry, second_provider = (
+                    exercise_failed_boundary("provider", 201)
+                )
+                self.assertTrue(provider_registry.is_closed)
+                self.assertEqual(provider_registry.close_calls, 1)
+                self.assertEqual(provider_registry.reaper_join_count, 1)
+                self.assertFalse(provider_registry.reaper_alive)
+                self.assertTrue(provider_partial.is_closed)
+                self.assertEqual(
+                    (provider_partial.close_calls, provider_partial.worker_join_calls,
+                     provider_partial.child_reap_calls,
+                     provider_partial.child_handle_close_calls,
+                     provider_partial.lock_probe_calls),
+                    (1, 1, 1, 1, 1),
+                )
+                self.assertEqual(set(provider_partial.fd_close_calls.values()), {1})
+                self.app.extensions["close_edit_preview_services"]()
+                self.app.extensions["close_edit_preview_services"]()
+        finally:
+            release_factory.set()
+            for registry in registries:
+                registry.close()
+            for provider in providers:
+                provider.shutdown()
+
+        self.assertEqual(len(registries), 4)
+        self.assertEqual(len(providers), 3)
+        self.assertTrue(all(registry.is_closed for registry in registries))
+        self.assertTrue(all(registry.close_calls == 1 for registry in registries))
+        self.assertTrue(all(registry.reaper_join_count == 1 for registry in registries))
+        self.assertTrue(all(not registry.reaper_alive for registry in registries))
+        self.assertTrue(all(registry.total_count == 0 for registry in registries))
+        self.assertTrue(all(registry.expired_count == 0 for registry in registries))
+        self.assertTrue(all(registry.capacity.active_count == 0 for registry in registries))
+        self.assertTrue(all(registry.capacity.waiting_count == 0 for registry in registries))
+        self.assertTrue(all(set(registry.fd_close_calls.values()) == {1}
+                            for registry in registries))
+        self.assertTrue(all(provider.is_closed for provider in providers))
+        self.assertTrue(all(provider.close_calls == 1 for provider in providers))
+        self.assertTrue(all(provider.worker_join_calls == 1 for provider in providers))
+        self.assertTrue(all(provider.child_reap_calls == 1 for provider in providers))
+        self.assertTrue(all(provider.child_handle_close_calls == 1 for provider in providers))
+        self.assertTrue(all(set(provider.fd_close_calls.values()) == {1}
+                            for provider in providers))
+        self.assertTrue(all(provider.active_worker_count == 0 for provider in providers))
+        self.assertTrue(all(provider.active_child_count == 0 for provider in providers))
+        self.assertEqual(Path(self.store.path).read_bytes(), before_config)
+        self.assertEqual(Path(self.device_store.path).read_bytes(), before_devices)
+        self.assertEqual(sorted(
+            (path.relative_to(self.media_dir).as_posix(), path.read_bytes())
+            for path in self.media_dir.rglob("*") if path.is_file()
+        ), before_media)
+        self.assertEqual(self.controller.method_calls, [])
+        self.assertEqual(
+            {child.pid for child in multiprocessing.active_children()}, before_children,
+        )
+        self.assertEqual(
+            {(thread.ident, thread.name) for thread in threading.enumerate()}, before_threads,
+        )
+        self.assertEqual(len(list(Path("/proc/self/fd").iterdir())), before_fds)
+
+    def test_same_page_slow_generation_is_superseded_by_newer_generation(self):
+        from contextlib import contextmanager
+
+        start_path = "/api/edit-preview/clock_lava"
+        page_path = "/api/edit-preview/page"
+        cancel_path = "/api/edit-preview/cancel"
+        preview_instance = "44444444444444444444444444444444"
+
+        self.pair_browser()
+        with self.client.session_transaction() as browser_session:
+            paired_session = dict(browser_session)
+            device_id = browser_session["device_id"]
+        old_page_client = self.app.test_client()
+        new_start_client = self.app.test_client()
+        for client in (old_page_client, new_start_client):
+            with client.session_transaction() as client_session:
+                client_session.update(paired_session)
+
+        self.controller.reset_mock()
+        before_config = Path(self.store.path).read_bytes()
+        before_devices = Path(self.device_store.path).read_bytes()
+        before_media = sorted(
+            (path.relative_to(self.media_dir).as_posix(), path.read_bytes())
+            for path in self.media_dir.rglob("*") if path.is_file()
+        )
+        iterators = {}
+        stop_events = {}
+        constructed = []
+        pin_enters = []
+        pin_exits = []
+
+        class SlowIterator:
+            def __init__(self, label, *, block_on_call=None):
+                self.label = label
+                self.block_on_call = block_on_call
+                self.next_calls = 0
+                self.close_calls = 0
+                self.concurrent_close_calls = 0
+                self.active = False
+                self.lookahead_ready = threading.Event()
+                self.release_lookahead = threading.Event()
+
+            def __iter__(self):
+                return self
+
+            def __next__(self):
+                self.next_calls += 1
+                if self.next_calls > 100:
+                    raise StopIteration
+                self.active = True
+                try:
+                    frame = {
+                        "png": f"{self.label}-frame-{self.next_calls}",
+                        "delay_ms": self.next_calls,
+                    }
+                    if self.next_calls == self.block_on_call:
+                        self.lookahead_ready.set()
+                        if not self.release_lookahead.wait(2):
+                            raise AssertionError("slow lookahead was not released")
+                    return frame
+                finally:
+                    self.active = False
+
+            def close(self):
+                if self.active:
+                    self.concurrent_close_calls += 1
+                    raise AssertionError("iterator close overlapped advancement")
+                self.close_calls += 1
+                if self.close_calls > 1:
+                    raise AssertionError("iterator closed more than once")
+
+        @contextmanager
+        def pinned(candidate, media_root, *, allow_missing=()):
+            label = candidate["weather"]["location"]
+            pin_enters.append(label)
+            try:
+                yield {}
+            finally:
+                pin_exits.append(label)
+
+        def prepare(_provider, module_name, candidate, stop_event):
+            label = candidate["weather"]["location"]
+            stop_events[label] = stop_event
+            return {"label": label}
+
+        def iterator(module_name, candidate, selected_palette, pinned_media, prepared,
+                     stop_event):
+            label = prepared["label"]
+            constructed.append(label)
+            current = SlowIterator(label, block_on_call=34 if label == "old-slow" else None)
+            iterators[label] = current
+            return current
+
+        def payload(label, generation):
+            candidate = copy.deepcopy(self.store.get())
+            candidate.pop("revision")
+            candidate["weather"]["location"] = label
+            return {
+                "config": candidate,
+                "generation": generation,
+                "preview_instance": preview_instance,
+            }
+
+        def assert_response(response, status):
+            self.assertEqual(response.status_code, status, response.get_data(as_text=True))
+            self.assertEqual(response.headers.get("Cache-Control"), "no-store")
+            self.assertNotIn("ETag", response.headers)
+            body = response.get_json()
+            self.assertIsInstance(body, dict)
+            serialized = json.dumps(body)
+            self.assertNotIn("revision", body)
+            self.assertNotIn("device_id", serialized)
+            self.assertNotIn(device_id, serialized)
+            return body
+
+        def continuation(page):
+            return {
+                "session": page["session"],
+                "preview_instance": preview_instance,
+                "token": page["next_token"],
+            }
+
+        registry = None
+        old_result = {}
+        old_failure = []
+        with patch("webapp.pin_candidate_media", pinned), patch(
+            "webapp._prepare_edit_preview_provider", prepare, create=True,
+        ), patch("webapp._edit_preview_iterator", iterator, create=True):
+            old = assert_response(
+                self.client.post(start_path, json=payload("old-slow", 7)), 200,
+            )
+            self.assertEqual(old["generation"], 7)
+            self.assertEqual(old["page"], 0)
+            self.assertEqual(len(old["frames"]), 32)
+            self.assertFalse(old["complete"])
+            registry = self.app.extensions["edit_preview_registry"]
+            old_instance = registry.lookup(
+                old["session"], (device_id, preview_instance),
+            )
+            old_session = old_instance.admit()
+
+            def continue_old():
+                try:
+                    old_result["response"] = old_page_client.post(
+                        page_path, json=continuation(old),
+                    )
+                except BaseException as error:
+                    old_failure.append(error)
+
+            old_thread = threading.Thread(
+                target=continue_old, name="slow-edit-preview-route-page",
+            )
+            old_thread.start()
+            self.assertTrue(
+                iterators["old-slow"].lookahead_ready.wait(1),
+                "old route did not reach the continuation lookahead barrier",
+            )
+
+            newer_started = time.monotonic()
+            newer = assert_response(
+                new_start_client.post(start_path, json=payload("new-fast", 8)), 200,
+            )
+            newer_latency = time.monotonic() - newer_started
+            self.assertLess(newer_latency, 0.25)
+            self.assertEqual(newer["generation"], 8)
+            self.assertEqual(newer["page"], 0)
+            self.assertEqual(len(newer["frames"]), 32)
+            self.assertTrue(stop_events["old-slow"].is_set())
+            self.assertFalse(stop_events["new-fast"].is_set())
+            self.assertTrue(old_thread.is_alive())
+            self.assertEqual(registry.total_count, 2)
+
+            new_page_started = time.monotonic()
+            newer_second = assert_response(new_start_client.post(
+                page_path, json=continuation(newer),
+            ), 200)
+            self.assertLess(time.monotonic() - new_page_started, 0.25)
+            self.assertEqual(newer_second["generation"], 8)
+            self.assertEqual(newer_second["page"], 1)
+            self.assertEqual(len(newer_second["frames"]), 32)
+            self.assertFalse(newer_second["complete"])
+
+            constructed_before_rejection = list(constructed)
+            advances_before_rejection = {
+                label: current.next_calls for label, current in iterators.items()
+            }
+            for label, generation in (("equal-rejected", 8), ("older-rejected", 6)):
+                with self.subTest(rejected_generation=generation):
+                    assert_response(new_start_client.post(
+                        start_path, json=payload(label, generation),
+                    ), 400)
+                    self.assertEqual(constructed, constructed_before_rejection)
+                    self.assertEqual(
+                        {name: current.next_calls for name, current in iterators.items()},
+                        advances_before_rejection,
+                    )
+
+            iterators["old-slow"].release_lookahead.set()
+            old_thread.join(0.25)
+            self.assertFalse(old_thread.is_alive())
+            self.assertEqual(old_failure, [])
+            superseded = assert_response(old_result["response"], 409)
+            self.assertEqual(superseded, {"error": "Preview generation was superseded."})
+            self.assertNotIn("frames", superseded)
+            self.assertNotIn("next_token", superseded)
+            self.assertNotIn("session", superseded)
+            self.assertNotIn("generation", superseded)
+            self.assertEqual(old_session.retained_frame_count, 0)
+            self.assertEqual(iterators["old-slow"].close_calls, 1)
+            self.assertEqual(iterators["old-slow"].concurrent_close_calls, 0)
+            self.assertEqual(pin_exits.count("old-slow"), 1)
+            self.assertEqual(registry.total_count, 1)
+
+            newer_third = assert_response(new_start_client.post(
+                page_path, json=continuation(newer_second),
+            ), 200)
+            self.assertEqual(newer_third["generation"], 8)
+            self.assertEqual(newer_third["page"], 2)
+            self.assertEqual(len(newer_third["frames"]), 32)
+            self.assertFalse(newer_third["complete"])
+            self.assertFalse(stop_events["new-fast"].is_set())
+            cancelled = assert_response(new_start_client.post(cancel_path, json={
+                "session": newer["session"],
+                "preview_instance": preview_instance,
+            }), 200)
+            self.assertEqual(cancelled, {"cancelled": True})
+            self.assertEqual(iterators["new-fast"].close_calls, 1)
+            self.assertEqual(iterators["new-fast"].concurrent_close_calls, 0)
+            self.assertEqual(pin_exits.count("new-fast"), 1)
+            self.assertEqual(registry.total_count, 0)
+
+        self.assertCountEqual(
+            pin_enters, ["old-slow", "new-fast"],
+        )
+        self.assertCountEqual(pin_exits, pin_enters)
+        self.assertEqual(Path(self.store.path).read_bytes(), before_config)
+        self.assertEqual(Path(self.device_store.path).read_bytes(), before_devices)
+        self.assertEqual(sorted(
+            (path.relative_to(self.media_dir).as_posix(), path.read_bytes())
+            for path in self.media_dir.rglob("*") if path.is_file()
+        ), before_media)
+        self.assertEqual(self.controller.method_calls, [])
+        registry.close()
+        self.assertFalse(registry.reaper_alive)
+        self.assertNotIn(old_thread, threading.enumerate())
+
+    def test_two_tabs_on_one_paired_device_do_not_cancel_each_other(self):
+        from contextlib import contextmanager
+
+        start_path = "/api/edit-preview/clock_lava"
+        page_path = "/api/edit-preview/page"
+        cancel_path = "/api/edit-preview/cancel"
+        tab_a_instance = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+        tab_b_instance = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+
+        self.pair_browser()
+        with self.client.session_transaction() as paired_browser_session:
+            paired_identity = dict(paired_browser_session)
+            device_id = paired_browser_session["device_id"]
+        tab_a_client = self.app.test_client()
+        tab_b_client = self.app.test_client()
+        for client in (tab_a_client, tab_b_client):
+            with client.session_transaction() as tab_session:
+                tab_session.update(paired_identity)
+            with client.session_transaction() as tab_session:
+                self.assertEqual(tab_session["device_id"], device_id)
+
+        self.controller.reset_mock()
+        before_config = Path(self.store.path).read_bytes()
+        before_devices = Path(self.device_store.path).read_bytes()
+        before_media = sorted(
+            (path.relative_to(self.media_dir).as_posix(), path.read_bytes())
+            for path in self.media_dir.rglob("*") if path.is_file()
+        )
+        iterators = {}
+        stop_events = {}
+        pin_enters = []
+        pin_exits = []
+
+        class CountingIterator:
+            def __init__(self, label):
+                self.label = label
+                self.next_calls = 0
+                self.close_calls = 0
+
+            def __iter__(self):
+                return self
+
+            def __next__(self):
+                self.next_calls += 1
+                return {
+                    "png": f"{self.label}-frame-{self.next_calls}",
+                    "delay_ms": self.next_calls,
+                }
+
+            def close(self):
+                self.close_calls += 1
+                if self.close_calls > 1:
+                    raise AssertionError(f"{self.label} iterator closed more than once")
+
+        @contextmanager
+        def pinned(candidate, media_root, *, allow_missing=()):
+            label = candidate["weather"]["location"]
+            pin_enters.append(label)
+            try:
+                yield {}
+            finally:
+                pin_exits.append(label)
+
+        def prepare(_provider, module_name, candidate, stop_event):
+            label = candidate["weather"]["location"]
+            stop_events[label] = stop_event
+            return {"label": label}
+
+        def iterator(module_name, candidate, selected_palette, pinned_media, prepared,
+                     stop_event):
+            label = prepared["label"]
+            current = CountingIterator(label)
+            iterators[label] = current
+            return current
+
+        def payload(label, preview_instance):
+            candidate = copy.deepcopy(self.store.get())
+            candidate.pop("revision")
+            candidate["weather"]["location"] = label
+            return {
+                "config": candidate,
+                "generation": 1,
+                "preview_instance": preview_instance,
+            }
+
+        def assert_response(response, status):
+            self.assertEqual(response.status_code, status, response.get_data(as_text=True))
+            self.assertEqual(response.headers.get("Cache-Control"), "no-store")
+            self.assertNotIn("ETag", response.headers)
+            body = response.get_json()
+            self.assertIsInstance(body, dict)
+            serialized = json.dumps(body)
+            self.assertNotIn("revision", body)
+            self.assertNotIn("device_id", serialized)
+            self.assertNotIn(device_id, serialized)
+            return body
+
+        def continuation(page, preview_instance):
+            return {
+                "session": page["session"],
+                "preview_instance": preview_instance,
+                "token": page["next_token"],
+            }
+
+        registry = None
+        with patch("webapp.pin_candidate_media", pinned), patch(
+            "webapp._prepare_edit_preview_provider", prepare, create=True,
+        ), patch("webapp._edit_preview_iterator", iterator, create=True):
+            tab_a = assert_response(tab_a_client.post(
+                start_path, json=payload("tab-a", tab_a_instance),
+            ), 200)
+            tab_b = assert_response(tab_b_client.post(
+                start_path, json=payload("tab-b", tab_b_instance),
+            ), 200)
+            registry = self.app.extensions["edit_preview_registry"]
+            self.assertEqual(registry.total_count, 2)
+            self.assertEqual(registry.count_for_device(device_id), 2)
+            self.assertNotEqual(tab_a["session"], tab_b["session"])
+            self.assertNotEqual(tab_a["next_token"], tab_b["next_token"])
+            self.assertEqual(iterators["tab-a"].next_calls, 33)
+            self.assertEqual(iterators["tab-b"].next_calls, 33)
+
+            baseline_advances = {
+                label: current.next_calls for label, current in iterators.items()
+            }
+            assert_response(tab_b_client.post(
+                page_path, json=continuation(tab_a, tab_b_instance),
+            ), 409)
+            assert_response(tab_a_client.post(
+                page_path, json=continuation(tab_b, tab_a_instance),
+            ), 409)
+            assert_response(tab_b_client.post(cancel_path, json={
+                "session": tab_a["session"],
+                "preview_instance": tab_b_instance,
+            }), 409)
+            assert_response(tab_a_client.post(cancel_path, json={
+                "session": tab_b["session"],
+                "preview_instance": tab_a_instance,
+            }), 409)
+            self.assertEqual(
+                {label: current.next_calls for label, current in iterators.items()},
+                baseline_advances,
+            )
+            self.assertEqual(iterators["tab-a"].close_calls, 0)
+            self.assertEqual(iterators["tab-b"].close_calls, 0)
+            self.assertEqual(pin_exits, [])
+            self.assertFalse(stop_events["tab-a"].is_set())
+            self.assertFalse(stop_events["tab-b"].is_set())
+
+            tab_a_page = assert_response(tab_a_client.post(
+                page_path, json=continuation(tab_a, tab_a_instance),
+            ), 200)
+            self.assertEqual(tab_a_page["page"], 1)
+            self.assertEqual(iterators["tab-a"].next_calls, 65)
+            self.assertEqual(iterators["tab-b"].next_calls, 33)
+
+            cancelled_a = assert_response(tab_a_client.post(cancel_path, json={
+                "session": tab_a["session"],
+                "preview_instance": tab_a_instance,
+            }), 200)
+            self.assertEqual(cancelled_a, {"cancelled": True})
+            self.assertTrue(stop_events["tab-a"].is_set())
+            self.assertFalse(stop_events["tab-b"].is_set())
+            self.assertEqual(iterators["tab-a"].close_calls, 1)
+            self.assertEqual(iterators["tab-b"].close_calls, 0)
+            self.assertEqual(pin_exits.count("tab-a"), 1)
+            self.assertEqual(pin_exits.count("tab-b"), 0)
+            self.assertEqual(registry.total_count, 1)
+
+            tab_b_page = assert_response(tab_b_client.post(
+                page_path, json=continuation(tab_b, tab_b_instance),
+            ), 200)
+            self.assertEqual(tab_b_page["page"], 1)
+            self.assertEqual(iterators["tab-b"].next_calls, 65)
+            self.assertEqual(iterators["tab-a"].next_calls, 65)
+            cancelled_b = assert_response(tab_b_client.post(cancel_path, json={
+                "session": tab_b["session"],
+                "preview_instance": tab_b_instance,
+            }), 200)
+            self.assertEqual(cancelled_b, {"cancelled": True})
+            self.assertTrue(stop_events["tab-b"].is_set())
+            self.assertEqual(iterators["tab-b"].close_calls, 1)
+            self.assertEqual(pin_exits.count("tab-b"), 1)
+            self.assertEqual(registry.total_count, 0)
+
+        self.assertCountEqual(pin_enters, ["tab-a", "tab-b"])
+        self.assertCountEqual(pin_exits, pin_enters)
+        self.assertEqual(Path(self.store.path).read_bytes(), before_config)
+        self.assertEqual(Path(self.device_store.path).read_bytes(), before_devices)
+        self.assertEqual(sorted(
+            (path.relative_to(self.media_dir).as_posix(), path.read_bytes())
+            for path in self.media_dir.rglob("*") if path.is_file()
+        ), before_media)
+        self.assertEqual(self.controller.method_calls, [])
+        registry.close()
+        self.assertEqual(registry.total_count, 0)
+        self.assertFalse(registry.reaper_alive)
+
+    def test_two_paired_devices_have_independent_preview_sessions(self):
+        from contextlib import contextmanager
+        import multiprocessing
+
+        start_path = "/api/edit-preview/clock_lava"
+        page_path = "/api/edit-preview/page"
+        cancel_path = "/api/edit-preview/cancel"
+        preview_instance = "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee"
+
+        device_a = self.client
+        device_b = self.app.test_client()
+        self.pairing.verify.return_value = True
+        device_a.post(
+            "/pair", data={"pin": "123456", "device_name": "Independent A"},
+        )
+        device_b.post(
+            "/pair", data={"pin": "123456", "device_name": "Independent B"},
+        )
+        with device_a.session_transaction() as session_a:
+            device_a_id = session_a["device_id"]
+        with device_b.session_transaction() as session_b:
+            device_b_id = session_b["device_id"]
+        self.assertNotEqual(device_a_id, device_b_id)
+
+        self.controller.reset_mock()
+        before_config = Path(self.store.path).read_bytes()
+        before_devices = Path(self.device_store.path).read_bytes()
+        before_media = sorted(
+            (path.relative_to(self.media_dir).as_posix(), path.read_bytes())
+            for path in self.media_dir.rglob("*") if path.is_file()
+        )
+        before_children = {child.pid for child in multiprocessing.active_children()}
+        before_threads = {
+            (thread.ident, thread.name) for thread in threading.enumerate()
+        }
+        before_fds = len(list(Path("/proc/self/fd").iterdir()))
+        iterators = {}
+        stop_events = {}
+        pin_enters = []
+        pin_exits = []
+
+        class CountingIterator:
+            def __init__(self, label):
+                self.label = label
+                self.next_calls = 0
+                self.close_calls = 0
+
+            def __iter__(self):
+                return self
+
+            def __next__(self):
+                self.next_calls += 1
+                return {
+                    "png": f"frame-{self.next_calls}",
+                    "delay_ms": self.next_calls,
+                }
+
+            def close(self):
+                self.close_calls += 1
+                if self.close_calls > 1:
+                    raise AssertionError(f"{self.label} iterator closed more than once")
+
+        @contextmanager
+        def pinned(candidate, media_root, *, allow_missing=()):
+            label = candidate["weather"]["location"]
+            pin_enters.append(label)
+            try:
+                yield {}
+            finally:
+                pin_exits.append(label)
+
+        def prepare(_provider, module_name, candidate, stop_event):
+            label = candidate["weather"]["location"]
+            stop_events[label] = stop_event
+            return {"label": label}
+
+        def iterator(module_name, candidate, selected_palette, pinned_media, prepared,
+                     stop_event):
+            label = prepared["label"]
+            current = CountingIterator(label)
+            iterators[label] = current
+            return current
+
+        def payload(label, generation):
+            candidate = copy.deepcopy(self.store.get())
+            candidate.pop("revision")
+            candidate["weather"]["location"] = label
+            return {
+                "config": candidate,
+                "generation": generation,
+                "preview_instance": preview_instance,
+            }
+
+        def assert_response(response, status):
+            self.assertEqual(response.status_code, status, response.get_data(as_text=True))
+            self.assertEqual(response.headers.get("Cache-Control"), "no-store")
+            self.assertNotIn("ETag", response.headers)
+            body = response.get_json()
+            self.assertIsInstance(body, dict)
+            wire = response.get_data(as_text=True)
+            self.assertNotIn("revision", body)
+            self.assertNotIn("device_id", wire)
+            self.assertNotIn(device_a_id, wire)
+            self.assertNotIn(device_b_id, wire)
+            return body
+
+        def start(client, label, generation):
+            body = assert_response(
+                client.post(start_path, json=payload(label, generation)), 200,
+            )
+            self.assertEqual(body["generation"], generation)
+            self.assertEqual(body["page"], 0)
+            self.assertEqual(len(body["frames"]), 32)
+            self.assertFalse(body["complete"])
+            self.assertRegex(body["session"], r"^[0-9a-f]{32}$")
+            self.assertRegex(body["next_token"], r"^[0-9a-f]{64}$")
+            return body
+
+        def continuation(page):
+            return {
+                "session": page["session"],
+                "preview_instance": preview_instance,
+                "token": page["next_token"],
+            }
+
+        registry = None
+        with patch("webapp.pin_candidate_media", pinned), patch(
+            "webapp._prepare_edit_preview_provider", prepare, create=True,
+        ), patch("webapp._edit_preview_iterator", iterator, create=True):
+            first_a = start(device_a, "device-a-generation-7", 7)
+            first_b = start(device_b, "device-b-generation-7", 7)
+            registry = self.app.extensions["edit_preview_registry"]
+
+            self.assertNotEqual(first_a["session"], first_b["session"])
+            self.assertNotEqual(first_a["next_token"], first_b["next_token"])
+            self.assertEqual(registry.total_count, 2)
+            self.assertEqual(registry.count_for_device(device_a_id), 1)
+            self.assertEqual(registry.count_for_device(device_b_id), 1)
+            instance_a = registry.lookup(
+                first_a["session"], (device_a_id, preview_instance),
+            )
+            instance_b = registry.lookup(
+                first_b["session"], (device_b_id, preview_instance),
+            )
+            self.assertIsNot(instance_a, instance_b)
+            self.assertEqual(instance_a.generation, 7)
+            self.assertEqual(instance_b.generation, 7)
+
+            advances_before_cross_access = {
+                label: current.next_calls for label, current in iterators.items()
+            }
+            for response in (
+                device_b.post(page_path, json=continuation(first_a)),
+                device_a.post(page_path, json=continuation(first_b)),
+                device_b.post(cancel_path, json={
+                    "session": first_a["session"],
+                    "preview_instance": preview_instance,
+                }),
+                device_a.post(cancel_path, json={
+                    "session": first_b["session"],
+                    "preview_instance": preview_instance,
+                }),
+            ):
+                self.assertEqual(
+                    assert_response(response, 409),
+                    {"error": "Preview session is no longer active."},
+                )
+            self.assertEqual(
+                {label: current.next_calls for label, current in iterators.items()},
+                advances_before_cross_access,
+            )
+            self.assertEqual(pin_exits, [])
+            self.assertEqual(iterators["device-a-generation-7"].close_calls, 0)
+            self.assertEqual(iterators["device-b-generation-7"].close_calls, 0)
+            self.assertFalse(stop_events["device-a-generation-7"].is_set())
+            self.assertFalse(stop_events["device-b-generation-7"].is_set())
+
+            page_a = assert_response(
+                device_a.post(page_path, json=continuation(first_a)), 200,
+            )
+            self.assertEqual(page_a["generation"], 7)
+            self.assertEqual(page_a["page"], 1)
+            self.assertEqual(iterators["device-a-generation-7"].next_calls, 65)
+            self.assertEqual(iterators["device-b-generation-7"].next_calls, 33)
+
+            newer_a = start(device_a, "device-a-generation-8", 8)
+            self.assertTrue(stop_events["device-a-generation-7"].is_set())
+            self.assertFalse(stop_events["device-a-generation-8"].is_set())
+            self.assertFalse(stop_events["device-b-generation-7"].is_set())
+            self.assertEqual(iterators["device-a-generation-7"].close_calls, 1)
+            self.assertEqual(pin_exits.count("device-a-generation-7"), 1)
+            self.assertEqual(iterators["device-b-generation-7"].close_calls, 0)
+            self.assertEqual(pin_exits.count("device-b-generation-7"), 0)
+            self.assertEqual(iterators["device-b-generation-7"].next_calls, 33)
+            self.assertEqual(registry.total_count, 2)
+            self.assertEqual(registry.count_for_device(device_a_id), 1)
+            self.assertEqual(registry.count_for_device(device_b_id), 1)
+            self.assertEqual(
+                registry.lookup(
+                    newer_a["session"], (device_a_id, preview_instance),
+                ).generation,
+                8,
+            )
+            self.assertIs(
+                registry.lookup(
+                    first_b["session"], (device_b_id, preview_instance),
+                ),
+                instance_b,
+            )
+            self.assertEqual(
+                assert_response(
+                    device_a.post(page_path, json=continuation(page_a)), 409,
+                ),
+                {"error": "Preview session is no longer active."},
+            )
+
+            page_newer_a = assert_response(
+                device_a.post(page_path, json=continuation(newer_a)), 200,
+            )
+            self.assertEqual((page_newer_a["generation"], page_newer_a["page"]), (8, 1))
+            self.assertEqual(iterators["device-a-generation-8"].next_calls, 65)
+            self.assertEqual(iterators["device-b-generation-7"].next_calls, 33)
+
+            page_b = assert_response(
+                device_b.post(page_path, json=continuation(first_b)), 200,
+            )
+            self.assertEqual((page_b["generation"], page_b["page"]), (7, 1))
+            self.assertEqual(iterators["device-b-generation-7"].next_calls, 65)
+            self.assertEqual(iterators["device-a-generation-8"].next_calls, 65)
+
+            self.assertEqual(
+                assert_response(device_a.post(cancel_path, json={
+                    "session": newer_a["session"],
+                    "preview_instance": preview_instance,
+                }), 200),
+                {"cancelled": True},
+            )
+            self.assertTrue(stop_events["device-a-generation-8"].is_set())
+            self.assertFalse(stop_events["device-b-generation-7"].is_set())
+            self.assertEqual(iterators["device-a-generation-8"].close_calls, 1)
+            self.assertEqual(iterators["device-b-generation-7"].close_calls, 0)
+            self.assertEqual(pin_exits.count("device-a-generation-8"), 1)
+            self.assertEqual(pin_exits.count("device-b-generation-7"), 0)
+            self.assertEqual(registry.total_count, 1)
+
+            self.assertEqual(
+                assert_response(device_b.post(cancel_path, json={
+                    "session": first_b["session"],
+                    "preview_instance": preview_instance,
+                }), 200),
+                {"cancelled": True},
+            )
+            self.assertTrue(stop_events["device-b-generation-7"].is_set())
+            self.assertEqual(iterators["device-b-generation-7"].close_calls, 1)
+            self.assertEqual(pin_exits.count("device-b-generation-7"), 1)
+            self.assertEqual(registry.total_count, 0)
+
+        self.assertCountEqual(
+            pin_enters,
+            ["device-a-generation-7", "device-b-generation-7", "device-a-generation-8"],
+        )
+        self.assertCountEqual(pin_exits, pin_enters)
+        self.assertTrue(all(current.close_calls == 1 for current in iterators.values()))
+        self.assertEqual(Path(self.store.path).read_bytes(), before_config)
+        self.assertEqual(Path(self.device_store.path).read_bytes(), before_devices)
+        self.assertEqual(sorted(
+            (path.relative_to(self.media_dir).as_posix(), path.read_bytes())
+            for path in self.media_dir.rglob("*") if path.is_file()
+        ), before_media)
+        self.assertEqual(self.controller.method_calls, [])
+        registry.close()
+        self.assertEqual(registry.total_count, 0)
+        self.assertFalse(registry.reaper_alive)
+        self.assertEqual(
+            {child.pid for child in multiprocessing.active_children()}, before_children,
+        )
+        self.assertEqual(
+            {(thread.ident, thread.name) for thread in threading.enumerate()},
+            before_threads,
+        )
+        self.assertEqual(len(list(Path("/proc/self/fd").iterdir())), before_fds)
+
+    def test_two_paired_devices_cannot_cancel_or_page_each_other(self):
+        from contextlib import contextmanager
+        import multiprocessing
+
+        start_path = "/api/edit-preview/clock_lava"
+        page_path = "/api/edit-preview/page"
+        cancel_path = "/api/edit-preview/cancel"
+        preview_instance = "dddddddddddddddddddddddddddddddd"
+
+        device_a = self.client
+        device_b = self.app.test_client()
+        self.pairing.verify.return_value = True
+        device_a.post(
+            "/pair", data={"pin": "123456", "device_name": "Device A"},
+        )
+        device_b.post(
+            "/pair", data={"pin": "123456", "device_name": "Device B"},
+        )
+        with device_a.session_transaction() as device_a_session:
+            device_a_id = device_a_session["device_id"]
+        with device_b.session_transaction() as device_b_session:
+            device_b_id = device_b_session["device_id"]
+        self.assertNotEqual(device_a_id, device_b_id)
+
+        self.controller.reset_mock()
+        before_config = Path(self.store.path).read_bytes()
+        before_devices = Path(self.device_store.path).read_bytes()
+        before_media = sorted(
+            (path.relative_to(self.media_dir).as_posix(), path.read_bytes())
+            for path in self.media_dir.rglob("*") if path.is_file()
+        )
+        before_children = {child.pid for child in multiprocessing.active_children()}
+        before_threads = {
+            (thread.ident, thread.name) for thread in threading.enumerate()
+        }
+        before_fds = len(list(Path("/proc/self/fd").iterdir()))
+        iterators = {}
+        stop_events = {}
+        pin_enters = []
+        pin_exits = []
+
+        class CountingIterator:
+            def __init__(self, label):
+                self.label = label
+                self.next_calls = 0
+                self.close_calls = 0
+
+            def __iter__(self):
+                return self
+
+            def __next__(self):
+                self.next_calls += 1
+                return {
+                    "png": f"{self.label}-frame-{self.next_calls}",
+                    "delay_ms": self.next_calls,
+                }
+
+            def close(self):
+                self.close_calls += 1
+                if self.close_calls > 1:
+                    raise AssertionError(f"{self.label} iterator closed more than once")
+
+        @contextmanager
+        def pinned(candidate, media_root, *, allow_missing=()):
+            label = candidate["weather"]["location"]
+            pin_enters.append(label)
+            try:
+                yield {}
+            finally:
+                pin_exits.append(label)
+
+        def prepare(_provider, module_name, candidate, stop_event):
+            label = candidate["weather"]["location"]
+            stop_events[label] = stop_event
+            return {"label": label}
+
+        def iterator(module_name, candidate, selected_palette, pinned_media, prepared,
+                     stop_event):
+            label = prepared["label"]
+            current = CountingIterator(label)
+            iterators[label] = current
+            return current
+
+        def payload(label):
+            candidate = copy.deepcopy(self.store.get())
+            candidate.pop("revision")
+            candidate["weather"]["location"] = label
+            return {
+                "config": candidate,
+                "generation": 1,
+                "preview_instance": preview_instance,
+            }
+
+        def assert_response(response, status):
+            self.assertEqual(response.status_code, status, response.get_data(as_text=True))
+            self.assertEqual(response.headers.get("Cache-Control"), "no-store")
+            self.assertNotIn("ETag", response.headers)
+            body = response.get_json()
+            self.assertIsInstance(body, dict)
+            serialized = json.dumps(body)
+            self.assertNotIn("revision", body)
+            self.assertNotIn("device_id", serialized)
+            self.assertNotIn(device_a_id, serialized)
+            self.assertNotIn(device_b_id, serialized)
+            return body
+
+        def continuation(page):
+            return {
+                "session": page["session"],
+                "preview_instance": preview_instance,
+                "token": page["next_token"],
+            }
+
+        registry = None
+        with patch("webapp.pin_candidate_media", pinned), patch(
+            "webapp._prepare_edit_preview_provider", prepare, create=True,
+        ), patch("webapp._edit_preview_iterator", iterator, create=True):
+            page_a = assert_response(
+                device_a.post(start_path, json=payload("device-a")), 200,
+            )
+            page_b = assert_response(
+                device_b.post(start_path, json=payload("device-b")), 200,
+            )
+            registry = self.app.extensions["edit_preview_registry"]
+            self.assertEqual(registry.total_count, 2)
+            self.assertEqual(
+                registry.count_for_device((device_a_id, preview_instance)), 1,
+            )
+            self.assertEqual(
+                registry.count_for_device((device_b_id, preview_instance)), 1,
+            )
+            self.assertNotEqual(page_a["session"], page_b["session"])
+            self.assertNotEqual(page_a["next_token"], page_b["next_token"])
+            self.assertEqual(iterators["device-a"].next_calls, 33)
+            self.assertEqual(iterators["device-b"].next_calls, 33)
+
+            advances_before_cross_access = {
+                label: current.next_calls for label, current in iterators.items()
+            }
+            for response in (
+                device_b.post(page_path, json=continuation(page_a)),
+                device_a.post(page_path, json=continuation(page_b)),
+                device_b.post(cancel_path, json={
+                    "session": page_a["session"],
+                    "preview_instance": preview_instance,
+                }),
+                device_a.post(cancel_path, json={
+                    "session": page_b["session"],
+                    "preview_instance": preview_instance,
+                }),
+            ):
+                self.assertEqual(
+                    assert_response(response, 409),
+                    {"error": "Preview session is no longer active."},
+                )
+            self.assertEqual(
+                {label: current.next_calls for label, current in iterators.items()},
+                advances_before_cross_access,
+            )
+            self.assertEqual(pin_exits, [])
+            self.assertEqual(iterators["device-a"].close_calls, 0)
+            self.assertEqual(iterators["device-b"].close_calls, 0)
+            self.assertFalse(stop_events["device-a"].is_set())
+            self.assertFalse(stop_events["device-b"].is_set())
+
+            second_a = assert_response(
+                device_a.post(page_path, json=continuation(page_a)), 200,
+            )
+            self.assertEqual(second_a["page"], 1)
+            self.assertEqual(iterators["device-a"].next_calls, 65)
+            self.assertEqual(iterators["device-b"].next_calls, 33)
+            self.assertEqual(
+                assert_response(device_a.post(cancel_path, json={
+                    "session": page_a["session"],
+                    "preview_instance": preview_instance,
+                }), 200),
+                {"cancelled": True},
+            )
+            self.assertTrue(stop_events["device-a"].is_set())
+            self.assertFalse(stop_events["device-b"].is_set())
+            self.assertEqual(iterators["device-a"].close_calls, 1)
+            self.assertEqual(iterators["device-b"].close_calls, 0)
+            self.assertEqual(pin_exits.count("device-a"), 1)
+            self.assertEqual(pin_exits.count("device-b"), 0)
+            self.assertEqual(registry.total_count, 1)
+
+            second_b = assert_response(
+                device_b.post(page_path, json=continuation(page_b)), 200,
+            )
+            self.assertEqual(second_b["page"], 1)
+            self.assertEqual(iterators["device-a"].next_calls, 65)
+            self.assertEqual(iterators["device-b"].next_calls, 65)
+            self.assertEqual(
+                assert_response(device_b.post(cancel_path, json={
+                    "session": page_b["session"],
+                    "preview_instance": preview_instance,
+                }), 200),
+                {"cancelled": True},
+            )
+            self.assertTrue(stop_events["device-b"].is_set())
+            self.assertEqual(iterators["device-b"].close_calls, 1)
+            self.assertEqual(pin_exits.count("device-b"), 1)
+            self.assertEqual(registry.total_count, 0)
+
+        self.assertCountEqual(pin_enters, ["device-a", "device-b"])
+        self.assertCountEqual(pin_exits, pin_enters)
+        self.assertEqual(Path(self.store.path).read_bytes(), before_config)
+        self.assertEqual(Path(self.device_store.path).read_bytes(), before_devices)
+        self.assertEqual(sorted(
+            (path.relative_to(self.media_dir).as_posix(), path.read_bytes())
+            for path in self.media_dir.rglob("*") if path.is_file()
+        ), before_media)
+        self.assertEqual(self.controller.method_calls, [])
+        registry.close()
+        self.assertEqual(registry.total_count, 0)
+        self.assertFalse(registry.reaper_alive)
+        self.assertEqual(
+            {child.pid for child in multiprocessing.active_children()}, before_children,
+        )
+        self.assertEqual(
+            {(thread.ident, thread.name) for thread in threading.enumerate()},
+            before_threads,
+        )
+        self.assertEqual(len(list(Path("/proc/self/fd").iterdir())), before_fds)
+
+    def test_two_devices_and_two_tabs_are_isolated_and_same_instance_generation_supersedes(self):
+        from contextlib import contextmanager
+
+        start_path = "/api/edit-preview/clock_lava"
+        page_path = "/api/edit-preview/page"
+        cancel_path = "/api/edit-preview/cancel"
+        tab_one = "11111111111111111111111111111111"
+        tab_two = "22222222222222222222222222222222"
+        device_two_tab = "33333333333333333333333333333333"
+
+        device_one = self.client
+        device_two = self.app.test_client()
+        self.pairing.verify.return_value = True
+        device_one.post(
+            "/pair", data={"pin": "123456", "device_name": "First device"},
+        )
+        device_two.post(
+            "/pair", data={"pin": "123456", "device_name": "Second device"},
+        )
+        with device_one.session_transaction() as device_one_session:
+            device_one_id = device_one_session["device_id"]
+        with device_two.session_transaction() as device_two_session:
+            device_two_id = device_two_session["device_id"]
+        self.assertNotEqual(device_one_id, device_two_id)
+
+        self.controller.reset_mock()
+        before_config = Path(self.store.path).read_bytes()
+        before_devices = Path(self.device_store.path).read_bytes()
+        before_media = sorted(
+            (path.relative_to(self.media_dir).as_posix(), path.read_bytes())
+            for path in self.media_dir.rglob("*") if path.is_file()
+        )
+        iterators = {}
+        stop_events = {}
+        pin_enters = []
+        pin_exits = []
+
+        class CountingIterator:
+            def __init__(self, label):
+                self.label = label
+                self.next_calls = 0
+                self.close_calls = 0
+
+            def __iter__(self):
+                return self
+
+            def __next__(self):
+                self.next_calls += 1
+                if self.next_calls > 40:
+                    raise StopIteration
+                return {
+                    "png": f"{self.label}-frame-{self.next_calls}",
+                    "delay_ms": self.next_calls,
+                }
+
+            def close(self):
+                self.close_calls += 1
+                if self.close_calls > 1:
+                    raise AssertionError(f"{self.label} iterator closed more than once")
+
+        @contextmanager
+        def pinned(candidate, media_root, *, allow_missing=()):
+            label = candidate["weather"]["location"]
+            pin_enters.append(label)
+            try:
+                yield {}
+            finally:
+                pin_exits.append(label)
+
+        def prepare(_provider, module_name, candidate, stop_event):
+            label = candidate["weather"]["location"]
+            stop_events[label] = stop_event
+            return {"label": label, "stop": stop_event}
+
+        def iterator(module_name, candidate, selected_palette, pinned_media, prepared, stop_event):
+            label = prepared["label"]
+            self.assertIs(prepared["stop"], stop_event)
+            current = CountingIterator(label)
+            iterators[label] = current
+            return current
+
+        def payload(label, generation, preview_instance):
+            candidate = copy.deepcopy(self.store.get())
+            candidate.pop("revision")
+            candidate["weather"]["location"] = label
+            return {
+                "config": candidate,
+                "generation": generation,
+                "preview_instance": preview_instance,
+            }
+
+        def assert_response(response, status):
+            self.assertEqual(response.status_code, status, response.get_data(as_text=True))
+            self.assertEqual(response.headers.get("Cache-Control"), "no-store")
+            self.assertNotIn("ETag", response.headers)
+            body = response.get_json()
+            self.assertIsInstance(body, dict)
+            serialized = json.dumps(body)
+            self.assertNotIn("device_id", serialized)
+            self.assertNotIn(device_one_id, serialized)
+            self.assertNotIn(device_two_id, serialized)
+            return body
+
+        def start(client, label, generation, preview_instance):
+            body = assert_response(client.post(
+                start_path, json=payload(label, generation, preview_instance),
+            ), 200)
+            self.assertEqual(body["generation"], generation)
+            self.assertEqual(body["page"], 0)
+            self.assertEqual(len(body["frames"]), 32)
+            self.assertFalse(body["complete"])
+            self.assertRegex(body["next_token"], r"^[0-9a-f]{64}$")
+            return body
+
+        def continuation(body, preview_instance):
+            return {
+                "session": body["session"],
+                "preview_instance": preview_instance,
+                "token": body["next_token"],
+            }
+
+        registry = None
+        with patch("webapp.pin_candidate_media", pinned), patch(
+            "webapp._prepare_edit_preview_provider", prepare, create=True,
+        ), patch("webapp._edit_preview_iterator", iterator, create=True), patch(
+            "edit_preview.PreviewSessionCapacity.MAX_ACTIVE", 4,
+        ):
+            first_tab_old = start(device_one, "first-tab-old", 7, tab_one)
+            second_tab = start(device_one, "second-tab", 3, tab_two)
+            other_device = start(device_two, "other-device", 7, device_two_tab)
+            registry = self.app.extensions["edit_preview_registry"]
+
+            self.assertEqual(registry.total_count, 3)
+            self.assertEqual(registry.count_for_device(device_one_id), 2)
+            self.assertEqual(registry.count_for_device(device_two_id), 1)
+            baseline_advances = {
+                label: current.next_calls for label, current in iterators.items()
+            }
+
+            assert_response(device_one.post(page_path, json={
+                **continuation(first_tab_old, tab_one),
+                "preview_instance": tab_two,
+            }), 409)
+            assert_response(device_two.post(
+                page_path, json=continuation(first_tab_old, tab_one),
+            ), 409)
+            assert_response(device_one.post(
+                cancel_path,
+                json={
+                    "session": other_device["session"],
+                    "preview_instance": device_two_tab,
+                },
+            ), 409)
+            self.assertEqual(
+                {label: current.next_calls for label, current in iterators.items()},
+                baseline_advances,
+            )
+
+            first_tab_new = start(device_one, "first-tab-new", 8, tab_one)
+            self.assertTrue(stop_events["first-tab-old"].is_set())
+            self.assertFalse(stop_events["first-tab-new"].is_set())
+            self.assertFalse(stop_events["second-tab"].is_set())
+            self.assertFalse(stop_events["other-device"].is_set())
+            self.assertEqual(iterators["first-tab-old"].close_calls, 1)
+            self.assertEqual(pin_exits.count("first-tab-old"), 1)
+            self.assertEqual(registry.total_count, 3)
+            self.assertEqual(iterators["second-tab"].next_calls, baseline_advances["second-tab"])
+            self.assertEqual(iterators["other-device"].next_calls, baseline_advances["other-device"])
+            self.assertEqual(iterators["second-tab"].close_calls, 0)
+            self.assertEqual(iterators["other-device"].close_calls, 0)
+
+            assert_response(device_one.post(
+                page_path, json=continuation(first_tab_old, tab_one),
+            ), 409)
+            assert_response(device_one.post(cancel_path, json={
+                "session": first_tab_old["session"], "preview_instance": tab_one,
+            }), 409)
+
+            constructed = set(iterators)
+            advances = sum(current.next_calls for current in iterators.values())
+            for generation in (8, 7):
+                with self.subTest(rejected_generation=generation):
+                    assert_response(device_one.post(
+                        start_path,
+                        json=payload(f"rejected-{generation}", generation, tab_one),
+                    ), 400)
+                    self.assertEqual(set(iterators), constructed)
+                    self.assertEqual(
+                        sum(current.next_calls for current in iterators.values()), advances,
+                    )
+
+            second_page = assert_response(device_one.post(
+                page_path, json=continuation(second_tab, tab_two),
+            ), 200)
+            other_page = assert_response(device_two.post(
+                page_path, json=continuation(other_device, device_two_tab),
+            ), 200)
+            self.assertTrue(second_page["complete"])
+            self.assertTrue(other_page["complete"])
+            self.assertEqual(iterators["second-tab"].next_calls, 41)
+            self.assertEqual(iterators["other-device"].next_calls, 41)
+            self.assertEqual(iterators["second-tab"].close_calls, 0)
+            self.assertEqual(iterators["other-device"].close_calls, 0)
+            self.assertEqual(pin_exits.count("second-tab"), 1)
+            self.assertEqual(pin_exits.count("other-device"), 1)
+
+            cancelled = assert_response(device_one.post(cancel_path, json={
+                "session": first_tab_new["session"], "preview_instance": tab_one,
+            }), 200)
+            self.assertEqual(cancelled, {"cancelled": True})
+            self.assertEqual(iterators["first-tab-new"].close_calls, 1)
+            self.assertEqual(pin_exits.count("first-tab-new"), 1)
+            self.assertEqual(registry.total_count, 0)
+
+        self.assertCountEqual(
+            pin_enters,
+            [
+                "first-tab-old", "second-tab", "other-device", "first-tab-new",
+            ],
+        )
+        self.assertCountEqual(pin_exits, pin_enters)
+        self.assertEqual(Path(self.store.path).read_bytes(), before_config)
+        self.assertEqual(Path(self.device_store.path).read_bytes(), before_devices)
+        self.assertEqual(sorted(
+            (path.relative_to(self.media_dir).as_posix(), path.read_bytes())
+            for path in self.media_dir.rglob("*") if path.is_file()
+        ), before_media)
+        self.assertEqual(self.controller.method_calls, [])
+        registry.close()
+        self.assertFalse(registry.reaper_alive)
+
     def test_unsaved_announcement_preview_validates_without_mutating_config(self):
         self.pair_browser()
         before = self.store.get()
@@ -6582,6 +8957,2088 @@ console.log('ANNOUNCEMENT_HEADING_SYNC_PASS');
         self.assertEqual(response.status_code, 202)
         self.controller.preview.assert_called_once_with("custom_welcome")
 
+    def test_capacity_and_provider_failures_are_bounded_and_sanitized(self):
+        from contextlib import contextmanager
+
+        from edit_preview import PreviewInstanceRegistry, PreviewSessionCapacity
+
+        start_path = "/api/edit-preview/clock_lava"
+        page_path = "/api/edit-preview/page"
+        cancel_path = "/api/edit-preview/cancel"
+        private = f"{self.temp.name}/provider?credential=https://secret.invalid/token"
+
+        device_a = self.client
+        device_b = self.app.test_client()
+        self.pairing.verify.return_value = True
+        device_a.post("/pair", data={"pin": "123456", "device_name": "Capacity A"})
+        device_b.post("/pair", data={"pin": "123456", "device_name": "Capacity B"})
+        with device_a.session_transaction() as state_a:
+            identity_a = dict(state_a)
+            device_a_id = state_a["device_id"]
+        with device_b.session_transaction() as state_b:
+            identity_b = dict(state_b)
+            device_b_id = state_b["device_id"]
+
+        def tab_client(identity):
+            client = self.app.test_client()
+            with client.session_transaction() as tab:
+                tab.update(identity)
+            return client
+
+        tabs_a = [tab_client(identity_a) for _ in range(6)]
+        tabs_b = [tab_client(identity_b) for _ in range(6)]
+        candidate = copy.deepcopy(self.store.get())
+        candidate.pop("revision")
+        candidate["weather"]["location"] = private
+
+        def payload(instance, generation=1):
+            return {
+                "config": copy.deepcopy(candidate),
+                "generation": generation,
+                "preview_instance": instance,
+            }
+
+        forbidden = (
+            private, self.temp.name, "secret.invalid", "credential", "https://",
+            device_a_id, device_b_id, "frames", "next_token", "session", "revision",
+            "etag", "token",
+        )
+
+        def assert_error(response, status, message):
+            self.assertEqual(response.status_code, status, response.get_data(as_text=True))
+            self.assertEqual(response.headers.get("Cache-Control"), "no-store")
+            self.assertNotIn("ETag", response.headers)
+            self.assertEqual(response.get_json(), {"error": message})
+            wire = response.get_data(as_text=True).lower()
+            for value in forbidden:
+                self.assertNotIn(value.lower(), wire)
+            if status == 429:
+                self.assertEqual(response.headers.get("Retry-After"), "2")
+
+        pin_enters = []
+        pin_exits = []
+        provider_calls = []
+        renderers = []
+
+        class EndlessIterator:
+            def __init__(self, label):
+                self.label = label
+                self.next_calls = 0
+                self.close_calls = 0
+
+            def __iter__(self):
+                return self
+
+            def __next__(self):
+                self.next_calls += 1
+                return {"png": f"{self.label}-{self.next_calls}", "delay_ms": 1}
+
+            def close(self):
+                self.close_calls += 1
+                if self.close_calls > 1:
+                    raise AssertionError("renderer closed more than once")
+
+        @contextmanager
+        def pinned(candidate_value, media_root, *, allow_missing=()):
+            label = candidate_value["weather"]["location"]
+            pin_enters.append(label)
+            try:
+                yield {}
+            finally:
+                pin_exits.append(label)
+
+        def prepare(_provider, module_name, candidate_value, stop_event):
+            provider_calls.append(candidate_value["weather"]["location"])
+            return None
+
+        def renderer(module_name, candidate_value, selected_palette, pinned_media,
+                     prepared, stop_event):
+            current = EndlessIterator(candidate_value["weather"]["location"])
+            renderers.append(current)
+            return current
+
+        self.controller.reset_mock()
+        before_config = Path(self.store.path).read_bytes()
+        before_devices = Path(self.device_store.path).read_bytes()
+        before_media = sorted(
+            (path.relative_to(self.media_dir).as_posix(), path.read_bytes())
+            for path in self.media_dir.rglob("*") if path.is_file()
+        )
+        registry = None
+        sessions = []
+        try:
+            with patch("webapp.pin_candidate_media", pinned), patch(
+                "webapp._prepare_edit_preview_provider", prepare,
+            ), patch("webapp._edit_preview_iterator", renderer), patch(
+                "edit_preview.PreviewSessionCapacity.MAX_ACTIVE", 8,
+            ):
+                for index in range(4):
+                    response = tabs_a[index].post(
+                        start_path, json=payload(f"{index + 1:032x}"),
+                    )
+                    self.assertEqual(response.status_code, 200, response.get_data(as_text=True))
+                    sessions.append((tabs_a[index], f"{index + 1:032x}", response.get_json()))
+                registry = self.app.extensions["edit_preview_registry"]
+                self.assertEqual(registry.total_count, 4)
+                self.assertEqual(registry.count_for_device(device_a_id), 4)
+
+                before_rejected = (
+                    len(pin_enters), len(provider_calls), len(renderers),
+                    [item.next_calls for item in renderers], registry.total_count,
+                )
+                assert_error(
+                    tabs_a[4].post(start_path, json=payload("5" * 32)), 429,
+                    "Preview capacity is temporarily exhausted.",
+                )
+                self.assertEqual(
+                    (
+                        len(pin_enters), len(provider_calls), len(renderers),
+                        [item.next_calls for item in renderers], registry.total_count,
+                    ),
+                    before_rejected,
+                )
+                self.assertTrue(all(not item[2]["complete"] for item in sessions))
+
+                for index in range(4):
+                    instance = f"{index + 9:032x}"
+                    response = tabs_b[index].post(start_path, json=payload(instance))
+                    self.assertEqual(response.status_code, 200, response.get_data(as_text=True))
+                    sessions.append((tabs_b[index], instance, response.get_json()))
+                self.assertEqual(registry.total_count, 8)
+                self.assertEqual(registry.count_for_device(device_a_id), 4)
+                self.assertEqual(registry.count_for_device(device_b_id), 4)
+                before_rejected = (len(pin_enters), len(provider_calls), len(renderers))
+                assert_error(
+                    tabs_b[4].post(start_path, json=payload("e" * 32)), 429,
+                    "Preview capacity is temporarily exhausted.",
+                )
+                self.assertEqual(
+                    (len(pin_enters), len(provider_calls), len(renderers)), before_rejected,
+                )
+                self.assertEqual(registry.total_count, 8)
+
+                released_client, released_instance, released = sessions.pop(0)
+                cancelled = released_client.post(cancel_path, json={
+                    "session": released["session"],
+                    "preview_instance": released_instance,
+                })
+                self.assertEqual(cancelled.status_code, 200, cancelled.get_data(as_text=True))
+                self.assertEqual(registry.total_count, 7)
+                retry_instance = "f" * 32
+                retry = tabs_a[5].post(
+                    start_path, json=payload(retry_instance, generation=2),
+                )
+                self.assertEqual(retry.status_code, 200, retry.get_data(as_text=True))
+                sessions.append((tabs_a[5], retry_instance, retry.get_json()))
+                self.assertEqual(registry.total_count, 8)
+
+                survivor_client, survivor_instance, survivor = sessions[0]
+                page = survivor_client.post(page_path, json={
+                    "session": survivor["session"],
+                    "preview_instance": survivor_instance,
+                    "token": survivor["next_token"],
+                })
+                self.assertEqual(page.status_code, 200, page.get_data(as_text=True))
+                self.assertEqual(page.get_json()["page"], 1)
+
+                for client, instance, body in list(sessions):
+                    response = client.post(cancel_path, json={
+                        "session": body["session"], "preview_instance": instance,
+                    })
+                    self.assertEqual(response.status_code, 200, response.get_data(as_text=True))
+                sessions.clear()
+                self.assertEqual(registry.total_count, 0)
+                self.assertEqual(registry.counts_by_device, {})
+                self.assertEqual(registry._capacity.active_count, 0)
+        finally:
+            for client, instance, body in list(sessions):
+                client.post(cancel_path, json={
+                    "session": body["session"], "preview_instance": instance,
+                })
+
+        class Clock:
+            now = 100.0
+
+            def monotonic(self):
+                return self.now
+
+            def wait(self, condition, timeout):
+                self.now += timeout
+                return False
+
+        clock = Clock()
+        capacity = registry._capacity
+        capacity._monotonic = clock.monotonic
+        capacity._wait = clock.wait
+        pin_enters.clear()
+        pin_exits.clear()
+        provider_calls.clear()
+        renderers.clear()
+        active = []
+        try:
+            with patch("webapp.pin_candidate_media", pinned), patch(
+                "webapp._prepare_edit_preview_provider", prepare,
+            ), patch("webapp._edit_preview_iterator", renderer):
+                for index in range(2):
+                    instance = f"{index + 20:032x}"
+                    response = tabs_a[index].post(start_path, json=payload(instance))
+                    self.assertEqual(response.status_code, 200, response.get_data(as_text=True))
+                    active.append((tabs_a[index], instance, response.get_json()))
+                before_third = (len(pin_enters), len(provider_calls), len(renderers))
+                assert_error(
+                    tabs_b[0].post(start_path, json=payload("d" * 32)), 429,
+                    "Preview capacity is temporarily exhausted.",
+                )
+                self.assertEqual(
+                    (len(pin_enters), len(provider_calls), len(renderers)), before_third,
+                )
+                self.assertEqual(capacity.active_count, 2)
+                self.assertEqual(capacity.waiting_count, 0)
+                self.assertEqual(registry.total_count, 2)
+
+                client, instance, body = active.pop(0)
+                self.assertEqual(client.post(cancel_path, json={
+                    "session": body["session"], "preview_instance": instance,
+                }).status_code, 200)
+                recovered_instance = "c" * 32
+                recovered = tabs_b[0].post(
+                    start_path, json=payload(recovered_instance, generation=2),
+                )
+                self.assertEqual(recovered.status_code, 200, recovered.get_data(as_text=True))
+                active.append((tabs_b[0], recovered_instance, recovered.get_json()))
+                for client, instance, body in active:
+                    self.assertEqual(client.post(cancel_path, json={
+                        "session": body["session"], "preview_instance": instance,
+                    }).status_code, 200)
+                self.assertEqual((capacity.active_count, capacity.waiting_count), (0, 0))
+                self.assertEqual(registry.total_count, 0)
+        finally:
+            for client, instance, body in active:
+                client.post(cancel_path, json={
+                    "session": body["session"], "preview_instance": instance,
+                })
+
+        from preview_provider import (
+            PreviewProviderCapacityError, PreviewProviderTimeout,
+            PreviewProviderUnavailable,
+        )
+
+        failure_cases = (
+            (PreviewProviderTimeout(private), "provider-timeout"),
+            (PreviewProviderUnavailable(private), "provider-unavailable"),
+            (webapp.EditPreviewDecodeError(private), "decode"),
+            (webapp.EditPreviewRenderError(private), "render"),
+        )
+        pin_enters.clear()
+        pin_exits.clear()
+        provider_calls.clear()
+        renderers.clear()
+        try:
+            for index, (failure, phase) in enumerate(failure_cases):
+                instance = f"{index + 30:032x}"
+                if phase.startswith("provider"):
+                    provider_patch = patch(
+                        "webapp._prepare_edit_preview_provider", side_effect=failure,
+                    )
+                    renderer_patch = patch("webapp._edit_preview_iterator", renderer)
+                else:
+                    provider_patch = patch(
+                        "webapp._prepare_edit_preview_provider", prepare,
+                    )
+                    renderer_patch = patch(
+                        "webapp._edit_preview_iterator", side_effect=failure,
+                    )
+                with patch("webapp.pin_candidate_media", pinned), provider_patch, renderer_patch:
+                    response = tabs_a[index].post(start_path, json=payload(instance))
+                assert_error(response, 503, "Preview is temporarily unavailable.")
+                self.assertEqual(registry.total_count, 0)
+                self.assertEqual(capacity.active_count, 0)
+                self.assertEqual(capacity.waiting_count, 0)
+                self.assertEqual(len(pin_enters), len(pin_exits))
+
+            with patch("webapp.pin_candidate_media", pinned), patch(
+                "webapp._prepare_edit_preview_provider",
+                side_effect=PreviewProviderCapacityError(private),
+            ), patch("webapp._edit_preview_iterator", renderer):
+                response = tabs_a[5].post(start_path, json=payload("b" * 32))
+            assert_error(
+                response, 429, "Preview capacity is temporarily exhausted.",
+            )
+            self.assertEqual(registry.total_count, 0)
+            self.assertEqual(capacity.active_count, 0)
+        finally:
+            registry.close()
+            self.app.extensions.pop("edit_preview_registry", None)
+
+        self.assertEqual(Path(self.store.path).read_bytes(), before_config)
+        self.assertEqual(Path(self.device_store.path).read_bytes(), before_devices)
+        self.assertEqual(sorted(
+            (path.relative_to(self.media_dir).as_posix(), path.read_bytes())
+            for path in self.media_dir.rglob("*") if path.is_file()
+        ), before_media)
+        self.assertEqual(self.controller.method_calls, [])
+        self.assertEqual(pin_enters, pin_exits)
+
+    def test_preview_service_restart_cleans_registry_workers_and_descriptors(self):
+        """Restart keeps the broad lifecycle contract and closes pinned decode FDs."""
+        from contextlib import contextmanager
+        import multiprocessing
+        from edit_preview import PreviewInstanceRegistry, PreviewSessionCapacity
+
+        # Keep the exact restart node tied to the already accepted real-route
+        # singleton, concurrent replacement, blocked-provider, stale-session,
+        # sanitized-error, teardown, and immutable-state contract.
+        self.test_preview_services_restart_after_close_and_failed_init()
+
+        before_children = {child.pid for child in multiprocessing.active_children()}
+        before_threads = {(thread.ident, thread.name) for thread in threading.enumerate()}
+        before_fds = len(list(Path("/proc/self/fd").iterdir()))
+        before_config = Path(self.store.path).read_bytes()
+        before_devices = Path(self.device_store.path).read_bytes()
+        before_media = sorted(
+            (path.relative_to(self.media_dir).as_posix(), path.read_bytes())
+            for path in self.media_dir.rglob("*") if path.is_file()
+        )
+        self.controller.reset_mock()
+
+        registries = []
+        providers = []
+        pins = []
+        iterators = []
+        decoder_blocked = threading.Event()
+        response = {}
+        failures = []
+
+        class TrackedRegistry(PreviewInstanceRegistry):
+            def __init__(self):
+                capacity = PreviewSessionCapacity()
+                super().__init__(capacity=capacity)
+                self.capacity = capacity
+                self.close_calls = 0
+                registries.append(self)
+
+            def close(self):
+                was_closed = self.is_closed
+                super().close()
+                if not was_closed:
+                    self.close_calls += 1
+
+        class TrackedProvider:
+            MAX_WORKERS = 2
+
+            def __init__(self):
+                self.is_closed = False
+                self.close_calls = 0
+                self.prepare_calls = 0
+                providers.append(self)
+
+            @property
+            def active_child_count(self):
+                return 0
+
+            @property
+            def active_worker_count(self):
+                return 0
+
+            @property
+            def available_worker_slots(self):
+                return self.MAX_WORKERS
+
+            def prepare(self, provider, *, settings, credentials, cancel_event,
+                        request_deadline):
+                if self.is_closed:
+                    raise RuntimeError("closed provider attempted to serve")
+                self.prepare_calls += 1
+                return (
+                    ("feels_like", 19), ("high", 23), ("humidity", 50),
+                    ("location", settings["weather"]["location"]), ("low", 12),
+                    ("status", "Clear sky"), ("temperature", 20),
+                )
+
+            def shutdown(self):
+                if not self.is_closed:
+                    self.is_closed = True
+                    self.close_calls += 1
+
+        class BlockedDecoderIterator:
+            def __init__(self, stop_event):
+                self.stop_event = stop_event
+                self.close_calls = 0
+                self.read_fd, self.write_fd = os.pipe()
+                self.fd_close_calls = {self.read_fd: 0, self.write_fd: 0}
+                iterators.append(self)
+
+            def __iter__(self):
+                return self
+
+            def __next__(self):
+                decoder_blocked.set()
+                while not self.stop_event.wait(0.005):
+                    pass
+                raise StopIteration
+
+            def close(self):
+                self.close_calls += 1
+                if self.close_calls > 1:
+                    raise AssertionError("decoder iterator closed more than once")
+                for descriptor in (self.read_fd, self.write_fd):
+                    os.close(descriptor)
+                    self.fd_close_calls[descriptor] += 1
+
+        @contextmanager
+        def pinned(candidate, media_root, *, allow_missing=()):
+            read_fd, write_fd = os.pipe()
+            record = {
+                "fds": (read_fd, write_fd),
+                "fd_close_calls": {read_fd: 0, write_fd: 0},
+                "close_calls": 0,
+            }
+            pins.append(record)
+            try:
+                yield {"weather": "pinned"}
+            finally:
+                record["close_calls"] += 1
+                if record["close_calls"] > 1:
+                    raise AssertionError("pinned descriptors closed more than once")
+                for descriptor in record["fds"]:
+                    os.close(descriptor)
+                    record["fd_close_calls"][descriptor] += 1
+
+        def iterator(module_name, candidate, selected_palette, pinned_media, prepared,
+                     stop_event):
+            resource = BlockedDecoderIterator(stop_event)
+
+            def owned_decoder():
+                try:
+                    yield from resource
+                finally:
+                    resource.close()
+
+            return owned_decoder()
+
+        candidate = copy.deepcopy(self.store.get())
+        candidate.pop("revision")
+        candidate["weather"]["location"] = "blocked-decoder-private"
+        payload = {
+            "config": candidate,
+            "generation": 100,
+            "preview_instance": "abababababababababababababababab",
+        }
+        with self.client.session_transaction() as paired:
+            browser_session = dict(paired)
+
+        def blocked_start():
+            try:
+                client = self.app.test_client()
+                with client.session_transaction() as session:
+                    session.update(browser_session)
+                response["value"] = client.post(
+                    "/api/edit-preview/weather", json=payload,
+                )
+            except BaseException as error:
+                failures.append(error)
+
+        factory_patch = patch.multiple(
+            "webapp", PreviewInstanceRegistry=TrackedRegistry,
+            PreviewProvider=TrackedProvider, pin_candidate_media=pinned,
+            _edit_preview_iterator=iterator,
+        )
+        blocked_thread = threading.Thread(
+            target=blocked_start, name="preview-restart-blocked-decoder",
+        )
+        try:
+            with factory_patch:
+                blocked_thread.start()
+                self.assertTrue(decoder_blocked.wait(1))
+                registry = self.app.extensions["edit_preview_registry"]
+                provider = self.app.extensions["edit_preview_provider"]
+                self.assertIs(self.app.extensions["get_edit_preview_services"]()[0], registry)
+                self.assertIs(self.app.extensions["get_edit_preview_services"]()[1], provider)
+                with self.app.app_context():
+                    pass
+                self.assertFalse(registry.is_closed)
+                self.assertFalse(provider.is_closed)
+
+                closed_at = time.monotonic()
+                self.app.extensions["close_edit_preview_services"]()
+                self.assertLess(time.monotonic() - closed_at, 0.25)
+                blocked_thread.join(1)
+                self.assertFalse(blocked_thread.is_alive())
+                self.assertEqual(failures, [])
+                self.assertEqual(response["value"].status_code, 200)
+                self.assertEqual(response["value"].headers.get("Cache-Control"), "no-store")
+                self.assertNotIn("blocked-decoder-private", response["value"].get_data(as_text=True))
+                self.assertTrue(registry.is_closed)
+                self.assertTrue(provider.is_closed)
+                self.assertEqual((registry.close_calls, provider.close_calls), (1, 1))
+                self.assertEqual(registry.reaper_join_count, 1)
+                self.assertFalse(registry.reaper_alive)
+                self.assertEqual((registry.total_count, registry.expired_count), (0, 0))
+                self.assertEqual(
+                    (registry.capacity.active_count, registry.capacity.waiting_count),
+                    (0, 0),
+                )
+                self.assertEqual((provider.active_worker_count, provider.active_child_count), (0, 0))
+                with self.assertRaisesRegex(RuntimeError, "closed"):
+                    registry.register(("closed", "closed"), lambda: iter(()))
+                with self.assertRaisesRegex(RuntimeError, "closed provider"):
+                    provider.prepare(
+                        None, settings={"weather": {"location": "closed"}},
+                        credentials=None, cancel_event=threading.Event(),
+                        request_deadline=1,
+                    )
+        finally:
+            blocked_thread.join(1)
+            for registry in registries:
+                registry.close()
+            for provider in providers:
+                provider.shutdown()
+
+        self.assertEqual((len(registries), len(providers)), (1, 1))
+        self.assertEqual((len(pins), len(iterators)), (1, 1))
+        for resource in iterators:
+            self.assertEqual(resource.close_calls, 1)
+            self.assertEqual(set(resource.fd_close_calls.values()), {1})
+            for descriptor in resource.fd_close_calls:
+                with self.assertRaises(OSError):
+                    os.fstat(descriptor)
+        for resource in pins:
+            self.assertEqual(resource["close_calls"], 1)
+            self.assertEqual(set(resource["fd_close_calls"].values()), {1})
+            for descriptor in resource["fd_close_calls"]:
+                with self.assertRaises(OSError):
+                    os.fstat(descriptor)
+        self.assertEqual(Path(self.store.path).read_bytes(), before_config)
+        self.assertEqual(Path(self.device_store.path).read_bytes(), before_devices)
+        self.assertEqual(sorted(
+            (path.relative_to(self.media_dir).as_posix(), path.read_bytes())
+            for path in self.media_dir.rglob("*") if path.is_file()
+        ), before_media)
+        self.assertEqual(self.controller.method_calls, [])
+        self.assertEqual(
+            {child.pid for child in multiprocessing.active_children()}, before_children,
+        )
+        self.assertEqual(
+            {(thread.ident, thread.name) for thread in threading.enumerate()}, before_threads,
+        )
+        self.assertEqual(len(list(Path("/proc/self/fd").iterdir())), before_fds)
+
+    def test_preview_service_close_is_idempotent_during_active_page(self):
+        """Concurrent service close suppresses a claimed page and cleans once."""
+        from contextlib import contextmanager
+        import multiprocessing
+
+        from edit_preview import PreviewInstanceRegistry, PreviewSessionCapacity
+
+        self.pair_browser()
+        with self.client.session_transaction() as paired:
+            browser_session = dict(paired)
+            device_id = paired["device_id"]
+        self.controller.reset_mock()
+
+        before_children = {child.pid for child in multiprocessing.active_children()}
+        before_threads = {(thread.ident, thread.name) for thread in threading.enumerate()}
+        before_fds = len(list(Path("/proc/self/fd").iterdir()))
+        before_config = Path(self.store.path).read_bytes()
+        before_devices = Path(self.device_store.path).read_bytes()
+        before_media = sorted(
+            (path.relative_to(self.media_dir).as_posix(), path.read_bytes())
+            for path in self.media_dir.rglob("*") if path.is_file()
+        )
+
+        registries = []
+        providers = []
+        pins = []
+        decoders = []
+        service_callbacks = []
+        service_accessor = [None]
+        decoder_blocked = threading.Event()
+
+        class TrackedRegistry(PreviewInstanceRegistry):
+            def __init__(self):
+                capacity = PreviewSessionCapacity()
+                super().__init__(capacity=capacity)
+                self.capacity = capacity
+                self.close_calls = 0
+                self._close_tracking_lock = threading.Lock()
+                self._close_tracked = False
+                registries.append(self)
+
+            def close(self):
+                with self._close_tracking_lock:
+                    first_close = not self._close_tracked
+                    if first_close:
+                        self._close_tracked = True
+                        # Re-enter the app-owned service accessor from a lifecycle
+                        # callback. It must not run under the service-pair lock.
+                        callback_result = []
+                        callback = threading.Thread(
+                            target=lambda: callback_result.append(
+                                service_accessor[0]()
+                            ),
+                            name="preview-service-lock-callback",
+                        )
+                        callback.start()
+                        callback.join(0.25)
+                        if callback.is_alive():
+                            raise AssertionError("registry callback ran under service lock")
+                        service_callbacks.append(callback_result[0])
+                super().close()
+                if first_close:
+                    self.close_calls += 1
+
+        class TrackedProvider:
+            MAX_WORKERS = 2
+
+            def __init__(self):
+                self._lock = threading.Lock()
+                self.is_closed = False
+                self.close_calls = 0
+                self.prepare_calls = 0
+                self.shutdown_seen = threading.Event()
+                self.child_close_calls = 0
+                self.child_reap_calls = 0
+                self.child_join_calls = 0
+                self.child_fds = os.pipe()
+                providers.append(self)
+
+            @property
+            def active_child_count(self):
+                return 0
+
+            @property
+            def active_worker_count(self):
+                return 0
+
+            @property
+            def available_worker_slots(self):
+                return self.MAX_WORKERS
+
+            def prepare(self, provider, *, settings, credentials, cancel_event,
+                        request_deadline):
+                with self._lock:
+                    if self.is_closed:
+                        raise RuntimeError("closed provider attempted to serve")
+                    self.prepare_calls += 1
+                return (
+                    ("feels_like", 19), ("high", 23), ("humidity", 50),
+                    ("location", settings["weather"]["location"]), ("low", 12),
+                    ("status", "Clear sky"), ("temperature", 20),
+                )
+
+            def shutdown(self):
+                with self._lock:
+                    if self.is_closed:
+                        return
+                    self.is_closed = True
+                    self.close_calls += 1
+                    self.shutdown_seen.set()
+                    for descriptor in self.child_fds:
+                        os.close(descriptor)
+                        self.child_close_calls += 1
+                    self.child_reap_calls += 1
+                    self.child_join_calls += 1
+
+        class BlockedDecoder:
+            def __init__(self, stop_event):
+                self.stop_event = stop_event
+                self.next_calls = 0
+                self.close_calls = 0
+                self.concurrent_close_calls = 0
+                self.active = False
+                self.stop_seen = threading.Event()
+                self.fds = os.pipe()
+                self.fd_close_calls = {descriptor: 0 for descriptor in self.fds}
+                decoders.append(self)
+
+            def __iter__(self):
+                return self
+
+            def __next__(self):
+                self.next_calls += 1
+                self.active = True
+                try:
+                    if self.next_calls == 34:
+                        decoder_blocked.set()
+                        if not self.stop_event.wait(1):
+                            raise AssertionError("service close did not stop active decoder")
+                        self.stop_seen.set()
+                    return {
+                        "png": f"private-frame-{self.next_calls}",
+                        "delay_ms": self.next_calls,
+                    }
+                finally:
+                    self.active = False
+
+            def close(self):
+                if self.active:
+                    self.concurrent_close_calls += 1
+                    raise AssertionError("decoder close overlapped iteration")
+                self.close_calls += 1
+                if self.close_calls > 1:
+                    raise AssertionError("decoder closed more than once")
+                for descriptor in self.fds:
+                    os.close(descriptor)
+                    self.fd_close_calls[descriptor] += 1
+
+        @contextmanager
+        def pinned(candidate, media_root, *, allow_missing=()):
+            fds = os.pipe()
+            record = {
+                "fds": fds,
+                "close_calls": 0,
+                "fd_close_calls": {descriptor: 0 for descriptor in fds},
+            }
+            pins.append(record)
+            try:
+                yield {"draft": "pinned"}
+            finally:
+                record["close_calls"] += 1
+                if record["close_calls"] > 1:
+                    raise AssertionError("pin stack closed more than once")
+                for descriptor in fds:
+                    os.close(descriptor)
+                    record["fd_close_calls"][descriptor] += 1
+
+        def iterator(module_name, candidate, selected_palette, pinned_media, prepared,
+                     stop_event):
+            decoder = BlockedDecoder(stop_event)
+
+            def owned_decoder():
+                try:
+                    while True:
+                        yield next(decoder)
+                except StopIteration:
+                    return
+                finally:
+                    decoder.close()
+
+            return owned_decoder()
+
+        def client_for_thread():
+            client = self.app.test_client()
+            with client.session_transaction() as paired:
+                paired.update(browser_session)
+            return client
+
+        def assert_response(response, status):
+            self.assertEqual(response.status_code, status, response.get_data(as_text=True))
+            self.assertEqual(response.headers.get("Cache-Control"), "no-store")
+            self.assertNotIn("ETag", response.headers)
+            return response.get_json()
+
+        candidate = copy.deepcopy(self.store.get())
+        candidate.pop("revision")
+        candidate["weather"]["location"] = "private-active-page-location"
+        preview_instance = "cd" * 16
+        payload = {
+            "config": candidate,
+            "generation": 200,
+            "preview_instance": preview_instance,
+        }
+        page_result = {}
+        page_failures = []
+        close_results = []
+        close_failures = []
+        close_barrier = threading.Barrier(3)
+
+        def active_page(first):
+            try:
+                page_result["response"] = client_for_thread().post(
+                    "/api/edit-preview/page",
+                    json={
+                        "session": first["session"],
+                        "preview_instance": preview_instance,
+                        "token": first["next_token"],
+                    },
+                )
+            except BaseException as error:
+                page_failures.append(error)
+
+        def close_service(caller):
+            try:
+                close_barrier.wait()
+                started = time.monotonic()
+                self.app.extensions["close_edit_preview_services"]()
+                close_results.append((caller, time.monotonic() - started))
+            except BaseException as error:
+                close_failures.append(error)
+
+        factory_patch = patch.multiple(
+            "webapp", PreviewInstanceRegistry=TrackedRegistry,
+            PreviewProvider=TrackedProvider, pin_candidate_media=pinned,
+            _edit_preview_iterator=iterator,
+        )
+        page_thread = None
+        close_threads = []
+        try:
+            with factory_patch:
+                first = assert_response(
+                    self.client.post("/api/edit-preview/weather", json=payload), 200,
+                )
+                self.assertEqual(len(first["frames"]), 32)
+                self.assertFalse(first["complete"])
+                registry = self.app.extensions["edit_preview_registry"]
+                provider = self.app.extensions["edit_preview_provider"]
+                service_accessor[0] = self.app.extensions["get_edit_preview_services"]
+                identity = (device_id, preview_instance)
+                instance = registry.lookup(first["session"], identity)
+                preview_session = instance.admit()
+
+                page_thread = threading.Thread(
+                    target=active_page, args=(first,),
+                    name="preview-service-close-active-page",
+                )
+                page_thread.start()
+                self.assertTrue(decoder_blocked.wait(1), "page did not claim and block")
+
+                replay = assert_response(client_for_thread().post(
+                    "/api/edit-preview/page",
+                    json={
+                        "session": first["session"],
+                        "preview_instance": preview_instance,
+                        "token": first["next_token"],
+                    },
+                ), 409)
+                self.assertEqual(replay, {"error": "Preview continuation was already used."})
+
+                close_threads = [
+                    threading.Thread(
+                        target=close_service, args=(index,),
+                        name=f"preview-service-close-{index}",
+                    )
+                    for index in range(2)
+                ]
+                for thread in close_threads:
+                    thread.start()
+                close_barrier.wait()
+                page_thread.join(0.5)
+                for thread in close_threads:
+                    thread.join(0.5)
+
+                self.assertFalse(page_thread.is_alive())
+                self.assertTrue(all(not thread.is_alive() for thread in close_threads))
+                self.assertEqual(page_failures, [])
+                self.assertEqual(close_failures, [])
+                self.assertEqual({caller for caller, _elapsed in close_results}, {0, 1})
+                self.assertTrue(all(elapsed < 0.25 for _caller, elapsed in close_results))
+                shutdown = assert_response(page_result["response"], 503)
+                self.assertEqual(shutdown, {"error": "Preview is temporarily unavailable."})
+                for forbidden in ("frames", "next_token", "session", "generation"):
+                    self.assertNotIn(forbidden, shutdown)
+
+                self.assertTrue(decoders[0].stop_seen.is_set())
+                self.assertTrue(provider.shutdown_seen.is_set())
+                self.assertEqual(decoders[0].concurrent_close_calls, 0)
+                self.assertEqual(decoders[0].close_calls, 1)
+                self.assertEqual(pins[0]["close_calls"], 1)
+                self.assertEqual(preview_session.state, "CLOSED")
+                self.assertEqual(preview_session.retained_frame_count, 0)
+                self.assertEqual(registry.lifecycle_state, "CLOSED")
+                self.assertEqual(registry.close_calls, 1)
+                self.assertEqual(registry.reaper_join_count, 1)
+                self.assertFalse(registry.reaper_alive)
+                self.assertEqual(provider.close_calls, 1)
+                self.assertEqual(
+                    (provider.child_close_calls, provider.child_reap_calls,
+                     provider.child_join_calls),
+                    (2, 1, 1),
+                )
+                self.assertEqual(len(service_callbacks), 1)
+                callback_registry, callback_provider = service_callbacks[0]
+                self.assertIs(
+                    self.app.extensions["edit_preview_registry"], callback_registry,
+                )
+                self.assertIs(
+                    self.app.extensions["edit_preview_provider"], callback_provider,
+                )
+
+                self.app.extensions["close_edit_preview_services"]()
+                self.app.extensions["close_edit_preview_services"]()
+                self.assertEqual((registry.close_calls, provider.close_calls), (1, 1))
+                self.assertEqual(registry.reaper_join_count, 1)
+                self.assertEqual(decoders[0].close_calls, 1)
+                self.assertEqual(pins[0]["close_calls"], 1)
+
+                stale = assert_response(client_for_thread().post(
+                    "/api/edit-preview/page",
+                    json={
+                        "session": first["session"],
+                        "preview_instance": preview_instance,
+                        "token": first["next_token"],
+                    },
+                ), 409)
+                self.assertEqual(stale, {"error": "Preview session is no longer active."})
+                replacement_registry = self.app.extensions["edit_preview_registry"]
+                replacement_provider = self.app.extensions["edit_preview_provider"]
+                self.assertIsNot(replacement_registry, registry)
+                self.assertIsNot(replacement_provider, provider)
+
+                replacement = assert_response(client_for_thread().post(
+                    "/api/edit-preview/weather",
+                    json={**payload, "generation": 201},
+                ), 200)
+                self.assertEqual(replacement["generation"], 201)
+                assert_response(client_for_thread().post(
+                    "/api/edit-preview/cancel",
+                    json={
+                        "session": replacement["session"],
+                        "preview_instance": preview_instance,
+                    },
+                ), 200)
+                self.app.extensions["close_edit_preview_services"]()
+        finally:
+            if page_thread is not None:
+                page_thread.join(1)
+            for thread in close_threads:
+                thread.join(1)
+            for registry in registries:
+                registry.close()
+            for provider in providers:
+                provider.shutdown()
+
+        self.assertEqual((len(registries), len(providers)), (2, 2))
+        self.assertTrue(all(registry.lifecycle_state == "CLOSED" for registry in registries))
+        self.assertTrue(all(registry.close_calls == 1 for registry in registries))
+        self.assertTrue(all(registry.reaper_join_count == 1 for registry in registries))
+        self.assertTrue(all(registry.total_count == 0 for registry in registries))
+        self.assertTrue(all(registry.expired_count == 0 for registry in registries))
+        self.assertTrue(all(registry.capacity.active_count == 0 for registry in registries))
+        self.assertTrue(all(registry.capacity.waiting_count == 0 for registry in registries))
+        self.assertTrue(all(provider.close_calls == 1 for provider in providers))
+        self.assertTrue(all(provider.active_worker_count == 0 for provider in providers))
+        self.assertTrue(all(provider.active_child_count == 0 for provider in providers))
+        self.assertTrue(all(decoder.close_calls == 1 for decoder in decoders))
+        self.assertTrue(all(set(decoder.fd_close_calls.values()) == {1} for decoder in decoders))
+        self.assertTrue(all(pin["close_calls"] == 1 for pin in pins))
+        self.assertTrue(all(set(pin["fd_close_calls"].values()) == {1} for pin in pins))
+        self.assertEqual(Path(self.store.path).read_bytes(), before_config)
+        self.assertEqual(Path(self.device_store.path).read_bytes(), before_devices)
+        self.assertEqual(sorted(
+            (path.relative_to(self.media_dir).as_posix(), path.read_bytes())
+            for path in self.media_dir.rglob("*") if path.is_file()
+        ), before_media)
+        self.assertEqual(self.controller.method_calls, [])
+        self.assertEqual(
+            {child.pid for child in multiprocessing.active_children()}, before_children,
+        )
+        self.assertEqual(
+            {(thread.ident, thread.name) for thread in threading.enumerate()}, before_threads,
+        )
+        self.assertEqual(len(list(Path("/proc/self/fd").iterdir())), before_fds)
+
+    def test_preview_instance_registry_is_bounded_and_expires(self):
+        from contextlib import contextmanager
+        import multiprocessing
+
+        from edit_preview import PreviewInstanceRegistry, PreviewSessionCapacity
+
+        class Clock:
+            def __init__(self):
+                self.now = 1000.0
+                self.capacity = None
+
+            def monotonic(self):
+                return self.now
+
+            def advance(self, seconds):
+                capacity = self.capacity
+                with capacity._condition:
+                    self.now += seconds
+                capacity.request_reap()
+
+            def timeout_wait(self, condition, timeout):
+                self.now += timeout
+                return False
+
+        class DeterministicCapacity(PreviewSessionCapacity):
+            def __init__(self, **kwargs):
+                self._reap_requested = threading.Semaphore(0)
+                self.reap_completed = threading.Event()
+                super().__init__(**kwargs)
+
+            def request_reap(self):
+                self.reap_completed.clear()
+                self._reap_requested.release()
+
+            def run_expiry_reaper(self):
+                while True:
+                    self._reap_requested.acquire()
+                    with self._condition:
+                        if self._closed:
+                            return
+                    self.last_reaped = self.reap_expired()
+                    self.reap_completed.set()
+
+            def close(self):
+                super().close()
+                self._reap_requested.release()
+
+        class CountingIterator:
+            def __init__(self, label, stop_event, *, block_on=None):
+                self.label = label
+                self.stop_event = stop_event
+                self.block_on = block_on
+                self.next_calls = 0
+                self.close_calls = 0
+                self.blocked = threading.Event()
+                self.closed = threading.Event()
+
+            def __iter__(self):
+                return self
+
+            def __next__(self):
+                self.next_calls += 1
+                if self.next_calls == self.block_on:
+                    self.blocked.set()
+                    if not self.stop_event.wait(1):
+                        raise AssertionError("active iterator was not stopped by expiry")
+                    return {"png": f"{self.label}-{self.next_calls}", "delay_ms": 1}
+                if self.stop_event.is_set():
+                    raise StopIteration
+                return {"png": f"{self.label}-{self.next_calls}", "delay_ms": 1}
+
+            def close(self):
+                self.close_calls += 1
+                if self.close_calls > 1:
+                    raise AssertionError(f"{self.label} iterator closed more than once")
+                self.closed.set()
+
+        class LightweightProvider:
+            MAX_WORKERS = 2
+
+            def __init__(self):
+                self.is_closed = False
+                self.close_calls = 0
+
+            @property
+            def active_child_count(self):
+                return 0
+
+            @property
+            def active_worker_count(self):
+                return 0
+
+            @property
+            def available_worker_slots(self):
+                return self.MAX_WORKERS
+
+            def shutdown(self):
+                if not self.is_closed:
+                    self.is_closed = True
+                    self.close_calls += 1
+
+        start_path = "/api/edit-preview/clock_lava"
+        page_path = "/api/edit-preview/page"
+        cancel_path = "/api/edit-preview/cancel"
+        private = f"{self.temp.name}/private?credential=https://secret.invalid/key"
+
+        devices = [self.client, self.app.test_client(), self.app.test_client()]
+        self.pairing.verify.return_value = True
+        identities = []
+        device_ids = []
+        for index, client in enumerate(devices):
+            client.post(
+                "/pair", data={"pin": "123456", "device_name": f"Bounded {index}"},
+            )
+            with client.session_transaction() as paired:
+                identities.append(dict(paired))
+                device_ids.append(paired["device_id"])
+        self.assertEqual(len(set(device_ids)), 3)
+
+        def tab(device_index):
+            client = self.app.test_client()
+            with client.session_transaction() as paired:
+                paired.update(identities[device_index])
+            return client
+
+        tabs = [[tab(device) for _ in range(6)] for device in range(3)]
+        candidate = copy.deepcopy(self.store.get())
+        candidate.pop("revision")
+
+        def payload(label, instance, generation=1):
+            value = copy.deepcopy(candidate)
+            value["weather"]["location"] = f"{private}-{label}"
+            return {
+                "config": value,
+                "generation": generation,
+                "preview_instance": instance,
+            }
+
+        def assert_error(response, status, message):
+            self.assertEqual(response.status_code, status, response.get_data(as_text=True))
+            self.assertEqual(response.headers.get("Cache-Control"), "no-store")
+            self.assertNotIn("ETag", response.headers)
+            self.assertEqual(response.get_json(), {"error": message})
+            wire = response.get_data(as_text=True).lower()
+            for forbidden in (
+                private, self.temp.name, "secret.invalid", "credential", "https://",
+                *device_ids, "revision", "frame", "next_token",
+            ):
+                self.assertNotIn(forbidden.lower(), wire)
+            if status == 429:
+                self.assertEqual(response.headers.get("Retry-After"), "2")
+
+        def assert_success(response):
+            self.assertEqual(response.status_code, 200, response.get_data(as_text=True))
+            self.assertEqual(response.headers.get("Cache-Control"), "no-store")
+            self.assertNotIn("ETag", response.headers)
+            return response.get_json()
+
+        pin_enters = []
+        pin_exits = []
+        provider_calls = []
+        renderer_calls = []
+        iterators = []
+        block_next = False
+
+        @contextmanager
+        def pinned(candidate_value, media_root, *, allow_missing=()):
+            label = candidate_value["weather"]["location"]
+            pin_enters.append(label)
+            try:
+                yield {}
+            finally:
+                pin_exits.append(label)
+
+        def prepare(provider_value, module_name, candidate_value, stop_event):
+            provider_calls.append(candidate_value["weather"]["location"])
+            return None
+
+        def renderer(module_name, candidate_value, selected_palette, pinned_media,
+                     prepared, stop_event):
+            nonlocal block_next
+            label = candidate_value["weather"]["location"]
+            renderer_calls.append(label)
+            current = CountingIterator(
+                label, stop_event, block_on=34 if block_next else None,
+            )
+            block_next = False
+            iterators.append(current)
+            return current
+
+        self.controller.reset_mock()
+        before_config = Path(self.store.path).read_bytes()
+        before_devices = Path(self.device_store.path).read_bytes()
+        before_media = sorted(
+            (path.relative_to(self.media_dir).as_posix(), path.read_bytes())
+            for path in self.media_dir.rglob("*") if path.is_file()
+        )
+        before_children = {child.pid for child in multiprocessing.active_children()}
+        before_threads = {(thread.ident, thread.name) for thread in threading.enumerate()}
+        before_fds = len(list(Path("/proc/self/fd").iterdir()))
+
+        clock = Clock()
+        capacity = DeterministicCapacity(
+            monotonic=clock.monotonic, wait=clock.timeout_wait,
+        )
+        clock.capacity = capacity
+        capacity.IDLE_TTL = 1.0
+        registry = PreviewInstanceRegistry(capacity=capacity)
+        registry.EXPIRED_TOMBSTONE_TTL = 100.0
+        provider = LightweightProvider()
+        registry_factory = Mock(return_value=registry)
+        provider_factory = Mock(return_value=provider)
+        sessions = []
+
+        def await_reaper(event, message):
+            for _attempt in range(20):
+                if event.wait(0.05):
+                    return
+                with capacity._condition:
+                    capacity._condition.notify_all()
+            self.fail(message)
+
+        reaper_names = [
+            thread.name for thread in threading.enumerate()
+            if thread.name == "edit-preview-expiry-reaper"
+        ]
+        baseline_reapers = sum(
+            name == "edit-preview-expiry-reaper" for _ident, name in before_threads
+        )
+        self.assertEqual(len(reaper_names), baseline_reapers + 1)
+        self.assertTrue(registry.reaper_alive)
+        self.assertTrue(registry.reaper_is_daemon)
+
+        try:
+            with patch("webapp.PreviewInstanceRegistry", registry_factory), patch(
+                "webapp.PreviewProvider", provider_factory,
+            ), patch("webapp.pin_candidate_media", pinned), patch(
+                "webapp._prepare_edit_preview_provider", prepare, create=True,
+            ), patch("webapp._edit_preview_iterator", renderer, create=True):
+                # Retained instances are bounded to four per paired device and
+                # eight process-wide, even when each tab has a distinct identity.
+                capacity.MAX_ACTIVE = 8
+                for device in range(2):
+                    for index in range(4):
+                        instance = f"{device * 8 + index + 1:032x}"
+                        body = assert_success(tabs[device][index].post(
+                            start_path,
+                            json=payload(f"retained-{device}-{index}", instance),
+                        ))
+                        sessions.append((tabs[device][index], instance, body))
+                self.assertEqual(registry.total_count, 8)
+                self.assertEqual(registry.count_for_device(device_ids[0]), 4)
+                self.assertEqual(registry.count_for_device(device_ids[1]), 4)
+                self.assertEqual(capacity.active_count, 8)
+
+                constructions = (
+                    len(pin_enters), len(provider_calls), len(renderer_calls), len(iterators),
+                )
+                assert_error(
+                    tabs[0][4].post(
+                        start_path, json=payload("per-device-rejected", "a" * 32),
+                    ),
+                    429, "Preview capacity is temporarily exhausted.",
+                )
+                assert_error(
+                    tabs[2][0].post(
+                        start_path, json=payload("process-rejected", "b" * 32),
+                    ),
+                    429, "Preview capacity is temporarily exhausted.",
+                )
+                self.assertEqual(
+                    (len(pin_enters), len(provider_calls), len(renderer_calls), len(iterators)),
+                    constructions,
+                )
+                self.assertEqual(registry.total_count, 8)
+
+                for client, instance, body in sessions:
+                    self.assertEqual(assert_success(client.post(cancel_path, json={
+                        "session": body["session"], "preview_instance": instance,
+                    })), {"cancelled": True})
+                sessions.clear()
+                self.assertEqual((registry.total_count, capacity.active_count), (0, 0))
+
+                # Only two renderer sessions are active. A rejected third start
+                # reaches no pin, provider, or renderer construction.
+                capacity.MAX_ACTIVE = 2
+                for index in range(2):
+                    instance = f"{index + 40:032x}"
+                    body = assert_success(tabs[index][0].post(
+                        start_path, json=payload(f"active-{index}", instance, 2),
+                    ))
+                    sessions.append((tabs[index][0], instance, body))
+                constructions = (
+                    len(pin_enters), len(provider_calls), len(renderer_calls), len(iterators),
+                )
+                capacity.ACQUIRE_TIMEOUT = 0
+                assert_error(
+                    tabs[2][0].post(
+                        start_path, json=payload("active-rejected", "c" * 32, 2),
+                    ),
+                    429, "Preview capacity is temporarily exhausted.",
+                )
+                capacity.ACQUIRE_TIMEOUT = 2.0
+                self.assertEqual(
+                    (len(pin_enters), len(provider_calls), len(renderer_calls), len(iterators)),
+                    constructions,
+                )
+                self.assertEqual((capacity.active_count, registry.total_count), (2, 2))
+
+                # The daemon expires retained idle sessions without another request,
+                # releases both resource layers once, and leaves identity tombstones.
+                expired_idle = list(sessions)
+                sessions.clear()
+                clock.advance(capacity.IDLE_TTL + 0.001)
+                for iterator in iterators[-2:]:
+                    await_reaper(iterator.closed, "idle expiry did not close")
+                    self.assertEqual(iterator.close_calls, 1)
+                self.assertEqual((capacity.active_count, registry.total_count), (0, 0))
+                self.assertEqual(registry.expired_count, 2)
+                self.assertEqual(pin_exits[-2:], pin_enters[-2:])
+
+                owner, expired_instance, expired = expired_idle[0]
+                expired_page = {
+                    "session": expired["session"],
+                    "preview_instance": expired_instance,
+                    "token": expired["next_token"],
+                }
+                expired_cancel = {
+                    "session": expired["session"],
+                    "preview_instance": expired_instance,
+                }
+                assert_error(
+                    owner.post(page_path, json=expired_page), 410,
+                    "Preview session expired.",
+                )
+                assert_error(
+                    owner.post(cancel_path, json=expired_cancel), 410,
+                    "Preview session expired.",
+                )
+                assert_error(
+                    tabs[2][0].post(page_path, json=expired_page), 409,
+                    "Preview session is no longer active.",
+                )
+
+                retry_instance = "d" * 32
+                retry = assert_success(tabs[2][0].post(
+                    start_path, json=payload("retry-after-expiry", retry_instance, 3),
+                ))
+                self.assertEqual(capacity.active_count, 1)
+                self.assertEqual(assert_success(tabs[2][0].post(cancel_path, json={
+                    "session": retry["session"], "preview_instance": retry_instance,
+                })), {"cancelled": True})
+
+                # Expiry during a page signals active work, then closes and releases
+                # ownership exactly once after that page leaves the iterator.
+                active_instance = "e" * 32
+                block_next = True
+                active = assert_success(tabs[0][0].post(
+                    start_path, json=payload("expire-active-page", active_instance, 4),
+                ))
+                active_iterator = iterators[-1]
+                active_result = {}
+                active_failures = []
+
+                def continue_active():
+                    try:
+                        active_result["response"] = tabs[0][0].post(page_path, json={
+                            "session": active["session"],
+                            "preview_instance": active_instance,
+                            "token": active["next_token"],
+                        })
+                    except BaseException as error:
+                        active_failures.append(error)
+
+                active_thread = threading.Thread(
+                    target=continue_active, name="preview-active-expiry-page",
+                )
+                active_thread.start()
+                self.assertTrue(active_iterator.blocked.wait(1))
+                with capacity._condition:
+                    self.assertEqual(len(capacity._sessions), 1)
+                    active_last_activity = next(iter(capacity._sessions.values()))
+                clock.advance(
+                    active_last_activity + capacity.IDLE_TTL + 0.001 - clock.now,
+                )
+                await_reaper(capacity.reap_completed, "active reaper did not run")
+                self.assertEqual(capacity.last_reaped, 1)
+                await_reaper(active_iterator.closed, "active expiry did not close")
+                active_thread.join(1)
+                self.assertFalse(active_thread.is_alive())
+                self.assertEqual(active_failures, [])
+                self.assertEqual(active_result["response"].status_code, 200)
+                self.assertEqual(active_iterator.close_calls, 1)
+                self.assertEqual((capacity.active_count, registry.total_count), (0, 0))
+                assert_error(
+                    tabs[0][0].post(cancel_path, json={
+                        "session": active["session"],
+                        "preview_instance": active_instance,
+                    }), 410, "Preview session expired.",
+                )
+
+                # Expiry tombstones retain only the eight newest identities, and
+                # disappear after their own TTL so old expiry degrades to generic 409.
+                oldest = None
+                for index in range(9):
+                    instance = f"{index + 100:032x}"
+                    body = assert_success(tabs[index % 3][0].post(
+                        start_path, json=payload(f"tombstone-{index}", instance, index + 10),
+                    ))
+                    if oldest is None:
+                        oldest = (tabs[index % 3][0], instance, body)
+                    current_iterator = iterators[-1]
+                    clock.advance(capacity.IDLE_TTL + 0.001)
+                    await_reaper(current_iterator.closed, "tombstone expiry did not close")
+                    self.assertEqual(current_iterator.close_calls, 1)
+                self.assertEqual(registry.expired_count, 8)
+                self.assertLessEqual(
+                    registry.expired_count, registry.MAX_EXPIRED_TOMBSTONES,
+                )
+                old_client, old_instance, old_body = oldest
+                assert_error(old_client.post(cancel_path, json={
+                    "session": old_body["session"],
+                    "preview_instance": old_instance,
+                }), 409, "Preview session is no longer active.")
+
+                newest_instance = f"{108:032x}"
+                newest_body = body
+                assert_error(tabs[2][0].post(cancel_path, json={
+                    "session": newest_body["session"],
+                    "preview_instance": newest_instance,
+                }), 410, "Preview session expired.")
+                clock.advance(registry.EXPIRED_TOMBSTONE_TTL + 0.001)
+                assert_error(tabs[2][0].post(cancel_path, json={
+                    "session": newest_body["session"],
+                    "preview_instance": newest_instance,
+                }), 409, "Preview session is no longer active.")
+                self.assertEqual(registry.expired_count, 0)
+
+                self.app.extensions["close_edit_preview_services"]()
+
+            self.assertEqual((registry_factory.call_count, provider_factory.call_count), (1, 1))
+            self.assertEqual(registry.reaper_join_count, 1)
+            self.assertFalse(registry.reaper_alive)
+            self.assertTrue(provider.is_closed)
+            self.assertEqual(provider.close_calls, 1)
+            self.assertEqual(provider.active_child_count, 0)
+            self.assertEqual(provider.active_worker_count, 0)
+            self.assertEqual(provider.available_worker_slots, provider.MAX_WORKERS)
+            self.assertEqual((registry.total_count, registry.expired_count), (0, 0))
+            self.assertEqual((capacity.active_count, capacity.waiting_count), (0, 0))
+            self.assertEqual(pin_enters, pin_exits)
+            self.assertTrue(all(iterator.close_calls == 1 for iterator in iterators))
+            self.assertEqual(Path(self.store.path).read_bytes(), before_config)
+            self.assertEqual(Path(self.device_store.path).read_bytes(), before_devices)
+            self.assertEqual(sorted(
+                (path.relative_to(self.media_dir).as_posix(), path.read_bytes())
+                for path in self.media_dir.rglob("*") if path.is_file()
+            ), before_media)
+            self.assertEqual(self.controller.method_calls, [])
+        finally:
+            registry.close()
+            provider.shutdown()
+
+        self.assertEqual(
+            {child.pid for child in multiprocessing.active_children()}, before_children,
+        )
+        self.assertEqual(
+            {(thread.ident, thread.name) for thread in threading.enumerate()}, before_threads,
+        )
+        self.assertEqual(len(list(Path("/proc/self/fd").iterdir())), before_fds)
+
+    def test_malformed_or_reused_preview_instance_and_tokens_fail_closed(self):
+        from contextlib import contextmanager
+        import multiprocessing
+
+        from edit_preview import PreviewInstanceRegistry, PreviewSessionCapacity
+
+        class Clock:
+            now = 500.0
+
+            def monotonic(self):
+                return self.now
+
+        class CountingIterator:
+            def __init__(self, label):
+                self.label = label
+                self.next_calls = 0
+                self.close_calls = 0
+
+            def __iter__(self):
+                return self
+
+            def __next__(self):
+                self.next_calls += 1
+                return {"png": f"frame-{self.label}-{self.next_calls}", "delay_ms": 1}
+
+            def close(self):
+                self.close_calls += 1
+                if self.close_calls > 1:
+                    raise AssertionError(f"iterator {self.label} closed more than once")
+
+        class LightweightProvider:
+            MAX_WORKERS = 2
+
+            def __init__(self):
+                self.prepare_calls = 0
+                self.close_calls = 0
+                self.is_closed = False
+
+            @property
+            def active_child_count(self):
+                return 0
+
+            @property
+            def active_worker_count(self):
+                return 0
+
+            @property
+            def available_worker_slots(self):
+                return self.MAX_WORKERS
+
+            def shutdown(self):
+                if not self.is_closed:
+                    self.is_closed = True
+                    self.close_calls += 1
+
+        start_path = "/api/edit-preview/clock_lava"
+        page_path = "/api/edit-preview/page"
+        cancel_path = "/api/edit-preview/cancel"
+        owner_instance = "1" * 32
+        wrong_instance = "2" * 32
+        expired_instance = "3" * 32
+        private_values = (
+            str(Path(self.temp.name) / "private-preview.png"),
+            "https://secret.invalid/preview?credential=private-token",
+        )
+
+        owner = self.client
+        attacker = self.app.test_client()
+        self.pairing.verify.return_value = True
+        owner.post("/pair", data={"pin": "123456", "device_name": "Token owner"})
+        attacker.post("/pair", data={"pin": "123456", "device_name": "Token attacker"})
+        with owner.session_transaction() as owner_session:
+            owner_device = owner_session["device_id"]
+        with attacker.session_transaction() as attacker_session:
+            attacker_device = attacker_session["device_id"]
+        self.assertNotEqual(owner_device, attacker_device)
+
+        candidate = copy.deepcopy(self.store.get())
+        candidate.pop("revision")
+        candidate["weather"]["location"] = private_values[1]
+        start_payload = {
+            "config": candidate,
+            "generation": 1,
+            "preview_instance": owner_instance,
+        }
+        self.controller.reset_mock()
+        before_config = Path(self.store.path).read_bytes()
+        before_devices = Path(self.device_store.path).read_bytes()
+        before_media = sorted(
+            (path.relative_to(self.media_dir).as_posix(), path.read_bytes())
+            for path in self.media_dir.rglob("*") if path.is_file()
+        )
+        before_children = {child.pid for child in multiprocessing.active_children()}
+        before_threads = {(thread.ident, thread.name) for thread in threading.enumerate()}
+        before_fds = len(list(Path("/proc/self/fd").iterdir()))
+
+        clock = Clock()
+        capacity = PreviewSessionCapacity(monotonic=clock.monotonic)
+        registry = PreviewInstanceRegistry(capacity=capacity)
+        provider = LightweightProvider()
+        iterators = []
+        pin_enters = []
+        pin_exits = []
+        provider_calls = []
+        renderer_calls = []
+
+        def assert_error(response, status, message):
+            self.assertEqual(response.status_code, status, response.get_data(as_text=True))
+            self.assertEqual(response.headers.get("Cache-Control"), "no-store")
+            self.assertNotIn("ETag", response.headers)
+            self.assertEqual(response.get_json(), {"error": message})
+            wire = response.get_data(as_text=True)
+            for forbidden in (
+                "revision", "generation", "frame", "preview_instance", "path", "url",
+                owner_device, attacker_device, *private_values,
+            ):
+                self.assertNotIn(forbidden.lower(), wire.lower())
+
+        def assert_success(response):
+            self.assertEqual(response.status_code, 200, response.get_data(as_text=True))
+            self.assertEqual(response.headers.get("Cache-Control"), "no-store")
+            self.assertNotIn("ETag", response.headers)
+            return response.get_json()
+
+        @contextmanager
+        def pinned(candidate_value, media_root, *, allow_missing=()):
+            label = candidate_value["weather"]["location"]
+            pin_enters.append(label)
+            try:
+                yield {}
+            finally:
+                pin_exits.append(label)
+
+        def prepare(provider_value, module_name, candidate_value, stop_event):
+            provider_calls.append((provider_value, module_name))
+            provider_value.prepare_calls += 1
+            return None
+
+        def renderer(module_name, candidate_value, selected_palette, pinned_media,
+                     prepared, stop_event):
+            label = f"session-{len(iterators)}"
+            renderer_calls.append((module_name, label))
+            current = CountingIterator(label)
+            iterators.append(current)
+            return current
+
+        malformed_instances = [
+            None, True, 1, [], {}, "", "1" * 31, "1" * 33,
+            "A" * 32, "g" * 32,
+        ]
+        malformed_start_requests = [
+            {"data": "{", "content_type": "application/json"},
+            {"data": "{}", "content_type": "text/plain"},
+            {"data": "null", "content_type": "application/json"},
+            {"json": []},
+            {"json": "not-an-object"},
+            {"json": {}},
+            {"json": {key: value for key, value in start_payload.items()
+                      if key != "preview_instance"}},
+            {"json": {**start_payload, "extra": "must-fail"}},
+            *({"json": {**start_payload, "preview_instance": value}}
+              for value in malformed_instances),
+        ]
+
+        registry_factory = Mock(return_value=registry)
+        provider_factory = Mock(return_value=provider)
+        try:
+            with patch("webapp.PreviewInstanceRegistry", registry_factory), patch(
+                "webapp.PreviewProvider", provider_factory,
+            ), patch("webapp.pin_candidate_media", pinned), patch(
+                "webapp._prepare_edit_preview_provider", prepare, create=True,
+            ), patch("webapp._edit_preview_iterator", renderer, create=True):
+                for request_args in malformed_start_requests:
+                    with self.subTest(start_request=request_args):
+                        assert_error(
+                            owner.post(start_path, **request_args), 400,
+                            "Preview request is invalid.",
+                        )
+                self.assertEqual(registry_factory.call_count, 0)
+                self.assertEqual(provider_factory.call_count, 0)
+                self.assertEqual(capacity.active_count, 0)
+                self.assertEqual(registry.total_count, 0)
+                self.assertEqual(pin_enters, [])
+                self.assertEqual(provider_calls, [])
+                self.assertEqual(renderer_calls, [])
+
+                first = assert_success(owner.post(start_path, json=start_payload))
+                self.assertRegex(first["session"], r"^[0-9a-f]{32}$")
+                self.assertRegex(first["next_token"], r"^[0-9a-f]{64}$")
+                self.assertEqual((registry_factory.call_count, provider_factory.call_count), (1, 1))
+                self.assertEqual((len(pin_enters), len(provider_calls), len(iterators)), (1, 1, 1))
+                owner_iterator = iterators[0]
+                continuation = {
+                    "session": first["session"],
+                    "preview_instance": owner_instance,
+                    "token": first["next_token"],
+                }
+
+                malformed_session_values = [
+                    None, True, 1, [], {}, "", "a" * 31, "a" * 33,
+                    "A" * 32, "g" * 32,
+                ]
+                malformed_token_values = [
+                    None, True, 1, [], {}, "", "b" * 63, "b" * 65,
+                    "B" * 64, "g" * 64,
+                ]
+                malformed_page_requests = [
+                    {"data": "{", "content_type": "application/json"},
+                    {"data": json.dumps(continuation), "content_type": "text/plain"},
+                    {"data": "null", "content_type": "application/json"},
+                    {"json": []},
+                    {"json": "not-an-object"},
+                    {"json": {}},
+                    *({"json": {key: value for key, value in continuation.items() if key != missing}}
+                      for missing in continuation),
+                    {"json": {**continuation, "extra": "must-fail"}},
+                    *({"json": {**continuation, "session": value}}
+                      for value in malformed_session_values),
+                    *({"json": {**continuation, "preview_instance": value}}
+                      for value in malformed_instances),
+                    *({"json": {**continuation, "token": value}}
+                      for value in malformed_token_values),
+                ]
+                calls_before_malformed = owner_iterator.next_calls
+                for request_args in malformed_page_requests:
+                    with self.subTest(page_request=request_args):
+                        assert_error(
+                            owner.post(page_path, **request_args), 400,
+                            "Preview request is invalid.",
+                        )
+                self.assertEqual(owner_iterator.next_calls, calls_before_malformed)
+
+                cancel_payload = {
+                    "session": first["session"],
+                    "preview_instance": owner_instance,
+                }
+                malformed_cancel_requests = [
+                    {"data": "{", "content_type": "application/json"},
+                    {"data": json.dumps(cancel_payload), "content_type": "text/plain"},
+                    {"data": "null", "content_type": "application/json"},
+                    {"json": []},
+                    {"json": {}},
+                    *({"json": {key: value for key, value in cancel_payload.items()
+                                if key != missing}}
+                      for missing in cancel_payload),
+                    {"json": {**cancel_payload, "extra": "must-fail"}},
+                    *({"json": {**cancel_payload, "session": value}}
+                      for value in malformed_session_values),
+                    *({"json": {**cancel_payload, "preview_instance": value}}
+                      for value in malformed_instances),
+                ]
+                for request_args in malformed_cancel_requests:
+                    with self.subTest(cancel_request=request_args):
+                        assert_error(
+                            owner.post(cancel_path, **request_args), 400,
+                            "Preview request is invalid.",
+                        )
+                self.assertEqual(owner_iterator.next_calls, calls_before_malformed)
+                self.assertEqual(owner_iterator.close_calls, 0)
+
+                unknown_session = {**continuation, "session": "f" * 32}
+                unknown_token = {**continuation, "token": "e" * 64}
+                wrong_instance_page = {**continuation, "preview_instance": wrong_instance}
+                conflict_attempts = [
+                    (owner, page_path, unknown_session),
+                    (owner, page_path, unknown_token),
+                    (owner, page_path, wrong_instance_page),
+                    (attacker, page_path, continuation),
+                    (owner, cancel_path, {
+                        "session": "f" * 32, "preview_instance": owner_instance,
+                    }),
+                    (owner, cancel_path, {
+                        "session": first["session"], "preview_instance": wrong_instance,
+                    }),
+                    (attacker, cancel_path, cancel_payload),
+                ]
+                for client, path, payload in conflict_attempts:
+                    with self.subTest(conflict_path=path, payload=payload):
+                        message = (
+                            "Preview continuation was already used."
+                            if payload is unknown_token
+                            else "Preview session is no longer active."
+                        )
+                        assert_error(client.post(path, json=payload), 409, message)
+                self.assertEqual(owner_iterator.next_calls, calls_before_malformed)
+                self.assertEqual(owner_iterator.close_calls, 0)
+
+                second = assert_success(owner.post(page_path, json=continuation))
+                calls_after_valid_claim = owner_iterator.next_calls
+                self.assertGreater(calls_after_valid_claim, calls_before_malformed)
+                assert_error(
+                    owner.post(page_path, json=continuation), 409,
+                    "Preview continuation was already used.",
+                )
+                self.assertEqual(owner_iterator.next_calls, calls_after_valid_claim)
+
+                current = {**continuation, "token": second["next_token"]}
+                third = assert_success(owner.post(page_path, json=current))
+                self.assertEqual(third["page"], second["page"] + 1)
+                owner_cancel = assert_success(owner.post(cancel_path, json=cancel_payload))
+                self.assertEqual(owner_cancel, {"cancelled": True})
+                owner_calls_after_cancel = owner_iterator.next_calls
+                self.assertEqual(owner_iterator.close_calls, 1)
+                assert_error(
+                    owner.post(cancel_path, json=cancel_payload), 409,
+                    "Preview session is no longer active.",
+                )
+                self.assertEqual(owner_iterator.next_calls, owner_calls_after_cancel)
+
+                expiring = assert_success(owner.post(start_path, json={
+                    **start_payload,
+                    "preview_instance": expired_instance,
+                }))
+                expired_iterator = iterators[-1]
+                expired_calls = expired_iterator.next_calls
+                expired_page = {
+                    "session": expiring["session"],
+                    "preview_instance": expired_instance,
+                    "token": expiring["next_token"],
+                }
+                expired_cancel = {
+                    "session": expiring["session"],
+                    "preview_instance": expired_instance,
+                }
+                clock.now += capacity.IDLE_TTL + 0.001
+                self.assertEqual(capacity.reap_expired(), 1)
+                self.assertEqual(expired_iterator.close_calls, 1)
+                self.assertEqual(expired_iterator.next_calls, expired_calls)
+                self.assertEqual(capacity.active_count, 0)
+                self.assertEqual(capacity.available_slots, capacity.MAX_ACTIVE)
+                self.assertEqual(registry.total_count, 0)
+                self.assertEqual(registry.expired_count, 1)
+                assert_error(
+                    owner.post(page_path, json=expired_page), 410,
+                    "Preview session expired.",
+                )
+                assert_error(
+                    owner.post(cancel_path, json=expired_cancel), 410,
+                    "Preview session expired.",
+                )
+                assert_error(
+                    attacker.post(page_path, json=expired_page), 409,
+                    "Preview session is no longer active.",
+                )
+                self.assertEqual(expired_iterator.next_calls, expired_calls)
+
+                self.app.extensions["close_edit_preview_services"]()
+
+            self.assertEqual(Path(self.store.path).read_bytes(), before_config)
+            self.assertEqual(Path(self.device_store.path).read_bytes(), before_devices)
+            self.assertEqual(sorted(
+                (path.relative_to(self.media_dir).as_posix(), path.read_bytes())
+                for path in self.media_dir.rglob("*") if path.is_file()
+            ), before_media)
+            self.assertEqual(self.controller.method_calls, [])
+            self.assertEqual(len(pin_enters), 2)
+            self.assertEqual(pin_exits, pin_enters)
+            self.assertEqual(len(provider_calls), 2)
+            self.assertEqual(len(renderer_calls), 2)
+            self.assertTrue(all(iterator.close_calls == 1 for iterator in iterators))
+            self.assertEqual(registry.total_count, 0)
+            self.assertEqual(registry.expired_count, 0)
+            self.assertFalse(registry.reaper_alive)
+            self.assertTrue(provider.is_closed)
+            self.assertEqual(provider.close_calls, 1)
+            self.assertEqual(provider.active_child_count, 0)
+            self.assertEqual(provider.active_worker_count, 0)
+            self.assertEqual(provider.available_worker_slots, provider.MAX_WORKERS)
+        finally:
+            registry.close()
+            provider.shutdown()
+
+        self.assertEqual(
+            {child.pid for child in multiprocessing.active_children()}, before_children,
+        )
+        self.assertEqual(
+            {(thread.ident, thread.name) for thread in threading.enumerate()}, before_threads,
+        )
+        self.assertEqual(len(list(Path("/proc/self/fd").iterdir())), before_fds)
+
+    def test_malformed_tokens_and_expired_sessions_have_stable_errors(self):
+        from contextlib import contextmanager
+
+        from edit_preview import PreviewInstanceRegistry, PreviewSessionCapacity
+
+        class Clock:
+            now = 100.0
+
+            def monotonic(self):
+                return self.now
+
+        class CountingIterator:
+            def __init__(self, count):
+                self._remaining = iter(range(count))
+                self.next_calls = 0
+                self.close_calls = 0
+
+            def __iter__(self):
+                return self
+
+            def __next__(self):
+                self.next_calls += 1
+                index = next(self._remaining)
+                return {"png": f"stable-frame-{index}", "delay_ms": 1}
+
+            def close(self):
+                self.close_calls += 1
+
+        start_path = "/api/edit-preview/clock_lava"
+        page_path = "/api/edit-preview/page"
+        cancel_path = "/api/edit-preview/cancel"
+        preview_instance = "a" * 32
+        cancel_instance = "b" * 32
+        expired_instance = "c" * 32
+        wrong_instance = "d" * 32
+        private_sentinel = f"{self.temp.name}/private?credential=https://secret.invalid/key"
+        candidate = copy.deepcopy(self.store.get())
+        candidate.pop("revision")
+        candidate["weather"]["location"] = private_sentinel
+
+        self.pair_browser()
+        self.controller.reset_mock()
+        before_config = Path(self.store.path).read_bytes()
+        before_devices = Path(self.device_store.path).read_bytes()
+        before_media = sorted(
+            (path.relative_to(self.media_dir).as_posix(), path.read_bytes())
+            for path in self.media_dir.rglob("*") if path.is_file()
+        )
+        clock = Clock()
+        capacity = PreviewSessionCapacity(monotonic=clock.monotonic)
+        registry = PreviewInstanceRegistry(capacity=capacity)
+        provider_calls = []
+        iterators = []
+        pin_enters = []
+        pin_exits = []
+
+        def assert_error(response, status, message):
+            self.assertEqual(response.status_code, status, response.get_data(as_text=True))
+            self.assertEqual(response.headers.get("Cache-Control"), "no-store")
+            self.assertNotIn("ETag", response.headers)
+            self.assertEqual(response.get_json(), {"error": message})
+            wire = response.get_data(as_text=True)
+            for forbidden in (
+                "revision", "device_id", private_sentinel, self.temp.name,
+                "secret.invalid", "credential", "https://",
+            ):
+                self.assertNotIn(forbidden, wire)
+
+        @contextmanager
+        def pinned(*args, **kwargs):
+            pin_enters.append(object())
+            try:
+                yield {}
+            finally:
+                pin_exits.append(object())
+
+        def prepare(*args):
+            provider_calls.append(args[0])
+            return None
+
+        def renderer(*args):
+            count = (70, 100, 100)[len(iterators)]
+            iterator = CountingIterator(count)
+            iterators.append(iterator)
+            return iterator
+
+        start_payload = {
+            "config": candidate,
+            "generation": 1,
+            "preview_instance": preview_instance,
+        }
+        bad_start_requests = [
+            {"data": "not-json", "content_type": "application/json"},
+            {"data": "{}", "content_type": "text/plain"},
+            {"json": []},
+            {"json": {}},
+            {"json": {**start_payload, "extra": True}},
+            {"json": {**start_payload, "preview_instance": "A" * 32}},
+        ]
+
+        try:
+            with patch("webapp.PreviewInstanceRegistry", return_value=registry), patch(
+                "webapp.pin_candidate_media", pinned,
+            ), patch(
+                "webapp._prepare_edit_preview_provider", prepare, create=True,
+            ), patch("webapp._edit_preview_iterator", renderer, create=True):
+                for request_args in bad_start_requests:
+                    with self.subTest(start_request=request_args):
+                        assert_error(
+                            self.client.post(start_path, **request_args), 400,
+                            "Preview request is invalid.",
+                        )
+                self.assertEqual(provider_calls, [])
+                self.assertEqual(iterators, [])
+                self.assertEqual(pin_enters, [])
+
+                first_response = self.client.post(start_path, json=start_payload)
+                self.assertEqual(first_response.status_code, 200)
+                first = first_response.get_json()
+                self.assertFalse(first["complete"])
+                first_token = first["next_token"]
+                self.assertRegex(first_token, r"^[0-9a-f]{64}$")
+                self.assertEqual(len(provider_calls), 1)
+                self.assertEqual(len(iterators), 1)
+                valid_iterator = iterators[0]
+
+                continuation = {
+                    "session": first["session"],
+                    "preview_instance": preview_instance,
+                    "token": first_token,
+                }
+                bad_page_requests = [
+                    {"data": "{", "content_type": "application/json"},
+                    {"data": json.dumps(continuation), "content_type": "text/plain"},
+                    {"json": []},
+                    {"json": {key: value for key, value in continuation.items() if key != "token"}},
+                    {"json": {**continuation, "extra": True}},
+                    {"json": {**continuation, "session": "A" * 32}},
+                    {"json": {**continuation, "preview_instance": "bad"}},
+                    {"json": {**continuation, "token": "z" * 64}},
+                ]
+                calls_before_bad_pages = valid_iterator.next_calls
+                for request_args in bad_page_requests:
+                    with self.subTest(page_request=request_args):
+                        assert_error(
+                            self.client.post(page_path, **request_args), 400,
+                            "Preview request is invalid.",
+                        )
+                self.assertEqual(valid_iterator.next_calls, calls_before_bad_pages)
+                self.assertEqual(len(provider_calls), 1)
+                self.assertEqual(len(iterators), 1)
+
+                second_response = self.client.post(page_path, json=continuation)
+                self.assertEqual(second_response.status_code, 200)
+                second = second_response.get_json()
+                self.assertFalse(second["complete"])
+                calls_after_consumption = valid_iterator.next_calls
+                assert_error(
+                    self.client.post(page_path, json=continuation), 409,
+                    "Preview continuation was already used.",
+                )
+                self.assertEqual(valid_iterator.next_calls, calls_after_consumption)
+
+                current = {**continuation, "token": second["next_token"]}
+                unknown = {**current, "session": "f" * 32}
+                wrong_identity = {**current, "preview_instance": wrong_instance}
+                for payload in (unknown, wrong_identity):
+                    assert_error(
+                        self.client.post(page_path, json=payload), 409,
+                        "Preview session is no longer active.",
+                    )
+                self.assertEqual(valid_iterator.next_calls, calls_after_consumption)
+
+                terminal_response = self.client.post(page_path, json=current)
+                self.assertEqual(terminal_response.status_code, 200)
+                self.assertTrue(terminal_response.get_json()["complete"])
+                self.assertEqual(len(pin_exits), 1)
+
+                cancelled = self.client.post(start_path, json={
+                    **start_payload,
+                    "generation": 1,
+                    "preview_instance": cancel_instance,
+                }).get_json()
+                cancel_iterator = iterators[-1]
+                ordinary_cancel = self.client.post(cancel_path, json={
+                    "session": cancelled["session"],
+                    "preview_instance": cancel_instance,
+                })
+                self.assertEqual(ordinary_cancel.status_code, 200)
+                self.assertEqual(ordinary_cancel.get_json(), {"cancelled": True})
+                self.assertEqual(cancel_iterator.close_calls, 1)
+
+                expiring = self.client.post(start_path, json={
+                    **start_payload,
+                    "generation": 1,
+                    "preview_instance": expired_instance,
+                }).get_json()
+                expired_iterator = iterators[-1]
+                expired_token = expiring["next_token"]
+                expired_calls = expired_iterator.next_calls
+                self.assertEqual(capacity.active_count, 1)
+                clock.now += capacity.IDLE_TTL + 0.001
+                self.assertEqual(capacity.reap_expired(), 1)
+                self.assertEqual(expired_iterator.close_calls, 1)
+                self.assertEqual(expired_iterator.next_calls, expired_calls)
+                self.assertEqual(capacity.active_count, 0)
+                self.assertEqual(capacity.available_slots, capacity.MAX_ACTIVE)
+                self.assertEqual(registry.total_count, 0)
+                self.assertEqual(registry.expired_count, 1)
+                self.assertLessEqual(
+                    registry.expired_count, registry.MAX_EXPIRED_TOMBSTONES,
+                )
+
+                expired_page = {
+                    "session": expiring["session"],
+                    "preview_instance": expired_instance,
+                    "token": expired_token,
+                }
+                expired_cancel = {
+                    "session": expiring["session"],
+                    "preview_instance": expired_instance,
+                }
+                assert_error(
+                    self.client.post(page_path, json=expired_page), 410,
+                    "Preview session expired.",
+                )
+                assert_error(
+                    self.client.post(cancel_path, json=expired_cancel), 410,
+                    "Preview session expired.",
+                )
+                assert_error(
+                    self.client.post(cancel_path, json={
+                        **expired_cancel, "preview_instance": wrong_instance,
+                    }), 409, "Preview session is no longer active.",
+                )
+                self.assertEqual(expired_iterator.next_calls, expired_calls)
+                self.assertEqual(expired_iterator.close_calls, 1)
+
+                clock.now += registry.EXPIRED_TOMBSTONE_TTL + 0.001
+                assert_error(
+                    self.client.post(cancel_path, json=expired_cancel), 409,
+                    "Preview session is no longer active.",
+                )
+                self.assertEqual(registry.expired_count, 0)
+
+            self.assertEqual(Path(self.store.path).read_bytes(), before_config)
+            self.assertEqual(Path(self.device_store.path).read_bytes(), before_devices)
+            self.assertEqual(sorted(
+                (path.relative_to(self.media_dir).as_posix(), path.read_bytes())
+                for path in self.media_dir.rglob("*") if path.is_file()
+            ), before_media)
+            self.assertEqual(self.controller.method_calls, [])
+            self.assertEqual(len(provider_calls), 3)
+            self.assertEqual(len(iterators), 3)
+            self.assertEqual(len(pin_enters), 3)
+            self.assertEqual(len(pin_exits), 3)
+        finally:
+            registry.close()
+        self.assertEqual(registry.expired_count, 0)
+        self.assertFalse(registry.reaper_alive)
+
     def test_stale_session_generation_is_rejected(self):
         with self.client.session_transaction() as browser_session:
             browser_session["paired"] = True
@@ -6589,6 +11046,247 @@ console.log('ANNOUNCEMENT_HEADING_SYNC_PASS');
         response = self.client.get("/")
         self.assertEqual(response.status_code, 302)
         self.assertIn("/pair", response.headers["Location"])
+
+    def test_preview_service_atexit_close_joins_reaper_and_reaps_children(self):
+        """The exact lifecycle node reuses the isolated WSGI process proof below."""
+        getattr(
+            WSGIImportTests,
+            "test_wsgi_import_owns_one_registry_and_atexit_closes_it",
+        )(self)
+
+
+class WSGIImportTests(unittest.TestCase):
+    def test_wsgi_import_owns_one_registry_and_atexit_closes_it(self):
+        script = r'''
+import atexit
+import importlib
+import json
+import multiprocessing
+import os
+from pathlib import Path
+import shutil
+import subprocess
+import sys
+import tempfile
+import threading
+import types
+from unittest.mock import patch
+
+root = Path(sys.argv[1])
+registered = []
+atexit.register = lambda callback, *args, **kwargs: registered.append(callback) or callback
+
+# Importing the reusable factory is not a process-entrypoint side effect.
+import webapp
+real_create_app = webapp.create_app
+
+class Passive:
+    def __init__(self, *args, **kwargs):
+        self.path = kwargs.get("path")
+
+class FakeController(Passive):
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.stop_calls = 0
+        self.method_calls = []
+
+    def stop(self):
+        self.stop_calls += 1
+
+class FakeLock(Passive):
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.acquire_calls = 0
+        self.release_calls = 0
+
+    def acquire(self):
+        self.acquire_calls += 1
+
+    def release(self):
+        self.release_calls += 1
+
+class FakePairing(Passive):
+    pass
+
+class FakeDeviceStore(Passive):
+    def any_devices(self):
+        return True
+
+registries = []
+providers = []
+
+class TrackedRegistry:
+    def __init__(self):
+        self.is_closed = False
+        self.close_calls = 0
+        self.stop = threading.Event()
+        self.read_fd, self.write_fd = os.pipe()
+        self.reaper = threading.Thread(
+            target=self.stop.wait, name="tracked-preview-reaper", daemon=True,
+        )
+        self.reaper.start()
+        registries.append(self)
+
+    @property
+    def reaper_alive(self):
+        return self.reaper.is_alive()
+
+    def close(self):
+        if self.is_closed:
+            return
+        self.is_closed = True
+        self.close_calls += 1
+        self.stop.set()
+        self.reaper.join(1)
+        os.close(self.read_fd)
+        os.close(self.write_fd)
+
+class TrackedProvider:
+    def __init__(self):
+        self.is_closed = False
+        self.close_calls = 0
+        self.stop = threading.Event()
+        self.read_fd, self.write_fd = os.pipe()
+        self.worker = threading.Thread(
+            target=self.stop.wait, name="tracked-preview-worker", daemon=True,
+        )
+        self.worker.start()
+        self.child = subprocess.Popen(
+            [sys.executable, "-c", "import time; time.sleep(30)"],
+            stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL, close_fds=True,
+        )
+        providers.append(self)
+
+    def shutdown(self):
+        if self.is_closed:
+            return
+        self.is_closed = True
+        self.close_calls += 1
+        self.stop.set()
+        self.worker.join(1)
+        self.child.terminate()
+        self.child.wait(timeout=1)
+        os.close(self.read_fd)
+        os.close(self.write_fd)
+
+create_calls = []
+
+with tempfile.TemporaryDirectory() as temp:
+    temp = Path(temp)
+    package = temp / "app"
+    package.mkdir()
+    shutil.copy2(root / "app" / "__init__.py", package / "__init__.py")
+    shutil.copy2(root / "app" / "wsgi.py", package / "wsgi.py")
+
+    def tracked_create_app(*args, **kwargs):
+        create_calls.append((args, kwargs))
+        return real_create_app(
+            FakeController(), Passive(), FakePairing(), secret_key="test",
+            session_generation="wsgi-test", media_dir=temp / "media",
+            location_search=lambda query: [], device_store=FakeDeviceStore(),
+            openweather_secrets=Passive(),
+        )
+
+    # Calling create_app in a test/import context must not own process cleanup.
+    standalone = tracked_create_app()
+    create_calls.clear()
+    assert "edit_preview_registry" not in standalone.extensions
+    assert standalone.extensions["close_edit_preview_services"] not in registered
+
+    fake_modules = {}
+    for name, attributes in {
+        "config_store": {"ConfigStore": Passive},
+        "display_controller": {"DisplayController": FakeController},
+        "hardware_lock": {"DisplayOwnershipLock": FakeLock},
+        "matrix_framework": {"Matrix": Passive},
+        "pairing": {
+            "PairedDeviceStore": FakeDeviceStore,
+            "PairingManager": FakePairing,
+            "initialize_pairing_display": lambda *args: None,
+        },
+        "secret_store": {"SecretStore": Passive},
+    }.items():
+        module = types.ModuleType(name)
+        for attribute, value in attributes.items():
+            setattr(module, attribute, value)
+        fake_modules[name] = module
+
+    with patch.dict(sys.modules, fake_modules), \
+         patch.object(webapp, "create_app", tracked_create_app), \
+         patch.object(webapp, "PreviewInstanceRegistry", TrackedRegistry), \
+         patch.object(webapp, "PreviewProvider", TrackedProvider):
+        sys.path.insert(0, str(temp))
+        entry = importlib.import_module("app.wsgi")
+        sys.path.insert(0, str(package))
+        alias = importlib.import_module("wsgi")
+        importlib.reload(entry)
+        importlib.reload(alias)
+
+        assert len(create_calls) == 1, len(create_calls)
+        assert entry.app is alias.app
+        assert registries == [] and providers == []
+        preview_callbacks = [
+            callback for callback in registered
+            if callback is entry.app.extensions["close_edit_preview_services"]
+        ]
+        assert len(preview_callbacks) == 1, registered
+
+        baseline_fds = len(os.listdir("/proc/self/fd"))
+        baseline_threads = {thread.ident for thread in threading.enumerate()}
+        baseline_children = {child.pid for child in multiprocessing.active_children()}
+        registry, provider = entry.app.extensions["get_edit_preview_services"]()
+        assert (len(registries), len(providers)) == (1, 1)
+        assert entry.app.extensions["edit_preview_registry"] is registry
+        assert entry.app.extensions["edit_preview_provider"] is provider
+        assert alias.app.extensions["get_edit_preview_services"]() == (registry, provider)
+
+        with entry.app.test_request_context("/"):
+            pass
+        with entry.app.app_context():
+            pass
+        assert not registry.is_closed and not provider.is_closed
+
+        callback = preview_callbacks[0]
+        callback()
+        callback()
+        assert (registry.close_calls, provider.close_calls) == (1, 1)
+        assert registry.is_closed and provider.is_closed
+        assert not registry.reaper_alive and not provider.worker.is_alive()
+        assert provider.child.poll() is not None
+        assert len(os.listdir("/proc/self/fd")) == baseline_fds
+        assert {thread.ident for thread in threading.enumerate()} == baseline_threads
+        assert {child.pid for child in multiprocessing.active_children()} == baseline_children
+        assert entry.controller.method_calls == []
+
+print(json.dumps({
+    "create_calls": len(create_calls),
+    "preview_callbacks": len(preview_callbacks),
+    "registries": len(registries),
+    "providers": len(providers),
+    "registry_close_calls": registry.close_calls,
+    "provider_close_calls": provider.close_calls,
+    "reaper_alive": registry.reaper_alive,
+    "worker_alive": provider.worker.is_alive(),
+    "child_returncode": provider.child.returncode,
+}))
+'''
+        result = subprocess.run(
+            [sys.executable, "-c", script, str(Path(__file__).parents[1])],
+            cwd=Path(__file__).parents[1], text=True, capture_output=True, timeout=15,
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(json.loads(result.stdout), {
+            "create_calls": 1,
+            "preview_callbacks": 1,
+            "registries": 1,
+            "providers": 1,
+            "registry_close_calls": 1,
+            "provider_close_calls": 1,
+            "reaper_alive": False,
+            "worker_alive": False,
+            "child_returncode": -signal.SIGTERM,
+        })
 
 
 if __name__ == "__main__":

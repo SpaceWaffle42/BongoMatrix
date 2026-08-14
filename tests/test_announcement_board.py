@@ -285,7 +285,7 @@ class AnnouncementBoardTests(unittest.TestCase):
         result = run(
             matrix,
             {"announcement_board": {"announcements": [announcement]}},
-            duration=0.001,
+            duration=0,
             stop_event=stop,
             now_provider=lambda: dt.datetime(2030, 1, 15, 12, 0),
         )
@@ -691,7 +691,7 @@ class AnnouncementBoardTests(unittest.TestCase):
             [call.args[3].red for call in matrix.draw_text.call_args_list],
             [64, 128, 191, 255],
         )
-        self.assertEqual(matrix.swap.call_count, 4)
+        self.assertEqual(matrix.swap.call_count, 5)
         self.assertEqual(
             [call.args[0] for call in stop.wait.call_args_list],
             [0.1, 0.1, 0.1, 0.1, 8],
@@ -846,7 +846,7 @@ class AnnouncementBoardTests(unittest.TestCase):
         ))
 
         self.assertEqual([call.args[1] for call in matrix.draw_text.call_args_list], [50, 34, 18, 2])
-        self.assertEqual(matrix.swap.call_count, 4)
+        self.assertEqual(matrix.swap.call_count, 5)
         self.assertEqual(
             [call.args[0] for call in stop.wait.call_args_list],
             [0.1, 0.1, 0.1, 0.1, 8],
@@ -884,7 +884,7 @@ class AnnouncementBoardTests(unittest.TestCase):
         )
         self.assertTrue(all(call.args[1:4] == (0, call.args[0], 31) for call in matrix.draw_line.call_args_list))
         self.assertTrue(all(call.args[4] is black for call in matrix.draw_line.call_args_list))
-        self.assertEqual(matrix.swap.call_count, 4)
+        self.assertEqual(matrix.swap.call_count, 5)
         self.assertEqual([call.args[0] for call in stop.wait.call_args_list], [0.1] * 4 + [8])
     def test_pixel_dissolve_order_is_stable_complete_and_id_specific(self):
         first = announcement_board.dissolve_pixel_order("announcement_one", 4, 2)
@@ -929,7 +929,7 @@ class AnnouncementBoardTests(unittest.TestCase):
             expected_hidden,
         )
         self.assertTrue(all(call.args[2:5] == (0, 0, 0) for call in matrix.pixel.call_args_list))
-        self.assertEqual(matrix.swap.call_count, 4)
+        self.assertEqual(matrix.swap.call_count, 5)
         self.assertEqual([call.args[0] for call in stop.wait.call_args_list], [0.1] * 4 + [8])
     def test_fade_transition_dims_icon_pixels_as_well_as_text(self):
         matrix = Mock()

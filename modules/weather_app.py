@@ -192,6 +192,28 @@ def ticker_text(weather, units):
     return f"{weather.location} | {weather.status} | Feels {weather.feels_like}{suffix} | Humidity {weather.humidity}%"
 
 
+def ticker_positions(canvas_width, text_width, loops, direction):
+    """Yield every physical ticker position for the configured traversals."""
+    start = -text_width if direction == "right" else canvas_width
+    step = -1 if direction == "right" else 1
+    for _ in range(loops):
+        position = start
+        while True:
+            yield position
+            position -= step
+            if step >= 0 and position + text_width < 0:
+                break
+            if step < 0 and position > canvas_width:
+                break
+
+
+def measure_ticker(matrix, font, y, colour, text, canvas):
+    """Return width for physical DrawText and capture next-x implementations."""
+    origin = -10000
+    measured = matrix.draw_text(font, origin, y, colour, text, canvas=canvas)
+    return measured - origin if measured < 0 else measured
+
+
 def prepare_ticker_plan(config, client=None, *, deadline=None):
     """Fetch only normalized Open-Meteo text needed by the timing editor."""
     settings = config["weather"]
@@ -208,12 +230,9 @@ def prepare_ticker_plan(config, client=None, *, deadline=None):
             "milliseconds": milliseconds}
 
 
-def run(matrix, config, duration=20, stop_event=None, client=None):
-    if stop_event and stop_event.is_set():
-        return False
-    client = client or OpenMeteoClient()
+def weather_frames(matrix, config, weather, stop_event=None):
+    """Submit and yield one complete configured weather ticker cycle."""
     weather_config = config.get("weather", {})
-    location = weather_config.get("location", "London, England, GB")
     units = weather_config.get("units", "celsius")
     unit_suffix = "F" if units == "fahrenheit" else "C"
     temperature_y = weather_config.get("temperature_y", 17)
@@ -228,17 +247,6 @@ def run(matrix, config, duration=20, stop_event=None, client=None):
     low_x = weather_config.get("low_x", 35)
     low_y = weather_config.get("low_y", 15)
     line_y = weather_config.get("line_y", ticker_y - 11)
-    try:
-        weather = client.fetch(
-            location,
-            latitude=weather_config.get("latitude"),
-            longitude=weather_config.get("longitude"),
-            units=units,
-        )
-    except Exception as exc:
-        _render_error(matrix, str(exc), duration, stop_event)
-        return False
-
     canvas = matrix.matrix.CreateFrameCanvas()
     background_hex = weather_config.get("background_colour", "#000000")
     white = matrix.colour_rgb(weather_config["text_colour"]) if "text_colour" in weather_config else matrix.colour("retro_soft_grey")
@@ -250,18 +258,16 @@ def run(matrix, config, duration=20, stop_event=None, client=None):
     small = matrix.font("4x6")
     main = matrix.font("5x7")
     scroll = ticker_text(weather, units)
-    text_width = matrix.draw_text(
-        small, -10000, ticker_y, yellow, scroll, canvas=canvas
+    text_width = measure_ticker(
+        matrix, small, ticker_y, yellow, scroll, canvas,
     )
-    if scroll_direction == "right":
-        scroll_x = -text_width
-        scroll_step = -1
-    else:
-        scroll_x = canvas.width
-        scroll_step = 1
-    loops_remaining = weather_config.get("scroll_loops", 1)
-
-    while loops_remaining > 0 and not (stop_event and stop_event.is_set()):
+    scroll_step = -1 if scroll_direction == "right" else 1
+    for scroll_x in ticker_positions(
+        canvas.width, text_width, weather_config.get("scroll_loops", 1),
+        scroll_direction,
+    ):
+        if stop_event and stop_event.is_set():
+            return
         if "background_colour" in weather_config:
             matrix.fill(*_hex_rgb(background_hex), canvas=canvas)
         else:
@@ -271,17 +277,32 @@ def run(matrix, config, duration=20, stop_event=None, client=None):
         matrix.draw_text_with_border(small, high_x, high_y, pink, black, f"H {weather.high}", canvas=canvas)
         matrix.draw_text_with_border(small, low_x, low_y, cyan, black, f"L {weather.low}", canvas=canvas)
         matrix.draw_line(0, line_y, 63, line_y, blue, canvas=canvas)
-        scroll_x, _ = matrix.widget_scroll(
+        matrix.widget_scroll(
             scroll, small, scroll_x, ticker_y, yellow,
             canvas=canvas, step=scroll_step, wrap=False,
         )
-        if scroll_step >= 0 and scroll_x + text_width < 0:
-            loops_remaining -= 1
-            scroll_x = canvas.width
-        elif scroll_step < 0 and scroll_x > canvas.width:
-            loops_remaining -= 1
-            scroll_x = -text_width
+        submitted = canvas
         canvas = matrix.swap(canvas)
+        yield submitted, frame_delay
+
+
+def run(matrix, config, duration=20, stop_event=None, client=None):
+    if stop_event and stop_event.is_set():
+        return False
+    client = client or OpenMeteoClient()
+    weather_config = config.get("weather", {})
+    try:
+        weather = client.fetch(
+            weather_config.get("location", "London, England, GB"),
+            latitude=weather_config.get("latitude"),
+            longitude=weather_config.get("longitude"),
+            units=weather_config.get("units", "celsius"),
+        )
+    except Exception as exc:
+        _render_error(matrix, str(exc), duration, stop_event)
+        return False
+
+    for _canvas, frame_delay in weather_frames(matrix, config, weather, stop_event):
         if _wait(stop_event, frame_delay):
             break
     return True

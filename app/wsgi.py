@@ -14,6 +14,7 @@ ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
+import app as _entrypoint_owner
 from config_store import ConfigStore
 from display_controller import DisplayController
 from hardware_lock import DisplayOwnershipLock
@@ -46,38 +47,61 @@ def load_secret(path):
     return value
 
 
-config_store = ConfigStore(ROOT / "data" / "config.json")
-device_store = PairedDeviceStore(ROOT / "data" / "paired-devices.json")
-display_lock = DisplayOwnershipLock(os.environ.get("MATRIX_LOCK_FILE", "/run/matrix-display.lock"))
-display_lock.acquire()
-atexit.register(display_lock.release)
-matrix = Matrix()
-openweather_secrets = SecretStore(ROOT / "data" / "secrets" / "openweather-api-key")
-controller = DisplayController(
-    matrix, config_store, openweather_secrets=openweather_secrets
-)
-pairing = PairingManager(ttl_seconds=600)
-session_secret = load_secret(ROOT / "data" / "session.key")
-sanitizer_path = os.environ.get("MATRIX_SANITIZER_PATH")
-nobody = pwd.getpwnam("nobody") if sanitizer_path else None
-app = create_app(
-    controller,
-    config_store,
-    pairing,
-    secret_key=session_secret,
-    session_generation=session_secret,
-    device_store=device_store,
-    openweather_secrets=openweather_secrets,
-    sanitizer_path=sanitizer_path,
-    sanitizer_python=os.environ.get("MATRIX_SANITIZER_PYTHON"),
-    sanitizer_identity=(nobody.pw_uid, nobody.pw_gid) if nobody else None,
-)
+with _entrypoint_owner._wsgi_runtime_lock:
+    runtime = _entrypoint_owner._wsgi_runtime
+    if runtime is None:
+        config_store = ConfigStore(ROOT / "data" / "config.json")
+        device_store = PairedDeviceStore(ROOT / "data" / "paired-devices.json")
+        display_lock = DisplayOwnershipLock(
+            os.environ.get("MATRIX_LOCK_FILE", "/run/matrix-display.lock")
+        )
+        display_lock.acquire()
+        atexit.register(display_lock.release)
+        matrix = Matrix()
+        openweather_secrets = SecretStore(
+            ROOT / "data" / "secrets" / "openweather-api-key"
+        )
+        controller = DisplayController(
+            matrix, config_store, openweather_secrets=openweather_secrets
+        )
+        pairing = PairingManager(ttl_seconds=600)
+        session_secret = load_secret(ROOT / "data" / "session.key")
+        sanitizer_path = os.environ.get("MATRIX_SANITIZER_PATH")
+        nobody = pwd.getpwnam("nobody") if sanitizer_path else None
+        app = create_app(
+            controller,
+            config_store,
+            pairing,
+            secret_key=session_secret,
+            session_generation=session_secret,
+            device_store=device_store,
+            openweather_secrets=openweather_secrets,
+            sanitizer_path=sanitizer_path,
+            sanitizer_python=os.environ.get("MATRIX_SANITIZER_PYTHON"),
+            sanitizer_identity=(nobody.pw_uid, nobody.pw_gid) if nobody else None,
+        )
+        atexit.register(app.extensions["close_edit_preview_services"])
 
-# With no trusted device, show a fresh short-lived code. Once devices exist,
-# keep the Matrix running across service restarts; their signed sessions remain
-# valid until they expire, unpair, or are removed.
-initialize_pairing_display(controller, pairing, device_store)
-atexit.register(controller.stop)
+        # With no trusted device, show a fresh short-lived code. Once devices exist,
+        # keep the Matrix running across service restarts; their signed sessions remain
+        # valid until they expire, unpair, or are removed.
+        initialize_pairing_display(controller, pairing, device_store)
+        atexit.register(controller.stop)
+        runtime = {
+            "app": app,
+            "config_store": config_store,
+            "controller": controller,
+            "device_store": device_store,
+            "display_lock": display_lock,
+            "matrix": matrix,
+            "nobody": nobody,
+            "openweather_secrets": openweather_secrets,
+            "pairing": pairing,
+            "sanitizer_path": sanitizer_path,
+            "session_secret": session_secret,
+        }
+        _entrypoint_owner._wsgi_runtime = runtime
+    globals().update(runtime)
 
 
 if __name__ == "__main__":

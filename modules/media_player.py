@@ -1,7 +1,93 @@
 """Shared interruptible playback for configured Matrix media."""
 
 from pathlib import Path
+import math
 import threading
+import time
+
+from PIL import Image, ImageSequence
+
+
+def gif_media_frames(
+    path, loops=1, playback_rate=1.0, stop_event=None, max_duration=None,
+    monotonic=None, image_open=None, image_iterator=None,
+):
+    """Yield the finite GIF timeline shared by physical and preview playback."""
+    image_open = image_open or Image.open
+    image_iterator = image_iterator or ImageSequence.Iterator
+    if (
+        isinstance(playback_rate, bool)
+        or not isinstance(playback_rate, (int, float))
+        or not math.isfinite(playback_rate)
+        or not 0.25 <= playback_rate <= 4.0
+    ):
+        raise ValueError("GIF playback rate must be between 0.25 and 4.0")
+    playback_rate = float(playback_rate)
+    started = monotonic() if monotonic is not None else 0.0
+    elapsed_delays = 0.0
+    gif = image_open(path)
+    completed = 0
+    try:
+        while loops == 0 or completed < loops:
+            rendered_frame = False
+            for frame in image_iterator(gif):
+                rendered_frame = True
+                if stop_event is not None and stop_event.is_set():
+                    return
+                elapsed = elapsed_delays
+                if monotonic is not None:
+                    elapsed = max(elapsed, monotonic() - started)
+                if max_duration is not None and elapsed >= max_duration:
+                    return
+                delay = max(
+                    0.01, frame.info.get("duration", 100) / 1000.0 / playback_rate
+                )
+                if max_duration is not None:
+                    delay = min(delay, max_duration - elapsed)
+                yield frame.copy(), delay
+                elapsed_delays += delay
+            if not rendered_frame:
+                return
+            completed += 1
+    finally:
+        gif.close()
+
+
+def video_media_frames(
+    frame_decoder, fps=20, loops=1, stop_event=None, max_duration=None,
+    monotonic=None,
+):
+    """Yield one decoded video timeline repeatedly with deadline-clipped waits."""
+    fps = max(1.0, min(60.0, float(fps)))
+    frame_delay = 1.0 / fps
+    started = monotonic() if monotonic is not None else 0.0
+    elapsed_delays = 0.0
+    completed = 0
+    while loops == 0 or completed < loops:
+        decoded_frame = False
+        decoder = iter(frame_decoder())
+        try:
+            for frame in decoder:
+                decoded_frame = True
+                if stop_event is not None and stop_event.is_set():
+                    return
+                elapsed = elapsed_delays
+                if monotonic is not None:
+                    elapsed = max(elapsed, monotonic() - started)
+                if max_duration is not None and elapsed >= max_duration:
+                    return
+                delay = frame_delay
+                if max_duration is not None:
+                    delay = min(delay, max_duration - elapsed)
+                yield frame, delay
+                elapsed_delays += delay
+        finally:
+            close = getattr(decoder, "close", None)
+            if close is not None:
+                close()
+        if not decoded_frame:
+            return
+        completed += 1
 
 
 def play_media(matrix, filename, duration, stop_event=None, settings=None):
@@ -37,9 +123,19 @@ def play_media(matrix, filename, duration, stop_event=None, settings=None):
             max_duration=duration,
         )
 
-    shown = matrix.show_image(filename, delay=None, **geometry)
-    if not shown:
+    from edit_preview import static_media_frames
+
+    frame_iterator = static_media_frames(
+        filename, duration, settings,
+        render=lambda frame_filename, frame_geometry: matrix.show_image(
+            frame_filename, delay=None, **frame_geometry,
+        ),
+        monotonic=time.monotonic,
+    )
+    try:
+        _, delay_ms, _ = next(frame_iterator)
+    except StopIteration:
         return False
     waiter = stop_event or threading.Event()
-    waiter.wait(max(0, float(duration)))
+    waiter.wait(delay_ms / 1000)
     return True

@@ -1029,6 +1029,24 @@ class ConfigStore:
         with self._lock:
             return json.loads(self.path.read_text())
 
+    def validate_candidate(self, changes):
+        """Validate and canonicalize an unsaved draft without persisting it."""
+        if not isinstance(changes, dict):
+            raise ValueError("configuration candidate must be a JSON object")
+        if "revision" in changes:
+            raise ValueError("revision is server-owned")
+        _validate_update_keys(changes, DEFAULT_CONFIG)
+        with self._lock:
+            current = self.get()
+            candidate = _merge(current, changes)
+            candidate["revision"] = current["revision"]
+            candidate = validate_config(
+                candidate,
+                allow_legacy_announcements=False,
+                enforce_save_bounds=True,
+            )
+            return copy.deepcopy(candidate)
+
     def update(self, changes, *, base_revision=None):
         if not isinstance(changes, dict):
             raise ValueError("configuration update must be a JSON object")

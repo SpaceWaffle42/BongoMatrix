@@ -231,14 +231,7 @@ def _draw_layer(matrix, canvas, layer, properties, *, media_cache=None, frame=0)
         _draw_polygon(matrix, canvas, _ellipse_points(properties), colour, properties["filled"])
 
 
-def _run_canvas(matrix, duration, stop_event, module_config):
-    if stop_event is not None and stop_event.is_set() is True:
-        return False
-    canvas = matrix.matrix.CreateFrameCanvas()
-    background = matrix.colour_rgb(module_config["background"])
-    sequence = frame_sequence(module_config["frame_count"], module_config["playback"])
-    delay = 1 / module_config["fps"]
-    cycle_index = 0
+def _canvas_media_cache(matrix, stop_event, module_config, pinned_handles=None):
     media_sources = set()
     for layer in module_config["layers"]:
         if layer["type"] != "media":
@@ -251,6 +244,7 @@ def _run_canvas(matrix, duration, stop_event, module_config):
         for override in module_config["overrides"]:
             if override["layer_id"] == layer["id"] and "source" in override["properties"]:
                 media_sources.add(override["properties"]["source"])
+
     media_cache = {}
     media_cache_bytes = 0
     prepare_deadline = (
@@ -258,27 +252,35 @@ def _run_canvas(matrix, duration, stop_event, module_config):
     )
     sorted_media_sources = sorted(media_sources)
     for index, source in enumerate(sorted_media_sources):
-        assert prepare_deadline is not None
+        if prepare_deadline is None:
+            raise RuntimeError("canvas media preparation deadline is unavailable")
         if stop_event is not None and stop_event.is_set() is True:
-            return False
+            return None
         remaining = prepare_deadline - time.monotonic()
         if remaining <= 0:
             media_cache[source] = []
             continue
         remaining_source_count = len(sorted_media_sources) - index
         try:
-            frames = matrix.media_frames(
-                source, module_config["frame_count"], module_config["fps"],
-                stop_event=stop_event, preserve_size=True,
-                decode_timeout=min(
+            media_options = {
+                "stop_event": stop_event,
+                "preserve_size": True,
+                "decode_timeout": min(
                     CANVAS_MEDIA_PREPARE_TIMEOUT,
                     remaining / remaining_source_count,
                 ),
+            }
+            pinned_handle = (pinned_handles or {}).get(source)
+            if pinned_handle is not None:
+                media_options["pinned_handle"] = pinned_handle
+            frames = matrix.media_frames(
+                source, module_config["frame_count"], module_config["fps"],
+                **media_options,
             )
         except (OSError, ValueError):
             frames = []
         if stop_event is not None and stop_event.is_set() is True:
-            return False
+            return None
         media_cache_bytes += sum(
             image.width * image.height * 3
             for image in {id(frame): frame for frame in frames}.values()
@@ -287,42 +289,112 @@ def _run_canvas(matrix, duration, stop_event, module_config):
         if media_cache_bytes > CANVAS_MEDIA_CACHE_BYTES:
             raise ValueError("canvas media cache exceeds its aggregate memory budget")
         media_cache[source] = frames
-    if stop_event is not None and stop_event.is_set() is True:
-        return False
-    started = time.monotonic()
-    rendered = False
-    while time.monotonic() - started < duration:
+    return media_cache
+
+
+def canvas_timeline_frames(
+    matrix, duration, stop_event, module_config, *, monotonic=None,
+    pinned_handles=None,
+):
+    """Yield rendered Advanced Canvas frames and deadline-clipped delays."""
+    duration = max(0.0, float(duration))
+    if duration == 0 or (stop_event is not None and stop_event.is_set() is True):
+        return
+    media_cache = _canvas_media_cache(
+        matrix, stop_event, module_config, pinned_handles=pinned_handles,
+    )
+    if media_cache is None or (stop_event is not None and stop_event.is_set() is True):
+        return
+
+    background = matrix.colour_rgb(module_config["background"])
+    sequence = frame_sequence(module_config["frame_count"], module_config["playback"])
+    normal_delay = 1 / module_config["fps"]
+    cycle_index = 0
+    elapsed = 0.0
+    started = monotonic() if monotonic is not None else None
+    while True:
+        clock_elapsed = 0.0 if monotonic is None else monotonic() - started
+        remaining = duration - max(elapsed, clock_elapsed)
+        if remaining <= 0 or (stop_event is not None and stop_event.is_set() is True):
+            return
         frame = sequence[min(cycle_index, len(sequence) - 1)]
+        canvas = matrix.matrix.CreateFrameCanvas()
         _fill_background(matrix, canvas, background)
         for layer, properties in ordered_layers_for_frame(module_config, frame):
-            if not layer["visible"]:
-                continue
-            if properties.get("present", True):
+            if layer["visible"] and properties.get("present", True):
                 _draw_layer(
                     matrix, canvas, layer, properties,
                     media_cache=media_cache, frame=frame,
                 )
         if stop_event is not None and stop_event.is_set() is True:
-            return rendered
-        canvas = matrix.swap(canvas)
-        rendered = True
-        if _wait(stop_event, delay):
-            break
+            return
+        delay = min(normal_delay, remaining)
+        yield canvas, delay
+        elapsed += delay
         if module_config["playback"] == "hold":
             cycle_index = min(cycle_index + 1, len(sequence) - 1)
         else:
             cycle_index = (cycle_index + 1) % len(sequence)
+
+
+def _run_canvas(matrix, duration, stop_event, module_config, pinned_handles=None):
+    rendered = False
+    for canvas, delay in canvas_timeline_frames(
+        matrix, duration, stop_event, module_config, monotonic=time.monotonic,
+        pinned_handles=pinned_handles,
+    ):
+        matrix.swap(canvas)
+        rendered = True
+        if _wait(stop_event, delay):
+            break
     return rendered
 
 
-def run(matrix, config, duration=15, stop_event=None, module_config=None):
+def advance_left_scroll(position, text_width, canvas_width, completed_loops, loop_limit):
+    """Advance one frame while preserving the physical ticker reset boundary."""
+    position -= 1
+    if position + text_width < 0:
+        completed_loops += 1
+        if completed_loops < loop_limit:
+            position = canvas_width
+    return position, completed_loops
+
+
+def left_scroll_positions(canvas_width, text_width, loops):
+    """Yield every physical left-ticker position through natural loop exhaustion."""
+    yield from scroll_positions(canvas_width, text_width, loops, direction="left")
+
+
+def scroll_positions(canvas_width, text_width, loops, direction="left"):
+    """Yield every physical ticker position through natural loop exhaustion."""
+    if direction == "right":
+        for _ in range(loops):
+            yield from range(-text_width, canvas_width + 1)
+        return
+
+    position = canvas_width
+    completed_loops = 0
+    while completed_loops < loops:
+        yield position
+        position, completed_loops = advance_left_scroll(
+            position, text_width, canvas_width, completed_loops, loops,
+        )
+
+
+def run(
+    matrix, config, duration=15, stop_event=None, module_config=None,
+    *, pinned_handles=None,
+):
     """Render one validated custom definition using capture-aware Matrix calls."""
     if module_config is None:
         raise ValueError("custom module configuration is required")
     if stop_event is not None and stop_event.is_set() is True:
         return False
     if module_config["type"] == "canvas":
-        return _run_canvas(matrix, duration, stop_event, module_config)
+        return _run_canvas(
+            matrix, duration, stop_event, module_config,
+            pinned_handles=pinned_handles,
+        )
 
     font = matrix.font(module_config["font"])
     foreground = matrix.colour_rgb(module_config["colour"])
@@ -344,11 +416,15 @@ def run(matrix, config, duration=15, stop_event=None, module_config=None):
     if direction == "left":
         position = matrix.matrix.width
         text_width = None
+        positions = None
     else:
         measure_canvas = matrix.matrix.CreateFrameCanvas()
         matrix.clear(measure_canvas)
         text_width = matrix.draw_text(font, 0, y, foreground, text, canvas=measure_canvas)
-        position = -text_width
+        positions = iter(scroll_positions(
+            matrix.matrix.width, text_width, module_config.get("loops", 1), direction,
+        ))
+        position = next(positions)
 
     completed_loops = 0
     loop_limit = module_config.get("loops", 1)
@@ -365,19 +441,16 @@ def run(matrix, config, duration=15, stop_event=None, module_config=None):
         text_width = text_width or drawn_width
         loop_finished = False
         if direction == "left":
-            position -= 1
-            if position + text_width < 0:
-                completed_loops += 1
-                loop_finished = completed_loops >= loop_limit
-                if not loop_finished:
-                    position = matrix.matrix.width
+            position, completed_loops = advance_left_scroll(
+                position, text_width, matrix.matrix.width, completed_loops, loop_limit,
+            )
+            loop_finished = completed_loops >= loop_limit
         else:
-            position += 1
-            if position > matrix.matrix.width:
-                completed_loops += 1
-                loop_finished = completed_loops >= loop_limit
-                if not loop_finished:
-                    position = -text_width
+            try:
+                position = next(positions)
+            except StopIteration:
+                completed_loops = loop_limit
+                loop_finished = True
         if _wait(stop_event, module_config["speed"]) or loop_finished:
             break
     return rendered

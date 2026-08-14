@@ -449,6 +449,237 @@ def _render_fade(matrix, canvas, announcement, stop_event, media_frame=None):
     return canvas, False, submitted
 
 
+def static_announcement_frames(matrix, announcement, stop_event=None):
+    """Yield rendered fade frames and one final static hold frame for text notices."""
+    transition_delay_ms = announcement["transition"]["duration_seconds"] * 1000 / 4
+    canvas = None
+    for step in range(1, 5):
+        if stop_event is not None and stop_event.is_set():
+            return
+        factor = step / 4
+        faded = {
+            **announcement,
+            "style": {
+                **announcement["style"],
+                "foreground": _scaled_colour(announcement["style"]["foreground"], factor),
+                "background": _scaled_colour(announcement["style"]["background"], factor),
+                "border_colour": _scaled_colour(
+                    announcement["style"]["border_colour"], factor,
+                ),
+            },
+        }
+        canvas = matrix.matrix.CreateFrameCanvas()
+        _render_static_layout(matrix, canvas, faded, stop_event=stop_event)
+        if stop_event is not None and stop_event.is_set():
+            return
+        yield canvas, transition_delay_ms
+
+    # The completed transition canvas is submitted once more as the sole hold
+    # frame; its hold delay represents the configured static duration.
+    yield canvas, announcement["timing"]["duration_seconds"] * 1000
+
+
+def _render_static_announcement_frames(matrix, announcement, stop_event):
+    submitted = False
+    canvas = None
+    for canvas, delay_ms in static_announcement_frames(matrix, announcement, stop_event):
+        canvas = matrix.swap(canvas)
+        submitted = True
+        delay = delay_ms / 1000
+        if stop_event is not None:
+            if stop_event.wait(delay):
+                return canvas, True, submitted
+        else:
+            time.sleep(delay)
+    interrupted = stop_event is not None and stop_event.is_set()
+    return canvas, interrupted, submitted
+
+
+def _static_transition_frames(matrix, announcement, stop_event, media_frame):
+    """Yield the four existing transition draws without submitting or waiting."""
+    transition = announcement["transition"]
+    transition_type = transition["type"]
+    delay_ms = transition["duration_seconds"] * 1000 / 4
+    for step in range(1, 5):
+        if stop_event is not None and stop_event.is_set():
+            return
+        canvas = matrix.matrix.CreateFrameCanvas()
+        if transition_type == "fade":
+            factor = step / 4
+            faded = {
+                **announcement,
+                "style": {
+                    **announcement["style"],
+                    "foreground": _scaled_colour(
+                        announcement["style"]["foreground"], factor,
+                    ),
+                    "background": _scaled_colour(
+                        announcement["style"]["background"], factor,
+                    ),
+                    "border_colour": _scaled_colour(
+                        announcement["style"]["border_colour"], factor,
+                    ),
+                },
+            }
+            _render_static_layout(
+                matrix, canvas, faded, media_brightness=factor,
+                stop_event=stop_event, media_frame=media_frame,
+            )
+        elif transition_type == "slide":
+            remaining = 4 - step
+            offset = (matrix.matrix.width * remaining) // 4
+            if transition["direction"] == "right":
+                offset = -offset
+            _render_static_layout(
+                matrix, canvas, announcement, x_offset=offset,
+                stop_event=stop_event, media_frame=media_frame,
+            )
+        elif transition_type == "wipe":
+            _render_static_layout(
+                matrix, canvas, announcement, stop_event=stop_event,
+                media_frame=media_frame,
+            )
+            width = matrix.matrix.width
+            reveal_width = (width * step) // 4
+            hidden_columns = (
+                range(reveal_width, width)
+                if transition["direction"] == "left"
+                else range(0, width - reveal_width)
+            )
+            background = matrix.colour_rgb(announcement["style"]["background"])
+            for x in hidden_columns:
+                matrix.draw_line(
+                    x, 0, x, matrix.matrix.height - 1, background, canvas=canvas,
+                )
+        else:
+            _render_static_layout(
+                matrix, canvas, announcement, stop_event=stop_event,
+                media_frame=media_frame,
+            )
+            order = dissolve_pixel_order(
+                announcement["id"], matrix.matrix.width, matrix.matrix.height,
+            )
+            revealed = (len(order) * step) // 4
+            background = matrix.colour_rgb(announcement["style"]["background"])
+            for x, y in order[revealed:]:
+                matrix.pixel(
+                    x, y, background.red, background.green, background.blue,
+                    canvas=canvas,
+                )
+        if stop_event is not None and stop_event.is_set():
+            return
+        yield canvas, delay_ms
+
+
+def announcement_frames(
+    matrix, announcements, duration=None, stop_event=None, eligibility=None,
+    monotonic=None, *, pinned_handles=None,
+):
+    """Yield one physical announcement invocation as canvases and delays.
+
+    A positive ``duration`` is an invocation deadline.  The final delay is
+    clipped after rendering, so drawing time and waits cannot overrun it.
+    """
+    monotonic = monotonic or time.monotonic
+    deadline = None
+    if duration is not None and float(duration) > 0:
+        deadline = monotonic() + float(duration)
+
+    def clipped(delay_ms):
+        if deadline is None:
+            return delay_ms
+        return min(delay_ms, max(0.0, (deadline - monotonic()) * 1000))
+
+    for announcement in announcements:
+        if stop_event is not None and stop_event.is_set():
+            return
+        if eligibility is not None and not eligibility(announcement):
+            continue
+        media_frame = None
+        if announcement["layout"] != "text_notice":
+            try:
+                media_options = {
+                    "stop_event": stop_event,
+                    "preserve_size": True,
+                    "decode_timeout": ANNOUNCEMENT_MEDIA_DECODE_TIMEOUT,
+                }
+                pinned_handle = (pinned_handles or {}).get(announcement["media"])
+                if pinned_handle is not None:
+                    media_options["pinned_handle"] = pinned_handle
+                frames = matrix.media_frames(
+                    announcement["media"], 1, 1, **media_options,
+                )
+            except (OSError, ValueError):
+                frames = []
+            if stop_event is not None and stop_event.is_set():
+                return
+            media_frame = frames[0] if frames else None
+
+        if announcement["timing"]["mode"] == "scroll":
+            style = announcement["style"]
+            font = matrix.font(style["font"])
+            foreground = matrix.colour_rgb(style["foreground"])
+            background = matrix.colour_rgb(style["background"])
+            text = announcement["headline"]
+            if announcement["message"]:
+                text += " - " + announcement["message"]
+            width = None
+            for _ in range(announcement["timing"]["loops"]):
+                x = matrix.matrix.width
+                while True:
+                    if stop_event is not None and stop_event.is_set():
+                        return
+                    canvas = matrix.matrix.CreateFrameCanvas()
+                    matrix.fill(
+                        background.red, background.green, background.blue,
+                        canvas=canvas,
+                    )
+                    drawn_width = matrix.draw_text(
+                        font, x, 20, foreground, text, canvas=canvas,
+                    )
+                    if width is None:
+                        width = (
+                            text_width(style["font"], text)
+                            if hasattr(font, "text_pixels")
+                            else drawn_width
+                        )
+                    if stop_event is not None and stop_event.is_set():
+                        return
+                    delay_ms = clipped(announcement["timing"]["frame_delay"] * 1000)
+                    if delay_ms <= 0:
+                        return
+                    yield canvas, delay_ms
+                    if x <= -width:
+                        break
+                    x -= 1
+            continue
+
+        transition_type = announcement["transition"]["type"]
+        if transition_type == "cut":
+            canvas = matrix.matrix.CreateFrameCanvas()
+            _render_static_layout(
+                matrix, canvas, announcement, stop_event=stop_event,
+                media_frame=media_frame,
+            )
+        else:
+            canvas = None
+            for canvas, delay_ms in _static_transition_frames(
+                matrix, announcement, stop_event, media_frame,
+            ):
+                delay_ms = clipped(delay_ms)
+                if delay_ms <= 0:
+                    return
+                yield canvas, delay_ms
+            if canvas is None:
+                return
+        if stop_event is not None and stop_event.is_set():
+            return
+        hold_ms = clipped(announcement["timing"]["duration_seconds"] * 1000)
+        if hold_ms <= 0:
+            return
+        yield canvas, hold_ms
+
+
 def _render_slide(matrix, canvas, announcement, stop_event, media_frame=None):
     delay = announcement["transition"]["duration_seconds"] / 4
     direction = announcement["transition"]["direction"]
@@ -542,102 +773,48 @@ def _render_pixel_dissolve(matrix, canvas, announcement, stop_event, media_frame
     return canvas, False, submitted
 
 
-def _run_announcements(matrix, announcements, stop_event=None, eligibility=None):
+def _run_announcements(
+    matrix, announcements, duration=None, stop_event=None, eligibility=None,
+    *, pinned_handles=None,
+):
     if stop_event is not None and stop_event.is_set():
         return False
-    canvas = None
     rendered = False
-    for announcement in announcements:
-        if stop_event is not None and stop_event.is_set():
-            break
-        if eligibility is not None and not eligibility(announcement):
-            continue
-        if canvas is None:
-            canvas = matrix.matrix.CreateFrameCanvas()
-        media_frame = None
-        if announcement["layout"] != "text_notice":
-            try:
-                frames = matrix.media_frames(
-                    announcement["media"], 1, 1, stop_event=stop_event,
-                    preserve_size=True,
-                    decode_timeout=ANNOUNCEMENT_MEDIA_DECODE_TIMEOUT,
-                )
-            except (OSError, ValueError):
-                frames = []
-            if stop_event is not None and stop_event.is_set():
-                break
-            media_frame = frames[0] if frames else None
-        if announcement["timing"]["mode"] == "scroll":
-            if announcement["transition"]["type"] != "cut":
-                raise NotImplementedError("scrolling announcement transition is not implemented")
-            if announcement["layout"] != "text_notice":
-                raise NotImplementedError("scrolling announcement layout is not implemented")
-            canvas, interrupted, submitted = _scroll_text_notice(
-                matrix, canvas, announcement, stop_event,
-            )
-            rendered = rendered or submitted
-            if interrupted:
+    for canvas, delay_ms in announcement_frames(
+        matrix, announcements, duration, stop_event, eligibility,
+        pinned_handles=pinned_handles,
+    ):
+        matrix.swap(canvas)
+        rendered = True
+        seconds = delay_ms / 1000
+        if stop_event is not None:
+            if stop_event.wait(seconds):
                 break
         else:
-            if announcement["transition"]["type"] == "fade":
-                canvas, interrupted, submitted = _render_fade(
-                    matrix, canvas, announcement, stop_event, media_frame,
-                )
-                rendered = rendered or submitted
-                if interrupted:
-                    break
-            elif announcement["transition"]["type"] == "slide":
-                canvas, interrupted, submitted = _render_slide(
-                    matrix, canvas, announcement, stop_event, media_frame,
-                )
-                rendered = rendered or submitted
-                if interrupted:
-                    break
-            elif announcement["transition"]["type"] == "wipe":
-                canvas, interrupted, submitted = _render_wipe(
-                    matrix, canvas, announcement, stop_event, media_frame,
-                )
-                rendered = rendered or submitted
-                if interrupted:
-                    break
-            elif announcement["transition"]["type"] == "pixel_dissolve":
-                canvas, interrupted, submitted = _render_pixel_dissolve(
-                    matrix, canvas, announcement, stop_event, media_frame,
-                )
-                rendered = rendered or submitted
-                if interrupted:
-                    break
-            else:
-                _render_static_layout(
-                    matrix, canvas, announcement, stop_event=stop_event,
-                    media_frame=media_frame,
-                )
-                if stop_event is not None and stop_event.is_set():
-                    break
-                canvas = matrix.swap(canvas)
-                rendered = True
-            seconds = announcement["timing"]["duration_seconds"]
-            if stop_event is not None:
-                if stop_event.wait(seconds):
-                    break
-            else:
-                time.sleep(seconds)
+            time.sleep(seconds)
     return rendered
 
 
-def run_preview(matrix, announcement, stop_event=None):
+def run_preview(matrix, announcement, stop_event=None, *, pinned_handles=None):
     """Render one validated draft regardless of enabled or schedule state."""
-    return _run_announcements(matrix, [announcement], stop_event=stop_event)
+    return _run_announcements(
+        matrix, [announcement], stop_event=stop_event,
+        pinned_handles=pinned_handles,
+    )
 
 
-def run(matrix, config, duration, stop_event=None, now_provider=dt.datetime.now):
+def run(
+    matrix, config, duration, stop_event=None, now_provider=dt.datetime.now,
+    *, pinned_handles=None,
+):
     """Render each eligible announcement once in configured order, rechecking at start."""
-    del duration
     announcements = config["announcement_board"]["announcements"]
     return _run_announcements(
         matrix,
         announcements,
+        duration=duration,
         stop_event=stop_event,
+        pinned_handles=pinned_handles,
         eligibility=lambda announcement: (
             announcement.get("enabled", True)
             and is_announcement_active(announcement, now=now_provider())

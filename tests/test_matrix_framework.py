@@ -1,5 +1,6 @@
 import importlib
 import os
+import subprocess
 import sys
 import tempfile
 import threading
@@ -17,7 +18,12 @@ fake_pil = types.SimpleNamespace(Image=fake_image, ImageDraw=Mock(), ImageSequen
 previous_modules = {name: sys.modules.get(name) for name in ("rgbmatrix", "PIL")}
 sys.modules["rgbmatrix"] = fake_rgb
 sys.modules["PIL"] = fake_pil
+previous_framework = sys.modules.pop("matrix_framework", None)
 framework = importlib.import_module("matrix_framework")
+if previous_framework is None:
+    sys.modules.pop("matrix_framework", None)
+else:
+    sys.modules["matrix_framework"] = previous_framework
 for name, previous in previous_modules.items():
     if previous is None:
         sys.modules.pop(name, None)
@@ -28,8 +34,60 @@ Matrix = framework.Matrix
 
 
 class MatrixFrameworkTests(unittest.TestCase):
+    def test_import_without_rgbmatrix_allows_capture_but_physical_matrix_fails_closed(self):
+        script = """
+import matrix_framework
+colour = matrix_framework.graphics.Color(1, 2, 3)
+assert (colour.red, colour.green, colour.blue) == (1, 2, 3)
+try:
+    matrix_framework.Matrix()
+except RuntimeError as error:
+    assert str(error) == 'RGB Matrix hardware bindings are unavailable'
+else:
+    raise AssertionError('physical matrix construction unexpectedly succeeded')
+"""
+        environment = os.environ.copy()
+        environment["PYTHONPATH"] = str(Path(__file__).resolve().parents[1])
+        with tempfile.TemporaryDirectory() as directory:
+            result = subprocess.run(
+                [sys.executable, "-c", script], cwd=directory, env=environment,
+                text=True, capture_output=True,
+            )
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+
+    def test_import_propagates_unrelated_rgbmatrix_transitive_module_not_found(self):
+        with tempfile.TemporaryDirectory() as directory:
+            Path(directory, "rgbmatrix.py").write_text(
+                "raise ModuleNotFoundError(\"No module named 'unrelated_native_dependency'\", "
+                "name='unrelated_native_dependency')\n",
+                encoding="utf-8",
+            )
+            script = """
+try:
+    import matrix_framework
+except ModuleNotFoundError as error:
+    assert error.name == 'unrelated_native_dependency'
+    assert str(error) == "No module named 'unrelated_native_dependency'"
+else:
+    raise AssertionError('transitive import fault was hidden by fallback')
+"""
+            environment = os.environ.copy()
+            environment["PYTHONPATH"] = os.pathsep.join((
+                directory, str(Path(__file__).resolve().parents[1]),
+            ))
+            result = subprocess.run(
+                [sys.executable, "-c", script], cwd=directory, env=environment,
+                text=True, capture_output=True,
+            )
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+
     def test_colour_rgb_accepts_html_hex_values(self):
-        with patch("matrix_framework.graphics.Color", side_effect=lambda red, green, blue: (red, green, blue)):
+        with patch.object(
+            framework.graphics, "Color",
+            side_effect=lambda red, green, blue: (red, green, blue),
+        ):
             self.assertEqual(Matrix.colour_rgb("#1aB2ff"), (26, 178, 255))
         with self.assertRaises(ValueError):
             Matrix.colour_rgb("red")
@@ -163,6 +221,29 @@ class MatrixFrameworkTests(unittest.TestCase):
         image_open.assert_not_called()
         iterator.assert_not_called()
 
+    def test_media_frames_reaper_start_failure_precedes_child_spawn(self):
+        matrix = Matrix.__new__(Matrix)
+        matrix.matrix = Mock(width=64, height=32)
+        matrix._media_file = Mock(return_value=framework.pathlib.Path("/tmp/asset.gif"))
+
+        with patch.object(
+            framework, "_ensure_decoder_reaper",
+            side_effect=RuntimeError("reaper unavailable"),
+        ), patch.object(
+            framework.os, "open", return_value=9,
+        ), patch.object(
+            framework.os, "close",
+        ) as close_fd, patch.object(
+            framework.subprocess, "Popen",
+        ) as popen, patch.object(
+            framework, "_read_exact_interruptibly", return_value=b"",
+        ):
+            with self.assertRaisesRegex(RuntimeError, "reaper unavailable"):
+                matrix.media_frames("asset.gif", 1, 1)
+
+        popen.assert_not_called()
+        close_fd.assert_called_once_with(9)
+
     def test_media_frames_repeats_clean_short_decoder_timeline(self):
         matrix = Matrix.__new__(Matrix)
         matrix.matrix = Mock(width=64, height=32)
@@ -187,6 +268,421 @@ class MatrixFrameworkTests(unittest.TestCase):
         frombytes.assert_called_once_with("RGB", (64, 32), raw)
         video_filter = popen.call_args.args[0][popen.call_args.args[0].index("-vf") + 1]
         self.assertIn("fps=2:eof_action=pass", video_filter)
+
+    def test_decoder_reaper_normal_lifecycle_leaves_no_thread(self):
+        framework._reset_decoder_reaper_for_tests()
+        work_queue = framework._ensure_decoder_reaper()
+        reaper = framework._decoder_reaper_thread
+
+        framework._release_decoder_reaper(work_queue)
+
+        self.assertFalse(reaper.is_alive())
+        self.assertIsNone(framework._decoder_reaper_thread)
+        self.assertIsNone(framework._decoder_reaper_queue)
+        self.assertEqual(framework._decoder_reaper_leases, 0)
+
+    def test_decoder_reaper_concurrent_leases_stop_only_after_final_release(self):
+        framework._reset_decoder_reaper_for_tests()
+        first_queue = framework._ensure_decoder_reaper()
+        reaper = framework._decoder_reaper_thread
+        second_queue = framework._ensure_decoder_reaper()
+        self.assertIsNot(second_queue, first_queue)
+        self.assertIs(second_queue.owner, first_queue.owner)
+
+        framework._release_decoder_reaper(first_queue)
+        self.assertTrue(reaper.is_alive())
+        self.assertIs(framework._decoder_reaper_thread, reaper)
+        self.assertEqual(framework._decoder_reaper_leases, 1)
+
+        framework._release_decoder_reaper(second_queue)
+        self.assertFalse(reaper.is_alive())
+        self.assertIsNone(framework._decoder_reaper_thread)
+        self.assertEqual(framework._decoder_reaper_leases, 0)
+
+    def test_media_frames_popen_failure_releases_owner_and_input_fd(self):
+        framework._reset_decoder_reaper_for_tests()
+        matrix = Matrix.__new__(Matrix)
+        matrix.matrix = Mock(width=64, height=32)
+        matrix._media_file = Mock(return_value=framework.pathlib.Path("/tmp/asset.gif"))
+
+        with patch.object(framework.os, "geteuid", return_value=1), patch.object(
+            framework.os, "open", return_value=9,
+        ), patch.object(framework.os, "close") as close_fd, patch.object(
+            framework.subprocess, "Popen", side_effect=RuntimeError("spawn failed"),
+        ):
+            with self.assertRaisesRegex(RuntimeError, "spawn failed"):
+                matrix.media_frames("asset.gif", 1, 1)
+
+        close_fd.assert_called_once_with(9)
+        self.assertIsNone(framework._decoder_reaper_thread)
+        self.assertIsNone(framework._decoder_reaper_queue)
+        self.assertEqual(framework._decoder_reaper_leases, 0)
+
+    def test_decoder_reaper_deferred_process_precedes_stop_and_worker_exits(self):
+        framework._reset_decoder_reaper_for_tests()
+        operations = []
+        real_queue_type = framework.queue.SimpleQueue
+
+        class RecordingQueue:
+            def __init__(self):
+                self._queue = real_queue_type()
+
+            def put(self, item):
+                operations.append(item)
+                self._queue.put(item)
+
+            def get(self):
+                return self._queue.get()
+
+        process = Mock()
+        reaped = threading.Event()
+        process.wait.side_effect = lambda: reaped.set()
+        with patch.object(framework.queue, "SimpleQueue", RecordingQueue):
+            work_queue = framework._ensure_decoder_reaper()
+            reaper = framework._decoder_reaper_thread
+            framework._release_decoder_reaper(work_queue, deferred_process=process)
+
+        self.assertEqual(operations, [])
+        self.assertTrue(reaped.wait(0.5), "deferred decoder was not reaped")
+        reaper.join(0.5)
+        self.assertFalse(reaper.is_alive())
+
+    def test_media_frames_deferred_handoff_put_fault_preserves_primary_and_child_owner(self):
+        framework._reset_decoder_reaper_for_tests()
+        matrix = Matrix.__new__(Matrix)
+        matrix.matrix = Mock(width=64, height=32)
+        matrix._media_file = Mock(return_value=framework.pathlib.Path("/tmp/asset.gif"))
+        real_queue_type = framework.queue.SimpleQueue
+        reaped = threading.Event()
+
+        class DeferredPutFaultQueue:
+            def __init__(self):
+                self._queue = real_queue_type()
+
+            def put(self, item):
+                if item is not framework._DECODER_REAPER_STOP:
+                    raise RuntimeError("deferred put failed")
+                self._queue.put(item)
+
+            def get(self):
+                return self._queue.get()
+
+        process = Mock()
+        process.stdout = Mock()
+        process.poll.return_value = None
+
+        def wait_for_decoder(*_args, **kwargs):
+            if "timeout" in kwargs:
+                raise subprocess.TimeoutExpired("ffmpeg", kwargs["timeout"])
+            reaped.set()
+            return 0
+
+        process.wait.side_effect = wait_for_decoder
+        with patch.object(framework.queue, "SimpleQueue", DeferredPutFaultQueue), patch.object(
+            framework.os, "geteuid", return_value=1,
+        ), patch.object(framework.os, "open", return_value=9), patch.object(
+            framework.os, "close",
+        ), patch.object(framework.subprocess, "Popen", return_value=process), patch.object(
+            framework, "_read_exact_interruptibly",
+            side_effect=ValueError("primary decode failed"),
+        ):
+            with self.assertRaisesRegex(ValueError, "primary decode failed"):
+                matrix.media_frames("asset.gif", 1, 1, decode_timeout=1)
+
+        self.assertTrue(reaped.wait(0.5), "killed decoder lost its pre-spawn owner")
+
+    def test_decoder_reaper_stop_put_fault_never_detaches_live_worker(self):
+        framework._reset_decoder_reaper_for_tests()
+        real_queue_type = framework.queue.SimpleQueue
+
+        class StopPutFaultQueue:
+            def __init__(self):
+                self._queue = real_queue_type()
+
+            def put(self, item):
+                if item is framework._DECODER_REAPER_STOP:
+                    raise RuntimeError("stop put failed")
+                self._queue.put(item)
+
+            def get(self):
+                return self._queue.get()
+
+            def force_stop(self):
+                self._queue.put(framework._DECODER_REAPER_STOP)
+
+        with patch.object(framework.queue, "SimpleQueue", StopPutFaultQueue):
+            work_queue = framework._ensure_decoder_reaper()
+            reaper = framework._decoder_reaper_thread
+            try:
+                try:
+                    framework._release_decoder_reaper(work_queue)
+                except RuntimeError:
+                    pass
+                worker_alive = reaper.is_alive()
+                tracked_thread = framework._decoder_reaper_thread
+                tracked_owner = framework._decoder_reaper_queue
+            finally:
+                if reaper.is_alive():
+                    work_queue.force_stop()
+                    reaper.join(0.5)
+                framework._decoder_reaper_thread = None
+                framework._decoder_reaper_queue = None
+                framework._decoder_reaper_leases = 0
+                framework._decoder_reaper_had_deferred = False
+
+        self.assertTrue(
+            not worker_alive
+            or (tracked_thread is reaper and tracked_owner is work_queue),
+            "live decoder reaper became unreachable after STOP publication failed",
+        )
+
+    def test_decoder_reaper_new_acquire_waits_for_old_owned_child_to_exit(self):
+        framework._reset_decoder_reaper_for_tests()
+        release_wait = threading.Event()
+        process = Mock()
+        process.wait.side_effect = lambda: release_wait.wait(0.5)
+        first_queue = framework._ensure_decoder_reaper()
+        first_reaper = framework._decoder_reaper_thread
+
+        framework._release_decoder_reaper(first_queue, deferred_process=process)
+        with self.assertRaisesRegex(RuntimeError, "shutting down"):
+            framework._ensure_decoder_reaper()
+        self.assertIs(framework._decoder_reaper_thread, first_reaper)
+        self.assertIs(framework._decoder_reaper_queue, first_queue.owner)
+
+        release_wait.set()
+        first_reaper.join(0.5)
+        second_queue = framework._ensure_decoder_reaper()
+        second_reaper = framework._decoder_reaper_thread
+
+        self.assertIsNot(second_queue, first_queue)
+        self.assertIsNot(second_reaper, first_reaper)
+        framework._release_decoder_reaper(second_queue)
+        self.assertFalse(first_reaper.is_alive())
+        self.assertFalse(second_reaper.is_alive())
+
+    def test_decoder_reaper_release_join_fault_preserves_popen_failure(self):
+        framework._reset_decoder_reaper_for_tests()
+        matrix = Matrix.__new__(Matrix)
+        matrix.matrix = Mock(width=64, height=32)
+        matrix._media_file = Mock(return_value=framework.pathlib.Path("/tmp/asset.gif"))
+        reaper = Mock()
+        reaper.is_alive.return_value = True
+        reaper.join.side_effect = RuntimeError("join failed")
+
+        try:
+            with patch.object(framework.os, "geteuid", return_value=1), patch.object(
+                framework.os, "open", return_value=9,
+            ), patch.object(framework.os, "close"), patch.object(
+                framework.threading, "Thread", return_value=reaper,
+            ), patch.object(
+                framework.subprocess, "Popen", side_effect=ValueError("primary spawn failed"),
+            ):
+                with self.assertRaisesRegex(ValueError, "primary spawn failed"):
+                    matrix.media_frames("asset.gif", 1, 1)
+
+            reaper.start.assert_called_once_with()
+            reaper.join.assert_called_once()
+            self.assertIs(framework._decoder_reaper_thread, reaper)
+            self.assertIsNotNone(framework._decoder_reaper_queue)
+            self.assertEqual(framework._decoder_reaper_leases, 0)
+        finally:
+            with framework._decoder_reaper_lock:
+                framework._set_decoder_reaper_owner(None)
+
+    def test_video_frame_timeline_reaper_start_failure_precedes_child_spawn(self):
+        matrix = Matrix.__new__(Matrix)
+        reaper = Mock()
+        reaper.start.side_effect = RuntimeError("reaper unavailable")
+
+        with patch.object(
+            framework, "_decoder_reaper_thread", None, create=True,
+        ), patch.object(
+            framework, "_decoder_reaper_queue", None, create=True,
+        ), patch.object(
+            framework.threading, "Thread", return_value=reaper,
+        ), patch.object(
+            framework.os, "open", return_value=9,
+        ), patch.object(
+            framework.os, "close",
+        ) as close_fd, patch.object(
+            framework.subprocess, "Popen",
+        ) as popen, patch.object(
+            framework, "_read_exact_interruptibly", return_value=b"",
+        ):
+            with self.assertRaisesRegex(RuntimeError, "reaper unavailable"):
+                list(matrix._video_frame_timeline("video.mp4", 2, 2, True))
+
+        popen.assert_not_called()
+        close_fd.assert_called_once_with(9)
+
+    def test_video_frame_timeline_timeout_transfers_reaping_to_existing_owner_across_process_races(self):
+        matrix = Matrix.__new__(Matrix)
+        for race in ("poll", "terminate"):
+            with self.subTest(race=race):
+                process = Mock()
+                process.stdout = Mock()
+                process.poll.return_value = None
+                if race == "poll":
+                    process.poll.side_effect = ProcessLookupError("poll raced")
+                else:
+                    process.terminate.side_effect = ProcessLookupError("terminate raced")
+                process.wait.side_effect = [
+                    framework.subprocess.TimeoutExpired("ffmpeg", 2),
+                    framework.subprocess.TimeoutExpired("ffmpeg", 0.25),
+                ]
+                owned_queue = Mock()
+
+                with patch.object(
+                    framework, "_ensure_decoder_reaper", return_value=owned_queue,
+                ), patch.object(
+                    framework, "_release_decoder_reaper",
+                ) as release_reaper, patch.object(
+                    framework.threading, "Thread",
+                    side_effect=RuntimeError("thread creation unavailable after spawn"),
+                ) as thread, patch.object(
+                    framework.os, "open", return_value=9,
+                ), patch.object(
+                    framework.os, "close",
+                ), patch.object(
+                    framework.subprocess, "Popen", return_value=process,
+                ), patch.object(
+                    framework, "_read_exact_interruptibly", return_value=b"",
+                ):
+                    self.assertEqual(
+                        list(matrix._video_frame_timeline("video.mp4", 2, 2, True)),
+                        [],
+                    )
+
+                self.assertEqual(process.wait.call_count, 2)
+                process.kill.assert_called_once_with()
+                release_reaper.assert_called_once_with(
+                    owned_queue, deferred_process=process,
+                )
+                thread.assert_not_called()
+
+    def test_video_frame_timeline_closes_stdout_and_input_on_normal_exhaustion(self):
+        matrix = Matrix.__new__(Matrix)
+        raw = b"\x10\x20\x30" * 4
+        image = Mock()
+        process = Mock()
+        process.stdout = Mock()
+        process.poll.return_value = 0
+        process.wait.return_value = 0
+
+        with patch.object(framework.os, "open", return_value=9), patch.object(
+            framework.os, "close"
+        ) as close_fd, patch.object(
+            framework.subprocess, "Popen", return_value=process
+        ), patch.object(
+            framework, "_read_exact_interruptibly", side_effect=[raw, b""]
+        ), patch.object(
+            framework.Image, "frombytes", return_value=image, create=True
+        ):
+            frames = list(matrix._video_frame_timeline("video.mp4", 2, 2, True))
+
+        self.assertEqual(frames, [image])
+        process.stdout.close.assert_called_once_with()
+        close_fd.assert_called_once_with(9)
+
+    def test_video_frame_timeline_closes_stdout_and_input_on_early_close(self):
+        matrix = Matrix.__new__(Matrix)
+        raw = b"\x10\x20\x30" * 4
+        process = Mock()
+        process.stdout = Mock()
+        process.poll.return_value = None
+        process.wait.return_value = 0
+
+        with patch.object(framework.os, "open", return_value=9), patch.object(
+            framework.os, "close"
+        ) as close_fd, patch.object(
+            framework.subprocess, "Popen", return_value=process
+        ), patch.object(
+            framework, "_read_exact_interruptibly", return_value=raw
+        ), patch.object(
+            framework.Image, "frombytes", return_value=Mock(), create=True
+        ):
+            timeline = matrix._video_frame_timeline("video.mp4", 2, 2, True)
+            next(timeline)
+            close_fd.assert_called_once_with(9)
+            timeline.close()
+
+        process.stdout.close.assert_called_once_with()
+        process.terminate.assert_called_once_with()
+        process.wait.assert_called_once_with(timeout=2)
+        close_fd.assert_called_once_with(9)
+
+    def test_video_frame_timeline_cleanup_preserves_primary_decoder_failure(self):
+        matrix = Matrix.__new__(Matrix)
+        process = Mock()
+        process.stdout.close.side_effect = RuntimeError("stdout close failed")
+        process.poll.return_value = 0
+        process.wait.return_value = 0
+
+        with patch.object(framework.os, "open", return_value=9), patch.object(
+            framework.os, "close",
+        ) as close_fd, patch.object(
+            framework.subprocess, "Popen", return_value=process,
+        ), patch.object(
+            framework, "_read_exact_interruptibly",
+            side_effect=ValueError("primary read failed"),
+        ):
+            with self.assertRaisesRegex(ValueError, "primary read failed"):
+                list(matrix._video_frame_timeline("video.mp4", 2, 2, True))
+
+        process.stdout.close.assert_called_once_with()
+        process.wait.assert_called_once_with(timeout=2)
+        close_fd.assert_called_once_with(9)
+
+    def test_video_frame_timeline_surfaces_cleanup_failure_without_primary_failure(self):
+        matrix = Matrix.__new__(Matrix)
+        process = Mock()
+        process.stdout.close.side_effect = RuntimeError("stdout close failed")
+        process.poll.return_value = 0
+        process.wait.return_value = 0
+
+        with patch.object(framework.os, "open", return_value=9), patch.object(
+            framework.os, "close",
+        ) as close_fd, patch.object(
+            framework.subprocess, "Popen", return_value=process,
+        ), patch.object(
+            framework, "_read_exact_interruptibly", return_value=b"",
+        ):
+            with self.assertRaisesRegex(RuntimeError, "stdout close failed"):
+                list(matrix._video_frame_timeline("video.mp4", 2, 2, True))
+
+        process.wait.assert_called_once_with(timeout=2)
+        close_fd.assert_called_once_with(9)
+
+    def test_video_frame_timeline_parent_input_close_failure_surfaces_without_unsafe_retry(self):
+        matrix = Matrix.__new__(Matrix)
+        process = Mock()
+        process.poll.return_value = 0
+        process.wait.return_value = 0
+        close_calls = []
+
+        def ambiguous_close(fd):
+            close_calls.append(fd)
+            if len(close_calls) == 1:
+                raise InterruptedError("parent input close ownership ambiguous")
+            raise OSError("numeric descriptor was unsafely retried after ambiguous close")
+
+        with patch.object(framework.os, "open", return_value=9), patch.object(
+            framework.os, "close", side_effect=ambiguous_close,
+        ), patch.object(
+            framework.subprocess, "Popen", return_value=process,
+        ), patch.object(
+            framework, "_read_exact_interruptibly", return_value=b"",
+        ) as read_frame:
+            with self.assertRaisesRegex(
+                InterruptedError, "parent input close ownership ambiguous",
+            ):
+                list(matrix._video_frame_timeline("video.mp4", 2, 2, True))
+
+        self.assertEqual(close_calls, [9])
+        read_frame.assert_not_called()
+        process.stdout.close.assert_called_once_with()
+        process.wait.assert_called_once_with(timeout=2)
 
     def test_media_frames_can_preserve_source_dimensions_for_canvas_layers(self):
         matrix = Matrix.__new__(Matrix)
@@ -249,14 +745,21 @@ class MatrixFrameworkTests(unittest.TestCase):
             stop.set()
             return b""
 
-        reaper = Mock()
+        owned_queue = Mock()
         with patch.object(framework.time, "monotonic", side_effect=[0, 46]), patch.object(
             framework.os, "open", return_value=9,
         ), patch.object(framework.os, "close"), patch.object(
             framework.subprocess, "Popen", return_value=process,
         ), patch.object(
             framework, "_read_exact_interruptibly", side_effect=cancel_during_read,
-        ), patch.object(framework.threading, "Thread", return_value=reaper) as thread:
+        ), patch.object(
+            framework, "_ensure_decoder_reaper", return_value=owned_queue,
+        ), patch.object(
+            framework, "_release_decoder_reaper",
+        ) as release_reaper, patch.object(
+            framework.threading, "Thread",
+            side_effect=AssertionError("reaper ownership must exist before decoder spawn"),
+        ) as thread:
             self.assertEqual(
                 matrix.media_frames("animation.gif", 1, 1, stop_event=stop),
                 [],
@@ -264,8 +767,10 @@ class MatrixFrameworkTests(unittest.TestCase):
 
         process.kill.assert_called_once_with()
         process.wait.assert_not_called()
-        self.assertTrue(thread.call_args.kwargs["daemon"])
-        reaper.start.assert_called_once_with()
+        release_reaper.assert_called_once_with(
+            owned_queue, deferred_process=process,
+        )
+        thread.assert_not_called()
 
     def test_canvas_many_source_deadline_includes_decoder_cleanup(self):
         from config_store import _validate_canvas_module
@@ -354,14 +859,21 @@ class MatrixFrameworkTests(unittest.TestCase):
         stop = Mock()
         stop.is_set.return_value = False
         stop.wait.return_value = True
-        reaper = Mock()
+        owned_queue = Mock()
         with patch.object(framework.time, "monotonic", side_effect=lambda: clock[0]), patch.object(
             framework.os, "open", return_value=9,
         ), patch.object(framework.os, "close"), patch.object(
             framework.subprocess, "Popen", side_effect=launch_decoder,
         ), patch.object(
             framework, "_read_ppm_frame_interruptibly", side_effect=read_frame,
-        ), patch.object(framework.threading, "Thread", return_value=reaper):
+        ), patch.object(
+            framework, "_ensure_decoder_reaper", return_value=owned_queue,
+        ), patch.object(
+            framework, "_release_decoder_reaper",
+        ) as release_reaper, patch.object(
+            framework.threading, "Thread",
+            side_effect=AssertionError("per-failure reaper threads are forbidden"),
+        ):
             result = custom_text.run(
                 matrix, {}, duration=1, stop_event=stop, module_config=options,
             )
@@ -381,6 +893,13 @@ class MatrixFrameworkTests(unittest.TestCase):
             process.wait.call_count == 0
             for process in processes[:-1]
         ))
+        self.assertEqual(
+            [call.kwargs["deferred_process"] for call in release_reaper.call_args_list[:-1]],
+            processes[:-1],
+        )
+        self.assertIsNone(
+            release_reaper.call_args_list[-1].kwargs["deferred_process"],
+        )
 
     def test_media_frames_stdout_close_failure_still_reaps_and_closes_input(self):
         matrix = Matrix.__new__(Matrix)
@@ -407,6 +926,43 @@ class MatrixFrameworkTests(unittest.TestCase):
         process.kill.assert_called_once_with()
         self.assertGreaterEqual(process.wait.call_count, 2)
         close_fd.assert_called_once_with(19)
+
+    def test_media_frames_cleanup_preserves_primary_decoder_failure(self):
+        matrix = Matrix.__new__(Matrix)
+        matrix.matrix = Mock(width=64, height=32)
+        matrix._media_file = Mock(return_value=framework.pathlib.Path("/tmp/asset.gif"))
+
+        for cleanup_case in ("stdout", "input_fd"):
+            with self.subTest(cleanup_case=cleanup_case):
+                process = Mock()
+                process.poll.return_value = 0
+                process.wait.return_value = 0
+                if cleanup_case == "stdout":
+                    process.stdout.close.side_effect = OSError("stdout close failed")
+
+                close_error = (
+                    OSError("input close failed")
+                    if cleanup_case == "input_fd" else None
+                )
+                with patch.object(
+                    framework.os, "open", return_value=19,
+                ), patch.object(
+                    framework.os, "close", side_effect=close_error,
+                ) as close_fd, patch.object(
+                    framework.subprocess, "Popen", return_value=process,
+                ), patch.object(
+                    framework, "_read_ppm_frame_interruptibly",
+                    side_effect=ValueError("primary decode failed"),
+                ):
+                    with self.assertRaisesRegex(ValueError, "primary decode failed"):
+                        matrix.media_frames(
+                            "asset.gif", frame_count=1, fps=10,
+                            preserve_size=True, decode_timeout=1,
+                        )
+
+                process.stdout.close.assert_called_once_with()
+                process.wait.assert_not_called()
+                close_fd.assert_called_once_with(19)
 
     def test_media_frames_cancels_while_waiting_for_decoder_completion(self):
         matrix = Matrix.__new__(Matrix)
@@ -827,7 +1383,7 @@ class MatrixFrameworkTests(unittest.TestCase):
         matrix._frame_capture = Mock()
         matrix._capture_fonts = {id(font): "capture-font"}
 
-        with patch("matrix_framework.graphics.DrawText", return_value=18, create=True):
+        with patch.object(framework.graphics, "DrawText", return_value=18, create=True):
             position, width = matrix.widget_scroll(
                 "Brighton | Clear sky", font, 30, 31, colour, canvas=canvas
             )
@@ -846,7 +1402,7 @@ class MatrixFrameworkTests(unittest.TestCase):
         matrix._frame_capture = Mock()
         matrix._capture_fonts = {id(font): "capture-font"}
 
-        with patch("matrix_framework.graphics.DrawText", return_value=18, create=True):
+        with patch.object(framework.graphics, "DrawText", return_value=18, create=True):
             position, width = matrix.widget_scroll(
                 "Weather", font, 65, 31, colour, canvas=canvas, step=-1, wrap=True
             )

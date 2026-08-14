@@ -8,7 +8,9 @@ import time
 from font_catalog import text_width
 from modules.openweather_common import OpenWeatherClient, OpenWeatherError, composite_icon
 from modules.scroll_timing import duration_milliseconds, frame_delay_seconds, scroll_frames
-from modules.weather_app import _hex_rgb, _render_error, _wait
+from modules.weather_app import (
+    _hex_rgb, _render_error, _wait, measure_ticker, ticker_positions,
+)
 
 
 @dataclass(frozen=True)
@@ -82,19 +84,9 @@ def prepare(config, stop_event=None, client=None, api_key=None):
     )
 
 
-def run(
-    matrix, config, duration=20, stop_event=None, client=None, api_key=None,
-    prepared=None,
-):
+def overview_frames(matrix, config, prepared, stop_event=None):
+    """Submit and yield one complete prepared overview ticker cycle."""
     settings = config.get("openweather_overview", {})
-    prepared = prepared or prepare(
-        config, stop_event=stop_event, client=client, api_key=api_key
-    )
-    if prepared.cancelled:
-        return False
-    if prepared.error:
-        _render_error(matrix, prepared.error, duration, stop_event)
-        return False
     weather = prepared.weather
     icon = prepared.icon
     suffix = "F" if settings.get("units", "celsius") == "fahrenheit" else "C"
@@ -111,19 +103,16 @@ def run(
     ticker_y = settings.get("ticker_y", 28)
     scroll = ticker_text(weather, settings.get("units", "celsius"))
     direction = settings.get("scroll_direction", "left")
-    text_width = matrix.draw_text(
-        ticker_font, -10000, ticker_y, ticker, scroll, canvas=canvas
+    text_width = measure_ticker(
+        matrix, ticker_font, ticker_y, ticker, scroll, canvas,
     )
-    if direction == "right":
-        scroll_x = -text_width
-        step = -1
-    else:
-        scroll_x = canvas.width
-        step = 1
+    step = -1 if direction == "right" else 1
     frame_delay = frame_delay_seconds(settings.get("scroll_speed", 0.05))
-    loops_remaining = settings.get("scroll_loops", 1)
-
-    while loops_remaining > 0 and not (stop_event and stop_event.is_set()):
+    for scroll_x in ticker_positions(
+        canvas.width, text_width, settings.get("scroll_loops", 1), direction,
+    ):
+        if stop_event and stop_event.is_set():
+            return
         matrix.fill(*_hex_rgb(background_hex), canvas=canvas)
         matrix.draw_image(
             icon,
@@ -147,17 +136,28 @@ def run(
             main_font, settings.get("low_x", 50), settings.get("low_y", 20),
             low, background, str(weather.low), canvas=canvas,
         )
-        scroll_x, _ = matrix.widget_scroll(
+        matrix.widget_scroll(
             scroll, ticker_font, scroll_x, ticker_y, ticker,
             canvas=canvas, step=step, wrap=False,
         )
-        if step >= 0 and scroll_x + text_width < 0:
-            loops_remaining -= 1
-            scroll_x = canvas.width
-        elif step < 0 and scroll_x > canvas.width:
-            loops_remaining -= 1
-            scroll_x = -text_width
+        submitted = canvas
         canvas = matrix.swap(canvas)
+        yield submitted, frame_delay
+
+
+def run(
+    matrix, config, duration=20, stop_event=None, client=None, api_key=None,
+    prepared=None,
+):
+    prepared = prepared or prepare(
+        config, stop_event=stop_event, client=client, api_key=api_key
+    )
+    if prepared.cancelled:
+        return False
+    if prepared.error:
+        _render_error(matrix, prepared.error, duration, stop_event)
+        return False
+    for _canvas, frame_delay in overview_frames(matrix, config, prepared, stop_event):
         if _wait(stop_event, frame_delay):
             break
     return True

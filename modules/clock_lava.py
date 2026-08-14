@@ -173,77 +173,91 @@ def measure_text(matrix, font, y, colour, text, canvas):
     return matrix.draw_text(font, 0, y, colour, text, canvas=canvas)
 
 
+def prepare_lava_frame_state(matrix, lava_config=None):
+    """Prepare one physical Lava invocation without changing palette selection."""
+    settings = lava_config or {}
+    c_outside, c_inside, c_line = pick_palette(matrix, lava_config)
+    return {
+        "settings": settings,
+        "colours": (c_outside, c_inside, c_line),
+        "blobs": make_blobs(settings),
+        "font_time": matrix.font(settings.get("time_font", "9x18B")),
+        "font_date": matrix.font(settings.get("date_font", "clR6x12")),
+        "text_colour": (
+            matrix.colour_rgb(settings["text_colour"])
+            if "text_colour" in settings else matrix.colour("white")
+        ),
+        "border_colour": (
+            matrix.colour_rgb(settings["border_colour"])
+            if "border_colour" in settings else matrix.colour("black")
+        ),
+    }
+
+
+def render_lava_frame(matrix, state, canvas, temp_canvas):
+    """Render one frame shared by physical playback and finite preview parity."""
+    settings = state["settings"]
+    c_outside, c_inside, c_line = state["colours"]
+    blob_values = state["blobs"]
+    matrix.clear(canvas)
+    update_blobs(blob_values)
+    image = Image.new(
+        "RGB", (WIDTH, HEIGHT),
+        (c_outside.red, c_outside.green, c_outside.blue),
+    )
+    draw = ImageDraw.Draw(image)
+    draw_lava(
+        draw, c_outside, c_inside, c_line, blob_values,
+        threshold=settings.get("field_threshold", THRESHOLD),
+        edge_width=settings.get("edge_width", 4),
+    )
+    image_to_canvas(
+        matrix,
+        image.filter(ImageFilter.BoxBlur(radius=settings.get("blur_radius", 2))),
+        canvas,
+    )
+    now = datetime.datetime.now()
+    time_text = now.strftime("%H:%M")
+    date_text = now.strftime("%d %b")
+    time_y = settings.get("time_y", 15)
+    date_y = settings.get("date_y", 27)
+    time_width = measure_text(
+        matrix, state["font_time"], time_y, state["text_colour"], time_text,
+        temp_canvas,
+    )
+    date_width = measure_text(
+        matrix, state["font_date"], date_y, state["text_colour"], date_text,
+        temp_canvas,
+    )
+    if settings.get("show_time", True):
+        matrix.draw_text_with_border(
+            state["font_time"], aligned_x(settings.get("time_align", "center"), time_width),
+            time_y, state["text_colour"], state["border_colour"], time_text,
+            canvas=canvas,
+        )
+    if settings.get("show_date", True):
+        matrix.draw_text_with_border(
+            state["font_date"], aligned_x(settings.get("date_align", "center"), date_width),
+            date_y, state["text_colour"], state["border_colour"], date_text,
+            canvas=canvas,
+        )
+    return canvas
+
+
 def clock(duration=300, matrix=None, stop_event=None, lava_config=None):
     """Run the lava clock for a set duration of seconds."""
     if matrix is None:
         from matrix_framework import Matrix
 
         matrix = Matrix(rows=HEIGHT, cols=WIDTH)
-    settings = lava_config or {}
-    c_outside, c_inside, c_line = pick_palette(matrix, lava_config)
-    blob_values = make_blobs(settings)
-    font_time = matrix.font(settings.get("time_font", "9x18B"))
-    font_date = matrix.font(settings.get("date_font", "clR6x12"))
-    text_colour = (
-        matrix.colour_rgb(settings["text_colour"])
-        if "text_colour" in settings else matrix.colour("white")
-    )
-    border_colour = (
-        matrix.colour_rgb(settings["border_colour"])
-        if "border_colour" in settings else matrix.colour("black")
-    )
-    time_y = settings.get("time_y", 15)
-    date_y = settings.get("date_y", 27)
+    state = prepare_lava_frame_state(matrix, lava_config)
     canvas = matrix.matrix.CreateFrameCanvas()
     temp_canvas = matrix.matrix.CreateFrameCanvas()
     end_time = time.time() + duration
 
     try:
         while time.time() < end_time and not (stop_event and stop_event.is_set()):
-            matrix.clear(canvas)
-            update_blobs(blob_values)
-            image = Image.new(
-                "RGB",
-                (WIDTH, HEIGHT),
-                (c_outside.red, c_outside.green, c_outside.blue),
-            )
-            draw = ImageDraw.Draw(image)
-            draw_lava(
-                draw,
-                c_outside,
-                c_inside,
-                c_line,
-                blob_values,
-                threshold=settings.get("field_threshold", THRESHOLD),
-                edge_width=settings.get("edge_width", 4),
-            )
-            blurred = image.filter(
-                ImageFilter.BoxBlur(radius=settings.get("blur_radius", 2))
-            )
-            image_to_canvas(matrix, blurred, canvas)
-            now = datetime.datetime.now()
-            time_text = now.strftime("%H:%M")
-            date_text = now.strftime("%d %b")
-            time_width = measure_text(
-                matrix, font_time, time_y, text_colour, time_text, temp_canvas
-            )
-            date_width = measure_text(
-                matrix, font_date, date_y, text_colour, date_text, temp_canvas
-            )
-            time_x = aligned_x(settings.get("time_align", "center"), time_width)
-            date_x = aligned_x(settings.get("date_align", "center"), date_width)
-
-            if settings.get("show_time", True):
-                matrix.draw_text_with_border(
-                    font_time, time_x, time_y, text_colour, border_colour,
-                    time_text, canvas=canvas,
-                )
-            if settings.get("show_date", True):
-                matrix.draw_text_with_border(
-                    font_date, date_x, date_y, text_colour, border_colour,
-                    date_text, canvas=canvas,
-                )
-
+            render_lava_frame(matrix, state, canvas, temp_canvas)
             canvas = matrix.swap(canvas)
             if stop_event:
                 if stop_event.wait(FRAME_DELAY):
