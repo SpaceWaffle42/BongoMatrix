@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import multiprocessing
 import threading
+import time
 from collections.abc import Mapping
 
 
@@ -46,6 +47,10 @@ class PreviewProviderCancelled(RuntimeError):
     """Provider preparation was cancelled before a result could be published."""
 
 
+class PreviewProviderTimeout(RuntimeError):
+    """Provider preparation exceeded its effective hard deadline."""
+
+
 class PreviewProvider:
     """Fail-closed entry point for provider preparation.
 
@@ -55,28 +60,28 @@ class PreviewProvider:
     """
 
     MAX_WORKERS = 2
+    _worker_slots = threading.BoundedSemaphore(MAX_WORKERS)
+    _accounting_lock = threading.Lock()
+    _active_children = 0
+    _active_workers = 0
 
     def __init__(self):
         self._context = multiprocessing.get_context("spawn")
-        self._worker_slots = threading.BoundedSemaphore(self.MAX_WORKERS)
-        self._accounting_lock = threading.Lock()
-        self._active_children = 0
-        self._active_workers = 0
 
     @property
     def active_child_count(self):
-        with self._accounting_lock:
-            return self._active_children
+        with type(self)._accounting_lock:
+            return type(self)._active_children
 
     @property
     def active_worker_count(self):
-        with self._accounting_lock:
-            return self._active_workers
+        with type(self)._accounting_lock:
+            return type(self)._active_workers
 
     @property
     def available_worker_slots(self):
-        with self._accounting_lock:
-            return self.MAX_WORKERS - self._active_workers
+        with type(self)._accounting_lock:
+            return self.MAX_WORKERS - type(self)._active_workers
 
     @staticmethod
     def _terminate_and_reap(child):
@@ -102,14 +107,16 @@ class PreviewProvider:
         if not self._worker_slots.acquire(blocking=False):
             raise RuntimeError("preview provider worker capacity exhausted")
 
+        effective_timeout = min(3.0, float(request_deadline))
+        deadline = time.monotonic() + effective_timeout
         worker_accounted = False
         child_accounted = False
         child = None
         result_receiver = None
         result_sender = None
         try:
-            with self._accounting_lock:
-                self._active_workers += 1
+            with type(self)._accounting_lock:
+                type(self)._active_workers += 1
                 worker_accounted = True
 
             result_receiver, result_sender = self._context.Pipe(duplex=False)
@@ -119,15 +126,15 @@ class PreviewProvider:
                     provider,
                     settings,
                     credentials,
-                    min(3.0, float(request_deadline)),
+                    effective_timeout,
                     result_sender,
                 ),
             )
             child.start()
             result_sender.close()
             result_sender = None
-            with self._accounting_lock:
-                self._active_children += 1
+            with type(self)._accounting_lock:
+                type(self)._active_children += 1
                 child_accounted = True
 
             while True:
@@ -137,6 +144,13 @@ class PreviewProvider:
                     self._terminate_and_reap(child)
                     raise PreviewProviderCancelled(
                         "preview provider preparation cancelled"
+                    )
+                if time.monotonic() >= deadline:
+                    result_receiver.close()
+                    result_receiver = None
+                    self._terminate_and_reap(child)
+                    raise PreviewProviderTimeout(
+                        "preview provider preparation timed out"
                     )
                 if result_receiver.poll():
                     message = result_receiver.recv()
@@ -169,10 +183,10 @@ class PreviewProvider:
             if child is not None:
                 self._terminate_and_reap(child)
                 if child_accounted:
-                    with self._accounting_lock:
-                        self._active_children -= 1
+                    with type(self)._accounting_lock:
+                        type(self)._active_children -= 1
                 child.close()
             if worker_accounted:
-                with self._accounting_lock:
-                    self._active_workers -= 1
+                with type(self)._accounting_lock:
+                    type(self)._active_workers -= 1
             self._worker_slots.release()

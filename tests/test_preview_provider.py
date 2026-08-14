@@ -5,7 +5,11 @@ import time
 import unittest
 from unittest.mock import patch
 
-from preview_provider import PreviewProvider, PreviewProviderCancelled
+from preview_provider import (
+    PreviewProvider,
+    PreviewProviderCancelled,
+    PreviewProviderTimeout,
+)
 
 
 def provider_work_that_must_not_start(_settings, _credentials, _timeout):
@@ -32,7 +36,194 @@ def provider_returns_prepared_weather(settings, credentials, _timeout):
     }
 
 
+def provider_blocked_until_timeout(settings, _credentials, _timeout):
+    settings["started"].set()
+    time.sleep(60.0)
+
+
+def provider_blocked_until_cancelled(settings, _credentials, _timeout):
+    settings["started"].set()
+    time.sleep(60.0)
+
+
+def provider_returns_recovery_marker(settings, credentials, timeout):
+    return {
+        "marker": settings["marker"],
+        "effective_timeout": timeout,
+        "api_key": credentials["api_key"],
+    }
+
+
 class PreviewProviderTests(unittest.TestCase):
+    def test_timeout_and_cancel_release_worker_slot(self):
+        context = multiprocessing.get_context("spawn")
+        timeout_started = context.Event()
+        cancel_started = context.Event()
+        cancellation = threading.Event()
+        timeout_cancel = threading.Event()
+        provider = PreviewProvider()
+        overflow_provider = PreviewProvider()
+        children_before = {child.pid for child in multiprocessing.active_children()}
+        threads_before = {thread.ident for thread in threading.enumerate()}
+        descriptors_before = set(os.listdir("/proc/self/fd"))
+        created_pipes = []
+        created_children = []
+        outcomes = {}
+        real_pipe = provider._context.Pipe
+        real_process = provider._context.Process
+
+        def tracked_pipe(*args, **kwargs):
+            connections = real_pipe(*args, **kwargs)
+            created_pipes.extend(connections)
+            return connections
+
+        def tracked_process(*args, **kwargs):
+            child = real_process(*args, **kwargs)
+            created_children.append(child)
+            return child
+
+        def run(name, callable_, started, cancel_event, deadline):
+            try:
+                provider.prepare(
+                    callable_,
+                    settings={"started": started},
+                    credentials={"api_key": f"{name}-secret"},
+                    cancel_event=cancel_event,
+                    request_deadline=deadline,
+                )
+            except BaseException as error:
+                outcomes[name] = error
+
+        timeout_thread = threading.Thread(
+            target=run,
+            args=(
+                "timeout",
+                provider_blocked_until_timeout,
+                timeout_started,
+                timeout_cancel,
+                0.300,
+            ),
+        )
+        cancel_thread = threading.Thread(
+            target=run,
+            args=(
+                "cancel",
+                provider_blocked_until_cancelled,
+                cancel_started,
+                cancellation,
+                3.0,
+            ),
+        )
+
+        with patch.object(provider._context, "Pipe", side_effect=tracked_pipe), patch.object(
+            provider._context, "Process", side_effect=tracked_process
+        ):
+            timeout_started_at = time.monotonic()
+            timeout_thread.start()
+            try:
+                for started, name in ((timeout_started, "timeout"),):
+                    if not started.wait(2.0):
+                        if name in outcomes:
+                            raise outcomes[name]
+                        self.fail(f"{name} provider never started")
+                cancel_thread.start()
+                if not cancel_started.wait(2.0):
+                    if "cancel" in outcomes:
+                        raise outcomes["cancel"]
+                    self.fail("cancel provider never started")
+
+                self.assertEqual(provider.active_child_count, 2)
+                self.assertEqual(provider.active_worker_count, 2)
+                self.assertEqual(provider.available_worker_slots, 0)
+                children_at_capacity = len(created_children)
+                with self.assertRaisesRegex(
+                    RuntimeError, "preview provider worker capacity exhausted"
+                ):
+                    overflow_provider.prepare(
+                        provider_returns_recovery_marker,
+                        settings={"marker": "over-admitted"},
+                        credentials={"api_key": "capacity-secret"},
+                        cancel_event=threading.Event(),
+                        request_deadline=3.0,
+                    )
+                self.assertEqual(len(created_children), children_at_capacity)
+
+                timeout_thread.join(1.0)
+                timeout_elapsed = time.monotonic() - timeout_started_at
+                self.assertFalse(timeout_thread.is_alive(), "timeout did not settle")
+                self.assertGreaterEqual(timeout_elapsed, 0.275)
+                self.assertLess(timeout_elapsed, 0.650)
+                self.assertIsInstance(outcomes.get("timeout"), PreviewProviderTimeout)
+                self.assertEqual(
+                    str(outcomes["timeout"]),
+                    "preview provider preparation timed out",
+                )
+                self.assertTrue(created_children[0]._closed)
+                self.assertEqual(provider.active_child_count, 1)
+                self.assertEqual(provider.active_worker_count, 1)
+                self.assertEqual(provider.available_worker_slots, 1)
+
+                timeout_recovery = provider.prepare(
+                    provider_returns_recovery_marker,
+                    settings={"marker": "after-timeout"},
+                    credentials={"api_key": "timeout-recovery-secret"},
+                    cancel_event=threading.Event(),
+                    request_deadline=8.0,
+                )
+                self.assertEqual(
+                    timeout_recovery,
+                    (("effective_timeout", 3.0), ("marker", "after-timeout")),
+                )
+                self.assertTrue(created_children[-1]._closed)
+                self.assertEqual(provider.active_worker_count, 1)
+
+                cancelled_at = time.monotonic()
+                cancellation.set()
+                cancel_thread.join(1.0)
+                cancellation_latency = time.monotonic() - cancelled_at
+                self.assertFalse(cancel_thread.is_alive(), "cancellation did not settle")
+                self.assertLessEqual(cancellation_latency, 0.250)
+                self.assertIsInstance(outcomes.get("cancel"), PreviewProviderCancelled)
+                self.assertEqual(
+                    str(outcomes["cancel"]),
+                    "preview provider preparation cancelled",
+                )
+                self.assertTrue(created_children[1]._closed)
+                self.assertEqual(provider.active_child_count, 0)
+                self.assertEqual(provider.active_worker_count, 0)
+                self.assertEqual(provider.available_worker_slots, 2)
+
+                cancel_recovery = provider.prepare(
+                    provider_returns_recovery_marker,
+                    settings={"marker": "after-cancel"},
+                    credentials={"api_key": "cancel-recovery-secret"},
+                    cancel_event=threading.Event(),
+                    request_deadline=3.0,
+                )
+                self.assertEqual(
+                    cancel_recovery,
+                    (("effective_timeout", 3.0), ("marker", "after-cancel")),
+                )
+                self.assertLessEqual(provider.active_child_count, provider.MAX_WORKERS)
+                self.assertTrue(all(connection.closed for connection in created_pipes))
+                self.assertTrue(all(child._closed for child in created_children))
+                self.assertEqual(provider.active_child_count, 0)
+                self.assertEqual(provider.active_worker_count, 0)
+                self.assertEqual(provider.available_worker_slots, 2)
+                self.assertEqual(
+                    {child.pid for child in multiprocessing.active_children()},
+                    children_before,
+                )
+                self.assertEqual(
+                    {thread.ident for thread in threading.enumerate()}, threads_before
+                )
+                self.assertEqual(set(os.listdir("/proc/self/fd")), descriptors_before)
+            finally:
+                timeout_cancel.set()
+                cancellation.set()
+                timeout_thread.join(1.0)
+                cancel_thread.join(1.0)
+
     def test_cancel_before_dns_starts_no_child(self):
         cancellation = threading.Event()
         cancellation.set()
