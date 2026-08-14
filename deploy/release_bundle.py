@@ -6,9 +6,11 @@ import hashlib
 import json
 import os
 import re
+import secrets
 import stat
+from collections.abc import Callable
 from pathlib import Path, PurePosixPath
-from typing import NoReturn
+from typing import NoReturn, Protocol
 
 _SHA256_RE = re.compile(r"[0-9a-f]{64}\Z")
 _MODE_RE = re.compile(r"0[0-7]{3}\Z")
@@ -30,6 +32,18 @@ _FORBIDDEN_DIRECTORY_PARTS = {
 
 class ReleaseManifestError(ValueError):
     """The approved release manifest or its source tree is not exact."""
+
+
+class ServiceControl(Protocol):
+    def is_active(self) -> bool: ...
+
+    def stop(self) -> None: ...
+
+    def daemon_reload_needed(self) -> bool: ...
+
+    def daemon_reload(self) -> None: ...
+
+    def start(self) -> None: ...
 
 
 def _reject(message: str) -> NoReturn:
@@ -515,3 +529,207 @@ def preflight_release(
     elif archived_paths:
         _reject("required backup archive is missing")
     return release_manifest, backup_manifest
+
+
+def _open_confined_parent(root: Path, relative_path: str) -> tuple[int, str]:
+    """Open an existing destination parent without following symlinks."""
+
+    parts = PurePosixPath(_validate_relative_path(relative_path)).parts
+    flags = os.O_RDONLY | os.O_DIRECTORY | os.O_CLOEXEC | os.O_NOFOLLOW
+    try:
+        directory_fd = os.open(root, flags)
+    except OSError as error:
+        raise ReleaseManifestError("destination root is unsafe") from error
+    try:
+        for part in parts[:-1]:
+            try:
+                next_fd = os.open(part, flags, dir_fd=directory_fd)
+            except OSError as error:
+                raise ReleaseManifestError(
+                    "destination parent traversal is unsafe"
+                ) from error
+            os.close(directory_fd)
+            directory_fd = next_fd
+        return directory_fd, parts[-1]
+    except BaseException:
+        os.close(directory_fd)
+        raise
+
+
+def _atomic_replace_confined(
+    root: Path,
+    relative_path: str,
+    content: bytes,
+    uid: int,
+    gid: int,
+    mode: str,
+) -> None:
+    """Durably replace one confined regular file with exact metadata."""
+
+    directory_fd, name = _open_confined_parent(root, relative_path)
+    temporary_name = f".release-bundle-{os.getpid()}-{secrets.token_hex(8)}"
+    temporary_fd: int | None = None
+    try:
+        temporary_fd = os.open(
+            temporary_name,
+            os.O_WRONLY
+            | os.O_CREAT
+            | os.O_EXCL
+            | os.O_CLOEXEC
+            | os.O_NOFOLLOW,
+            0o600,
+            dir_fd=directory_fd,
+        )
+        view = memoryview(content)
+        while view:
+            written = os.write(temporary_fd, view)
+            if written <= 0:
+                raise OSError("short write while preparing release file")
+            view = view[written:]
+        os.fchmod(temporary_fd, int(mode, 8))
+        os.fchown(temporary_fd, uid, gid)
+        os.fsync(temporary_fd)
+        os.close(temporary_fd)
+        temporary_fd = None
+        os.replace(
+            temporary_name,
+            name,
+            src_dir_fd=directory_fd,
+            dst_dir_fd=directory_fd,
+        )
+        os.fsync(directory_fd)
+    finally:
+        if temporary_fd is not None:
+            os.close(temporary_fd)
+        try:
+            os.unlink(temporary_name, dir_fd=directory_fd)
+        except FileNotFoundError:
+            pass
+        os.close(directory_fd)
+
+
+def _remove_confined(root: Path, relative_path: str) -> None:
+    directory_fd, name = _open_confined_parent(root, relative_path)
+    try:
+        try:
+            target_stat = os.stat(name, dir_fd=directory_fd, follow_symlinks=False)
+        except FileNotFoundError:
+            return
+        if not stat.S_ISREG(target_stat.st_mode):
+            _reject("rollback target is not a regular file")
+        os.unlink(name, dir_fd=directory_fd)
+        os.fsync(directory_fd)
+    finally:
+        os.close(directory_fd)
+
+
+def _verify_backup_record(
+    destination_root: Path,
+    bundle: Path,
+    backup_entry: dict[str, object],
+) -> None:
+    relative_path = _validate_relative_path(backup_entry["path"])
+    restored = _read_confined_regular(destination_root, relative_path, missing_ok=True)
+    if not backup_entry["present_before"]:
+        if restored is not None:
+            _reject("absent-before path remains after rollback")
+        return
+    if restored is None:
+        _reject("present-before path is missing after rollback")
+    restored_bytes, restored_stat = restored
+    if (
+        hashlib.sha256(restored_bytes).hexdigest() != backup_entry["sha256"]
+        or restored_stat.st_uid != backup_entry["uid"]
+        or restored_stat.st_gid != backup_entry["gid"]
+        or f"{stat.S_IMODE(restored_stat.st_mode):04o}" != backup_entry["mode"]
+    ):
+        _reject("rollback verification failed")
+    archive = _read_confined_regular(
+        bundle, f"archive/{relative_path}", missing_ok=False
+    )
+    if archive is None or restored_bytes != archive[0]:
+        _reject("rollback bytes do not match archived prior content")
+
+
+def deploy_release(
+    staged_tool: str | os.PathLike[str],
+    release_root: str | os.PathLike[str],
+    destination_root: str | os.PathLike[str],
+    bundle: str | os.PathLike[str],
+    release_manifest_path: str | os.PathLike[str],
+    backup_manifest_path: str | os.PathLike[str],
+    *,
+    service: ServiceControl,
+    after_replace: Callable[[str], None] | None = None,
+) -> None:
+    """Deploy an exact release and roll back every touched path on failure."""
+
+    release_manifest, backup_manifest = preflight_release(
+        staged_tool,
+        release_root,
+        destination_root,
+        bundle,
+        release_manifest_path,
+        backup_manifest_path,
+    )
+    release_entries = release_manifest["files"]
+    backup_entries = backup_manifest["files"]
+    if not isinstance(release_entries, list) or not isinstance(backup_entries, list):
+        _reject("validated manifest scope is unavailable")
+
+    destination = Path(destination_root)
+    release = Path(release_root)
+    bundle_path = Path(bundle)
+    initially_active = bool(service.is_active())
+    if initially_active:
+        service.stop()
+
+    touched: list[int] = []
+    try:
+        for index, entry in enumerate(release_entries):
+            if not isinstance(entry, dict):
+                _reject("release manifest is not validated")
+            relative_path = _validate_relative_path(entry["path"])
+            source = _read_confined_regular(release, relative_path, missing_ok=False)
+            if source is None or hashlib.sha256(source[0]).hexdigest() != entry["sha256"]:
+                _reject("release source changed after preflight")
+            _atomic_replace_confined(
+                destination,
+                relative_path,
+                source[0],
+                entry["uid"],
+                entry["gid"],
+                entry["mode"],
+            )
+            touched.append(index)
+            if after_replace is not None:
+                after_replace(relative_path)
+    except BaseException:
+        for index in reversed(touched):
+            backup_entry = backup_entries[index]
+            if not isinstance(backup_entry, dict):
+                _reject("backup manifest is not validated")
+            relative_path = _validate_relative_path(backup_entry["path"])
+            if backup_entry["present_before"]:
+                archive = _read_confined_regular(
+                    bundle_path, f"archive/{relative_path}", missing_ok=False
+                )
+                if archive is None:
+                    _reject("required rollback archive is missing")
+                _atomic_replace_confined(
+                    destination,
+                    relative_path,
+                    archive[0],
+                    backup_entry["uid"],
+                    backup_entry["gid"],
+                    backup_entry["mode"],
+                )
+            else:
+                _remove_confined(destination, relative_path)
+            _verify_backup_record(destination, bundle_path, backup_entry)
+        raise
+    finally:
+        if service.daemon_reload_needed():
+            service.daemon_reload()
+        if initially_active:
+            service.start()

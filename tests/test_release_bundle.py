@@ -5,6 +5,7 @@ import stat
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 import deploy.release_bundle as release_bundle
 from deploy.release_bundle import (
@@ -500,3 +501,164 @@ class ReleaseBundleTests(unittest.TestCase):
                     forbidden = prepare(("deploy/release_bundle.py", forbidden_path))
                     with self.assertRaises(ReleaseManifestError):
                         preflight(forbidden)
+
+    def test_deploy_failure_rolls_back_touched_paths_and_recovers_service_state(self):
+        class FakeService:
+            def __init__(self, active):
+                self.active = active
+                self.calls = []
+
+            def is_active(self):
+                self.calls.append("is-active")
+                return self.active
+
+            def stop(self):
+                self.calls.append("stop")
+                self.active = False
+
+            def daemon_reload_needed(self):
+                self.calls.append("daemon-reload-needed")
+                return True
+
+            def daemon_reload(self):
+                self.calls.append("daemon-reload")
+
+            def start(self):
+                self.calls.append("start")
+                self.active = True
+
+        for initially_active in (True, False):
+            with self.subTest(initially_active=initially_active), tempfile.TemporaryDirectory() as directory:
+                root = Path(directory)
+                release_root = root / "release"
+                destination_root = root / "destination"
+                bundle = root / "bundle"
+                release_root.mkdir()
+                destination_root.mkdir()
+                (destination_root / "app").mkdir()
+
+                sources = {
+                    "deploy/release_bundle.py": b"approved release tool bytes\n",
+                    "app/new.py": b"new module bytes\n",
+                    "webapp.py": b"new application bytes\n",
+                }
+                entries = []
+                for relative_path, source_bytes in sources.items():
+                    source = release_root / relative_path
+                    source.parent.mkdir(parents=True, exist_ok=True)
+                    source.write_bytes(source_bytes)
+                    entries.append({
+                        "path": relative_path,
+                        "sha256": hashlib.sha256(source_bytes).hexdigest(),
+                        "uid": os.getuid(),
+                        "gid": os.getgid(),
+                        "mode": "0600",
+                    })
+
+                release_manifest_path = root / "release-manifest.json"
+                release_manifest_path.write_text(
+                    json.dumps({"version": 1, "files": entries}), encoding="utf-8"
+                )
+                old_tool = b"installed release tool bytes\n"
+                old_webapp = b"installed application bytes\n"
+                installed = {
+                    "deploy/release_bundle.py": (old_tool, 0o640),
+                    "webapp.py": (old_webapp, 0o644),
+                }
+                for relative_path, (prior_bytes, mode) in installed.items():
+                    destination = destination_root / relative_path
+                    destination.parent.mkdir(parents=True, exist_ok=True)
+                    destination.write_bytes(prior_bytes)
+                    destination.chmod(mode)
+                unrelated = destination_root / "unrelated.txt"
+                unrelated.write_bytes(b"outside release scope\n")
+                unrelated.chmod(0o600)
+                unrelated_before = (
+                    unrelated.read_bytes(),
+                    stat.S_IMODE(unrelated.stat().st_mode),
+                )
+
+                validated_release = validate_release_manifest(
+                    release_root, release_manifest_path
+                )
+                backup_manifest_path = bundle / "backup-manifest.json"
+                create_backup_manifest(
+                    destination_root,
+                    bundle,
+                    validated_release,
+                    backup_manifest_path,
+                )
+                staged_tool = root / "release_bundle.py"
+                staged_tool.write_bytes(sources["deploy/release_bundle.py"])
+                before = {
+                    relative_path: (
+                        (destination_root / relative_path).read_bytes(),
+                        (destination_root / relative_path).stat().st_uid,
+                        (destination_root / relative_path).stat().st_gid,
+                        stat.S_IMODE((destination_root / relative_path).stat().st_mode),
+                    )
+                    for relative_path in installed
+                }
+
+                replacements = []
+                fsync_count_at_failure = None
+
+                def fail_after_second_replace(relative_path):
+                    nonlocal fsync_count_at_failure
+                    replacements.append(relative_path)
+                    if len(replacements) == 2:
+                        fsync_count_at_failure = fsync.call_count
+                        raise RuntimeError("injected mid-deploy failure")
+
+                service = FakeService(initially_active)
+                with mock.patch.object(
+                    release_bundle.os, "fsync", wraps=os.fsync
+                ) as fsync, self.assertRaisesRegex(
+                    RuntimeError, "injected mid-deploy failure"
+                ):
+                    release_bundle.deploy_release(
+                        staged_tool,
+                        release_root,
+                        destination_root,
+                        bundle,
+                        release_manifest_path,
+                        backup_manifest_path,
+                        service=service,
+                        after_replace=fail_after_second_replace,
+                    )
+
+                self.assertEqual(replacements, ["deploy/release_bundle.py", "app/new.py"])
+                self.assertIsNotNone(fsync_count_at_failure)
+                if fsync_count_at_failure is not None:
+                    self.assertGreater(fsync.call_count, fsync_count_at_failure)
+                for relative_path, expected in before.items():
+                    restored = destination_root / relative_path
+                    restored_stat = restored.stat()
+                    self.assertEqual(
+                        (
+                            restored.read_bytes(),
+                            restored_stat.st_uid,
+                            restored_stat.st_gid,
+                            stat.S_IMODE(restored_stat.st_mode),
+                        ),
+                        expected,
+                    )
+                self.assertFalse((destination_root / "app/new.py").exists())
+                self.assertEqual(
+                    (unrelated.read_bytes(), stat.S_IMODE(unrelated.stat().st_mode)),
+                    unrelated_before,
+                )
+                self.assertEqual(list(destination_root.rglob(".release-bundle-*")), [])
+                self.assertEqual(service.active, initially_active)
+                self.assertEqual(
+                    service.calls,
+                    [
+                        "is-active",
+                        "stop",
+                        "daemon-reload-needed",
+                        "daemon-reload",
+                        "start",
+                    ]
+                    if initially_active
+                    else ["is-active", "daemon-reload-needed", "daemon-reload"],
+                )
