@@ -7052,11 +7052,44 @@ console.log('ANNOUNCEMENT_HEADING_SYNC_PASS');
                 "preview_instance": preview_instance,
             }), 200)
 
+            # A newer generation must also cancel pre-session provider work
+            # promptly and preserve the typed superseded HTTP outcome.
+            superseded_result = {}
+            superseded_client = paired_client()
+            provider_prepare_started.clear()
+
+            def superseded_start():
+                superseded_result["response"] = superseded_client.post(
+                    weather_path, json=payload(29, location="blocked-old"),
+                )
+
+            superseded_thread = threading.Thread(
+                target=superseded_start, name="preview-superseded-provider-init",
+            )
+            superseded_thread.start()
+            self.assertTrue(provider_prepare_started.wait(1))
+            newer_at = time.monotonic()
+            superseding = assert_response(paired_client().post(
+                weather_path, json=payload(30, location="new-healthy"),
+            ), 200)
+            self.assertLess(time.monotonic() - newer_at, 0.25)
+            superseded_thread.join(0.25)
+            self.assertFalse(superseded_thread.is_alive())
+            stale_generation = assert_response(superseded_result["response"], 409)
+            self.assertEqual(
+                stale_generation, {"error": "Preview generation was superseded."},
+            )
+            assert_response(paired_client().post(cancel_path, json={
+                "session": superseding["session"],
+                "preview_instance": preview_instance,
+            }), 200)
+
             # Closing during pre-session provider preparation signals promptly.
             # A newer service generation for the same identity is not blocked by
             # the old PreviewInstance admission lock and stale work publishes none.
             old_result = {}
             old_client = paired_client()
+            provider_prepare_started.clear()
 
             def blocked_start():
                 old_result["response"] = old_client.post(

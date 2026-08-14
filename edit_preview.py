@@ -654,10 +654,15 @@ class PreviewInstance:
                 stop_event=self._stop_event,
                 on_close=self._release_registration,
             )
-        except BaseException:
+        except BaseException as error:
             with self._lock:
                 self._initializing = False
+                superseded = self._superseded
                 self._lock.notify_all()
+            if superseded:
+                raise PreviewPageSupersededError(
+                    "preview generation was superseded"
+                ) from error
             raise
 
         with self._lock:
