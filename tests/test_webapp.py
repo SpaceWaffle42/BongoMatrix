@@ -350,14 +350,14 @@ class WebAppTests(unittest.TestCase):
         body = self.client.get("/").get_data(as_text=True)
 
         application_version = getattr(webapp, "APPLICATION_VERSION", None)
-        self.assertEqual(application_version, "0.3.44-preview")
+        self.assertEqual(application_version, "0.3.45-preview")
         self.assertEqual(body.count(f"Version {application_version}"), 1)
         self.assertRegex(
             body,
             rf"LAN CONTROL</span><br><span[^>]*>Version {re.escape(application_version)}</span>",
         )
         template = (Path(__file__).parents[1] / "app" / "templates" / "dashboard.html").read_text()
-        self.assertNotIn("0.3.44-preview", template)
+        self.assertNotIn("0.3.45-preview", template)
 
     def test_control_stop_reports_timeout_without_claiming_success(self):
         self.pair_browser()
@@ -607,11 +607,11 @@ if(PRELOAD_EDIT){
 }
 """
         harness = r"""
-const vm=require('node:vm');
+const vm=require('node:vm'),crypto=require('node:crypto').webcrypto;
 const scenario=SCENARIO_SOURCE;
 const run=preloadEdit=>vm.runInNewContext(
   '(async()=>{'+scenario.replaceAll('PRELOAD_EDIT',preloadEdit?'true':'false')+'})()',
-  {console,AbortController,structuredClone,setImmediate},
+  {console,AbortController,structuredClone,setImmediate,crypto},
 );
 (async()=>{
  await run(true);
@@ -1035,7 +1035,7 @@ async function api(path,options){request={path,options};const error=new Error('C
             "window.addEventListener('online',matrixCheckForNewerConfig)",
             "document.visibilityState==='visible'",
             "clearInterval(matrixStatusTimer)",
-            "if(!matrixSyncStopped)matrixFrameTimer=setTimeout",
+            "if(!matrixSyncStopped&&previewMode==='live'&&matrixFrameTimer===null&&matrixFrameController===null)matrixFrameTimer=setTimeout",
             "Reload latest saved state",
             "Remain with unsaved draft",
         )
@@ -1081,6 +1081,7 @@ function configBody(){return structuredClone(configState)}
 function setMessage(text){message.textContent=text}
 function setInterval(){return nextTimer++} function clearInterval(id){clearedIntervals.push(id)}
 function setTimeout(){return nextTimer++} function clearTimeout(id){clearedTimeouts.push(id)}
+function cancelEditPreview(){}
 const responses=[];
 function response(status,revision=null,data=null){return {status,statusText:'failed',redirected:false,ok:status>=200&&status<300,headers:{get(name){return name==='X-Matrix-Minimum-Client-Contract'?'2':null}},json:async()=>(data??{revision})}}
 async function fetch(){const item=responses.shift();return await item}
@@ -1397,6 +1398,7 @@ try{
  const poppedLabel=await evaluate(`document.querySelector('#preview-module').textContent`);
  const livePoint=await evaluate(`(()=>{const r=document.querySelector('label[for="preview-mode-live"]').getBoundingClientRect();return {x:r.left+r.width/2,y:r.top+r.height/2}})()`);
  await send('Input.dispatchTouchEvent',{type:'touchStart',touchPoints:[livePoint]});await send('Input.dispatchTouchEvent',{type:'touchEnd',touchPoints:[]});
+ await waitFor(`document.querySelector('.edit-preview-switch-dialog')?.open`);await evaluate(`document.querySelector('.edit-preview-switch-dialog button').click();matrixDirty=false;matrixSavedSnapshot=matrixCurrentSnapshot();document.querySelector('#preview-mode-live').click()`);
  await waitFor(`__requests.filter(item=>item.url.startsWith('/api/display-frame')).length>=2`);await new Promise(r=>setTimeout(r,180));
  const restored=await evaluate(`(()=>({live:document.querySelector('#preview-mode-live').checked,label:document.querySelector('#preview-module').textContent,cancels:__requests.filter(item=>item.url==='/api/edit-preview/cancel').length,displayRequests:__requests.filter(item=>item.url.startsWith('/api/display-frame')).length,maxDisplayActive:__displayMaxActive,editTimers:globalThis.editPreviewAnimationTimer??null,canvasCount:document.querySelectorAll('#matrix-preview').length}))()`);
  console.log(JSON.stringify({initial,edited,poppedLabel,restored}));
@@ -1541,6 +1543,134 @@ try{
         self.assertEqual(report["final"]["forbidden"], [], report)
         self.assertEqual(report["final"]["errors"], [], report)
         self.assertEqual(report["final"]["canvasCount"], 1, report)
+        self.assertEqual(Path(self.store.path).read_bytes(), before_config)
+        self.assertEqual(self.controller.method_calls, [])
+
+    @unittest.skipUnless(shutil.which("node"), "Node.js is required")
+    @unittest.skipUnless(
+        os.environ.get("MATRIX_CHROMIUM")
+        and Path(os.environ.get("MATRIX_CHROMIUM", "")).is_file()
+        and os.access(os.environ.get("MATRIX_CHROMIUM", ""), os.X_OK),
+        "MATRIX_CHROMIUM browser is required",
+    )
+    def test_edit_preview_switch_away_requires_exact_unsaved_choice(self):
+        self.pair_browser()
+        before_config = Path(self.store.path).read_bytes()
+        body = self.client.get("/").get_data(as_text=True)
+        self.controller.reset_mock()
+        probe = r"""
+const port=process.argv[1],pagePath=process.argv[2];let endpoint;
+for(let attempt=0;attempt<50;attempt++){try{endpoint=await fetch(`http://127.0.0.1:${port}/json/new`,{method:'PUT'}).then(r=>r.json());break}catch(_){await new Promise(r=>setTimeout(r,100))}}
+if(!endpoint)throw new Error('Chromium DevTools endpoint unavailable');
+const socket=new WebSocket(endpoint.webSocketDebuggerUrl),pending=new Map();let nextId=1,loadCount=0;
+socket.onmessage=event=>{const message=JSON.parse(event.data);if(message.id&&pending.has(message.id)){const request=pending.get(message.id);pending.delete(message.id);message.error?request.reject(new Error(JSON.stringify(message.error))):request.resolve(message.result)}else if(message.method==='Page.loadEventFired')loadCount++};
+await new Promise((resolve,reject)=>{socket.onopen=resolve;socket.onerror=reject});
+const send=(method,params={})=>{const id=nextId++;socket.send(JSON.stringify({id,method,params}));return new Promise((resolve,reject)=>pending.set(id,{resolve,reject}))};
+const evaluate=async expression=>{const result=await send('Runtime.evaluate',{expression,returnByValue:true,awaitPromise:true});if(result.exceptionDetails)throw new Error(JSON.stringify(result.exceptionDetails));return result.result.value};
+const waitFor=async expression=>{for(let attempt=0;attempt<120;attempt++){if(await evaluate(expression))return;await new Promise(r=>setTimeout(r,25))}throw new Error('waitFor timed out: '+expression)};
+try{
+ await send('Runtime.enable');await send('Page.enable');await send('Emulation.setDeviceMetricsOverride',{width:390,height:844,deviceScaleFactor:1,mobile:true});
+ await send('Page.addScriptToEvaluateOnNewDocument',{source:`
+  globalThis.__requests=[];globalThis.__errors=[];
+  addEventListener('error',event=>__errors.push(String(event.error||event.message)));addEventListener('unhandledrejection',event=>__errors.push(String(event.reason)));
+  const png='iVBORw0KGgoAAAANSUhEUgAAAEAAAAAgCAIAAAAt/+nTAAAAT0lEQVR4nO3PUQkAIBTAwBfOClawfwRD+HEIgwW4zdrn64YLGtCCBrSgAS1oQAsa0IIGtKABLWhACxrQgga0oAEtaEALGtCCBrSgAS147AIqPPhqwA8fegAAAABJRU5ErkJggg==';
+  const bytes=Uint8Array.from(atob(png),c=>c.charCodeAt(0));
+  globalThis.fetch=async(input,options={})=>{const url=String(input),method=options.method||'GET';__requests.push({url,method});
+   if(url.startsWith('/api/display-frame'))return new Response(new Blob([bytes],{type:'image/png'}),{status:200,headers:{'X-Matrix-Frame':'saved'}});
+   if(url.startsWith('/api/edit-preview/')&&url!='/api/edit-preview/cancel')return new Response(JSON.stringify({session:'1'.repeat(32),generation:1,page:0,frames:[{png,delay_ms:1000}],next_token:null,complete:true}),{status:200,headers:{'Content-Type':'application/json'}});
+   if(url==='/api/edit-preview/cancel')return new Response(JSON.stringify({cancelled:true}),{status:200,headers:{'Content-Type':'application/json'}});
+   if(url==='/api/config')return new Response(null,{status:304,headers:{'X-Matrix-Minimum-Client-Contract':'2'}});
+   return new Response(JSON.stringify({running:true,current_module:'weather',minimum_client_contract:2}),{status:200,headers:{'Content-Type':'application/json'}})
+  };
+ `});
+ await send('Page.navigate',{url:'file://'+pagePath});await waitFor(`document.readyState==='complete'`);
+ await evaluate(`document.querySelector('#preview-mode-edit').click()`);await waitFor(`previewMode==='edit'`);await evaluate(`document.querySelector('#preview-mode-live').click()`);
+ const clean=await evaluate(`({mode:previewMode,live:document.querySelector('#preview-mode-live').checked,dialogs:document.querySelectorAll('dialog[open]').length})`);
+ await evaluate(`document.querySelector('#preview-mode-edit').click();(()=>{const input=document.querySelector('#device-name');input.value='UNSAVED SWITCH SENTINEL';input.dispatchEvent(new Event('input',{bubbles:true}));input.focus();input.setSelectionRange(2,8);document.querySelector('.palette-grid').scrollTop=31;const palette=document.querySelector('input[name="edit-preview-lava-palette"]');if(palette){palette.checked=true;palette.dispatchEvent(new Event('change',{bubbles:true}))}document.querySelector('#preview-mode-live').click()})()`);
+ const opened=await evaluate(`(()=>{const dialog=document.querySelector('.edit-preview-switch-dialog');return {mode:previewMode,edit:document.querySelector('#preview-mode-edit').checked,buttons:[...dialog?.querySelectorAll('button')||[]].map(b=>b.textContent),count:document.querySelectorAll('.edit-preview-switch-dialog').length,open:dialog?.open||false}})()`);
+ if(opened.open){
+ await send('Input.dispatchKeyEvent',{type:'keyDown',key:'Escape',code:'Escape'});await send('Input.dispatchKeyEvent',{type:'keyUp',key:'Escape',code:'Escape'});
+ const escaped=await evaluate(`document.querySelector('.edit-preview-switch-dialog')?.open||false`);
+ await evaluate(`(()=>{const buttons=[...document.querySelectorAll('.edit-preview-switch-dialog button')];buttons.at(-1).focus()})()`);await send('Input.dispatchKeyEvent',{type:'keyDown',key:'Tab',code:'Tab'});await send('Input.dispatchKeyEvent',{type:'keyUp',key:'Tab',code:'Tab'});
+ const trapped=await evaluate(`document.activeElement===document.querySelector('.edit-preview-switch-dialog button')`);
+ await evaluate(`document.querySelector('.edit-preview-switch-dialog button').click()`);
+ const stayed=await evaluate(`(()=>{const input=document.querySelector('#device-name'),palette=document.querySelector('input[name="edit-preview-lava-palette"]:checked');return {mode:previewMode,value:input.value,focus:document.activeElement===input,selection:[input.selectionStart,input.selectionEnd],palette:palette?.value||null,scroll:document.querySelector('.palette-grid').scrollTop,dialog:Boolean(document.querySelector('.edit-preview-switch-dialog'))}})()`);
+ await evaluate(`showMatrixRevisionDialog(matrixLoadedRevision+1);document.querySelector('#preview-mode-live').click()`);
+ const barrier=await evaluate(`({revision:document.querySelectorAll('.config-revision-dialog[open]').length,switches:document.querySelectorAll('.edit-preview-switch-dialog').length,saveDisabled:document.querySelector('#save-config').disabled,mode:previewMode})`);
+ await evaluate(`document.querySelector('.config-revision-dialog .config-upgrade-actions button:last-child').click();document.querySelector('#preview-mode-live').click()`);
+ await waitFor(`document.querySelector('.edit-preview-switch-dialog')?.open`);
+ const beforeReload=loadCount;await evaluate(`document.querySelector('.edit-preview-switch-dialog .discard-edit-preview').click()`);
+ for(let attempt=0;attempt<120&&loadCount===beforeReload;attempt++)await new Promise(r=>setTimeout(r,25));
+ await waitFor(`document.readyState==='complete'&&typeof previewMode==='string'`);
+ const discarded=await evaluate(`({mode:previewMode,live:document.querySelector('#preview-mode-live').checked,value:document.querySelector('#device-name').value,canvasCount:document.querySelectorAll('#matrix-preview').length,forbidden:__requests.filter(r=>r.method==='POST'&&(r.url==='/api/config'||r.url.startsWith('/api/preview/')||r.url.startsWith('/api/control/'))).map(r=>r.url),errors:[...__errors]})`);
+ console.log(JSON.stringify({clean,opened,escaped,trapped,stayed,barrier,discarded,reloaded:loadCount>beforeReload}));
+ }else console.log(JSON.stringify({clean,opened}));
+}finally{socket.close()}
+"""
+        report = self._run_dashboard_chromium_probe(body, probe)
+        self.assertEqual(report["clean"], {"mode": "live", "live": True, "dialogs": 0}, report)
+        self.assertEqual(report["opened"]["buttons"], ["Stay Editing", "Discard Draft and switch to Live"], report)
+        self.assertEqual(report["opened"]["count"], 1, report)
+        self.assertTrue(report["opened"]["open"], report)
+        self.assertEqual(report["opened"]["mode"], "edit", report)
+        self.assertTrue(report["opened"]["edit"], report)
+        self.assertTrue(report["escaped"], report)
+        self.assertTrue(report["trapped"], report)
+        self.assertEqual(report["stayed"]["mode"], "edit", report)
+        self.assertEqual(report["stayed"]["value"], "UNSAVED SWITCH SENTINEL", report)
+        self.assertTrue(report["stayed"]["focus"], report)
+        self.assertEqual(report["stayed"]["selection"], [2, 8], report)
+        self.assertGreater(report["stayed"]["scroll"], 0, report)
+        self.assertFalse(report["stayed"]["dialog"], report)
+        self.assertEqual(report["barrier"], {"revision": 1, "switches": 0, "saveDisabled": True, "mode": "edit"}, report)
+        self.assertTrue(report["reloaded"], report)
+        self.assertEqual(report["discarded"]["mode"], "live", report)
+        self.assertTrue(report["discarded"]["live"], report)
+        self.assertNotEqual(report["discarded"]["value"], "UNSAVED SWITCH SENTINEL", report)
+        self.assertEqual(report["discarded"]["canvasCount"], 1, report)
+        self.assertEqual(report["discarded"]["forbidden"], [], report)
+        self.assertEqual(report["discarded"]["errors"], [], report)
+        self.assertEqual(Path(self.store.path).read_bytes(), before_config)
+        self.assertEqual(self.controller.method_calls, [])
+
+    @unittest.skipUnless(shutil.which("node"), "Node.js is required")
+    @unittest.skipUnless(
+        os.environ.get("MATRIX_CHROMIUM")
+        and Path(os.environ.get("MATRIX_CHROMIUM", "")).is_file()
+        and os.access(os.environ.get("MATRIX_CHROMIUM", ""), os.X_OK),
+        "MATRIX_CHROMIUM browser is required",
+    )
+    def test_live_edit_preview_is_responsive_accessible_and_preserves_sticky_preview(self):
+        self.pair_browser()
+        before_config = Path(self.store.path).read_bytes()
+        body = self.client.get("/").get_data(as_text=True)
+        self.controller.reset_mock()
+        probe = r"""
+const port=process.argv[1],path=process.argv[2];let target;
+for(let n=0;n<50;n++){try{target=await fetch(`http://127.0.0.1:${port}/json/new`,{method:'PUT'}).then(r=>r.json());break}catch(_){await new Promise(r=>setTimeout(r,50))}}
+const ws=new WebSocket(target.webSocketDebuggerUrl),pending=new Map();let id=0,resolveLoad,loaded=new Promise(r=>resolveLoad=r);ws.onmessage=e=>{const m=JSON.parse(e.data);if(m.id&&pending.has(m.id)){const p=pending.get(m.id);pending.delete(m.id);m.error?p.reject(m.error):p.resolve(m.result)}else if(m.method==='Page.loadEventFired')resolveLoad()};await new Promise((r,j)=>{ws.onopen=r;ws.onerror=j});const send=(method,params={})=>new Promise((resolve,reject)=>{const key=++id;pending.set(key,{resolve,reject});ws.send(JSON.stringify({id:key,method,params}))});const ev=async expression=>{const r=await send('Runtime.evaluate',{expression,returnByValue:true,awaitPromise:true});if(r.exceptionDetails)throw Error(JSON.stringify(r.exceptionDetails));return r.result.value};
+try{await send('Runtime.enable');await send('Page.enable');await send('Emulation.setDeviceMetricsOverride',{width:390,height:844,deviceScaleFactor:1,mobile:true});await send('Page.addScriptToEvaluateOnNewDocument',{source:`globalThis.__errors=[];addEventListener('error',e=>__errors.push(String(e.message)));addEventListener('unhandledrejection',e=>__errors.push(String(e.reason)));const png='iVBORw0KGgoAAAANSUhEUgAAAEAAAAAgCAIAAAAt/+nTAAAAT0lEQVR4nO3PUQkAIBTAwBfOClawfwRD+HEIgwW4zdrn64YLGtCCBrSgAS1oQAsa0IIGtKABLWhACxrQgga0oAEtaEALGtCCBrSgAS147AIqPPhqwA8fegAAAABJRU5ErkJggg==',bytes=Uint8Array.from(atob(png),c=>c.charCodeAt(0));globalThis.fetch=async(u,o={})=>String(u).startsWith('/api/display-frame')?new Response(new Blob([bytes],{type:'image/png'})):String(u).startsWith('/api/edit-preview/')?new Response(JSON.stringify({session:'2'.repeat(32),generation:1,page:0,frames:[{png,delay_ms:999}],next_token:null,complete:true}),{headers:{'Content-Type':'application/json'}}):String(u)==='/api/config'?new Response(null,{status:304,headers:{'X-Matrix-Minimum-Client-Contract':'2'}}):new Response(JSON.stringify({running:true,current_module:'clock_lava',minimum_client_contract:2}),{headers:{'Content-Type':'application/json'}})`});loaded=new Promise(r=>resolveLoad=r);await send('Page.navigate',{url:'file://'+path});await loaded;
+const edit=await ev(`(()=>{const r=document.querySelector('label[for="preview-mode-edit"]').getBoundingClientRect();return{x:r.x+r.width/2,y:r.y+r.height/2}})()`);await send('Input.dispatchTouchEvent',{type:'touchStart',touchPoints:[edit]});await send('Input.dispatchTouchEvent',{type:'touchEnd',touchPoints:[]});await ev(`(()=>{const i=document.querySelector('#device-name');i.value='RESPONSIVE DRAFT';i.dispatchEvent(new Event('input',{bubbles:true}));i.focus();i.setSelectionRange(3,9);document.querySelector('.palette-grid').scrollTop=37})()`);
+const sizes=[[320,568],[360,800],[390,844],[412,915],[768,1024],[820,1180],[1024,768],[1280,720],[1440,900],[844,390],[599,800],[600,800],[601,800],[899,800],[900,800],[901,800]],geometry=[];for(const [width,height]of sizes){await send('Emulation.setDeviceMetricsOverride',{width,height,deviceScaleFactor:1,mobile:width<1024});await ev(`resizePreviewPopout()`);geometry.push(await ev(`(()=>{const i=document.querySelector('#device-name'),g=document.querySelector('.palette-grid'),c=document.querySelector('#matrix-preview');return{viewport:[innerWidth,innerHeight],overflow:document.documentElement.scrollWidth-document.documentElement.clientWidth,targets:[...document.querySelectorAll('.preview-modes label')].map(e=>{const r=e.getBoundingClientRect();return[r.width,r.height]}),canvas:[document.querySelectorAll('#matrix-preview').length,c.width,c.height],draft:i.value,selection:[i.selectionStart,i.selectionEnd],scroll:g.scrollTop,focus:document.activeElement===i}})()`))}
+const dprs=[];for(const dpr of[1,2,3]){await send('Emulation.setDeviceMetricsOverride',{width:390,height:844,deviceScaleFactor:dpr,mobile:true});dprs.push(await ev(`devicePixelRatio`))}await send('Emulation.setEmulatedMedia',{features:[{name:'prefers-reduced-motion',value:'reduce'}]});const reduced=await ev(`getComputedStyle(document.querySelector('.preview-live')).animationDuration`);await send('Emulation.setPageScaleFactor',{pageScaleFactor:2});const zoom=await ev(`({scale:visualViewport.scale,overflow:document.documentElement.scrollWidth-document.documentElement.clientWidth})`);await send('Emulation.setPageScaleFactor',{pageScaleFactor:1});const heights=[];for(const height of[430,844]){await send('Emulation.setDeviceMetricsOverride',{width:390,height,deviceScaleFactor:1,mobile:true});heights.push(await ev(`({height:innerHeight,draft:document.querySelector('#device-name').value,scroll:document.querySelector('.palette-grid').scrollTop})`))}await ev(`scrollTo(0,document.documentElement.scrollHeight);syncPreviewPopout()`);const popped=await ev(`({active:document.querySelector('.preview-live').classList.contains('is-popped'),count:document.querySelectorAll('#matrix-preview').length,overflow:document.documentElement.scrollWidth-document.documentElement.clientWidth})`);const live=await ev(`(()=>{const r=document.querySelector('label[for="preview-mode-live"]').getBoundingClientRect();return{x:r.x+r.width/2,y:r.y+r.height/2}})()`);await send('Input.dispatchMouseEvent',{type:'mousePressed',x:live.x,y:live.y,button:'left',clickCount:1});await send('Input.dispatchMouseEvent',{type:'mouseReleased',x:live.x,y:live.y,button:'left',clickCount:1});const modal=await ev(`(()=>{const d=document.querySelector('.edit-preview-switch-dialog');return{names:[...d.querySelectorAll('button')].map(b=>b.textContent),targets:[...d.querySelectorAll('button')].map(b=>{const r=b.getBoundingClientRect();return[r.width,r.height]})}})()`);await send('Input.dispatchKeyEvent',{type:'keyDown',key:'Tab',code:'Tab'});await send('Input.dispatchKeyEvent',{type:'keyUp',key:'Tab',code:'Tab'});await send('Input.dispatchKeyEvent',{type:'keyDown',key:'Tab',code:'Tab',modifiers:8});await send('Input.dispatchKeyEvent',{type:'keyUp',key:'Tab',code:'Tab',modifiers:8});await send('Input.dispatchKeyEvent',{type:'keyDown',key:'Enter',code:'Enter'});await send('Input.dispatchKeyEvent',{type:'keyUp',key:'Enter',code:'Enter'});await ev(`document.querySelector('#preview-mode-edit').focus()`);await send('Input.dispatchKeyEvent',{type:'keyDown',key:' ',code:'Space'});await send('Input.dispatchKeyEvent',{type:'keyUp',key:' ',code:'Space'});const final=await ev(`(()=>{const i=document.querySelector('#device-name');return{mode:document.querySelector('#preview-mode-edit').checked?'edit':'live',draft:i.value,selection:[i.selectionStart,i.selectionEnd],scroll:document.querySelector('.palette-grid').scrollTop,count:document.querySelectorAll('#matrix-preview').length,errors:__errors}})()`);console.log(JSON.stringify({geometry,dprs,reduced,zoom,heights,popped,modal,final}))}finally{ws.close()}
+"""
+        report = self._run_dashboard_chromium_probe(body, probe, timeout=60)
+        expected = [[320, 568], [360, 800], [390, 844], [412, 915], [768, 1024], [820, 1180], [1024, 768], [1280, 720], [1440, 900], [844, 390], [599, 800], [600, 800], [601, 800], [899, 800], [900, 800], [901, 800]]
+        self.assertEqual([item["viewport"] for item in report["geometry"]], expected, report)
+        for item in report["geometry"]:
+            self.assertLessEqual(item["overflow"], 1, report)
+            self.assertTrue(all(width >= 44 and height >= 44 for width, height in item["targets"]), report)
+            self.assertEqual(item["canvas"], [1, 64, 32], report)
+            self.assertEqual((item["draft"], item["selection"], item["scroll"], item["focus"]), ("RESPONSIVE DRAFT", [3, 9], 37, True), report)
+        self.assertEqual(report["dprs"], [1, 2, 3], report)
+        self.assertIn(report["reduced"], {"0.01ms", "1e-05s"}, report)
+        self.assertEqual(report["zoom"]["scale"], 2, report)
+        self.assertLessEqual(report["zoom"]["overflow"], 1, report)
+        self.assertEqual(report["heights"], [{"height": 430, "draft": "RESPONSIVE DRAFT", "scroll": 37}, {"height": 844, "draft": "RESPONSIVE DRAFT", "scroll": 37}], report)
+        self.assertEqual(report["popped"], {"active": True, "count": 1, "overflow": 0}, report)
+        self.assertEqual(report["modal"]["names"], ["Stay Editing", "Discard Draft and switch to Live"], report)
+        self.assertTrue(all(width >= 44 and height >= 44 for width, height in report["modal"]["targets"]), report)
+        self.assertEqual(report["final"], {"mode": "edit", "draft": "RESPONSIVE DRAFT", "selection": [3, 9], "scroll": 37, "count": 1, "errors": []}, report)
         self.assertEqual(Path(self.store.path).read_bytes(), before_config)
         self.assertEqual(self.controller.method_calls, [])
 
