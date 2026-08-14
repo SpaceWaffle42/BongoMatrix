@@ -387,6 +387,10 @@ class PreviewSessionExpiredError(RuntimeError):
     """Raised when a continuation belongs to an expired preview session."""
 
 
+class PreviewPageSupersededError(RuntimeError):
+    """Raised when a newer generation wins an in-flight page publication."""
+
+
 class PreviewInstanceRegistry:
     """Own opaque, non-rendering page instances within process-local bounds."""
 
@@ -480,7 +484,7 @@ class PreviewInstanceRegistry:
         # Never wait for or signal an old page while holding the registry lock;
         # its unregister callback re-enters this registry during deferred cleanup.
         if superseded is not None:
-            superseded.close()
+            superseded.supersede()
         return instance
 
     def lookup(self, instance_id, device_identity):
@@ -582,6 +586,13 @@ class PreviewInstance:
             return self._session
 
     def close(self):
+        self._terminate(superseded=False)
+
+    def supersede(self):
+        """Close this instance with a typed stale-publication outcome."""
+        self._terminate(superseded=True)
+
+    def _terminate(self, *, superseded):
         with self._lock:
             if self._closed:
                 return
@@ -591,6 +602,8 @@ class PreviewInstance:
             session = self._session
         if session is None:
             self._release_registration()
+        elif superseded:
+            session.supersede()
         else:
             session.cancel()
 
@@ -788,6 +801,7 @@ class PreviewSession:
         self._state_lock = threading.Lock()
         self._page_in_progress = False
         self._state = "ACTIVE"
+        self._superseded = False
 
     @property
     def state(self):
@@ -821,6 +835,12 @@ class PreviewSession:
         if close_now:
             self._close_iterator()
 
+    def supersede(self):
+        """Cancel while preserving the typed reason an active page lost publication."""
+        with self._state_lock:
+            self._superseded = True
+        self.cancel()
+
     def _close_iterator(self):
         """Release the finite renderer exactly once on cancel or exhaustion."""
         with self._state_lock:
@@ -845,8 +865,12 @@ class PreviewSession:
             return frame
         return next(self._iterator)
 
-    def _cancelled_page(self, page_number):
+    def _cancelled_page(self, page_number, *, raise_on_superseded=False):
         self.cancel()
+        with self._state_lock:
+            superseded = self._superseded
+        if superseded and raise_on_superseded:
+            raise PreviewPageSupersededError("preview generation was superseded")
         return {
             "page": page_number,
             "frames": [],
@@ -854,7 +878,7 @@ class PreviewSession:
             "complete": True,
         }
 
-    def page(self, token=None, *, publish=None):
+    def page(self, token=None, *, publish=None, raise_on_superseded=False):
         """Generate one page and optionally acknowledge its response publication.
 
         A claimed continuation token is never restored.  If the injected response
@@ -882,10 +906,14 @@ class PreviewSession:
                 self._token = None
                 self._page += 1
         if cancelled_page is not None:
-            return self._cancelled_page(cancelled_page)
+            return self._cancelled_page(
+                cancelled_page, raise_on_superseded=raise_on_superseded,
+            )
 
         try:
-            page = self._page_after_claim()
+            page = self._page_after_claim(
+                raise_on_superseded=raise_on_superseded,
+            )
             if publish is not None:
                 try:
                     publish(page)
@@ -900,7 +928,7 @@ class PreviewSession:
             if close_after_page:
                 self._close_iterator()
 
-    def _page_after_claim(self):
+    def _page_after_claim(self, *, raise_on_superseded=False):
         self._current = []
         exhausted = False
         while len(self._current) < self.MAX_FRAMES:
@@ -910,7 +938,9 @@ class PreviewSession:
                 exhausted = True
                 break
             if self._stop_event is not None and self._stop_event.is_set():
-                return self._cancelled_page(self._page)
+                return self._cancelled_page(
+                    self._page, raise_on_superseded=raise_on_superseded,
+                )
             candidate = self._current + [frame]
             probe = {
                 "page": self._page, "frames": candidate, "next_token": "0" * 64,
@@ -933,7 +963,9 @@ class PreviewSession:
             except StopIteration:
                 exhausted = True
             if self._stop_event is not None and self._stop_event.is_set():
-                return self._cancelled_page(self._page)
+                return self._cancelled_page(
+                    self._page, raise_on_superseded=raise_on_superseded,
+                )
         page = None
         with self._state_lock:
             cancelled = self._complete or (
@@ -950,7 +982,9 @@ class PreviewSession:
                 }
                 self._current = []
         if cancelled:
-            return self._cancelled_page(self._page)
+            return self._cancelled_page(
+                self._page, raise_on_superseded=raise_on_superseded,
+            )
         if exhausted:
             self._close_iterator()
         if self._on_activity is not None:

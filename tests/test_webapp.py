@@ -6810,6 +6810,252 @@ console.log('ANNOUNCEMENT_HEADING_SYNC_PASS');
         registry.close()
         self.assertFalse(registry.reaper_alive)
 
+    def test_same_page_slow_generation_is_superseded_by_newer_generation(self):
+        from contextlib import contextmanager
+
+        start_path = "/api/edit-preview/clock_lava"
+        page_path = "/api/edit-preview/page"
+        cancel_path = "/api/edit-preview/cancel"
+        preview_instance = "44444444444444444444444444444444"
+
+        self.pair_browser()
+        with self.client.session_transaction() as browser_session:
+            paired_session = dict(browser_session)
+            device_id = browser_session["device_id"]
+        old_page_client = self.app.test_client()
+        new_start_client = self.app.test_client()
+        for client in (old_page_client, new_start_client):
+            with client.session_transaction() as client_session:
+                client_session.update(paired_session)
+
+        self.controller.reset_mock()
+        before_config = Path(self.store.path).read_bytes()
+        before_devices = Path(self.device_store.path).read_bytes()
+        before_media = sorted(
+            (path.relative_to(self.media_dir).as_posix(), path.read_bytes())
+            for path in self.media_dir.rglob("*") if path.is_file()
+        )
+        iterators = {}
+        stop_events = {}
+        constructed = []
+        pin_enters = []
+        pin_exits = []
+
+        class SlowIterator:
+            def __init__(self, label, *, block_on_call=None):
+                self.label = label
+                self.block_on_call = block_on_call
+                self.next_calls = 0
+                self.close_calls = 0
+                self.concurrent_close_calls = 0
+                self.active = False
+                self.lookahead_ready = threading.Event()
+                self.release_lookahead = threading.Event()
+
+            def __iter__(self):
+                return self
+
+            def __next__(self):
+                self.next_calls += 1
+                if self.next_calls > 100:
+                    raise StopIteration
+                self.active = True
+                try:
+                    frame = {
+                        "png": f"{self.label}-frame-{self.next_calls}",
+                        "delay_ms": self.next_calls,
+                    }
+                    if self.next_calls == self.block_on_call:
+                        self.lookahead_ready.set()
+                        if not self.release_lookahead.wait(2):
+                            raise AssertionError("slow lookahead was not released")
+                    return frame
+                finally:
+                    self.active = False
+
+            def close(self):
+                if self.active:
+                    self.concurrent_close_calls += 1
+                    raise AssertionError("iterator close overlapped advancement")
+                self.close_calls += 1
+                if self.close_calls > 1:
+                    raise AssertionError("iterator closed more than once")
+
+        @contextmanager
+        def pinned(candidate, media_root, *, allow_missing=()):
+            label = candidate["weather"]["location"]
+            pin_enters.append(label)
+            try:
+                yield {}
+            finally:
+                pin_exits.append(label)
+
+        def prepare(module_name, candidate, stop_event):
+            label = candidate["weather"]["location"]
+            stop_events[label] = stop_event
+            return {"label": label}
+
+        def iterator(module_name, candidate, selected_palette, pinned_media, prepared,
+                     stop_event):
+            label = prepared["label"]
+            constructed.append(label)
+            current = SlowIterator(label, block_on_call=34 if label == "old-slow" else None)
+            iterators[label] = current
+            return current
+
+        def payload(label, generation):
+            candidate = copy.deepcopy(self.store.get())
+            candidate.pop("revision")
+            candidate["weather"]["location"] = label
+            return {
+                "config": candidate,
+                "generation": generation,
+                "preview_instance": preview_instance,
+            }
+
+        def assert_response(response, status):
+            self.assertEqual(response.status_code, status, response.get_data(as_text=True))
+            self.assertEqual(response.headers.get("Cache-Control"), "no-store")
+            self.assertNotIn("ETag", response.headers)
+            body = response.get_json()
+            self.assertIsInstance(body, dict)
+            serialized = json.dumps(body)
+            self.assertNotIn("revision", body)
+            self.assertNotIn("device_id", serialized)
+            self.assertNotIn(device_id, serialized)
+            return body
+
+        def continuation(page):
+            return {
+                "session": page["session"],
+                "preview_instance": preview_instance,
+                "token": page["next_token"],
+            }
+
+        registry = None
+        old_result = {}
+        old_failure = []
+        with patch("webapp.pin_candidate_media", pinned), patch(
+            "webapp._prepare_edit_preview_provider", prepare, create=True,
+        ), patch("webapp._edit_preview_iterator", iterator, create=True):
+            old = assert_response(
+                self.client.post(start_path, json=payload("old-slow", 7)), 200,
+            )
+            self.assertEqual(old["generation"], 7)
+            self.assertEqual(old["page"], 0)
+            self.assertEqual(len(old["frames"]), 32)
+            self.assertFalse(old["complete"])
+            registry = self.app.extensions["edit_preview_registry"]
+            old_instance = registry.lookup(
+                old["session"], (device_id, preview_instance),
+            )
+            old_session = old_instance.admit()
+
+            def continue_old():
+                try:
+                    old_result["response"] = old_page_client.post(
+                        page_path, json=continuation(old),
+                    )
+                except BaseException as error:
+                    old_failure.append(error)
+
+            old_thread = threading.Thread(
+                target=continue_old, name="slow-edit-preview-route-page",
+            )
+            old_thread.start()
+            self.assertTrue(
+                iterators["old-slow"].lookahead_ready.wait(1),
+                "old route did not reach the continuation lookahead barrier",
+            )
+
+            newer_started = time.monotonic()
+            newer = assert_response(
+                new_start_client.post(start_path, json=payload("new-fast", 8)), 200,
+            )
+            newer_latency = time.monotonic() - newer_started
+            self.assertLess(newer_latency, 0.25)
+            self.assertEqual(newer["generation"], 8)
+            self.assertEqual(newer["page"], 0)
+            self.assertEqual(len(newer["frames"]), 32)
+            self.assertTrue(stop_events["old-slow"].is_set())
+            self.assertFalse(stop_events["new-fast"].is_set())
+            self.assertTrue(old_thread.is_alive())
+            self.assertEqual(registry.total_count, 2)
+
+            new_page_started = time.monotonic()
+            newer_second = assert_response(new_start_client.post(
+                page_path, json=continuation(newer),
+            ), 200)
+            self.assertLess(time.monotonic() - new_page_started, 0.25)
+            self.assertEqual(newer_second["generation"], 8)
+            self.assertEqual(newer_second["page"], 1)
+            self.assertEqual(len(newer_second["frames"]), 32)
+            self.assertFalse(newer_second["complete"])
+
+            constructed_before_rejection = list(constructed)
+            advances_before_rejection = {
+                label: current.next_calls for label, current in iterators.items()
+            }
+            for label, generation in (("equal-rejected", 8), ("older-rejected", 6)):
+                with self.subTest(rejected_generation=generation):
+                    assert_response(new_start_client.post(
+                        start_path, json=payload(label, generation),
+                    ), 400)
+                    self.assertEqual(constructed, constructed_before_rejection)
+                    self.assertEqual(
+                        {name: current.next_calls for name, current in iterators.items()},
+                        advances_before_rejection,
+                    )
+
+            iterators["old-slow"].release_lookahead.set()
+            old_thread.join(0.25)
+            self.assertFalse(old_thread.is_alive())
+            self.assertEqual(old_failure, [])
+            superseded = assert_response(old_result["response"], 409)
+            self.assertEqual(superseded, {"error": "Preview generation was superseded."})
+            self.assertNotIn("frames", superseded)
+            self.assertNotIn("next_token", superseded)
+            self.assertNotIn("session", superseded)
+            self.assertNotIn("generation", superseded)
+            self.assertEqual(old_session.retained_frame_count, 0)
+            self.assertEqual(iterators["old-slow"].close_calls, 1)
+            self.assertEqual(iterators["old-slow"].concurrent_close_calls, 0)
+            self.assertEqual(pin_exits.count("old-slow"), 1)
+            self.assertEqual(registry.total_count, 1)
+
+            newer_third = assert_response(new_start_client.post(
+                page_path, json=continuation(newer_second),
+            ), 200)
+            self.assertEqual(newer_third["generation"], 8)
+            self.assertEqual(newer_third["page"], 2)
+            self.assertEqual(len(newer_third["frames"]), 32)
+            self.assertFalse(newer_third["complete"])
+            self.assertFalse(stop_events["new-fast"].is_set())
+            cancelled = assert_response(new_start_client.post(cancel_path, json={
+                "session": newer["session"],
+                "preview_instance": preview_instance,
+            }), 200)
+            self.assertEqual(cancelled, {"cancelled": True})
+            self.assertEqual(iterators["new-fast"].close_calls, 1)
+            self.assertEqual(iterators["new-fast"].concurrent_close_calls, 0)
+            self.assertEqual(pin_exits.count("new-fast"), 1)
+            self.assertEqual(registry.total_count, 0)
+
+        self.assertCountEqual(
+            pin_enters, ["old-slow", "new-fast", "equal-rejected", "older-rejected"],
+        )
+        self.assertCountEqual(pin_exits, pin_enters)
+        self.assertEqual(Path(self.store.path).read_bytes(), before_config)
+        self.assertEqual(Path(self.device_store.path).read_bytes(), before_devices)
+        self.assertEqual(sorted(
+            (path.relative_to(self.media_dir).as_posix(), path.read_bytes())
+            for path in self.media_dir.rglob("*") if path.is_file()
+        ), before_media)
+        self.assertEqual(self.controller.method_calls, [])
+        registry.close()
+        self.assertFalse(registry.reaper_alive)
+        self.assertNotIn(old_thread, threading.enumerate())
+
     def test_two_devices_and_two_tabs_are_isolated_and_same_instance_generation_supersedes(self):
         from contextlib import contextmanager
 

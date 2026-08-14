@@ -44,7 +44,7 @@ from pairing import PairedDeviceStore, PairingDurabilityError
 from secret_store import SecretDurabilityError, SecretStore
 from edit_preview import (
     CaptureMatrix, PreviewCapacityError, PreviewInstanceCapacityError,
-    PreviewInstanceRegistry, PreviewSessionExpiredError,
+    PreviewInstanceRegistry, PreviewPageSupersededError, PreviewSessionExpiredError,
 )
 from preview_provider import PreviewProvider
 
@@ -1505,7 +1505,7 @@ def create_app(
                 generation=generation,
             )
             preview_session = instance.admit()
-            page = preview_session.page()
+            page = preview_session.page(raise_on_superseded=True)
             return jsonify({
                 "session": instance.instance_id,
                 "generation": generation,
@@ -1517,6 +1517,9 @@ def create_app(
         except PreviewSessionExpiredError:
             stack.close()
             return edit_preview_error("Preview session expired.", 410)
+        except PreviewPageSupersededError:
+            stack.close()
+            return edit_preview_error("Preview generation was superseded.", 409)
         except (PreviewInstanceCapacityError, PreviewCapacityError):
             stack.close()
             return edit_preview_error(
@@ -1558,7 +1561,7 @@ def create_app(
             ):
                 raise ValueError("preview continuation is invalid")
             instance = get_edit_preview_registry().lookup(session_id, identity)
-            page = instance.admit().page(token)
+            page = instance.admit().page(token, raise_on_superseded=True)
             return jsonify({
                 "session": session_id, "generation": instance.generation, **page,
             })
@@ -1566,6 +1569,8 @@ def create_app(
             return edit_preview_error("Preview request exceeds 1 MiB.", 413)
         except PreviewSessionExpiredError:
             return edit_preview_error("Preview session expired.", 410)
+        except PreviewPageSupersededError:
+            return edit_preview_error("Preview generation was superseded.", 409)
         except (KeyError, StopIteration):
             return edit_preview_error("Preview session is no longer active.", 409)
         except ValueError as error:
