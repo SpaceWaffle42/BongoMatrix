@@ -51,13 +51,15 @@ class PinnedMediaHandle:
             return self._descriptor
 
     def dup_file(self):
-        """Return a consumer-owned binary file at the start of the pinned bytes."""
+        """Return a consumer-owned binary file with an independent offset."""
         duplicate = None
         with self._lock:
             if self._descriptor is None:
                 raise ValueError("media handle is closed")
-            os.lseek(self._descriptor, 0, os.SEEK_SET)
-            duplicate = os.dup(self._descriptor)
+            duplicate = os.open(
+                f"/proc/self/fd/{self._descriptor}",
+                os.O_RDONLY | os.O_CLOEXEC,
+            )
         try:
             duplicate_file = os.fdopen(duplicate, "rb")
             duplicate = None

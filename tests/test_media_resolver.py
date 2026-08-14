@@ -339,6 +339,20 @@ class MediaResolverTests(unittest.TestCase):
                         handle = handles[reference]
                         original_descriptor = handle.fileno()
 
+                        with (
+                            handle.dup_file() as first_independent,
+                            handle.dup_file() as second_independent,
+                        ):
+                            self.assertEqual(first_independent.tell(), 0)
+                            self.assertEqual(second_independent.tell(), 0)
+                            first_byte = first_independent.read(1)
+                            self.assertTrue(first_byte)
+                            self.assertEqual(second_independent.tell(), 0)
+                            self.assertEqual(
+                                os.lseek(original_descriptor, 0, os.SEEK_CUR), 0
+                            )
+                            self.assertEqual(second_independent.read(1), first_byte)
+
                         first_duplicate = handle.dup_file()
                         first_descriptor = first_duplicate.fileno()
                         self.assertEqual(first_duplicate.mode, "rb")
