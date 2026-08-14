@@ -8972,6 +8972,410 @@ console.log('ANNOUNCEMENT_HEADING_SYNC_PASS');
         )
         self.assertEqual(len(list(Path("/proc/self/fd").iterdir())), before_fds)
 
+    def test_preview_service_close_is_idempotent_during_active_page(self):
+        """Concurrent service close suppresses a claimed page and cleans once."""
+        from contextlib import contextmanager
+        import multiprocessing
+
+        from edit_preview import PreviewInstanceRegistry, PreviewSessionCapacity
+
+        self.pair_browser()
+        with self.client.session_transaction() as paired:
+            browser_session = dict(paired)
+            device_id = paired["device_id"]
+        self.controller.reset_mock()
+
+        before_children = {child.pid for child in multiprocessing.active_children()}
+        before_threads = {(thread.ident, thread.name) for thread in threading.enumerate()}
+        before_fds = len(list(Path("/proc/self/fd").iterdir()))
+        before_config = Path(self.store.path).read_bytes()
+        before_devices = Path(self.device_store.path).read_bytes()
+        before_media = sorted(
+            (path.relative_to(self.media_dir).as_posix(), path.read_bytes())
+            for path in self.media_dir.rglob("*") if path.is_file()
+        )
+
+        registries = []
+        providers = []
+        pins = []
+        decoders = []
+        service_callbacks = []
+        service_accessor = [None]
+        decoder_blocked = threading.Event()
+
+        class TrackedRegistry(PreviewInstanceRegistry):
+            def __init__(self):
+                capacity = PreviewSessionCapacity()
+                super().__init__(capacity=capacity)
+                self.capacity = capacity
+                self.close_calls = 0
+                self._close_tracking_lock = threading.Lock()
+                self._close_tracked = False
+                registries.append(self)
+
+            def close(self):
+                with self._close_tracking_lock:
+                    first_close = not self._close_tracked
+                    if first_close:
+                        self._close_tracked = True
+                        # Re-enter the app-owned service accessor from a lifecycle
+                        # callback. It must not run under the service-pair lock.
+                        callback_result = []
+                        callback = threading.Thread(
+                            target=lambda: callback_result.append(
+                                service_accessor[0]()
+                            ),
+                            name="preview-service-lock-callback",
+                        )
+                        callback.start()
+                        callback.join(0.25)
+                        if callback.is_alive():
+                            raise AssertionError("registry callback ran under service lock")
+                        service_callbacks.append(callback_result[0])
+                super().close()
+                if first_close:
+                    self.close_calls += 1
+
+        class TrackedProvider:
+            MAX_WORKERS = 2
+
+            def __init__(self):
+                self._lock = threading.Lock()
+                self.is_closed = False
+                self.close_calls = 0
+                self.prepare_calls = 0
+                self.shutdown_seen = threading.Event()
+                self.child_close_calls = 0
+                self.child_reap_calls = 0
+                self.child_join_calls = 0
+                self.child_fds = os.pipe()
+                providers.append(self)
+
+            @property
+            def active_child_count(self):
+                return 0
+
+            @property
+            def active_worker_count(self):
+                return 0
+
+            @property
+            def available_worker_slots(self):
+                return self.MAX_WORKERS
+
+            def prepare(self, provider, *, settings, credentials, cancel_event,
+                        request_deadline):
+                with self._lock:
+                    if self.is_closed:
+                        raise RuntimeError("closed provider attempted to serve")
+                    self.prepare_calls += 1
+                return (
+                    ("feels_like", 19), ("high", 23), ("humidity", 50),
+                    ("location", settings["weather"]["location"]), ("low", 12),
+                    ("status", "Clear sky"), ("temperature", 20),
+                )
+
+            def shutdown(self):
+                with self._lock:
+                    if self.is_closed:
+                        return
+                    self.is_closed = True
+                    self.close_calls += 1
+                    self.shutdown_seen.set()
+                    for descriptor in self.child_fds:
+                        os.close(descriptor)
+                        self.child_close_calls += 1
+                    self.child_reap_calls += 1
+                    self.child_join_calls += 1
+
+        class BlockedDecoder:
+            def __init__(self, stop_event):
+                self.stop_event = stop_event
+                self.next_calls = 0
+                self.close_calls = 0
+                self.concurrent_close_calls = 0
+                self.active = False
+                self.stop_seen = threading.Event()
+                self.fds = os.pipe()
+                self.fd_close_calls = {descriptor: 0 for descriptor in self.fds}
+                decoders.append(self)
+
+            def __iter__(self):
+                return self
+
+            def __next__(self):
+                self.next_calls += 1
+                self.active = True
+                try:
+                    if self.next_calls == 34:
+                        decoder_blocked.set()
+                        if not self.stop_event.wait(1):
+                            raise AssertionError("service close did not stop active decoder")
+                        self.stop_seen.set()
+                    return {
+                        "png": f"private-frame-{self.next_calls}",
+                        "delay_ms": self.next_calls,
+                    }
+                finally:
+                    self.active = False
+
+            def close(self):
+                if self.active:
+                    self.concurrent_close_calls += 1
+                    raise AssertionError("decoder close overlapped iteration")
+                self.close_calls += 1
+                if self.close_calls > 1:
+                    raise AssertionError("decoder closed more than once")
+                for descriptor in self.fds:
+                    os.close(descriptor)
+                    self.fd_close_calls[descriptor] += 1
+
+        @contextmanager
+        def pinned(candidate, media_root, *, allow_missing=()):
+            fds = os.pipe()
+            record = {
+                "fds": fds,
+                "close_calls": 0,
+                "fd_close_calls": {descriptor: 0 for descriptor in fds},
+            }
+            pins.append(record)
+            try:
+                yield {"draft": "pinned"}
+            finally:
+                record["close_calls"] += 1
+                if record["close_calls"] > 1:
+                    raise AssertionError("pin stack closed more than once")
+                for descriptor in fds:
+                    os.close(descriptor)
+                    record["fd_close_calls"][descriptor] += 1
+
+        def iterator(module_name, candidate, selected_palette, pinned_media, prepared,
+                     stop_event):
+            decoder = BlockedDecoder(stop_event)
+
+            def owned_decoder():
+                try:
+                    while True:
+                        yield next(decoder)
+                except StopIteration:
+                    return
+                finally:
+                    decoder.close()
+
+            return owned_decoder()
+
+        def client_for_thread():
+            client = self.app.test_client()
+            with client.session_transaction() as paired:
+                paired.update(browser_session)
+            return client
+
+        def assert_response(response, status):
+            self.assertEqual(response.status_code, status, response.get_data(as_text=True))
+            self.assertEqual(response.headers.get("Cache-Control"), "no-store")
+            self.assertNotIn("ETag", response.headers)
+            return response.get_json()
+
+        candidate = copy.deepcopy(self.store.get())
+        candidate.pop("revision")
+        candidate["weather"]["location"] = "private-active-page-location"
+        preview_instance = "cd" * 16
+        payload = {
+            "config": candidate,
+            "generation": 200,
+            "preview_instance": preview_instance,
+        }
+        page_result = {}
+        page_failures = []
+        close_results = []
+        close_failures = []
+        close_barrier = threading.Barrier(3)
+
+        def active_page(first):
+            try:
+                page_result["response"] = client_for_thread().post(
+                    "/api/edit-preview/page",
+                    json={
+                        "session": first["session"],
+                        "preview_instance": preview_instance,
+                        "token": first["next_token"],
+                    },
+                )
+            except BaseException as error:
+                page_failures.append(error)
+
+        def close_service(caller):
+            try:
+                close_barrier.wait()
+                started = time.monotonic()
+                self.app.extensions["close_edit_preview_services"]()
+                close_results.append((caller, time.monotonic() - started))
+            except BaseException as error:
+                close_failures.append(error)
+
+        factory_patch = patch.multiple(
+            "webapp", PreviewInstanceRegistry=TrackedRegistry,
+            PreviewProvider=TrackedProvider, pin_candidate_media=pinned,
+            _edit_preview_iterator=iterator,
+        )
+        page_thread = None
+        close_threads = []
+        try:
+            with factory_patch:
+                first = assert_response(
+                    self.client.post("/api/edit-preview/weather", json=payload), 200,
+                )
+                self.assertEqual(len(first["frames"]), 32)
+                self.assertFalse(first["complete"])
+                registry = self.app.extensions["edit_preview_registry"]
+                provider = self.app.extensions["edit_preview_provider"]
+                service_accessor[0] = self.app.extensions["get_edit_preview_services"]
+                identity = (device_id, preview_instance)
+                instance = registry.lookup(first["session"], identity)
+                preview_session = instance.admit()
+
+                page_thread = threading.Thread(
+                    target=active_page, args=(first,),
+                    name="preview-service-close-active-page",
+                )
+                page_thread.start()
+                self.assertTrue(decoder_blocked.wait(1), "page did not claim and block")
+
+                replay = assert_response(client_for_thread().post(
+                    "/api/edit-preview/page",
+                    json={
+                        "session": first["session"],
+                        "preview_instance": preview_instance,
+                        "token": first["next_token"],
+                    },
+                ), 409)
+                self.assertEqual(replay, {"error": "Preview continuation was already used."})
+
+                close_threads = [
+                    threading.Thread(
+                        target=close_service, args=(index,),
+                        name=f"preview-service-close-{index}",
+                    )
+                    for index in range(2)
+                ]
+                for thread in close_threads:
+                    thread.start()
+                close_barrier.wait()
+                page_thread.join(0.5)
+                for thread in close_threads:
+                    thread.join(0.5)
+
+                self.assertFalse(page_thread.is_alive())
+                self.assertTrue(all(not thread.is_alive() for thread in close_threads))
+                self.assertEqual(page_failures, [])
+                self.assertEqual(close_failures, [])
+                self.assertEqual({caller for caller, _elapsed in close_results}, {0, 1})
+                self.assertTrue(all(elapsed < 0.25 for _caller, elapsed in close_results))
+                shutdown = assert_response(page_result["response"], 503)
+                self.assertEqual(shutdown, {"error": "Preview is temporarily unavailable."})
+                for forbidden in ("frames", "next_token", "session", "generation"):
+                    self.assertNotIn(forbidden, shutdown)
+
+                self.assertTrue(decoders[0].stop_seen.is_set())
+                self.assertTrue(provider.shutdown_seen.is_set())
+                self.assertEqual(decoders[0].concurrent_close_calls, 0)
+                self.assertEqual(decoders[0].close_calls, 1)
+                self.assertEqual(pins[0]["close_calls"], 1)
+                self.assertEqual(preview_session.state, "CLOSED")
+                self.assertEqual(preview_session.retained_frame_count, 0)
+                self.assertEqual(registry.lifecycle_state, "CLOSED")
+                self.assertEqual(registry.close_calls, 1)
+                self.assertEqual(registry.reaper_join_count, 1)
+                self.assertFalse(registry.reaper_alive)
+                self.assertEqual(provider.close_calls, 1)
+                self.assertEqual(
+                    (provider.child_close_calls, provider.child_reap_calls,
+                     provider.child_join_calls),
+                    (2, 1, 1),
+                )
+                self.assertEqual(len(service_callbacks), 1)
+                callback_registry, callback_provider = service_callbacks[0]
+                self.assertIs(
+                    self.app.extensions["edit_preview_registry"], callback_registry,
+                )
+                self.assertIs(
+                    self.app.extensions["edit_preview_provider"], callback_provider,
+                )
+
+                self.app.extensions["close_edit_preview_services"]()
+                self.app.extensions["close_edit_preview_services"]()
+                self.assertEqual((registry.close_calls, provider.close_calls), (1, 1))
+                self.assertEqual(registry.reaper_join_count, 1)
+                self.assertEqual(decoders[0].close_calls, 1)
+                self.assertEqual(pins[0]["close_calls"], 1)
+
+                stale = assert_response(client_for_thread().post(
+                    "/api/edit-preview/page",
+                    json={
+                        "session": first["session"],
+                        "preview_instance": preview_instance,
+                        "token": first["next_token"],
+                    },
+                ), 409)
+                self.assertEqual(stale, {"error": "Preview session is no longer active."})
+                replacement_registry = self.app.extensions["edit_preview_registry"]
+                replacement_provider = self.app.extensions["edit_preview_provider"]
+                self.assertIsNot(replacement_registry, registry)
+                self.assertIsNot(replacement_provider, provider)
+
+                replacement = assert_response(client_for_thread().post(
+                    "/api/edit-preview/weather",
+                    json={**payload, "generation": 201},
+                ), 200)
+                self.assertEqual(replacement["generation"], 201)
+                assert_response(client_for_thread().post(
+                    "/api/edit-preview/cancel",
+                    json={
+                        "session": replacement["session"],
+                        "preview_instance": preview_instance,
+                    },
+                ), 200)
+                self.app.extensions["close_edit_preview_services"]()
+        finally:
+            if page_thread is not None:
+                page_thread.join(1)
+            for thread in close_threads:
+                thread.join(1)
+            for registry in registries:
+                registry.close()
+            for provider in providers:
+                provider.shutdown()
+
+        self.assertEqual((len(registries), len(providers)), (2, 2))
+        self.assertTrue(all(registry.lifecycle_state == "CLOSED" for registry in registries))
+        self.assertTrue(all(registry.close_calls == 1 for registry in registries))
+        self.assertTrue(all(registry.reaper_join_count == 1 for registry in registries))
+        self.assertTrue(all(registry.total_count == 0 for registry in registries))
+        self.assertTrue(all(registry.expired_count == 0 for registry in registries))
+        self.assertTrue(all(registry.capacity.active_count == 0 for registry in registries))
+        self.assertTrue(all(registry.capacity.waiting_count == 0 for registry in registries))
+        self.assertTrue(all(provider.close_calls == 1 for provider in providers))
+        self.assertTrue(all(provider.active_worker_count == 0 for provider in providers))
+        self.assertTrue(all(provider.active_child_count == 0 for provider in providers))
+        self.assertTrue(all(decoder.close_calls == 1 for decoder in decoders))
+        self.assertTrue(all(set(decoder.fd_close_calls.values()) == {1} for decoder in decoders))
+        self.assertTrue(all(pin["close_calls"] == 1 for pin in pins))
+        self.assertTrue(all(set(pin["fd_close_calls"].values()) == {1} for pin in pins))
+        self.assertEqual(Path(self.store.path).read_bytes(), before_config)
+        self.assertEqual(Path(self.device_store.path).read_bytes(), before_devices)
+        self.assertEqual(sorted(
+            (path.relative_to(self.media_dir).as_posix(), path.read_bytes())
+            for path in self.media_dir.rglob("*") if path.is_file()
+        ), before_media)
+        self.assertEqual(self.controller.method_calls, [])
+        self.assertEqual(
+            {child.pid for child in multiprocessing.active_children()}, before_children,
+        )
+        self.assertEqual(
+            {(thread.ident, thread.name) for thread in threading.enumerate()}, before_threads,
+        )
+        self.assertEqual(len(list(Path("/proc/self/fd").iterdir())), before_fds)
+
     def test_preview_instance_registry_is_bounded_and_expires(self):
         from contextlib import contextmanager
         import multiprocessing
