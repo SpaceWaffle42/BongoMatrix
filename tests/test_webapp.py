@@ -34,6 +34,41 @@ import webapp
 from webapp import create_app
 
 
+def terminate_process_group(process, timeout=5.0):
+    """Terminate and reap a dedicated process group before profile cleanup."""
+    process_group = process.pid
+
+    def group_exists():
+        try:
+            os.killpg(process_group, 0)
+        except ProcessLookupError:
+            return False
+        return True
+
+    def wait_for_extinction(deadline):
+        while True:
+            process.poll()
+            if not group_exists():
+                return True
+            if time.monotonic() >= deadline:
+                return False
+            time.sleep(.01)
+
+    try:
+        os.killpg(process_group, signal.SIGTERM)
+    except ProcessLookupError:
+        pass
+    if not wait_for_extinction(time.monotonic() + timeout):
+        try:
+            os.killpg(process_group, signal.SIGKILL)
+        except ProcessLookupError:
+            pass
+        if not wait_for_extinction(time.monotonic() + timeout):
+            raise RuntimeError("Chromium process group did not terminate")
+    if process.poll() is None:
+        process.wait(timeout=timeout)
+
+
 class WebAppTests(unittest.TestCase):
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory()
@@ -73,6 +108,44 @@ class WebAppTests(unittest.TestCase):
             headers.setdefault("If-Match", f'"{self.store.get()["revision"]}"')
             kwargs["headers"] = headers
         return client.post("/api/config", json=json, **kwargs)
+
+    def test_chromium_process_group_cleanup_waits_for_descendant_extinction(self):
+        child_code = (
+            "import signal,time;"
+            "signal.signal(signal.SIGTERM,signal.SIG_IGN);"
+            "print('ready',flush=True);"
+            "time.sleep(60)"
+        )
+        parent_code = (
+            "import subprocess,sys,time;"
+            f"child=subprocess.Popen([sys.executable,'-c',{child_code!r}],"
+            "stdout=subprocess.PIPE,text=True);"
+            "child.stdout.readline();"
+            "print(child.pid,flush=True);"
+            "time.sleep(60)"
+        )
+        process = subprocess.Popen(
+            [sys.executable, "-c", parent_code],
+            stdout=subprocess.PIPE,
+            text=True,
+            start_new_session=True,
+        )
+        assert process.stdout is not None
+        child_pid = int(process.stdout.readline())
+        process.stdout.close()
+        try:
+            terminate_process_group(process, timeout=.2)
+        finally:
+            try:
+                os.killpg(process.pid, signal.SIGKILL)
+            except ProcessLookupError:
+                pass
+            process.wait(timeout=5)
+
+        self.assertIsNotNone(process.returncode)
+        with self.assertRaises(ProcessLookupError):
+            os.kill(child_pid, 0)
+
 
     def pair_browser(self):
         self.pairing.verify.return_value = True
@@ -2057,9 +2130,9 @@ try{
  await metrics(899,700);const dynamicBefore=await evaluate(`(()=>{const field=document.querySelector('#device-name');field.value='dynamic draft';field.focus();field.setSelectionRange(1,6);scrollTo(0,Math.min(240,document.documentElement.scrollHeight));return {width:innerWidth,nav:getComputedStyle(document.querySelector('.nav')).display,value:field.value,start:field.selectionStart,end:field.selectionEnd,scroll:scrollY}})()`);await metrics(901,700,false);const dynamicAfter=await evaluate(`(()=>{const field=document.querySelector('#device-name');return {width:innerWidth,nav:getComputedStyle(document.querySelector('.nav')).display,value:field.value,start:field.selectionStart,end:field.selectionEnd,scroll:scrollY}})()`);
  await metrics(390,844,true);const mousePoint=await dialogPoint(101,'mouse draft','Remain with unsaved draft');await mouseClick(mousePoint);const mouse=await evaluate(`(()=>{const field=document.querySelector('#device-name');return {closed:!document.querySelector('.config-revision-dialog'),restored:document.activeElement===field,value:field.value,start:field.selectionStart,end:field.selectionEnd}})()`);
  const touchPoint=await dialogPoint(102,'touch draft','Remain with unsaved draft');await touchTap(touchPoint);const touch=await evaluate(`(()=>{const field=document.querySelector('#device-name');return {closed:!document.querySelector('.config-revision-dialog'),restored:document.activeElement===field,value:field.value,start:field.selectionStart,end:field.selectionEnd}})()`);
- await evaluate(`(()=>{if(matrixSyncTimer!==null){clearInterval(matrixSyncTimer);matrixSyncTimer=null}globalThis.__matrixRecovery={fetches:0,events:[],visibility:[]};globalThis.fetch=async()=>{__matrixRecovery.fetches++;return {status:304,redirected:false,ok:true,headers:{get:()=>String(MATRIX_CLIENT_CONTRACT)},json:async()=>({})}};addEventListener('offline',()=>__matrixRecovery.events.push('offline'));addEventListener('online',()=>__matrixRecovery.events.push('online'));document.addEventListener('visibilitychange',()=>__matrixRecovery.visibility.push({state:document.visibilityState,fetches:__matrixRecovery.fetches}));return true})()`);
+ await evaluate(`(async()=>{stopMatrixConfigSync();await new Promise(resolve=>setTimeout(resolve,0));globalThis.__matrixRecovery={fetches:0,events:[],visibility:[]};globalThis.fetch=async()=>{__matrixRecovery.fetches++;return {status:304,redirected:false,ok:true,headers:{get:()=>String(MATRIX_CLIENT_CONTRACT)},json:async()=>({})}};matrixSyncStopped=false;addEventListener('online',matrixCheckForNewerConfig);document.addEventListener('visibilitychange',matrixVisibilityCheck);addEventListener('offline',()=>__matrixRecovery.events.push('offline'));addEventListener('online',()=>__matrixRecovery.events.push('online'));document.addEventListener('visibilitychange',()=>__matrixRecovery.visibility.push({state:document.visibilityState,fetches:__matrixRecovery.fetches}));return true})()`,true);
  await send('Network.emulateNetworkConditions',{offline:true,latency:0,downloadThroughput:-1,uploadThroughput:-1});await waitFor(`navigator.onLine===false&&__matrixRecovery.events.includes('offline')`,'offline event');const offlineFetches=await evaluate(`__matrixRecovery.fetches`);await send('Network.emulateNetworkConditions',{offline:false,latency:0,downloadThroughput:-1,uploadThroughput:-1});await waitFor(`navigator.onLine===true&&__matrixRecovery.events.includes('online')&&__matrixRecovery.fetches>${offlineFetches}`,'online recovery poll');const onlineOffline=await evaluate(`({events:__matrixRecovery.events,offlineFetches:${offlineFetches},fetches:__matrixRecovery.fetches})`);
- const visibilityBefore=await evaluate(`__matrixRecovery.fetches`),visibilityMode='event-override';const visibilityHidden=await evaluate(`(()=>{globalThis.__matrixVisibilityState='hidden';Object.defineProperty(document,'visibilityState',{configurable:true,get:()=>globalThis.__matrixVisibilityState});document.dispatchEvent(new Event('visibilitychange'));return __matrixRecovery.visibility.at(-1)})()`);await evaluate(`(()=>{globalThis.__matrixVisibilityState='visible';document.dispatchEvent(new Event('visibilitychange'));return true})()`);await waitFor(`__matrixRecovery.fetches>${visibilityBefore}`,'visible event recovery');const visibilityVisible={state:await evaluate(`document.visibilityState`),fetches:await evaluate(`__matrixRecovery.fetches`)};
+ const visibilityMode='event-override',visibilityHidden=await evaluate(`(()=>{const before=__matrixRecovery.fetches;globalThis.__matrixVisibilityState='hidden';Object.defineProperty(document,'visibilityState',{configurable:true,get:()=>globalThis.__matrixVisibilityState});document.dispatchEvent(new Event('visibilitychange'));return {...__matrixRecovery.visibility.at(-1),before}})()`),visibilityBefore=visibilityHidden.before;await evaluate(`(()=>{globalThis.__matrixVisibilityState='visible';document.dispatchEvent(new Event('visibilitychange'));return true})()`);await waitFor(`__matrixRecovery.fetches>${visibilityBefore}`,'visible event recovery');const visibilityVisible={state:await evaluate(`document.visibilityState`),fetches:await evaluate(`__matrixRecovery.fetches`)};
  await send('Emulation.setEmulatedMedia',{media:'screen',features:[{name:'prefers-reduced-motion',value:'reduce'}]});const reducedPoint=await dialogPoint(103,'reduced draft','Remain with unsaved draft');const reducedBefore=await evaluate(`({matches:matchMedia('(prefers-reduced-motion: reduce)').matches,focused:document.activeElement.textContent==='Reload latest saved state',fits:(()=>{const r=document.querySelector('.config-revision-dialog').getBoundingClientRect();return r.top>=0&&r.bottom<=innerHeight})()})`);await mouseClick(reducedPoint);const reducedAfter=await evaluate(`({closed:!document.querySelector('.config-revision-dialog'),restored:document.activeElement===document.querySelector('#device-name')})`);
  await metrics(390,844,true);const reloadPoint=await dialogPoint(104,'discard this draft','Reload latest saved state');loaded=new Promise(resolve=>loadResolve=resolve);await mouseClick(reloadPoint);await Promise.race([loaded,new Promise((_,reject)=>setTimeout(()=>reject(new Error('reload choice timeout')),5000))]);const reloadChoice=await evaluate(`({value:document.querySelector('#device-name').value,dialog:!!document.querySelector('.config-revision-dialog')})`);
  console.log(JSON.stringify({geometry,zoomBefore,zoomAfter,breakpoint,dynamicBefore,dynamicAfter,mouse,touch,onlineOffline,visibilityMode,visibilityBefore,visibilityHidden,visibilityVisible,reducedBefore,reducedAfter,reloadChoice}));
@@ -2072,7 +2145,7 @@ try{
             browser = subprocess.Popen([
                 chromium, "--headless", "--no-sandbox", "--disable-gpu",
                 "--remote-debugging-port=0", f"--user-data-dir={profile}", "about:blank",
-            ], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            ], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, start_new_session=True)
             try:
                 active_port = profile / "DevToolsActivePort"
                 for _attempt in range(50):
@@ -2087,11 +2160,7 @@ try{
                     capture_output=True, text=True, timeout=30,
                 )
             finally:
-                browser.terminate()
-                try:
-                    browser.wait(timeout=5)
-                except subprocess.TimeoutExpired:
-                    browser.kill(); browser.wait(timeout=5)
+                terminate_process_group(browser)
         self.assertEqual(completed.returncode, 0, completed.stderr)
         report = json.loads(completed.stdout.strip().splitlines()[-1])
         self.assertIn("visibilityHidden", report, report)
@@ -3485,7 +3554,7 @@ const result=await send('Runtime.evaluate',{expression,returnByValue:true,awaitP
             page = Path(directory) / "dashboard.html"
             page.write_text(body)
             profile = Path(directory) / "profile"
-            browser = subprocess.Popen([chromium, "--headless", "--no-sandbox", "--disable-gpu", "--remote-debugging-port=0", f"--user-data-dir={profile}", "about:blank"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            browser = subprocess.Popen([chromium, "--headless", "--no-sandbox", "--disable-gpu", "--remote-debugging-port=0", f"--user-data-dir={profile}", "about:blank"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, start_new_session=True)
             try:
                 active = profile / "DevToolsActivePort"
                 for _ in range(50):
@@ -3495,9 +3564,7 @@ const result=await send('Runtime.evaluate',{expression,returnByValue:true,awaitP
                 port = active.read_text().splitlines()[0]
                 completed = subprocess.run([shutil.which("node"), "-e", probe, port, str(page)], capture_output=True, text=True, timeout=15)
             finally:
-                browser.terminate()
-                try: browser.wait(5)
-                except subprocess.TimeoutExpired: browser.kill(); browser.wait(5)
+                terminate_process_group(browser)
         self.assertEqual(completed.returncode, 0, completed.stderr)
         result = json.loads(completed.stdout.strip().splitlines()[-1])
         self.assertEqual(result["seconds"], "14.01")
