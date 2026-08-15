@@ -910,6 +910,7 @@
     scroll.addEventListener('scroll', () => {
       state.timelineScrollLeft = scroll.scrollLeft;
       state.timelineScrollTop = scroll.scrollTop;
+      state.timelineScrollRevision = (state.timelineScrollRevision || 0) + 1;
     }, {passive: true});
     {
       let resizeHandler = null;
@@ -938,6 +939,7 @@
       };
       resizeHandler = () => {
         const generation = (state.timelineResizeGeneration || 0) + 1;
+        const scrollRevision = state.timelineScrollRevision || 0;
         state.timelineResizeGeneration = generation;
         for (const frame of state.timelineResizeFrames || []) cancelAnimationFrame(frame);
         state.timelineResizeFrames?.clear();
@@ -947,7 +949,8 @@
         const settle = () => {
           const frame = requestAnimationFrame(() => {
             state.timelineResizeFrames?.delete(frame);
-            if (state.timelineResizeGeneration !== generation || state.timelineResizeHandler !== resizeHandler) return;
+            if (state.timelineResizeGeneration !== generation || state.timelineResizeHandler !== resizeHandler
+                || (state.timelineScrollRevision || 0) !== scrollRevision) return;
           keepActiveVisible();
           if (--remaining > 0) settle();
           });
@@ -955,7 +958,8 @@
         };
         settle();
         state.timelineResizeTimer = setTimeout(() => {
-          if (state.timelineResizeGeneration !== generation || state.timelineResizeHandler !== resizeHandler) return;
+          if (state.timelineResizeGeneration !== generation || state.timelineResizeHandler !== resizeHandler
+              || (state.timelineScrollRevision || 0) !== scrollRevision) return;
           state.timelineResizeTimer = null;
           keepActiveVisible();
         }, 100);
