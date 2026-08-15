@@ -114,6 +114,31 @@ class CaptureMatrix:
             )
         return int(x) + advance
 
+    def draw_text_with_border(
+        self, font, x, y, fill_color, border_color, text, width=1, canvas=None,
+    ):
+        canvas = canvas or self.canvas
+        if width < 1:
+            width = 1
+        for dirx in range(-width, width + 1):
+            for diry in range(-width, width + 1):
+                if dirx != 0 or diry != 0:
+                    self.draw_text(
+                        font, x + dirx, y + diry, border_color, text, canvas=canvas,
+                    )
+        return self.draw_text(font, x, y, fill_color, text, canvas=canvas)
+
+    def widget_scroll(self, text, font, x, y, colour, canvas=None, step=1, wrap=True):
+        canvas = canvas or self.canvas
+        text_len = self.draw_text(font, x, y, colour, text, canvas=canvas)
+        x -= step
+        if wrap:
+            if step >= 0 and x + text_len < 0:
+                x = canvas.width
+            elif step < 0 and x > canvas.width:
+                x = -text_len
+        return x, text_len
+
     def snapshot(self, canvas=None):
         """Return an isolated copy without changing publication or revision state."""
         return self._capture.snapshot(canvas or self.canvas)

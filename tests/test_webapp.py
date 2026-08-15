@@ -1,3 +1,4 @@
+import base64
 import copy
 import hashlib
 import io
@@ -352,14 +353,14 @@ class WebAppTests(unittest.TestCase):
         body = self.client.get("/").get_data(as_text=True)
 
         application_version = getattr(webapp, "APPLICATION_VERSION", None)
-        self.assertEqual(application_version, "0.3.48-preview")
+        self.assertEqual(application_version, "0.3.49-preview")
         self.assertEqual(body.count(f"Version {application_version}"), 1)
         self.assertRegex(
             body,
             rf"LAN CONTROL</span><br><span[^>]*>Version {re.escape(application_version)}</span>",
         )
         template = (Path(__file__).parents[1] / "app" / "templates" / "dashboard.html").read_text()
-        self.assertNotIn("0.3.48-preview", template)
+        self.assertNotIn("0.3.49-preview", template)
 
     def test_control_stop_reports_timeout_without_claiming_success(self):
         self.pair_browser()
@@ -7228,6 +7229,57 @@ console.log('ANNOUNCEMENT_HEADING_SYNC_PASS');
         self.assertEqual(self.controller.method_calls, [])
         registry.close()
         self.assertFalse(registry.reaper_alive)
+
+    def test_edit_preview_route_renders_default_lava_text(self):
+        self.pair_browser()
+        self.controller.reset_mock()
+        candidate = copy.deepcopy(self.store.get())
+        candidate.pop("revision")
+        self.assertTrue(candidate["lava"]["show_time"])
+        self.assertTrue(candidate["lava"]["show_date"])
+
+        response = self.client.post("/api/edit-preview/clock_lava", json={
+            "config": candidate,
+            "generation": 1,
+            "preview_instance": "0123456789abcdef0123456789abcdef",
+        })
+
+        self.assertEqual(response.status_code, 200, response.get_data(as_text=True))
+        body = response.get_json()
+        self.assertGreater(len(body["frames"]), 0)
+        self.assertEqual(Image.open(io.BytesIO(base64.b64decode(
+            body["frames"][0]["png"]
+        ))).size, (64, 32))
+        self.assertEqual(self.controller.method_calls, [])
+
+    def test_edit_preview_route_renders_default_weather_text_and_scroll(self):
+        from modules.weather_app import WeatherSnapshot
+
+        self.pair_browser()
+        self.controller.reset_mock()
+        candidate = copy.deepcopy(self.store.get())
+        candidate.pop("revision")
+        prepared = WeatherSnapshot(
+            location="Brighton, England, GB", status="Clear sky",
+            temperature=20, feels_like=19, high=23, low=12, humidity=50,
+        )
+
+        with patch.object(
+            webapp, "_prepare_edit_preview_provider", return_value=prepared,
+        ):
+            response = self.client.post("/api/edit-preview/weather", json={
+                "config": candidate,
+                "generation": 1,
+                "preview_instance": "0123456789abcdef0123456789abcdef",
+            })
+
+        self.assertEqual(response.status_code, 200, response.get_data(as_text=True))
+        body = response.get_json()
+        self.assertGreater(len(body["frames"]), 0)
+        self.assertEqual(Image.open(io.BytesIO(base64.b64decode(
+            body["frames"][0]["png"]
+        ))).size, (64, 32))
+        self.assertEqual(self.controller.method_calls, [])
 
     def test_edit_preview_routes_render_splash_sleep_and_media_consumers(self):
         self.pair_browser()
