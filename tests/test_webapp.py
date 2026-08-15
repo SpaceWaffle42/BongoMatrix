@@ -13,7 +13,7 @@ import tempfile
 import threading
 import time
 import unittest
-from datetime import timedelta
+from datetime import datetime, timedelta
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from unittest.mock import Mock, patch
@@ -265,18 +265,20 @@ class WebAppTests(unittest.TestCase):
         self.pair_browser()
         current = self.store.get()
         active = test_config_store.ConfigStoreTests.announcement()
-        today = time.strftime("%Y-%m-%d")
-        active["schedule"].update({"start_date": today, "end_date": today,
-                                   "days": [time.localtime().tm_wday],
-                                   "start_time": "00:00", "end_time": "23:59"})
+        class FixedDateTime(datetime):
+            @classmethod
+            def now(cls, tz=None):
+                return cls(2030, 1, 15, 12, tzinfo=tz)
         payload = {"base_revision": current["revision"], "settings": {"announcements": [active]}}
-        response = self.client.post("/api/scroll-timing/announcement_board", json=payload)
+        with patch("webapp.dt.datetime", FixedDateTime):
+            response = self.client.post("/api/scroll-timing/announcement_board", json=payload)
         self.assertEqual(response.status_code, 200, response.get_data(as_text=True))
         self.assertEqual(response.get_json()["display"], "8.0 s")
         self.assertEqual(response.get_json()["status"], "fresh")
         self.assertIn("refresh_at", response.get_json())
         payload["settings"]["announcements"][0]["enabled"] = False
-        unavailable = self.client.post("/api/scroll-timing/announcement_board", json=payload)
+        with patch("webapp.dt.datetime", FixedDateTime):
+            unavailable = self.client.post("/api/scroll-timing/announcement_board", json=payload)
         self.assertEqual(unavailable.status_code, 200, unavailable.get_data(as_text=True))
         self.assertEqual(unavailable.get_json()["display"], "Unavailable")
         self.assertIsNone(unavailable.get_json()["milliseconds"])
@@ -350,14 +352,14 @@ class WebAppTests(unittest.TestCase):
         body = self.client.get("/").get_data(as_text=True)
 
         application_version = getattr(webapp, "APPLICATION_VERSION", None)
-        self.assertEqual(application_version, "0.3.47-preview")
+        self.assertEqual(application_version, "0.3.48-preview")
         self.assertEqual(body.count(f"Version {application_version}"), 1)
         self.assertRegex(
             body,
             rf"LAN CONTROL</span><br><span[^>]*>Version {re.escape(application_version)}</span>",
         )
         template = (Path(__file__).parents[1] / "app" / "templates" / "dashboard.html").read_text()
-        self.assertNotIn("0.3.47-preview", template)
+        self.assertNotIn("0.3.48-preview", template)
 
     def test_control_stop_reports_timeout_without_claiming_success(self):
         self.pair_browser()
@@ -5074,6 +5076,7 @@ try{
  await metrics(390,844,true);const fieldState=await evaluate(`(()=>{const field=document.querySelector('[data-id="custom_motion"] .canvas-toolbar label:first-child input');field.value='Mobile keyboard draft';field.dispatchEvent(new Event('input',{bubbles:true}));field.scrollIntoView({block:'center'});field.focus();field.setSelectionRange(2,8);return true})()`);await metrics(390,430,true);
  const keyboardViewport=await evaluate(`(()=>{const field=document.querySelector('[data-id="custom_motion"] .canvas-toolbar label:first-child input'),active=document.querySelector('.layer-frame-cell.active');return {height:innerHeight,value:field.value,start:field.selectionStart,end:field.selectionEnd,focused:document.activeElement===field,active:[active.dataset.layerId,active.dataset.frame],dirty:matrixHasUnsavedDraft()}})()`);
  const keyboardCycles=[];for(const height of [844,430,844,430]){await metrics(390,height,true);await evaluate(`(async()=>{visualViewport.dispatchEvent(new Event('resize'));for(let frame=0;frame<6;frame++)await new Promise(requestAnimationFrame);await new Promise(resolve=>setTimeout(resolve,150));return true})()`);keyboardCycles.push(await evaluate(`(()=>{const field=document.querySelector('[data-id="custom_motion"] .canvas-toolbar label:first-child input'),rect=field.getBoundingClientRect(),viewport=visualViewport;return {height:innerHeight,value:field.value,start:field.selectionStart,end:field.selectionEnd,focused:document.activeElement===field,visible:rect.top>=viewport.offsetTop-1&&rect.bottom<=viewport.offsetTop+viewport.height+1,rect:[rect.top,rect.bottom],viewport:[viewport.offsetTop,viewport.height,viewport.pageTop]}})()`))}
+ const manualScrollAfterResize=await evaluate(`(async()=>{const scroll=document.querySelector('.aseprite-timeline-scroll');visualViewport.dispatchEvent(new Event('resize'));scroll.scrollLeft=140;for(let frame=0;frame<6;frame++)await new Promise(requestAnimationFrame);await new Promise(resolve=>setTimeout(resolve,150));return scroll.scrollLeft})()`);
  await metrics(390,844,true);await evaluate(`(()=>{document.activeElement?.blur();const scroll=document.querySelector('.aseprite-timeline-scroll');scroll.scrollLeft=140;window.scrollTo(0,Math.min(180,document.documentElement.scrollHeight-innerHeight));return new Promise(resolve=>requestAnimationFrame(()=>requestAnimationFrame(()=>resolve(true))))})()`);const orientationBefore=await evaluate(`(()=>{const scroll=document.querySelector('.aseprite-timeline-scroll'),active=document.querySelector('.layer-frame-cell.active');return {local:scroll.scrollLeft,page:scrollY,maxPage:document.documentElement.scrollHeight-innerHeight,active:[active.dataset.layerId,active.dataset.frame],focused:document.activeElement?.dataset?.control||null}})()`);await metrics(844,390,true);const orientationAfter=await evaluate(`(()=>{const scroll=document.querySelector('.aseprite-timeline-scroll'),active=document.querySelector('.layer-frame-cell.active');return {local:scroll.scrollLeft,page:scrollY,maxPage:document.documentElement.scrollHeight-innerHeight,active:[active.dataset.layerId,active.dataset.frame],focused:document.activeElement?.dataset?.control||null}})()`);
  await metrics(899,700,false,false);await evaluate(`(()=>{const scroll=document.querySelector('.aseprite-timeline-scroll');scroll.scrollLeft=160;return true})()`);const breakpointBefore=await evaluate(`(()=>{const scroll=document.querySelector('.aseprite-timeline-scroll');return {local:scroll.scrollLeft,columns:getComputedStyle(document.querySelector('.advanced-layout')).gridTemplateColumns.split(' ').length}})()`);await metrics(901,700,false,false);const breakpointAfter=await evaluate(`(()=>{const scroll=document.querySelector('.aseprite-timeline-scroll'),active=document.querySelector('.layer-frame-cell.active');return {local:scroll.scrollLeft,columns:getComputedStyle(document.querySelector('.advanced-layout')).gridTemplateColumns.split(' ').length,active:[active.dataset.layerId,active.dataset.frame]}})()`);
  await metrics(390,844,true);await send('Emulation.setPageScaleFactor',{pageScaleFactor:2});await send('Emulation.setEmulatedMedia',{media:'screen',features:[{name:'prefers-reduced-motion',value:'reduce'}]});const zoomReduced=await evaluate(`(()=>{const scroll=document.querySelector('.aseprite-timeline-scroll'),active=document.querySelector('.layer-frame-cell.active'),context=document.querySelector('.timeline-context').getBoundingClientRect(),button=document.querySelector('.timeline-context-actions button').getBoundingClientRect();return {scale:visualViewport.scale,reduced:matchMedia('(prefers-reduced-motion: reduce)').matches,active:[active.dataset.layerId,active.dataset.frame],localOverflow:scroll.scrollWidth-scroll.clientWidth,button:[button.width,button.height],safeHorizontal:context.left>=-0.5&&context.right<=innerWidth+0.5}})()`);await send('Emulation.resetPageScaleFactor');await send('Emulation.setEmulatedMedia',{media:'screen',features:[{name:'prefers-reduced-motion',value:'no-preference'}]});
@@ -5083,7 +5086,7 @@ try{
  const playback=await evaluate(`({start:__timelineStartFrame,end:document.querySelector('.layer-frame-cell.active').dataset.frame,childMutations:__timelineChildMutations})`);await touchTap(await point('.timeline-toolbar button.btn.primary'));await send('Emulation.setCPUThrottlingRate',{rate:1});
  const finalState=await evaluate(`(()=>{const payload=configBody(),module=customModules.find(item=>item.id==='custom_motion'),mutatingFetches=__timelineFetches.filter(item=>item.method!=='GET'||item.url.includes('/api/preview'));return {payloadMatches:JSON.stringify(payload.custom_modules.find(item=>item.id==='custom_motion'))===JSON.stringify(module),dirty:matrixHasUnsavedDraft(),mutatingFetches,exceptions:${JSON.stringify(exceptions)}}})()`);
  const resizeLifecycle=await evaluate(`(async()=>{visualViewport.dispatchEvent(new Event('resize'));document.querySelector('.layer-row.active button.btn').click();await new Promise(resolve=>setTimeout(resolve,150));const before={window:__trackedWindowResize.size,viewport:__trackedViewportResize.size};const originalConfirm=globalThis.confirm;globalThis.confirm=()=>true;applyCanvasTemplate('custom_motion','blank');await new Promise(resolve=>requestAnimationFrame(()=>requestAnimationFrame(resolve)));const afterTemplate={window:__trackedWindowResize.size,viewport:__trackedViewportResize.size};removeCustomModule('custom_motion');globalThis.confirm=originalConfirm;await new Promise(resolve=>requestAnimationFrame(()=>requestAnimationFrame(resolve)));return {before,afterTemplate,after:{window:__trackedWindowResize.size,viewport:__trackedViewportResize.size}}})()`);
- console.log(JSON.stringify({selected,emptyPan,secondTouchCancelled,subthreshold,multiTouchSafe,longPress,touchMove,collision,keyboardMove,markerTouchMove,mouseMove,cancelled,blurSafe,rerenderDragSafe,moveFocusRestores,moveFocusCalls,focusRerenders,rerender,reflow,keyboardViewport,keyboardCycles,orientationBefore,orientationAfter,breakpointBefore,breakpointAfter,zoomReduced,desktop,safeAreaRule,playback,finalState,resizeLifecycle,exceptions:exceptions.map(item=>item.text)}));
+ console.log(JSON.stringify({selected,emptyPan,secondTouchCancelled,subthreshold,multiTouchSafe,longPress,touchMove,collision,keyboardMove,markerTouchMove,mouseMove,cancelled,blurSafe,rerenderDragSafe,moveFocusRestores,moveFocusCalls,focusRerenders,rerender,reflow,keyboardViewport,keyboardCycles,manualScrollAfterResize,orientationBefore,orientationAfter,breakpointBefore,breakpointAfter,zoomReduced,desktop,safeAreaRule,playback,finalState,resizeLifecycle,exceptions:exceptions.map(item=>item.text)}));
 }finally{socket.close()}
 """
         chromium = os.environ["MATRIX_CHROMIUM"]
@@ -5192,6 +5195,7 @@ try{
             self.assertEqual((item["value"], item["start"], item["end"]), ("Mobile keyboard draft", 2, 8), item)
             self.assertTrue(item["focused"], item)
             self.assertTrue(item["visible"], item)
+        self.assertEqual(report["manualScrollAfterResize"], 140)
         self.assertEqual(report["orientationAfter"]["active"], report["orientationBefore"]["active"])
         self.assertEqual(report["orientationAfter"]["focused"], report["orientationBefore"]["focused"])
         self.assertEqual(report["orientationAfter"]["local"], report["orientationBefore"]["local"])
