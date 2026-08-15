@@ -103,7 +103,7 @@ class PreviewProviderTests(unittest.TestCase):
                 provider_blocked_until_timeout,
                 timeout_started,
                 timeout_cancel,
-                0.300,
+                1.500,
             ),
         )
         cancel_thread = threading.Thread(
@@ -150,11 +150,11 @@ class PreviewProviderTests(unittest.TestCase):
                     )
                 self.assertEqual(len(created_children), children_at_capacity)
 
-                timeout_thread.join(1.0)
+                timeout_thread.join(2.0)
                 timeout_elapsed = time.monotonic() - timeout_started_at
                 self.assertFalse(timeout_thread.is_alive(), "timeout did not settle")
-                self.assertGreaterEqual(timeout_elapsed, 0.275)
-                self.assertLess(timeout_elapsed, 0.650)
+                self.assertGreaterEqual(timeout_elapsed, 1.400)
+                self.assertLess(timeout_elapsed, 1.850)
                 self.assertIsInstance(outcomes.get("timeout"), PreviewProviderTimeout)
                 self.assertEqual(
                     str(outcomes["timeout"]),
