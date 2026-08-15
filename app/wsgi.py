@@ -7,6 +7,7 @@ import os
 import pwd
 import secrets
 import stat
+import subprocess
 import sys
 from pathlib import Path
 
@@ -79,6 +80,11 @@ with _entrypoint_owner._wsgi_runtime_lock:
             sanitizer_path=sanitizer_path,
             sanitizer_python=os.environ.get("MATRIX_SANITIZER_PYTHON"),
             sanitizer_identity=(nobody.pw_uid, nobody.pw_gid) if nobody else None,
+            device_restart_runner=(
+                subprocess.run
+                if os.environ.get("MATRIX_DEVICE_RESTART_ENABLED") == "1"
+                else None
+            ),
         )
         atexit.register(app.extensions["close_edit_preview_services"])
 

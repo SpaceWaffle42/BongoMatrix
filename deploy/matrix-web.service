@@ -15,6 +15,7 @@ Environment=MATRIX_PORT=5000
 Environment=MATRIX_LOCK_FILE=/run/matrix-display/matrix-display.lock
 Environment=MATRIX_SANITIZER_PATH=/run/matrix-display/media_sanitizer.py
 Environment=MATRIX_SANITIZER_PYTHON=/usr/bin/python3
+Environment=MATRIX_DEVICE_RESTART_ENABLED=1
 RuntimeDirectory=matrix-display
 RuntimeDirectoryMode=0755
 ExecStartPre=/usr/bin/install -m 0644 -o root -g root /home/admin/matrix/media_sanitizer.py /run/matrix-display/media_sanitizer.py

@@ -19,6 +19,7 @@ The browser preview is captured from the same frames submitted to the physical p
 - Image, GIF, and video playback with a protected built-in media library
 - Configurable custom text modules
 - Atomic configuration writes and persistent paired-device sessions
+- Confirmed whole-device restart from the paired control panel
 - Single-owner hardware locking so two processes cannot drive the panel at once
 - Hardened systemd services for startup and recovery
 

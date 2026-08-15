@@ -82,6 +82,7 @@ class WebAppTests(unittest.TestCase):
         self.media_dir.chmod(0o755)
         self.controller = Mock()
         self.pairing = Mock()
+        self.device_restart_runner = Mock()
         self.location_search = Mock(return_value=[{
             "label": "Brighton, England, GB",
             "latitude": 50.8225,
@@ -98,8 +99,10 @@ class WebAppTests(unittest.TestCase):
             device_store=self.device_store,
             openweather_secrets=self.openweather_secrets,
             scroll_timing_cache=self.scroll_timing_cache,
+            device_restart_runner=self.device_restart_runner,
         )
         self.client = self.app.test_client()
+        self.client.environ_base["HTTP_X_MATRIX_ACTION"] = "restart-whole-device"
 
     def post_config(self, json=None, client=None, require_revision=True, **kwargs):
         client = client or self.client
@@ -426,14 +429,144 @@ class WebAppTests(unittest.TestCase):
         body = self.client.get("/").get_data(as_text=True)
 
         application_version = getattr(webapp, "APPLICATION_VERSION", None)
-        self.assertEqual(application_version, "0.3.49-preview")
+        self.assertEqual(application_version, "0.3.50-preview")
         self.assertEqual(body.count(f"Version {application_version}"), 1)
         self.assertRegex(
             body,
             rf"LAN CONTROL</span><br><span[^>]*>Version {re.escape(application_version)}</span>",
         )
         template = (Path(__file__).parents[1] / "app" / "templates" / "dashboard.html").read_text()
-        self.assertNotIn("0.3.49-preview", template)
+        self.assertNotIn("0.3.50-preview", template)
+
+    def test_dashboard_groups_a_confirmed_whole_device_restart_action(self):
+        self.pair_browser()
+
+        body = self.client.get("/").get_data(as_text=True)
+
+        device_card = re.search(r'<article class="card half" id="device">(.*?)</article>', body, re.DOTALL)
+        if device_card is None:
+            self.fail("Device settings card was not rendered")
+        card_body = device_card.group(1)
+        self.assertIn('id="restart-device"', card_body)
+        self.assertIn('type="button"', card_body)
+        self.assertIn('class="btn danger"', card_body)
+        self.assertIn('Restart whole device', card_body)
+        self.assertIn('onclick="restartDevice()"', card_body)
+        self.assertIn("matrixHasUnsavedDraft()", body)
+        self.assertIn("Save any changes before restarting", body)
+        self.assertIn("await api('/api/system/restart',{method:'POST',headers:{'X-Matrix-Action':'restart-whole-device'}})", body)
+        self.assertIn("button.disabled=true", body)
+        self.assertIn("button.disabled=false", body)
+        self.assertIn(".device-actions .btn{min-height:44px", body)
+
+    def test_production_restart_requires_explicit_service_capability(self):
+        root = Path(__file__).parents[1]
+        wsgi = (root / "app" / "wsgi.py").read_text()
+        service = (root / "deploy" / "matrix-web.service").read_text()
+
+        self.assertIn('os.environ.get("MATRIX_DEVICE_RESTART_ENABLED") == "1"', wsgi)
+        self.assertEqual(service.count("Environment=MATRIX_DEVICE_RESTART_ENABLED=1"), 1)
+
+    @unittest.skipUnless(shutil.which("node"), "Node.js is required")
+    def test_restart_button_cancel_confirm_and_failure_paths_execute_without_saving(self):
+        self.pair_browser()
+        body = self.client.get("/").get_data(as_text=True)
+        match = re.search(
+            r"(async function restartDevice\(\)\{.*?\})\nasync function startAdditionalPairing",
+            body,
+            re.DOTALL,
+        )
+        if match is None:
+            self.fail("Restart function was not rendered")
+        probe = f"""
+const button={{disabled:false}},decisions=[false,true,true,true],confirmations=[],requests=[],messages=[];
+let dirty=true,failRequest=false,uncertain=false;
+globalThis.document={{querySelector:selector=>{{if(selector!=='#restart-device')throw new Error(selector);return button}}}};
+globalThis.matrixHasUnsavedDraft=()=>dirty;
+globalThis.confirm=message=>{{confirmations.push(message);return decisions.shift()}};
+globalThis.api=async(url,options)=>{{requests.push({{url,method:options.method}});if(failRequest)throw new Error('offline');return {{restarting:true,scheduling_uncertain:uncertain}}}};
+globalThis.setMessage=(text,error=false)=>messages.push({{text,error}});
+{match.group(1)}
+await restartDevice();
+const cancelled={{requests:requests.length,disabled:button.disabled}};
+await restartDevice();
+const confirmed={{requests:[...requests],disabled:button.disabled,message:messages.at(-1)}};
+button.disabled=false;dirty=false;failRequest=true;
+await restartDevice();
+const failed={{disabled:button.disabled,message:messages.at(-1)}};
+button.disabled=false;failRequest=false;uncertain=true;
+await restartDevice();
+console.log(JSON.stringify({{cancelled,confirmed,failed,uncertain:{{disabled:button.disabled,message:messages.at(-1)}},confirmations}}));
+"""
+        node = shutil.which("node")
+        if node is None:
+            self.fail("Node.js disappeared after the prerequisite check")
+        completed = subprocess.run(
+            [node, "--input-type=module", "-e", probe],
+            capture_output=True,
+            text=True,
+            timeout=10,
+        )
+        self.assertEqual(completed.returncode, 0, completed.stderr)
+        report = json.loads(completed.stdout)
+        self.assertEqual(report["cancelled"], {"requests": 0, "disabled": False})
+        self.assertEqual(
+            report["confirmed"]["requests"],
+            [{"url": "/api/system/restart", "method": "POST"}],
+        )
+        self.assertTrue(report["confirmed"]["disabled"])
+        self.assertIn("restart scheduled", report["confirmed"]["message"]["text"].lower())
+        self.assertFalse(report["failed"]["disabled"])
+        self.assertEqual(report["failed"]["message"], {"text": "offline", "error": True})
+        self.assertTrue(report["uncertain"]["disabled"])
+        self.assertIn("Scheduling confirmation timed out", report["uncertain"]["message"]["text"])
+        self.assertTrue(report["uncertain"]["message"]["error"])
+        self.assertIn("Save any changes before restarting", report["confirmations"][0])
+        self.assertNotIn("Save any changes before restarting", report["confirmations"][-1])
+        self.assertEqual(len(report["confirmed"]["requests"]), 1)
+
+    @unittest.skipUnless(shutil.which("node"), "Node.js is required")
+    @unittest.skipUnless(
+        os.environ.get("MATRIX_CHROMIUM")
+        and Path(os.environ.get("MATRIX_CHROMIUM", "")).is_file()
+        and os.access(os.environ.get("MATRIX_CHROMIUM", ""), os.X_OK),
+        "MATRIX_CHROMIUM browser is required",
+    )
+    def test_restart_button_is_mobile_safe_and_confirms_in_real_chromium(self):
+        self.pair_browser()
+        body = self.client.get("/").get_data(as_text=True)
+        probe = r"""
+const port=process.argv[1],pagePath=process.argv[2];let endpoint;
+for(let attempt=0;attempt<50;attempt++){try{endpoint=await fetch(`http://127.0.0.1:${port}/json/new`,{method:'PUT'}).then(r=>r.json());break}catch(_){await new Promise(r=>setTimeout(r,50))}}
+if(!endpoint)throw new Error('Chromium DevTools endpoint unavailable');
+const socket=new WebSocket(endpoint.webSocketDebuggerUrl),pending=new Map();let nextId=1,loadResolve,loaded=new Promise(resolve=>loadResolve=resolve);
+socket.onmessage=event=>{const message=JSON.parse(event.data);if(message.id&&pending.has(message.id)){const request=pending.get(message.id);pending.delete(message.id);message.error?request.reject(new Error(JSON.stringify(message.error))):request.resolve(message.result)}else if(message.method==='Page.loadEventFired')loadResolve()};
+await new Promise((resolve,reject)=>{socket.onopen=resolve;socket.onerror=reject});
+const send=(method,params={})=>{const id=nextId++;socket.send(JSON.stringify({id,method,params}));return new Promise((resolve,reject)=>pending.set(id,{resolve,reject}))};
+const evaluate=async expression=>{const result=await send('Runtime.evaluate',{expression,returnByValue:true,awaitPromise:true});if(result.exceptionDetails)throw new Error(JSON.stringify(result.exceptionDetails));return result.result.value};
+try{
+ await send('Runtime.enable');await send('Page.enable');await send('Emulation.setDeviceMetricsOverride',{width:320,height:568,deviceScaleFactor:1,mobile:true});loaded=new Promise(resolve=>loadResolve=resolve);await send('Page.navigate',{url:'file://'+pagePath});await loaded;
+ const geometry=[];for(const [width,height]of[[320,568],[390,844],[768,1024],[1280,720]]){await send('Emulation.setDeviceMetricsOverride',{width,height,deviceScaleFactor:1,mobile:width<1024});geometry.push(await evaluate(`(()=>{const button=document.querySelector('#restart-device'),r=button.getBoundingClientRect();return{viewport:[innerWidth,innerHeight],target:[r.width,r.height],overflow:document.documentElement.scrollWidth-document.documentElement.clientWidth,insideCard:button.closest('#device')!==null}})()`))}
+ await evaluate(`globalThis.__restartCalls=[];globalThis.__allowRestart=false;globalThis.confirm=()=>__allowRestart;globalThis.matrixHasUnsavedDraft=()=>true;globalThis.api=async(url,options)=>{__restartCalls.push({url,method:options.method});return{restarting:true}}`);
+ const cancelled=await evaluate(`(async()=>{const button=document.querySelector('#restart-device');await restartDevice();return{calls:[...__restartCalls],disabled:button.disabled}})()`);
+ const confirmed=await evaluate(`(async()=>{__allowRestart=true;const button=document.querySelector('#restart-device');await restartDevice();return{calls:[...__restartCalls],disabled:button.disabled,message:document.querySelector('#message').textContent}})()`);
+ console.log(JSON.stringify({geometry,cancelled,confirmed}));
+}finally{socket.close()}
+"""
+        report = self._run_dashboard_chromium_probe(body, probe, timeout=30)
+        for geometry in report["geometry"]:
+            self.assertLessEqual(geometry["overflow"], 1, report)
+            self.assertGreaterEqual(geometry["target"][0], 44, report)
+            self.assertGreaterEqual(geometry["target"][1], 44, report)
+            self.assertTrue(geometry["insideCard"], report)
+        self.assertEqual(report["cancelled"], {"calls": [], "disabled": False}, report)
+        self.assertEqual(
+            report["confirmed"]["calls"],
+            [{"url": "/api/system/restart", "method": "POST"}],
+            report,
+        )
+        self.assertTrue(report["confirmed"]["disabled"], report)
+        self.assertIn("restart scheduled", report["confirmed"]["message"].lower(), report)
 
     def test_control_stop_reports_timeout_without_claiming_success(self):
         self.pair_browser()
@@ -447,6 +580,310 @@ class WebAppTests(unittest.TestCase):
             "error": "Display did not stop within the timeout.",
             "running": True,
         })
+
+    def test_device_restart_is_disabled_without_explicit_scheduler_capability(self):
+        disabled_app = create_app(
+            self.controller,
+            self.store,
+            self.pairing,
+            secret_key="test",
+            session_generation="generation-one",
+            media_dir=self.media_dir,
+            location_search=self.location_search,
+            device_store=self.device_store,
+            openweather_secrets=self.openweather_secrets,
+            scroll_timing_cache=self.scroll_timing_cache,
+        )
+        disabled_app.config.update(TESTING=True)
+        disabled_client = disabled_app.test_client()
+        disabled_client.environ_base["HTTP_X_MATRIX_ACTION"] = "restart-whole-device"
+        self.pairing.verify.return_value = True
+        disabled_client.post(
+            "/pair", data={"pin": "123456", "device_name": "Disabled test browser"}
+        )
+        with patch(
+            "webapp.subprocess.run",
+            side_effect=AssertionError("disabled restart must not execute subprocesses"),
+        ) as run:
+            response = disabled_client.post("/api/system/restart")
+
+        self.assertEqual(response.status_code, 503)
+        self.assertEqual(response.get_json(), {
+            "error": "Whole-device restart is not enabled on this installation."
+        })
+        run.assert_not_called()
+
+    def test_device_restart_rejects_cross_origin_simple_request_without_action_header(self):
+        self.pair_browser()
+        with self.client.session_transaction() as session:
+            paired_session = dict(session)
+        cross_origin_client = self.app.test_client()
+        with cross_origin_client.session_transaction() as session:
+            session.update(paired_session)
+
+        response = cross_origin_client.post("/api/system/restart")
+
+        self.assertEqual(response.status_code, 403)
+        self.assertEqual(response.get_json(), {
+            "error": "Restart request authorization failed."
+        })
+        self.device_restart_runner.assert_not_called()
+
+    def test_device_restart_is_paired_post_only_and_queued_once(self):
+        self.assertEqual(self.client.post("/api/system/restart").status_code, 401)
+        self.pair_browser()
+
+        first = self.client.post("/api/system/restart")
+        second = self.client.post("/api/system/restart")
+
+        self.assertEqual(first.status_code, 202)
+        self.assertEqual(first.get_json(), {"restarting": True, "already_pending": False})
+        self.assertEqual(second.status_code, 202)
+        self.assertEqual(second.get_json(), {"restarting": True, "already_pending": True})
+        self.assertEqual(self.client.get("/api/system/restart").status_code, 405)
+        self.device_restart_runner.assert_called_once_with(
+            [
+                "/usr/bin/systemd-run",
+                "--quiet",
+                "--collect",
+                "--no-block",
+                "--unit=matrix-device-restart",
+                "--on-active=30s",
+                "/usr/bin/systemctl",
+                "reboot",
+            ],
+            check=True,
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            timeout=5,
+        )
+
+    def test_device_restart_coalesces_genuinely_concurrent_requests(self):
+        self.pair_browser()
+        with self.client.session_transaction() as session:
+            paired_session = dict(session)
+        clients = [self.app.test_client(), self.app.test_client()]
+        for client in clients:
+            client.environ_base["HTTP_X_MATRIX_ACTION"] = "restart-whole-device"
+            with client.session_transaction() as session:
+                session.update(paired_session)
+
+        scheduler_started = threading.Event()
+        release_scheduler = threading.Event()
+        second_request_started = threading.Event()
+        responses = []
+
+        def slow_schedule(*_args, **_kwargs):
+            scheduler_started.set()
+            self.assertTrue(release_scheduler.wait(2))
+
+        def post_restart(client, started=None):
+            if started is not None:
+                started.set()
+            responses.append(client.post("/api/system/restart"))
+
+        self.device_restart_runner.side_effect = slow_schedule
+        first = threading.Thread(target=post_restart, args=(clients[0],))
+        second = threading.Thread(
+            target=post_restart,
+            args=(clients[1], second_request_started),
+        )
+        first.start()
+        self.assertTrue(scheduler_started.wait(1))
+        second.start()
+        self.assertTrue(second_request_started.wait(1))
+        release_scheduler.set()
+        first.join(2)
+        second.join(2)
+
+        self.assertFalse(first.is_alive())
+        self.assertFalse(second.is_alive())
+        self.assertEqual(self.device_restart_runner.call_count, 1)
+        self.assertEqual([response.status_code for response in responses], [202, 202])
+        self.assertEqual(
+            {response.get_json()["already_pending"] for response in responses},
+            {False, True},
+        )
+
+    def test_device_restart_delay_exceeds_scheduler_timeout_and_delivery_margin(self):
+        self.assertEqual(webapp.DEVICE_RESTART_SCHEDULER_TIMEOUT_SECONDS, 5)
+        self.assertEqual(webapp.DEVICE_RESTART_PENDING_TTL_SECONDS, 60)
+        self.assertEqual(webapp.DEVICE_RESTART_RESPONSE_MARGIN_SECONDS, 20)
+        self.assertEqual(webapp.DEVICE_RESTART_DELAY_SECONDS, 30)
+        self.assertGreaterEqual(
+            webapp.DEVICE_RESTART_DELAY_SECONDS,
+            webapp.DEVICE_RESTART_SCHEDULER_TIMEOUT_SECONDS
+            + webapp.DEVICE_RESTART_RESPONSE_MARGIN_SECONDS,
+        )
+
+    def test_device_restart_pending_state_expires_if_the_host_never_reboots(self):
+        self.pair_browser()
+
+        with patch("webapp.time.monotonic", side_effect=[100.0, 159.0, 161.0]):
+            first = self.client.post("/api/system/restart")
+            still_pending = self.client.post("/api/system/restart")
+            retry = self.client.post("/api/system/restart")
+
+        self.assertEqual(first.status_code, 202)
+        self.assertEqual(still_pending.get_json(), {"restarting": True, "already_pending": True})
+        self.assertEqual(retry.status_code, 202)
+        self.assertEqual(retry.get_json(), {"restarting": True, "already_pending": False})
+        self.assertEqual(self.device_restart_runner.call_count, 2)
+
+    def test_device_restart_response_precedes_reboot_after_slow_scheduler_return(self):
+        self.pair_browser()
+        clock = {"now": 100.0}
+        observation = {}
+
+        def slow_schedule(command, **options):
+            observation["eligible_at"] = clock["now"] + int(
+                next(part for part in command if part.startswith("--on-active=")).split("=")[1][:-1]
+            )
+            clock["now"] += options["timeout"]
+
+        self.device_restart_runner.side_effect = slow_schedule
+        response = self.client.post("/api/system/restart")
+        response_ready_at = clock["now"]
+
+        self.assertEqual(response.status_code, 202)
+        self.assertLessEqual(
+            response_ready_at + webapp.DEVICE_RESTART_RESPONSE_MARGIN_SECONDS,
+            observation["eligible_at"],
+        )
+
+    def test_device_restart_timeout_is_indeterminate_and_never_invites_a_retry(self):
+        self.pair_browser()
+        timeout = subprocess.TimeoutExpired(["systemd-run"], 5)
+
+        self.device_restart_runner.side_effect = timeout
+        with patch("webapp.LOGGER.warning") as logged:
+            first = self.client.post("/api/system/restart")
+            second = self.client.post("/api/system/restart")
+
+        self.assertEqual(first.status_code, 202)
+        self.assertEqual(
+            first.get_json(),
+            {"restarting": True, "already_pending": False, "scheduling_uncertain": True},
+        )
+        self.assertEqual(second.status_code, 202)
+        self.assertEqual(second.get_json(), {"restarting": True, "already_pending": True})
+        self.device_restart_runner.assert_called_once()
+        logged.assert_called_once_with(
+            "Device restart scheduling timed out; treating the request as accepted"
+        )
+
+    def test_device_restart_existing_systemd_unit_is_cross_process_idempotent(self):
+        self.pair_browser()
+        collision = subprocess.CalledProcessError(1, ["systemd-run"])
+        existing = subprocess.CompletedProcess(
+            ["systemctl", "show"],
+            0,
+            stdout=(
+                "LoadState=loaded\nActiveState=active\nSubState=waiting\n\n"
+                "LoadState=loaded\nActiveState=inactive\nSubState=dead\n"
+            ),
+            stderr="",
+        )
+
+        self.device_restart_runner.side_effect = [collision, existing]
+        response = self.client.post("/api/system/restart")
+        duplicate = self.client.post("/api/system/restart")
+
+        self.assertEqual(response.status_code, 202)
+        self.assertEqual(response.get_json(), {"restarting": True, "already_pending": True})
+        self.assertEqual(duplicate.status_code, 202)
+        self.assertEqual(duplicate.get_json(), {"restarting": True, "already_pending": True})
+        self.assertEqual(self.device_restart_runner.call_count, 2)
+        self.assertEqual(
+            self.device_restart_runner.call_args_list[1].args[0],
+            [
+                "/usr/bin/systemctl",
+                "show",
+                "--property=LoadState",
+                "--property=ActiveState",
+                "--property=SubState",
+                "matrix-device-restart.timer",
+                "matrix-device-restart.service",
+            ],
+        )
+
+    def test_device_restart_stale_loaded_units_are_not_reported_as_pending(self):
+        self.pair_browser()
+        collision = subprocess.CalledProcessError(1, ["systemd-run"])
+        stale = subprocess.CompletedProcess(
+            ["systemctl", "show"],
+            0,
+            stdout=(
+                "LoadState=loaded\nActiveState=inactive\nSubState=dead\n\n"
+                "LoadState=loaded\nActiveState=failed\nSubState=failed\n"
+            ),
+            stderr="",
+        )
+        self.device_restart_runner.side_effect = [collision, stale]
+
+        response = self.client.post("/api/system/restart")
+
+        self.assertEqual(response.status_code, 503)
+        self.assertEqual(response.get_json(), {
+            "error": "Device restart could not be scheduled."
+        })
+
+    def test_device_restart_unknown_collision_state_stays_indeterminate(self):
+        self.pair_browser()
+        collision = subprocess.CalledProcessError(1, ["systemd-run"])
+        self.device_restart_runner.side_effect = [collision, OSError("unavailable")]
+
+        response = self.client.post("/api/system/restart")
+        duplicate = self.client.post("/api/system/restart")
+
+        self.assertEqual(response.status_code, 202)
+        self.assertEqual(response.get_json(), {
+            "restarting": True,
+            "already_pending": True,
+            "scheduling_uncertain": True,
+        })
+        self.assertEqual(duplicate.get_json(), {
+            "restarting": True, "already_pending": True
+        })
+
+    def test_device_restart_failure_is_sanitized_and_can_be_retried(self):
+        self.pair_browser()
+        failure = subprocess.CalledProcessError(1, ["systemd-run"])
+        missing = subprocess.CompletedProcess(
+            ["systemctl", "show"],
+            0,
+            stdout=(
+                "LoadState=not-found\nActiveState=inactive\nSubState=dead\n\n"
+                "LoadState=not-found\nActiveState=inactive\nSubState=dead\n"
+            ),
+            stderr="",
+        )
+
+        self.device_restart_runner.side_effect = [failure, missing, None]
+        with patch("webapp.LOGGER.exception") as logged:
+            failed = self.client.post("/api/system/restart")
+            retried = self.client.post("/api/system/restart")
+
+        self.assertEqual(failed.status_code, 503)
+        self.assertEqual(failed.get_json(), {"error": "Device restart could not be scheduled."})
+        self.assertNotIn("systemd-run", failed.get_data(as_text=True))
+        self.assertEqual(retried.status_code, 202)
+        self.assertEqual(retried.get_json(), {"restarting": True, "already_pending": False})
+        self.assertEqual(self.device_restart_runner.call_count, 3)
+        logged.assert_called_once_with("Unable to schedule device restart")
+
+    def test_device_restart_oserror_is_sanitized_and_retryable(self):
+        self.pair_browser()
+        self.device_restart_runner.side_effect = [OSError("secret detail"), None]
+
+        failed = self.client.post("/api/system/restart")
+        retried = self.client.post("/api/system/restart")
+
+        self.assertEqual(failed.status_code, 503)
+        self.assertNotIn("secret detail", failed.get_data(as_text=True))
+        self.assertEqual(retried.status_code, 202)
+        self.assertEqual(self.device_restart_runner.call_count, 2)
 
     def test_config_update_reports_committed_state_when_display_reload_fails(self):
         self.pair_browser()
