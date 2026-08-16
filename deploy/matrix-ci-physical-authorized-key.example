@@ -1,0 +1,2 @@
+# Replace the key material and install this single line in root's authorized_keys.
+command="/usr/local/libexec/matrix-ci-physical-dispatcher",restrict,no-agent-forwarding,no-port-forwarding,no-pty,no-user-rc,no-X11-forwarding ssh-ed25519 REPLACE_WITH_DEDICATED_PHYSICAL_CI_PUBLIC_KEY matrix-physical-ci

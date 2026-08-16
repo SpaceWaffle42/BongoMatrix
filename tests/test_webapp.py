@@ -429,14 +429,81 @@ class WebAppTests(unittest.TestCase):
         body = self.client.get("/").get_data(as_text=True)
 
         application_version = getattr(webapp, "APPLICATION_VERSION", None)
-        self.assertEqual(application_version, "0.3.50-preview")
+        self.assertEqual(application_version, "0.3.51-preview")
         self.assertEqual(body.count(f"Version {application_version}"), 1)
         self.assertRegex(
             body,
             rf"LAN CONTROL</span><br><span[^>]*>Version {re.escape(application_version)}</span>",
         )
         template = (Path(__file__).parents[1] / "app" / "templates" / "dashboard.html").read_text()
-        self.assertNotIn("0.3.50-preview", template)
+        self.assertNotIn("0.3.51-preview", template)
+
+    @unittest.skipUnless(shutil.which("node"), "Node.js is required")
+    @unittest.skipUnless(
+        os.environ.get("MATRIX_CHROMIUM")
+        and Path(os.environ.get("MATRIX_CHROMIUM", "")).is_file()
+        and os.access(os.environ.get("MATRIX_CHROMIUM", ""), os.X_OK),
+        "MATRIX_CHROMIUM browser is required",
+    )
+    def test_canonical_version_remains_visible_across_mobile_layouts(self):
+        self.pair_browser()
+        body = self.client.get("/").get_data(as_text=True)
+        probe = r"""
+const port=process.argv[1],pagePath=process.argv[2];let endpoint;
+for(let attempt=0;attempt<50;attempt++){try{endpoint=await fetch(`http://127.0.0.1:${port}/json/new`,{method:'PUT'}).then(r=>r.json());break}catch(_){await new Promise(r=>setTimeout(r,50))}}
+if(!endpoint)throw new Error('Chromium DevTools endpoint unavailable');
+const socket=new WebSocket(endpoint.webSocketDebuggerUrl),pending=new Map();let nextId=1,loadResolve,loaded=new Promise(resolve=>loadResolve=resolve);
+socket.onmessage=event=>{const message=JSON.parse(event.data);if(message.id&&pending.has(message.id)){const request=pending.get(message.id);pending.delete(message.id);message.error?request.reject(new Error(JSON.stringify(message.error))):request.resolve(message.result)}else if(message.method==='Page.loadEventFired')loadResolve()};
+await new Promise((resolve,reject)=>{socket.onopen=resolve;socket.onerror=reject});
+const send=(method,params={})=>{const id=nextId++;socket.send(JSON.stringify({id,method,params}));return new Promise((resolve,reject)=>pending.set(id,{resolve,reject}))};
+const evaluate=async expression=>{const result=await send('Runtime.evaluate',{expression,returnByValue:true,awaitPromise:true});if(result.exceptionDetails)throw new Error(JSON.stringify(result.exceptionDetails));return result.result.value};
+try{
+ await send('Runtime.enable');await send('Page.enable');await send('Emulation.setDeviceMetricsOverride',{width:320,height:568,deviceScaleFactor:1,mobile:false});loaded=new Promise(resolve=>loadResolve=resolve);await send('Page.navigate',{url:'file://'+pagePath});await loaded;
+ await evaluate(`document.querySelector('.brand>span:last-child').textContent='D'.repeat(40)`);
+ const layouts=[];for(const [width,height]of[[320,568],[360,800],[390,844],[412,915],[568,320],[844,390],[768,1024],[820,1180],[899,700],[900,700],[901,700],[1280,720],[1440,900]]){await send('Emulation.setDeviceMetricsOverride',{width,height,deviceScaleFactor:1,mobile:false});layouts.push(await evaluate(`(()=>{const foot=document.querySelector('.sidebar-foot'),lan=foot.querySelector('.mono'),version=foot.querySelector('span:last-child'),style=getComputedStyle(foot),versionStyle=getComputedStyle(version),background=getComputedStyle(document.querySelector('.sidebar')).backgroundColor,rect=foot.getBoundingClientRect(),bounds=e=>{const r=e.getBoundingClientRect();return[r.left,r.top,r.right,r.bottom,r.width,r.height,e.scrollWidth,e.scrollHeight]};return{viewport:[innerWidth,innerHeight],deviceName:document.querySelector('.brand>span:last-child').textContent,lanControl:lan.textContent.trim(),version:version.textContent.trim(),display:style.display,visibility:style.visibility,fontSize:parseFloat(versionStyle.fontSize),foreground:versionStyle.color,background,rect:[rect.left,rect.top,rect.right,rect.bottom,rect.width,rect.height],lanRect:bounds(lan),versionRect:bounds(version),overflow:document.documentElement.scrollWidth-document.documentElement.clientWidth}})()`))}
+ console.log(JSON.stringify({layouts}));
+}finally{socket.close()}
+"""
+        report = self._run_dashboard_chromium_probe(body, probe, timeout=30)
+
+        def rgb(value):
+            channels = [int(item) for item in re.findall(r"\d+", value)[:3]]
+            self.assertEqual(len(channels), 3, value)
+            return channels
+
+        def luminance(channels):
+            linear = [value / 255 for value in channels]
+            linear = [value / 12.92 if value <= .04045 else ((value + .055) / 1.055) ** 2.4 for value in linear]
+            return .2126 * linear[0] + .7152 * linear[1] + .0722 * linear[2]
+
+        for layout in report["layouts"]:
+            self.assertEqual(layout["deviceName"], "D" * 40, report)
+            self.assertEqual(layout["lanControl"], "LAN CONTROL", report)
+            self.assertEqual(layout["version"], f"Version {webapp.APPLICATION_VERSION}", report)
+            self.assertNotEqual(layout["display"], "none", report)
+            self.assertNotEqual(layout["visibility"], "hidden", report)
+            self.assertGreaterEqual(layout["fontSize"], 12, report)
+            foreground, background = luminance(rgb(layout["foreground"])), luminance(rgb(layout["background"]))
+            contrast = (max(foreground, background) + .05) / (min(foreground, background) + .05)
+            self.assertGreaterEqual(contrast, 4.5, report)
+            left, top, right, bottom, width, height = layout["rect"]
+            self.assertGreater(width, 0, report)
+            self.assertGreater(height, 0, report)
+            self.assertGreaterEqual(left, 0, report)
+            self.assertGreaterEqual(top, 0, report)
+            self.assertLessEqual(right, layout["viewport"][0] + 1, report)
+            self.assertLessEqual(bottom, layout["viewport"][1] + 1, report)
+            for bounds in (layout["lanRect"], layout["versionRect"]):
+                child_left, child_top, child_right, child_bottom, child_width, child_height, scroll_width, scroll_height = bounds
+                self.assertGreater(child_width, 0, report)
+                self.assertGreater(child_height, 0, report)
+                self.assertGreaterEqual(child_left, left - 1, report)
+                self.assertGreaterEqual(child_top, top - 1, report)
+                self.assertLessEqual(child_right, right + 1, report)
+                self.assertLessEqual(child_bottom, bottom + 1, report)
+                self.assertLessEqual(scroll_width, child_width + 1, report)
+                self.assertLessEqual(scroll_height, child_height + 1, report)
+            self.assertLessEqual(layout["overflow"], 1, report)
 
     def test_dashboard_groups_a_confirmed_whole_device_restart_action(self):
         self.pair_browser()
