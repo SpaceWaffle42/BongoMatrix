@@ -63,11 +63,66 @@ MEDIA_METADATA_ERRORS = (
 CONFIG_REQUEST_LIMIT = 1_048_576
 CONDITIONAL_HEADER_LIMIT = 4096
 MINIMUM_CLIENT_CONTRACT = 2
-APPLICATION_VERSION = "0.3.49-preview"
+APPLICATION_VERSION = "0.3.51-preview"
+DEVICE_RESTART_SCHEDULER_TIMEOUT_SECONDS = 5
+DEVICE_RESTART_RESPONSE_MARGIN_SECONDS = 20
+DEVICE_RESTART_DELAY_SECONDS = 30
+DEVICE_RESTART_PENDING_TTL_SECONDS = 60
 ETAG_ITEM = re.compile(r'(?P<weak>W/)?"(?P<opaque>[\x21\x23-\x7e\x80-\xff]*)"')
 EDIT_PREVIEW_INSTANCE = re.compile(r"[0-9a-f]{32}")
 EDIT_PREVIEW_SESSION = re.compile(r"[0-9a-f]{32}")
 EDIT_PREVIEW_TOKEN = re.compile(r"[0-9a-f]{64}")
+
+
+def device_restart_unit_pending(runner):
+    """Return True/False for a known unit state, or None when it is unknowable."""
+    try:
+        result = runner(
+            [
+                "/usr/bin/systemctl",
+                "show",
+                "--property=LoadState",
+                "--property=ActiveState",
+                "--property=SubState",
+                "matrix-device-restart.timer",
+                "matrix-device-restart.service",
+            ],
+            check=False,
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.DEVNULL,
+            text=True,
+            timeout=2,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return None
+    if result.returncode != 0:
+        return None
+    units = []
+    for block in result.stdout.strip().split("\n\n"):
+        properties = {}
+        for line in block.splitlines():
+            if "=" not in line:
+                return None
+            key, value = line.split("=", 1)
+            properties[key] = value
+        if not {"LoadState", "ActiveState", "SubState"} <= properties.keys():
+            return None
+        units.append(properties)
+    if len(units) != 2:
+        return None
+    timer, service = units
+    timer_pending = (
+        timer["LoadState"] == "loaded"
+        and timer["ActiveState"] == "active"
+        and timer["SubState"] in {"waiting", "running"}
+    )
+    service_pending = (
+        service["LoadState"] == "loaded"
+        and service["ActiveState"] in {"activating", "active"}
+        and service["SubState"] not in {"dead", "exited", "failed"}
+    )
+    return timer_pending or service_pending
 
 
 class EditPreviewRenderError(RuntimeError):
@@ -284,6 +339,7 @@ def create_app(
     device_store=None,
     openweather_secrets=None,
     scroll_timing_cache=None,
+    device_restart_runner=None,
 ):
     session_generation = session_generation or secrets.token_hex(16)
     media_root = Path(media_dir or Path(__file__).resolve().parent / "resources" / "media")
@@ -307,6 +363,8 @@ def create_app(
     edit_preview_provider = None
     edit_preview_services_lock = threading.Condition()
     edit_preview_services_initializing = False
+    device_restart_lock = threading.Lock()
+    device_restart_pending_until = 0.0
 
     def get_edit_preview_services():
         """Lazily publish one healthy registry/provider pair per app process."""
@@ -1726,5 +1784,79 @@ def create_app(
         else:
             abort(404)
         return jsonify(controller.status())
+
+    @app.post("/api/system/restart")
+    @requires_pairing
+    def restart_device():
+        nonlocal device_restart_pending_until
+        if request.headers.get("X-Matrix-Action") != "restart-whole-device":
+            return jsonify({
+                "error": "Restart request authorization failed."
+            }), 403
+        if device_restart_runner is None:
+            return jsonify({
+                "error": "Whole-device restart is not enabled on this installation."
+            }), 503
+        with device_restart_lock:
+            requested_at = time.monotonic()
+            if device_restart_pending_until > requested_at:
+                return jsonify({"restarting": True, "already_pending": True}), 202
+            device_restart_pending_until = 0.0
+            try:
+                device_restart_runner(
+                    [
+                        "/usr/bin/systemd-run",
+                        "--quiet",
+                        "--collect",
+                        "--no-block",
+                        "--unit=matrix-device-restart",
+                        f"--on-active={DEVICE_RESTART_DELAY_SECONDS}s",
+                        "/usr/bin/systemctl",
+                        "reboot",
+                    ],
+                    check=True,
+                    stdin=subprocess.DEVNULL,
+                    stdout=subprocess.DEVNULL,
+                    stderr=subprocess.DEVNULL,
+                    timeout=DEVICE_RESTART_SCHEDULER_TIMEOUT_SECONDS,
+                )
+            except subprocess.TimeoutExpired:
+                device_restart_pending_until = (
+                    requested_at + DEVICE_RESTART_PENDING_TTL_SECONDS
+                )
+                LOGGER.warning(
+                    "Device restart scheduling timed out; treating the request as accepted"
+                )
+                return jsonify({
+                    "restarting": True,
+                    "already_pending": False,
+                    "scheduling_uncertain": True,
+                }), 202
+            except subprocess.CalledProcessError:
+                existing_unit = device_restart_unit_pending(device_restart_runner)
+                if existing_unit is not False:
+                    device_restart_pending_until = (
+                        requested_at + DEVICE_RESTART_PENDING_TTL_SECONDS
+                    )
+                    if existing_unit is None:
+                        LOGGER.warning(
+                            "Device restart unit collision could not be reconciled; "
+                            "treating the request as accepted"
+                        )
+                        return jsonify({
+                            "restarting": True,
+                            "already_pending": True,
+                            "scheduling_uncertain": True,
+                        }), 202
+                    return jsonify({"restarting": True, "already_pending": True}), 202
+                LOGGER.exception("Unable to schedule device restart")
+                return jsonify({"error": "Device restart could not be scheduled."}), 503
+            except (OSError, subprocess.SubprocessError):
+                LOGGER.exception("Unable to schedule device restart")
+                return jsonify({"error": "Device restart could not be scheduled."}), 503
+            device_restart_pending_until = (
+                requested_at + DEVICE_RESTART_PENDING_TTL_SECONDS
+            )
+        return jsonify({"restarting": True, "already_pending": False}), 202
 
     return app

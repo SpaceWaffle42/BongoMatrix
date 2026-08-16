@@ -79,7 +79,7 @@ class GitLabPipelineContractTests(unittest.TestCase):
         cls.pipeline = CI_CONFIG.read_text(encoding="utf-8")
         cls.sections = top_level_sections(cls.pipeline)
 
-    def test_pipeline_targets_merge_requests_and_all_branches_without_deploying(self):
+    def test_pipeline_targets_merge_requests_and_all_branches_with_protected_physical_gate(self):
         rules = workflow_rules(self.sections)
         self.assertEqual(
             rules,
@@ -115,15 +115,60 @@ class GitLabPipelineContractTests(unittest.TestCase):
         stages = block(self.sections, "stages")
         self.assertEqual(
             re.findall(r"^  - ([a-z-]+)$", stages, flags=re.MULTILINE),
-            ["validate", "test", "quality", "security", "summary"],
+            ["validate", "test", "quality", "security", "summary", "physical"],
         )
         self.assertNotIn("deploy", self.sections)
+        for name in self.sections:
+            if name == "physical_device_acceptance":
+                continue
+            self.assertNotRegex(
+                block(self.sections, name),
+                r"\b(?:systemctl|scp|rsync|ssh)\b",
+                name,
+            )
+        physical = block(self.sections, "physical_device_acceptance")
+        self.assertIn("ssh", physical)
+        self.assertNotRegex(physical, r"\b(?:scp|rsync|systemctl|sudo)\b")
+        self.assertNotRegex(physical, r"\b(?:git archive|tar|candidate|PYTHONPATH)\b")
+        self.assertIn("resource_group: matrix-physical-device", physical)
+        self.assertIn("retry: 0", physical)
         active_lines = "\n".join(
             line for line in self.pipeline.splitlines()
             if line.strip() and not line.lstrip().startswith("#")
         )
-        self.assertNotRegex(active_lines, r"\b(?:systemctl|scp|rsync|ssh)\b")
         self.assertNotIn("Auto-DevOps.gitlab-ci.yml", active_lines)
+
+    def test_physical_job_rules_are_exactly_protected_default_branch_push(self):
+        physical = block(self.sections, "physical_device_acceptance")
+        rule_lines = [line.strip() for line in physical.splitlines() if line.strip().startswith(("- if:", "- when:"))]
+        self.assertEqual(
+            rule_lines,
+            [
+                '- if: \'$CI_PIPELINE_SOURCE == "push" && $CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH && $CI_COMMIT_REF_PROTECTED == "true"\'',
+                "- when: never",
+            ],
+        )
+        self.assertRegex(physical, r"needs:\n\s+- job: ci_summary\n\s+artifacts: false")
+        self.assertIn("resource_group: matrix-physical-device", physical)
+        self.assertIn("interruptible: false", physical)
+        self.assertIn("retry: 0", physical)
+        self.assertIn("timeout: 3m", physical)
+        self.assertIn("ServerAliveInterval=10", physical)
+        self.assertIn("ServerAliveCountMax=2", physical)
+
+    def test_physical_secrets_are_protected_and_file_typed_by_documented_contract(self):
+        physical = block(self.sections, "physical_device_acceptance")
+        install = (ROOT / "deploy" / "matrix-ci-physical-install.md").read_text(encoding="utf-8")
+
+        self.assertIn('"$MATRIX_DEVICE_TARGET"', physical)
+        self.assertNotIn("MATRIX_DEVICE_SSH_TARGET", physical + install)
+        self.assertIn("MATRIX_DEVICE_TARGET", install)
+        for variable in ("MATRIX_DEVICE_SSH_KEY", "MATRIX_DEVICE_KNOWN_HOSTS"):
+            self.assertIn(variable, physical)
+            self.assertRegex(install, rf"{variable}.*protected.*FILE")
+        self.assertRegex(install, r"MATRIX_DEVICE_TARGET.*protected.*variable")
+        self.assertIn("never available to merge-request or branch jobs", install)
+        self.assertNotRegex(physical, r"(?m)^\s*(?:variables:|MATRIX_DEVICE_[A-Z_]+:)\s*$")
 
     def test_full_test_job_exercises_optional_browser_and_media_paths(self):
         job = block(self.sections, "full_test_suite")
@@ -219,7 +264,7 @@ class GitLabPipelineContractTests(unittest.TestCase):
             "workflow", "stages", "include", "variables", ".default_project_job",
             "python_syntax", "full_test_suite", "python_static_analysis",
             "dependency_audit", "semgrep-sast", "secret_detection",
-            "ci_summary",
+            "ci_summary", "physical_device_acceptance",
         }
         self.assertEqual(set(self.sections), required)
 
