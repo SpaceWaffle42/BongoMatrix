@@ -1600,6 +1600,7 @@ class PhysicalVerifierTests(unittest.TestCase):
             finally:
                 gate.Path, gate.run = original_path, original_run
 
+    @unittest.skipUnless(Path("/usr/sbin/sshd").is_file(), "requires a local OpenSSH daemon binary")
     def test_complete_sshd_connection_context_selects_every_match_dimension_fail_closed(self):
         gate = load_deploy_module("verify_matrix_ci_physical_install")
         context = gate.SshConnectionContext(
