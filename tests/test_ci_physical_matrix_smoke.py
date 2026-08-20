@@ -2504,6 +2504,40 @@ class PhysicalVerifierTests(unittest.TestCase):
         finally:
             gate.run = original_run
 
+    def test_install_gate_accepts_repeated_device_allow_records(self):
+        gate = load_deploy_module("verify_matrix_ci_physical_install")
+        original_run = gate.run
+        gate.run = lambda *_argv: (
+            "DevicePolicy=closed\n"
+            "DeviceAllow=/dev/vcio rw\n"
+            "DeviceAllow=/dev/gpiomem rw\n"
+            "DeviceAllow=/dev/mem rw\n"
+        )
+        try:
+            self.assertEqual(
+                gate.properties("matrix-web.service", "DevicePolicy", "DeviceAllow"),
+                {
+                    "DevicePolicy": "closed",
+                    "DeviceAllow": "/dev/vcio rw\n/dev/gpiomem rw\n/dev/mem rw",
+                },
+            )
+        finally:
+            gate.run = original_run
+
+    def test_install_gate_rejects_duplicate_device_allow_records(self):
+        gate = load_deploy_module("verify_matrix_ci_physical_install")
+        original_run = gate.run
+        gate.run = lambda *_argv: (
+            "DevicePolicy=closed\n"
+            "DeviceAllow=/dev/mem rw\n"
+            "DeviceAllow=/dev/mem rw\n"
+        )
+        try:
+            with self.assertRaisesRegex(RuntimeError, "malformed systemctl show output"):
+                gate.properties("matrix-web.service", "DevicePolicy", "DeviceAllow")
+        finally:
+            gate.run = original_run
+
     def test_install_gate_rejects_each_effective_privilege_boundary_widening(self):
         gate = load_deploy_module("verify_matrix_ci_physical_install")
         baseline = {
@@ -2528,12 +2562,14 @@ class PhysicalVerifierTests(unittest.TestCase):
             "matrix-web.service": {
                 "User": "matrix-web", "Group": "matrix-web",
                 "InaccessiblePaths": "/run/systemd/private /run/dbus/system_bus_socket /run/matrix-ci-physical",
-                "CapabilityBoundingSet": "CAP_SYS_RAWIO", "AmbientCapabilities": "CAP_SYS_RAWIO",
+                "CapabilityBoundingSet": "cap_sys_rawio", "AmbientCapabilities": "cap_sys_rawio",
                 "Requires": "matrix-network-setup.service systemd-tmpfiles-setup.service",
                 "After": "network-online.target matrix-network-setup.service systemd-tmpfiles-setup.service",
                 "ReadOnlyPaths": "/run/matrix-display",
                 "ReadWritePaths": "/home/admin/matrix/data /home/admin/matrix/resources/media /run/matrix-device-restart",
-                "DevicePolicy": "closed", "DeviceAllow": "/dev/mem rw /dev/gpiomem rw /dev/vcio rw", "UMask": "0077",
+                "DevicePolicy": "closed",
+                "DeviceAllow": ["/dev/vcio rw", "/dev/gpiomem rw", "/dev/mem rw"],
+                "UMask": "0077",
             },
         }
         attacks = (
@@ -2544,7 +2580,7 @@ class PhysicalVerifierTests(unittest.TestCase):
             ("matrix-web.service", "CapabilityBoundingSet", "CAP_SYS_RAWIO CAP_SYS_ADMIN"),
             ("matrix-web.service", "AmbientCapabilities", "CAP_SYS_RAWIO CAP_SYS_ADMIN"),
             ("matrix-web.service", "ReadWritePaths", baseline["matrix-web.service"]["ReadWritePaths"] + " /etc"),
-            ("matrix-web.service", "DeviceAllow", baseline["matrix-web.service"]["DeviceAllow"] + " /dev/sda rw"),
+            ("matrix-web.service", "DeviceAllow", baseline["matrix-web.service"]["DeviceAllow"] + ["/dev/sda rw"]),
             ("matrix-ci-physical.service", "CapabilityBoundingSet", "CAP_SYS_RAWIO"),
             ("matrix-ci-physical.service", "CapabilityBoundingSet", "CAP_DAC_READ_SEARCH CAP_SYS_RAWIO CAP_SYS_ADMIN"),
             ("matrix-ci-physical.service", "AmbientCapabilities", "CAP_SYS_RAWIO"),
@@ -2561,15 +2597,16 @@ class PhysicalVerifierTests(unittest.TestCase):
                 return "[Unit]\nDescription=reviewed\n"
             requested = [argv[index + 1] for index, item in enumerate(argv) if item == "-p"]
             values = observed[argv[2]]
-            return "".join(
-                f"{key}={values[key]}\n"
-                for key in requested
-                if not (
-                    key == "DeviceAllow"
-                    and values.get("DevicePolicy") == "auto"
-                    and values[key] == ""
-                )
-            )
+            lines = []
+            for key in requested:
+                value = values[key]
+                if key == "DeviceAllow" and values.get("DevicePolicy") == "auto" and value == "":
+                    continue
+                if key == "DeviceAllow" and isinstance(value, list):
+                    lines.extend(f"{key}={item}\n" for item in value)
+                else:
+                    lines.append(f"{key}={value}\n")
+            return "".join(lines)
 
         try:
             gate.run = fake_run

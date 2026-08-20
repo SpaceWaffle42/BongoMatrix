@@ -306,9 +306,18 @@ def properties(unit, *names):
         if "=" not in line:
             raise RuntimeError(f"malformed systemctl show output: {unit}")
         key, value = line.split("=", 1)
-        if key not in names or key in result:
+        if key not in names:
             raise RuntimeError(f"malformed systemctl show output: {unit}")
-        result[key] = value
+        if key in result:
+            if (
+                key != "DeviceAllow"
+                or not value
+                or value in result[key].splitlines()
+            ):
+                raise RuntimeError(f"malformed systemctl show output: {unit}")
+            result[key] += f"\n{value}"
+        else:
+            result[key] = value
     missing = set(names) - set(result)
     if missing == {"DeviceAllow"} and result.get("DevicePolicy") == "auto":
         result["DeviceAllow"] = ""
@@ -460,9 +469,13 @@ def verify_units():
         "/run/systemd/private", "/run/dbus/system_bus_socket", "/run/matrix-ci-physical"
     }:
         raise RuntimeError("matrix-web inaccessible paths differ from review")
-    if web["CapabilityBoundingSet"].split() != ["CAP_SYS_RAWIO"]:
+    if {capability.upper() for capability in web["CapabilityBoundingSet"].split()} != {
+        "CAP_SYS_RAWIO"
+    }:
         raise RuntimeError("matrix-web CapabilityBoundingSet differs from review")
-    if web["AmbientCapabilities"].split() != ["CAP_SYS_RAWIO"]:
+    if {capability.upper() for capability in web["AmbientCapabilities"].split()} != {
+        "CAP_SYS_RAWIO"
+    }:
         raise RuntimeError("matrix-web AmbientCapabilities differs from review")
     if "systemd-tmpfiles-setup.service" not in web["Requires"].split() or "systemd-tmpfiles-setup.service" not in web["After"].split():
         raise RuntimeError("matrix-web can start before display-lock tmpfiles setup")
@@ -472,7 +485,9 @@ def verify_units():
         "/home/admin/matrix/data", "/home/admin/matrix/resources/media", "/run/matrix-device-restart"
     }:
         raise RuntimeError("matrix-web writable paths differ from review")
-    if web["DevicePolicy"] != "closed" or web["DeviceAllow"] != "/dev/mem rw /dev/gpiomem rw /dev/vcio rw":
+    if web["DevicePolicy"] != "closed" or set(web["DeviceAllow"].splitlines()) != {
+        "/dev/mem rw", "/dev/gpiomem rw", "/dev/vcio rw"
+    }:
         raise RuntimeError("matrix-web device access differs from review")
     if web["UMask"] != "0077":
         raise RuntimeError("matrix-web UMask is not 0077")
