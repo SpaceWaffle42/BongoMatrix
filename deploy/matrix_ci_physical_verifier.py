@@ -236,7 +236,6 @@ def _state_record_prefix(record_type, path, info, *, content_length=None):
 def _state_directory(info):
     return (
         stat.S_ISDIR(info.st_mode)
-        and info.st_nlink >= 2
         and not stat.S_IMODE(info.st_mode) & 0o022
     )
 

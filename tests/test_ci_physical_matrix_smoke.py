@@ -1510,6 +1510,14 @@ class PhysicalVerifierTests(unittest.TestCase):
             finally:
                 target.unlink(missing_ok=True)
 
+    def test_state_directory_accepts_overlayfs_link_count_without_weakening_mode_checks(self):
+        verifier = load_deploy_module("matrix_ci_physical_verifier")
+        overlay_directory = types.SimpleNamespace(st_mode=stat.S_IFDIR | 0o755, st_nlink=1)
+        writable_directory = types.SimpleNamespace(st_mode=stat.S_IFDIR | 0o775, st_nlink=1)
+
+        self.assertTrue(verifier._state_directory(overlay_directory))
+        self.assertFalse(verifier._state_directory(writable_directory))
+
     def test_state_snapshot_rejects_fifo_socket_and_device_nodes(self):
         verifier = load_deploy_module("matrix_ci_physical_verifier")
         with tempfile.TemporaryDirectory(prefix="matrix-state-special-", dir="/root") as directory:

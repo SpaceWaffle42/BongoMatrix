@@ -216,6 +216,7 @@ class GitLabPipelineContractTests(unittest.TestCase):
         self.assertIn("image: node:22-bookworm", job)
         self.assertIn("MATRIX_CHROMIUM: /usr/bin/chromium", job)
         self.assertIn("chromium ffmpeg", job)
+        self.assertIn("openssh-server", job)
         self.assertIn("python3-pil", job)
         self.assertIn("python3-opencv", job)
         self.assertIn(
