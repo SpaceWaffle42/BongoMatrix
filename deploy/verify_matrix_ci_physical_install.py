@@ -297,17 +297,22 @@ def verify_restart_broker_install():
 
 
 def properties(unit, *names):
-    # effective policy: systemctl show, not repository text
+    # systemd 257 omits ``DeviceAllow=`` when DevicePolicy=auto, although the
+    # empty allow-list is the effective value.  Preserve exact presence checks
+    # for every other property and accept only that one bound representation.
     output = run(SYSTEMCTL, "show", unit, *(item for name in names for item in ("-p", name)))
     result = {}
     for line in output.splitlines():
         if "=" not in line:
             raise RuntimeError(f"malformed systemctl show output: {unit}")
         key, value = line.split("=", 1)
-        if key in result:
-            raise RuntimeError(f"duplicate effective property: {key}")
+        if key not in names or key in result:
+            raise RuntimeError(f"malformed systemctl show output: {unit}")
         result[key] = value
-    if set(result) != set(names):
+    missing = set(names) - set(result)
+    if missing == {"DeviceAllow"} and result.get("DevicePolicy") == "auto":
+        result["DeviceAllow"] = ""
+    elif missing:
         raise RuntimeError(f"missing effective properties: {unit}")
     return result
 

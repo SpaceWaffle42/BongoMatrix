@@ -2456,6 +2456,54 @@ class PhysicalVerifierTests(unittest.TestCase):
             finally:
                 gate.Path, gate.run = original_path, original_run
 
+    def test_install_gate_accepts_only_device_allow_omission_under_auto_policy(self):
+        gate = load_deploy_module("verify_matrix_ci_physical_install")
+        original_run = gate.run
+        calls = []
+
+        def fake_run(*argv):
+            calls.append(argv)
+            self.assertEqual(
+                argv,
+                (
+                    gate.SYSTEMCTL, "show", "matrix-ci-physical.service",
+                    "-p", "DevicePolicy", "-p", "DeviceAllow",
+                ),
+            )
+            return "DevicePolicy=auto\n"
+
+        gate.run = fake_run
+        try:
+            self.assertEqual(
+                gate.properties("matrix-ci-physical.service", "DevicePolicy", "DeviceAllow"),
+                {"DevicePolicy": "auto", "DeviceAllow": ""},
+            )
+        finally:
+            gate.run = original_run
+        self.assertEqual(len(calls), 1)
+
+    def test_install_gate_rejects_any_other_missing_effective_property(self):
+        gate = load_deploy_module("verify_matrix_ci_physical_install")
+        original_run = gate.run
+        gate.run = lambda *_argv: "DevicePolicy=auto\n"
+        try:
+            with self.assertRaisesRegex(RuntimeError, "missing effective properties"):
+                gate.properties(
+                    "matrix-ci-physical.service", "DevicePolicy", "AmbientCapabilities"
+                )
+        finally:
+            gate.run = original_run
+
+    def test_install_gate_rejects_malformed_effective_property_output(self):
+        gate = load_deploy_module("verify_matrix_ci_physical_install")
+        original_run = gate.run
+        gate.run = lambda *_argv: "DevicePolicy=auto\nmalformed\n"
+        try:
+            with self.assertRaisesRegex(RuntimeError, "malformed systemctl show output"):
+                gate.properties("matrix-ci-physical.service", "DevicePolicy")
+        finally:
+            gate.run = original_run
+
     def test_install_gate_rejects_each_effective_privilege_boundary_widening(self):
         gate = load_deploy_module("verify_matrix_ci_physical_install")
         baseline = {
@@ -2506,18 +2554,29 @@ class PhysicalVerifierTests(unittest.TestCase):
         original_run = gate.run
         original_verifiers = gate.verify_physical_runtime_install, gate.verify_display_lock_install, gate.verify_restart_broker_install
         gate.verify_physical_runtime_install = gate.verify_display_lock_install = gate.verify_restart_broker_install = lambda: None
+        observed = {key: dict(values) for key, values in baseline.items()}
+
+        def fake_run(*argv):
+            if argv[1] == "cat":
+                return "[Unit]\nDescription=reviewed\n"
+            requested = [argv[index + 1] for index, item in enumerate(argv) if item == "-p"]
+            values = observed[argv[2]]
+            return "".join(
+                f"{key}={values[key]}\n"
+                for key in requested
+                if not (
+                    key == "DeviceAllow"
+                    and values.get("DevicePolicy") == "auto"
+                    and values[key] == ""
+                )
+            )
+
         try:
+            gate.run = fake_run
+            gate.verify_units()
             for unit, name, value in attacks:
                 observed = {key: dict(values) for key, values in baseline.items()}
                 observed[unit][name] = value
-
-                def fake_run(*argv):
-                    if argv[1] == "cat":
-                        return "[Unit]\nDescription=reviewed\n"
-                    requested = [argv[index + 1] for index, item in enumerate(argv) if item == "-p"]
-                    return "".join(f"{key}={observed[argv[2]][key]}\n" for key in requested)
-
-                gate.run = fake_run
                 with self.subTest(unit=unit, property=name, value=value):
                     with self.assertRaises(RuntimeError):
                         gate.verify_units()
