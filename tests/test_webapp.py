@@ -24,7 +24,7 @@ from PIL import Image, UnidentifiedImageError
 
 from config_store import ConfigStore
 from font_catalog import available_font_names
-from pairing import PairedDeviceStore, PairingDurabilityError
+from pairing import PairedDeviceStore, PairingDurabilityError, PairingManager
 from secret_store import SecretDurabilityError, SecretStore
 from modules.scroll_timing_cache import ScrollTimingCache, TimingCacheBusy
 from modules.scroll_timing import frame_delay_for_seconds
@@ -82,6 +82,7 @@ class WebAppTests(unittest.TestCase):
         self.media_dir.chmod(0o755)
         self.controller = Mock()
         self.pairing = Mock()
+        self.pairing.has_testing_pin.return_value = False
         self.device_restart_runner = Mock()
         self.location_search = Mock(return_value=[{
             "label": "Brighton, England, GB",
@@ -429,14 +430,14 @@ class WebAppTests(unittest.TestCase):
         body = self.client.get("/").get_data(as_text=True)
 
         application_version = getattr(webapp, "APPLICATION_VERSION", None)
-        self.assertEqual(application_version, "0.3.51-preview")
+        self.assertEqual(application_version, "0.3.52-preview")
         self.assertEqual(body.count(f"Version {application_version}"), 1)
         self.assertRegex(
             body,
             rf"LAN CONTROL</span><br><span[^>]*>Version {re.escape(application_version)}</span>",
         )
         template = (Path(__file__).parents[1] / "app" / "templates" / "dashboard.html").read_text()
-        self.assertNotIn("0.3.51-preview", template)
+        self.assertNotIn("0.3.52-preview", template)
 
     @unittest.skipUnless(shutil.which("node"), "Node.js is required")
     @unittest.skipUnless(
@@ -3204,6 +3205,44 @@ globalThis.document=document;globalThis.window=window;globalThis.fetch=fetch;
         self.assertTrue(next(item for item in config["playlist"] if item["module"] == "weather")["enabled"])
         self.assertFalse(next(item for item in config["playlist"] if item["module"] == "openweather_overview")["enabled"])
         self.assertFalse(next(item for item in config["playlist"] if item["module"] == "openweather_forecast")["enabled"])
+
+    def test_testing_pin_form_is_available_with_existing_device_without_disclosure(self):
+        testing_pin = "731946"
+        self.device_store.add("Existing browser", max_devices=4)
+        self.pairing.active_pin.return_value = None
+        self.pairing.has_testing_pin.return_value = True
+
+        response = self.client.get("/pair")
+        body = response.get_data(as_text=True)
+
+        self.assertEqual(response.status_code, 200)
+        self.assertNotIn("Pairing another browser must be started", body)
+        self.assertNotIn(testing_pin, body)
+        self.assertNotIn("testing PIN", body)
+        self.controller.show_pairing_pin.assert_not_called()
+
+    def test_testing_pin_pairs_during_transient_lockout_and_preserves_one_time_pin(self):
+        testing_pin = "731946"
+        manager = PairingManager(testing_pin=testing_pin, max_attempts=1)
+        one_time_pin = manager.issue_pin()
+        wrong_pin = "000000" if one_time_pin != "000000" else "111111"
+        self.device_store.add("Existing browser", max_devices=4)
+        self.pairing.verify.side_effect = manager.verify
+        self.pairing.is_locked.side_effect = manager.is_locked
+
+        rejected = self.client.post(
+            "/pair", data={"pin": wrong_pin, "device_name": "Testing browser"}
+        )
+        accepted = self.client.post(
+            "/pair", data={"pin": testing_pin, "device_name": "Testing browser"}
+        )
+
+        self.assertEqual(rejected.status_code, 401)
+        self.assertIn("Too many attempts", rejected.get_data(as_text=True))
+        self.assertEqual(accepted.status_code, 302)
+        self.assertEqual(len(self.device_store.list()), 2)
+        self.assertEqual(manager.active_pin(), one_time_pin)
+        self.assertTrue(manager.is_locked())
 
     def test_successful_pairing_registers_a_named_device_session(self):
         self.pair_browser()
@@ -12125,6 +12164,7 @@ real_create_app = webapp.create_app
 class Passive:
     def __init__(self, *args, **kwargs):
         self.path = kwargs.get("path")
+        self.kwargs = kwargs
 
 class FakeController(Passive):
     def __init__(self, *args, **kwargs):
@@ -12220,6 +12260,12 @@ with tempfile.TemporaryDirectory() as temp:
     package.mkdir()
     shutil.copy2(root / "app" / "__init__.py", package / "__init__.py")
     shutil.copy2(root / "app" / "wsgi.py", package / "wsgi.py")
+    shutil.copy2(root / "app" / "testing_pin.py", package / "testing_pin.py")
+    runtime_data = temp / "data"
+    runtime_data.mkdir()
+    testing_pin = "731946"
+    (runtime_data / "testing-pin").write_text(testing_pin)
+    (runtime_data / "testing-pin").chmod(0o600)
 
     def tracked_create_app(*args, **kwargs):
         create_calls.append((args, kwargs))
@@ -12266,6 +12312,7 @@ with tempfile.TemporaryDirectory() as temp:
         importlib.reload(alias)
 
         assert len(create_calls) == 1, len(create_calls)
+        assert entry.pairing.kwargs.get("testing_pin") == testing_pin
         assert entry.app is alias.app
         assert registries == [] and providers == []
         preview_callbacks = [

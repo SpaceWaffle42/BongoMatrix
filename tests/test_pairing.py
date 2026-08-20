@@ -16,6 +16,40 @@ class FakeClock:
 
 
 class PairingManagerTests(unittest.TestCase):
+    TESTING_PIN = "731946"
+
+    def test_testing_pin_is_reusable_without_consuming_the_one_time_pin(self):
+        manager = PairingManager(testing_pin=self.TESTING_PIN)
+        one_time_pin = manager.issue_pin()
+
+        self.assertTrue(manager.verify(self.TESTING_PIN))
+        self.assertTrue(manager.verify(self.TESTING_PIN))
+        self.assertEqual(manager.active_pin(), one_time_pin)
+        self.assertTrue(manager.verify(one_time_pin))
+        self.assertIsNone(manager.active_pin())
+        self.assertTrue(manager.verify(self.TESTING_PIN))
+
+    def test_testing_pin_bypasses_lockout_without_resetting_transient_state(self):
+        clock = FakeClock()
+        manager = PairingManager(
+            max_attempts=2,
+            lockout_seconds=30,
+            clock=clock,
+            testing_pin=self.TESTING_PIN,
+        )
+        one_time_pin = manager.issue_pin()
+        wrong_pin = "000000" if one_time_pin != "000000" else "111111"
+
+        self.assertFalse(manager.verify(wrong_pin))
+        self.assertFalse(manager.verify(wrong_pin))
+        self.assertTrue(manager.is_locked())
+        self.assertTrue(manager.verify(self.TESTING_PIN))
+        self.assertTrue(manager.is_locked())
+        self.assertEqual(manager.active_pin(), one_time_pin)
+        self.assertFalse(manager.verify(one_time_pin))
+        clock.value += 31
+        self.assertTrue(manager.verify(one_time_pin))
+
     def test_initial_display_runs_normally_when_a_paired_device_exists(self):
         devices = Mock()
         devices.list.return_value = [{"id": "device"}]
