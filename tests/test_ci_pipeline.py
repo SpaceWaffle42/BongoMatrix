@@ -217,6 +217,11 @@ class GitLabPipelineContractTests(unittest.TestCase):
         self.assertIn("MATRIX_CHROMIUM: /usr/bin/chromium", job)
         self.assertIn("chromium ffmpeg", job)
         self.assertIn("openssh-server", job)
+        self.assertIn("install -d -m 0755 /run/sshd", job)
+        self.assertLess(
+            job.index("install -d -m 0755 /run/sshd"),
+            job.index("coverage run"),
+        )
         self.assertIn("python3-pil", job)
         self.assertIn("python3-opencv", job)
         self.assertIn(
