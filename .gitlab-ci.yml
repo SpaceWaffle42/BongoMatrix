@@ -45,6 +45,12 @@ python_syntax:
   stage: validate
   script:
     - >-
+      test -f deploy/matrix-device-restart.conf &&
+      test -f deploy/matrix-device-restart.path &&
+      test -f deploy/matrix-device-restart.service &&
+      test -f deploy/matrix_device_restart_broker.py &&
+      test -f deploy/matrix-ci-physical.conf
+    - >-
       python -c 'import ast, pathlib;
       files = sorted(pathlib.Path(".").rglob("*.py"));
       [ast.parse(path.read_text(encoding="utf-8"), filename=str(path)) for path in files];
@@ -183,7 +189,8 @@ physical_device_acceptance:
     - when: never
   before_script:
     - apt-get update -qq
-    - DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends openssh-client
+    - DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends openssh-client util-linux
+    - useradd --uid 65532 --user-group --no-create-home --shell /usr/sbin/nologin matrix-ci-unprivileged
     - install -d -m 0700 "$HOME/.ssh"
     - install -m 0600 "$MATRIX_DEVICE_SSH_KEY" "$HOME/.ssh/matrix-device"
     - install -m 0600 "$MATRIX_DEVICE_KNOWN_HOSTS" "$HOME/.ssh/known_hosts"
@@ -194,15 +201,27 @@ physical_device_acceptance:
       [[ "$CI_PIPELINE_ID" =~ ^[0-9]+$ ]]
       SSH=(ssh -i "$HOME/.ssh/matrix-device" -o IdentitiesOnly=yes -o BatchMode=yes -o StrictHostKeyChecking=yes -o UserKnownHostsFile="$HOME/.ssh/known_hosts" -o ConnectTimeout=10 -o ServerAliveInterval=10 -o ServerAliveCountMax=2)
       set +e
-      "${SSH[@]}" "$MATRIX_DEVICE_TARGET" "verify $CI_COMMIT_SHA $CI_PIPELINE_ID" > physical-device-report.txt
-      acceptance_status=$?
-      test -f physical-device-report.txt
-      cat physical-device-report.txt
-      python scripts/verify_physical_device_report.py --report physical-device-report.txt --source-sha "$CI_COMMIT_SHA" --pipeline-id "$CI_PIPELINE_ID"
-      report_status=$?
+      "${SSH[@]}" "$MATRIX_DEVICE_TARGET" "verify $CI_COMMIT_SHA $CI_PIPELINE_ID" | head -c 4097 > physical-device-report.txt
+      acceptance_status="${PIPESTATUS[0]}"
+      overflow_status=0
+      if [[ "$(wc -c < physical-device-report.txt)" -gt 4096 ]]; then
+        overflow_status=1
+      fi
+      primary_status="$acceptance_status"
+      if [[ "$primary_status" -eq 0 && "$overflow_status" -ne 0 ]]; then
+        primary_status="$overflow_status"
+      fi
+      report_status=0
+      if [[ "$overflow_status" -eq 0 ]]; then
+        setpriv --reuid=65532 --regid=65532 --clear-groups python scripts/verify_physical_device_report.py --report physical-device-report.txt --source-sha "$CI_COMMIT_SHA" --pipeline-id "$CI_PIPELINE_ID"
+        report_status=$?
+      fi
+      if [[ "$primary_status" -eq 0 && "$report_status" -ne 0 ]]; then
+        primary_status="$report_status"
+      fi
       set -e
-      test "$acceptance_status" -eq 0
-      exit "$report_status"
+      test "$primary_status" -eq 0
+      exit "$primary_status"
   artifacts:
     when: always
     expire_in: 14 days

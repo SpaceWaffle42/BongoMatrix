@@ -19,8 +19,10 @@ import tempfile
 import threading
 import time
 import datetime as dt
+import fcntl
 from contextlib import ExitStack
 from datetime import timedelta
+from enum import Enum
 from functools import wraps
 from pathlib import Path
 
@@ -63,10 +65,7 @@ MEDIA_METADATA_ERRORS = (
 CONFIG_REQUEST_LIMIT = 1_048_576
 CONDITIONAL_HEADER_LIMIT = 4096
 MINIMUM_CLIENT_CONTRACT = 2
-APPLICATION_VERSION = "0.3.52-preview"
-DEVICE_RESTART_SCHEDULER_TIMEOUT_SECONDS = 5
-DEVICE_RESTART_RESPONSE_MARGIN_SECONDS = 20
-DEVICE_RESTART_DELAY_SECONDS = 30
+APPLICATION_VERSION = "0.3.53-preview"
 DEVICE_RESTART_PENDING_TTL_SECONDS = 60
 ETAG_ITEM = re.compile(r'(?P<weak>W/)?"(?P<opaque>[\x21\x23-\x7e\x80-\xff]*)"')
 EDIT_PREVIEW_INSTANCE = re.compile(r"[0-9a-f]{32}")
@@ -74,55 +73,144 @@ EDIT_PREVIEW_SESSION = re.compile(r"[0-9a-f]{32}")
 EDIT_PREVIEW_TOKEN = re.compile(r"[0-9a-f]{64}")
 
 
-def device_restart_unit_pending(runner):
-    """Return True/False for a known unit state, or None when it is unknowable."""
+class RestartRequestOutcome(Enum):
+    CREATED = "created"
+    ACTIVE_REQUEST = "active_request"
+    MANUAL_RECOVERY_REQUIRED = "manual_recovery_required"
+
+
+def _open_trusted_restart_directory(path):
+    path = Path(path)
+    if not path.is_absolute() or any(part in ("", ".", "..") for part in path.parts[1:]):
+        raise RuntimeError("unsafe fixed restart request directory ancestry")
+    parent_fd = os.open(
+        "/", os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC,
+    )
     try:
-        result = runner(
-            [
-                "/usr/bin/systemctl",
-                "show",
-                "--property=LoadState",
-                "--property=ActiveState",
-                "--property=SubState",
-                "matrix-device-restart.timer",
-                "matrix-device-restart.service",
-            ],
-            check=False,
-            stdin=subprocess.DEVNULL,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.DEVNULL,
-            text=True,
-            timeout=2,
-        )
-    except (OSError, subprocess.SubprocessError):
-        return None
-    if result.returncode != 0:
-        return None
-    units = []
-    for block in result.stdout.strip().split("\n\n"):
-        properties = {}
-        for line in block.splitlines():
-            if "=" not in line:
-                return None
-            key, value = line.split("=", 1)
-            properties[key] = value
-        if not {"LoadState", "ActiveState", "SubState"} <= properties.keys():
-            return None
-        units.append(properties)
-    if len(units) != 2:
-        return None
-    timer, service = units
-    timer_pending = (
-        timer["LoadState"] == "loaded"
-        and timer["ActiveState"] == "active"
-        and timer["SubState"] in {"waiting", "running"}
-    )
-    service_pending = (
-        service["LoadState"] == "loaded"
-        and service["ActiveState"] in {"activating", "active"}
-        and service["SubState"] not in {"dead", "exited", "failed"}
-    )
-    return timer_pending or service_pending
+        components = path.parts[1:]
+        for index, component in enumerate(components):
+            if index:
+                ancestor = os.fstat(parent_fd)
+                if (
+                    not stat.S_ISDIR(ancestor.st_mode)
+                    or ancestor.st_uid != 0
+                    or ancestor.st_gid != 0
+                    or stat.S_IMODE(ancestor.st_mode) & 0o022
+                ):
+                    raise RuntimeError("unsafe fixed restart request directory ancestry")
+            child_fd = os.open(
+                component,
+                os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC,
+                dir_fd=parent_fd,
+            )
+            os.close(parent_fd)
+            parent_fd = child_fd
+        return parent_fd
+    except BaseException:
+        os.close(parent_fd)
+        raise
+
+
+class RestartRequest:
+    """Publish the one fixed zero-byte marker accepted by the host broker."""
+
+    def __init__(self, path):
+        self.path = Path(path)
+
+    def __call__(self):
+        parent_fd = _open_trusted_restart_directory(self.path.parent)
+        fd = None
+        lock_fd = None
+        try:
+            parent = os.fstat(parent_fd)
+            if (
+                not stat.S_ISDIR(parent.st_mode)
+                or parent.st_uid != 0
+                or parent.st_gid != os.getegid()
+                or stat.S_IMODE(parent.st_mode) != 0o1730
+            ):
+                raise RuntimeError("unsafe fixed restart request directory")
+            lock_before = os.stat(
+                "transaction.lock", dir_fd=parent_fd, follow_symlinks=False,
+            )
+            lock_fd = os.open(
+                "transaction.lock",
+                os.O_RDONLY | os.O_NONBLOCK | os.O_NOFOLLOW | os.O_CLOEXEC,
+                dir_fd=parent_fd,
+            )
+            lock_opened = os.fstat(lock_fd)
+            if (
+                not stat.S_ISREG(lock_opened.st_mode)
+                or lock_opened.st_uid != 0
+                or lock_opened.st_gid != 0
+                or stat.S_IMODE(lock_opened.st_mode) != 0o644
+                or lock_opened.st_nlink != 1
+                or (lock_before.st_dev, lock_before.st_ino)
+                != (lock_opened.st_dev, lock_opened.st_ino)
+            ):
+                raise RuntimeError("unsafe fixed restart transaction lock")
+            fcntl.flock(lock_fd, fcntl.LOCK_EX)
+            lock_current = os.stat(
+                "transaction.lock", dir_fd=parent_fd, follow_symlinks=False,
+            )
+            if (
+                (lock_opened.st_dev, lock_opened.st_ino)
+                != (lock_current.st_dev, lock_current.st_ino)
+                or not stat.S_ISREG(lock_current.st_mode)
+                or lock_current.st_uid != 0
+                or lock_current.st_gid != 0
+                or stat.S_IMODE(lock_current.st_mode) != 0o644
+                or lock_current.st_nlink != 1
+            ):
+                raise RuntimeError("fixed restart transaction lock changed")
+            for terminal in ("failed", "cancelled", "invalid"):
+                try:
+                    terminal_info = os.stat(
+                        f"{self.path.name}.{terminal}",
+                        dir_fd=parent_fd,
+                        follow_symlinks=False,
+                    )
+                except FileNotFoundError:
+                    continue
+                if (
+                    not stat.S_ISREG(terminal_info.st_mode)
+                    or (terminal_info.st_uid, terminal_info.st_gid)
+                    not in ((os.geteuid(), os.getegid()), (0, 0))
+                    or stat.S_IMODE(terminal_info.st_mode) != 0o600
+                    or terminal_info.st_nlink != 1
+                    or terminal_info.st_size != 0
+                ):
+                    raise RuntimeError("unsafe fixed restart terminal marker")
+                return RestartRequestOutcome.MANUAL_RECOVERY_REQUIRED
+            try:
+                fd = os.open(
+                    self.path.name,
+                    os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW | os.O_CLOEXEC,
+                    0o600,
+                    dir_fd=parent_fd,
+                )
+            except FileExistsError:
+                info = os.stat(self.path.name, dir_fd=parent_fd, follow_symlinks=False)
+                if (
+                    not stat.S_ISREG(info.st_mode)
+                    or (info.st_uid, info.st_gid)
+                    not in ((os.geteuid(), os.getegid()), (0, 0))
+                    or stat.S_IMODE(info.st_mode) != 0o600
+                    or info.st_nlink != 1
+                    or info.st_size != 0
+                ):
+                    raise RuntimeError("unsafe fixed restart request marker")
+                return RestartRequestOutcome.ACTIVE_REQUEST
+            os.fchmod(fd, 0o600)
+            os.fsync(fd)
+            os.fsync(parent_fd)
+            return RestartRequestOutcome.CREATED
+        finally:
+            if fd is not None:
+                os.close(fd)
+            if lock_fd is not None:
+                os.close(lock_fd)
+            os.close(parent_fd)
 
 
 class EditPreviewRenderError(RuntimeError):
@@ -1801,64 +1889,33 @@ def create_app(
             }), 503
         with device_restart_lock:
             requested_at = time.monotonic()
-            if device_restart_pending_until > requested_at:
-                return jsonify({"restarting": True, "already_pending": True}), 202
-            device_restart_pending_until = 0.0
+            locally_pending = device_restart_pending_until > requested_at
             try:
-                device_restart_runner(
-                    [
-                        "/usr/bin/systemd-run",
-                        "--quiet",
-                        "--collect",
-                        "--no-block",
-                        "--unit=matrix-device-restart",
-                        f"--on-active={DEVICE_RESTART_DELAY_SECONDS}s",
-                        "/usr/bin/systemctl",
-                        "reboot",
-                    ],
-                    check=True,
-                    stdin=subprocess.DEVNULL,
-                    stdout=subprocess.DEVNULL,
-                    stderr=subprocess.DEVNULL,
-                    timeout=DEVICE_RESTART_SCHEDULER_TIMEOUT_SECONDS,
-                )
-            except subprocess.TimeoutExpired:
+                outcome = device_restart_runner()
+            except (OSError, RuntimeError):
+                LOGGER.exception("Unable to publish fixed device restart request")
+                return jsonify({"error": "Device restart could not be scheduled."}), 503
+            if outcome is RestartRequestOutcome.MANUAL_RECOVERY_REQUIRED:
+                device_restart_pending_until = 0.0
+                return jsonify({
+                    "error": "Device restart requires operator recovery.",
+                    "manual_recovery_required": True,
+                }), 409
+            if outcome not in (
+                RestartRequestOutcome.CREATED, RestartRequestOutcome.ACTIVE_REQUEST,
+            ):
+                LOGGER.error("Fixed device restart publisher returned an invalid outcome")
+                device_restart_pending_until = 0.0
+                return jsonify({"error": "Device restart could not be scheduled."}), 503
+            if not locally_pending:
                 device_restart_pending_until = (
                     requested_at + DEVICE_RESTART_PENDING_TTL_SECONDS
                 )
-                LOGGER.warning(
-                    "Device restart scheduling timed out; treating the request as accepted"
-                )
-                return jsonify({
-                    "restarting": True,
-                    "already_pending": False,
-                    "scheduling_uncertain": True,
-                }), 202
-            except subprocess.CalledProcessError:
-                existing_unit = device_restart_unit_pending(device_restart_runner)
-                if existing_unit is not False:
-                    device_restart_pending_until = (
-                        requested_at + DEVICE_RESTART_PENDING_TTL_SECONDS
-                    )
-                    if existing_unit is None:
-                        LOGGER.warning(
-                            "Device restart unit collision could not be reconciled; "
-                            "treating the request as accepted"
-                        )
-                        return jsonify({
-                            "restarting": True,
-                            "already_pending": True,
-                            "scheduling_uncertain": True,
-                        }), 202
-                    return jsonify({"restarting": True, "already_pending": True}), 202
-                LOGGER.exception("Unable to schedule device restart")
-                return jsonify({"error": "Device restart could not be scheduled."}), 503
-            except (OSError, subprocess.SubprocessError):
-                LOGGER.exception("Unable to schedule device restart")
-                return jsonify({"error": "Device restart could not be scheduled."}), 503
-            device_restart_pending_until = (
-                requested_at + DEVICE_RESTART_PENDING_TTL_SECONDS
-            )
-        return jsonify({"restarting": True, "already_pending": False}), 202
+        return jsonify({
+            "restarting": True,
+            "already_pending": (
+                outcome is RestartRequestOutcome.ACTIVE_REQUEST or locally_pending
+            ),
+        }), 202
 
     return app

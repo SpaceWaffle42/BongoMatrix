@@ -1,4 +1,5 @@
 import contextlib
+import fcntl
 import hashlib
 import importlib.util
 import io
@@ -11,6 +12,7 @@ import tempfile
 import threading
 import types
 import unittest
+from unittest import mock
 from pathlib import Path
 
 
@@ -327,46 +329,202 @@ class PhysicalVerifierTests(unittest.TestCase):
                 dispatcher._TEMPORARY_SEQUENCE = old_sequence
                 dispatcher.RUNTIME, dispatcher.LABELS, dispatcher.REPORT = old_paths
 
-    def test_pid1_serialized_scavenging_converges_without_touching_live_or_hostile_nodes(self):
+    def test_quiescent_temporary_namespace_has_bounded_work_and_guaranteed_convergence(self):
+        modules = (
+            load_deploy_module("matrix_ci_physical_dispatcher"),
+            load_deploy_module("matrix_ci_physical_verifier"),
+        )
+        for module in modules:
+            with self.subTest(module=module.__name__):
+                with tempfile.TemporaryDirectory(prefix="matrix-ci-quiescent-", dir="/root") as directory:
+                    root = Path(directory)
+                    namespace = root / "temporaries"
+                    namespace.mkdir()
+                    target = root / "target"
+                    target.write_text("unchanged", encoding="ascii")
+                    for counter in range(260):
+                        path = namespace / f"hostile-{counter:03d}"
+                        if counter == 7:
+                            path.symlink_to(target)
+                        else:
+                            path.write_bytes(b"stale")
+                    fd = os.open(namespace, os.O_RDONLY | os.O_DIRECTORY)
+                    try:
+                        passes = 0
+                        while module._scavenge_quiescent_temporaries(fd, limit=64):
+                            passes += 1
+                            self.assertLessEqual(module._LAST_SCAVENGE_VISITED, 64)
+                            self.assertLess(passes, 10)
+                    finally:
+                        os.close(fd)
+                    self.assertEqual(target.read_text(encoding="ascii"), "unchanged")
+                    self.assertEqual(list(namespace.iterdir()), [])
+
+    def test_restore_only_scavenges_only_report_temporaries_without_breaking_dispatch_lock(self):
         dispatcher = load_deploy_module("matrix_ci_physical_dispatcher")
         verifier = load_deploy_module("matrix_ci_physical_verifier")
-        with tempfile.TemporaryDirectory(prefix="matrix-ci-scavenge-", dir="/root") as directory:
-            runtime = Path(directory)
-            os.chmod(runtime, 0o700)
-            target = runtime / "target"
-            target.write_bytes(b"preserve\n")
-            os.chmod(target, 0o600)
-            live = runtime / f"claim.tmp.{os.getpid()}.1"
-            live.write_bytes(b"live")
-            os.chmod(live, 0o600)
-            stale_claim = runtime / "claim.tmp.999999.2"
-            stale_claim.write_bytes(b"dead")
-            os.chmod(stale_claim, 0o600)
-            hostile = runtime / "claim.tmp.999998.3"
-            hostile.symlink_to(target.name)
-            stale_report = runtime / "report.tmp.999997.4"
-            stale_report.write_bytes(b"dead")
-            os.chmod(stale_report, 0o600)
-            overflow = []
-            for counter in range(130):
-                path = runtime / f"report.tmp.999996.{counter + 10}"
-                path.write_bytes(b"dead")
-                os.chmod(path, 0o600)
-                overflow.append(path)
 
-            runtime_fd = os.open(runtime, os.O_RDONLY | os.O_DIRECTORY)
+        class ReadyOps:
+            def service_active(self):
+                return True
+
+            def start_service(self):
+                raise AssertionError("service was already active")
+
+            def wait_ready(self):
+                return None
+
+        with tempfile.TemporaryDirectory(prefix="matrix-ci-restore-scavenge-", dir="/root") as directory:
+            runtime = Path(directory) / "runtime"
+            runtime.mkdir(mode=0o700)
+            claim_temporaries = runtime / dispatcher.CLAIM_TEMPORARIES
+            report_temporaries = runtime / verifier.REPORT_TEMPORARIES
+            claim_temporaries.mkdir(mode=0o700)
+            report_temporaries.mkdir(mode=0o700)
+            dispatch_lock = runtime / "dispatch.lock"
+            report = runtime / "report"
+            claim = runtime / "claim"
+            for path, payload in (
+                (dispatch_lock, b"lock"),
+                (report, b"trusted report"),
+                (claim, b"a" * 40 + b" 7\n"),
+            ):
+                path.write_bytes(payload)
+                os.chmod(path, 0o600)
+            claim_temporary = claim_temporaries / "claim.tmp.sentinel"
+            claim_temporary.write_bytes(b"preserve")
+            for counter in range(260):
+                stale = report_temporaries / f"report.tmp.stale.{counter:03d}"
+                stale.write_bytes(b"stale")
+                os.chmod(stale, 0o600)
+
+            trusted = (runtime, claim_temporaries, report_temporaries, dispatch_lock, report)
+            identities = {path: (path.stat().st_dev, path.stat().st_ino) for path in trusted}
+            lock_fd = os.open(dispatch_lock, os.O_RDWR | os.O_NOFOLLOW | os.O_CLOEXEC)
+            contender_fd = os.open(dispatch_lock, os.O_RDWR | os.O_NOFOLLOW | os.O_CLOEXEC)
+            fcntl.flock(lock_fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            old_claim, old_report = verifier.CLAIM_FILE, verifier.REPORT_FILE
+            verifier.CLAIM_FILE = runtime / "claim"
+            verifier.REPORT_FILE = runtime / "report"
             try:
-                self.assertEqual(dispatcher._scavenge_stale_temporaries(runtime_fd, "claim.tmp", limit=128), 1)
-                removed = verifier._scavenge_stale_temporaries(runtime_fd, "report.tmp", limit=128)
+                passes = 0
+                while list(report_temporaries.iterdir()):
+                    verifier.restore_only(ReadyOps(), scavenge_stale_temporaries=True)
+                    passes += 1
+                    self.assertLess(passes, 10)
+                with self.assertRaises(BlockingIOError):
+                    fcntl.flock(contender_fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
             finally:
+                verifier.CLAIM_FILE, verifier.REPORT_FILE = old_claim, old_report
+                os.close(contender_fd)
+                os.close(lock_fd)
+
+            self.assertFalse(claim.exists(), "successful recovery consumes only the durable claim")
+            self.assertEqual(claim_temporary.read_bytes(), b"preserve")
+            for path, identity in identities.items():
+                self.assertEqual((path.stat().st_dev, path.stat().st_ino), identity, path)
+
+    def test_compatibility_scavengers_reject_the_wrong_temporary_namespace(self):
+        dispatcher = load_deploy_module("matrix_ci_physical_dispatcher")
+        verifier = load_deploy_module("matrix_ci_physical_verifier")
+        with tempfile.TemporaryDirectory(prefix="matrix-ci-compat-scavenge-", dir="/root") as directory:
+            directory_fd = os.open(directory, os.O_RDONLY | os.O_DIRECTORY)
+            try:
+                with self.assertRaisesRegex(RuntimeError, "claim temporary namespace"):
+                    dispatcher._scavenge_stale_temporaries(directory_fd, "report.tmp")
+                with self.assertRaisesRegex(RuntimeError, "report temporary namespace"):
+                    verifier._scavenge_stale_temporaries(directory_fd, "claim.tmp")
+            finally:
+                os.close(directory_fd)
+
+    def _assert_broken_stderr_cannot_mask_owned_cleanup(self, module):
+        class BrokenDiagnostics:
+            def write(self, _payload):
+                raise BrokenPipeError("stderr transport closed")
+
+            def flush(self):
+                raise OSError("stderr flush closed")
+
+        with tempfile.TemporaryDirectory(prefix="matrix-ci-broken-stderr-", dir="/root") as directory:
+            runtime = Path(directory)
+            temporary = runtime / "owned.tmp"
+            temporary.write_bytes(b"private")
+            info = temporary.stat()
+            runtime_fd = os.open(runtime, os.O_RDONLY | os.O_DIRECTORY)
+            original_unlink = module.os.unlink
+            original_stderr = module.sys.stderr
+            primary = RuntimeError("primary lifecycle result")
+            module.os.unlink = lambda *_args, **_kwargs: (_ for _ in ()).throw(
+                OSError("cleanup failed")
+            )
+            module.sys.stderr = BrokenDiagnostics()
+            try:
+                with self.assertRaises(RuntimeError) as raised:
+                    try:
+                        raise primary
+                    except RuntimeError:
+                        module._unlink_owned_temporary(
+                            runtime_fd, temporary.name, (info.st_dev, info.st_ino)
+                        )
+                        raise
+            finally:
+                module.sys.stderr = original_stderr
+                module.os.unlink = original_unlink
                 os.close(runtime_fd)
-            self.assertFalse(stale_claim.exists())
-            self.assertFalse(stale_report.exists())
-            self.assertTrue(live.exists())
-            self.assertTrue(hostile.is_symlink())
-            self.assertEqual(target.read_bytes(), b"preserve\n")
-            self.assertLessEqual(removed, 128)
-            self.assertGreaterEqual(sum(path.exists() for path in overflow), 2)
+            self.assertIs(raised.exception, primary)
+
+    def test_dispatcher_owned_cleanup_survives_broken_stderr(self):
+        self._assert_broken_stderr_cannot_mask_owned_cleanup(
+            load_deploy_module("matrix_ci_physical_dispatcher")
+        )
+
+    def test_verifier_owned_cleanup_survives_broken_stderr(self):
+        self._assert_broken_stderr_cannot_mask_owned_cleanup(
+            load_deploy_module("matrix_ci_physical_verifier")
+        )
+
+    def test_scavenger_unlink_and_fsync_warnings_survive_broken_stderr(self):
+        class BrokenDiagnostics:
+            def write(self, _payload):
+                raise BrokenPipeError("stderr transport closed")
+
+            def flush(self):
+                raise OSError("stderr flush closed")
+
+        for module in (
+            load_deploy_module("matrix_ci_physical_dispatcher"),
+            load_deploy_module("matrix_ci_physical_verifier"),
+        ):
+            for failure in ("unlink", "fsync"):
+                with self.subTest(module=module.__name__, failure=failure):
+                    with tempfile.TemporaryDirectory(
+                        prefix="matrix-ci-broken-scavenger-", dir="/root"
+                    ) as directory:
+                        runtime = Path(directory)
+                        (runtime / "stale").write_bytes(b"private")
+                        runtime_fd = os.open(runtime, os.O_RDONLY | os.O_DIRECTORY)
+                        original_unlink = module.os.unlink
+                        original_fsync = module.os.fsync
+                        original_stderr = module.sys.stderr
+                        if failure == "unlink":
+                            module.os.unlink = lambda *_args, **_kwargs: (
+                                _ for _ in ()
+                            ).throw(OSError("unlink failed"))
+                        else:
+                            module.os.fsync = lambda *_args, **_kwargs: (
+                                _ for _ in ()
+                            ).throw(OSError("fsync failed"))
+                        module.sys.stderr = BrokenDiagnostics()
+                        try:
+                            removed = module._scavenge_quiescent_temporaries(
+                                runtime_fd, limit=1
+                            )
+                        finally:
+                            module.sys.stderr = original_stderr
+                            module.os.fsync = original_fsync
+                            module.os.unlink = original_unlink
+                            os.close(runtime_fd)
+                        self.assertEqual(removed, 0 if failure == "unlink" else 1)
 
     def test_unique_temporary_cleanup_failures_emit_fixed_diagnostics_without_masking_primary(self):
         modules = (
@@ -463,7 +621,7 @@ class PhysicalVerifierTests(unittest.TestCase):
                     module.os.unlink = fail_unlink
                     try:
                         with contextlib.redirect_stderr(stderr):
-                            removed = module._scavenge_stale_temporaries(runtime_fd, "claim.tmp")
+                            removed = module._scavenge_quiescent_temporaries(runtime_fd)
                     finally:
                         module.os.unlink = original_unlink
                         os.close(runtime_fd)
@@ -481,7 +639,7 @@ class PhysicalVerifierTests(unittest.TestCase):
                     module.os.fsync = lambda _fd: (_ for _ in ()).throw(OSError("sensitive-sync-detail"))
                     try:
                         with contextlib.redirect_stderr(stderr):
-                            removed = module._scavenge_stale_temporaries(runtime_fd, "report.tmp")
+                            removed = module._scavenge_quiescent_temporaries(runtime_fd)
                     finally:
                         module.os.fsync = original_fsync
                         os.close(runtime_fd)
@@ -602,6 +760,85 @@ class PhysicalVerifierTests(unittest.TestCase):
         self.assertIn("ReadWritePaths=/run/matrix-ci-physical", verifier_unit)
         self.assertNotIn("ReadWritePaths=/run/matrix-display", web_unit + verifier_unit)
         self.assertNotIn("matrix-ci-display.lock", web_unit + verifier_unit + verifier_source)
+
+    def test_host_owned_physical_runtime_exists_before_web_namespace_is_applied(self):
+        policy_path = ROOT / "deploy" / "matrix-ci-physical.conf"
+        self.assertTrue(policy_path.is_file())
+        self.assertEqual(
+            policy_path.read_text(encoding="ascii"),
+            "# Host-owned prerequisite for matrix-web InaccessiblePaths.\n"
+            "d /run/matrix-ci-physical 0700 root root -\n",
+        )
+        web_unit = (ROOT / "deploy" / "matrix-web.service").read_text(encoding="utf-8")
+        self.assertIn("InaccessiblePaths=/run/matrix-ci-physical", web_unit)
+        self.assertIn("Requires=matrix-network-setup.service systemd-tmpfiles-setup.service", web_unit)
+        install = (ROOT / "deploy" / "matrix-ci-physical-install.md").read_text(encoding="utf-8")
+        source = "deploy/matrix-ci-physical.conf"
+        destination = "/etc/tmpfiles.d/matrix-ci-physical.conf"
+        create = f"/usr/bin/systemd-tmpfiles --create {destination}"
+        self.assertIn(f"{source}:{destination}", install)
+        self.assertIn(create, install)
+        self.assertLess(install.index(create), install.index("systemctl enable --now"))
+        gate = (ROOT / "deploy" / "verify_matrix_ci_physical_install.py").read_text(
+            encoding="utf-8"
+        )
+        pipeline = (ROOT / ".gitlab-ci.yml").read_text(encoding="utf-8")
+        self.assertIn(destination, gate)
+        self.assertIn(source, pipeline)
+
+    def test_restart_install_gate_rejects_non_matrix_web_request_directory(self):
+        gate = load_deploy_module("verify_matrix_ci_physical_install")
+        with tempfile.TemporaryDirectory(prefix="matrix-restart-install-", dir="/root") as directory:
+            root = Path(directory)
+            broker = root / "broker"
+            service = root / "service"
+            path_unit = root / "path"
+            policy = root / "policy"
+            for artifact in (broker, service, path_unit):
+                artifact.write_bytes(b"reviewed\n")
+            os.chmod(broker, 0o755)
+            os.chmod(service, 0o644)
+            os.chmod(path_unit, 0o644)
+            policy.write_bytes(gate.EXPECTED_RESTART_TMPFILES_POLICY)
+            os.chmod(policy, 0o644)
+            runtime = root / "runtime"
+            runtime.mkdir(mode=0o700)
+            os.chown(runtime, 65534, 65534)
+            old_paths = (
+                gate.RESTART_BROKER,
+                gate.RESTART_SERVICE,
+                gate.RESTART_PATH,
+                gate.RESTART_TMPFILES_POLICY,
+                gate.RESTART_DIRECTORY,
+            )
+            old_getpwnam = gate.pwd.getpwnam
+            old_digests = gate.EXPECTED_ARTIFACT_DIGESTS
+            (
+                gate.RESTART_BROKER,
+                gate.RESTART_SERVICE,
+                gate.RESTART_PATH,
+                gate.RESTART_TMPFILES_POLICY,
+                gate.RESTART_DIRECTORY,
+            ) = (broker, service, path_unit, policy, runtime)
+            gate.pwd.getpwnam = lambda name: types.SimpleNamespace(
+                pw_uid=12345, pw_gid=12345
+            ) if name == "matrix-web" else old_getpwnam(name)
+            gate.EXPECTED_ARTIFACT_DIGESTS = {
+                broker: hashlib.sha256(broker.read_bytes()).hexdigest()
+            }
+            try:
+                with self.assertRaisesRegex(RuntimeError, "restart request directory"):
+                    gate.verify_restart_broker_install()
+            finally:
+                gate.pwd.getpwnam = old_getpwnam
+                gate.EXPECTED_ARTIFACT_DIGESTS = old_digests
+                (
+                    gate.RESTART_BROKER,
+                    gate.RESTART_SERVICE,
+                    gate.RESTART_PATH,
+                    gate.RESTART_TMPFILES_POLICY,
+                    gate.RESTART_DIRECTORY,
+                ) = old_paths
 
     def test_tmpfiles_install_contract_is_exact_ordered_and_verified(self):
         policy_path = ROOT / "deploy" / "matrix-display.conf"
@@ -724,6 +961,50 @@ class PhysicalVerifierTests(unittest.TestCase):
                 dispatcher._systemctl = original_systemctl
                 verifier.REPORT_FILE = old_report
                 dispatcher.RUNTIME, dispatcher.REPORT = old_dispatcher_paths
+
+    def test_report_publication_is_descriptor_confined_to_dedicated_temporary_namespace(self):
+        verifier = load_deploy_module("matrix_ci_physical_verifier")
+        values = {"SOURCE_SHA": "a" * 40, "PIPELINE_ID": "99", "PHYSICAL_DEVICE_ACCEPTANCE": "PASS"}
+        expected = verifier_report("a" * 40, "99")
+        with tempfile.TemporaryDirectory(prefix="matrix-ci-report-namespace-", dir="/root") as directory:
+            runtime = Path(directory)
+            os.chmod(runtime, 0o700)
+            target = runtime / "outside-target"
+            target.write_bytes(b"unchanged")
+            hostile = runtime / "report.tmp.999999.0"
+            os.link(target, hostile)
+            old_report = verifier.REPORT_FILE
+            original_rename = verifier._rename_noreplace
+            publications = []
+            verifier.REPORT_FILE = runtime / "report"
+
+            def observe_rename(old_name, new_name, source_fd, target_fd=None):
+                effective_target_fd = source_fd if target_fd is None else target_fd
+                publications.append((
+                    old_name,
+                    new_name,
+                    os.fstat(source_fd).st_ino,
+                    os.fstat(effective_target_fd).st_ino,
+                ))
+                return original_rename(old_name, new_name, source_fd, target_fd)
+
+            verifier._rename_noreplace = observe_rename
+            try:
+                verifier._write_report(values)
+            finally:
+                verifier._rename_noreplace = original_rename
+                verifier.REPORT_FILE = old_report
+
+            self.assertEqual((runtime / "report").read_bytes(), expected)
+            self.assertEqual(target.read_bytes(), b"unchanged")
+            self.assertEqual(hostile.stat().st_nlink, 2)
+            self.assertEqual(len(publications), 1)
+            temporary_name, published_name, source_inode, target_inode = publications[0]
+            self.assertRegex(temporary_name, r"^report\.tmp\.[0-9]+\.[0-9]+$")
+            self.assertEqual(published_name, "report")
+            self.assertNotEqual(source_inode, target_inode)
+            namespace = runtime / verifier.REPORT_TEMPORARIES
+            self.assertEqual(list(namespace.iterdir()), [])
 
     def test_interrupted_report_temporaries_cannot_wedge_future_publication(self):
         verifier = load_deploy_module("matrix_ci_physical_verifier")
@@ -877,6 +1158,135 @@ class PhysicalVerifierTests(unittest.TestCase):
             (source / "core.so").write_bytes(b"tampered")
             with self.assertRaisesRegex(RuntimeError, "digest"):
                 installer.install(source, Path(dest_dir) / "other", manifest)
+
+    def test_rgb_installer_rejects_zero_progress_write(self):
+        installer = load_deploy_module("matrix_ci_install_rgb_bindings")
+        with tempfile.TemporaryDirectory(prefix="matrix-ci-rgb-write-", dir="/root") as directory:
+            directory_fd = os.open(directory, os.O_RDONLY | os.O_DIRECTORY)
+            original_write = installer.os.write
+            installer.os.write = lambda _fd, _payload: 0
+            try:
+                with self.assertRaisesRegex(RuntimeError, "zero-progress"):
+                    installer._write_file(directory_fd, "payload", b"reviewed")
+            finally:
+                installer.os.write = original_write
+                os.close(directory_fd)
+
+    def test_rgb_installer_write_failure_exposes_no_final_and_retry_succeeds(self):
+        installer = load_deploy_module("matrix_ci_install_rgb_bindings")
+        with tempfile.TemporaryDirectory(prefix="matrix-ci-rgb-source-", dir="/root") as source_dir, tempfile.TemporaryDirectory(prefix="matrix-ci-rgb-parent-", dir="/root") as parent_dir:
+            source, parent = Path(source_dir), Path(parent_dir)
+            destination = parent / "bindings"
+            payloads = {name: (name + "-reviewed").encode("ascii") for name in installer.EXPECTED_FILES}
+            for name, payload in payloads.items():
+                (source / name).write_bytes(payload)
+            manifest = "".join(
+                f"{hashlib.sha256(payloads[name]).hexdigest()}  rgbmatrix/{name}\n"
+                for name in sorted(payloads)
+            ).encode("ascii")
+            original_write_file = installer._write_file
+            calls = 0
+
+            def fail_second_write(*args):
+                nonlocal calls
+                calls += 1
+                if calls == 2:
+                    raise OSError("injected partial write failure")
+                return original_write_file(*args)
+
+            installer._write_file = fail_second_write
+            try:
+                with self.assertRaisesRegex(OSError, "injected partial write failure"):
+                    installer.install(source, destination, manifest)
+            finally:
+                installer._write_file = original_write_file
+            self.assertFalse(destination.exists())
+            self.assertEqual(list(parent.iterdir()), [])
+            installer.install(source, destination, manifest)
+            self.assertTrue((destination / "rgbmatrix" / "core.so").is_file())
+
+    def test_rgb_installer_fault_boundaries_never_expose_partial_final(self):
+        for fault in ("package-create", *(f"fsync-{index}" for index in range(1, 7)), "publish"):
+            with self.subTest(fault=fault), tempfile.TemporaryDirectory(prefix="matrix-ci-rgb-source-", dir="/root") as source_dir, tempfile.TemporaryDirectory(prefix="matrix-ci-rgb-parent-", dir="/root") as parent_dir:
+                installer = load_deploy_module("matrix_ci_install_rgb_bindings")
+                source, parent = Path(source_dir), Path(parent_dir)
+                destination = parent / "bindings"
+                payloads = {name: (name + "-reviewed").encode("ascii") for name in installer.EXPECTED_FILES}
+                for name, payload in payloads.items():
+                    (source / name).write_bytes(payload)
+                manifest = "".join(
+                    f"{hashlib.sha256(payloads[name]).hexdigest()}  rgbmatrix/{name}\n"
+                    for name in sorted(payloads)
+                ).encode("ascii")
+                original_mkdir = installer.os.mkdir
+                original_fsync = installer.os.fsync
+                original_publish = installer._rename_noreplace
+                fsync_calls = 0
+
+                def injected_mkdir(name, *args, **kwargs):
+                    if fault == "package-create" and name == "rgbmatrix":
+                        raise OSError("injected package create failure")
+                    return original_mkdir(name, *args, **kwargs)
+
+                def injected_fsync(fd):
+                    nonlocal fsync_calls
+                    fsync_calls += 1
+                    if fault == f"fsync-{fsync_calls}":
+                        raise OSError("injected fsync failure")
+                    return original_fsync(fd)
+
+                def injected_publish(*args):
+                    if fault == "publish":
+                        raise OSError("injected publication failure")
+                    self.assertFalse(destination.exists(), "final appeared before atomic publication")
+                    return original_publish(*args)
+
+                installer.os.mkdir = injected_mkdir
+                installer.os.fsync = injected_fsync
+                installer._rename_noreplace = injected_publish
+                try:
+                    with self.assertRaisesRegex(OSError, "injected"):
+                        installer.install(source, destination, manifest)
+                finally:
+                    installer.os.mkdir = original_mkdir
+                    installer.os.fsync = original_fsync
+                    installer._rename_noreplace = original_publish
+                self.assertFalse(destination.exists())
+                self.assertEqual(list(parent.iterdir()), [])
+
+    def test_rgb_installer_rejects_hostile_final_and_skips_prepositioned_staging_sibling(self):
+        installer = load_deploy_module("matrix_ci_install_rgb_bindings")
+        with tempfile.TemporaryDirectory(prefix="matrix-ci-rgb-source-", dir="/root") as source_dir, tempfile.TemporaryDirectory(prefix="matrix-ci-rgb-parent-", dir="/root") as parent_dir:
+            source, parent = Path(source_dir), Path(parent_dir)
+            payloads = {name: name.encode("ascii") for name in installer.EXPECTED_FILES}
+            for name, payload in payloads.items():
+                (source / name).write_bytes(payload)
+            manifest = "".join(
+                f"{hashlib.sha256(payloads[name]).hexdigest()}  rgbmatrix/{name}\n"
+                for name in sorted(payloads)
+            ).encode("ascii")
+            target = parent / "hostile-target"
+            target.write_text("unchanged", encoding="ascii")
+            destination = parent / "bindings"
+            destination.symlink_to(target)
+            with self.assertRaisesRegex(RuntimeError, "fresh trusted path"):
+                installer.install(source, destination, manifest)
+            self.assertTrue(destination.is_symlink())
+            self.assertEqual(target.read_text(encoding="ascii"), "unchanged")
+            destination.unlink()
+
+            first, second = b"a" * 16, b"b" * 16
+            hostile = parent / f".bindings.tmp.{os.getpid()}.{first.hex()}"
+            hostile.write_text("hostile", encoding="ascii")
+            values = iter((first, second))
+            original_urandom = installer.os.urandom
+            installer.os.urandom = lambda _count: next(values)
+            try:
+                installer.install(source, destination, manifest)
+            finally:
+                installer.os.urandom = original_urandom
+            self.assertEqual(hostile.read_text(encoding="ascii"), "hostile")
+            self.assertTrue((destination / "rgbmatrix.sha256").is_file())
 
     def test_fixed_matrix_adapter_uses_exact_production_hardware_options(self):
         verifier = load_deploy_module("matrix_ci_physical_verifier")
@@ -1083,6 +1493,240 @@ class PhysicalVerifierTests(unittest.TestCase):
 
             self.assertEqual(target.read_text(encoding="ascii"), "protected\n")
 
+    def test_state_snapshot_rejects_symlinks_and_hardlinks(self):
+        verifier = load_deploy_module("matrix_ci_physical_verifier")
+        with tempfile.TemporaryDirectory(prefix="matrix-state-tree-", dir="/root") as directory:
+            root = Path(directory)
+            target = root.parent / f"{root.name}-outside"
+            target.write_bytes(b"outside")
+            try:
+                (root / "symlink").symlink_to(target)
+                with self.assertRaisesRegex(RuntimeError, "state tree"):
+                    verifier._tree_digest(root)
+                (root / "symlink").unlink()
+                os.link(target, root / "hardlink")
+                with self.assertRaisesRegex(RuntimeError, "state tree"):
+                    verifier._tree_digest(root)
+            finally:
+                target.unlink(missing_ok=True)
+
+    def test_state_snapshot_rejects_fifo_socket_and_device_nodes(self):
+        verifier = load_deploy_module("matrix_ci_physical_verifier")
+        with tempfile.TemporaryDirectory(prefix="matrix-state-special-", dir="/root") as directory:
+            root = Path(directory)
+            creators = {
+                "fifo": lambda path: os.mkfifo(path, 0o600),
+                "socket": lambda path: __import__("socket").socket(__import__("socket").AF_UNIX).bind(str(path)),
+                "device": lambda path: os.mknod(path, stat.S_IFCHR | 0o600, os.makedev(1, 3)),
+            }
+            for kind, create in creators.items():
+                path = root / kind
+                resource = None
+                try:
+                    if kind == "socket":
+                        resource = __import__("socket").socket(__import__("socket").AF_UNIX)
+                        resource.bind(str(path))
+                    else:
+                        create(path)
+                    with self.subTest(kind=kind):
+                        with self.assertRaisesRegex(RuntimeError, "state tree"):
+                            verifier._tree_digest(root)
+                finally:
+                    if resource is not None:
+                        resource.close()
+                    path.unlink(missing_ok=True)
+
+    def test_state_snapshot_rejects_path_replacement_race(self):
+        verifier = load_deploy_module("matrix_ci_physical_verifier")
+        with tempfile.TemporaryDirectory(prefix="matrix-state-race-", dir="/root") as directory:
+            root = Path(directory)
+            victim = root / "victim"
+            victim.write_bytes(b"reviewed")
+            outside = root.parent / f"{root.name}-outside"
+            outside.write_bytes(b"attacker")
+            original_os_open = verifier.os.open
+            original_path_open = Path.open
+            replaced = False
+
+            def replace():
+                nonlocal replaced
+                if not replaced:
+                    victim.unlink()
+                    victim.symlink_to(outside)
+                    replaced = True
+
+            def racing_os_open(path, *args, **kwargs):
+                if path == "victim" and kwargs.get("dir_fd") is not None:
+                    replace()
+                return original_os_open(path, *args, **kwargs)
+
+            def racing_path_open(path, *args, **kwargs):
+                if path == victim:
+                    replace()
+                return original_path_open(path, *args, **kwargs)
+
+            try:
+                with mock.patch.object(verifier.os, "open", side_effect=racing_os_open), \
+                     mock.patch.object(Path, "open", autospec=True, side_effect=racing_path_open):
+                    with self.assertRaisesRegex((RuntimeError, OSError), "state|symlink|loop|unsafe"):
+                        verifier._tree_digest(root)
+            finally:
+                outside.unlink(missing_ok=True)
+
+    def test_state_snapshot_rejects_each_file_metadata_race_and_closes_descriptor(self):
+        verifier = load_deploy_module("matrix_ci_physical_verifier")
+        mutations = {
+            "st_mode": lambda value: value ^ stat.S_IXUSR,
+            "st_uid": lambda value: value + 1,
+            "st_gid": lambda value: value + 1,
+            "st_nlink": lambda value: value + 1,
+            "st_size": lambda value: value + 1,
+            "st_mtime_ns": lambda value: value + 1,
+            "st_ctime_ns": lambda value: value + 1,
+        }
+
+        for window in ("admitted-to-opened", "closed-to-current"):
+            for field, mutate in mutations.items():
+                with self.subTest(window=window, field=field):
+                    with tempfile.TemporaryDirectory(prefix="matrix-state-metadata-race-", dir="/root") as directory:
+                        root = Path(directory)
+                        victim = root / "victim"
+                        victim.write_bytes(b"reviewed")
+                        original_open = verifier.os.open
+                        original_fstat = verifier.os.fstat
+                        original_stat = verifier.os.stat
+                        victim_fd = None
+                        victim_stats = 0
+
+                        def changed(info):
+                            values = {
+                                name: getattr(info, name)
+                                for name in (
+                                    "st_dev", "st_ino", "st_mode", "st_uid", "st_gid",
+                                    "st_nlink", "st_size", "st_mtime_ns", "st_ctime_ns",
+                                )
+                            }
+                            values[field] = mutate(values[field])
+                            return types.SimpleNamespace(**values)
+
+                        def racing_open(path, *args, **kwargs):
+                            nonlocal victim_fd
+                            fd = original_open(path, *args, **kwargs)
+                            if path == "victim" and kwargs.get("dir_fd") is not None:
+                                victim_fd = fd
+                            return fd
+
+                        def racing_fstat(fd):
+                            info = original_fstat(fd)
+                            if window == "admitted-to-opened" and fd == victim_fd:
+                                return changed(info)
+                            return info
+
+                        def racing_stat(path, *args, **kwargs):
+                            nonlocal victim_stats
+                            info = original_stat(path, *args, **kwargs)
+                            if path == "victim" and kwargs.get("dir_fd") is not None:
+                                victim_stats += 1
+                                if window == "closed-to-current" and victim_stats == 2:
+                                    return changed(info)
+                            return info
+
+                        with mock.patch.object(verifier.os, "open", side_effect=racing_open), \
+                             mock.patch.object(verifier.os, "fstat", side_effect=racing_fstat), \
+                             mock.patch.object(verifier.os, "stat", side_effect=racing_stat):
+                            with self.assertRaisesRegex(RuntimeError, "state tree file identity changed"):
+                                verifier._tree_digest(root)
+
+                        self.assertIsNotNone(victim_fd)
+                        with self.assertRaises(OSError):
+                            original_fstat(victim_fd)
+
+    def test_state_snapshot_allows_exact_depth_bound_and_rejects_overflow_before_descent(self):
+        verifier = load_deploy_module("matrix_ci_physical_verifier")
+        max_depth = verifier.MAX_STATE_DEPTH
+        self.assertGreater(max_depth, 0)
+
+        with tempfile.TemporaryDirectory(prefix="matrix-state-depth-boundary-", dir="/root") as directory:
+            root = Path(directory)
+            cursor = root
+            for depth in range(max_depth):
+                cursor /= f"level-{depth:02d}"
+                cursor.mkdir()
+            (cursor / "leaf").write_bytes(b"boundary")
+            self.assertRegex(verifier._tree_digest(root), r"^[0-9a-f]{64}$")
+
+        with tempfile.TemporaryDirectory(prefix="matrix-state-depth-overflow-", dir="/root") as directory:
+            root = Path(directory)
+            cursor = root
+            for depth in range(max_depth + 1):
+                cursor /= f"level-{depth:02d}"
+                cursor.mkdir()
+            (cursor / "leaf").write_bytes(b"overflow")
+            overflow_name = f"level-{max_depth:02d}"
+            original_open = verifier.os.open
+            descended = []
+
+            def recording_open(path, *args, **kwargs):
+                if kwargs.get("dir_fd") is not None:
+                    descended.append(path)
+                return original_open(path, *args, **kwargs)
+
+            with mock.patch.object(verifier.os, "open", side_effect=recording_open):
+                with self.assertRaises(RuntimeError) as raised:
+                    verifier._tree_digest(root)
+
+            self.assertEqual(str(raised.exception), "state tree depth bound exceeded")
+            self.assertNotIn(overflow_name, descended)
+            self.assertNotIn(overflow_name, str(raised.exception))
+
+    def test_state_snapshot_enforces_file_aggregate_and_entry_bounds(self):
+        verifier = load_deploy_module("matrix_ci_physical_verifier")
+        max_file_bytes = 1024 * 1024
+        max_aggregate_bytes = 2 * 1024 * 1024
+        max_entries = 256
+        cases = (
+            ("file", lambda root: (root / "large").write_bytes(b"x" * (max_file_bytes + 1))),
+            ("aggregate", lambda root: [
+                (root / f"part-{index}").write_bytes(b"x" * (max_file_bytes - 1))
+                for index in range(3)
+            ]),
+            ("entries", lambda root: [
+                (root / f"entry-{index}").write_bytes(b"")
+                for index in range(max_entries + 1)
+            ]),
+        )
+        for kind, populate in cases:
+            with self.subTest(kind=kind):
+                with tempfile.TemporaryDirectory(prefix="matrix-state-bound-", dir="/root") as directory:
+                    root = Path(directory)
+                    populate(root)
+                    with self.assertRaisesRegex(RuntimeError, "state tree"):
+                        verifier._tree_digest(root)
+
+    def test_verifier_stops_production_before_snapshot_and_skips_hardware_when_admission_fails(self):
+        verifier = load_deploy_module("matrix_ci_physical_verifier")
+        events = []
+
+        class SnapshotFailureOps(FakeOps):
+            def snapshot(self):
+                events.append(("snapshot",))
+                if self.active:
+                    raise RuntimeError("snapshot while production active")
+                raise RuntimeError("unsafe state tree")
+
+        ops = SnapshotFailureOps(events)
+        opened = []
+        report = verifier.run_verification(
+            "a" * 40, "122", ops=ops,
+            lock_factory=lambda: FakeLock(events),
+            matrix_factory=lambda: opened.append(True),
+        )
+        self.assertEqual(report["PHYSICAL_DEVICE_ACCEPTANCE"], "FAIL")
+        self.assertIn("unsafe state tree", report["ERROR"])
+        self.assertLess(events.index(("service", "stop")), events.index(("snapshot",)))
+        self.assertFalse(ops.active)
+        self.assertEqual(opened, [])
+
     def test_verifier_reports_acceptance_while_production_remains_stopped(self):
         verifier = load_deploy_module("matrix_ci_physical_verifier")
         events = []
@@ -1256,14 +1900,110 @@ class PhysicalVerifierTests(unittest.TestCase):
         self.assertIn("stop transport failed", report["ERROR"])
         self.assertFalse(ops.active)
 
+    def test_state_tree_digest_framing_distinguishes_record_boundary_collision_shape(self):
+        verifier = load_deploy_module("matrix_ci_physical_verifier")
+        with tempfile.TemporaryDirectory(prefix="matrix-state-framing-", dir="/root") as directory:
+            base = Path(directory)
+            tree_a = base / "tree-a"
+            tree_b = base / "tree-b"
+            tree_a.mkdir(mode=0o700)
+            tree_b.mkdir(mode=0o700)
+            (tree_a / "a").write_bytes(b"x")
+            (tree_a / "b").write_bytes(b"")
+            (tree_b / "a").write_bytes(b"")
+            (tree_b / "xb").write_bytes(b"")
+            for path in (*tree_a.iterdir(), *tree_b.iterdir()):
+                os.chmod(path, 0o600)
+
+            self.assertNotEqual(verifier._tree_digest(tree_a), verifier._tree_digest(tree_b))
+
+    def test_state_record_stream_framing_alone_distinguishes_collision_shape(self):
+        verifier = load_deploy_module("matrix_ci_physical_verifier")
+        identical_metadata = types.SimpleNamespace(
+            st_dev=1, st_ino=2, st_mode=stat.S_IFREG | 0o600,
+            st_uid=0, st_gid=0, st_nlink=1, st_size=0,
+            st_mtime_ns=3, st_ctime_ns=4,
+        )
+
+        def canonical_stream(records):
+            return b"".join(
+                verifier._state_record_prefix(
+                    verifier._STATE_RECORD_FILE,
+                    path,
+                    identical_metadata,
+                    content_length=len(content),
+                ) + content
+                for path, content in records
+            )
+
+        first = ((b"a", b"x"), (b"b", b""))
+        second = ((b"a", b""), (b"xb", b""))
+        self.assertEqual(
+            b"".join(path + content for path, content in first),
+            b"".join(path + content for path, content in second),
+        )
+        self.assertNotEqual(canonical_stream(first), canonical_stream(second))
+
+    def test_state_tree_digest_is_deterministic_for_zero_length_and_non_ascii_name(self):
+        verifier = load_deploy_module("matrix_ci_physical_verifier")
+        with tempfile.TemporaryDirectory(prefix="matrix-state-canonical-", dir="/root") as directory:
+            root = Path(directory)
+            filename = os.fsdecode(b"empty-\xff")
+            (root / filename).write_bytes(b"")
+
+            first = verifier._tree_digest(root)
+            second = verifier._tree_digest(root)
+
+            self.assertEqual(first, second)
+
+    def test_state_tree_digest_changes_with_file_name(self):
+        verifier = load_deploy_module("matrix_ci_physical_verifier")
+        with tempfile.TemporaryDirectory(prefix="matrix-state-name-", dir="/root") as directory:
+            root = Path(directory)
+            original = root / "first"
+            original.write_bytes(b"same")
+            before = verifier._tree_digest(root)
+            original.rename(root / "second")
+
+            self.assertNotEqual(before, verifier._tree_digest(root))
+
+    def test_state_tree_digest_changes_with_file_content(self):
+        verifier = load_deploy_module("matrix_ci_physical_verifier")
+        with tempfile.TemporaryDirectory(prefix="matrix-state-content-", dir="/root") as directory:
+            root = Path(directory)
+            target = root / "same"
+            target.write_bytes(b"first")
+            before = verifier._tree_digest(root)
+            target.write_bytes(b"other")
+
+            self.assertNotEqual(before, verifier._tree_digest(root))
+
+    def test_state_record_encoding_rejects_overflow_metadata(self):
+        verifier = load_deploy_module("matrix_ci_physical_verifier")
+        info = types.SimpleNamespace(
+            st_dev=1 << 64, st_ino=1, st_mode=stat.S_IFREG | 0o600,
+            st_uid=0, st_gid=0, st_nlink=1, st_size=0,
+            st_mtime_ns=0, st_ctime_ns=0,
+        )
+
+        with self.assertRaisesRegex(RuntimeError, "metadata is not encodable"):
+            verifier._state_record_prefix(
+                verifier._STATE_RECORD_FILE, b"a", info, content_length=0,
+            )
+
     def test_mutable_state_is_compared_before_and_after_while_production_is_stopped(self):
         verifier = load_deploy_module("matrix_ci_physical_verifier")
         events = []
 
         class ChangedStateOps(FakeOps):
+            def __init__(self, recorded_events):
+                super().__init__(recorded_events)
+                self.snapshot_count = 0
+
             def snapshot(self):
                 snapshot = super().snapshot()
-                if not self.active:
+                self.snapshot_count += 1
+                if self.snapshot_count == 2:
                     snapshot["data"] = "changed"
                 return snapshot
 
@@ -1600,7 +2340,6 @@ class PhysicalVerifierTests(unittest.TestCase):
             finally:
                 gate.Path, gate.run = original_path, original_run
 
-    @unittest.skipUnless(Path("/usr/sbin/sshd").is_file(), "requires a local OpenSSH daemon binary")
     def test_complete_sshd_connection_context_selects_every_match_dimension_fail_closed(self):
         gate = load_deploy_module("verify_matrix_ci_physical_install")
         context = gate.SshConnectionContext(
@@ -1686,6 +2425,14 @@ class PhysicalVerifierTests(unittest.TestCase):
                         "authorizedkeyscommand none\n"
                         "authorizedkeyscommanduser nobody\n"
                         "permitrootlogin forced-commands-only\n"
+                        "trustedusercakeys none\n"
+                        "authorizedprincipalsfile none\n"
+                        "authorizedprincipalscommand none\n"
+                        "authorizedprincipalscommanduser nobody\n"
+                        "hostbasedauthentication no\n"
+                        "pubkeyauthentication yes\n"
+                        "pubkeyauthoptions none\n"
+                        "ignorerhosts yes\n"
                     )
                 return ""
 
@@ -1701,6 +2448,683 @@ class PhysicalVerifierTests(unittest.TestCase):
             finally:
                 gate.Path, gate.run = original_path, original_run
 
+    def test_install_gate_rejects_each_effective_privilege_boundary_widening(self):
+        gate = load_deploy_module("verify_matrix_ci_physical_install")
+        baseline = {
+            "matrix-ci-physical.service": {
+                "Type": "exec", "RuntimeMaxUSec": "90000000", "User": "root", "Group": "root",
+                "CapabilityBoundingSet": "CAP_DAC_READ_SEARCH CAP_SYS_RAWIO", "AmbientCapabilities": "",
+                "ExecStart": "/usr/bin/python3 -I -B /usr/local/libexec/matrix-ci-physical-verifier",
+                "ExecStop": "/usr/bin/python3 -I -B /usr/local/libexec/matrix-ci-physical-verifier --restore-only",
+                "ExecStopPost": "/usr/bin/python3 -I -B /usr/local/libexec/matrix-ci-physical-verifier --restore-only --scavenge-stale-temporaries",
+                "Requires": "systemd-tmpfiles-setup.service", "After": "matrix-web.service systemd-tmpfiles-setup.service",
+                "ReadOnlyPaths": "/run/matrix-display", "ReadWritePaths": "/run/matrix-ci-physical",
+                "DevicePolicy": "auto", "DeviceAllow": "", "UMask": "0077",
+            },
+            "matrix-ci-physical.path": {"Unit": "matrix-ci-physical.service", "Paths": "/run/matrix-ci-physical/claim", "ActiveState": "active"},
+            "matrix-device-restart.path": {"Unit": "matrix-device-restart.service", "Paths": "/run/matrix-device-restart/request", "ActiveState": "active"},
+            "matrix-device-restart.service": {
+                "Type": "oneshot", "ExecStart": "/usr/local/libexec/matrix-device-restart-broker",
+                "User": "root", "Group": "root", "CapabilityBoundingSet": "CAP_SYS_BOOT",
+                "AmbientCapabilities": "", "ReadWritePaths": "/run/matrix-device-restart",
+                "DevicePolicy": "auto", "DeviceAllow": "",
+            },
+            "matrix-web.service": {
+                "User": "matrix-web", "Group": "matrix-web",
+                "InaccessiblePaths": "/run/systemd/private /run/dbus/system_bus_socket /run/matrix-ci-physical",
+                "CapabilityBoundingSet": "CAP_SYS_RAWIO", "AmbientCapabilities": "CAP_SYS_RAWIO",
+                "Requires": "matrix-network-setup.service systemd-tmpfiles-setup.service",
+                "After": "network-online.target matrix-network-setup.service systemd-tmpfiles-setup.service",
+                "ReadOnlyPaths": "/run/matrix-display",
+                "ReadWritePaths": "/home/admin/matrix/data /home/admin/matrix/resources/media /run/matrix-device-restart",
+                "DevicePolicy": "closed", "DeviceAllow": "/dev/mem rw /dev/gpiomem rw /dev/vcio rw", "UMask": "0077",
+            },
+        }
+        attacks = (
+            ("matrix-web.service", "User", "root"),
+            ("matrix-web.service", "Group", "root"),
+            ("matrix-web.service", "InaccessiblePaths", "/run/dbus/system_bus_socket /run/matrix-ci-physical"),
+            ("matrix-web.service", "InaccessiblePaths", "/run/systemd/private /run/matrix-ci-physical"),
+            ("matrix-web.service", "CapabilityBoundingSet", "CAP_SYS_RAWIO CAP_SYS_ADMIN"),
+            ("matrix-web.service", "AmbientCapabilities", "CAP_SYS_RAWIO CAP_SYS_ADMIN"),
+            ("matrix-web.service", "ReadWritePaths", baseline["matrix-web.service"]["ReadWritePaths"] + " /etc"),
+            ("matrix-web.service", "DeviceAllow", baseline["matrix-web.service"]["DeviceAllow"] + " /dev/sda rw"),
+            ("matrix-ci-physical.service", "CapabilityBoundingSet", "CAP_SYS_RAWIO"),
+            ("matrix-ci-physical.service", "CapabilityBoundingSet", "CAP_DAC_READ_SEARCH CAP_SYS_RAWIO CAP_SYS_ADMIN"),
+            ("matrix-ci-physical.service", "AmbientCapabilities", "CAP_SYS_RAWIO"),
+            ("matrix-device-restart.service", "CapabilityBoundingSet", "CAP_SYS_BOOT CAP_SYS_ADMIN"),
+            ("matrix-device-restart.service", "AmbientCapabilities", "CAP_SYS_BOOT"),
+        )
+        original_run = gate.run
+        original_verifiers = gate.verify_physical_runtime_install, gate.verify_display_lock_install, gate.verify_restart_broker_install
+        gate.verify_physical_runtime_install = gate.verify_display_lock_install = gate.verify_restart_broker_install = lambda: None
+        try:
+            for unit, name, value in attacks:
+                observed = {key: dict(values) for key, values in baseline.items()}
+                observed[unit][name] = value
+
+                def fake_run(*argv):
+                    if argv[1] == "cat":
+                        return "[Unit]\nDescription=reviewed\n"
+                    requested = [argv[index + 1] for index, item in enumerate(argv) if item == "-p"]
+                    return "".join(f"{key}={observed[argv[2]][key]}\n" for key in requested)
+
+                gate.run = fake_run
+                with self.subTest(unit=unit, property=name, value=value):
+                    with self.assertRaises(RuntimeError):
+                        gate.verify_units()
+        finally:
+            gate.run = original_run
+            gate.verify_physical_runtime_install, gate.verify_display_lock_install, gate.verify_restart_broker_install = original_verifiers
+
+    def test_restart_install_gate_rejects_altered_reviewed_broker_bytes(self):
+        gate = load_deploy_module("verify_matrix_ci_physical_install")
+        with tempfile.TemporaryDirectory(prefix="matrix-install-digest-", dir="/root") as directory:
+            root = Path(directory)
+            broker = root / "broker"
+            service = root / "service"
+            path_unit = root / "path"
+            policy = root / "tmpfiles"
+            request_directory = root / "requests"
+            broker.write_bytes(b"altered broker bytes\n")
+            service.write_bytes(b"reviewed service\n")
+            path_unit.write_bytes(b"reviewed path\n")
+            policy.write_bytes(gate.EXPECTED_RESTART_TMPFILES_POLICY)
+            request_directory.mkdir(mode=0o700)
+            for installed, mode in ((broker, 0o755), (service, 0o644), (path_unit, 0o644), (policy, 0o644)):
+                os.chmod(installed, mode)
+            old_paths = gate.RESTART_BROKER, gate.RESTART_SERVICE, gate.RESTART_PATH, gate.RESTART_TMPFILES_POLICY, gate.RESTART_DIRECTORY
+            old_account = gate.pwd.getpwnam
+            gate.RESTART_BROKER, gate.RESTART_SERVICE, gate.RESTART_PATH = broker, service, path_unit
+            gate.RESTART_TMPFILES_POLICY, gate.RESTART_DIRECTORY = policy, request_directory
+            gate.pwd.getpwnam = lambda _name: types.SimpleNamespace(pw_uid=os.getuid(), pw_gid=os.getgid())
+            gate.EXPECTED_ARTIFACT_DIGESTS = {broker: hashlib.sha256(b"reviewed broker bytes\n").hexdigest()}
+            try:
+                with self.assertRaisesRegex(RuntimeError, "reviewed digest"):
+                    gate.verify_restart_broker_install()
+            finally:
+                gate.RESTART_BROKER, gate.RESTART_SERVICE, gate.RESTART_PATH, gate.RESTART_TMPFILES_POLICY, gate.RESTART_DIRECTORY = old_paths
+                gate.pwd.getpwnam = old_account
+
+    def test_install_gate_binds_every_installed_artifact_to_operator_supplied_reviewed_digest(self):
+        gate = load_deploy_module("verify_matrix_ci_physical_install")
+        with tempfile.TemporaryDirectory(prefix="matrix-all-install-digests-", dir="/root") as directory:
+            root = Path(directory)
+            artifacts = {}
+            expected = {}
+            for index, name in enumerate(gate.REVIEWED_ARTIFACTS):
+                path = root / f"artifact-{index}"
+                payload = f"reviewed:{name}\n".encode("ascii")
+                path.write_bytes(payload)
+                mode = gate.REVIEWED_ARTIFACTS[name][1]
+                os.chmod(path, mode)
+                artifacts[name] = (path, mode)
+                expected[name] = hashlib.sha256(payload).hexdigest()
+            old_artifacts = gate.REVIEWED_ARTIFACTS
+            gate.REVIEWED_ARTIFACTS = artifacts
+            try:
+                gate.verify_reviewed_artifacts(expected)
+                for name, (path, mode) in artifacts.items():
+                    with self.subTest(name=name):
+                        reviewed = path.read_bytes()
+                        path.write_bytes(reviewed + b"altered")
+                        os.chmod(path, mode)
+                        with self.assertRaisesRegex(RuntimeError, "reviewed digest"):
+                            gate.verify_reviewed_artifacts(expected)
+                        path.write_bytes(reviewed)
+                        os.chmod(path, mode)
+            finally:
+                gate.REVIEWED_ARTIFACTS = old_artifacts
+
+    def test_restart_tmpfiles_creates_sticky_group_admission_directory_and_root_lock(self):
+        policy = (ROOT / "deploy" / "matrix-device-restart.conf").read_text(encoding="ascii")
+        self.assertEqual(policy, (
+            "# Host-owned fixed whole-device restart transaction namespace.\n"
+            "d /run/matrix-device-restart 1730 root matrix-web -\n"
+            "f /run/matrix-device-restart/transaction.lock 0644 root root -\n"
+        ))
+
+    def test_restart_terminal_recovery_documentation_is_inode_validated_and_narrow(self):
+        guide = (ROOT / "deploy" / "matrix-ci-physical-install.md").read_text(encoding="utf-8")
+        for terminal in ("request.failed", "request.cancelled", "request.invalid"):
+            self.assertIn(terminal, guide)
+        self.assertIn("Restart requests remain blocked", guide)
+        self.assertIn("investigate", guide.lower())
+        self.assertIn("O_DIRECTORY | os.O_NOFOLLOW", guide)
+        self.assertIn("follow_symlinks=False", guide)
+        self.assertIn("(before.st_dev, before.st_ino)", guide)
+        self.assertIn("os.unlink(marker, dir_fd=directory_fd)", guide)
+        self.assertIn("os.fsync(directory_fd)", guide)
+        self.assertNotIn("rm -f /run/matrix-device-restart/request.*", guide)
+
+    def test_restart_terminal_publication_serializes_with_web_admission(self):
+        broker = load_deploy_module("matrix_device_restart_broker")
+        app = __import__("webapp")
+        with tempfile.TemporaryDirectory(prefix="matrix-restart-interleave-", dir="/root") as directory:
+            parent = Path(directory)
+            os.chmod(parent, 0o1730)
+            lock = parent / "transaction.lock"
+            lock.write_bytes(b"")
+            os.chmod(lock, 0o644)
+            request = parent / broker.REQUEST
+            request.write_bytes(b"")
+            os.chmod(request, 0o600)
+            after_terminal_scan = threading.Event()
+            release_web = threading.Event()
+            terminal_published = threading.Event()
+            outcomes = []
+            errors = []
+            broker_errors = []
+            real_open = os.open
+            def paused_open(path, flags, *args, **kwargs):
+                if path == broker.REQUEST and flags & os.O_EXCL:
+                    after_terminal_scan.set()
+                    if not release_web.wait(2):
+                        raise RuntimeError("web admission was not released")
+                return real_open(path, flags, *args, **kwargs)
+            def publish_from_web():
+                try:
+                    outcomes.append(app.RestartRequest(request)())
+                except BaseException as error:
+                    errors.append(error)
+            old_parent = broker.PARENT
+            old_account = broker.pwd.getpwnam
+            broker.PARENT = str(parent)
+            broker.pwd.getpwnam = lambda _name: types.SimpleNamespace(
+                pw_uid=os.getuid(), pw_gid=os.getgid(),
+            )
+            publisher = threading.Thread(target=publish_from_web)
+
+            def publish_terminal():
+                try:
+                    broker.run_broker(
+                        sleep=lambda _seconds: None,
+                        reboot=lambda: (_ for _ in ()).throw(RuntimeError("reboot failed")),
+                    )
+                except BaseException as error:
+                    broker_errors.append(error)
+                finally:
+                    terminal_published.set()
+
+            broker_thread = threading.Thread(target=publish_terminal)
+            try:
+                with mock.patch.object(app.os, "open", side_effect=paused_open):
+                    publisher.start()
+                    self.assertTrue(after_terminal_scan.wait(1))
+                    broker_thread.start()
+                    self.assertFalse(terminal_published.wait(0.1))
+                    release_web.set()
+                    publisher.join(2)
+                    broker_thread.join(2)
+            finally:
+                release_web.set()
+                publisher.join(2)
+                broker_thread.join(2)
+                broker.PARENT = old_parent
+                broker.pwd.getpwnam = old_account
+            self.assertFalse(publisher.is_alive())
+            self.assertFalse(broker_thread.is_alive())
+            self.assertEqual(errors, [])
+            self.assertEqual(len(broker_errors), 1)
+            self.assertIsInstance(broker_errors[0], RuntimeError)
+            self.assertEqual(outcomes, [app.RestartRequestOutcome.ACTIVE_REQUEST])
+            self.assertFalse(request.exists())
+            self.assertTrue((parent / "request.failed").exists())
+
+    def test_restart_broker_exposes_no_terminal_publication_primitive_without_lock_enforcement(self):
+        broker = load_deploy_module("matrix_device_restart_broker")
+        self.assertFalse(hasattr(broker, "_quarantine_validated_request_locked"))
+        self.assertFalse(hasattr(broker, "_remove_validated_request_locked"))
+        with tempfile.TemporaryDirectory(prefix="matrix-restart-lock-contract-", dir="/root") as directory:
+            parent = Path(directory)
+            os.chmod(parent, 0o1730)
+            lock = parent / broker.LOCK
+            lock.write_bytes(b"")
+            os.chmod(lock, 0o644)
+            request = parent / broker.REQUEST
+            request.write_bytes(b"")
+            os.chmod(request, 0o600)
+            parent_fd = os.open(parent, os.O_RDONLY | os.O_DIRECTORY | os.O_CLOEXEC)
+            lock_fd = os.open(lock, os.O_RDONLY | os.O_CLOEXEC)
+            try:
+                identity = (request.stat().st_dev, request.stat().st_ino)
+                with self.assertRaisesRegex(RuntimeError, "transaction lock context"):
+                    broker._remove_validated_request_with_lock(parent_fd, lock_fd, identity)
+                self.assertTrue(request.exists())
+            finally:
+                os.close(lock_fd)
+                os.close(parent_fd)
+
+    def test_restart_broker_rejects_closed_module_transaction_capability(self):
+        broker = load_deploy_module("matrix_device_restart_broker")
+        with tempfile.TemporaryDirectory(prefix="matrix-restart-closed-capability-", dir="/root") as directory:
+            parent = Path(directory)
+            os.chmod(parent, 0o1730)
+            lock = parent / broker.LOCK
+            lock.write_bytes(b"")
+            os.chmod(lock, 0o644)
+            request = parent / broker.REQUEST
+            request.write_bytes(b"")
+            os.chmod(request, 0o600)
+            parent_fd = os.open(parent, os.O_RDONLY | os.O_DIRECTORY | os.O_CLOEXEC)
+            transaction = broker._acquire_transaction_lock(parent_fd)
+            transaction.close()
+            try:
+                identity = (request.stat().st_dev, request.stat().st_ino)
+                with self.assertRaisesRegex(RuntimeError, "transaction lock context"):
+                    broker._remove_validated_request_with_lock(parent_fd, transaction, identity)
+                self.assertTrue(request.exists())
+            finally:
+                os.close(parent_fd)
+
+    def test_restart_broker_rejects_parent_inode_replacement_for_transaction(self):
+        broker = load_deploy_module("matrix_device_restart_broker")
+        with tempfile.TemporaryDirectory(prefix="matrix-restart-parent-capability-", dir="/root") as directory:
+            root = Path(directory)
+            parent = root / "parent"
+            replacement = root / "replacement"
+            parent.mkdir()
+            replacement.mkdir()
+            lock = parent / broker.LOCK
+            lock.write_bytes(b"")
+            os.chmod(lock, 0o644)
+            request = parent / broker.REQUEST
+            request.write_bytes(b"")
+            os.chmod(request, 0o600)
+            parent_fd = os.open(parent, os.O_RDONLY | os.O_DIRECTORY | os.O_CLOEXEC)
+            replacement_fd = os.open(replacement, os.O_RDONLY | os.O_DIRECTORY | os.O_CLOEXEC)
+            transaction = broker._acquire_transaction_lock(parent_fd)
+            try:
+                os.dup2(replacement_fd, parent_fd)
+                identity = (request.stat().st_dev, request.stat().st_ino)
+                with self.assertRaisesRegex(RuntimeError, "transaction parent changed"):
+                    broker._remove_validated_request_with_lock(parent_fd, transaction, identity)
+                self.assertTrue(request.exists())
+            finally:
+                transaction.close()
+                os.close(replacement_fd)
+                os.close(parent_fd)
+
+    def test_restart_broker_rejects_lock_inode_replacement_for_transaction(self):
+        broker = load_deploy_module("matrix_device_restart_broker")
+        with tempfile.TemporaryDirectory(prefix="matrix-restart-lock-capability-", dir="/root") as directory:
+            parent = Path(directory)
+            lock = parent / broker.LOCK
+            lock.write_bytes(b"")
+            os.chmod(lock, 0o644)
+            request = parent / broker.REQUEST
+            request.write_bytes(b"")
+            os.chmod(request, 0o600)
+            parent_fd = os.open(parent, os.O_RDONLY | os.O_DIRECTORY | os.O_CLOEXEC)
+            transaction = broker._acquire_transaction_lock(parent_fd)
+            try:
+                lock.unlink()
+                lock.write_bytes(b"")
+                os.chmod(lock, 0o644)
+                identity = (request.stat().st_dev, request.stat().st_ino)
+                with self.assertRaisesRegex(RuntimeError, "transaction lock"):
+                    broker._remove_validated_request_with_lock(parent_fd, transaction, identity)
+                self.assertTrue(request.exists())
+            finally:
+                transaction.close()
+                os.close(parent_fd)
+
+    def test_restart_broker_locked_helper_makes_no_nested_flock_call(self):
+        broker = load_deploy_module("matrix_device_restart_broker")
+        with tempfile.TemporaryDirectory(prefix="matrix-restart-no-reentrant-flock-", dir="/root") as directory:
+            parent = Path(directory)
+            lock = parent / broker.LOCK
+            lock.write_bytes(b"")
+            os.chmod(lock, 0o644)
+            request = parent / broker.REQUEST
+            request.write_bytes(b"")
+            os.chmod(request, 0o600)
+            parent_fd = os.open(parent, os.O_RDONLY | os.O_DIRECTORY | os.O_CLOEXEC)
+            transaction = broker._acquire_transaction_lock(parent_fd)
+            try:
+                identity = (request.stat().st_dev, request.stat().st_ino)
+                with mock.patch.object(
+                    broker.fcntl,
+                    "flock",
+                    side_effect=AssertionError("locked helper attempted nested flock"),
+                ) as nested_flock:
+                    broker._remove_validated_request_with_lock(parent_fd, transaction, identity)
+                nested_flock.assert_not_called()
+                self.assertFalse(request.exists())
+            finally:
+                transaction.close()
+                os.close(parent_fd)
+
+    def test_restart_broker_refuses_symlink_in_runtime_ancestry(self):
+        broker = load_deploy_module("matrix_device_restart_broker")
+        with tempfile.TemporaryDirectory(prefix="matrix-restart-broker-ancestry-", dir="/root") as directory:
+            root = Path(directory)
+            trusted = root / "trusted"
+            trusted.mkdir()
+            parent = trusted / "requests"
+            parent.mkdir()
+            os.chmod(parent, 0o1730)
+            lock = parent / "transaction.lock"
+            lock.write_bytes(b"")
+            os.chmod(lock, 0o644)
+            request = parent / broker.REQUEST
+            request.write_bytes(b"")
+            os.chmod(request, 0o600)
+            alias = root / "alias"
+            alias.symlink_to(trusted, target_is_directory=True)
+            old_parent, old_account = broker.PARENT, broker.pwd.getpwnam
+            broker.PARENT = str(alias / "requests")
+            broker.pwd.getpwnam = lambda _name: types.SimpleNamespace(
+                pw_uid=os.getuid(), pw_gid=os.getgid(),
+            )
+            events = []
+            try:
+                with self.assertRaises((OSError, RuntimeError)):
+                    broker.run_broker(
+                        sleep=lambda _seconds: events.append("sleep"),
+                        reboot=lambda: events.append("reboot"),
+                    )
+            finally:
+                broker.PARENT, broker.pwd.getpwnam = old_parent, old_account
+            self.assertEqual(events, [])
+            self.assertTrue(request.exists())
+
+    def test_restart_broker_refuses_admission_when_terminal_state_exists(self):
+        broker = load_deploy_module("matrix_device_restart_broker")
+        with tempfile.TemporaryDirectory(prefix="matrix-restart-terminal-admission-", dir="/root") as directory:
+            parent = Path(directory)
+            os.chmod(parent, 0o1730)
+            lock = parent / "transaction.lock"
+            lock.write_bytes(b"")
+            os.chmod(lock, 0o644)
+            request = parent / broker.REQUEST
+            request.write_bytes(b"")
+            os.chmod(request, 0o600)
+            terminal = parent / "request.failed"
+            terminal.write_bytes(b"")
+            os.chmod(terminal, 0o600)
+            events = []
+            old_parent = broker.PARENT
+            old_account = broker.pwd.getpwnam
+            broker.PARENT = str(parent)
+            broker.pwd.getpwnam = lambda _name: types.SimpleNamespace(
+                pw_uid=os.getuid(), pw_gid=os.getgid(),
+            )
+            try:
+                with self.assertRaisesRegex(RuntimeError, "manual recovery"):
+                    broker.run_broker(
+                        sleep=lambda _seconds: events.append("sleep"),
+                        reboot=lambda: events.append("reboot"),
+                    )
+            finally:
+                broker.PARENT = old_parent
+                broker.pwd.getpwnam = old_account
+
+            self.assertEqual(events, [])
+            self.assertFalse(request.exists(), "terminal admission left path activation live")
+            self.assertTrue(terminal.exists())
+
+    def test_restart_broker_rechecks_all_terminal_variants_before_reboot(self):
+        broker = load_deploy_module("matrix_device_restart_broker")
+        for terminal_name in broker.TERMINALS:
+            with self.subTest(terminal=terminal_name):
+                with tempfile.TemporaryDirectory(prefix="matrix-restart-pre-reboot-", dir="/root") as directory:
+                    parent = Path(directory)
+                    os.chmod(parent, 0o1730)
+                    lock = parent / "transaction.lock"
+                    lock.write_bytes(b"")
+                    os.chmod(lock, 0o644)
+                    request = parent / broker.REQUEST
+                    request.write_bytes(b"")
+                    os.chmod(request, 0o600)
+                    terminal = parent / f"{broker.REQUEST}.{terminal_name}"
+                    old_parent, old_account = broker.PARENT, broker.pwd.getpwnam
+                    broker.PARENT = str(parent)
+                    broker.pwd.getpwnam = lambda _name: types.SimpleNamespace(
+                        pw_uid=os.getuid(), pw_gid=os.getgid(),
+                    )
+                    events = []
+
+                    def publish_during_delay(_seconds):
+                        terminal.write_bytes(b"")
+                        os.chmod(terminal, 0o600)
+                        events.append("sleep")
+
+                    try:
+                        with self.assertRaisesRegex(RuntimeError, "manual recovery"):
+                            broker.run_broker(
+                                sleep=publish_during_delay,
+                                reboot=lambda: events.append("reboot"),
+                            )
+                    finally:
+                        broker.PARENT, broker.pwd.getpwnam = old_parent, old_account
+                    self.assertEqual(events, ["sleep"])
+                    self.assertTrue(terminal.exists())
+                    self.assertFalse(request.exists())
+                    self.assertFalse(any(
+                        (parent / f"{broker.REQUEST}.{other}").exists()
+                        for other in broker.TERMINALS if other != terminal_name
+                    ))
+
+    def test_restart_broker_claims_request_as_root_before_releasing_transaction_lock(self):
+        broker = load_deploy_module("matrix_device_restart_broker")
+        account = broker.pwd.getpwnam("nobody")
+        with tempfile.TemporaryDirectory(prefix="matrix-restart-claim-", dir="/root") as directory:
+            parent = Path(directory)
+            os.chown(parent, 0, account.pw_gid)
+            os.chmod(parent, 0o1730)
+            lock = parent / "transaction.lock"
+            lock.write_bytes(b"")
+            os.chmod(lock, 0o644)
+            request = parent / broker.REQUEST
+            request.write_bytes(b"")
+            os.chown(request, account.pw_uid, account.pw_gid)
+            os.chmod(request, 0o600)
+            old_parent, old_account = broker.PARENT, broker.pwd.getpwnam
+            broker.PARENT = str(parent)
+            broker.pwd.getpwnam = lambda _name: account
+            try:
+                broker.run_broker(
+                    sleep=lambda _seconds: self.assertEqual(
+                        (request.stat().st_uid, request.stat().st_gid), (0, 0)
+                    ),
+                    reboot=lambda: None,
+                )
+            finally:
+                broker.PARENT, broker.pwd.getpwnam = old_parent, old_account
+            self.assertFalse(request.exists())
+
+    def test_restart_broker_retains_validated_marker_through_delay_and_reboot_then_cleans_success(self):
+        broker = load_deploy_module("matrix_device_restart_broker")
+        with tempfile.TemporaryDirectory(prefix="matrix-restart-broker-", dir="/root") as directory:
+            parent = Path(directory)
+            os.chmod(parent, 0o1730)
+            lock = parent / "transaction.lock"
+            lock.write_bytes(b"")
+            os.chmod(lock, 0o644)
+            request = parent / broker.REQUEST
+            request.write_bytes(b"")
+            os.chmod(request, 0o600)
+            events = []
+            old_parent = broker.PARENT
+            old_account = broker.pwd.getpwnam
+            old_run = broker.subprocess.run
+            old_geteuid = broker.os.geteuid
+            broker.PARENT = str(parent)
+            broker.pwd.getpwnam = lambda _name: types.SimpleNamespace(pw_uid=os.getuid(), pw_gid=os.getgid())
+            broker.os.geteuid = lambda: 0
+
+            def fake_sleep(seconds):
+                self.assertEqual(seconds, broker.DELAY_SECONDS)
+                self.assertTrue(request.exists(), "durable admission vanished during delay")
+                app = __import__("webapp")
+                self.assertIs(
+                    app.RestartRequest(request)(), app.RestartRequestOutcome.ACTIVE_REQUEST,
+                    "duplicate request did not coalesce",
+                )
+                events.append("sleep")
+
+            def fake_reboot(*_args, **_kwargs):
+                self.assertTrue(request.exists(), "durable admission vanished before reboot")
+                events.append("reboot")
+                return types.SimpleNamespace(returncode=0)
+
+            broker.subprocess.run = lambda *_args, **_kwargs: self.fail("real subprocess boundary reached")
+            try:
+                broker.run_broker(sleep=fake_sleep, reboot=fake_reboot)
+            finally:
+                broker.PARENT = old_parent
+                broker.pwd.getpwnam = old_account
+                broker.subprocess.run = old_run
+                broker.os.geteuid = old_geteuid
+            self.assertEqual(events, ["sleep", "reboot"])
+            self.assertFalse(request.exists())
+
+    def test_restart_broker_quarantines_failed_timeout_and_cancelled_admissions(self):
+        broker = load_deploy_module("matrix_device_restart_broker")
+        outcomes = (
+            (subprocess.CalledProcessError(1, ["fake-reboot"]), "failed"),
+            (subprocess.TimeoutExpired(["fake-reboot"], 10), "failed"),
+            (KeyboardInterrupt(), "cancelled"),
+        )
+        for error, terminal in outcomes:
+            with self.subTest(error=type(error).__name__):
+                with tempfile.TemporaryDirectory(prefix="matrix-restart-terminal-", dir="/root") as directory:
+                    parent = Path(directory)
+                    os.chmod(parent, 0o1730)
+                    lock = parent / "transaction.lock"
+                    lock.write_bytes(b"")
+                    os.chmod(lock, 0o644)
+                    request = parent / broker.REQUEST
+                    request.write_bytes(b"")
+                    os.chmod(request, 0o600)
+                    old_parent, old_account = broker.PARENT, broker.pwd.getpwnam
+                    old_run, old_geteuid = broker.subprocess.run, broker.os.geteuid
+                    broker.PARENT = str(parent)
+                    broker.pwd.getpwnam = lambda _name: types.SimpleNamespace(pw_uid=os.getuid(), pw_gid=os.getgid())
+                    broker.os.geteuid = lambda: 0
+                    broker.subprocess.run = lambda *_args, **_kwargs: self.fail("real subprocess boundary reached")
+                    try:
+                        with self.assertRaises(type(error)):
+                            broker.run_broker(
+                                sleep=lambda _seconds: None,
+                                reboot=lambda: (_ for _ in ()).throw(error),
+                            )
+                    finally:
+                        broker.PARENT, broker.pwd.getpwnam = old_parent, old_account
+                        broker.subprocess.run, broker.os.geteuid = old_run, old_geteuid
+                    self.assertFalse(request.exists(), "path activation would immediately retrigger")
+                    terminal_marker = parent / f"{broker.REQUEST}.{terminal}"
+                    self.assertTrue(terminal_marker.exists(), "manual recovery state was not retained")
+                    self.assertEqual(terminal_marker.stat().st_size, 0)
+
+    def test_restart_broker_invalid_terminal_is_root_owned_before_publication(self):
+        broker = load_deploy_module("matrix_device_restart_broker")
+        account = broker.pwd.getpwnam("nobody")
+        with tempfile.TemporaryDirectory(prefix="matrix-restart-invalid-owner-", dir="/root") as directory:
+            parent = Path(directory)
+            os.chown(parent, 0, account.pw_gid)
+            os.chmod(parent, 0o1730)
+            lock = parent / "transaction.lock"
+            lock.write_bytes(b"")
+            os.chmod(lock, 0o644)
+            request = parent / broker.REQUEST
+            request.write_bytes(b"invalid")
+            os.chown(request, account.pw_uid, account.pw_gid)
+            os.chmod(request, 0o600)
+            old_parent, old_account = broker.PARENT, broker.pwd.getpwnam
+            broker.PARENT = str(parent)
+            broker.pwd.getpwnam = lambda _name: account
+            try:
+                with self.assertRaisesRegex(RuntimeError, "unsafe fixed restart request marker"):
+                    broker.run_broker(
+                        sleep=lambda _seconds: self.fail("invalid request reached sleep"),
+                        reboot=lambda: self.fail("invalid request reached reboot"),
+                    )
+            finally:
+                broker.PARENT, broker.pwd.getpwnam = old_parent, old_account
+            terminal = parent / "request.invalid"
+            self.assertEqual((terminal.stat().st_uid, terminal.stat().st_gid), (0, 0))
+            self.assertEqual(stat.S_IMODE(terminal.stat().st_mode), 0o600)
+            self.assertEqual(terminal.stat().st_nlink, 1)
+            self.assertEqual(terminal.read_bytes(), b"")
+
+    def test_restart_broker_quarantines_invalid_marker_without_sleep_or_reboot(self):
+        broker = load_deploy_module("matrix_device_restart_broker")
+        with tempfile.TemporaryDirectory(prefix="matrix-restart-invalid-", dir="/root") as directory:
+            parent = Path(directory)
+            os.chmod(parent, 0o1730)
+            lock = parent / "transaction.lock"
+            lock.write_bytes(b"")
+            os.chmod(lock, 0o644)
+            request = parent / broker.REQUEST
+            request.write_bytes(b"not-empty")
+            os.chmod(request, 0o600)
+            old_parent, old_account = broker.PARENT, broker.pwd.getpwnam
+            broker.PARENT = str(parent)
+            broker.pwd.getpwnam = lambda _name: types.SimpleNamespace(pw_uid=os.getuid(), pw_gid=os.getgid())
+            try:
+                with self.assertRaisesRegex(RuntimeError, "unsafe fixed restart request marker"):
+                    broker.run_broker(
+                        sleep=lambda _seconds: self.fail("invalid marker reached delay"),
+                        reboot=lambda: self.fail("invalid marker reached reboot"),
+                    )
+            finally:
+                broker.PARENT, broker.pwd.getpwnam = old_parent, old_account
+            self.assertFalse(request.exists(), "invalid path activation would immediately retrigger")
+            invalid = parent / f"{broker.REQUEST}.invalid"
+            self.assertTrue(invalid.exists())
+            self.assertEqual(invalid.read_bytes(), b"")
+
+    def test_restart_publication_fails_closed_while_manual_terminal_state_exists(self):
+        app = __import__("webapp")
+        restart_request = app.RestartRequest
+        for terminal in ("failed", "cancelled", "invalid"):
+            with self.subTest(terminal=terminal):
+                with tempfile.TemporaryDirectory(prefix="matrix-restart-manual-", dir="/root") as directory:
+                    parent = Path(directory)
+                    os.chmod(parent, 0o1730)
+                    lock = parent / "transaction.lock"
+                    lock.write_bytes(b"")
+                    os.chmod(lock, 0o644)
+                    request = parent / "request"
+                    state = parent / f"request.{terminal}"
+                    state.write_bytes(b"")
+                    os.chmod(state, 0o600)
+                    self.assertIs(
+                        restart_request(request)(),
+                        app.RestartRequestOutcome.MANUAL_RECOVERY_REQUIRED,
+                    )
+                    self.assertFalse(request.exists())
+
+    def test_effective_sshd_policy_rejects_certificate_principal_and_hostbased_sources(self):
+        gate = load_deploy_module("verify_matrix_ci_physical_install")
+        safe = (
+            "authorizedkeysfile .ssh/authorized_keys\n"
+            "authorizedkeyscommand none\n"
+            "authorizedkeyscommanduser none\n"
+            "permitrootlogin forced-commands-only\n"
+            "trustedusercakeys none\n"
+            "authorizedprincipalsfile none\n"
+            "authorizedprincipalscommand none\n"
+            "authorizedprincipalscommanduser none\n"
+            "hostbasedauthentication no\n"
+            "pubkeyauthentication yes\n"
+            "pubkeyauthoptions none\n"
+            "ignorerhosts yes\n"
+        )
+        attacks = (
+            safe.replace("trustedusercakeys none", "trustedusercakeys /etc/ssh/ci_user_ca.pub"),
+            safe.replace("authorizedprincipalsfile none", "authorizedprincipalsfile /etc/ssh/principals/%u"),
+            safe.replace("authorizedprincipalscommand none", "authorizedprincipalscommand /bin/true"),
+            safe.replace("hostbasedauthentication no", "hostbasedauthentication yes"),
+            safe.replace("pubkeyauthoptions none", "pubkeyauthoptions verify-required"),
+        )
+        for output in attacks:
+            with self.subTest(output=output):
+                with self.assertRaises(RuntimeError):
+                    gate._parse_effective_sshd_policy(output)
+
     def test_effective_sshd_policy_is_uniquely_bound_to_reviewed_key_source(self):
         gate = load_deploy_module("verify_matrix_ci_physical_install")
         safe = (
@@ -1708,7 +3132,14 @@ class PhysicalVerifierTests(unittest.TestCase):
             "authorizedkeyscommand none\n"
             "authorizedkeyscommanduser nobody\n"
             "permitrootlogin forced-commands-only\n"
-            "passwordauthentication no\n"
+            "trustedusercakeys none\n"
+            "authorizedprincipalsfile none\n"
+            "authorizedprincipalscommand none\n"
+            "authorizedprincipalscommanduser nobody\n"
+            "hostbasedauthentication no\n"
+            "pubkeyauthentication yes\n"
+            "pubkeyauthoptions none\n"
+            "ignorerhosts yes\n"
         )
         self.assertEqual(
             gate._parse_effective_sshd_policy(safe),
@@ -1725,6 +3156,8 @@ class PhysicalVerifierTests(unittest.TestCase):
             safe + "authorizedkeysfile .ssh/authorized_keys\n",
             safe + "authorizedkeyscommand none\n",
             safe.replace("authorizedkeyscommanduser nobody\n", ""),
+            safe.replace("authorizedkeyscommanduser nobody", "authorizedkeyscommanduser %u"),
+            safe.replace("authorizedprincipalscommanduser nobody", "authorizedprincipalscommanduser /bin/root"),
             "authorizedkeysfile\n" + safe,
             safe.replace("authorizedkeysfile ", "AuthorizedKeysFile "),
         )

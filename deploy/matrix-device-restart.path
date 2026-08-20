@@ -1,0 +1,9 @@
+[Unit]
+Description=Watch the fixed Matrix whole-device restart request
+
+[Path]
+PathExists=/run/matrix-device-restart/request
+Unit=matrix-device-restart.service
+
+[Install]
+WantedBy=multi-user.target

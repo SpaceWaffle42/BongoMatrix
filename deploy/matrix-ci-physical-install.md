@@ -6,14 +6,37 @@ Install these assets once from a separately reviewed release on the appliance. T
 
 ```sh
 set -eu
+
+# Freeze expected digests from the separately reviewed release input before any
+# installation write. Never compute these expected digests from the installed destinations:
+# live files cannot self-certify that they are the reviewed bytes.
+MATRIX_CI_PHYSICAL_VERIFIER_SHA256=$(sha256sum deploy/matrix_ci_physical_verifier.py | cut -d' ' -f1)
+MATRIX_CI_PHYSICAL_DISPATCHER_SHA256=$(sha256sum deploy/matrix_ci_physical_dispatcher.py | cut -d' ' -f1)
+MATRIX_CI_INSTALL_RGB_BINDINGS_SHA256=$(sha256sum deploy/matrix_ci_install_rgb_bindings.py | cut -d' ' -f1)
+VERIFY_MATRIX_CI_PHYSICAL_INSTALL_SHA256=$(sha256sum deploy/verify_matrix_ci_physical_install.py | cut -d' ' -f1)
+MATRIX_DEVICE_RESTART_BROKER_SHA256=$(sha256sum deploy/matrix_device_restart_broker.py | cut -d' ' -f1)
+MATRIX_CI_PHYSICAL_SERVICE_SHA256=$(sha256sum deploy/matrix-ci-physical.service | cut -d' ' -f1)
+MATRIX_CI_PHYSICAL_PATH_SHA256=$(sha256sum deploy/matrix-ci-physical.path | cut -d' ' -f1)
+MATRIX_DEVICE_RESTART_SERVICE_SHA256=$(sha256sum deploy/matrix-device-restart.service | cut -d' ' -f1)
+MATRIX_DEVICE_RESTART_PATH_SHA256=$(sha256sum deploy/matrix-device-restart.path | cut -d' ' -f1)
+MATRIX_WEB_SERVICE_SHA256=$(sha256sum deploy/matrix-web.service | cut -d' ' -f1)
+MATRIX_CI_PHYSICAL_CONF_SHA256=$(sha256sum deploy/matrix-ci-physical.conf | cut -d' ' -f1)
+MATRIX_DISPLAY_CONF_SHA256=$(sha256sum deploy/matrix-display.conf | cut -d' ' -f1)
+MATRIX_DEVICE_RESTART_CONF_SHA256=$(sha256sum deploy/matrix-device-restart.conf | cut -d' ' -f1)
+
 install -o root -g root -m 0755 deploy/matrix_ci_physical_verifier.py /usr/local/libexec/matrix-ci-physical-verifier
 install -o root -g root -m 0755 deploy/matrix_ci_physical_dispatcher.py /usr/local/libexec/matrix-ci-physical-dispatcher
 install -o root -g root -m 0755 deploy/matrix_ci_install_rgb_bindings.py /usr/local/libexec/matrix-ci-install-rgb-bindings
 install -o root -g root -m 0755 deploy/verify_matrix_ci_physical_install.py /usr/local/libexec/verify-matrix-ci-physical-install
+install -o root -g root -m 0755 deploy/matrix_device_restart_broker.py /usr/local/libexec/matrix-device-restart-broker
 install -o root -g root -m 0644 deploy/matrix-ci-physical.service /etc/systemd/system/matrix-ci-physical.service
 install -o root -g root -m 0644 deploy/matrix-ci-physical.path /etc/systemd/system/matrix-ci-physical.path
+install -o root -g root -m 0644 deploy/matrix-device-restart.service /etc/systemd/system/matrix-device-restart.service
+install -o root -g root -m 0644 deploy/matrix-device-restart.path /etc/systemd/system/matrix-device-restart.path
 install -o root -g root -m 0644 deploy/matrix-web.service /etc/systemd/system/matrix-web.service
+install -o root -g root -m 0644 deploy/matrix-ci-physical.conf /etc/tmpfiles.d/matrix-ci-physical.conf
 install -o root -g root -m 0644 deploy/matrix-display.conf /etc/tmpfiles.d/matrix-display.conf
+install -o root -g root -m 0644 deploy/matrix-device-restart.conf /etc/tmpfiles.d/matrix-device-restart.conf
 
 # Fail if installed bytes or metadata differ from the reviewed release.
 for pair in \
@@ -21,22 +44,156 @@ for pair in \
   deploy/matrix_ci_physical_dispatcher.py:/usr/local/libexec/matrix-ci-physical-dispatcher \
   deploy/matrix_ci_install_rgb_bindings.py:/usr/local/libexec/matrix-ci-install-rgb-bindings \
   deploy/verify_matrix_ci_physical_install.py:/usr/local/libexec/verify-matrix-ci-physical-install \
+  deploy/matrix_device_restart_broker.py:/usr/local/libexec/matrix-device-restart-broker \
   deploy/matrix-ci-physical.service:/etc/systemd/system/matrix-ci-physical.service \
   deploy/matrix-ci-physical.path:/etc/systemd/system/matrix-ci-physical.path \
+  deploy/matrix-device-restart.service:/etc/systemd/system/matrix-device-restart.service \
+  deploy/matrix-device-restart.path:/etc/systemd/system/matrix-device-restart.path \
   deploy/matrix-web.service:/etc/systemd/system/matrix-web.service \
-  deploy/matrix-display.conf:/etc/tmpfiles.d/matrix-display.conf
+  deploy/matrix-ci-physical.conf:/etc/tmpfiles.d/matrix-ci-physical.conf \
+  deploy/matrix-display.conf:/etc/tmpfiles.d/matrix-display.conf \
+  deploy/matrix-device-restart.conf:/etc/tmpfiles.d/matrix-device-restart.conf
 do
   test "$(sha256sum "${pair%%:*}" | cut -d' ' -f1)" = "$(sha256sum "${pair#*:}" | cut -d' ' -f1)"
 done
 
 # Create and normalize the host-owned parent and canonical lock before either
 # service is enabled or started. An existing canonical inode is not replaced.
+/usr/bin/systemd-tmpfiles --create /etc/tmpfiles.d/matrix-ci-physical.conf
 /usr/bin/systemd-tmpfiles --create /etc/tmpfiles.d/matrix-display.conf
+/usr/bin/systemd-tmpfiles --create /etc/tmpfiles.d/matrix-device-restart.conf
 test "$(stat -c '%U:%G:%a:%F' /run/matrix-display)" = "root:root:755:directory"
 test -f /run/matrix-display/matrix-display.lock
 test ! -L /run/matrix-display/matrix-display.lock
 test "$(stat -c '%U:%G:%a:%h' /run/matrix-display/matrix-display.lock)" = "root:root:644:1"
+test "$(stat -c '%U:%G:%a:%F' /run/matrix-device-restart)" = "root:matrix-web:1730:directory"
+test -f /run/matrix-device-restart/transaction.lock
+test ! -L /run/matrix-device-restart/transaction.lock
+test "$(stat -c '%U:%G:%a:%h' /run/matrix-device-restart/transaction.lock)" = "root:root:644:1"
 ```
+
+The whole-device restart route runs as the unprivileged `matrix-web` account and
+can only create the fixed zero-byte `/run/matrix-device-restart/request` marker.
+It has no access to the system manager private socket or system bus and cannot
+choose a command, unit, delay, or alternate path. The separately installed,
+root-owned broker validates and claims that marker as `root:root` while holding
+the fixed transaction lock, waits its fixed 30-second response margin, and
+invokes only the fixed reboot operation. Duplicate markers coalesce. The runtime
+namespace is a root-owned `1730` sticky directory in group `matrix-web`; its
+immutable transaction inode is a root-owned `0644` single-link regular file. No
+sudo, setuid helper, or optional dependency is used.
+
+### Durable restart terminal states and manual recovery
+
+The broker preserves a root-claimed, zero-byte `root:root` mode-`0600` forensic
+terminal marker instead of retrying after an uncertain or unsafe outcome. The
+active `request` is likewise root-claimed after broker admission:
+
+- `request.failed` means the fixed reboot command failed or timed out.
+- `request.cancelled` means the broker was interrupted before completing it.
+- `request.invalid` means admission metadata or marker content failed validation.
+
+Restart requests remain blocked while any one of these markers exists. The API
+returns a sanitized manual-recovery-required response; it does not remove or
+identify the marker to a browser. Before clearing anything, investigate the
+broker journal (`journalctl -u matrix-device-restart.service`), record the
+marker metadata and inode, and determine why the reboot failed, was cancelled,
+or was rejected. Preserve any required forensic evidence outside this runtime
+namespace through the approved incident process.
+
+After that investigation, an administrator may clear exactly one diagnosed
+terminal marker with the following descriptor-relative procedure. Set `MARKER`
+to one of the three literal names shown; never use a glob or recursively remove
+the runtime directory.
+
+```sh
+MARKER=request.failed /usr/bin/python3 -I -B <<'PY'
+import fcntl
+import os
+import pwd
+import stat
+
+marker = os.environ["MARKER"]
+if marker not in {"request.failed", "request.cancelled", "request.invalid"}:
+    raise SystemExit("refusing unknown restart terminal marker")
+account = pwd.getpwnam("matrix-web")
+directory_fd = os.open(
+    "/run/matrix-device-restart",
+    os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC,
+)
+lock_fd = None
+marker_fd = None
+try:
+    directory = os.fstat(directory_fd)
+    if (
+        not stat.S_ISDIR(directory.st_mode)
+        or directory.st_uid != 0
+        or directory.st_gid != account.pw_gid
+        or stat.S_IMODE(directory.st_mode) != 0o1730
+    ):
+        raise RuntimeError("unsafe restart runtime directory")
+    lock_before = os.stat(
+        "transaction.lock", dir_fd=directory_fd, follow_symlinks=False,
+    )
+    lock_fd = os.open(
+        "transaction.lock",
+        os.O_RDONLY | os.O_NONBLOCK | os.O_NOFOLLOW | os.O_CLOEXEC,
+        dir_fd=directory_fd,
+    )
+    lock_opened = os.fstat(lock_fd)
+    if (
+        not stat.S_ISREG(lock_opened.st_mode)
+        or (lock_opened.st_uid, lock_opened.st_gid) != (0, 0)
+        or stat.S_IMODE(lock_opened.st_mode) != 0o644
+        or lock_opened.st_nlink != 1
+        or (lock_before.st_dev, lock_before.st_ino)
+        != (lock_opened.st_dev, lock_opened.st_ino)
+    ):
+        raise RuntimeError("unsafe restart transaction lock")
+    fcntl.flock(lock_fd, fcntl.LOCK_EX)
+    lock_current = os.stat(
+        "transaction.lock", dir_fd=directory_fd, follow_symlinks=False,
+    )
+    if (
+        (lock_opened.st_dev, lock_opened.st_ino)
+        != (lock_current.st_dev, lock_current.st_ino)
+        or not stat.S_ISREG(lock_current.st_mode)
+        or (lock_current.st_uid, lock_current.st_gid) != (0, 0)
+        or stat.S_IMODE(lock_current.st_mode) != 0o644
+        or lock_current.st_nlink != 1
+    ):
+        raise RuntimeError("restart transaction lock changed during recovery")
+    before = os.stat(marker, dir_fd=directory_fd, follow_symlinks=False)
+    marker_fd = os.open(
+        marker,
+        os.O_RDONLY | os.O_NONBLOCK | os.O_NOFOLLOW | os.O_CLOEXEC,
+        dir_fd=directory_fd,
+    )
+    opened = os.fstat(marker_fd)
+    if (
+        not stat.S_ISREG(opened.st_mode)
+        or (opened.st_uid, opened.st_gid) != (0, 0)
+        or stat.S_IMODE(opened.st_mode) != 0o600
+        or opened.st_nlink != 1
+        or opened.st_size != 0
+        or (before.st_dev, before.st_ino) != (opened.st_dev, opened.st_ino)
+    ):
+        raise RuntimeError("unsafe restart terminal marker")
+    current = os.stat(marker, dir_fd=directory_fd, follow_symlinks=False)
+    if (before.st_dev, before.st_ino) != (current.st_dev, current.st_ino):
+        raise RuntimeError("restart terminal marker changed during validation")
+    os.unlink(marker, dir_fd=directory_fd)
+    os.fsync(directory_fd)
+finally:
+    if marker_fd is not None:
+        os.close(marker_fd)
+    if lock_fd is not None:
+        os.close(lock_fd)
+    os.close(directory_fd)
+PY
+```
+
+Run the endpoint again only after the diagnosed marker has been safely cleared.
 
 `claim` is the single durable admission transaction: the dispatcher writes through a unique, descriptor-confined temporary inode, loops short writes, fsyncs it, and atomically publishes it with `renameat2(RENAME_NOREPLACE)`. Interrupted empty/partial unique temporaries are never reused or deleted by a later writer and therefore cannot wedge admission or steal a live writer. Reports use the same unique-temporary publication discipline. There is no dispatcher `systemctl start` and no shared start/flock lock, so a queued path activation survives SSH loss without deadlocking the `Type=exec` verifier. `RuntimeMaxSec` bounds the live verifier; `ExecStopPost` restores production after timeout, signal, or hard kill.
 
@@ -58,7 +215,7 @@ printf '%s  %s\n' \
 sha256sum rgbmatrix.sha256
 ```
 
-Transfer that reviewed artifact and manifest through the administrator release channel, never through candidate CI. The installer descriptor-walks both source and destination ancestry with no-follow checks, requires root-owned non-writable regular single-link source files, rejects extra entries, verifies the independent manifest before creating the destination, and publishes only a fresh exact tree:
+Transfer that reviewed artifact and manifest through the administrator release channel, never through candidate CI. The installer descriptor-walks both source and destination ancestry with no-follow checks, requires root-owned non-writable regular single-link source files, rejects extra entries, and verifies the independent manifest before writing. It builds and fsyncs the complete exact tree in a process-owned unique sibling staging directory, then performs atomic no-replace publication of the final destination. The final name therefore never exposes partial trusted content; ordinary pre-publication failures are cleaned up for a safe retry. A hostile existing final destination or prepositioned staging sibling is left untouched and fails closed or is skipped rather than removed.
 
 ```sh
 # Destination must not already exist; replacement requires a new immutable review.
@@ -95,20 +252,34 @@ The install gate structurally parses the complete effective output and requires 
 
 ```sh
 systemctl daemon-reload
+/usr/bin/systemd-tmpfiles --create /etc/tmpfiles.d/matrix-ci-physical.conf
 /usr/bin/systemd-tmpfiles --create /etc/tmpfiles.d/matrix-display.conf
-systemd-analyze verify /etc/systemd/system/matrix-ci-physical.service /etc/systemd/system/matrix-ci-physical.path /etc/systemd/system/matrix-web.service
-systemctl enable --now matrix-ci-physical.path
+systemd-analyze verify /etc/systemd/system/matrix-ci-physical.service /etc/systemd/system/matrix-ci-physical.path /etc/systemd/system/matrix-device-restart.service /etc/systemd/system/matrix-device-restart.path /etc/systemd/system/matrix-web.service
+systemctl enable --now matrix-ci-physical.path matrix-device-restart.path
 systemctl is-enabled --quiet matrix-ci-physical.path
 systemctl show matrix-ci-physical.service -p Type -p RuntimeMaxUSec -p CapabilityBoundingSet -p ExecStart -p ExecStop -p ExecStopPost -p Requires -p After -p ReadOnlyPaths -p UMask
 systemctl show matrix-web.service -p InaccessiblePaths -p CapabilityBoundingSet -p Requires -p After -p ReadOnlyPaths -p UMask
-systemctl cat matrix-ci-physical.service matrix-ci-physical.path matrix-web.service
+systemctl cat matrix-ci-physical.service matrix-ci-physical.path matrix-device-restart.service matrix-device-restart.path matrix-web.service
 /usr/bin/python3 -I -B /usr/local/libexec/verify-matrix-ci-physical-install \
   --dedicated-key-fingerprint SHA256:REVIEWED_DEDICATED_KEY_FINGERPRINT \
   --runner-address RUNNER_EGRESS_IP \
   --runner-hostname RUNNER_RESOLVED_HOSTNAME \
   --local-address APPLIANCE_SSH_ADDRESS \
   --local-port APPLIANCE_SSH_PORT \
-  --routing-domain SSH_ROUTING_DOMAIN
+  --routing-domain SSH_ROUTING_DOMAIN \
+  --expected-artifact-sha256 matrix-ci-physical-verifier="$MATRIX_CI_PHYSICAL_VERIFIER_SHA256" \
+  --expected-artifact-sha256 matrix-ci-physical-dispatcher="$MATRIX_CI_PHYSICAL_DISPATCHER_SHA256" \
+  --expected-artifact-sha256 matrix-ci-install-rgb-bindings="$MATRIX_CI_INSTALL_RGB_BINDINGS_SHA256" \
+  --expected-artifact-sha256 verify-matrix-ci-physical-install="$VERIFY_MATRIX_CI_PHYSICAL_INSTALL_SHA256" \
+  --expected-artifact-sha256 matrix-device-restart-broker="$MATRIX_DEVICE_RESTART_BROKER_SHA256" \
+  --expected-artifact-sha256 matrix-ci-physical.service="$MATRIX_CI_PHYSICAL_SERVICE_SHA256" \
+  --expected-artifact-sha256 matrix-ci-physical.path="$MATRIX_CI_PHYSICAL_PATH_SHA256" \
+  --expected-artifact-sha256 matrix-device-restart.service="$MATRIX_DEVICE_RESTART_SERVICE_SHA256" \
+  --expected-artifact-sha256 matrix-device-restart.path="$MATRIX_DEVICE_RESTART_PATH_SHA256" \
+  --expected-artifact-sha256 matrix-web.service="$MATRIX_WEB_SERVICE_SHA256" \
+  --expected-artifact-sha256 matrix-ci-physical.conf="$MATRIX_CI_PHYSICAL_CONF_SHA256" \
+  --expected-artifact-sha256 matrix-display.conf="$MATRIX_DISPLAY_CONF_SHA256" \
+  --expected-artifact-sha256 matrix-device-restart.conf="$MATRIX_DEVICE_RESTART_CONF_SHA256"
 ```
 
 Every SSH tuple value above must come from the real accepted connection: source address, sshd-resolved source hostname, appliance local address and port, and routing domain. The gate passes the complete tuple to `sshd -T -C`, because any of `Match Host`, `Match Address`, `Match LocalAddress`, `Match LocalPort`, or `Match RDomain` can change the effective key policy. These commands are installation instructions only; repository verification does not claim that this live appliance gate was run.

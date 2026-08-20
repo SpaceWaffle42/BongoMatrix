@@ -1,6 +1,7 @@
 import base64
 import copy
 import hashlib
+import importlib.util
 import io
 import json
 import re
@@ -8,6 +9,7 @@ import os
 import signal
 import pwd
 import shutil
+import stat
 import subprocess
 import sys
 import tempfile
@@ -430,14 +432,14 @@ class WebAppTests(unittest.TestCase):
         body = self.client.get("/").get_data(as_text=True)
 
         application_version = getattr(webapp, "APPLICATION_VERSION", None)
-        self.assertEqual(application_version, "0.3.52-preview")
+        self.assertEqual(application_version, "0.3.53-preview")
         self.assertEqual(body.count(f"Version {application_version}"), 1)
         self.assertRegex(
             body,
             rf"LAN CONTROL</span><br><span[^>]*>Version {re.escape(application_version)}</span>",
         )
         template = (Path(__file__).parents[1] / "app" / "templates" / "dashboard.html").read_text()
-        self.assertNotIn("0.3.52-preview", template)
+        self.assertNotIn("0.3.53-preview", template)
 
     @unittest.skipUnless(shutil.which("node"), "Node.js is required")
     @unittest.skipUnless(
@@ -527,13 +529,75 @@ try{
         self.assertIn("button.disabled=false", body)
         self.assertIn(".device-actions .btn{min-height:44px", body)
 
-    def test_production_restart_requires_explicit_service_capability(self):
+    def test_production_restart_uses_only_fixed_unprivileged_broker_marker(self):
         root = Path(__file__).parents[1]
         wsgi = (root / "app" / "wsgi.py").read_text()
         service = (root / "deploy" / "matrix-web.service").read_text()
+        broker_path = (root / "deploy" / "matrix-device-restart.path").read_text()
+        broker_service = (root / "deploy" / "matrix-device-restart.service").read_text()
+        broker_source = (root / "deploy" / "matrix_device_restart_broker.py").read_text()
+        tmpfiles = (root / "deploy" / "matrix-device-restart.conf").read_text()
+        install = (root / "deploy" / "matrix-ci-physical-install.md").read_text()
+        install_gate = (
+            root / "deploy" / "verify_matrix_ci_physical_install.py"
+        ).read_text()
+        pipeline = (root / ".gitlab-ci.yml").read_text()
+        candidate = wsgi + (root / "webapp.py").read_text() + service
 
-        self.assertIn('os.environ.get("MATRIX_DEVICE_RESTART_ENABLED") == "1"', wsgi)
-        self.assertEqual(service.count("Environment=MATRIX_DEVICE_RESTART_ENABLED=1"), 1)
+        self.assertNotIn("systemd-run", candidate)
+        self.assertNotIn("systemctl", candidate)
+        self.assertIn("User=matrix-web", service)
+        self.assertIn("Group=matrix-web", service)
+        self.assertIn("NoNewPrivileges=true", service)
+        self.assertIn(
+            "InaccessiblePaths=/run/systemd/private /run/dbus/system_bus_socket",
+            service,
+        )
+        writable_lines = "\n".join(
+            line for line in service.splitlines() if line.startswith("ReadWritePaths=")
+        )
+        self.assertIn("/run/matrix-device-restart", writable_lines)
+        self.assertNotIn("/run/matrix-display", writable_lines)
+        self.assertIn("PathExists=/run/matrix-device-restart/request", broker_path)
+        self.assertNotIn("PathChanged=", broker_path)
+        self.assertIn(
+            "ExecStart=/usr/local/libexec/matrix-device-restart-broker",
+            broker_service,
+        )
+        self.assertNotIn("Environment=", broker_service)
+        self.assertIn("DELAY_SECONDS = 30", broker_source)
+        self.assertIn('PARENT = "/run/matrix-device-restart"', broker_source)
+        self.assertIn('REQUEST = "request"', broker_source)
+        self.assertNotIn("sys.argv", broker_source)
+        self.assertIn("d /run/matrix-device-restart 1730 root matrix-web -", tmpfiles)
+        self.assertIn(
+            "f /run/matrix-device-restart/transaction.lock 0644 root root -",
+            tmpfiles,
+        )
+        self.assertIn("root-owned `1730`", install)
+        self.assertIn("root-owned `0644`", install)
+        self.assertIn("fcntl.flock(lock_fd, fcntl.LOCK_EX)", install)
+        self.assertIn("restart transaction lock changed during recovery", install)
+        self.assertIn("(opened.st_uid, opened.st_gid) != (0, 0)", install)
+        self.assertIn("opened.st_size != 0", install)
+        self.assertIn('RestartRequest("/run/matrix-device-restart/request")', wsgi)
+
+        artifact_destinations = {
+            "deploy/matrix-device-restart.conf":
+                "/etc/tmpfiles.d/matrix-device-restart.conf",
+            "deploy/matrix-device-restart.path":
+                "/etc/systemd/system/matrix-device-restart.path",
+            "deploy/matrix-device-restart.service":
+                "/etc/systemd/system/matrix-device-restart.service",
+            "deploy/matrix_device_restart_broker.py":
+                "/usr/local/libexec/matrix-device-restart-broker",
+        }
+        for source, destination in artifact_destinations.items():
+            with self.subTest(source=source):
+                self.assertIn(source, install)
+                self.assertIn(source, pipeline)
+                self.assertIn(destination, install)
+                self.assertIn(destination, install_gate)
 
     @unittest.skipUnless(shutil.which("node"), "Node.js is required")
     def test_restart_button_cancel_confirm_and_failure_paths_execute_without_saving(self):
@@ -592,6 +656,46 @@ console.log(JSON.stringify({{cancelled,confirmed,failed,uncertain:{{disabled:but
         self.assertIn("Save any changes before restarting", report["confirmations"][0])
         self.assertNotIn("Save any changes before restarting", report["confirmations"][-1])
         self.assertEqual(len(report["confirmed"]["requests"]), 1)
+
+    @unittest.skipUnless(shutil.which("node"), "Node.js is required")
+    def test_restart_button_recovers_for_every_manual_terminal_state(self):
+        self.pair_browser()
+        body = self.client.get("/").get_data(as_text=True)
+        match = re.search(
+            r"(async function restartDevice\(\)\{.*?\})\nasync function startAdditionalPairing",
+            body,
+            re.DOTALL,
+        )
+        if match is None:
+            self.fail("Restart function was not rendered")
+        probe = f"""
+const button={{disabled:false}},messages=[];
+globalThis.document={{querySelector:()=>button}};
+globalThis.matrixHasUnsavedDraft=()=>false;
+globalThis.confirm=()=>true;
+globalThis.setMessage=(text,error=false)=>messages.push({{text,error}});
+{match.group(1)}
+const states=['failed','cancelled','invalid'],results=[];
+for(const state of states){{
+ globalThis.api=async()=>{{const error=new Error('Device restart requires operator recovery.');error.data={{manual_recovery_required:true}};throw error}};
+ button.disabled=false;await restartDevice();
+ results.push({{state,disabled:button.disabled,message:messages.at(-1)}});
+}}
+console.log(JSON.stringify(results));
+"""
+        node = shutil.which("node")
+        if node is None:
+            self.fail("Node.js disappeared after the prerequisite check")
+        completed = subprocess.run(
+            [node, "--input-type=module", "-e", probe],
+            capture_output=True, text=True, timeout=10,
+        )
+        self.assertEqual(completed.returncode, 0, completed.stderr)
+        for result in json.loads(completed.stdout):
+            self.assertFalse(result["disabled"], result)
+            self.assertEqual(result["message"], {
+                "text": "Device restart requires operator recovery.", "error": True,
+            })
 
     @unittest.skipUnless(shutil.which("node"), "Node.js is required")
     @unittest.skipUnless(
@@ -700,6 +804,7 @@ try{
     def test_device_restart_is_paired_post_only_and_queued_once(self):
         self.assertEqual(self.client.post("/api/system/restart").status_code, 401)
         self.pair_browser()
+        self.device_restart_runner.return_value = webapp.RestartRequestOutcome.CREATED
 
         first = self.client.post("/api/system/restart")
         second = self.client.post("/api/system/restart")
@@ -709,23 +814,7 @@ try{
         self.assertEqual(second.status_code, 202)
         self.assertEqual(second.get_json(), {"restarting": True, "already_pending": True})
         self.assertEqual(self.client.get("/api/system/restart").status_code, 405)
-        self.device_restart_runner.assert_called_once_with(
-            [
-                "/usr/bin/systemd-run",
-                "--quiet",
-                "--collect",
-                "--no-block",
-                "--unit=matrix-device-restart",
-                "--on-active=30s",
-                "/usr/bin/systemctl",
-                "reboot",
-            ],
-            check=True,
-            stdin=subprocess.DEVNULL,
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
-            timeout=5,
-        )
+        self.assertEqual(self.device_restart_runner.call_count, 2)
 
     def test_device_restart_coalesces_genuinely_concurrent_requests(self):
         self.pair_browser()
@@ -737,56 +826,54 @@ try{
             with client.session_transaction() as session:
                 session.update(paired_session)
 
-        scheduler_started = threading.Event()
-        release_scheduler = threading.Event()
-        second_request_started = threading.Event()
+        publisher_started = threading.Event()
+        release_publisher = threading.Event()
         responses = []
 
-        def slow_schedule(*_args, **_kwargs):
-            scheduler_started.set()
-            self.assertTrue(release_scheduler.wait(2))
+        outcomes = iter((
+            webapp.RestartRequestOutcome.CREATED,
+            webapp.RestartRequestOutcome.ACTIVE_REQUEST,
+        ))
 
-        def post_restart(client, started=None):
-            if started is not None:
-                started.set()
-            responses.append(client.post("/api/system/restart"))
+        def slow_publish():
+            publisher_started.set()
+            self.assertTrue(release_publisher.wait(2))
+            return next(outcomes)
 
-        self.device_restart_runner.side_effect = slow_schedule
-        first = threading.Thread(target=post_restart, args=(clients[0],))
-        second = threading.Thread(
-            target=post_restart,
-            args=(clients[1], second_request_started),
-        )
-        first.start()
-        self.assertTrue(scheduler_started.wait(1))
-        second.start()
-        self.assertTrue(second_request_started.wait(1))
-        release_scheduler.set()
-        first.join(2)
-        second.join(2)
+        self.device_restart_runner.side_effect = slow_publish
+        threads = [
+            threading.Thread(target=lambda client=client: responses.append(
+                client.post("/api/system/restart")
+            ))
+            for client in clients
+        ]
+        threads[0].start()
+        self.assertTrue(publisher_started.wait(1))
+        threads[1].start()
+        release_publisher.set()
+        for thread in threads:
+            thread.join(2)
+            self.assertFalse(thread.is_alive())
 
-        self.assertFalse(first.is_alive())
-        self.assertFalse(second.is_alive())
-        self.assertEqual(self.device_restart_runner.call_count, 1)
+        self.assertEqual(self.device_restart_runner.call_count, 2)
         self.assertEqual([response.status_code for response in responses], [202, 202])
         self.assertEqual(
             {response.get_json()["already_pending"] for response in responses},
             {False, True},
         )
 
-    def test_device_restart_delay_exceeds_scheduler_timeout_and_delivery_margin(self):
-        self.assertEqual(webapp.DEVICE_RESTART_SCHEDULER_TIMEOUT_SECONDS, 5)
+    def test_device_restart_delay_is_owned_only_by_fixed_broker(self):
+        broker = Path(__file__).parents[1] / "deploy" / "matrix_device_restart_broker.py"
+        source = broker.read_text(encoding="utf-8")
+        self.assertIn("DELAY_SECONDS = 30", source)
+        self.assertIn("sleep(DELAY_SECONDS)", source)
+        self.assertIn("sleep=time.sleep", source)
+        self.assertNotIn("DEVICE_RESTART_DELAY_SECONDS", Path(webapp.__file__).read_text())
         self.assertEqual(webapp.DEVICE_RESTART_PENDING_TTL_SECONDS, 60)
-        self.assertEqual(webapp.DEVICE_RESTART_RESPONSE_MARGIN_SECONDS, 20)
-        self.assertEqual(webapp.DEVICE_RESTART_DELAY_SECONDS, 30)
-        self.assertGreaterEqual(
-            webapp.DEVICE_RESTART_DELAY_SECONDS,
-            webapp.DEVICE_RESTART_SCHEDULER_TIMEOUT_SECONDS
-            + webapp.DEVICE_RESTART_RESPONSE_MARGIN_SECONDS,
-        )
 
     def test_device_restart_pending_state_expires_if_the_host_never_reboots(self):
         self.pair_browser()
+        self.device_restart_runner.return_value = webapp.RestartRequestOutcome.CREATED
 
         with patch("webapp.time.monotonic", side_effect=[100.0, 159.0, 161.0]):
             first = self.client.post("/api/system/restart")
@@ -797,161 +884,293 @@ try{
         self.assertEqual(still_pending.get_json(), {"restarting": True, "already_pending": True})
         self.assertEqual(retry.status_code, 202)
         self.assertEqual(retry.get_json(), {"restarting": True, "already_pending": False})
-        self.assertEqual(self.device_restart_runner.call_count, 2)
+        self.assertEqual(self.device_restart_runner.call_count, 3)
 
-    def test_device_restart_response_precedes_reboot_after_slow_scheduler_return(self):
+    def test_device_restart_response_lifecycle_depends_only_on_marker_publication(self):
         self.pair_browser()
-        clock = {"now": 100.0}
-        observation = {}
+        events = []
 
-        def slow_schedule(command, **options):
-            observation["eligible_at"] = clock["now"] + int(
-                next(part for part in command if part.startswith("--on-active=")).split("=")[1][:-1]
-            )
-            clock["now"] += options["timeout"]
+        def publish():
+            events.append("marker-durable")
+            return webapp.RestartRequestOutcome.CREATED
 
-        self.device_restart_runner.side_effect = slow_schedule
+        self.device_restart_runner.side_effect = publish
         response = self.client.post("/api/system/restart")
-        response_ready_at = clock["now"]
+        events.append("response-returned")
 
         self.assertEqual(response.status_code, 202)
-        self.assertLessEqual(
-            response_ready_at + webapp.DEVICE_RESTART_RESPONSE_MARGIN_SECONDS,
-            observation["eligible_at"],
-        )
+        self.assertEqual(response.get_json(), {"restarting": True, "already_pending": False})
+        self.assertEqual(events, ["marker-durable", "response-returned"])
 
-    def test_device_restart_timeout_is_indeterminate_and_never_invites_a_retry(self):
+    def test_device_restart_terminal_markers_require_manual_recovery_without_pending_state(self):
         self.pair_browser()
-        timeout = subprocess.TimeoutExpired(["systemd-run"], 5)
+        for terminal in ("failed", "cancelled", "invalid"):
+            with self.subTest(terminal=terminal):
+                with tempfile.TemporaryDirectory(prefix="matrix-restart-endpoint-", dir="/root") as directory:
+                    parent = Path(directory)
+                    os.chmod(parent, 0o1730)
+                    lock = parent / "transaction.lock"
+                    lock.write_bytes(b"")
+                    os.chmod(lock, 0o644)
+                    request_path = parent / "request"
+                    terminal_path = parent / f"request.{terminal}"
+                    terminal_path.write_bytes(b"")
+                    os.chmod(terminal_path, 0o600)
+                    self.device_restart_runner.side_effect = webapp.RestartRequest(request_path)
 
-        self.device_restart_runner.side_effect = timeout
-        with patch("webapp.LOGGER.warning") as logged:
-            first = self.client.post("/api/system/restart")
-            second = self.client.post("/api/system/restart")
+                    blocked = self.client.post("/api/system/restart")
+                    retried = self.client.post("/api/system/restart")
 
-        self.assertEqual(first.status_code, 202)
-        self.assertEqual(
-            first.get_json(),
-            {"restarting": True, "already_pending": False, "scheduling_uncertain": True},
-        )
-        self.assertEqual(second.status_code, 202)
-        self.assertEqual(second.get_json(), {"restarting": True, "already_pending": True})
-        self.device_restart_runner.assert_called_once()
-        logged.assert_called_once_with(
-            "Device restart scheduling timed out; treating the request as accepted"
-        )
+                    self.assertEqual(blocked.status_code, 409)
+                    self.assertEqual(retried.status_code, 409)
+                    self.assertEqual(blocked.get_json(), {
+                        "error": "Device restart requires operator recovery.",
+                        "manual_recovery_required": True,
+                    })
+                    self.assertNotIn(terminal, blocked.get_data(as_text=True))
+                    self.assertFalse(request_path.exists())
+                    self.assertTrue(terminal_path.exists())
+                    self.assertEqual(self.device_restart_runner.call_count, 2)
+                    self.device_restart_runner.reset_mock(side_effect=True)
 
-    def test_device_restart_existing_systemd_unit_is_cross_process_idempotent(self):
+    def test_hostile_restart_requests_are_normalized_through_broker_to_manual_recovery(self):
         self.pair_browser()
-        collision = subprocess.CalledProcessError(1, ["systemd-run"])
-        existing = subprocess.CompletedProcess(
-            ["systemctl", "show"],
-            0,
-            stdout=(
-                "LoadState=loaded\nActiveState=active\nSubState=waiting\n\n"
-                "LoadState=loaded\nActiveState=inactive\nSubState=dead\n"
-            ),
-            stderr="",
-        )
+        broker_path = Path(__file__).resolve().parents[1] / "deploy" / "matrix_device_restart_broker.py"
+        spec = importlib.util.spec_from_file_location("matrix_device_restart_broker_endpoint", broker_path)
+        broker = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(broker)
+        account = pwd.getpwuid(os.getuid())
 
-        self.device_restart_runner.side_effect = [collision, existing]
+        for shape in ("nonempty", "wrong-mode", "hardlink", "symlink", "fifo"):
+            with self.subTest(shape=shape):
+                with tempfile.TemporaryDirectory(prefix="matrix-restart-hostile-", dir="/root") as directory:
+                    parent = Path(directory)
+                    os.chmod(parent, 0o1730)
+                    lock = parent / broker.LOCK
+                    lock.write_bytes(b"")
+                    os.chmod(lock, 0o644)
+                    request_path = parent / broker.REQUEST
+                    target = parent / "target"
+                    target.write_bytes(b"target-unchanged")
+                    os.chmod(target, 0o640)
+                    if shape == "nonempty":
+                        request_path.write_bytes(b"hostile")
+                        os.chmod(request_path, 0o600)
+                    elif shape == "wrong-mode":
+                        request_path.write_bytes(b"")
+                        os.chmod(request_path, 0o666)
+                    elif shape == "hardlink":
+                        os.link(target, request_path)
+                    elif shape == "symlink":
+                        request_path.symlink_to(target)
+                    else:
+                        os.mkfifo(request_path, 0o600)
+                    target_before = (target.read_bytes(), stat.S_IMODE(target.stat().st_mode),
+                                     target.stat().st_uid, target.stat().st_gid)
+                    events = []
+                    old_parent, old_account = broker.PARENT, broker.pwd.getpwnam
+                    broker.PARENT = str(parent)
+                    broker.pwd.getpwnam = lambda _name: account
+                    try:
+                        with self.assertRaisesRegex(RuntimeError, "unsafe fixed restart request marker"):
+                            broker.run_broker(
+                                sleep=lambda _seconds: events.append("sleep"),
+                                reboot=lambda: events.append("reboot"),
+                            )
+                    finally:
+                        broker.PARENT, broker.pwd.getpwnam = old_parent, old_account
+
+                    terminal = parent / "request.invalid"
+                    terminal_info = terminal.stat()
+                    self.assertEqual(events, [])
+                    self.assertFalse(request_path.exists())
+                    self.assertFalse(request_path.is_symlink())
+                    self.assertEqual(terminal.read_bytes(), b"")
+                    self.assertEqual((terminal_info.st_uid, terminal_info.st_gid), (0, 0))
+                    self.assertEqual(stat.S_IMODE(terminal_info.st_mode), 0o600)
+                    self.assertEqual(terminal_info.st_nlink, 1)
+                    self.assertEqual(
+                        (target.read_bytes(), stat.S_IMODE(target.stat().st_mode),
+                         target.stat().st_uid, target.stat().st_gid),
+                        target_before,
+                    )
+
+                    self.device_restart_runner.side_effect = webapp.RestartRequest(request_path)
+                    blocked = self.client.post("/api/system/restart")
+                    retried = self.client.post("/api/system/restart")
+                    expected = {
+                        "error": "Device restart requires operator recovery.",
+                        "manual_recovery_required": True,
+                    }
+                    self.assertEqual((blocked.status_code, retried.status_code), (409, 409))
+                    self.assertEqual(blocked.get_json(), expected)
+                    self.assertEqual(retried.get_json(), expected)
+                    self.assertNotIn(shape, blocked.get_data(as_text=True))
+                    self.assertFalse(request_path.exists())
+                    terminal.unlink()
+                    self.device_restart_runner.side_effect = None
+                    self.device_restart_runner.return_value = webapp.RestartRequestOutcome.CREATED
+                    after_recovery = self.client.post("/api/system/restart")
+                    self.assertEqual(after_recovery.status_code, 202)
+                    self.assertEqual(
+                        after_recovery.get_json(),
+                        {"restarting": True, "already_pending": False},
+                    )
+                    self.device_restart_runner.reset_mock(side_effect=True)
+
+    def test_device_restart_existing_marker_is_cross_process_idempotent(self):
+        self.pair_browser()
+        self.device_restart_runner.return_value = webapp.RestartRequestOutcome.ACTIVE_REQUEST
+
         response = self.client.post("/api/system/restart")
         duplicate = self.client.post("/api/system/restart")
 
         self.assertEqual(response.status_code, 202)
         self.assertEqual(response.get_json(), {"restarting": True, "already_pending": True})
-        self.assertEqual(duplicate.status_code, 202)
         self.assertEqual(duplicate.get_json(), {"restarting": True, "already_pending": True})
         self.assertEqual(self.device_restart_runner.call_count, 2)
-        self.assertEqual(
-            self.device_restart_runner.call_args_list[1].args[0],
-            [
-                "/usr/bin/systemctl",
-                "show",
-                "--property=LoadState",
-                "--property=ActiveState",
-                "--property=SubState",
-                "matrix-device-restart.timer",
-                "matrix-device-restart.service",
-            ],
-        )
 
-    def test_device_restart_stale_loaded_units_are_not_reported_as_pending(self):
-        self.pair_browser()
-        collision = subprocess.CalledProcessError(1, ["systemd-run"])
-        stale = subprocess.CompletedProcess(
-            ["systemctl", "show"],
-            0,
-            stdout=(
-                "LoadState=loaded\nActiveState=inactive\nSubState=dead\n\n"
-                "LoadState=loaded\nActiveState=failed\nSubState=failed\n"
-            ),
-            stderr="",
-        )
-        self.device_restart_runner.side_effect = [collision, stale]
+    def test_fixed_restart_marker_rejects_symlink_fifo_hardlink_and_path_traversal(self):
+        with tempfile.TemporaryDirectory(prefix="matrix-restart-marker-", dir="/root") as directory:
+            parent = Path(directory) / "requests"
+            parent.mkdir(mode=0o1730)
+            os.chmod(parent, 0o1730)
+            lock = parent / "transaction.lock"
+            lock.write_bytes(b"")
+            os.chmod(lock, 0o644)
+            target = Path(directory) / "target"
+            target.write_bytes(b"unchanged")
+            os.chmod(target, 0o600)
+            request_path = parent / "request"
+            publisher = webapp.RestartRequest(request_path)
+            self.assertIs(publisher(), webapp.RestartRequestOutcome.CREATED)
+            self.assertIs(publisher(), webapp.RestartRequestOutcome.ACTIVE_REQUEST)
+            request_path.unlink()
 
-        response = self.client.post("/api/system/restart")
+            for kind in ("symlink", "fifo", "hardlink"):
+                if kind == "symlink":
+                    request_path.symlink_to(target)
+                elif kind == "fifo":
+                    os.mkfifo(request_path, 0o600)
+                else:
+                    os.link(target, request_path)
+                with self.subTest(kind=kind):
+                    with self.assertRaises(RuntimeError):
+                        publisher()
+                    self.assertEqual(target.read_bytes(), b"unchanged")
+                request_path.unlink()
 
-        self.assertEqual(response.status_code, 503)
-        self.assertEqual(response.get_json(), {
-            "error": "Device restart could not be scheduled."
-        })
+            with self.assertRaises((FileNotFoundError, RuntimeError)):
+                webapp.RestartRequest(parent / ".." / "outside" / "request")()
+            self.assertEqual(target.read_bytes(), b"unchanged")
 
-    def test_device_restart_unknown_collision_state_stays_indeterminate(self):
-        self.pair_browser()
-        collision = subprocess.CalledProcessError(1, ["systemd-run"])
-        self.device_restart_runner.side_effect = [collision, OSError("unavailable")]
+    def test_restart_request_rejects_symlink_in_runtime_ancestry(self):
+        with tempfile.TemporaryDirectory(prefix="matrix-restart-ancestry-", dir="/root") as directory:
+            root = Path(directory)
+            trusted = root / "trusted"
+            trusted.mkdir()
+            parent = trusted / "requests"
+            parent.mkdir()
+            os.chmod(parent, 0o1730)
+            lock = parent / "transaction.lock"
+            lock.write_bytes(b"")
+            os.chmod(lock, 0o644)
+            alias = root / "alias"
+            alias.symlink_to(trusted, target_is_directory=True)
 
-        response = self.client.post("/api/system/restart")
-        duplicate = self.client.post("/api/system/restart")
+            with self.assertRaises((OSError, RuntimeError)):
+                webapp.RestartRequest(alias / "requests" / "request")()
+            self.assertFalse((parent / "request").exists())
 
-        self.assertEqual(response.status_code, 202)
-        self.assertEqual(response.get_json(), {
-            "restarting": True,
-            "already_pending": True,
-            "scheduling_uncertain": True,
-        })
-        self.assertEqual(duplicate.get_json(), {
-            "restarting": True, "already_pending": True
-        })
+    def test_restart_request_coalesces_root_claimed_active_request(self):
+        account = pwd.getpwnam("nobody")
+        with tempfile.TemporaryDirectory(prefix="matrix-restart-claimed-", dir="/root") as directory:
+            parent = Path(directory)
+            os.chown(parent, 0, account.pw_gid)
+            os.chmod(parent, 0o1730)
+            lock = parent / "transaction.lock"
+            lock.write_bytes(b"")
+            os.chmod(lock, 0o644)
+            request = parent / "request"
+            request.write_bytes(b"")
+            os.chmod(request, 0o600)
+
+            with patch.object(webapp.os, "geteuid", return_value=account.pw_uid), \
+                    patch.object(webapp.os, "getegid", return_value=account.pw_gid):
+                self.assertIs(
+                    webapp.RestartRequest(request)(),
+                    webapp.RestartRequestOutcome.ACTIVE_REQUEST,
+                )
+
+    def test_restart_transaction_lock_rejects_symlink_hardlink_wrong_mode_and_owner(self):
+        with tempfile.TemporaryDirectory(prefix="matrix-restart-lock-", dir="/root") as directory:
+            root = Path(directory)
+            parent = root / "requests"
+            parent.mkdir()
+            os.chmod(parent, 0o1730)
+            request = parent / "request"
+            target = root / "target"
+            target.write_bytes(b"")
+            os.chmod(target, 0o644)
+            lock = parent / "transaction.lock"
+
+            for kind in ("symlink", "hardlink", "wrong-mode", "wrong-owner"):
+                with self.subTest(kind=kind):
+                    if kind == "symlink":
+                        lock.symlink_to(target)
+                    elif kind == "hardlink":
+                        os.link(target, lock)
+                    else:
+                        lock.write_bytes(b"")
+                        os.chmod(lock, 0o600 if kind == "wrong-mode" else 0o644)
+                        if kind == "wrong-owner":
+                            os.chown(lock, 1, 0)
+                    try:
+                        with self.assertRaises((OSError, RuntimeError)):
+                            webapp.RestartRequest(request)()
+                        self.assertFalse(request.exists())
+                    finally:
+                        lock.unlink(missing_ok=True)
+
+    def test_restart_transaction_lock_replacement_during_acquire_fails_closed(self):
+        with tempfile.TemporaryDirectory(prefix="matrix-restart-lock-race-", dir="/root") as directory:
+            parent = Path(directory)
+            os.chmod(parent, 0o1730)
+            lock = parent / "transaction.lock"
+            lock.write_bytes(b"")
+            os.chmod(lock, 0o644)
+            replacement = parent / "replacement"
+            replacement.write_bytes(b"")
+            os.chmod(replacement, 0o644)
+            real_flock = webapp.fcntl.flock
+
+            def replace_then_lock(fd, operation):
+                real_flock(fd, operation)
+                lock.unlink()
+                replacement.rename(lock)
+
+            with patch.object(webapp.fcntl, "flock", side_effect=replace_then_lock):
+                with self.assertRaisesRegex(RuntimeError, "lock changed"):
+                    webapp.RestartRequest(parent / "request")()
+            self.assertFalse((parent / "request").exists())
 
     def test_device_restart_failure_is_sanitized_and_can_be_retried(self):
         self.pair_browser()
-        failure = subprocess.CalledProcessError(1, ["systemd-run"])
-        missing = subprocess.CompletedProcess(
-            ["systemctl", "show"],
-            0,
-            stdout=(
-                "LoadState=not-found\nActiveState=inactive\nSubState=dead\n\n"
-                "LoadState=not-found\nActiveState=inactive\nSubState=dead\n"
-            ),
-            stderr="",
-        )
+        self.device_restart_runner.side_effect = [
+            OSError("secret detail"), webapp.RestartRequestOutcome.CREATED,
+        ]
 
-        self.device_restart_runner.side_effect = [failure, missing, None]
         with patch("webapp.LOGGER.exception") as logged:
             failed = self.client.post("/api/system/restart")
             retried = self.client.post("/api/system/restart")
 
         self.assertEqual(failed.status_code, 503)
         self.assertEqual(failed.get_json(), {"error": "Device restart could not be scheduled."})
-        self.assertNotIn("systemd-run", failed.get_data(as_text=True))
-        self.assertEqual(retried.status_code, 202)
-        self.assertEqual(retried.get_json(), {"restarting": True, "already_pending": False})
-        self.assertEqual(self.device_restart_runner.call_count, 3)
-        logged.assert_called_once_with("Unable to schedule device restart")
-
-    def test_device_restart_oserror_is_sanitized_and_retryable(self):
-        self.pair_browser()
-        self.device_restart_runner.side_effect = [OSError("secret detail"), None]
-
-        failed = self.client.post("/api/system/restart")
-        retried = self.client.post("/api/system/restart")
-
-        self.assertEqual(failed.status_code, 503)
         self.assertNotIn("secret detail", failed.get_data(as_text=True))
         self.assertEqual(retried.status_code, 202)
+        self.assertEqual(retried.get_json(), {"restarting": True, "already_pending": False})
         self.assertEqual(self.device_restart_runner.call_count, 2)
+        logged.assert_called_once_with("Unable to publish fixed device restart request")
 
     def test_config_update_reports_committed_state_when_display_reload_fails(self):
         self.pair_browser()

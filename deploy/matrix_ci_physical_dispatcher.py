@@ -22,6 +22,7 @@ RUNTIME = Path("/run/matrix-ci-physical")
 LABELS = RUNTIME / "claim"
 REPORT = RUNTIME / "report"
 DISPATCH_LOCK = RUNTIME / "dispatch.lock"
+CLAIM_TEMPORARIES = "claim-temporaries"
 
 MAX_REPORT_BYTES = 4096
 MAX_ERROR_CHARS = 512
@@ -30,9 +31,24 @@ REPORT_WAIT_SECONDS = 70
 RENAME_NOREPLACE = 1
 _TEMPORARY_SEQUENCE = itertools.count()
 
+_CLEANUP_WARNINGS = {
+    "unlink": "physical verifier cleanup warning: temporary unlink failed\n",
+    "fsync": "physical verifier cleanup warning: directory sync failed\n",
+}
 
-def _rename_noreplace(old_name, new_name, directory_fd):
+
+def _cleanup_warning(kind):
+    """Emit one fixed non-secret warning; diagnostics can never affect lifecycle."""
+    try:
+        sys.stderr.write(_CLEANUP_WARNINGS[kind])
+        sys.stderr.flush()
+    except BaseException:
+        pass
+
+
+def _rename_noreplace(old_name, new_name, directory_fd, new_directory_fd=None):
     """Linux renameat2: atomically move a complete inode without replacement."""
+    target_fd = directory_fd if new_directory_fd is None else new_directory_fd
     libc = ctypes.CDLL(None, use_errno=True)
     renameat2 = getattr(libc, "renameat2", None)
     if renameat2 is None:
@@ -41,7 +57,7 @@ def _rename_noreplace(old_name, new_name, directory_fd):
         ctypes.c_int, ctypes.c_char_p, ctypes.c_int, ctypes.c_char_p, ctypes.c_uint
     )
     renameat2.restype = ctypes.c_int
-    if renameat2(directory_fd, os.fsencode(old_name), directory_fd, os.fsencode(new_name), RENAME_NOREPLACE):
+    if renameat2(directory_fd, os.fsencode(old_name), target_fd, os.fsencode(new_name), RENAME_NOREPLACE):
         error = ctypes.get_errno()
         raise OSError(error, os.strerror(error), new_name)
 
@@ -70,68 +86,49 @@ def _unlink_owned_temporary(runtime_fd, name, identity):
             return
         os.unlink(name, dir_fd=runtime_fd)
     except OSError:
-        print(
-            "physical verifier cleanup warning: temporary unlink failed",
-            file=sys.stderr,
-        )
+        _cleanup_warning("unlink")
         return
     try:
         os.fsync(runtime_fd)
     except OSError:
-        print(
-            "physical verifier cleanup warning: directory sync failed",
-            file=sys.stderr,
-        )
+        _cleanup_warning("fsync")
 
 
-def _scavenge_stale_temporaries(runtime_fd, prefix, *, limit=128):
-    """Remove bounded dead-writer temps only while caller owns dispatch serialization."""
-    pattern = re.compile(rf"{re.escape(prefix)}\.([1-9][0-9]*)\.([0-9]+)\Z")
+_LAST_SCAVENGE_VISITED = 0
+
+
+def _scavenge_quiescent_temporaries(temporary_fd, *, limit=128):
+    """At a host-proven quiescent point, unlink bounded entries without following."""
+    global _LAST_SCAVENGE_VISITED
+    visited = 0
     removed = 0
-    examined = 0
     unlink_warning_emitted = False
-    with os.scandir(runtime_fd) as entries:
+    with os.scandir(temporary_fd) as entries:
         for entry in entries:
-            if examined >= limit:
+            if visited >= limit:
                 break
-            match = pattern.fullmatch(entry.name)
-            if match is None:
-                continue
-            examined += 1
+            visited += 1
             try:
-                os.kill(int(match.group(1)), 0)
-            except ProcessLookupError:
-                pass
-            except PermissionError:
-                continue
-            else:
-                continue
-            try:
-                info = entry.stat(follow_symlinks=False)
-                if (
-                    not stat.S_ISREG(info.st_mode) or info.st_uid != 0 or info.st_gid != 0
-                    or stat.S_IMODE(info.st_mode) != 0o600 or info.st_nlink != 1
-                ):
-                    continue
-                os.unlink(entry.name, dir_fd=runtime_fd)
+                os.unlink(entry.name, dir_fd=temporary_fd)
                 removed += 1
             except OSError:
                 if not unlink_warning_emitted:
-                    print(
-                        "physical verifier cleanup warning: temporary unlink failed",
-                        file=sys.stderr,
-                    )
+                    _cleanup_warning("unlink")
                     unlink_warning_emitted = True
-                continue
+    _LAST_SCAVENGE_VISITED = visited
     if removed:
         try:
-            os.fsync(runtime_fd)
+            os.fsync(temporary_fd)
         except OSError:
-            print(
-                "physical verifier cleanup warning: directory sync failed",
-                file=sys.stderr,
-            )
+            _cleanup_warning("fsync")
     return removed
+
+
+def _scavenge_stale_temporaries(temporary_fd, prefix, *, limit=128):
+    """Compatibility entry point restricted to the claim-temporary namespace."""
+    if prefix != LABELS.name + ".tmp":
+        raise RuntimeError("invalid claim temporary namespace")
+    return _scavenge_quiescent_temporaries(temporary_fd, limit=limit)
 
 
 def _require_metadata(info, *, mode, kind, description):
@@ -202,6 +199,22 @@ def open_runtime_fd():
         os.close(runtime_fd)
         raise
     return runtime_fd
+
+
+def open_temporary_namespace(runtime_fd, name):
+    try:
+        os.mkdir(name, 0o700, dir_fd=runtime_fd)
+        os.fsync(runtime_fd)
+    except FileExistsError:
+        pass
+    fd = os.open(name, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC,
+                 dir_fd=runtime_fd)
+    try:
+        _require_trusted_directory(os.fstat(fd), "temporary namespace", exact_mode=0o700)
+    except BaseException:
+        os.close(fd)
+        raise
+    return fd
 
 
 def open_named_lock(name, description):
@@ -302,6 +315,7 @@ class SystemOps:
 
     def prepare(self, sha, pipeline_id):
         runtime_fd = open_runtime_fd()
+        temporary_fd = open_temporary_namespace(runtime_fd, CLAIM_TEMPORARIES)
         temporary_name = None
         temporary_identity = None
         try:
@@ -315,7 +329,7 @@ class SystemOps:
             else:
                 raise RuntimeError("physical verifier durable claim is busy")
             try:
-                temporary_name, fd = _create_unique_temporary(runtime_fd, LABELS.name + ".tmp")
+                temporary_name, fd = _create_unique_temporary(temporary_fd, LABELS.name + ".tmp")
             except OSError as error:
                 raise RuntimeError("unsafe physical verifier label temporary") from error
             try:
@@ -335,7 +349,7 @@ class SystemOps:
                 )
             except BaseException:
                 if temporary_identity is not None:
-                    _unlink_owned_temporary(runtime_fd, temporary_name, temporary_identity)
+                    _unlink_owned_temporary(temporary_fd, temporary_name, temporary_identity)
                 raise
             finally:
                 os.close(fd)
@@ -353,13 +367,14 @@ class SystemOps:
                 # A no-replace move publishes one name and one link atomically:
                 # once claim exists, its labels survive caller/SSH death and the
                 # host path unit can finish admission independently.
-                _rename_noreplace(temporary_name, LABELS.name, runtime_fd)
+                _rename_noreplace(temporary_name, LABELS.name, temporary_fd, runtime_fd)
             except OSError as error:
                 if temporary_identity is not None:
-                    _unlink_owned_temporary(runtime_fd, temporary_name, temporary_identity)
+                    _unlink_owned_temporary(temporary_fd, temporary_name, temporary_identity)
                 raise RuntimeError("physical verifier durable claim is busy") from error
             os.fsync(runtime_fd)
         finally:
+            os.close(temporary_fd)
             os.close(runtime_fd)
 
 
@@ -472,9 +487,11 @@ def main():
             print("physical verifier dispatcher is busy", file=sys.stderr)
             return 75
         runtime_fd = open_runtime_fd()
+        temporary_fd = open_temporary_namespace(runtime_fd, CLAIM_TEMPORARIES)
         try:
-            _scavenge_stale_temporaries(runtime_fd, LABELS.name + ".tmp")
+            _scavenge_quiescent_temporaries(temporary_fd)
         finally:
+            os.close(temporary_fd)
             os.close(runtime_fd)
         try:
             status, report = dispatch(f"verify {sha} {pipeline_id}")

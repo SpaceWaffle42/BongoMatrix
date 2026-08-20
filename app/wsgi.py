@@ -7,7 +7,6 @@ import os
 import pwd
 import secrets
 import stat
-import subprocess
 import sys
 from pathlib import Path
 
@@ -23,7 +22,7 @@ from hardware_lock import DisplayOwnershipLock
 from matrix_framework import Matrix
 from pairing import PairedDeviceStore, PairingManager, initialize_pairing_display
 from secret_store import SecretStore
-from webapp import APPLICATION_VERSION, create_app
+from webapp import APPLICATION_VERSION, RestartRequest, create_app
 
 
 def load_secret(path):
@@ -72,7 +71,7 @@ with _entrypoint_owner._wsgi_runtime_lock:
         )
         session_secret = load_secret(ROOT / "data" / "session.key")
         sanitizer_path = os.environ.get("MATRIX_SANITIZER_PATH")
-        nobody = pwd.getpwnam("nobody") if sanitizer_path else None
+        nobody = pwd.getpwnam("nobody") if sanitizer_path and os.geteuid() == 0 else None
         app = create_app(
             controller,
             config_store,
@@ -85,7 +84,7 @@ with _entrypoint_owner._wsgi_runtime_lock:
             sanitizer_python=os.environ.get("MATRIX_SANITIZER_PYTHON"),
             sanitizer_identity=(nobody.pw_uid, nobody.pw_gid) if nobody else None,
             device_restart_runner=(
-                subprocess.run
+                RestartRequest("/run/matrix-device-restart/request")
                 if os.environ.get("MATRIX_DEVICE_RESTART_ENABLED") == "1"
                 else None
             ),
