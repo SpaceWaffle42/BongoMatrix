@@ -4,6 +4,8 @@
 from __future__ import annotations
 
 import argparse
+import ctypes
+import errno
 import hashlib
 import os
 import re
@@ -12,6 +14,7 @@ from pathlib import Path
 
 EXPECTED_FILES = ("__init__.py", "core.so", "graphics.so")
 MAX_FILE_BYTES = 16 * 1024 * 1024
+RENAME_NOREPLACE = 1
 
 
 def _trusted_directory(info):
@@ -101,10 +104,87 @@ def _write_file(directory_fd, name, payload):
     try:
         offset = 0
         while offset < len(payload):
-            offset += os.write(fd, payload[offset:])
+            written = os.write(fd, payload[offset:])
+            if written <= 0:
+                raise RuntimeError("zero-progress RGB destination write")
+            offset += written
         os.fsync(fd)
     finally:
         os.close(fd)
+
+
+def _rename_noreplace(directory_fd, source, destination):
+    libc = ctypes.CDLL(None, use_errno=True)
+    result = libc.renameat2(
+        directory_fd, os.fsencode(source), directory_fd, os.fsencode(destination),
+        RENAME_NOREPLACE,
+    )
+    if result != 0:
+        code = ctypes.get_errno()
+        raise OSError(code, os.strerror(code), destination)
+
+
+def _create_staging(parent_fd, destination_name):
+    for _attempt in range(128):
+        name = f".{destination_name}.tmp.{os.getpid()}.{os.urandom(16).hex()}"
+        try:
+            os.mkdir(name, 0o755, dir_fd=parent_fd)
+        except FileExistsError:
+            continue
+        info = os.stat(name, dir_fd=parent_fd, follow_symlinks=False)
+        fd = os.open(
+            name, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC,
+            dir_fd=parent_fd,
+        )
+        if not _trusted_directory(os.fstat(fd)):
+            os.close(fd)
+            raise RuntimeError("unsafe RGB staging directory")
+        return name, fd, (info.st_dev, info.st_ino)
+    raise RuntimeError("unable to create unique RGB staging directory")
+
+
+def _cleanup_staging(parent_fd, name, identity):
+    """Best-effort removal of only the exact staging inode created by this run."""
+    staging_fd = package_fd = None
+    try:
+        current = os.stat(name, dir_fd=parent_fd, follow_symlinks=False)
+        if (current.st_dev, current.st_ino) != identity or not stat.S_ISDIR(current.st_mode):
+            return
+        staging_fd = os.open(
+            name, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC,
+            dir_fd=parent_fd,
+        )
+        try:
+            package_fd = os.open(
+                "rgbmatrix", os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC,
+                dir_fd=staging_fd,
+            )
+        except FileNotFoundError:
+            package_fd = None
+        if package_fd is not None:
+            for filename in EXPECTED_FILES:
+                try:
+                    os.unlink(filename, dir_fd=package_fd)
+                except FileNotFoundError:
+                    pass
+            os.close(package_fd)
+            package_fd = None
+            os.rmdir("rgbmatrix", dir_fd=staging_fd)
+        try:
+            os.unlink("rgbmatrix.sha256", dir_fd=staging_fd)
+        except FileNotFoundError:
+            pass
+        os.close(staging_fd)
+        staging_fd = None
+        os.rmdir(name, dir_fd=parent_fd)
+        os.fsync(parent_fd)
+    except BaseException:
+        pass
+    finally:
+        if package_fd is not None:
+            os.close(package_fd)
+        if staging_fd is not None:
+            os.close(staging_fd)
 
 
 def install(source: Path, destination: Path, manifest_payload: bytes):
@@ -122,37 +202,45 @@ def install(source: Path, destination: Path, manifest_payload: bytes):
             raise RuntimeError(f"RGB source digest mismatch: {name}")
 
     parent_fd = _open_directory(destination.parent)
-    destination_fd = None
+    staging_name = None
+    staging_identity = None
+    staging_fd = None
     package_fd = None
+    published = False
     try:
         try:
-            os.mkdir(destination.name, 0o755, dir_fd=parent_fd)
+            os.stat(destination.name, dir_fd=parent_fd, follow_symlinks=False)
         except OSError as error:
-            raise RuntimeError("RGB destination must be a fresh trusted path") from error
-        destination_fd = os.open(
-            destination.name,
-            os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC,
-            dir_fd=parent_fd,
-        )
-        if not _trusted_directory(os.fstat(destination_fd)):
-            raise RuntimeError("unsafe RGB destination")
-        os.mkdir("rgbmatrix", 0o755, dir_fd=destination_fd)
+            if error.errno != errno.ENOENT:
+                raise RuntimeError("RGB destination must be a fresh trusted path") from error
+        else:
+            raise RuntimeError("RGB destination must be a fresh trusted path")
+        staging_name, staging_fd, staging_identity = _create_staging(parent_fd, destination.name)
+        os.mkdir("rgbmatrix", 0o755, dir_fd=staging_fd)
         package_fd = os.open(
             "rgbmatrix",
             os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC,
-            dir_fd=destination_fd,
+            dir_fd=staging_fd,
         )
         for name in EXPECTED_FILES:
             _write_file(package_fd, name, files[name])
-        _write_file(destination_fd, "rgbmatrix.sha256", manifest_payload)
+        _write_file(staging_fd, "rgbmatrix.sha256", manifest_payload)
         os.fsync(package_fd)
-        os.fsync(destination_fd)
+        os.fsync(staging_fd)
+        os.close(package_fd)
+        package_fd = None
+        os.close(staging_fd)
+        staging_fd = None
+        _rename_noreplace(parent_fd, staging_name, destination.name)
+        published = True
         os.fsync(parent_fd)
     finally:
         if package_fd is not None:
             os.close(package_fd)
-        if destination_fd is not None:
-            os.close(destination_fd)
+        if staging_fd is not None:
+            os.close(staging_fd)
+        if not published and staging_name is not None and staging_identity is not None:
+            _cleanup_staging(parent_fd, staging_name, staging_identity)
         os.close(parent_fd)
 
 

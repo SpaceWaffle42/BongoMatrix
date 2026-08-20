@@ -156,6 +156,47 @@ class GitLabPipelineContractTests(unittest.TestCase):
         self.assertIn("ServerAliveInterval=10", physical)
         self.assertIn("ServerAliveCountMax=2", physical)
 
+    def test_physical_job_drops_privilege_and_bounds_remote_output_with_primary_status(self):
+        physical = block(self.sections, "physical_device_acceptance")
+        self.assertLess(physical.index("apt-get install"), physical.index("setpriv"))
+        self.assertIn("useradd --uid 65532", physical)
+        self.assertNotRegex(physical, r"(?m)^\s+python scripts/")
+        self.assertRegex(physical, r"setpriv --reuid=65532 --regid=65532 --clear-groups python scripts/verify_physical_device_report\.py")
+        self.assertIn("head -c 4097", physical)
+        self.assertIn("PIPESTATUS[0]", physical)
+        self.assertIn("overflow_status", physical)
+        self.assertNotIn("cat physical-device-report.txt", physical)
+        self.assertIn('primary_status="$acceptance_status"', physical)
+        self.assertIn('test "$primary_status" -eq 0', physical)
+        self.assertLess(physical.index('primary_status="$acceptance_status"'), physical.index('primary_status="$overflow_status"'))
+
+    def test_install_documentation_supplies_all_reviewed_artifact_digests_without_live_self_certification(self):
+        install = (ROOT / "deploy" / "matrix-ci-physical-install.md").read_text(encoding="utf-8")
+        names = (
+            "matrix-ci-physical-verifier", "matrix-ci-physical-dispatcher",
+            "matrix-ci-install-rgb-bindings", "verify-matrix-ci-physical-install",
+            "matrix-device-restart-broker", "matrix-ci-physical.service",
+            "matrix-ci-physical.path", "matrix-device-restart.service",
+            "matrix-device-restart.path", "matrix-web.service",
+            "matrix-ci-physical.conf", "matrix-display.conf",
+            "matrix-device-restart.conf",
+        )
+        self.assertEqual(install.count("--expected-artifact-sha256"), len(names))
+        for name in names:
+            self.assertRegex(
+                install,
+                rf"--expected-artifact-sha256 {re.escape(name)}=\"?\$[A-Z0-9_]+\"?",
+            )
+        self.assertIn("separately reviewed release input", install)
+        self.assertIn("Never compute these expected digests from the installed destinations", install)
+        self.assertIn("unique sibling staging directory", install)
+        self.assertIn("atomic no-replace publication", install)
+        self.assertIn("ordinary pre-publication failures are cleaned up for a safe retry", install)
+        self.assertLess(
+            install.index("sha256sum deploy/matrix_ci_physical_verifier.py"),
+            install.index("install -o root -g root -m 0755 deploy/matrix_ci_physical_verifier.py"),
+        )
+
     def test_physical_secrets_are_protected_and_file_typed_by_documented_contract(self):
         physical = block(self.sections, "physical_device_acceptance")
         install = (ROOT / "deploy" / "matrix-ci-physical-install.md").read_text(encoding="utf-8")
@@ -175,6 +216,12 @@ class GitLabPipelineContractTests(unittest.TestCase):
         self.assertIn("image: node:22-bookworm", job)
         self.assertIn("MATRIX_CHROMIUM: /usr/bin/chromium", job)
         self.assertIn("chromium ffmpeg", job)
+        self.assertIn("openssh-server", job)
+        self.assertIn("install -d -m 0755 /run/sshd", job)
+        self.assertLess(
+            job.index("install -d -m 0755 /run/sshd"),
+            job.index("coverage run"),
+        )
         self.assertIn("python3-pil", job)
         self.assertIn("python3-opencv", job)
         self.assertIn(

@@ -12,6 +12,7 @@ import base64
 import hashlib
 import ipaddress
 import os
+import pwd
 import re
 import stat
 import subprocess
@@ -21,7 +22,13 @@ from typing import NamedTuple
 SYSTEMCTL = "/bin/systemctl"
 SSHD = "/usr/sbin/sshd"
 SSH_KEYGEN = "/usr/bin/ssh-keygen"
-UNITS = ("matrix-ci-physical.service", "matrix-ci-physical.path", "matrix-web.service")
+UNITS = (
+    "matrix-ci-physical.service",
+    "matrix-ci-physical.path",
+    "matrix-device-restart.service",
+    "matrix-device-restart.path",
+    "matrix-web.service",
+)
 TMPFILES_POLICY = Path("/etc/tmpfiles.d/matrix-display.conf")
 DISPLAY_LOCK_DIRECTORY = Path("/run/matrix-display")
 DISPLAY_LOCK = DISPLAY_LOCK_DIRECTORY / "matrix-display.lock"
@@ -30,6 +37,38 @@ EXPECTED_TMPFILES_POLICY = (
     b"d /run/matrix-display 0755 root root -\n"
     b"f /run/matrix-display/matrix-display.lock 0644 root root -\n"
 )
+PHYSICAL_TMPFILES_POLICY = Path("/etc/tmpfiles.d/matrix-ci-physical.conf")
+PHYSICAL_RUNTIME_DIRECTORY = Path("/run/matrix-ci-physical")
+EXPECTED_PHYSICAL_TMPFILES_POLICY = (
+    b"# Host-owned prerequisite for matrix-web InaccessiblePaths.\n"
+    b"d /run/matrix-ci-physical 0700 root root -\n"
+)
+RESTART_BROKER = Path("/usr/local/libexec/matrix-device-restart-broker")
+RESTART_SERVICE = Path("/etc/systemd/system/matrix-device-restart.service")
+RESTART_PATH = Path("/etc/systemd/system/matrix-device-restart.path")
+RESTART_TMPFILES_POLICY = Path("/etc/tmpfiles.d/matrix-device-restart.conf")
+RESTART_DIRECTORY = Path("/run/matrix-device-restart")
+EXPECTED_RESTART_TMPFILES_POLICY = (
+    b"# Host-owned fixed whole-device restart transaction namespace.\n"
+    b"d /run/matrix-device-restart 1730 root matrix-web -\n"
+    b"f /run/matrix-device-restart/transaction.lock 0644 root root -\n"
+)
+EXPECTED_ARTIFACT_DIGESTS = {}
+REVIEWED_ARTIFACTS = {
+    "matrix-ci-physical-verifier": (Path("/usr/local/libexec/matrix-ci-physical-verifier"), 0o755),
+    "matrix-ci-physical-dispatcher": (Path("/usr/local/libexec/matrix-ci-physical-dispatcher"), 0o755),
+    "matrix-ci-install-rgb-bindings": (Path("/usr/local/libexec/matrix-ci-install-rgb-bindings"), 0o755),
+    "verify-matrix-ci-physical-install": (Path("/usr/local/libexec/verify-matrix-ci-physical-install"), 0o755),
+    "matrix-device-restart-broker": (RESTART_BROKER, 0o755),
+    "matrix-ci-physical.service": (Path("/etc/systemd/system/matrix-ci-physical.service"), 0o644),
+    "matrix-ci-physical.path": (Path("/etc/systemd/system/matrix-ci-physical.path"), 0o644),
+    "matrix-device-restart.service": (RESTART_SERVICE, 0o644),
+    "matrix-device-restart.path": (RESTART_PATH, 0o644),
+    "matrix-web.service": (Path("/etc/systemd/system/matrix-web.service"), 0o644),
+    "matrix-ci-physical.conf": (PHYSICAL_TMPFILES_POLICY, 0o644),
+    "matrix-display.conf": (TMPFILES_POLICY, 0o644),
+    "matrix-device-restart.conf": (RESTART_TMPFILES_POLICY, 0o644),
+}
 SUPPORTED_KEY_TYPES = {"ssh-ed25519"}
 REQUIRED_AUTHORIZED_KEY_OPTIONS = (
     'command="/usr/local/libexec/matrix-ci-physical-dispatcher",restrict,'
@@ -171,6 +210,40 @@ def require_file(path: Path, mode: int):
         raise RuntimeError(f"unsafe installed file: {path}")
 
 
+def _require_reviewed_digest(path: Path):
+    expected = EXPECTED_ARTIFACT_DIGESTS.get(path)
+    if expected is None:
+        raise RuntimeError(f"missing separately reviewed digest: {path}")
+    if hashlib.sha256(path.read_bytes()).hexdigest() != expected:
+        raise RuntimeError(f"installed file differs from reviewed digest: {path}")
+
+
+def verify_reviewed_artifacts(expected):
+    """Bind installed policy/code to operator-supplied, separately reviewed digests."""
+    if set(expected) != set(REVIEWED_ARTIFACTS):
+        raise RuntimeError("expected artifact digest set is incomplete")
+    EXPECTED_ARTIFACT_DIGESTS.clear()
+    for name, (path, mode) in REVIEWED_ARTIFACTS.items():
+        digest = expected[name]
+        if not re.fullmatch(r"[0-9a-f]{64}", digest):
+            raise RuntimeError(f"invalid reviewed digest: {name}")
+        require_file(path, mode)
+        EXPECTED_ARTIFACT_DIGESTS[path] = digest
+        _require_reviewed_digest(path)
+
+
+def _parse_expected_artifact_digests(values):
+    expected = {}
+    for value in values:
+        if "=" not in value:
+            raise RuntimeError("expected artifact digest must be NAME=SHA256")
+        name, digest = value.split("=", 1)
+        if name in expected:
+            raise RuntimeError(f"duplicate expected artifact digest: {name}")
+        expected[name] = digest
+    return expected
+
+
 def verify_display_lock_install():
     require_file(TMPFILES_POLICY, 0o644)
     if TMPFILES_POLICY.read_bytes() != EXPECTED_TMPFILES_POLICY:
@@ -187,18 +260,68 @@ def verify_display_lock_install():
     require_file(DISPLAY_LOCK, 0o644)
 
 
+def verify_physical_runtime_install():
+    require_file(PHYSICAL_TMPFILES_POLICY, 0o644)
+    if PHYSICAL_TMPFILES_POLICY.read_bytes() != EXPECTED_PHYSICAL_TMPFILES_POLICY:
+        raise RuntimeError("installed physical-runtime tmpfiles policy differs from reviewed source")
+    info = PHYSICAL_RUNTIME_DIRECTORY.lstat()
+    if (
+        not stat.S_ISDIR(info.st_mode)
+        or stat.S_ISLNK(info.st_mode)
+        or info.st_uid != 0
+        or info.st_gid != 0
+        or stat.S_IMODE(info.st_mode) != 0o700
+    ):
+        raise RuntimeError("unsafe host-created physical runtime directory")
+
+
+def verify_restart_broker_install():
+    require_file(RESTART_BROKER, 0o755)
+    _require_reviewed_digest(RESTART_BROKER)
+    require_file(RESTART_SERVICE, 0o644)
+    require_file(RESTART_PATH, 0o644)
+    require_file(RESTART_TMPFILES_POLICY, 0o644)
+    if RESTART_TMPFILES_POLICY.read_bytes() != EXPECTED_RESTART_TMPFILES_POLICY:
+        raise RuntimeError("installed restart tmpfiles policy differs from reviewed source")
+    account = pwd.getpwnam("matrix-web")
+    info = RESTART_DIRECTORY.lstat()
+    if (
+        not stat.S_ISDIR(info.st_mode)
+        or stat.S_ISLNK(info.st_mode)
+        or info.st_uid != 0
+        or info.st_gid != account.pw_gid
+        or stat.S_IMODE(info.st_mode) != 0o1730
+    ):
+        raise RuntimeError("unsafe fixed restart request directory")
+    require_file(RESTART_DIRECTORY / "transaction.lock", 0o644)
+
+
 def properties(unit, *names):
-    # effective policy: systemctl show, not repository text
+    # systemd 257 omits ``DeviceAllow=`` when DevicePolicy=auto, although the
+    # empty allow-list is the effective value.  Preserve exact presence checks
+    # for every other property and accept only that one bound representation.
     output = run(SYSTEMCTL, "show", unit, *(item for name in names for item in ("-p", name)))
     result = {}
     for line in output.splitlines():
         if "=" not in line:
             raise RuntimeError(f"malformed systemctl show output: {unit}")
         key, value = line.split("=", 1)
+        if key not in names:
+            raise RuntimeError(f"malformed systemctl show output: {unit}")
         if key in result:
-            raise RuntimeError(f"duplicate effective property: {key}")
-        result[key] = value
-    if set(result) != set(names):
+            if (
+                key != "DeviceAllow"
+                or not value
+                or value in result[key].splitlines()
+            ):
+                raise RuntimeError(f"malformed systemctl show output: {unit}")
+            result[key] += f"\n{value}"
+        else:
+            result[key] = value
+    missing = set(names) - set(result)
+    if missing == {"DeviceAllow"} and result.get("DevicePolicy") == "auto":
+        result["DeviceAllow"] = ""
+    elif missing:
         raise RuntimeError(f"missing effective properties: {unit}")
     return result
 
@@ -212,29 +335,46 @@ def _parse_effective_sshd_policy(output: str):
         name, value = line.split(" ", 1)
         if not name.islower() or not value or value != value.strip():
             raise RuntimeError("malformed effective sshd output")
-        if name in directives and name in {
-            "authorizedkeysfile", "authorizedkeyscommand", "authorizedkeyscommanduser", "permitrootlogin"
-        }:
+        security_directives = {
+            "authorizedkeysfile", "authorizedkeyscommand", "authorizedkeyscommanduser",
+            "permitrootlogin", "trustedusercakeys", "authorizedprincipalsfile",
+            "authorizedprincipalscommand", "authorizedprincipalscommanduser",
+            "hostbasedauthentication", "pubkeyauthentication", "pubkeyauthoptions",
+            "ignorerhosts",
+        }
+        if name in directives and name in security_directives:
             raise RuntimeError(f"duplicate effective sshd directive: {name}")
         if name not in directives:
             directives[name] = value
 
     required = {
-        "authorizedkeysfile",
-        "authorizedkeyscommand",
-        "authorizedkeyscommanduser",
-        "permitrootlogin",
+        "authorizedkeysfile", "authorizedkeyscommand", "authorizedkeyscommanduser",
+        "permitrootlogin", "trustedusercakeys", "authorizedprincipalsfile",
+        "authorizedprincipalscommand", "authorizedprincipalscommanduser",
+        "hostbasedauthentication", "pubkeyauthentication", "pubkeyauthoptions",
+        "ignorerhosts",
     }
     if not required.issubset(directives):
         raise RuntimeError("effective sshd key-source policy is incomplete")
     key_file = directives["authorizedkeysfile"]
     if key_file not in (".ssh/authorized_keys", "/root/.ssh/authorized_keys"):
         raise RuntimeError("effective AuthorizedKeysFile is not the reviewed file")
-    if directives["authorizedkeyscommand"] != "none":
-        raise RuntimeError("effective AuthorizedKeysCommand provides an alternate key source")
-    command_user = directives["authorizedkeyscommanduser"]
-    if len(command_user.split()) != 1 or any(character in command_user for character in "%/"):
-        raise RuntimeError("effective AuthorizedKeysCommandUser is malformed")
+    exact = {
+        "authorizedkeyscommand": "none",
+        "trustedusercakeys": "none",
+        "authorizedprincipalsfile": "none",
+        "authorizedprincipalscommand": "none",
+        "hostbasedauthentication": "no",
+        "pubkeyauthentication": "yes",
+        "pubkeyauthoptions": "none",
+        "ignorerhosts": "yes",
+    }
+    for name, expected in exact.items():
+        if directives[name] != expected:
+            raise RuntimeError(f"effective {name} permits an alternate SSH key source")
+    for name in ("authorizedkeyscommanduser", "authorizedprincipalscommanduser"):
+        if not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_-]*", directives[name]):
+            raise RuntimeError(f"effective {name} is malformed")
     if directives["permitrootlogin"] != "forced-commands-only":
         raise RuntimeError("effective PermitRootLogin is incompatible with forced-key-only access")
     return {
@@ -253,15 +393,22 @@ def verify_units():
 
     physical = properties(
         "matrix-ci-physical.service",
-        "Type", "RuntimeMaxUSec", "CapabilityBoundingSet", "ExecStart", "ExecStop", "ExecStopPost",
-        "Requires", "After", "ReadOnlyPaths", "UMask",
+        "Type", "RuntimeMaxUSec", "User", "Group", "CapabilityBoundingSet",
+        "AmbientCapabilities", "ExecStart", "ExecStop", "ExecStopPost", "Requires",
+        "After", "ReadOnlyPaths", "ReadWritePaths", "DevicePolicy", "DeviceAllow", "UMask",
     )
     if physical["Type"] != "exec":
         raise RuntimeError("physical service Type is not exec")
     if physical["RuntimeMaxUSec"] in ("", "0", "infinity"):
         raise RuntimeError("physical RuntimeMaxUSec is not effective")
-    if not physical["CapabilityBoundingSet"]:
-        raise RuntimeError("physical CapabilityBoundingSet is empty")
+    if physical["User"] != "root" or physical["Group"] != "root":
+        raise RuntimeError("physical service identity differs from review")
+    if {capability.upper() for capability in physical["CapabilityBoundingSet"].split()} != {
+        "CAP_SYS_RAWIO", "CAP_DAC_READ_SEARCH"
+    }:
+        raise RuntimeError("physical CapabilityBoundingSet differs from review")
+    if physical["AmbientCapabilities"]:
+        raise RuntimeError("physical AmbientCapabilities differs from review")
     if "flock" in physical["ExecStart"] or "matrix-ci-physical-verifier" not in physical["ExecStart"]:
         raise RuntimeError("physical ExecStart violates single path admission")
     if "--restore-only" not in physical["ExecStop"] or "--restore-only" not in physical["ExecStopPost"]:
@@ -270,6 +417,10 @@ def verify_units():
         raise RuntimeError("physical service can start before display-lock tmpfiles setup")
     if "/run/matrix-display" not in physical["ReadOnlyPaths"].split():
         raise RuntimeError("physical service display-lock namespace is not read-only")
+    if physical["ReadWritePaths"].split() != ["/run/matrix-ci-physical"]:
+        raise RuntimeError("physical writable paths differ from review")
+    if physical["DevicePolicy"] != "auto" or physical["DeviceAllow"]:
+        raise RuntimeError("physical device access differs from review")
     if physical["UMask"] != "0077":
         raise RuntimeError("physical service UMask is not 0077")
 
@@ -279,21 +430,70 @@ def verify_units():
     if path["ActiveState"] != "active":
         raise RuntimeError("matrix-ci-physical.path is not active")
 
-    web = properties(
-        "matrix-web.service", "InaccessiblePaths", "CapabilityBoundingSet",
-        "Requires", "After", "ReadOnlyPaths", "UMask",
+    restart_path = properties(
+        "matrix-device-restart.path", "Unit", "Paths", "ActiveState"
     )
-    if "/run/matrix-ci-physical" not in web["InaccessiblePaths"]:
-        raise RuntimeError("matrix-web lacks physical namespace isolation")
-    if not web["CapabilityBoundingSet"]:
-        raise RuntimeError("matrix-web CapabilityBoundingSet is empty")
+    if (
+        "matrix-device-restart.service" not in restart_path["Unit"]
+        or "/run/matrix-device-restart/request" not in restart_path["Paths"]
+        or restart_path["ActiveState"] != "active"
+    ):
+        raise RuntimeError("fixed restart path admission is not active")
+
+    restart = properties(
+        "matrix-device-restart.service", "Type", "ExecStart", "User", "Group",
+        "CapabilityBoundingSet", "AmbientCapabilities", "ReadWritePaths", "DevicePolicy", "DeviceAllow",
+    )
+    if (
+        restart["Type"] != "oneshot"
+        or "matrix-device-restart-broker" not in restart["ExecStart"]
+        or restart["User"] != "root"
+        or restart["Group"] != "root"
+        or {capability.upper() for capability in restart["CapabilityBoundingSet"].split()}
+        != {"CAP_SYS_BOOT"}
+        or restart["AmbientCapabilities"]
+        or restart["ReadWritePaths"].split() != ["/run/matrix-device-restart"]
+        or restart["DevicePolicy"] != "auto"
+        or restart["DeviceAllow"]
+    ):
+        raise RuntimeError("fixed restart broker effective policy differs from review")
+
+    web = properties(
+        "matrix-web.service", "User", "Group", "InaccessiblePaths", "CapabilityBoundingSet",
+        "AmbientCapabilities", "Requires", "After", "ReadOnlyPaths", "ReadWritePaths",
+        "DevicePolicy", "DeviceAllow", "UMask",
+    )
+    if web["User"] != "matrix-web" or web["Group"] != "matrix-web":
+        raise RuntimeError("matrix-web effective identity differs from review")
+    if set(web["InaccessiblePaths"].split()) != {
+        "/run/systemd/private", "/run/dbus/system_bus_socket", "/run/matrix-ci-physical"
+    }:
+        raise RuntimeError("matrix-web inaccessible paths differ from review")
+    if {capability.upper() for capability in web["CapabilityBoundingSet"].split()} != {
+        "CAP_SYS_RAWIO"
+    }:
+        raise RuntimeError("matrix-web CapabilityBoundingSet differs from review")
+    if {capability.upper() for capability in web["AmbientCapabilities"].split()} != {
+        "CAP_SYS_RAWIO"
+    }:
+        raise RuntimeError("matrix-web AmbientCapabilities differs from review")
     if "systemd-tmpfiles-setup.service" not in web["Requires"].split() or "systemd-tmpfiles-setup.service" not in web["After"].split():
         raise RuntimeError("matrix-web can start before display-lock tmpfiles setup")
     if "/run/matrix-display" not in web["ReadOnlyPaths"].split():
         raise RuntimeError("matrix-web display-lock namespace is not read-only")
+    if set(web["ReadWritePaths"].split()) != {
+        "/home/admin/matrix/data", "/home/admin/matrix/resources/media", "/run/matrix-device-restart"
+    }:
+        raise RuntimeError("matrix-web writable paths differ from review")
+    if web["DevicePolicy"] != "closed" or set(web["DeviceAllow"].splitlines()) != {
+        "/dev/mem rw", "/dev/gpiomem rw", "/dev/vcio rw"
+    }:
+        raise RuntimeError("matrix-web device access differs from review")
     if web["UMask"] != "0077":
         raise RuntimeError("matrix-web UMask is not 0077")
+    verify_physical_runtime_install()
     verify_display_lock_install()
+    verify_restart_broker_install()
 
 
 def verify_ssh(fingerprint: str, context: SshConnectionContext):
@@ -328,9 +528,14 @@ def main(argv=None):
     parser.add_argument("--local-address", required=True, help="actual appliance address receiving SSH")
     parser.add_argument("--local-port", required=True, type=int, help="actual appliance SSH port")
     parser.add_argument("--routing-domain", required=True, help="actual sshd connection routing domain")
+    parser.add_argument(
+        "--expected-artifact-sha256", action="append", required=True, metavar="NAME=SHA256",
+        help="digest copied from the separately reviewed installation input manifest",
+    )
     args = parser.parse_args(argv)
     if os.geteuid() != 0:
         parser.error("root is required")
+    verify_reviewed_artifacts(_parse_expected_artifact_digests(args.expected_artifact_sha256))
     verify_units()
     context = SshConnectionContext(
         source_address=args.runner_address,

@@ -28,15 +28,39 @@ BINDINGS_ROOT = Path("/usr/local/lib/matrix-ci-python")
 LABELS_FILE = Path("/run/matrix-ci-physical/claim")
 CLAIM_FILE = LABELS_FILE
 REPORT_FILE = Path("/run/matrix-ci-physical/report")
+REPORT_TEMPORARIES = "report-temporaries"
 LOCK_FILE = "/run/matrix-display/matrix-display.lock"
 EXPECTED_DIMENSIONS = (64, 32)
 BRIGHTNESS_REQUESTS = (0, 1, 25, 50, 75, 100, 101)
 MAX_REPORT_BYTES = 65536
+MAX_STATE_FILE_BYTES = 1024 * 1024
+MAX_STATE_AGGREGATE_BYTES = 2 * 1024 * 1024
+MAX_STATE_ENTRIES = 256
+MAX_STATE_DEPTH = 32
 RENAME_NOREPLACE = 1
 _TEMPORARY_SEQUENCE = itertools.count()
+_STATE_DIGEST_DOMAIN = b"matrix-state-tree\x00schema-v1\x00"
+_STATE_RECORD_ROOT = 1
+_STATE_RECORD_DIRECTORY = 2
+_STATE_RECORD_FILE = 3
+
+_CLEANUP_WARNINGS = {
+    "unlink": "physical verifier cleanup warning: temporary unlink failed\n",
+    "fsync": "physical verifier cleanup warning: directory sync failed\n",
+}
 
 
-def _rename_noreplace(old_name, new_name, directory_fd):
+def _cleanup_warning(kind):
+    """Emit one fixed non-secret warning; diagnostics can never affect lifecycle."""
+    try:
+        sys.stderr.write(_CLEANUP_WARNINGS[kind])
+        sys.stderr.flush()
+    except BaseException:
+        pass
+
+
+def _rename_noreplace(old_name, new_name, directory_fd, new_directory_fd=None):
+    target_fd = directory_fd if new_directory_fd is None else new_directory_fd
     libc = ctypes.CDLL(None, use_errno=True)
     renameat2 = getattr(libc, "renameat2", None)
     if renameat2 is None:
@@ -45,7 +69,7 @@ def _rename_noreplace(old_name, new_name, directory_fd):
         ctypes.c_int, ctypes.c_char_p, ctypes.c_int, ctypes.c_char_p, ctypes.c_uint
     )
     renameat2.restype = ctypes.c_int
-    if renameat2(directory_fd, os.fsencode(old_name), directory_fd, os.fsencode(new_name), RENAME_NOREPLACE):
+    if renameat2(directory_fd, os.fsencode(old_name), target_fd, os.fsencode(new_name), RENAME_NOREPLACE):
         error = ctypes.get_errno()
         raise OSError(error, os.strerror(error), new_name)
 
@@ -72,68 +96,49 @@ def _unlink_owned_temporary(runtime_fd, name, identity):
             return
         os.unlink(name, dir_fd=runtime_fd)
     except OSError:
-        print(
-            "physical verifier cleanup warning: temporary unlink failed",
-            file=sys.stderr,
-        )
+        _cleanup_warning("unlink")
         return
     try:
         os.fsync(runtime_fd)
     except OSError:
-        print(
-            "physical verifier cleanup warning: directory sync failed",
-            file=sys.stderr,
-        )
+        _cleanup_warning("fsync")
 
 
-def _scavenge_stale_temporaries(runtime_fd, prefix, *, limit=128):
-    """Remove bounded dead-writer temps only from PID-1's post-stop state."""
-    pattern = re.compile(rf"{re.escape(prefix)}\.([1-9][0-9]*)\.([0-9]+)\Z")
+_LAST_SCAVENGE_VISITED = 0
+
+
+def _scavenge_quiescent_temporaries(temporary_fd, *, limit=128):
+    """Remove bounded entries only after PID 1 has stopped the sole writer."""
+    global _LAST_SCAVENGE_VISITED
+    visited = 0
     removed = 0
-    examined = 0
     unlink_warning_emitted = False
-    with os.scandir(runtime_fd) as entries:
+    with os.scandir(temporary_fd) as entries:
         for entry in entries:
-            if examined >= limit:
+            if visited >= limit:
                 break
-            match = pattern.fullmatch(entry.name)
-            if match is None:
-                continue
-            examined += 1
+            visited += 1
             try:
-                os.kill(int(match.group(1)), 0)
-            except ProcessLookupError:
-                pass
-            except PermissionError:
-                continue
-            else:
-                continue
-            try:
-                info = entry.stat(follow_symlinks=False)
-                if (
-                    not stat.S_ISREG(info.st_mode) or info.st_uid != 0 or info.st_gid != 0
-                    or stat.S_IMODE(info.st_mode) != 0o600 or info.st_nlink != 1
-                ):
-                    continue
-                os.unlink(entry.name, dir_fd=runtime_fd)
+                os.unlink(entry.name, dir_fd=temporary_fd)
                 removed += 1
             except OSError:
                 if not unlink_warning_emitted:
-                    print(
-                        "physical verifier cleanup warning: temporary unlink failed",
-                        file=sys.stderr,
-                    )
+                    _cleanup_warning("unlink")
                     unlink_warning_emitted = True
-                continue
+    _LAST_SCAVENGE_VISITED = visited
     if removed:
         try:
-            os.fsync(runtime_fd)
+            os.fsync(temporary_fd)
         except OSError:
-            print(
-                "physical verifier cleanup warning: directory sync failed",
-                file=sys.stderr,
-            )
+            _cleanup_warning("fsync")
     return removed
+
+
+def _scavenge_stale_temporaries(temporary_fd, prefix, *, limit=128):
+    """Compatibility entry point restricted to the report-temporary namespace."""
+    if prefix != REPORT_FILE.name + ".tmp":
+        raise RuntimeError("invalid report temporary namespace")
+    return _scavenge_quiescent_temporaries(temporary_fd, limit=limit)
 
 
 def _trusted_directory(info, *, exact_mode=None):
@@ -180,32 +185,225 @@ def _open_runtime_directory(path: Path):
     return fd
 
 
+def _open_temporary_namespace(runtime_fd, name):
+    try:
+        os.mkdir(name, 0o700, dir_fd=runtime_fd)
+        os.fsync(runtime_fd)
+    except FileExistsError:
+        pass
+    fd = os.open(name, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC,
+                 dir_fd=runtime_fd)
+    if not _trusted_directory(os.fstat(fd), exact_mode=0o700):
+        os.close(fd)
+        raise RuntimeError("unsafe physical verifier temporary namespace")
+    return fd
+
+
 def _run(*argv: str, check: bool = True) -> subprocess.CompletedProcess:
     return subprocess.run(argv, check=check, text=True, capture_output=True, timeout=15)
 
 
+def _stable_state_identity(info):
+    return (
+        info.st_dev, info.st_ino, info.st_mode, info.st_uid, info.st_gid,
+        info.st_nlink, info.st_size, info.st_mtime_ns, info.st_ctime_ns,
+    )
+
+
+def _state_uint(value, width, field):
+    if type(value) is not int or value < 0 or value >= 1 << (width * 8):
+        raise RuntimeError(f"state tree {field} is not encodable")
+    return value.to_bytes(width, "big")
+
+
+def _state_record_prefix(record_type, path, info, *, content_length=None):
+    if record_type not in (_STATE_RECORD_ROOT, _STATE_RECORD_DIRECTORY, _STATE_RECORD_FILE):
+        raise RuntimeError("state tree record type is not encodable")
+    if not isinstance(path, bytes):
+        raise RuntimeError("state tree path is not encodable")
+    encoded = bytearray((record_type,))
+    encoded.extend(_state_uint(len(path), 4, "path length"))
+    encoded.extend(path)
+    for value in _stable_state_identity(info):
+        encoded.extend(_state_uint(value, 8, "metadata"))
+    if record_type == _STATE_RECORD_FILE:
+        encoded.extend(_state_uint(content_length, 8, "content length"))
+    elif content_length is not None:
+        raise RuntimeError("state tree content length is not encodable")
+    return bytes(encoded)
+
+
+def _state_directory(info):
+    return (
+        stat.S_ISDIR(info.st_mode)
+        and not stat.S_IMODE(info.st_mode) & 0o022
+    )
+
+
+def _open_state_root(root: Path):
+    if not root.is_absolute():
+        raise RuntimeError("unsafe state tree root")
+    parent_fd = os.open("/", os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC)
+    try:
+        for index, component in enumerate(root.parts[1:]):
+            child_fd = os.open(
+                component,
+                os.O_RDONLY | os.O_DIRECTORY | os.O_NONBLOCK | os.O_NOFOLLOW | os.O_CLOEXEC,
+                dir_fd=parent_fd,
+            )
+            child_info = os.fstat(child_fd)
+            if not _state_directory(child_info):
+                os.close(child_fd)
+                raise RuntimeError("unsafe state tree directory")
+            if index == len(root.parts[1:]) - 1:
+                return parent_fd, component, child_fd, child_info
+            os.close(parent_fd)
+            parent_fd = child_fd
+    except BaseException:
+        os.close(parent_fd)
+        raise
+    os.close(parent_fd)
+    raise RuntimeError("unsafe state tree root")
+
+
 def _tree_digest(root: Path) -> str:
+    """Digest an inactive candidate tree without pathname-based content reads."""
     digest = hashlib.sha256()
-    if not root.is_dir() or root.is_symlink():
-        raise RuntimeError(f"unsafe or missing state root: {root}")
-    root_info = root.lstat()
-    digest.update(f".|{root_info.st_mode}|{root_info.st_uid}|{root_info.st_gid}\n".encode())
-    for path in sorted(root.rglob("*"), key=lambda item: str(item.relative_to(root))):
-        relative = str(path.relative_to(root)).encode()
-        info = path.lstat()
-        digest.update(
-            relative
-            + b"\0"
-            + f"{info.st_mode}|{info.st_uid}|{info.st_gid}".encode()
-            + b"\0"
-        )
-        if path.is_symlink():
-            digest.update(os.readlink(path).encode())
-        elif path.is_file():
-            with path.open("rb") as handle:
-                for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+    digest.update(_STATE_DIGEST_DOMAIN)
+    entries = 0
+    aggregate = 0
+    parent_fd = root_fd = None
+
+    def walk(directory_fd, parts, depth):
+        nonlocal entries, aggregate
+        try:
+            names = sorted(entry.name for entry in os.scandir(directory_fd))
+            directory_before = os.fstat(directory_fd)
+        except OSError as error:
+            raise RuntimeError("unsafe state tree directory") from error
+        for name in names:
+            entries += 1
+            if entries > MAX_STATE_ENTRIES:
+                raise RuntimeError("state tree entry bound exceeded")
+            try:
+                admitted = os.stat(name, dir_fd=directory_fd, follow_symlinks=False)
+            except OSError as error:
+                raise RuntimeError("unsafe state tree entry") from error
+            relative = b"/".join((*parts, os.fsencode(name)))
+            if stat.S_ISDIR(admitted.st_mode):
+                if not _state_directory(admitted):
+                    raise RuntimeError("unsafe state tree directory")
+                digest.update(_state_record_prefix(
+                    _STATE_RECORD_DIRECTORY, relative, admitted,
+                ))
+                if depth >= MAX_STATE_DEPTH:
+                    raise RuntimeError("state tree depth bound exceeded")
+                try:
+                    child_fd = os.open(
+                        name,
+                        os.O_RDONLY | os.O_DIRECTORY | os.O_NONBLOCK | os.O_NOFOLLOW | os.O_CLOEXEC,
+                        dir_fd=directory_fd,
+                    )
+                except OSError as error:
+                    raise RuntimeError("unsafe state tree directory") from error
+                try:
+                    opened = os.fstat(child_fd)
+                    if (
+                        not _state_directory(opened)
+                        or _stable_state_identity(admitted) != _stable_state_identity(opened)
+                    ):
+                        raise RuntimeError("state tree directory identity changed")
+                    walk(child_fd, (*parts, os.fsencode(name)), depth + 1)
+                    closed = os.fstat(child_fd)
+                    current = os.stat(name, dir_fd=directory_fd, follow_symlinks=False)
+                    if (
+                        _stable_state_identity(opened) != _stable_state_identity(closed)
+                        or _stable_state_identity(opened) != _stable_state_identity(current)
+                    ):
+                        raise RuntimeError("state tree directory identity changed")
+                finally:
+                    os.close(child_fd)
+                continue
+            if not stat.S_ISREG(admitted.st_mode) or admitted.st_nlink != 1:
+                raise RuntimeError("unsafe state tree non-regular entry")
+            if admitted.st_size > MAX_STATE_FILE_BYTES:
+                raise RuntimeError("state tree file bound exceeded")
+            try:
+                file_fd = os.open(
+                    name,
+                    os.O_RDONLY | os.O_NONBLOCK | os.O_NOFOLLOW | os.O_CLOEXEC,
+                    dir_fd=directory_fd,
+                )
+            except OSError as error:
+                raise RuntimeError("unsafe state tree file") from error
+            try:
+                opened = os.fstat(file_fd)
+                if (
+                    not stat.S_ISREG(opened.st_mode)
+                    or opened.st_nlink != 1
+                    or _stable_state_identity(admitted) != _stable_state_identity(opened)
+                    or opened.st_size > MAX_STATE_FILE_BYTES
+                ):
+                    raise RuntimeError("state tree file identity changed")
+                digest.update(_state_record_prefix(
+                    _STATE_RECORD_FILE, relative, opened,
+                    content_length=opened.st_size,
+                ))
+                file_bytes = 0
+                while True:
+                    chunk = os.read(file_fd, min(65536, MAX_STATE_FILE_BYTES + 1 - file_bytes))
+                    if not chunk:
+                        break
+                    file_bytes += len(chunk)
+                    aggregate += len(chunk)
+                    if file_bytes > MAX_STATE_FILE_BYTES:
+                        raise RuntimeError("state tree file bound exceeded")
+                    if aggregate > MAX_STATE_AGGREGATE_BYTES:
+                        raise RuntimeError("state tree aggregate bound exceeded")
                     digest.update(chunk)
-    return digest.hexdigest()
+                closed = os.fstat(file_fd)
+                current = os.stat(name, dir_fd=directory_fd, follow_symlinks=False)
+                if (
+                    file_bytes != opened.st_size
+                    or _stable_state_identity(opened) != _stable_state_identity(closed)
+                    or _stable_state_identity(opened) != _stable_state_identity(current)
+                ):
+                    raise RuntimeError("state tree file identity changed")
+            finally:
+                os.close(file_fd)
+        try:
+            names_after = sorted(entry.name for entry in os.scandir(directory_fd))
+            directory_after = os.fstat(directory_fd)
+        except OSError as error:
+            raise RuntimeError("unsafe state tree directory") from error
+        if (
+            names_after != names
+            or _stable_state_identity(directory_before)
+            != _stable_state_identity(directory_after)
+        ):
+            raise RuntimeError("state tree directory changed during snapshot")
+
+    try:
+        parent_fd, root_name, root_fd, root_info = _open_state_root(root)
+        digest.update(_state_record_prefix(_STATE_RECORD_ROOT, b"", root_info))
+        walk(root_fd, (), 0)
+        closed_root = os.fstat(root_fd)
+        current_root = os.stat(root_name, dir_fd=parent_fd, follow_symlinks=False)
+        if (
+            _stable_state_identity(root_info) != _stable_state_identity(closed_root)
+            or _stable_state_identity(root_info) != _stable_state_identity(current_root)
+        ):
+            raise RuntimeError("state tree root identity changed")
+        return digest.hexdigest()
+    except RuntimeError:
+        raise
+    except OSError as error:
+        raise RuntimeError("unsafe state tree") from error
+    finally:
+        if root_fd is not None:
+            os.close(root_fd)
+        if parent_fd is not None:
+            os.close(parent_fd)
 
 
 class FixedDisplayOwnershipLock:
@@ -587,10 +785,6 @@ def run_verification(sha: str, pipeline_id: str, *, ops=None, lock_factory=None,
         if not ops.http_ready():
             failure = RuntimeError("production service must be HTTP ready before verification")
         try:
-            before = ops.snapshot()
-        except BaseException as error:
-            failure = failure or error
-        try:
             # The systemd unit owns recovery before this first mutating operation.
             ops.stop_service()
         except BaseException as error:
@@ -598,6 +792,11 @@ def run_verification(sha: str, pipeline_id: str, *, ops=None, lock_factory=None,
         if ops.service_active():
             # Never produce evidence while the root application can rewrite it.
             raise RuntimeError("production service remained active after stop")
+        if failure is None:
+            try:
+                before = ops.snapshot()
+            except BaseException as error:
+                failure = error
     else:
         failure = RuntimeError("production service must be active before verification")
 
@@ -661,9 +860,15 @@ def restore_only(ops=None, *, scavenge_stale_temporaries=False):
     _remove_claim()
     if scavenge_stale_temporaries:
         runtime_fd = _open_runtime_directory(REPORT_FILE.parent)
+        temporary_fd = None
         try:
-            _scavenge_stale_temporaries(runtime_fd, REPORT_FILE.name + ".tmp")
+            temporary_fd = _open_temporary_namespace(runtime_fd, REPORT_TEMPORARIES)
+            _scavenge_stale_temporaries(
+                temporary_fd, REPORT_FILE.name + ".tmp"
+            )
         finally:
+            if temporary_fd is not None:
+                os.close(temporary_fd)
             os.close(runtime_fd)
 
 
@@ -704,12 +909,15 @@ def _write_report(values):
     if len(payload) > MAX_REPORT_BYTES:
         raise RuntimeError("physical verifier report exceeded bound")
     runtime_fd = _open_runtime_directory(REPORT_FILE.parent)
+    temporary_fd = _open_temporary_namespace(runtime_fd, REPORT_TEMPORARIES)
     temporary_name = None
     fd = None
     temporary_identity = None
     try:
         try:
-            temporary_name, fd = _create_unique_temporary(runtime_fd, REPORT_FILE.name + ".tmp")
+            temporary_name, fd = _create_unique_temporary(
+                temporary_fd, REPORT_FILE.name + ".tmp"
+            )
         except OSError as error:
             raise RuntimeError("unsafe physical verifier report publication") from error
         info = os.fstat(fd)
@@ -732,17 +940,22 @@ def _write_report(values):
         os.close(fd)
         fd = None
         try:
-            _rename_noreplace(temporary_name, REPORT_FILE.name, runtime_fd)
+            _rename_noreplace(
+                temporary_name, REPORT_FILE.name, temporary_fd, runtime_fd
+            )
         except OSError as error:
             raise RuntimeError("unsafe physical verifier report publication") from error
         os.fsync(runtime_fd)
     except BaseException:
         if temporary_identity is not None:
-            _unlink_owned_temporary(runtime_fd, temporary_name, temporary_identity)
+            _unlink_owned_temporary(
+                temporary_fd, temporary_name, temporary_identity
+            )
         raise
     finally:
         if fd is not None:
             os.close(fd)
+        os.close(temporary_fd)
         os.close(runtime_fd)
 
 
