@@ -2509,7 +2509,7 @@ class PhysicalVerifierTests(unittest.TestCase):
         baseline = {
             "matrix-ci-physical.service": {
                 "Type": "exec", "RuntimeMaxUSec": "90000000", "User": "root", "Group": "root",
-                "CapabilityBoundingSet": "CAP_DAC_READ_SEARCH CAP_SYS_RAWIO", "AmbientCapabilities": "",
+                "CapabilityBoundingSet": "cap_dac_read_search cap_sys_rawio", "AmbientCapabilities": "",
                 "ExecStart": "/usr/bin/python3 -I -B /usr/local/libexec/matrix-ci-physical-verifier",
                 "ExecStop": "/usr/bin/python3 -I -B /usr/local/libexec/matrix-ci-physical-verifier --restore-only",
                 "ExecStopPost": "/usr/bin/python3 -I -B /usr/local/libexec/matrix-ci-physical-verifier --restore-only --scavenge-stale-temporaries",
@@ -2521,7 +2521,7 @@ class PhysicalVerifierTests(unittest.TestCase):
             "matrix-device-restart.path": {"Unit": "matrix-device-restart.service", "Paths": "/run/matrix-device-restart/request", "ActiveState": "active"},
             "matrix-device-restart.service": {
                 "Type": "oneshot", "ExecStart": "/usr/local/libexec/matrix-device-restart-broker",
-                "User": "root", "Group": "root", "CapabilityBoundingSet": "CAP_SYS_BOOT",
+                "User": "root", "Group": "root", "CapabilityBoundingSet": "cap_sys_boot",
                 "AmbientCapabilities": "", "ReadWritePaths": "/run/matrix-device-restart",
                 "DevicePolicy": "auto", "DeviceAllow": "",
             },

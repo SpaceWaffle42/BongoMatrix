@@ -394,7 +394,9 @@ def verify_units():
         raise RuntimeError("physical RuntimeMaxUSec is not effective")
     if physical["User"] != "root" or physical["Group"] != "root":
         raise RuntimeError("physical service identity differs from review")
-    if set(physical["CapabilityBoundingSet"].split()) != {"CAP_SYS_RAWIO", "CAP_DAC_READ_SEARCH"}:
+    if {capability.upper() for capability in physical["CapabilityBoundingSet"].split()} != {
+        "CAP_SYS_RAWIO", "CAP_DAC_READ_SEARCH"
+    }:
         raise RuntimeError("physical CapabilityBoundingSet differs from review")
     if physical["AmbientCapabilities"]:
         raise RuntimeError("physical AmbientCapabilities differs from review")
@@ -438,7 +440,8 @@ def verify_units():
         or "matrix-device-restart-broker" not in restart["ExecStart"]
         or restart["User"] != "root"
         or restart["Group"] != "root"
-        or restart["CapabilityBoundingSet"].split() != ["CAP_SYS_BOOT"]
+        or {capability.upper() for capability in restart["CapabilityBoundingSet"].split()}
+        != {"CAP_SYS_BOOT"}
         or restart["AmbientCapabilities"]
         or restart["ReadWritePaths"].split() != ["/run/matrix-device-restart"]
         or restart["DevicePolicy"] != "auto"
