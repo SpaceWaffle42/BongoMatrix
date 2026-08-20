@@ -63,7 +63,7 @@ MEDIA_METADATA_ERRORS = (
 CONFIG_REQUEST_LIMIT = 1_048_576
 CONDITIONAL_HEADER_LIMIT = 4096
 MINIMUM_CLIENT_CONTRACT = 2
-APPLICATION_VERSION = "0.3.51-preview"
+APPLICATION_VERSION = "0.3.52-preview"
 DEVICE_RESTART_SCHEDULER_TIMEOUT_SECONDS = 5
 DEVICE_RESTART_RESPONSE_MARGIN_SECONDS = 20
 DEVICE_RESTART_DELAY_SECONDS = 30
@@ -748,15 +748,17 @@ def create_app(
         if session.get("paired") and device_store.contains(session.get("device_id")):
             return render_template("pair.html", paired=True, error=warning)
         pin = pairing.active_pin()
-        if pin is None and device_store.list():
+        testing_pin_available = pairing.has_testing_pin()
+        if pin is None and device_store.list() and not testing_pin_available:
             pairing_gate = "Pairing another browser must be started from an already paired device."
             return render_template(
                 "pair.html",
                 error=f"{warning} {pairing_gate}" if warning else pairing_gate,
             ), 403
-        if pin is None:
+        if pin is None and not testing_pin_available:
             pin = pairing.issue_pin()
-        controller.show_pairing_pin(pin, ttl_seconds=pairing.remaining_seconds())
+        if pin is not None:
+            controller.show_pairing_pin(pin, ttl_seconds=pairing.remaining_seconds())
         return render_template("pair.html", error=warning)
 
     @app.post("/pair")

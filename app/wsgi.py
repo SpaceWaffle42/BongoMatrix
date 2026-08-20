@@ -16,13 +16,14 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 import app as _entrypoint_owner
+from app.testing_pin import load_testing_pin
 from config_store import ConfigStore
 from display_controller import DisplayController
 from hardware_lock import DisplayOwnershipLock
 from matrix_framework import Matrix
 from pairing import PairedDeviceStore, PairingManager, initialize_pairing_display
 from secret_store import SecretStore
-from webapp import create_app
+from webapp import APPLICATION_VERSION, create_app
 
 
 def load_secret(path):
@@ -65,7 +66,10 @@ with _entrypoint_owner._wsgi_runtime_lock:
         controller = DisplayController(
             matrix, config_store, openweather_secrets=openweather_secrets
         )
-        pairing = PairingManager(ttl_seconds=600)
+        pairing = PairingManager(
+            ttl_seconds=600,
+            testing_pin=load_testing_pin(ROOT / "data" / "testing-pin", APPLICATION_VERSION),
+        )
         session_secret = load_secret(ROOT / "data" / "session.key")
         sanitizer_path = os.environ.get("MATRIX_SANITIZER_PATH")
         nobody = pwd.getpwnam("nobody") if sanitizer_path else None
