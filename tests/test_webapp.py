@@ -2065,7 +2065,15 @@ try{
     const payload=JSON.parse(options.body),descriptor=payload.selected_lava_palette;record.payload=payload;
     if(descriptor?.id==='fire_burst')await new Promise((resolve,reject)=>{const timer=setTimeout(resolve,350);options.signal?.addEventListener('abort',()=>{clearTimeout(timer);record.aborted=true;__aborted.push(descriptor.id);reject(new DOMException('Aborted','AbortError'))},{once:true})});
     if(url.endsWith('/weather')&&payload.config.weather.now_x===13)return new Response(JSON.stringify({error:'provider unavailable'}),{status:503,headers:{'Content-Type':'application/json'}});
-    const frames=descriptor?.kind==='custom'?[{png:blue,delay_ms:35},{png:green,delay_ms:80}]:[{png:green,delay_ms:35},{png:blue,delay_ms:80}];
+    let frames;
+    if(url.endsWith('/weather')){
+     frames=Number(payload.config.weather.now_x)===14
+      ?[{png:blue,delay_ms:10000}]
+      :[{png:green,delay_ms:10000}];
+    }else frames=descriptor?.kind==='custom'
+     ?[{png:blue,delay_ms:35},{png:green,delay_ms:80}]
+     :[{png:green,delay_ms:10000}];
+    record.responded=true;
     return new Response(JSON.stringify({session:String(payload.generation).padStart(32,'0'),generation:payload.generation,page:0,frames,next_token:null,complete:true}),{status:200,headers:{'Content-Type':'application/json'}})
    }
    if(url==='/api/edit-preview/cancel')return new Response(JSON.stringify({cancelled:true}),{status:200,headers:{'Content-Type':'application/json'}});
@@ -2087,11 +2095,11 @@ try{
   const custom=await evaluate(`(()=>{const request=__requests.filter(r=>r.payload?.selected_lava_palette?.kind==='custom').at(-1),radio=document.querySelector('input[name="edit-preview-lava-palette"]:checked');radio.focus();renderCustomLavaPalettes();const rerendered=document.querySelector('input[name="edit-preview-lava-palette"]:checked');return {descriptor:request.payload.selected_lava_palette,pixels:${JSON.stringify(customPixels)},selected:rerendered?.value,focus:document.activeElement===rerendered,configHasDescriptor:Object.hasOwn(configBody(),'selected_lava_palette')}})()`);
   const modules=['weather','openweather_overview','openweather_forecast','splash','sleep','announcement_board'];
   for(const module of modules){await evaluate(`(()=>{const select=document.querySelector('#preview-select');select.value='${module}';select.dispatchEvent(new Event('change',{bubbles:true}))})()`);await waitFor(`__requests.some(r=>r.url.endsWith('/${module}')&&r.payload)`)}
-  await evaluate(`(()=>{const select=document.querySelector('#preview-select');select.value='weather';select.dispatchEvent(new Event('change',{bubbles:true}))})()`);await waitFor(`__requests.filter(r=>r.url.endsWith('/weather')&&r.payload).length>=2`);await new Promise(r=>setTimeout(r,45));
+  await evaluate(`(()=>{const select=document.querySelector('#preview-select');select.value='weather';select.dispatchEvent(new Event('change',{bubbles:true}))})()`);await waitFor(`(()=>{const request=__requests.filter(r=>r.url.endsWith('/weather')&&r.payload&&r.payload.config.weather.now_x!==13&&r.payload.config.weather.now_x!==14).at(-1),pixel=[...document.querySelector('#matrix-preview').getContext('2d').getImageData(0,0,1,1).data];return request?.responded&&document.querySelector('#preview-frame').textContent.includes('Unsaved draft frame')&&pixel.join(',')==='68,85,102,255'})()`);
   const validPixel=await evaluate(`[...document.querySelector('#matrix-preview').getContext('2d').getImageData(0,0,1,1).data]`);
-  await evaluate(`(()=>{const x=document.querySelector('[data-built-in-module="weather"][data-setting="now_x"]');x.value='13';x.dispatchEvent(new Event('input',{bubbles:true}))})()`);await waitFor(`document.querySelector('#preview-frame').textContent.includes('Draft error')`);
+  await evaluate(`(()=>{const x=document.querySelector('[data-built-in-module="weather"][data-setting="now_x"]');x.value='13';x.dispatchEvent(new Event('input',{bubbles:true}))})()`);await waitFor(`__requests.some(r=>r.url.endsWith('/weather')&&r.payload?.config.weather.now_x===13)&&document.querySelector('#preview-frame').textContent.includes('Draft error')`);
   const errorPixel=await evaluate(`[...document.querySelector('#matrix-preview').getContext('2d').getImageData(0,0,1,1).data]`),errorAccessible=await evaluate(`document.querySelector('#preview-frame').getAttribute('role')==='alert'`);
-  await evaluate(`(()=>{const x=document.querySelector('[data-built-in-module="weather"][data-setting="now_x"]');x.value='14';x.dispatchEvent(new Event('input',{bubbles:true}))})()`);await waitFor(`document.querySelector('#preview-frame').textContent.includes('Unsaved draft frame')`);
+  await evaluate(`(()=>{const x=document.querySelector('[data-built-in-module="weather"][data-setting="now_x"]');x.value='14';x.dispatchEvent(new Event('input',{bubbles:true}))})()`);await waitFor(`(()=>{const request=__requests.filter(r=>r.url.endsWith('/weather')&&r.payload?.config.weather.now_x===14).at(-1),pixel=[...document.querySelector('#matrix-preview').getContext('2d').getImageData(0,0,1,1).data];return request?.responded&&document.querySelector('#preview-frame').textContent.includes('Unsaved draft frame')&&pixel.join(',')==='170,187,204,255'})()`);
   const final=await evaluate(`(()=>({validPixel:${JSON.stringify(validPixel)},errorPixel:${JSON.stringify(errorPixel)},recoveredPixel:[...document.querySelector('#matrix-preview').getContext('2d').getImageData(0,0,1,1).data],errorAccessible:${JSON.stringify(errorAccessible)},paths:[...new Set(__requests.filter(r=>r.payload).map(r=>r.url))],forbidden:__requests.filter(r=>r.method==='POST'&&(r.url==='/api/config'||r.url.startsWith('/api/preview/')||r.url.startsWith('/api/control/')||r.url.includes('/preview'))&&!r.url.startsWith('/api/edit-preview/')).map(r=>r.url),errors:[...__errors],canvasCount:document.querySelectorAll('#matrix-preview').length}))()`);
   console.log(JSON.stringify({initial,builtIn,custom,final}));
  }else console.log(JSON.stringify({initial}));
@@ -2116,8 +2124,9 @@ try{
         self.assertEqual(report["custom"]["selected"], "custom:palette_sunset", report)
         self.assertTrue(report["custom"]["focus"], report)
         self.assertFalse(report["custom"]["configHasDescriptor"], report)
+        self.assertEqual(report["final"]["validPixel"], [68, 85, 102, 255], report)
         self.assertEqual(report["final"]["validPixel"], report["final"]["errorPixel"], report)
-        self.assertNotEqual(report["final"]["errorPixel"], report["final"]["recoveredPixel"], report)
+        self.assertEqual(report["final"]["recoveredPixel"], [170, 187, 204, 255], report)
         self.assertTrue(report["final"]["errorAccessible"], report)
         for module in ("weather", "openweather_overview", "openweather_forecast", "splash", "sleep", "announcement_board"):
             self.assertIn(f"/api/edit-preview/{module}", report["final"]["paths"], report)
@@ -3221,28 +3230,86 @@ globalThis.document=document;globalThis.window=window;globalThis.fetch=fetch;
         self.assertNotIn("testing PIN", body)
         self.controller.show_pairing_pin.assert_not_called()
 
-    def test_testing_pin_pairs_during_transient_lockout_and_preserves_one_time_pin(self):
+    def test_shared_lockout_blocks_both_pairing_credentials_until_expiry(self):
         testing_pin = "731946"
-        manager = PairingManager(testing_pin=testing_pin, max_attempts=1)
+        clock = Mock(return_value=100.0)
+        manager = PairingManager(
+            testing_pin=testing_pin,
+            max_attempts=2,
+            lockout_seconds=30,
+            clock=clock,
+        )
         one_time_pin = manager.issue_pin()
         wrong_pin = "000000" if one_time_pin != "000000" else "111111"
         self.device_store.add("Existing browser", max_devices=4)
         self.pairing.verify.side_effect = manager.verify
         self.pairing.is_locked.side_effect = manager.is_locked
 
-        rejected = self.client.post(
+        first = self.client.post(
             "/pair", data={"pin": wrong_pin, "device_name": "Testing browser"}
         )
-        accepted = self.client.post(
+        threshold = self.client.post(
+            "/pair", data={"pin": wrong_pin, "device_name": "Testing browser"}
+        )
+        testing_blocked = self.client.post(
+            "/pair", data={"pin": testing_pin, "device_name": "Testing browser"}
+        )
+        one_time_blocked = self.client.post(
+            "/pair", data={"pin": one_time_pin, "device_name": "One-time browser"}
+        )
+
+        self.assertEqual(first.status_code, 401)
+        self.assertIn("invalid or expired", first.get_data(as_text=True))
+        for response in (threshold, testing_blocked, one_time_blocked):
+            body = response.get_data(as_text=True)
+            self.assertEqual(response.status_code, 401)
+            self.assertIn("Too many attempts", body)
+            self.assertNotIn(testing_pin, body)
+            self.assertNotIn("testing PIN", body)
+        self.assertEqual(len(self.device_store.list()), 1)
+        self.assertEqual(manager.active_pin(), one_time_pin)
+        self.assertTrue(manager.is_locked())
+
+        clock.return_value += 31
+        testing_accepted = self.client.post(
+            "/pair", data={"pin": testing_pin, "device_name": "Testing browser"}
+        )
+        one_time_accepted = self.app.test_client().post(
+            "/pair", data={"pin": one_time_pin, "device_name": "One-time browser"}
+        )
+
+        self.assertEqual(testing_accepted.status_code, 302)
+        self.assertEqual(one_time_accepted.status_code, 302)
+        self.assertEqual(len(self.device_store.list()), 3)
+        self.assertIsNone(manager.active_pin())
+        self.assertFalse(manager.is_locked())
+
+    def test_testing_pin_brute_force_lockout_returns_sanitized_pairing_error(self):
+        testing_pin = "731946"
+        manager = PairingManager(testing_pin=testing_pin, max_attempts=2)
+        self.device_store.add("Existing browser", max_devices=4)
+        self.pairing.verify.side_effect = manager.verify
+        self.pairing.is_locked.side_effect = manager.is_locked
+
+        first = self.client.post(
+            "/pair", data={"pin": "000000", "device_name": "Testing browser"}
+        )
+        threshold = self.client.post(
+            "/pair", data={"pin": "111111", "device_name": "Testing browser"}
+        )
+        blocked = self.client.post(
             "/pair", data={"pin": testing_pin, "device_name": "Testing browser"}
         )
 
-        self.assertEqual(rejected.status_code, 401)
-        self.assertIn("Too many attempts", rejected.get_data(as_text=True))
-        self.assertEqual(accepted.status_code, 302)
-        self.assertEqual(len(self.device_store.list()), 2)
-        self.assertEqual(manager.active_pin(), one_time_pin)
-        self.assertTrue(manager.is_locked())
+        self.assertEqual(first.status_code, 401)
+        self.assertIn("invalid or expired", first.get_data(as_text=True))
+        for response in (threshold, blocked):
+            body = response.get_data(as_text=True)
+            self.assertEqual(response.status_code, 401)
+            self.assertIn("Too many attempts", body)
+            self.assertNotIn(testing_pin, body)
+            self.assertNotIn("testing PIN", body)
+        self.assertEqual(len(self.device_store.list()), 1)
 
     def test_successful_pairing_registers_a_named_device_session(self):
         self.pair_browser()

@@ -153,6 +153,7 @@ else:
         finished = threading.Event()
         result = []
         read_fd, write_fd = os.pipe()
+        real_close = os.close
         process = Mock()
         process.stdout = os.fdopen(read_fd, "rb", buffering=0)
         process.poll.return_value = None
@@ -193,15 +194,25 @@ else:
             stop.set()
             stopped_promptly = finished.wait(0.3)
             release_pillow.set()
-            os.close(write_fd)
+            real_close(write_fd)
             worker.join(1)
 
         process.stdout.close()
+        with framework._decoder_reaper_lock:
+            reaper = framework._decoder_reaper_thread
+        self.assertIsNotNone(reaper)
+        reaper.join(0.5)
+        self.assertFalse(reaper.is_alive(), "deferred decoder reaper outlived its test")
+        framework._reset_decoder_reaper_for_tests()
         self.assertTrue(stopped_promptly, "cancellation did not interrupt image decoding")
         self.assertFalse(worker.is_alive())
         self.assertEqual(result, [])
         pillow_open.assert_not_called()
         process.kill.assert_called_once_with()
+        self.assertGreaterEqual(process.wait.call_count, 1)
+        with self.assertRaises(OSError):
+            os.fstat(write_fd)
+        self.assertIsNone(framework._decoder_reaper_owner)
 
     def test_media_frames_observes_cancellation_during_image_decode(self):
         matrix = Matrix.__new__(Matrix)

@@ -181,15 +181,20 @@ class PairingManager:
     def verify(self, candidate):
         with self._lock:
             candidate = str(candidate)
-            if self._testing_pin is not None and hmac.compare_digest(candidate, self._testing_pin):
-                return True
             now = self.clock()
             if now < self._locked_until:
                 return False
+            testing_valid = self._testing_pin is not None and hmac.compare_digest(
+                candidate, self._testing_pin
+            )
+            if testing_valid:
+                self._failed_attempts = 0
+                self._locked_until = 0
+                return True
             valid = (
                 self._pin is not None
                 and now <= self._expires_at
-                and hmac.compare_digest(str(candidate), self._pin)
+                and hmac.compare_digest(candidate, self._pin)
             )
             if valid:
                 self._pin = None
@@ -197,7 +202,9 @@ class PairingManager:
                 self._failed_attempts = 0
                 self._locked_until = 0
                 return True
-            if self._pin is not None and now <= self._expires_at:
+            if self._testing_pin is not None or (
+                self._pin is not None and now <= self._expires_at
+            ):
                 self._failed_attempts += 1
                 if self._failed_attempts >= self.max_attempts:
                     self._failed_attempts = 0
