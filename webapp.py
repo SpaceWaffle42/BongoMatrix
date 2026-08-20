@@ -517,6 +517,7 @@ def create_app(
             scroll_timing_cache.clear(provider="openweather")
 
     app = Flask(__name__, template_folder="app/templates", static_folder="app/static")
+    app.jinja_env.globals["application_version"] = APPLICATION_VERSION
     app.extensions["get_edit_preview_services"] = get_edit_preview_services
     app.extensions["close_edit_preview_services"] = close_edit_preview_services
     app.extensions["media_timeline_slots"] = media_timeline_slots

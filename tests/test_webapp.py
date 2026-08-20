@@ -3434,6 +3434,15 @@ globalThis.document=document;globalThis.window=window;globalThis.fetch=fetch;
         self.assertFalse(next(item for item in config["playlist"] if item["module"] == "openweather_overview")["enabled"])
         self.assertFalse(next(item for item in config["playlist"] if item["module"] == "openweather_forecast")["enabled"])
 
+    def test_pair_page_renders_the_canonical_preview_version(self):
+        response = self.client.get("/pair")
+        body = response.get_data(as_text=True)
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(body.count(f"Version {webapp.APPLICATION_VERSION}"), 1)
+        template = (Path(__file__).parents[1] / "app" / "templates" / "pair.html").read_text()
+        self.assertNotIn(webapp.APPLICATION_VERSION, template)
+
     def test_testing_pin_form_is_available_with_existing_device_without_disclosure(self):
         testing_pin = "731946"
         self.device_store.add("Existing browser", max_devices=4)
