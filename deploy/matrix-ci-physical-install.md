@@ -66,22 +66,39 @@ test "$(stat -c '%U:%G:%a:%F' /run/matrix-display)" = "root:root:755:directory"
 test -f /run/matrix-display/matrix-display.lock
 test ! -L /run/matrix-display/matrix-display.lock
 test "$(stat -c '%U:%G:%a:%h' /run/matrix-display/matrix-display.lock)" = "root:root:644:1"
-test "$(stat -c '%U:%G:%a:%F' /run/matrix-device-restart)" = "root:matrix-web:1730:directory"
-test -f /run/matrix-device-restart/transaction.lock
-test ! -L /run/matrix-device-restart/transaction.lock
-test "$(stat -c '%U:%G:%a:%h' /run/matrix-device-restart/transaction.lock)" = "root:root:644:1"
+test "$(stat -c '%U:%G:%a:%F' /run/matrix-device-restart)" = "root:root:700:directory"
+test "$(stat -c '%U:%G:%a:%F' /run/matrix-device-restart/state)" = "root:root:700:directory"
+test -f /run/matrix-device-restart/state/transaction.lock
+test ! -L /run/matrix-device-restart/state/transaction.lock
+test "$(stat -c '%U:%G:%a:%h' /run/matrix-device-restart/state/transaction.lock)" = "root:root:644:1"
+test "$(stat -c '%U:%G:%a:%F' /run/matrix-device-restart/submit)" = "root:matrix-web:1730:directory"
+restart_root_device="$(stat -c '%d' /run/matrix-device-restart)"
+test "$(stat -c '%d' /run/matrix-device-restart/state)" = "$restart_root_device"
+test "$(stat -c '%d' /run/matrix-device-restart/submit)" = "$restart_root_device"
+unset restart_root_device
 ```
 
-The whole-device restart route runs as the unprivileged `matrix-web` account and
-can only create the fixed zero-byte `/run/matrix-device-restart/request` marker.
-It has no access to the system manager private socket or system bus and cannot
-choose a command, unit, delay, or alternate path. The separately installed,
-root-owned broker validates and claims that marker as `root:root` while holding
-the fixed transaction lock, waits its fixed 30-second response margin, and
-invokes only the fixed reboot operation. Duplicate markers coalesce. The runtime
-namespace is a root-owned `1730` sticky directory in group `matrix-web`; its
-immutable transaction inode is a root-owned `0644` single-link regular file. No
-sudo, setuid helper, or optional dependency is used.
+The whole-device restart route runs inside the hardware-owning web service, which
+must retain effective uid 0 because the pinned RGB Matrix native library rejects
+non-root initialization even with `CAP_SYS_RAWIO`. The unit is nevertheless
+confined with `NoNewPrivileges`, an exact capability/device allow-list, a strict
+read/write namespace, an empty private home view with only the application tree
+bound read-only, zero-byte read-only overlays for `/etc/shadow` and
+`/etc/gshadow`, an empty read-only `/etc/ssh` filesystem, and inaccessible
+system-manager private and DBus sockets. The route can only create the fixed zero-byte
+`/run/matrix-device-restart/submit/request` marker; it cannot choose a command,
+unit, delay, or alternate path. The separately installed root-owned broker
+validates and atomically moves that marker into the inaccessible root-only
+`/run/matrix-device-restart/state` namespace while holding the fixed transaction
+lock, waits its fixed 30-second response margin, and invokes only the fixed reboot
+operation. Duplicate submissions coalesce. The submission namespace is a
+root-owned `1730` sticky directory in group `matrix-web`; the state namespace is
+root-only mode `0700`, and its immutable transaction inode is a root-owned `0644`
+single-link regular file. Both children reside beneath one broker-writable
+`/run/matrix-device-restart` mount, so the atomic no-replace claim cannot cross a
+systemd writable-path bind-mount boundary. Only the submission child is writable
+by the web unit, and the state child is inaccessible there. The web service cannot erase an active request or a
+forensic terminal marker. No sudo, setuid helper, or optional dependency is used.
 
 ### Durable restart terminal states and manual recovery
 
@@ -93,13 +110,14 @@ active `request` is likewise root-claimed after broker admission:
 - `request.cancelled` means the broker was interrupted before completing it.
 - `request.invalid` means admission metadata or marker content failed validation.
 
-Restart requests remain blocked while any one of these markers exists. The API
-returns a sanitized manual-recovery-required response; it does not remove or
-identify the marker to a browser. Before clearing anything, investigate the
-broker journal (`journalctl -u matrix-device-restart.service`), record the
-marker metadata and inode, and determine why the reboot failed, was cancelled,
-or was rejected. Preserve any required forensic evidence outside this runtime
-namespace through the approved incident process.
+Restart submissions are consumed without reboot while any one of these markers
+exists. The API confirms only durable publication in the isolated submission
+namespace; it cannot inspect, identify, or remove the inaccessible forensic state.
+Operators must therefore investigate the broker journal
+(`journalctl -u matrix-device-restart.service`), record the marker metadata and
+inode, and determine why the reboot failed, was cancelled, or was rejected before
+accepting a later restart attempt. Preserve any required forensic evidence outside
+this runtime namespace through the approved incident process.
 
 After that investigation, an administrator may clear exactly one diagnosed
 terminal marker with the following descriptor-relative procedure. Set `MARKER`
@@ -110,15 +128,13 @@ the runtime directory.
 MARKER=request.failed /usr/bin/python3 -I -B <<'PY'
 import fcntl
 import os
-import pwd
 import stat
 
 marker = os.environ["MARKER"]
 if marker not in {"request.failed", "request.cancelled", "request.invalid"}:
     raise SystemExit("refusing unknown restart terminal marker")
-account = pwd.getpwnam("matrix-web")
 directory_fd = os.open(
-    "/run/matrix-device-restart",
+    "/run/matrix-device-restart/state",
     os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC,
 )
 lock_fd = None
@@ -128,8 +144,8 @@ try:
     if (
         not stat.S_ISDIR(directory.st_mode)
         or directory.st_uid != 0
-        or directory.st_gid != account.pw_gid
-        or stat.S_IMODE(directory.st_mode) != 0o1730
+        or directory.st_gid != 0
+        or stat.S_IMODE(directory.st_mode) != 0o700
     ):
         raise RuntimeError("unsafe restart runtime directory")
     lock_before = os.stat(

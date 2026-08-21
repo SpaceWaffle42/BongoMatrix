@@ -47,11 +47,15 @@ RESTART_BROKER = Path("/usr/local/libexec/matrix-device-restart-broker")
 RESTART_SERVICE = Path("/etc/systemd/system/matrix-device-restart.service")
 RESTART_PATH = Path("/etc/systemd/system/matrix-device-restart.path")
 RESTART_TMPFILES_POLICY = Path("/etc/tmpfiles.d/matrix-device-restart.conf")
-RESTART_DIRECTORY = Path("/run/matrix-device-restart")
+RESTART_ROOT_DIRECTORY = Path("/run/matrix-device-restart")
+RESTART_DIRECTORY = RESTART_ROOT_DIRECTORY / "state"
+RESTART_SUBMIT_DIRECTORY = RESTART_ROOT_DIRECTORY / "submit"
 EXPECTED_RESTART_TMPFILES_POLICY = (
-    b"# Host-owned fixed whole-device restart transaction namespace.\n"
-    b"d /run/matrix-device-restart 1730 root matrix-web -\n"
-    b"f /run/matrix-device-restart/transaction.lock 0644 root root -\n"
+    b"# Host-owned fixed whole-device restart transaction namespaces on one mount.\n"
+    b"d /run/matrix-device-restart 0700 root root -\n"
+    b"d /run/matrix-device-restart/state 0700 root root -\n"
+    b"f /run/matrix-device-restart/state/transaction.lock 0644 root root -\n"
+    b"d /run/matrix-device-restart/submit 1730 root matrix-web -\n"
 )
 EXPECTED_ARTIFACT_DIGESTS = {}
 REVIEWED_ARTIFACTS = {
@@ -283,17 +287,37 @@ def verify_restart_broker_install():
     require_file(RESTART_TMPFILES_POLICY, 0o644)
     if RESTART_TMPFILES_POLICY.read_bytes() != EXPECTED_RESTART_TMPFILES_POLICY:
         raise RuntimeError("installed restart tmpfiles policy differs from reviewed source")
-    account = pwd.getpwnam("matrix-web")
+    root_info = RESTART_ROOT_DIRECTORY.lstat()
+    if (
+        not stat.S_ISDIR(root_info.st_mode)
+        or stat.S_ISLNK(root_info.st_mode)
+        or root_info.st_uid != 0
+        or root_info.st_gid != 0
+        or stat.S_IMODE(root_info.st_mode) != 0o700
+    ):
+        raise RuntimeError("unsafe fixed restart root directory")
     info = RESTART_DIRECTORY.lstat()
     if (
         not stat.S_ISDIR(info.st_mode)
         or stat.S_ISLNK(info.st_mode)
         or info.st_uid != 0
-        or info.st_gid != account.pw_gid
-        or stat.S_IMODE(info.st_mode) != 0o1730
+        or info.st_gid != 0
+        or stat.S_IMODE(info.st_mode) != 0o700
     ):
-        raise RuntimeError("unsafe fixed restart request directory")
+        raise RuntimeError("unsafe fixed restart state directory")
     require_file(RESTART_DIRECTORY / "transaction.lock", 0o644)
+    account = pwd.getpwnam("matrix-web")
+    submit = RESTART_SUBMIT_DIRECTORY.lstat()
+    if (
+        not stat.S_ISDIR(submit.st_mode)
+        or stat.S_ISLNK(submit.st_mode)
+        or submit.st_uid != 0
+        or submit.st_gid != account.pw_gid
+        or stat.S_IMODE(submit.st_mode) != 0o1730
+    ):
+        raise RuntimeError("unsafe fixed restart submission directory")
+    if root_info.st_dev != info.st_dev or root_info.st_dev != submit.st_dev:
+        raise RuntimeError("unsafe fixed restart runtime filesystem topology")
 
 
 def properties(unit, *names):
@@ -435,7 +459,7 @@ def verify_units():
     )
     if (
         "matrix-device-restart.service" not in restart_path["Unit"]
-        or "/run/matrix-device-restart/request" not in restart_path["Paths"]
+        or "/run/matrix-device-restart/submit/request" not in restart_path["Paths"]
         or restart_path["ActiveState"] != "active"
     ):
         raise RuntimeError("fixed restart path admission is not active")
@@ -461,28 +485,46 @@ def verify_units():
     web = properties(
         "matrix-web.service", "User", "Group", "InaccessiblePaths", "CapabilityBoundingSet",
         "AmbientCapabilities", "Requires", "After", "ReadOnlyPaths", "ReadWritePaths",
-        "DevicePolicy", "DeviceAllow", "UMask",
+        "BindReadOnlyPaths", "TemporaryFileSystem", "ProtectHome", "ProtectProc", "ProcSubset",
+        "RestrictAddressFamilies", "DevicePolicy", "DeviceAllow", "UMask",
     )
-    if web["User"] != "matrix-web" or web["Group"] != "matrix-web":
+    if web["User"] != "root" or web["Group"] != "matrix-web":
         raise RuntimeError("matrix-web effective identity differs from review")
     if set(web["InaccessiblePaths"].split()) != {
-        "/run/systemd/private", "/run/dbus/system_bus_socket", "/run/matrix-ci-physical"
+        "/run/systemd/private", "/run/dbus/system_bus_socket", "/run/matrix-ci-physical",
+        "/run/matrix-device-restart/state", "/etc/shadow", "/etc/gshadow", "/etc/ssh",
     }:
         raise RuntimeError("matrix-web inaccessible paths differ from review")
-    if {capability.upper() for capability in web["CapabilityBoundingSet"].split()} != {
-        "CAP_SYS_RAWIO"
-    }:
+    expected_web_capabilities = {
+        "CAP_DAC_OVERRIDE", "CAP_FOWNER", "CAP_SETGID", "CAP_SETUID",
+        "CAP_SYS_NICE", "CAP_SYS_RAWIO",
+    }
+    if {capability.upper() for capability in web["CapabilityBoundingSet"].split()} != expected_web_capabilities:
         raise RuntimeError("matrix-web CapabilityBoundingSet differs from review")
-    if {capability.upper() for capability in web["AmbientCapabilities"].split()} != {
-        "CAP_SYS_RAWIO"
-    }:
+    if web["AmbientCapabilities"]:
         raise RuntimeError("matrix-web AmbientCapabilities differs from review")
     if "systemd-tmpfiles-setup.service" not in web["Requires"].split() or "systemd-tmpfiles-setup.service" not in web["After"].split():
         raise RuntimeError("matrix-web can start before display-lock tmpfiles setup")
     if "/run/matrix-display" not in web["ReadOnlyPaths"].split():
         raise RuntimeError("matrix-web display-lock namespace is not read-only")
+    expected_bind_read_only = {
+        "/home/admin/matrix:/home/admin/matrix:rbind",
+        "/dev/null:/etc/shadow:rbind",
+        "/dev/null:/etc/gshadow:rbind",
+    }
+    if (
+        web["ProtectHome"] != "tmpfs"
+        or set(web["BindReadOnlyPaths"].split()) != expected_bind_read_only
+        or web["TemporaryFileSystem"].split() != ["/etc/ssh:ro"]
+    ):
+        raise RuntimeError("matrix-web home and secret visibility differs from review")
+    if web["ProtectProc"] != "invisible" or web["ProcSubset"] != "pid":
+        raise RuntimeError("matrix-web process visibility differs from review")
+    if set(web["RestrictAddressFamilies"].split()) != {"AF_INET", "AF_INET6"}:
+        raise RuntimeError("matrix-web address-family boundary differs from review")
     if set(web["ReadWritePaths"].split()) != {
-        "/home/admin/matrix/data", "/home/admin/matrix/resources/media", "/run/matrix-device-restart"
+        "/home/admin/matrix/data", "/home/admin/matrix/resources/media",
+        "/run/matrix-device-restart/submit",
     }:
         raise RuntimeError("matrix-web writable paths differ from review")
     if web["DevicePolicy"] != "closed" or set(web["DeviceAllow"].splitlines()) != {

@@ -1,6 +1,6 @@
 [Unit]
 Description=Fixed host-owned delayed Matrix whole-device restart broker
-ConditionPathExists=/run/matrix-device-restart/request
+ConditionPathExists=/run/matrix-device-restart/submit/request
 
 [Service]
 Type=oneshot

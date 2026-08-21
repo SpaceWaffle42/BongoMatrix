@@ -2,7 +2,7 @@
 Description=Watch the fixed Matrix whole-device restart request
 
 [Path]
-PathExists=/run/matrix-device-restart/request
+PathExists=/run/matrix-device-restart/submit/request
 Unit=matrix-device-restart.service
 
 [Install]
