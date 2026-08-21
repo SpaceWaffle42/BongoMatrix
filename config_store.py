@@ -764,13 +764,6 @@ def validate_config(config, *, allow_legacy_announcements=True, enforce_save_bou
             raise ValueError("lava custom palette colours must contain three #RRGGBB colours")
         palette["name"] = palette["name"].strip()
         palette["colours"] = [colour.lower() for colour in palette_colours]
-    if (
-        not enabled_palettes
-        and not lava["custom_enabled"]
-        and not any(palette["enabled"] for palette in custom_palettes)
-    ):
-        raise ValueError("enable at least one predefined or custom lava palette")
-
     for key, filename in config["media"].items():
         if not _is_safe_media_reference(filename):
             raise ValueError(

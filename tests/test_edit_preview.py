@@ -39,6 +39,37 @@ class Colour:
 
 
 class EditPreviewTests(unittest.TestCase):
+    def test_zero_selected_lava_preview_is_neutral_and_matches_physical_renderer(self):
+        class FixedDateTime(datetime.datetime):
+            @classmethod
+            def now(cls, tz=None):
+                return cls(2030, 1, 15, 9, 30, tzinfo=tz)
+
+        candidate = copy.deepcopy(DEFAULT_CONFIG)
+        candidate["lava"].update({
+            "enabled_palettes": [], "custom_enabled": False,
+            "custom_palettes": [], "show_time": True, "show_date": True,
+        })
+
+        def rendered_pixels(show_time, show_date):
+            config = copy.deepcopy(candidate)
+            config["lava"].update({"show_time": show_time, "show_date": show_date})
+            frame = next(edit_preview.lava_preview_frames(CaptureMatrix(), config))
+            with Image.open(io.BytesIO(base64.b64decode(frame["png"]))) as image:
+                return tuple(image.convert("RGB").get_flattened_data()), frame["delay_ms"]
+
+        with patch("modules.clock_lava.datetime.datetime", FixedDateTime):
+            visible, delay = rendered_pixels(True, True)
+            time_hidden, _ = rendered_pixels(False, True)
+            date_hidden, _ = rendered_pixels(True, False)
+            text_hidden, _ = rendered_pixels(False, False)
+
+        self.assertIn((0, 0, 0), visible)
+        self.assertNotEqual(visible, time_hidden)
+        self.assertNotEqual(visible, date_hidden)
+        self.assertEqual(set(text_hidden), {(0, 0, 0)})
+        self.assertEqual(delay, 30)
+
     def test_page_supersede_race_drops_old_generation_output(self):
         class CommitBarrierIterator:
             def __init__(self, name, *, block_on_call=None):

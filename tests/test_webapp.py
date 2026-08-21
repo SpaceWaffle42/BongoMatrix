@@ -105,15 +105,97 @@ class WebAppTests(unittest.TestCase):
             device_restart_runner=self.device_restart_runner,
         )
         self.client = self.app.test_client()
-        self.client.environ_base["HTTP_X_MATRIX_ACTION"] = "restart-whole-device"
+
+    def paired_request(self, method, path, client=None, **kwargs):
+        if client is None:
+            client = self.client
+        headers = dict(kwargs.pop("headers", {}))
+        headers["X-Matrix-Action"] = "paired-request"
+        return client.open(path, method=method, headers=headers, **kwargs)
+
+    def paired_client_request(self, method, client, path, **kwargs):
+        return self.paired_request(method, path, client=client, **kwargs)
+
+    def run_live_chromium_probe(self, probe, timeout=30):
+        server = make_server("127.0.0.1", 0, self.app, threaded=True)
+        server_thread = threading.Thread(target=server.serve_forever, daemon=True)
+        server_thread.start()
+        chromium = os.environ["MATRIX_CHROMIUM"]
+        node = shutil.which("node")
+        assert node is not None
+        with tempfile.TemporaryDirectory(prefix="matrix-live-browser-") as directory:
+            profile = Path(directory) / "profile"
+            browser = subprocess.Popen([
+                chromium, "--headless", "--no-sandbox", "--disable-gpu",
+                "--remote-debugging-port=0", f"--user-data-dir={profile}", "about:blank",
+            ], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, start_new_session=True)
+            try:
+                active = profile / "DevToolsActivePort"
+                for _attempt in range(50):
+                    if active.is_file():
+                        break
+                    if browser.poll() is not None:
+                        self.fail("Chromium exited before publishing DevTools port")
+                    time.sleep(.1)
+                self.assertTrue(active.is_file(), "Chromium DevTools port unavailable")
+                completed = subprocess.run([
+                    node, "-e", probe, active.read_text().splitlines()[0],
+                    str(server.server_port),
+                ], capture_output=True, text=True, timeout=timeout)
+            finally:
+                terminate_process_group(browser)
+                server.shutdown()
+                server.server_close()
+                server_thread.join(timeout=5)
+        self.assertEqual(completed.returncode, 0, completed.stderr)
+        return json.loads(completed.stdout.strip().splitlines()[-1])
+
+    def run_pair_action_chromium_probe(self, expected_status, expected_text):
+        probe = r"""
+const debugPort=process.argv[1],appPort=process.argv[2],sleep=ms=>new Promise(r=>setTimeout(r,ms));let endpoint;
+for(let attempt=0;attempt<50;attempt++){try{endpoint=await fetch(`http://127.0.0.1:${debugPort}/json/new`,{method:'PUT'}).then(r=>r.json());break}catch(_){await sleep(100)}}
+if(!endpoint)throw Error('CDP unavailable');
+const socket=new WebSocket(endpoint.webSocketDebuggerUrl),pending=new Map();let id=0;
+socket.onmessage=e=>{const m=JSON.parse(e.data);if(m.id&&pending.has(m.id)){const p=pending.get(m.id);pending.delete(m.id);m.error?p.reject(Error(JSON.stringify(m.error))):p.resolve(m.result)}};
+await new Promise((resolve,reject)=>{socket.onopen=resolve;socket.onerror=reject});
+const send=(method,params={})=>new Promise((resolve,reject)=>{const request=++id;pending.set(request,{resolve,reject});socket.send(JSON.stringify({id:request,method,params}))});
+const evaluate=async(expression,awaitPromise=false)=>{const result=await send('Runtime.evaluate',{expression,returnByValue:true,awaitPromise});if(result.exceptionDetails)throw Error(JSON.stringify(result.exceptionDetails));return result.result.value};
+const waitFor=async(expression,timeout=5000)=>{const end=Date.now()+timeout;while(Date.now()<end){try{const value=await evaluate(expression);if(value)return value}catch(_){}await sleep(25)}throw Error('timeout: '+expression)};
+try{
+ await send('Runtime.enable');await send('Page.enable');
+ await send('Page.navigate',{url:`http://127.0.0.1:${appPort}/pair`});
+ await waitFor(`document.querySelector('form')&&document.readyState==='complete'`);
+ await evaluate(`fetch('/pair',{method:'POST',headers:{'Content-Type':'application/x-www-form-urlencoded'},body:new URLSearchParams({device_name:'Pair action browser',pin:'123456'})}).then(()=>true)`,true);
+ await send('Page.navigate',{url:`http://127.0.0.1:${appPort}/pair`});
+ await waitFor(`document.querySelector('button[data-paired-action="/pair/new"]')&&document.readyState==='complete'`);
+ await evaluate(`(()=>{const realFetch=fetch;window.fetch=async(...args)=>{if(args[0]==='/pair/new')sessionStorage.setItem('pairRequest',JSON.stringify({method:args[1]?.method,signal:args[1]?.headers?.['X-Matrix-Action']}));const response=await realFetch(...args);if(args[0]==='/pair/new')sessionStorage.setItem('pairResponse',JSON.stringify({status:response.status}));return response};const button=document.querySelector('button[data-paired-action="/pair/new"]');sessionStorage.setItem('pairSemantics',JSON.stringify({tag:button.tagName,type:button.type,tabIndex:button.tabIndex}));button.click();return true})()`);
+ await waitFor(`sessionStorage.getItem('pairResponse')`);await sleep(250);
+ const report=await evaluate(`({path:location.pathname,body:document.body.innerText,request:JSON.parse(sessionStorage.getItem('pairRequest')),response:JSON.parse(sessionStorage.getItem('pairResponse')),semantics:JSON.parse(sessionStorage.getItem('pairSemantics')),errorRole:document.querySelector('.error')?.getAttribute('role')||null})`);
+ if(report.response.status!==EXPECTED_STATUS||!report.body.includes(EXPECTED_TEXT))throw Error('authoritative pair response was discarded: '+JSON.stringify(report));
+ if(report.request.method!=='POST'||report.request.signal!=='paired-request')throw Error('paired action signal missing: '+JSON.stringify(report));
+ if(report.semantics.tag!=='BUTTON'||report.semantics.type!=='button'||report.semantics.tabIndex!==0)throw Error('pair action is not keyboard-operable: '+JSON.stringify(report));
+ console.log(JSON.stringify(report));
+}finally{socket.close()}
+""".replace("EXPECTED_STATUS", str(expected_status)).replace(
+            "EXPECTED_TEXT", json.dumps(expected_text)
+        )
+        return self.run_live_chromium_probe(probe)
 
     def post_config(self, json=None, client=None, require_revision=True, **kwargs):
-        client = client or self.client
+        if client is None:
+            client = self.client
         if require_revision:
             headers = dict(kwargs.pop("headers", {}))
             headers.setdefault("If-Match", f'"{self.store.get()["revision"]}"')
             kwargs["headers"] = headers
-        return client.post("/api/config", json=json, **kwargs)
+        return self.paired_request("POST", "/api/config", client=client, json=json, **kwargs)
+
+    def post_restart(self, client=None, **kwargs):
+        if client is None:
+            client = self.client
+        headers = dict(kwargs.pop("headers", {}))
+        headers["X-Matrix-Action"] = "restart-whole-device"
+        return client.open("/api/system/restart", method="POST", headers=headers, **kwargs)
 
     def test_chromium_process_group_cleanup_waits_for_descendant_extinction(self):
         child_code = (
@@ -170,7 +252,7 @@ class WebAppTests(unittest.TestCase):
             },
         }
         self.assertEqual(
-            self.client.post("/api/scroll-timing/weather", json=payload).status_code,
+            self.paired_request("POST", "/api/scroll-timing/weather", json=payload).status_code,
             401,
         )
         self.pair_browser()
@@ -179,7 +261,7 @@ class WebAppTests(unittest.TestCase):
             feels_like=19, high=23, low=12, humidity=50,
         )
         with patch("modules.weather_app.OpenMeteoClient.fetch", return_value=snapshot) as fetch:
-            response = self.client.post("/api/scroll-timing/weather", json=payload)
+            response = self.paired_request("POST", "/api/scroll-timing/weather", json=payload)
         self.assertEqual(response.status_code, 200, response.get_data(as_text=True))
         result = response.get_json()
         self.assertEqual(result["status"], "fresh")
@@ -198,7 +280,7 @@ class WebAppTests(unittest.TestCase):
         self.assertLessEqual(fetch.call_args.kwargs["deadline"] - time.monotonic(), 5)
 
         oversized = b'{"settings":"' + b'x' * (16 * 1024) + b'"}'
-        response = self.client.post(
+        response = self.paired_request("POST",
             "/api/scroll-timing/weather", data=oversized,
             content_type="application/json",
         )
@@ -207,8 +289,8 @@ class WebAppTests(unittest.TestCase):
     def test_provider_scroll_timing_rejects_unknown_length_body_before_json_parsing(self):
         self.pair_browser()
         oversized = b'{"settings":"' + b'x' * (17 * 1024) + b'"}'
-        response = self.client.open(
-            "/api/scroll-timing/weather", method="POST",
+        response = self.paired_request(
+            "POST", "/api/scroll-timing/weather",
             input_stream=io.BytesIO(oversized), content_type="application/json",
             environ_overrides={"CONTENT_LENGTH": "", "wsgi.input_terminated": True},
         )
@@ -292,7 +374,7 @@ class WebAppTests(unittest.TestCase):
             return original_validate(*args, **kwargs)
         with patch("webapp.validate_config", side_effect=slow_validate), \
              patch("modules.weather_app.prepare_ticker_plan", side_effect=prepare):
-            response = self.client.post("/api/scroll-timing/weather", json=payload)
+            response = self.paired_request("POST", "/api/scroll-timing/weather", json=payload)
         self.assertEqual(response.status_code, 200, response.get_data(as_text=True))
         self.assertEqual(len(observed), 1)
         self.assertGreater(observed[0], 0)
@@ -351,14 +433,14 @@ class WebAppTests(unittest.TestCase):
                 return cls(2030, 1, 15, 12, tzinfo=tz)
         payload = {"base_revision": current["revision"], "settings": {"announcements": [active]}}
         with patch("webapp.dt.datetime", FixedDateTime):
-            response = self.client.post("/api/scroll-timing/announcement_board", json=payload)
+            response = self.paired_request("POST", "/api/scroll-timing/announcement_board", json=payload)
         self.assertEqual(response.status_code, 200, response.get_data(as_text=True))
         self.assertEqual(response.get_json()["display"], "8.0 s")
         self.assertEqual(response.get_json()["status"], "fresh")
         self.assertIn("refresh_at", response.get_json())
         payload["settings"]["announcements"][0]["enabled"] = False
         with patch("webapp.dt.datetime", FixedDateTime):
-            unavailable = self.client.post("/api/scroll-timing/announcement_board", json=payload)
+            unavailable = self.paired_request("POST", "/api/scroll-timing/announcement_board", json=payload)
         self.assertEqual(unavailable.status_code, 200, unavailable.get_data(as_text=True))
         self.assertEqual(unavailable.get_json()["display"], "Unavailable")
         self.assertIsNone(unavailable.get_json()["milliseconds"])
@@ -381,30 +463,30 @@ class WebAppTests(unittest.TestCase):
         second_key = "second_key_material_654321"
 
         with patch("modules.openweather_overview.prepare_ticker_plan", return_value=plan) as prepare:
-            initial = self.client.post("/api/scroll-timing/openweather_overview", json=payload)
+            initial = self.paired_request("POST", "/api/scroll-timing/openweather_overview", json=payload)
             self.assertEqual(initial.status_code, 200, initial.get_data(as_text=True))
-            cached = self.client.post("/api/scroll-timing/openweather_overview", json=payload)
+            cached = self.paired_request("POST", "/api/scroll-timing/openweather_overview", json=payload)
             self.assertEqual(cached.get_json()["cache"], "hit")
             self.assertEqual(prepare.call_count, 1)
 
-            saved = self.client.put("/api/secrets/openweather", json={"api_key": first_key})
+            saved = self.paired_request("PUT", "/api/secrets/openweather", json={"api_key": first_key})
             self.assertEqual(saved.status_code, 200)
             self.assertEqual(len(self.scroll_timing_cache._entries), 0)
-            after_set = self.client.post("/api/scroll-timing/openweather_overview", json=payload)
+            after_set = self.paired_request("POST", "/api/scroll-timing/openweather_overview", json=payload)
             self.assertEqual(after_set.status_code, 200, after_set.get_data(as_text=True))
             self.assertEqual(prepare.call_count, 2)
 
-            replaced = self.client.put("/api/secrets/openweather", json={"api_key": second_key})
+            replaced = self.paired_request("PUT", "/api/secrets/openweather", json={"api_key": second_key})
             self.assertEqual(replaced.status_code, 200)
             self.assertEqual(len(self.scroll_timing_cache._entries), 0)
-            after_replace = self.client.post("/api/scroll-timing/openweather_overview", json=payload)
+            after_replace = self.paired_request("POST", "/api/scroll-timing/openweather_overview", json=payload)
             self.assertEqual(after_replace.status_code, 200, after_replace.get_data(as_text=True))
             self.assertEqual(prepare.call_count, 3)
 
-            cleared = self.client.delete("/api/secrets/openweather")
+            cleared = self.paired_request("DELETE", "/api/secrets/openweather")
             self.assertEqual(cleared.status_code, 200)
             self.assertEqual(len(self.scroll_timing_cache._entries), 0)
-            after_clear = self.client.post("/api/scroll-timing/openweather_overview", json=payload)
+            after_clear = self.paired_request("POST", "/api/scroll-timing/openweather_overview", json=payload)
             self.assertEqual(after_clear.status_code, 200, after_clear.get_data(as_text=True))
             self.assertEqual(prepare.call_count, 4)
 
@@ -838,12 +920,358 @@ try{
         self.assertTrue(report["confirmed"]["disabled"], report)
         self.assertIn("restart scheduled", report["confirmed"]["message"].lower(), report)
 
+    def test_paired_logout_and_control_reject_hostile_origin_without_trusted_action_signal(self):
+        self.pair_browser()
+        with self.client.session_transaction() as paired:
+            paired_session = dict(paired)
+        device_id = paired_session["device_id"]
+        self.controller.reset_mock()
+
+        for path in ("/api/control/stop", "/logout"):
+            with self.subTest(path=path):
+                attacker = self.app.test_client()
+                with attacker.session_transaction() as session:
+                    session.update(paired_session)
+                response = self.paired_client_request("POST", attacker,
+                    path,
+                    headers={"Origin": "http://matrix.local:9999"},
+                    environ_overrides={"HTTP_X_MATRIX_ACTION": ""},
+                )
+                self.assertEqual(response.status_code, 403, response.get_data(as_text=True))
+                self.assertTrue(self.device_store.contains(device_id))
+                self.controller.stop.assert_not_called()
+
+    def test_every_paired_unsafe_route_rejects_missing_or_wrong_action_signal_before_side_effects(self):
+        self.pair_browser()
+        with self.client.session_transaction() as paired:
+            paired_session = dict(paired)
+        unsafe_routes = {
+            (method, rule.rule)
+            for rule in self.app.url_map.iter_rules()
+            for method in rule.methods & {"POST", "PUT", "PATCH", "DELETE"}
+        }
+        expected_routes = {
+            ("POST", "/pair"),
+            ("POST", "/pair/new"),
+            ("POST", "/api/devices/pair"),
+            ("DELETE", "/api/devices/<device_id>"),
+            ("POST", "/logout"),
+            ("POST", "/api/scroll-timing/<module_name>"),
+            ("POST", "/api/media"),
+            ("POST", "/api/media/<path:filename>/preview"),
+            ("DELETE", "/api/media/<path:filename>"),
+            ("POST", "/api/config"),
+            ("PUT", "/api/secrets/openweather"),
+            ("DELETE", "/api/secrets/openweather"),
+            ("POST", "/api/edit-preview/<module_name>"),
+            ("POST", "/api/edit-preview/page"),
+            ("POST", "/api/edit-preview/cancel"),
+            ("POST", "/api/preview/announcement"),
+            ("POST", "/api/preview/<module_name>"),
+            ("POST", "/api/control/<action>"),
+            ("POST", "/api/system/restart"),
+        }
+        self.assertEqual(unsafe_routes, expected_routes)
+        concrete_routes = [
+            ("POST", "/pair"),
+            ("POST", "/pair/new"),
+            ("POST", "/api/devices/pair"),
+            ("DELETE", "/api/devices/not-a-device"),
+            ("POST", "/logout"),
+            ("POST", "/api/scroll-timing/weather"),
+            ("POST", "/api/media"),
+            ("POST", "/api/media/missing.gif/preview"),
+            ("DELETE", "/api/media/missing.gif"),
+            ("POST", "/api/config"),
+            ("PUT", "/api/secrets/openweather"),
+            ("DELETE", "/api/secrets/openweather"),
+            ("POST", "/api/edit-preview/clock_lava"),
+            ("POST", "/api/edit-preview/page"),
+            ("POST", "/api/edit-preview/cancel"),
+            ("POST", "/api/preview/announcement"),
+            ("POST", "/api/preview/clock_lava"),
+            ("POST", "/api/control/stop"),
+            ("POST", "/api/system/restart"),
+        ]
+        config_before = self.store.get()
+        devices_before = self.device_store.list()
+        media_before = sorted(path.name for path in self.media_dir.iterdir())
+        secret_before = self.openweather_secrets.status()
+        self.controller.reset_mock()
+        self.pairing.reset_mock()
+        self.device_restart_runner.reset_mock()
+
+        for signal in (None, "wrong-value"):
+            for method, path in concrete_routes:
+                with self.subTest(signal=signal, method=method, path=path):
+                    attacker = self.app.test_client()
+                    with attacker.session_transaction() as session:
+                        session.update(paired_session)
+                    headers = {"Origin": "http://matrix.local:9999"}
+                    if signal is not None:
+                        headers["X-Matrix-Action"] = signal
+                    response = attacker.open(path, method=method, headers=headers, json={})
+                    self.assertEqual(response.status_code, 403, response.get_data(as_text=True))
+
+        self.assertEqual(self.store.get(), config_before)
+        self.assertEqual(self.device_store.list(), devices_before)
+        self.assertEqual(sorted(path.name for path in self.media_dir.iterdir()), media_before)
+        self.assertEqual(self.openweather_secrets.status(), secret_before)
+        for action in (
+            self.controller.start, self.controller.stop, self.controller.reload,
+            self.controller.preview, self.controller.preview_media,
+            self.controller.preview_announcement, self.controller.show_pairing_pin,
+        ):
+            action.assert_not_called()
+        self.pairing.issue_pin.assert_not_called()
+        self.device_restart_runner.assert_not_called()
+        self.assertIsNone(self.app.extensions.get("edit_preview_registry"))
+        self.assertIsNone(self.app.extensions.get("edit_preview_provider"))
+
+    def test_expired_paired_action_returns_auth_failure_before_action_validation(self):
+        self.pair_browser()
+        device_id = self.device_store.list()[0]["id"]
+        self.device_store.remove(device_id)
+        self.controller.reset_mock()
+
+        response = self.paired_request("POST", "/api/control/stop")
+
+        self.assertEqual(response.status_code, 401, response.get_data(as_text=True))
+        self.assertEqual(response.get_json(), {"error": "Pairing session expired."})
+        self.controller.stop.assert_not_called()
+
+    def test_dashboard_get_is_side_effect_free_and_shipped_actions_send_exact_signal(self):
+        self.pair_browser()
+        self.controller.reset_mock()
+
+        body = self.client.get("/").get_data(as_text=True)
+
+        self.controller.start.assert_not_called()
+        self.assertIn("const PAIRED_ACTION_SIGNAL='paired-request'", body)
+        self.assertIn("options.headers['X-Matrix-Action']=PAIRED_ACTION_SIGNAL", body)
+        self.assertIn("'X-Matrix-Action':PAIRED_ACTION_SIGNAL", body)
+        self.assertIn('data-paired-action="/logout"', body)
+
+    @unittest.skipUnless(shutil.which("node"), "Node.js is required")
+    def test_unpair_503_keeps_dashboard_sync_and_surfaces_server_error(self):
+        source = (Path(__file__).parents[1] / "app" / "templates" / "dashboard.html").read_text()
+        start = source.index("for(const button of document.querySelectorAll?.('button[data-paired-action]')")
+        handler_source = source[start:source.index("\n", start)]
+        harness = r"""
+let handler,stopped=0,messages=[];
+const useful='This device could not be removed, so this browser remains signed in.';
+const button={dataset:{pairedAction:'/logout'},addEventListener(type,callback){if(type!=='click')throw new Error('unexpected event');handler=callback}};
+global.document={querySelectorAll(selector){if(selector!=='button[data-paired-action]')throw new Error('unexpected selector');return [button]}};
+global.window={location:'/'};
+global.PAIRED_ACTION_SIGNAL='paired-request';
+global.stopMatrixConfigSync=()=>{stopped++};
+global.setMessage=(text,error)=>{messages.push({text,error})};
+global.fetch=async()=>({ok:false,status:503,text:async()=>'<p class="error">'+useful+'</p>'});
+global.DOMParser=class{parseFromString(){return{querySelector(selector){if(selector!=='.error')throw new Error('unexpected error selector');return{textContent:useful}}}}};
+""" + handler_source + r"""
+await handler({preventDefault(){}});
+if(window.location!=='/')throw new Error('503 navigated away from dashboard');
+if(stopped!==0)throw new Error('503 stopped dashboard synchronization');
+if(JSON.stringify(messages)!==JSON.stringify([{text:useful,error:true}]))throw new Error('503 message was not useful: '+JSON.stringify(messages));
+console.log('UNPAIR_503_CALLER_PASS');
+"""
+        result = subprocess.run(
+            [shutil.which("node"), "--input-type=module", "-e", harness],
+            cwd=Path(__file__).parents[1], text=True, capture_output=True, check=False,
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("UNPAIR_503_CALLER_PASS", result.stdout)
+
+    @unittest.skipUnless(shutil.which("node"), "Node.js is required")
+    def test_unpair_success_and_committed_redirect_stop_sync_and_navigate(self):
+        source = (Path(__file__).parents[1] / "app" / "templates" / "dashboard.html").read_text()
+        start = source.index("for(const button of document.querySelectorAll?.('button[data-paired-action]')")
+        handler_source = source[start:source.index("\n", start)]
+        for redirected in (False, True):
+            with self.subTest(redirected=redirected):
+                harness = r"""
+let handler,stopped=0,request=null;
+const button={dataset:{pairedAction:'/logout'},addEventListener(type,callback){handler=callback}};
+global.document={querySelectorAll(){return [button]}};
+global.window={location:'/'};global.PAIRED_ACTION_SIGNAL='paired-request';
+global.stopMatrixConfigSync=()=>{stopped++};global.setMessage=()=>{throw new Error('success showed an error')};
+global.fetch=async(url,options)=>{request={url,options};return{ok:true,redirected:REDIRECTED,url:'/pair'}};
+""".replace("REDIRECTED", json.dumps(redirected).lower()) + handler_source + r"""
+await handler();
+if(request.url!=='/logout'||request.options.method!=='POST'||request.options.headers['X-Matrix-Action']!=='paired-request')throw new Error('wrong unpair request');
+if(stopped!==1||window.location!=='/pair')throw new Error('successful unpair did not stop sync and navigate');
+console.log('UNPAIR_SUCCESS_CALLER_PASS');
+"""
+                result = subprocess.run(
+                    [shutil.which("node"), "--input-type=module", "-e", harness],
+                    cwd=Path(__file__).parents[1], text=True, capture_output=True, check=False,
+                )
+                self.assertEqual(result.returncode, 0, result.stderr)
+                self.assertIn("UNPAIR_SUCCESS_CALLER_PASS", result.stdout)
+
+    @unittest.skipUnless(shutil.which("node"), "Node.js is required")
+    @unittest.skipUnless(
+        os.environ.get("MATRIX_CHROMIUM")
+        and Path(os.environ.get("MATRIX_CHROMIUM", "")).is_file()
+        and os.access(os.environ.get("MATRIX_CHROMIUM", ""), os.X_OK),
+        "MATRIX_CHROMIUM browser is required",
+    )
+    def test_committed_logout_followed_to_forbidden_pair_page_uses_authoritative_redirect(self):
+        testing_pin_checks = 0
+        def testing_pin_available():
+            nonlocal testing_pin_checks
+            testing_pin_checks += 1
+            return testing_pin_checks == 1
+        self.pairing.has_testing_pin.side_effect = testing_pin_available
+        self.pairing.active_pin.return_value = None
+        remaining = self.device_store.add("Remaining device", max_devices=4)
+        self.pairing.verify.return_value = True
+        probe = r"""
+const debugPort=process.argv[1],appPort=process.argv[2],sleep=ms=>new Promise(r=>setTimeout(r,ms));let endpoint;
+for(let attempt=0;attempt<50;attempt++){try{endpoint=await fetch(`http://127.0.0.1:${debugPort}/json/new`,{method:'PUT'}).then(r=>r.json());break}catch(_){await sleep(100)}}
+if(!endpoint)throw Error('CDP unavailable');
+const socket=new WebSocket(endpoint.webSocketDebuggerUrl),pending=new Map();let id=0;
+socket.onmessage=e=>{const m=JSON.parse(e.data);if(m.id&&pending.has(m.id)){const p=pending.get(m.id);pending.delete(m.id);m.error?p.reject(Error(JSON.stringify(m.error))):p.resolve(m.result)}};
+await new Promise((resolve,reject)=>{socket.onopen=resolve;socket.onerror=reject});
+const send=(method,params={})=>new Promise((resolve,reject)=>{const request=++id;pending.set(request,{resolve,reject});socket.send(JSON.stringify({id:request,method,params}))});
+const evaluate=async(expression,awaitPromise=false)=>{const result=await send('Runtime.evaluate',{expression,returnByValue:true,awaitPromise});if(result.exceptionDetails)throw Error(JSON.stringify(result.exceptionDetails));return result.result.value};
+const waitFor=async(expression,timeout=5000)=>{const end=Date.now()+timeout;while(Date.now()<end){try{const value=await evaluate(expression);if(value)return value}catch(_){}await sleep(25)}throw Error('timeout: '+expression)};
+try{
+ await send('Runtime.enable');await send('Page.enable');
+ await send('Page.navigate',{url:`http://127.0.0.1:${appPort}/pair`});
+ await waitFor(`document.querySelector('form')&&document.readyState==='complete'`);
+ await evaluate(`fetch('/pair',{method:'POST',headers:{'Content-Type':'application/x-www-form-urlencoded'},body:new URLSearchParams({device_name:'Browser under test',pin:'123456'})}).then(()=>true)`,true);
+ await send('Page.navigate',{url:`http://127.0.0.1:${appPort}/`});
+ await waitFor(`location.pathname==='/'&&document.querySelector('button[data-paired-action="/logout"]')&&typeof stopMatrixConfigSync==='function'`);
+ await sleep(500);
+ await evaluate(`(()=>{const stop=stopMatrixConfigSync;stop();sessionStorage.setItem('logoutStopped','0');stopMatrixConfigSync=()=>{sessionStorage.setItem('logoutStopped','1');stop()};const realFetch=fetch;window.fetch=async(...args)=>{const response=await realFetch(...args);if(args[0]==='/logout')sessionStorage.setItem('logoutResponse',JSON.stringify({status:response.status,redirected:response.redirected,url:response.url}));return response};document.querySelector('button[data-paired-action="/logout"]').click();return true})()`);
+ await waitFor(`sessionStorage.getItem('logoutResponse')`);
+ await sleep(250);
+ const report=await evaluate(`({path:location.pathname,body:document.body.innerText,stopped:sessionStorage.getItem('logoutStopped')==='1',response:JSON.parse(sessionStorage.getItem('logoutResponse'))})`);
+ if(report.response.status!==403||!report.response.redirected||!report.response.url.endsWith('/pair'))throw Error('real followed logout response mismatch: '+JSON.stringify(report));
+ if(report.path!=='/pair'||!report.stopped||!report.body.includes('Pairing another browser must be started'))throw Error('committed redirect was reported as failure: '+JSON.stringify(report));
+ console.log(JSON.stringify(report));
+}finally{socket.close()}
+"""
+        report = self.run_live_chromium_probe(probe)
+
+        self.assertEqual(report["path"], "/pair")
+        self.assertTrue(report["stopped"])
+        self.assertEqual(report["response"]["status"], 403)
+        self.assertTrue(report["response"]["redirected"])
+        self.assertTrue(self.device_store.contains(remaining["id"]))
+        self.assertEqual(len(self.device_store.list()), 1)
+
+    @unittest.skipUnless(shutil.which("node"), "Node.js is required")
+    def test_unpair_network_rejection_keeps_sync_and_reports_failure(self):
+        source = (Path(__file__).parents[1] / "app" / "templates" / "dashboard.html").read_text()
+        start = source.index("for(const button of document.querySelectorAll?.('button[data-paired-action]')")
+        handler_source = source[start:source.index("\n", start)]
+        harness = r"""
+let handler,stopped=0,messages=[];
+const button={dataset:{pairedAction:'/logout'},addEventListener(_type,callback){handler=callback}};
+global.document={querySelectorAll(){return[button]}};global.window={location:'/'};
+global.PAIRED_ACTION_SIGNAL='paired-request';global.stopMatrixConfigSync=()=>{stopped++};
+global.setMessage=(text,error)=>messages.push({text,error});global.fetch=async()=>{throw new TypeError('network down')};
+""" + handler_source + r"""
+await handler();
+if(window.location!=='/'||stopped!==0)throw new Error('network rejection claimed success');
+if(JSON.stringify(messages)!==JSON.stringify([{text:'The paired action could not be completed.',error:true}]))throw new Error('network feedback missing');
+console.log('UNPAIR_NETWORK_PASS');
+"""
+        result = subprocess.run(
+            [shutil.which("node"), "--input-type=module", "-e", harness],
+            cwd=Path(__file__).parents[1], text=True, capture_output=True, check=False,
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("UNPAIR_NETWORK_PASS", result.stdout)
+
+    @unittest.skipUnless(shutil.which("node"), "Node.js is required")
+    @unittest.skipUnless(
+        os.environ.get("MATRIX_CHROMIUM")
+        and Path(os.environ.get("MATRIX_CHROMIUM", "")).is_file()
+        and os.access(os.environ.get("MATRIX_CHROMIUM", ""), os.X_OK),
+        "MATRIX_CHROMIUM browser is required",
+    )
+    def test_pair_another_device_keeps_authoritative_202_explanation_visible(self):
+        self.pairing.verify.return_value = True
+        self.pairing.issue_pin.return_value = "[REDACTED]"
+        self.pairing.remaining_seconds.return_value = 600
+
+        report = self.run_pair_action_chromium_probe(202, "Pairing is ready")
+
+        self.assertEqual(report["response"]["status"], 202)
+        self.assertIn("Pairing is ready", report["body"])
+        self.assertEqual(report["request"]["signal"], "paired-request")
+
+    @unittest.skipUnless(shutil.which("node"), "Node.js is required")
+    @unittest.skipUnless(
+        os.environ.get("MATRIX_CHROMIUM")
+        and Path(os.environ.get("MATRIX_CHROMIUM", "")).is_file()
+        and os.access(os.environ.get("MATRIX_CHROMIUM", ""), os.X_OK),
+        "MATRIX_CHROMIUM browser is required",
+    )
+    def test_pair_another_device_keeps_authoritative_409_explanation_visible(self):
+        self.pairing.verify.return_value = True
+        self.store.update({"pairing": {"max_devices": 1}})
+
+        report = self.run_pair_action_chromium_probe(409, "paired-device limit has been reached")
+
+        self.assertEqual(report["response"]["status"], 409)
+        self.assertIn("paired-device limit has been reached", report["body"])
+        self.assertEqual(report["errorRole"], "alert")
+
+    @unittest.skipUnless(shutil.which("node"), "Node.js is required")
+    def test_pair_another_device_network_rejection_is_announced_and_focusable(self):
+        source = (Path(__file__).parents[1] / "app" / "templates" / "pair.html").read_text()
+        start = source.index("function showPairActionFailure(button)")
+        handler_source = source[start:source.index("</script>", start)]
+        harness = r"""
+let handler,focused=false;
+const button={dataset:{pairedAction:'/pair/new'},addEventListener(_type,callback){handler=callback},before(node){global.notice=node}};
+global.document={querySelectorAll(){return[button]},querySelector(){return null},createElement(){return{className:'',dataset:{},setAttribute(name,value){this[name]=value},focus(){focused=true}}}};
+global.window={location:'/pair'};global.fetch=async()=>{throw new TypeError('network down')};
+""" + handler_source + r"""
+await handler();
+if(window.location!=='/pair')throw Error('network rejection navigated');
+if(!global.notice||notice.textContent!=='Unable to reach the Matrix. Check the connection and try again.'||notice.role!=='alert'||notice.tabIndex!==-1||!focused)throw Error('accessible network feedback missing: '+JSON.stringify(global.notice));
+console.log('PAIR_NETWORK_PASS');
+"""
+        result = subprocess.run(
+            [shutil.which("node"), "--input-type=module", "-e", harness],
+            cwd=Path(__file__).parents[1], text=True, capture_output=True, check=False,
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("PAIR_NETWORK_PASS", result.stdout)
+
+    def test_initial_pairing_needs_no_action_header_but_paired_repair_does(self):
+        self.pairing.verify.return_value = True
+
+        initial = self.client.post(
+            "/pair", data={"pin": "123456", "device_name": "Plain browser"},
+        )
+        blocked_repair = self.client.post("/pair")
+
+        self.assertEqual(initial.status_code, 302, initial.get_data(as_text=True))
+        self.assertEqual(blocked_repair.status_code, 403, blocked_repair.get_data(as_text=True))
+
+    def test_javascript_only_paired_actions_are_explicit_buttons(self):
+        self.pair_browser()
+
+        dashboard = self.client.get("/").get_data(as_text=True)
+        pair_page = self.client.get("/pair").get_data(as_text=True)
+
+        self.assertIn('type="button" data-paired-action="/logout"', dashboard)
+        self.assertIn('type="button" data-paired-action="/pair/new"', pair_page)
+        self.assertNotIn('<form data-paired-action=', dashboard)
+        self.assertNotIn('<form data-paired-action=', pair_page)
+
     def test_control_stop_reports_timeout_without_claiming_success(self):
         self.pair_browser()
         self.controller.stop.return_value = False
         self.controller.status.return_value = {"running": True}
 
-        response = self.client.post("/api/control/stop")
+        response = self.paired_request("POST", "/api/control/stop")
 
         self.assertEqual(response.status_code, 503)
         self.assertEqual(response.get_json(), {
@@ -866,16 +1294,16 @@ try{
         )
         disabled_app.config.update(TESTING=True)
         disabled_client = disabled_app.test_client()
-        disabled_client.environ_base["HTTP_X_MATRIX_ACTION"] = "restart-whole-device"
+
         self.pairing.verify.return_value = True
-        disabled_client.post(
+        self.paired_client_request("POST", disabled_client,
             "/pair", data={"pin": "123456", "device_name": "Disabled test browser"}
         )
         with patch(
             "webapp.subprocess.run",
             side_effect=AssertionError("disabled restart must not execute subprocesses"),
         ) as run:
-            response = disabled_client.post("/api/system/restart")
+            response = self.post_restart(client=disabled_client)
 
         self.assertEqual(response.status_code, 503)
         self.assertEqual(response.get_json(), {
@@ -895,17 +1323,17 @@ try{
 
         self.assertEqual(response.status_code, 403)
         self.assertEqual(response.get_json(), {
-            "error": "Restart request authorization failed."
+            "error": "Paired action authorization failed."
         })
         self.device_restart_runner.assert_not_called()
 
     def test_device_restart_is_paired_post_only_and_queued_once(self):
-        self.assertEqual(self.client.post("/api/system/restart").status_code, 401)
+        self.assertEqual(self.post_restart().status_code, 401)
         self.pair_browser()
         self.device_restart_runner.return_value = webapp.RestartRequestOutcome.CREATED
 
-        first = self.client.post("/api/system/restart")
-        second = self.client.post("/api/system/restart")
+        first = self.post_restart()
+        second = self.post_restart()
 
         self.assertEqual(first.status_code, 202)
         self.assertEqual(first.get_json(), {"restarting": True, "already_pending": False})
@@ -920,7 +1348,6 @@ try{
             paired_session = dict(session)
         clients = [self.app.test_client(), self.app.test_client()]
         for client in clients:
-            client.environ_base["HTTP_X_MATRIX_ACTION"] = "restart-whole-device"
             with client.session_transaction() as session:
                 session.update(paired_session)
 
@@ -941,7 +1368,7 @@ try{
         self.device_restart_runner.side_effect = slow_publish
         threads = [
             threading.Thread(target=lambda client=client: responses.append(
-                client.post("/api/system/restart")
+                self.post_restart(client=client)
             ))
             for client in clients
         ]
@@ -974,9 +1401,9 @@ try{
         self.device_restart_runner.return_value = webapp.RestartRequestOutcome.CREATED
 
         with patch("webapp.time.monotonic", side_effect=[100.0, 159.0, 161.0]):
-            first = self.client.post("/api/system/restart")
-            still_pending = self.client.post("/api/system/restart")
-            retry = self.client.post("/api/system/restart")
+            first = self.post_restart()
+            still_pending = self.post_restart()
+            retry = self.post_restart()
 
         self.assertEqual(first.status_code, 202)
         self.assertEqual(still_pending.get_json(), {"restarting": True, "already_pending": True})
@@ -993,7 +1420,7 @@ try{
             return webapp.RestartRequestOutcome.CREATED
 
         self.device_restart_runner.side_effect = publish
-        response = self.client.post("/api/system/restart")
+        response = self.post_restart()
         events.append("response-returned")
 
         self.assertEqual(response.status_code, 202)
@@ -1004,8 +1431,8 @@ try{
         self.pair_browser()
         self.device_restart_runner.return_value = webapp.RestartRequestOutcome.MANUAL_RECOVERY_REQUIRED
 
-        blocked = self.client.post("/api/system/restart")
-        retried = self.client.post("/api/system/restart")
+        blocked = self.post_restart()
+        retried = self.post_restart()
 
         self.assertEqual(blocked.status_code, 409)
         self.assertEqual(retried.status_code, 409)
@@ -1081,8 +1508,8 @@ try{
         self.pair_browser()
         self.device_restart_runner.return_value = webapp.RestartRequestOutcome.ACTIVE_REQUEST
 
-        response = self.client.post("/api/system/restart")
-        duplicate = self.client.post("/api/system/restart")
+        response = self.post_restart()
+        duplicate = self.post_restart()
 
         self.assertEqual(response.status_code, 202)
         self.assertEqual(response.get_json(), {"restarting": True, "already_pending": True})
@@ -1182,8 +1609,8 @@ try{
         ]
 
         with patch("webapp.LOGGER.exception") as logged:
-            failed = self.client.post("/api/system/restart")
-            retried = self.client.post("/api/system/restart")
+            failed = self.post_restart()
+            retried = self.post_restart()
 
         self.assertEqual(failed.status_code, 503)
         self.assertEqual(failed.get_json(), {"error": "Device restart could not be scheduled."})
@@ -1271,7 +1698,10 @@ try{
             with self.subTest(method=method, header=header, value=value):
                 response = self.client.open(
                     "/api/config", method=method, json={} if method == "POST" else None,
-                    headers={header: value},
+                    headers={
+                        header: value,
+                        **({"X-Matrix-Action": "paired-request"} if method == "POST" else {}),
+                    },
                 )
                 self.assertEqual(response.status_code, 400)
         valid_nonmatching = ('""', '"opaque"', 'W/"opaque"', '"a:b"', '"a,b"', '"\x80"')
@@ -1289,7 +1719,10 @@ try{
                 response = self.client.open(
                     "/api/config", method="POST" if header == "If-Match" else "GET",
                     json={} if header == "If-Match" else None,
-                    headers={header: '"' + ('1' * 4095) + '"'},
+                    headers={
+                        header: '"' + ('1' * 4095) + '"',
+                        **({"X-Matrix-Action": "paired-request"} if header == "If-Match" else {}),
+                    },
                 )
                 self.assertEqual(response.status_code, 431)
 
@@ -1324,7 +1757,7 @@ try{
         self.pair_browser()
         before = self.store.get()["revision"]
 
-        response = self.client.post("/api/preview/clock_lava")
+        response = self.paired_request("POST", "/api/preview/clock_lava")
 
         self.assertEqual(response.status_code, 202)
         self.assertEqual(self.store.get()["revision"], before)
@@ -1993,8 +2426,8 @@ globalThis.document=document;globalThis.window=window;globalThis.fetch=fetch;
         self.pairing.verify.return_value = True
         client_a = self.app.test_client()
         client_b = self.app.test_client()
-        self.assertEqual(client_a.post("/pair", data={"pin": "123456", "device_name": "A"}).status_code, 302)
-        self.assertEqual(client_b.post("/pair", data={"pin": "123456", "device_name": "B"}).status_code, 302)
+        self.assertEqual(self.paired_client_request("POST", client_a, "/pair", data={"pin": "123456", "device_name": "A"}).status_code, 302)
+        self.assertEqual(self.paired_client_request("POST", client_b, "/pair", data={"pin": "123456", "device_name": "B"}).status_code, 302)
 
         base_a = client_a.get("/api/config").get_json()
         base_b = client_b.get("/api/config").get_json()
@@ -2004,7 +2437,7 @@ globalThis.document=document;globalThis.window=window;globalThis.fetch=fetch;
             "background": "#000000", "x": 2, "y": 20,
             "direction": "left", "speed": 0.05, "loops": 1,
         }
-        created = client_a.post(
+        created = self.paired_client_request("POST", client_a,
             "/api/config",
             json={
                 "pairing": {"max_devices": 10},
@@ -2032,7 +2465,7 @@ globalThis.document=document;globalThis.window=window;globalThis.fetch=fetch;
 
         def race_save(label, client):
             race_barrier.wait()
-            race_results[label] = client.post(
+            race_results[label] = self.paired_client_request("POST", client,
                 "/api/config", json={"device": {"name": label}},
                 headers={"If-Match": '"1"'},
             )
@@ -2051,7 +2484,7 @@ globalThis.document=document;globalThis.window=window;globalThis.fetch=fetch;
         conflict = next(response for response in race_results.values() if response.status_code == 412)
         self.assertEqual(conflict.get_json()["revision"], 2)
 
-        deleted = client_a.post(
+        deleted = self.paired_client_request("POST", client_a,
             "/api/config", json={"custom_modules": [], "playlist": base_a["playlist"]},
             headers={"If-Match": '"2"'},
         )
@@ -2065,7 +2498,7 @@ globalThis.document=document;globalThis.window=window;globalThis.fetch=fetch;
             {"module": "clock_lava", "duration": 1, "enabled": True}
             for _index in range(256)
         ]
-        maximum = client_a.post(
+        maximum = self.paired_client_request("POST", client_a,
             "/api/config", json={"playlist": maximum_playlist},
             headers={"If-Match": '"3"'},
         )
@@ -2077,11 +2510,11 @@ globalThis.document=document;globalThis.window=window;globalThis.fetch=fetch;
 
         with client_b.session_transaction() as b_session:
             b_device_id = b_session["device_id"]
-        revoked = client_a.delete(f"/api/devices/{b_device_id}")
+        revoked = self.paired_client_request("DELETE", client_a, f"/api/devices/{b_device_id}")
         self.assertEqual(revoked.status_code, 200)
         self.assertEqual(client_b.get("/api/config").status_code, 401)
         self.assertEqual(
-            client_b.post("/api/config", json={}, headers={"If-Match": '"4"'}).status_code,
+            self.paired_client_request("POST", client_b, "/api/config", json={}, headers={"If-Match": '"4"'}).status_code,
             401,
         )
 
@@ -2089,7 +2522,7 @@ globalThis.document=document;globalThis.window=window;globalThis.fetch=fetch;
         for index in range(9):
             client = self.app.test_client()
             self.assertEqual(
-                client.post(
+                self.paired_client_request("POST", client,
                     "/pair", data={"pin": "123456", "device_name": f"Poll client {index}"},
                 ).status_code,
                 302,
@@ -3133,7 +3566,7 @@ globalThis.document=document;globalThis.window=window;globalThis.fetch=fetch;
 
         def add_device():
             client = self.app.test_client()
-            results["pair"] = client.post(
+            results["pair"] = self.paired_client_request("POST", client,
                 "/pair", data={"pin": "123456", "device_name": "Racing browser"},
             )
 
@@ -3162,7 +3595,7 @@ globalThis.document=document;globalThis.window=window;globalThis.fetch=fetch;
             data=json.dumps({"device": {"name": "Wrong type"}}),
             content_type="text/plain",
         )
-        missing = self.client.post("/api/media/missing.gif/preview")
+        missing = self.paired_request("POST", "/api/media/missing.gif/preview")
 
         self.assertEqual((malformed.status_code, malformed.is_json), (400, True))
         self.assertEqual((wrong_type.status_code, wrong_type.is_json), (415, True))
@@ -3184,7 +3617,7 @@ globalThis.document=document;globalThis.window=window;globalThis.fetch=fetch;
         device_id = self.device_store.list()[0]["id"]
 
         with patch.object(self.device_store, "_write", side_effect=OSError("disk details")):
-            response = self.client.delete(f"/api/devices/{device_id}")
+            response = self.paired_request("DELETE", f"/api/devices/{device_id}")
 
         self.assertEqual(response.status_code, 500)
         self.assertTrue(response.is_json)
@@ -3201,7 +3634,7 @@ globalThis.document=document;globalThis.window=window;globalThis.fetch=fetch;
             "remove",
             side_effect=PairingDurabilityError([]),
         ):
-            response = self.client.delete(f"/api/devices/{device_id}")
+            response = self.paired_request("DELETE", f"/api/devices/{device_id}")
 
         self.assertEqual(response.status_code, 503)
         self.assertEqual(response.get_json(), {
@@ -3219,7 +3652,7 @@ globalThis.document=document;globalThis.window=window;globalThis.fetch=fetch;
         with patch.object(
             self.device_store, "remove", side_effect=PairingDurabilityError([])
         ):
-            response = self.client.delete(f"/api/devices/{device_id}")
+            response = self.paired_request("DELETE", f"/api/devices/{device_id}")
 
         self.assertEqual(response.status_code, 503)
         warning = response.get_json()["error"]
@@ -3236,7 +3669,7 @@ globalThis.document=document;globalThis.window=window;globalThis.fetch=fetch;
         with patch.object(
             self.device_store, "_write", side_effect=PairingDurabilityError([second])
         ):
-            response = self.client.delete(f"/api/devices/{current_id}")
+            response = self.paired_request("DELETE", f"/api/devices/{current_id}")
 
         self.assertEqual(response.status_code, 503)
         warning = response.get_json()["error"]
@@ -3257,7 +3690,7 @@ globalThis.document=document;globalThis.window=window;globalThis.fetch=fetch;
         with patch.object(
             self.device_store, "remove", side_effect=PairingDurabilityError([])
         ):
-            response = self.client.post("/logout")
+            response = self.paired_request("POST", "/logout")
 
         self.assertEqual(response.status_code, 302)
         self.assertIn("warning=", response.headers["Location"])
@@ -3271,7 +3704,7 @@ globalThis.document=document;globalThis.window=window;globalThis.fetch=fetch;
         self.pair_browser()
         device_id = self.device_store.list()[0]["id"]
         with patch.object(self.device_store, "remove", side_effect=OSError("disk failed")):
-            response = self.client.post("/logout")
+            response = self.paired_request("POST", "/logout")
 
         self.assertEqual(response.status_code, 503)
         self.assertIn("could not be removed", response.get_data(as_text=True))
@@ -3285,7 +3718,7 @@ globalThis.document=document;globalThis.window=window;globalThis.fetch=fetch;
         key = "test_key_1234567890"
         self.assertEqual(self.client.get("/api/secrets/openweather").status_code, 401)
         self.assertEqual(
-            self.client.put("/api/secrets/openweather", json={"api_key": key}).status_code,
+            self.paired_request("PUT", "/api/secrets/openweather", json={"api_key": key}).status_code,
             401,
         )
         self.pair_browser()
@@ -3294,7 +3727,7 @@ globalThis.document=document;globalThis.window=window;globalThis.fetch=fetch;
             self.client.get("/api/secrets/openweather").get_json(),
             {"configured": False},
         )
-        saved = self.client.put("/api/secrets/openweather", json={"api_key": key})
+        saved = self.paired_request("PUT", "/api/secrets/openweather", json={"api_key": key})
         self.assertEqual(saved.status_code, 200)
         self.assertEqual(saved.get_json(), {"configured": True})
         self.assertNotIn(key, saved.get_data(as_text=True))
@@ -3304,7 +3737,7 @@ globalThis.document=document;globalThis.window=window;globalThis.fetch=fetch;
         self.assertEqual(status.get_json(), {"configured": True})
         self.assertNotIn(key, status.get_data(as_text=True))
 
-        removed = self.client.delete("/api/secrets/openweather")
+        removed = self.paired_request("DELETE", "/api/secrets/openweather")
         self.assertEqual(removed.get_json(), {"configured": False})
         self.assertIsNone(self.openweather_secrets.get())
 
@@ -3324,9 +3757,9 @@ globalThis.document=document;globalThis.window=window;globalThis.fetch=fetch;
                 media_dir=media, device_store=devices,
             )
             client = app.test_client()
-            client.post("/pair", data={"pin": "123456", "device_name": "Test browser"})
+            self.paired_client_request("POST", client, "/pair", data={"pin": "123456", "device_name": "Test browser"})
 
-            response = client.put(
+            response = self.paired_client_request("PUT", client,
                 "/api/secrets/openweather", json={"api_key": "test_key_1234567890"}
             )
 
@@ -3340,7 +3773,7 @@ globalThis.document=document;globalThis.window=window;globalThis.fetch=fetch;
             self.openweather_secrets, "set",
             side_effect=SecretDurabilityError(configured=True),
         ):
-            saved = self.client.put(
+            saved = self.paired_request("PUT",
                 "/api/secrets/openweather", json={"api_key": "test_key_1234567890"}
             )
         self.assertEqual(saved.status_code, 503)
@@ -3351,7 +3784,7 @@ globalThis.document=document;globalThis.window=window;globalThis.fetch=fetch;
             self.openweather_secrets, "clear",
             side_effect=SecretDurabilityError(configured=False),
         ):
-            cleared = self.client.delete("/api/secrets/openweather")
+            cleared = self.paired_request("DELETE", "/api/secrets/openweather")
         self.assertEqual(cleared.status_code, 503)
         self.assertEqual(cleared.get_json()["configured"], False)
 
@@ -3372,7 +3805,11 @@ globalThis.document=document;globalThis.window=window;globalThis.fetch=fetch;
                 attribute,
                 side_effect=RuntimeError("unsafe /private/secret path"),
             ):
-                response = getattr(self.client, method)(path, **kwargs)
+                response = (
+                    getattr(self.client, method)(path, **kwargs)
+                    if method == "get"
+                    else self.paired_request(method.upper(), path, **kwargs)
+                )
 
             self.assertEqual(response.status_code, 503)
             self.assertEqual(response.content_type, "application/json")
@@ -3494,16 +3931,16 @@ globalThis.document=document;globalThis.window=window;globalThis.fetch=fetch;
         self.pairing.verify.side_effect = manager.verify
         self.pairing.is_locked.side_effect = manager.is_locked
 
-        first = self.client.post(
+        first = self.paired_request("POST",
             "/pair", data={"pin": wrong_pin, "device_name": "Testing browser"}
         )
-        threshold = self.client.post(
+        threshold = self.paired_request("POST",
             "/pair", data={"pin": wrong_pin, "device_name": "Testing browser"}
         )
-        testing_blocked = self.client.post(
+        testing_blocked = self.paired_request("POST",
             "/pair", data={"pin": testing_pin, "device_name": "Testing browser"}
         )
-        one_time_blocked = self.client.post(
+        one_time_blocked = self.paired_request("POST",
             "/pair", data={"pin": one_time_pin, "device_name": "One-time browser"}
         )
 
@@ -3520,7 +3957,7 @@ globalThis.document=document;globalThis.window=window;globalThis.fetch=fetch;
         self.assertTrue(manager.is_locked())
 
         clock.return_value += 31
-        testing_accepted = self.client.post(
+        testing_accepted = self.paired_request("POST",
             "/pair", data={"pin": testing_pin, "device_name": "Testing browser"}
         )
         one_time_accepted = self.app.test_client().post(
@@ -3540,13 +3977,13 @@ globalThis.document=document;globalThis.window=window;globalThis.fetch=fetch;
         self.pairing.verify.side_effect = manager.verify
         self.pairing.is_locked.side_effect = manager.is_locked
 
-        first = self.client.post(
+        first = self.paired_request("POST",
             "/pair", data={"pin": "000000", "device_name": "Testing browser"}
         )
-        threshold = self.client.post(
+        threshold = self.paired_request("POST",
             "/pair", data={"pin": "111111", "device_name": "Testing browser"}
         )
-        blocked = self.client.post(
+        blocked = self.paired_request("POST",
             "/pair", data={"pin": testing_pin, "device_name": "Testing browser"}
         )
 
@@ -3572,7 +4009,7 @@ globalThis.document=document;globalThis.window=window;globalThis.fetch=fetch;
     def test_first_pairing_durability_uncertainty_keeps_browser_authorized(self):
         self.pairing.verify.return_value = True
         with patch("pairing.os.fsync", side_effect=[None, OSError("directory unavailable")]):
-            response = self.client.post(
+            response = self.paired_request("POST",
                 "/pair", data={"pin": "123456", "device_name": "First browser"}
             )
 
@@ -3623,7 +4060,7 @@ globalThis.document=document;globalThis.window=window;globalThis.fetch=fetch;
         self.pairing.issue_pin.return_value = "[REDACTED]"
         self.pairing.remaining_seconds.return_value = 600
 
-        response = self.client.post("/api/devices/pair")
+        response = self.paired_request("POST", "/api/devices/pair")
 
         self.assertEqual(response.status_code, 202)
         self.assertEqual(response.get_json(), {"pairing": "ready"})
@@ -3635,7 +4072,7 @@ globalThis.document=document;globalThis.window=window;globalThis.fetch=fetch;
         self.pair_browser()
         self.pairing.issue_pin.reset_mock()
 
-        response = self.client.post("/api/devices/pair")
+        response = self.paired_request("POST", "/api/devices/pair")
 
         self.assertEqual(response.status_code, 409)
         self.assertIn("limit", response.get_json()["error"])
@@ -3645,7 +4082,7 @@ globalThis.document=document;globalThis.window=window;globalThis.fetch=fetch;
         self.pairing.verify.return_value = True
         self.device_store.add = Mock(side_effect=ValueError("maximum paired devices reached"))
 
-        response = self.client.post(
+        response = self.paired_request("POST",
             "/pair", data={"pin": "123456", "device_name": "Racing phone"}
         )
 
@@ -3664,7 +4101,7 @@ globalThis.document=document;globalThis.window=window;globalThis.fetch=fetch;
         self.assertTrue(listed[current["id"]]["current"])
         self.assertFalse(listed[other["id"]]["current"])
 
-        removed = self.client.delete(f"/api/devices/{other['id']}")
+        removed = self.paired_request("DELETE", f"/api/devices/{other['id']}")
         self.assertEqual(removed.status_code, 200)
         self.assertFalse(self.device_store.contains(other["id"]))
 
@@ -3672,7 +4109,7 @@ globalThis.document=document;globalThis.window=window;globalThis.fetch=fetch;
         self.pair_browser()
         device_id = self.device_store.list()[0]["id"]
 
-        response = self.client.post("/logout")
+        response = self.paired_request("POST", "/logout")
 
         self.assertEqual(response.status_code, 302)
         self.assertFalse(self.device_store.contains(device_id))
@@ -4450,10 +4887,10 @@ const result=await send('Runtime.evaluate',{expression,returnByValue:true,awaitP
         self.pair_browser()
         peer = self.app.test_client()
         self.pairing.verify.return_value = True
-        peer.post("/pair", data={"pin": "123456", "device_name": "Peer browser"})
+        self.paired_client_request("POST", peer, "/pair", data={"pin": "123456", "device_name": "Peer browser"})
         base_revision = self.store.get()["revision"]
         original_loops = self.store.get()["weather"]["scroll_loops"]
-        saved = self.client.post(
+        saved = self.paired_request("POST",
             "/api/config",
             json={"weather": {"scroll_speed": 0.055}},
             headers={"If-Match": f'"{base_revision}"'},
@@ -4462,7 +4899,7 @@ const result=await send('Runtime.evaluate',{expression,returnByValue:true,awaitP
         self.assertEqual(saved.get_json()["weather"]["scroll_loops"], original_loops)
         reopened = self.client.get("/api/config")
         self.assertEqual(reopened.get_json()["weather"]["scroll_speed"], 0.055)
-        stale = peer.post(
+        stale = self.paired_client_request("POST", peer,
             "/api/config",
             json={"weather": {"scroll_speed": 0.06}},
             headers={"If-Match": f'"{base_revision}"'},
@@ -4676,10 +5113,10 @@ try{
  const contracts=await evaluate(`(async()=>{
    const make=name=>{const payload=providerTimingPayload('weather');payload.settings.location=name;payload.settings.latitude=null;payload.settings.longitude=null;return payload};
    const freshPayload=providerTimingPayload('weather'),fresh=await api('/api/scroll-timing/weather',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(freshPayload)}),freshDigest=await timingSettingsDigest('weather',freshPayload);
-   const raw=async payload=>{const response=await fetch('/api/scroll-timing/weather',{method:'POST',headers:{'Content-Type':'application/json','X-Matrix-Client-Contract':String(MATRIX_CLIENT_CONTRACT)},body:JSON.stringify(payload)});return {status:response.status,data:await response.json(),retry:response.headers.get('Retry-After')}};
+   const raw=async payload=>{const response=await fetch('/api/scroll-timing/weather',{method:'POST',headers:{'Content-Type':'application/json','X-Matrix-Client-Contract':String(MATRIX_CLIENT_CONTRACT),'X-Matrix-Action':PAIRED_ACTION_SIGNAL},body:JSON.stringify(payload)});return {status:response.status,data:await response.json(),retry:response.headers.get('Retry-After')}};
    const stale=await raw(make('STALE')),busy=await raw(make('BUSY')),unavailable=await raw(make('UNAVAILABLE'));
    const staleBase=make('STALE');staleBase.base_revision=-1;const precondition=await raw(staleBase);
-   const oversizedResponse=await fetch('/api/scroll-timing/weather',{method:'POST',headers:{'Content-Type':'application/json','X-Matrix-Client-Contract':String(MATRIX_CLIENT_CONTRACT)},body:'{"settings":"'+'x'.repeat(17000)+'"}'});
+   const oversizedResponse=await fetch('/api/scroll-timing/weather',{method:'POST',headers:{'Content-Type':'application/json','X-Matrix-Client-Contract':String(MATRIX_CLIENT_CONTRACT),'X-Matrix-Action':PAIRED_ACTION_SIGNAL},body:'{"settings":"'+'x'.repeat(17000)+'"}'});
    return {fresh,freshDigest,stale,busy,unavailable,precondition,oversized:oversizedResponse.status};
  })()`,true);
  if(contracts.fresh.status!=='fresh'||contracts.fresh.settings_digest!==contracts.freshDigest)throw Error('fresh digest contract mismatch: '+JSON.stringify(contracts));
@@ -5077,7 +5514,7 @@ let attempts=0,accepted=0;
 async function api(path,options){
   attempts++;
   if(attempts>4)throw new Error('recursive request guard');
-  const response=await fetch(base+path,{...options,headers:{...options.headers,Cookie:cookie}});
+  const response=await fetch(base+path,{...options,headers:{...options.headers,Cookie:cookie,'X-Matrix-Action':'paired-request'}});
   if(response.ok)accepted++;
   const data=await response.json();
   if(!response.ok)throw new Error(data.error||response.statusText);
@@ -5160,13 +5597,13 @@ global.document={querySelector(selector){return {value:values[selector]??''}}};
         }
         route_digests = {}
         with patch("modules.weather_app.prepare_ticker_plan", return_value=plan):
-            response = self.client.post(
+            response = self.paired_request("POST",
                 "/api/scroll-timing/weather", json=browser["weather"]["payload"],
             )
             self.assertEqual(response.status_code, 200, response.get_data(as_text=True))
             route_digests["weather"] = response.get_json()["settings_digest"]
         with patch("modules.openweather_overview.prepare_ticker_plan", return_value=plan):
-            response = self.client.post(
+            response = self.paired_request("POST",
                 "/api/scroll-timing/openweather_overview",
                 json=browser["openweather_overview"]["payload"],
             )
@@ -5829,7 +6266,7 @@ console.log('ADVANCED_CANVAS_TIMELINE_MOVE_PASS');
         self.pair_browser()
         stale_client = self.app.test_client()
         self.assertEqual(
-            stale_client.post(
+            self.paired_client_request("POST", stale_client,
                 "/pair", data={"pin": "123456", "device_name": "Stale canvas peer"},
             ).status_code,
             302,
@@ -5862,7 +6299,7 @@ console.log(JSON.stringify(result.module));
             [2, 4],
         )
 
-        saved = self.client.post(
+        saved = self.paired_request("POST",
             "/api/config", json={"custom_modules": [moved]},
             headers={"If-Match": f'"{baseline_revision}"'},
         )
@@ -5874,7 +6311,7 @@ console.log(JSON.stringify(result.module));
 
         stale_payload = json.loads(json.dumps(module))
         stale_payload["name"] = "Unsaved dirty peer draft"
-        conflict = stale_client.post(
+        conflict = self.paired_client_request("POST", stale_client,
             "/api/config", json={"custom_modules": [stale_payload]},
             headers={"If-Match": f'"{baseline_revision}"'},
         )
@@ -7189,6 +7626,147 @@ console.log('LAVA_PALETTE_BULK_CONTROLS_PASS');
         self.assertIn("LAVA_PALETTE_BULK_CONTROLS_PASS", result.stdout)
 
     @unittest.skipUnless(shutil.which("node"), "Node.js is required")
+    def test_deselect_all_sends_no_selected_palette_to_edit_preview(self):
+        source = (Path(__file__).parents[1] / "app" / "templates" / "dashboard.html").read_text()
+        start = source.index("function setAllLavaPalettes")
+        end = source.index("\nfunction renderCustomLavaPalettes", start)
+        function_source = source[start:end]
+        harness = r"""
+const builtInInput={checked:true,value:'fire_burst'};
+const builtInCard={dataset:{builtInPalette:'fire_burst'}};
+let editPreviewLavaPalette='built_in:fire_burst';
+global.previewMode='edit';global.previewModule='clock_lava';
+global.document={
+ querySelectorAll(selector){
+  if(selector==='.lava-palette')return [builtInInput];
+  if(selector==='.custom-lava-card'||selector==='input[name="edit-preview-lava-palette"]')return [];
+  if(selector==='[data-built-in-palette]')return [builtInCard];
+  throw new Error('unexpected selector '+selector);
+ },
+ querySelector(selector){
+  if(selector==='.lava-palette:checked')return builtInInput.checked?builtInInput:null;
+  if(selector==='[data-built-in-palette]')return builtInCard;
+  if(selector==='#built-in-palette-count'||selector==='#custom-palette-count')return {textContent:''};
+  throw new Error('unexpected selector '+selector);
+ }
+};
+global.updatePaletteGroupCounts=()=>{};global.markMatrixDirty=()=>{};
+global.scheduleEditPreview=()=>{};global.setMessage=()=>{};
+""" + function_source + r"""
+setAllLavaPalettes(false);
+const descriptor=selectedLavaPaletteDescriptor();
+if(descriptor!==null)throw new Error('Deselect All sent '+JSON.stringify(descriptor)+' instead of no selected palette');
+console.log('ZERO_LAVA_EDIT_PREVIEW_DESCRIPTOR_PASS');
+"""
+        result = subprocess.run(
+            [shutil.which("node"), "-e", harness], cwd=Path(__file__).parents[1],
+            text=True, capture_output=True, check=False,
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("ZERO_LAVA_EDIT_PREVIEW_DESCRIPTOR_PASS", result.stdout)
+
+    @unittest.skipUnless(shutil.which("node"), "Node.js is required")
+    @unittest.skipUnless(
+        os.environ.get("MATRIX_CHROMIUM")
+        and Path(os.environ.get("MATRIX_CHROMIUM", "")).is_file()
+        and os.access(os.environ.get("MATRIX_CHROMIUM", ""), os.X_OK),
+        "MATRIX_CHROMIUM browser is required",
+    )
+    def test_lava_preview_radios_follow_preview_mode_without_mutating_draft_in_real_chromium(self):
+        self.store.update({"lava": {
+            "enabled_palettes": ["fire_burst"],
+            "custom_palettes": [{
+                "id": "palette_visibility",
+                "name": "Visibility palette",
+                "colours": ["#101020", "#ff6600", "#ffee99"],
+                "enabled": True,
+            }],
+        }})
+        self.pair_browser()
+        before_config = Path(self.store.path).read_bytes()
+        body = self.client.get("/").get_data(as_text=True)
+        self.controller.reset_mock()
+        probe = r"""
+const port=process.argv[1],pagePath=process.argv[2];let endpoint;
+for(let attempt=0;attempt<50;attempt++){try{endpoint=await fetch(`http://127.0.0.1:${port}/json/new`,{method:'PUT'}).then(r=>r.json());break}catch(_){await new Promise(r=>setTimeout(r,50))}}
+if(!endpoint)throw new Error('Chromium DevTools endpoint unavailable');
+const socket=new WebSocket(endpoint.webSocketDebuggerUrl),pending=new Map();let nextId=1,loadResolve,loaded=new Promise(resolve=>loadResolve=resolve);
+socket.onmessage=event=>{const message=JSON.parse(event.data);if(message.id&&pending.has(message.id)){const request=pending.get(message.id);pending.delete(message.id);message.error?request.reject(new Error(JSON.stringify(message.error))):request.resolve(message.result)}else if(message.method==='Page.loadEventFired')loadResolve()};
+await new Promise((resolve,reject)=>{socket.onopen=resolve;socket.onerror=reject});
+const send=(method,params={})=>{const id=nextId++;socket.send(JSON.stringify({id,method,params}));return new Promise((resolve,reject)=>pending.set(id,{resolve,reject}))};
+const evaluate=async expression=>{const result=await send('Runtime.evaluate',{expression,returnByValue:true,awaitPromise:true});if(result.exceptionDetails)throw new Error(JSON.stringify(result.exceptionDetails));return result.result.value};
+const waitFor=async expression=>{for(let attempt=0;attempt<100;attempt++){if(await evaluate(expression))return;await new Promise(resolve=>setTimeout(resolve,20))}const context=await evaluate(`({width:innerWidth,height:innerHeight,scrollY,mode:previewMode,active:document.activeElement?.outerHTML,target:document.elementFromPoint(innerWidth/2,innerHeight/2)?.outerHTML})`);throw new Error('waitFor timed out: '+expression+' '+JSON.stringify(context))};
+const activate=async(point,touch)=>{if(touch){await send('Input.dispatchTouchEvent',{type:'touchStart',touchPoints:[point]});await send('Input.dispatchTouchEvent',{type:'touchEnd',touchPoints:[]})}else{await send('Input.dispatchMouseEvent',{type:'mousePressed',x:point.x,y:point.y,button:'left',clickCount:1});await send('Input.dispatchMouseEvent',{type:'mouseReleased',x:point.x,y:point.y,button:'left',clickCount:1})}};
+const modePoint=selector=>evaluate(`(()=>{const rect=document.querySelector(${JSON.stringify(selector)}).getBoundingClientRect();return{x:rect.left+rect.width/2,y:rect.top+rect.height/2}})()`);
+const revealMode=async selector=>{await evaluate(`document.querySelector(${JSON.stringify(selector)}).scrollIntoView({block:'center',behavior:'instant'})`);await new Promise(resolve=>setTimeout(resolve,50));return modePoint(selector)};
+const revealPoint=async selector=>{await evaluate(`(()=>{const element=document.querySelector(${JSON.stringify(selector)});element.scrollIntoView({block:'end',behavior:'instant'});const rect=element.getBoundingClientRect(),sticky=document.querySelector('.sticky-save').getBoundingClientRect();if(rect.bottom>sticky.top-8)scrollBy(0,rect.bottom-(sticky.top-8))})()`);await new Promise(resolve=>setTimeout(resolve,50));return modePoint(selector)};
+const radioState=()=>evaluate(`(()=>{const radios=[...document.querySelectorAll('input[name="edit-preview-lava-palette"]')],labels=radios.map(radio=>radio.closest('.palette-inspect')),viewport=document.documentElement.clientWidth;return{mode:previewMode,count:radios.length,builtIns:radios.filter(radio=>radio.value.startsWith('built_in:')).length,customs:radios.filter(radio=>radio.value.startsWith('custom:')).length,allHidden:labels.every(label=>label.hidden&&getComputedStyle(label).display==='none'&&label.getClientRects().length===0),allDisabled:radios.every(radio=>radio.disabled),allUntabbable:radios.every(radio=>radio.tabIndex<0),allVisible:labels.every(label=>!label.hidden&&getComputedStyle(label).display!=='none'&&label.getClientRects().length>0),allEnabled:radios.every(radio=>!radio.disabled),labels:labels.map(label=>label.textContent.trim()),selected:radios.filter(radio=>radio.checked).map(radio=>radio.value),config:JSON.stringify(configBody()),dirty:matrixDirty,overflow:document.documentElement.scrollWidth-viewport,offenders:[...document.querySelectorAll('body *')].map(element=>{const rect=element.getBoundingClientRect();return{tag:element.tagName,className:element.className?.toString?.()||'',left:rect.left,right:rect.right,width:rect.width}}).filter(rect=>rect.right>viewport+1||rect.left<-1).slice(0,30),locals:[...document.querySelectorAll('body *')].filter(element=>element.scrollWidth>element.clientWidth+1).map(element=>({tag:element.tagName,className:element.className?.toString?.()||'',client:element.clientWidth,scroll:element.scrollWidth})).slice(0,12)}})()`);
+try{
+ await send('Runtime.enable');await send('Page.enable');
+ await send('Page.addScriptToEvaluateOnNewDocument',{source:`
+  globalThis.__editPreviewPayloads=[];
+  const png='iVBORw0KGgoAAAANSUhEUgAAAEAAAAAgCAIAAAAt/+nTAAAAT0lEQVR4nO3PUQkAIBTAwFfBClawfzdD+HEIgwW4zdrn64YLGtCCBrSgAS1oQAsa0IIGtKABLWhACxrQgga0oAEtaEALGtCCBrSgAS147AJI7DAuPOp5lgAAAABJRU5ErkJggg==';
+  globalThis.fetch=async(input,options={})=>{const url=String(input),payload=options.body?JSON.parse(options.body):null;
+   if(url.startsWith('/api/edit-preview/')&&url!='/api/edit-preview/cancel'&&url!='/api/edit-preview/page'){__editPreviewPayloads.push(payload);return new Response(JSON.stringify({session:'1'.repeat(32),generation:payload.generation,page:0,frames:[{png,delay_ms:10000}],next_token:null,complete:true}),{headers:{'Content-Type':'application/json'}})}
+   if(url==='/api/config')return new Response(null,{status:304,headers:{'X-Matrix-Minimum-Client-Contract':'2'}});
+   if(url.startsWith('/api/display-frame'))return new Response(new Blob([Uint8Array.from(atob(png),c=>c.charCodeAt(0))],{type:'image/png'}));
+   return new Response(JSON.stringify({running:true,current_module:'clock_lava',minimum_client_contract:2}),{headers:{'Content-Type':'application/json'}})
+  };
+ `});
+ const layouts=[];
+ for(const [width,height,touch] of [[320,568,true],[390,844,true],[768,1024,true],[1280,720,false]]){
+  await send('Emulation.setDeviceMetricsOverride',{width,height,deviceScaleFactor:1,mobile:false});await send('Emulation.setTouchEmulationEnabled',{enabled:touch,maxTouchPoints:1});loaded=new Promise(resolve=>loadResolve=resolve);await send('Page.navigate',{url:'file://'+pagePath});await loaded;await evaluate(`document.documentElement.style.scrollBehavior='auto';scrollTo(0,0);syncPreviewPopout()`);
+  const live=await radioState();
+  await activate(await revealMode('label[for="preview-mode-edit"]'),false);await waitFor(`previewMode==='edit'`);await new Promise(resolve=>setTimeout(resolve,50));const edit=await radioState();
+  await evaluate(`document.querySelector('input[name="edit-preview-lava-palette"][value="built_in:ember_glow"]').focus()`);await send('Input.dispatchKeyEvent',{type:'keyDown',key:' ',code:'Space'});await send('Input.dispatchKeyEvent',{type:'keyUp',key:' ',code:'Space'});await waitFor(`document.querySelector('input[name="edit-preview-lava-palette"][value="built_in:ember_glow"]').checked`);const keyboard=await radioState();
+  await evaluate(`document.querySelector('input[name="edit-preview-lava-palette"][value="custom:palette_visibility"]').focus()`);await send('Input.dispatchKeyEvent',{type:'keyDown',key:' ',code:'Space'});await send('Input.dispatchKeyEvent',{type:'keyUp',key:' ',code:'Space'});await waitFor(`document.querySelector('input[name="edit-preview-lava-palette"][value="custom:palette_visibility"]').checked`);const custom=await radioState();
+  await activate(await revealPoint('[data-built-in-palette="fire_burst"] .palette-inspect'),touch);await waitFor(`document.querySelector('input[name="edit-preview-lava-palette"][value="built_in:fire_burst"]').checked`);const pointer=await radioState();
+  await evaluate(`setAllLavaPalettes(false);matrixDirty=false;matrixSavedSnapshot=matrixCurrentSnapshot()`);const zero=await radioState();
+  await activate(await revealMode('label[for="preview-mode-live"]'),false);await waitFor(`previewMode==='live'`);const restored=await radioState();
+  layouts.push({width,height,touch,live,edit,keyboard,custom,pointer,zero,restored});
+ }
+ console.log(JSON.stringify({layouts}));
+}finally{socket.close()}
+"""
+        report = self._run_dashboard_chromium_probe(body, probe, timeout=45)
+
+        self.assertEqual(len(report["layouts"]), 4, report)
+        for layout in report["layouts"]:
+            self.assertGreater(layout["live"]["builtIns"], 1, report)
+            self.assertEqual(layout["live"]["customs"], 1, report)
+            self.assertTrue(layout["live"]["allHidden"], report)
+            self.assertTrue(layout["live"]["allDisabled"], report)
+            self.assertTrue(layout["live"]["allUntabbable"], report)
+            self.assertTrue(layout["edit"]["allVisible"], report)
+            self.assertTrue(layout["edit"]["allEnabled"], report)
+            self.assertIn("Inspect fire burst in Edit Preview", layout["edit"]["labels"])
+            self.assertIn("Inspect Visibility palette in Edit Preview", layout["edit"]["labels"])
+            self.assertEqual(layout["keyboard"]["selected"], ["built_in:ember_glow"], report)
+            self.assertEqual(layout["keyboard"]["config"], layout["live"]["config"], report)
+            self.assertEqual(layout["custom"]["selected"], ["custom:palette_visibility"], report)
+            self.assertEqual(layout["custom"]["config"], layout["live"]["config"], report)
+            self.assertEqual(layout["pointer"]["selected"], ["built_in:fire_burst"], report)
+            self.assertEqual(layout["pointer"]["config"], layout["live"]["config"], report)
+            self.assertEqual(layout["zero"]["selected"], [], report)
+            self.assertEqual(json.loads(layout["zero"]["config"])["lava"]["enabled_palettes"], [])
+            self.assertFalse(any(
+                palette["enabled"]
+                for palette in json.loads(layout["zero"]["config"])["lava"]["custom_palettes"]
+            ))
+            self.assertTrue(layout["restored"]["allHidden"], report)
+            self.assertTrue(layout["restored"]["allDisabled"], report)
+            self.assertTrue(layout["restored"]["allUntabbable"], report)
+            self.assertEqual(layout["restored"]["selected"], [], report)
+            self.assertEqual(layout["restored"]["config"], layout["zero"]["config"], report)
+            for state in ("live", "edit", "keyboard", "custom", "pointer", "zero", "restored"):
+                self.assertLessEqual(
+                    layout[state]["overflow"], 1,
+                    (layout["width"], layout["height"], state, layout[state]["offenders"], layout[state]["locals"]),
+                )
+        self.assertEqual(Path(self.store.path).read_bytes(), before_config)
+        self.assertEqual(self.controller.method_calls, [])
+
+    @unittest.skipUnless(shutil.which("node"), "Node.js is required")
     @unittest.skipUnless(
         os.environ.get("MATRIX_CHROMIUM")
         and Path(os.environ.get("MATRIX_CHROMIUM", "")).is_file()
@@ -7196,6 +7774,10 @@ console.log('LAVA_PALETTE_BULK_CONTROLS_PASS');
         "MATRIX_CHROMIUM browser is required",
     )
     def test_lava_palette_bulk_controls_are_mobile_safe_in_real_chromium(self):
+        built_in = self.media_dir / "built-in"
+        built_in.mkdir()
+        for filename in ("squares_tb.gif", "sleep.gif"):
+            (built_in / filename).write_bytes(self.gif_bytes().getvalue())
         self.store.update({"lava": {"custom_palettes": [{
             "id": "palette_mobile",
             "name": "Mobile palette",
@@ -7215,10 +7797,20 @@ const send=(method,params={})=>{const id=nextId++;socket.send(JSON.stringify({id
 const evaluate=async expression=>{const result=await send('Runtime.evaluate',{expression,returnByValue:true,awaitPromise:true});if(result.exceptionDetails)throw new Error(JSON.stringify(result.exceptionDetails));return result.result.value};
 try{
  await send('Runtime.enable');await send('Page.enable');
+ await send('Page.addScriptToEvaluateOnNewDocument',{source:`
+  globalThis.__editPreviewPayloads=[];
+  const png='iVBORw0KGgoAAAANSUhEUgAAAEAAAAAgCAIAAAAt/+nTAAAAT0lEQVR4nO3PUQkAIBTAwFfBClawfzdD+HEIgwW4zdrn64YLGtCCBrSgAS1oQAsa0IIGtKABLWhACxrQgga0oAEtaEALGtCCBrSgAS147AJI7DAuPOp5lgAAAABJRU5ErkJggg==';
+  globalThis.fetch=async(input,options={})=>{const url=String(input),payload=options.body?JSON.parse(options.body):null;
+   if(url.startsWith('/api/edit-preview/')&&url!='/api/edit-preview/cancel'&&url!='/api/edit-preview/page'){__editPreviewPayloads.push(payload);return new Response(JSON.stringify({session:'1'.repeat(32),generation:payload.generation,page:0,frames:[{png,delay_ms:10000}],next_token:null,complete:true}),{headers:{'Content-Type':'application/json'}})}
+   if(url==='/api/config')return new Response(null,{status:304,headers:{'X-Matrix-Minimum-Client-Contract':'2'}});
+   if(url.startsWith('/api/display-frame'))return new Response(new Blob([Uint8Array.from(atob(png),c=>c.charCodeAt(0))],{type:'image/png'}));
+   return new Response(JSON.stringify({running:true,current_module:'clock_lava',minimum_client_contract:2}),{headers:{'Content-Type':'application/json'}})
+  };
+ `});
  const layouts=[];
  for(const [width,height] of [[320,568],[768,1024],[1280,720]]){
   await send('Emulation.setDeviceMetricsOverride',{width,height,deviceScaleFactor:1,mobile:false});loaded=new Promise(resolve=>loadResolve=resolve);await send('Page.navigate',{url:'file://'+pagePath});await loaded;
-  layouts.push(await evaluate(`(()=>{const group=document.querySelector('.palette-bulk-actions'),buttons=[...group.querySelectorAll('button')],bounds=buttons.map(button=>{const rect=button.getBoundingClientRect();return{width:rect.width,height:rect.height,left:rect.left,right:rect.right}});buttons[0].click();const selected=[...document.querySelectorAll('.lava-palette,[data-field="enabled"]')].every(input=>input.checked);buttons[1].click();const deselected=[...document.querySelectorAll('.lava-palette,[data-field="enabled"]')].every(input=>!input.checked);return{viewport:innerWidth,labels:buttons.map(button=>button.textContent.trim()),role:group.getAttribute('role'),aria:group.getAttribute('aria-label'),bounds,selected,deselected,dirty:matrixDirty,overflow:document.documentElement.scrollWidth-document.documentElement.clientWidth}})()`));
+  layouts.push(await evaluate(`(async()=>{const group=document.querySelector('.palette-bulk-actions'),buttons=[...group.querySelectorAll('button')],bounds=buttons.map(button=>{const rect=button.getBoundingClientRect();return{width:rect.width,height:rect.height,left:rect.left,right:rect.right}});document.querySelector('#device-name').value='Preserved lava draft';buttons[0].click();const selected=[...document.querySelectorAll('.lava-palette,[data-field="enabled"]')].every(input=>input.checked);buttons[1].focus();buttons[1].click();const deselected=[...document.querySelectorAll('.lava-palette,[data-field="enabled"]')].every(input=>!input.checked),payload=configBody(),focused=document.activeElement===buttons[1],overflow=document.documentElement.scrollWidth-document.documentElement.clientWidth;document.querySelector('#preview-select').value='clock_lava';document.querySelector('#preview-mode-edit').click();for(let attempt=0;attempt<40&&!__editPreviewPayloads.length;attempt++)await new Promise(resolve=>setTimeout(resolve,10));const editPreviewPayload=__editPreviewPayloads.at(-1);const first=document.querySelector('.lava-palette');first.checked=true;first.dispatchEvent(new Event('change',{bubbles:true}));const reselected=configBody().lava.enabled_palettes;resetBuiltInModule('clock_lava');const reset=configBody().lava.enabled_palettes;return{viewport:innerWidth,labels:buttons.map(button=>button.textContent.trim()),types:buttons.map(button=>button.type),role:group.getAttribute('role'),aria:group.getAttribute('aria-label'),bounds,selected,deselected,focused,reselected,reset,dirty:matrixDirty,payload,editPreviewPayload,overflow}})()`));
  }
  console.log(JSON.stringify({layouts}));
 }finally{socket.close()}
@@ -7227,11 +7819,25 @@ try{
 
         for layout in report["layouts"]:
             self.assertEqual(layout["labels"], ["Select all", "Deselect all"], report)
+            self.assertEqual(layout["types"], ["button", "button"], report)
             self.assertEqual(layout["role"], "group", report)
             self.assertEqual(layout["aria"], "Lava palette selection", report)
             self.assertTrue(layout["selected"], report)
             self.assertTrue(layout["deselected"], report)
+            self.assertTrue(layout["focused"], report)
+            self.assertEqual(len(layout["reselected"]), 1, report)
+            self.assertEqual(
+                layout["reset"], list(webapp.LAVA_PALETTES), report,
+            )
             self.assertTrue(layout["dirty"], report)
+            self.assertNotIn("selected_lava_palette", layout["editPreviewPayload"], report)
+            self.assertEqual(layout["editPreviewPayload"]["config"]["lava"]["enabled_palettes"], [], report)
+            self.assertFalse(any(
+                item["enabled"]
+                for item in layout["editPreviewPayload"]["config"]["lava"]["custom_palettes"]
+            ), report)
+            self.assertTrue(layout["editPreviewPayload"]["config"]["lava"]["show_time"], report)
+            self.assertTrue(layout["editPreviewPayload"]["config"]["lava"]["show_date"], report)
             self.assertLessEqual(layout["overflow"], 1, report)
             for bounds in layout["bounds"]:
                 self.assertGreater(bounds["width"], 0, report)
@@ -7239,6 +7845,16 @@ try{
                 self.assertLessEqual(bounds["right"], layout["viewport"] + 1, report)
                 if layout["viewport"] <= 600:
                     self.assertGreaterEqual(bounds["height"], 44, report)
+        payload = report["layouts"][-1]["payload"]
+        self.assertEqual(payload["lava"]["enabled_palettes"], [])
+        self.assertFalse(any(item["enabled"] for item in payload["lava"]["custom_palettes"]))
+        self.assertEqual(payload["device"]["name"], "Preserved lava draft")
+
+        saved = self.post_config(json=payload)
+
+        self.assertEqual(saved.status_code, 200, saved.get_data(as_text=True))
+        self.assertEqual(saved.get_json()["lava"]["enabled_palettes"], [])
+        self.assertEqual(self.store.get()["device"]["name"], "Preserved lava draft")
 
     def test_display_frame_is_paired_and_returns_the_controller_frame(self):
         self.controller.frame_png.return_value = (io.BytesIO(b"png-frame"), 17)
@@ -7449,7 +8065,7 @@ try{
             "overrides": [],
         }]})
 
-        response = self.client.delete("/api/media/custom.gif")
+        response = self.paired_request("DELETE", "/api/media/custom.gif")
 
         self.assertEqual(response.status_code, 409)
         self.assertTrue((self.media_dir / "custom.gif").exists())
@@ -7471,7 +8087,7 @@ try{
         self.assertEqual(served.status_code, 200)
         self.assertEqual(served.mimetype, "image/gif")
         served.close()
-        self.assertEqual(self.client.delete("/api/media/built-in/system.gif").status_code, 403)
+        self.assertEqual(self.paired_request("DELETE", "/api/media/built-in/system.gif").status_code, 403)
 
     def test_media_classification_cannot_be_changed_through_the_api(self):
         self.pair_browser()
@@ -7481,10 +8097,10 @@ try{
         (self.media_dir / "custom.gif").write_bytes(payload)
         (built_in / "system.gif").write_bytes(payload)
 
-        promoted = self.client.post(
+        promoted = self.paired_request("POST",
             "/api/media/custom.gif/classification", json={"built_in": True}
         )
-        demoted = self.client.post(
+        demoted = self.paired_request("POST",
             "/api/media/built-in/system.gif/classification", json={"built_in": False}
         )
 
@@ -7570,7 +8186,7 @@ try{
 
     def test_media_upload_list_and_download(self):
         self.pair_browser()
-        response = self.client.post(
+        response = self.paired_request("POST",
             "/api/media",
             data={"file": (self.gif_bytes(), "custom.gif")},
             content_type="multipart/form-data",
@@ -7588,7 +8204,7 @@ try{
         self.pair_browser()
         (self.media_dir / "custom.gif").write_bytes(self.gif_bytes().getvalue())
 
-        response = self.client.post("/api/media/custom.gif/preview")
+        response = self.paired_request("POST", "/api/media/custom.gif/preview")
 
         self.assertEqual(response.status_code, 202)
         self.assertEqual(response.get_json(), {"previewing": "custom.gif"})
@@ -7597,19 +8213,19 @@ try{
         built_in = self.media_dir / "built-in"
         built_in.mkdir()
         (built_in / "system.gif").write_bytes(self.gif_bytes().getvalue())
-        built_in_response = self.client.post("/api/media/built-in/system.gif/preview")
+        built_in_response = self.paired_request("POST", "/api/media/built-in/system.gif/preview")
         self.assertEqual(built_in_response.status_code, 202)
         self.controller.preview_media.assert_called_with("built-in/system.gif")
 
         (self.media_dir / "linked.gif").symlink_to(self.media_dir / "custom.gif")
-        self.assertEqual(self.client.post("/api/media/linked.gif/preview").status_code, 404)
-        self.assertEqual(self.client.post("/api/media/missing.gif/preview").status_code, 404)
+        self.assertEqual(self.paired_request("POST", "/api/media/linked.gif/preview").status_code, 404)
+        self.assertEqual(self.paired_request("POST", "/api/media/missing.gif/preview").status_code, 404)
 
     @unittest.skipUnless(shutil.which("ffmpeg") and shutil.which("ffprobe"), "FFmpeg is required")
     def test_mp4_upload_is_optimized_listed_and_served(self):
         self.pair_browser()
 
-        response = self.client.post(
+        response = self.paired_request("POST",
             "/api/media",
             data={"file": (self.mp4_bytes(), "clip.mp4")},
             content_type="multipart/form-data",
@@ -7644,9 +8260,9 @@ try{
         )
         client = app.test_client()
         self.pairing.verify.return_value = True
-        client.post("/pair", data={"pin": "123456", "device_name": "Test browser"})
+        self.paired_client_request("POST", client, "/pair", data={"pin": "123456", "device_name": "Test browser"})
 
-        response = client.post(
+        response = self.paired_client_request("POST", client,
             "/api/media",
             data={"file": (self.gif_bytes(), "preexec.gif")},
             content_type="multipart/form-data",
@@ -7674,9 +8290,9 @@ try{
         )
         client = app.test_client()
         self.pairing.verify.return_value = True
-        client.post("/pair", data={"pin": "123456", "device_name": "Test browser"})
+        self.paired_client_request("POST", client, "/pair", data={"pin": "123456", "device_name": "Test browser"})
 
-        response = client.post(
+        response = self.paired_client_request("POST", client,
             "/api/media",
             data={"file": (self.mp4_bytes(), "unprivileged.mp4")},
             content_type="multipart/form-data",
@@ -7695,7 +8311,7 @@ try{
         self.assertGreater(original_size, 16 * 1024 * 1024)
         payload.seek(0)
 
-        response = self.client.post(
+        response = self.paired_request("POST",
             "/api/media",
             data={"file": (payload, "large-source.png")},
             content_type="multipart/form-data",
@@ -7716,10 +8332,10 @@ try{
     def test_media_routes_require_pairing_and_upload_does_not_overwrite(self):
         self.assertEqual(self.client.get("/api/media").status_code, 401)
         self.assertEqual(self.client.get("/media/custom.gif").status_code, 302)
-        self.assertEqual(self.client.delete("/api/media/custom.gif").status_code, 401)
+        self.assertEqual(self.paired_request("DELETE", "/api/media/custom.gif").status_code, 401)
         self.pair_browser()
         (self.media_dir / "custom.gif").write_bytes(self.gif_bytes().read())
-        response = self.client.post(
+        response = self.paired_request("POST",
             "/api/media",
             data={"file": (self.gif_bytes(), "custom.gif")},
             content_type="multipart/form-data",
@@ -7750,7 +8366,7 @@ try{
                 with patch("webapp.subprocess.run"), patch(
                     "webapp.Image.open", side_effect=failure,
                 ):
-                    response = self.client.post(
+                    response = self.paired_request("POST",
                         "/api/media",
                         data={"file": (self.gif_bytes(), "rejected.gif")},
                         content_type="multipart/form-data",
@@ -7761,7 +8377,7 @@ try{
                 self.assertIn("error", response.get_json())
                 self.assertFalse((self.media_dir / "rejected.gif").exists())
 
-                retry = self.client.post(
+                retry = self.paired_request("POST",
                     "/api/media",
                     data={"file": (self.gif_bytes(), "rejected.gif")},
                     content_type="multipart/form-data",
@@ -7772,7 +8388,7 @@ try{
         with patch("webapp.subprocess.run"), patch(
             "webapp.Image.open", side_effect=RuntimeError("unexpected bug"),
         ):
-            response = self.client.post(
+            response = self.paired_request("POST",
                 "/api/media",
                 data={"file": (self.gif_bytes(), "rejected.gif")},
                 content_type="multipart/form-data",
@@ -7795,7 +8411,7 @@ try{
             patch("webapp.Image.open", side_effect=KeyError("missing metadata")),
             patch.object(Path, "unlink", autospec=True, side_effect=fail_destination_unlink),
         ):
-            response = self.client.post(
+            response = self.paired_request("POST",
                 "/api/media",
                 data={"file": (self.gif_bytes(), destination.name)},
                 content_type="multipart/form-data",
@@ -7833,7 +8449,7 @@ try{
                     autospec=True,
                     side_effect=fail_selected_cleanup,
                 ):
-                    response = self.client.post(
+                    response = self.paired_request("POST",
                         "/api/media",
                         data={"file": (self.gif_bytes(), destination.name)},
                         content_type="multipart/form-data",
@@ -7873,7 +8489,7 @@ try{
                         Path, "unlink", autospec=True, side_effect=fail_selected_cleanup,
                     ),
                 ):
-                    response = self.client.post(
+                    response = self.paired_request("POST",
                         "/api/media",
                         data={"file": (self.gif_bytes(), destination.name)},
                         content_type="multipart/form-data",
@@ -7914,7 +8530,7 @@ try{
                     patch("webapp.subprocess.run", side_effect=run_helper),
                     patch("webapp.os.close", side_effect=close_then_fail),
                 ):
-                    response = self.client.post(
+                    response = self.paired_request("POST",
                         "/api/media",
                         data={"file": (self.gif_bytes(), filename)},
                         content_type="multipart/form-data",
@@ -7945,7 +8561,7 @@ try{
                 Path, "unlink", autospec=True, side_effect=fail_sanitized_cleanup,
             ),
         ):
-            response = self.client.post(
+            response = self.paired_request("POST",
                 "/api/media",
                 data={"file": (self.gif_bytes(), "rejected-helper.gif")},
                 content_type="multipart/form-data",
@@ -7961,7 +8577,7 @@ try{
     def test_upload_reports_post_publication_durability_uncertainty(self):
         self.pair_browser()
         with patch("webapp.os.fsync", side_effect=OSError("directory unavailable")):
-            response = self.client.post(
+            response = self.paired_request("POST",
                 "/api/media",
                 data={"file": (self.gif_bytes(), "uncertain.gif")},
                 content_type="multipart/form-data",
@@ -7979,7 +8595,7 @@ try{
             patch("webapp.os.fsync", side_effect=[None, OSError("directory unavailable")]),
             patch("webapp.Image.open", side_effect=KeyError("bad metadata")),
         ):
-            response = self.client.post(
+            response = self.paired_request("POST",
                 "/api/media",
                 data={"file": (self.gif_bytes(), "rollback-uncertain.gif")},
                 content_type="multipart/form-data",
@@ -8000,7 +8616,7 @@ try{
             ("broken.mp4", io.BytesIO(b"not an mp4")),
         ):
             with self.subTest(filename=filename):
-                response = self.client.post(
+                response = self.paired_request("POST",
                     "/api/media",
                     data={"file": (payload, filename)},
                     content_type="multipart/form-data",
@@ -8011,15 +8627,15 @@ try{
         self.pair_browser()
         (self.media_dir / "unused.gif").write_bytes(self.gif_bytes().read())
         (self.media_dir / "squares_tb.gif").write_bytes(self.gif_bytes().read())
-        self.assertEqual(self.client.delete("/api/media/unused.gif").status_code, 200)
+        self.assertEqual(self.paired_request("DELETE", "/api/media/unused.gif").status_code, 200)
         self.assertFalse((self.media_dir / "unused.gif").exists())
-        response = self.client.delete("/api/media/squares_tb.gif")
+        response = self.paired_request("DELETE", "/api/media/squares_tb.gif")
         self.assertEqual(response.status_code, 200)
         self.assertFalse((self.media_dir / "squares_tb.gif").exists())
 
         (self.media_dir / "durability.gif").write_bytes(self.gif_bytes().read())
         with patch("webapp.os.fsync", side_effect=OSError("directory unavailable")):
-            uncertain = self.client.delete("/api/media/durability.gif")
+            uncertain = self.paired_request("DELETE", "/api/media/durability.gif")
         self.assertEqual(uncertain.status_code, 503)
         self.assertEqual(uncertain.get_json()["committed"], True)
         self.assertEqual(uncertain.get_json()["durability_uncertain"], True)
@@ -8027,11 +8643,11 @@ try{
 
         (self.media_dir / "active.gif").write_bytes(self.gif_bytes().read())
         self.store.update({"media": {"splash": "active.gif"}})
-        response = self.client.delete("/api/media/active.gif")
+        response = self.paired_request("DELETE", "/api/media/active.gif")
         self.assertEqual(response.status_code, 409)
         self.assertTrue((self.media_dir / "active.gif").exists())
         (self.media_dir / "hermes_self_portrait.png").write_bytes(self.gif_bytes().read())
-        response = self.client.delete("/api/media/hermes_self_portrait.png")
+        response = self.paired_request("DELETE", "/api/media/hermes_self_portrait.png")
         self.assertEqual(response.status_code, 200)
 
     def tearDown(self):
@@ -8048,25 +8664,28 @@ try{
         self.assertIn("if(error.data?.committed){input.value='';try{await refreshMedia()}", page)
 
     @unittest.skipUnless(shutil.which("node"), "Node.js is required")
-    def test_rendered_dashboard_inline_javascript_is_syntactically_valid(self):
+    def test_rendered_inline_javascript_is_syntactically_valid(self):
         self.pair_browser()
-        page = self.client.get("/").get_data(as_text=True)
-        inline = "\n".join(
-            script for script in re.findall(r"<script[^>]*>(.*?)</script>", page, re.DOTALL)
-            if script.strip()
-        )
-
+        pages = [
+            self.client.get("/").get_data(as_text=True),
+            self.client.get("/pair").get_data(as_text=True),
+        ]
         node = shutil.which("node")
         assert node is not None
-        result = subprocess.run(
-            [node, "--check", "-"],
-            input=inline,
-            text=True,
-            capture_output=True,
-            check=False,
-        )
 
-        self.assertEqual(result.returncode, 0, result.stderr)
+        for page in pages:
+            inline = "\n".join(
+                script for script in re.findall(r"<script[^>]*>(.*?)</script>", page, re.DOTALL)
+                if script.strip()
+            )
+            result = subprocess.run(
+                [node, "--check", "-"],
+                input=inline,
+                text=True,
+                capture_output=True,
+                check=False,
+            )
+            self.assertEqual(result.returncode, 0, result.stderr)
 
     def test_dashboard_requires_pairing(self):
         response = self.client.get("/")
@@ -8075,7 +8694,7 @@ try{
 
     def test_unauthenticated_requests_are_redirected(self):
         dashboard = self.client.get("/")
-        timing_api = self.client.post("/api/scroll-timing/weather", json={})
+        timing_api = self.paired_request("POST", "/api/scroll-timing/weather", json={})
 
         self.assertEqual(dashboard.status_code, 302)
         self.assertIn("/pair", dashboard.headers["Location"])
@@ -8084,7 +8703,7 @@ try{
 
     def test_valid_pin_unlocks_dashboard_and_updates_configuration(self):
         self.pairing.verify.return_value = True
-        response = self.client.post("/pair", data={"pin": "123456", "device_name": "Test browser"}, follow_redirects=True)
+        response = self.paired_request("POST", "/pair", data={"pin": "123456", "device_name": "Test browser"}, follow_redirects=True)
         self.assertEqual(response.status_code, 200)
         self.controller.end_pairing.assert_called_once()
         with self.client.session_transaction() as browser_session:
@@ -8121,9 +8740,9 @@ try{
             self.assertNotIn("device_id", json.dumps(body))
             return body
 
-        assert_response(self.client.post(start_path, json=start_payload), 401)
-        assert_response(self.client.post(page_path, json={}), 401)
-        assert_response(self.client.post(cancel_path, json={}), 401)
+        assert_response(self.paired_request("POST", start_path, json=start_payload), 401)
+        assert_response(self.paired_request("POST", page_path, json={}), 401)
+        assert_response(self.paired_request("POST", cancel_path, json={}), 401)
 
         self.pair_browser()
         self.controller.reset_mock()
@@ -8135,7 +8754,7 @@ try{
         )
 
         oversized = b'{"config":"' + (b"x" * 1_048_576) + b'"}'
-        assert_response(self.client.post(
+        assert_response(self.paired_request("POST",
             start_path, data=oversized, content_type="application/json",
         ), 413)
         malformed_payloads = [
@@ -8146,9 +8765,9 @@ try{
         ]
         for payload in malformed_payloads:
             with self.subTest(payload=payload):
-                assert_response(self.client.post(start_path, json=payload), 400)
+                assert_response(self.paired_request("POST", start_path, json=payload), 400)
         assert_response(
-            self.client.post("/api/edit-preview/not-a-module", json=start_payload), 404,
+            self.paired_request("POST", "/api/edit-preview/not-a-module", json=start_payload), 404,
         )
 
         lifecycle = []
@@ -8176,7 +8795,7 @@ try{
         with patch("webapp.pin_candidate_media", pinned), patch(
             "webapp._prepare_edit_preview_provider", prepare, create=True,
         ), patch("webapp._edit_preview_iterator", iterator, create=True):
-            response = self.client.post(start_path, json=start_payload)
+            response = self.paired_request("POST", start_path, json=start_payload)
             first = assert_response(response, 200)
             self.assertEqual(
                 set(first),
@@ -8195,7 +8814,7 @@ try{
                 "preview_instance": preview_instance,
                 "token": first["next_token"],
             }
-            second = assert_response(self.client.post(page_path, json=continuation), 200)
+            second = assert_response(self.paired_request("POST", page_path, json=continuation), 200)
             self.assertEqual(
                 set(second),
                 {"session", "generation", "page", "frames", "next_token", "complete"},
@@ -8207,17 +8826,17 @@ try{
             self.assertIsNone(second["next_token"])
             self.assertEqual(lifecycle, ["pin-enter", "provider", "render", "pin-exit"])
 
-            assert_response(self.client.post(page_path, json=continuation), 409)
+            assert_response(self.paired_request("POST", page_path, json=continuation), 409)
 
             second_payload = {**start_payload, "generation": 2}
             with patch("webapp._edit_preview_iterator", side_effect=RuntimeError("decode detail"), create=True):
-                assert_response(self.client.post(start_path, json=second_payload), 503)
+                assert_response(self.paired_request("POST", start_path, json=second_payload), 503)
 
             registry = self.app.extensions["edit_preview_registry"]
             with patch.object(
                 registry, "lookup", side_effect=PreviewSessionExpiredError("private expiry"),
             ):
-                expired = self.client.post(page_path, json={
+                expired = self.paired_request("POST", page_path, json={
                     "session": "1" * 32,
                     "preview_instance": preview_instance,
                     "token": "2" * 64,
@@ -8226,7 +8845,7 @@ try{
             with patch.object(
                 registry, "register", side_effect=PreviewInstanceCapacityError("private capacity"),
             ):
-                limited = self.client.post(
+                limited = self.paired_request("POST",
                     start_path, json={**start_payload, "generation": 3},
                 )
             assert_response(limited, 429)
@@ -8239,16 +8858,16 @@ try{
                 )
 
             with patch("webapp._edit_preview_iterator", active_iterator, create=True):
-                active = self.client.post(
+                active = self.paired_request("POST",
                     start_path, json={**start_payload, "generation": 4},
                 )
             active_body = assert_response(active, 200)
-            cancel = assert_response(self.client.post(cancel_path, json={
+            cancel = assert_response(self.paired_request("POST", cancel_path, json={
                 "session": active_body["session"],
                 "preview_instance": preview_instance,
             }), 200)
             self.assertEqual(cancel, {"cancelled": True})
-            assert_response(self.client.post(cancel_path, json={
+            assert_response(self.paired_request("POST", cancel_path, json={
                 "session": active_body["session"],
                 "preview_instance": preview_instance,
             }), 409)
@@ -8271,7 +8890,7 @@ try{
         self.assertTrue(candidate["lava"]["show_time"])
         self.assertTrue(candidate["lava"]["show_date"])
 
-        response = self.client.post("/api/edit-preview/clock_lava", json={
+        response = self.paired_request("POST", "/api/edit-preview/clock_lava", json={
             "config": candidate,
             "generation": 1,
             "preview_instance": "0123456789abcdef0123456789abcdef",
@@ -8300,7 +8919,7 @@ try{
         with patch.object(
             webapp, "_prepare_edit_preview_provider", return_value=prepared,
         ):
-            response = self.client.post("/api/edit-preview/weather", json={
+            response = self.paired_request("POST", "/api/edit-preview/weather", json={
                 "config": candidate,
                 "generation": 1,
                 "preview_instance": "0123456789abcdef0123456789abcdef",
@@ -8343,7 +8962,7 @@ try{
             nonlocal preview_index
             preview_index += 1
             instance = f"{preview_index:032x}"
-            response = self.client.post(f"/api/edit-preview/{module_name}", json={
+            response = self.paired_request("POST", f"/api/edit-preview/{module_name}", json={
                 "config": candidate,
                 "generation": preview_index,
                 "preview_instance": instance,
@@ -8353,7 +8972,7 @@ try{
             body = response.get_json()
             self.assertGreater(len(body["frames"]), 0)
             if not body["complete"]:
-                cancelled = self.client.post("/api/edit-preview/cancel", json={
+                cancelled = self.paired_request("POST", "/api/edit-preview/cancel", json={
                     "session": body["session"], "preview_instance": instance,
                 })
                 self.assertEqual(cancelled.status_code, 200)
@@ -8435,8 +9054,8 @@ try{
         self.assertLess(len(payload), 1_048_576)
 
         def unknown_length(path, body):
-            return self.client.open(
-                path, method="POST", input_stream=io.BytesIO(body),
+            return self.paired_request(
+                "POST", path, input_stream=io.BytesIO(body),
                 content_type="application/json",
                 environ_overrides={
                     "CONTENT_LENGTH": "", "wsgi.input_terminated": True,
@@ -8465,7 +9084,7 @@ try{
         self.assertEqual(accepted.headers.get("Cache-Control"), "no-store")
         accepted_body = accepted.get_json()
         if not accepted_body["complete"]:
-            self.client.post("/api/edit-preview/cancel", json={
+            self.paired_request("POST", "/api/edit-preview/cancel", json={
                 "session": accepted_body["session"], "preview_instance": instance,
             })
 
@@ -8634,24 +9253,24 @@ try{
             # Lazy creation is one registry/provider pair, shared by successful
             # requests and independent Flask clients. Request teardown owns neither.
             self.assertNotIn("edit_preview_registry", self.app.extensions)
-            first = assert_response(self.client.post(start_path, json=payload(1)), 200)
+            first = assert_response(self.paired_request("POST", start_path, json=payload(1)), 200)
             first_registry = self.app.extensions["edit_preview_registry"]
             first_provider = self.app.extensions["edit_preview_provider"]
             self.assertEqual((len(registries), len(providers)), (1, 1))
-            second = assert_response(paired_client().post(
+            second = assert_response(self.paired_client_request("POST", paired_client(),
                 cancel_path, json={
                     "session": first["session"],
                     "preview_instance": preview_instance,
                 },
             ), 200)
             self.assertEqual(second, {"cancelled": True})
-            again = assert_response(paired_client().post(
+            again = assert_response(self.paired_client_request("POST", paired_client(),
                 start_path, json=payload(2),
             ), 200)
             self.assertIs(self.app.extensions["edit_preview_registry"], first_registry)
             self.assertIs(self.app.extensions["edit_preview_provider"], first_provider)
             self.assertEqual((len(registries), len(providers)), (1, 1))
-            assert_response(self.client.post(cancel_path, json={
+            assert_response(self.paired_request("POST", cancel_path, json={
                 "session": again["session"], "preview_instance": preview_instance,
             }), 200)
 
@@ -8668,7 +9287,7 @@ try{
             def concurrent_start(index):
                 try:
                     barrier.wait()
-                    results.append((index, paired_client().post(
+                    results.append((index, self.paired_client_request("POST", paired_client(),
                         start_path,
                         json={**payload(index + 3), "preview_instance": f"{index + 1:032x}"},
                     )))
@@ -8695,7 +9314,7 @@ try{
             self.assertIsNot(replacement_provider, first_provider)
             for index, response in results:
                 body = assert_response(response, 200)
-                assert_response(paired_client().post(cancel_path, json={
+                assert_response(self.paired_client_request("POST", paired_client(), cancel_path, json={
                     "session": body["session"],
                     "preview_instance": f"{index + 1:032x}",
                 }), 200)
@@ -8704,7 +9323,7 @@ try{
             # partially-created registry is closed exactly once, then retried.
             self.app.extensions["close_edit_preview_services"]()
             fail_provider_init.set()
-            failed = assert_response(self.client.post(
+            failed = assert_response(self.paired_request("POST",
                 start_path, json=payload(20),
             ), 503)
             self.assertEqual(failed, {"error": "Preview is temporarily unavailable."})
@@ -8712,7 +9331,7 @@ try{
             self.assertTrue(partial_registry.is_closed)
             self.assertEqual(partial_registry.close_calls, 1)
             self.assertIs(self.app.extensions.get("edit_preview_registry"), replacement_registry)
-            recovered = assert_response(self.client.post(
+            recovered = assert_response(self.paired_request("POST",
                 start_path, json=payload(21),
             ), 200)
             healthy_registry = self.app.extensions["edit_preview_registry"]
@@ -8721,7 +9340,7 @@ try{
             self.assertFalse(healthy_registry.is_closed)
             self.assertFalse(healthy_provider.is_closed)
             self.assertEqual((len(registries), len(providers)), (4, 3))
-            assert_response(self.client.post(cancel_path, json={
+            assert_response(self.paired_request("POST", cancel_path, json={
                 "session": recovered["session"],
                 "preview_instance": preview_instance,
             }), 200)
@@ -8733,7 +9352,7 @@ try{
             provider_prepare_started.clear()
 
             def superseded_start():
-                superseded_result["response"] = superseded_client.post(
+                superseded_result["response"] = self.paired_client_request("POST", superseded_client,
                     weather_path, json=payload(29, location="blocked-old"),
                 )
 
@@ -8743,7 +9362,7 @@ try{
             superseded_thread.start()
             self.assertTrue(provider_prepare_started.wait(1))
             newer_at = time.monotonic()
-            superseding = assert_response(paired_client().post(
+            superseding = assert_response(self.paired_client_request("POST", paired_client(),
                 weather_path, json=payload(30, location="new-healthy"),
             ), 200)
             self.assertLess(time.monotonic() - newer_at, 0.25)
@@ -8753,7 +9372,7 @@ try{
             self.assertEqual(
                 stale_generation, {"error": "Preview generation was superseded."},
             )
-            assert_response(paired_client().post(cancel_path, json={
+            assert_response(self.paired_client_request("POST", paired_client(), cancel_path, json={
                 "session": superseding["session"],
                 "preview_instance": preview_instance,
             }), 200)
@@ -8766,7 +9385,7 @@ try{
             provider_prepare_started.clear()
 
             def blocked_start():
-                old_result["response"] = old_client.post(
+                old_result["response"] = self.paired_client_request("POST", old_client,
                     weather_path, json=payload(30, location="blocked-old"),
                 )
 
@@ -8778,7 +9397,7 @@ try{
             closed_at = time.monotonic()
             self.app.extensions["close_edit_preview_services"]()
             self.assertLess(time.monotonic() - closed_at, 0.25)
-            newer = assert_response(paired_client().post(
+            newer = assert_response(self.paired_client_request("POST", paired_client(),
                 weather_path, json=payload(31, location="new-healthy"),
             ), 200)
             old_thread.join(0.25)
@@ -8786,7 +9405,7 @@ try{
             stale = assert_response(old_result["response"], 503)
             self.assertEqual(stale, {"error": "Preview is temporarily unavailable."})
             self.assertNotIn("frames", stale)
-            assert_response(paired_client().post(cancel_path, json={
+            assert_response(self.paired_client_request("POST", paired_client(), cancel_path, json={
                 "session": newer["session"], "preview_instance": preview_instance,
             }), 200)
 
@@ -9025,7 +9644,7 @@ try{
 
             def request(index, destination):
                 try:
-                    destination.append((index, paired_client().post(
+                    destination.append((index, self.paired_client_request("POST", paired_client(),
                         "/api/edit-preview/clock_lava", json=payload(index),
                     )))
                 except BaseException as error:
@@ -9086,21 +9705,21 @@ try{
                 self.app.extensions["get_edit_preview_services"]()[1], healthy_provider,
             )
             first_index, first_session = sessions.pop(0)
-            cancelled = assert_transport(paired_client().post(
+            cancelled = assert_transport(self.paired_client_request("POST", paired_client(),
                 "/api/edit-preview/cancel", json={
                     "session": first_session,
                     "preview_instance": f"{first_index:032x}",
                 },
             ), 200)
             self.assertEqual(cancelled, {"cancelled": True})
-            reused = assert_transport(paired_client().post(
+            reused = assert_transport(self.paired_client_request("POST", paired_client(),
                 "/api/edit-preview/clock_lava", json=payload(base_index + 3),
             ), 200)
             sessions.append((base_index + 3, reused["session"]))
             self.assertIs(self.app.extensions["edit_preview_registry"], healthy_registry)
             self.assertIs(self.app.extensions["edit_preview_provider"], healthy_provider)
             for index, session_id in sessions:
-                cancelled = assert_transport(paired_client().post(
+                cancelled = assert_transport(self.paired_client_request("POST", paired_client(),
                     "/api/edit-preview/cancel", json={
                         "session": session_id,
                         "preview_instance": f"{index:032x}",
@@ -9324,7 +9943,7 @@ try{
             "webapp._prepare_edit_preview_provider", prepare, create=True,
         ), patch("webapp._edit_preview_iterator", iterator, create=True):
             old = assert_response(
-                self.client.post(start_path, json=payload("old-slow", 7)), 200,
+                self.paired_request("POST", start_path, json=payload("old-slow", 7)), 200,
             )
             self.assertEqual(old["generation"], 7)
             self.assertEqual(old["page"], 0)
@@ -9338,7 +9957,7 @@ try{
 
             def continue_old():
                 try:
-                    old_result["response"] = old_page_client.post(
+                    old_result["response"] = self.paired_client_request("POST", old_page_client,
                         page_path, json=continuation(old),
                     )
                 except BaseException as error:
@@ -9355,7 +9974,7 @@ try{
 
             newer_started = time.monotonic()
             newer = assert_response(
-                new_start_client.post(start_path, json=payload("new-fast", 8)), 200,
+                self.paired_client_request("POST", new_start_client, start_path, json=payload("new-fast", 8)), 200,
             )
             newer_latency = time.monotonic() - newer_started
             self.assertLess(newer_latency, 0.25)
@@ -9368,7 +9987,7 @@ try{
             self.assertEqual(registry.total_count, 2)
 
             new_page_started = time.monotonic()
-            newer_second = assert_response(new_start_client.post(
+            newer_second = assert_response(self.paired_client_request("POST", new_start_client,
                 page_path, json=continuation(newer),
             ), 200)
             self.assertLess(time.monotonic() - new_page_started, 0.25)
@@ -9383,7 +10002,7 @@ try{
             }
             for label, generation in (("equal-rejected", 8), ("older-rejected", 6)):
                 with self.subTest(rejected_generation=generation):
-                    assert_response(new_start_client.post(
+                    assert_response(self.paired_client_request("POST", new_start_client,
                         start_path, json=payload(label, generation),
                     ), 400)
                     self.assertEqual(constructed, constructed_before_rejection)
@@ -9408,7 +10027,7 @@ try{
             self.assertEqual(pin_exits.count("old-slow"), 1)
             self.assertEqual(registry.total_count, 1)
 
-            newer_third = assert_response(new_start_client.post(
+            newer_third = assert_response(self.paired_client_request("POST", new_start_client,
                 page_path, json=continuation(newer_second),
             ), 200)
             self.assertEqual(newer_third["generation"], 8)
@@ -9416,7 +10035,7 @@ try{
             self.assertEqual(len(newer_third["frames"]), 32)
             self.assertFalse(newer_third["complete"])
             self.assertFalse(stop_events["new-fast"].is_set())
-            cancelled = assert_response(new_start_client.post(cancel_path, json={
+            cancelled = assert_response(self.paired_client_request("POST", new_start_client, cancel_path, json={
                 "session": newer["session"],
                 "preview_instance": preview_instance,
             }), 200)
@@ -9549,10 +10168,10 @@ try{
         with patch("webapp.pin_candidate_media", pinned), patch(
             "webapp._prepare_edit_preview_provider", prepare, create=True,
         ), patch("webapp._edit_preview_iterator", iterator, create=True):
-            tab_a = assert_response(tab_a_client.post(
+            tab_a = assert_response(self.paired_client_request("POST", tab_a_client,
                 start_path, json=payload("tab-a", tab_a_instance),
             ), 200)
-            tab_b = assert_response(tab_b_client.post(
+            tab_b = assert_response(self.paired_client_request("POST", tab_b_client,
                 start_path, json=payload("tab-b", tab_b_instance),
             ), 200)
             registry = self.app.extensions["edit_preview_registry"]
@@ -9566,17 +10185,17 @@ try{
             baseline_advances = {
                 label: current.next_calls for label, current in iterators.items()
             }
-            assert_response(tab_b_client.post(
+            assert_response(self.paired_client_request("POST", tab_b_client,
                 page_path, json=continuation(tab_a, tab_b_instance),
             ), 409)
-            assert_response(tab_a_client.post(
+            assert_response(self.paired_client_request("POST", tab_a_client,
                 page_path, json=continuation(tab_b, tab_a_instance),
             ), 409)
-            assert_response(tab_b_client.post(cancel_path, json={
+            assert_response(self.paired_client_request("POST", tab_b_client, cancel_path, json={
                 "session": tab_a["session"],
                 "preview_instance": tab_b_instance,
             }), 409)
-            assert_response(tab_a_client.post(cancel_path, json={
+            assert_response(self.paired_client_request("POST", tab_a_client, cancel_path, json={
                 "session": tab_b["session"],
                 "preview_instance": tab_a_instance,
             }), 409)
@@ -9590,14 +10209,14 @@ try{
             self.assertFalse(stop_events["tab-a"].is_set())
             self.assertFalse(stop_events["tab-b"].is_set())
 
-            tab_a_page = assert_response(tab_a_client.post(
+            tab_a_page = assert_response(self.paired_client_request("POST", tab_a_client,
                 page_path, json=continuation(tab_a, tab_a_instance),
             ), 200)
             self.assertEqual(tab_a_page["page"], 1)
             self.assertEqual(iterators["tab-a"].next_calls, 65)
             self.assertEqual(iterators["tab-b"].next_calls, 33)
 
-            cancelled_a = assert_response(tab_a_client.post(cancel_path, json={
+            cancelled_a = assert_response(self.paired_client_request("POST", tab_a_client, cancel_path, json={
                 "session": tab_a["session"],
                 "preview_instance": tab_a_instance,
             }), 200)
@@ -9610,13 +10229,13 @@ try{
             self.assertEqual(pin_exits.count("tab-b"), 0)
             self.assertEqual(registry.total_count, 1)
 
-            tab_b_page = assert_response(tab_b_client.post(
+            tab_b_page = assert_response(self.paired_client_request("POST", tab_b_client,
                 page_path, json=continuation(tab_b, tab_b_instance),
             ), 200)
             self.assertEqual(tab_b_page["page"], 1)
             self.assertEqual(iterators["tab-b"].next_calls, 65)
             self.assertEqual(iterators["tab-a"].next_calls, 65)
-            cancelled_b = assert_response(tab_b_client.post(cancel_path, json={
+            cancelled_b = assert_response(self.paired_client_request("POST", tab_b_client, cancel_path, json={
                 "session": tab_b["session"],
                 "preview_instance": tab_b_instance,
             }), 200)
@@ -9651,10 +10270,10 @@ try{
         device_a = self.client
         device_b = self.app.test_client()
         self.pairing.verify.return_value = True
-        device_a.post(
+        self.paired_client_request("POST", device_a,
             "/pair", data={"pin": "123456", "device_name": "Independent A"},
         )
-        device_b.post(
+        self.paired_client_request("POST", device_b,
             "/pair", data={"pin": "123456", "device_name": "Independent B"},
         )
         with device_a.session_transaction() as session_a:
@@ -9747,7 +10366,7 @@ try{
 
         def start(client, label, generation):
             body = assert_response(
-                client.post(start_path, json=payload(label, generation)), 200,
+                self.paired_client_request("POST", client, start_path, json=payload(label, generation)), 200,
             )
             self.assertEqual(body["generation"], generation)
             self.assertEqual(body["page"], 0)
@@ -9791,13 +10410,13 @@ try{
                 label: current.next_calls for label, current in iterators.items()
             }
             for response in (
-                device_b.post(page_path, json=continuation(first_a)),
-                device_a.post(page_path, json=continuation(first_b)),
-                device_b.post(cancel_path, json={
+                self.paired_client_request("POST", device_b, page_path, json=continuation(first_a)),
+                self.paired_client_request("POST", device_a, page_path, json=continuation(first_b)),
+                self.paired_client_request("POST", device_b, cancel_path, json={
                     "session": first_a["session"],
                     "preview_instance": preview_instance,
                 }),
-                device_a.post(cancel_path, json={
+                self.paired_client_request("POST", device_a, cancel_path, json={
                     "session": first_b["session"],
                     "preview_instance": preview_instance,
                 }),
@@ -9817,7 +10436,7 @@ try{
             self.assertFalse(stop_events["device-b-generation-7"].is_set())
 
             page_a = assert_response(
-                device_a.post(page_path, json=continuation(first_a)), 200,
+                self.paired_client_request("POST", device_a, page_path, json=continuation(first_a)), 200,
             )
             self.assertEqual(page_a["generation"], 7)
             self.assertEqual(page_a["page"], 1)
@@ -9850,27 +10469,27 @@ try{
             )
             self.assertEqual(
                 assert_response(
-                    device_a.post(page_path, json=continuation(page_a)), 409,
+                    self.paired_client_request("POST", device_a, page_path, json=continuation(page_a)), 409,
                 ),
                 {"error": "Preview session is no longer active."},
             )
 
             page_newer_a = assert_response(
-                device_a.post(page_path, json=continuation(newer_a)), 200,
+                self.paired_client_request("POST", device_a, page_path, json=continuation(newer_a)), 200,
             )
             self.assertEqual((page_newer_a["generation"], page_newer_a["page"]), (8, 1))
             self.assertEqual(iterators["device-a-generation-8"].next_calls, 65)
             self.assertEqual(iterators["device-b-generation-7"].next_calls, 33)
 
             page_b = assert_response(
-                device_b.post(page_path, json=continuation(first_b)), 200,
+                self.paired_client_request("POST", device_b, page_path, json=continuation(first_b)), 200,
             )
             self.assertEqual((page_b["generation"], page_b["page"]), (7, 1))
             self.assertEqual(iterators["device-b-generation-7"].next_calls, 65)
             self.assertEqual(iterators["device-a-generation-8"].next_calls, 65)
 
             self.assertEqual(
-                assert_response(device_a.post(cancel_path, json={
+                assert_response(self.paired_client_request("POST", device_a, cancel_path, json={
                     "session": newer_a["session"],
                     "preview_instance": preview_instance,
                 }), 200),
@@ -9885,7 +10504,7 @@ try{
             self.assertEqual(registry.total_count, 1)
 
             self.assertEqual(
-                assert_response(device_b.post(cancel_path, json={
+                assert_response(self.paired_client_request("POST", device_b, cancel_path, json={
                     "session": first_b["session"],
                     "preview_instance": preview_instance,
                 }), 200),
@@ -9933,10 +10552,10 @@ try{
         device_a = self.client
         device_b = self.app.test_client()
         self.pairing.verify.return_value = True
-        device_a.post(
+        self.paired_client_request("POST", device_a,
             "/pair", data={"pin": "123456", "device_name": "Device A"},
         )
-        device_b.post(
+        self.paired_client_request("POST", device_b,
             "/pair", data={"pin": "123456", "device_name": "Device B"},
         )
         with device_a.session_transaction() as device_a_session:
@@ -10039,10 +10658,10 @@ try{
             "webapp._prepare_edit_preview_provider", prepare, create=True,
         ), patch("webapp._edit_preview_iterator", iterator, create=True):
             page_a = assert_response(
-                device_a.post(start_path, json=payload("device-a")), 200,
+                self.paired_client_request("POST", device_a, start_path, json=payload("device-a")), 200,
             )
             page_b = assert_response(
-                device_b.post(start_path, json=payload("device-b")), 200,
+                self.paired_client_request("POST", device_b, start_path, json=payload("device-b")), 200,
             )
             registry = self.app.extensions["edit_preview_registry"]
             self.assertEqual(registry.total_count, 2)
@@ -10061,13 +10680,13 @@ try{
                 label: current.next_calls for label, current in iterators.items()
             }
             for response in (
-                device_b.post(page_path, json=continuation(page_a)),
-                device_a.post(page_path, json=continuation(page_b)),
-                device_b.post(cancel_path, json={
+                self.paired_client_request("POST", device_b, page_path, json=continuation(page_a)),
+                self.paired_client_request("POST", device_a, page_path, json=continuation(page_b)),
+                self.paired_client_request("POST", device_b, cancel_path, json={
                     "session": page_a["session"],
                     "preview_instance": preview_instance,
                 }),
-                device_a.post(cancel_path, json={
+                self.paired_client_request("POST", device_a, cancel_path, json={
                     "session": page_b["session"],
                     "preview_instance": preview_instance,
                 }),
@@ -10087,13 +10706,13 @@ try{
             self.assertFalse(stop_events["device-b"].is_set())
 
             second_a = assert_response(
-                device_a.post(page_path, json=continuation(page_a)), 200,
+                self.paired_client_request("POST", device_a, page_path, json=continuation(page_a)), 200,
             )
             self.assertEqual(second_a["page"], 1)
             self.assertEqual(iterators["device-a"].next_calls, 65)
             self.assertEqual(iterators["device-b"].next_calls, 33)
             self.assertEqual(
-                assert_response(device_a.post(cancel_path, json={
+                assert_response(self.paired_client_request("POST", device_a, cancel_path, json={
                     "session": page_a["session"],
                     "preview_instance": preview_instance,
                 }), 200),
@@ -10108,13 +10727,13 @@ try{
             self.assertEqual(registry.total_count, 1)
 
             second_b = assert_response(
-                device_b.post(page_path, json=continuation(page_b)), 200,
+                self.paired_client_request("POST", device_b, page_path, json=continuation(page_b)), 200,
             )
             self.assertEqual(second_b["page"], 1)
             self.assertEqual(iterators["device-a"].next_calls, 65)
             self.assertEqual(iterators["device-b"].next_calls, 65)
             self.assertEqual(
-                assert_response(device_b.post(cancel_path, json={
+                assert_response(self.paired_client_request("POST", device_b, cancel_path, json={
                     "session": page_b["session"],
                     "preview_instance": preview_instance,
                 }), 200),
@@ -10159,10 +10778,10 @@ try{
         device_one = self.client
         device_two = self.app.test_client()
         self.pairing.verify.return_value = True
-        device_one.post(
+        self.paired_client_request("POST", device_one,
             "/pair", data={"pin": "123456", "device_name": "First device"},
         )
-        device_two.post(
+        self.paired_client_request("POST", device_two,
             "/pair", data={"pin": "123456", "device_name": "Second device"},
         )
         with device_one.session_transaction() as device_one_session:
@@ -10250,7 +10869,7 @@ try{
             return body
 
         def start(client, label, generation, preview_instance):
-            body = assert_response(client.post(
+            body = assert_response(self.paired_client_request("POST", client,
                 start_path, json=payload(label, generation, preview_instance),
             ), 200)
             self.assertEqual(body["generation"], generation)
@@ -10285,14 +10904,14 @@ try{
                 label: current.next_calls for label, current in iterators.items()
             }
 
-            assert_response(device_one.post(page_path, json={
+            assert_response(self.paired_client_request("POST", device_one, page_path, json={
                 **continuation(first_tab_old, tab_one),
                 "preview_instance": tab_two,
             }), 409)
-            assert_response(device_two.post(
+            assert_response(self.paired_client_request("POST", device_two,
                 page_path, json=continuation(first_tab_old, tab_one),
             ), 409)
-            assert_response(device_one.post(
+            assert_response(self.paired_client_request("POST", device_one,
                 cancel_path,
                 json={
                     "session": other_device["session"],
@@ -10317,10 +10936,10 @@ try{
             self.assertEqual(iterators["second-tab"].close_calls, 0)
             self.assertEqual(iterators["other-device"].close_calls, 0)
 
-            assert_response(device_one.post(
+            assert_response(self.paired_client_request("POST", device_one,
                 page_path, json=continuation(first_tab_old, tab_one),
             ), 409)
-            assert_response(device_one.post(cancel_path, json={
+            assert_response(self.paired_client_request("POST", device_one, cancel_path, json={
                 "session": first_tab_old["session"], "preview_instance": tab_one,
             }), 409)
 
@@ -10328,7 +10947,7 @@ try{
             advances = sum(current.next_calls for current in iterators.values())
             for generation in (8, 7):
                 with self.subTest(rejected_generation=generation):
-                    assert_response(device_one.post(
+                    assert_response(self.paired_client_request("POST", device_one,
                         start_path,
                         json=payload(f"rejected-{generation}", generation, tab_one),
                     ), 400)
@@ -10337,10 +10956,10 @@ try{
                         sum(current.next_calls for current in iterators.values()), advances,
                     )
 
-            second_page = assert_response(device_one.post(
+            second_page = assert_response(self.paired_client_request("POST", device_one,
                 page_path, json=continuation(second_tab, tab_two),
             ), 200)
-            other_page = assert_response(device_two.post(
+            other_page = assert_response(self.paired_client_request("POST", device_two,
                 page_path, json=continuation(other_device, device_two_tab),
             ), 200)
             self.assertTrue(second_page["complete"])
@@ -10352,7 +10971,7 @@ try{
             self.assertEqual(pin_exits.count("second-tab"), 1)
             self.assertEqual(pin_exits.count("other-device"), 1)
 
-            cancelled = assert_response(device_one.post(cancel_path, json={
+            cancelled = assert_response(self.paired_client_request("POST", device_one, cancel_path, json={
                 "session": first_tab_new["session"], "preview_instance": tab_one,
             }), 200)
             self.assertEqual(cancelled, {"cancelled": True})
@@ -10390,7 +11009,7 @@ try{
             "transition": {"type": "cut"},
         }
 
-        response = self.client.post("/api/preview/announcement", json=announcement)
+        response = self.paired_request("POST", "/api/preview/announcement", json=announcement)
 
         self.assertEqual(response.status_code, 202)
         previewed = self.controller.preview_announcement.call_args.args[0]
@@ -10421,7 +11040,7 @@ try{
 
         for payload in invalid_payloads:
             with self.subTest(payload=payload):
-                response = self.client.post("/api/preview/announcement", json=payload)
+                response = self.paired_request("POST", "/api/preview/announcement", json=payload)
                 self.assertEqual(response.status_code, 400)
                 self.assertIn("invalid fields", response.get_json()["error"])
         self.controller.preview_announcement.assert_not_called()
@@ -10429,7 +11048,7 @@ try{
     def test_unsaved_announcement_preview_rejects_invalid_payload_without_hardware_work(self):
         self.pair_browser()
 
-        response = self.client.post("/api/preview/announcement", json={"headline": "BROKEN"})
+        response = self.paired_request("POST", "/api/preview/announcement", json={"headline": "BROKEN"})
 
         self.assertEqual(response.status_code, 400)
         self.assertEqual(response.content_type, "application/json")
@@ -10438,9 +11057,9 @@ try{
 
     def test_preview_only_accepts_known_modules(self):
         self.pairing.verify.return_value = True
-        self.client.post("/pair", data={"pin": "123456", "device_name": "Test browser"})
-        self.assertEqual(self.client.post("/api/preview/shell").status_code, 404)
-        self.assertEqual(self.client.post("/api/preview/clock_lava").status_code, 202)
+        self.paired_request("POST", "/pair", data={"pin": "123456", "device_name": "Test browser"})
+        self.assertEqual(self.paired_request("POST", "/api/preview/shell").status_code, 404)
+        self.assertEqual(self.paired_request("POST", "/api/preview/clock_lava").status_code, 202)
         self.controller.preview.assert_called_once_with("clock_lava")
 
     def test_custom_text_module_is_available_to_preview_endpoint(self):
@@ -10456,7 +11075,7 @@ try{
         })
         self.pair_browser()
 
-        response = self.client.post("/api/preview/custom_welcome")
+        response = self.paired_request("POST", "/api/preview/custom_welcome")
 
         self.assertEqual(response.status_code, 202)
         self.controller.preview.assert_called_once_with("custom_welcome")
@@ -10474,8 +11093,8 @@ try{
         device_a = self.client
         device_b = self.app.test_client()
         self.pairing.verify.return_value = True
-        device_a.post("/pair", data={"pin": "123456", "device_name": "Capacity A"})
-        device_b.post("/pair", data={"pin": "123456", "device_name": "Capacity B"})
+        self.paired_client_request("POST", device_a, "/pair", data={"pin": "123456", "device_name": "Capacity A"})
+        self.paired_client_request("POST", device_b, "/pair", data={"pin": "123456", "device_name": "Capacity B"})
         with device_a.session_transaction() as state_a:
             identity_a = dict(state_a)
             device_a_id = state_a["device_id"]
@@ -10577,7 +11196,7 @@ try{
                 "edit_preview.PreviewSessionCapacity.MAX_ACTIVE", 8,
             ):
                 for index in range(4):
-                    response = tabs_a[index].post(
+                    response = self.paired_client_request("POST", tabs_a[index],
                         start_path, json=payload(f"{index + 1:032x}"),
                     )
                     self.assertEqual(response.status_code, 200, response.get_data(as_text=True))
@@ -10591,7 +11210,7 @@ try{
                     [item.next_calls for item in renderers], registry.total_count,
                 )
                 assert_error(
-                    tabs_a[4].post(start_path, json=payload("5" * 32)), 429,
+                    self.paired_client_request("POST", tabs_a[4], start_path, json=payload("5" * 32)), 429,
                     "Preview capacity is temporarily exhausted.",
                 )
                 self.assertEqual(
@@ -10605,7 +11224,7 @@ try{
 
                 for index in range(4):
                     instance = f"{index + 9:032x}"
-                    response = tabs_b[index].post(start_path, json=payload(instance))
+                    response = self.paired_client_request("POST", tabs_b[index], start_path, json=payload(instance))
                     self.assertEqual(response.status_code, 200, response.get_data(as_text=True))
                     sessions.append((tabs_b[index], instance, response.get_json()))
                 self.assertEqual(registry.total_count, 8)
@@ -10613,7 +11232,7 @@ try{
                 self.assertEqual(registry.count_for_device(device_b_id), 4)
                 before_rejected = (len(pin_enters), len(provider_calls), len(renderers))
                 assert_error(
-                    tabs_b[4].post(start_path, json=payload("e" * 32)), 429,
+                    self.paired_client_request("POST", tabs_b[4], start_path, json=payload("e" * 32)), 429,
                     "Preview capacity is temporarily exhausted.",
                 )
                 self.assertEqual(
@@ -10622,14 +11241,14 @@ try{
                 self.assertEqual(registry.total_count, 8)
 
                 released_client, released_instance, released = sessions.pop(0)
-                cancelled = released_client.post(cancel_path, json={
+                cancelled = self.paired_client_request("POST", released_client, cancel_path, json={
                     "session": released["session"],
                     "preview_instance": released_instance,
                 })
                 self.assertEqual(cancelled.status_code, 200, cancelled.get_data(as_text=True))
                 self.assertEqual(registry.total_count, 7)
                 retry_instance = "f" * 32
-                retry = tabs_a[5].post(
+                retry = self.paired_client_request("POST", tabs_a[5],
                     start_path, json=payload(retry_instance, generation=2),
                 )
                 self.assertEqual(retry.status_code, 200, retry.get_data(as_text=True))
@@ -10637,7 +11256,7 @@ try{
                 self.assertEqual(registry.total_count, 8)
 
                 survivor_client, survivor_instance, survivor = sessions[0]
-                page = survivor_client.post(page_path, json={
+                page = self.paired_client_request("POST", survivor_client, page_path, json={
                     "session": survivor["session"],
                     "preview_instance": survivor_instance,
                     "token": survivor["next_token"],
@@ -10646,7 +11265,7 @@ try{
                 self.assertEqual(page.get_json()["page"], 1)
 
                 for client, instance, body in list(sessions):
-                    response = client.post(cancel_path, json={
+                    response = self.paired_client_request("POST", client, cancel_path, json={
                         "session": body["session"], "preview_instance": instance,
                     })
                     self.assertEqual(response.status_code, 200, response.get_data(as_text=True))
@@ -10656,7 +11275,7 @@ try{
                 self.assertEqual(registry._capacity.active_count, 0)
         finally:
             for client, instance, body in list(sessions):
-                client.post(cancel_path, json={
+                self.paired_client_request("POST", client, cancel_path, json={
                     "session": body["session"], "preview_instance": instance,
                 })
 
@@ -10685,12 +11304,12 @@ try{
             ), patch("webapp._edit_preview_iterator", renderer):
                 for index in range(2):
                     instance = f"{index + 20:032x}"
-                    response = tabs_a[index].post(start_path, json=payload(instance))
+                    response = self.paired_client_request("POST", tabs_a[index], start_path, json=payload(instance))
                     self.assertEqual(response.status_code, 200, response.get_data(as_text=True))
                     active.append((tabs_a[index], instance, response.get_json()))
                 before_third = (len(pin_enters), len(provider_calls), len(renderers))
                 assert_error(
-                    tabs_b[0].post(start_path, json=payload("d" * 32)), 429,
+                    self.paired_client_request("POST", tabs_b[0], start_path, json=payload("d" * 32)), 429,
                     "Preview capacity is temporarily exhausted.",
                 )
                 self.assertEqual(
@@ -10701,24 +11320,24 @@ try{
                 self.assertEqual(registry.total_count, 2)
 
                 client, instance, body = active.pop(0)
-                self.assertEqual(client.post(cancel_path, json={
+                self.assertEqual(self.paired_client_request("POST", client, cancel_path, json={
                     "session": body["session"], "preview_instance": instance,
                 }).status_code, 200)
                 recovered_instance = "c" * 32
-                recovered = tabs_b[0].post(
+                recovered = self.paired_client_request("POST", tabs_b[0],
                     start_path, json=payload(recovered_instance, generation=2),
                 )
                 self.assertEqual(recovered.status_code, 200, recovered.get_data(as_text=True))
                 active.append((tabs_b[0], recovered_instance, recovered.get_json()))
                 for client, instance, body in active:
-                    self.assertEqual(client.post(cancel_path, json={
+                    self.assertEqual(self.paired_client_request("POST", client, cancel_path, json={
                         "session": body["session"], "preview_instance": instance,
                     }).status_code, 200)
                 self.assertEqual((capacity.active_count, capacity.waiting_count), (0, 0))
                 self.assertEqual(registry.total_count, 0)
         finally:
             for client, instance, body in active:
-                client.post(cancel_path, json={
+                self.paired_client_request("POST", client, cancel_path, json={
                     "session": body["session"], "preview_instance": instance,
                 })
 
@@ -10753,7 +11372,7 @@ try{
                         "webapp._edit_preview_iterator", side_effect=failure,
                     )
                 with patch("webapp.pin_candidate_media", pinned), provider_patch, renderer_patch:
-                    response = tabs_a[index].post(start_path, json=payload(instance))
+                    response = self.paired_client_request("POST", tabs_a[index], start_path, json=payload(instance))
                 assert_error(response, 503, "Preview is temporarily unavailable.")
                 self.assertEqual(registry.total_count, 0)
                 self.assertEqual(capacity.active_count, 0)
@@ -10764,7 +11383,7 @@ try{
                 "webapp._prepare_edit_preview_provider",
                 side_effect=PreviewProviderCapacityError(private),
             ), patch("webapp._edit_preview_iterator", renderer):
-                response = tabs_a[5].post(start_path, json=payload("b" * 32))
+                response = self.paired_client_request("POST", tabs_a[5], start_path, json=payload("b" * 32))
             assert_error(
                 response, 429, "Preview capacity is temporarily exhausted.",
             )
@@ -10936,7 +11555,7 @@ try{
                 client = self.app.test_client()
                 with client.session_transaction() as session:
                     session.update(browser_session)
-                response["value"] = client.post(
+                response["value"] = self.paired_client_request("POST", client,
                     "/api/edit-preview/weather", json=payload,
                 )
             except BaseException as error:
@@ -11248,7 +11867,7 @@ try{
 
         def active_page(first):
             try:
-                page_result["response"] = client_for_thread().post(
+                page_result["response"] = self.paired_client_request("POST", client_for_thread(),
                     "/api/edit-preview/page",
                     json={
                         "session": first["session"],
@@ -11278,7 +11897,7 @@ try{
         try:
             with factory_patch:
                 first = assert_response(
-                    self.client.post("/api/edit-preview/weather", json=payload), 200,
+                    self.paired_request("POST", "/api/edit-preview/weather", json=payload), 200,
                 )
                 self.assertEqual(len(first["frames"]), 32)
                 self.assertFalse(first["complete"])
@@ -11296,7 +11915,7 @@ try{
                 page_thread.start()
                 self.assertTrue(decoder_blocked.wait(1), "page did not claim and block")
 
-                replay = assert_response(client_for_thread().post(
+                replay = assert_response(self.paired_client_request("POST", client_for_thread(),
                     "/api/edit-preview/page",
                     json={
                         "session": first["session"],
@@ -11364,7 +11983,7 @@ try{
                 self.assertEqual(decoders[0].close_calls, 1)
                 self.assertEqual(pins[0]["close_calls"], 1)
 
-                stale = assert_response(client_for_thread().post(
+                stale = assert_response(self.paired_client_request("POST", client_for_thread(),
                     "/api/edit-preview/page",
                     json={
                         "session": first["session"],
@@ -11378,12 +11997,12 @@ try{
                 self.assertIsNot(replacement_registry, registry)
                 self.assertIsNot(replacement_provider, provider)
 
-                replacement = assert_response(client_for_thread().post(
+                replacement = assert_response(self.paired_client_request("POST", client_for_thread(),
                     "/api/edit-preview/weather",
                     json={**payload, "generation": 201},
                 ), 200)
                 self.assertEqual(replacement["generation"], 201)
-                assert_response(client_for_thread().post(
+                assert_response(self.paired_client_request("POST", client_for_thread(),
                     "/api/edit-preview/cancel",
                     json={
                         "session": replacement["session"],
@@ -11542,7 +12161,7 @@ try{
         identities = []
         device_ids = []
         for index, client in enumerate(devices):
-            client.post(
+            self.paired_client_request("POST", client,
                 "/pair", data={"pin": "123456", "device_name": f"Bounded {index}"},
             )
             with client.session_transaction() as paired:
@@ -11676,7 +12295,7 @@ try{
                 for device in range(2):
                     for index in range(4):
                         instance = f"{device * 8 + index + 1:032x}"
-                        body = assert_success(tabs[device][index].post(
+                        body = assert_success(self.paired_client_request("POST", tabs[device][index],
                             start_path,
                             json=payload(f"retained-{device}-{index}", instance),
                         ))
@@ -11690,13 +12309,13 @@ try{
                     len(pin_enters), len(provider_calls), len(renderer_calls), len(iterators),
                 )
                 assert_error(
-                    tabs[0][4].post(
+                    self.paired_client_request("POST", tabs[0][4],
                         start_path, json=payload("per-device-rejected", "a" * 32),
                     ),
                     429, "Preview capacity is temporarily exhausted.",
                 )
                 assert_error(
-                    tabs[2][0].post(
+                    self.paired_client_request("POST", tabs[2][0],
                         start_path, json=payload("process-rejected", "b" * 32),
                     ),
                     429, "Preview capacity is temporarily exhausted.",
@@ -11708,7 +12327,7 @@ try{
                 self.assertEqual(registry.total_count, 8)
 
                 for client, instance, body in sessions:
-                    self.assertEqual(assert_success(client.post(cancel_path, json={
+                    self.assertEqual(assert_success(self.paired_client_request("POST", client, cancel_path, json={
                         "session": body["session"], "preview_instance": instance,
                     })), {"cancelled": True})
                 sessions.clear()
@@ -11719,7 +12338,7 @@ try{
                 capacity.MAX_ACTIVE = 2
                 for index in range(2):
                     instance = f"{index + 40:032x}"
-                    body = assert_success(tabs[index][0].post(
+                    body = assert_success(self.paired_client_request("POST", tabs[index][0],
                         start_path, json=payload(f"active-{index}", instance, 2),
                     ))
                     sessions.append((tabs[index][0], instance, body))
@@ -11728,7 +12347,7 @@ try{
                 )
                 capacity.ACQUIRE_TIMEOUT = 0
                 assert_error(
-                    tabs[2][0].post(
+                    self.paired_client_request("POST", tabs[2][0],
                         start_path, json=payload("active-rejected", "c" * 32, 2),
                     ),
                     429, "Preview capacity is temporarily exhausted.",
@@ -11763,24 +12382,24 @@ try{
                     "preview_instance": expired_instance,
                 }
                 assert_error(
-                    owner.post(page_path, json=expired_page), 410,
+                    self.paired_client_request("POST", owner, page_path, json=expired_page), 410,
                     "Preview session expired.",
                 )
                 assert_error(
-                    owner.post(cancel_path, json=expired_cancel), 410,
+                    self.paired_client_request("POST", owner, cancel_path, json=expired_cancel), 410,
                     "Preview session expired.",
                 )
                 assert_error(
-                    tabs[2][0].post(page_path, json=expired_page), 409,
+                    self.paired_client_request("POST", tabs[2][0], page_path, json=expired_page), 409,
                     "Preview session is no longer active.",
                 )
 
                 retry_instance = "d" * 32
-                retry = assert_success(tabs[2][0].post(
+                retry = assert_success(self.paired_client_request("POST", tabs[2][0],
                     start_path, json=payload("retry-after-expiry", retry_instance, 3),
                 ))
                 self.assertEqual(capacity.active_count, 1)
-                self.assertEqual(assert_success(tabs[2][0].post(cancel_path, json={
+                self.assertEqual(assert_success(self.paired_client_request("POST", tabs[2][0], cancel_path, json={
                     "session": retry["session"], "preview_instance": retry_instance,
                 })), {"cancelled": True})
 
@@ -11788,7 +12407,7 @@ try{
                 # ownership exactly once after that page leaves the iterator.
                 active_instance = "e" * 32
                 block_next = True
-                active = assert_success(tabs[0][0].post(
+                active = assert_success(self.paired_client_request("POST", tabs[0][0],
                     start_path, json=payload("expire-active-page", active_instance, 4),
                 ))
                 active_iterator = iterators[-1]
@@ -11797,7 +12416,7 @@ try{
 
                 def continue_active():
                     try:
-                        active_result["response"] = tabs[0][0].post(page_path, json={
+                        active_result["response"] = self.paired_client_request("POST", tabs[0][0], page_path, json={
                             "session": active["session"],
                             "preview_instance": active_instance,
                             "token": active["next_token"],
@@ -11826,7 +12445,7 @@ try{
                 self.assertEqual(active_iterator.close_calls, 1)
                 self.assertEqual((capacity.active_count, registry.total_count), (0, 0))
                 assert_error(
-                    tabs[0][0].post(cancel_path, json={
+                    self.paired_client_request("POST", tabs[0][0], cancel_path, json={
                         "session": active["session"],
                         "preview_instance": active_instance,
                     }), 410, "Preview session expired.",
@@ -11837,7 +12456,7 @@ try{
                 oldest = None
                 for index in range(9):
                     instance = f"{index + 100:032x}"
-                    body = assert_success(tabs[index % 3][0].post(
+                    body = assert_success(self.paired_client_request("POST", tabs[index % 3][0],
                         start_path, json=payload(f"tombstone-{index}", instance, index + 10),
                     ))
                     if oldest is None:
@@ -11851,19 +12470,19 @@ try{
                     registry.expired_count, registry.MAX_EXPIRED_TOMBSTONES,
                 )
                 old_client, old_instance, old_body = oldest
-                assert_error(old_client.post(cancel_path, json={
+                assert_error(self.paired_client_request("POST", old_client, cancel_path, json={
                     "session": old_body["session"],
                     "preview_instance": old_instance,
                 }), 409, "Preview session is no longer active.")
 
                 newest_instance = f"{108:032x}"
                 newest_body = body
-                assert_error(tabs[2][0].post(cancel_path, json={
+                assert_error(self.paired_client_request("POST", tabs[2][0], cancel_path, json={
                     "session": newest_body["session"],
                     "preview_instance": newest_instance,
                 }), 410, "Preview session expired.")
                 clock.advance(registry.EXPIRED_TOMBSTONE_TTL + 0.001)
-                assert_error(tabs[2][0].post(cancel_path, json={
+                assert_error(self.paired_client_request("POST", tabs[2][0], cancel_path, json={
                     "session": newest_body["session"],
                     "preview_instance": newest_instance,
                 }), 409, "Preview session is no longer active.")
@@ -11971,8 +12590,8 @@ try{
         owner = self.client
         attacker = self.app.test_client()
         self.pairing.verify.return_value = True
-        owner.post("/pair", data={"pin": "123456", "device_name": "Token owner"})
-        attacker.post("/pair", data={"pin": "123456", "device_name": "Token attacker"})
+        self.paired_client_request("POST", owner, "/pair", data={"pin": "123456", "device_name": "Token owner"})
+        self.paired_client_request("POST", attacker, "/pair", data={"pin": "123456", "device_name": "Token attacker"})
         with owner.session_transaction() as owner_session:
             owner_device = owner_session["device_id"]
         with attacker.session_transaction() as attacker_session:
@@ -12077,7 +12696,7 @@ try{
                 for request_args in malformed_start_requests:
                     with self.subTest(start_request=request_args):
                         assert_error(
-                            owner.post(start_path, **request_args), 400,
+                            self.paired_client_request("POST", owner, start_path, **request_args), 400,
                             "Preview request is invalid.",
                         )
                 self.assertEqual(registry_factory.call_count, 0)
@@ -12088,7 +12707,7 @@ try{
                 self.assertEqual(provider_calls, [])
                 self.assertEqual(renderer_calls, [])
 
-                first = assert_success(owner.post(start_path, json=start_payload))
+                first = assert_success(self.paired_client_request("POST", owner, start_path, json=start_payload))
                 self.assertRegex(first["session"], r"^[0-9a-f]{32}$")
                 self.assertRegex(first["next_token"], r"^[0-9a-f]{64}$")
                 self.assertEqual((registry_factory.call_count, provider_factory.call_count), (1, 1))
@@ -12129,7 +12748,7 @@ try{
                 for request_args in malformed_page_requests:
                     with self.subTest(page_request=request_args):
                         assert_error(
-                            owner.post(page_path, **request_args), 400,
+                            self.paired_client_request("POST", owner, page_path, **request_args), 400,
                             "Preview request is invalid.",
                         )
                 self.assertEqual(owner_iterator.next_calls, calls_before_malformed)
@@ -12156,7 +12775,7 @@ try{
                 for request_args in malformed_cancel_requests:
                     with self.subTest(cancel_request=request_args):
                         assert_error(
-                            owner.post(cancel_path, **request_args), 400,
+                            self.paired_client_request("POST", owner, cancel_path, **request_args), 400,
                             "Preview request is invalid.",
                         )
                 self.assertEqual(owner_iterator.next_calls, calls_before_malformed)
@@ -12185,33 +12804,33 @@ try{
                             if payload is unknown_token
                             else "Preview session is no longer active."
                         )
-                        assert_error(client.post(path, json=payload), 409, message)
+                        assert_error(self.paired_client_request("POST", client, path, json=payload), 409, message)
                 self.assertEqual(owner_iterator.next_calls, calls_before_malformed)
                 self.assertEqual(owner_iterator.close_calls, 0)
 
-                second = assert_success(owner.post(page_path, json=continuation))
+                second = assert_success(self.paired_client_request("POST", owner, page_path, json=continuation))
                 calls_after_valid_claim = owner_iterator.next_calls
                 self.assertGreater(calls_after_valid_claim, calls_before_malformed)
                 assert_error(
-                    owner.post(page_path, json=continuation), 409,
+                    self.paired_client_request("POST", owner, page_path, json=continuation), 409,
                     "Preview continuation was already used.",
                 )
                 self.assertEqual(owner_iterator.next_calls, calls_after_valid_claim)
 
                 current = {**continuation, "token": second["next_token"]}
-                third = assert_success(owner.post(page_path, json=current))
+                third = assert_success(self.paired_client_request("POST", owner, page_path, json=current))
                 self.assertEqual(third["page"], second["page"] + 1)
-                owner_cancel = assert_success(owner.post(cancel_path, json=cancel_payload))
+                owner_cancel = assert_success(self.paired_client_request("POST", owner, cancel_path, json=cancel_payload))
                 self.assertEqual(owner_cancel, {"cancelled": True})
                 owner_calls_after_cancel = owner_iterator.next_calls
                 self.assertEqual(owner_iterator.close_calls, 1)
                 assert_error(
-                    owner.post(cancel_path, json=cancel_payload), 409,
+                    self.paired_client_request("POST", owner, cancel_path, json=cancel_payload), 409,
                     "Preview session is no longer active.",
                 )
                 self.assertEqual(owner_iterator.next_calls, owner_calls_after_cancel)
 
-                expiring = assert_success(owner.post(start_path, json={
+                expiring = assert_success(self.paired_client_request("POST", owner, start_path, json={
                     **start_payload,
                     "preview_instance": expired_instance,
                 }))
@@ -12235,15 +12854,15 @@ try{
                 self.assertEqual(registry.total_count, 0)
                 self.assertEqual(registry.expired_count, 1)
                 assert_error(
-                    owner.post(page_path, json=expired_page), 410,
+                    self.paired_client_request("POST", owner, page_path, json=expired_page), 410,
                     "Preview session expired.",
                 )
                 assert_error(
-                    owner.post(cancel_path, json=expired_cancel), 410,
+                    self.paired_client_request("POST", owner, cancel_path, json=expired_cancel), 410,
                     "Preview session expired.",
                 )
                 assert_error(
-                    attacker.post(page_path, json=expired_page), 409,
+                    self.paired_client_request("POST", attacker, page_path, json=expired_page), 409,
                     "Preview session is no longer active.",
                 )
                 self.assertEqual(expired_iterator.next_calls, expired_calls)
@@ -12391,14 +13010,14 @@ try{
                 for request_args in bad_start_requests:
                     with self.subTest(start_request=request_args):
                         assert_error(
-                            self.client.post(start_path, **request_args), 400,
+                            self.paired_request("POST", start_path, **request_args), 400,
                             "Preview request is invalid.",
                         )
                 self.assertEqual(provider_calls, [])
                 self.assertEqual(iterators, [])
                 self.assertEqual(pin_enters, [])
 
-                first_response = self.client.post(start_path, json=start_payload)
+                first_response = self.paired_request("POST", start_path, json=start_payload)
                 self.assertEqual(first_response.status_code, 200)
                 first = first_response.get_json()
                 self.assertFalse(first["complete"])
@@ -12427,20 +13046,20 @@ try{
                 for request_args in bad_page_requests:
                     with self.subTest(page_request=request_args):
                         assert_error(
-                            self.client.post(page_path, **request_args), 400,
+                            self.paired_request("POST", page_path, **request_args), 400,
                             "Preview request is invalid.",
                         )
                 self.assertEqual(valid_iterator.next_calls, calls_before_bad_pages)
                 self.assertEqual(len(provider_calls), 1)
                 self.assertEqual(len(iterators), 1)
 
-                second_response = self.client.post(page_path, json=continuation)
+                second_response = self.paired_request("POST", page_path, json=continuation)
                 self.assertEqual(second_response.status_code, 200)
                 second = second_response.get_json()
                 self.assertFalse(second["complete"])
                 calls_after_consumption = valid_iterator.next_calls
                 assert_error(
-                    self.client.post(page_path, json=continuation), 409,
+                    self.paired_request("POST", page_path, json=continuation), 409,
                     "Preview continuation was already used.",
                 )
                 self.assertEqual(valid_iterator.next_calls, calls_after_consumption)
@@ -12450,23 +13069,23 @@ try{
                 wrong_identity = {**current, "preview_instance": wrong_instance}
                 for payload in (unknown, wrong_identity):
                     assert_error(
-                        self.client.post(page_path, json=payload), 409,
+                        self.paired_request("POST", page_path, json=payload), 409,
                         "Preview session is no longer active.",
                     )
                 self.assertEqual(valid_iterator.next_calls, calls_after_consumption)
 
-                terminal_response = self.client.post(page_path, json=current)
+                terminal_response = self.paired_request("POST", page_path, json=current)
                 self.assertEqual(terminal_response.status_code, 200)
                 self.assertTrue(terminal_response.get_json()["complete"])
                 self.assertEqual(len(pin_exits), 1)
 
-                cancelled = self.client.post(start_path, json={
+                cancelled = self.paired_request("POST", start_path, json={
                     **start_payload,
                     "generation": 1,
                     "preview_instance": cancel_instance,
                 }).get_json()
                 cancel_iterator = iterators[-1]
-                ordinary_cancel = self.client.post(cancel_path, json={
+                ordinary_cancel = self.paired_request("POST", cancel_path, json={
                     "session": cancelled["session"],
                     "preview_instance": cancel_instance,
                 })
@@ -12474,7 +13093,7 @@ try{
                 self.assertEqual(ordinary_cancel.get_json(), {"cancelled": True})
                 self.assertEqual(cancel_iterator.close_calls, 1)
 
-                expiring = self.client.post(start_path, json={
+                expiring = self.paired_request("POST", start_path, json={
                     **start_payload,
                     "generation": 1,
                     "preview_instance": expired_instance,
@@ -12505,15 +13124,15 @@ try{
                     "preview_instance": expired_instance,
                 }
                 assert_error(
-                    self.client.post(page_path, json=expired_page), 410,
+                    self.paired_request("POST", page_path, json=expired_page), 410,
                     "Preview session expired.",
                 )
                 assert_error(
-                    self.client.post(cancel_path, json=expired_cancel), 410,
+                    self.paired_request("POST", cancel_path, json=expired_cancel), 410,
                     "Preview session expired.",
                 )
                 assert_error(
-                    self.client.post(cancel_path, json={
+                    self.paired_request("POST", cancel_path, json={
                         **expired_cancel, "preview_instance": wrong_instance,
                     }), 409, "Preview session is no longer active.",
                 )
@@ -12522,7 +13141,7 @@ try{
 
                 clock.now += registry.EXPIRED_TOMBSTONE_TTL + 0.001
                 assert_error(
-                    self.client.post(cancel_path, json=expired_cancel), 409,
+                    self.paired_request("POST", cancel_path, json=expired_cancel), 409,
                     "Preview session is no longer active.",
                 )
                 self.assertEqual(registry.expired_count, 0)

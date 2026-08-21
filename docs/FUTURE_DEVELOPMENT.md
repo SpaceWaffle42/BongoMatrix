@@ -121,9 +121,9 @@ Every scrolling-text module should display its calculated runtime in seconds, co
 
 Begin these after Priority 0 is clear. They improve existing editing, preview, media, and composition workflows without introducing an unrelated provider-backed module.
 
-### 1.1a Add Lava Clock pattern selection controls
+### ~~1.1a Add Lava Clock pattern selection controls~~ — Completed
 
-Add grouped **Select all** and **Deselect all** buttons to the Lava Clock pattern selector.
+**Completed 2026-08-21:** added grouped Select all and Deselect all actions that update only the unsaved draft, preserve unrelated edits, remain individually adjustable, and persist through normal Save. A saved zero-palette selection is explicit: physical playback and Edit Preview render a neutral Lava background without silently enabling a palette, while configured time and date remain visible. Mobile, keyboard, save/reload, validator, runtime, and preview behavior are covered by automated tests.
 
 - **Select all** selects every available Lava Clock pattern.
 - **Deselect all** clears every selected Lava Clock pattern.

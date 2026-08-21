@@ -82,6 +82,8 @@ def pick_palette(matrix, lava_config=None):
         for palette in lava_config.get("custom_palettes", [])
         if palette.get("enabled")
     )
+    if not choices:
+        return None
     selected = random.choice(choices)
     return tuple(
         matrix.colour_rgb(value) if value.startswith("#") else matrix.colour(value)
@@ -176,10 +178,9 @@ def measure_text(matrix, font, y, colour, text, canvas):
 def prepare_lava_frame_state(matrix, lava_config=None):
     """Prepare one physical Lava invocation without changing palette selection."""
     settings = lava_config or {}
-    c_outside, c_inside, c_line = pick_palette(matrix, lava_config)
     return {
         "settings": settings,
-        "colours": (c_outside, c_inside, c_line),
+        "colours": pick_palette(matrix, lava_config),
         "blobs": make_blobs(settings),
         "font_time": matrix.font(settings.get("time_font", "9x18B")),
         "font_date": matrix.font(settings.get("date_font", "clR6x12")),
@@ -197,25 +198,26 @@ def prepare_lava_frame_state(matrix, lava_config=None):
 def render_lava_frame(matrix, state, canvas, temp_canvas):
     """Render one frame shared by physical playback and finite preview parity."""
     settings = state["settings"]
-    c_outside, c_inside, c_line = state["colours"]
     blob_values = state["blobs"]
     matrix.clear(canvas)
-    update_blobs(blob_values)
-    image = Image.new(
-        "RGB", (WIDTH, HEIGHT),
-        (c_outside.red, c_outside.green, c_outside.blue),
-    )
-    draw = ImageDraw.Draw(image)
-    draw_lava(
-        draw, c_outside, c_inside, c_line, blob_values,
-        threshold=settings.get("field_threshold", THRESHOLD),
-        edge_width=settings.get("edge_width", 4),
-    )
-    image_to_canvas(
-        matrix,
-        image.filter(ImageFilter.BoxBlur(radius=settings.get("blur_radius", 2))),
-        canvas,
-    )
+    if state["colours"] is not None:
+        c_outside, c_inside, c_line = state["colours"]
+        update_blobs(blob_values)
+        image = Image.new(
+            "RGB", (WIDTH, HEIGHT),
+            (c_outside.red, c_outside.green, c_outside.blue),
+        )
+        draw = ImageDraw.Draw(image)
+        draw_lava(
+            draw, c_outside, c_inside, c_line, blob_values,
+            threshold=settings.get("field_threshold", THRESHOLD),
+            edge_width=settings.get("edge_width", 4),
+        )
+        image_to_canvas(
+            matrix,
+            image.filter(ImageFilter.BoxBlur(radius=settings.get("blur_radius", 2))),
+            canvas,
+        )
     now = datetime.datetime.now()
     time_text = now.strftime("%H:%M")
     date_text = now.strftime("%d %b")
