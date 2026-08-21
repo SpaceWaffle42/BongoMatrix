@@ -54,6 +54,37 @@ class ClockLavaOptionsTests(unittest.TestCase):
 
         self.assertEqual(palette, ("#102030", "#a0b0c0", "#ffffff"))
 
+    def test_zero_selected_palettes_runs_a_neutral_clock_without_random_choice(self):
+        matrix = Mock()
+        canvas = Mock()
+        temporary = Mock()
+        matrix.matrix.CreateFrameCanvas.side_effect = [canvas, temporary]
+        matrix.font.side_effect = lambda name: name
+        matrix.colour.side_effect = lambda name: name
+        matrix.draw_text.return_value = 20
+        matrix.swap.return_value = canvas
+        stop = Mock()
+        stop.is_set.return_value = False
+        stop.wait.return_value = True
+        settings = {
+            "enabled_palettes": [], "custom_enabled": False,
+            "custom_colours": ["#000000", "#ffffff", "#00ffff"],
+            "custom_palettes": [], "show_time": True, "show_date": True,
+        }
+
+        with patch("modules.clock_lava.random.choice") as choose, \
+             patch("modules.clock_lava.draw_lava") as draw_lava, \
+             patch("modules.clock_lava.image_to_canvas") as image_to_canvas:
+            clock_lava.clock(
+                duration=1, matrix=matrix, stop_event=stop, lava_config=settings,
+            )
+
+        choose.assert_not_called()
+        draw_lava.assert_not_called()
+        image_to_canvas.assert_not_called()
+        self.assertEqual(matrix.draw_text_with_border.call_count, 2)
+        matrix.swap.assert_called_once_with(canvas)
+
     def test_lava_blob_and_clock_layout_settings_drive_runtime_helpers(self):
         settings = {
             "blob_count": 6, "blob_min_radius": 3, "blob_max_radius": 12,

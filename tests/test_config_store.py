@@ -1007,8 +1007,16 @@ class ConfigStoreTests(unittest.TestCase):
 
             with self.assertRaises(ValueError):
                 store.update({"lava": {"enabled_palettes": ["not-a-palette"]}})
-            with self.assertRaises(ValueError):
-                store.update({"lava": {"enabled_palettes": [], "custom_enabled": False}})
+            zero_selected = store.update({"lava": {
+                "enabled_palettes": [], "custom_enabled": False,
+            }})
+            self.assertEqual(zero_selected["lava"]["enabled_palettes"], [])
+            self.assertFalse(zero_selected["lava"]["custom_enabled"])
+            reloaded = ConfigStore(Path(directory) / "config.json").get()
+            self.assertEqual(reloaded["lava"]["enabled_palettes"], [])
+            self.assertFalse(any(
+                palette["enabled"] for palette in reloaded["lava"]["custom_palettes"]
+            ))
             with self.assertRaises(ValueError):
                 store.update({"lava": {"custom_colours": ["red", "#000000", "#ffffff"]}})
 

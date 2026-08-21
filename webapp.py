@@ -66,6 +66,8 @@ CONDITIONAL_HEADER_LIMIT = 4096
 MINIMUM_CLIENT_CONTRACT = 2
 APPLICATION_VERSION = "0.3.55-preview"
 DEVICE_RESTART_PENDING_TTL_SECONDS = 60
+PAIRED_ACTION_HEADER = "X-Matrix-Action"
+PAIRED_ACTION_VALUE = "paired-request"
 ETAG_ITEM = re.compile(r'(?P<weak>W/)?"(?P<opaque>[\x21\x23-\x7e\x80-\xff]*)"')
 EDIT_PREVIEW_INSTANCE = re.compile(r"[0-9a-f]{32}")
 EDIT_PREVIEW_SESSION = re.compile(r"[0-9a-f]{32}")
@@ -473,6 +475,36 @@ def create_app(
         MAX_CONTENT_LENGTH=128 * 1024 * 1024,
     )
 
+    def pairing_session_is_current():
+        return (
+            session.get("paired")
+            and session.get("generation") == session_generation
+            and device_store.contains(session.get("device_id"))
+        )
+
+    def pairing_expired_response():
+        session.clear()
+        if request.path.startswith("/api/"):
+            return jsonify({"error": "Pairing session expired."}), 401
+        return redirect(url_for("pair"))
+
+    @app.before_request
+    def require_paired_action_signal():
+        if request.method not in {"POST", "PUT", "PATCH", "DELETE"} or not session.get("paired"):
+            return None
+        if not pairing_session_is_current():
+            return pairing_expired_response()
+        expected = (
+            "restart-whole-device"
+            if request.endpoint == "restart_device"
+            else PAIRED_ACTION_VALUE
+        )
+        if request.headers.get(PAIRED_ACTION_HEADER) != expected:
+            if request.path.startswith("/api/"):
+                return jsonify({"error": "Paired action authorization failed."}), 403
+            return "Paired action authorization failed.", 403
+        return None
+
     @app.after_request
     def advertise_client_contract(response):
         if request.path == "/api/config":
@@ -729,15 +761,8 @@ def create_app(
     def requires_pairing(view):
         @wraps(view)
         def wrapped(*args, **kwargs):
-            if (
-                not session.get("paired")
-                or session.get("generation") != session_generation
-                or not device_store.contains(session.get("device_id"))
-            ):
-                session.clear()
-                if request.path.startswith("/api/"):
-                    return jsonify({"error": "Pairing session expired."}), 401
-                return redirect(url_for("pair"))
+            if not pairing_session_is_current():
+                return pairing_expired_response()
             return view(*args, **kwargs)
 
         return wrapped
@@ -920,7 +945,6 @@ def create_app(
     @app.get("/")
     @requires_pairing
     def dashboard():
-        controller.start()
         config = config_store.get()
         current_device_id = session["device_id"]
         paired_devices = [
