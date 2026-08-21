@@ -803,7 +803,12 @@ class PhysicalVerifierTests(unittest.TestCase):
             os.chmod(policy, 0o644)
             runtime = root / "runtime"
             runtime.mkdir(mode=0o700)
-            os.chown(runtime, 65534, 65534)
+            transaction_lock = runtime / "transaction.lock"
+            transaction_lock.write_bytes(b"")
+            os.chmod(transaction_lock, 0o644)
+            submit = root / "submit"
+            submit.mkdir(mode=0o700)
+            os.chown(submit, 65534, 65534)
             old_paths = (
                 gate.RESTART_BROKER,
                 gate.RESTART_SERVICE,
@@ -811,6 +816,8 @@ class PhysicalVerifierTests(unittest.TestCase):
                 gate.RESTART_TMPFILES_POLICY,
                 gate.RESTART_DIRECTORY,
             )
+            old_submit_directory = getattr(gate, "RESTART_SUBMIT_DIRECTORY")
+            old_root_directory = getattr(gate, "RESTART_ROOT_DIRECTORY")
             old_getpwnam = gate.pwd.getpwnam
             old_digests = gate.EXPECTED_ARTIFACT_DIGESTS
             (
@@ -820,6 +827,8 @@ class PhysicalVerifierTests(unittest.TestCase):
                 gate.RESTART_TMPFILES_POLICY,
                 gate.RESTART_DIRECTORY,
             ) = (broker, service, path_unit, policy, runtime)
+            setattr(gate, "RESTART_ROOT_DIRECTORY", root)
+            setattr(gate, "RESTART_SUBMIT_DIRECTORY", submit)
             gate.pwd.getpwnam = lambda name: types.SimpleNamespace(
                 pw_uid=12345, pw_gid=12345
             ) if name == "matrix-web" else old_getpwnam(name)
@@ -827,7 +836,11 @@ class PhysicalVerifierTests(unittest.TestCase):
                 broker: hashlib.sha256(broker.read_bytes()).hexdigest()
             }
             try:
-                with self.assertRaisesRegex(RuntimeError, "restart request directory"):
+                os.chmod(root, 0o755)
+                with self.assertRaisesRegex(RuntimeError, "restart root directory"):
+                    gate.verify_restart_broker_install()
+                os.chmod(root, 0o700)
+                with self.assertRaisesRegex(RuntimeError, "restart submission directory"):
                     gate.verify_restart_broker_install()
             finally:
                 gate.pwd.getpwnam = old_getpwnam
@@ -839,6 +852,105 @@ class PhysicalVerifierTests(unittest.TestCase):
                     gate.RESTART_TMPFILES_POLICY,
                     gate.RESTART_DIRECTORY,
                 ) = old_paths
+                setattr(gate, "RESTART_ROOT_DIRECTORY", old_root_directory)
+                setattr(gate, "RESTART_SUBMIT_DIRECTORY", old_submit_directory)
+
+    def test_restart_install_gate_rejects_cross_device_runtime_children(self):
+        gate = load_deploy_module("verify_matrix_ci_physical_install")
+
+        class DirectoryView:
+            def __init__(self, path, device):
+                self.path = path
+                self.device = device
+
+            def lstat(self):
+                info = self.path.lstat()
+                return types.SimpleNamespace(
+                    st_mode=info.st_mode,
+                    st_uid=info.st_uid,
+                    st_gid=info.st_gid,
+                    st_dev=self.device,
+                )
+
+            def __truediv__(self, child):
+                return self.path / child
+
+        with tempfile.TemporaryDirectory(prefix="matrix-restart-device-", dir="/root") as directory:
+            root = Path(directory)
+            state = root / "state"
+            submit = root / "submit"
+            state.mkdir(mode=0o700)
+            submit.mkdir(mode=0o1730)
+            os.chmod(submit, 0o1730)
+            os.chown(submit, 0, 12345)
+            transaction_lock = state / "transaction.lock"
+            transaction_lock.write_bytes(b"")
+            os.chmod(transaction_lock, 0o644)
+            broker = root / "broker"
+            service = root / "service"
+            path_unit = root / "path"
+            policy = root / "policy"
+            for artifact in (broker, service, path_unit):
+                artifact.write_bytes(b"reviewed\n")
+            os.chmod(broker, 0o755)
+            os.chmod(service, 0o644)
+            os.chmod(path_unit, 0o644)
+            policy.write_bytes(gate.EXPECTED_RESTART_TMPFILES_POLICY)
+            os.chmod(policy, 0o644)
+            old_paths = (
+                gate.RESTART_BROKER,
+                gate.RESTART_SERVICE,
+                gate.RESTART_PATH,
+                gate.RESTART_TMPFILES_POLICY,
+                gate.RESTART_ROOT_DIRECTORY,
+                gate.RESTART_DIRECTORY,
+                gate.RESTART_SUBMIT_DIRECTORY,
+            )
+            old_getpwnam = gate.pwd.getpwnam
+            old_digests = gate.EXPECTED_ARTIFACT_DIGESTS
+            root_device = root.lstat().st_dev
+            setattr(gate, "RESTART_BROKER", broker)
+            setattr(gate, "RESTART_SERVICE", service)
+            setattr(gate, "RESTART_PATH", path_unit)
+            setattr(gate, "RESTART_TMPFILES_POLICY", policy)
+            gate.pwd.getpwnam = lambda name: types.SimpleNamespace(
+                pw_uid=12345, pw_gid=12345
+            ) if name == "matrix-web" else old_getpwnam(name)
+            setattr(gate, "EXPECTED_ARTIFACT_DIGESTS", {
+                broker: hashlib.sha256(broker.read_bytes()).hexdigest()
+            })
+            try:
+                for differing_child in ("state", "submit"):
+                    with self.subTest(differing_child=differing_child):
+                        setattr(gate, "RESTART_ROOT_DIRECTORY", DirectoryView(root, root_device))
+                        setattr(
+                            gate,
+                            "RESTART_DIRECTORY",
+                            DirectoryView(state, root_device + (differing_child == "state")),
+                        )
+                        setattr(
+                            gate,
+                            "RESTART_SUBMIT_DIRECTORY",
+                            DirectoryView(submit, root_device + (differing_child == "submit")),
+                        )
+                        with self.assertRaisesRegex(RuntimeError, "restart runtime filesystem"):
+                            gate.verify_restart_broker_install()
+            finally:
+                gate.pwd.getpwnam = old_getpwnam
+                setattr(gate, "EXPECTED_ARTIFACT_DIGESTS", old_digests)
+                for name, value in zip(
+                    (
+                        "RESTART_BROKER",
+                        "RESTART_SERVICE",
+                        "RESTART_PATH",
+                        "RESTART_TMPFILES_POLICY",
+                        "RESTART_ROOT_DIRECTORY",
+                        "RESTART_DIRECTORY",
+                        "RESTART_SUBMIT_DIRECTORY",
+                    ),
+                    old_paths,
+                ):
+                    setattr(gate, name, value)
 
     def test_tmpfiles_install_contract_is_exact_ordered_and_verified(self):
         policy_path = ROOT / "deploy" / "matrix-display.conf"
@@ -875,7 +987,11 @@ class PhysicalVerifierTests(unittest.TestCase):
 
     def test_web_service_cannot_access_physical_ci_namespace(self):
         web_unit = (ROOT / "deploy" / "matrix-web.service").read_text(encoding="utf-8")
-        self.assertRegex(web_unit, r"(?m)^InaccessiblePaths=/run/matrix-ci-physical$")
+        self.assertRegex(
+            web_unit,
+            r"(?m)^InaccessiblePaths=/run/matrix-ci-physical /run/matrix-device-restart/state "
+            r"/etc/shadow /etc/gshadow /etc/ssh$",
+        )
 
     def test_verifier_report_publication_rejects_prepositioned_links_without_mutation(self):
         verifier = load_deploy_module("matrix_ci_physical_verifier")
@@ -2139,6 +2255,88 @@ class PhysicalVerifierTests(unittest.TestCase):
         self.assertEqual(len(calls), 1)
         self.assertGreater(calls[0][1]["timeout"], 0)
 
+    def test_dispatcher_stop_is_nonblocking_and_waits_for_pid1_terminal_state(self):
+        dispatcher = load_deploy_module("matrix_ci_physical_dispatcher")
+        calls = []
+        states = iter((
+            b"Job=/org/freedesktop/systemd1/job/51\nActiveState=deactivating\n",
+            b"Job=0\nActiveState=inactive\n",
+        ))
+        clock = iter((0.0, 0.0, 0.0, 2.0))
+        original = dispatcher._systemctl
+        old_monotonic = dispatcher.time.monotonic
+        old_sleep = dispatcher.time.sleep
+        old_wait = dispatcher.STOP_WAIT_SECONDS
+
+        def fake_systemctl(*args, check=True):
+            calls.append((args, check))
+            if args[0] == "stop":
+                return types.SimpleNamespace(returncode=0, stdout=b"")
+            return types.SimpleNamespace(returncode=0, stdout=next(states))
+
+        dispatcher._systemctl = fake_systemctl
+        dispatcher.time.monotonic = lambda: next(clock)
+        dispatcher.time.sleep = lambda _seconds: None
+        setattr(dispatcher, "STOP_WAIT_SECONDS", 1)
+        try:
+            self.assertEqual(dispatcher.SystemOps().stop_and_wait(), 0)
+        finally:
+            setattr(dispatcher, "_systemctl", original)
+            dispatcher.time.monotonic = old_monotonic
+            dispatcher.time.sleep = old_sleep
+            setattr(dispatcher, "STOP_WAIT_SECONDS", old_wait)
+
+        self.assertEqual(
+            calls,
+            [
+                (("stop", "--no-block", dispatcher.SERVICE), False),
+                (("show", dispatcher.SERVICE, "-p", "ActiveState", "-p", "Job"), False),
+                (("show", dispatcher.SERVICE, "-p", "ActiveState", "-p", "Job"), False),
+            ],
+        )
+
+    def test_dispatcher_stop_state_parser_is_fail_closed(self):
+        dispatcher = load_deploy_module("matrix_ci_physical_dispatcher")
+        original = dispatcher._systemctl
+        old_monotonic = dispatcher.time.monotonic
+        old_sleep = dispatcher.time.sleep
+        old_wait = dispatcher.STOP_WAIT_SECONDS
+
+        def run_with(state, clock):
+            def fake_systemctl(*args, check=True):
+                if args[0] == "stop":
+                    return types.SimpleNamespace(returncode=0, stdout=b"")
+                return types.SimpleNamespace(returncode=0, stdout=state)
+
+            setattr(dispatcher, "_systemctl", fake_systemctl)
+            ticks = iter(clock)
+            dispatcher.time.monotonic = lambda: next(ticks)
+            dispatcher.time.sleep = lambda _seconds: None
+            setattr(dispatcher, "STOP_WAIT_SECONDS", 1)
+            return dispatcher.SystemOps().stop_and_wait()
+
+        try:
+            self.assertEqual(run_with(b"ActiveState=failed\nJob=0\n", (0.0, 0.0)), 1)
+            for malformed in (
+                b"ActiveState=inactive\nJob=\n",
+                b"ActiveState=inactive\nJob=1\n",
+                b"ActiveState=inactive\nJob=/org/freedesktop/systemd1/job/0\n",
+                b"ActiveState=inactive\nJob=/untrusted/job/51\n",
+            ):
+                with self.subTest(malformed=malformed):
+                    with self.assertRaisesRegex(RuntimeError, "stop state was malformed"):
+                        run_with(malformed, (0.0, 0.0))
+            with self.assertRaisesRegex(RuntimeError, "stop wait timed out"):
+                run_with(
+                    b"ActiveState=deactivating\nJob=/org/freedesktop/systemd1/job/51\n",
+                    (0.0, 0.0, 2.0),
+                )
+        finally:
+            setattr(dispatcher, "_systemctl", original)
+            dispatcher.time.monotonic = old_monotonic
+            dispatcher.time.sleep = old_sleep
+            setattr(dispatcher, "STOP_WAIT_SECONDS", old_wait)
+
     def test_dispatcher_distinguishes_acceptance_fail_from_recovery_pass(self):
         dispatcher = load_deploy_module("matrix_ci_physical_dispatcher")
         sha = "f" * 40
@@ -2240,7 +2438,14 @@ class PhysicalVerifierTests(unittest.TestCase):
         self.assertIn("Type=exec", unit)
         self.assertNotIn("RemainAfterExit", unit)
         self.assertRegex(unit, r"(?m)^TimeoutStartSec=[1-9][0-9]*$")
-        self.assertRegex(unit, r"(?m)^TimeoutStopSec=[1-9][0-9]*$")
+        stop_timeout_match = re.search(r"(?m)^TimeoutStopSec=([1-9][0-9]*)$", unit)
+        if stop_timeout_match is None:
+            self.fail("physical service stop timeout is missing")
+        stop_timeout = int(stop_timeout_match.group(1))
+        self.assertGreaterEqual(
+            load_deploy_module("matrix_ci_physical_dispatcher").STOP_WAIT_SECONDS,
+            stop_timeout * 2 + 20,
+        )
         self.assertRegex(unit, r"(?m)^RuntimeMaxSec=[1-9][0-9]*$")
         self.assertNotIn("flock", unit)
         self.assertIn("matrix-ci-physical-verifier", unit)
@@ -2251,7 +2456,7 @@ class PhysicalVerifierTests(unittest.TestCase):
         self.assertIn("ProtectHome=read-only", unit)
         self.assertNotRegex(unit, r"(?m)^ReadWritePaths=.*?/home/")
         self.assertNotRegex(dispatcher, r'_systemctl\("start"')
-        self.assertIn('_systemctl("stop", SERVICE', dispatcher)
+        self.assertIn('_systemctl("stop", "--no-block", SERVICE', dispatcher)
         self.assertNotIn('_systemctl("stop", "--wait", SERVICE', dispatcher)
 
     def test_units_pass_systemd_analyze_verify_with_safe_substituted_paths(self):
@@ -2552,7 +2757,7 @@ class PhysicalVerifierTests(unittest.TestCase):
                 "DevicePolicy": "auto", "DeviceAllow": "", "UMask": "0077",
             },
             "matrix-ci-physical.path": {"Unit": "matrix-ci-physical.service", "Paths": "/run/matrix-ci-physical/claim", "ActiveState": "active"},
-            "matrix-device-restart.path": {"Unit": "matrix-device-restart.service", "Paths": "/run/matrix-device-restart/request", "ActiveState": "active"},
+            "matrix-device-restart.path": {"Unit": "matrix-device-restart.service", "Paths": "/run/matrix-device-restart/submit/request", "ActiveState": "active"},
             "matrix-device-restart.service": {
                 "Type": "oneshot", "ExecStart": "/usr/local/libexec/matrix-device-restart-broker",
                 "User": "root", "Group": "root", "CapabilityBoundingSet": "cap_sys_boot",
@@ -2560,26 +2765,52 @@ class PhysicalVerifierTests(unittest.TestCase):
                 "DevicePolicy": "auto", "DeviceAllow": "",
             },
             "matrix-web.service": {
-                "User": "matrix-web", "Group": "matrix-web",
-                "InaccessiblePaths": "/run/systemd/private /run/dbus/system_bus_socket /run/matrix-ci-physical",
-                "CapabilityBoundingSet": "cap_sys_rawio", "AmbientCapabilities": "cap_sys_rawio",
+                "User": "root", "Group": "matrix-web",
+                "InaccessiblePaths": (
+                    "/run/systemd/private /run/dbus/system_bus_socket /run/matrix-ci-physical "
+                    "/run/matrix-device-restart/state /etc/shadow /etc/gshadow /etc/ssh"
+                ),
+                "CapabilityBoundingSet": (
+                    "cap_dac_override cap_fowner cap_setgid cap_setuid "
+                    "cap_sys_nice cap_sys_rawio"
+                ),
+                "AmbientCapabilities": "",
                 "Requires": "matrix-network-setup.service systemd-tmpfiles-setup.service",
                 "After": "network-online.target matrix-network-setup.service systemd-tmpfiles-setup.service",
                 "ReadOnlyPaths": "/run/matrix-display",
-                "ReadWritePaths": "/home/admin/matrix/data /home/admin/matrix/resources/media /run/matrix-device-restart",
+                "BindReadOnlyPaths": (
+                    "/home/admin/matrix:/home/admin/matrix:rbind "
+                    "/dev/null:/etc/shadow:rbind /dev/null:/etc/gshadow:rbind"
+                ),
+                "TemporaryFileSystem": "/etc/ssh:ro",
+                "ProtectHome": "tmpfs", "ProtectProc": "invisible", "ProcSubset": "pid",
+                "RestrictAddressFamilies": "AF_INET AF_INET6",
+                "ReadWritePaths": "/home/admin/matrix/data /home/admin/matrix/resources/media /run/matrix-device-restart/submit",
                 "DevicePolicy": "closed",
                 "DeviceAllow": ["/dev/vcio rw", "/dev/gpiomem rw", "/dev/mem rw"],
                 "UMask": "0077",
             },
         }
         attacks = (
-            ("matrix-web.service", "User", "root"),
+            ("matrix-web.service", "User", "matrix-web"),
             ("matrix-web.service", "Group", "root"),
-            ("matrix-web.service", "InaccessiblePaths", "/run/dbus/system_bus_socket /run/matrix-ci-physical"),
-            ("matrix-web.service", "InaccessiblePaths", "/run/systemd/private /run/matrix-ci-physical"),
-            ("matrix-web.service", "CapabilityBoundingSet", "CAP_SYS_RAWIO CAP_SYS_ADMIN"),
-            ("matrix-web.service", "AmbientCapabilities", "CAP_SYS_RAWIO CAP_SYS_ADMIN"),
-            ("matrix-web.service", "ReadWritePaths", baseline["matrix-web.service"]["ReadWritePaths"] + " /etc"),
+            ("matrix-web.service", "InaccessiblePaths", "/run/dbus/system_bus_socket /run/matrix-ci-physical /run/matrix-device-restart"),
+            ("matrix-web.service", "InaccessiblePaths", "/run/systemd/private /run/matrix-ci-physical /run/matrix-device-restart"),
+            (
+                "matrix-web.service", "CapabilityBoundingSet",
+                "CAP_DAC_OVERRIDE CAP_FOWNER CAP_SETGID CAP_SETUID "
+                "CAP_SYS_NICE CAP_SYS_RAWIO CAP_SYS_ADMIN",
+            ),
+            (
+                "matrix-web.service", "AmbientCapabilities",
+                "CAP_SYS_ADMIN",
+            ),
+            ("matrix-web.service", "ReadWritePaths", baseline["matrix-web.service"]["ReadWritePaths"] + " /run/matrix-device-restart/state"),
+            (
+                "matrix-web.service", "BindReadOnlyPaths",
+                "/home/admin/matrix:/home/admin/matrix:rbind /dev/null:/etc/gshadow:rbind",
+            ),
+            ("matrix-web.service", "TemporaryFileSystem", ""),
             ("matrix-web.service", "DeviceAllow", baseline["matrix-web.service"]["DeviceAllow"] + ["/dev/sda rw"]),
             ("matrix-ci-physical.service", "CapabilityBoundingSet", "CAP_SYS_RAWIO"),
             ("matrix-ci-physical.service", "CapabilityBoundingSet", "CAP_DAC_READ_SEARCH CAP_SYS_RAWIO CAP_SYS_ADMIN"),
@@ -2680,19 +2911,72 @@ class PhysicalVerifierTests(unittest.TestCase):
             finally:
                 gate.REVIEWED_ARTIFACTS = old_artifacts
 
+    def test_restart_broker_claims_submission_into_root_only_state_before_delay(self):
+        broker = load_deploy_module("matrix_device_restart_broker")
+        with tempfile.TemporaryDirectory(
+            prefix="matrix-restart-split-", dir="/root"
+        ) as directory:
+            root = Path(directory)
+            state = root / "state"
+            submit = root / "submit"
+            state.mkdir(mode=0o700)
+            submit.mkdir(mode=0o1730)
+            os.chmod(state, 0o700)
+            os.chmod(submit, 0o1730)
+            lock = state / broker.LOCK
+            lock.write_bytes(b"")
+            os.chmod(lock, 0o644)
+            request = submit / broker.REQUEST
+            request.write_bytes(b"")
+            os.chmod(request, 0o600)
+            account = types.SimpleNamespace(pw_uid=os.getuid(), pw_gid=os.getgid())
+            old_paths = tuple(
+                getattr(broker, name)
+                for name in ("STATE_PARENT", "SUBMIT_PARENT", "PARENT")
+            )
+            old_account = broker.pwd.getpwnam
+            setattr(broker, "STATE_PARENT", str(state))
+            setattr(broker, "SUBMIT_PARENT", str(submit))
+            setattr(broker, "PARENT", str(state))
+            broker.pwd.getpwnam = lambda _name: account
+            events = []
+
+            def observe_delay(_seconds):
+                self.assertFalse(request.exists())
+                claimed = state / broker.REQUEST
+                self.assertTrue(claimed.exists())
+                self.assertEqual(
+                    (claimed.stat().st_uid, claimed.stat().st_gid), (0, 0)
+                )
+                events.append("claimed")
+
+            try:
+                broker.run_broker(sleep=observe_delay, reboot=lambda: events.append("reboot"))
+            finally:
+                for name, value in zip(
+                    ("STATE_PARENT", "SUBMIT_PARENT", "PARENT"), old_paths
+                ):
+                    setattr(broker, name, value)
+                broker.pwd.getpwnam = old_account
+            self.assertEqual(events, ["claimed", "reboot"])
+            self.assertFalse((state / broker.REQUEST).exists())
+            self.assertFalse(request.exists())
+
     def test_restart_tmpfiles_creates_sticky_group_admission_directory_and_root_lock(self):
         policy = (ROOT / "deploy" / "matrix-device-restart.conf").read_text(encoding="ascii")
         self.assertEqual(policy, (
-            "# Host-owned fixed whole-device restart transaction namespace.\n"
-            "d /run/matrix-device-restart 1730 root matrix-web -\n"
-            "f /run/matrix-device-restart/transaction.lock 0644 root root -\n"
+            "# Host-owned fixed whole-device restart transaction namespaces on one mount.\n"
+            "d /run/matrix-device-restart 0700 root root -\n"
+            "d /run/matrix-device-restart/state 0700 root root -\n"
+            "f /run/matrix-device-restart/state/transaction.lock 0644 root root -\n"
+            "d /run/matrix-device-restart/submit 1730 root matrix-web -\n"
         ))
 
     def test_restart_terminal_recovery_documentation_is_inode_validated_and_narrow(self):
         guide = (ROOT / "deploy" / "matrix-ci-physical-install.md").read_text(encoding="utf-8")
         for terminal in ("request.failed", "request.cancelled", "request.invalid"):
             self.assertIn(terminal, guide)
-        self.assertIn("Restart requests remain blocked", guide)
+        self.assertIn("Restart submissions are consumed without reboot", guide)
         self.assertIn("investigate", guide.lower())
         self.assertIn("O_DIRECTORY | os.O_NOFOLLOW", guide)
         self.assertIn("follow_symlinks=False", guide)
@@ -2700,80 +2984,6 @@ class PhysicalVerifierTests(unittest.TestCase):
         self.assertIn("os.unlink(marker, dir_fd=directory_fd)", guide)
         self.assertIn("os.fsync(directory_fd)", guide)
         self.assertNotIn("rm -f /run/matrix-device-restart/request.*", guide)
-
-    def test_restart_terminal_publication_serializes_with_web_admission(self):
-        broker = load_deploy_module("matrix_device_restart_broker")
-        app = __import__("webapp")
-        with tempfile.TemporaryDirectory(prefix="matrix-restart-interleave-", dir="/root") as directory:
-            parent = Path(directory)
-            os.chmod(parent, 0o1730)
-            lock = parent / "transaction.lock"
-            lock.write_bytes(b"")
-            os.chmod(lock, 0o644)
-            request = parent / broker.REQUEST
-            request.write_bytes(b"")
-            os.chmod(request, 0o600)
-            after_terminal_scan = threading.Event()
-            release_web = threading.Event()
-            terminal_published = threading.Event()
-            outcomes = []
-            errors = []
-            broker_errors = []
-            real_open = os.open
-            def paused_open(path, flags, *args, **kwargs):
-                if path == broker.REQUEST and flags & os.O_EXCL:
-                    after_terminal_scan.set()
-                    if not release_web.wait(2):
-                        raise RuntimeError("web admission was not released")
-                return real_open(path, flags, *args, **kwargs)
-            def publish_from_web():
-                try:
-                    outcomes.append(app.RestartRequest(request)())
-                except BaseException as error:
-                    errors.append(error)
-            old_parent = broker.PARENT
-            old_account = broker.pwd.getpwnam
-            broker.PARENT = str(parent)
-            broker.pwd.getpwnam = lambda _name: types.SimpleNamespace(
-                pw_uid=os.getuid(), pw_gid=os.getgid(),
-            )
-            publisher = threading.Thread(target=publish_from_web)
-
-            def publish_terminal():
-                try:
-                    broker.run_broker(
-                        sleep=lambda _seconds: None,
-                        reboot=lambda: (_ for _ in ()).throw(RuntimeError("reboot failed")),
-                    )
-                except BaseException as error:
-                    broker_errors.append(error)
-                finally:
-                    terminal_published.set()
-
-            broker_thread = threading.Thread(target=publish_terminal)
-            try:
-                with mock.patch.object(app.os, "open", side_effect=paused_open):
-                    publisher.start()
-                    self.assertTrue(after_terminal_scan.wait(1))
-                    broker_thread.start()
-                    self.assertFalse(terminal_published.wait(0.1))
-                    release_web.set()
-                    publisher.join(2)
-                    broker_thread.join(2)
-            finally:
-                release_web.set()
-                publisher.join(2)
-                broker_thread.join(2)
-                broker.PARENT = old_parent
-                broker.pwd.getpwnam = old_account
-            self.assertFalse(publisher.is_alive())
-            self.assertFalse(broker_thread.is_alive())
-            self.assertEqual(errors, [])
-            self.assertEqual(len(broker_errors), 1)
-            self.assertIsInstance(broker_errors[0], RuntimeError)
-            self.assertEqual(outcomes, [app.RestartRequestOutcome.ACTIVE_REQUEST])
-            self.assertFalse(request.exists())
-            self.assertTrue((parent / "request.failed").exists())
 
     def test_restart_broker_exposes_no_terminal_publication_primitive_without_lock_enforcement(self):
         broker = load_deploy_module("matrix_device_restart_broker")
@@ -3180,26 +3390,53 @@ class PhysicalVerifierTests(unittest.TestCase):
             self.assertTrue(invalid.exists())
             self.assertEqual(invalid.read_bytes(), b"")
 
-    def test_restart_publication_fails_closed_while_manual_terminal_state_exists(self):
+    def test_restart_broker_blocks_split_submission_while_manual_terminal_exists(self):
         app = __import__("webapp")
-        restart_request = app.RestartRequest
+        broker = load_deploy_module("matrix_device_restart_broker")
+        account = types.SimpleNamespace(pw_uid=os.getuid(), pw_gid=os.getgid())
         for terminal in ("failed", "cancelled", "invalid"):
             with self.subTest(terminal=terminal):
                 with tempfile.TemporaryDirectory(prefix="matrix-restart-manual-", dir="/root") as directory:
-                    parent = Path(directory)
-                    os.chmod(parent, 0o1730)
-                    lock = parent / "transaction.lock"
+                    root = Path(directory) / "matrix-device-restart"
+                    state = root / "state"
+                    submit = root / "submit"
+                    root.mkdir(mode=0o700)
+                    state.mkdir(mode=0o700)
+                    submit.mkdir(mode=0o1730)
+                    os.chmod(submit, 0o1730)
+                    lock = state / broker.LOCK
                     lock.write_bytes(b"")
                     os.chmod(lock, 0o644)
-                    request = parent / "request"
-                    state = parent / f"request.{terminal}"
-                    state.write_bytes(b"")
-                    os.chmod(state, 0o600)
+                    terminal_path = state / f"{broker.REQUEST}.{terminal}"
+                    terminal_path.write_bytes(b"")
+                    os.chmod(terminal_path, 0o600)
+                    request = submit / broker.REQUEST
                     self.assertIs(
-                        restart_request(request)(),
-                        app.RestartRequestOutcome.MANUAL_RECOVERY_REQUIRED,
+                        app.RestartRequest(request)(),
+                        app.RestartRequestOutcome.CREATED,
                     )
+                    old_paths = broker.STATE_PARENT, broker.SUBMIT_PARENT, broker.PARENT
+                    old_getpwnam = broker.pwd.getpwnam
+                    setattr(broker, "STATE_PARENT", str(state))
+                    setattr(broker, "SUBMIT_PARENT", str(submit))
+                    setattr(broker, "PARENT", broker.STATE_PARENT)
+                    broker.pwd.getpwnam = lambda _name: account
+                    try:
+                        with self.assertRaisesRegex(
+                            broker.ManualRecoveryError, "restart requires manual recovery"
+                        ):
+                            broker.run_broker(
+                                sleep=lambda _seconds: self.fail("terminal reached delay"),
+                                reboot=lambda: self.fail("terminal reached reboot"),
+                            )
+                    finally:
+                        for name, value in zip(
+                            ("STATE_PARENT", "SUBMIT_PARENT", "PARENT"), old_paths
+                        ):
+                            setattr(broker, name, value)
+                        broker.pwd.getpwnam = old_getpwnam
                     self.assertFalse(request.exists())
+                    self.assertTrue(terminal_path.exists())
 
     def test_effective_sshd_policy_rejects_certificate_principal_and_hostbased_sources(self):
         gate = load_deploy_module("verify_matrix_ci_physical_install")

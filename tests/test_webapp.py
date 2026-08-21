@@ -432,14 +432,14 @@ class WebAppTests(unittest.TestCase):
         body = self.client.get("/").get_data(as_text=True)
 
         application_version = getattr(webapp, "APPLICATION_VERSION", None)
-        self.assertEqual(application_version, "0.3.53-preview")
+        self.assertEqual(application_version, "0.3.54-preview")
         self.assertEqual(body.count(f"Version {application_version}"), 1)
         self.assertRegex(
             body,
             rf"LAN CONTROL</span><br><span[^>]*>Version {re.escape(application_version)}</span>",
         )
         template = (Path(__file__).parents[1] / "app" / "templates" / "dashboard.html").read_text()
-        self.assertNotIn("0.3.53-preview", template)
+        self.assertNotIn("0.3.54-preview", template)
 
     @unittest.skipUnless(shutil.which("node"), "Node.js is required")
     @unittest.skipUnless(
@@ -529,7 +529,7 @@ try{
         self.assertIn("button.disabled=false", body)
         self.assertIn(".device-actions .btn{min-height:44px", body)
 
-    def test_production_restart_uses_only_fixed_unprivileged_broker_marker(self):
+    def test_production_restart_uses_only_fixed_broker_marker_from_confined_hardware_service(self):
         root = Path(__file__).parents[1]
         wsgi = (root / "app" / "wsgi.py").read_text()
         service = (root / "deploy" / "matrix-web.service").read_text()
@@ -546,32 +546,71 @@ try{
 
         self.assertNotIn("systemd-run", candidate)
         self.assertNotIn("systemctl", candidate)
-        self.assertIn("User=matrix-web", service)
+        # The RGB Matrix native library requires effective uid 0 even when
+        # CAP_SYS_RAWIO and exact device cgroup rules are present. Keep the
+        # hardware process root, but deny direct systemd/DBus control and
+        # retain only the capabilities needed for hardware and owner-private
+        # persistent state.
+        self.assertIn("User=root", service)
         self.assertIn("Group=matrix-web", service)
         self.assertIn("NoNewPrivileges=true", service)
+        self.assertIn(
+            "CapabilityBoundingSet=CAP_DAC_OVERRIDE CAP_FOWNER CAP_SETGID "
+            "CAP_SETUID CAP_SYS_NICE CAP_SYS_RAWIO",
+            service,
+        )
+        self.assertIn("AmbientCapabilities=", service)
+        self.assertNotIn("AmbientCapabilities=CAP_", service)
         self.assertIn(
             "InaccessiblePaths=/run/systemd/private /run/dbus/system_bus_socket",
             service,
         )
+        self.assertIn("InaccessiblePaths=/run/matrix-ci-physical /run/matrix-device-restart/state", service)
+        self.assertIn("ProtectHome=tmpfs", service)
+        self.assertIn(
+            "BindReadOnlyPaths=/home/admin/matrix /dev/null:/etc/shadow "
+            "/dev/null:/etc/gshadow",
+            service,
+        )
+        self.assertIn("TemporaryFileSystem=/etc/ssh:ro", service)
+        self.assertIn("ProtectProc=invisible", service)
+        self.assertIn("ProcSubset=pid", service)
+        self.assertIn("RestrictAddressFamilies=AF_INET AF_INET6", service)
+        self.assertNotIn("RestrictAddressFamilies=AF_UNIX", service)
+        inaccessible = "\n".join(
+            line for line in service.splitlines() if line.startswith("InaccessiblePaths=")
+        )
         writable_lines = "\n".join(
             line for line in service.splitlines() if line.startswith("ReadWritePaths=")
         )
-        self.assertIn("/run/matrix-device-restart", writable_lines)
+        self.assertIn("/run/matrix-device-restart/submit", writable_lines)
+        self.assertIn("/run/matrix-device-restart/state", inaccessible)
+        self.assertIn("/etc/shadow", inaccessible)
+        self.assertIn("/etc/gshadow", inaccessible)
+        self.assertIn("/etc/ssh", inaccessible)
+        self.assertNotIn("/run/matrix-device-restart ", writable_lines + " ")
         self.assertNotIn("/run/matrix-display", writable_lines)
-        self.assertIn("PathExists=/run/matrix-device-restart/request", broker_path)
+        self.assertIn("PathExists=/run/matrix-device-restart/submit/request", broker_path)
         self.assertNotIn("PathChanged=", broker_path)
         self.assertIn(
             "ExecStart=/usr/local/libexec/matrix-device-restart-broker",
             broker_service,
         )
+        self.assertIn(
+            "ConditionPathExists=/run/matrix-device-restart/submit/request",
+            broker_service,
+        )
         self.assertNotIn("Environment=", broker_service)
         self.assertIn("DELAY_SECONDS = 30", broker_source)
-        self.assertIn('PARENT = "/run/matrix-device-restart"', broker_source)
+        self.assertIn('STATE_PARENT = "/run/matrix-device-restart/state"', broker_source)
+        self.assertIn('SUBMIT_PARENT = "/run/matrix-device-restart/submit"', broker_source)
         self.assertIn('REQUEST = "request"', broker_source)
         self.assertNotIn("sys.argv", broker_source)
-        self.assertIn("d /run/matrix-device-restart 1730 root matrix-web -", tmpfiles)
+        self.assertIn("d /run/matrix-device-restart 0700 root root -", tmpfiles)
+        self.assertIn("d /run/matrix-device-restart/state 0700 root root -", tmpfiles)
+        self.assertIn("d /run/matrix-device-restart/submit 1730 root matrix-web -", tmpfiles)
         self.assertIn(
-            "f /run/matrix-device-restart/transaction.lock 0644 root root -",
+            "f /run/matrix-device-restart/state/transaction.lock 0644 root root -",
             tmpfiles,
         )
         self.assertIn("root-owned `1730`", install)
@@ -580,7 +619,7 @@ try{
         self.assertIn("restart transaction lock changed during recovery", install)
         self.assertIn("(opened.st_uid, opened.st_gid) != (0, 0)", install)
         self.assertIn("opened.st_size != 0", install)
-        self.assertIn('RestartRequest("/run/matrix-device-restart/request")', wsgi)
+        self.assertIn('RestartRequest("/run/matrix-device-restart/submit/request")', wsgi)
 
         artifact_destinations = {
             "deploy/matrix-device-restart.conf":
@@ -598,6 +637,65 @@ try{
                 self.assertIn(source, pipeline)
                 self.assertIn(destination, install)
                 self.assertIn(destination, install_gate)
+
+    def test_restart_broker_claim_topology_uses_one_broker_writable_mount(self):
+        root = Path(__file__).parents[1]
+        broker = (root / "deploy" / "matrix_device_restart_broker.py").read_text()
+        broker_service = (root / "deploy" / "matrix-device-restart.service").read_text()
+        broker_path = (root / "deploy" / "matrix-device-restart.path").read_text()
+        web_service = (root / "deploy" / "matrix-web.service").read_text()
+        wsgi = (root / "app" / "wsgi.py").read_text()
+        tmpfiles = (root / "deploy" / "matrix-device-restart.conf").read_text()
+        install = (root / "deploy" / "matrix-ci-physical-install.md").read_text()
+
+        self.assertRegex(
+            broker_service, r"(?m)^ReadWritePaths=/run/matrix-device-restart$"
+        )
+        self.assertIn('STATE_PARENT = "/run/matrix-device-restart/state"', broker)
+        self.assertIn('SUBMIT_PARENT = "/run/matrix-device-restart/submit"', broker)
+        self.assertIn(
+            "PathExists=/run/matrix-device-restart/submit/request", broker_path
+        )
+        self.assertIn(
+            "ConditionPathExists=/run/matrix-device-restart/submit/request",
+            broker_service,
+        )
+        self.assertIn(
+            'RestartRequest("/run/matrix-device-restart/submit/request")', wsgi
+        )
+        self.assertIn(
+            "InaccessiblePaths=/run/matrix-ci-physical "
+            "/run/matrix-device-restart/state",
+            web_service,
+        )
+        writable = "\n".join(
+            line for line in web_service.splitlines()
+            if line.startswith("ReadWritePaths=")
+        )
+        self.assertIn("/run/matrix-device-restart/submit", writable)
+        self.assertNotIn("/run/matrix-device-restart ", writable + " ")
+        self.assertIn(
+            "d /run/matrix-device-restart/state 0700 root root -", tmpfiles
+        )
+        self.assertIn(
+            "d /run/matrix-device-restart/submit 1730 root matrix-web -", tmpfiles
+        )
+        self.assertIn(
+            "f /run/matrix-device-restart/state/transaction.lock 0644 root root -",
+            tmpfiles,
+        )
+        self.assertIn(
+            'restart_root_device="$(stat -c \'%d\' /run/matrix-device-restart)"',
+            install,
+        )
+        self.assertIn(
+            'test "$(stat -c \'%d\' /run/matrix-device-restart/state)" = "$restart_root_device"',
+            install,
+        )
+        self.assertIn(
+            'test "$(stat -c \'%d\' /run/matrix-device-restart/submit)" = "$restart_root_device"',
+            install,
+        )
 
     @unittest.skipUnless(shutil.which("node"), "Node.js is required")
     def test_restart_button_cancel_confirm_and_failure_paths_execute_without_saving(self):
@@ -902,38 +1000,22 @@ try{
         self.assertEqual(response.get_json(), {"restarting": True, "already_pending": False})
         self.assertEqual(events, ["marker-durable", "response-returned"])
 
-    def test_device_restart_terminal_markers_require_manual_recovery_without_pending_state(self):
+    def test_device_restart_manual_recovery_outcome_does_not_set_pending_state(self):
         self.pair_browser()
-        for terminal in ("failed", "cancelled", "invalid"):
-            with self.subTest(terminal=terminal):
-                with tempfile.TemporaryDirectory(prefix="matrix-restart-endpoint-", dir="/root") as directory:
-                    parent = Path(directory)
-                    os.chmod(parent, 0o1730)
-                    lock = parent / "transaction.lock"
-                    lock.write_bytes(b"")
-                    os.chmod(lock, 0o644)
-                    request_path = parent / "request"
-                    terminal_path = parent / f"request.{terminal}"
-                    terminal_path.write_bytes(b"")
-                    os.chmod(terminal_path, 0o600)
-                    self.device_restart_runner.side_effect = webapp.RestartRequest(request_path)
+        self.device_restart_runner.return_value = webapp.RestartRequestOutcome.MANUAL_RECOVERY_REQUIRED
 
-                    blocked = self.client.post("/api/system/restart")
-                    retried = self.client.post("/api/system/restart")
+        blocked = self.client.post("/api/system/restart")
+        retried = self.client.post("/api/system/restart")
 
-                    self.assertEqual(blocked.status_code, 409)
-                    self.assertEqual(retried.status_code, 409)
-                    self.assertEqual(blocked.get_json(), {
-                        "error": "Device restart requires operator recovery.",
-                        "manual_recovery_required": True,
-                    })
-                    self.assertNotIn(terminal, blocked.get_data(as_text=True))
-                    self.assertFalse(request_path.exists())
-                    self.assertTrue(terminal_path.exists())
-                    self.assertEqual(self.device_restart_runner.call_count, 2)
-                    self.device_restart_runner.reset_mock(side_effect=True)
+        self.assertEqual(blocked.status_code, 409)
+        self.assertEqual(retried.status_code, 409)
+        self.assertEqual(blocked.get_json(), {
+            "error": "Device restart requires operator recovery.",
+            "manual_recovery_required": True,
+        })
+        self.assertEqual(self.device_restart_runner.call_count, 2)
 
-    def test_hostile_restart_requests_are_normalized_through_broker_to_manual_recovery(self):
+    def test_hostile_restart_requests_are_normalized_by_broker_to_terminal_state(self):
         self.pair_browser()
         broker_path = Path(__file__).resolve().parents[1] / "deploy" / "matrix_device_restart_broker.py"
         spec = importlib.util.spec_from_file_location("matrix_device_restart_broker_endpoint", broker_path)
@@ -995,29 +1077,6 @@ try{
                         target_before,
                     )
 
-                    self.device_restart_runner.side_effect = webapp.RestartRequest(request_path)
-                    blocked = self.client.post("/api/system/restart")
-                    retried = self.client.post("/api/system/restart")
-                    expected = {
-                        "error": "Device restart requires operator recovery.",
-                        "manual_recovery_required": True,
-                    }
-                    self.assertEqual((blocked.status_code, retried.status_code), (409, 409))
-                    self.assertEqual(blocked.get_json(), expected)
-                    self.assertEqual(retried.get_json(), expected)
-                    self.assertNotIn(shape, blocked.get_data(as_text=True))
-                    self.assertFalse(request_path.exists())
-                    terminal.unlink()
-                    self.device_restart_runner.side_effect = None
-                    self.device_restart_runner.return_value = webapp.RestartRequestOutcome.CREATED
-                    after_recovery = self.client.post("/api/system/restart")
-                    self.assertEqual(after_recovery.status_code, 202)
-                    self.assertEqual(
-                        after_recovery.get_json(),
-                        {"restarting": True, "already_pending": False},
-                    )
-                    self.device_restart_runner.reset_mock(side_effect=True)
-
     def test_device_restart_existing_marker_is_cross_process_idempotent(self):
         self.pair_browser()
         self.device_restart_runner.return_value = webapp.RestartRequestOutcome.ACTIVE_REQUEST
@@ -1030,14 +1089,34 @@ try{
         self.assertEqual(duplicate.get_json(), {"restarting": True, "already_pending": True})
         self.assertEqual(self.device_restart_runner.call_count, 2)
 
+    def test_restart_publisher_uses_only_split_submission_namespace(self):
+        with tempfile.TemporaryDirectory(prefix="matrix-restart-split-", dir="/root") as directory:
+            restart_root = Path(directory) / "matrix-device-restart"
+            state = restart_root / "state"
+            submit = restart_root / "submit"
+            restart_root.mkdir(mode=0o700)
+            state.mkdir(mode=0o700)
+            submit.mkdir(mode=0o1730)
+            os.chmod(submit, 0o1730)
+            transaction_lock = state / "transaction.lock"
+            transaction_lock.write_bytes(b"")
+            os.chmod(transaction_lock, 0o644)
+            request = submit / "request"
+
+            publisher = webapp.RestartRequest(request)
+
+            self.assertIs(publisher(), webapp.RestartRequestOutcome.CREATED)
+            self.assertIs(publisher(), webapp.RestartRequestOutcome.ACTIVE_REQUEST)
+            self.assertEqual(request.read_bytes(), b"")
+            self.assertEqual(stat.S_IMODE(request.stat().st_mode), 0o600)
+            self.assertFalse((submit / "transaction.lock").exists())
+            self.assertEqual(set(state.iterdir()), {transaction_lock})
+
     def test_fixed_restart_marker_rejects_symlink_fifo_hardlink_and_path_traversal(self):
         with tempfile.TemporaryDirectory(prefix="matrix-restart-marker-", dir="/root") as directory:
             parent = Path(directory) / "requests"
             parent.mkdir(mode=0o1730)
             os.chmod(parent, 0o1730)
-            lock = parent / "transaction.lock"
-            lock.write_bytes(b"")
-            os.chmod(lock, 0o644)
             target = Path(directory) / "target"
             target.write_bytes(b"unchanged")
             os.chmod(target, 0o600)
@@ -1072,9 +1151,6 @@ try{
             parent = trusted / "requests"
             parent.mkdir()
             os.chmod(parent, 0o1730)
-            lock = parent / "transaction.lock"
-            lock.write_bytes(b"")
-            os.chmod(lock, 0o644)
             alias = root / "alias"
             alias.symlink_to(trusted, target_is_directory=True)
 
@@ -1088,9 +1164,6 @@ try{
             parent = Path(directory)
             os.chown(parent, 0, account.pw_gid)
             os.chmod(parent, 0o1730)
-            lock = parent / "transaction.lock"
-            lock.write_bytes(b"")
-            os.chmod(lock, 0o644)
             request = parent / "request"
             request.write_bytes(b"")
             os.chmod(request, 0o600)
@@ -1101,58 +1174,6 @@ try{
                     webapp.RestartRequest(request)(),
                     webapp.RestartRequestOutcome.ACTIVE_REQUEST,
                 )
-
-    def test_restart_transaction_lock_rejects_symlink_hardlink_wrong_mode_and_owner(self):
-        with tempfile.TemporaryDirectory(prefix="matrix-restart-lock-", dir="/root") as directory:
-            root = Path(directory)
-            parent = root / "requests"
-            parent.mkdir()
-            os.chmod(parent, 0o1730)
-            request = parent / "request"
-            target = root / "target"
-            target.write_bytes(b"")
-            os.chmod(target, 0o644)
-            lock = parent / "transaction.lock"
-
-            for kind in ("symlink", "hardlink", "wrong-mode", "wrong-owner"):
-                with self.subTest(kind=kind):
-                    if kind == "symlink":
-                        lock.symlink_to(target)
-                    elif kind == "hardlink":
-                        os.link(target, lock)
-                    else:
-                        lock.write_bytes(b"")
-                        os.chmod(lock, 0o600 if kind == "wrong-mode" else 0o644)
-                        if kind == "wrong-owner":
-                            os.chown(lock, 1, 0)
-                    try:
-                        with self.assertRaises((OSError, RuntimeError)):
-                            webapp.RestartRequest(request)()
-                        self.assertFalse(request.exists())
-                    finally:
-                        lock.unlink(missing_ok=True)
-
-    def test_restart_transaction_lock_replacement_during_acquire_fails_closed(self):
-        with tempfile.TemporaryDirectory(prefix="matrix-restart-lock-race-", dir="/root") as directory:
-            parent = Path(directory)
-            os.chmod(parent, 0o1730)
-            lock = parent / "transaction.lock"
-            lock.write_bytes(b"")
-            os.chmod(lock, 0o644)
-            replacement = parent / "replacement"
-            replacement.write_bytes(b"")
-            os.chmod(replacement, 0o644)
-            real_flock = webapp.fcntl.flock
-
-            def replace_then_lock(fd, operation):
-                real_flock(fd, operation)
-                lock.unlink()
-                replacement.rename(lock)
-
-            with patch.object(webapp.fcntl, "flock", side_effect=replace_then_lock):
-                with self.assertRaisesRegex(RuntimeError, "lock changed"):
-                    webapp.RestartRequest(parent / "request")()
-            self.assertFalse((parent / "request").exists())
 
     def test_device_restart_failure_is_sanitized_and_can_be_retried(self):
         self.pair_browser()

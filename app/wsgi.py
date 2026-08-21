@@ -84,7 +84,7 @@ with _entrypoint_owner._wsgi_runtime_lock:
             sanitizer_python=os.environ.get("MATRIX_SANITIZER_PYTHON"),
             sanitizer_identity=(nobody.pw_uid, nobody.pw_gid) if nobody else None,
             device_restart_runner=(
-                RestartRequest("/run/matrix-device-restart/request")
+                RestartRequest("/run/matrix-device-restart/submit/request")
                 if os.environ.get("MATRIX_DEVICE_RESTART_ENABLED") == "1"
                 else None
             ),

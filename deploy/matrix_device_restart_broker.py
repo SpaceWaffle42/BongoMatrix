@@ -11,7 +11,12 @@ import stat
 import subprocess
 import time
 
-PARENT = "/run/matrix-device-restart"
+STATE_PARENT = "/run/matrix-device-restart/state"
+SUBMIT_PARENT = "/run/matrix-device-restart/submit"
+# Compatibility seam for isolated tests that use one private directory.  Live
+# installation leaves this equal to STATE_PARENT and therefore uses the split
+# submission namespace above.
+PARENT = STATE_PARENT
 REQUEST = "request"
 LOCK = "transaction.lock"
 TERMINALS = ("failed", "cancelled", "invalid")
@@ -77,11 +82,24 @@ def _open_trusted_runtime(path):
         raise
 
 
-def _validate_parent(parent_fd, account):
+def _validate_state_parent(parent_fd):
+    parent = os.fstat(parent_fd)
+    if (not stat.S_ISDIR(parent.st_mode) or parent.st_uid != 0
+            or parent.st_gid != 0 or stat.S_IMODE(parent.st_mode) != 0o700):
+        raise RuntimeError("unsafe fixed restart state directory")
+
+
+def _validate_submit_parent(parent_fd, account):
     parent = os.fstat(parent_fd)
     if (not stat.S_ISDIR(parent.st_mode) or parent.st_uid != 0
             or parent.st_gid != account.pw_gid or stat.S_IMODE(parent.st_mode) != 0o1730):
-        raise RuntimeError("unsafe fixed restart request directory")
+        raise RuntimeError("unsafe fixed restart submission directory")
+
+
+def _live_parent_paths():
+    if PARENT != STATE_PARENT:
+        return PARENT, PARENT
+    return STATE_PARENT, SUBMIT_PARENT
 
 
 def _acquire_transaction_lock(parent_fd):
@@ -257,46 +275,67 @@ def _normalize_invalid_request_with_lock(parent_fd, transaction, identity):
     _remove_validated_request_with_lock(parent_fd, transaction, identity)
 
 
+def _remove_submission(submit_fd, identity):
+    current = os.stat(REQUEST, dir_fd=submit_fd, follow_symlinks=False)
+    if (current.st_dev, current.st_ino) != identity:
+        raise RuntimeError("restart request marker changed before submission cleanup")
+    os.unlink(REQUEST, dir_fd=submit_fd)
+    os.fsync(submit_fd)
+
+
 def _validated_request():
     account = pwd.getpwnam("matrix-web")
-    parent_fd = _open_trusted_runtime(PARENT)
+    state_path, submit_path = _live_parent_paths()
+    parent_fd = _open_trusted_runtime(state_path)
+    submit_fd = None
     transaction = None
     try:
-        _validate_parent(parent_fd, account)
+        submit_fd = _open_trusted_runtime(submit_path)
+        same_parent = (
+            (os.fstat(parent_fd).st_dev, os.fstat(parent_fd).st_ino)
+            == (os.fstat(submit_fd).st_dev, os.fstat(submit_fd).st_ino)
+        )
+        if same_parent:
+            _validate_submit_parent(parent_fd, account)
+        else:
+            _validate_state_parent(parent_fd)
+            _validate_submit_parent(submit_fd, account)
         transaction = _acquire_transaction_lock(parent_fd)
+        observed = os.stat(REQUEST, dir_fd=submit_fd, follow_symlinks=False)
+        identity = (observed.st_dev, observed.st_ino)
         if _terminal_exists(parent_fd, account):
-            _discard_request_for_terminal_with_lock(parent_fd, transaction, account)
+            _remove_submission(submit_fd, identity)
             raise ManualRecoveryError("restart requires manual recovery")
-        observed = os.stat(REQUEST, dir_fd=parent_fd, follow_symlinks=False)
-        if (not stat.S_ISREG(observed.st_mode) or observed.st_uid != account.pw_uid
-                or observed.st_gid != account.pw_gid or stat.S_IMODE(observed.st_mode) != 0o600
+        allowed_owners = {(account.pw_uid, account.pw_gid), (0, account.pw_gid)}
+        if (not stat.S_ISREG(observed.st_mode)
+                or (observed.st_uid, observed.st_gid) not in allowed_owners
+                or stat.S_IMODE(observed.st_mode) != 0o600
                 or observed.st_nlink != 1 or observed.st_size != 0):
-            _normalize_invalid_request_with_lock(
-                parent_fd, transaction, (observed.st_dev, observed.st_ino)
-            )
+            _publish_invalid_terminal_with_lock(parent_fd, transaction)
+            _remove_submission(submit_fd, identity)
             raise RuntimeError("unsafe fixed restart request marker")
         fd = os.open(REQUEST, os.O_RDONLY | os.O_NONBLOCK | os.O_NOFOLLOW | os.O_CLOEXEC,
-                     dir_fd=parent_fd)
+                     dir_fd=submit_fd)
         try:
             info = os.fstat(fd)
-            current = os.stat(REQUEST, dir_fd=parent_fd, follow_symlinks=False)
+            current = os.stat(REQUEST, dir_fd=submit_fd, follow_symlinks=False)
             if ((current.st_dev, current.st_ino) != (info.st_dev, info.st_ino)
-                    or (observed.st_dev, observed.st_ino) != (info.st_dev, info.st_ino)):
+                    or identity != (info.st_dev, info.st_ino)):
                 raise RuntimeError("restart request marker changed during admission")
             os.fchown(fd, 0, 0)
+            if not same_parent:
+                _rename_noreplace(submit_fd, REQUEST, REQUEST, destination_fd=parent_fd)
+                os.fsync(submit_fd)
             claimed = os.fstat(fd)
             current = os.stat(REQUEST, dir_fd=parent_fd, follow_symlinks=False)
             if (
                 (claimed.st_dev, claimed.st_ino) != (info.st_dev, info.st_ino)
                 or (current.st_dev, current.st_ino) != (info.st_dev, info.st_ino)
-                or claimed.st_uid != 0
-                or claimed.st_gid != 0
-                or current.st_uid != 0
-                or current.st_gid != 0
+                or claimed.st_uid != 0 or claimed.st_gid != 0
+                or current.st_uid != 0 or current.st_gid != 0
                 or stat.S_IMODE(claimed.st_mode) != 0o600
                 or stat.S_IMODE(current.st_mode) != 0o600
-                or claimed.st_nlink != 1
-                or current.st_nlink != 1
+                or claimed.st_nlink != 1 or current.st_nlink != 1
             ):
                 raise RuntimeError("restart request claim changed during admission")
             os.fsync(parent_fd)
@@ -313,6 +352,9 @@ def _validated_request():
             transaction.close()
         os.close(parent_fd)
         raise
+    finally:
+        if submit_fd is not None:
+            os.close(submit_fd)
 
 
 def _remove_validated_request_with_lock(parent_fd, transaction, identity):
@@ -332,14 +374,15 @@ def _remove_validated_request(parent_fd, identity):
         transaction.close()
 
 
-def _rename_noreplace(parent_fd, source, destination):
+def _rename_noreplace(parent_fd, source, destination, *, destination_fd=None):
+    target_fd = parent_fd if destination_fd is None else destination_fd
     libc = ctypes.CDLL(None, use_errno=True)
     renameat2 = getattr(libc, "renameat2", None)
     if renameat2 is None:
         raise RuntimeError("atomic restart-state publication is unavailable")
     renameat2.argtypes = (ctypes.c_int, ctypes.c_char_p, ctypes.c_int, ctypes.c_char_p, ctypes.c_uint)
     renameat2.restype = ctypes.c_int
-    if renameat2(parent_fd, os.fsencode(source), parent_fd, os.fsencode(destination), RENAME_NOREPLACE):
+    if renameat2(parent_fd, os.fsencode(source), target_fd, os.fsencode(destination), RENAME_NOREPLACE):
         error = ctypes.get_errno()
         raise OSError(error, os.strerror(error), destination)
 

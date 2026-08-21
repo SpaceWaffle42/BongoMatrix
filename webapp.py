@@ -19,7 +19,6 @@ import tempfile
 import threading
 import time
 import datetime as dt
-import fcntl
 from contextlib import ExitStack
 from datetime import timedelta
 from enum import Enum
@@ -65,7 +64,7 @@ MEDIA_METADATA_ERRORS = (
 CONFIG_REQUEST_LIMIT = 1_048_576
 CONDITIONAL_HEADER_LIMIT = 4096
 MINIMUM_CLIENT_CONTRACT = 2
-APPLICATION_VERSION = "0.3.53-preview"
+APPLICATION_VERSION = "0.3.54-preview"
 DEVICE_RESTART_PENDING_TTL_SECONDS = 60
 ETAG_ITEM = re.compile(r'(?P<weak>W/)?"(?P<opaque>[\x21\x23-\x7e\x80-\xff]*)"')
 EDIT_PREVIEW_INSTANCE = re.compile(r"[0-9a-f]{32}")
@@ -120,7 +119,6 @@ class RestartRequest:
     def __call__(self):
         parent_fd = _open_trusted_restart_directory(self.path.parent)
         fd = None
-        lock_fd = None
         try:
             parent = os.fstat(parent_fd)
             if (
@@ -130,58 +128,6 @@ class RestartRequest:
                 or stat.S_IMODE(parent.st_mode) != 0o1730
             ):
                 raise RuntimeError("unsafe fixed restart request directory")
-            lock_before = os.stat(
-                "transaction.lock", dir_fd=parent_fd, follow_symlinks=False,
-            )
-            lock_fd = os.open(
-                "transaction.lock",
-                os.O_RDONLY | os.O_NONBLOCK | os.O_NOFOLLOW | os.O_CLOEXEC,
-                dir_fd=parent_fd,
-            )
-            lock_opened = os.fstat(lock_fd)
-            if (
-                not stat.S_ISREG(lock_opened.st_mode)
-                or lock_opened.st_uid != 0
-                or lock_opened.st_gid != 0
-                or stat.S_IMODE(lock_opened.st_mode) != 0o644
-                or lock_opened.st_nlink != 1
-                or (lock_before.st_dev, lock_before.st_ino)
-                != (lock_opened.st_dev, lock_opened.st_ino)
-            ):
-                raise RuntimeError("unsafe fixed restart transaction lock")
-            fcntl.flock(lock_fd, fcntl.LOCK_EX)
-            lock_current = os.stat(
-                "transaction.lock", dir_fd=parent_fd, follow_symlinks=False,
-            )
-            if (
-                (lock_opened.st_dev, lock_opened.st_ino)
-                != (lock_current.st_dev, lock_current.st_ino)
-                or not stat.S_ISREG(lock_current.st_mode)
-                or lock_current.st_uid != 0
-                or lock_current.st_gid != 0
-                or stat.S_IMODE(lock_current.st_mode) != 0o644
-                or lock_current.st_nlink != 1
-            ):
-                raise RuntimeError("fixed restart transaction lock changed")
-            for terminal in ("failed", "cancelled", "invalid"):
-                try:
-                    terminal_info = os.stat(
-                        f"{self.path.name}.{terminal}",
-                        dir_fd=parent_fd,
-                        follow_symlinks=False,
-                    )
-                except FileNotFoundError:
-                    continue
-                if (
-                    not stat.S_ISREG(terminal_info.st_mode)
-                    or (terminal_info.st_uid, terminal_info.st_gid)
-                    not in ((os.geteuid(), os.getegid()), (0, 0))
-                    or stat.S_IMODE(terminal_info.st_mode) != 0o600
-                    or terminal_info.st_nlink != 1
-                    or terminal_info.st_size != 0
-                ):
-                    raise RuntimeError("unsafe fixed restart terminal marker")
-                return RestartRequestOutcome.MANUAL_RECOVERY_REQUIRED
             try:
                 fd = os.open(
                     self.path.name,
@@ -208,8 +154,6 @@ class RestartRequest:
         finally:
             if fd is not None:
                 os.close(fd)
-            if lock_fd is not None:
-                os.close(lock_fd)
             os.close(parent_fd)
 
 

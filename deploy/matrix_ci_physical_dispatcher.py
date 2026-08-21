@@ -27,6 +27,7 @@ CLAIM_TEMPORARIES = "claim-temporaries"
 MAX_REPORT_BYTES = 4096
 MAX_ERROR_CHARS = 512
 SYSTEMCTL_TIMEOUT = 10
+STOP_WAIT_SECONDS = 170
 REPORT_WAIT_SECONDS = 70
 RENAME_NOREPLACE = 1
 _TEMPORARY_SEQUENCE = itertools.count()
@@ -411,8 +412,36 @@ class SystemOps:
         raise RuntimeError("physical verifier report wait timed out")
 
     def stop_and_wait(self):
-        # Plain stop waits for the stop job; systemctl rejects --wait with stop.
-        return _systemctl("stop", SERVICE, check=False).returncode
+        # Start the stop transaction without imposing the per-command timeout
+        # on the complete PID 1 stop/recovery job.
+        status = _systemctl("stop", "--no-block", SERVICE, check=False).returncode
+        if status != 0:
+            return status
+        deadline = time.monotonic() + STOP_WAIT_SECONDS
+        while time.monotonic() < deadline:
+            result = _systemctl(
+                "show", SERVICE, "-p", "ActiveState", "-p", "Job",
+                check=False,
+            )
+            if result.returncode != 0:
+                return result.returncode
+            records = {}
+            for line in result.stdout.decode("ascii", "strict").splitlines():
+                if "=" not in line:
+                    raise RuntimeError("physical verifier stop state was malformed")
+                name, value = line.split("=", 1)
+                if name in records:
+                    raise RuntimeError("physical verifier stop state was malformed")
+                records[name] = value
+            if set(records) != {"ActiveState", "Job"}:
+                raise RuntimeError("physical verifier stop state was malformed")
+            job = records["Job"]
+            if job == "0":
+                return 0 if records["ActiveState"] == "inactive" else 1
+            if re.fullmatch(r"/org/freedesktop/systemd1/job/[1-9][0-9]*", job) is None:
+                raise RuntimeError("physical verifier stop state was malformed")
+            time.sleep(0.05)
+        raise RuntimeError("physical verifier PID 1 stop wait timed out")
 
     def recovery_ready(self):
         if _systemctl("is-active", "--quiet", PRODUCTION_SERVICE, check=False).returncode != 0:
