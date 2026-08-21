@@ -5,6 +5,7 @@ import importlib.util
 import io
 import os
 import re
+import signal
 import subprocess
 import stat
 import sys
@@ -1043,6 +1044,7 @@ class PhysicalVerifierTests(unittest.TestCase):
             write_entered = threading.Event()
             permit_write = threading.Event()
             result = []
+            commit_locks = []
 
             def blocked_write(fd, payload):
                 write_entered.set()
@@ -1057,7 +1059,9 @@ class PhysicalVerifierTests(unittest.TestCase):
             dispatcher._systemctl = lambda *_args, **_kwargs: types.SimpleNamespace(
                 returncode=0, stdout=b"active\n"
             )
-            writer = threading.Thread(target=verifier._write_report, args=(values,))
+            writer = threading.Thread(
+                target=lambda: commit_locks.append(verifier._write_report(values))
+            )
             reader = threading.Thread(target=lambda: result.append(dispatcher.SystemOps().read_report()))
             try:
                 writer.start()
@@ -1073,6 +1077,8 @@ class PhysicalVerifierTests(unittest.TestCase):
                 permit_write.set()
                 writer.join(5)
                 reader.join(5)
+                for commit_lock in commit_locks:
+                    commit_lock.close()
                 verifier.os.write = original_write
                 dispatcher._systemctl = original_systemctl
                 verifier.REPORT_FILE = old_report
@@ -1106,7 +1112,7 @@ class PhysicalVerifierTests(unittest.TestCase):
 
             verifier._rename_noreplace = observe_rename
             try:
-                verifier._write_report(values)
+                verifier._write_report(values).close()
             finally:
                 verifier._rename_noreplace = original_rename
                 verifier.REPORT_FILE = old_report
@@ -1140,7 +1146,7 @@ class PhysicalVerifierTests(unittest.TestCase):
                     temporary.write_bytes(expected[:length])
                     os.chmod(temporary, 0o600)
                     with self.subTest(interrupted_length=length):
-                        verifier._write_report(values)
+                        verifier._write_report(values).close()
                         self.assertEqual((runtime / "report").read_bytes(), expected)
                         self.assertTrue(temporary.exists())
                     (runtime / "report").unlink(missing_ok=True)
@@ -1154,7 +1160,7 @@ class PhysicalVerifierTests(unittest.TestCase):
                     else:
                         os.link(target, temporary)
                     with self.subTest(attack=attack):
-                        verifier._write_report(values)
+                        verifier._write_report(values).close()
                         self.assertEqual((runtime / "report").read_bytes(), expected)
                         self.assertEqual(target.read_bytes(), expected)
                         self.assertTrue(temporary.exists() or temporary.is_symlink())
@@ -2251,6 +2257,96 @@ class PhysicalVerifierTests(unittest.TestCase):
             self.assertEqual(len(reader_results), 1)
             self.assertIsInstance(reader_results[0], RuntimeError)
 
+    def test_abrupt_writer_death_never_authorizes_report_acceptance(self):
+        verifier = load_deploy_module("matrix_ci_physical_verifier")
+        dispatcher = load_deploy_module("matrix_ci_physical_dispatcher")
+        for boundary in ("after-rename", "directory-fsync"):
+            with self.subTest(boundary=boundary), tempfile.TemporaryDirectory(
+                dir="/root"
+            ) as directory:
+                runtime = Path(directory)
+                os.chmod(runtime, 0o700)
+                report = runtime / "report"
+                report_lock = runtime / "report.lock"
+                old_verifier_paths = (
+                    verifier.REPORT_FILE,
+                    verifier.REPORT_LOCK_FILE,
+                )
+                old_dispatcher_paths = (
+                    dispatcher.RUNTIME,
+                    dispatcher.REPORT,
+                    dispatcher.REPORT_LOCK,
+                )
+                old_systemctl = dispatcher._systemctl
+                old_report_wait = dispatcher.REPORT_WAIT_SECONDS
+                verifier.REPORT_FILE = report
+                verifier.REPORT_LOCK_FILE = report_lock
+                dispatcher.RUNTIME = runtime
+                dispatcher.REPORT = report
+                dispatcher.REPORT_LOCK = report_lock
+                dispatcher.REPORT_WAIT_SECONDS = 0.2
+                dispatcher._systemctl = lambda *_args, **_kwargs: types.SimpleNamespace(
+                    returncode=0, stdout=b"active\n"
+                )
+                read_fd, write_fd = os.pipe()
+                pid = os.fork()
+                if pid == 0:
+                    try:
+                        os.close(read_fd)
+                        original_rename = verifier._rename_noreplace
+                        original_fsync = verifier.os.fsync
+                        runtime_identity = (runtime.stat().st_dev, runtime.stat().st_ino)
+
+                        def stop_after_rename(*args, **kwargs):
+                            original_rename(*args, **kwargs)
+                            os.write(write_fd, b"R")
+                            signal.pause()
+
+                        def stop_in_directory_fsync(fd):
+                            info = os.fstat(fd)
+                            if report.exists() and (
+                                info.st_dev,
+                                info.st_ino,
+                            ) == runtime_identity:
+                                os.write(write_fd, b"F")
+                                signal.pause()
+                            return original_fsync(fd)
+
+                        if boundary == "after-rename":
+                            verifier._rename_noreplace = stop_after_rename
+                        else:
+                            verifier.os.fsync = stop_in_directory_fsync
+                        verifier._write_report(
+                            {"PHYSICAL_DEVICE_ACCEPTANCE": "PASS"},
+                            deadline=verifier.time.monotonic() + 10,
+                        )
+                    except BaseException:
+                        os._exit(98)
+                    os._exit(99)
+                os.close(write_fd)
+                try:
+                    self.assertIn(os.read(read_fd, 1), (b"R", b"F"))
+                    self.assertTrue(report.exists())
+                    os.kill(pid, signal.SIGKILL)
+                    _, status = os.waitpid(pid, 0)
+                    pid = None
+                    self.assertEqual(os.waitstatus_to_exitcode(status), -signal.SIGKILL)
+                    with self.assertRaisesRegex(RuntimeError, "report wait timed out"):
+                        dispatcher.SystemOps().read_report()
+                finally:
+                    os.close(read_fd)
+                    if pid is not None:
+                        os.kill(pid, signal.SIGKILL)
+                        os.waitpid(pid, 0)
+                    verifier.REPORT_FILE, verifier.REPORT_LOCK_FILE = old_verifier_paths
+                    (
+                        dispatcher.RUNTIME,
+                        dispatcher.REPORT,
+                        dispatcher.REPORT_LOCK,
+                    ) = old_dispatcher_paths
+                    dispatcher._systemctl = old_systemctl
+                    dispatcher.REPORT_WAIT_SECONDS = old_report_wait
+
     def test_failed_final_report_rollback_poisons_admission_until_safe_reset(self):
         verifier = load_deploy_module("matrix_ci_physical_verifier")
         dispatcher = load_deploy_module("matrix_ci_physical_dispatcher")
@@ -2315,6 +2411,78 @@ class PhysicalVerifierTests(unittest.TestCase):
                     dispatcher.REPORT_LOCK,
                 ) = old_paths
 
+    def test_rollback_and_poison_failure_still_cannot_authorize_report(self):
+        verifier = load_deploy_module("matrix_ci_physical_verifier")
+        dispatcher = load_deploy_module("matrix_ci_physical_dispatcher")
+        with tempfile.TemporaryDirectory(dir="/root") as directory:
+            runtime = Path(directory)
+            os.chmod(runtime, 0o700)
+            report = runtime / "report"
+            report_lock = runtime / "report.lock"
+            old_paths = (
+                verifier.REPORT_FILE,
+                verifier.REPORT_LOCK_FILE,
+                dispatcher.RUNTIME,
+                dispatcher.REPORT,
+                dispatcher.REPORT_LOCK,
+            )
+            old_monotonic = verifier.time.monotonic
+            old_rename = verifier._rename_noreplace
+            old_rollback = verifier._rollback_published_report
+            old_fchmod = verifier.os.fchmod
+            old_systemctl = dispatcher._systemctl
+            old_report_wait = dispatcher.REPORT_WAIT_SECONDS
+            now = [0.0]
+
+            def expire_after_rename(*args, **kwargs):
+                old_rename(*args, **kwargs)
+                now[0] = 11.0
+
+            def fail_poison(fd, mode):
+                if mode == 0:
+                    raise OSError("poison unavailable")
+                return old_fchmod(fd, mode)
+
+            verifier.REPORT_FILE = report
+            verifier.REPORT_LOCK_FILE = report_lock
+            dispatcher.RUNTIME = runtime
+            dispatcher.REPORT = report
+            dispatcher.REPORT_LOCK = report_lock
+            verifier.time.monotonic = lambda: now[0]
+            verifier._rename_noreplace = expire_after_rename
+            verifier._rollback_published_report = lambda *_args: (_ for _ in ()).throw(
+                OSError("rollback unavailable")
+            )
+            verifier.os.fchmod = fail_poison
+            dispatcher._systemctl = lambda *_args, **_kwargs: types.SimpleNamespace(
+                returncode=0, stdout=b"active\n"
+            )
+            dispatcher.REPORT_WAIT_SECONDS = 0.2
+            try:
+                with self.assertRaisesRegex(OSError, "poison unavailable"):
+                    verifier._write_report(
+                        {"PHYSICAL_DEVICE_ACCEPTANCE": "PASS"}, deadline=10.0
+                    )
+                self.assertTrue(report.exists())
+                self.assertEqual(stat.S_IMODE(report_lock.stat().st_mode), 0o600)
+                verifier.time.monotonic = old_monotonic
+                with self.assertRaisesRegex(RuntimeError, "report wait timed out"):
+                    dispatcher.SystemOps().read_report()
+            finally:
+                verifier.time.monotonic = old_monotonic
+                verifier._rename_noreplace = old_rename
+                verifier._rollback_published_report = old_rollback
+                verifier.os.fchmod = old_fchmod
+                dispatcher._systemctl = old_systemctl
+                dispatcher.REPORT_WAIT_SECONDS = old_report_wait
+                (
+                    verifier.REPORT_FILE,
+                    verifier.REPORT_LOCK_FILE,
+                    dispatcher.RUNTIME,
+                    dispatcher.REPORT,
+                    dispatcher.REPORT_LOCK,
+                ) = old_paths
+
     @staticmethod
     def _capture_thread_error(results, operation, *args, **kwargs):
         try:
@@ -2340,13 +2508,23 @@ class PhysicalVerifierTests(unittest.TestCase):
         verifier.signal.signal = lambda signum, handler: calls.append(("signal", signum, handler))
         verifier.signal.setitimer = lambda which, seconds: calls.append(("timer", which, seconds))
         verifier._labels = lambda: ("a" * 40, "460")
+        class CommitLock:
+            closed = False
+
+            def close(self):
+                self.closed = True
+                calls.append(("commit-close",))
+
+        commit_lock = CommitLock()
         verifier.run_verification = lambda sha, pipeline_id, **kwargs: calls.append(
             ("verify", sha, pipeline_id, kwargs["deadline"])
         ) or {"PHYSICAL_DEVICE_ACCEPTANCE": "PASS"}
         verifier._write_report = lambda report, **kwargs: calls.append(
             ("publish", report, kwargs["deadline"])
+        ) or commit_lock
+        verifier.wait_for_stop = lambda: (
+            self.assertFalse(commit_lock.closed), calls.append(("wait",))
         )
-        verifier.wait_for_stop = lambda: calls.append(("wait",))
         try:
             self.assertEqual(verifier.main([]), 0)
         finally:
@@ -2366,6 +2544,8 @@ class PhysicalVerifierTests(unittest.TestCase):
         self.assertIn(("publish", {"PHYSICAL_DEVICE_ACCEPTANCE": "PASS"}, deadline), calls)
         self.assertIn(("timer", verifier.signal.ITIMER_REAL, verifier.REPORT_PUBLICATION_SECONDS), calls)
         self.assertIn(("timer", verifier.signal.ITIMER_REAL, 0), calls)
+        self.assertLess(calls.index(("wait",)), calls.index(("commit-close",)))
+        self.assertTrue(commit_lock.closed)
 
     def test_lock_contention_writes_acceptance_fail_and_leaves_recovery_to_unit(self):
         verifier = load_deploy_module("matrix_ci_physical_verifier")

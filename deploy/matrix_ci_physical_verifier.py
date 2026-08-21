@@ -31,6 +31,7 @@ LABELS_FILE = Path("/run/matrix-ci-physical/claim")
 CLAIM_FILE = LABELS_FILE
 REPORT_FILE = Path("/run/matrix-ci-physical/report")
 REPORT_LOCK_FILE = Path("/run/matrix-ci-physical/report.lock")
+REPORT_COMMIT_LOCK_FILE = Path("/run/matrix-ci-physical/report.commit.lock")
 REPORT_TEMPORARIES = "report-temporaries"
 LOCK_FILE = "/run/matrix-display/matrix-display.lock"
 EXPECTED_DIMENSIONS = (64, 32)
@@ -219,9 +220,9 @@ def _open_temporary_namespace(runtime_fd, name):
     return fd
 
 
-def _open_report_lock(runtime_fd):
+def _open_report_protocol_lock(runtime_fd, path, description):
     fd = os.open(
-        REPORT_LOCK_FILE.name,
+        path.name,
         os.O_RDWR | os.O_CREAT | os.O_NOFOLLOW | os.O_CLOEXEC,
         0o600,
         dir_fd=runtime_fd,
@@ -235,8 +236,20 @@ def _open_report_lock(runtime_fd):
         or info.st_nlink != 1
     ):
         os.close(fd)
-        raise RuntimeError("unsafe physical verifier report lock")
+        raise RuntimeError(f"unsafe physical verifier {description}")
     return fd
+
+
+def _open_report_lock(runtime_fd):
+    return _open_report_protocol_lock(
+        runtime_fd, REPORT_LOCK_FILE, "report publication lock"
+    )
+
+
+def _open_report_commit_lock(runtime_fd):
+    return _open_report_protocol_lock(
+        runtime_fd, REPORT_COMMIT_LOCK_FILE, "report commit lock"
+    )
 
 
 def _rollback_published_report(runtime_fd, identity):
@@ -1189,6 +1202,7 @@ def _write_report(values, *, deadline: float | None = None):
     check_deadline()
     report_lock_fd = _open_report_lock(runtime_fd)
     fcntl.flock(report_lock_fd, fcntl.LOCK_EX)
+    commit_lock_fd = _open_report_commit_lock(runtime_fd)
     check_deadline()
     temporary_fd = _open_temporary_namespace(runtime_fd, REPORT_TEMPORARIES)
     temporary_name = None
@@ -1234,6 +1248,14 @@ def _write_report(values, *, deadline: float | None = None):
             raise RuntimeError("unsafe physical verifier report publication") from error
         os.fsync(runtime_fd)
         check_deadline()
+        # The persistent exclusive commit lock is acquired before publication
+        # exclusivity is released and remains held while the verifier waits for
+        # stop.  Abrupt death before this point leaves no positive commit signal.
+        fcntl.flock(commit_lock_fd, fcntl.LOCK_EX)
+        check_deadline()
+        commit_lock = os.fdopen(commit_lock_fd, "r+b", buffering=0)
+        commit_lock_fd = None
+        return commit_lock
     except BaseException:
         if published:
             try:
@@ -1256,6 +1278,8 @@ def _write_report(values, *, deadline: float | None = None):
             os.close(fd)
         os.close(temporary_fd)
         os.close(runtime_fd)
+        if commit_lock_fd is not None:
+            os.close(commit_lock_fd)
         os.close(report_lock_fd)
 
 
@@ -1291,13 +1315,18 @@ def main(argv=None):
     deadline = time.monotonic() + REPORT_PUBLICATION_SECONDS
     signal.signal(signal.SIGALRM, _report_deadline_alarm)
     signal.setitimer(signal.ITIMER_REAL, _require_report_time(deadline))
+    commit_lock = None
     try:
         sha, pipeline_id = _labels()
         report = run_verification(sha, pipeline_id, deadline=deadline)
-        _write_report(report, deadline=deadline)
+        commit_lock = _write_report(report, deadline=deadline)
     finally:
         signal.setitimer(signal.ITIMER_REAL, 0)
-    wait_for_stop()
+    try:
+        wait_for_stop()
+    finally:
+        if commit_lock is not None:
+            commit_lock.close()
     return 0
 
 

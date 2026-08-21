@@ -22,6 +22,7 @@ RUNTIME = Path("/run/matrix-ci-physical")
 LABELS = RUNTIME / "claim"
 REPORT = RUNTIME / "report"
 REPORT_LOCK = RUNTIME / "report.lock"
+REPORT_COMMIT_LOCK = RUNTIME / "report.commit.lock"
 DISPATCH_LOCK = RUNTIME / "dispatch.lock"
 CLAIM_TEMPORARIES = "claim-temporaries"
 
@@ -244,13 +245,27 @@ def open_dispatch_lock():
     return open_named_lock(DISPATCH_LOCK.name, "physical verifier dispatcher lock")
 
 
-def reset_report_lock(runtime_fd):
+def report_commit_is_held():
+    commit_lock = open_named_lock(
+        REPORT_COMMIT_LOCK.name, "physical verifier report commit lock"
+    )
+    try:
+        try:
+            fcntl.flock(commit_lock.fileno(), fcntl.LOCK_SH | fcntl.LOCK_NB)
+        except BlockingIOError:
+            return True
+        return False
+    finally:
+        commit_lock.close()
+
+
+def _reset_protocol_lock(runtime_fd, path, description):
     flags = os.O_RDWR | os.O_CLOEXEC | os.O_NOFOLLOW
     try:
-        fd = os.open(REPORT_LOCK.name, flags | os.O_CREAT | os.O_EXCL, 0o600,
+        fd = os.open(path.name, flags | os.O_CREAT | os.O_EXCL, 0o600,
                      dir_fd=runtime_fd)
     except FileExistsError:
-        fd = os.open(REPORT_LOCK.name, flags, dir_fd=runtime_fd)
+        fd = os.open(path.name, flags, dir_fd=runtime_fd)
     try:
         info = os.fstat(fd)
         if (
@@ -260,7 +275,7 @@ def reset_report_lock(runtime_fd):
             or stat.S_IMODE(info.st_mode) not in (0, 0o600)
             or info.st_nlink != 1
         ):
-            raise RuntimeError("unsafe physical verifier report publication lock")
+            raise RuntimeError(f"unsafe physical verifier {description}")
         try:
             fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
         except BlockingIOError as error:
@@ -270,6 +285,11 @@ def reset_report_lock(runtime_fd):
         os.fsync(runtime_fd)
     finally:
         os.close(fd)
+
+
+def reset_report_lock(runtime_fd):
+    _reset_protocol_lock(runtime_fd, REPORT_LOCK, "report publication lock")
+    _reset_protocol_lock(runtime_fd, REPORT_COMMIT_LOCK, "report commit lock")
 
 
 def parse_command(command):
@@ -430,7 +450,7 @@ class SystemOps:
                     lock_acquired = True
                 except BlockingIOError:
                     lock_acquired = False
-                if lock_acquired:
+                if lock_acquired and report_commit_is_held():
                     remaining = deadline - time.monotonic()
                     if remaining <= 0:
                         break
