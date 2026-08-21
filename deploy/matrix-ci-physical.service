@@ -1,7 +1,7 @@
 [Unit]
 Description=Fixed physical Matrix CI verifier
 Requires=systemd-tmpfiles-setup.service
-After=matrix-web.service systemd-tmpfiles-setup.service
+After=systemd-tmpfiles-setup.service
 Conflicts=shutdown.target
 
 [Service]

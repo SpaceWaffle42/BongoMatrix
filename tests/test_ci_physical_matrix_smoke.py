@@ -121,6 +121,27 @@ class FakeOps:
 
 
 class PhysicalVerifierTests(unittest.TestCase):
+    def test_physical_stop_recovery_cannot_be_ordered_after_production(self):
+        unit = (ROOT / "deploy" / "matrix-ci-physical.service").read_text(encoding="utf-8")
+        ordering_units = {
+            dependency
+            for line in unit.splitlines()
+            for directive in ("After=", "Before=")
+            if line.startswith(directive)
+            for dependency in line.removeprefix(directive).split()
+        }
+        self.assertIn(
+            "ExecStop=/usr/bin/python3 -I -B /usr/local/libexec/"
+            "matrix-ci-physical-verifier --restore-only",
+            unit,
+        )
+        self.assertNotIn(
+            "matrix-web.service",
+            ordering_units,
+            "ExecStop starts and waits for matrix-web while the physical unit is stopping; "
+            "an ordering edge reverses stop ordering and deadlocks that recovery job",
+        )
+
     def test_durable_claim_is_the_only_admission_trigger_and_cannot_race_or_deadlock(self):
         unit = (ROOT / "deploy" / "matrix-ci-physical.service").read_text(encoding="utf-8")
         path_unit = (ROOT / "deploy" / "matrix-ci-physical.path").read_text(encoding="utf-8")
@@ -3718,7 +3739,7 @@ class PhysicalVerifierTests(unittest.TestCase):
                 "ExecStart": "/usr/bin/python3 -I -B /usr/local/libexec/matrix-ci-physical-verifier",
                 "ExecStop": "/usr/bin/python3 -I -B /usr/local/libexec/matrix-ci-physical-verifier --restore-only",
                 "ExecStopPost": "/usr/bin/python3 -I -B /usr/local/libexec/matrix-ci-physical-verifier --restore-only --scavenge-stale-temporaries",
-                "Requires": "systemd-tmpfiles-setup.service", "After": "matrix-web.service systemd-tmpfiles-setup.service",
+                "Requires": "systemd-tmpfiles-setup.service", "After": "systemd-tmpfiles-setup.service",
                 "ReadOnlyPaths": "/run/matrix-display", "ReadWritePaths": "/run/matrix-ci-physical",
                 "DevicePolicy": "auto", "DeviceAllow": "", "UMask": "0077",
             },
