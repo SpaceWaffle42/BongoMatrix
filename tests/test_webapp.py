@@ -432,14 +432,14 @@ class WebAppTests(unittest.TestCase):
         body = self.client.get("/").get_data(as_text=True)
 
         application_version = getattr(webapp, "APPLICATION_VERSION", None)
-        self.assertEqual(application_version, "0.3.54-preview")
+        self.assertEqual(application_version, "0.3.55-preview")
         self.assertEqual(body.count(f"Version {application_version}"), 1)
         self.assertRegex(
             body,
             rf"LAN CONTROL</span><br><span[^>]*>Version {re.escape(application_version)}</span>",
         )
         template = (Path(__file__).parents[1] / "app" / "templates" / "dashboard.html").read_text()
-        self.assertNotIn("0.3.54-preview", template)
+        self.assertNotIn("0.3.55-preview", template)
 
     @unittest.skipUnless(shutil.which("node"), "Node.js is required")
     @unittest.skipUnless(
@@ -7132,6 +7132,113 @@ console.log('ANNOUNCEMENT_HEADING_SYNC_PASS');
         self.assertIn("initialCustomLavaPalettes", body)
         self.assertIn("renderCustomLavaPalettes", body)
         self.assertIn("custom_palettes:customLavaPalettesFromEditor()", body)
+
+    def test_dashboard_exposes_grouped_lava_palette_bulk_controls(self):
+        self.pair_browser()
+
+        body = self.client.get("/").get_data(as_text=True)
+
+        self.assertIn('class="palette-bulk-actions"', body)
+        self.assertIn('role="group"', body)
+        self.assertIn('aria-label="Lava palette selection"', body)
+        self.assertIn('onclick="setAllLavaPalettes(true)"', body)
+        self.assertIn('onclick="setAllLavaPalettes(false)"', body)
+        self.assertIn(">Select all<", body)
+        self.assertIn(">Deselect all<", body)
+        self.assertIn(".palette-bulk-actions .btn{min-height:44px", body)
+
+    @unittest.skipUnless(shutil.which("node"), "Node.js is required")
+    def test_lava_palette_bulk_controls_change_only_unsaved_palette_state(self):
+        source = (Path(__file__).parents[1] / "app" / "templates" / "dashboard.html").read_text()
+        start = source.index("function setAllLavaPalettes")
+        end = source.index("\nfunction lavaInspectionOptions", start)
+        function_source = source[start:end]
+        harness = r"""
+const builtIns=[{checked:false},{checked:true}];
+const customEnabled=[{checked:false},{checked:true}];
+const customCards=customEnabled.map(input=>({querySelector(selector){if(selector!=='[data-field=enabled]')throw new Error('unexpected custom selector');return input;}}));
+let counts=0,dirty=0,inspection=[],previewSchedules=[],messages=[];
+global.document={querySelectorAll(selector){
+  if(selector==='.lava-palette')return builtIns;
+  if(selector==='.custom-lava-card')return customCards;
+  throw new Error('unexpected selector '+selector);
+}};
+global.updatePaletteGroupCounts=()=>{counts++};
+global.markMatrixDirty=()=>{dirty++};
+global.syncLavaInspectionRadios=options=>{inspection.push(options)};
+global.scheduleEditPreview=delay=>{previewSchedules.push(delay)};
+global.setMessage=text=>{messages.push(text)};
+global.previewMode='edit';
+global.previewModule='clock_lava';
+""" + function_source + r"""
+setAllLavaPalettes(true);
+if(!builtIns.every(input=>input.checked) || !customEnabled.every(input=>input.checked))throw new Error('select all did not enable every palette');
+setAllLavaPalettes(false);
+if(builtIns.some(input=>input.checked) || customEnabled.some(input=>input.checked))throw new Error('deselect all did not disable every palette');
+if(counts!==2 || dirty!==2)throw new Error('bulk actions did not refresh counts and mark the draft dirty');
+if(JSON.stringify(inspection)!==JSON.stringify([{chooseDefault:true},{chooseDefault:false}]))throw new Error('inspection controls were not synchronized');
+if(JSON.stringify(previewSchedules)!==JSON.stringify([150,150]))throw new Error('Edit Preview was not refreshed');
+if(messages.length!==2 || !messages[0].includes('Save configuration') || !messages[1].includes('Save configuration'))throw new Error('bulk actions did not explain unsaved state');
+console.log('LAVA_PALETTE_BULK_CONTROLS_PASS');
+"""
+        result = subprocess.run(
+            [shutil.which("node"), "-e", harness], cwd=Path(__file__).parents[1],
+            text=True, capture_output=True, check=False,
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("LAVA_PALETTE_BULK_CONTROLS_PASS", result.stdout)
+
+    @unittest.skipUnless(shutil.which("node"), "Node.js is required")
+    @unittest.skipUnless(
+        os.environ.get("MATRIX_CHROMIUM")
+        and Path(os.environ.get("MATRIX_CHROMIUM", "")).is_file()
+        and os.access(os.environ.get("MATRIX_CHROMIUM", ""), os.X_OK),
+        "MATRIX_CHROMIUM browser is required",
+    )
+    def test_lava_palette_bulk_controls_are_mobile_safe_in_real_chromium(self):
+        self.store.update({"lava": {"custom_palettes": [{
+            "id": "palette_mobile",
+            "name": "Mobile palette",
+            "colours": ["#101020", "#ff6600", "#ffee99"],
+            "enabled": False,
+        }]}})
+        self.pair_browser()
+        body = self.client.get("/").get_data(as_text=True)
+        probe = r"""
+const port=process.argv[1],pagePath=process.argv[2];let endpoint;
+for(let attempt=0;attempt<50;attempt++){try{endpoint=await fetch(`http://127.0.0.1:${port}/json/new`,{method:'PUT'}).then(r=>r.json());break}catch(_){await new Promise(r=>setTimeout(r,50))}}
+if(!endpoint)throw new Error('Chromium DevTools endpoint unavailable');
+const socket=new WebSocket(endpoint.webSocketDebuggerUrl),pending=new Map();let nextId=1,loadResolve,loaded=new Promise(resolve=>loadResolve=resolve);
+socket.onmessage=event=>{const message=JSON.parse(event.data);if(message.id&&pending.has(message.id)){const request=pending.get(message.id);pending.delete(message.id);message.error?request.reject(new Error(JSON.stringify(message.error))):request.resolve(message.result)}else if(message.method==='Page.loadEventFired')loadResolve()};
+await new Promise((resolve,reject)=>{socket.onopen=resolve;socket.onerror=reject});
+const send=(method,params={})=>{const id=nextId++;socket.send(JSON.stringify({id,method,params}));return new Promise((resolve,reject)=>pending.set(id,{resolve,reject}))};
+const evaluate=async expression=>{const result=await send('Runtime.evaluate',{expression,returnByValue:true,awaitPromise:true});if(result.exceptionDetails)throw new Error(JSON.stringify(result.exceptionDetails));return result.result.value};
+try{
+ await send('Runtime.enable');await send('Page.enable');
+ const layouts=[];
+ for(const [width,height] of [[320,568],[768,1024],[1280,720]]){
+  await send('Emulation.setDeviceMetricsOverride',{width,height,deviceScaleFactor:1,mobile:false});loaded=new Promise(resolve=>loadResolve=resolve);await send('Page.navigate',{url:'file://'+pagePath});await loaded;
+  layouts.push(await evaluate(`(()=>{const group=document.querySelector('.palette-bulk-actions'),buttons=[...group.querySelectorAll('button')],bounds=buttons.map(button=>{const rect=button.getBoundingClientRect();return{width:rect.width,height:rect.height,left:rect.left,right:rect.right}});buttons[0].click();const selected=[...document.querySelectorAll('.lava-palette,[data-field="enabled"]')].every(input=>input.checked);buttons[1].click();const deselected=[...document.querySelectorAll('.lava-palette,[data-field="enabled"]')].every(input=>!input.checked);return{viewport:innerWidth,labels:buttons.map(button=>button.textContent.trim()),role:group.getAttribute('role'),aria:group.getAttribute('aria-label'),bounds,selected,deselected,dirty:matrixDirty,overflow:document.documentElement.scrollWidth-document.documentElement.clientWidth}})()`));
+ }
+ console.log(JSON.stringify({layouts}));
+}finally{socket.close()}
+"""
+        report = self._run_dashboard_chromium_probe(body, probe, timeout=30)
+
+        for layout in report["layouts"]:
+            self.assertEqual(layout["labels"], ["Select all", "Deselect all"], report)
+            self.assertEqual(layout["role"], "group", report)
+            self.assertEqual(layout["aria"], "Lava palette selection", report)
+            self.assertTrue(layout["selected"], report)
+            self.assertTrue(layout["deselected"], report)
+            self.assertTrue(layout["dirty"], report)
+            self.assertLessEqual(layout["overflow"], 1, report)
+            for bounds in layout["bounds"]:
+                self.assertGreater(bounds["width"], 0, report)
+                self.assertGreaterEqual(bounds["left"], 0, report)
+                self.assertLessEqual(bounds["right"], layout["viewport"] + 1, report)
+                if layout["viewport"] <= 600:
+                    self.assertGreaterEqual(bounds["height"], 44, report)
 
     def test_display_frame_is_paired_and_returns_the_controller_frame(self):
         self.controller.frame_png.return_value = (io.BytesIO(b"png-frame"), 17)

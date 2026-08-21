@@ -1,6 +1,6 @@
 # Future development notes
 
-Last updated: 2026-08-14
+Last updated: 2026-08-21
 
 This file records requested Matrix features that are intentionally deferred. They are product requirements and design notes, not descriptions of current behavior. Do not treat an item as implemented until its code, tests, review, merge, deployment, and physical-device verification are complete.
 
@@ -120,6 +120,17 @@ Every scrolling-text module should display its calculated runtime in seconds, co
 ## Priority 1 — Improvements to existing workflows
 
 Begin these after Priority 0 is clear. They improve existing editing, preview, media, and composition workflows without introducing an unrelated provider-backed module.
+
+### 1.1a Add Lava Clock pattern selection controls
+
+Add grouped **Select all** and **Deselect all** buttons to the Lava Clock pattern selector.
+
+- **Select all** selects every available Lava Clock pattern.
+- **Deselect all** clears every selected Lava Clock pattern.
+- Apply either action immediately to the current unsaved editor state without changing other Lava Clock settings.
+- Keep the individual pattern controls synchronized so the result is visible and can still be adjusted one pattern at a time.
+- Persist the resulting pattern selection only through the normal Save action; the bulk controls must not save automatically.
+- Keep both actions usable and clearly labelled on mobile, tablet, and desktop, including keyboard and assistive-technology access.
 
 ### ~~1.1 Keep the Matrix preview sticky~~ — Completed
 
