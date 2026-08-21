@@ -2168,6 +2168,160 @@ class PhysicalVerifierTests(unittest.TestCase):
 
         self.assertEqual(matrix_opened, [])
 
+    def test_report_reader_cannot_accept_final_name_while_deadline_rollback_is_pending(self):
+        verifier = load_deploy_module("matrix_ci_physical_verifier")
+        dispatcher = load_deploy_module("matrix_ci_physical_dispatcher")
+        with tempfile.TemporaryDirectory(dir="/root") as directory:
+            runtime = Path(directory)
+            os.chmod(runtime, 0o700)
+            report = runtime / "report"
+            report_lock = runtime / "report.lock"
+            old_verifier_paths = (verifier.REPORT_FILE, verifier.REPORT_LOCK_FILE)
+            old_dispatcher_paths = (
+                dispatcher.RUNTIME, dispatcher.REPORT, dispatcher.REPORT_LOCK,
+            )
+            old_fsync = verifier.os.fsync
+            old_systemctl = dispatcher._systemctl
+            old_report_wait = dispatcher.REPORT_WAIT_SECONDS
+            publication_visible = threading.Event()
+            release_publication = threading.Event()
+            writer_errors = []
+            reader_results = []
+
+            def deadline_fsync(fd):
+                if report.exists() and stat.S_ISDIR(os.fstat(fd).st_mode):
+                    publication_visible.set()
+                    if not release_publication.wait(5):
+                        raise AssertionError("publication rollback was not released")
+                    raise verifier.ReportDeadlineExceeded("deadline crossed after rename")
+                return old_fsync(fd)
+
+            def active_systemctl(*_args, **_kwargs):
+                return types.SimpleNamespace(returncode=0, stdout=b"active\n")
+
+            verifier.REPORT_FILE = report
+            verifier.REPORT_LOCK_FILE = report_lock
+            dispatcher.RUNTIME = runtime
+            dispatcher.REPORT = report
+            dispatcher.REPORT_LOCK = report_lock
+            verifier.os.fsync = deadline_fsync
+            dispatcher.REPORT_WAIT_SECONDS = 0.2
+            setattr(dispatcher, "_systemctl", active_systemctl)
+            writer = threading.Thread(
+                target=lambda: self._capture_thread_error(
+                    writer_errors,
+                    verifier._write_report,
+                    {
+                        "SOURCE_SHA": "a" * 40,
+                        "PIPELINE_ID": "461",
+                        "PHYSICAL_DEVICE_ACCEPTANCE": "PASS",
+                    },
+                    deadline=verifier.time.monotonic() + 10,
+                )
+            )
+            reader = threading.Thread(
+                target=lambda: self._capture_thread_error(
+                    reader_results, dispatcher.SystemOps().read_report
+                )
+            )
+            try:
+                writer.start()
+                self.assertTrue(publication_visible.wait(5), writer_errors)
+                reader.start()
+                reader.join(0.1)
+                self.assertTrue(reader.is_alive())
+                self.assertEqual(reader_results, [])
+                release_publication.set()
+                writer.join(5)
+                reader.join(5)
+            finally:
+                release_publication.set()
+                writer.join(5)
+                if reader.ident is not None:
+                    reader.join(5)
+                verifier.os.fsync = old_fsync
+                setattr(dispatcher, "_systemctl", old_systemctl)
+                dispatcher.REPORT_WAIT_SECONDS = old_report_wait
+                verifier.REPORT_FILE, verifier.REPORT_LOCK_FILE = old_verifier_paths
+                dispatcher.RUNTIME, dispatcher.REPORT, dispatcher.REPORT_LOCK = old_dispatcher_paths
+
+            self.assertFalse(report.exists())
+            self.assertEqual(len(writer_errors), 1)
+            self.assertIsInstance(writer_errors[0], verifier.ReportDeadlineExceeded)
+            self.assertEqual(len(reader_results), 1)
+            self.assertIsInstance(reader_results[0], RuntimeError)
+
+    def test_failed_final_report_rollback_poisons_admission_until_safe_reset(self):
+        verifier = load_deploy_module("matrix_ci_physical_verifier")
+        dispatcher = load_deploy_module("matrix_ci_physical_dispatcher")
+        with tempfile.TemporaryDirectory(dir="/root") as directory:
+            runtime = Path(directory)
+            os.chmod(runtime, 0o700)
+            report = runtime / "report"
+            report_lock = runtime / "report.lock"
+            old_paths = (
+                verifier.REPORT_FILE,
+                verifier.REPORT_LOCK_FILE,
+                dispatcher.RUNTIME,
+                dispatcher.REPORT,
+                dispatcher.REPORT_LOCK,
+            )
+            old_monotonic = verifier.time.monotonic
+            old_rename = verifier._rename_noreplace
+            old_rollback = verifier._rollback_published_report
+            now = [0.0]
+
+            def expire_after_rename(*args, **kwargs):
+                old_rename(*args, **kwargs)
+                now[0] = 11.0
+
+            verifier.REPORT_FILE = report
+            verifier.REPORT_LOCK_FILE = report_lock
+            dispatcher.RUNTIME = runtime
+            dispatcher.REPORT = report
+            dispatcher.REPORT_LOCK = report_lock
+            verifier.time.monotonic = lambda: now[0]
+            verifier._rename_noreplace = expire_after_rename
+            verifier._rollback_published_report = lambda *_args: (_ for _ in ()).throw(
+                OSError("rollback unavailable")
+            )
+            try:
+                with self.assertRaisesRegex(OSError, "rollback unavailable"):
+                    verifier._write_report(
+                        {"PHYSICAL_DEVICE_ACCEPTANCE": "PASS"}, deadline=10.0
+                    )
+                self.assertTrue(report.exists())
+                self.assertEqual(stat.S_IMODE(report_lock.stat().st_mode), 0)
+                with self.assertRaisesRegex(RuntimeError, "publication lock"):
+                    dispatcher.open_named_lock(
+                        dispatcher.REPORT_LOCK.name,
+                        "physical verifier report publication lock",
+                    )
+                runtime_fd = dispatcher.open_runtime_fd()
+                try:
+                    dispatcher.reset_report_lock(runtime_fd)
+                finally:
+                    os.close(runtime_fd)
+                self.assertEqual(stat.S_IMODE(report_lock.stat().st_mode), 0o600)
+            finally:
+                verifier.time.monotonic = old_monotonic
+                verifier._rename_noreplace = old_rename
+                verifier._rollback_published_report = old_rollback
+                (
+                    verifier.REPORT_FILE,
+                    verifier.REPORT_LOCK_FILE,
+                    dispatcher.RUNTIME,
+                    dispatcher.REPORT,
+                    dispatcher.REPORT_LOCK,
+                ) = old_paths
+
+    @staticmethod
+    def _capture_thread_error(results, operation, *args, **kwargs):
+        try:
+            results.append(operation(*args, **kwargs))
+        except BaseException as error:
+            results.append(error)
+
     def test_main_arms_one_deadline_for_labels_verification_and_atomic_publication(self):
         verifier = load_deploy_module("matrix_ci_physical_verifier")
         calls = []

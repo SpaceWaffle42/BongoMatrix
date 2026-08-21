@@ -21,6 +21,7 @@ PRODUCTION_SERVICE = "matrix-web.service"
 RUNTIME = Path("/run/matrix-ci-physical")
 LABELS = RUNTIME / "claim"
 REPORT = RUNTIME / "report"
+REPORT_LOCK = RUNTIME / "report.lock"
 DISPATCH_LOCK = RUNTIME / "dispatch.lock"
 CLAIM_TEMPORARIES = "claim-temporaries"
 
@@ -243,6 +244,34 @@ def open_dispatch_lock():
     return open_named_lock(DISPATCH_LOCK.name, "physical verifier dispatcher lock")
 
 
+def reset_report_lock(runtime_fd):
+    flags = os.O_RDWR | os.O_CLOEXEC | os.O_NOFOLLOW
+    try:
+        fd = os.open(REPORT_LOCK.name, flags | os.O_CREAT | os.O_EXCL, 0o600,
+                     dir_fd=runtime_fd)
+    except FileExistsError:
+        fd = os.open(REPORT_LOCK.name, flags, dir_fd=runtime_fd)
+    try:
+        info = os.fstat(fd)
+        if (
+            not stat.S_ISREG(info.st_mode)
+            or info.st_uid != 0
+            or info.st_gid != 0
+            or stat.S_IMODE(info.st_mode) not in (0, 0o600)
+            or info.st_nlink != 1
+        ):
+            raise RuntimeError("unsafe physical verifier report publication lock")
+        try:
+            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError as error:
+            raise RuntimeError("physical verifier report publisher is busy") from error
+        os.fchmod(fd, 0o600)
+        os.fsync(fd)
+        os.fsync(runtime_fd)
+    finally:
+        os.close(fd)
+
+
 def parse_command(command):
     match = COMMAND.fullmatch(command)
     if not match:
@@ -329,6 +358,7 @@ class SystemOps:
                 pass
             else:
                 raise RuntimeError("physical verifier durable claim is busy")
+            reset_report_lock(runtime_fd)
             try:
                 temporary_name, fd = _create_unique_temporary(temporary_fd, LABELS.name + ".tmp")
             except OSError as error:
@@ -391,27 +421,52 @@ class SystemOps:
             ).stdout.decode().strip()
             if state in ("failed", "inactive"):
                 raise RuntimeError("physical verifier became inactive before reporting")
-            runtime_fd = open_runtime_fd()
+            report_lock = open_named_lock(
+                REPORT_LOCK.name, "physical verifier report publication lock"
+            )
             try:
                 try:
-                    fd = os.open(
-                        REPORT.name,
-                        os.O_RDONLY | os.O_NONBLOCK | os.O_NOFOLLOW | os.O_CLOEXEC,
-                        dir_fd=runtime_fd,
-                    )
-                except FileNotFoundError:
-                    fd = None
-                if fd is not None:
-                    try:
-                        _require_metadata(
-                            os.fstat(fd), mode=0o600, kind=stat.S_ISREG,
-                            description="physical verifier report",
+                    fcntl.flock(report_lock.fileno(), fcntl.LOCK_SH | fcntl.LOCK_NB)
+                    lock_acquired = True
+                except BlockingIOError:
+                    lock_acquired = False
+                if lock_acquired:
+                    remaining = deadline - time.monotonic()
+                    if remaining <= 0:
+                        break
+                    state = _systemctl(
+                        "show", SERVICE, "-p", "ActiveState", "--value",
+                        check=False, timeout=min(SYSTEMCTL_TIMEOUT, remaining),
+                    ).stdout.decode().strip()
+                    if state in ("failed", "inactive"):
+                        raise RuntimeError(
+                            "physical verifier became inactive before reporting"
                         )
-                        return os.read(fd, MAX_REPORT_BYTES + 1)
-                    finally:
-                        os.close(fd)
+                    if state == "active":
+                        runtime_fd = open_runtime_fd()
+                        try:
+                            try:
+                                fd = os.open(
+                                    REPORT.name,
+                                    os.O_RDONLY | os.O_NONBLOCK | os.O_NOFOLLOW
+                                    | os.O_CLOEXEC,
+                                    dir_fd=runtime_fd,
+                                )
+                            except FileNotFoundError:
+                                fd = None
+                            if fd is not None:
+                                try:
+                                    _require_metadata(
+                                        os.fstat(fd), mode=0o600, kind=stat.S_ISREG,
+                                        description="physical verifier report",
+                                    )
+                                    return os.read(fd, MAX_REPORT_BYTES + 1)
+                                finally:
+                                    os.close(fd)
+                        finally:
+                            os.close(runtime_fd)
             finally:
-                os.close(runtime_fd)
+                report_lock.close()
             remaining = deadline - time.monotonic()
             if remaining <= 0:
                 break

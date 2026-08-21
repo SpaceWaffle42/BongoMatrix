@@ -30,6 +30,7 @@ BINDINGS_ROOT = Path("/usr/local/lib/matrix-ci-python")
 LABELS_FILE = Path("/run/matrix-ci-physical/claim")
 CLAIM_FILE = LABELS_FILE
 REPORT_FILE = Path("/run/matrix-ci-physical/report")
+REPORT_LOCK_FILE = Path("/run/matrix-ci-physical/report.lock")
 REPORT_TEMPORARIES = "report-temporaries"
 LOCK_FILE = "/run/matrix-display/matrix-display.lock"
 EXPECTED_DIMENSIONS = (64, 32)
@@ -216,6 +217,42 @@ def _open_temporary_namespace(runtime_fd, name):
         os.close(fd)
         raise RuntimeError("unsafe physical verifier temporary namespace")
     return fd
+
+
+def _open_report_lock(runtime_fd):
+    fd = os.open(
+        REPORT_LOCK_FILE.name,
+        os.O_RDWR | os.O_CREAT | os.O_NOFOLLOW | os.O_CLOEXEC,
+        0o600,
+        dir_fd=runtime_fd,
+    )
+    info = os.fstat(fd)
+    if (
+        not stat.S_ISREG(info.st_mode)
+        or info.st_uid != 0
+        or info.st_gid != 0
+        or stat.S_IMODE(info.st_mode) != 0o600
+        or info.st_nlink != 1
+    ):
+        os.close(fd)
+        raise RuntimeError("unsafe physical verifier report lock")
+    return fd
+
+
+def _rollback_published_report(runtime_fd, identity):
+    try:
+        current = os.stat(REPORT_FILE.name, dir_fd=runtime_fd, follow_symlinks=False)
+    except FileNotFoundError:
+        return
+    if (current.st_dev, current.st_ino) != identity:
+        raise RuntimeError("physical verifier published report identity changed")
+    os.unlink(REPORT_FILE.name, dir_fd=runtime_fd)
+    os.fsync(runtime_fd)
+    try:
+        os.stat(REPORT_FILE.name, dir_fd=runtime_fd, follow_symlinks=False)
+    except FileNotFoundError:
+        return
+    raise RuntimeError("physical verifier published report rollback failed")
 
 
 def _run(
@@ -1150,10 +1187,14 @@ def _write_report(values, *, deadline: float | None = None):
         raise RuntimeError("physical verifier report exceeded bound")
     runtime_fd = _open_runtime_directory(REPORT_FILE.parent)
     check_deadline()
+    report_lock_fd = _open_report_lock(runtime_fd)
+    fcntl.flock(report_lock_fd, fcntl.LOCK_EX)
+    check_deadline()
     temporary_fd = _open_temporary_namespace(runtime_fd, REPORT_TEMPORARIES)
     temporary_name = None
     fd = None
     temporary_identity = None
+    published = False
     try:
         try:
             temporary_name, fd = _create_unique_temporary(
@@ -1187,13 +1228,25 @@ def _write_report(values, *, deadline: float | None = None):
             _rename_noreplace(
                 temporary_name, REPORT_FILE.name, temporary_fd, runtime_fd
             )
+            published = True
             check_deadline()
         except OSError as error:
             raise RuntimeError("unsafe physical verifier report publication") from error
         os.fsync(runtime_fd)
         check_deadline()
     except BaseException:
-        if temporary_identity is not None:
+        if published:
+            try:
+                _rollback_published_report(runtime_fd, temporary_identity)
+            except BaseException:
+                # A rollback failure must poison admission before releasing the
+                # writer lock; the next prepare repairs this only after proving
+                # there is no surviving claim/writer.
+                os.fchmod(report_lock_fd, 0)
+                os.fsync(report_lock_fd)
+                os.fsync(runtime_fd)
+                raise
+        elif temporary_identity is not None:
             _unlink_owned_temporary(
                 temporary_fd, temporary_name, temporary_identity
             )
@@ -1203,6 +1256,7 @@ def _write_report(values, *, deadline: float | None = None):
             os.close(fd)
         os.close(temporary_fd)
         os.close(runtime_fd)
+        os.close(report_lock_fd)
 
 
 def _interrupted(_signum, _frame):
