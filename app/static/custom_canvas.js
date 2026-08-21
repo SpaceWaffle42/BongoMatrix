@@ -284,6 +284,11 @@
     return {id: card.dataset.id, name: card.querySelector('[data-field=name]').value.trim(), type: card.querySelector('[data-field=type]').value, text: card.querySelector('[data-field=text]').value, font: card.querySelector('[data-field=font]').value, colour: card.querySelector('[data-field=colour]').value, background: card.querySelector('[data-field=background]').value, x: Number(card.querySelector('[data-field=x]').value), y: Number(card.querySelector('[data-field=y]').value), direction: card.querySelector('[data-field=direction]').value, speed: Number(card.querySelector('[data-field=speed]').value), loops: Number(card.querySelector('[data-field=loops]').value)};
   }
 
+  const provisionalSimpleDrafts = new Map([...document.querySelectorAll('.custom-module-card')]
+    .filter(card => customModules.find(module => module.id === card.dataset.id)?.type !== 'canvas')
+    .map(card => [card.dataset.id, simpleModuleFromCard(card)]));
+  customModules = customModules.map(module => module.type === 'canvas' ? module : (provisionalSimpleDrafts.get(module.id) || module));
+
   window.customModulesFromEditor = function customModulesFromEditor() {
     const simple = new Map([...document.querySelectorAll('.custom-module-card[data-editor-type="simple"]')].map(card => [card.dataset.id, simpleModuleFromCard(card)]));
     return customModules.map(module => module.type === 'canvas' ? clone(module) : (simple.get(module.id) || clone(module)));
@@ -1215,4 +1220,5 @@
 
   setInterval(() => { if (customModules.some(module => module.type === 'canvas' && module.layers.some(layer => layer.type === 'time' && layer.visible))) redrawMediaCanvases(); }, 1000);
   renderCustomModules();
+  globalThis.matrixCustomCanvasReady = true;
 })();

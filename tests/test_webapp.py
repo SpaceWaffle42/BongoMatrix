@@ -1787,11 +1787,18 @@ console.log('PAIR_NETWORK_PASS');
         )
         baseline_initialization = next(
             line for line in body.splitlines()
-            if line.startswith("matrixSavedSnapshot=matrixCurrentSnapshot();")
+            if line.startswith("if(matrixEditorsReady)matrixSavedSnapshot=matrixCurrentSnapshot();")
+        )
+        readiness_initialization = next(
+            line for line in body.splitlines()
+            if line.startswith("matrixEditorsReady=globalThis.matrixCustomCanvasReady===true")
         )
         production = (
             body[sync_start:sync_end] + body[save_start:save_end] + "\n"
-            + editor_initialization + "\n" + baseline_initialization
+            + editor_initialization + "\n"
+            + "globalThis.matrixCustomCanvasReady=true;window.renderCustomModules=renderCustomModules;window.customModulesFromEditor=()=>[];window.orderedLayersForFrame=()=>[];\n"
+            + readiness_initialization + "\n"
+            + baseline_initialization
         )
         scenario = r"""
 class Element {
@@ -1843,7 +1850,7 @@ for(const handler of windowListeners.load||[])handler();
 await new Promise(resolve=>setImmediate(resolve));
 if(PRELOAD_EDIT){
   if(matrixSavedSnapshot!==initialSnapshot||!matrixDirty||!matrixHasUnsavedDraft()||reloads!==0||!currentDialog||currentDialog.matrixRemoteRevision!==1||field.value!=='typed before load'||document.activeElement===field||!saveButton.disabled){
-    throw new Error('pre-load edit was reclassified as saved: newer poll reloaded or failed to open the dirty conflict dialog');
+    throw new Error('pre-load edit was reclassified as saved: newer poll reloaded or failed to open the dirty conflict dialog '+JSON.stringify({saved:matrixSavedSnapshot,initial:initialSnapshot,dirty:matrixDirty,unsaved:matrixHasUnsavedDraft(),reloads,dialog:!!currentDialog,remote:currentDialog?.matrixRemoteRevision,value:field.value,focused:document.activeElement===field,disabled:saveButton.disabled,ready:matrixEditorsReady,marker:globalThis.matrixCustomCanvasReady}));
   }
   const actions=currentDialog.children.at(-1);
   if(currentDialog.children[0].textContent!=='Newer saved configuration available'||actions.children[0].textContent!=='Reload latest saved state'||actions.children[1].textContent!=='Remain with unsaved draft')throw new Error('newer poll did not open the exact dirty conflict dialog');
@@ -2052,6 +2059,312 @@ try{
         and os.access(os.environ.get("MATRIX_CHROMIUM", ""), os.X_OK),
         "MATRIX_CHROMIUM browser is required",
     )
+    def test_save_waits_for_delayed_canvas_serializer_and_preserves_modules(self):
+        advanced_canvas = {
+            "id": "custom_delayed_canvas", "name": "Delayed canvas", "type": "canvas",
+            "background": "#102938", "frame_count": 37, "fps": 23, "playback": "ping_pong",
+            "layers": [{
+                "id": "layer_delayed", "name": "Delayed layer", "type": "rectangle", "visible": True,
+                "properties": {"present": True, "x": 7, "y": 11, "width": 19, "height": 13,
+                               "rotation": 17, "colour": "#abcdef", "filled": True, "z_index": 9},
+                "keyframes": [{"frame": 31, "easing": "ease_in_out",
+                               "properties": {"x": 41, "rotation": 271, "colour": "#fedcba"}}],
+            }],
+            "overrides": [{"frame": 19, "layer_id": "layer_delayed",
+                           "properties": {"y": 29, "present": False, "z_index": -4}}],
+        }
+        basic_text = {
+            "id": "custom_basic_text", "name": "Basic text", "type": "text", "text": "KEEP ME",
+            "font": "5x7", "colour": "#ffffff", "background": "#000000", "x": 2, "y": 20,
+            "direction": "left", "speed": .05, "loops": 1,
+        }
+        expected_basic = {
+            **basic_text, "name": "Early renamed basic", "text": "EARLY BASIC DRAFT",
+        }
+        self.store.update({"custom_modules": [advanced_canvas, basic_text]})
+        expected_modules = self.store.get()["custom_modules"]
+        self.pair_browser()
+        body = self.client.get("/").get_data(as_text=True)
+        asset = (Path(__file__).parents[1] / "app/static/custom_canvas.js").read_bytes()
+        posted = []
+        previewed = []
+
+        class Handler(BaseHTTPRequestHandler):
+            def log_message(self, format, *args):
+                pass
+
+            def send(self, status, content=b"", content_type="application/json", headers=None):
+                self.send_response(status)
+                self.send_header("Content-Type", content_type)
+                self.send_header("Content-Length", str(len(content)))
+                for name, value in (headers or {}).items():
+                    self.send_header(name, value)
+                self.end_headers()
+                self.wfile.write(content)
+
+            def do_GET(self):
+                if self.path == "/":
+                    page = body.replace('src="/static/custom_canvas.js"', 'src="/custom_canvas.js"')
+                    self.send(200, page.encode(), "text/html; charset=utf-8")
+                elif self.path == "/custom_canvas.js":
+                    time.sleep(3)
+                    self.send(200, asset, "text/javascript; charset=utf-8")
+                elif self.path == "/static/custom_canvas.css":
+                    self.send(200, b"", "text/css")
+                elif self.path.startswith("/api/display-frame"):
+                    self.send(503, b'{"error":"probe"}')
+                elif self.path == "/api/status":
+                    self.send(200, b'{"running":false,"minimum_client_contract":2}')
+                elif self.path == "/api/config":
+                    self.send(200, b'{"revision":2}', headers={"ETag": '"2"'})
+                else:
+                    self.send(404, b"{}")
+
+            def do_POST(self):
+                length = int(self.headers.get("Content-Length", "0"))
+                payload = self.rfile.read(length)
+                if self.path == "/api/config":
+                    posted.append(json.loads(payload))
+                    self.send(200, b'{"revision":3}')
+                elif self.path.startswith("/api/edit-preview/"):
+                    previewed.append(json.loads(payload))
+                    self.send(503, b'{"error":"probe"}')
+                else:
+                    self.send(404, b"{}")
+
+        server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+        server_thread = threading.Thread(target=server.serve_forever, daemon=True)
+        server_thread.start()
+        self.addCleanup(lambda: (server.shutdown(), server.server_close(), server_thread.join(timeout=5)))
+        probe = r"""
+const debugPort=process.argv[1],appPort=process.argv[2],sleep=ms=>new Promise(resolve=>setTimeout(resolve,ms));let endpoint;
+for(let attempt=0;attempt<50;attempt++){try{endpoint=await fetch(`http://127.0.0.1:${debugPort}/json/new`,{method:'PUT'}).then(r=>r.json());break}catch(_){await sleep(100)}}
+if(!endpoint)throw Error('CDP unavailable');
+const socket=new WebSocket(endpoint.webSocketDebuggerUrl),pending=new Map();let id=0;
+socket.onmessage=event=>{const message=JSON.parse(event.data);if(message.id&&pending.has(message.id)){const request=pending.get(message.id);pending.delete(message.id);message.error?request.reject(Error(JSON.stringify(message.error))):request.resolve(message.result)}};
+await new Promise((resolve,reject)=>{socket.onopen=resolve;socket.onerror=reject});
+const send=(method,params={})=>new Promise((resolve,reject)=>{const request=++id;pending.set(request,{resolve,reject});socket.send(JSON.stringify({id:request,method,params}))});
+const evaluate=async(expression,awaitPromise=false)=>{const result=await send('Runtime.evaluate',{expression,returnByValue:true,awaitPromise});if(result.exceptionDetails)throw Error(JSON.stringify(result.exceptionDetails));return result.result.value};
+const waitFor=async(expression,timeout=10000)=>{const end=Date.now()+timeout;while(Date.now()<end){try{const value=await evaluate(expression);if(value)return value}catch(_){}await sleep(25)}throw Error('timeout: '+expression)};
+const replaceInput=async(selector,text)=>{await evaluate(`document.querySelector(${JSON.stringify(selector)}).focus();document.querySelector(${JSON.stringify(selector)}).select();true`);await send('Input.insertText',{text})};
+try{
+ await send('Runtime.enable');await send('Page.enable');await send('Page.navigate',{url:`http://127.0.0.1:${appPort}/`});
+ await waitFor(`document.readyState==='loading'&&typeof saveConfig==='function'&&typeof window.orderedLayersForFrame==='undefined'`);
+ await evaluate(`globalThis.__configBodyCalls=0;globalThis.__originalConfigBody=configBody;configBody=(...args)=>{globalThis.__configBodyCalls++;return globalThis.__originalConfigBody(...args)};globalThis.__advancedBefore=JSON.stringify(customModules.find(module=>module.type==='canvas'));globalThis.__provisionalCanvasSerializations=0;globalThis.__provisionalSerializer=customModulesFromEditor;customModulesFromEditor=(...args)=>{const result=globalThis.__provisionalSerializer(...args),canvas=result.find(module=>module.id==='custom_delayed_canvas');if(JSON.stringify(canvas)!==globalThis.__advancedBefore)globalThis.__provisionalCanvasSerializations++;return result};globalThis.__restartWarnings=[];window.confirm=warning=>{globalThis.__restartWarnings.push(warning);return false};true`);
+ await replaceInput('.custom-module-card[data-id="custom_basic_text"] [data-field="name"]','Early renamed basic');
+ await replaceInput('.custom-module-card[data-id="custom_basic_text"] [data-field="text"]','EARLY BASIC DRAFT');
+ const during=await evaluate(`({ready:document.readyState,disabled:document.querySelector('#save-config').disabled,status:document.querySelector('#message').textContent,role:document.querySelector('#message').getAttribute('role'),draft:{name:document.querySelector('.custom-module-card[data-id="custom_basic_text"] [data-field="name"]').value,text:document.querySelector('.custom-module-card[data-id="custom_basic_text"] [data-field="text"]').value,x:document.querySelector('.custom-module-card[data-id="custom_basic_text"] [data-field="x"]').value},advanced:JSON.stringify(customModules.find(module=>module.type==='canvas')),provisionalCanvasSerializations:globalThis.__provisionalCanvasSerializations})`);
+ await evaluate(`document.querySelector('#restart-device').click();true`);
+ const afterRestart=await evaluate(`({configBodyCalls:globalThis.__configBodyCalls,warnings:globalThis.__restartWarnings,modules:structuredClone(customModules)})`);
+ await evaluate(`document.querySelector('#preview-mode-edit').click();true`);
+ await sleep(250);
+ const afterEditPreview=await evaluate(`({configBodyCalls:globalThis.__configBodyCalls,mode:previewMode,modules:structuredClone(customModules)})`);
+ const direct=await evaluate(`saveConfig()`,true);
+ await waitFor(`document.readyState==='complete'&&typeof window.orderedLayersForFrame==='function'&&document.querySelector('.config-revision-dialog')`);
+ const conflict=await evaluate(`({title:document.querySelector('.config-revision-dialog h2').textContent,buttons:[...document.querySelectorAll('.config-revision-dialog button')].map(button=>button.textContent),disabled:document.querySelector('#save-config').disabled,draft:document.querySelector('.custom-module-card[data-id="custom_basic_text"] [data-field="text"]').value})`);
+ await evaluate(`document.querySelectorAll('.config-revision-dialog button')[1].click();true`);
+ await waitFor(`!document.querySelector('.config-revision-dialog')&&!matrixRecoveryPending`);
+ const after=await evaluate(`({disabled:document.querySelector('#save-config').disabled,status:document.querySelector('#message').textContent,editors:[...document.querySelectorAll('.custom-module-card')].map(card=>card.dataset.editorType||'basic'),draft:{name:document.querySelector('.custom-module-card[data-id="custom_basic_text"] [data-field="name"]').value,text:document.querySelector('.custom-module-card[data-id="custom_basic_text"] [data-field="text"]').value,x:document.querySelector('.custom-module-card[data-id="custom_basic_text"] [data-field="x"]').value},advanced:JSON.stringify(customModules.find(module=>module.type==='canvas')),provisionalCanvasSerializations:globalThis.__provisionalCanvasSerializations,configBodyCalls:globalThis.__configBodyCalls})`);
+ const normal=await evaluate(`saveConfig()`,true);
+ console.log(JSON.stringify({during,afterRestart,afterEditPreview,direct,conflict,after,normal}));
+}finally{socket.close()}
+"""
+        report = self.run_live_chromium_probe(
+            probe.replace("process.argv[2]", json.dumps(str(server.server_port))), timeout=35,
+        )
+        self.assertEqual(report["during"]["ready"], "loading", report)
+        self.assertTrue(report["during"]["disabled"], report)
+        self.assertEqual(report["during"]["status"], "Finishing editor setup before saving.", report)
+        self.assertEqual(report["during"]["role"], "status", report)
+        self.assertEqual(report["during"]["draft"], {
+            "name": expected_basic["name"], "text": expected_basic["text"], "x": str(expected_basic["x"]),
+        }, report)
+        self.assertEqual(report["during"]["advanced"], report["after"]["advanced"], report)
+        self.assertEqual(report["afterRestart"]["configBodyCalls"], 0, report)
+        self.assertEqual(len(report["afterRestart"]["warnings"]), 1, report)
+        self.assertIn("Save any changes before restarting", report["afterRestart"]["warnings"][0], report)
+        self.assertEqual(report["afterRestart"]["modules"][0], expected_modules[0], report)
+        self.assertEqual(report["afterEditPreview"]["configBodyCalls"], 0, report)
+        self.assertEqual(report["afterEditPreview"]["mode"], "edit", report)
+        self.assertEqual(report["afterEditPreview"]["modules"][0], expected_modules[0], report)
+        self.assertEqual(previewed, [], {"report": report, "previewed": previewed})
+        self.assertEqual(report["direct"], {
+            "saved": False, "warning": "Finish loading the configuration editors before saving."
+        }, report)
+        self.assertEqual(report["conflict"]["title"], "Newer saved configuration available", report)
+        self.assertEqual(report["conflict"]["buttons"], [
+            "Reload latest saved state", "Remain with unsaved draft",
+        ], report)
+        self.assertTrue(report["conflict"]["disabled"], report)
+        self.assertEqual(report["conflict"]["draft"], expected_basic["text"], report)
+        self.assertFalse(report["after"]["disabled"], report)
+        self.assertEqual(report["after"]["editors"], ["canvas", "simple"], report)
+        self.assertEqual(report["after"]["draft"], {
+            "name": expected_basic["name"], "text": expected_basic["text"], "x": str(expected_basic["x"]),
+        }, report)
+        self.assertEqual(report["during"]["provisionalCanvasSerializations"], 0, report)
+        self.assertEqual(report["after"]["provisionalCanvasSerializations"], 0, report)
+        self.assertTrue(report["normal"]["saved"], report)
+        self.assertEqual(posted, [{**posted[0], "custom_modules": [expected_modules[0], expected_basic]}])
+
+    @unittest.skipUnless(shutil.which("node"), "Node.js is required")
+    @unittest.skipUnless(
+        os.environ.get("MATRIX_CHROMIUM")
+        and Path(os.environ.get("MATRIX_CHROMIUM", "")).is_file()
+        and os.access(os.environ.get("MATRIX_CHROMIUM", ""), os.X_OK),
+        "MATRIX_CHROMIUM browser is required",
+    )
+    def test_canvas_asset_failure_keeps_save_fail_closed_and_accessible(self):
+        advanced_canvas = {
+            "id": "custom_failed_canvas", "name": "Failed canvas", "type": "canvas",
+            "background": "#102938", "frame_count": 37, "fps": 23, "playback": "ping_pong",
+            "layers": [{
+                "id": "layer_failed", "name": "Failed layer", "type": "rectangle", "visible": True,
+                "properties": {"present": True, "x": 7, "y": 11, "width": 19, "height": 13,
+                               "rotation": 17, "colour": "#abcdef", "filled": True, "z_index": 9},
+                "keyframes": [{"frame": 31, "easing": "ease_in_out",
+                               "properties": {"x": 41, "rotation": 271, "colour": "#fedcba"}}],
+            }],
+            "overrides": [{"frame": 19, "layer_id": "layer_failed",
+                           "properties": {"y": 29, "present": False, "z_index": -4}}],
+        }
+        basic_text = {
+            "id": "custom_failed_basic", "name": "Failed basic", "type": "text", "text": "KEEP ME",
+            "font": "5x7", "colour": "#ffffff", "background": "#000000", "x": 2, "y": 20,
+            "direction": "left", "speed": .05, "loops": 1,
+        }
+        self.store.update({"custom_modules": [advanced_canvas, basic_text]})
+        expected_modules = self.store.get()["custom_modules"]
+        self.pair_browser()
+        body = self.client.get("/").get_data(as_text=True)
+        asset = (Path(__file__).parents[1] / "app/static/custom_canvas.js").read_bytes()
+        initialization_exception = asset.replace(
+            b"  const editorState = new Map();",
+            b"  throw new Error('injected canvas initialization failure');\n  const editorState = new Map();",
+            1,
+        )
+        posts = {"http": [], "exception": []}
+        config_gets = {"http": 0, "exception": 0}
+
+        class Handler(BaseHTTPRequestHandler):
+            def log_message(self, format, *args):
+                pass
+
+            def send(self, status, content=b"", content_type="application/json"):
+                self.send_response(status)
+                self.send_header("Content-Type", content_type)
+                self.send_header("Content-Length", str(len(content)))
+                self.end_headers()
+                self.wfile.write(content)
+
+            def scenario(self):
+                return "exception" if "/exception" in self.headers.get("Referer", "") else "http"
+
+            def do_GET(self):
+                if self.path in ("/http", "/exception"):
+                    scenario = self.path[1:]
+                    page = body.replace(
+                        'src="/static/custom_canvas.js"',
+                        f'src="/custom_canvas.js?scenario={scenario}"',
+                    ).encode()
+                    self.send(200, page, "text/html; charset=utf-8")
+                elif self.path.startswith("/custom_canvas.js?scenario=http"):
+                    self.send(404, b"/* missing custom canvas asset */", "text/javascript; charset=utf-8")
+                elif self.path.startswith("/custom_canvas.js?scenario=exception"):
+                    self.send(200, initialization_exception, "text/javascript; charset=utf-8")
+                elif self.path == "/static/custom_canvas.css":
+                    self.send(200, b"", "text/css")
+                elif self.path.startswith("/api/display-frame"):
+                    self.send(503, b'{"error":"probe"}')
+                elif self.path == "/api/status":
+                    self.send(200, b'{"running":false,"minimum_client_contract":2}')
+                elif self.path == "/api/config":
+                    scenario = self.scenario()
+                    config_gets[scenario] += 1
+                    if config_gets[scenario] == 1:
+                        self.send(304, b"")
+                    else:
+                        self.send(200, b'{"revision":2}')
+                else:
+                    self.send(404, b"{}")
+
+            def do_POST(self):
+                length = int(self.headers.get("Content-Length", "0"))
+                payload = self.rfile.read(length)
+                if self.path == "/api/config":
+                    posts[self.scenario()].append(json.loads(payload))
+                    self.send(200, b'{"revision":1}')
+                else:
+                    self.send(404, b"{}")
+
+        server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+        server_thread = threading.Thread(target=server.serve_forever, daemon=True)
+        server_thread.start()
+        self.addCleanup(lambda: (server.shutdown(), server.server_close(), server_thread.join(timeout=5)))
+        probe = r"""
+const debugPort=process.argv[1],appPort=process.argv[2],sleep=ms=>new Promise(resolve=>setTimeout(resolve,ms));let endpoint;
+for(let attempt=0;attempt<50;attempt++){try{endpoint=await fetch(`http://127.0.0.1:${debugPort}/json/new`,{method:'PUT'}).then(response=>response.json());break}catch(_){await sleep(100)}}
+if(!endpoint)throw Error('CDP unavailable');
+const socket=new WebSocket(endpoint.webSocketDebuggerUrl),pending=new Map();let id=0;
+socket.onmessage=event=>{const message=JSON.parse(event.data);if(message.id&&pending.has(message.id)){const request=pending.get(message.id);pending.delete(message.id);message.error?request.reject(Error(JSON.stringify(message.error))):request.resolve(message.result)}};
+await new Promise((resolve,reject)=>{socket.onopen=resolve;socket.onerror=reject});
+const send=(method,params={})=>new Promise((resolve,reject)=>{const request=++id;pending.set(request,{resolve,reject});socket.send(JSON.stringify({id:request,method,params}))});
+const evaluate=async(expression,awaitPromise=false)=>{const result=await send('Runtime.evaluate',{expression,returnByValue:true,awaitPromise});if(result.exceptionDetails)throw Error(JSON.stringify(result.exceptionDetails));return result.result.value};
+const waitFor=async(expression,timeout=5000)=>{const end=Date.now()+timeout;while(Date.now()<end){try{const value=await evaluate(expression);if(value)return value}catch(_){}await sleep(25)}throw Error('timeout: '+expression)};
+try{
+ await send('Runtime.enable');await send('Page.enable');
+ const reports={};
+ for(const scenario of ['http','exception']){
+   await send('Page.navigate',{url:`http://127.0.0.1:${appPort}/${scenario}`});
+   await waitFor(`document.readyState==='complete'&&typeof saveConfig==='function'`);
+   const before=await evaluate(`(()=>{const button=document.querySelector('#save-config'),status=document.querySelector('#message');return {disabled:button.disabled,describedBy:button.getAttribute('aria-describedby'),status:status.textContent,role:status.getAttribute('role'),live:status.getAttribute('aria-live'),marker:globalThis.matrixCustomCanvasReady??false,renderer:typeof window.renderCustomModules,serializer:typeof window.customModulesFromEditor,ordered:typeof window.orderedLayersForFrame}})()`);
+   await evaluate(`globalThis.__configBodyCalls=0;globalThis.__originalConfigBody=configBody;configBody=(...args)=>{globalThis.__configBodyCalls++;return globalThis.__originalConfigBody(...args)};true`);
+   await waitFor(`matrixSyncGeneration>=1`);await sleep(100);await evaluate(`matrixCheckForNewerConfig()`,true);
+   await waitFor(`document.querySelector('.config-revision-dialog')`);
+   await evaluate(`document.querySelector('.config-revision-dialog .btn:not(.primary)').click();true`);
+   const afterRemain=await evaluate(`(()=>{const button=document.querySelector('#save-config'),status=document.querySelector('#message');return {disabled:button.disabled,status:status.textContent,role:status.getAttribute('role'),live:status.getAttribute('aria-live'),configBodyCalls:globalThis.__configBodyCalls,modules:structuredClone(customModules),dialog:!!document.querySelector('.config-revision-dialog')}})()`);
+   const direct=await evaluate(`saveConfig()`,true);
+   const after=await evaluate(`({configBodyCalls:globalThis.__configBodyCalls,modules:structuredClone(customModules),baseline:matrixSavedSnapshot})`);
+   reports[scenario]={before,afterRemain,direct,after};
+ }
+ console.log(JSON.stringify(reports));
+}finally{socket.close()}
+"""
+        report = self.run_live_chromium_probe(
+            probe.replace("process.argv[2]", json.dumps(str(server.server_port))), timeout=30,
+        )
+        for scenario in ("http", "exception"):
+            with self.subTest(scenario=scenario):
+                before = report[scenario]["before"]
+                self.assertTrue(before["disabled"], {"report": report, "posts": posts})
+                self.assertEqual(before["describedBy"], "message", report)
+                self.assertEqual(before["role"], "status", report)
+                self.assertEqual(before["live"], "polite", report)
+                self.assertIn("could not finish loading", before["status"].lower(), report)
+                self.assertFalse(before["marker"], report)
+                after_remain = report[scenario]["afterRemain"]
+                self.assertTrue(after_remain["disabled"], {"report": report, "posts": posts})
+                self.assertFalse(after_remain["dialog"], report)
+                self.assertEqual(after_remain["role"], "status", report)
+                self.assertEqual(after_remain["live"], "polite", report)
+                self.assertIn("could not finish loading", after_remain["status"].lower(), report)
+                self.assertEqual(after_remain["configBodyCalls"], 0, report)
+                self.assertEqual(after_remain["modules"], expected_modules, report)
+                self.assertEqual(report[scenario]["direct"], {
+                    "saved": False, "warning": "Finish loading the configuration editors before saving."
+                }, report)
+                self.assertEqual(report[scenario]["after"]["configBodyCalls"], 0, report)
+                self.assertEqual(report[scenario]["after"]["modules"], expected_modules, report)
+                self.assertIsNone(report[scenario]["after"]["baseline"], report)
+                self.assertEqual(posts[scenario], [], {"report": report, "posts": posts})
+
+    @unittest.skipUnless(shutil.which("node"), "Node.js is required")
+    @unittest.skipUnless(
+        os.environ.get("MATRIX_CHROMIUM")
+        and Path(os.environ.get("MATRIX_CHROMIUM", "")).is_file()
+        and os.access(os.environ.get("MATRIX_CHROMIUM", ""), os.X_OK),
+        "MATRIX_CHROMIUM browser is required",
+    )
     def test_delayed_canvas_asset_preserves_prebaseline_real_input(self):
         self.pair_browser()
         body = self.client.get("/").get_data(as_text=True)
@@ -2248,7 +2561,7 @@ try{
         end = body.index("\nfunction updateOpenWeatherSecretStatus", start)
         save_function = body[start:end]
         harness = r"""
-let matrixRecoveryPending=false,matrixLoadedRevision=0,highestNotifiedRemoteRevision=0;
+let matrixEditorsReady=true,matrixRecoveryPending=false,matrixLoadedRevision=0,highestNotifiedRemoteRevision=0;
 let matrixSavedSnapshot='saved baseline',matrixDirty=true,messageText='',request=null;
 const configState={device:{name:'unsaved draft'}};
 function matrixRevisionETag(){return '"'+matrixLoadedRevision+'"'}
@@ -2342,6 +2655,7 @@ async function fetch(){const item=responses.shift();return await item}
 globalThis.document=document;globalThis.window=window;globalThis.fetch=fetch;
 """ + synchronization + "\n" + save_function + r"""
 (async()=>{
+ matrixEditorsReady=true;saveButton.disabled=false;
  matrixSavedSnapshot=matrixCurrentSnapshot();
  responses.push(response(200,1));await matrixCheckForNewerConfig();
  if(reloads!==1||!matrixRecoveryPending)throw new Error('clean newer snapshot did not reload exactly once');
@@ -2550,7 +2864,10 @@ globalThis.document=document;globalThis.window=window;globalThis.fetch=fetch;
         assert node is not None
         with tempfile.TemporaryDirectory(prefix="matrix-sticky-preview-") as directory:
             page = Path(directory) / "dashboard.html"
-            page.write_text(body)
+            page.write_text(body.replace('src="/static/custom_canvas.js"', 'src="custom_canvas.js"'))
+            (Path(directory) / "custom_canvas.js").write_bytes(
+                (Path(__file__).parents[1] / "app/static/custom_canvas.js").read_bytes()
+            )
             profile = Path(directory) / "profile"
             browser = subprocess.Popen(
                 [
@@ -3462,6 +3779,7 @@ async function fetch(path,options={}){requests.push({path,options});return {stat
 globalThis.document=document;globalThis.window=window;globalThis.fetch=fetch;
 """ + bridge + r"""
 (async()=>{
+  matrixEditorsReady=true;
   matrixSavedSnapshot=matrixCurrentSnapshot();
   await api('/api/status');
   if(requests[0].options.headers['X-Matrix-Client-Contract']!=='1')throw new Error('contract header missing');
@@ -4614,7 +4932,7 @@ globalThis.reconcileMediaRemoval=()=>{throw new Error('Local reconciliation fail
         preview_end = source.index("\nfunction previewSelected", preview_start)
         function_source = source[save_start:save_end] + "\n" + source[preview_start:preview_end]
         harness = r"""
-let messages=[],previewCalls=0,previewModule='',matrixLoadedRevision=0,matrixDirty=true,matrixRecoveryPending=false,highestNotifiedRemoteRevision=0;
+let messages=[],previewCalls=0,previewModule='',matrixLoadedRevision=0,matrixDirty=true,matrixEditorsReady=true,matrixRecoveryPending=false,highestNotifiedRemoteRevision=0;
 function matrixRevisionETag(){return '"'+matrixLoadedRevision+'"';}
 function configBody(){return {};}
 function setMessage(text,error=false){messages.push({text,error});}
@@ -4649,7 +4967,7 @@ async function api(path){
         preview_end = source.index("\nfunction previewSelected", preview_start)
         function_source = source[save_start:save_end] + "\n" + source[preview_start:preview_end]
         harness = r"""
-let messages=[],previewModule='',matrixLoadedRevision=0,matrixDirty=true,matrixRecoveryPending=false,highestNotifiedRemoteRevision=0;
+let messages=[],previewModule='',matrixLoadedRevision=0,matrixDirty=true,matrixEditorsReady=true,matrixRecoveryPending=false,highestNotifiedRemoteRevision=0;
 function matrixRevisionETag(){return '"'+matrixLoadedRevision+'"';}
 function configBody(){return {};}
 function setMessage(text,error=false){messages.push({text,error});}
@@ -5684,6 +6002,7 @@ let customLavaPalettes=[];
 const builtInSettings={weather:{},openweather_overview:{},openweather_forecast:{},clock_lava:{},splash:{},sleep:{}};
 const legacyCustomLavaColours=[];
 const announcements=[];
+const matrixEditorsReady=true;
 function customModulesFromEditor(){return []}
 function customLavaPalettesFromEditor(){return []}
 function announcementsFromEditor(){return []}
@@ -7568,7 +7887,8 @@ console.log('ANNOUNCEMENT_HEADING_SYNC_PASS');
         self.assertIn("Add saved palette", body)
         self.assertIn("initialCustomLavaPalettes", body)
         self.assertIn("renderCustomLavaPalettes", body)
-        self.assertIn("custom_palettes:customLavaPalettesFromEditor()", body)
+        self.assertIn("serializedCustomLavaPalettes=customLavaPalettesFromEditor()", body)
+        self.assertIn("custom_palettes:serializedCustomLavaPalettes", body)
 
     def test_dashboard_exposes_grouped_lava_palette_bulk_controls(self):
         self.pair_browser()
