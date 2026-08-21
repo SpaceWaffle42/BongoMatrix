@@ -41,15 +41,27 @@ MAX_STATE_ENTRIES = 256
 MAX_STATE_DEPTH = 32
 MAX_HTTP_STATUS_BYTES = 256
 PREFLIGHT_WAIT_SECONDS = 35
-SERVICE_STOP_WAIT_SECONDS = 45
+SERVICE_STOP_WAIT_SECONDS = 40
 SERVICE_READY_WAIT_SECONDS = 60
 INITIAL_READY_ATTEMPTS = 12
+REPORT_PUBLICATION_SECONDS = 80
 RENAME_NOREPLACE = 1
 _TEMPORARY_SEQUENCE = itertools.count()
 _STATE_DIGEST_DOMAIN = b"matrix-state-tree\x00schema-v1\x00"
 _STATE_RECORD_ROOT = 1
 _STATE_RECORD_DIRECTORY = 2
 _STATE_RECORD_FILE = 3
+
+
+class ReportDeadlineExceeded(RuntimeError):
+    pass
+
+
+def _require_report_time(deadline: float) -> float:
+    remaining = deadline - time.monotonic()
+    if remaining <= 0:
+        raise ReportDeadlineExceeded("physical verifier report publication deadline exhausted")
+    return remaining
 
 _CLEANUP_WARNINGS = {
     "unlink": "physical verifier cleanup warning: temporary unlink failed\n",
@@ -798,12 +810,26 @@ class ApplianceOps:
                 time.sleep(min(1, remaining))
         return False
 
-    def snapshot(self) -> dict[str, str]:
+    def snapshot(self, *, deadline: float | None = None) -> dict[str, str]:
+        if deadline is None:
+            deadline = time.monotonic() + REPORT_PUBLICATION_SECONDS
+        _require_report_time(deadline)
+        boot = Path("/proc/sys/kernel/random/boot_id").read_text(encoding="ascii").strip()
+        _require_report_time(deadline)
+        data = _tree_digest(APP_ROOT / "data")
+        _require_report_time(deadline)
+        media = _tree_digest(APP_ROOT / "resources" / "media")
+        remaining = _require_report_time(deadline)
+        restarts = _run(
+            "/bin/systemctl", "show", SERVICE, "-p", "NRestarts", "--value",
+            timeout=min(15, remaining),
+        ).stdout.strip()
+        _require_report_time(deadline)
         return {
-            "boot": Path("/proc/sys/kernel/random/boot_id").read_text(encoding="ascii").strip(),
-            "data": _tree_digest(APP_ROOT / "data"),
-            "media": _tree_digest(APP_ROOT / "resources" / "media"),
-            "restarts": _run("/bin/systemctl", "show", SERVICE, "-p", "NRestarts", "--value").stdout.strip(),
+            "boot": boot,
+            "data": data,
+            "media": media,
+            "restarts": restarts,
         }
 
     def stop_service(self, *, deadline: float | None = None) -> None:
@@ -946,19 +972,25 @@ def _safe_error(error: BaseException) -> str:
     return "".join(character if " " <= character <= "~" else "?" for character in text)[:512] or "verification failed"
 
 
-def run_verification(sha: str, pipeline_id: str, *, ops=None, lock_factory=None, matrix_factory=None):
+def run_verification(
+    sha: str, pipeline_id: str, *, ops=None, lock_factory=None,
+    matrix_factory=None, deadline: float | None = None,
+):
     ops = ops or ApplianceOps()
+    if deadline is None:
+        deadline = time.monotonic() + REPORT_PUBLICATION_SECONDS
     failure = None
     before = None
-    preflight_deadline = time.monotonic() + PREFLIGHT_WAIT_SECONDS
-    preflight_remaining = preflight_deadline - time.monotonic()
-    if preflight_remaining <= 0:
-        raise RuntimeError("production preflight deadline exhausted")
+    remaining = _require_report_time(deadline)
+    preflight_deadline = min(deadline, time.monotonic() + PREFLIGHT_WAIT_SECONDS)
     try:
-        active = ops.service_active(timeout=min(15, preflight_remaining))
+        active = ops.service_active(timeout=min(15, remaining))
+    except ReportDeadlineExceeded:
+        raise
     except BaseException as error:
         active = False
         failure = error
+    _require_report_time(deadline)
     if active:
         initial_ready = getattr(ops, "initial_ready", None)
         if initial_ready is None:
@@ -966,23 +998,30 @@ def run_verification(sha: str, pipeline_id: str, *, ops=None, lock_factory=None,
             ready = initial_ready()
         else:
             ready = initial_ready(deadline=preflight_deadline)
+        _require_report_time(deadline)
         if not ready:
             failure = RuntimeError("production service must be HTTP ready before verification")
-        stop_deadline = time.monotonic() + SERVICE_STOP_WAIT_SECONDS
+        stop_deadline = min(deadline, time.monotonic() + SERVICE_STOP_WAIT_SECONDS)
         try:
             # The systemd unit owns recovery before this first mutating operation.
             ops.stop_service(deadline=stop_deadline)
+        except ReportDeadlineExceeded:
+            raise
         except BaseException as error:
             failure = failure or error
         stop_remaining = stop_deadline - time.monotonic()
         if stop_remaining <= 0:
-            raise RuntimeError("production service stop deadline exhausted")
+            raise ReportDeadlineExceeded("production service stop deadline exhausted")
         if ops.service_active(timeout=min(15, stop_remaining)):
             # Never produce evidence while the root application can rewrite it.
             raise RuntimeError("production service remained active after stop")
+        _require_report_time(deadline)
         if failure is None:
             try:
-                before = ops.snapshot()
+                before = ops.snapshot(deadline=deadline)
+                _require_report_time(deadline)
+            except ReportDeadlineExceeded:
+                raise
             except BaseException as error:
                 failure = error
     else:
@@ -990,6 +1029,7 @@ def run_verification(sha: str, pipeline_id: str, *, ops=None, lock_factory=None,
 
     if failure is None:
         try:
+            _require_report_time(deadline)
             if lock_factory is None or matrix_factory is None:
                 lock_factory = lock_factory or FixedDisplayOwnershipLock
                 matrix_factory = matrix_factory or (
@@ -997,18 +1037,25 @@ def run_verification(sha: str, pipeline_id: str, *, ops=None, lock_factory=None,
                 )
             with lock_factory():
                 exercise_matrix(matrix_factory)
+            _require_report_time(deadline)
+        except ReportDeadlineExceeded:
+            raise
         except BaseException as error:
             failure = error
 
     if before is not None:
         try:
-            after = ops.snapshot()
+            after = ops.snapshot(deadline=deadline)
+            _require_report_time(deadline)
             if after != before:
                 raise RuntimeError(f"appliance state changed: before={before!r} after={after!r}")
+        except ReportDeadlineExceeded:
+            raise
         except BaseException as error:
             if failure is None:
                 failure = error
 
+    _require_report_time(deadline)
     report = {
         "SOURCE_SHA": sha,
         "PIPELINE_ID": pipeline_id,
@@ -1092,11 +1139,17 @@ def _labels():
     return parts
 
 
-def _write_report(values):
+def _write_report(values, *, deadline: float | None = None):
+    def check_deadline():
+        if deadline is not None:
+            _require_report_time(deadline)
+
+    check_deadline()
     payload = "".join(f"{key}={value}\n" for key, value in values.items()).encode()
     if len(payload) > MAX_REPORT_BYTES:
         raise RuntimeError("physical verifier report exceeded bound")
     runtime_fd = _open_runtime_directory(REPORT_FILE.parent)
+    check_deadline()
     temporary_fd = _open_temporary_namespace(runtime_fd, REPORT_TEMPORARIES)
     temporary_name = None
     fd = None
@@ -1106,6 +1159,7 @@ def _write_report(values):
             temporary_name, fd = _create_unique_temporary(
                 temporary_fd, REPORT_FILE.name + ".tmp"
             )
+            check_deadline()
         except OSError as error:
             raise RuntimeError("unsafe physical verifier report publication") from error
         info = os.fstat(fd)
@@ -1120,20 +1174,24 @@ def _write_report(values):
         temporary_identity = (info.st_dev, info.st_ino)
         written = 0
         while written < len(payload):
+            check_deadline()
             count = os.write(fd, payload[written:])
             if count <= 0:
                 raise RuntimeError("physical verifier report write made no progress")
             written += count
         os.fsync(fd)
+        check_deadline()
         os.close(fd)
         fd = None
         try:
             _rename_noreplace(
                 temporary_name, REPORT_FILE.name, temporary_fd, runtime_fd
             )
+            check_deadline()
         except OSError as error:
             raise RuntimeError("unsafe physical verifier report publication") from error
         os.fsync(runtime_fd)
+        check_deadline()
     except BaseException:
         if temporary_identity is not None:
             _unlink_owned_temporary(
@@ -1150,6 +1208,10 @@ def _write_report(values):
 def _interrupted(_signum, _frame):
     global STOP_REQUESTED
     STOP_REQUESTED = True
+
+
+def _report_deadline_alarm(_signum, _frame):
+    raise ReportDeadlineExceeded("physical verifier report publication deadline exhausted")
 
 
 STOP_REQUESTED = False
@@ -1172,9 +1234,15 @@ def main(argv=None):
         return 0
     for signum in (signal.SIGTERM, signal.SIGINT, signal.SIGHUP):
         signal.signal(signum, _interrupted)
-    sha, pipeline_id = _labels()
-    report = run_verification(sha, pipeline_id)
-    _write_report(report)
+    deadline = time.monotonic() + REPORT_PUBLICATION_SECONDS
+    signal.signal(signal.SIGALRM, _report_deadline_alarm)
+    signal.setitimer(signal.ITIMER_REAL, _require_report_time(deadline))
+    try:
+        sha, pipeline_id = _labels()
+        report = run_verification(sha, pipeline_id, deadline=deadline)
+        _write_report(report, deadline=deadline)
+    finally:
+        signal.setitimer(signal.ITIMER_REAL, 0)
     wait_for_stop()
     return 0
 

@@ -381,9 +381,13 @@ class SystemOps:
 
     def read_report(self):
         deadline = time.monotonic() + REPORT_WAIT_SECONDS
-        while time.monotonic() < deadline:
+        while True:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                break
             state = _systemctl(
-                "show", SERVICE, "-p", "ActiveState", "--value", check=False
+                "show", SERVICE, "-p", "ActiveState", "--value", check=False,
+                timeout=min(SYSTEMCTL_TIMEOUT, remaining),
             ).stdout.decode().strip()
             if state in ("failed", "inactive"):
                 raise RuntimeError("physical verifier became inactive before reporting")
@@ -408,7 +412,10 @@ class SystemOps:
                         os.close(fd)
             finally:
                 os.close(runtime_fd)
-            time.sleep(0.05)
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                break
+            time.sleep(min(0.05, remaining))
         raise RuntimeError("physical verifier report wait timed out")
 
     def stop_and_wait(self):
@@ -483,13 +490,13 @@ def dispatch(command, ops=None):
     return (0 if parsed["PHYSICAL_DEVICE_ACCEPTANCE"] == "PASS" else 1), report
 
 
-def _systemctl(*args, check=True):
+def _systemctl(*args, check=True, timeout: float = SYSTEMCTL_TIMEOUT):
     try:
         return subprocess.run(
             ("/bin/systemctl", *args),
             check=check,
             capture_output=True,
-            timeout=SYSTEMCTL_TIMEOUT,
+            timeout=timeout,
         )
     except subprocess.TimeoutExpired as error:
         raise RuntimeError(f"bounded systemctl call timed out: {args[0]}") from error

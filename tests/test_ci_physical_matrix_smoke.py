@@ -101,7 +101,7 @@ class FakeOps:
         self.events.append(("http", "ready?"))
         return self.http
 
-    def snapshot(self):
+    def snapshot(self, *, deadline=None):
         self.events.append(("snapshot",))
         return dict(self.before)
 
@@ -1832,7 +1832,7 @@ class PhysicalVerifierTests(unittest.TestCase):
         events = []
 
         class SnapshotFailureOps(FakeOps):
-            def snapshot(self):
+            def snapshot(self, *, deadline=None):
                 events.append(("snapshot",))
                 if self.active:
                     raise RuntimeError("snapshot while production active")
@@ -2117,6 +2117,102 @@ class PhysicalVerifierTests(unittest.TestCase):
 
         self.assertEqual(ops.service_calls, 1)
 
+    def test_verification_report_deadline_covers_post_stop_snapshot_and_publication(self):
+        verifier = load_deploy_module("matrix_ci_physical_verifier")
+        now = [0.0]
+        matrix_opened = []
+
+        class NearLimitOps(FakeOps):
+            def __init__(self, events):
+                super().__init__(events)
+                self.service_calls = 0
+
+            def service_active(self, *, timeout=15):
+                self.service_calls += 1
+                return self.service_calls == 1
+
+            def initial_ready(self, *, deadline=None):
+                if deadline is None:
+                    raise AssertionError("deadline missing")
+                now[0] = deadline - 1
+                return True
+
+            def stop_service(self, *, deadline=None):
+                if deadline is None:
+                    raise AssertionError("deadline missing")
+                now[0] = deadline - 1
+                self.active = False
+
+            def snapshot(self, *, deadline=None):
+                if deadline is None:
+                    raise AssertionError("deadline missing")
+                now[0] = deadline + 1
+                return dict(self.before)
+
+        old_monotonic = verifier.time.monotonic
+        verifier.time.monotonic = lambda: now[0]
+        try:
+            with self.assertRaisesRegex(RuntimeError, "report publication deadline"):
+                verifier.run_verification(
+                    "f" * 40,
+                    "459",
+                    ops=NearLimitOps([]),
+                    lock_factory=lambda: FakeLock([]),
+                    matrix_factory=lambda: matrix_opened.append(True),
+                    deadline=verifier.REPORT_PUBLICATION_SECONDS,
+                )
+            with self.assertRaisesRegex(RuntimeError, "report publication deadline"):
+                verifier._write_report({}, deadline=now[0])
+        finally:
+            verifier.time.monotonic = old_monotonic
+
+        self.assertEqual(matrix_opened, [])
+
+    def test_main_arms_one_deadline_for_labels_verification_and_atomic_publication(self):
+        verifier = load_deploy_module("matrix_ci_physical_verifier")
+        calls = []
+        originals = (
+            verifier.os.geteuid,
+            verifier.time.monotonic,
+            verifier.signal.signal,
+            verifier.signal.setitimer,
+            verifier._labels,
+            verifier.run_verification,
+            verifier._write_report,
+            verifier.wait_for_stop,
+        )
+        verifier.os.geteuid = lambda: 0
+        verifier.time.monotonic = lambda: 10.0
+        verifier.signal.signal = lambda signum, handler: calls.append(("signal", signum, handler))
+        verifier.signal.setitimer = lambda which, seconds: calls.append(("timer", which, seconds))
+        verifier._labels = lambda: ("a" * 40, "460")
+        verifier.run_verification = lambda sha, pipeline_id, **kwargs: calls.append(
+            ("verify", sha, pipeline_id, kwargs["deadline"])
+        ) or {"PHYSICAL_DEVICE_ACCEPTANCE": "PASS"}
+        verifier._write_report = lambda report, **kwargs: calls.append(
+            ("publish", report, kwargs["deadline"])
+        )
+        verifier.wait_for_stop = lambda: calls.append(("wait",))
+        try:
+            self.assertEqual(verifier.main([]), 0)
+        finally:
+            (
+                verifier.os.geteuid,
+                verifier.time.monotonic,
+                verifier.signal.signal,
+                verifier.signal.setitimer,
+                verifier._labels,
+                verifier.run_verification,
+                verifier._write_report,
+                verifier.wait_for_stop,
+            ) = originals
+
+        deadline = 10.0 + verifier.REPORT_PUBLICATION_SECONDS
+        self.assertIn(("verify", "a" * 40, "460", deadline), calls)
+        self.assertIn(("publish", {"PHYSICAL_DEVICE_ACCEPTANCE": "PASS"}, deadline), calls)
+        self.assertIn(("timer", verifier.signal.ITIMER_REAL, verifier.REPORT_PUBLICATION_SECONDS), calls)
+        self.assertIn(("timer", verifier.signal.ITIMER_REAL, 0), calls)
+
     def test_lock_contention_writes_acceptance_fail_and_leaves_recovery_to_unit(self):
         verifier = load_deploy_module("matrix_ci_physical_verifier")
         events = []
@@ -2280,8 +2376,8 @@ class PhysicalVerifierTests(unittest.TestCase):
                 super().__init__(recorded_events)
                 self.snapshot_count = 0
 
-            def snapshot(self):
-                snapshot = super().snapshot()
+            def snapshot(self, *, deadline=None):
+                snapshot = super().snapshot(deadline=deadline)
                 self.snapshot_count += 1
                 if self.snapshot_count == 2:
                     snapshot["data"] = "changed"
@@ -2410,6 +2506,28 @@ class PhysicalVerifierTests(unittest.TestCase):
             dispatcher.subprocess.run = original
         self.assertEqual(len(calls), 1)
         self.assertGreater(calls[0][1]["timeout"], 0)
+
+    def test_dispatcher_report_poll_caps_systemctl_to_remaining_deadline(self):
+        dispatcher = load_deploy_module("matrix_ci_physical_dispatcher")
+        now = iter((0.0, dispatcher.REPORT_WAIT_SECONDS - 0.25))
+        calls = []
+        original = dispatcher._systemctl
+        old_monotonic = dispatcher.time.monotonic
+
+        def fake_systemctl(*args, check=True, timeout=None):
+            calls.append((args, check, timeout))
+            raise RuntimeError("stop after bounded probe")
+
+        setattr(dispatcher, "_systemctl", fake_systemctl)
+        dispatcher.time.monotonic = lambda: next(now)
+        try:
+            with self.assertRaisesRegex(RuntimeError, "bounded probe"):
+                dispatcher.SystemOps().read_report()
+        finally:
+            setattr(dispatcher, "_systemctl", original)
+            dispatcher.time.monotonic = old_monotonic
+
+        self.assertEqual(calls[0][2], 0.25)
 
     def test_verifier_stop_deadline_includes_request_and_caps_each_poll_to_remaining_time(self):
         verifier = load_deploy_module("matrix_ci_physical_verifier")
@@ -2953,10 +3071,15 @@ class PhysicalVerifierTests(unittest.TestCase):
         verifier_module = load_deploy_module("matrix_ci_physical_verifier")
         self.assertLess(
             verifier_module.PREFLIGHT_WAIT_SECONDS + verifier_module.SERVICE_STOP_WAIT_SECONDS,
+            verifier_module.REPORT_PUBLICATION_SECONDS,
+        )
+        self.assertLess(
+            verifier_module.REPORT_PUBLICATION_SECONDS,
             dispatcher_module.REPORT_WAIT_SECONDS,
         )
         self.assertLess(dispatcher_module.REPORT_WAIT_SECONDS, runtime_max)
         self.assertNotIn("flock", unit)
+
         self.assertIn("matrix-ci-physical-verifier", unit)
         self.assertIn("ExecStop=", unit)
         self.assertIn("ExecStopPost=", unit)
