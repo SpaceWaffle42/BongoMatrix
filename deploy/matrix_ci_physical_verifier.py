@@ -40,7 +40,8 @@ MAX_STATE_AGGREGATE_BYTES = 2 * 1024 * 1024
 MAX_STATE_ENTRIES = 256
 MAX_STATE_DEPTH = 32
 MAX_HTTP_STATUS_BYTES = 256
-SERVICE_STOP_WAIT_SECONDS = 100
+PREFLIGHT_WAIT_SECONDS = 35
+SERVICE_STOP_WAIT_SECONDS = 45
 SERVICE_READY_WAIT_SECONDS = 60
 INITIAL_READY_ATTEMPTS = 12
 RENAME_NOREPLACE = 1
@@ -781,12 +782,20 @@ class ApplianceOps:
                 except OSError:
                     pass
 
-    def initial_ready(self) -> bool:
+    def initial_ready(self, *, deadline: float | None = None) -> bool:
+        if deadline is None:
+            deadline = time.monotonic() + PREFLIGHT_WAIT_SECONDS
         for attempt in range(INITIAL_READY_ATTEMPTS):
-            if self.http_ready():
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                return False
+            if self.http_ready(timeout=min(2, remaining), deadline=deadline):
                 return True
             if attempt + 1 < INITIAL_READY_ATTEMPTS:
-                time.sleep(1)
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    return False
+                time.sleep(min(1, remaining))
         return False
 
     def snapshot(self) -> dict[str, str]:
@@ -797,8 +806,9 @@ class ApplianceOps:
             "restarts": _run("/bin/systemctl", "show", SERVICE, "-p", "NRestarts", "--value").stdout.strip(),
         }
 
-    def stop_service(self) -> None:
-        deadline = time.monotonic() + SERVICE_STOP_WAIT_SECONDS
+    def stop_service(self, *, deadline: float | None = None) -> None:
+        if deadline is None:
+            deadline = time.monotonic() + SERVICE_STOP_WAIT_SECONDS
 
         def remaining_timeout():
             remaining = deadline - time.monotonic()
@@ -940,19 +950,34 @@ def run_verification(sha: str, pipeline_id: str, *, ops=None, lock_factory=None,
     ops = ops or ApplianceOps()
     failure = None
     before = None
-    active = ops.service_active()
+    preflight_deadline = time.monotonic() + PREFLIGHT_WAIT_SECONDS
+    preflight_remaining = preflight_deadline - time.monotonic()
+    if preflight_remaining <= 0:
+        raise RuntimeError("production preflight deadline exhausted")
+    try:
+        active = ops.service_active(timeout=min(15, preflight_remaining))
+    except BaseException as error:
+        active = False
+        failure = error
     if active:
         initial_ready = getattr(ops, "initial_ready", None)
         if initial_ready is None:
             initial_ready = ops.http_ready
-        if not initial_ready():
+            ready = initial_ready()
+        else:
+            ready = initial_ready(deadline=preflight_deadline)
+        if not ready:
             failure = RuntimeError("production service must be HTTP ready before verification")
+        stop_deadline = time.monotonic() + SERVICE_STOP_WAIT_SECONDS
         try:
             # The systemd unit owns recovery before this first mutating operation.
-            ops.stop_service()
+            ops.stop_service(deadline=stop_deadline)
         except BaseException as error:
             failure = failure or error
-        if ops.service_active():
+        stop_remaining = stop_deadline - time.monotonic()
+        if stop_remaining <= 0:
+            raise RuntimeError("production service stop deadline exhausted")
+        if ops.service_active(timeout=min(15, stop_remaining)):
             # Never produce evidence while the root application can rewrite it.
             raise RuntimeError("production service remained active after stop")
         if failure is None:
@@ -961,7 +986,7 @@ def run_verification(sha: str, pipeline_id: str, *, ops=None, lock_factory=None,
             except BaseException as error:
                 failure = error
     else:
-        failure = RuntimeError("production service must be active before verification")
+        failure = failure or RuntimeError("production service must be active before verification")
 
     if failure is None:
         try:

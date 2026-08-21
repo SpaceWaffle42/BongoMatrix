@@ -93,7 +93,7 @@ class FakeOps:
             "restarts": "0",
         }
 
-    def service_active(self):
+    def service_active(self, *, timeout=15):
         self.events.append(("service", "active?"))
         return self.active
 
@@ -105,7 +105,7 @@ class FakeOps:
         self.events.append(("snapshot",))
         return dict(self.before)
 
-    def stop_service(self):
+    def stop_service(self, *, deadline=None):
         self.events.append(("service", "stop"))
         self.active = False
 
@@ -1968,7 +1968,7 @@ class PhysicalVerifierTests(unittest.TestCase):
         ops = verifier.ApplianceOps()
         original_http_ready = ops.http_ready
         old_sleep = verifier.time.sleep
-        ops.http_ready = lambda: next(ready)
+        ops.http_ready = lambda **_kwargs: next(ready)
         verifier.time.sleep = sleeps.append
         try:
             self.assertTrue(ops.initial_ready())
@@ -1984,7 +1984,7 @@ class PhysicalVerifierTests(unittest.TestCase):
         ops = verifier.ApplianceOps()
         original_http_ready = ops.http_ready
         old_sleep = verifier.time.sleep
-        ops.http_ready = lambda: (probes.append("probe") or False)
+        ops.http_ready = lambda **_kwargs: (probes.append("probe") or False)
         verifier.time.sleep = sleeps.append
         try:
             self.assertFalse(ops.initial_ready())
@@ -1997,7 +1997,7 @@ class PhysicalVerifierTests(unittest.TestCase):
         events = []
 
         class ExhaustedPreflightOps(FakeOps):
-            def initial_ready(self):
+            def initial_ready(self, *, deadline=None):
                 self.events.append(("http", "bounded-initial-exhausted"))
                 return False
 
@@ -2021,7 +2021,7 @@ class PhysicalVerifierTests(unittest.TestCase):
                     raise AssertionError("bounded initial readiness must not require http_ready")
                 return super().__getattribute__(name)
 
-            def initial_ready(self):
+            def initial_ready(self, *, deadline=None):
                 self.events.append(("http", "bounded-initial-ready"))
                 return True
 
@@ -2038,6 +2038,84 @@ class PhysicalVerifierTests(unittest.TestCase):
         self.assertIn(("http", "bounded-initial-ready"), events)
         self.assertNotIn(("http", "single-probe-would-fail"), events)
         self.assertIn(("service", "stop"), events)
+
+    def test_verification_composes_preflight_and_stop_checks_under_absolute_deadlines(self):
+        verifier = load_deploy_module("matrix_ci_physical_verifier")
+        now = [0.0]
+
+        class DeadlineOps(FakeOps):
+            def __init__(self, events):
+                super().__init__(events)
+                self.service_timeouts = []
+                self.preflight_deadlines = []
+                self.stop_deadlines = []
+
+            def service_active(self, *, timeout=15):
+                self.service_timeouts.append(timeout)
+                return len(self.service_timeouts) == 1
+
+            def initial_ready(self, *, deadline=None):
+                self.preflight_deadlines.append(deadline)
+                if deadline is None:
+                    raise AssertionError("deadline missing")
+                now[0] = deadline - 1
+                return False
+
+            def stop_service(self, *, deadline=None):
+                self.stop_deadlines.append(deadline)
+                if deadline is None:
+                    raise AssertionError("deadline missing")
+                now[0] = deadline - 1
+                self.active = False
+
+        old_monotonic = verifier.time.monotonic
+        verifier.time.monotonic = lambda: now[0]
+        try:
+            ops = DeadlineOps([])
+            report = verifier.run_verification("d" * 40, "457", ops=ops)
+        finally:
+            verifier.time.monotonic = old_monotonic
+
+        self.assertEqual(report["PHYSICAL_DEVICE_ACCEPTANCE"], "FAIL")
+        self.assertEqual(ops.preflight_deadlines, [verifier.PREFLIGHT_WAIT_SECONDS])
+        self.assertEqual(
+            ops.stop_deadlines,
+            [verifier.PREFLIGHT_WAIT_SECONDS - 1 + verifier.SERVICE_STOP_WAIT_SECONDS],
+        )
+        self.assertEqual(ops.service_timeouts, [15, 1])
+
+    def test_verification_refuses_post_stop_check_after_shared_deadline_exhaustion(self):
+        verifier = load_deploy_module("matrix_ci_physical_verifier")
+        now = [0.0]
+
+        class ExhaustedStopOps(FakeOps):
+            def __init__(self, events):
+                super().__init__(events)
+                self.service_calls = 0
+
+            def service_active(self, *, timeout=15):
+                self.service_calls += 1
+                return True
+
+            def initial_ready(self, *, deadline=None):
+                return True
+
+            def stop_service(self, *, deadline=None):
+                if deadline is None:
+                    raise AssertionError("deadline missing")
+                now[0] = deadline
+                self.active = False
+
+        old_monotonic = verifier.time.monotonic
+        verifier.time.monotonic = lambda: now[0]
+        try:
+            ops = ExhaustedStopOps([])
+            with self.assertRaisesRegex(RuntimeError, "stop deadline"):
+                verifier.run_verification("e" * 40, "458", ops=ops)
+        finally:
+            verifier.time.monotonic = old_monotonic
+
+        self.assertEqual(ops.service_calls, 1)
 
     def test_lock_contention_writes_acceptance_fail_and_leaves_recovery_to_unit(self):
         verifier = load_deploy_module("matrix_ci_physical_verifier")
@@ -2083,8 +2161,8 @@ class PhysicalVerifierTests(unittest.TestCase):
         events = []
 
         class StopFailureOps(FakeOps):
-            def stop_service(self):
-                super().stop_service()
+            def stop_service(self, *, deadline=None):
+                super().stop_service(deadline=deadline)
                 raise RuntimeError("stop transport failed")
 
         ops = StopFailureOps(events)
@@ -2344,7 +2422,7 @@ class PhysicalVerifierTests(unittest.TestCase):
         def fake_run(*args, check=True, timeout=None):
             calls.append((args, check, timeout))
             if args[1] == "stop":
-                now[0] = 90.0
+                now[0] = verifier.SERVICE_STOP_WAIT_SECONDS - 10
                 return types.SimpleNamespace(returncode=0, stdout="")
             return types.SimpleNamespace(
                 returncode=0, stdout="ActiveState=inactive\nJob=\n"
@@ -2867,7 +2945,17 @@ class PhysicalVerifierTests(unittest.TestCase):
             load_deploy_module("matrix_ci_physical_dispatcher").STOP_WAIT_SECONDS,
             stop_timeout * 2 + 20,
         )
-        self.assertRegex(unit, r"(?m)^RuntimeMaxSec=[1-9][0-9]*$")
+        runtime_max_match = re.search(r"(?m)^RuntimeMaxSec=([1-9][0-9]*)$", unit)
+        if runtime_max_match is None:
+            self.fail("physical service runtime maximum is missing")
+        runtime_max = int(runtime_max_match.group(1))
+        dispatcher_module = load_deploy_module("matrix_ci_physical_dispatcher")
+        verifier_module = load_deploy_module("matrix_ci_physical_verifier")
+        self.assertLess(
+            verifier_module.PREFLIGHT_WAIT_SECONDS + verifier_module.SERVICE_STOP_WAIT_SECONDS,
+            dispatcher_module.REPORT_WAIT_SECONDS,
+        )
+        self.assertLess(dispatcher_module.REPORT_WAIT_SECONDS, runtime_max)
         self.assertNotIn("flock", unit)
         self.assertIn("matrix-ci-physical-verifier", unit)
         self.assertIn("ExecStop=", unit)
