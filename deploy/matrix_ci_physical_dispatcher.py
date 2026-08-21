@@ -436,9 +436,9 @@ class SystemOps:
             if set(records) != {"ActiveState", "Job"}:
                 raise RuntimeError("physical verifier stop state was malformed")
             job = records["Job"]
-            if job == "0":
+            if job == "":
                 return 0 if records["ActiveState"] == "inactive" else 1
-            if re.fullmatch(r"/org/freedesktop/systemd1/job/[1-9][0-9]*", job) is None:
+            if re.fullmatch(r"[1-9][0-9]*", job) is None:
                 raise RuntimeError("physical verifier stop state was malformed")
             time.sleep(0.05)
         raise RuntimeError("physical verifier PID 1 stop wait timed out")

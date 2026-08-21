@@ -2259,8 +2259,8 @@ class PhysicalVerifierTests(unittest.TestCase):
         dispatcher = load_deploy_module("matrix_ci_physical_dispatcher")
         calls = []
         states = iter((
-            b"Job=/org/freedesktop/systemd1/job/51\nActiveState=deactivating\n",
-            b"Job=0\nActiveState=inactive\n",
+            b"Job=74391\nActiveState=deactivating\n",
+            b"Job=\nActiveState=inactive\n",
         ))
         clock = iter((0.0, 0.0, 0.0, 2.0))
         original = dispatcher._systemctl
@@ -2316,11 +2316,12 @@ class PhysicalVerifierTests(unittest.TestCase):
             return dispatcher.SystemOps().stop_and_wait()
 
         try:
-            self.assertEqual(run_with(b"ActiveState=failed\nJob=0\n", (0.0, 0.0)), 1)
+            self.assertEqual(run_with(b"ActiveState=failed\nJob=\n", (0.0, 0.0)), 1)
+            self.assertEqual(run_with(b"ActiveState=active\nJob=\n", (0.0, 0.0)), 1)
             for malformed in (
-                b"ActiveState=inactive\nJob=\n",
-                b"ActiveState=inactive\nJob=1\n",
-                b"ActiveState=inactive\nJob=/org/freedesktop/systemd1/job/0\n",
+                b"ActiveState=inactive\nJob=0\n",
+                b"ActiveState=inactive\nJob=-1\n",
+                b"ActiveState=inactive\nJob=/org/freedesktop/systemd1/job/51\n",
                 b"ActiveState=inactive\nJob=/untrusted/job/51\n",
             ):
                 with self.subTest(malformed=malformed):
@@ -2328,7 +2329,7 @@ class PhysicalVerifierTests(unittest.TestCase):
                         run_with(malformed, (0.0, 0.0))
             with self.assertRaisesRegex(RuntimeError, "stop wait timed out"):
                 run_with(
-                    b"ActiveState=deactivating\nJob=/org/freedesktop/systemd1/job/51\n",
+                    b"ActiveState=deactivating\nJob=74391\n",
                     (0.0, 0.0, 2.0),
                 )
         finally:
