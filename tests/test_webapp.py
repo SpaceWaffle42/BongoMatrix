@@ -2088,6 +2088,10 @@ try{
         asset = (Path(__file__).parents[1] / "app/static/custom_canvas.js").read_bytes()
         posted = []
         previewed = []
+        preview_lock = threading.Lock()
+        preview_boundaries = {}
+        preview_publication_phase = {"value": "blocked"}
+        release_canvas_asset = threading.Event()
 
         class Handler(BaseHTTPRequestHandler):
             def log_message(self, format, *args):
@@ -2107,8 +2111,23 @@ try{
                     page = body.replace('src="/static/custom_canvas.js"', 'src="/custom_canvas.js"')
                     self.send(200, page.encode(), "text/html; charset=utf-8")
                 elif self.path == "/custom_canvas.js":
-                    time.sleep(3)
-                    self.send(200, asset, "text/javascript; charset=utf-8")
+                    if release_canvas_asset.wait(timeout=15):
+                        self.send(200, asset, "text/javascript; charset=utf-8")
+                    else:
+                        self.send(503, b"/* timed out waiting to release Canvas editor */", "text/javascript")
+                elif self.path == "/preview-boundary-before-readiness":
+                    with preview_lock:
+                        preview_boundaries["before_readiness"] = copy.deepcopy(previewed)
+                    self.send(200, json.dumps({"count": len(preview_boundaries["before_readiness"])}).encode())
+                elif self.path == "/release-canvas-asset":
+                    with preview_lock:
+                        preview_publication_phase["value"] = "released"
+                        release_canvas_asset.set()
+                    self.send(200, b'{"released":true}')
+                elif self.path == "/preview-boundary-after-readiness":
+                    with preview_lock:
+                        preview_boundaries["after_readiness"] = copy.deepcopy(previewed)
+                    self.send(200, json.dumps({"count": len(preview_boundaries["after_readiness"])}).encode())
                 elif self.path == "/static/custom_canvas.css":
                     self.send(200, b"", "text/css")
                 elif self.path.startswith("/api/display-frame"):
@@ -2127,7 +2146,11 @@ try{
                     posted.append(json.loads(payload))
                     self.send(200, b'{"revision":3}')
                 elif self.path.startswith("/api/edit-preview/"):
-                    previewed.append(json.loads(payload))
+                    with preview_lock:
+                        previewed.append({
+                            "phase": preview_publication_phase["value"],
+                            "payload": json.loads(payload),
+                        })
                     self.send(503, b'{"error":"probe"}')
                 else:
                     self.send(404, b"{}")
@@ -2160,18 +2183,26 @@ try{
  await sleep(250);
  const afterEditPreview=await evaluate(`({configBodyCalls:globalThis.__configBodyCalls,mode:previewMode,modules:structuredClone(customModules)})`);
  const direct=await evaluate(`saveConfig()`,true);
- await waitFor(`document.readyState==='complete'&&typeof window.orderedLayersForFrame==='function'&&document.querySelector('.config-revision-dialog')`);
+ await evaluate(`matrixCheckForNewerConfig()`,true);
+ await waitFor(`document.readyState==='loading'&&document.querySelector('.config-revision-dialog')`);
  const conflict=await evaluate(`({title:document.querySelector('.config-revision-dialog h2').textContent,buttons:[...document.querySelectorAll('.config-revision-dialog button')].map(button=>button.textContent),disabled:document.querySelector('#save-config').disabled,draft:document.querySelector('.custom-module-card[data-id="custom_basic_text"] [data-field="text"]').value})`);
  await evaluate(`document.querySelectorAll('.config-revision-dialog button')[1].click();true`);
- await waitFor(`!document.querySelector('.config-revision-dialog')&&!matrixRecoveryPending`);
+ await waitFor(`document.readyState==='loading'&&!document.querySelector('.config-revision-dialog')&&!matrixRecoveryPending`);
+ const beforeReadinessPreviewBoundary=await fetch(`http://127.0.0.1:${appPort}/preview-boundary-before-readiness`).then(response=>response.json());
+ const beforeRelease=await evaluate(`({ready:document.readyState,canvasReady:globalThis.matrixCustomCanvasReady,editorsReady:matrixEditorsReady})`);
+ await fetch(`http://127.0.0.1:${appPort}/release-canvas-asset`).then(response=>response.json());
+ await waitFor(`document.readyState==='complete'&&typeof window.orderedLayersForFrame==='function'&&!document.querySelector('.config-revision-dialog')&&!matrixRecoveryPending`);
  const after=await evaluate(`({disabled:document.querySelector('#save-config').disabled,status:document.querySelector('#message').textContent,editors:[...document.querySelectorAll('.custom-module-card')].map(card=>card.dataset.editorType||'basic'),draft:{name:document.querySelector('.custom-module-card[data-id="custom_basic_text"] [data-field="name"]').value,text:document.querySelector('.custom-module-card[data-id="custom_basic_text"] [data-field="text"]').value,x:document.querySelector('.custom-module-card[data-id="custom_basic_text"] [data-field="x"]').value},advanced:JSON.stringify(customModules.find(module=>module.type==='canvas')),provisionalCanvasSerializations:globalThis.__provisionalCanvasSerializations,configBodyCalls:globalThis.__configBodyCalls})`);
  const normal=await evaluate(`saveConfig()`,true);
- console.log(JSON.stringify({during,afterRestart,afterEditPreview,direct,conflict,after,normal}));
+ const afterReadinessPreviewBoundary=await fetch(`http://127.0.0.1:${appPort}/preview-boundary-after-readiness`).then(response=>response.json());
+ console.log(JSON.stringify({during,afterRestart,afterEditPreview,direct,beforeReadinessPreviewBoundary,beforeRelease,conflict,after,normal,afterReadinessPreviewBoundary}));
 }finally{socket.close()}
 """
         report = self.run_live_chromium_probe(
             probe.replace("process.argv[2]", json.dumps(str(server.server_port))), timeout=35,
         )
+        with preview_lock:
+            observed_previews = copy.deepcopy(previewed)
         self.assertEqual(report["during"]["ready"], "loading", report)
         self.assertTrue(report["during"]["disabled"], report)
         self.assertEqual(report["during"]["status"], "Finishing editor setup before saving.", report)
@@ -2187,7 +2218,13 @@ try{
         self.assertEqual(report["afterEditPreview"]["configBodyCalls"], 0, report)
         self.assertEqual(report["afterEditPreview"]["mode"], "edit", report)
         self.assertEqual(report["afterEditPreview"]["modules"][0], expected_modules[0], report)
-        self.assertEqual(previewed, [], {"report": report, "previewed": previewed})
+        self.assertEqual(report["beforeReadinessPreviewBoundary"]["count"], 0, report)
+        self.assertEqual(report["beforeRelease"], {
+            "ready": "loading", "canvasReady": False, "editorsReady": False,
+        }, report)
+        self.assertEqual(preview_boundaries["before_readiness"], [], {
+            "report": report, "preview_boundaries": preview_boundaries,
+        })
         self.assertEqual(report["direct"], {
             "saved": False, "warning": "Finish loading the configuration editors before saving."
         }, report)
@@ -2206,6 +2243,23 @@ try{
         self.assertEqual(report["after"]["provisionalCanvasSerializations"], 0, report)
         self.assertTrue(report["normal"]["saved"], report)
         self.assertEqual(posted, [{**posted[0], "custom_modules": [expected_modules[0], expected_basic]}])
+        self.assertEqual(
+            report["afterReadinessPreviewBoundary"]["count"],
+            len(preview_boundaries["after_readiness"]),
+            report,
+        )
+        self.assertEqual(
+            [preview_record["phase"] for preview_record in observed_previews],
+            ["released"] * len(observed_previews),
+            {"report": report, "previewed": observed_previews},
+        )
+        for preview_record in observed_previews:
+            preview_payload = preview_record["payload"]
+            self.assertEqual(
+                preview_payload["config"]["custom_modules"],
+                [expected_modules[0], expected_basic],
+                {"report": report, "preview_payload": preview_payload},
+            )
 
     @unittest.skipUnless(shutil.which("node"), "Node.js is required")
     @unittest.skipUnless(
