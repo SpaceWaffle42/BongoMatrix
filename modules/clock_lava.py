@@ -84,7 +84,8 @@ def pick_palette(matrix, lava_config=None):
     )
     if not choices:
         return None
-    selected = random.choice(choices)
+    # Non-cryptographic randomness selects visual colour variation only.
+    selected = random.choice(choices)  # nosemgrep: bandit.B311
     return tuple(
         matrix.colour_rgb(value) if value.startswith("#") else matrix.colour(value)
         for value in selected
