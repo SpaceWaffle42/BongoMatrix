@@ -1961,6 +1961,84 @@ class PhysicalVerifierTests(unittest.TestCase):
             [("brightness-attempt", 1), ("clear-attempt",), ("swap-attempt",)],
         )
 
+    def test_verifier_preflight_retries_transient_http_unreadiness_before_mutation(self):
+        verifier = load_deploy_module("matrix_ci_physical_verifier")
+        ready = iter((False, False, True))
+        sleeps = []
+        ops = verifier.ApplianceOps()
+        original_http_ready = ops.http_ready
+        old_sleep = verifier.time.sleep
+        ops.http_ready = lambda: next(ready)
+        verifier.time.sleep = sleeps.append
+        try:
+            self.assertTrue(ops.initial_ready())
+        finally:
+            ops.http_ready = original_http_ready
+            verifier.time.sleep = old_sleep
+        self.assertEqual(sleeps, [1, 1])
+
+    def test_verifier_preflight_exhaustion_is_bounded_and_skips_matrix_exercise(self):
+        verifier = load_deploy_module("matrix_ci_physical_verifier")
+        probes = []
+        sleeps = []
+        ops = verifier.ApplianceOps()
+        original_http_ready = ops.http_ready
+        old_sleep = verifier.time.sleep
+        ops.http_ready = lambda: (probes.append("probe") or False)
+        verifier.time.sleep = sleeps.append
+        try:
+            self.assertFalse(ops.initial_ready())
+        finally:
+            ops.http_ready = original_http_ready
+            verifier.time.sleep = old_sleep
+        self.assertEqual(len(probes), 12)
+        self.assertEqual(sleeps, [1] * 11)
+
+        events = []
+
+        class ExhaustedPreflightOps(FakeOps):
+            def initial_ready(self):
+                self.events.append(("http", "bounded-initial-exhausted"))
+                return False
+
+        report = verifier.run_verification(
+            "c" * 40,
+            "456",
+            ops=ExhaustedPreflightOps(events),
+            lock_factory=lambda: FakeLock(events),
+            matrix_factory=lambda: (events.append(("matrix", "create")) or FakeMatrix(events)),
+        )
+        self.assertEqual(report["PHYSICAL_DEVICE_ACCEPTANCE"], "FAIL")
+        self.assertNotIn(("matrix", "create"), events)
+
+    def test_verification_uses_bounded_initial_readiness_before_stopping_production(self):
+        verifier = load_deploy_module("matrix_ci_physical_verifier")
+        events = []
+
+        class TransientPreflightOps(FakeOps):
+            def __getattribute__(self, name):
+                if name == "http_ready":
+                    raise AssertionError("bounded initial readiness must not require http_ready")
+                return super().__getattribute__(name)
+
+            def initial_ready(self):
+                self.events.append(("http", "bounded-initial-ready"))
+                return True
+
+        ops = TransientPreflightOps(events)
+        report = verifier.run_verification(
+            "b" * 40,
+            "455",
+            ops=ops,
+            lock_factory=lambda: FakeLock(events),
+            matrix_factory=lambda: FakeMatrix(events),
+        )
+
+        self.assertEqual(report["PHYSICAL_DEVICE_ACCEPTANCE"], "PASS")
+        self.assertIn(("http", "bounded-initial-ready"), events)
+        self.assertNotIn(("http", "single-probe-would-fail"), events)
+        self.assertIn(("service", "stop"), events)
+
     def test_lock_contention_writes_acceptance_fail_and_leaves_recovery_to_unit(self):
         verifier = load_deploy_module("matrix_ci_physical_verifier")
         events = []

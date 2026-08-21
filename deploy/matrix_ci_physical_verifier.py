@@ -42,6 +42,7 @@ MAX_STATE_DEPTH = 32
 MAX_HTTP_STATUS_BYTES = 256
 SERVICE_STOP_WAIT_SECONDS = 100
 SERVICE_READY_WAIT_SECONDS = 60
+INITIAL_READY_ATTEMPTS = 12
 RENAME_NOREPLACE = 1
 _TEMPORARY_SEQUENCE = itertools.count()
 _STATE_DIGEST_DOMAIN = b"matrix-state-tree\x00schema-v1\x00"
@@ -780,6 +781,14 @@ class ApplianceOps:
                 except OSError:
                     pass
 
+    def initial_ready(self) -> bool:
+        for attempt in range(INITIAL_READY_ATTEMPTS):
+            if self.http_ready():
+                return True
+            if attempt + 1 < INITIAL_READY_ATTEMPTS:
+                time.sleep(1)
+        return False
+
     def snapshot(self) -> dict[str, str]:
         return {
             "boot": Path("/proc/sys/kernel/random/boot_id").read_text(encoding="ascii").strip(),
@@ -933,7 +942,10 @@ def run_verification(sha: str, pipeline_id: str, *, ops=None, lock_factory=None,
     before = None
     active = ops.service_active()
     if active:
-        if not ops.http_ready():
+        initial_ready = getattr(ops, "initial_ready", None)
+        if initial_ready is None:
+            initial_ready = ops.http_ready
+        if not initial_ready():
             failure = RuntimeError("production service must be HTTP ready before verification")
         try:
             # The systemd unit owns recovery before this first mutating operation.
