@@ -13,14 +13,16 @@ import itertools
 
 import os
 import re
+import select
 import signal
+import socket
 import stat
 import subprocess
 import sys
 import time
 from pathlib import Path
 from typing import Callable
-from urllib.request import urlopen
+
 
 SERVICE = "matrix-web.service"
 APP_ROOT = Path("/home/admin/matrix")
@@ -37,6 +39,9 @@ MAX_STATE_FILE_BYTES = 1024 * 1024
 MAX_STATE_AGGREGATE_BYTES = 2 * 1024 * 1024
 MAX_STATE_ENTRIES = 256
 MAX_STATE_DEPTH = 32
+MAX_HTTP_STATUS_BYTES = 256
+SERVICE_STOP_WAIT_SECONDS = 100
+SERVICE_READY_WAIT_SECONDS = 60
 RENAME_NOREPLACE = 1
 _TEMPORARY_SEQUENCE = itertools.count()
 _STATE_DIGEST_DOMAIN = b"matrix-state-tree\x00schema-v1\x00"
@@ -199,8 +204,12 @@ def _open_temporary_namespace(runtime_fd, name):
     return fd
 
 
-def _run(*argv: str, check: bool = True) -> subprocess.CompletedProcess:
-    return subprocess.run(argv, check=check, text=True, capture_output=True, timeout=15)
+def _run(
+    *argv: str, check: bool = True, timeout: float = 15
+) -> subprocess.CompletedProcess:
+    return subprocess.run(
+        argv, check=check, text=True, capture_output=True, timeout=timeout
+    )
 
 
 def _stable_state_identity(info):
@@ -693,15 +702,83 @@ def _load_fixed_rgbmatrix():
 
 
 class ApplianceOps:
-    def service_active(self) -> bool:
-        return _run("/bin/systemctl", "is-active", "--quiet", SERVICE, check=False).returncode == 0
+    def service_active(self, *, timeout: float = 15) -> bool:
+        return _run(
+            "/bin/systemctl", "is-active", "--quiet", SERVICE,
+            check=False, timeout=timeout,
+        ).returncode == 0
 
-    def http_ready(self) -> bool:
+    def http_ready(self, *, timeout: float = 2, deadline: float | None = None) -> bool:
+        operation_deadline = time.monotonic() + timeout
+        if deadline is not None:
+            operation_deadline = min(operation_deadline, deadline)
+        connection = None
         try:
-            with urlopen("http://127.0.0.1:5000/", timeout=2) as response:
-                return response.status in (200, 302)
+            connection = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            connection.setblocking(False)
+            result = connection.connect_ex(("127.0.0.1", 5000))
+            if result not in (0, errno.EINPROGRESS, errno.EWOULDBLOCK, errno.EALREADY):
+                return False
+            if result:
+                remaining = operation_deadline - time.monotonic()
+                if remaining <= 0:
+                    return False
+                _, writable, exceptional = select.select(
+                    [], [connection], [connection], remaining
+                )
+                if exceptional or not writable:
+                    return False
+                if connection.getsockopt(socket.SOL_SOCKET, socket.SO_ERROR):
+                    return False
+
+            request = memoryview(
+                b"GET / HTTP/1.0\r\nHost: 127.0.0.1\r\nConnection: close\r\n\r\n"
+            )
+            while request:
+                remaining = operation_deadline - time.monotonic()
+                if remaining <= 0:
+                    return False
+                _, writable, exceptional = select.select(
+                    [], [connection], [connection], remaining
+                )
+                if exceptional or not writable:
+                    return False
+                sent = connection.send(request)
+                if sent <= 0:
+                    return False
+                request = request[sent:]
+
+            status = bytearray()
+            while len(status) < MAX_HTTP_STATUS_BYTES:
+                remaining = operation_deadline - time.monotonic()
+                if remaining <= 0:
+                    return False
+                readable, _, exceptional = select.select(
+                    [connection], [], [connection], remaining
+                )
+                if exceptional or not readable:
+                    return False
+                chunk = connection.recv(MAX_HTTP_STATUS_BYTES - len(status))
+                if not chunk:
+                    return False
+                status.extend(chunk)
+                if time.monotonic() >= operation_deadline:
+                    return False
+                marker = status.find(b"\r\n")
+                if marker >= 0:
+                    line = bytes(status[:marker])
+                    return re.fullmatch(
+                        rb"HTTP/1\.[01] (?:200|302)(?: [^\r\n]*)?", line
+                    ) is not None
+            return False
         except Exception:
             return False
+        finally:
+            if connection is not None:
+                try:
+                    connection.close()
+                except OSError:
+                    pass
 
     def snapshot(self) -> dict[str, str]:
         return {
@@ -712,17 +789,91 @@ class ApplianceOps:
         }
 
     def stop_service(self) -> None:
-        _run("/bin/systemctl", "stop", SERVICE)
+        deadline = time.monotonic() + SERVICE_STOP_WAIT_SECONDS
+
+        def remaining_timeout():
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                raise RuntimeError("matrix-web.service stop wait timed out")
+            return min(15, remaining)
+
+        result = _run(
+            "/bin/systemctl", "stop", "--no-block", SERVICE,
+            check=False, timeout=remaining_timeout(),
+        )
+        if result.returncode != 0:
+            raise RuntimeError("matrix-web.service stop request failed")
+        while time.monotonic() < deadline:
+            result = _run(
+                "/bin/systemctl", "show", SERVICE,
+                "-p", "ActiveState", "-p", "Job",
+                check=False, timeout=remaining_timeout(),
+            )
+            if result.returncode != 0:
+                raise RuntimeError("matrix-web.service stop state unavailable")
+            records = {}
+            for line in result.stdout.splitlines():
+                if "=" not in line:
+                    raise RuntimeError("matrix-web.service stop state malformed")
+                name, value = line.split("=", 1)
+                if name in records:
+                    raise RuntimeError("matrix-web.service stop state malformed")
+                records[name] = value
+            if set(records) != {"ActiveState", "Job"}:
+                raise RuntimeError("matrix-web.service stop state malformed")
+            job = records["Job"]
+            if job == "":
+                if records["ActiveState"] != "inactive":
+                    raise RuntimeError("matrix-web.service did not stop")
+                return
+            if re.fullmatch(r"[1-9][0-9]*", job) is None:
+                raise RuntimeError("matrix-web.service stop state malformed")
+            remaining = deadline - time.monotonic()
+            if remaining > 0:
+                time.sleep(min(0.05, remaining))
+        raise RuntimeError("matrix-web.service stop wait timed out")
 
     def start_service(self) -> None:
-        _run("/bin/systemctl", "start", SERVICE)
+        self._ready_deadline = time.monotonic() + SERVICE_READY_WAIT_SECONDS
+        remaining = self._ready_deadline - time.monotonic()
+        if remaining <= 0:
+            del self._ready_deadline
+            raise RuntimeError("matrix-web.service start request deadline expired")
+        try:
+            result = _run(
+                "/bin/systemctl", "start", "--no-block", SERVICE,
+                check=False,
+                timeout=min(15, remaining),
+            )
+        except BaseException:
+            del self._ready_deadline
+            raise
+        if result.returncode != 0:
+            del self._ready_deadline
+            raise RuntimeError("matrix-web.service start request failed")
 
     def wait_ready(self) -> None:
-        for _ in range(120):
-            if self.service_active() and self.http_ready():
-                return
-            time.sleep(0.25)
-        raise RuntimeError("matrix-web.service did not recover with HTTP ready")
+        deadline = getattr(self, "_ready_deadline", None)
+        if deadline is None:
+            deadline = time.monotonic() + SERVICE_READY_WAIT_SECONDS
+        try:
+            while True:
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    raise RuntimeError("matrix-web.service did not recover")
+                if self.service_active(timeout=min(15, remaining)):
+                    remaining = deadline - time.monotonic()
+                    if remaining <= 0:
+                        raise RuntimeError("matrix-web.service did not recover")
+                    if self.http_ready(timeout=min(2, remaining), deadline=deadline):
+                        return
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    raise RuntimeError("matrix-web.service did not recover")
+                time.sleep(min(0.25, remaining))
+        finally:
+            if hasattr(self, "_ready_deadline"):
+                del self._ready_deadline
 
 
 def exercise_matrix(matrix_factory: Callable):

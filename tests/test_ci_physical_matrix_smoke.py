@@ -2255,6 +2255,348 @@ class PhysicalVerifierTests(unittest.TestCase):
         self.assertEqual(len(calls), 1)
         self.assertGreater(calls[0][1]["timeout"], 0)
 
+    def test_verifier_stop_deadline_includes_request_and_caps_each_poll_to_remaining_time(self):
+        verifier = load_deploy_module("matrix_ci_physical_verifier")
+        now = [0.0]
+        calls = []
+        original = verifier._run
+        old_monotonic = verifier.time.monotonic
+        old_sleep = verifier.time.sleep
+
+        def fake_run(*args, check=True, timeout=None):
+            calls.append((args, check, timeout))
+            if args[1] == "stop":
+                now[0] = 90.0
+                return types.SimpleNamespace(returncode=0, stdout="")
+            return types.SimpleNamespace(
+                returncode=0, stdout="ActiveState=inactive\nJob=\n"
+            )
+
+        setattr(verifier, "_run", fake_run)
+        verifier.time.monotonic = lambda: now[0]
+        verifier.time.sleep = lambda _seconds: None
+        try:
+            verifier.ApplianceOps().stop_service()
+        finally:
+            setattr(verifier, "_run", original)
+            verifier.time.monotonic = old_monotonic
+            verifier.time.sleep = old_sleep
+
+        self.assertEqual(calls[0][2], 15)
+        self.assertEqual(calls[1][2], 10)
+
+    def test_verifier_http_probe_rejects_slow_trickle_past_end_to_end_deadline(self):
+        verifier = load_deploy_module("matrix_ci_physical_verifier")
+        now = [0.0]
+        select_timeouts = []
+        response = iter(b"HTTP/1.1 200 OK\r\n")
+        old_monotonic = verifier.time.monotonic
+        old_urlopen = getattr(verifier, "urlopen", None)
+        old_socket = getattr(verifier, "socket", None)
+        old_select = getattr(verifier, "select", None)
+
+        class SlowResponse:
+            status = 200
+
+            def __enter__(self):
+                now[0] = 1.2
+                return self
+
+            def __exit__(self, *_args):
+                return False
+
+        class FakeSocket:
+            def setblocking(self, _blocking):
+                pass
+
+            def connect_ex(self, _address):
+                return verifier.errno.EINPROGRESS
+
+            def getsockopt(self, *_args):
+                return 0
+
+            def send(self, data):
+                return len(data)
+
+            def recv(self, _size):
+                now[0] += 0.6
+                return bytes((next(response),))
+
+            def close(self):
+                pass
+
+        fake_socket_module = types.SimpleNamespace(
+            AF_INET=2,
+            SOCK_STREAM=1,
+            SOL_SOCKET=1,
+            SO_ERROR=4,
+            socket=lambda *_args: FakeSocket(),
+        )
+
+        def fake_select(readable, writable, exceptional, timeout):
+            select_timeouts.append(timeout)
+            if writable:
+                return [], writable, []
+            return readable, [], []
+
+        setattr(verifier, "socket", fake_socket_module)
+        setattr(verifier, "select", types.SimpleNamespace(select=fake_select))
+        verifier.time.monotonic = lambda: now[0]
+        setattr(verifier, "urlopen", lambda *_args, **_kwargs: SlowResponse())
+        try:
+            self.assertFalse(verifier.ApplianceOps().http_ready(timeout=1))
+        finally:
+            verifier.time.monotonic = old_monotonic
+            if old_urlopen is None:
+                delattr(verifier, "urlopen")
+            else:
+                setattr(verifier, "urlopen", old_urlopen)
+            if old_socket is None:
+                delattr(verifier, "socket")
+            else:
+                setattr(verifier, "socket", old_socket)
+            if old_select is None:
+                delattr(verifier, "select")
+            else:
+                setattr(verifier, "select", old_select)
+        self.assertTrue(select_timeouts)
+        self.assertLessEqual(now[0], 1.2)
+
+    def test_verifier_http_probe_close_failure_preserves_probe_result(self):
+        verifier = load_deploy_module("matrix_ci_physical_verifier")
+        old_socket = verifier.socket
+        old_select = verifier.select
+
+        class CloseFailingSocket:
+            def __init__(self, response):
+                self.response = response
+
+            def setblocking(self, _blocking):
+                pass
+
+            def connect_ex(self, _address):
+                return 0
+
+            def send(self, data):
+                return len(data)
+
+            def recv(self, _size):
+                response, self.response = self.response, b""
+                return response
+
+            def close(self):
+                raise OSError("close failed")
+
+        try:
+            for response, expected in (
+                (b"HTTP/1.1 200 OK\r\n", True),
+                (b"HTTP/1.1 503 Unavailable\r\n", False),
+            ):
+                with self.subTest(response=response):
+                    fake_socket = CloseFailingSocket(response)
+                    setattr(
+                        verifier,
+                        "socket",
+                        types.SimpleNamespace(
+                            AF_INET=2,
+                            SOCK_STREAM=1,
+                            SOL_SOCKET=1,
+                            SO_ERROR=4,
+                            socket=lambda *_args: fake_socket,
+                        ),
+                    )
+                    setattr(
+                        verifier,
+                        "select",
+                        types.SimpleNamespace(
+                            select=lambda readable, writable, exceptional, _timeout: (
+                                readable, writable, []
+                            )
+                        ),
+                    )
+                    self.assertEqual(
+                        verifier.ApplianceOps().http_ready(timeout=1), expected
+                    )
+        finally:
+            setattr(verifier, "socket", old_socket)
+            setattr(verifier, "select", old_select)
+
+    def test_verifier_start_exceptions_clear_shared_readiness_deadline(self):
+        verifier = load_deploy_module("matrix_ci_physical_verifier")
+        original = verifier._run
+
+        try:
+            for error in (
+                subprocess.TimeoutExpired(("systemctl", "start"), 15),
+                OSError("start failed"),
+            ):
+                with self.subTest(error=type(error).__name__):
+                    ops = verifier.ApplianceOps()
+
+                    def fail_start(*_args, **_kwargs):
+                        raise error
+
+                    setattr(verifier, "_run", fail_start)
+                    with self.assertRaises(type(error)):
+                        ops.start_service()
+                    self.assertFalse(hasattr(ops, "_ready_deadline"))
+        finally:
+            setattr(verifier, "_run", original)
+
+    def test_verifier_start_and_readiness_share_one_capped_wall_clock_budget(self):
+        verifier = load_deploy_module("matrix_ci_physical_verifier")
+        now = [0.0]
+        command_calls = []
+        http_timeouts = []
+        http_deadlines = []
+        sleeps = []
+        original = verifier._run
+        old_monotonic = verifier.time.monotonic
+        old_sleep = verifier.time.sleep
+        ops = verifier.ApplianceOps()
+        original_http_ready = ops.http_ready
+
+        def fake_run(*args, check=True, timeout=None):
+            command_calls.append((args, check, timeout))
+            if args[1] == "start":
+                now[0] = 50.0
+                return types.SimpleNamespace(returncode=0, stdout="")
+            now[0] = 55.0
+            return types.SimpleNamespace(returncode=0, stdout="")
+
+        def fake_http_ready(*, timeout=2, deadline=None):
+            http_timeouts.append(timeout)
+            http_deadlines.append(deadline)
+            now[0] = 59.9
+            return False
+
+        setattr(verifier, "_run", fake_run)
+        verifier.time.monotonic = lambda: now[0]
+        verifier.time.sleep = lambda seconds: (
+            sleeps.append(seconds), now.__setitem__(0, now[0] + seconds)
+        )[-1]
+        ops.http_ready = fake_http_ready
+        try:
+            ops.start_service()
+            with self.assertRaisesRegex(RuntimeError, "did not recover"):
+                ops.wait_ready()
+        finally:
+            setattr(verifier, "_run", original)
+            verifier.time.monotonic = old_monotonic
+            verifier.time.sleep = old_sleep
+            ops.http_ready = original_http_ready
+
+        self.assertEqual(command_calls[0][2], 15)
+        self.assertEqual(command_calls[1][2], 10)
+        self.assertEqual(http_timeouts, [2])
+        self.assertEqual(http_deadlines, [60])
+        self.assertEqual(len(sleeps), 1)
+        self.assertAlmostEqual(sleeps[0], 0.1)
+        self.assertLessEqual(now[0], 60)
+
+    def test_verifier_start_is_nonblocking_so_recovery_wait_owns_the_deadline(self):
+        verifier = load_deploy_module("matrix_ci_physical_verifier")
+        calls = []
+        original = verifier._run
+
+        def fake_run(*args, check=True, timeout=None):
+            calls.append((args, check))
+            return types.SimpleNamespace(returncode=0, stdout="")
+
+        setattr(verifier, "_run", fake_run)
+        try:
+            verifier.ApplianceOps().start_service()
+        finally:
+            setattr(verifier, "_run", original)
+
+        self.assertEqual(
+            calls,
+            [(("/bin/systemctl", "start", "--no-block", verifier.SERVICE), False)],
+        )
+
+    def test_verifier_stop_is_nonblocking_and_waits_for_systemd257_terminal_state(self):
+        verifier = load_deploy_module("matrix_ci_physical_verifier")
+        calls = []
+        states = iter((
+            "Job=74391\nActiveState=deactivating\n",
+            "Job=\nActiveState=inactive\n",
+        ))
+        now = [0.0]
+        original = verifier._run
+        old_monotonic = verifier.time.monotonic
+        old_sleep = verifier.time.sleep
+
+        def fake_run(*args, check=True, timeout=None):
+            calls.append((args, check))
+            if args[1] == "stop":
+                return types.SimpleNamespace(returncode=0, stdout="")
+            return types.SimpleNamespace(returncode=0, stdout=next(states))
+
+        setattr(verifier, "_run", fake_run)
+        verifier.time.monotonic = lambda: now[0]
+        verifier.time.sleep = lambda seconds: now.__setitem__(0, now[0] + seconds)
+        try:
+            verifier.ApplianceOps().stop_service()
+        finally:
+            setattr(verifier, "_run", original)
+            verifier.time.monotonic = old_monotonic
+            verifier.time.sleep = old_sleep
+
+        self.assertEqual(
+            calls,
+            [
+                (("/bin/systemctl", "stop", "--no-block", verifier.SERVICE), False),
+                (("/bin/systemctl", "show", verifier.SERVICE, "-p", "ActiveState", "-p", "Job"), False),
+                (("/bin/systemctl", "show", verifier.SERVICE, "-p", "ActiveState", "-p", "Job"), False),
+            ],
+        )
+
+    def test_verifier_stop_and_start_state_fail_closed(self):
+        verifier = load_deploy_module("matrix_ci_physical_verifier")
+        original = verifier._run
+        old_monotonic = verifier.time.monotonic
+        old_sleep = verifier.time.sleep
+
+        def run_stop(*, stop_rc=0, show_rc=0, state="ActiveState=inactive\nJob=\n"):
+            now = [0.0]
+
+            def fake_run(*args, check=True, timeout=None):
+                if args[1] == "stop":
+                    return types.SimpleNamespace(returncode=stop_rc, stdout="")
+                return types.SimpleNamespace(returncode=show_rc, stdout=state)
+
+            setattr(verifier, "_run", fake_run)
+            verifier.time.monotonic = lambda: now[0]
+            verifier.time.sleep = lambda seconds: now.__setitem__(0, now[0] + seconds)
+            verifier.ApplianceOps().stop_service()
+
+        try:
+            with self.assertRaisesRegex(RuntimeError, "stop request failed"):
+                run_stop(stop_rc=1)
+            with self.assertRaisesRegex(RuntimeError, "stop state unavailable"):
+                run_stop(show_rc=1)
+            for state in (
+                "ActiveState=inactive\n",
+                "ActiveState=inactive\nJob=\nJob=\n",
+                "ActiveState=active\nJob=\n",
+                "ActiveState=inactive\nJob=0\n",
+                "ActiveState=inactive\nJob=/org/freedesktop/systemd1/job/1\n",
+            ):
+                with self.subTest(state=state):
+                    with self.assertRaisesRegex(RuntimeError, "stop state malformed|did not stop"):
+                        run_stop(state=state)
+
+            def failed_start(*args, check=True, timeout=None):
+                return types.SimpleNamespace(returncode=1, stdout="")
+
+            setattr(verifier, "_run", failed_start)
+            with self.assertRaisesRegex(RuntimeError, "start request failed"):
+                verifier.ApplianceOps().start_service()
+        finally:
+            setattr(verifier, "_run", original)
+            verifier.time.monotonic = old_monotonic
+            verifier.time.sleep = old_sleep
+
     def test_dispatcher_stop_is_nonblocking_and_waits_for_pid1_terminal_state(self):
         dispatcher = load_deploy_module("matrix_ci_physical_dispatcher")
         calls = []
