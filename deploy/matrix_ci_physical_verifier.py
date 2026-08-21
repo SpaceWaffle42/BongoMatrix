@@ -13,14 +13,16 @@ import itertools
 
 import os
 import re
+import select
 import signal
+import socket
 import stat
 import subprocess
 import sys
 import time
 from pathlib import Path
 from typing import Callable
-from urllib.request import urlopen
+
 
 SERVICE = "matrix-web.service"
 APP_ROOT = Path("/home/admin/matrix")
@@ -28,6 +30,8 @@ BINDINGS_ROOT = Path("/usr/local/lib/matrix-ci-python")
 LABELS_FILE = Path("/run/matrix-ci-physical/claim")
 CLAIM_FILE = LABELS_FILE
 REPORT_FILE = Path("/run/matrix-ci-physical/report")
+REPORT_LOCK_FILE = Path("/run/matrix-ci-physical/report.lock")
+REPORT_COMMIT_LOCK_FILE = Path("/run/matrix-ci-physical/report.commit.lock")
 REPORT_TEMPORARIES = "report-temporaries"
 LOCK_FILE = "/run/matrix-display/matrix-display.lock"
 EXPECTED_DIMENSIONS = (64, 32)
@@ -37,12 +41,29 @@ MAX_STATE_FILE_BYTES = 1024 * 1024
 MAX_STATE_AGGREGATE_BYTES = 2 * 1024 * 1024
 MAX_STATE_ENTRIES = 256
 MAX_STATE_DEPTH = 32
+MAX_HTTP_STATUS_BYTES = 256
+PREFLIGHT_WAIT_SECONDS = 35
+SERVICE_STOP_WAIT_SECONDS = 40
+SERVICE_READY_WAIT_SECONDS = 60
+INITIAL_READY_ATTEMPTS = 12
+REPORT_PUBLICATION_SECONDS = 80
 RENAME_NOREPLACE = 1
 _TEMPORARY_SEQUENCE = itertools.count()
 _STATE_DIGEST_DOMAIN = b"matrix-state-tree\x00schema-v1\x00"
 _STATE_RECORD_ROOT = 1
 _STATE_RECORD_DIRECTORY = 2
 _STATE_RECORD_FILE = 3
+
+
+class ReportDeadlineExceeded(RuntimeError):
+    pass
+
+
+def _require_report_time(deadline: float) -> float:
+    remaining = deadline - time.monotonic()
+    if remaining <= 0:
+        raise ReportDeadlineExceeded("physical verifier report publication deadline exhausted")
+    return remaining
 
 _CLEANUP_WARNINGS = {
     "unlink": "physical verifier cleanup warning: temporary unlink failed\n",
@@ -199,8 +220,60 @@ def _open_temporary_namespace(runtime_fd, name):
     return fd
 
 
-def _run(*argv: str, check: bool = True) -> subprocess.CompletedProcess:
-    return subprocess.run(argv, check=check, text=True, capture_output=True, timeout=15)
+def _open_report_protocol_lock(runtime_fd, path, description):
+    fd = os.open(
+        path.name,
+        os.O_RDWR | os.O_CREAT | os.O_NOFOLLOW | os.O_CLOEXEC,
+        0o600,
+        dir_fd=runtime_fd,
+    )
+    info = os.fstat(fd)
+    if (
+        not stat.S_ISREG(info.st_mode)
+        or info.st_uid != 0
+        or info.st_gid != 0
+        or stat.S_IMODE(info.st_mode) != 0o600
+        or info.st_nlink != 1
+    ):
+        os.close(fd)
+        raise RuntimeError(f"unsafe physical verifier {description}")
+    return fd
+
+
+def _open_report_lock(runtime_fd):
+    return _open_report_protocol_lock(
+        runtime_fd, REPORT_LOCK_FILE, "report publication lock"
+    )
+
+
+def _open_report_commit_lock(runtime_fd):
+    return _open_report_protocol_lock(
+        runtime_fd, REPORT_COMMIT_LOCK_FILE, "report commit lock"
+    )
+
+
+def _rollback_published_report(runtime_fd, identity):
+    try:
+        current = os.stat(REPORT_FILE.name, dir_fd=runtime_fd, follow_symlinks=False)
+    except FileNotFoundError:
+        return
+    if (current.st_dev, current.st_ino) != identity:
+        raise RuntimeError("physical verifier published report identity changed")
+    os.unlink(REPORT_FILE.name, dir_fd=runtime_fd)
+    os.fsync(runtime_fd)
+    try:
+        os.stat(REPORT_FILE.name, dir_fd=runtime_fd, follow_symlinks=False)
+    except FileNotFoundError:
+        return
+    raise RuntimeError("physical verifier published report rollback failed")
+
+
+def _run(
+    *argv: str, check: bool = True, timeout: float = 15
+) -> subprocess.CompletedProcess:
+    return subprocess.run(
+        argv, check=check, text=True, capture_output=True, timeout=timeout
+    )
 
 
 def _stable_state_identity(info):
@@ -693,36 +766,209 @@ def _load_fixed_rgbmatrix():
 
 
 class ApplianceOps:
-    def service_active(self) -> bool:
-        return _run("/bin/systemctl", "is-active", "--quiet", SERVICE, check=False).returncode == 0
+    def service_active(self, *, timeout: float = 15) -> bool:
+        return _run(
+            "/bin/systemctl", "is-active", "--quiet", SERVICE,
+            check=False, timeout=timeout,
+        ).returncode == 0
 
-    def http_ready(self) -> bool:
+    def http_ready(self, *, timeout: float = 2, deadline: float | None = None) -> bool:
+        operation_deadline = time.monotonic() + timeout
+        if deadline is not None:
+            operation_deadline = min(operation_deadline, deadline)
+        connection = None
         try:
-            with urlopen("http://127.0.0.1:5000/", timeout=2) as response:
-                return response.status in (200, 302)
+            connection = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            connection.setblocking(False)
+            result = connection.connect_ex(("127.0.0.1", 5000))
+            if result not in (0, errno.EINPROGRESS, errno.EWOULDBLOCK, errno.EALREADY):
+                return False
+            if result:
+                remaining = operation_deadline - time.monotonic()
+                if remaining <= 0:
+                    return False
+                _, writable, exceptional = select.select(
+                    [], [connection], [connection], remaining
+                )
+                if exceptional or not writable:
+                    return False
+                if connection.getsockopt(socket.SOL_SOCKET, socket.SO_ERROR):
+                    return False
+
+            request = memoryview(
+                b"GET / HTTP/1.0\r\nHost: 127.0.0.1\r\nConnection: close\r\n\r\n"
+            )
+            while request:
+                remaining = operation_deadline - time.monotonic()
+                if remaining <= 0:
+                    return False
+                _, writable, exceptional = select.select(
+                    [], [connection], [connection], remaining
+                )
+                if exceptional or not writable:
+                    return False
+                sent = connection.send(request)
+                if sent <= 0:
+                    return False
+                request = request[sent:]
+
+            status = bytearray()
+            while len(status) < MAX_HTTP_STATUS_BYTES:
+                remaining = operation_deadline - time.monotonic()
+                if remaining <= 0:
+                    return False
+                readable, _, exceptional = select.select(
+                    [connection], [], [connection], remaining
+                )
+                if exceptional or not readable:
+                    return False
+                chunk = connection.recv(MAX_HTTP_STATUS_BYTES - len(status))
+                if not chunk:
+                    return False
+                status.extend(chunk)
+                if time.monotonic() >= operation_deadline:
+                    return False
+                marker = status.find(b"\r\n")
+                if marker >= 0:
+                    line = bytes(status[:marker])
+                    return re.fullmatch(
+                        rb"HTTP/1\.[01] (?:200|302)(?: [^\r\n]*)?", line
+                    ) is not None
+            return False
         except Exception:
             return False
+        finally:
+            if connection is not None:
+                try:
+                    connection.close()
+                except OSError:
+                    pass
 
-    def snapshot(self) -> dict[str, str]:
+    def initial_ready(self, *, deadline: float | None = None) -> bool:
+        if deadline is None:
+            deadline = time.monotonic() + PREFLIGHT_WAIT_SECONDS
+        for attempt in range(INITIAL_READY_ATTEMPTS):
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                return False
+            if self.http_ready(timeout=min(2, remaining), deadline=deadline):
+                return True
+            if attempt + 1 < INITIAL_READY_ATTEMPTS:
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    return False
+                time.sleep(min(1, remaining))
+        return False
+
+    def snapshot(self, *, deadline: float | None = None) -> dict[str, str]:
+        if deadline is None:
+            deadline = time.monotonic() + REPORT_PUBLICATION_SECONDS
+        _require_report_time(deadline)
+        boot = Path("/proc/sys/kernel/random/boot_id").read_text(encoding="ascii").strip()
+        _require_report_time(deadline)
+        data = _tree_digest(APP_ROOT / "data")
+        _require_report_time(deadline)
+        media = _tree_digest(APP_ROOT / "resources" / "media")
+        remaining = _require_report_time(deadline)
+        restarts = _run(
+            "/bin/systemctl", "show", SERVICE, "-p", "NRestarts", "--value",
+            timeout=min(15, remaining),
+        ).stdout.strip()
+        _require_report_time(deadline)
         return {
-            "boot": Path("/proc/sys/kernel/random/boot_id").read_text(encoding="ascii").strip(),
-            "data": _tree_digest(APP_ROOT / "data"),
-            "media": _tree_digest(APP_ROOT / "resources" / "media"),
-            "restarts": _run("/bin/systemctl", "show", SERVICE, "-p", "NRestarts", "--value").stdout.strip(),
+            "boot": boot,
+            "data": data,
+            "media": media,
+            "restarts": restarts,
         }
 
-    def stop_service(self) -> None:
-        _run("/bin/systemctl", "stop", SERVICE)
+    def stop_service(self, *, deadline: float | None = None) -> None:
+        if deadline is None:
+            deadline = time.monotonic() + SERVICE_STOP_WAIT_SECONDS
+
+        def remaining_timeout():
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                raise RuntimeError("matrix-web.service stop wait timed out")
+            return min(15, remaining)
+
+        result = _run(
+            "/bin/systemctl", "stop", "--no-block", SERVICE,
+            check=False, timeout=remaining_timeout(),
+        )
+        if result.returncode != 0:
+            raise RuntimeError("matrix-web.service stop request failed")
+        while time.monotonic() < deadline:
+            result = _run(
+                "/bin/systemctl", "show", SERVICE,
+                "-p", "ActiveState", "-p", "Job",
+                check=False, timeout=remaining_timeout(),
+            )
+            if result.returncode != 0:
+                raise RuntimeError("matrix-web.service stop state unavailable")
+            records = {}
+            for line in result.stdout.splitlines():
+                if "=" not in line:
+                    raise RuntimeError("matrix-web.service stop state malformed")
+                name, value = line.split("=", 1)
+                if name in records:
+                    raise RuntimeError("matrix-web.service stop state malformed")
+                records[name] = value
+            if set(records) != {"ActiveState", "Job"}:
+                raise RuntimeError("matrix-web.service stop state malformed")
+            job = records["Job"]
+            if job == "":
+                if records["ActiveState"] != "inactive":
+                    raise RuntimeError("matrix-web.service did not stop")
+                return
+            if re.fullmatch(r"[1-9][0-9]*", job) is None:
+                raise RuntimeError("matrix-web.service stop state malformed")
+            remaining = deadline - time.monotonic()
+            if remaining > 0:
+                time.sleep(min(0.05, remaining))
+        raise RuntimeError("matrix-web.service stop wait timed out")
 
     def start_service(self) -> None:
-        _run("/bin/systemctl", "start", SERVICE)
+        self._ready_deadline = time.monotonic() + SERVICE_READY_WAIT_SECONDS
+        remaining = self._ready_deadline - time.monotonic()
+        if remaining <= 0:
+            del self._ready_deadline
+            raise RuntimeError("matrix-web.service start request deadline expired")
+        try:
+            result = _run(
+                "/bin/systemctl", "start", "--no-block", SERVICE,
+                check=False,
+                timeout=min(15, remaining),
+            )
+        except BaseException:
+            del self._ready_deadline
+            raise
+        if result.returncode != 0:
+            del self._ready_deadline
+            raise RuntimeError("matrix-web.service start request failed")
 
     def wait_ready(self) -> None:
-        for _ in range(120):
-            if self.service_active() and self.http_ready():
-                return
-            time.sleep(0.25)
-        raise RuntimeError("matrix-web.service did not recover with HTTP ready")
+        deadline = getattr(self, "_ready_deadline", None)
+        if deadline is None:
+            deadline = time.monotonic() + SERVICE_READY_WAIT_SECONDS
+        try:
+            while True:
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    raise RuntimeError("matrix-web.service did not recover")
+                if self.service_active(timeout=min(15, remaining)):
+                    remaining = deadline - time.monotonic()
+                    if remaining <= 0:
+                        raise RuntimeError("matrix-web.service did not recover")
+                    if self.http_ready(timeout=min(2, remaining), deadline=deadline):
+                        return
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    raise RuntimeError("matrix-web.service did not recover")
+                time.sleep(min(0.25, remaining))
+        finally:
+            if hasattr(self, "_ready_deadline"):
+                del self._ready_deadline
 
 
 def exercise_matrix(matrix_factory: Callable):
@@ -776,32 +1022,64 @@ def _safe_error(error: BaseException) -> str:
     return "".join(character if " " <= character <= "~" else "?" for character in text)[:512] or "verification failed"
 
 
-def run_verification(sha: str, pipeline_id: str, *, ops=None, lock_factory=None, matrix_factory=None):
+def run_verification(
+    sha: str, pipeline_id: str, *, ops=None, lock_factory=None,
+    matrix_factory=None, deadline: float | None = None,
+):
     ops = ops or ApplianceOps()
+    if deadline is None:
+        deadline = time.monotonic() + REPORT_PUBLICATION_SECONDS
     failure = None
     before = None
-    active = ops.service_active()
+    remaining = _require_report_time(deadline)
+    preflight_deadline = min(deadline, time.monotonic() + PREFLIGHT_WAIT_SECONDS)
+    try:
+        active = ops.service_active(timeout=min(15, remaining))
+    except ReportDeadlineExceeded:
+        raise
+    except BaseException as error:
+        active = False
+        failure = error
+    _require_report_time(deadline)
     if active:
-        if not ops.http_ready():
+        initial_ready = getattr(ops, "initial_ready", None)
+        if initial_ready is None:
+            initial_ready = ops.http_ready
+            ready = initial_ready()
+        else:
+            ready = initial_ready(deadline=preflight_deadline)
+        _require_report_time(deadline)
+        if not ready:
             failure = RuntimeError("production service must be HTTP ready before verification")
+        stop_deadline = min(deadline, time.monotonic() + SERVICE_STOP_WAIT_SECONDS)
         try:
             # The systemd unit owns recovery before this first mutating operation.
-            ops.stop_service()
+            ops.stop_service(deadline=stop_deadline)
+        except ReportDeadlineExceeded:
+            raise
         except BaseException as error:
             failure = failure or error
-        if ops.service_active():
+        stop_remaining = stop_deadline - time.monotonic()
+        if stop_remaining <= 0:
+            raise ReportDeadlineExceeded("production service stop deadline exhausted")
+        if ops.service_active(timeout=min(15, stop_remaining)):
             # Never produce evidence while the root application can rewrite it.
             raise RuntimeError("production service remained active after stop")
+        _require_report_time(deadline)
         if failure is None:
             try:
-                before = ops.snapshot()
+                before = ops.snapshot(deadline=deadline)
+                _require_report_time(deadline)
+            except ReportDeadlineExceeded:
+                raise
             except BaseException as error:
                 failure = error
     else:
-        failure = RuntimeError("production service must be active before verification")
+        failure = failure or RuntimeError("production service must be active before verification")
 
     if failure is None:
         try:
+            _require_report_time(deadline)
             if lock_factory is None or matrix_factory is None:
                 lock_factory = lock_factory or FixedDisplayOwnershipLock
                 matrix_factory = matrix_factory or (
@@ -809,18 +1087,25 @@ def run_verification(sha: str, pipeline_id: str, *, ops=None, lock_factory=None,
                 )
             with lock_factory():
                 exercise_matrix(matrix_factory)
+            _require_report_time(deadline)
+        except ReportDeadlineExceeded:
+            raise
         except BaseException as error:
             failure = error
 
     if before is not None:
         try:
-            after = ops.snapshot()
+            after = ops.snapshot(deadline=deadline)
+            _require_report_time(deadline)
             if after != before:
                 raise RuntimeError(f"appliance state changed: before={before!r} after={after!r}")
+        except ReportDeadlineExceeded:
+            raise
         except BaseException as error:
             if failure is None:
                 failure = error
 
+    _require_report_time(deadline)
     report = {
         "SOURCE_SHA": sha,
         "PIPELINE_ID": pipeline_id,
@@ -904,20 +1189,32 @@ def _labels():
     return parts
 
 
-def _write_report(values):
+def _write_report(values, *, deadline: float | None = None):
+    def check_deadline():
+        if deadline is not None:
+            _require_report_time(deadline)
+
+    check_deadline()
     payload = "".join(f"{key}={value}\n" for key, value in values.items()).encode()
     if len(payload) > MAX_REPORT_BYTES:
         raise RuntimeError("physical verifier report exceeded bound")
     runtime_fd = _open_runtime_directory(REPORT_FILE.parent)
+    check_deadline()
+    report_lock_fd = _open_report_lock(runtime_fd)
+    fcntl.flock(report_lock_fd, fcntl.LOCK_EX)
+    commit_lock_fd = _open_report_commit_lock(runtime_fd)
+    check_deadline()
     temporary_fd = _open_temporary_namespace(runtime_fd, REPORT_TEMPORARIES)
     temporary_name = None
     fd = None
     temporary_identity = None
+    published = False
     try:
         try:
             temporary_name, fd = _create_unique_temporary(
                 temporary_fd, REPORT_FILE.name + ".tmp"
             )
+            check_deadline()
         except OSError as error:
             raise RuntimeError("unsafe physical verifier report publication") from error
         info = os.fstat(fd)
@@ -932,22 +1229,46 @@ def _write_report(values):
         temporary_identity = (info.st_dev, info.st_ino)
         written = 0
         while written < len(payload):
+            check_deadline()
             count = os.write(fd, payload[written:])
             if count <= 0:
                 raise RuntimeError("physical verifier report write made no progress")
             written += count
         os.fsync(fd)
+        check_deadline()
         os.close(fd)
         fd = None
         try:
             _rename_noreplace(
                 temporary_name, REPORT_FILE.name, temporary_fd, runtime_fd
             )
+            published = True
+            check_deadline()
         except OSError as error:
             raise RuntimeError("unsafe physical verifier report publication") from error
         os.fsync(runtime_fd)
+        check_deadline()
+        # The persistent exclusive commit lock is acquired before publication
+        # exclusivity is released and remains held while the verifier waits for
+        # stop.  Abrupt death before this point leaves no positive commit signal.
+        fcntl.flock(commit_lock_fd, fcntl.LOCK_EX)
+        check_deadline()
+        commit_lock = os.fdopen(commit_lock_fd, "r+b", buffering=0)
+        commit_lock_fd = None
+        return commit_lock
     except BaseException:
-        if temporary_identity is not None:
+        if published:
+            try:
+                _rollback_published_report(runtime_fd, temporary_identity)
+            except BaseException:
+                # A rollback failure must poison admission before releasing the
+                # writer lock; the next prepare repairs this only after proving
+                # there is no surviving claim/writer.
+                os.fchmod(report_lock_fd, 0)
+                os.fsync(report_lock_fd)
+                os.fsync(runtime_fd)
+                raise
+        elif temporary_identity is not None:
             _unlink_owned_temporary(
                 temporary_fd, temporary_name, temporary_identity
             )
@@ -957,11 +1278,18 @@ def _write_report(values):
             os.close(fd)
         os.close(temporary_fd)
         os.close(runtime_fd)
+        if commit_lock_fd is not None:
+            os.close(commit_lock_fd)
+        os.close(report_lock_fd)
 
 
 def _interrupted(_signum, _frame):
     global STOP_REQUESTED
     STOP_REQUESTED = True
+
+
+def _report_deadline_alarm(_signum, _frame):
+    raise ReportDeadlineExceeded("physical verifier report publication deadline exhausted")
 
 
 STOP_REQUESTED = False
@@ -984,10 +1312,21 @@ def main(argv=None):
         return 0
     for signum in (signal.SIGTERM, signal.SIGINT, signal.SIGHUP):
         signal.signal(signum, _interrupted)
-    sha, pipeline_id = _labels()
-    report = run_verification(sha, pipeline_id)
-    _write_report(report)
-    wait_for_stop()
+    deadline = time.monotonic() + REPORT_PUBLICATION_SECONDS
+    signal.signal(signal.SIGALRM, _report_deadline_alarm)
+    signal.setitimer(signal.ITIMER_REAL, _require_report_time(deadline))
+    commit_lock = None
+    try:
+        sha, pipeline_id = _labels()
+        report = run_verification(sha, pipeline_id, deadline=deadline)
+        commit_lock = _write_report(report, deadline=deadline)
+    finally:
+        signal.setitimer(signal.ITIMER_REAL, 0)
+    try:
+        wait_for_stop()
+    finally:
+        if commit_lock is not None:
+            commit_lock.close()
     return 0
 
 
