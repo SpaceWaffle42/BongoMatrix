@@ -5,15 +5,18 @@ from __future__ import annotations
 
 import fcntl
 import ctypes
+import errno
 import itertools
 import os
 import re
+import select
+import socket
 import stat
 import subprocess
 import sys
 import time
 from pathlib import Path
-from urllib.request import urlopen
+
 
 COMMAND = re.compile(r"verify ([0-9a-f]{40}) ([0-9]{1,20})\Z")
 SERVICE = "matrix-ci-physical.service"
@@ -28,6 +31,7 @@ CLAIM_TEMPORARIES = "claim-temporaries"
 
 MAX_REPORT_BYTES = 4096
 MAX_ERROR_CHARS = 512
+MAX_HTTP_STATUS_BYTES = 256
 SYSTEMCTL_TIMEOUT = 10
 STOP_WAIT_SECONDS = 170
 REPORT_WAIT_SECONDS = 85
@@ -528,11 +532,74 @@ class SystemOps:
     def recovery_ready(self):
         if _systemctl("is-active", "--quiet", PRODUCTION_SERVICE, check=False).returncode != 0:
             return False
+        deadline = time.monotonic() + 2
+        connection = None
         try:
-            with urlopen("http://127.0.0.1:5000/", timeout=2) as response:
-                return response.status in (200, 302)
+            connection = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            connection.setblocking(False)
+            result = connection.connect_ex(("127.0.0.1", 5000))
+            if result not in (0, errno.EINPROGRESS, errno.EWOULDBLOCK, errno.EALREADY):
+                return False
+            if result:
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    return False
+                _, writable, exceptional = select.select(
+                    [], [connection], [connection], remaining
+                )
+                if exceptional or not writable:
+                    return False
+                if connection.getsockopt(socket.SOL_SOCKET, socket.SO_ERROR):
+                    return False
+
+            request = memoryview(
+                b"GET / HTTP/1.0\r\nHost: 127.0.0.1\r\nConnection: close\r\n\r\n"
+            )
+            while request:
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    return False
+                _, writable, exceptional = select.select(
+                    [], [connection], [connection], remaining
+                )
+                if exceptional or not writable:
+                    return False
+                sent = connection.send(request)
+                if sent <= 0:
+                    return False
+                request = request[sent:]
+
+            status = bytearray()
+            while len(status) < MAX_HTTP_STATUS_BYTES:
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    return False
+                readable, _, exceptional = select.select(
+                    [connection], [], [connection], remaining
+                )
+                if exceptional or not readable:
+                    return False
+                chunk = connection.recv(MAX_HTTP_STATUS_BYTES - len(status))
+                if not chunk:
+                    return False
+                status.extend(chunk)
+                if time.monotonic() >= deadline:
+                    return False
+                marker = status.find(b"\r\n")
+                if marker >= 0:
+                    return re.fullmatch(
+                        rb"HTTP/1\.[01] (?:200|302)(?: [^\r\n]*)?",
+                        bytes(status[:marker]),
+                    ) is not None
+            return False
         except Exception:
             return False
+        finally:
+            if connection is not None:
+                try:
+                    connection.close()
+                except OSError:
+                    pass
 
 
 def dispatch(command, ops=None):

@@ -142,6 +142,64 @@ class PhysicalVerifierTests(unittest.TestCase):
             "an ordering edge reverses stop ordering and deadlocks that recovery job",
         )
 
+    def test_dispatcher_recovery_accepts_original_302_without_following_pair_redirect(self):
+        dispatcher = load_deploy_module("matrix_ci_physical_dispatcher")
+        sent = bytearray()
+
+        class Socket:
+            def setblocking(self, _enabled):
+                pass
+
+            def connect_ex(self, address):
+                self.address = address
+                return 0
+
+            def send(self, payload):
+                sent.extend(payload)
+                return len(payload)
+
+            def recv(self, _limit):
+                return b"HTTP/1.1 302 Found\r\nLocation: /pair\r\n\r\n"
+
+            def close(self):
+                pass
+
+        dispatcher.socket = types.SimpleNamespace(
+            AF_INET=2,
+            SOCK_STREAM=1,
+            SOL_SOCKET=1,
+            SO_ERROR=4,
+            socket=lambda *_args: Socket(),
+        )
+        dispatcher.select = types.SimpleNamespace(
+            select=lambda readable, writable, _exceptional, _timeout: (
+                readable, writable, [],
+            )
+        )
+        original_systemctl = dispatcher._systemctl
+        missing = object()
+        original_urlopen = getattr(dispatcher, "urlopen", missing)
+        dispatcher._systemctl = lambda *_args, **_kwargs: types.SimpleNamespace(returncode=0)
+        setattr(
+            dispatcher,
+            "urlopen",
+            lambda *_args, **_kwargs: (_ for _ in ()).throw(
+                AssertionError("redirect-following HTTP client must not be used")
+            ),
+        )
+        try:
+            self.assertTrue(dispatcher.SystemOps().recovery_ready())
+        finally:
+            dispatcher._systemctl = original_systemctl
+            if original_urlopen is missing:
+                delattr(dispatcher, "urlopen")
+            else:
+                setattr(dispatcher, "urlopen", original_urlopen)
+        self.assertEqual(
+            bytes(sent),
+            b"GET / HTTP/1.0\r\nHost: 127.0.0.1\r\nConnection: close\r\n\r\n",
+        )
+
     def test_durable_claim_is_the_only_admission_trigger_and_cannot_race_or_deadlock(self):
         unit = (ROOT / "deploy" / "matrix-ci-physical.service").read_text(encoding="utf-8")
         path_unit = (ROOT / "deploy" / "matrix-ci-physical.path").read_text(encoding="utf-8")
