@@ -308,6 +308,7 @@ class Matrix:
         self._frame_capture = FrameCapture(self.matrix.width, self.matrix.height)
         self._frame_capture.register(self.canvas)
         self._capture_fonts = {}
+        self._publication_guard = None
         self.colours = self._load_colours()
         self.loaded_fonts = self._load_fonts()
 
@@ -401,13 +402,24 @@ class Matrix:
         self._frame_capture.fill(canvas, r, g, b)
         canvas.Fill(r, g, b)
 
+    def set_publication_guard(self, guard):
+        """Install a final authority check for the owned render invocation."""
+        if guard is not None and not callable(guard):
+            raise TypeError("publication guard must be callable")
+        self._publication_guard = guard
+
     def swap(self, canvas=None):
+        guard = self._publication_guard
         if canvas is None:
             submitted = self.canvas
+            if guard is not None and not guard():
+                return submitted
             self._frame_capture.publish(submitted)
             self.canvas = self.matrix.SwapOnVSync(submitted)
             self._frame_capture.register(self.canvas)
             return self.canvas
+        if guard is not None and not guard():
+            return canvas
         self._frame_capture.publish(canvas)
         returned = self.matrix.SwapOnVSync(canvas)
         self._frame_capture.register(returned)

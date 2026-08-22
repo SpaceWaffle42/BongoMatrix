@@ -11,6 +11,7 @@ import threading
 import time
 
 from modules.media_player import play_media
+from device_preview import DevicePreviewManager, PreviewAdmissionStatus
 
 LOGGER = logging.getLogger(__name__)
 MODULES = {
@@ -80,6 +81,9 @@ class DisplayController:
         self._stopping = False
         self._lifecycle_generation = 0
         self._module_stop = None
+        self.device_preview_manager = DevicePreviewManager()
+        self._device_draft_pending = None
+        self._device_draft_stop = None
         self._preview_name = None
         self._media_preview_name = None
         self._announcement_preview = None
@@ -143,6 +147,7 @@ class DisplayController:
             self._shutdown.set()
             thread = self._thread
         try:
+            self._terminate_device_draft(wait=False)
             if not self._interrupt_module(timeout=max(0, deadline - time.monotonic())):
                 return False
             pairing_setup_active = self._pairing_setup.is_set()
@@ -159,6 +164,7 @@ class DisplayController:
                 LOGGER.error("Matrix display lock was not released within %s seconds", timeout)
                 return False
             try:
+                self.device_preview_manager.close()
                 self.matrix.clear()
                 self.matrix.swap()
             finally:
@@ -172,8 +178,107 @@ class DisplayController:
                 self._stopping = False
 
     def reload(self):
+        self._terminate_device_draft()
         self._reload_requested.set()
         self._interrupt_module()
+
+    def _terminate_device_draft(self, *, wait=True):
+        with self._state_lock:
+            stop_event = self._device_draft_stop
+            self._device_draft_pending = None
+            if stop_event is not None:
+                stop_event.set()
+        if wait:
+            with self._display_lock:
+                pass
+            self.device_preview_manager.close()
+
+    def shutdown_device_drafts(self):
+        self._terminate_device_draft()
+        self._reload_requested.set()
+
+    def submit_device_draft(self, request, *, renderer):
+        displaced = self.device_preview_manager.active_lease()
+        admission = self.device_preview_manager.submit(
+            request, close_displaced=False,
+        )
+        if admission.status is not PreviewAdmissionStatus.ACCEPTED:
+            return admission
+        with self._state_lock:
+            if self._device_draft_stop is not None:
+                self._device_draft_stop.set()
+            if self._module_stop is not None:
+                self._module_stop.set()
+        if displaced is not None:
+            with self._display_lock:
+                pass
+            self.device_preview_manager.finish(displaced)
+        with self._state_lock:
+            self._device_draft_pending = (admission.lease, renderer)
+        self.start()
+        return admission
+
+    def cancel_device_draft(self, owner, *, generation):
+        lease = self.device_preview_manager.cancel(
+            owner, generation=generation, close=False,
+        )
+        if lease is None:
+            return False
+        with self._state_lock:
+            if self._device_draft_stop is not None:
+                self._device_draft_stop.set()
+            if self._device_draft_pending is not None and self._device_draft_pending[0] is lease:
+                self._device_draft_pending = None
+        with self._display_lock:
+            pass
+        self.device_preview_manager.finish(lease)
+        self._reload_requested.set()
+        return True
+
+    def _execute_pending_device_draft(self):
+        with self._state_lock:
+            pending = self._device_draft_pending
+            self._device_draft_pending = None
+            if pending is None:
+                return False
+            lease, renderer = pending
+            stop_event = threading.Event()
+            self._device_draft_stop = stop_event
+            self._module_stop = stop_event
+        request = lease.request
+        guard = lambda: (
+            not stop_event.is_set()
+            and self.device_preview_manager.is_current(request.owner, request.generation)
+        )
+        self.current_module = f"device-draft:{request.config.get('module', 'unknown')}"
+        try:
+            with self._display_lock:
+                guard_installed = hasattr(self.matrix, "set_publication_guard")
+                if guard_installed:
+                    self.matrix.set_publication_guard(guard)
+                try:
+                    if not guard():
+                        return False
+                    return bool(renderer(self.matrix, request, stop_event=stop_event))
+                finally:
+                    if guard_installed:
+                        self.matrix.set_publication_guard(None)
+        except Exception as exc:
+            self.last_error = f"{type(exc).__name__}: {exc}"
+            return False
+        finally:
+            self.current_module = None
+            with self._state_lock:
+                if self._device_draft_stop is stop_event:
+                    self._device_draft_stop = None
+                if self._module_stop is stop_event:
+                    self._module_stop = None
+            terminal = self.device_preview_manager.cancel(
+                request.owner, generation=request.generation, close=False,
+            )
+            if terminal is not None:
+                self.device_preview_manager.finish(terminal)
+                self._reload_requested.set()
 
     def preview(self, module_name):
         if module_name not in MODULES and custom_module(self.config_store.get(), module_name) is None:
@@ -220,6 +325,7 @@ class DisplayController:
         return self.matrix.latest_frame_png()
 
     def show_pairing_pin(self, pin, ttl_seconds=600):
+        self._terminate_device_draft()
         with self._lifecycle_lock:
             if self._shutdown.is_set():
                 return
@@ -555,6 +661,12 @@ class DisplayController:
             if self._shutdown.is_set():
                 break
             self._reload_requested.clear()
+            with self._state_lock:
+                device_draft_pending = self._device_draft_pending is not None
+            if device_draft_pending:
+                self._execute_pending_device_draft()
+                self._mark_scheduler_healthy()
+                continue
             config = self.config_store.get()
 
             announcement_preview = self._take_announcement_preview()

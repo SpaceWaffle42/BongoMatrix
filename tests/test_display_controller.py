@@ -751,5 +751,288 @@ class DisplayControllerTests(unittest.TestCase):
         self.assertEqual(calls, ["weather"])
 
 
+    def test_device_draft_cancel_waits_for_submission_barrier_then_resumes(self):
+        from device_preview import DevicePreviewOwner, DevicePreviewRequest
+
+        matrix = Mock()
+        controller = DisplayController(matrix, Mock())
+        controller.start = Mock()
+        owner = DevicePreviewOwner("device-a", "tab-a")
+        entered = threading.Event()
+        release = threading.Event()
+        returned = threading.Event()
+
+        def render(_matrix, _request, *, stop_event):
+            entered.set()
+            release.wait(1)
+            self.assertTrue(stop_event.is_set())
+            return True
+
+        controller.submit_device_draft(
+            DevicePreviewRequest(owner, 1, {"module": "clock_lava"}, 60),
+            renderer=render,
+        )
+        worker = threading.Thread(target=controller._execute_pending_device_draft)
+        worker.start()
+        self.assertTrue(entered.wait(0.5))
+
+        cancelling = threading.Thread(
+            target=lambda: (
+                controller.cancel_device_draft(owner, generation=1),
+                returned.set(),
+            )
+        )
+        cancelling.start()
+        self.assertFalse(returned.wait(0.1))
+        release.set()
+        worker.join(1)
+        cancelling.join(1)
+
+        self.assertFalse(worker.is_alive())
+        self.assertFalse(cancelling.is_alive())
+        self.assertTrue(returned.is_set())
+        self.assertIsNone(controller.device_preview_manager.active_lease())
+        self.assertTrue(controller._reload_requested.is_set())
+
+
+    def test_device_draft_pairing_reload_stop_and_shutdown_cleanup(self):
+        from device_preview import DevicePreviewOwner, DevicePreviewRequest
+
+        for terminal in ("pairing", "reload", "stop", "shutdown"):
+            with self.subTest(terminal=terminal):
+                matrix = Mock()
+                controller = DisplayController(matrix, Mock())
+                controller.start = Mock()
+                owner = DevicePreviewOwner("device-a", terminal)
+                cleanup = Mock()
+                render_entered = threading.Event()
+                release_render = threading.Event()
+
+                def renderer(_matrix, _request, *, stop_event):
+                    if terminal == "stop":
+                        render_entered.set()
+                        release_render.wait(1)
+                    return not stop_event.is_set()
+
+                controller.submit_device_draft(
+                    DevicePreviewRequest(
+                        owner, 1, {"module": "clock_lava"}, 60, cleanup=cleanup,
+                    ),
+                    renderer=renderer,
+                )
+                render_worker = None
+                if terminal == "stop":
+                    render_worker = threading.Thread(
+                        target=controller._execute_pending_device_draft,
+                    )
+                    render_worker.start()
+                    self.assertTrue(render_entered.wait(0.5))
+
+                if terminal == "pairing":
+                    with patch("display_controller.threading.Timer"):
+                        controller.show_pairing_pin("123456", ttl_seconds=60)
+                    controller.end_pairing()
+                elif terminal == "reload":
+                    controller.reload()
+                elif terminal == "stop":
+                    stop_result = []
+                    stopping = threading.Thread(
+                        target=lambda: stop_result.append(controller.stop(timeout=1)),
+                    )
+                    stopping.start()
+                    self.assertTrue(controller._shutdown.wait(0.5))
+                    self.assertFalse(cleanup.called)
+                    release_render.set()
+                    render_worker.join(1)
+                    stopping.join(1)
+                    self.assertEqual(stop_result, [True])
+                else:
+                    controller.shutdown_device_drafts()
+
+                self.assertIsNone(controller.device_preview_manager.active_lease())
+                self.assertIsNone(controller._device_draft_pending)
+                cleanup.assert_called_once_with()
+
+
+    def test_device_draft_render_failure_releases_owner_and_resumes(self):
+        from device_preview import DevicePreviewOwner, DevicePreviewRequest
+
+        controller = DisplayController(Mock(), Mock())
+        controller.start = Mock()
+        owner = DevicePreviewOwner("device-a", "tab-a")
+        cleanup = Mock()
+        controller.submit_device_draft(
+            DevicePreviewRequest(
+                owner, 4, {"module": "weather"}, 60, cleanup=cleanup,
+            ),
+            renderer=Mock(side_effect=RuntimeError("draft failed")),
+        )
+
+        self.assertFalse(controller._execute_pending_device_draft())
+
+        self.assertIsNone(controller.device_preview_manager.active_lease())
+        cleanup.assert_called_once_with()
+        self.assertTrue(controller._reload_requested.is_set())
+        self.assertEqual(controller.last_error, "RuntimeError: draft failed")
+        self.assertIsNone(controller.current_module)
+
+
+    def test_device_draft_temporarily_overrides_and_restores_sleep(self):
+        from device_preview import DevicePreviewOwner, DevicePreviewRequest
+
+        sleep_config = {
+            **DEFAULT_CONFIG,
+            "display": {
+                **DEFAULT_CONFIG["display"],
+                "active_start": "09:00",
+                "active_end": "17:00",
+            },
+        }
+        store = Mock(get=Mock(return_value=sleep_config))
+        controller = DisplayController(Mock(), store)
+        controller.start = Mock()
+        events = []
+
+        def render(_matrix, _request, *, stop_event):
+            events.append("draft")
+            return not stop_event.is_set()
+
+        def execute(name, _config, _duration):
+            events.append(name)
+            controller._shutdown.set()
+            return True
+
+        controller._execute = execute
+        controller.submit_device_draft(
+            DevicePreviewRequest(
+                DevicePreviewOwner("device-a", "tab-a"),
+                1,
+                {"module": "weather"},
+                60,
+            ),
+            renderer=render,
+        )
+        with patch.object(controller, "_is_active", return_value=False):
+            controller._run_loop_unchecked()
+
+        self.assertEqual(events, ["draft", "sleep"])
+        self.assertIsNone(controller.device_preview_manager.active_lease())
+
+
+    def test_physical_draft_latest_generation_owns_hardware_until_bounded_return(self):
+        from device_preview import DevicePreviewOwner, DevicePreviewRequest
+
+        class OwnedLock:
+            def __init__(self):
+                self._lock = threading.RLock()
+                self._owner = None
+
+            def __enter__(self):
+                self._lock.acquire()
+                self._owner = threading.get_ident()
+                return self
+
+            def __exit__(self, *_exc):
+                self._owner = None
+                self._lock.release()
+
+            def owned_by_current_thread(self):
+                return self._owner == threading.get_ident()
+
+        class GuardedMatrix:
+            def __init__(self, display_lock):
+                self.display_lock = display_lock
+                self.guard = None
+                self.publications = []
+
+            def set_publication_guard(self, guard):
+                if not self.display_lock.owned_by_current_thread():
+                    raise RuntimeError("publication guard changed outside display lock")
+                self.guard = guard
+
+            def swap(self, label):
+                if self.guard is None or self.guard():
+                    self.publications.append(label)
+
+            def set_brightness(self, _brightness):
+                pass
+
+        config = {
+            **DEFAULT_CONFIG,
+            "playlist": [{"module": "splash", "duration": 1, "enabled": True}],
+        }
+        display_lock = OwnedLock()
+        matrix = GuardedMatrix(display_lock)
+        controller = DisplayController(matrix, Mock(get=Mock(return_value=config)))
+        controller._display_lock = display_lock
+        controller.start = Mock()
+        owner = DevicePreviewOwner("device-a", "tab-a")
+        old_entered = threading.Event()
+        release_old = threading.Event()
+        events = []
+
+        def old_render(matrix, _request, *, stop_event):
+            events.append("generation-1")
+            old_entered.set()
+            release_old.wait(1)
+            matrix.swap("generation-1")
+            return not stop_event.is_set()
+
+        def new_render(matrix, _request, *, stop_event):
+            events.append("generation-2")
+            matrix.swap("generation-2")
+            return not stop_event.is_set()
+
+        old_cleanup = Mock()
+        controller.submit_device_draft(
+            DevicePreviewRequest(
+                owner, 1, {"module": "weather"}, 60, cleanup=old_cleanup,
+            ),
+            renderer=old_render,
+        )
+        old_worker = threading.Thread(target=controller._execute_pending_device_draft)
+        old_worker.start()
+        self.assertTrue(old_entered.wait(0.5))
+        replacement_returned = threading.Event()
+        replacement = threading.Thread(
+            target=lambda: (
+                controller.submit_device_draft(
+                    DevicePreviewRequest(
+                        owner, 2, {"module": "clock_lava"}, 60,
+                    ),
+                    renderer=new_render,
+                ),
+                replacement_returned.set(),
+            )
+        )
+        replacement.start()
+        self.assertFalse(replacement_returned.wait(0.1))
+        old_cleanup.assert_not_called()
+        release_old.set()
+        old_worker.join(1)
+        replacement.join(1)
+        self.assertFalse(old_worker.is_alive())
+        self.assertFalse(replacement.is_alive())
+        old_cleanup.assert_called_once_with()
+
+        self.assertTrue(controller._execute_pending_device_draft())
+
+        def saved_execute(name, _config, _duration):
+            events.append(f"saved:{name}")
+            controller._shutdown.set()
+            return True
+
+        controller._execute = saved_execute
+        with patch.object(controller, "_is_active", return_value=True):
+            controller._run_loop_unchecked()
+
+        self.assertEqual(
+            events, ["generation-1", "generation-2", "saved:splash"],
+        )
+        self.assertEqual(matrix.publications, ["generation-2"])
+        self.assertIsNone(controller.device_preview_manager.active_lease())
+        self.assertGreaterEqual(controller.config_store.get.call_count, 1)
+
+
 if __name__ == "__main__":
     unittest.main()

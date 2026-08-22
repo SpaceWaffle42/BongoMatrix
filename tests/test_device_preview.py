@@ -1,0 +1,225 @@
+import unittest
+
+
+class DevicePreviewTests(unittest.TestCase):
+    def test_owner_tuple_admission_and_foreign_conflict(self):
+        from device_preview import (
+            DevicePreviewManager,
+            DevicePreviewOwner,
+            DevicePreviewRequest,
+            PreviewAdmissionStatus,
+        )
+
+        now = [100.0]
+        manager = DevicePreviewManager(clock=lambda: now[0])
+        owner = DevicePreviewOwner(device_id="device-a", preview_instance="tab-a")
+        accepted = manager.submit(
+            DevicePreviewRequest(
+                owner=owner,
+                generation=1,
+                config={"module": "clock_lava"},
+                timeout_seconds=60,
+            )
+        )
+
+        self.assertEqual(accepted.status, PreviewAdmissionStatus.ACCEPTED)
+        self.assertEqual(accepted.lease.owner, owner)
+        self.assertEqual(accepted.lease.generation, 1)
+
+        for foreign_owner in (
+            DevicePreviewOwner(device_id="device-b", preview_instance="tab-a"),
+            DevicePreviewOwner(device_id="device-a", preview_instance="tab-b"),
+        ):
+            rejected = manager.submit(
+                DevicePreviewRequest(
+                    owner=foreign_owner,
+                    generation=2,
+                    config={"module": "weather"},
+                    timeout_seconds=30,
+                )
+            )
+            self.assertEqual(rejected.status, PreviewAdmissionStatus.OWNER_CONFLICT)
+            self.assertIsNone(rejected.lease)
+
+        active = manager.active_lease()
+        self.assertEqual(active, accepted.lease)
+        self.assertEqual(active.request.config, {"module": "clock_lava"})
+        self.assertEqual(active.content_deadline, 160.0)
+        self.assertEqual(active.connectivity_deadline, 115.0)
+
+    def test_newer_generation_supersedes_and_stale_equal_do_not_mutate(self):
+        from device_preview import (
+            DevicePreviewManager,
+            DevicePreviewOwner,
+            DevicePreviewRequest,
+            PreviewAdmissionStatus,
+        )
+
+        now = [200.0]
+        manager = DevicePreviewManager(clock=lambda: now[0])
+        owner = DevicePreviewOwner(device_id="device-a", preview_instance="tab-a")
+
+        first = manager.submit(
+            DevicePreviewRequest(owner, 3, {"module": "clock_lava"}, 60)
+        )
+        original_lease = first.lease
+
+        for generation in (3, 2):
+            rejected = manager.submit(
+                DevicePreviewRequest(owner, generation, {"module": "weather"}, 5)
+            )
+            self.assertEqual(
+                rejected.status,
+                PreviewAdmissionStatus.STALE_GENERATION,
+            )
+            self.assertIsNone(rejected.lease)
+            self.assertIs(manager.active_lease(), original_lease)
+
+        now[0] = 204.0
+        replacement = manager.submit(
+            DevicePreviewRequest(owner, 4, {"module": "weather"}, 30)
+        )
+        self.assertEqual(replacement.status, PreviewAdmissionStatus.ACCEPTED)
+        self.assertEqual(replacement.lease.generation, 4)
+        self.assertEqual(replacement.lease.request.config, {"module": "weather"})
+        self.assertEqual(replacement.lease.content_deadline, 234.0)
+        self.assertEqual(replacement.lease.connectivity_deadline, 215.0)
+        self.assertIs(manager.active_lease(), replacement.lease)
+        self.assertEqual(original_lease.request.config, {"module": "clock_lava"})
+        self.assertEqual(original_lease.content_deadline, 260.0)
+
+
+    def test_accepted_update_restarts_timeout_but_other_traffic_does_not(self):
+        from device_preview import (
+            DevicePreviewManager,
+            DevicePreviewOwner,
+            DevicePreviewRequest,
+            PreviewAdmissionStatus,
+        )
+
+        now = [300.0]
+        manager = DevicePreviewManager(clock=lambda: now[0])
+        owner = DevicePreviewOwner(device_id="device-a", preview_instance="tab-a")
+        first = manager.submit(
+            DevicePreviewRequest(owner, 1, {"module": "clock_lava"}, 60)
+        )
+        self.assertEqual(first.lease.content_deadline, 360.0)
+        self.assertEqual(first.lease.connectivity_deadline, 315.0)
+
+        now[0] = 304.0
+        foreign = manager.submit(
+            DevicePreviewRequest(
+                DevicePreviewOwner("device-b", "tab-a"),
+                2,
+                {"module": "weather"},
+                30,
+            )
+        )
+        stale = manager.submit(
+            DevicePreviewRequest(owner, 1, {"module": "weather"}, 30)
+        )
+        self.assertEqual(foreign.status, PreviewAdmissionStatus.OWNER_CONFLICT)
+        self.assertEqual(stale.status, PreviewAdmissionStatus.STALE_GENERATION)
+        self.assertIs(manager.active_lease(), first.lease)
+
+        accepted = manager.submit(
+            DevicePreviewRequest(owner, 2, {"module": "weather"}, 30)
+        )
+        self.assertEqual(accepted.status, PreviewAdmissionStatus.ACCEPTED)
+        self.assertEqual(accepted.lease.content_deadline, 334.0)
+        self.assertEqual(accepted.lease.connectivity_deadline, 315.0)
+
+
+    def test_heartbeat_five_seconds_renews_fifteen_second_connectivity_only(self):
+        from unittest.mock import Mock
+
+        from device_preview import (
+            DevicePreviewManager,
+            DevicePreviewOwner,
+            DevicePreviewRequest,
+            PreviewHeartbeatStatus,
+        )
+
+        now = [400.0]
+        manager = DevicePreviewManager(clock=lambda: now[0])
+        owner = DevicePreviewOwner("device-a", "tab-a")
+        cleanup = Mock()
+        admitted = manager.submit(
+            DevicePreviewRequest(
+                owner, 7, {"module": "clock_lava"}, 60, cleanup=cleanup,
+            )
+        )
+        self.assertEqual(admitted.lease.content_deadline, 460.0)
+        self.assertEqual(admitted.lease.connectivity_deadline, 415.0)
+
+        now[0] = 404.0
+        early = manager.heartbeat(owner, generation=7)
+        self.assertEqual(early.status, PreviewHeartbeatStatus.TOO_EARLY)
+        self.assertEqual(manager.active_lease().connectivity_deadline, 415.0)
+
+        now[0] = 405.0
+        renewed = manager.heartbeat(owner, generation=7)
+        self.assertEqual(renewed.status, PreviewHeartbeatStatus.ACCEPTED)
+        self.assertEqual(renewed.lease.content_deadline, 460.0)
+        self.assertEqual(renewed.lease.connectivity_deadline, 420.0)
+
+        now[0] = 410.0
+        foreign = manager.heartbeat(
+            DevicePreviewOwner("device-b", "tab-a"), generation=7
+        )
+        stale = manager.heartbeat(owner, generation=6)
+        self.assertEqual(foreign.status, PreviewHeartbeatStatus.OWNER_CONFLICT)
+        self.assertEqual(stale.status, PreviewHeartbeatStatus.STALE_GENERATION)
+        self.assertEqual(manager.active_lease().connectivity_deadline, 420.0)
+
+        now[0] = 420.0
+        expired = manager.heartbeat(owner, generation=7)
+        self.assertEqual(expired.status, PreviewHeartbeatStatus.EXPIRED)
+        self.assertIsNone(expired.lease)
+        self.assertIsNone(manager.active_lease())
+        manager.close()
+        cleanup.assert_called_once_with()
+
+
+    def test_supersession_failure_and_close_release_media_once(self):
+        from unittest.mock import Mock
+        from device_preview import (
+            DevicePreviewManager,
+            DevicePreviewOwner,
+            DevicePreviewRequest,
+        )
+
+        manager = DevicePreviewManager(clock=lambda: 500.0)
+        owner = DevicePreviewOwner("device-a", "tab-a")
+        first_close = Mock()
+        failed_close = Mock()
+        final_close = Mock()
+
+        manager.submit(
+            DevicePreviewRequest(
+                owner, 1, {"module": "media:first.gif"}, 60, cleanup=first_close,
+            )
+        )
+        manager.submit(
+            DevicePreviewRequest(
+                owner, 2, {"module": "media:failed.gif"}, 60, cleanup=failed_close,
+            )
+        )
+        first_close.assert_called_once_with()
+
+        self.assertTrue(manager.fail(owner, generation=2))
+        self.assertFalse(manager.fail(owner, generation=2))
+        failed_close.assert_called_once_with()
+
+        manager.submit(
+            DevicePreviewRequest(
+                owner, 3, {"module": "media:final.gif"}, 60, cleanup=final_close,
+            )
+        )
+        manager.close()
+        manager.close()
+        final_close.assert_called_once_with()
+
+
+if __name__ == "__main__":
+    unittest.main()
