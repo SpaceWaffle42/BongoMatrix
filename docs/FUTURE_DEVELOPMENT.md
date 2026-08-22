@@ -136,7 +136,9 @@ Begin these after Priority 0 is clear. They improve existing editing, preview, m
 
 **Completed 2026-08-13:** implemented as the original full preview at the top with the same live preview popping into a compact fixed strip only after scrolling beyond it. Responsive flow, focus, reduced motion, one 64×32 canvas, and one framebuffer polling lifecycle were tested in real Chromium. The exact artifact was independently approved, accepted on the physical Matrix, merged through MR !50, deployed, and verified against the live device.
 
-### 1.2 Add Live and Edit Preview modes
+### ~~1.2 Add Live and Edit Preview modes~~ — Completed
+
+**Completed 2026-08-22:** added mutually exclusive Live and Edit Preview modes. Live continues to show the physical framebuffer, while Edit Preview renders the selected module from current unsaved controls with bounded debouncing, explicit draft status, no automatic save, deterministic custom-module source selection, deliberate single-palette Lava inspection, browser/physical parity coverage, and a two-choice warning before discarding a draft. The exact reviewed artifact passed protected CI and physical acceptance, merged through MR !69, and was deployed with preservation and rollback evidence.
 
 Add a mode control below the preview with two mutually exclusive states:
 
