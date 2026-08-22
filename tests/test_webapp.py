@@ -514,7 +514,7 @@ try{
         body = self.client.get("/").get_data(as_text=True)
 
         application_version = getattr(webapp, "APPLICATION_VERSION", None)
-        self.assertEqual(application_version, "0.3.55-preview")
+        self.assertEqual(application_version, "0.3.56-preview")
         self.assertEqual(body.count(f"Version {application_version}"), 1)
         self.assertRegex(
             body,
@@ -9525,6 +9525,26 @@ try{
             body["frames"][0]["png"]
         ))).size, (64, 32))
         self.assertEqual(self.controller.method_calls, [])
+
+    def test_edit_preview_provider_requests_bounded_cold_start_budget(self):
+        class CapturingProvider:
+            request_deadline = None
+
+            def prepare(
+                self, _provider, *, settings, credentials, cancel_event,
+                request_deadline,
+            ):
+                self.request_deadline = request_deadline
+                raise webapp.PreviewProviderTimeout("expected test stop")
+
+        provider = CapturingProvider()
+        with self.assertRaises(webapp.PreviewProviderTimeout):
+            webapp._prepare_edit_preview_provider(
+                provider, "weather", copy.deepcopy(self.store.get()),
+                threading.Event(),
+            )
+
+        self.assertEqual(provider.request_deadline, 8.0)
 
     def test_edit_preview_routes_render_splash_sleep_and_media_consumers(self):
         self.pair_browser()

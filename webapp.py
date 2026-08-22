@@ -64,13 +64,14 @@ MEDIA_METADATA_ERRORS = (
 CONFIG_REQUEST_LIMIT = 1_048_576
 CONDITIONAL_HEADER_LIMIT = 4096
 MINIMUM_CLIENT_CONTRACT = 2
-APPLICATION_VERSION = "0.3.55-preview"
+APPLICATION_VERSION = "0.3.56-preview"
 DEVICE_RESTART_PENDING_TTL_SECONDS = 60
 PAIRED_ACTION_HEADER = "X-Matrix-Action"
 PAIRED_ACTION_VALUE = "paired-request"
 ETAG_ITEM = re.compile(r'(?P<weak>W/)?"(?P<opaque>[\x21\x23-\x7e\x80-\xff]*)"')
 EDIT_PREVIEW_INSTANCE = re.compile(r"[0-9a-f]{32}")
 EDIT_PREVIEW_SESSION = re.compile(r"[0-9a-f]{32}")
+EDIT_PREVIEW_PROVIDER_DEADLINE_SECONDS = 8.0
 EDIT_PREVIEW_TOKEN = re.compile(r"[0-9a-f]{64}")
 
 
@@ -229,7 +230,8 @@ def _prepare_edit_preview_provider(provider, module_name, candidate, stop_event)
     transported = provider.prepare(
         _edit_preview_provider_child,
         settings=provider_candidate, credentials=None,
-        cancel_event=stop_event, request_deadline=3.0,
+        cancel_event=stop_event,
+        request_deadline=EDIT_PREVIEW_PROVIDER_DEADLINE_SECONDS,
     )
     prepared = _provider_value(transported)
     if module_name == "weather":
