@@ -514,7 +514,7 @@ try{
         body = self.client.get("/").get_data(as_text=True)
 
         application_version = getattr(webapp, "APPLICATION_VERSION", None)
-        self.assertEqual(application_version, "0.3.56-preview")
+        self.assertEqual(application_version, "0.3.57-preview")
         self.assertEqual(body.count(f"Version {application_version}"), 1)
         self.assertRegex(
             body,
@@ -3332,7 +3332,8 @@ try{
  const initial=await evaluate(`(()=>{const radios=[...document.querySelectorAll('input[name="edit-preview-lava-palette"]')];return {count:radios.length,labels:radios.map(r=>r.labels?.[0]?.textContent.trim()),selected:radios.filter(r=>r.checked).map(r=>r.value)}})()`);
  if(initial.count){
   await evaluate(`(()=>{const select=document.querySelector('#preview-select');select.value='clock_lava';select.dispatchEvent(new Event('change',{bubbles:true}));const edit=document.querySelector('#preview-mode-edit');edit.checked=true;edit.dispatchEvent(new Event('change',{bubbles:true}))})()`);
-  await waitFor(`__requests.some(r=>r.payload?.selected_lava_palette?.id==='fire_burst')`);
+  await waitFor(`__requests.some(r=>r.url.endsWith('/clock_lava')&&r.payload&&!Object.hasOwn(r.payload,'selected_lava_palette'))`);
+  const blankSelection=await evaluate(`(()=>({selected:[...document.querySelectorAll('input[name="edit-preview-lava-palette"]:checked')].map(r=>r.value),descriptor:selectedLavaPaletteDescriptor()}))()`);
   const savedBefore=await evaluate(`JSON.stringify(configBody())`),dirtyBefore=await evaluate(`matrixDirty`);
   await evaluate(`(()=>{const radio=[...document.querySelectorAll('input[name="edit-preview-lava-palette"]')].find(r=>r.value==='built_in:ember_glow');radio.focus();radio.checked=true;radio.dispatchEvent(new Event('change',{bubbles:true}))})()`);
   await waitFor(`__requests.some(r=>r.payload?.selected_lava_palette?.id==='ember_glow')`);await new Promise(r=>setTimeout(r,120));
@@ -3349,7 +3350,7 @@ try{
   const errorPixel=await evaluate(`[...document.querySelector('#matrix-preview').getContext('2d').getImageData(0,0,1,1).data]`),errorAccessible=await evaluate(`document.querySelector('#preview-frame').getAttribute('role')==='alert'`);
   await evaluate(`(()=>{const x=document.querySelector('[data-built-in-module="weather"][data-setting="now_x"]');x.value='14';x.dispatchEvent(new Event('input',{bubbles:true}))})()`);await waitFor(`(()=>{const request=__requests.filter(r=>r.url.endsWith('/weather')&&r.payload?.config.weather.now_x===14).at(-1),pixel=[...document.querySelector('#matrix-preview').getContext('2d').getImageData(0,0,1,1).data];return request?.responded&&document.querySelector('#preview-frame').textContent.includes('Unsaved draft frame')&&pixel.join(',')==='170,187,204,255'})()`);
   const final=await evaluate(`(()=>({validPixel:${JSON.stringify(validPixel)},errorPixel:${JSON.stringify(errorPixel)},recoveredPixel:[...document.querySelector('#matrix-preview').getContext('2d').getImageData(0,0,1,1).data],errorAccessible:${JSON.stringify(errorAccessible)},paths:[...new Set(__requests.filter(r=>r.payload).map(r=>r.url))],forbidden:__requests.filter(r=>r.method==='POST'&&(r.url==='/api/config'||r.url.startsWith('/api/preview/')||r.url.startsWith('/api/control/')||r.url.includes('/preview'))&&!r.url.startsWith('/api/edit-preview/')).map(r=>r.url),errors:[...__errors],canvasCount:document.querySelectorAll('#matrix-preview').length}))()`);
-  console.log(JSON.stringify({initial,builtIn,custom,final}));
+  console.log(JSON.stringify({initial,blankSelection,builtIn,custom,final}));
  }else console.log(JSON.stringify({initial}));
 }finally{socket.close()}
 """
@@ -3358,12 +3359,13 @@ try{
         self.assertIn("Inspect fire burst in Edit Preview", report["initial"]["labels"])
         self.assertIn("Inspect Saved sunset in Edit Preview", report["initial"]["labels"])
         self.assertEqual(report["initial"]["selected"], [], report)
+        self.assertEqual(report["blankSelection"], {"selected": [], "descriptor": None}, report)
         self.assertEqual(report["builtIn"]["descriptor"], {"kind": "built_in", "id": "ember_glow"})
         self.assertFalse(report["builtIn"]["enabled"], report)
         self.assertTrue(report["builtIn"]["savedSame"], report)
         self.assertTrue(report["builtIn"]["dirtySame"], report)
         self.assertEqual(report["builtIn"]["selected"], ["built_in:ember_glow"], report)
-        self.assertIn("fire_burst", report["builtIn"]["aborted"], report)
+        self.assertNotIn("fire_burst", report["builtIn"]["aborted"], report)
         self.assertEqual(report["custom"]["descriptor"], {
             "kind": "custom", "id": "palette_sunset",
             "colours": ["#112233", "#445566", "#778899"],
@@ -8186,6 +8188,176 @@ console.log('ANNOUNCEMENT_HEADING_SYNC_PASS');
         self.assertIn(".palette-bulk-actions .btn{min-height:44px", body)
 
     @unittest.skipUnless(shutil.which("node"), "Node.js is required")
+    def test_removing_the_targeted_custom_module_releases_the_preview_target(self):
+        source = (Path(__file__).parents[1] / "app" / "templates" / "dashboard.html").read_text()
+        start = source.index("window.matrixCustomCanvasDraftRemoved")
+        end = source.index("\nfunction customEditorForEvent", start)
+        function_source = source[start:end]
+        harness = r"""
+let previewModule='custom_removed',previewModulePinned=true,previewMode='live';
+const options=[{value:'clock_lava',textContent:''}];
+const select={options,value:'custom_removed'};
+global.window={};
+global.document={querySelector(selector){if(selector==='#preview-select')return select;throw new Error('unexpected selector '+selector)}};
+global.syncLavaInspectionRadios=()=>{};
+global.cancelEditPreview=()=>{throw new Error('Live target removal cancelled Edit Preview')};
+""" + function_source + r"""
+window.matrixCustomCanvasDraftRemoved('custom_removed');
+if(previewModule!=='clock_lava'||select.value!=='clock_lava'||previewModulePinned)throw new Error('removed custom target remained pinned or invalid');
+console.log('REMOVED_CUSTOM_PREVIEW_TARGET_RELEASED_PASS');
+"""
+        node = shutil.which("node")
+        assert node is not None
+        result = subprocess.run(
+            [node, "-e", harness], cwd=Path(__file__).parents[1],
+            text=True, capture_output=True, check=False,
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("REMOVED_CUSTOM_PREVIEW_TARGET_RELEASED_PASS", result.stdout)
+
+    @unittest.skipUnless(shutil.which("node"), "Node.js is required")
+    def test_live_status_poll_preserves_an_explicit_edit_preview_target(self):
+        source = (Path(__file__).parents[1] / "app" / "templates" / "dashboard.html").read_text()
+        select_start = source.index("function selectEditPreviewModule")
+        select_end = source.index("\nfunction cyclePreview", select_start)
+        status_start = source.index("function updateStatus")
+        status_end = source.index("\nasync function refreshDisplayFrame", status_start)
+        inspect_start = source.index("function inspectLavaPalette")
+        inspect_end = source.index("\nfunction selectedLavaPaletteDescriptor", inspect_start)
+        function_source = source[select_start:select_end] + "\n" + source[status_start:status_end] + "\n" + source[inspect_start:inspect_end]
+        harness = r"""
+const options=['clock_lava','weather'].map(value=>({value})),select={value:'clock_lava',options};
+const elements={
+ '#preview-select':select,
+ '#status':{textContent:'',dataset:{}},
+ '#current-label':{textContent:''},
+ '#preview-module':{textContent:''},
+};
+global.document={querySelector(selector){const element=elements[selector];if(!element)throw new Error('unexpected selector '+selector);return element}};
+let previewModule='clock_lava',previewMode='live',previewModulePinned=false;
+let editPreviewLavaPalette=null;
+global.scheduleEditPreview=()=>{throw new Error('Live target selection scheduled Edit Preview')};
+""" + function_source + r"""
+previewModule='weather';select.value='weather';previewModulePinned=true;
+inspectLavaPalette('built_in:fire_burst');
+if(previewModule!=='clock_lava'||select.value!=='clock_lava'||!previewModulePinned||editPreviewLavaPalette!=='built_in:fire_burst')throw new Error('explicit Lava inspection did not target Lava');
+selectEditPreviewModule('weather');
+updateStatus({current_module:'clock_lava',running:true,last_error:null});
+if(previewModule!=='weather'||select.value!=='weather'||elements['#preview-module'].textContent!=='Live · clock_lava')throw new Error('status poll overwrote explicit Edit Preview target');
+previewModulePinned=false;
+updateStatus({current_module:'clock_lava',running:true,last_error:null});
+if(previewModule!=='clock_lava'||select.value!=='clock_lava')throw new Error('unselected target did not follow initial live status');
+console.log('LIVE_STATUS_PRESERVES_EDIT_TARGET_PASS');
+"""
+        node = shutil.which("node")
+        assert node is not None
+        result = subprocess.run(
+            [node, "-e", harness], cwd=Path(__file__).parents[1],
+            text=True, capture_output=True, check=False,
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("LIVE_STATUS_PRESERVES_EDIT_TARGET_PASS", result.stdout)
+
+    @unittest.skipUnless(shutil.which("node"), "Node.js is required")
+    def test_editing_controls_selects_their_module_for_edit_preview(self):
+        source = (Path(__file__).parents[1] / "app" / "templates" / "dashboard.html").read_text()
+        self.assertIn("document.addEventListener('pointerdown',onEditPreviewTargetInteraction)", source)
+        self.assertIn("document.addEventListener('focusin',event=>{selectEditedPreviewModule(event.target);", source)
+        select_start = source.index("function selectEditPreviewModule")
+        select_end = source.index("\nfunction cyclePreview", select_start)
+        event_start = source.index("function editPreviewDelay")
+        event_end = source.index("\nfunction setPreviewMode", event_start)
+        function_source = source[select_start:select_end] + "\n" + source[event_start:event_end]
+        harness = r"""
+const options=['clock_lava','weather','splash','sleep','announcement_board','custom_example'].map(value=>({value}));
+const select={value:'weather',options};
+let previewModule='weather',previewModulePinned=false,previewMode='edit',matrixSyncStopped=false,scheduled=[];
+global.document={querySelector(selector){if(selector==='#preview-select')return select;throw new Error('unexpected selector '+selector)},addEventListener(){}};
+global.clearTimeout=()=>{};global.setTimeout=()=>1;global.startEditPreview=()=>{};
+global.customEditorForEvent=()=>null;
+function target({id='',name='',builtIn='',moduleEditor='',custom='',lava=false}={}){
+ return {id,name,dataset:builtIn?{builtInModule:builtIn}:{},matches(){return false},closest(selector){
+  if(selector==='#lava-palette-groups')return lava?{}:null;
+  if(selector==='#splash-slot-editor')return moduleEditor==='splash'?{}:null;
+  if(selector==='#sleep-slot-editor')return moduleEditor==='sleep'?{}:null;
+  if(selector==='[data-module-editor]')return moduleEditor?{dataset:{moduleEditor}}:null;
+  if(selector==='.custom-module-card')return custom?{dataset:{id:custom}}:null;
+  return null;
+ }};
+}
+""" + function_source + r"""
+global.scheduleEditPreview=delay=>scheduled.push(delay);
+const cases=[
+ [target({builtIn:'weather'}),'weather'],
+ [target({moduleEditor:'announcement_board'}),'announcement_board'],
+ [target({custom:'custom_example'}),'custom_example'],
+ [target({lava:true}),'clock_lava'],
+ [target({id:'splash-file'}),'splash'],
+ [target({id:'sleep-file'}),'sleep'],
+];
+for(const [control,module] of cases){onEditPreviewDraftEvent({target:control});if(previewModule!==module||select.value!==module)throw new Error('editing did not select '+module)}
+if(scheduled.length!==cases.length||scheduled.some(delay=>delay!==150))throw new Error('edits were not scheduled exactly once');
+console.log('EDITED_MODULE_EDIT_PREVIEW_SELECTION_PASS');
+"""
+        result = subprocess.run(
+            [shutil.which("node"), "-e", harness], cwd=Path(__file__).parents[1],
+            text=True, capture_output=True, check=False,
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("EDITED_MODULE_EDIT_PREVIEW_SELECTION_PASS", result.stdout)
+
+    @unittest.skipUnless(shutil.which("node"), "Node.js is required")
+    def test_opening_each_module_editor_selects_that_module_for_edit_preview(self):
+        source = (Path(__file__).parents[1] / "app" / "templates" / "dashboard.html").read_text()
+        select_start = source.index("function selectEditPreviewModule")
+        select_end = source.index("\nfunction cyclePreview", select_start)
+        toggle_start = source.index("async function toggleModuleEditor")
+        toggle_end = source.index("\nfunction updatePaletteGroupCounts", toggle_start)
+        function_source = source[select_start:select_end] + "\n" + source[toggle_start:toggle_end]
+        harness = r"""
+const options=['clock_lava','weather','splash','sleep','custom_example'].map(value=>({value}));
+const select={value:'clock_lava',options};
+let previewModule='clock_lava',previewModulePinned=false,previewMode='edit',previewSchedules=[],scrolled=0;
+const editors=new Map();
+function moduleButton(module,hasEditor=true){
+ const editor=hasEditor?{hidden:true}:null;
+ if(editor)editors.set(module,editor);
+ const item={isConnected:true,querySelector(selector){if(selector!=='.module-editor')throw new Error('unexpected editor selector');return editor;}};
+ return {textContent:'Edit',disabled:false,closest(selector){if(selector!=='.module-item')throw new Error('unexpected closest selector');return item;}};
+}
+global.document={querySelector(selector){
+ if(selector==='#preview-select')return select;
+ if(selector==='#custom-module-builder')return {scrollIntoView(){scrolled++}};
+ if(selector.startsWith('#')&&selector.endsWith('-slot-editor'))return editors.get(selector.slice(1,-12));
+ throw new Error('unexpected selector '+selector);
+}};
+global.scheduleEditPreview=delay=>previewSchedules.push(delay);
+global.automaticWeatherModules=new Set();
+global.providerTimingRequests=new Map();
+""" + function_source + r"""
+for(const module of ['clock_lava','weather']){
+ const button=moduleButton(module);
+ await toggleModuleEditor(button,module);
+ if(previewModule!==module||select.value!==module||editors.get(module).hidden)throw new Error('opening '+module+' did not select its Edit Preview');
+}
+const customButton=moduleButton('custom_example',false);
+await toggleModuleEditor(customButton,'custom_example');
+if(previewModule!=='custom_example'||select.value!=='custom_example'||scrolled!==1)throw new Error('custom editor did not select its Edit Preview');
+for(const module of ['splash','sleep']){
+ editors.set(module,{hidden:true});toggleSlotEditor(module);
+ if(previewModule!==module||select.value!==module||editors.get(module).hidden)throw new Error('slot editor did not select '+module);
+}
+if(previewSchedules.length!==5||previewSchedules.some(delay=>delay!==150))throw new Error('selected module previews were not refreshed');
+console.log('MODULE_EDITOR_EDIT_PREVIEW_SELECTION_PASS');
+"""
+        result = subprocess.run(
+            [shutil.which("node"), "--input-type=module", "-e", harness],
+            cwd=Path(__file__).parents[1], text=True, capture_output=True, check=False,
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("MODULE_EDITOR_EDIT_PREVIEW_SELECTION_PASS", result.stdout)
+
+    @unittest.skipUnless(shutil.which("node"), "Node.js is required")
     def test_lava_palette_bulk_controls_change_only_unsaved_palette_state(self):
         source = (Path(__file__).parents[1] / "app" / "templates" / "dashboard.html").read_text()
         start = source.index("function setAllLavaPalettes")
@@ -8214,7 +8386,7 @@ if(!builtIns.every(input=>input.checked) || !customEnabled.every(input=>input.ch
 setAllLavaPalettes(false);
 if(builtIns.some(input=>input.checked) || customEnabled.some(input=>input.checked))throw new Error('deselect all did not disable every palette');
 if(counts!==2 || dirty!==2)throw new Error('bulk actions did not refresh counts and mark the draft dirty');
-if(JSON.stringify(inspection)!==JSON.stringify([{chooseDefault:true},{chooseDefault:false}]))throw new Error('inspection controls were not synchronized');
+if(inspection.length!==2||inspection.some(options=>options!==undefined))throw new Error('bulk actions automatically selected an inspection palette');
 if(JSON.stringify(previewSchedules)!==JSON.stringify([150,150]))throw new Error('Edit Preview was not refreshed');
 if(messages.length!==2 || !messages[0].includes('Save configuration') || !messages[1].includes('Save configuration'))throw new Error('bulk actions did not explain unsaved state');
 console.log('LAVA_PALETTE_BULK_CONTROLS_PASS');

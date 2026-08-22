@@ -130,6 +130,7 @@ Begin these after Priority 0 is clear. They improve existing editing, preview, m
 - Apply either action immediately to the current unsaved editor state without changing other Lava Clock settings.
 - Keep the individual pattern controls synchronized so the result is visible and can still be adjusted one pattern at a time.
 - Persist the resulting pattern selection only through the normal Save action; the bulk controls must not save automatically.
+- Keep the separate Edit Preview inspection radio buttons unselected until the user deliberately chooses one; bulk selection must never choose an inspection palette.
 - Keep both actions usable and clearly labelled on mobile, tablet, and desktop, including keyboard and assistive-technology access.
 
 ### ~~1.1 Keep the Matrix preview sticky~~ — Completed
@@ -149,11 +150,13 @@ A two-option segmented control is preferred over a checkbox because the modes ar
 
 Edit Preview should:
 
+- be available for every module, with opening a module editor making that module the active Edit Preview target without switching preview mode automatically;
 - update as module controls change;
 - use a short debounce for sliders, position controls, and rapid input;
 - accurately render position, colour, ticker, icon, timing, and other supported changes;
 - in the Lava Clock palette editor, render the currently selected built-in or custom palette immediately as a complete animated 64×32 Lava Clock preview, updating as each colour control changes without requiring Save;
-- preview one selected palette at a time rather than rotating through every enabled palette, so the user can inspect that exact colour combination deliberately;
+- leave every Lava palette inspection radio unselected initially and use normal configured Lava rendering until the user deliberately selects a palette;
+- after a palette is selected, preview only that palette rather than rotating through every enabled palette, so the user can inspect that exact colour combination deliberately;
 - use the same palette order, interpolation, animation frame generation, clipping, and colour conversion as physical Lava Clock rendering, with browser/physical parity fixtures;
 - keep the Lava Clock colour preview in the browser unless the user separately enables the opt-in physical-device draft preview;
 - avoid saving configuration automatically; and
