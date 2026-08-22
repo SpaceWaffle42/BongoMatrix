@@ -2176,12 +2176,13 @@ try{
  await evaluate(`globalThis.__configBodyCalls=0;globalThis.__originalConfigBody=configBody;configBody=(...args)=>{globalThis.__configBodyCalls++;return globalThis.__originalConfigBody(...args)};globalThis.__advancedBefore=JSON.stringify(customModules.find(module=>module.type==='canvas'));globalThis.__provisionalCanvasSerializations=0;globalThis.__provisionalSerializer=customModulesFromEditor;customModulesFromEditor=(...args)=>{const result=globalThis.__provisionalSerializer(...args),canvas=result.find(module=>module.id==='custom_delayed_canvas');if(JSON.stringify(canvas)!==globalThis.__advancedBefore)globalThis.__provisionalCanvasSerializations++;return result};globalThis.__restartWarnings=[];window.confirm=warning=>{globalThis.__restartWarnings.push(warning);return false};true`);
  await replaceInput('.custom-module-card[data-id="custom_basic_text"] [data-field="name"]','Early renamed basic');
  await replaceInput('.custom-module-card[data-id="custom_basic_text"] [data-field="text"]','EARLY BASIC DRAFT');
- const during=await evaluate(`({ready:document.readyState,disabled:document.querySelector('#save-config').disabled,status:document.querySelector('#message').textContent,role:document.querySelector('#message').getAttribute('role'),draft:{name:document.querySelector('.custom-module-card[data-id="custom_basic_text"] [data-field="name"]').value,text:document.querySelector('.custom-module-card[data-id="custom_basic_text"] [data-field="text"]').value,x:document.querySelector('.custom-module-card[data-id="custom_basic_text"] [data-field="x"]').value},advanced:JSON.stringify(customModules.find(module=>module.type==='canvas')),provisionalCanvasSerializations:globalThis.__provisionalCanvasSerializations})`);
+ const during=await evaluate(`({ready:document.readyState,disabled:document.querySelector('#save-config').disabled,addDisabled:document.querySelector('#custom-module-builder .section-head button').disabled,status:document.querySelector('#message').textContent,role:document.querySelector('#message').getAttribute('role'),draft:{name:document.querySelector('.custom-module-card[data-id="custom_basic_text"] [data-field="name"]').value,text:document.querySelector('.custom-module-card[data-id="custom_basic_text"] [data-field="text"]').value,x:document.querySelector('.custom-module-card[data-id="custom_basic_text"] [data-field="x"]').value},advanced:JSON.stringify(customModules.find(module=>module.type==='canvas')),provisionalCanvasSerializations:globalThis.__provisionalCanvasSerializations})`);
  await evaluate(`document.querySelector('#restart-device').click();true`);
  const afterRestart=await evaluate(`({configBodyCalls:globalThis.__configBodyCalls,warnings:globalThis.__restartWarnings,modules:structuredClone(customModules)})`);
  await evaluate(`document.querySelector('#preview-mode-edit').click();true`);
  await sleep(250);
  const afterEditPreview=await evaluate(`({configBodyCalls:globalThis.__configBodyCalls,mode:previewMode,modules:structuredClone(customModules)})`);
+ const preReadyAdd=await evaluate(`(()=>{const before=JSON.stringify(customModules),result=addCustomModule();return{result:result??null,before,after:JSON.stringify(customModules),status:document.querySelector('#message').textContent,provisionalCanvasSerializations:globalThis.__provisionalCanvasSerializations}})()`);
  const direct=await evaluate(`saveConfig()`,true);
  await evaluate(`matrixCheckForNewerConfig()`,true);
  await waitFor(`document.readyState==='loading'&&document.querySelector('.config-revision-dialog')`);
@@ -2192,10 +2193,15 @@ try{
  const beforeRelease=await evaluate(`({ready:document.readyState,canvasReady:globalThis.matrixCustomCanvasReady,editorsReady:matrixEditorsReady})`);
  await fetch(`http://127.0.0.1:${appPort}/release-canvas-asset`).then(response=>response.json());
  await waitFor(`document.readyState==='complete'&&typeof window.orderedLayersForFrame==='function'&&!document.querySelector('.config-revision-dialog')&&!matrixRecoveryPending`);
- const after=await evaluate(`({disabled:document.querySelector('#save-config').disabled,status:document.querySelector('#message').textContent,editors:[...document.querySelectorAll('.custom-module-card')].map(card=>card.dataset.editorType||'basic'),draft:{name:document.querySelector('.custom-module-card[data-id="custom_basic_text"] [data-field="name"]').value,text:document.querySelector('.custom-module-card[data-id="custom_basic_text"] [data-field="text"]').value,x:document.querySelector('.custom-module-card[data-id="custom_basic_text"] [data-field="x"]').value},advanced:JSON.stringify(customModules.find(module=>module.type==='canvas')),provisionalCanvasSerializations:globalThis.__provisionalCanvasSerializations,configBodyCalls:globalThis.__configBodyCalls})`);
+ const after=await evaluate(`({disabled:document.querySelector('#save-config').disabled,addDisabled:document.querySelector('#custom-module-builder .section-head button').disabled,status:document.querySelector('#message').textContent,editors:[...document.querySelectorAll('.custom-module-card')].map(card=>card.dataset.editorType||'basic'),draft:{name:document.querySelector('.custom-module-card[data-id="custom_basic_text"] [data-field="name"]').value,text:document.querySelector('.custom-module-card[data-id="custom_basic_text"] [data-field="text"]').value,x:document.querySelector('.custom-module-card[data-id="custom_basic_text"] [data-field="x"]').value},advanced:JSON.stringify(customModules.find(module=>module.type==='canvas')),provisionalCanvasSerializations:globalThis.__provisionalCanvasSerializations,configBodyCalls:globalThis.__configBodyCalls})`);
+ await evaluate(`document.querySelector('#custom-module-builder .section-head button').click();true`);
+ const addedId=await evaluate(`customModules.at(-1).id`);
+ await waitFor(`document.querySelector('#preview-select').value===${JSON.stringify(addedId)}&&document.querySelector('#preview-module').textContent.includes(${JSON.stringify(addedId)})`);
+ await sleep(300);
+ const added=await evaluate(`({id:customModules.at(-1).id,module:structuredClone(customModules.at(-1)),selected:document.querySelector('#preview-select').value,label:document.querySelector('#preview-module').textContent})`);
  const normal=await evaluate(`saveConfig()`,true);
  const afterReadinessPreviewBoundary=await fetch(`http://127.0.0.1:${appPort}/preview-boundary-after-readiness`).then(response=>response.json());
- console.log(JSON.stringify({during,afterRestart,afterEditPreview,direct,beforeReadinessPreviewBoundary,beforeRelease,conflict,after,normal,afterReadinessPreviewBoundary}));
+ console.log(JSON.stringify({during,afterRestart,afterEditPreview,preReadyAdd,direct,beforeReadinessPreviewBoundary,beforeRelease,conflict,after,added,normal,afterReadinessPreviewBoundary}));
 }finally{socket.close()}
 """
         report = self.run_live_chromium_probe(
@@ -2205,6 +2211,7 @@ try{
             observed_previews = copy.deepcopy(previewed)
         self.assertEqual(report["during"]["ready"], "loading", report)
         self.assertTrue(report["during"]["disabled"], report)
+        self.assertTrue(report["during"]["addDisabled"], report)
         self.assertEqual(report["during"]["status"], "Finishing editor setup before saving.", report)
         self.assertEqual(report["during"]["role"], "status", report)
         self.assertEqual(report["during"]["draft"], {
@@ -2218,6 +2225,10 @@ try{
         self.assertEqual(report["afterEditPreview"]["configBodyCalls"], 0, report)
         self.assertEqual(report["afterEditPreview"]["mode"], "edit", report)
         self.assertEqual(report["afterEditPreview"]["modules"][0], expected_modules[0], report)
+        self.assertEqual(report["preReadyAdd"]["result"], False, report)
+        self.assertEqual(report["preReadyAdd"]["after"], report["preReadyAdd"]["before"], report)
+        self.assertIn("Finish loading", report["preReadyAdd"]["status"], report)
+        self.assertEqual(report["preReadyAdd"]["provisionalCanvasSerializations"], 0, report)
         self.assertEqual(report["beforeReadinessPreviewBoundary"]["count"], 0, report)
         self.assertEqual(report["beforeRelease"], {
             "ready": "loading", "canvasReady": False, "editorsReady": False,
@@ -2235,14 +2246,20 @@ try{
         self.assertTrue(report["conflict"]["disabled"], report)
         self.assertEqual(report["conflict"]["draft"], expected_basic["text"], report)
         self.assertFalse(report["after"]["disabled"], report)
+        self.assertFalse(report["after"]["addDisabled"], report)
         self.assertEqual(report["after"]["editors"], ["canvas", "simple"], report)
         self.assertEqual(report["after"]["draft"], {
             "name": expected_basic["name"], "text": expected_basic["text"], "x": str(expected_basic["x"]),
         }, report)
         self.assertEqual(report["during"]["provisionalCanvasSerializations"], 0, report)
         self.assertEqual(report["after"]["provisionalCanvasSerializations"], 0, report)
+        self.assertEqual(report["added"]["selected"], report["added"]["id"], report)
+        self.assertIn(report["added"]["id"], report["added"]["label"], report)
+        self.assertEqual(report["added"]["module"]["text"], "HELLO MATRIX", report)
         self.assertTrue(report["normal"]["saved"], report)
-        self.assertEqual(posted, [{**posted[0], "custom_modules": [expected_modules[0], expected_basic]}])
+        self.assertEqual(len(posted), 1, posted)
+        self.assertEqual(posted[0]["custom_modules"][:2], [expected_modules[0], expected_basic])
+        self.assertEqual(posted[0]["custom_modules"][2], report["added"]["module"])
         self.assertEqual(
             report["afterReadinessPreviewBoundary"]["count"],
             len(preview_boundaries["after_readiness"]),
@@ -2256,10 +2273,15 @@ try{
         for preview_record in observed_previews:
             preview_payload = preview_record["payload"]
             self.assertEqual(
-                preview_payload["config"]["custom_modules"],
+                preview_payload["config"]["custom_modules"][:2],
                 [expected_modules[0], expected_basic],
                 {"report": report, "preview_payload": preview_payload},
             )
+        self.assertEqual(
+            observed_previews[-1]["payload"]["config"]["custom_modules"][2],
+            report["added"]["module"],
+            {"report": report, "previewed": observed_previews},
+        )
 
     @unittest.skipUnless(shutil.which("node"), "Node.js is required")
     @unittest.skipUnless(
@@ -2973,6 +2995,175 @@ globalThis.document=document;globalThis.window=window;globalThis.fetch=fetch;
         and os.access(os.environ.get("MATRIX_CHROMIUM", ""), os.X_OK),
         "MATRIX_CHROMIUM browser is required",
     )
+    def test_every_custom_editor_automatically_becomes_edit_preview_source(self):
+        basic = {
+            "id": "custom_basic_source", "name": "Basic source", "type": "text_scroll",
+            "text": "SAVED BASIC", "font": "5x7", "colour": "#ffffff",
+            "background": "#000000", "x": 2, "y": 20, "direction": "left",
+            "speed": .05, "loops": 1,
+        }
+        canvas = {
+            "id": "custom_canvas_source", "name": "Canvas source", "type": "canvas",
+            "background": "#102938", "frame_count": 3, "fps": 10, "playback": "loop",
+            "layers": [{
+                "id": "layer_source", "name": "Source rectangle", "type": "rectangle",
+                "visible": True,
+                "properties": {"present": True, "x": 5, "y": 6, "width": 12,
+                               "height": 8, "rotation": 0, "colour": "#abcdef",
+                               "filled": True, "z_index": 0},
+                "keyframes": [],
+            }],
+            "overrides": [],
+        }
+        self.store.update({"custom_modules": [basic, canvas]})
+        self.pair_browser()
+        before_config = Path(self.store.path).read_bytes()
+        device_path = Path(self.temp.name) / "paired-devices.json"
+        before_devices = device_path.read_bytes()
+        before_media = {
+            path.relative_to(self.media_dir): path.read_bytes()
+            for path in self.media_dir.rglob("*") if path.is_file()
+        }
+        body = self.client.get("/").get_data(as_text=True)
+        self.controller.reset_mock()
+        probe = r"""
+const port=process.argv[1],pagePath=process.argv[2],sleep=ms=>new Promise(resolve=>setTimeout(resolve,ms));let endpoint;
+for(let attempt=0;attempt<50;attempt++){try{endpoint=await fetch(`http://127.0.0.1:${port}/json/new`,{method:'PUT'}).then(response=>response.json());break}catch(_){await sleep(100)}}
+if(!endpoint)throw new Error('Chromium DevTools endpoint unavailable');
+const socket=new WebSocket(endpoint.webSocketDebuggerUrl),pending=new Map();let nextId=0,resolveLoad,loaded=new Promise(resolve=>resolveLoad=resolve);
+socket.onmessage=event=>{const message=JSON.parse(event.data);if(message.id&&pending.has(message.id)){const request=pending.get(message.id);pending.delete(message.id);message.error?request.reject(new Error(JSON.stringify(message.error))):request.resolve(message.result)}else if(message.method==='Page.loadEventFired')resolveLoad()};
+await new Promise((resolve,reject)=>{socket.onopen=resolve;socket.onerror=reject});
+const send=(method,params={})=>new Promise((resolve,reject)=>{const id=++nextId;pending.set(id,{resolve,reject});socket.send(JSON.stringify({id,method,params}))});
+const evaluate=async expression=>{const result=await send('Runtime.evaluate',{expression,returnByValue:true,awaitPromise:true});if(result.exceptionDetails)throw new Error(JSON.stringify(result.exceptionDetails));return result.result.value};
+const waitFor=async expression=>{for(let attempt=0;attempt<160;attempt++){if(await evaluate(expression))return;await sleep(25)}throw new Error('waitFor timed out: '+expression)};
+try{
+ await send('Runtime.enable');await send('Page.enable');await send('Emulation.setDeviceMetricsOverride',{width:390,height:844,deviceScaleFactor:1,mobile:true});
+ await send('Page.addScriptToEvaluateOnNewDocument',{source:`
+  globalThis.__requests=[];globalThis.__aborted=[];globalThis.__errors=[];globalThis.__releaseSleepFrame=null;globalThis.__continuationMode=false;globalThis.__decodeCalls=0;globalThis.__decodeEntered=0;globalThis.__holdDecodeAt=null;globalThis.__decodeRelease=null;
+  const nativeCreateImageBitmap=globalThis.createImageBitmap.bind(globalThis);globalThis.createImageBitmap=async(...args)=>{const bitmap=await nativeCreateImageBitmap(...args),call=++__decodeCalls;if(call===__holdDecodeAt){__decodeEntered++;await new Promise(resolve=>__decodeRelease=resolve)}return bitmap};
+  addEventListener('error',event=>__errors.push(String(event.error||event.message)));addEventListener('unhandledrejection',event=>__errors.push(String(event.reason)));
+  const png='iVBORw0KGgoAAAANSUhEUgAAAEAAAAAgCAIAAAAt/+nTAAAAT0lEQVR4nO3PUQkAIBTAwBfOClawfwRD+HEIgwW4zdrn64YLGtCCBrSgAS1oQAsa0IIGtKABLWhACxrQgga0oAEtaEALGtCCBrSgAS147AIqPPhqwA8fegAAAABJRU5ErkJggg==',bytes=Uint8Array.from(atob(png),character=>character.charCodeAt(0));
+  globalThis.confirm=()=>true;
+  globalThis.fetch=async(input,options={})=>{const url=String(input),method=options.method||'GET',payload=options.body?JSON.parse(options.body):null,record={url,method,payload,aborted:false};__requests.push(record);
+   if(url.startsWith('/api/display-frame'))return await new Promise(resolve=>{__releaseSleepFrame=()=>resolve(new Response(new Blob([bytes],{type:'image/png'}),{headers:{'X-Matrix-Frame':'sleep'}}))});
+   if(url==='/api/config')return new Response(null,{status:304,headers:{'X-Matrix-Minimum-Client-Contract':'2'}});
+   if(url.startsWith('/api/status'))return new Response(JSON.stringify({running:true,current_module:'weather',minimum_client_contract:2}),{headers:{'Content-Type':'application/json'}});
+   if(url==='/api/edit-preview/cancel')return new Response(JSON.stringify({cancelled:true}),{headers:{'Content-Type':'application/json'}});
+   if(url==='/api/edit-preview/page'){const generation=Number(payload.session);return new Response(JSON.stringify({session:payload.session,generation,page:1,frames:[{png,delay_ms:10000}],next_token:null,complete:true}),{headers:{'Content-Type':'application/json'}})}
+   if(url.startsWith('/api/edit-preview/')){const samePath=__requests.filter(item=>item.url===url).length;if(url.endsWith('/custom_basic_source')&&samePath===1)await new Promise((resolve,reject)=>{const timer=setTimeout(resolve,500);options.signal?.addEventListener('abort',()=>{clearTimeout(timer);record.aborted=true;__aborted.push(payload.generation);reject(new DOMException('Aborted','AbortError'))},{once:true})});return new Response(JSON.stringify({session:String(payload.generation).padStart(32,'0'),generation:payload.generation,page:0,frames:[{png,delay_ms:10000}],next_token:__continuationMode?'a'.repeat(64):null,complete:!__continuationMode}),{headers:{'Content-Type':'application/json'}})}
+   return new Response(JSON.stringify({error:'fixture endpoint unavailable'}),{status:503,headers:{'Content-Type':'application/json'}})
+  };
+ `});
+ loaded=new Promise(resolve=>resolveLoad=resolve);await send('Page.navigate',{url:'file://'+pagePath});await loaded;await waitFor(`matrixEditorsReady===true`);await waitFor(`typeof __releaseSleepFrame==='function'`);
+ await evaluate(`(()=>{const select=document.querySelector('#preview-select');select.value='weather';select.dispatchEvent(new Event('change',{bubbles:true}));document.querySelector('#preview-mode-edit').click();__requests=[]})()`);
+ await evaluate(`(()=>{const card=document.querySelector('.custom-module-card[data-id="custom_basic_source"]'),set=(field,value)=>{const control=card.querySelector('[data-field="'+field+'"]');control.focus();control.value=value;control.dispatchEvent(new Event('input',{bubbles:true}))};set('text','FIRST UNSAVED');set('x','17');set('colour','#123456');set('speed','0.123')})()`);
+ await waitFor(`__requests.some(request=>request.url==='/api/edit-preview/custom_basic_source')`);
+ await evaluate(`(()=>{const text=document.querySelector('.custom-module-card[data-id="custom_basic_source"] [data-field="text"]');text.value='LATEST UNSAVED';text.dispatchEvent(new Event('input',{bubbles:true}))})()`);
+ await waitFor(`__aborted.length===1&&__requests.filter(request=>request.url==='/api/edit-preview/custom_basic_source').length===2`);await sleep(50);
+ const basic=await evaluate(`(()=>{const requests=__requests.filter(request=>request.url==='/api/edit-preview/custom_basic_source'),latest=requests.at(-1);return{paths:__requests.filter(request=>request.payload&&request.url!='/api/edit-preview/cancel').map(request=>request.url),count:requests.length,aborted:[...__aborted],generations:requests.map(request=>request.payload.generation),latest:latest.payload.config.custom_modules.find(module=>module.id==='custom_basic_source'),selected:document.querySelector('#preview-select').value,label:document.querySelector('#preview-module').textContent}})()`);
+ const mutateCanvas=async expression=>{const before=await evaluate(`__requests.filter(request=>request.url==='/api/edit-preview/custom_canvas_source').length`);await evaluate(expression);await waitFor(`__requests.filter(request=>request.url==='/api/edit-preview/custom_canvas_source').length>${before}`);await sleep(25)};
+ await mutateCanvas(`(()=>{const control=document.querySelector('.custom-module-card[data-id="custom_canvas_source"] [data-control="Background"]');control.focus();control.value='#334455';control.dispatchEvent(new Event('input',{bubbles:true}))})()`);
+ await mutateCanvas(`(()=>{const buttons=[...document.querySelectorAll('.custom-module-card[data-id="custom_canvas_source"] button')];buttons.find(button=>button.textContent==='Duplicate frame').click()})()`);
+ await mutateCanvas(`(()=>{const buttons=[...document.querySelectorAll('.custom-module-card[data-id="custom_canvas_source"] button')];buttons.find(button=>button.textContent==='Add/update keyframe').click()})()`);
+ await mutateCanvas(`applyCanvasTemplate('custom_canvas_source','three_lines_circle')`);
+ await evaluate(`document.querySelector('.custom-module-card[data-id="custom_canvas_source"] canvas').scrollIntoView({block:'center'});true`);await sleep(50);
+ const point=await evaluate(`(()=>{const canvas=document.querySelector('.custom-module-card[data-id="custom_canvas_source"] canvas'),box=canvas.getBoundingClientRect(),x=box.left+box.width*.3,y=box.top+box.height*.3;return{x,y,hit:document.elementFromPoint(x,y)===canvas}})()`);
+ if(!point.hit)throw new Error('Canvas touch point is not actionable: '+JSON.stringify(point));
+ const beforePointer=await evaluate(`__requests.filter(request=>request.url==='/api/edit-preview/custom_canvas_source').length`);await evaluate(`(()=>{const canvas=document.querySelector('.custom-module-card[data-id="custom_canvas_source"] canvas'),options={bubbles:true,pointerId:41,isPrimary:true,button:0,buttons:1,clientX:${point.x},clientY:${point.y}};canvas.setPointerCapture=()=>{};canvas.dispatchEvent(new PointerEvent('pointerdown',options));canvas.dispatchEvent(new PointerEvent('pointermove',{...options,clientX:${point.x+20},clientY:${point.y+10}}));canvas.dispatchEvent(new PointerEvent('pointerup',{...options,buttons:0,clientX:${point.x+20},clientY:${point.y+10}}))})()`);await waitFor(`__requests.filter(request=>request.url==='/api/edit-preview/custom_canvas_source').length>${beforePointer}`);await sleep(25);
+ const final=await evaluate(`(()=>{const requests=__requests.filter(request=>request.payload),canvasRequests=requests.filter(request=>request.url==='/api/edit-preview/custom_canvas_source'),latest=canvasRequests.at(-1),forbidden=__requests.filter(request=>request.method==='POST'&&(request.url==='/api/config'||request.url.startsWith('/api/preview/')||request.url.startsWith('/api/control/')||request.url.includes('/api/media/')&&request.url.endsWith('/preview')));return{canvasCount:canvasRequests.length,canvasGenerations:canvasRequests.map(request=>request.payload.generation),latestCanvas:latest.payload.config.custom_modules.find(module=>module.id==='custom_canvas_source'),selected:document.querySelector('#preview-select').value,label:document.querySelector('#preview-module').textContent,forbidden:forbidden.map(request=>request.url),errors:[...__errors],previewCanvasCount:document.querySelectorAll('#matrix-preview').length}})()`);
+ const sleepOwnership=await evaluate(`(async()=>{const preview=document.querySelector('#matrix-preview'),context=preview.getContext('2d'),source=document.querySelector('#preview-select'),module=document.querySelector('#preview-module'),frame=document.querySelector('#preview-frame');context.fillStyle='rgb(1, 2, 3)';context.fillRect(0,0,1,1);const before={source:source.value,module:module.textContent,frame:frame.textContent,pixel:[...context.getImageData(0,0,1,1).data]};updateStatus({running:true,current_module:'sleep',last_error:null});__releaseSleepFrame();await new Promise(resolve=>setTimeout(resolve,100));return{before,after:{source:source.value,module:module.textContent,frame:frame.textContent,pixel:[...context.getImageData(0,0,1,1).data]},mode:previewMode}})()`);
+ const sizes=[[320,568],[360,800],[390,844],[412,915],[768,1024],[820,1180],[1024,768],[1280,720],[1440,900],[844,390],[599,800],[600,800],[601,800],[899,800],[900,800],[901,800]],geometry=[];
+ for(const [width,height] of sizes){await send('Emulation.setDeviceMetricsOverride',{width,height,deviceScaleFactor:1,mobile:width<1024});await send('Emulation.setPageScaleFactor',{pageScaleFactor:1});await evaluate(`resizePreviewPopout();true`);geometry.push(await evaluate(`({viewport:[innerWidth,innerHeight],overflow:document.documentElement.scrollWidth-document.documentElement.clientWidth,source:document.querySelector('#preview-select').value,canvasCount:document.querySelectorAll('#matrix-preview').length})`))}
+ const starts=()=>evaluate(`__requests.filter(request=>request.url.startsWith('/api/edit-preview/')&&!['/api/edit-preview/page','/api/edit-preview/cancel'].includes(request.url)).length`);
+ const beforeNoop=await starts();await evaluate(`(()=>{const card=document.querySelector('.custom-module-card[data-id="custom_canvas_source"]'),play=[...card.querySelectorAll('button')].find(button=>button.textContent==='Play browser preview'),onion=card.querySelector('[data-control="Onion skin"]');play.focus();play.click();onion.checked=!onion.checked;onion.dispatchEvent(new Event('change',{bubbles:true}))})()`);await sleep(250);const afterNoop=await starts();
+ const cancelsBefore=await evaluate(`__requests.filter(request=>request.url==='/api/edit-preview/cancel').length`);
+ const initialDecodeBefore=await evaluate(`__decodeEntered`);await evaluate(`(()=>{const context=document.querySelector('#matrix-preview').getContext('2d');context.fillStyle='rgb(9, 10, 11)';context.fillRect(0,0,1,1);__holdDecodeAt=__decodeCalls+1;const control=document.querySelector('.custom-module-card[data-id="custom_canvas_source"] [data-control="Background"]');control.value='#556677';control.dispatchEvent(new Event('input',{bubbles:true}))})()`);await waitFor(`__decodeEntered>${initialDecodeBefore}`);const initialStartsBefore=await starts();
+ const initialDecodeRemoval=await evaluate(`(()=>{const card=document.querySelector('.custom-module-card[data-id="custom_canvas_source"]');[...card.querySelectorAll('button')].find(button=>button.textContent==='Remove').click();const context=document.querySelector('#matrix-preview').getContext('2d');return{before:{pixel:[...context.getImageData(0,0,1,1).data],selected:document.querySelector('#preview-select').value,label:document.querySelector('#preview-module').textContent,status:document.querySelector('#preview-frame').textContent}}})()`);await waitFor(`__requests.filter(request=>request.url==='/api/edit-preview/cancel').length>${cancelsBefore}`);await evaluate(`__decodeRelease()`);await sleep(250);initialDecodeRemoval.after=await evaluate(`(()=>{const context=document.querySelector('#matrix-preview').getContext('2d');return{pixel:[...context.getImageData(0,0,1,1).data],selected:document.querySelector('#preview-select').value,label:document.querySelector('#preview-module').textContent,status:document.querySelector('#preview-frame').textContent}})()`);const afterRemovalStarts=await starts();
+ initialDecodeRemoval.starts={before:initialStartsBefore,after:afterRemovalStarts};
+ const continuationDecodeBefore=await evaluate(`__decodeEntered`);await evaluate(`(()=>{__continuationMode=true;__holdDecodeAt=__decodeCalls+2;const text=document.querySelector('.custom-module-card[data-id="custom_basic_source"] [data-field="text"]');text.value='CONTINUATION RACE';text.dispatchEvent(new Event('input',{bubbles:true}))})()`);await waitFor(`__decodeEntered>${continuationDecodeBefore}`);const continuationStartsBefore=await starts();
+ const continuationDecodeRemoval=await evaluate(`(()=>{const card=document.querySelector('.custom-module-card[data-id="custom_basic_source"]');[...card.querySelectorAll('button')].find(button=>button.textContent==='Remove').click();const context=document.querySelector('#matrix-preview').getContext('2d');return{before:{pixel:[...context.getImageData(0,0,1,1).data],selected:document.querySelector('#preview-select').value,label:document.querySelector('#preview-module').textContent,status:document.querySelector('#preview-frame').textContent}}})()`);await evaluate(`__decodeRelease()`);await sleep(300);continuationDecodeRemoval.after=await evaluate(`(()=>{const context=document.querySelector('#matrix-preview').getContext('2d');return{pixel:[...context.getImageData(0,0,1,1).data],selected:document.querySelector('#preview-select').value,label:document.querySelector('#preview-module').textContent,status:document.querySelector('#preview-frame').textContent}})()`);continuationDecodeRemoval.starts={before:continuationStartsBefore,after:await starts()};
+ const removal=await evaluate(`({customCards:document.querySelectorAll('.custom-module-card').length,selected:document.querySelector('#preview-select').value,label:document.querySelector('#preview-module').textContent,status:document.querySelector('#preview-frame').textContent,cancels:__requests.filter(request=>request.url==='/api/edit-preview/cancel').length})`);removal.starts=await starts();removal.afterRemovalStarts=afterRemovalStarts;
+ console.log(JSON.stringify({basic,final,sleepOwnership,geometry,noops:{before:beforeNoop,after:afterNoop},initialDecodeRemoval,continuationDecodeRemoval,removal}));
+}finally{socket.close()}
+"""
+        report = self._run_dashboard_chromium_probe(body, probe, timeout=45)
+        self.assertEqual(report["basic"]["count"], 2, report)
+        self.assertEqual(report["basic"]["paths"], [
+            "/api/edit-preview/custom_basic_source",
+            "/api/edit-preview/custom_basic_source",
+        ], report)
+        self.assertEqual(len(report["basic"]["aborted"]), 1, report)
+        self.assertEqual(
+            report["basic"]["generations"],
+            sorted(set(report["basic"]["generations"])),
+            report,
+        )
+        self.assertEqual(report["basic"]["latest"]["text"], "LATEST UNSAVED", report)
+        self.assertEqual(report["basic"]["latest"]["x"], 17, report)
+        self.assertEqual(report["basic"]["latest"]["colour"], "#123456", report)
+        self.assertEqual(report["basic"]["latest"]["speed"], .123, report)
+        self.assertEqual(report["basic"]["selected"], "custom_basic_source", report)
+        self.assertIn("Unsaved draft · custom_basic_source", report["basic"]["label"])
+        self.assertGreaterEqual(report["final"]["canvasCount"], 5, report)
+        self.assertEqual(
+            report["final"]["canvasGenerations"],
+            sorted(set(report["final"]["canvasGenerations"])),
+            report,
+        )
+        self.assertEqual(report["final"]["latestCanvas"]["background"], "#000000", report)
+        self.assertEqual(report["final"]["selected"], "custom_canvas_source", report)
+        self.assertIn("Unsaved draft · custom_canvas_source", report["final"]["label"])
+        self.assertEqual(report["final"]["forbidden"], [], report)
+        self.assertEqual(report["final"]["errors"], [], report)
+        self.assertEqual(report["final"]["previewCanvasCount"], 1, report)
+        self.assertEqual(report["sleepOwnership"]["mode"], "edit", report)
+        self.assertEqual(
+            report["sleepOwnership"]["after"],
+            report["sleepOwnership"]["before"],
+            report,
+        )
+        self.assertEqual(
+            report["sleepOwnership"]["after"]["source"],
+            "custom_canvas_source",
+            report,
+        )
+        self.assertIn("Unsaved draft", report["sleepOwnership"]["after"]["module"])
+        self.assertIn("Unsaved draft frame", report["sleepOwnership"]["after"]["frame"])
+        self.assertEqual(
+            [item["viewport"] for item in report["geometry"]],
+            [[320, 568], [360, 800], [390, 844], [412, 915], [768, 1024],
+             [820, 1180], [1024, 768], [1280, 720], [1440, 900], [844, 390],
+             [599, 800], [600, 800], [601, 800], [899, 800], [900, 800], [901, 800]],
+            report,
+        )
+        self.assertTrue(all(item["overflow"] <= 1 for item in report["geometry"]), report)
+        self.assertTrue(all(item["source"] == "custom_canvas_source" for item in report["geometry"]), report)
+        self.assertTrue(all(item["canvasCount"] == 1 for item in report["geometry"]), report)
+        self.assertEqual(report["noops"]["before"], report["noops"]["after"], report)
+        self.assertEqual(report["initialDecodeRemoval"]["after"], report["initialDecodeRemoval"]["before"], report)
+        self.assertEqual(report["continuationDecodeRemoval"]["after"], report["continuationDecodeRemoval"]["before"], report)
+        self.assertEqual(report["initialDecodeRemoval"]["starts"]["after"], report["initialDecodeRemoval"]["starts"]["before"], report)
+        self.assertEqual(report["continuationDecodeRemoval"]["starts"]["after"], report["continuationDecodeRemoval"]["starts"]["before"], report)
+        self.assertEqual(report["removal"]["customCards"], 0, report)
+        self.assertFalse(report["removal"]["selected"].startswith("custom_"), report)
+        self.assertIn("select an editor", report["removal"]["label"])
+        self.assertIn("awaiting draft source", report["removal"]["status"])
+        self.assertGreaterEqual(report["removal"]["cancels"], 1, report)
+        self.assertEqual(Path(self.store.path).read_bytes(), before_config)
+        self.assertEqual(device_path.read_bytes(), before_devices)
+        self.assertEqual({
+            path.relative_to(self.media_dir): path.read_bytes()
+            for path in self.media_dir.rglob("*") if path.is_file()
+        }, before_media)
+        self.assertEqual(self.controller.method_calls, [])
+
+    @unittest.skipUnless(shutil.which("node"), "Node.js is required")
+    @unittest.skipUnless(
+        os.environ.get("MATRIX_CHROMIUM")
+        and Path(os.environ.get("MATRIX_CHROMIUM", "")).is_file()
+        and os.access(os.environ.get("MATRIX_CHROMIUM", ""), os.X_OK),
+        "MATRIX_CHROMIUM browser is required",
+    )
     def test_live_edit_segmented_control_updates_unsaved_preview_without_saving(self):
         self.pair_browser()
         before_config = Path(self.store.path).read_bytes()
@@ -3008,16 +3199,18 @@ try{
  `});
  loaded=new Promise(resolve=>loadResolve=resolve);await send('Page.navigate',{url:'file://'+pagePath});await Promise.race([loaded,new Promise((_,reject)=>setTimeout(()=>reject(new Error('load timeout')),5000))]);
  const initial=await evaluate(`(()=>{const group=document.querySelector('[role="radiogroup"]'),live=document.querySelector('#preview-mode-live'),edit=document.querySelector('#preview-mode-edit'),canvas=document.querySelector('#matrix-preview');return {canvasCount:document.querySelectorAll('#matrix-preview').length,groupBelow:Boolean(group)&&group.getBoundingClientRect().top>=canvas.getBoundingClientRect().bottom,labels:[live?.labels?.[0]?.textContent.trim()||null,edit?.labels?.[0]?.textContent.trim()||null],liveChecked:live?.checked??null,editChecked:edit?.checked??null,frame:document.querySelector('#preview-frame')?.textContent||null}})()`);
- await evaluate(`(()=>{addCustomModule();const selected=document.querySelector('#preview-select');selected.value='weather';selected.dispatchEvent(new Event('change',{bubbles:true}))})()`);
+ await evaluate(`(()=>{const selected=document.querySelector('#preview-select');selected.value='weather';selected.dispatchEvent(new Event('change',{bubbles:true}))})()`);
  const editPoint=await evaluate(`(()=>{const r=document.querySelector('label[for="preview-mode-edit"]')?.getBoundingClientRect();return r?{x:r.left+r.width/2,y:r.top+r.height/2}:null})()`);
  if(editPoint){await send('Input.dispatchTouchEvent',{type:'touchStart',touchPoints:[editPoint]});await send('Input.dispatchTouchEvent',{type:'touchEnd',touchPoints:[]})}
  await waitFor(`__requests.some(item=>item.url.startsWith('/api/edit-preview/weather'))`);
+ await evaluate(`addCustomModule()`);
+ await waitFor(`__requests.some(item=>item.url.startsWith('/api/edit-preview/custom_')&&item.url!='/api/edit-preview/cancel')`);
+ const added=await evaluate(`(()=>{const request=__requests.filter(item=>item.url.startsWith('/api/edit-preview/custom_')&&item.url!='/api/edit-preview/cancel').at(-1),module=request.payload.config.custom_modules.find(item=>request.url.endsWith('/'+item.id));return{path:request.url,module,selected:document.querySelector('#preview-select').value,label:document.querySelector('#preview-module').textContent}})()`);
  await evaluate(`(()=>{const set=(selector,value)=>{const control=document.querySelector(selector);control.value=value;control.dispatchEvent(new Event('input',{bubbles:true}))};set('[data-built-in-module="weather"][data-setting="now_x"]','9');set('[data-built-in-module="weather"][data-setting="text_colour"]','#123456');set('#weather-scroll-speed','0.123');const text=document.querySelector('.custom-module-card [data-field="text"]');if(text){text.value='UNSAVED TEST';text.dispatchEvent(new Event('input',{bubbles:true}))}})()`);
- await waitFor(`__requests.filter(item=>item.url.startsWith('/api/edit-preview/weather')).length>=2`);
- await new Promise(r=>setTimeout(r,25));
+ await waitFor(`__requests.some(item=>item.url.startsWith('/api/edit-preview/custom_')&&item.url!='/api/edit-preview/cancel'&&item.payload?.config?.weather?.now_x===9&&item.payload.config.custom_modules.some(module=>module.text==='UNSAVED TEST'))`);
  const firstEditPixel=await evaluate(`[...document.querySelector('#matrix-preview').getContext('2d').getImageData(0,0,1,1).data]`);
  await new Promise(r=>setTimeout(r,70));
- const edited=await evaluate(`(()=>{const requests=__requests.filter(item=>item.url.startsWith('/api/edit-preview/weather')),pageRequests=__requests.filter(item=>item.url==='/api/edit-preview/page'),latest=requests.at(-1).payload,pixel=[...document.querySelector('#matrix-preview').getContext('2d').getImageData(0,0,1,1).data],forbidden=__requests.filter(item=>item.method==='POST'&&(item.url==='/api/config'||item.url.startsWith('/api/preview/')||item.url.includes('/api/media/')&&item.url.endsWith('/preview')||item.url.startsWith('/api/control/')));return {instance:latest?.preview_instance||null,generations:requests.map(item=>item.payload.generation),modulePaths:requests.map(item=>item.url),pagePayloads:pageRequests.map(item=>item.payload),latest,pixel,label:document.querySelector('#preview-module').textContent,forbidden:forbidden.map(item=>item.url),canvasCount:document.querySelectorAll('#matrix-preview').length}})()`);
+ const edited=await evaluate(`(()=>{const requests=__requests.filter(item=>item.url.startsWith('/api/edit-preview/')&&!['/api/edit-preview/page','/api/edit-preview/cancel'].includes(item.url)),pageRequests=__requests.filter(item=>item.url==='/api/edit-preview/page'),latest=requests.at(-1).payload,pixel=[...document.querySelector('#matrix-preview').getContext('2d').getImageData(0,0,1,1).data],forbidden=__requests.filter(item=>item.method==='POST'&&(item.url==='/api/config'||item.url.startsWith('/api/preview/')||item.url.includes('/api/media/')&&item.url.endsWith('/preview')||item.url.startsWith('/api/control/')));return {instance:latest?.preview_instance||null,generations:requests.map(item=>item.payload.generation),modulePaths:requests.map(item=>item.url),pagePayloads:pageRequests.map(item=>item.payload),latest,pixel,label:document.querySelector('#preview-module').textContent,forbidden:forbidden.map(item=>item.url),canvasCount:document.querySelectorAll('#matrix-preview').length}})()`);
  edited.firstPixel=firstEditPixel;
  await evaluate(`document.documentElement.style.scrollBehavior='auto';scrollTo(0,document.documentElement.scrollHeight);syncPreviewPopout()`);await new Promise(r=>setTimeout(r,50));
  const poppedLabel=await evaluate(`document.querySelector('#preview-module').textContent`);
@@ -3026,7 +3219,7 @@ try{
  await waitFor(`document.querySelector('.edit-preview-switch-dialog')?.open`);await evaluate(`document.querySelector('.edit-preview-switch-dialog button').click();matrixDirty=false;matrixSavedSnapshot=matrixCurrentSnapshot();document.querySelector('#preview-mode-live').click()`);
  await waitFor(`__requests.filter(item=>item.url.startsWith('/api/display-frame')).length>=2`);await new Promise(r=>setTimeout(r,180));
  const restored=await evaluate(`(()=>({live:document.querySelector('#preview-mode-live').checked,label:document.querySelector('#preview-module').textContent,cancels:__requests.filter(item=>item.url==='/api/edit-preview/cancel').length,displayRequests:__requests.filter(item=>item.url.startsWith('/api/display-frame')).length,maxDisplayActive:__displayMaxActive,editTimers:globalThis.editPreviewAnimationTimer??null,canvasCount:document.querySelectorAll('#matrix-preview').length}))()`);
- console.log(JSON.stringify({initial,edited,poppedLabel,restored}));
+ console.log(JSON.stringify({initial,added,edited,poppedLabel,restored}));
 }finally{socket.close()}
 """
         report = self._run_dashboard_chromium_probe(body, probe)
@@ -3039,6 +3232,16 @@ try{
         self.assertRegex(report["edited"]["instance"], r"^[0-9a-f]{32}$")
         self.assertGreaterEqual(len(report["edited"]["generations"]), 2, report)
         self.assertEqual(report["edited"]["generations"], sorted(set(report["edited"]["generations"])), report)
+        self.assertEqual(report["edited"]["modulePaths"][0], "/api/edit-preview/weather", report)
+        self.assertRegex(report["added"]["path"], r"^/api/edit-preview/custom_[0-9a-z]+$")
+        self.assertEqual(report["added"]["module"]["text"], "HELLO MATRIX", report)
+        self.assertEqual(
+            report["added"]["selected"],
+            report["added"]["path"].rsplit("/", 1)[-1],
+            report,
+        )
+        self.assertIn("Unsaved draft", report["added"]["label"])
+        self.assertRegex(report["edited"]["modulePaths"][-1], r"^/api/edit-preview/custom_[0-9a-z]+$")
         self.assertGreaterEqual(len(report["edited"]["pagePayloads"]), 2, report)
         self.assertTrue(all(set(payload) == {"session", "preview_instance", "token"} for payload in report["edited"]["pagePayloads"]), report)
         latest = report["edited"]["latest"]
@@ -3048,8 +3251,9 @@ try{
         self.assertEqual(latest["config"]["custom_modules"][0]["text"], "UNSAVED TEST")
         self.assertEqual(report["edited"]["firstPixel"], [68, 85, 102, 255], report)
         self.assertEqual(report["edited"]["pixel"], [170, 187, 204, 255], report)
-        self.assertIn("Unsaved draft · weather", report["edited"]["label"])
-        self.assertIn("Unsaved draft · weather", report["poppedLabel"])
+        custom_source = report["edited"]["modulePaths"][-1].rsplit("/", 1)[-1]
+        self.assertIn(f"Unsaved draft · {custom_source}", report["edited"]["label"])
+        self.assertIn(f"Unsaved draft · {custom_source}", report["poppedLabel"])
         self.assertEqual(report["edited"]["forbidden"], [], report)
         self.assertEqual(report["edited"]["canvasCount"], 1, report)
         self.assertTrue(report["restored"]["live"], report)
@@ -5203,6 +5407,15 @@ console.log(JSON.stringify({result:JSON.parse(evaluated.result.value),exceptions
         "MATRIX_CHROMIUM browser is required",
     )
     def test_scrolling_seconds_editing_and_provider_states_in_real_chromium(self):
+        current_playlist = self.store.get()["playlist"]
+        self.store.update({"custom_modules": [{
+            "id": "custom_timing_fixture", "name": "Timing fixture", "type": "text_scroll",
+            "text": "TIMING", "font": "5x7", "colour": "#ffffff",
+            "background": "#000000", "x": 2, "y": 20, "direction": "left",
+            "speed": .05, "loops": 1,
+        }], "playlist": [*current_playlist, {
+            "module": "custom_timing_fixture", "duration": 15, "enabled": True,
+        }]})
         self.pair_browser()
         body = self.client.get("/").get_data(as_text=True)
         chromium = os.environ["MATRIX_CHROMIUM"]
@@ -5215,7 +5428,7 @@ socket.onmessage=e=>{const m=JSON.parse(e.data);if(m.id&&pending.has(m.id)){cons
 await new Promise((r,j)=>{socket.onopen=r;socket.onerror=j});
 const send=(method,params={})=>new Promise((resolve,reject)=>{const request=++id;pending.set(request,{resolve,reject});socket.send(JSON.stringify({id:request,method,params}))});
 await send('Runtime.enable');await send('Page.enable');await send('Page.navigate',{url:'file://'+pagePath});await Promise.race([loaded,new Promise((_,j)=>setTimeout(()=>j(Error('load timeout')),5000))]);
-const expression=`JSON.stringify((()=>{addCustomModule();const card=[...document.querySelectorAll('.custom-module-card')].at(-1),row=document.querySelector('.module-row[data-module="'+CSS.escape(card.dataset.id)+'"]'),seconds=row.querySelector('.duration'),delay=card.querySelector('[data-field="speed"]'),loops=card.querySelector('[data-field="loops"]');const beforeLoops=loops.value,beforeDelay=delay.value;seconds.value='14.01';seconds.dispatchEvent(new Event('input',{bubbles:true}));addAnnouncement();const boardRow=document.querySelector('.module-row[data-module="announcement_board"]'),disabledAnnouncementSeconds=boardRow.querySelector('.duration').value;const announcement=announcements.at(-1);announcement.enabled=true;announcement.layout='text_notice';announcement.style.border='none';announcement.transition={type:'cut'};announcement.timing={mode:'scroll',loops:2,frame_delay:.05};renderAllAnnouncementEditors();announcementDraftMutated(announcement);const announcementSeconds=boardRow.querySelector('.duration').value,announcementPhysical=boardRow.querySelector('.physical-time').textContent;announcement.enabled=false;announcementDraftMutated(announcement);return {seconds:seconds.value,delay:delay.value,loops:loops.value,beforeLoops,beforeDelay,disabledAnnouncementSeconds,announcementSeconds,announcementPhysical,removedAnnouncementSeconds:boardRow.querySelector('.duration').value,removedAnnouncementPhysical:boardRow.querySelector('.physical-time').textContent,separateRuntimeControls:document.querySelectorAll('.scroll-seconds-editor').length,providerStates:[...document.querySelectorAll('[data-provider-timing-state]')].map(e=>e.textContent)}})())`;
+const expression=`JSON.stringify((()=>{const card=[...document.querySelectorAll('.custom-module-card')].at(-1),row=document.querySelector('.module-row[data-module="'+CSS.escape(card.dataset.id)+'"]'),seconds=row.querySelector('.duration'),delay=card.querySelector('[data-field="speed"]'),loops=card.querySelector('[data-field="loops"]');const beforeLoops=loops.value,beforeDelay=delay.value;seconds.value='14.01';seconds.dispatchEvent(new Event('input',{bubbles:true}));addAnnouncement();const boardRow=document.querySelector('.module-row[data-module="announcement_board"]'),disabledAnnouncementSeconds=boardRow.querySelector('.duration').value;const announcement=announcements.at(-1);announcement.enabled=true;announcement.layout='text_notice';announcement.style.border='none';announcement.transition={type:'cut'};announcement.timing={mode:'scroll',loops:2,frame_delay:.05};renderAllAnnouncementEditors();announcementDraftMutated(announcement);const announcementSeconds=boardRow.querySelector('.duration').value,announcementPhysical=boardRow.querySelector('.physical-time').textContent;announcement.enabled=false;announcementDraftMutated(announcement);return {seconds:seconds.value,delay:delay.value,loops:loops.value,beforeLoops,beforeDelay,disabledAnnouncementSeconds,announcementSeconds,announcementPhysical,removedAnnouncementSeconds:boardRow.querySelector('.duration').value,removedAnnouncementPhysical:boardRow.querySelector('.physical-time').textContent,separateRuntimeControls:document.querySelectorAll('.scroll-seconds-editor').length,providerStates:[...document.querySelectorAll('[data-provider-timing-state]')].map(e=>e.textContent)}})())`;
 const result=await send('Runtime.evaluate',{expression,returnByValue:true,awaitPromise:true});if(result.exceptionDetails)throw Error(JSON.stringify(result.exceptionDetails));console.log(result.result.value);socket.close();
 """
         with tempfile.TemporaryDirectory(prefix="matrix-seconds-") as directory:
@@ -5256,6 +5469,12 @@ const result=await send('Runtime.evaluate',{expression,returnByValue:true,awaitP
         "MATRIX_CHROMIUM browser is required",
     )
     def test_scrolling_timing_paired_responsive_integration(self):
+        self.store.update({"custom_modules": [{
+            "id": "custom_responsive_fixture", "name": "Responsive fixture",
+            "type": "text_scroll", "text": "RESPONSIVE", "font": "5x7",
+            "colour": "#ffffff", "background": "#000000", "x": 2, "y": 20,
+            "direction": "left", "speed": .05, "loops": 1,
+        }]})
         self.pair_browser()
         peer = self.app.test_client()
         self.pairing.verify.return_value = True
@@ -5315,7 +5534,7 @@ if(JSON.stringify(JSON.parse(vectors))!==JSON.stringify(expected))throw Error('P
 const provider=await evaluate(`(async()=>{let aborted=0,calls=0;api=async(_path,options)=>{calls++;const payload=JSON.parse(options.body),digest=await timingSettingsDigest('weather',payload);await new Promise((resolve,reject)=>{const timer=setTimeout(resolve,30);options.signal.addEventListener('abort',()=>{aborted++;clearTimeout(timer);reject(new DOMException('Aborted','AbortError'))},{once:true})});return {status:'fresh',milliseconds:5000,frames_per_loop:100,loops:1,settings_digest:digest,settings_correlation:payload.settings_correlation}};const row=document.querySelector('.module-row[data-module="weather"]'),edit=row.querySelector('.module-actions button:last-child');edit.click();setTimeout(()=>{document.querySelector('#weather-location').value='NEW DRAFT'},5);await new Promise(r=>setTimeout(r,420));return JSON.stringify({calls,aborted,state:row.closest('.module-item').querySelector('[data-provider-timing-state]').textContent,hidden:row.closest('.module-item').querySelector('.module-editor').hidden})})()`);
 const providerResult=JSON.parse(provider);if(providerResult.calls!==2||providerResult.hidden||!providerResult.state.includes('5.5 s'))throw Error('provider lifecycle mismatch: '+provider);
 const announcementOrder=await evaluate(`(async()=>{const pending=[];api=(_path,options)=>new Promise(resolve=>pending.push({resolve,body:options.body}));const first=loadAnnouncementTiming();announcements.push({id:'newer'});const second=loadAnnouncementTiming();pending[1].resolve({status:'fresh',milliseconds:2000,refresh_at:new Date(Date.now()+60000).toISOString()});await second;pending[0].resolve({status:'fresh',milliseconds:1000,refresh_at:new Date(Date.now()+60000).toISOString()});await first;return announcementTimingPlan.milliseconds})()`);if(announcementOrder!==2000)throw Error('announcement timing regressed to older draft: '+announcementOrder);
-await evaluate(`(()=>{addCustomModule();const input=[...document.querySelectorAll('.custom-module-card')].at(-1).querySelector('[data-field="text"]');input.value='PRESERVED DRAFT';input.dispatchEvent(new Event('input',{bubbles:true}));input.focus();return true})()`);
+await evaluate(`(()=>{const input=[...document.querySelectorAll('.custom-module-card')].at(-1).querySelector('[data-field="text"]');input.value='PRESERVED DRAFT';input.dispatchEvent(new Event('input',{bubbles:true}));input.focus();return true})()`);
 const viewports=[[320,568],[360,800],[390,844],[412,915],[599,900],[600,900],[601,900],[768,1024],[844,390],[899,800],[900,800],[901,800],[1024,768],[1280,720],[1440,900]],reports=[];
 for(const [width,height] of viewports){await send('Emulation.setDeviceMetricsOverride',{width,height,deviceScaleFactor:1,mobile:width<1024,screenOrientation:{type:width>height?'landscapePrimary':'portraitPrimary',angle:width>height?90:0}});reports.push(JSON.parse(await evaluate(`JSON.stringify((()=>{const edit=document.querySelector('.module-row[data-module="weather"] .module-actions button:last-child'),input=[...document.querySelectorAll('.custom-module-card')].at(-1).querySelector('[data-field="text"]'),offender=[...document.querySelectorAll('body *')].map(element=>({element,right:element.getBoundingClientRect().right})).sort((a,b)=>b.right-a.right)[0];return {width:innerWidth,overflow:document.documentElement.scrollWidth-document.documentElement.clientWidth,editWidth:edit.getBoundingClientRect().width,editHeight:edit.getBoundingClientRect().height,draft:input.value,offender:offender?.element?.outerHTML?.slice(0,180)}})())`)))}
 await send('Emulation.setPageScaleFactor',{pageScaleFactor:2});const zoomDraft=await evaluate(`[...document.querySelectorAll('.custom-module-card')].at(-1).querySelector('[data-field="text"]').value`);await send('Emulation.setPageScaleFactor',{pageScaleFactor:1});

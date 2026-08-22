@@ -250,6 +250,13 @@
     rainbow_pulse: rainbowPulse,
   });
 
+  function publishCanvasDraftMutation(id) {
+    if (globalThis.matrixCustomCanvasReady === true
+        && typeof globalThis.matrixCustomCanvasDraftChanged === 'function') {
+      globalThis.matrixCustomCanvasDraftChanged(id, 150);
+    }
+  }
+
   function applyTemplate(id, template) {
     const module = byId(id);
     if (!module || !confirm('Replace this canvas with the ' + template.replaceAll('_', ' ') + ' example?')) return;
@@ -261,6 +268,7 @@
     if (previousState) disposeTimelineState(previousState);
     editorState.delete(module.id);
     renderCustomModules();
+    publishCanvasDraftMutation(module.id);
     setMessage('Starter example loaded locally. Save configuration to apply.');
   }
   window.canvasStarterExamples = canvasStarterExamples;
@@ -277,6 +285,7 @@
       overrides: [],
     };
     renderCustomModules();
+    publishCanvasDraftMutation(source.id);
     setMessage('Converted to an advanced layered canvas. Save configuration to apply.');
   }
 
@@ -593,7 +602,7 @@
       }
       saveFrameProperties(module, layer, properties); drawEditor(module, canvas); syncPropertyInputs(module);
     });
-    const end = () => { if (state.drag) { state.drag = null; refreshAdvanced(module.id); } };
+    const end = () => { if (state.drag) { state.drag = null; refreshAdvanced(module.id, true); } };
     canvas.addEventListener('pointerup', end); canvas.addEventListener('pointercancel', end);
   }
 
@@ -616,7 +625,7 @@
     container.replaceChildren(); const state = stateFor(module), layer = module.layers.find(item => item.id === state.selected); if (!layer) return;
     const values = resolvedProperties(module, layer, state.frame); const title = document.createElement('h4'); title.textContent = layer.name + ' · frame ' + (state.frame + 1); container.append(title);
     const grid = document.createElement('div'); grid.className = 'property-grid';
-    const name = moduleControl('Layer name', layer.name, 'text', value => { layer.name = value; refreshAdvanced(module.id); }); name.className = 'wide'; grid.append(name);
+    const name = moduleControl('Layer name', layer.name, 'text', value => { layer.name = value; refreshAdvanced(module.id, true); }); name.className = 'wide'; grid.append(name);
     const editableFields = [['present', 'Present at this frame', 'checkbox'], ['z_index', 'Depth at this frame', 'number'], ...fieldDefinitions[layer.type]];
     if (!Object.hasOwn(values, 'present')) values.present = true;
     if (!Object.hasOwn(values, 'z_index')) values.z_index = module.layers.indexOf(layer);
@@ -624,16 +633,16 @@
     for (const [field, labelText, type] of editableFields) {
       let label;
       if (type === 'select' || type === 'media-select' || type === 'time-format') label = moduleControl(labelText, values[field], 'select', value => { saveFrameProperties(module, layer, {[field]: value}); if (type === 'media-select') pruneMediaFailureStates(); drawEditor(module, container.closest('.advanced-card').querySelector('canvas')); }, type === 'media-select' ? mediaItems.map(item => item.name) : (type === 'time-format' ? ['24h', '24h_seconds', '12h', '12h_seconds'] : (field === 'font' ? fonts : [])));
-      else if (type === 'points') { label = document.createElement('label'); label.textContent = labelText; label.className = 'wide'; const textarea = document.createElement('textarea'); textarea.rows = 4; textarea.dataset.property = field; textarea.value = formatPoints(values[field]); textarea.addEventListener('change', () => { const points = parsePoints(textarea.value); if (points.length) { saveFrameProperties(module, layer, {points}); refreshAdvanced(module.id); } }); label.append(textarea); }
+      else if (type === 'points') { label = document.createElement('label'); label.textContent = labelText; label.className = 'wide'; const textarea = document.createElement('textarea'); textarea.rows = 4; textarea.dataset.property = field; textarea.value = formatPoints(values[field]); textarea.addEventListener('change', () => { const points = parsePoints(textarea.value); if (points.length) { saveFrameProperties(module, layer, {points}); refreshAdvanced(module.id, true); } }); label.append(textarea); }
       else label = moduleControl(labelText, values[field], type, value => { const nextValue = field === 'z_index' ? Math.max(-64, Math.min(64, Math.round(value))) : value; saveFrameProperties(module, layer, {[field]: nextValue}); drawEditor(module, container.closest('.advanced-card').querySelector('canvas')); }, null);
       label.querySelector('input,select,textarea').dataset.property = field; grid.append(label);
     }
     container.append(grid);
     const tools = document.createElement('div'); tools.className = 'advanced-section'; const toolsTitle = document.createElement('h4'); toolsTitle.textContent = 'Keyframes and frame override';
     const easing = moduleControl('Easing into this keyframe', state.easing, 'select', value => { state.easing = value; }, easings);
-    const row = document.createElement('div'); row.className = 'row'; row.append(makeButton('Add/update keyframe', () => addCanvasKeyframe(module.id), 'btn primary'), makeButton('Show from this frame', () => setLayerPresence(module.id, true)), makeButton('Hide from this frame', () => setLayerPresence(module.id, false), 'btn danger'), makeButton('Save frame override', () => { saveFrameProperties(module, layer, resolvedProperties(module, layer, state.frame)); refreshAdvanced(module.id); }), makeButton('Clear frame override', () => { module.overrides = module.overrides.filter(item => item.frame !== state.frame || item.layer_id !== layer.id); refreshAdvanced(module.id); }, 'btn danger'));
+    const row = document.createElement('div'); row.className = 'row'; row.append(makeButton('Add/update keyframe', () => addCanvasKeyframe(module.id), 'btn primary'), makeButton('Show from this frame', () => setLayerPresence(module.id, true)), makeButton('Hide from this frame', () => setLayerPresence(module.id, false), 'btn danger'), makeButton('Save frame override', () => { saveFrameProperties(module, layer, resolvedProperties(module, layer, state.frame)); refreshAdvanced(module.id, true); }), makeButton('Clear frame override', () => { module.overrides = module.overrides.filter(item => item.frame !== state.frame || item.layer_id !== layer.id); refreshAdvanced(module.id, true); }, 'btn danger'));
     const list = document.createElement('div'); list.className = 'keyframe-list';
-    for (const keyframe of layer.keyframes) { const item = document.createElement('div'); item.className = 'keyframe-row'; const text = document.createElement('span'); text.textContent = 'Frame ' + (keyframe.frame + 1) + ' · ' + keyframe.easing.replaceAll('_', ' '); item.append(text, makeButton('Remove', () => { layer.keyframes = layer.keyframes.filter(candidate => candidate !== keyframe); refreshAdvanced(module.id); }, 'btn danger')); list.append(item); }
+    for (const keyframe of layer.keyframes) { const item = document.createElement('div'); item.className = 'keyframe-row'; const text = document.createElement('span'); text.textContent = 'Frame ' + (keyframe.frame + 1) + ' · ' + keyframe.easing.replaceAll('_', ' '); item.append(text, makeButton('Remove', () => { layer.keyframes = layer.keyframes.filter(candidate => candidate !== keyframe); refreshAdvanced(module.id, true); }, 'btn danger')); list.append(item); }
     tools.append(toolsTitle, easing, row, list); container.append(tools);
   }
 
@@ -656,7 +665,7 @@
     if (index < 0 || target === index) return;
     const [layer] = module.layers.splice(index, 1);
     module.layers.splice(target, 0, layer);
-    refreshAdvanced(module.id);
+    refreshAdvanced(module.id, true);
   }
 
   function renderLayers(module, container) {
@@ -671,13 +680,13 @@
       const layer = module.layers[index], properties = resolvedProperties(module, layer, state.frame);
       const depth = Object.hasOwn(properties, 'z_index') ? properties.z_index : index;
       const row = document.createElement('div'); row.className = 'layer-row' + (layer.id === state.selected ? ' active' : '');
-      const visible = document.createElement('input'); visible.type = 'checkbox'; visible.checked = layer.visible; visible.title = 'Visible'; visible.setAttribute('aria-label', 'Show ' + layer.name); visible.onchange = () => { layer.visible = visible.checked; refreshAdvanced(module.id); };
+      const visible = document.createElement('input'); visible.type = 'checkbox'; visible.checked = layer.visible; visible.title = 'Visible'; visible.setAttribute('aria-label', 'Show ' + layer.name); visible.onchange = () => { layer.visible = visible.checked; refreshAdvanced(module.id, true); };
       const name = document.createElement('button'); name.className = 'btn layer-select'; name.setAttribute('aria-label', 'Select ' + layer.name + ', ' + layer.type + ', depth ' + depth); name.onclick = () => { state.selected = layer.id; refreshAdvanced(module.id); };
       const layerName = document.createElement('span'); layerName.className = 'layer-name'; layerName.textContent = layer.name;
       const layerMeta = document.createElement('span'); layerMeta.className = 'layer-meta'; layerMeta.textContent = 'depth ' + depth + ' · ' + layer.type; name.append(layerName, layerMeta);
       const forward = makeButton('Bring forward', () => moveLayerStack(module, layer.id, 1), 'btn icon layer-stack-action layer-forward'); forward.textContent = '↑'; forward.title = 'Bring forward'; forward.setAttribute('aria-label', 'Bring forward'); forward.disabled = index === module.layers.length - 1;
       const backward = makeButton('Send backward', () => moveLayerStack(module, layer.id, -1), 'btn icon layer-stack-action layer-backward'); backward.textContent = '↓'; backward.title = 'Send backward'; backward.setAttribute('aria-label', 'Send backward'); backward.disabled = index === 0;
-      const remove = makeButton('×', () => { if (module.layers.length === 1) { setMessage('An advanced canvas needs at least one layer.', true); return; } module.layers.splice(index, 1); module.overrides = module.overrides.filter(item => item.layer_id !== layer.id); state.selected = module.layers[Math.max(0, index - 1)].id; refreshAdvanced(module.id); }, 'btn danger layer-remove'); remove.title = 'Remove ' + layer.name; remove.setAttribute('aria-label', 'Remove ' + layer.name);
+      const remove = makeButton('×', () => { if (module.layers.length === 1) { setMessage('An advanced canvas needs at least one layer.', true); return; } module.layers.splice(index, 1); module.overrides = module.overrides.filter(item => item.layer_id !== layer.id); state.selected = module.layers[Math.max(0, index - 1)].id; refreshAdvanced(module.id, true); }, 'btn danger layer-remove'); remove.title = 'Remove ' + layer.name; remove.setAttribute('aria-label', 'Remove ' + layer.name);
       row.append(visible, name, forward, backward, remove); list.append(row);
     }
     container.append(list);
@@ -731,7 +740,7 @@
     if (moduleIndex < 0) return false;
     customModules[moduleIndex] = result.module;
     state.frame = result.frame;
-    syncCustomModuleUI(); refreshAdvanced(id);
+    syncCustomModuleUI(); refreshAdvanced(id, true);
     restoreTimelineActionFocus(id, 'move', direction);
     return true;
   }
@@ -808,7 +817,7 @@
       if (moduleIndex < 0) return;
       customModules[moduleIndex] = result.module;
       state.selected = layerId; state.frame = result.frame;
-      syncCustomModuleUI(); refreshAdvanced(module.id);
+      syncCustomModuleUI(); refreshAdvanced(module.id, true);
       restoreTimelineCellFocus(module.id, layerId, result.frame);
     };
     cell.addEventListener('pointerdown', event => {
@@ -991,7 +1000,7 @@
     const module = byId(id), state = module && stateFor(module), layer = module?.layers.find(item => item.id === state.selected); if (!layer) return;
     const properties = resolvedProperties(module, layer, state.frame); let keyframe = layer.keyframes.find(item => item.frame === state.frame);
     if (keyframe) Object.assign(keyframe, {easing: state.easing, properties}); else layer.keyframes.push({frame: state.frame, easing: state.easing, properties});
-    layer.keyframes.sort((a, b) => a.frame - b.frame); module.overrides = module.overrides.filter(item => item.frame !== state.frame || item.layer_id !== layer.id); refreshAdvanced(id);
+    layer.keyframes.sort((a, b) => a.frame - b.frame); module.overrides = module.overrides.filter(item => item.frame !== state.frame || item.layer_id !== layer.id); refreshAdvanced(id, true);
   }
   window.addCanvasKeyframe = addCanvasKeyframe;
 
@@ -1003,7 +1012,7 @@
     layer.keyframes.sort((a, b) => a.frame - b.frame);
     for (const override of module.overrides) if (override.frame === state.frame && override.layer_id === layer.id) delete override.properties.present;
     module.overrides = module.overrides.filter(item => Object.keys(item.properties).length);
-    refreshAdvanced(id);
+    refreshAdvanced(id, true);
   }
 
   function expandTimelineForAnimatedMedia(module, source) {
@@ -1048,7 +1057,7 @@
     } else {
       setMessage(layer.name + ' added with a complete keyframe at frame ' + (stateFor(module).frame + 1) + '.');
     }
-    refreshAdvanced(id);
+    refreshAdvanced(id, true);
     return true;
   }
   window.addAdvancedLayer = addAdvancedLayer;
@@ -1097,13 +1106,13 @@
   window.uploadAdvancedMedia = uploadAdvancedMedia;
 
   function copyFrame(module) { const state = stateFor(module); state.clipboard = module.layers.map(layer => ({layer_id: layer.id, properties: resolvedProperties(module, layer, state.frame)})); setMessage('Frame ' + (state.frame + 1) + ' copied.'); }
-  function pasteFrame(module) { const state = stateFor(module); if (!state.clipboard) return; for (const snapshot of state.clipboard) { const layer = module.layers.find(item => item.id === snapshot.layer_id); if (layer) { module.overrides = module.overrides.filter(item => item.frame !== state.frame || item.layer_id !== layer.id); module.overrides.push({frame: state.frame, layer_id: layer.id, properties: clone(snapshot.properties)}); } } refreshAdvanced(module.id); }
+  function pasteFrame(module) { const state = stateFor(module); if (!state.clipboard) return; for (const snapshot of state.clipboard) { const layer = module.layers.find(item => item.id === snapshot.layer_id); if (layer) { module.overrides = module.overrides.filter(item => item.frame !== state.frame || item.layer_id !== layer.id); module.overrides.push({frame: state.frame, layer_id: layer.id, properties: clone(snapshot.properties)}); } } refreshAdvanced(module.id, true); }
   function duplicateFrame(module) {
     if (module.frame_count >= 120) { setMessage('Animations are limited to 120 frames.', true); return; }
     const state = stateFor(module), insert = state.frame + 1, snapshots = module.layers.map(layer => ({layer_id: layer.id, properties: resolvedProperties(module, layer, state.frame)}));
     for (const layer of module.layers) for (const keyframe of layer.keyframes) if (keyframe.frame >= insert) keyframe.frame++;
     for (const override of module.overrides) if (override.frame >= insert) override.frame++;
-    module.frame_count++; state.frame = insert; for (const snapshot of snapshots) module.overrides.push({frame: insert, layer_id: snapshot.layer_id, properties: snapshot.properties}); refreshAdvanced(module.id);
+    module.frame_count++; state.frame = insert; for (const snapshot of snapshots) module.overrides.push({frame: insert, layer_id: snapshot.layer_id, properties: snapshot.properties}); refreshAdvanced(module.id, true);
   }
 
   window.advanceCanvasPlaybackFrame = function advanceCanvasPlaybackFrame(frame, frameCount, playback, direction = 1) {
@@ -1178,11 +1187,12 @@
     });
   }
 
-  function refreshAdvanced(id) {
+  function refreshAdvanced(id, draftChanged = false) {
     pruneMediaFailureStates(); const module = byId(id); if (!module) return;
     const card = document.querySelector(`.custom-module-card[data-id="${CSS.escape(id)}"]`);
-    if (!card) { renderCustomModules(); return; }
+    if (!card) { renderCustomModules(); if (draftChanged) publishCanvasDraftMutation(id); return; }
     captureTimelineViewState(card, stateFor(module)); renderAdvancedInto(module, card);
+    if (draftChanged) publishCanvasDraftMutation(id);
   }
 
   function renderAdvancedInto(module, card) {
@@ -1215,7 +1225,7 @@
     if (previousState) disposeTimelineState(previousState);
     editorState.delete(id);
     for (const row of document.querySelectorAll('.module-row')) if (row.dataset.module === id) row.closest('.module-item').remove();
-    renderCustomModules(); setMessage('Custom module removed. Save configuration to apply.');
+    renderCustomModules(); globalThis.matrixCustomCanvasDraftRemoved?.(id); setMessage('Custom module removed. Save configuration to apply.');
   };
 
   setInterval(() => { if (customModules.some(module => module.type === 'canvas' && module.layers.some(layer => layer.type === 'time' && layer.visible))) redrawMediaCanvases(); }, 1000);
