@@ -3409,14 +3409,14 @@ const waitFor=async expression=>{for(let attempt=0;attempt<160;attempt++){if(awa
 try{
  await send('Runtime.enable');await send('Page.enable');await send('Emulation.setDeviceMetricsOverride',{width:390,height:844,deviceScaleFactor:1,mobile:true});
  await send('Page.addScriptToEvaluateOnNewDocument',{source:`
-  globalThis.__requests=[];globalThis.__errors=[];globalThis.__starts=0;globalThis.__variant='base64';globalThis.__session=null;
+  globalThis.__requests=[];globalThis.__errors=[];globalThis.__starts=0;globalThis.__variant='base64';globalThis.__session=null;globalThis.__inactivePages=0;globalThis.__sessionGenerations={};
   addEventListener('error',event=>__errors.push(String(event.error||event.message)));addEventListener('unhandledrejection',event=>__errors.push(String(event.reason)));
   const png='iVBORw0KGgoAAAANSUhEUgAAAEAAAAAgCAIAAAAt/+nTAAAAT0lEQVR4nO3PUQkAIBTAwBfOClawfwRD+HEIgwW4zdrn64YLGtCCBrSgAS1oQAsa0IIGtKABLWhACxrQgga0oAEtaEALGtCCBrSgAS147AIqPPhqwA8fegAAAABJRU5ErkJggg==',bytes=Uint8Array.from(atob(png),c=>c.charCodeAt(0));
   globalThis.fetch=async(input,options={})=>{const url=String(input),method=options.method||'GET',payload=options.body?JSON.parse(options.body):null;__requests.push({url,method,payload});
    if(url.startsWith('/api/display-frame'))return new Response(new Blob([bytes],{type:'image/png'}));
    if(url==='/api/edit-preview/cancel')return new Response(JSON.stringify({cancelled:true}),{headers:{'Content-Type':'application/json'}});
-   if(url==='/api/edit-preview/page'){let page;if(__variant==='page')page={session:__session,generation:payload.generation??__starts,page:1,frames:null,next_token:7,complete:false};else if(__variant==='contract')page={session:__session,generation:payload.generation??__starts,page:'not-an-integer',frames:[{png,delay_ms:20}],next_token:7,complete:true};else page={session:__session,generation:payload.generation??__starts,page:1,frames:[{png:__variant==='base64'?'%%% malformed base64 %%%':'bm90IGEgcG5n',delay_ms:20}],next_token:'b'.repeat(64),complete:false};return new Response(JSON.stringify(page),{headers:{'Content-Type':'application/json'}})}
-   if(url.startsWith('/api/edit-preview/')){__starts++;const generation=payload.generation,fails=__variant!=='valid';__session=(__starts%10).toString().repeat(32);return new Response(JSON.stringify({session:__session,generation,page:0,frames:[{png,delay_ms:10000}],next_token:fails?'a'.repeat(64):null,complete:!fails}),{headers:{'Content-Type':'application/json'}})}
+   if(url==='/api/edit-preview/page'){if(__variant==='inactive'&&__inactivePages++===0)return new Response(JSON.stringify({error:'Preview session is no longer active.'}),{status:409,headers:{'Content-Type':'application/json'}});let page;if(__variant==='page')page={session:__session,generation:payload.generation??__starts,page:1,frames:null,next_token:7,complete:false};else if(__variant==='contract')page={session:__session,generation:payload.generation??__starts,page:'not-an-integer',frames:[{png,delay_ms:20}],next_token:7,complete:true};else if(__variant==='inactive')page={session:__session,generation:__sessionGenerations[payload.session],page:1,frames:[{png,delay_ms:20}],next_token:null,complete:true};else page={session:__session,generation:payload.generation??__starts,page:1,frames:[{png:__variant==='base64'?'%%% malformed base64 %%%':'bm90IGEgcG5n',delay_ms:20}],next_token:'b'.repeat(64),complete:false};return new Response(JSON.stringify(page),{headers:{'Content-Type':'application/json'}})}
+   if(url.startsWith('/api/edit-preview/')){__starts++;const generation=payload.generation,fails=__variant!=='valid';__session=(__starts%10).toString().repeat(32);__sessionGenerations[__session]=generation;return new Response(JSON.stringify({session:__session,generation,page:0,frames:[{png,delay_ms:10000}],next_token:fails?'a'.repeat(64):null,complete:!fails}),{headers:{'Content-Type':'application/json'}})}
    if(url==='/api/config')return new Response(null,{status:304,headers:{'X-Matrix-Minimum-Client-Contract':'2'}});
    return new Response(JSON.stringify({running:true,current_module:'weather',minimum_client_contract:2}),{headers:{'Content-Type':'application/json'}})
   };
@@ -3433,7 +3433,9 @@ try{
  await evaluate(`__variant='contract';startEditPreview()`);await waitFor(`document.querySelector('#preview-frame').textContent.includes('Draft error')&&__requests.filter(request=>request.url==='/api/edit-preview/cancel'&&request.payload.session==='7'.repeat(32)).length===1`);failures.push(await captureFailure());
  await evaluate(`__variant='valid';startEditPreview()`);await waitFor(`__starts>=8&&document.querySelector('#preview-frame').textContent.includes('Unsaved draft frame')`);
  const recovered=await evaluate(`({starts:__starts,session:editPreviewSession,status:document.querySelector('#preview-frame').textContent,errors:[...__errors],canvasCount:document.querySelectorAll('#matrix-preview').length})`);
- console.log(JSON.stringify({failures,recovered}));
+ await evaluate(`__variant='inactive';startEditPreview()`);await new Promise(resolve=>setTimeout(resolve,500));
+ const staleRecovered=await evaluate(`({starts:__starts,session:editPreviewSession,status:document.querySelector('#preview-frame').textContent,cancels:__requests.filter(request=>request.url==='/api/edit-preview/cancel').length,recoveryAttempts:editPreviewRecoveryAttempts,recoveryTimer:editPreviewDebounceTimer!==null,errors:[...__errors],canvasCount:document.querySelectorAll('#matrix-preview').length})`);
+ console.log(JSON.stringify({failures,recovered,staleRecovered}));
 }finally{socket.close()}
 """
         report = self._run_dashboard_chromium_probe(body, probe)
@@ -3452,6 +3454,12 @@ try{
         self.assertIn("Unsaved draft frame", report["recovered"]["status"])
         self.assertEqual(report["recovered"]["errors"], [], report)
         self.assertEqual(report["recovered"]["canvasCount"], 1, report)
+        self.assertEqual(report["staleRecovered"]["starts"], 10, report)
+        self.assertEqual(report["staleRecovered"]["session"], "0" * 32, report)
+        self.assertIn("Unsaved draft frame", report["staleRecovered"]["status"])
+        self.assertGreaterEqual(report["staleRecovered"]["cancels"], 5, report)
+        self.assertEqual(report["staleRecovered"]["errors"], [], report)
+        self.assertEqual(report["staleRecovered"]["canvasCount"], 1, report)
         self.assertEqual(Path(self.store.path).read_bytes(), before_config)
         self.assertEqual(self.controller.method_calls, [])
 
