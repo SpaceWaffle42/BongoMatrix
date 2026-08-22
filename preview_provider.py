@@ -68,6 +68,7 @@ class PreviewProvider:
     """
 
     MAX_WORKERS = 2
+    MAX_REQUEST_SECONDS = 8.0
     _worker_slots = threading.BoundedSemaphore(MAX_WORKERS)
     _accounting_lock = threading.Lock()
     _active_children = 0
@@ -130,7 +131,7 @@ class PreviewProvider:
         if cancel_event.is_set():
             raise PreviewProviderCancelled("preview provider preparation cancelled")
 
-        effective_timeout = min(3.0, float(request_deadline))
+        effective_timeout = min(self.MAX_REQUEST_SECONDS, float(request_deadline))
         deadline = time.monotonic() + effective_timeout
         shutdown_event = threading.Event()
         with self._lifecycle:

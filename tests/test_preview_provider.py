@@ -57,6 +57,25 @@ def provider_returns_recovery_marker(settings, credentials, timeout):
 
 
 class PreviewProviderTests(unittest.TestCase):
+    def test_provider_preserves_bounded_eight_second_cold_start_budget(self):
+        provider = PreviewProvider()
+
+        prepared = provider.prepare(
+            provider_returns_recovery_marker,
+            settings={"marker": "cold-start-budget"},
+            credentials={"api_key": "server-held"},
+            cancel_event=threading.Event(),
+            request_deadline=8.0,
+        )
+
+        self.assertEqual(
+            prepared,
+            (("effective_timeout", 8.0), ("marker", "cold-start-budget")),
+        )
+        self.assertEqual(provider.active_child_count, 0)
+        self.assertEqual(provider.active_worker_count, 0)
+        self.assertEqual(provider.available_worker_slots, 2)
+
     def test_timeout_and_cancel_release_worker_slot(self):
         context = multiprocessing.get_context("spawn")
         timeout_started = context.Event()
@@ -174,7 +193,7 @@ class PreviewProviderTests(unittest.TestCase):
                 )
                 self.assertEqual(
                     timeout_recovery,
-                    (("effective_timeout", 3.0), ("marker", "after-timeout")),
+                    (("effective_timeout", 8.0), ("marker", "after-timeout")),
                 )
                 self.assertTrue(created_children[-1]._closed)
                 self.assertEqual(provider.active_worker_count, 1)
