@@ -6,6 +6,7 @@ import argparse
 import ctypes
 import errno
 import hashlib
+import http.client
 import json
 import os
 import re
@@ -13,6 +14,8 @@ import secrets
 import stat
 import subprocess
 import sys
+import time
+import urllib.parse
 from collections.abc import Callable
 from pathlib import Path, PurePosixPath
 from typing import NoReturn, Protocol
@@ -1212,6 +1215,12 @@ def _dry_run_lines(
 class _SystemdServiceControl:
     def __init__(self, name: str):
         self.name = _validate_service_name(name)
+        self._health: tuple[str, int, int] | None = None
+
+    def configure_health(self, url: str, status: int, timeout_seconds: int) -> None:
+        if (url, status, timeout_seconds) != ("http://127.0.0.1:5000/", 302, 30):
+            _reject("recovery health configuration is not exact")
+        self._health = (url, status, timeout_seconds)
 
     def _run(self, *arguments: str, check: bool = True) -> subprocess.CompletedProcess[str]:
         return subprocess.run(
@@ -1244,6 +1253,31 @@ class _SystemdServiceControl:
     def run_health_checks(self) -> None:
         if self._run("is-active", "--quiet", check=False).returncode != 0:
             _reject("service health check failed")
+        if self._health is None:
+            return
+        url, expected_status, timeout_seconds = self._health
+        parsed = urllib.parse.urlsplit(url)
+        if parsed.scheme != "http" or parsed.hostname != "127.0.0.1" or parsed.port != 5000:
+            _reject("recovery health URL is not exact loopback HTTP")
+        deadline = time.monotonic() + timeout_seconds
+        while True:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                _reject("application readiness deadline expired")
+            connection = http.client.HTTPConnection(
+                parsed.hostname, parsed.port, timeout=min(2.0, remaining)
+            )
+            try:
+                connection.request("GET", parsed.path or "/")
+                response = connection.getresponse()
+                response.read()
+                if response.status == expected_status:
+                    return
+            except OSError:
+                pass
+            finally:
+                connection.close()
+            time.sleep(min(0.1, max(0.0, deadline - time.monotonic())))
 
     def recovery_commands(self) -> tuple[str, ...]:
         return (
@@ -1919,6 +1953,92 @@ def _restore_release_indices(
     return diagnostics
 
 
+
+def recover_release(
+    staged_tool: str | os.PathLike[str],
+    release_root: str | os.PathLike[str],
+    destination_root: str | os.PathLike[str],
+    bundle: str | os.PathLike[str],
+    release_manifest_path: str | os.PathLike[str],
+    backup_manifest_path: str | os.PathLike[str],
+    *,
+    service: ServiceControl,
+    initially_active: bool,
+    after_boundary: Callable[[str], None] | None = None,
+) -> None:
+    """Idempotently restore a verified backup without trusting mixed destination bytes."""
+
+    destination_path = Path(destination_root)
+    release = Path(release_root)
+    bundle_path = Path(bundle)
+    _verify_bundle_provenance(
+        staged_tool, release, bundle_path, Path(release_manifest_path)
+    )
+    release_manifest = validate_release_manifest(release, release_manifest_path)
+    backup_manifest = _load_backup_manifest(bundle_path, backup_manifest_path)
+    _, backup_entries = _validate_backup_for_rollback(
+        release_manifest, backup_manifest, bundle_path
+    )
+    backup_records = _snapshot_backup_records(bundle_path, backup_entries)
+    try:
+        destination_fd = _open_absolute_directory(destination_path)
+    except OSError as error:
+        raise ReleaseManifestError("destination root is unsafe") from error
+    try:
+        _assert_pinned_root_identity(destination_path, destination_fd)
+        if service.is_active():
+            service.stop()
+            if after_boundary is not None:
+                after_boundary("stop")
+        _assert_pinned_root_identity(destination_path, destination_fd)
+        if service.is_active():
+            _reject("service remains active before recovery writes")
+        for index, record in enumerate(backup_records):
+            relative_path, present, content, uid, gid, mode = record
+            _assert_pinned_root_identity(destination_path, destination_fd)
+            if present:
+                if content is None or uid is None or gid is None or mode is None:
+                    _reject("immutable backup snapshot is invalid")
+                _atomic_replace_confined(
+                    destination_fd, relative_path, content, uid, gid, mode
+                )
+                boundary = f"restore:{index}"
+            else:
+                _remove_confined(destination_fd, relative_path)
+                boundary = f"remove:{index}"
+            if after_boundary is not None:
+                after_boundary(boundary)
+            backup_entry = backup_entries[index]
+            if not isinstance(backup_entry, dict):
+                _reject("backup manifest is invalid")
+            _verify_backup_record(destination_fd, bundle_path, backup_entry)
+        if service.daemon_reload_needed():
+            service.daemon_reload()
+            if after_boundary is not None:
+                after_boundary("daemon_reload")
+        _assert_pinned_root_identity(destination_path, destination_fd)
+        if initially_active:
+            if not service.is_active():
+                service.start()
+                if after_boundary is not None:
+                    after_boundary("start")
+            if not service.is_active():
+                _reject("service is inactive after recovery")
+            service.run_health_checks()
+            if after_boundary is not None:
+                after_boundary("readiness")
+        elif service.is_active():
+            service.stop()
+            if service.is_active():
+                _reject("service is active after inactive recovery")
+        _assert_pinned_root_identity(destination_path, destination_fd)
+        for backup_entry in backup_entries:
+            if not isinstance(backup_entry, dict):
+                _reject("backup manifest is invalid")
+            _verify_backup_record(destination_fd, bundle_path, backup_entry)
+    finally:
+        os.close(destination_fd)
+
 def rollback_release(
     release_root: str | os.PathLike[str],
     destination_root: str | os.PathLike[str],
@@ -2011,10 +2131,24 @@ def rollback_release(
         os.close(destination_fd)
 
 
+
+class _StoreOnce(argparse.Action):
+    def __call__(self, parser, namespace, values, option_string=None):
+        if getattr(namespace, self.dest, None) is not None:
+            parser.error(f"{option_string} may be specified only once")
+        setattr(namespace, self.dest, values)
+
+
+def _add_once(parser: argparse.ArgumentParser, name: str, **kwargs: object) -> None:
+    kwargs["action"] = _StoreOnce
+    kwargs.setdefault("default", None)
+    parser.add_argument(name, **kwargs)
+
 def build_parser() -> argparse.ArgumentParser:
     options = (
         "required flags: --release-root --destination-root --bundle "
         "--release-manifest --backup-manifest; preflight/backup/deploy: --release-spec; "
+        "recover: --service --initial-service-state and active readiness; "
         "optional: --service --dry-run; verify: --mode deploy|rollback"
     )
     parser = argparse.ArgumentParser(
@@ -2022,7 +2156,8 @@ def build_parser() -> argparse.ArgumentParser:
         epilog=options,
     )
     subparsers = parser.add_subparsers(dest="command", required=True)
-    for command in ("backup", "preflight", "deploy", "rollback", "verify", "cleanup"):
+    common_commands = ("backup", "preflight", "deploy", "rollback", "verify", "cleanup")
+    for command in common_commands:
         subparser = subparsers.add_parser(command, description=options)
         subparser.add_argument("--release-root", required=True)
         subparser.add_argument("--destination-root", required=True)
@@ -2035,6 +2170,19 @@ def build_parser() -> argparse.ArgumentParser:
             subparser.add_argument("--release-spec", required=True)
         if command == "verify":
             subparser.add_argument("--mode", choices=("deploy", "rollback"), required=True)
+    recover = subparsers.add_parser("recover", description=options)
+    for option in (
+        "--release-root", "--destination-root", "--bundle", "--release-manifest",
+        "--backup-manifest", "--service",
+    ):
+        _add_once(recover, option, required=True)
+    _add_once(
+        recover, "--initial-service-state", required=True,
+        choices=("active", "inactive"),
+    )
+    _add_once(recover, "--health-url")
+    _add_once(recover, "--health-status", type=int)
+    _add_once(recover, "--health-timeout-seconds", type=int)
     return parser
 
 
@@ -2050,6 +2198,28 @@ def main(argv: list[str] | None = None) -> int:
     release_spec_path = Path(release_spec_value) if release_spec_value else None
     if arguments.service is not None:
         _validate_service_name(arguments.service)
+
+    if arguments.command == "recover":
+        initially_active = arguments.initial_service_state == "active"
+        readiness = (
+            arguments.health_url, arguments.health_status,
+            arguments.health_timeout_seconds,
+        )
+        if not initially_active:
+            if any(value is not None for value in readiness):
+                _reject("inactive recovery forbids readiness arguments")
+        elif readiness != ("http://127.0.0.1:5000/", 302, 30):
+            _reject("active recovery requires exact loopback readiness arguments")
+        service = _service_control(arguments.service)
+        configure = getattr(service, "configure_health", None)
+        if initially_active and configure is not None:
+            configure(*readiness)
+        recover_release(
+            staged_tool, release_root, destination_root, bundle,
+            release_manifest_path, backup_manifest_path,
+            service=service, initially_active=initially_active,
+        )
+        return 0
 
     if arguments.command == "backup":
         if arguments.dry_run:

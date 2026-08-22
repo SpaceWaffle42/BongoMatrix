@@ -52,6 +52,10 @@ from preview_provider import (
     PreviewProvider, PreviewProviderCancelled, PreviewProviderCapacityError,
     PreviewProviderTimeout, PreviewProviderUnavailable,
 )
+from device_preview import (
+    DevicePreviewOwner, DevicePreviewRequest, PreviewAdmissionStatus,
+    PreviewHeartbeatStatus,
+)
 
 MEDIA_EXTENSIONS = {".gif", ".png", ".jpg", ".jpeg", ".webp", ".mp4"}
 Image.MAX_IMAGE_PIXELS = 1_000_000
@@ -485,6 +489,9 @@ def create_app(
         )
 
     def pairing_expired_response():
+        device_id = session.get("device_id")
+        if device_id:
+            controller.cancel_device_drafts_for_device(device_id)
         session.clear()
         if request.path.startswith("/api/"):
             return jsonify({"error": "Pairing session expired."}), 401
@@ -511,7 +518,7 @@ def create_app(
     def advertise_client_contract(response):
         if request.path == "/api/config":
             response.headers["X-Matrix-Minimum-Client-Contract"] = str(MINIMUM_CLIENT_CONTRACT)
-        if request.path.startswith("/api/edit-preview"):
+        if request.path.startswith(("/api/edit-preview", "/api/device-preview")):
             response.headers["Cache-Control"] = "no-store"
             response.headers.pop("ETag", None)
         return response
@@ -913,6 +920,7 @@ def create_app(
             if not device_store.remove(device_id):
                 abort(404)
         except PairingDurabilityError:
+            controller.cancel_device_drafts_for_device(device_id)
             if current:
                 session.clear()
             return jsonify({
@@ -922,6 +930,7 @@ def create_app(
                 "durability_uncertain": True,
                 "error": DEVICE_REMOVAL_DURABILITY_WARNING,
             }), 503
+        controller.cancel_device_drafts_for_device(device_id)
         if current:
             session.clear()
         return jsonify({"removed": device_id, "current": current})
@@ -933,6 +942,8 @@ def create_app(
             if device_id:
                 device_store.remove(device_id)
         except PairingDurabilityError:
+            if device_id:
+                controller.cancel_device_drafts_for_device(device_id)
             session.clear()
             return redirect(url_for("pair", warning="device-removal-durability"))
         except OSError:
@@ -941,6 +952,8 @@ def create_app(
                 "pair.html", paired=True,
                 error="This device could not be removed, so this browser remains signed in.",
             ), 503
+        if device_id:
+            controller.cancel_device_drafts_for_device(device_id)
         session.clear()
         return redirect(url_for("pair"))
 
@@ -1803,6 +1816,154 @@ def create_app(
             return edit_preview_error("Preview request is invalid.", 400)
         except Exception:
             return edit_preview_error("Preview is temporarily unavailable.", 503)
+
+    device_preview_operation = threading.BoundedSemaphore(1)
+
+    @app.post("/api/device-preview/<module_name>")
+    @requires_pairing
+    def start_device_preview(module_name):
+        if not device_preview_operation.acquire(blocking=False):
+            return edit_preview_error(
+                "Device preview capacity is temporarily exhausted.",
+                429, retry_after=2,
+            )
+        stack = ExitStack()
+        transferred = False
+        try:
+            payload = edit_preview_json(
+                {"config", "generation", "preview_instance"},
+                {"timeout_seconds", "selected_lava_palette"},
+            )
+            generation = payload["generation"]
+            timeout_seconds = payload.get("timeout_seconds", 60)
+            if (
+                isinstance(generation, bool) or not isinstance(generation, int)
+                or generation < 0
+                or isinstance(timeout_seconds, bool)
+                or not isinstance(timeout_seconds, int)
+                or not 5 <= timeout_seconds <= 3600
+            ):
+                raise ValueError("invalid transient preview values")
+            identity = edit_preview_identity(payload)
+            selected_palette = payload.get("selected_lava_palette")
+            if selected_palette is not None and not isinstance(selected_palette, dict):
+                raise ValueError("selected_lava_palette is invalid")
+            candidate = config_store.validate_candidate(payload["config"])
+            custom_ids = {item["id"] for item in candidate["custom_modules"]}
+            if module_name not in ALLOWED_MODULES and module_name not in custom_ids:
+                stack.close()
+                return edit_preview_error("Device preview was not found.", 404)
+            owner = DevicePreviewOwner(*identity)
+            with media_lock:
+                pinned_media = stack.enter_context(pin_candidate_media(
+                    candidate, media_root, allow_missing=default_built_in_media,
+                ))
+            request_record = DevicePreviewRequest(
+                owner=owner,
+                generation=generation,
+                config={
+                    "module": module_name,
+                    "candidate": candidate,
+                    "selected_lava_palette": selected_palette,
+                },
+                timeout_seconds=timeout_seconds,
+                cleanup=stack.close,
+                pinned_media=pinned_media,
+            )
+            def render_device_draft(matrix, owned_request, *, stop_event):
+                prepared = None
+                if module_name in {
+                    "weather", "openweather_overview", "openweather_forecast",
+                }:
+                    _registry, provider = get_edit_preview_services()
+                    provider_candidate = copy.deepcopy(candidate)
+                    if module_name in {
+                        "openweather_overview", "openweather_forecast",
+                    }:
+                        provider_candidate["_preview_openweather_key"] = (
+                            openweather_secrets.get()
+                        )
+                    prepared = _prepare_edit_preview_provider(
+                        provider, module_name, provider_candidate, stop_event,
+                    )
+                    if stop_event.is_set():
+                        return False
+                return controller.render_device_draft(
+                    matrix, owned_request,
+                    stop_event=stop_event, prepared=prepared,
+                )
+
+            admission = controller.submit_device_draft(
+                request_record, renderer=render_device_draft,
+            )
+            if admission.status is not PreviewAdmissionStatus.ACCEPTED:
+                stack.close()
+                status = 409
+                return edit_preview_error("Device preview is not available.", status)
+            transferred = True
+            now = time.monotonic()
+            lease = admission.lease
+            return jsonify({
+                "generation": generation,
+                "active_module": module_name,
+                "timeout_seconds": timeout_seconds,
+                "expires_in": max(0, lease.content_deadline - now),
+                "connectivity_expires_in": max(0, lease.connectivity_deadline - now),
+            }), 202
+        except RequestEntityTooLarge:
+            return edit_preview_error("Device preview request exceeds 1 MiB.", 413)
+        except (KeyError, TypeError, ValueError):
+            return edit_preview_error("Device preview request is invalid.", 400)
+        except Exception:
+            return edit_preview_error("Device preview is temporarily unavailable.", 503)
+        finally:
+            if not transferred:
+                stack.close()
+            device_preview_operation.release()
+
+    def device_preview_control_payload():
+        payload = edit_preview_json({"generation", "preview_instance"})
+        generation = payload["generation"]
+        if isinstance(generation, bool) or not isinstance(generation, int) or generation < 0:
+            raise ValueError("generation is invalid")
+        return DevicePreviewOwner(*edit_preview_identity(payload)), generation
+
+    @app.post("/api/device-preview/heartbeat")
+    @requires_pairing
+    def heartbeat_device_preview():
+        try:
+            owner, generation = device_preview_control_payload()
+            outcome = controller.heartbeat_device_draft(owner, generation=generation)
+            if outcome.status is not PreviewHeartbeatStatus.ACCEPTED:
+                return edit_preview_error("Device preview is no longer active.", 409)
+            now = time.monotonic()
+            return jsonify({
+                "active": True,
+                "generation": generation,
+                "expires_in": max(0, outcome.lease.content_deadline - now),
+                "connectivity_expires_in": max(0, outcome.lease.connectivity_deadline - now),
+            }), 202
+        except RequestEntityTooLarge:
+            return edit_preview_error("Device preview request exceeds 1 MiB.", 413)
+        except (KeyError, TypeError, ValueError):
+            return edit_preview_error("Device preview request is invalid.", 400)
+        except Exception:
+            return edit_preview_error("Device preview is temporarily unavailable.", 503)
+
+    @app.post("/api/device-preview/cancel")
+    @requires_pairing
+    def cancel_device_preview():
+        try:
+            owner, generation = device_preview_control_payload()
+            if not controller.cancel_device_draft(owner, generation=generation):
+                return edit_preview_error("Device preview is no longer active.", 409)
+            return jsonify({"cancelled": True}), 202
+        except RequestEntityTooLarge:
+            return edit_preview_error("Device preview request exceeds 1 MiB.", 413)
+        except (KeyError, TypeError, ValueError):
+            return edit_preview_error("Device preview request is invalid.", 400)
+        except Exception:
+            return edit_preview_error("Device preview is temporarily unavailable.", 503)
 
     @app.post("/api/preview/announcement")
     @requires_pairing

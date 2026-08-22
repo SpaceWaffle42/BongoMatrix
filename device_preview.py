@@ -5,6 +5,7 @@ from __future__ import annotations
 import copy
 import threading
 import time
+import weakref
 from dataclasses import dataclass, replace
 from enum import Enum
 from types import MappingProxyType
@@ -39,12 +40,18 @@ class DevicePreviewRequest:
     config: Mapping[str, object]
     timeout_seconds: int = 60
     cleanup: Callable[[], None] | None = None
+    pinned_media: Mapping[str, object] | None = None
 
     def __post_init__(self) -> None:
         object.__setattr__(
             self,
             "config",
             MappingProxyType(copy.deepcopy(dict(self.config))),
+        )
+        object.__setattr__(
+            self,
+            "pinned_media",
+            MappingProxyType(dict(self.pinned_media or {})),
         )
 
 
@@ -83,7 +90,7 @@ class DevicePreviewManager:
         self._clock = clock
         self._lock = threading.Lock()
         self._active: DevicePreviewLease | None = None
-        self._closed_request_ids: set[int] = set()
+        self._closed_request_refs: dict[int, weakref.ReferenceType[DevicePreviewRequest]] = {}
 
     def submit(
         self, request: DevicePreviewRequest, *, close_displaced: bool = True
@@ -176,10 +183,21 @@ class DevicePreviewManager:
         if cleanup is None:
             return
         request_id = id(request)
-        with self._lock:
-            if request_id in self._closed_request_ids:
+        manager_ref = weakref.ref(self)
+
+        def forget(reference: weakref.ReferenceType[DevicePreviewRequest]) -> None:
+            manager = manager_ref()
+            if manager is None:
                 return
-            self._closed_request_ids.add(request_id)
+            with manager._lock:
+                if manager._closed_request_refs.get(request_id) is reference:
+                    manager._closed_request_refs.pop(request_id, None)
+
+        with self._lock:
+            existing = self._closed_request_refs.get(request_id)
+            if existing is not None and existing() is request:
+                return
+            self._closed_request_refs[request_id] = weakref.ref(request, forget)
         cleanup()
 
     def cancel(

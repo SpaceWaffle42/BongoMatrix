@@ -966,6 +966,9 @@ try{
             ("POST", "/api/edit-preview/<module_name>"),
             ("POST", "/api/edit-preview/page"),
             ("POST", "/api/edit-preview/cancel"),
+            ("POST", "/api/device-preview/<module_name>"),
+            ("POST", "/api/device-preview/heartbeat"),
+            ("POST", "/api/device-preview/cancel"),
             ("POST", "/api/preview/announcement"),
             ("POST", "/api/preview/<module_name>"),
             ("POST", "/api/control/<action>"),
@@ -988,6 +991,9 @@ try{
             ("POST", "/api/edit-preview/clock_lava"),
             ("POST", "/api/edit-preview/page"),
             ("POST", "/api/edit-preview/cancel"),
+            ("POST", "/api/device-preview/clock_lava"),
+            ("POST", "/api/device-preview/heartbeat"),
+            ("POST", "/api/device-preview/cancel"),
             ("POST", "/api/preview/announcement"),
             ("POST", "/api/preview/clock_lava"),
             ("POST", "/api/control/stop"),
@@ -13970,6 +13976,566 @@ try{
             "test_wsgi_import_owns_one_registry_and_atexit_closes_it",
         )(self)
 
+    def physical_draft_fixture(self, client=None, device_name="Browser"):
+        from device_preview import DevicePreviewManager
+        client = client or self.client
+        device_id = self.device_store.add(device_name, max_devices=8)["id"]
+        with client.session_transaction() as paired:
+            paired.update({"paired": True, "generation": "generation-one", "device_id": device_id})
+        manager = DevicePreviewManager()
+        controller = self.controller
+        controller.submit_device_draft.side_effect = lambda request, **_kwargs: manager.submit(request)
+        controller.heartbeat_device_draft.side_effect = lambda owner, generation: manager.heartbeat(owner, generation=generation)
+        controller.cancel_device_draft.side_effect = lambda owner, generation: manager.cancel(owner, generation=generation) is not None
+        controller.cancel_device_drafts_for_device.side_effect = lambda device: (
+            bool(manager.active_lease() and manager.active_lease().owner.device_id == device)
+            and manager.cancel(manager.active_lease().owner, generation=manager.active_lease().generation) is not None
+        )
+        controller.device_preview_manager = manager
+        return client, device_id, manager
+
+    def test_physical_draft_routes_are_paired_and_action_protected(self):
+        paths = (
+            ("/api/device-preview/weather", {"config": self.store.get(), "generation": 1, "preview_instance": "1" * 32, "timeout_seconds": 60}),
+            ("/api/device-preview/heartbeat", {"generation": 1, "preview_instance": "1" * 32}),
+            ("/api/device-preview/cancel", {"generation": 1, "preview_instance": "1" * 32}),
+        )
+        device_id = None
+        for path, payload in paths:
+            with self.client.session_transaction() as unpaired:
+                unpaired.clear()
+            with self.subTest(path=path, mode="unpaired"):
+                self.assertEqual(self.client.post(path, json=payload).status_code, 401)
+            if device_id is None:
+                device_id = self.device_store.add("Browser", max_devices=4)["id"]
+            with self.client.session_transaction() as paired:
+                paired.update({"paired": True, "generation": "generation-one", "device_id": device_id})
+            with self.subTest(path=path, mode="missing-action"):
+                self.assertEqual(self.client.post(path, json=payload).status_code, 403)
+            with self.subTest(path=path, mode="wrong-action"):
+                self.assertEqual(self.client.post(path, json=payload, headers={"X-Matrix-Action": "wrong"}).status_code, 403)
+            with self.subTest(path=path, mode="paired-action"):
+                response = self.paired_request("POST", path, json=payload)
+                self.assertNotEqual(response.status_code, 404)
+                self.assertEqual(response.headers.get("Cache-Control"), "no-store")
+                self.assertNotIn("ETag", response.headers)
+
+    def test_physical_draft_timeout_is_strict_transient_and_non_persistent(self):
+        client, _device_id, manager = self.physical_draft_fixture()
+        saved = self.store.get()
+        candidate = {key: value for key, value in saved.items() if key != "revision"}
+        baseline = json.dumps(saved, sort_keys=True)
+        instance = "2" * 32
+        valid = {"config": candidate, "generation": 1, "preview_instance": instance}
+        response = self.paired_client_request("POST", client, "/api/device-preview/weather", json=valid)
+        self.assertEqual(response.status_code, 202, response.get_json())
+        self.assertEqual(response.get_json()["timeout_seconds"], 60)
+        self.assertEqual(response.get_json()["generation"], 1)
+        self.assertEqual(response.get_json()["active_module"], "weather")
+        self.assertNotIn("device_id", response.get_json())
+        self.assertEqual(manager.active_lease().request.timeout_seconds, 60)
+        self.assertEqual(json.dumps(self.store.get(), sort_keys=True), baseline)
+        self.assertNotIn("timeout_seconds", self.store.get())
+
+        manager.close()
+        for timeout in (True, False, 4, 3601, 5.0, "60", None):
+            with self.subTest(timeout=timeout):
+                payload = {**valid, "generation": valid["generation"] + 1, "timeout_seconds": timeout}
+                result = self.paired_client_request("POST", client, "/api/device-preview/weather", json=payload)
+                self.assertEqual(result.status_code, 400, result.get_json())
+        for payload in (
+            {**valid, "extra": 1},
+            {**valid, "selected_lava_palette": []},
+            {"generation": 1, "preview_instance": instance, "timeout_seconds": 60},
+        ):
+            self.assertEqual(self.paired_client_request("POST", client, "/api/device-preview/weather", json=payload).status_code, 400)
+        oversized = b'{' + b' ' * 1_048_576 + b'}'
+        result = self.paired_client_request("POST", client, "/api/device-preview/weather", data=oversized, content_type="application/json")
+        self.assertEqual(result.status_code, 413)
+        self.assertEqual(json.dumps(self.store.get(), sort_keys=True), baseline)
+
+    def test_physical_draft_two_tabs_and_devices_obey_exact_owner_tuple(self):
+        owner, device_id, manager = self.physical_draft_fixture()
+        tab = self.app.test_client()
+        with tab.session_transaction() as paired:
+            paired.update({"paired": True, "generation": "generation-one", "device_id": device_id})
+        foreign = self.app.test_client()
+        foreign_id = self.device_store.add("Other device", max_devices=8)["id"]
+        with foreign.session_transaction() as paired:
+            paired.update({"paired": True, "generation": "generation-one", "device_id": foreign_id})
+        candidate = {k: v for k, v in self.store.get().items() if k != "revision"}
+        def payload(instance, generation=1):
+            return {"config": candidate, "generation": generation, "preview_instance": instance, "timeout_seconds": 60}
+        accepted = self.paired_client_request("POST", owner, "/api/device-preview/weather", json=payload("a" * 32))
+        self.assertEqual(accepted.status_code, 202)
+        self.assertEqual(self.paired_client_request("POST", tab, "/api/device-preview/weather", json=payload("b" * 32)).status_code, 409)
+        self.assertEqual(self.paired_client_request("POST", foreign, "/api/device-preview/weather", json=payload("a" * 32)).status_code, 409)
+        replacement = self.paired_client_request("POST", owner, "/api/device-preview/weather", json=payload("a" * 32, 2))
+        self.assertEqual(replacement.status_code, 202)
+        self.assertEqual(manager.active_lease().owner.device_id, device_id)
+        self.assertEqual(manager.active_lease().owner.preview_instance, "a" * 32)
+        for response in (accepted, replacement):
+            self.assertNotIn("device_id", response.get_json())
+            self.assertNotIn("preview_instance", response.get_json())
+
+    def test_physical_draft_never_changes_config_bytes_revision_or_publish(self):
+        client, _device_id, manager = self.physical_draft_fixture()
+        before_bytes = Path(self.store.path).read_bytes()
+        before_revision = self.store.get()["revision"]
+        candidate = {k: copy.deepcopy(v) for k, v in self.store.get().items() if k != "revision"}
+        candidate["weather"]["location"] = "Unsaved physical draft"
+        self.controller.reset_mock()
+        result = self.paired_client_request("POST", client, "/api/device-preview/weather", json={
+            "config": candidate, "generation": 1, "preview_instance": "c" * 32, "timeout_seconds": 30,
+        })
+        self.assertEqual(result.status_code, 202, result.get_json())
+        self.assertEqual(Path(self.store.path).read_bytes(), before_bytes)
+        self.assertEqual(self.store.get()["revision"], before_revision)
+        self.assertEqual(manager.active_lease().request.config["candidate"]["weather"]["location"], "Unsaved physical draft")
+        self.controller.reload.assert_not_called()
+        self.controller.preview.assert_not_called()
+        self.controller.preview_media.assert_not_called()
+        self.controller.preview_announcement.assert_not_called()
+
+    def test_physical_draft_stale_and_foreign_heartbeat_cancel_fail_closed(self):
+        owner, device_id, manager = self.physical_draft_fixture()
+        foreign = self.app.test_client()
+        foreign_id = self.device_store.add("Foreign", max_devices=8)["id"]
+        with foreign.session_transaction() as paired:
+            paired.update({"paired": True, "generation": "generation-one", "device_id": foreign_id})
+        candidate = {k: v for k, v in self.store.get().items() if k != "revision"}
+        instance = "d" * 32
+        start = self.paired_client_request("POST", owner, "/api/device-preview/weather", json={
+            "config": candidate, "generation": 2, "preview_instance": instance, "timeout_seconds": 60,
+        })
+        self.assertEqual(start.status_code, 202)
+        deadline = manager.active_lease().connectivity_deadline
+        for client, generation, route in (
+            (owner, 1, "heartbeat"), (foreign, 2, "heartbeat"),
+            (owner, 1, "cancel"), (foreign, 2, "cancel"),
+        ):
+            result = self.paired_client_request("POST", client, f"/api/device-preview/{route}", json={
+                "generation": generation, "preview_instance": instance,
+            })
+            self.assertEqual(result.status_code, 409, (route, result.get_json()))
+            self.assertEqual(set(result.get_json()), {"error"})
+            self.assertEqual(manager.active_lease().connectivity_deadline, deadline)
+        cancelled = self.paired_client_request("POST", owner, "/api/device-preview/cancel", json={
+            "generation": 2, "preview_instance": instance,
+        })
+        self.assertEqual(cancelled.status_code, 202, cancelled.get_json())
+        self.assertEqual(cancelled.get_json(), {"cancelled": True})
+        self.assertIsNone(manager.active_lease())
+        repeated = self.paired_client_request("POST", owner, "/api/device-preview/cancel", json={
+            "generation": 2, "preview_instance": instance,
+        })
+        self.assertEqual(repeated.status_code, 409)
+
+    def test_physical_draft_unpair_revoke_logout_release_owner(self):
+        candidate = {k: v for k, v in self.store.get().items() if k != "revision"}
+        def start(client, instance, generation):
+            return self.paired_client_request("POST", client, "/api/device-preview/weather", json={
+                "config": candidate, "generation": generation, "preview_instance": instance, "timeout_seconds": 60,
+            })
+
+        owner, owner_id, manager = self.physical_draft_fixture()
+        self.assertEqual(start(owner, "e" * 32, 1).status_code, 202)
+        removed = self.paired_client_request("DELETE", owner, f"/api/devices/{owner_id}")
+        self.assertEqual(removed.status_code, 200)
+        self.assertIsNone(manager.active_lease())
+
+        logout_client, _logout_id, manager = self.physical_draft_fixture(self.app.test_client(), "Logout")
+        self.assertEqual(start(logout_client, "f" * 32, 2).status_code, 202)
+        logged_out = self.paired_client_request("POST", logout_client, "/logout")
+        self.assertEqual(logged_out.status_code, 302)
+        self.assertIsNone(manager.active_lease())
+
+        victim, victim_id, manager = self.physical_draft_fixture(self.app.test_client(), "Victim")
+        self.assertEqual(start(victim, "1" * 32, 3).status_code, 202)
+        admin = self.app.test_client()
+        admin_id = self.device_store.add("Admin", max_devices=8)["id"]
+        with admin.session_transaction() as paired:
+            paired.update({"paired": True, "generation": "generation-one", "device_id": admin_id})
+        revoked = self.paired_client_request("DELETE", admin, f"/api/devices/{victim_id}")
+        self.assertEqual(revoked.status_code, 200)
+        self.assertIsNone(manager.active_lease())
+
+    def test_physical_draft_pins_accepted_media_inode_until_cleanup(self):
+        client, _device_id, manager = self.physical_draft_fixture()
+        media = self.media_dir / "draft.png"
+        media.write_bytes(b"accepted-inode")
+        candidate = {k: copy.deepcopy(v) for k, v in self.store.get().items() if k != "revision"}
+        candidate["media"]["splash"] = "draft.png"
+        instance = "2" * 32
+        started = self.paired_client_request("POST", client, "/api/device-preview/splash", json={
+            "config": candidate, "generation": 1, "preview_instance": instance, "timeout_seconds": 60,
+        })
+        self.assertEqual(started.status_code, 202, started.get_json())
+        request_record = manager.active_lease().request
+        handle = request_record.pinned_media["draft.png"]
+        replacement = self.media_dir / "replacement.png"
+        replacement.write_bytes(b"replacement-inode")
+        os.replace(replacement, media)
+        with handle.dup_file() as accepted:
+            self.assertEqual(accepted.read(), b"accepted-inode")
+        self.assertFalse(handle.closed)
+        cancelled = self.paired_client_request("POST", client, "/api/device-preview/cancel", json={
+            "generation": 1, "preview_instance": instance,
+        })
+        self.assertEqual(cancelled.status_code, 202)
+        self.assertTrue(handle.closed)
+        self.assertEqual(media.read_bytes(), b"replacement-inode")
+
+
+    def test_physical_draft_cancelled_provider_cannot_publish(self):
+        client, _device_id, manager = self.physical_draft_fixture()
+        captured = {}
+
+        def admit(request, *, renderer):
+            captured.update(request=request, renderer=renderer)
+            return manager.submit(request)
+
+        self.controller.submit_device_draft.side_effect = admit
+        self.controller.render_device_draft.reset_mock()
+        candidate = {
+            key: copy.deepcopy(value)
+            for key, value in self.store.get().items()
+            if key != "revision"
+        }
+        entered = threading.Event()
+        release = threading.Event()
+
+        def prepare(_provider, _module, _candidate, stop_event):
+            entered.set()
+            self.assertTrue(release.wait(1))
+            return {"temperature": 12}
+
+        with patch("webapp._prepare_edit_preview_provider", side_effect=prepare):
+            started = self.paired_client_request(
+                "POST", client, "/api/device-preview/weather", json={
+                    "config": candidate,
+                    "generation": 1,
+                    "preview_instance": "3" * 32,
+                    "timeout_seconds": 60,
+                },
+            )
+            self.assertEqual(started.status_code, 202, started.get_json())
+            stop_event = threading.Event()
+            matrix = Mock()
+            worker = threading.Thread(
+                target=lambda: captured["renderer"](
+                    matrix, captured["request"], stop_event=stop_event,
+                )
+            )
+            worker.start()
+            self.assertTrue(entered.wait(0.5))
+            stop_event.set()
+            release.set()
+            worker.join(1)
+
+        self.assertFalse(worker.is_alive())
+        self.controller.render_device_draft.assert_not_called()
+        matrix.swap.assert_not_called()
+        manager.close()
+
+
+    def test_physical_draft_errors_are_generic_and_capacity_is_bounded(self):
+        from contextlib import contextmanager
+
+        owner, device_id, manager = self.physical_draft_fixture()
+        peer = self.app.test_client()
+        with peer.session_transaction() as paired:
+            paired.update({
+                "paired": True,
+                "generation": "generation-one",
+                "device_id": device_id,
+            })
+        candidate = {
+            key: copy.deepcopy(value)
+            for key, value in self.store.get().items()
+            if key != "revision"
+        }
+        entered = threading.Event()
+        release = threading.Event()
+        calls = [0]
+
+        @contextmanager
+        def bounded_pin(*_args, **_kwargs):
+            calls[0] += 1
+            if calls[0] == 1:
+                entered.set()
+                self.assertTrue(release.wait(1))
+            yield {}
+
+        payload = lambda generation: {
+            "config": candidate,
+            "generation": generation,
+            "preview_instance": "4" * 32,
+            "timeout_seconds": 60,
+        }
+        first = []
+        with patch("webapp.pin_candidate_media", bounded_pin):
+            worker = threading.Thread(target=lambda: first.append(
+                self.paired_client_request(
+                    "POST", owner, "/api/device-preview/weather",
+                    json=payload(1),
+                )
+            ))
+            worker.start()
+            self.assertTrue(entered.wait(0.5))
+            excess = self.paired_client_request(
+                "POST", peer, "/api/device-preview/weather", json=payload(2),
+            )
+            self.assertEqual(excess.status_code, 429, excess.get_json())
+            self.assertEqual(excess.headers.get("Retry-After"), "2")
+            self.assertEqual(set(excess.get_json()), {"error"})
+            release.set()
+            worker.join(1)
+        self.assertFalse(worker.is_alive())
+        self.assertEqual(first[0].status_code, 202, first[0].get_json())
+        manager.close()
+
+        private = "PRIVATE-device-id-and-media-path"
+        self.controller.submit_device_draft.side_effect = RuntimeError(private)
+        failed = self.paired_client_request(
+            "POST", owner, "/api/device-preview/weather", json=payload(3),
+        )
+        self.assertEqual(failed.status_code, 503)
+        self.assertEqual(set(failed.get_json()), {"error"})
+        self.assertNotIn(private, failed.get_data(as_text=True))
+        self.assertNotIn(device_id, failed.get_data(as_text=True))
+        self.assertNotIn("preview_instance", failed.get_data(as_text=True))
+
+
+    def test_physical_draft_preview_api_is_paired_bounded_private_and_non_persistent(self):
+        from contextlib import contextmanager
+
+        owner, device_id, manager = self.physical_draft_fixture()
+        peer = self.app.test_client()
+        with peer.session_transaction() as paired:
+            paired.update({"paired": True, "generation": "generation-one", "device_id": device_id})
+        foreign = self.app.test_client()
+        foreign_id = self.device_store.add("Foreign closure device", max_devices=8)["id"]
+        with foreign.session_transaction() as paired:
+            paired.update({"paired": True, "generation": "generation-one", "device_id": foreign_id})
+
+        before_bytes = Path(self.store.path).read_bytes()
+        before_revision = self.store.get()["revision"]
+        candidate = {
+            key: copy.deepcopy(value)
+            for key, value in self.store.get().items()
+            if key != "revision"
+        }
+        candidate["weather"]["location"] = "Unsaved integration closure"
+        media = self.media_dir / "closure-draft.png"
+        media.write_bytes(b"accepted-closure-inode")
+        candidate["media"]["splash"] = media.name
+        owner_instance = "5" * 32
+        peer_instance = "6" * 32
+        base_payload = {
+            "config": candidate,
+            "generation": 1,
+            "preview_instance": owner_instance,
+            "timeout_seconds": 5,
+        }
+        self.controller.reset_mock()
+
+        def assert_private(response, *private_values):
+            body = response.get_data(as_text=True)
+            for value in (device_id, foreign_id, owner_instance, peer_instance, *private_values):
+                self.assertNotIn(value, body)
+
+        provider_release = threading.Event()
+        capacity_release = threading.Event()
+        provider_worker = None
+        capacity_worker = None
+        try:
+            unpaired = self.app.test_client()
+            unauthorized = self.paired_client_request(
+                "POST", unpaired, "/api/device-preview/splash", json=base_payload,
+            )
+            self.assertEqual(unauthorized.status_code, 401)
+            missing_action = owner.post("/api/device-preview/splash", json=base_payload)
+            self.assertEqual(missing_action.status_code, 403)
+            for invalid in (
+                {**base_payload, "timeout_seconds": True},
+                {**base_payload, "timeout_seconds": 4},
+                {**base_payload, "timeout_seconds": 3601},
+                {**base_payload, "unexpected": "private-contract-value"},
+            ):
+                rejected = self.paired_client_request(
+                    "POST", owner, "/api/device-preview/splash", json=invalid,
+                )
+                self.assertEqual(rejected.status_code, 400, rejected.get_json())
+                self.assertEqual(set(rejected.get_json()), {"error"})
+                assert_private(rejected, "private-contract-value", media.name)
+            oversized = self.paired_client_request(
+                "POST", owner, "/api/device-preview/splash",
+                data=b"{" + b" " * 1_048_576 + b"}", content_type="application/json",
+            )
+            self.assertEqual(oversized.status_code, 413)
+            self.assertEqual(set(oversized.get_json()), {"error"})
+            self.assertIsNone(manager.active_lease())
+
+            started = self.paired_client_request(
+                "POST", owner, "/api/device-preview/splash", json=base_payload,
+            )
+            self.assertEqual(started.status_code, 202, started.get_json())
+            self.assertEqual(started.headers.get("Cache-Control"), "no-store")
+            self.assertNotIn("ETag", started.headers)
+            self.assertEqual(
+                set(started.get_json()),
+                {"generation", "active_module", "timeout_seconds", "expires_in", "connectivity_expires_in"},
+            )
+            self.assertEqual(started.get_json()["timeout_seconds"], 5)
+            assert_private(started, media.name)
+            accepted_lease = manager.active_lease()
+            self.assertEqual(accepted_lease.owner.device_id, device_id)
+            self.assertEqual(accepted_lease.owner.preview_instance, owner_instance)
+            self.assertEqual(
+                accepted_lease.request.config["candidate"]["weather"]["location"],
+                "Unsaved integration closure",
+            )
+            accepted_handle = accepted_lease.request.pinned_media[media.name]
+
+            for client, instance in ((peer, peer_instance), (foreign, owner_instance)):
+                conflict = self.paired_client_request(
+                    "POST", client, "/api/device-preview/splash",
+                    json={**base_payload, "preview_instance": instance},
+                )
+                self.assertEqual(conflict.status_code, 409, conflict.get_json())
+                self.assertEqual(set(conflict.get_json()), {"error"})
+                assert_private(conflict, media.name)
+
+            replacement = self.media_dir / "closure-replacement.png"
+            replacement.write_bytes(b"replacement-closure-inode")
+            os.replace(replacement, media)
+            with accepted_handle.dup_file() as pinned:
+                self.assertEqual(pinned.read(), b"accepted-closure-inode")
+            self.assertFalse(accepted_handle.closed)
+            cancelled = self.paired_client_request(
+                "POST", owner, "/api/device-preview/cancel", json={
+                    "generation": 1, "preview_instance": owner_instance,
+                },
+            )
+            self.assertEqual(cancelled.status_code, 202, cancelled.get_json())
+            self.assertEqual(cancelled.get_json(), {"cancelled": True})
+            self.assertTrue(accepted_handle.closed)
+            self.assertIsNone(manager.active_lease())
+            self.assertEqual(media.read_bytes(), b"replacement-closure-inode")
+
+            captured = {}
+            provider_stop = threading.Event()
+            provider_entered = threading.Event()
+
+            def admit(request, *, renderer):
+                captured.update(request=request, renderer=renderer)
+                return manager.submit(request)
+
+            def cancel_provider(owner_tuple, generation):
+                provider_stop.set()
+                return manager.cancel(owner_tuple, generation=generation) is not None
+
+            def prepare(_provider, module_name, provider_candidate, stop_event):
+                self.assertEqual(module_name, "weather")
+                self.assertEqual(provider_candidate["weather"]["location"], "Unsaved integration closure")
+                self.assertIs(stop_event, provider_stop)
+                provider_entered.set()
+                self.assertTrue(provider_release.wait(1))
+                return {"temperature": 12}
+
+            self.controller.submit_device_draft.side_effect = admit
+            self.controller.cancel_device_draft.side_effect = cancel_provider
+            self.controller.render_device_draft.reset_mock()
+            provider_payload = {**base_payload, "generation": 2, "timeout_seconds": 30}
+            with patch("webapp._prepare_edit_preview_provider", side_effect=prepare):
+                provider_start = self.paired_client_request(
+                    "POST", owner, "/api/device-preview/weather", json=provider_payload,
+                )
+                self.assertEqual(provider_start.status_code, 202, provider_start.get_json())
+                provider_handle = manager.active_lease().request.pinned_media[media.name]
+                matrix = Mock()
+                provider_worker = threading.Thread(target=lambda: captured["renderer"](
+                    matrix, captured["request"], stop_event=provider_stop,
+                ))
+                provider_worker.start()
+                self.assertTrue(provider_entered.wait(0.5))
+                provider_cancel = self.paired_client_request(
+                    "POST", owner, "/api/device-preview/cancel", json={
+                        "generation": 2, "preview_instance": owner_instance,
+                    },
+                )
+                self.assertEqual(provider_cancel.status_code, 202, provider_cancel.get_json())
+                self.assertTrue(provider_stop.is_set())
+                self.assertTrue(provider_handle.closed)
+                provider_release.set()
+                provider_worker.join(1)
+            self.assertFalse(provider_worker.is_alive())
+            self.controller.render_device_draft.assert_not_called()
+            matrix.swap.assert_not_called()
+            self.assertIsNone(manager.active_lease())
+
+            capacity_entered = threading.Event()
+            pin_calls = [0]
+
+            @contextmanager
+            def bounded_pin(*_args, **_kwargs):
+                pin_calls[0] += 1
+                if pin_calls[0] == 1:
+                    capacity_entered.set()
+                    self.assertTrue(capacity_release.wait(1))
+                yield {}
+
+            capacity_payload = {**base_payload, "generation": 3, "timeout_seconds": 3600}
+            first = []
+            with patch("webapp.pin_candidate_media", bounded_pin):
+                capacity_worker = threading.Thread(target=lambda: first.append(
+                    self.paired_client_request(
+                        "POST", owner, "/api/device-preview/weather", json=capacity_payload,
+                    )
+                ))
+                capacity_worker.start()
+                self.assertTrue(capacity_entered.wait(0.5))
+                excess = self.paired_client_request(
+                    "POST", peer, "/api/device-preview/weather", json={
+                        **capacity_payload,
+                        "generation": 4,
+                        "preview_instance": peer_instance,
+                    },
+                )
+                self.assertEqual(excess.status_code, 429, excess.get_json())
+                self.assertEqual(excess.headers.get("Retry-After"), "2")
+                self.assertEqual(set(excess.get_json()), {"error"})
+                assert_private(excess, media.name)
+                self.assertEqual(pin_calls[0], 1)
+                capacity_release.set()
+                capacity_worker.join(1)
+            self.assertFalse(capacity_worker.is_alive())
+            self.assertEqual(first[0].status_code, 202, first[0].get_json())
+            self.assertEqual(manager.active_lease().request.timeout_seconds, 3600)
+            final_cancel = self.paired_client_request(
+                "POST", owner, "/api/device-preview/cancel", json={
+                    "generation": 3, "preview_instance": owner_instance,
+                },
+            )
+            self.assertEqual(final_cancel.status_code, 202, final_cancel.get_json())
+            self.assertIsNone(manager.active_lease())
+
+            self.assertEqual(Path(self.store.path).read_bytes(), before_bytes)
+            self.assertEqual(self.store.get()["revision"], before_revision)
+            self.controller.reload.assert_not_called()
+            self.controller.preview.assert_not_called()
+            self.controller.preview_media.assert_not_called()
+            self.controller.preview_announcement.assert_not_called()
+        finally:
+            provider_release.set()
+            capacity_release.set()
+            if provider_worker is not None:
+                provider_worker.join(1)
+            if capacity_worker is not None:
+                capacity_worker.join(1)
+            manager.close()
+
 
 class WSGIImportTests(unittest.TestCase):
     def test_wsgi_import_owns_one_registry_and_atexit_closes_it(self):
@@ -14211,6 +14777,7 @@ print(json.dumps({
             "worker_alive": False,
             "child_returncode": -signal.SIGTERM,
         })
+
 
 
 if __name__ == "__main__":

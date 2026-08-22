@@ -218,6 +218,15 @@ class DisplayController:
         self.start()
         return admission
 
+    def cancel_device_drafts_for_device(self, device_id):
+        lease = self.device_preview_manager.active_lease()
+        if lease is None or lease.owner.device_id != device_id:
+            return False
+        return self.cancel_device_draft(lease.owner, generation=lease.generation)
+
+    def heartbeat_device_draft(self, owner, *, generation):
+        return self.device_preview_manager.heartbeat(owner, generation=generation)
+
     def cancel_device_draft(self, owner, *, generation):
         lease = self.device_preview_manager.cancel(
             owner, generation=generation, close=False,
@@ -279,6 +288,39 @@ class DisplayController:
             if terminal is not None:
                 self.device_preview_manager.finish(terminal)
                 self._reload_requested.set()
+
+    def render_device_draft(
+        self, matrix, request, *, stop_event, prepared=None,
+    ):
+        """Render one validated transient request without consulting saved config."""
+        module_name = request.config["module"]
+        candidate = request.config["candidate"]
+        if stop_event.is_set():
+            return False
+        custom = custom_module(candidate, module_name)
+        if module_name in MODULES:
+            module = importlib.import_module(MODULES[module_name])
+        elif custom is not None:
+            module = importlib.import_module("modules.custom_text")
+        else:
+            raise KeyError(module_name)
+        options = {
+            "duration": request.timeout_seconds,
+            "stop_event": stop_event,
+        }
+        if custom is not None:
+            options["module_config"] = custom
+            options["pinned_handles"] = request.pinned_media
+        elif module_name == "weather" and prepared is not None:
+            class PreparedWeatherClient:
+                def fetch(self, *_args, **_kwargs):
+                    return prepared
+            options["client"] = PreparedWeatherClient()
+        elif module_name in {"openweather_overview", "openweather_forecast"}:
+            options["prepared"] = prepared
+        if stop_event.is_set():
+            return False
+        return module.run(matrix, candidate, **options)
 
     def preview(self, module_name):
         if module_name not in MODULES and custom_module(self.config_store.get(), module_name) is None:

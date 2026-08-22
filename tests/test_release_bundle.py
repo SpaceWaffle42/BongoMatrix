@@ -1466,13 +1466,160 @@ class ReleaseBundleTests(unittest.TestCase):
             service_control.assert_not_called()
             preflight.assert_not_called()
 
+    def _recover_service(self, initially_active=True, fail_once=None):
+        class Service:
+            def __init__(self):
+                self.active = initially_active
+                self.events = []
+                self.fail_once = fail_once
+            def _event(self, name):
+                self.events.append(name)
+                if self.fail_once == name:
+                    self.fail_once = None
+                    raise RuntimeError(f"interrupted {name}")
+            def is_active(self): self._event("is_active"); return self.active
+            def stop(self): self._event("stop"); self.active = False
+            def daemon_reload_needed(self): return True
+            def daemon_reload(self): self._event("daemon_reload")
+            def start(self): self._event("start"); self.active = True
+            def run_health_checks(self): self._event("readiness")
+            def recovery_commands(self): return ()
+        return Service()
+
+    def _assert_case_baseline(self, case):
+        self.assertFalse((case["destination_root"] / "deploy/release_bundle.py").exists())
+        restored = case["destination_root"] / "app/code.py"
+        self.assertEqual(restored.read_bytes(), b"old code\n")
+        self.assertEqual(stat.S_IMODE(restored.stat().st_mode), 0o640)
+
+    def test_recover_restores_verified_backup_from_every_partial_deploy_boundary(self):
+        for boundary in range(3):
+            with self.subTest(boundary=boundary), tempfile.TemporaryDirectory() as directory:
+                case = self._backed_case(Path(directory))
+                for entry in case["entries"][:boundary]:
+                    target = case["destination_root"] / entry["path"]
+                    target.parent.mkdir(parents=True, exist_ok=True)
+                    target.write_bytes((case["release_root"] / entry["path"]).read_bytes())
+                    target.chmod(int(entry["mode"], 8))
+                service = self._recover_service()
+                release_bundle.recover_release(
+                    case["staged_tool"], case["release_root"], case["destination_root"],
+                    case["bundle"], case["release_manifest"], case["backup_manifest"],
+                    service=service, initially_active=True,
+                )
+                self._assert_case_baseline(case)
+                self.assertTrue(service.active)
+                self.assertIn("readiness", service.events)
+
+    def test_recover_completes_verified_backup_restore_from_every_partial_rollback_boundary(self):
+        for boundary in range(3):
+            with self.subTest(boundary=boundary), tempfile.TemporaryDirectory() as directory:
+                case = self._backed_case(Path(directory))
+                no_service = self._recover_service(initially_active=False)
+                release_bundle.deploy_release(
+                    case["staged_tool"], case["release_root"], case["destination_root"],
+                    case["bundle"], case["release_manifest"], case["backup_manifest"],
+                    service=no_service,
+                )
+                backup = json.loads(case["backup_manifest"].read_text())["files"]
+                for entry in backup[:boundary]:
+                    target = case["destination_root"] / entry["path"]
+                    if entry["present_before"]:
+                        target.write_bytes((case["bundle"] / "archive" / entry["path"]).read_bytes())
+                        target.chmod(int(entry["mode"], 8))
+                    else:
+                        target.unlink(missing_ok=True)
+                service = self._recover_service()
+                release_bundle.recover_release(
+                    case["staged_tool"], case["release_root"], case["destination_root"],
+                    case["bundle"], case["release_manifest"], case["backup_manifest"],
+                    service=service, initially_active=True,
+                )
+                self._assert_case_baseline(case)
+                self.assertTrue(service.active)
+
+    def test_recover_worker_retries_every_restore_service_and_readiness_interruption_to_exact_baseline(self):
+        boundaries = ("stop", "remove:0", "restore:1", "daemon_reload", "start", "readiness")
+        for interrupted in boundaries:
+            with self.subTest(interrupted=interrupted), tempfile.TemporaryDirectory() as directory:
+                case = self._backed_case(Path(directory))
+                for entry in case["entries"]:
+                    target = case["destination_root"] / entry["path"]
+                    target.parent.mkdir(parents=True, exist_ok=True)
+                    target.write_bytes((case["release_root"] / entry["path"]).read_bytes())
+                    target.chmod(int(entry["mode"], 8))
+                service = self._recover_service()
+                fired = False
+                def interrupt(boundary):
+                    nonlocal fired
+                    if boundary == interrupted and not fired:
+                        fired = True
+                        raise RuntimeError(f"worker killed after {boundary}")
+                with self.assertRaises(RuntimeError):
+                    release_bundle.recover_release(
+                        case["staged_tool"], case["release_root"], case["destination_root"],
+                        case["bundle"], case["release_manifest"], case["backup_manifest"],
+                        service=service, initially_active=True, after_boundary=interrupt,
+                    )
+                self.assertTrue(fired)
+                release_bundle.recover_release(
+                    case["staged_tool"], case["release_root"], case["destination_root"],
+                    case["bundle"], case["release_manifest"], case["backup_manifest"],
+                    service=service, initially_active=True,
+                )
+                self._assert_case_baseline(case)
+                self.assertTrue(service.active)
+                self.assertEqual(service.events[-1], "readiness")
+
     def test_parser_has_exact_command_argument_parity(self):
         parser = release_bundle.build_parser()
         help_text = parser.format_help()
-        for command in ("backup", "preflight", "deploy", "rollback", "verify", "cleanup"):
+        for command in ("backup", "preflight", "deploy", "rollback", "recover", "verify", "cleanup"):
             self.assertIn(command, help_text)
+        common = [
+            "--release-root", "/release", "--destination-root", "/destination",
+            "--bundle", "/bundle", "--release-manifest", "/release.json",
+            "--backup-manifest", "/backup.json", "--service", "matrix-web.service",
+            "--initial-service-state", "active", "--health-url", "http://127.0.0.1:5000/",
+            "--health-status", "302", "--health-timeout-seconds", "30",
+        ]
+        parsed = parser.parse_args(["recover", *common])
+        self.assertEqual(parsed.command, "recover")
+        self.assertEqual((parsed.health_status, parsed.health_timeout_seconds), (302, 30))
+        for required in (
+            "--release-root", "--destination-root", "--bundle", "--release-manifest",
+            "--backup-manifest", "--service", "--initial-service-state",
+        ):
+            broken = common[:]
+            at = broken.index(required)
+            del broken[at:at + 2]
+            with self.subTest(required=required), redirect_stderr(io.StringIO()), self.assertRaises(SystemExit):
+                parser.parse_args(["recover", *broken])
+        for forbidden in ("--dry-run", "--release-spec", "--mode"):
+            with self.subTest(forbidden=forbidden), redirect_stderr(io.StringIO()), self.assertRaises(SystemExit):
+                parser.parse_args(["recover", *common, forbidden, "deploy"])
+        for readiness in ("--health-url", "--health-status", "--health-timeout-seconds"):
+            inactive = common[:]
+            inactive[inactive.index("active")] = "inactive"
+            # Remove the other readiness arguments so each one is rejected independently.
+            for other in ("--health-url", "--health-status", "--health-timeout-seconds"):
+                if other != readiness:
+                    at = inactive.index(other)
+                    del inactive[at:at + 2]
+            with self.subTest(inactive=readiness), self.assertRaises(ReleaseManifestError):
+                release_bundle.main(["recover", *inactive])
         with self.assertRaises(SystemExit), redirect_stderr(io.StringIO()):
-            parser.parse_args(["verify", "--mode", "invalid"])
+            parser.parse_args(["recover", *common, "--service", "duplicate.service"])
+
+        with mock.patch.object(release_bundle, "recover_release") as recover, \
+                mock.patch.object(release_bundle, "_verify_deployed") as verify_deployed, \
+                mock.patch.object(release_bundle, "_service_control") as service_control:
+            service = service_control.return_value
+            self.assertEqual(release_bundle.main(["recover", *common]), 0)
+        recover.assert_called_once()
+        self.assertIs(recover.call_args.kwargs["service"], service)
+        self.assertTrue(recover.call_args.kwargs["initially_active"])
+        verify_deployed.assert_not_called()
 
     def _cleanup_ready_case(self, root):
         stage = root / "stage"
