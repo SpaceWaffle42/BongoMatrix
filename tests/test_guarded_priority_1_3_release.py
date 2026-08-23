@@ -3,6 +3,7 @@ import importlib
 import json
 import os
 import re
+import shlex
 import shutil
 from pathlib import Path
 import stat
@@ -260,7 +261,16 @@ print('EXPORTED_FULL_RUN_OK')
                 path.write_text("session=value" if name == "cookie" else "fixture", encoding="ascii")
                 path.chmod(0o600)
             shutil.copy2(source / "tests/fixtures/priority_1_3_fake_ssh.py", root / "bin/ssh")
-            shutil.copy2(source / "tests/fixtures/priority_1_3_fake_python.py", stage / "venv/bin/python")
+            fake_python = root / "bin/fake-python.py"
+            shutil.copy2(source / "tests/fixtures/priority_1_3_fake_python.py", fake_python)
+            (stage / "venv/bin/python").write_text(
+                "#!/bin/sh\nexec "
+                + shlex.quote(str(source / ".venv/bin/python"))
+                + " "
+                + shlex.quote(str(fake_python))
+                + " \"$@\"\n",
+                encoding="utf-8",
+            )
             (root / "bin/ssh").chmod(0o755)
             (stage / "venv/bin/python").chmod(0o755)
             harness = r'''import hashlib, json, pathlib, subprocess, sys, urllib.parse, urllib.request
