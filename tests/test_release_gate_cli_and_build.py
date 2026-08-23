@@ -96,6 +96,28 @@ class ReleaseTreePreparationTests(unittest.TestCase):
                 (release_root / "deploy/release_bundle.py").read_bytes(),
             )
 
+    def test_validated_exact_commit_export_supports_legacy_tarfile_extractall(self):
+        project = Path(__file__).resolve().parents[1]
+        original_extractall = release_bundle.tarfile.TarFile.extractall
+
+        def legacy_extractall(archive, path=".", members=None):
+            return original_extractall(archive, path, members)
+
+        with tempfile.TemporaryDirectory(dir=project) as directory:
+            root = Path(directory)
+            repository, source_sha = self._committed_repository(root)
+            stage = root / "stage"
+            with mock.patch.object(
+                release_bundle.tarfile.TarFile, "extractall", legacy_extractall,
+            ):
+                self.assertEqual(
+                    release_bundle.main(
+                        self._argv(project, repository, source_sha, stage)
+                    ),
+                    0,
+                )
+            self.assertTrue((stage / "release-spec.json").is_file())
+
     def test_builder_remote_proof_matches_the_approved_outer_release_spec(self):
         project = Path(__file__).resolve().parents[1]
         with tempfile.TemporaryDirectory(dir=project) as directory:

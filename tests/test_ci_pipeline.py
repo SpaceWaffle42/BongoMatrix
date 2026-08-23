@@ -1,5 +1,8 @@
 from pathlib import Path
+import os
 import re
+import subprocess
+import tempfile
 import unittest
 
 
@@ -233,6 +236,81 @@ class GitLabPipelineContractTests(unittest.TestCase):
         self.assertRegex(job, r"reports:\n\s+junit:")
         self.assertIn("coverage_report:", job)
         self.assertIn("when: always", job)
+
+    def test_full_test_job_provisions_the_repository_venv_contract(self):
+        job = block(self.sections, "full_test_suite")
+        self.assertIn("rm -rf -- .venv .venv-ci", job)
+        self.assertIn("python3 -m venv .venv-ci", job)
+        self.assertIn("ln -sT .venv-ci .venv", job)
+        self.assertIn('test "$(readlink .venv)" = ".venv-ci"', job)
+        self.assertLess(
+            job.index("rm -rf -- .venv .venv-ci"),
+            job.index("python3 -m venv .venv-ci"),
+        )
+        self.assertLess(
+            job.index("ln -sT .venv-ci .venv"),
+            job.index('test "$(readlink .venv)" = ".venv-ci"'),
+        )
+        self.assertLess(job.index('test "$(readlink .venv)" = ".venv-ci"'), job.index("coverage run"))
+
+    def test_full_test_job_replaces_stale_repository_venv_state(self):
+        job = block(self.sections, "full_test_suite")
+        setup = [
+            line.strip().removeprefix("- ")
+            for line in job.splitlines()
+            if line.strip().startswith("- ")
+            and any(token in line for token in (".venv-ci", "readlink .venv"))
+            and "pip install" not in line
+        ]
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            old = root / "old-venv"
+            (old / "bin").mkdir(parents=True)
+            stale_python = old / "bin/python"
+            stale_python.write_text("#!/bin/sh\nexit 99\n", encoding="ascii")
+            stale_python.chmod(0o755)
+            (root / ".venv").symlink_to("old-venv", target_is_directory=True)
+            stale_ci = root / ".venv-ci"
+            stale_ci.mkdir()
+            (stale_ci / "stale-marker").write_text("stale", encoding="ascii")
+            fake_bin = root / "fake-bin"
+            fake_bin.mkdir()
+            fake_python = fake_bin / "python3"
+            fake_python.write_text(
+                "#!/bin/sh\n"
+                "test \"$1 $2\" = '-m venv'\n"
+                "mkdir -p \"$3/bin\"\n"
+                "printf '#!/bin/sh\\nexit 0\\n' > \"$3/bin/python\"\n"
+                "chmod 0755 \"$3/bin/python\"\n",
+                encoding="ascii",
+            )
+            fake_python.chmod(0o755)
+
+            completed = subprocess.run(
+                ["/bin/sh", "-ceu", "\n".join(setup)],
+                cwd=root, text=True, capture_output=True, check=False,
+                env={
+                    **os.environ,
+                    "PATH": str(fake_bin) + os.pathsep + os.environ["PATH"],
+                    "PYTHONDONTWRITEBYTECODE": "1",
+                },
+            )
+
+            self.assertEqual(completed.returncode, 0, completed.stderr)
+            self.assertTrue((root / ".venv").is_symlink())
+            self.assertEqual(os.readlink(root / ".venv"), ".venv-ci")
+            self.assertTrue(os.access(root / ".venv/bin/python", os.X_OK))
+            self.assertFalse((root / ".venv-ci/stale-marker").exists())
+            self.assertFalse((old / ".venv-ci").exists())
+
+    def test_acceptance_browser_regression_uses_the_ci_configured_chromium(self):
+        acceptance_tests = (ROOT / "tests/test_priority_1_3_acceptance.py").read_text(
+            encoding="utf-8"
+        )
+        self.assertNotIn(
+            'mock.patch.dict(os.environ, {"MATRIX_CHROMIUM": "/usr/bin/google-chrome"})',
+            acceptance_tests,
+        )
 
     def test_pipeline_publishes_quality_and_security_evidence(self):
         variables = block(self.sections, "variables")

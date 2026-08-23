@@ -2230,7 +2230,7 @@ def _extract_exact_archive(archive: bytes, destination: Path) -> None:
                 if (path.is_absolute() or any(part in {"", ".", ".."} for part in path.parts)
                         or not (member.isdir() or member.isfile())):
                     _reject("exact Git commit export contains unsafe topology")
-            exported.extractall(destination, filter="data")
+            exported.extractall(destination)
     except (tarfile.TarError, OSError) as error:
         raise ReleaseManifestError("exact Git commit export is unreadable") from error
 

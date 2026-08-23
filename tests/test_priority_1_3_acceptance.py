@@ -413,7 +413,7 @@ class Priority13AcceptanceTests(unittest.TestCase):
             self.assertGreaterEqual(time.monotonic() - http_started, 5)
             self.assertEqual(http_report["foreign_rejected"], True)
             self.assertEqual(sum(item[1].endswith("/heartbeat") for item in observed), 3)
-            with mock.patch.object(acceptance, "_LOCAL_BASE_URL", base), mock.patch.dict(os.environ, {"MATRIX_CHROMIUM": "/usr/bin/google-chrome"}):
+            with mock.patch.object(acceptance, "_LOCAL_BASE_URL", base):
                 chromium_report = acceptance.LocalChromiumJourney().run(base, "session=browser-fixture", operation_timeout=300, aggregate_deadline=time.monotonic() + 30)
             self.assertEqual(chromium_report, {"paired": True, "explicit_ipv4": True, "status_checked": True, "frame_checked": True})
         finally:
