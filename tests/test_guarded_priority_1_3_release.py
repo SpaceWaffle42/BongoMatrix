@@ -263,9 +263,16 @@ print('EXPORTED_FULL_RUN_OK')
             shutil.copy2(source / "tests/fixtures/priority_1_3_fake_python.py", stage / "venv/bin/python")
             (root / "bin/ssh").chmod(0o755)
             (stage / "venv/bin/python").chmod(0o755)
-            harness = r'''import hashlib, json, pathlib, sys, urllib.parse, urllib.request
+            harness = r'''import hashlib, json, pathlib, subprocess, sys, urllib.parse, urllib.request
 root=pathlib.Path(sys.argv[1]);sys.path.insert(0,str(root/'export'))
 import deploy.guarded_priority_1_3_release as guarded
+import deploy.verify_priority_1_3_acceptance as acceptance
+real_executor=acceptance.PinnedRemoteExecutor
+def fixture_executor(*args,**kwargs):
+ def runner(argv,**run_kwargs):
+  return subprocess.run([sys.executable,str(root/'bin/ssh'),*argv[1:]],**run_kwargs)
+ return real_executor(*args,runner=runner,**kwargs)
+acceptance.PinnedRemoteExecutor=fixture_executor
 events=[];notes=[];next_id=100
 release_spec={'version':1,'files':[{'path':'app.py','sha256':'e'*64,'uid':0,'gid':0,'mode':'0644'}]}
 release_spec_bytes=(json.dumps(release_spec,sort_keys=True,separators=(',',':'))+'\n').encode()

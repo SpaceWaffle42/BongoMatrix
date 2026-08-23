@@ -5,6 +5,7 @@ from __future__ import annotations
 import os
 import http.cookiejar
 from pathlib import Path
+import subprocess
 import sys
 import threading
 import urllib.error
@@ -21,6 +22,17 @@ from webapp import create_app
 from werkzeug.serving import WSGIRequestHandler, make_server
 
 root = Path(os.environ["FIXTURE_ROOT"])
+real_executor = acceptance.PinnedRemoteExecutor
+
+
+def fixture_executor(*args, **kwargs):
+    def runner(argv, **run_kwargs):
+        return subprocess.run([sys.executable, str(root / "bin/ssh"), *argv[1:]], **run_kwargs)
+
+    return real_executor(*args, runner=runner, **kwargs)
+
+
+acceptance.PinnedRemoteExecutor = fixture_executor
 assert sys.argv[1:4] == [
     "-I", "-B", str(root / "stage/deploy/verify_priority_1_3_acceptance.py")
 ]

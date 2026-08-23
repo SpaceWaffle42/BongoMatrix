@@ -810,7 +810,7 @@ class Priority13AcceptanceTests(unittest.TestCase):
             self.assertIsInstance(result, acceptance.OperationResult)
             self.assertEqual(result.returncode, 0)
             argv = captured["argv"]
-            self.assertEqual(argv[:3], ("ssh", "-F", "/dev/null"))
+            self.assertEqual(argv[:3], ("/usr/bin/ssh", "-F", "/dev/null"))
             for exact in (
                 "BatchMode=yes", "IdentitiesOnly=yes", "IdentityAgent=none",
                 "StrictHostKeyChecking=yes", f"UserKnownHostsFile={known_hosts}",

@@ -112,7 +112,7 @@ class PinnedRemoteExecutor:
                 or operation_timeout <= 0):
             raise ValueError("operation timeout is invalid")
         argv = [
-            "ssh", "-F", "/dev/null",
+            "/usr/bin/ssh", "-F", "/dev/null",
             "-o", "BatchMode=yes", "-o", "IdentitiesOnly=yes",
             "-o", "IdentityAgent=none", "-o", "StrictHostKeyChecking=yes",
             "-o", f"UserKnownHostsFile={self.known_hosts_file}",
