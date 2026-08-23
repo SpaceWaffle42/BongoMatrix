@@ -70,6 +70,11 @@ with _entrypoint_owner._wsgi_runtime_lock:
             testing_pin=load_testing_pin(ROOT / "data" / "testing-pin", APPLICATION_VERSION),
         )
         session_secret = load_secret(ROOT / "data" / "session.key")
+        acceptance_authorization_file = ROOT / "data" / "acceptance-authorization.key"
+        load_secret(acceptance_authorization_file)
+        acceptance_runtime = ROOT / "data" / "acceptance-runtime"
+        acceptance_runtime.mkdir(mode=0o700, parents=False, exist_ok=True)
+        acceptance_runtime.chmod(0o700)
         sanitizer_path = os.environ.get("MATRIX_SANITIZER_PATH")
         nobody = pwd.getpwnam("nobody") if sanitizer_path and os.geteuid() == 0 else None
         app = create_app(
@@ -83,6 +88,8 @@ with _entrypoint_owner._wsgi_runtime_lock:
             sanitizer_path=sanitizer_path,
             sanitizer_python=os.environ.get("MATRIX_SANITIZER_PYTHON"),
             sanitizer_identity=(nobody.pw_uid, nobody.pw_gid) if nobody else None,
+            acceptance_authorization_file=acceptance_authorization_file,
+            acceptance_runtime=acceptance_runtime,
             device_restart_runner=(
                 RestartRequest("/run/matrix-device-restart/submit/request")
                 if os.environ.get("MATRIX_DEVICE_RESTART_ENABLED") == "1"

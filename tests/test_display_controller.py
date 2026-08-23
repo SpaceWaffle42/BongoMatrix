@@ -1,11 +1,24 @@
+import base64
+import copy
+import datetime
+import io
+import os
+from pathlib import Path
+import random
 import threading
+import tempfile
 import time
 import unittest
 from unittest.mock import Mock, patch
 
+from PIL import Image
+
 import display_controller
+import edit_preview
+from edit_preview import CaptureMatrix
 from config_store import DEFAULT_CONFIG
 from display_controller import DisplayController
+from media_resolver import PinnedMediaHandle
 
 
 class DisplayControllerTests(unittest.TestCase):
@@ -243,6 +256,79 @@ class DisplayControllerTests(unittest.TestCase):
             controller._run_loop_unchecked()
 
         self.assertEqual(calls, ["announcement_board", "clock_lava"])
+
+    def test_pending_physical_draft_preempts_next_saved_playlist_row(self):
+        config = {
+            **DEFAULT_CONFIG,
+            "playlist": [
+                {"module": "splash", "duration": 1, "enabled": True},
+                {"module": "sleep", "duration": 1, "enabled": True},
+            ],
+        }
+        store = Mock(get=Mock(return_value=config))
+        controller = DisplayController(Mock(), store)
+        observed = []
+
+        def execute(name, _config, _duration):
+            observed.append(f"saved:{name}")
+            if name == "splash":
+                with controller._state_lock:
+                    controller._device_draft_pending = (None, None)
+            return True
+
+        def execute_draft():
+            observed.append("draft")
+            with controller._state_lock:
+                controller._device_draft_pending = None
+            controller._shutdown.set()
+            return True
+
+        controller._execute = Mock(side_effect=execute)
+        controller._execute_pending_device_draft = Mock(side_effect=execute_draft)
+        with patch.object(controller, "_is_active", return_value=True):
+            controller._run_loop_unchecked()
+
+        self.assertEqual(observed, ["saved:splash", "draft"])
+        controller._execute_pending_device_draft.assert_called_once_with()
+
+    def test_builtin_device_draft_consumes_pinned_inode_after_path_replacement(self):
+        for module_name in ("splash", "sleep"):
+            with self.subTest(module=module_name), tempfile.TemporaryDirectory() as directory:
+                media_root = Path(directory)
+                filename = f"{module_name}.bin"
+                path = media_root / filename
+                path.write_bytes(b"original-inode:" + module_name.encode("ascii"))
+                handle = PinnedMediaHandle(os.open(path, os.O_RDONLY), lambda _handle: None)
+                replacement = media_root / "replacement"
+                replacement.write_bytes(b"replacement-path")
+                os.replace(replacement, path)
+                candidate = copy.deepcopy(DEFAULT_CONFIG)
+                candidate["media"][module_name] = filename
+                request = Mock(
+                    config={"module": module_name, "candidate": candidate},
+                    timeout_seconds=3,
+                    pinned_media={filename: handle},
+                )
+                consumed = []
+                module = Mock()
+
+                def run(_matrix, _candidate, *, duration, stop_event, pinned_handle):
+                    del duration, stop_event
+                    with pinned_handle.dup_file() as source:
+                        consumed.append(source.read())
+                    return True
+
+                module.run.side_effect = run
+                try:
+                    controller = DisplayController(Mock(), Mock())
+                    with patch("display_controller.importlib.import_module", return_value=module):
+                        self.assertTrue(controller.render_device_draft(
+                            Mock(), request, stop_event=threading.Event(),
+                        ))
+                    self.assertEqual(consumed, [b"original-inode:" + module_name.encode("ascii")])
+                    self.assertEqual(path.read_bytes(), b"replacement-path")
+                finally:
+                    handle.close()
 
     def test_scheduler_idles_when_announcement_only_playlist_has_no_active_record(self):
         config = {
@@ -751,6 +837,258 @@ class DisplayControllerTests(unittest.TestCase):
         self.assertEqual(calls, ["weather"])
 
 
+    def test_stop_does_not_join_expiry_reaper_while_holding_display_lock(self):
+        from device_preview import DevicePreviewOwner, DevicePreviewRequest
+
+        class BreakableOwnedLock:
+            """Test lock that can release an observed deadlock for clean teardown."""
+
+            def __init__(self):
+                self._condition = threading.Condition()
+                self._owner = None
+                self._depth = 0
+                self.stop_acquired = threading.Event()
+                self._ignore_orphaned_release = False
+
+            def acquire(self, timeout=None):
+                deadline = None if timeout is None else time.monotonic() + timeout
+                ident = threading.get_ident()
+                with self._condition:
+                    while self._owner not in (None, ident):
+                        if deadline is None:
+                            self._condition.wait()
+                        else:
+                            remaining = deadline - time.monotonic()
+                            if remaining <= 0:
+                                return False
+                            self._condition.wait(remaining)
+                    self._owner = ident
+                    self._depth += 1
+                    if threading.current_thread().name == "finding-3-stop":
+                        self.stop_acquired.set()
+                    return True
+
+            def release(self):
+                ident = threading.get_ident()
+                with self._condition:
+                    if self._owner != ident:
+                        if self._ignore_orphaned_release:
+                            self._ignore_orphaned_release = False
+                            return
+                        raise RuntimeError("cannot release unowned display lock")
+                    self._depth -= 1
+                    if self._depth == 0:
+                        self._owner = None
+                        self._condition.notify_all()
+
+            def __enter__(self):
+                self.acquire()
+                return self
+
+            def __exit__(self, *_exc):
+                self.release()
+
+            def break_deadlock_for_teardown(self):
+                with self._condition:
+                    if self._owner is not None:
+                        self._owner = None
+                        self._depth = 0
+                        self._ignore_orphaned_release = True
+                        self._condition.notify_all()
+
+        now = [100.0]
+        matrix = Mock()
+        controller = DisplayController(matrix, Mock())
+        display_lock = BreakableOwnedLock()
+        controller._display_lock = display_lock
+        controller.device_preview_manager._clock = lambda: now[0]
+        controller.start = Mock()
+        callback_before_display = threading.Event()
+        release_callback = threading.Event()
+        original_expire = controller._expire_device_draft
+
+        def paused_expire(lease):
+            callback_before_display.set()
+            self.assertTrue(release_callback.wait(1))
+            original_expire(lease)
+
+        controller.device_preview_manager._on_expire = paused_expire
+        cleanup = Mock()
+        controller.submit_device_draft(
+            DevicePreviewRequest(
+                DevicePreviewOwner("device-a", "pending"),
+                1,
+                {"module": "clock_lava"},
+                60,
+                cleanup=cleanup,
+            ),
+            renderer=Mock(),
+        )
+        now[0] = 115.0
+        self.assertTrue(callback_before_display.wait(0.5))
+
+        stop_results = []
+        stop_returned = threading.Event()
+        stopping = threading.Thread(
+            target=lambda: (
+                stop_results.append(controller.stop(timeout=1)),
+                stop_returned.set(),
+            ),
+            name="finding-3-stop",
+        )
+        stopping.start()
+        release_callback.set()
+        self.assertTrue(display_lock.stop_acquired.wait(0.5))
+        blocked = not stop_returned.wait(0.15)
+
+        if blocked:
+            display_lock.break_deadlock_for_teardown()
+        stopping.join(1)
+        self.assertFalse(stopping.is_alive(), "test teardown could not settle stop/reaper")
+        self.assertFalse(
+            blocked,
+            "stop joined the expiry reaper while owning its required display lock",
+        )
+        self.assertEqual(stop_results, [True])
+        cleanup.assert_called_once_with()
+        matrix.clear.assert_called_once_with()
+        matrix.swap.assert_called_once_with()
+
+    def test_stop_racing_active_render_expiry_defers_cleanup_and_drops_stale_publication(self):
+        from device_preview import DevicePreviewOwner, DevicePreviewRequest
+
+        class GuardedMatrix:
+            def __init__(self):
+                self.guard = None
+                self.publications = []
+                self.clear_count = 0
+                self.stop_swaps = 0
+
+            def set_publication_guard(self, guard):
+                self.guard = guard
+
+            def publish(self, label):
+                if self.guard is None or self.guard():
+                    self.publications.append(label)
+
+            def clear(self):
+                self.clear_count += 1
+
+            def swap(self):
+                self.stop_swaps += 1
+
+        now = [200.0]
+        matrix = GuardedMatrix()
+        controller = DisplayController(matrix, Mock())
+        controller.device_preview_manager._clock = lambda: now[0]
+        controller.start = Mock()
+        entered = threading.Event()
+        release_render = threading.Event()
+        cleanup = Mock()
+        owner = DevicePreviewOwner("device-a", "active-expiry")
+
+        def renderer(matrix, _request, *, stop_event):
+            entered.set()
+            self.assertTrue(release_render.wait(1))
+            matrix.publish("stale-unsaved")
+            return not stop_event.is_set()
+
+        controller.submit_device_draft(
+            DevicePreviewRequest(
+                owner, 1, {"module": "clock_lava"}, 60, cleanup=cleanup,
+            ),
+            renderer=renderer,
+        )
+        render_worker = threading.Thread(
+            target=controller._execute_pending_device_draft,
+            name="finding-3-active-render",
+        )
+        controller._thread = render_worker
+        render_worker.start()
+        self.assertTrue(entered.wait(0.5))
+
+        now[0] = 215.0
+        stop_event = controller._device_draft_stop
+        self.assertIsNotNone(stop_event)
+        self.assertTrue(stop_event.wait(0.5))
+        stop_results = []
+        stop_returned = threading.Event()
+        stopping = threading.Thread(
+            target=lambda: (
+                stop_results.append(controller.stop(timeout=1)),
+                stop_returned.set(),
+            )
+        )
+        stopping.start()
+        self.assertFalse(stop_returned.wait(0.1))
+        cleanup.assert_not_called()
+
+        release_render.set()
+        render_worker.join(1)
+        stopping.join(1)
+        self.assertFalse(render_worker.is_alive())
+        self.assertFalse(stopping.is_alive())
+        self.assertEqual(stop_results, [True])
+        self.assertEqual(matrix.publications, [])
+        self.assertIsNone(matrix.guard)
+        cleanup.assert_called_once_with()
+        self.assertIsNone(controller.device_preview_manager.active_lease())
+
+        self.assertTrue(controller.stop(timeout=1))
+        controller.shutdown_device_drafts()
+        cleanup.assert_called_once_with()
+
+    def test_pending_device_draft_autonomously_expires_once_before_saved_scheduler_resumes(self):
+        from device_preview import DevicePreviewOwner, DevicePreviewRequest
+
+        saved_config = {
+            **DEFAULT_CONFIG,
+            "playlist": [{"module": "splash", "duration": 1, "enabled": True}],
+        }
+        now = [300.0]
+        store = Mock(get=Mock(return_value=saved_config))
+        controller = DisplayController(Mock(), store)
+        controller.device_preview_manager._clock = lambda: now[0]
+        controller.start = Mock()
+        cleanup_finished = threading.Event()
+        cleanup = Mock(side_effect=cleanup_finished.set)
+        controller.submit_device_draft(
+            DevicePreviewRequest(
+                DevicePreviewOwner("device-a", "pending-expiry"),
+                1,
+                {"module": "weather", "candidate": {"draft": "unsaved"}},
+                60,
+                cleanup=cleanup,
+            ),
+            renderer=Mock(),
+        )
+        self.assertIsNotNone(controller._device_draft_pending)
+
+        now[0] = 315.0
+        self.assertTrue(cleanup_finished.wait(0.5))
+        cleanup.assert_called_once_with()
+        self.assertIsNone(controller._device_draft_pending)
+        self.assertIsNone(controller.device_preview_manager.active_lease())
+        self.assertTrue(controller._reload_requested.is_set())
+
+        saved_renders = []
+
+        def render_saved(name, config, duration):
+            saved_renders.append((name, config, duration))
+            controller._shutdown.set()
+            return True
+
+        controller._is_active = Mock(return_value=True)
+        controller._execute = render_saved
+        controller._run_loop_unchecked()
+        self.assertEqual(saved_renders, [("splash", saved_config, 1)])
+        store.set.assert_not_called()
+
+        controller.shutdown_device_drafts()
+        controller.device_preview_manager.close()
+        controller.device_preview_manager.close()
+        cleanup.assert_called_once_with()
+
     def test_device_draft_cancel_waits_for_submission_barrier_then_resumes(self):
         from device_preview import DevicePreviewOwner, DevicePreviewRequest
 
@@ -919,6 +1257,227 @@ class DisplayControllerTests(unittest.TestCase):
         self.assertIsNone(controller.device_preview_manager.active_lease())
 
 
+    def test_physical_draft_connectivity_expiry_settles_renderer_and_resumes_saved_config(self):
+        from device_preview import DevicePreviewOwner, DevicePreviewRequest
+
+        class FakeClock:
+            def __init__(self):
+                self.now = 100.0
+                self.reaper_checked = threading.Event()
+                self.calls = 0
+
+            def monotonic(self):
+                self.calls += 1
+                if self.calls > 1:
+                    self.reaper_checked.set()
+                return self.now
+
+            def advance(self, seconds):
+                self.now += seconds
+
+        class OwnedLock:
+            def __init__(self):
+                self._lock = threading.RLock()
+                self._owner = None
+
+            def __enter__(self):
+                self._lock.acquire()
+                self._owner = threading.get_ident()
+                return self
+
+            def __exit__(self, *_exc):
+                self._owner = None
+                self._lock.release()
+
+            def owned_by_current_thread(self):
+                return self._owner == threading.get_ident()
+
+        class GuardedMatrix:
+            def __init__(self, display_lock):
+                self.display_lock = display_lock
+                self.guard = None
+                self.publications = []
+
+            def set_publication_guard(self, guard):
+                if not self.display_lock.owned_by_current_thread():
+                    raise RuntimeError("publication guard changed outside display lock")
+                self.guard = guard
+
+            def swap(self, label):
+                if self.guard is None or self.guard():
+                    self.publications.append(label)
+
+            def set_brightness(self, _brightness):
+                pass
+
+        saved_config = {
+            **DEFAULT_CONFIG,
+            "playlist": [{"module": "splash", "duration": 1, "enabled": True}],
+        }
+        unsaved_candidate = {"module": "weather", "candidate": {"draft": "unsaved"}}
+        clock = FakeClock()
+        display_lock = OwnedLock()
+        matrix = GuardedMatrix(display_lock)
+        store = Mock(get=Mock(return_value=saved_config))
+        controller = DisplayController(matrix, store)
+        controller._display_lock = display_lock
+        controller.device_preview_manager._clock = clock.monotonic
+        controller._is_active = Mock(return_value=True)
+        controller.start = Mock()
+        owner = DevicePreviewOwner("device-a", "tab-a")
+        before_publication = threading.Event()
+        release_renderer = threading.Event()
+        cleanup_finished = threading.Event()
+        cleanup = Mock(side_effect=cleanup_finished.set)
+        saved_renders = []
+
+        def render(matrix, _request, *, stop_event):
+            before_publication.set()
+            self.assertTrue(release_renderer.wait(1))
+            matrix.swap("unsaved")
+            return not stop_event.is_set()
+
+        def render_saved(name, config, _duration):
+            saved_renders.append((name, config))
+            controller._shutdown.set()
+            return True
+
+        controller._execute = render_saved
+        controller.submit_device_draft(
+            DevicePreviewRequest(owner, 1, unsaved_candidate, 60, cleanup=cleanup),
+            renderer=render,
+        )
+        scheduler = threading.Thread(
+            target=controller._run_loop_unchecked,
+            name="physical-draft-expiry-scheduler",
+        )
+        scheduler.start()
+        self.assertTrue(before_publication.wait(0.5))
+        self.assertTrue(clock.reaper_checked.wait(0.5))
+
+        clock.advance(15)
+        stop_event = controller._device_draft_stop
+        self.assertIsNotNone(stop_event)
+        self.assertTrue(stop_event.wait(0.5))
+        self.assertFalse(cleanup_finished.wait(0.1))
+        cleanup.assert_not_called()
+        self.assertTrue(scheduler.is_alive())
+
+        release_renderer.set()
+        scheduler.join(1)
+        self.assertFalse(scheduler.is_alive())
+        self.assertTrue(cleanup_finished.wait(0.5))
+        cleanup.assert_called_once_with()
+        self.assertEqual(matrix.publications, [])
+        self.assertIsNone(matrix.guard)
+        self.assertIsNone(controller.device_preview_manager.active_lease())
+        self.assertEqual(saved_renders, [("splash", saved_config)])
+        store.set.assert_not_called()
+        controller.device_preview_manager.close()
+
+    def test_physical_draft_selected_lava_palette_matches_browser_complete_frame_sequence(self):
+        from device_preview import DevicePreviewOwner, DevicePreviewRequest, PreviewAdmissionStatus
+
+        class FixedDateTime(datetime.datetime):
+            @classmethod
+            def now(cls, tz=None):
+                return cls(2030, 1, 15, 9, 30, tzinfo=tz)
+
+        class FourFrameStop:
+            def __init__(self):
+                self.waits = 0
+
+            def is_set(self):
+                return False
+
+            def wait(self, _delay):
+                self.waits += 1
+                return self.waits == 4
+
+        class RecordingMatrix(CaptureMatrix):
+            def __init__(self):
+                super().__init__()
+                self.submitted = []
+
+            def swap(self, canvas=None):
+                submitted = canvas or self.canvas
+                image = self.snapshot(submitted)
+                self.assert_complete_frame(image)
+                self.submitted.append(image.tobytes())
+                return super().swap(submitted)
+
+            @staticmethod
+            def assert_complete_frame(image):
+                if image.mode != "RGB" or image.size != (64, 32) or len(image.tobytes()) != 64 * 32 * 3:
+                    raise AssertionError("physical Lava renderer did not submit a complete 64x32 RGB frame")
+
+        candidate = copy.deepcopy(DEFAULT_CONFIG)
+        candidate["lava"].update({
+            "enabled_palettes": ["fire_burst", "ocean_wave"],
+            "custom_enabled": False,
+            "custom_palettes": [],
+            "blur_radius": 0,
+            "show_time": False,
+            "show_date": False,
+            "blob_count": 3,
+            "blob_speed": 0.5,
+        })
+        original_lava = copy.deepcopy(candidate["lava"])
+        selected = {"kind": "built_in", "id": "ocean_wave"}
+        request = DevicePreviewRequest(
+            owner=DevicePreviewOwner("paired-device", "b" * 32),
+            generation=1,
+            config={
+                "module": "clock_lava",
+                "candidate": candidate,
+                "selected_lava_palette": selected,
+            },
+            timeout_seconds=60,
+        )
+        controller = DisplayController(Mock(), Mock())
+        admission = controller.device_preview_manager.submit(request)
+        self.assertIs(admission.status, PreviewAdmissionStatus.ACCEPTED)
+        owned_request = admission.lease.request
+        physical_matrix = RecordingMatrix()
+        physical_choices = []
+
+        def choose_physical(choices):
+            physical_choices.append(tuple(choices))
+            return choices[0]
+
+        with patch("modules.clock_lava.datetime.datetime", FixedDateTime),              patch("modules.clock_lava.random.uniform", side_effect=random.Random(17).uniform),              patch("modules.clock_lava.random.choice", side_effect=choose_physical):
+            controller.render_device_draft(
+                physical_matrix, owned_request, stop_event=FourFrameStop(),
+            )
+
+        browser_choices = []
+
+        def choose_browser(choices):
+            browser_choices.append(tuple(choices))
+            return choices[0]
+
+        with patch("modules.clock_lava.datetime.datetime", FixedDateTime),              patch("modules.clock_lava.random.uniform", side_effect=random.Random(17).uniform),              patch("modules.clock_lava.random.choice", side_effect=choose_browser):
+            iterator = edit_preview.continuous_lava_preview_frames(
+                CaptureMatrix(), candidate, selected,
+            )
+            browser = [next(iterator) for _ in range(4)]
+            iterator.close()
+
+        browser_frames = [
+            Image.open(io.BytesIO(base64.b64decode(frame["png"]))).convert("RGB").tobytes()
+            for frame in browser
+        ]
+        expected_choices = [(('black', 'cyan', 'blue'),)]
+        self.assertEqual(physical_choices, expected_choices)
+        self.assertEqual(browser_choices, expected_choices)
+        self.assertEqual([frame["delay_ms"] for frame in browser], [30] * 4)
+        self.assertEqual(len(physical_matrix.submitted), 4)
+        self.assertEqual(physical_matrix.submitted, browser_frames)
+        self.assertEqual(candidate["lava"], original_lava)
+        self.assertEqual(owned_request.config["candidate"]["lava"], original_lava)
+        self.assertEqual(owned_request.config["selected_lava_palette"], selected)
+        controller.device_preview_manager.close()
+
     def test_physical_draft_latest_generation_owns_hardware_until_bounded_return(self):
         from device_preview import DevicePreviewOwner, DevicePreviewRequest
 
@@ -1032,6 +1591,103 @@ class DisplayControllerTests(unittest.TestCase):
         self.assertEqual(matrix.publications, ["generation-2"])
         self.assertIsNone(controller.device_preview_manager.active_lease())
         self.assertGreaterEqual(controller.config_store.get.call_count, 1)
+
+    def test_acceptance_transaction_binds_exact_owner_and_finishes_only_after_later_saved_swap(self):
+        import json
+        import tempfile
+        from pathlib import Path
+        from acceptance_artifacts import AcceptanceArtifactTransaction
+        from device_preview import DevicePreviewOwner, DevicePreviewRequest, PreviewAdmissionStatus
+
+        class SwapMatrix:
+            def __init__(self):
+                self.frame = bytes([17]) * (64 * 32 * 3)
+                self.revision = 10
+                self.observer = None
+
+            def latest_frame_rgb(self):
+                return self.frame, self.revision
+
+            def set_physical_swap_observer(self, observer):
+                self.observer = observer
+
+            def physical_swap(self, frame):
+                self.frame = frame
+                self.revision += 1
+                if self.observer is not None:
+                    self.observer(frame, self.revision)
+
+        with tempfile.TemporaryDirectory(prefix="acceptance-controller-") as directory:
+            runtime = Path(directory) / "runtime"
+            runtime.mkdir(mode=0o700)
+            matrix = SwapMatrix()
+            controller = DisplayController(matrix, Mock())
+            owner = DevicePreviewOwner("device-a", "a" * 32)
+            foreign = DevicePreviewOwner("device-b", "b" * 32)
+            admission = controller.device_preview_manager.submit(
+                DevicePreviewRequest(owner, 4, {"module": "clock_lava"}, 60)
+            )
+            self.assertIs(admission.status, PreviewAdmissionStatus.ACCEPTED)
+            publisher = AcceptanceArtifactTransaction(runtime, {
+                "attempt_id": "1" * 32,
+                "acceptance_operation_id": "2" * 64,
+                "evidence_id": "2" * 64,
+                "expected_source_sha": "3" * 40,
+                "expected_version": "9.8.7-test",
+                "mode": "deploy",
+                "nonce": "4" * 64,
+                "owner_revision": 7,
+            }, owner_generation=4)
+            controller.begin_acceptance_transaction(publisher, owner, generation=4)
+            self.assertEqual(controller.acceptance_transaction_status(owner, generation=4), {
+                "state": "INIT", "nonce": "4" * 64,
+                "acceptance_operation_id": "2" * 64, "owner_generation": 4,
+            })
+
+            draft = bytes([91]) * (64 * 32 * 3)
+            saved = bytes([17]) * (64 * 32 * 3)
+            matrix.physical_swap(draft)
+            self.assertEqual(publisher.state, publisher.DRAFT_PUBLISHED)
+            self.assertTrue(controller.mark_acceptance_foreign_rejection(foreign, generation=4))
+            self.assertTrue(controller.mark_acceptance_result(
+                owner, generation=4, result="heartbeat_accepted",
+            ))
+            self.assertFalse(controller.mark_acceptance_result(
+                foreign, generation=4, result="timeout_returned",
+            ))
+            self.assertFalse(controller.mark_acceptance_result(
+                owner, generation=3, result="timeout_returned",
+            ))
+            self.assertTrue(controller.cancel_device_draft(owner, generation=4))
+
+            matrix.physical_swap(saved)
+            self.assertEqual(publisher.state, publisher.DRAFT_PUBLISHED)
+            self.assertTrue(controller.mark_acceptance_result(
+                owner, generation=4, result="timeout_returned",
+            ))
+            matrix.physical_swap(saved)
+
+            expected = {
+                "state": "SAVED_ROLLBACK_PUBLISHED", "nonce": "4" * 64,
+                "acceptance_operation_id": "2" * 64,
+                "owner_generation": 4, "saved_revision": 10,
+                "draft_revision": 11, "current_revision": 13,
+            }
+            self.assertEqual(controller.acceptance_transaction_status(owner, generation=4), expected)
+            self.assertEqual(set(expected), {
+                "state", "nonce", "acceptance_operation_id", "owner_generation",
+                "saved_revision", "draft_revision", "current_revision",
+            })
+            self.assertIsNone(controller.acceptance_transaction_status(foreign, generation=4))
+            self.assertIsNone(controller.acceptance_transaction_status(owner, generation=3))
+            self.assertIsNone(matrix.observer)
+            metadata = json.loads((publisher.path / "metadata.json").read_text())
+            self.assertEqual(metadata["owner_generation"], 4)
+            self.assertEqual(metadata["owner_revision"], 7)
+            self.assertEqual((publisher.path / "draft.rgb").read_bytes(), draft)
+            self.assertEqual((publisher.path / "saved.rgb").read_bytes(), saved)
+            self.assertEqual((publisher.path / "current.rgb").read_bytes(), saved)
+            controller.device_preview_manager.close()
 
 
 if __name__ == "__main__":

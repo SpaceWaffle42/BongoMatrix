@@ -181,6 +181,99 @@ class DevicePreviewTests(unittest.TestCase):
         cleanup.assert_called_once_with()
 
 
+    def test_snapshot_discovered_expiry_uses_terminal_callback(self):
+        from unittest.mock import Mock
+
+        from device_preview import DevicePreviewManager, DevicePreviewOwner, DevicePreviewRequest
+
+        now = [900.0]
+        terminal = Mock()
+        cleanup = Mock()
+        manager = DevicePreviewManager(clock=lambda: now[0], on_expire=terminal)
+        admitted = manager.submit(
+            DevicePreviewRequest(
+                DevicePreviewOwner("device-a", "tab-a"),
+                1,
+                {"module": "weather"},
+                60,
+                cleanup=cleanup,
+            )
+        )
+        with manager._lock:
+            manager._reaper_stop = True
+            reaper = manager._reaper_thread
+            manager._lock.notify_all()
+        reaper.join(0.5)
+        now[0] = admitted.lease.connectivity_deadline
+
+        self.assertIsNone(manager.active_lease())
+
+        terminal.assert_called_once_with(admitted.lease)
+        cleanup.assert_called_once_with()
+        manager.close()
+        cleanup.assert_called_once_with()
+
+    def test_heartbeat_discovered_expiry_uses_terminal_callback(self):
+        from unittest.mock import Mock
+
+        from device_preview import DevicePreviewManager, DevicePreviewOwner, DevicePreviewRequest
+
+        now = [800.0]
+        terminal = Mock()
+        cleanup = Mock()
+        manager = DevicePreviewManager(clock=lambda: now[0], on_expire=terminal)
+        owner = DevicePreviewOwner("device-a", "tab-a")
+        admitted = manager.submit(
+            DevicePreviewRequest(
+                owner, 1, {"module": "weather"}, 60, cleanup=cleanup,
+            )
+        )
+        with manager._lock:
+            manager._reaper_stop = True
+            reaper = manager._reaper_thread
+            manager._lock.notify_all()
+        reaper.join(0.5)
+        now[0] = admitted.lease.connectivity_deadline
+
+        manager.heartbeat(owner, generation=1)
+
+        terminal.assert_called_once_with(admitted.lease)
+        cleanup.assert_called_once_with()
+        manager.close()
+        cleanup.assert_called_once_with()
+
+    def test_content_expiry_is_autonomous_after_connectivity_renewal(self):
+        import threading
+        from unittest.mock import Mock
+
+        from device_preview import DevicePreviewManager, DevicePreviewOwner, DevicePreviewRequest
+
+        now = [700.0]
+        expired = threading.Event()
+        cleanup = Mock()
+        manager = DevicePreviewManager(
+            clock=lambda: now[0],
+            on_expire=lambda _lease: expired.set(),
+        )
+        owner = DevicePreviewOwner("device-a", "tab-a")
+        manager.submit(
+            DevicePreviewRequest(
+                owner, 1, {"module": "clock_lava"}, 6, cleanup=cleanup,
+            )
+        )
+        now[0] = 705.0
+        self.assertEqual(
+            manager.heartbeat(owner, generation=1).lease.connectivity_deadline,
+            720.0,
+        )
+
+        now[0] = 706.0
+        self.assertTrue(expired.wait(0.5))
+        cleanup.assert_called_once_with()
+        self.assertIsNone(manager.active_lease())
+        manager.close()
+        cleanup.assert_called_once_with()
+
     def test_supersession_failure_and_close_release_media_once(self):
         from unittest.mock import Mock
         from device_preview import (

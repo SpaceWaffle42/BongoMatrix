@@ -1,3 +1,4 @@
+import copy
 import datetime
 import random
 import time
@@ -176,6 +177,30 @@ def measure_text(matrix, font, y, colour, text, canvas):
     return matrix.draw_text(font, 0, y, colour, text, canvas=canvas)
 
 
+def selected_lava_config(lava_config, selected_palette):
+    """Prepare one exact inspected palette without mutating the accepted draft."""
+    lava = copy.deepcopy(lava_config)
+    kind = selected_palette["kind"]
+    palette_id = selected_palette["id"]
+    lava["custom_enabled"] = False
+    if kind == "built_in":
+        lava["enabled_palettes"] = [palette_id]
+        for palette in lava.get("custom_palettes", []):
+            palette["enabled"] = False
+        return lava
+    if kind == "custom":
+        lava["enabled_palettes"] = []
+        matched = False
+        for palette in lava.get("custom_palettes", []):
+            palette["enabled"] = palette["id"] == palette_id
+            if palette["enabled"]:
+                palette["colours"] = copy.deepcopy(selected_palette["colours"])
+                matched = True
+        if matched:
+            return lava
+    raise ValueError("selected Lava palette is not in the candidate")
+
+
 def prepare_lava_frame_state(matrix, lava_config=None):
     """Prepare one physical Lava invocation without changing palette selection."""
     settings = lava_config or {}
@@ -273,12 +298,15 @@ def clock(duration=300, matrix=None, stop_event=None, lava_config=None):
         matrix.swap(canvas)
 
 
-def run(matrix, config, duration=300, stop_event=None):
+def run(matrix, config, duration=300, stop_event=None, *, selected_palette=None):
+    lava_config = config.get("lava")
+    if selected_palette is not None:
+        lava_config = selected_lava_config(lava_config, selected_palette)
     return clock(
         duration=duration,
         matrix=matrix,
         stop_event=stop_event,
-        lava_config=config.get("lava"),
+        lava_config=lava_config,
     )
 
 

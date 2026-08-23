@@ -111,5 +111,42 @@ class FrameCaptureTests(unittest.TestCase):
         self.assertEqual(matrix._frame_capture.revision, 1)
 
 
+    def test_physical_swap_observer_receives_exact_submitted_rgb_only_after_success(self):
+        class FakeHardware:
+            width = 4
+            height = 2
+
+            def __init__(self):
+                self.fail = True
+
+            def SwapOnVSync(self, canvas):
+                if self.fail:
+                    raise RuntimeError("physical swap failed")
+                return object()
+
+        submitted = object()
+        matrix = Matrix.__new__(Matrix)
+        matrix.matrix = FakeHardware()
+        matrix.canvas = submitted
+        matrix._frame_capture = FrameCapture(4, 2)
+        matrix._frame_capture.register(submitted)
+        matrix._frame_capture.fill(submitted, 9, 8, 7)
+        matrix._publication_guard = None
+        observed = []
+        matrix.set_physical_swap_observer(
+            lambda frame, revision: observed.append((frame, revision))
+        )
+
+        with self.assertRaises(RuntimeError):
+            matrix.swap()
+        self.assertEqual(observed, [])
+        self.assertEqual(matrix._frame_capture.revision, 0)
+
+        matrix.matrix.fail = False
+        matrix.swap()
+        self.assertEqual(observed, [(bytes((9, 8, 7)) * 8, 1)])
+        self.assertEqual(matrix.latest_frame_rgb(), (bytes((9, 8, 7)) * 8, 1))
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -309,6 +309,7 @@ class Matrix:
         self._frame_capture.register(self.canvas)
         self._capture_fonts = {}
         self._publication_guard = None
+        self._physical_swap_observer = None
         self.colours = self._load_colours()
         self.loaded_fonts = self._load_fonts()
 
@@ -408,22 +409,31 @@ class Matrix:
             raise TypeError("publication guard must be callable")
         self._publication_guard = guard
 
+    def set_physical_swap_observer(self, observer):
+        """Observe only frames accepted by the production SwapOnVSync seam."""
+        if observer is not None and not callable(observer):
+            raise TypeError("physical swap observer must be callable")
+        self._physical_swap_observer = observer
+
     def swap(self, canvas=None):
         guard = self._publication_guard
-        if canvas is None:
-            submitted = self.canvas
-            if guard is not None and not guard():
-                return submitted
-            self._frame_capture.publish(submitted)
-            self.canvas = self.matrix.SwapOnVSync(submitted)
-            self._frame_capture.register(self.canvas)
-            return self.canvas
+        submitted = self.canvas if canvas is None else canvas
         if guard is not None and not guard():
-            return canvas
-        self._frame_capture.publish(canvas)
-        returned = self.matrix.SwapOnVSync(canvas)
+            return submitted
+        raw = self._frame_capture.raw_snapshot(submitted)
+        returned = self.matrix.SwapOnVSync(submitted)
+        revision = self._frame_capture.publish(submitted)
         self._frame_capture.register(returned)
+        if canvas is None:
+            self.canvas = returned
+        observer = getattr(self, "_physical_swap_observer", None)
+        if observer is not None:
+            observer(raw, revision)
         return returned
+
+    def latest_frame_rgb(self):
+        """Return immutable RGB bytes from the latest successful physical swap."""
+        return self._frame_capture.latest_rgb()
 
     def latest_frame_png(self):
         """Return the last frame submitted to the physical panel and its revision."""

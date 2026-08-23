@@ -83,14 +83,80 @@ class DevicePreviewHeartbeat:
     lease: DevicePreviewLease | None
 
 
+HEARTBEAT_INTERVAL_SECONDS = 5
+
+
 class DevicePreviewManager:
+    HEARTBEAT_INTERVAL_SECONDS = HEARTBEAT_INTERVAL_SECONDS
     """Own the one transient physical-preview lease independently of saved config."""
 
-    def __init__(self, *, clock: Callable[[], float] = time.monotonic) -> None:
+    def __init__(
+        self,
+        *,
+        clock: Callable[[], float] = time.monotonic,
+        on_expire: Callable[[DevicePreviewLease], None] | None = None,
+    ) -> None:
         self._clock = clock
-        self._lock = threading.Lock()
+        self._lock = threading.Condition(threading.RLock())
         self._active: DevicePreviewLease | None = None
+        self._closing: DevicePreviewLease | None = None
+        self._on_expire = on_expire
+        self._reaper_thread: threading.Thread | None = None
+        self._reaper_stop = False
         self._closed_request_refs: dict[int, weakref.ReferenceType[DevicePreviewRequest]] = {}
+
+    def _ensure_reaper_locked(self) -> None:
+        if self._reaper_thread is not None:
+            return
+        self._reaper_stop = False
+        self._reaper_thread = threading.Thread(
+            target=self._reap_expired,
+            name="device-preview-expiry-reaper",
+            daemon=True,
+        )
+        self._reaper_thread.start()
+
+    def _reap_expired(self) -> None:
+        try:
+            while True:
+                expired = None
+                with self._lock:
+                    while not self._reaper_stop:
+                        lease = self._active
+                        if lease is None:
+                            self._lock.wait()
+                            continue
+                        remaining = min(
+                            lease.content_deadline, lease.connectivity_deadline,
+                        ) - self._clock()
+                        if remaining > 0:
+                            self._lock.wait(min(remaining, 0.05))
+                            continue
+                        self._active = None
+                        self._closing = lease
+                        expired = lease
+                        break
+                    if self._reaper_stop:
+                        return
+                self._settle_expired(expired)
+        finally:
+            with self._lock:
+                if self._reaper_thread is threading.current_thread():
+                    self._reaper_thread = None
+                self._lock.notify_all()
+
+    def _settle_expired(self, lease: DevicePreviewLease) -> None:
+        try:
+            if self._on_expire is not None:
+                self._on_expire(lease)
+        finally:
+            try:
+                self._close_request(lease.request)
+            finally:
+                with self._lock:
+                    if self._closing is lease:
+                        self._closing = None
+                    self._lock.notify_all()
 
     def submit(
         self, request: DevicePreviewRequest, *, close_displaced: bool = True
@@ -98,6 +164,9 @@ class DevicePreviewManager:
         now = self._clock()
         displaced = None
         with self._lock:
+            while self._closing is not None:
+                self._lock.wait()
+            self._ensure_reaper_locked()
             if self._active is not None:
                 if self._active.owner != request.owner:
                     return DevicePreviewAdmission(
@@ -127,6 +196,7 @@ class DevicePreviewManager:
                 last_heartbeat_at=last_heartbeat_at,
             )
             self._active = lease
+            self._lock.notify_all()
         if displaced is not None and close_displaced:
             self._close_request(displaced.request)
         return DevicePreviewAdmission(PreviewAdmissionStatus.ACCEPTED, lease)
@@ -149,6 +219,8 @@ class DevicePreviewManager:
                 return DevicePreviewHeartbeat(PreviewHeartbeatStatus.NOT_ACTIVE, None)
             if self._is_expired(lease, now):
                 self._active = None
+                self._closing = lease
+                self._lock.notify_all()
                 expired = lease
             elif lease.owner != owner:
                 return DevicePreviewHeartbeat(
@@ -160,7 +232,7 @@ class DevicePreviewManager:
                     PreviewHeartbeatStatus.STALE_GENERATION,
                     None,
                 )
-            elif now - lease.last_heartbeat_at < 5:
+            elif now - lease.last_heartbeat_at < self.HEARTBEAT_INTERVAL_SECONDS:
                 return DevicePreviewHeartbeat(PreviewHeartbeatStatus.TOO_EARLY, None)
             else:
                 renewed = replace(
@@ -169,14 +241,22 @@ class DevicePreviewManager:
                     last_heartbeat_at=now,
                 )
                 self._active = renewed
+                self._lock.notify_all()
                 return DevicePreviewHeartbeat(PreviewHeartbeatStatus.ACCEPTED, renewed)
-        self._close_request(expired.request)
+        self._settle_expired(expired)
         return DevicePreviewHeartbeat(PreviewHeartbeatStatus.EXPIRED, None)
 
 
     def is_current(self, owner: DevicePreviewOwner, generation: int) -> bool:
-        lease = self.active_lease()
-        return bool(lease and lease.owner == owner and lease.generation == generation)
+        now = self._clock()
+        with self._lock:
+            lease = self._active
+            return bool(
+                lease
+                and not self._is_expired(lease, now)
+                and lease.owner == owner
+                and lease.generation == generation
+            )
 
     def _close_request(self, request: DevicePreviewRequest) -> None:
         cleanup = request.cleanup
@@ -212,6 +292,7 @@ class DevicePreviewManager:
             if lease is None or lease.owner != owner or lease.generation != generation:
                 return None
             self._active = None
+            self._lock.notify_all()
         if close:
             self._close_request(lease.request)
         return lease
@@ -226,6 +307,11 @@ class DevicePreviewManager:
         with self._lock:
             lease = self._active
             self._active = None
+            self._reaper_stop = True
+            reaper = self._reaper_thread
+            self._lock.notify_all()
+        if reaper is not None and reaper is not threading.current_thread():
+            reaper.join()
         if lease is not None:
             self._close_request(lease.request)
 
@@ -236,7 +322,9 @@ class DevicePreviewManager:
             if self._active is not None and self._is_expired(self._active, now):
                 expired = self._active
                 self._active = None
+                self._closing = expired
+                self._lock.notify_all()
             active = self._active
         if expired is not None:
-            self._close_request(expired.request)
+            self._settle_expired(expired)
         return active
