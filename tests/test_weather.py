@@ -1,3 +1,4 @@
+import threading
 import unittest
 from types import SimpleNamespace
 from unittest.mock import Mock, call, patch
@@ -130,6 +131,68 @@ class WeatherTests(unittest.TestCase):
 
         client.fetch.assert_not_called()
         matrix.matrix.CreateFrameCanvas.assert_not_called()
+
+    def test_renderer_does_not_publish_error_after_provider_cancels(self):
+        matrix = Mock()
+        client = Mock()
+        stop_event = threading.Event()
+
+        def cancel_then_fail(*_args, **_kwargs):
+            stop_event.set()
+            raise TimeoutError("cancelled provider")
+
+        client.fetch.side_effect = cancel_then_fail
+
+        self.assertFalse(run(
+            matrix, {"weather": {}}, duration=5,
+            stop_event=stop_event, client=client,
+        ))
+
+        matrix.matrix.CreateFrameCanvas.assert_not_called()
+        matrix.swap.assert_not_called()
+
+    def test_cancellation_during_error_draw_prevents_error_frame_swap(self):
+        matrix = Mock()
+        matrix.matrix.CreateFrameCanvas.return_value = "canvas"
+        stop_event = threading.Event()
+        matrix.draw_text_with_border.side_effect = (
+            lambda *_args, **_kwargs: stop_event.set()
+        )
+        client = Mock()
+        client.fetch.side_effect = TimeoutError("provider failed")
+
+        self.assertFalse(run(
+            matrix, {"weather": {}}, duration=5,
+            stop_event=stop_event, client=client,
+        ))
+
+        matrix.swap.assert_not_called()
+
+    @patch("modules.weather_app._wait", return_value=False)
+    def test_cancellation_during_final_ticker_draw_prevents_first_swap(self, wait):
+        canvas = SimpleNamespace(width=64)
+        matrix = Mock()
+        matrix.matrix.CreateFrameCanvas.return_value = canvas
+        matrix.colour.side_effect = lambda name: name
+        matrix.colour_rgb.side_effect = lambda value: value
+        matrix.font.side_effect = lambda name: name
+        matrix.draw_text.return_value = 80
+        matrix.swap.return_value = canvas
+        stop_event = threading.Event()
+        matrix.widget_scroll.side_effect = lambda *_args, **_kwargs: stop_event.set()
+        client = Mock()
+        client.fetch.return_value = WeatherSnapshot(
+            location="London", status="Clear", temperature=16,
+            feels_like=15, high=18, low=12, humidity=70,
+        )
+
+        self.assertFalse(run(
+            matrix, {"weather": {"scroll_loops": 1}}, duration=0,
+            stop_event=stop_event, client=client,
+        ))
+
+        matrix.swap.assert_not_called()
+        wait.assert_not_called()
 
     @patch("modules.weather_app._wait", return_value=False)
     def test_renderer_uses_ticker_loops_instead_of_playlist_duration(self, wait):

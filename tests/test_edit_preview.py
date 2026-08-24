@@ -2693,13 +2693,16 @@ class EditPreviewTests(unittest.TestCase):
             def __init__(self):
                 self.shown = []
 
-            def show_image(self, filename, delay=None, **geometry):
+            def show_image(self, filename, delay=None, *, stop_event=None, **geometry):
                 self.shown.append((filename, delay, geometry))
                 return True
 
         class FakeStopEvent:
             def __init__(self):
                 self.waits = []
+
+            def is_set(self):
+                return False
 
             def wait(self, delay):
                 self.waits.append(delay)
@@ -2925,7 +2928,7 @@ class EditPreviewTests(unittest.TestCase):
                 self.clock = clock
                 self.submissions = []
 
-            def show_image(self, filename, delay=None, **geometry):
+            def show_image(self, filename, delay=None, *, stop_event=None, **geometry):
                 self.clock.elapsed += 0.03
                 with Image.open(self.path) as image:
                     self.clear()
@@ -2937,6 +2940,9 @@ class EditPreviewTests(unittest.TestCase):
             def __init__(self, clock):
                 self.clock = clock
                 self.waits = []
+
+            def is_set(self):
+                return False
 
             def wait(self, delay):
                 self.waits.append(delay)

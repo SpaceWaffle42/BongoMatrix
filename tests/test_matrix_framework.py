@@ -100,6 +100,23 @@ else:
         matrix.set_brightness(0)
         self.assertEqual(matrix.matrix.brightness, 1)
 
+    def test_show_image_cancelled_during_final_canvas_draw_is_not_published(self):
+        matrix = Matrix.__new__(Matrix)
+        matrix.canvas = Mock()
+        matrix._frame_capture = Mock()
+        matrix.load_image = Mock(return_value="decoded-image")
+        matrix.show = Mock()
+        stop_event = threading.Event()
+        matrix.canvas.SetImage.side_effect = lambda *_args: stop_event.set()
+
+        result = matrix.show_image(
+            "custom.png", delay=None, stop_event=stop_event,
+        )
+
+        self.assertFalse(result)
+        matrix.canvas.SetImage.assert_called_once_with("decoded-image", 0, 0)
+        matrix.show.assert_not_called()
+
     def test_draw_text_rotates_glyph_pixels_around_text_centre(self):
         matrix = Matrix.__new__(Matrix)
         canvas = Mock()

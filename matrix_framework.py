@@ -840,17 +840,25 @@ class Matrix:
 
     def show_image(
         self, filename, x=0, y=0, delay=3, width=None, height=None, keep_aspect=True,
-        *, pinned_handle=None,
+        *, pinned_handle=None, stop_event=None,
     ):
+        if stop_event is not None and stop_event.is_set():
+            return False
         image = self.load_image(
             filename, width=width, height=height, keep_aspect=keep_aspect,
             pinned_handle=pinned_handle,
         )
         if image is None:
             return False
+        if stop_event is not None and stop_event.is_set():
+            return False
 
         self.canvas.SetImage(image, x, y)
+        if stop_event is not None and stop_event.is_set():
+            return False
         self._frame_capture.set_image(self.canvas, image, x, y)
+        if stop_event is not None and stop_event.is_set():
+            return False
         self.show(delay)
         return True
 

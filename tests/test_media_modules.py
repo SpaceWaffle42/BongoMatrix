@@ -79,7 +79,7 @@ class MediaModuleTests(unittest.TestCase):
             stop_event=stop, max_duration=8,
         )
 
-    def test_static_uploaded_image_is_shown_for_requested_duration(self):
+    def test_pre_cancelled_static_uploaded_image_is_not_published(self):
         matrix = Mock()
         matrix.show_image.return_value = True
         stop = threading.Event()
@@ -90,11 +90,11 @@ class MediaModuleTests(unittest.TestCase):
             duration=8,
             stop_event=stop,
         )
-        self.assertTrue(result)
-        matrix.show_image.assert_called_once_with("custom.png", delay=None)
+        self.assertFalse(result)
+        matrix.show_image.assert_not_called()
         matrix.show_gif.assert_not_called()
 
-    def test_static_sleep_image_ignores_gif_playback_speed(self):
+    def test_pre_cancelled_static_sleep_image_is_not_published(self):
         matrix = Mock()
         matrix.show_image.return_value = True
         stop = threading.Event()
@@ -111,11 +111,8 @@ class MediaModuleTests(unittest.TestCase):
             stop_event=stop,
         )
 
-        self.assertTrue(result)
-        matrix.show_image.assert_called_once_with(
-            "custom.png", x=0, y=0, width=64, height=32,
-            keep_aspect=True, delay=None,
-        )
+        self.assertFalse(result)
+        matrix.show_image.assert_not_called()
         matrix.show_gif.assert_not_called()
 
 

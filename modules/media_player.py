@@ -91,6 +91,8 @@ def video_media_frames(
 
 
 def play_media(matrix, filename, duration, stop_event=None, settings=None):
+    if stop_event is not None and stop_event.is_set():
+        return False
     geometry = {}
     if settings:
         geometry = {
@@ -128,7 +130,7 @@ def play_media(matrix, filename, duration, stop_event=None, settings=None):
     frame_iterator = static_media_frames(
         filename, duration, settings,
         render=lambda frame_filename, frame_geometry: matrix.show_image(
-            frame_filename, delay=None, **frame_geometry,
+            frame_filename, delay=None, stop_event=stop_event, **frame_geometry,
         ),
         monotonic=time.monotonic,
     )
