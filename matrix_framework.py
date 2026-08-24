@@ -419,6 +419,7 @@ class Matrix:
         guard = self._publication_guard
         submitted = self.canvas if canvas is None else canvas
         if guard is not None and not guard():
+            self._last_swap_admitted = False
             return submitted
         raw = self._frame_capture.raw_snapshot(submitted)
         returned = self.matrix.SwapOnVSync(submitted)
@@ -429,11 +430,16 @@ class Matrix:
         observer = getattr(self, "_physical_swap_observer", None)
         if observer is not None:
             observer(raw, revision)
+        self._last_swap_admitted = True
         return returned
 
     def latest_frame_rgb(self):
         """Return immutable RGB bytes from the latest successful physical swap."""
         return self._frame_capture.latest_rgb()
+
+    def last_swap_admitted(self):
+        """Report whether the most recent swap crossed the hardware guard."""
+        return getattr(self, "_last_swap_admitted", False)
 
     def latest_frame_png(self):
         """Return the last frame submitted to the physical panel and its revision."""
@@ -442,9 +448,11 @@ class Matrix:
     def show(self, delay=None):
         """Display the current canvas. delay=None means return immediately."""
         self.swap()
+        if not self._last_swap_admitted:
+            return False
 
         if delay is None:
-            return
+            return True
 
         if delay == 0:
             try:
@@ -454,6 +462,7 @@ class Matrix:
                 pass
         else:
             time.sleep(delay)
+        return True
 
     def pixel(self, x, y, r, g, b, canvas=None):
         canvas = canvas or self.canvas
@@ -859,8 +868,7 @@ class Matrix:
         self._frame_capture.set_image(self.canvas, image, x, y)
         if stop_event is not None and stop_event.is_set():
             return False
-        self.show(delay)
-        return True
+        return self.show(delay)
 
     def load_image(
         self, filename, width=None, height=None, keep_aspect=True, *, pinned_handle=None,

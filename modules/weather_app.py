@@ -287,6 +287,9 @@ def weather_frames(matrix, config, weather, stop_event=None):
             return
         submitted = canvas
         canvas = matrix.swap(canvas)
+        admission = getattr(type(matrix), "last_swap_admitted", None)
+        if admission is not None and not admission(matrix):
+            return
         yield submitted, frame_delay
 
 

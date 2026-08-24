@@ -117,6 +117,70 @@ else:
         matrix.canvas.SetImage.assert_called_once_with("decoded-image", 0, 0)
         matrix.show.assert_not_called()
 
+    def test_show_image_guard_rejection_is_reported_as_not_rendered(self):
+        matrix = Matrix.__new__(Matrix)
+        matrix.canvas = Mock()
+        matrix.matrix = Mock()
+        matrix._frame_capture = Mock()
+        matrix._physical_swap_observer = None
+        matrix.load_image = Mock(return_value="decoded-image")
+        stop_event = threading.Event()
+
+        def reject_at_hardware_admission():
+            stop_event.set()
+            return False
+
+        matrix._publication_guard = reject_at_hardware_admission
+
+        result = matrix.show_image(
+            "custom.png", delay=None, stop_event=stop_event,
+        )
+
+        self.assertFalse(result)
+        matrix.matrix.SwapOnVSync.assert_not_called()
+        matrix._frame_capture.publish.assert_not_called()
+
+    def test_static_playback_propagates_hardware_guard_rejection(self):
+        from modules.media_player import play_media
+
+        matrix = Matrix.__new__(Matrix)
+        matrix.canvas = Mock()
+        matrix.matrix = Mock()
+        matrix._frame_capture = Mock()
+        matrix._physical_swap_observer = None
+        matrix.load_image = Mock(return_value="decoded-image")
+        stop_event = threading.Event()
+
+        def reject_at_hardware_admission():
+            stop_event.set()
+            return False
+
+        matrix._publication_guard = reject_at_hardware_admission
+
+        self.assertFalse(play_media(
+            matrix, "custom.png", 8, stop_event=stop_event,
+        ))
+        matrix.matrix.SwapOnVSync.assert_not_called()
+        matrix._frame_capture.publish.assert_not_called()
+
+    def test_show_image_cancelled_during_capture_update_is_not_published(self):
+        matrix = Matrix.__new__(Matrix)
+        matrix.canvas = Mock()
+        matrix._frame_capture = Mock()
+        matrix.load_image = Mock(return_value="decoded-image")
+        matrix.show = Mock()
+        stop_event = threading.Event()
+        matrix._frame_capture.set_image.side_effect = (
+            lambda *_args: stop_event.set()
+        )
+
+        result = matrix.show_image(
+            "custom.png", delay=None, stop_event=stop_event,
+        )
+
+        self.assertFalse(result)
+        matrix.show.assert_not_called()
+
     def test_draw_text_rotates_glyph_pixels_around_text_centre(self):
         matrix = Matrix.__new__(Matrix)
         canvas = Mock()

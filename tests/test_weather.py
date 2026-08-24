@@ -195,6 +195,95 @@ class WeatherTests(unittest.TestCase):
         wait.assert_not_called()
 
     @patch("modules.weather_app._wait", return_value=False)
+    def test_publication_guard_rejection_does_not_count_first_weather_frame(self, wait):
+        from matrix_framework import Matrix
+
+        matrix = Matrix.__new__(Matrix)
+        canvas = SimpleNamespace(width=64)
+        matrix.canvas = canvas
+        matrix.matrix = Mock()
+        matrix.matrix.CreateFrameCanvas.return_value = canvas
+        matrix._frame_capture = Mock()
+        matrix._physical_swap_observer = None
+        matrix.clear = Mock()
+        matrix.fill = Mock()
+        matrix.colour = Mock(side_effect=lambda name: name)
+        matrix.colour_rgb = Mock(side_effect=lambda value: value)
+        matrix.font = Mock(side_effect=lambda name: name)
+        matrix.draw_text = Mock(return_value=80)
+        matrix.draw_text_with_border = Mock()
+        matrix.draw_line = Mock()
+        matrix.widget_scroll = Mock()
+        stop_event = threading.Event()
+
+        def reject_at_hardware_admission():
+            stop_event.set()
+            return False
+
+        matrix._publication_guard = reject_at_hardware_admission
+        client = Mock()
+        client.fetch.return_value = WeatherSnapshot(
+            location="London", status="Clear", temperature=16,
+            feels_like=15, high=18, low=12, humidity=70,
+        )
+
+        self.assertFalse(run(
+            matrix, {"weather": {"scroll_loops": 1}}, duration=0,
+            stop_event=stop_event, client=client,
+        ))
+
+        matrix.matrix.SwapOnVSync.assert_not_called()
+        matrix._frame_capture.publish.assert_not_called()
+        wait.assert_not_called()
+
+    @patch("modules.weather_app._wait", return_value=False)
+    def test_guard_rejection_after_admitted_weather_frame_preserves_true(self, wait):
+        from matrix_framework import Matrix
+
+        matrix = Matrix.__new__(Matrix)
+        canvas = SimpleNamespace(width=64)
+        matrix.canvas = canvas
+        matrix.matrix = Mock()
+        matrix.matrix.CreateFrameCanvas.return_value = canvas
+        matrix.matrix.SwapOnVSync.return_value = canvas
+        matrix._frame_capture = Mock()
+        matrix._frame_capture.publish.return_value = 1
+        matrix._physical_swap_observer = None
+        matrix.clear = Mock()
+        matrix.fill = Mock()
+        matrix.colour = Mock(side_effect=lambda name: name)
+        matrix.colour_rgb = Mock(side_effect=lambda value: value)
+        matrix.font = Mock(side_effect=lambda name: name)
+        matrix.draw_text = Mock(return_value=80)
+        matrix.draw_text_with_border = Mock()
+        matrix.draw_line = Mock()
+        matrix.widget_scroll = Mock()
+        stop_event = threading.Event()
+        admissions = iter((True, False))
+
+        def admit_once_then_reject():
+            admitted = next(admissions)
+            if not admitted:
+                stop_event.set()
+            return admitted
+
+        matrix._publication_guard = admit_once_then_reject
+        client = Mock()
+        client.fetch.return_value = WeatherSnapshot(
+            location="London", status="Clear", temperature=16,
+            feels_like=15, high=18, low=12, humidity=70,
+        )
+
+        self.assertTrue(run(
+            matrix, {"weather": {"scroll_loops": 1}}, duration=0,
+            stop_event=stop_event, client=client,
+        ))
+
+        matrix.matrix.SwapOnVSync.assert_called_once_with(canvas)
+        matrix._frame_capture.publish.assert_called_once_with(canvas)
+        self.assertEqual(wait.call_count, 1)
+
+    @patch("modules.weather_app._wait", return_value=False)
     def test_renderer_uses_ticker_loops_instead_of_playlist_duration(self, wait):
         canvas = SimpleNamespace(width=2)
         matrix = Mock()
