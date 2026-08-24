@@ -6058,31 +6058,28 @@ globalThis.reconcileMediaRemoval=()=>{throw new Error('Local reconciliation fail
         self.assertIn("MEDIA_REMOVAL_SUCCESS_REFRESH_FAILURE_PASS", result.stdout)
 
     @unittest.skipUnless(shutil.which("node"), "Node.js is required")
-    def test_silent_committed_save_warning_survives_custom_preview(self):
+    def test_custom_preview_uses_saved_config_without_committing_draft(self):
         source = (Path(__file__).parents[1] / "app" / "templates" / "dashboard.html").read_text()
-        save_start = source.index("async function saveConfig")
-        save_end = source.index("\nfunction updateOpenWeatherSecretStatus", save_start)
         preview_start = source.index("async function preview(name)")
         preview_end = source.index("\nfunction previewSelected", preview_start)
-        function_source = source[save_start:save_end] + "\n" + source[preview_start:preview_end]
+        function_source = source[preview_start:preview_end]
         harness = r"""
-let messages=[],previewCalls=0,previewModule='',matrixLoadedRevision=0,matrixDirty=true,matrixEditorsReady=true,matrixRecoveryPending=false,highestNotifiedRemoteRevision=0;
-function matrixRevisionETag(){return '"'+matrixLoadedRevision+'"';}
-function configBody(){return {};}
+let apiCalls=[],messages=[],previewModule='',matrixDirty=true,saveCalls=0;
+const previewSelect={value:''};
+globalThis.document={querySelector(selector){if(selector==='#preview-select')return previewSelect;throw new Error('unexpected selector '+selector);}};
 function setMessage(text,error=false){messages.push({text,error});}
-function dismissMatrixRevisionDialogThrough(){}
-global.document={querySelector(){return {value:''};}};
-async function api(path){
-  if(path==='/api/config'){const error=new Error('Configuration saved, but display reload failed.');error.data={committed:true,display_reloaded:false,config:{revision:1}};throw error;}
-  previewCalls++;return {};
-}
+async function saveConfig(){saveCalls++;return {saved:true,warning:null};}
+async function api(path,options){apiCalls.push({path,method:options?.method});return {};}
 """ + function_source + r"""
 (async()=>{
-  await preview('custom_test');
-  if(previewCalls!==1) throw new Error('preview did not continue after committed save');
+  await preview('custom_saved');
+  if(saveCalls!==0)throw new Error('custom preview silently committed the dashboard draft');
+  if(JSON.stringify(apiCalls)!==JSON.stringify([{path:'/api/preview/custom_saved',method:'POST'}]))throw new Error('unexpected preview requests '+JSON.stringify(apiCalls));
+  if(!matrixDirty)throw new Error('custom preview cleared the unsaved draft state');
+  if(previewModule!=='custom_saved'||previewSelect.value!=='custom_saved')throw new Error('saved custom module was not selected for preview');
   const final=messages.at(-1);
-  if(!final.error || !final.text.includes('reload failed') || !final.text.includes('Previewing custom_test')) throw new Error('preview overwrote the committed-save warning');
-  console.log('SILENT_COMMITTED_SAVE_PASS');
+  if(final.error||!final.text.includes('saved version')||!final.text.includes('Unsaved changes were not applied'))throw new Error('custom preview did not explain the saved/draft boundary');
+  console.log('CUSTOM_PREVIEW_SAVED_BOUNDARY_PASS');
 })().catch(error=>{console.error(error);process.exit(1)});
 """
         result = subprocess.run(
@@ -6090,33 +6087,81 @@ async function api(path){
             text=True, capture_output=True, check=False,
         )
         self.assertEqual(result.returncode, 0, result.stderr)
-        self.assertIn("SILENT_COMMITTED_SAVE_PASS", result.stdout)
+        self.assertIn("CUSTOM_PREVIEW_SAVED_BOUNDARY_PASS", result.stdout)
 
     @unittest.skipUnless(shutil.which("node"), "Node.js is required")
-    def test_failed_preview_preserves_committed_save_warning(self):
+    @unittest.skipUnless(
+        os.environ.get("MATRIX_CHROMIUM")
+        and Path(os.environ.get("MATRIX_CHROMIUM", "")).is_file()
+        and os.access(os.environ.get("MATRIX_CHROMIUM", ""), os.X_OK),
+        "MATRIX_CHROMIUM browser is required",
+    )
+    def test_custom_preview_click_keeps_unsaved_browser_draft_uncommitted(self):
+        custom = {
+            "id": "custom_saved", "name": "Saved custom", "type": "text_scroll",
+            "text": "SAVED", "font": "5x7", "colour": "#ffffff",
+            "background": "#000000", "x": 0, "y": 20,
+            "direction": "left", "speed": 0.05, "loops": 1,
+        }
+        self.store.update({
+            "custom_modules": [custom],
+            "playlist": [{"module": "custom_saved", "duration": 10, "enabled": True}],
+        })
+        self.pair_browser()
+        body = self.client.get("/").get_data(as_text=True)
+        probe = r"""
+const port=process.argv[1],pagePath=process.argv[2],sleep=ms=>new Promise(resolve=>setTimeout(resolve,ms));let endpoint;
+for(let attempt=0;attempt<50;attempt++){try{endpoint=await fetch(`http://127.0.0.1:${port}/json/new`,{method:'PUT'}).then(response=>response.json());break}catch(_){await sleep(50)}}
+if(!endpoint)throw new Error('Chromium DevTools endpoint unavailable');
+const socket=new WebSocket(endpoint.webSocketDebuggerUrl),pending=new Map();let nextId=1,loadResolve,loaded=new Promise(resolve=>loadResolve=resolve);
+socket.onmessage=event=>{const message=JSON.parse(event.data);if(message.id&&pending.has(message.id)){const request=pending.get(message.id);pending.delete(message.id);message.error?request.reject(new Error(JSON.stringify(message.error))):request.resolve(message.result)}else if(message.method==='Page.loadEventFired')loadResolve()};
+await new Promise((resolve,reject)=>{socket.onopen=resolve;socket.onerror=reject});
+const send=(method,params={})=>{const id=nextId++;socket.send(JSON.stringify({id,method,params}));return new Promise((resolve,reject)=>pending.set(id,{resolve,reject}))};
+const evaluate=async expression=>{const result=await send('Runtime.evaluate',{expression,returnByValue:true,awaitPromise:true});if(result.exceptionDetails)throw new Error(JSON.stringify(result.exceptionDetails));return result.result.value};
+try{
+ await send('Runtime.enable');await send('Page.enable');loaded=new Promise(resolve=>loadResolve=resolve);await send('Page.navigate',{url:'file://'+pagePath});await loaded;
+ await evaluate(`globalThis.stopMatrixConfigSync?.();globalThis.__previewCalls=[];globalThis.__saveCalls=0;globalThis.__messages=[];setMessage=(text,error=false)=>{globalThis.__messages.push({text,error});const status=document.querySelector('#message');status.textContent=text;status.setAttribute('role',error?'alert':'status')};matrixDirty=true;saveConfig=async()=>{globalThis.__saveCalls++;return{saved:true,warning:null}};api=async(path,options)=>{globalThis.__previewCalls.push({path,method:options?.method});return{}};(()=>{const input=document.querySelector('.custom-module-card[data-id="custom_saved"] [data-field="text"]');input.value='UNSAVED BROWSER DRAFT';input.dispatchEvent(new Event('input',{bubbles:true}));const row=document.querySelector('.module-row[data-module="custom_saved"]');[...row.querySelectorAll('button')].find(item=>item.textContent==='Preview').scrollIntoView({block:'center'})})()`);await sleep(20);
+ const point=await evaluate(`(()=>{const row=document.querySelector('.module-row[data-module="custom_saved"]'),button=[...row.querySelectorAll('button')].find(item=>item.textContent==='Preview'),rect=button.getBoundingClientRect(),x=rect.left+rect.width/2,y=rect.top+rect.height/2;return{x,y,hit:document.elementFromPoint(x,y)===button}})()`);
+ if(!point.hit)throw new Error('custom Preview center is not hit-testable: '+JSON.stringify(point));
+ await send('Input.dispatchMouseEvent',{type:'mousePressed',x:point.x,y:point.y,button:'left',clickCount:1});await send('Input.dispatchMouseEvent',{type:'mouseReleased',x:point.x,y:point.y,button:'left',clickCount:1});
+ for(let attempt=0;attempt<50&&!await evaluate(`globalThis.__previewCalls.length===1`);attempt++)await sleep(20);
+ const report=await evaluate(`({saveCalls:globalThis.__saveCalls,calls:globalThis.__previewCalls,dirty:matrixDirty,draft:document.querySelector('.custom-module-card[data-id="custom_saved"] [data-field="text"]').value,message:globalThis.__messages.at(-1)?.text||'',messageError:globalThis.__messages.at(-1)?.error??null})`);
+ console.log(JSON.stringify(report));
+}finally{socket.close()}
+"""
+        report = self._run_dashboard_chromium_probe(body, probe, timeout=30)
+        self.assertEqual(report["saveCalls"], 0, report)
+        self.assertEqual(report["calls"], [{"path": "/api/preview/custom_saved", "method": "POST"}], report)
+        self.assertTrue(report["dirty"], report)
+        self.assertEqual(report["draft"], "UNSAVED BROWSER DRAFT", report)
+        self.assertIn("saved version", report["message"], report)
+        self.assertIn("Unsaved changes were not applied", report["message"], report)
+        self.assertFalse(report["messageError"], report)
+
+    @unittest.skipUnless(shutil.which("node"), "Node.js is required")
+    def test_failed_custom_preview_preserves_unsaved_draft_without_saving(self):
         source = (Path(__file__).parents[1] / "app" / "templates" / "dashboard.html").read_text()
-        save_start = source.index("async function saveConfig")
-        save_end = source.index("\nfunction updateOpenWeatherSecretStatus", save_start)
         preview_start = source.index("async function preview(name)")
         preview_end = source.index("\nfunction previewSelected", preview_start)
-        function_source = source[save_start:save_end] + "\n" + source[preview_start:preview_end]
+        function_source = source[preview_start:preview_end]
         harness = r"""
-let messages=[],previewModule='',matrixLoadedRevision=0,matrixDirty=true,matrixEditorsReady=true,matrixRecoveryPending=false,highestNotifiedRemoteRevision=0;
-function matrixRevisionETag(){return '"'+matrixLoadedRevision+'"';}
-function configBody(){return {};}
+let messages=[],previewModule='',matrixDirty=true,saveCalls=0,apiCalls=[];
 function setMessage(text,error=false){messages.push({text,error});}
-function dismissMatrixRevisionDialogThrough(){}
 global.document={querySelector(){return {value:''};}};
+async function saveConfig(){saveCalls++;throw new Error('save path must not run');}
 async function api(path){
-  if(path==='/api/config'){const error=new Error('Configuration saved, but display reload failed.');error.data={committed:true,config:{revision:1}};throw error;}
+  apiCalls.push(path);
   throw new Error('Preview hardware unavailable.');
 }
 """ + function_source + r"""
 (async()=>{
   await preview('custom_test');
   const final=messages.at(-1);
-  if(!final.error || !final.text.includes('display reload failed') || !final.text.includes('Preview hardware unavailable'))throw new Error('failed preview overwrote committed-save warning');
-  console.log('FAILED_PREVIEW_COMMITTED_WARNING_PASS');
+  if(saveCalls!==0)throw new Error('failed custom preview invoked save');
+  if(JSON.stringify(apiCalls)!==JSON.stringify(['/api/preview/custom_test']))throw new Error('unexpected requests '+JSON.stringify(apiCalls));
+  if(!matrixDirty)throw new Error('failed custom preview cleared the unsaved draft');
+  if(!final.error||final.text!=='Preview hardware unavailable.')throw new Error('failed preview message was not preserved');
+  console.log('FAILED_CUSTOM_PREVIEW_DRAFT_PASS');
 })().catch(error=>{console.error(error);process.exit(1)});
 """
         node = shutil.which("node")
@@ -6126,7 +6171,7 @@ async function api(path){
             text=True, capture_output=True, check=False,
         )
         self.assertEqual(result.returncode, 0, result.stderr)
-        self.assertIn("FAILED_PREVIEW_COMMITTED_WARNING_PASS", result.stdout)
+        self.assertIn("FAILED_CUSTOM_PREVIEW_DRAFT_PASS", result.stdout)
 
     @unittest.skipUnless(shutil.which("node"), "Node.js is required")
     def test_playlist_uses_one_physical_time_format_for_every_row(self):
