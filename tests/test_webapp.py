@@ -640,10 +640,112 @@ try{
             body,
             r"function devicePreviewDelay\(event\).*?\?500:150",
         )
-        self.assertRegex(
+
+    def test_dashboard_device_preview_closes_lifecycle_and_mutation_races(self):
+        self.pair_browser()
+
+        body = self.client.get("/").get_data(as_text=True)
+
+        for fragment in (
+            "devicePreviewRequestPromise",
+            "cancelDevicePreviewGeneration",
+            "await devicePreviewRequestPromise",
+            "generation!==devicePreviewActiveGeneration",
+            "Malformed device preview response",
+            "globalThis.publishDeviceDraftMutation?.('announcement_board'",
+            "globalThis.publishDeviceDraftMutation?.(module",
+            "globalThis.publishDeviceDraftMutation?.('clock_lava'",
+            "globalThis.publishDeviceDraftMutation?.(id",
+            "globalThis.devicePreviewToggle.disabled=false",
+        ):
+            self.assertIn(fragment, body)
+        self.assertNotRegex(
             body,
-            r"function setPreviewMode\(mode\).*?scheduleDevicePreview",
+            r"function setPreviewMode\(mode\).*?scheduleDevicePreview\(0\)",
         )
+
+    @unittest.skipUnless(shutil.which("node"), "Node.js is required")
+    def test_dashboard_device_preview_executes_serialized_cancel_lifecycle(self):
+        source = (Path(__file__).parents[1] / "app" / "templates" / "dashboard.html").read_text()
+        start = source.index("let devicePreviewEnabled=")
+        end = source.index("\nfunction editPreviewCurrent", start)
+        lifecycle = source[start:end]
+        harness = r'''
+const vm=require('node:vm');
+const listeners={},calls=[],pending=[];let heartbeatDeferred=false,heartbeatWait=null;
+const control=extra=>Object.assign({addEventListener(name,handler){this.listeners??={};this.listeners[name]=handler}},extra);
+const toggle=control({checked:false,disabled:false}),timeout=control({value:'60',focus(){}}),stop=control({disabled:true}),status={textContent:'',dataset:{}};
+const elements={'#device-preview-enabled':toggle,'#device-preview-timeout':timeout,'#stop-device-preview':stop,'#device-preview-status':status};
+const context={console,AbortController,Date,Number,Promise,Set,Math,encodeURIComponent,clearTimeout,clearInterval,setTimeout,setInterval,
+ matrixSyncStopped:false,matrixEditorsReady:true,previewModule:'weather',previewInstance:'a'.repeat(32),PAIRED_ACTION_SIGNAL:'1',
+ configBody:()=>({device:{name:'draft'}}),selectedLavaPaletteDescriptor:()=>null,selectEditPreviewModule(){},selectEditedPreviewModule(){},
+ document:{querySelector:s=>elements[s],addEventListener(n,h){listeners[n]=h}},window:{addEventListener(n,h){listeners[n]=h}},
+ api:async(path,options={})=>{const body=options.body?JSON.parse(options.body):null;calls.push({path,body});if(path.startsWith('/api/device-preview/')&&!path.endsWith('/cancel')&&!path.endsWith('/heartbeat'))return new Promise(resolve=>pending.push({resolve,body}));if(path==='/api/device-preview/cancel')return {cancelled:true};if(path==='/api/device-preview/heartbeat'){if(heartbeatDeferred)return new Promise((resolve,reject)=>{heartbeatWait={resolve,reject,body}});return {heartbeat_after_seconds:60}}throw new Error('unexpected '+path)},
+ fetch:async()=>({ok:true})};
+vm.createContext(context);vm.runInContext(process.argv[1],context,{filename:'dashboard-device-preview.js'});
+(async()=>{
+ toggle.checked=true;toggle.listeners.change();await new Promise(r=>setTimeout(r,5));
+ context.startDevicePreview();
+ if(calls.filter(c=>c.path==='/api/device-preview/weather').length!==1)throw new Error('render requests were concurrent');
+ const stopping=context.stopDevicePreview();pending.shift().resolve({generation:1,expires_in:60,heartbeat_after_seconds:60});await stopping;
+ const firstCancels=calls.filter(c=>c.path==='/api/device-preview/cancel'&&c.body.generation===1);
+ if(firstCancels.length!==1||status.dataset.state!=='off')throw new Error('pending generation was not cancelled exactly once');
+ toggle.checked=true;toggle.listeners.change();await new Promise(r=>setTimeout(r,5));pending.shift().resolve({generation:999,expires_in:60});await new Promise(r=>setTimeout(r,10));
+ const secondCancels=calls.filter(c=>c.path==='/api/device-preview/cancel'&&c.body.generation===2);
+ if(toggle.checked||status.dataset.state!=='error'||secondCancels.length!==1)throw new Error('malformed success did not fail closed');
+ toggle.checked=true;toggle.listeners.change();await new Promise(r=>setTimeout(r,5));pending.shift().resolve({generation:3,expires_in:60,heartbeat_after_seconds:1});await new Promise(r=>setTimeout(r,1100));
+ const thirdHeartbeats=calls.filter(c=>c.path==='/api/device-preview/heartbeat'&&c.body.generation===3),thirdCancels=calls.filter(c=>c.path==='/api/device-preview/cancel'&&c.body.generation===3);
+ if(thirdHeartbeats.length!==1||thirdCancels.length!==1||toggle.checked||status.dataset.state!=='error')throw new Error('malformed heartbeat did not terminate exactly once');
+ heartbeatDeferred=true;toggle.checked=true;toggle.listeners.change();await new Promise(r=>setTimeout(r,5));pending.shift().resolve({generation:4,expires_in:60,heartbeat_after_seconds:1});await new Promise(r=>setTimeout(r,1050));
+ if(!heartbeatWait||heartbeatWait.body.generation!==4)throw new Error('older heartbeat did not enter flight');
+ context.startDevicePreview();await new Promise(r=>setTimeout(r,5));pending.shift().resolve({generation:5,expires_in:60,heartbeat_after_seconds:60});await new Promise(r=>setTimeout(r,10));heartbeatWait.reject(new Error('old heartbeat failed'));await new Promise(r=>setTimeout(r,10));
+ if(!toggle.checked||status.dataset.state!=='active'||calls.some(c=>c.path==='/api/device-preview/cancel'&&(c.body.generation===4||c.body.generation===5)))throw new Error('older heartbeat failure terminated newer generation');
+ heartbeatDeferred=false;await context.stopDevicePreview();
+ console.log('DEVICE_PREVIEW_SERIALIZED_CANCEL_PASS');
+})().catch(error=>{console.error(error);process.exit(1)});
+'''
+        result = subprocess.run(
+            [shutil.which("node"), "-e", harness, lifecycle],
+            text=True, capture_output=True, check=False,
+            cwd=Path(__file__).parents[1],
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("DEVICE_PREVIEW_SERIALIZED_CANCEL_PASS", result.stdout)
+
+    @unittest.skipUnless(shutil.which("node"), "Node.js is required")
+    def test_programmatic_mutations_publish_exact_device_preview_modules(self):
+        source = (Path(__file__).parents[1] / "app" / "templates" / "dashboard.html").read_text()
+        reset = source[source.index("function resetBuiltInModule"):source.index("\nasync function toggleModuleEditor")]
+        palettes = source[source.index("function addCustomLavaPalette"):source.index("\nfor(const input of document.querySelectorAll('.lava-palette')")]
+        customs = source[source.index("function addCustomModule"):source.index("\nfunction updateStatus")]
+        harness = r'''
+const publications=[],playlistAdds=[];
+globalThis.publishDeviceDraftMutation=(module,delay)=>publications.push({module,delay});
+const previewSelect={value:'clock',options:[{value:'clock'}]};
+globalThis.document={querySelector(selector){if(selector==='#playlist')return{append:item=>playlistAdds.push(item)};if(selector==='[data-palette-group="custom"]')return{open:false};if(selector==='#preview-select')return previewSelect;throw new Error('unexpected selector '+selector)},querySelectorAll(){return[]}};
+globalThis.setMessage=()=>{};globalThis.markMatrixDirty=()=>{};globalThis.renderBuiltInEditor=()=>{};globalThis.renderCustomLavaPalettes=()=>{};globalThis.renderCustomModules=()=>{};
+globalThis.automaticWeatherModules=new Set();globalThis.builtInDefaults={clock:{format:'24h'}};globalThis.builtInSettings={clock:{format:'12h'}};
+globalThis.customLavaPalettes=[];globalThis.legacyCustomLavaColours=['#000000','#111111','#222222'];globalThis.editPreviewLavaPalette=null;globalThis.previewMode='live';globalThis.previewModule='clock';
+globalThis.customLavaPalettesFromEditor=()=>structuredClone(customLavaPalettes);globalThis.confirm=()=>true;globalThis.scheduleEditPreview=()=>{};
+globalThis.matrixEditorsReady=true;globalThis.customModules=[];globalThis.customName=id=>customModules.find(item=>item.id===id)?.name||id;globalThis.customModulesFromEditor=()=>structuredClone(customModules);globalThis.createPlaylistRow=item=>item;globalThis.selectEditPreviewSource=id=>{previewModule=id};
+'''+reset+'\n'+palettes+'\n'+customs+r'''
+resetBuiltInModule('clock');
+customLavaPalettes=[];addCustomLavaPalette();
+customLavaPalettes=[{id:'p1',name:'P1',colours:['#000000','#111111','#222222'],enabled:true}];removeCustomLavaPalette('p1');
+customModules=[];if(!addCustomModule())throw new Error('custom add failed');const customId=customModules[0].id;
+customModules=[{id:customId,name:'Custom'}];previewModule=customId;previewSelect.value=customId;previewSelect.options=[{value:customId},{value:'clock'}];removeCustomModule(customId);
+const expected=[{module:'clock',delay:150},{module:'clock_lava',delay:150},{module:'clock_lava',delay:150},{module:customId,delay:150},{module:'clock',delay:150}];
+if(JSON.stringify(publications)!==JSON.stringify(expected))throw new Error('unexpected publications '+JSON.stringify(publications));
+console.log('PROGRAMMATIC_DEVICE_PREVIEW_PUBLICATION_PASS');
+'''
+        node = shutil.which("node")
+        assert node is not None
+        result = subprocess.run(
+            [node, "-e", harness], cwd=Path(__file__).parents[1],
+            text=True, capture_output=True, check=False,
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("PROGRAMMATIC_DEVICE_PREVIEW_PUBLICATION_PASS", result.stdout)
 
     def test_dashboard_groups_a_confirmed_whole_device_restart_action(self):
         self.pair_browser()
@@ -8256,10 +8358,13 @@ let announcementTimingPlan={};
 const syncPlaylistDurations=()=>{};
 const scheduleAnnouncementTiming=()=>{};
 const validateAnnouncementBoard=()=>true;
+const devicePublications=[];
+globalThis.publishDeviceDraftMutation=(module,delay)=>devicePublications.push({module,delay});
 announcementControl(announcement,'Name','name','text');
 control.value='Updated heading';control.listeners.input();
 if(announcement.name!=='Updated heading')throw new Error('model stale');
 if(heading.textContent!=='Updated heading')throw new Error('heading stale');
+if(JSON.stringify(devicePublications)!==JSON.stringify([{module:'announcement_board',delay:150}]))throw new Error('announcement device publication missing');
 console.log('ANNOUNCEMENT_HEADING_SYNC_PASS');
 """.replace("__ANNOUNCEMENT_JSON__", json.dumps(announcement))
         node = shutil.which("node")
@@ -8588,7 +8693,7 @@ console.log('MODULE_EDITOR_EDIT_PREVIEW_SELECTION_PASS');
 const builtIns=[{checked:false},{checked:true}];
 const customEnabled=[{checked:false},{checked:true}];
 const customCards=customEnabled.map(input=>({querySelector(selector){if(selector!=='[data-field=enabled]')throw new Error('unexpected custom selector');return input;}}));
-let counts=0,dirty=0,inspection=[],previewSchedules=[],messages=[];
+let counts=0,dirty=0,inspection=[],previewSchedules=[],devicePublications=[],messages=[];
 global.document={querySelectorAll(selector){
   if(selector==='.lava-palette')return builtIns;
   if(selector==='.custom-lava-card')return customCards;
@@ -8598,6 +8703,7 @@ global.updatePaletteGroupCounts=()=>{counts++};
 global.markMatrixDirty=()=>{dirty++};
 global.syncLavaInspectionRadios=options=>{inspection.push(options)};
 global.scheduleEditPreview=delay=>{previewSchedules.push(delay)};
+global.publishDeviceDraftMutation=(module,delay)=>{devicePublications.push({module,delay})};
 global.setMessage=text=>{messages.push(text)};
 global.previewMode='edit';
 global.previewModule='clock_lava';
@@ -8609,6 +8715,7 @@ if(builtIns.some(input=>input.checked) || customEnabled.some(input=>input.checke
 if(counts!==2 || dirty!==2)throw new Error('bulk actions did not refresh counts and mark the draft dirty');
 if(inspection.length!==2||inspection.some(options=>options!==undefined))throw new Error('bulk actions automatically selected an inspection palette');
 if(JSON.stringify(previewSchedules)!==JSON.stringify([150,150]))throw new Error('Edit Preview was not refreshed');
+if(JSON.stringify(devicePublications)!==JSON.stringify([{module:'clock_lava',delay:150},{module:'clock_lava',delay:150}]))throw new Error('physical device preview was not refreshed');
 if(messages.length!==2 || !messages[0].includes('Save configuration') || !messages[1].includes('Save configuration'))throw new Error('bulk actions did not explain unsaved state');
 console.log('LAVA_PALETTE_BULK_CONTROLS_PASS');
 """
