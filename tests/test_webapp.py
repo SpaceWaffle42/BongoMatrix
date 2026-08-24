@@ -898,19 +898,23 @@ const control=extra=>Object.assign({addEventListener(type,handler){this.listener
 const toggle=control({checked:false}),timeout=control({value:'60',focus(){}}),stop=control({disabled:true}),status={textContent:'',dataset:{}};
 const elements={'#device-preview-enabled':toggle,'#device-preview-timeout':timeout,'#stop-device-preview':stop,'#device-preview-status':status};
 const context={console,AbortController,Date,Number,Promise,Set,Map,Math,encodeURIComponent,setTimeout,clearTimeout,setInterval,clearInterval,matrixSyncStopped:false,matrixEditorsReady:true,previewModule:'custom_removed',previewInstance:'e'.repeat(32),PAIRED_ACTION_SIGNAL:'1',configBody:()=>({marker:'draft'}),selectedLavaPaletteDescriptor:()=>null,selectEditPreviewModule(){},selectEditedPreviewModule(){},document:{querySelector:s=>elements[s],addEventListener(){}},window:{addEventListener(){}},fetch:async()=>({ok:true}),api:async(path,options={})=>{const body=options.body?JSON.parse(options.body):null;calls.push({path,body});if(path==='/api/device-preview/custom_removed'){startSignal=options.signal;return new Promise(resolve=>{startResolve=value=>{admitted=true;resolve(value)}})}if(path==='/api/device-preview/cancel')return {cancelled:admitted};if(path==='/api/device-preview/clock')return {generation:body.generation,expires_in:60,heartbeat_after_seconds:5,active_module:'clock'};throw new Error(path)}};
-vm.createContext(context);vm.runInContext(process.argv[1],context);(async()=>{toggle.checked=true;toggle.listeners.change();await new Promise(resolve=>setTimeout(resolve,5));context.previewModule='clock';context.startDevicePreview();const replacing=context.replaceDevicePreviewAfterSourceRemoval('clock');
+vm.createContext(context);vm.runInContext(process.argv[1],context);(async()=>{toggle.checked=true;toggle.listeners.change();await new Promise(resolve=>setTimeout(resolve,5));context.previewModule='clock';const mode=process.argv[2];let replacing;
+ if(mode==='before'){context.startDevicePreview();replacing=context.replaceDevicePreviewAfterSourceRemoval('clock')}
+ else {replacing=context.replaceDevicePreviewAfterSourceRemoval('clock');if(mode==='during')context.startDevicePreview()}
  if(startSignal.aborted)throw new Error('pending admission was aborted before fencing');
- startResolve({generation:1,expires_in:60,heartbeat_after_seconds:5,active_module:'custom_removed'});if(await replacing!==true)throw new Error('replacement did not recover');await new Promise(resolve=>setTimeout(resolve,5));
+ startResolve({generation:1,expires_in:60,heartbeat_after_seconds:5,active_module:'custom_removed'});if(await replacing!==true)throw new Error('replacement did not recover');if(mode==='after')context.startDevicePreview();await new Promise(resolve=>setTimeout(resolve,5));
  if(calls.filter(call=>call.path==='/api/device-preview/cancel'&&call.body.generation===1).length!==1)throw new Error('removed generation not cancelled once');
  if(calls.filter(call=>call.path==='/api/device-preview/clock').length!==1)throw new Error('fallback publication count incorrect');
- console.log('REMOVED_DEVICE_SOURCE_FALLBACK_PASS');
+ console.log('REMOVED_DEVICE_SOURCE_FALLBACK_PASS '+mode);
 })().catch(error=>{console.error(error);process.exit(1)});
 '''
         node = shutil.which("node")
         assert node is not None
-        result = subprocess.run([node, "-e", harness, lifecycle], cwd=Path(__file__).parents[1], text=True, capture_output=True, check=False)
-        self.assertEqual(result.returncode, 0, result.stderr)
-        self.assertIn("REMOVED_DEVICE_SOURCE_FALLBACK_PASS", result.stdout)
+        for mode in ("before", "during", "after"):
+            with self.subTest(mode=mode):
+                result = subprocess.run([node, "-e", harness, lifecycle, mode], cwd=Path(__file__).parents[1], text=True, capture_output=True, check=False)
+                self.assertEqual(result.returncode, 0, result.stderr)
+                self.assertIn(f"REMOVED_DEVICE_SOURCE_FALLBACK_PASS {mode}", result.stdout)
 
     def test_dashboard_groups_a_confirmed_whole_device_restart_action(self):
         self.pair_browser()
