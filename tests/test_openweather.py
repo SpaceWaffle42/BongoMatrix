@@ -372,6 +372,39 @@ class OpenWeatherOverviewTests(unittest.TestCase):
             "4x6", 64, 28, "#dcd5d5", canvas=canvas, step=1, wrap=False,
         )
         stop_event.wait.assert_called_once_with(0.025)
+
+    def test_overview_cancellation_from_final_draw_prevents_publication(self):
+        stop_event = threading.Event()
+        canvas = SimpleNamespace(width=64)
+        matrix = Mock()
+        matrix.matrix.CreateFrameCanvas.return_value = canvas
+        matrix.colour_rgb.side_effect = lambda value: value
+        matrix.font.side_effect = lambda value: value
+        matrix.draw_text.return_value = 1
+
+        def cancel_from_final_draw(*_args, **_kwargs):
+            stop_event.set()
+            return 0, 1
+
+        matrix.widget_scroll.side_effect = cancel_from_final_draw
+        prepared = PreparedOverview(
+            weather=OpenWeatherSnapshot(
+                location="London", status="Clear", temperature=16,
+                feels_like=15, high=18, low=12, humidity=70, icon_code="01d",
+            ),
+            icon=Image.new("RGB", (1, 1)),
+        )
+
+        result = run_overview(
+            matrix,
+            {"openweather_overview": {"scroll_loops": 1}},
+            stop_event=stop_event,
+            prepared=prepared,
+        )
+
+        self.assertTrue(result)
+        matrix.swap.assert_not_called()
+
     @patch("modules.openweather_overview._wait", return_value=False)
     def test_overview_prepared_plan_frames_equal_executed_waits_and_swaps(self, wait):
         weather = OpenWeatherSnapshot(location="London", status="Clear", temperature=16,
@@ -391,6 +424,41 @@ class OpenWeatherOverviewTests(unittest.TestCase):
 
 
 class OpenWeatherForecastTests(unittest.TestCase):
+
+    def test_forecast_cancellation_from_final_draw_prevents_publication(self):
+        stop_event = threading.Event()
+        canvas = SimpleNamespace(width=64)
+        matrix = Mock()
+        matrix.matrix.CreateFrameCanvas.return_value = canvas
+        matrix.colour_rgb.side_effect = lambda value: value
+        matrix.font.side_effect = lambda value: value
+        matrix.draw_text.return_value = 1
+
+        def cancel_from_final_draw(*_args, **_kwargs):
+            stop_event.set()
+            return 0, 1
+
+        matrix.widget_scroll.side_effect = cancel_from_final_draw
+        period = OpenWeatherForecastPeriod(
+            label="Tue 15:00", status="Rain", temperature=18,
+            feels_like=17, high=20, low=16, icon_code="10d",
+        )
+        prepared = PreparedForecast(
+            periods=[period],
+            icons={"10d": Image.new("RGB", (1, 1))},
+        )
+
+        result = run_forecast(
+            matrix,
+            {"weather": {"location": "London"},
+             "openweather_forecast": {"scroll_loops": 1}},
+            stop_event=stop_event,
+            prepared=prepared,
+        )
+
+        self.assertTrue(result)
+        matrix.swap.assert_not_called()
+
     def test_prepare_uses_the_shared_top_level_weather_location(self):
         period = OpenWeatherForecastPeriod(
             label="Tue 15:00", status="Rain", temperature=18,

@@ -140,6 +140,8 @@ def overview_frames(matrix, config, prepared, stop_event=None):
             scroll, ticker_font, scroll_x, ticker_y, ticker,
             canvas=canvas, step=step, wrap=False,
         )
+        if stop_event and stop_event.is_set():
+            return
         submitted = canvas
         canvas = matrix.swap(canvas)
         yield submitted, frame_delay
