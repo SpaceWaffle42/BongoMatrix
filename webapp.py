@@ -1495,21 +1495,28 @@ def create_app(
                 response.status_code = 428
                 response.headers["ETag"] = _revision_etag(current_revision)
                 return response
-            elif validators == "*":
-                base_revision = None
-            else:
-                if not any(
-                    not weak and opaque == str(current_revision)
-                    for weak, opaque in validators
-                ):
-                    response = jsonify({
-                        "error": "Configuration has changed since this client loaded it.",
-                        "revision": current_revision,
-                    })
-                    response.status_code = 412
-                    response.headers["ETag"] = _revision_etag(current_revision)
-                    return response
-                base_revision = current_revision
+            if (
+                validators == "*"
+                or len(validators) != 1
+                or validators[0][0]
+            ):
+                response = jsonify({
+                    "error": "If-Match must contain exactly one strong configuration revision.",
+                    "revision": current_revision,
+                })
+                response.status_code = 400
+                response.headers["ETag"] = _revision_etag(current_revision)
+                return response
+            _weak, opaque_revision = validators[0]
+            if opaque_revision != str(current_revision):
+                response = jsonify({
+                    "error": "Configuration has changed since this client loaded it.",
+                    "revision": current_revision,
+                })
+                response.status_code = 412
+                response.headers["ETag"] = _revision_etag(current_revision)
+                return response
+            base_revision = current_revision
             if not request.is_json:
                 abort(415, description="Content-Type must be application/json.")
             changes = request.get_json()

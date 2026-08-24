@@ -2382,7 +2382,7 @@ console.log('PAIR_NETWORK_PASS');
     def test_optional_conditional_config_save_rejects_stale_revision(self):
         self.pair_browser()
         committed = self.post_config( json={"device": {"name": "Winner"}},
-            headers={"If-Match": '"opaque", "0"'},
+            headers={"If-Match": '"0"'},
         )
 
         self.assertEqual(committed.status_code, 200)
@@ -2428,7 +2428,7 @@ console.log('PAIR_NETWORK_PASS');
                 stale = self.post_config( json={}, headers={"If-Match": validator},
                 )
                 self.assertEqual(changed.status_code, 200)
-                self.assertEqual(stale.status_code, 412)
+                self.assertEqual(stale.status_code, 400 if validator.startswith("W/") else 412)
         for header in ("If-None-Match", "If-Match"):
             with self.subTest(header=header):
                 response = self.client.open(
@@ -2443,11 +2443,15 @@ console.log('PAIR_NETWORK_PASS');
 
         weak_write = self.post_config( json={}, headers={"If-Match": 'W/"0"'})
         stale_list = self.post_config( json={}, headers={"If-Match": '"8", "9"'})
-        self.assertEqual(weak_write.status_code, 412)
-        self.assertEqual(stale_list.status_code, 412)
+        self.assertEqual(weak_write.status_code, 400)
+        self.assertEqual(stale_list.status_code, 400)
+        before_wildcard = self.store.get()
+        self.controller.reset_mock()
         wildcard = self.post_config( json={"device": {"name": "Wildcard"}}, headers={"If-Match": "*"},
         )
-        self.assertEqual((wildcard.status_code, wildcard.headers["ETag"]), (200, '"1"'))
+        self.assertEqual((wildcard.status_code, wildcard.headers["ETag"]), (400, '"0"'))
+        self.assertEqual(self.store.get(), before_wildcard)
+        self.assertEqual(self.controller.method_calls, [])
 
         oversized = self.post_config( data=b"{" + (b" " * 1_048_576),
             content_type="application/json",
@@ -2459,6 +2463,45 @@ console.log('PAIR_NETWORK_PASS');
             environ_overrides={"CONTENT_LENGTH": "", "wsgi.input_terminated": True},
         )
         self.assertEqual(streamed_oversized.status_code, 413)
+
+    def test_config_save_requires_one_strong_current_revision_validator(self):
+        self.pair_browser()
+        invalid_validators = (
+            ("wildcard", lambda _revision: "*"),
+            ("weak", lambda revision: f'W/"{revision}"'),
+            ("multiple", lambda revision: f'"{revision}", "other"'),
+        )
+
+        for label, make_validator in invalid_validators:
+            with self.subTest(validator=label):
+                before = self.store.get()
+                validator = make_validator(before["revision"])
+                self.controller.reset_mock()
+
+                response = self.post_config(
+                    json={"device": {"name": f"Rejected {label}"}},
+                    headers={"If-Match": validator},
+                )
+
+                self.assertEqual(response.status_code, 400)
+                self.assertEqual(response.get_json(), {
+                    "error": "If-Match must contain exactly one strong configuration revision.",
+                    "revision": before["revision"],
+                })
+                self.assertEqual(response.headers["ETag"], f'"{before["revision"]}"')
+                self.assertEqual(self.store.get(), before)
+                self.assertEqual(self.controller.method_calls, [])
+
+        current_revision = self.store.get()["revision"]
+        self.controller.reset_mock()
+        accepted = self.post_config(
+            json={"device": {"name": "Strong current revision"}},
+            headers={"If-Match": f'"{current_revision}"'},
+        )
+        self.assertEqual(accepted.status_code, 200)
+        self.assertEqual(accepted.headers["ETag"], f'"{current_revision + 1}"')
+        self.assertEqual(self.store.get()["device"]["name"], "Strong current revision")
+        self.assertEqual(self.controller.reload.call_count, 1)
 
     def test_dashboard_is_never_reused_from_browser_cache(self):
         self.pair_browser()
