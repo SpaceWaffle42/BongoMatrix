@@ -10,11 +10,12 @@ from PIL import Image, ImageSequence
 
 def gif_media_frames(
     path, loops=1, playback_rate=1.0, stop_event=None, max_duration=None,
-    monotonic=None, image_open=None, image_iterator=None,
+    monotonic=None, image_open=None, image_iterator=None, frame_copy=None,
 ):
     """Yield the finite GIF timeline shared by physical and preview playback."""
     image_open = image_open or Image.open
     image_iterator = image_iterator or ImageSequence.Iterator
+    frame_copy = frame_copy or (lambda frame: frame.copy())
     if (
         isinstance(playback_rate, bool)
         or not isinstance(playback_rate, (int, float))
@@ -44,7 +45,7 @@ def gif_media_frames(
                 )
                 if max_duration is not None:
                     delay = min(delay, max_duration - elapsed)
-                yield frame.copy(), delay
+                yield frame_copy(frame), delay
                 elapsed_delays += delay
             if not rendered_frame:
                 return

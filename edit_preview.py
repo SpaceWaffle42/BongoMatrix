@@ -206,35 +206,60 @@ class _PreviewDecodeCancelled(Exception):
     """Internal control flow for a cancelled or expired Pillow decode."""
 
 
+def _close_preview_value(value):
+    """Close one worker-owned value or decoded-frame bundle."""
+    close = getattr(value, "close", None)
+    if close is not None:
+        close()
+    elif isinstance(value, (list, tuple)):
+        for item in value:
+            _close_preview_value(item)
+
+
+class _DecodedGif:
+    """Own fully decoded GIF frames without retaining the source decoder."""
+    def __init__(self, frames):
+        self.frames = frames
+        self._closed = False
+
+    def close(self):
+        if self._closed:
+            return
+        self._closed = True
+        for frame in self.frames:
+            frame.close()
+
+
 def _preview_decode(decode, stop_event, deadline, monotonic):
-    """Wait interruptibly for Pillow while leaving abandoned cleanup to its worker."""
+    """Transfer one Pillow result atomically or abandon it for worker cleanup."""
     while not _PREVIEW_DECODE_SLOTS.acquire(timeout=0.01):
-        cancelled = stop_event is not None and stop_event.is_set()
-        expired = deadline is not None and monotonic() >= deadline
-        if cancelled or expired:
+        if ((stop_event is not None and stop_event.is_set()) or
+                (deadline is not None and monotonic() >= deadline)):
             raise _PreviewDecodeCancelled()
-    cancelled = stop_event is not None and stop_event.is_set()
-    expired = deadline is not None and monotonic() >= deadline
-    if cancelled or expired:
+    if ((stop_event is not None and stop_event.is_set()) or
+            (deadline is not None and monotonic() >= deadline)):
         _PREVIEW_DECODE_SLOTS.release()
         raise _PreviewDecodeCancelled()
 
     done = threading.Event()
-    abandoned = threading.Event()
-    outcome = []
+    ownership_lock = threading.Lock()
+    state = {"abandoned": False, "outcome": None}
 
     def worker():
+        value_to_close = None
         try:
-            value = decode()
-            if abandoned.is_set():
-                close = getattr(value, "close", None)
-                if close is not None:
-                    close()
-            else:
-                outcome.append((True, value))
+            outcome = (True, decode())
         except BaseException as error:
-            if not abandoned.is_set():
-                outcome.append((False, error))
+            outcome = (False, error)
+        try:
+            with ownership_lock:
+                if state["abandoned"]:
+                    if outcome[0]:
+                        value_to_close = outcome[1]
+                else:
+                    state["outcome"] = outcome
+            if value_to_close is not None:
+                _close_preview_value(value_to_close)
         finally:
             done.set()
             _PREVIEW_DECODE_SLOTS.release()
@@ -247,33 +272,30 @@ def _preview_decode(decode, stop_event, deadline, monotonic):
     except BaseException:
         _PREVIEW_DECODE_SLOTS.release()
         raise
+
+    def abandon():
+        value_to_close = None
+        with ownership_lock:
+            state["abandoned"] = True
+            outcome = state["outcome"]
+            state["outcome"] = None
+            if outcome is not None and outcome[0]:
+                value_to_close = outcome[1]
+        if value_to_close is not None:
+            _close_preview_value(value_to_close)
+        raise _PreviewDecodeCancelled()
+
     while not done.wait(0.01):
-        cancelled = stop_event is not None and stop_event.is_set()
-        expired = deadline is not None and monotonic() >= deadline
-        if cancelled or expired:
-            abandoned.set()
-            # Close an outcome won by the worker at the cancellation boundary.
-            if done.wait(0) and outcome and outcome[0][0]:
-                close = getattr(outcome[0][1], "close", None)
-                if close is not None:
-                    close()
-                outcome.clear()
-            raise _PreviewDecodeCancelled()
-    if stop_event is not None and stop_event.is_set():
-        abandoned.set()
-        if outcome and outcome[0][0]:
-            close = getattr(outcome[0][1], "close", None)
-            if close is not None:
-                close()
-        raise _PreviewDecodeCancelled()
-    if deadline is not None and monotonic() >= deadline:
-        abandoned.set()
-        if outcome and outcome[0][0]:
-            close = getattr(outcome[0][1], "close", None)
-            if close is not None:
-                close()
-        raise _PreviewDecodeCancelled()
-    succeeded, value = outcome[0]
+        if ((stop_event is not None and stop_event.is_set()) or
+                (deadline is not None and monotonic() >= deadline)):
+            abandon()
+    if ((stop_event is not None and stop_event.is_set()) or
+            (deadline is not None and monotonic() >= deadline)):
+        abandon()
+    with ownership_lock:
+        outcome = state["outcome"]
+        state["outcome"] = None
+    succeeded, value = outcome
     if not succeeded:
         raise value
     return value
@@ -298,9 +320,8 @@ def _preview_decoder_options(decoder, options):
 
 
 def _preview_elapsed(monotonic, started):
-    """Count decode time while ignoring sub-10ms worker scheduling jitter."""
-    elapsed = max(0.0, monotonic() - started)
-    return 0.0 if elapsed < 0.01 else elapsed
+    """Return exact nonnegative elapsed invocation time."""
+    return max(0.0, monotonic() - started)
 
 
 def media_preview_frames(
@@ -330,9 +351,20 @@ def media_preview_frames(
         if pinned_handle is not None:
             source = io.BytesIO(_pinned_preview_bytes(pinned_handle))
 
-        def image_open(gif_source):
+        def decode_gif():
+            frames = []
+            try:
+                with Image.open(source) as opened:
+                    for frame in ImageSequence.Iterator(opened):
+                        frames.append(frame.copy())
+                return _DecodedGif(frames)
+            except BaseException:
+                _close_preview_value(frames)
+                raise
+
+        def image_open(_gif_source):
             return _preview_decode(
-                lambda: Image.open(gif_source), stop_event, deadline, monotonic,
+                decode_gif, stop_event, deadline, monotonic,
             )
 
         timeline = gif_media_frames(
@@ -340,18 +372,20 @@ def media_preview_frames(
             playback_rate=settings.get("gif_speed_percent", 100) / 100.0,
             stop_event=stop_event, max_duration=duration,
             monotonic=playback_monotonic, image_open=image_open,
-            image_iterator=ImageSequence.Iterator,
+            image_iterator=lambda decoded: iter(decoded.frames),
+            frame_copy=lambda frame: frame,
         )
     elif path.suffix.lower() == ".mp4":
         if video_decoder is None:
             video_decoder = getattr(matrix, "_video_frame_timeline", None)
         if video_decoder is None:
             raise ValueError("MP4 preview requires the production video decoder seam")
-        decoder_options = _preview_decoder_options(
-            video_decoder, {"stop_event": stop_event, "deadline": deadline},
-        )
+        decoder_options = {"stop_event": stop_event, "deadline": deadline}
         if pinned_handle is not None:
             decoder_options["pinned_handle"] = pinned_handle
+        decoder_options = _preview_decoder_options(
+            video_decoder, decoder_options,
+        )
         timeline = video_media_frames(
             lambda: video_decoder(path, settings, **decoder_options),
             fps=settings.get("video_fps", 20), loops=0,

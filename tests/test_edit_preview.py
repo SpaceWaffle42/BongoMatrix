@@ -1778,6 +1778,133 @@ class EditPreviewTests(unittest.TestCase):
         ):
             session.page()
 
+    def test_cancel_interrupts_blocked_gif_frame_copy_and_releases_capacity(self):
+        entered = threading.Event()
+        release = threading.Event()
+        stop = threading.Event()
+        result = {}
+
+        class Frame:
+            info = {"duration": 100}
+
+            def copy(self):
+                entered.set()
+                release.wait()
+                return Image.new("RGB", (2, 2), "red")
+
+        opened = MagicMock()
+        opened.__enter__.return_value = opened
+        capacity = edit_preview.PreviewSessionCapacity()
+        with (
+            patch.object(Image, "open", return_value=opened),
+            patch.object(ImageSequence, "Iterator", return_value=iter([Frame()])),
+        ):
+            session = capacity.admit(
+                lambda: edit_preview.media_preview_frames(
+                    CaptureMatrix(), "blocked.gif", 10, stop_event=stop,
+                ),
+                stop_event=stop,
+            )
+            thread = threading.Thread(target=lambda: result.update(session.page()))
+            thread.start()
+            self.assertTrue(entered.wait(1), "GIF frame copy did not block")
+            session.cancel()
+            thread.join(0.15)
+            prompt = not thread.is_alive()
+            state = session.state
+            active = capacity.active_count
+            release.set()
+            thread.join(1)
+
+        self.assertTrue(prompt, "GIF frame copy blocked page cancellation")
+        self.assertEqual(state, "CLOSED")
+        self.assertEqual(active, 0)
+        self.assertEqual(result.get("frames"), [])
+
+    def test_pinned_mp4_preserves_fixed_signature_decoder_compatibility(self):
+        calls = []
+        pinned = Mock()
+
+        def legacy_decoder(path, settings, stop_event=None):
+            calls.append((path, settings, stop_event))
+            return iter(())
+
+        stop = threading.Event()
+        frames = list(edit_preview.media_preview_frames(
+            CaptureMatrix(), "legacy.mp4", 1,
+            video_decoder=legacy_decoder, stop_event=stop, pinned_handle=pinned,
+        ))
+
+        self.assertEqual(frames, [])
+        self.assertEqual(len(calls), 1)
+        self.assertIs(calls[0][2], stop)
+
+    def test_preview_decode_completion_cancel_race_closes_result_once(self):
+        real_event = threading.Event
+        checked = real_event()
+        release = real_event()
+        stop = real_event()
+        returned = real_event()
+        closed = real_event()
+        event_count = [0]
+
+        class Value:
+            close_calls = 0
+
+            def close(self):
+                self.close_calls += 1
+                closed.set()
+
+        value = Value()
+
+        class GatedAbandonedEvent:
+            def __init__(self):
+                self._set = real_event()
+
+            def is_set(self):
+                if threading.current_thread().name == "matrix-preview-pillow":
+                    checked.set()
+                    release.wait()
+                    return False
+                return self._set.is_set()
+
+            def set(self):
+                self._set.set()
+
+        def event_factory():
+            event_count[0] += 1
+            return real_event() if event_count[0] == 1 else GatedAbandonedEvent()
+
+        def decode():
+            if event_count[0] == 1:  # Lock-based implementation: pause before transfer.
+                checked.set()
+                release.wait()
+            return value
+
+        threading_proxy = types.SimpleNamespace(
+            Event=event_factory, Lock=threading.Lock, Thread=threading.Thread,
+        )
+
+        def call_decode():
+            try:
+                edit_preview._preview_decode(decode, stop, None, time.monotonic)
+            except edit_preview._PreviewDecodeCancelled:
+                pass
+            finally:
+                returned.set()
+
+        with patch.object(edit_preview, "threading", threading_proxy):
+            caller = threading.Thread(target=call_decode)
+            caller.start()
+            self.assertTrue(checked.wait(1), "worker did not reach transfer boundary")
+            stop.set()
+            self.assertTrue(returned.wait(0.15), "cancel did not return promptly")
+            release.set()
+            caller.join(1)
+            self.assertTrue(closed.wait(1), "abandoned result was not closed")
+
+        self.assertEqual(value.close_calls, 1)
+
     def test_preview_pillow_workers_are_globally_bounded(self):
         release = threading.Event()
         fifth_worker = threading.Event()
@@ -1923,17 +2050,21 @@ class EditPreviewTests(unittest.TestCase):
         def clock():
             return now[0]
 
-        def consume_duration(source):
-            now[0] = 13.0
+        def consume_five_ms(source):
+            now[0] = 10.005
             return original_open(source)
 
-        with patch.object(Image, "open", side_effect=consume_duration):
+        with patch.object(Image, "open", side_effect=consume_five_ms):
             frames = list(edit_preview.media_preview_frames(
-                CaptureMatrix(), "slow.gif", 3,
+                CaptureMatrix(), "slow.gif", 0.006,
                 pinned_handle=pinned, monotonic=clock,
             ))
 
-        self.assertEqual(frames, [])
+        self.assertGreaterEqual(len(frames), 1)
+        self.assertAlmostEqual(frames[0]["delay_ms"], 1.0, places=6)
+        self.assertAlmostEqual(
+            sum(frame["delay_ms"] for frame in frames), 6.0, places=6,
+        )
 
     def test_pre_cancelled_gif_preview_skips_pinned_decode(self):
         encoded = io.BytesIO()
