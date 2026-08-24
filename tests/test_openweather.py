@@ -35,6 +35,35 @@ class FakeBinaryResponse(FakeResponse):
 
 
 class OpenWeatherClientTests(unittest.TestCase):
+    @patch("modules.openweather_common.time.monotonic")
+    @patch("modules.openweather_common.urlopen")
+    def test_aggregate_deadline_derives_each_transport_timeout(
+        self, urlopen, monotonic,
+    ):
+        encoded = BytesIO()
+        Image.new("RGBA", (2, 2), "blue").save(encoded, format="PNG")
+        urlopen.side_effect = [
+            FakeResponse({
+                "weather": [{"description": "clear", "icon": "01d"}],
+                "main": {
+                    "temp": 16, "feels_like": 15, "temp_min": 12,
+                    "temp_max": 18, "humidity": 70,
+                },
+            }),
+            FakeBinaryResponse(encoded.getvalue()),
+        ]
+        monotonic.side_effect = [96.0, 97.0, 98.0, 99.0]
+        client = OpenWeatherClient(timeout=8, deadline=100.0)
+
+        snapshot = client.fetch_current(api_key="x", location="Brighton")
+        icon = client.fetch_icon(snapshot.icon_code)
+
+        self.assertEqual(icon.size, (20, 20))
+        self.assertEqual(
+            [item.kwargs["timeout"] for item in urlopen.call_args_list],
+            [4.0, 2.0],
+        )
+
     @patch("modules.openweather_common.urlopen")
     def test_current_weather_is_normalized_with_units_and_selected_coordinates(self, urlopen):
         urlopen.return_value = FakeResponse({

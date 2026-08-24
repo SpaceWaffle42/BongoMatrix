@@ -2,16 +2,27 @@
 
 from __future__ import annotations
 
+import base64
 import copy
 import datetime as dt
 import importlib
+import io
 import logging
 import socket
 import threading
 import time
 
+from PIL import Image
+
 from modules.media_player import play_media
 from device_preview import DevicePreviewManager, PreviewAdmissionStatus
+from preview_provider import (
+    PreviewProvider,
+    PreviewProviderCancelled,
+    PreviewProviderCapacityError,
+    PreviewProviderTimeout,
+    PreviewProviderUnavailable,
+)
 
 LOGGER = logging.getLogger(__name__)
 MODULES = {
@@ -36,6 +47,91 @@ MODULE_DEFAULT_DURATIONS = {
     "sleep": 60,
 }
 ONE_OFF_PREVIEW_DURATION = 15
+OPENWEATHER_PREPARATION_DEADLINE_SECONDS = 5.0
+
+
+def _provider_image(image):
+    output = io.BytesIO()
+    image.save(output, format="PNG")
+    return base64.b64encode(output.getvalue()).decode("ascii")
+
+
+def _openweather_provider_child(config, api_key, timeout):
+    """Prepare and serialize one physical OpenWeather invocation in a child."""
+    module_name = config.pop("_openweather_provider_module")
+    module = importlib.import_module(f"modules.{module_name}")
+    from modules.openweather_common import OpenWeatherClient
+
+    deadline = time.monotonic() + timeout
+    prepared = module.prepare(
+        config,
+        client=OpenWeatherClient(timeout=timeout, deadline=deadline),
+        api_key=api_key,
+    )
+    result = {"error": prepared.error, "cancelled": prepared.cancelled}
+    if prepared.error or prepared.cancelled:
+        return result
+    if module_name == "openweather_overview":
+        result.update({
+            "weather": vars(prepared.weather),
+            "icon": _provider_image(prepared.icon),
+        })
+    else:
+        result.update({
+            "periods": [vars(period) for period in prepared.periods],
+            "icons": {
+                icon_code: _provider_image(image)
+                for icon_code, image in prepared.icons.items()
+            },
+        })
+    return result
+
+
+def _provider_value(value):
+    if isinstance(value, tuple):
+        if all(
+            isinstance(item, tuple) and len(item) == 2 and isinstance(item[0], str)
+            for item in value
+        ):
+            return {key: _provider_value(item) for key, item in value}
+        return [_provider_value(item) for item in value]
+    return value
+
+
+def _prepared_openweather(module_name, transported):
+    prepared = _provider_value(transported)
+    if module_name == "openweather_overview":
+        from modules.openweather_common import OpenWeatherSnapshot
+        from modules.openweather_overview import PreparedOverview
+
+        if prepared["error"] or prepared["cancelled"]:
+            return PreparedOverview(
+                error=prepared["error"], cancelled=prepared["cancelled"]
+            )
+        icon = Image.open(io.BytesIO(base64.b64decode(prepared["icon"])))
+        icon.load()
+        return PreparedOverview(
+            weather=OpenWeatherSnapshot(**prepared["weather"]), icon=icon,
+        )
+
+    from modules.openweather_common import OpenWeatherForecastPeriod
+    from modules.openweather_forecast import PreparedForecast
+
+    if prepared["error"] or prepared["cancelled"]:
+        return PreparedForecast(
+            error=prepared["error"], cancelled=prepared["cancelled"]
+        )
+    icons = {}
+    for icon_code, encoded in prepared["icons"].items():
+        icon = Image.open(io.BytesIO(base64.b64decode(encoded)))
+        icon.load()
+        icons[icon_code] = icon
+    return PreparedForecast(
+        periods=[
+            OpenWeatherForecastPeriod(**period) for period in prepared["periods"]
+        ],
+        icons=icons,
+    )
 
 
 def invocation_default_duration(module_name):
@@ -100,6 +196,7 @@ class DisplayController:
         self._pairing_generation = 0
         self._ip_address_provider = ip_address_provider or local_ip_address
         self._openweather_secrets = openweather_secrets
+        self._openweather_provider = PreviewProvider()
         self.current_module = None
         self.last_error = None
         self._scheduler_fault_backoff = 0.25
@@ -771,13 +868,34 @@ class DisplayController:
             if name in {"openweather_overview", "openweather_forecast"}:
                 api_key = self._openweather_secrets.get() if self._openweather_secrets else None
                 options["api_key"] = api_key
-                options["prepared"] = module.prepare(
-                    config,
-                    stop_event=stop_event,
-                    api_key=api_key,
-                )
+                if not api_key:
+                    transported = {"error": "KEY NOT SET", "cancelled": False}
+                else:
+                    provider_config = copy.deepcopy(config)
+                    provider_config["_openweather_provider_module"] = name
+                    try:
+                        transported = self._openweather_provider.prepare(
+                            _openweather_provider_child,
+                            settings=provider_config,
+                            credentials=api_key,
+                            cancel_event=stop_event,
+                            request_deadline=OPENWEATHER_PREPARATION_DEADLINE_SECONDS,
+                        )
+                    except PreviewProviderCancelled:
+                        return False
+                    except PreviewProviderTimeout:
+                        transported = {
+                            "error": "OpenWeather request timed out",
+                            "cancelled": False,
+                        }
+                    except (PreviewProviderCapacityError, PreviewProviderUnavailable):
+                        transported = {
+                            "error": "OpenWeather unavailable",
+                            "cancelled": False,
+                        }
                 if stop_event.is_set():
                     return False
+                options["prepared"] = _prepared_openweather(name, transported)
             with self._display_lock:
                 return module.run(
                     self.matrix,

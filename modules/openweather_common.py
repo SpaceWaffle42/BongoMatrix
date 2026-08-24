@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import re
+import time
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from io import BytesIO
@@ -50,8 +51,17 @@ class OpenWeatherClient:
     forecast_url = "https://api.openweathermap.org/data/2.5/forecast"
     icon_url = "https://openweathermap.org/img/wn/{icon_code}@2x.png"
 
-    def __init__(self, timeout=8):
+    def __init__(self, timeout=8, deadline=None):
         self.timeout = timeout
+        self.deadline = deadline
+
+    def _remaining_timeout(self, message):
+        timeout = float(self.timeout)
+        if self.deadline is not None:
+            timeout = min(timeout, self.deadline - time.monotonic())
+        if timeout <= 0:
+            raise OpenWeatherError(message)
+        return timeout
 
     def _get_json(self, base_url, params):
         request = Request(
@@ -59,7 +69,10 @@ class OpenWeatherClient:
             headers={"User-Agent": "MatrixDisplay/2.0", "Accept": "application/json"},
         )
         try:
-            with urlopen(request, timeout=self.timeout) as response:
+            with urlopen(
+                request,
+                timeout=self._remaining_timeout("OpenWeather request timed out"),
+            ) as response:
                 payload = response.read(MAX_RESPONSE_BYTES + 1)
         except HTTPError as exc:
             code = exc.code
@@ -73,6 +86,7 @@ class OpenWeatherClient:
             raise OpenWeatherError("OpenWeather request timed out") from None
         except (URLError, OSError):
             raise OpenWeatherError("OpenWeather unavailable") from None
+        self._remaining_timeout("OpenWeather request timed out")
         if len(payload) > MAX_RESPONSE_BYTES:
             raise OpenWeatherError("OpenWeather response too large")
         try:
@@ -91,12 +105,16 @@ class OpenWeatherClient:
             headers={"User-Agent": "MatrixDisplay/2.0", "Accept": "image/png"},
         )
         try:
-            with urlopen(request, timeout=self.timeout) as response:
+            with urlopen(
+                request,
+                timeout=self._remaining_timeout("OpenWeather icon timed out"),
+            ) as response:
                 payload = response.read(MAX_RESPONSE_BYTES + 1)
         except TimeoutError:
             raise OpenWeatherError("OpenWeather icon timed out") from None
         except (HTTPError, URLError, OSError):
             raise OpenWeatherError("OpenWeather icon unavailable") from None
+        self._remaining_timeout("OpenWeather icon timed out")
         if len(payload) > MAX_RESPONSE_BYTES:
             raise OpenWeatherError("OpenWeather icon too large")
         try:

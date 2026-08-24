@@ -19,6 +19,16 @@ from edit_preview import CaptureMatrix
 from config_store import DEFAULT_CONFIG
 from display_controller import DisplayController
 from media_resolver import PinnedMediaHandle
+from preview_provider import PreviewProvider, PreviewProviderCancelled
+
+
+def blocked_physical_openweather_provider(settings, _credentials, timeout):
+    """Spawn-safe provider that cannot return before its parent must cancel it."""
+    marker = settings["_test_entered_marker"]
+    with open(marker, "x", encoding="ascii") as handle:
+        handle.write("entered")
+    time.sleep(timeout + 1)
+    return {"error": "released unexpectedly", "cancelled": False}
 
 
 class DisplayControllerTests(unittest.TestCase):
@@ -77,6 +87,7 @@ class DisplayControllerTests(unittest.TestCase):
         self.assertIn("PAIR", texts)
         self.assertIn("123456", texts)
         matrix.swap.assert_called()
+        controller.end_pairing()
 
     def test_stale_pairing_timer_cannot_draw_after_pairing_ends(self):
         matrix = Mock()
@@ -409,6 +420,20 @@ class DisplayControllerTests(unittest.TestCase):
         secrets = Mock()
         secrets.get.return_value = "test_key_1234567890"
         controller = DisplayController(matrix, store, openweather_secrets=secrets)
+        provider = Mock()
+        icon = io.BytesIO()
+        Image.new("RGB", (1, 1), "blue").save(icon, format="PNG")
+        provider.prepare.return_value = {
+            "error": None,
+            "cancelled": False,
+            "weather": {
+                "location": "Brighton, GB", "status": "Clear",
+                "temperature": 16, "feels_like": 15, "high": 18,
+                "low": 12, "humidity": 70, "icon_code": "01d",
+            },
+            "icon": base64.b64encode(icon.getvalue()).decode("ascii"),
+        }
+        controller._openweather_provider = provider
         module = Mock()
         module.run.return_value = True
         config = {"custom_modules": [], "openweather_overview": {"location": "Brighton, GB"}}
@@ -420,6 +445,8 @@ class DisplayControllerTests(unittest.TestCase):
         importer.assert_called_once_with("modules.openweather_overview")
         module.run.assert_called_once()
         self.assertEqual(module.run.call_args.kwargs["api_key"], "test_key_1234567890")
+        self.assertEqual(provider.prepare.call_args.kwargs["credentials"], "test_key_1234567890")
+        self.assertNotIn("api_key", str(provider.prepare.call_args.kwargs["settings"]))
         self.assertNotIn("api_key", str(config))
 
     def test_openweather_preparation_runs_outside_display_lock(self):
@@ -427,17 +454,31 @@ class DisplayControllerTests(unittest.TestCase):
         secrets = Mock()
         secrets.get.return_value = "test_key_1234567890"
         controller = DisplayController(matrix, Mock(), openweather_secrets=secrets)
+        provider = Mock()
+        controller._openweather_provider = provider
         module = Mock()
         module.run.return_value = True
         preparation_started = threading.Event()
         release_preparation = threading.Event()
+        icon = io.BytesIO()
+        Image.new("RGB", (1, 1), "blue").save(icon, format="PNG")
+        transported = {
+            "error": None,
+            "cancelled": False,
+            "weather": {
+                "location": "Brighton, GB", "status": "Clear",
+                "temperature": 16, "feels_like": 15, "high": 18,
+                "low": 12, "humidity": 70, "icon_code": "01d",
+            },
+            "icon": base64.b64encode(icon.getvalue()).decode("ascii"),
+        }
 
         def prepare(*_args, **_kwargs):
             preparation_started.set()
             release_preparation.wait(1)
-            return "prepared-weather"
+            return transported
 
-        module.prepare.side_effect = prepare
+        provider.prepare.side_effect = prepare
         result = []
         config = {"custom_modules": [], "openweather_overview": {}}
 
@@ -456,7 +497,141 @@ class DisplayControllerTests(unittest.TestCase):
 
         self.assertFalse(worker.is_alive())
         self.assertEqual(result, [True])
-        self.assertEqual(module.run.call_args.kwargs["prepared"], "prepared-weather")
+        self.assertEqual(module.run.call_args.kwargs["prepared"].weather.location, "Brighton, GB")
+
+    def test_openweather_blocked_preparation_is_cancelled_within_reload_budget(self):
+        matrix = Mock()
+        secrets = Mock()
+        secrets.get.return_value = "test_key_1234567890"
+        controller = DisplayController(matrix, Mock(), openweather_secrets=secrets)
+        module = Mock()
+        preparation_started = threading.Event()
+        release_legacy_preparation = threading.Event()
+        provider_calls = []
+
+        class BlockingProvider:
+            def prepare(
+                self, provider, *, settings, credentials, cancel_event,
+                request_deadline,
+            ):
+                provider_calls.append({
+                    "provider": provider,
+                    "settings": settings,
+                    "credentials": credentials,
+                    "cancel_event": cancel_event,
+                    "request_deadline": request_deadline,
+                })
+                preparation_started.set()
+                if not cancel_event.wait(1):
+                    raise AssertionError("controller did not cancel blocked preparation")
+                raise PreviewProviderCancelled("test cancellation")
+
+        def legacy_prepare(*_args, **_kwargs):
+            preparation_started.set()
+            release_legacy_preparation.wait(1)
+            return "legacy-prepared-weather"
+
+        controller._openweather_provider = BlockingProvider()
+        module.prepare.side_effect = legacy_prepare
+        results = []
+        errors = []
+        config = {"custom_modules": [], "openweather_overview": {}}
+
+        def execute():
+            try:
+                results.append(controller._execute("openweather_overview", config, 9))
+            except BaseException as error:
+                errors.append(error)
+
+        with patch("display_controller.importlib.import_module", return_value=module):
+            worker = threading.Thread(target=execute)
+            worker.start()
+            try:
+                self.assertTrue(preparation_started.wait(0.5))
+                owned_stop_event = controller._module_stop
+                started = time.monotonic()
+                controller.reload()
+                worker.join(0.25)
+                settled_within_budget = not worker.is_alive()
+                elapsed = time.monotonic() - started
+            finally:
+                release_legacy_preparation.set()
+                worker.join(1)
+
+        self.assertTrue(settled_within_budget, f"blocked preparation survived {elapsed:.3f}s")
+        self.assertEqual(results, [False])
+        self.assertEqual(errors, [])
+        self.assertEqual(len(provider_calls), 1)
+        self.assertIs(provider_calls[0]["cancel_event"], owned_stop_event)
+        self.assertIsNotNone(owned_stop_event)
+        self.assertTrue(owned_stop_event.is_set())
+        self.assertLessEqual(provider_calls[0]["request_deadline"], 5)
+        module.run.assert_not_called()
+
+    def test_openweather_reload_cancels_and_reaps_real_blocked_child(self):
+        marker_handle = tempfile.NamedTemporaryFile(
+            prefix="openweather-provider-entered-", dir="/tmp", delete=False,
+        )
+        marker = marker_handle.name
+        marker_handle.close()
+        os.unlink(marker)
+        controller = DisplayController(
+            Mock(), Mock(), openweather_secrets=Mock(get=Mock(return_value="x")),
+        )
+        module = Mock()
+        results = []
+        errors = []
+        worker = None
+        config = {
+            "custom_modules": [],
+            "openweather_overview": {},
+            "_test_entered_marker": marker,
+        }
+        original_config = copy.deepcopy(config)
+
+        def execute():
+            try:
+                results.append(controller._execute("openweather_overview", config, 9))
+            except BaseException as error:
+                errors.append(error)
+
+        try:
+            with (
+                patch.object(
+                    display_controller,
+                    "_openweather_provider_child",
+                    blocked_physical_openweather_provider,
+                ),
+                patch("display_controller.importlib.import_module", return_value=module),
+            ):
+                worker = threading.Thread(target=execute)
+                worker.start()
+                entered_deadline = time.monotonic() + 1
+                while not os.path.exists(marker) and time.monotonic() < entered_deadline:
+                    time.sleep(0.005)
+                self.assertTrue(os.path.exists(marker))
+                started = time.monotonic()
+                controller.reload()
+                worker.join(0.25)
+                elapsed = time.monotonic() - started
+
+            self.assertFalse(worker.is_alive(), f"blocked child survived {elapsed:.3f}s")
+            self.assertEqual(results, [False])
+            self.assertEqual(errors, [])
+            self.assertEqual(config, original_config)
+            self.assertEqual(controller._openweather_provider.active_child_count, 0)
+            self.assertEqual(controller._openweather_provider.active_worker_count, 0)
+            self.assertEqual(controller._openweather_provider.available_worker_slots, 2)
+            module.run.assert_not_called()
+        finally:
+            if worker is not None:
+                worker.join(1)
+            controller._openweather_provider.shutdown()
+            PreviewProvider._shutdown_reaper_for_tests()
+            try:
+                os.unlink(marker)
+            except FileNotFoundError:
+                pass
 
     def test_custom_module_can_be_previewed(self):
         store = Mock()
