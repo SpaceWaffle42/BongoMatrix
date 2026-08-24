@@ -649,7 +649,7 @@ try{
         for fragment in (
             "devicePreviewRequestPromise",
             "cancelDevicePreviewGeneration",
-            "await waitForDevicePreviewRequest()",
+            "await waitForDevicePreviewRequest(deadline)",
             "generation!==devicePreviewActiveGeneration",
             "Malformed device preview response",
             "globalThis.publishDeviceDraftMutation?.('announcement_board'",
@@ -831,6 +831,26 @@ vm.createContext(context);vm.runInContext(process.argv[1],context);(async()=>{to
         result = subprocess.run([node, "-e", harness, lifecycle], cwd=Path(__file__).parents[1], text=True, capture_output=True, check=False)
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertIn("DEVICE_PREVIEW_BOUNDED_STOP_PASS", result.stdout)
+
+    @unittest.skipUnless(shutil.which("node"), "Node.js is required")
+    def test_device_preview_cancel_transport_uses_shared_deadline(self):
+        source = (Path(__file__).parents[1] / "app" / "templates" / "dashboard.html").read_text()
+        lifecycle = source[source.index("let devicePreviewEnabled="):source.index("\nfunction editPreviewCurrent")]
+        harness = r'''
+const vm=require('node:vm');let cancelSignal,cancelResolve,cancelCalls=0,startCalls=0;
+const control=extra=>Object.assign({addEventListener(type,handler){this.listeners??={};this.listeners[type]=handler}},extra);
+const toggle=control({checked:false}),timeout=control({value:'60',focus(){}}),stop=control({disabled:true}),status={textContent:'',dataset:{}};
+const elements={'#device-preview-enabled':toggle,'#device-preview-timeout':timeout,'#stop-device-preview':stop,'#device-preview-status':status};
+const context={console,AbortController,Date,Number,Promise,Set,Map,Math,encodeURIComponent,clearInterval,setInterval:()=>1,setTimeout,clearTimeout,matrixSyncStopped:false,matrixEditorsReady:true,previewModule:'clock',previewInstance:'f'.repeat(32),PAIRED_ACTION_SIGNAL:'1',configBody:()=>({}),selectedLavaPaletteDescriptor:()=>null,selectEditPreviewModule(){},selectEditedPreviewModule(){},document:{querySelector:s=>elements[s],addEventListener(){}},window:{addEventListener(){}},fetch:async()=>({ok:true}),api:async(path,options={})=>{const body=options.body?JSON.parse(options.body):null;if(path==='/api/device-preview/clock'){startCalls++;return {generation:body.generation,expires_in:60,heartbeat_after_seconds:5,active_module:'clock'}}if(path==='/api/device-preview/cancel'){cancelCalls++;cancelSignal=options.signal;return new Promise(resolve=>{cancelResolve=()=>resolve({cancelled:true})})}throw new Error(path)}};
+vm.createContext(context);vm.runInContext(process.argv[1],context);(async()=>{const mode=process.argv[2];toggle.checked=true;toggle.listeners.change();await new Promise(resolve=>setTimeout(resolve,5));let operation;if(mode==='replacement')operation=context.replaceDevicePreviewAfterSourceRemoval('clock');else if(mode==='save')operation=context.cancelDevicePreviewForSave();else operation=context.stopDevicePreview();const result=await Promise.race([operation,new Promise(resolve=>setTimeout(()=>resolve('hung'),3500))]);if(result!=='hung'&&result!==false)throw new Error('unexpected '+mode+' result '+result);if(result==='hung')throw new Error(mode+' cancel transport was unbounded');if(cancelCalls!==1)throw new Error('cancel call count '+cancelCalls);if(!cancelSignal?.aborted)throw new Error('timed-out cancel transport was not aborted');if(toggle.checked||status.dataset.state!=='error'||!status.textContent.includes('expire'))throw new Error('safe uncertainty state missing');toggle.checked=true;toggle.listeners.change();await new Promise(resolve=>setTimeout(resolve,5));if(startCalls!==2||status.dataset.state!=='active')throw new Error('later preview was suppressed');cancelResolve();await new Promise(resolve=>setImmediate(resolve));if(status.dataset.state!=='active')throw new Error('late cancellation overwrote newer state');console.log('DEVICE_PREVIEW_CANCEL_DEADLINE_PASS '+mode)})().catch(error=>{console.error(error);process.exit(1)});
+'''
+        node = shutil.which("node")
+        assert node is not None
+        for mode in ("stop", "replacement", "save"):
+            with self.subTest(mode=mode):
+                result = subprocess.run([node, "-e", harness, lifecycle, mode], cwd=Path(__file__).parents[1], text=True, capture_output=True, check=False)
+                self.assertEqual(result.returncode, 0, result.stderr)
+                self.assertIn(f"DEVICE_PREVIEW_CANCEL_DEADLINE_PASS {mode}", result.stdout)
 
     @unittest.skipUnless(shutil.which("node"), "Node.js is required")
     def test_device_preview_shares_inflight_cancellation_across_pagehide_and_start_completion(self):
