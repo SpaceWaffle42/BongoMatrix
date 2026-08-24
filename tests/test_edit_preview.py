@@ -3367,6 +3367,9 @@ class EditPreviewTests(unittest.TestCase):
             def __repr__(self):
                 raise RuntimeError("cleanup-repr-fault")
 
+            def __str__(self):
+                raise RuntimeError("cleanup-str-fault")
+
         class DecodePrimary(RuntimeError):
             def add_note(self, _note):
                 raise RuntimeError("primary-note-fault")
@@ -3404,8 +3407,9 @@ class EditPreviewTests(unittest.TestCase):
                 return self.result
 
         class Opened:
-            def __init__(self, frames):
+            def __init__(self, frames, exit_error=None):
                 self.frames = frames
+                self.exit_error = exit_error
                 self.exit_calls = 0
 
             def __enter__(self):
@@ -3413,6 +3417,8 @@ class EditPreviewTests(unittest.TestCase):
 
             def __exit__(self, *_args):
                 self.exit_calls += 1
+                if self.exit_error is not None:
+                    raise self.exit_error
 
         for scenario in ("first_callable", "first_getter_and_middle_callable"):
             with self.subTest(scenario=scenario):
@@ -3454,6 +3460,63 @@ class EditPreviewTests(unittest.TestCase):
                     [candidate.close_calls for candidate in candidates],
                     [0, 1] if scenario != "first_callable" else [1, 1],
                 )
+
+        primary = DecodePrimary("third-copy-primary-with-source-cleanup")
+        source_error = CleanupBase("source-exit")
+        candidates = [
+            Candidate(close_error=CleanupBase("first-close")),
+            Candidate(close_error=CleanupBase("middle-close")),
+        ]
+        opened = Opened([
+            Frame(result=candidates[0]), Frame(result=candidates[1]),
+            Frame(error=primary),
+        ], exit_error=source_error)
+        iterator = edit_preview.media_preview_frames(
+            CaptureMatrix(), "partial-source.gif", 1,
+        )
+        with (
+            patch.object(Image, "open", return_value=opened),
+            patch.object(
+                ImageSequence, "Iterator",
+                side_effect=lambda source: iter(source.frames),
+            ),
+        ):
+            try:
+                list(iterator)
+            except BaseException as observed:
+                if observed is not primary:
+                    self.fail("source cleanup replaced copy primary")
+            else:
+                self.fail("expected copy primary")
+        self.assertEqual(opened.exit_calls, 1)
+        self.assertEqual(
+            [candidate.close_calls for candidate in candidates], [1, 1],
+        )
+
+        source_error = CleanupBase("source-exit-without-operation-error")
+        candidates = [
+            Candidate(close_error=CleanupBase("candidate-close")), Candidate(),
+        ]
+        opened = Opened([
+            Frame(result=candidates[0]), Frame(result=candidates[1]),
+        ], exit_error=source_error)
+        iterator = edit_preview.media_preview_frames(
+            CaptureMatrix(), "source-cleanup.gif", 1,
+        )
+        with (
+            patch.object(Image, "open", return_value=opened),
+            patch.object(
+                ImageSequence, "Iterator",
+                side_effect=lambda source: iter(source.frames),
+            ),
+        ):
+            with self.assertRaises(CleanupBase) as raised:
+                list(iterator)
+        self.assertIs(raised.exception, source_error)
+        self.assertEqual(opened.exit_calls, 1)
+        self.assertEqual(
+            [candidate.close_calls for candidate in candidates], [1, 1],
+        )
 
         first_error = CleanupBase("first-cleanup")
         later_error = CleanupBase("later-cleanup")

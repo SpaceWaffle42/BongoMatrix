@@ -386,9 +386,27 @@ def media_preview_frames(
         def decode_gif():
             frames = []
             try:
-                with Image.open(source) as opened:
+                manager = Image.open(source)
+                opened = manager.__enter__()
+                try:
                     for frame in ImageSequence.Iterator(opened):
                         frames.append(frame.copy())
+                except BaseException as primary_error:
+                    try:
+                        manager.__exit__(
+                            type(primary_error), primary_error,
+                            primary_error.__traceback__,
+                        )
+                    except BaseException:
+                        try:
+                            primary_error.add_note(
+                                "suppressed GIF source cleanup failure"
+                            )
+                        except BaseException:
+                            pass
+                    raise
+                else:
+                    manager.__exit__(None, None, None)
                 return _DecodedGif(frames)
             except BaseException:
                 _close_preview_value(frames)
