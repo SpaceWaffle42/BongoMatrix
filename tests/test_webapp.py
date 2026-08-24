@@ -833,6 +833,29 @@ vm.createContext(context);vm.runInContext(process.argv[1],context);(async()=>{to
         self.assertIn("DEVICE_PREVIEW_BOUNDED_STOP_PASS", result.stdout)
 
     @unittest.skipUnless(shutil.which("node"), "Node.js is required")
+    def test_device_preview_late_admission_keeps_original_cleanup_deadline(self):
+        source = (Path(__file__).parents[1] / "app" / "templates" / "dashboard.html").read_text()
+        lifecycle = source[source.index("let devicePreviewEnabled="):source.index("\nfunction editPreviewCurrent")]
+        save = source[source.index("async function saveConfig"):source.index("\nfunction updateOpenWeatherSecretStatus")]
+        harness = r'''
+const vm=require('node:vm');let now=0,nextTimer=0,startResolve,cancelResolve,cancelSignal,startCalls=0,cancelCalls=0,persistence=0,startImmediate=false;
+const timers=new Map(),setTimeout=(fn,delay=0)=>{const id=++nextTimer;timers.set(id,{at:now+Math.max(0,Number(delay)||0),fn});return id},clearTimeout=id=>timers.delete(id);
+async function drain(){for(let i=0;i<8;i++)await Promise.resolve()}
+async function advance(target){while(true){const due=[...timers].filter(([,timer])=>timer.at<=target).sort((a,b)=>a[1].at-b[1].at||a[0]-b[0]);if(!due.length)break;const [id,timer]=due[0];timers.delete(id);now=timer.at;timer.fn();await drain()}now=target;await drain()}
+const control=extra=>Object.assign({addEventListener(type,handler){this.listeners??={};this.listeners[type]=handler}},extra),toggle=control({checked:false}),timeout=control({value:'60',focus(){}}),stop=control({disabled:true}),status={textContent:'',dataset:{}};
+const elements={'#device-preview-enabled':toggle,'#device-preview-timeout':timeout,'#stop-device-preview':stop,'#device-preview-status':status};
+const context={console,AbortController,Date:{now:()=>now},Number,Promise,Set,Map,Math,encodeURIComponent,setTimeout,clearTimeout,setInterval:()=>++nextTimer,clearInterval(){},matrixSyncStopped:false,matrixEditorsReady:true,matrixRecoveryPending:false,matrixLoadedRevision:7,highestNotifiedRemoteRevision:7,matrixSavedSnapshot:'saved',matrixDirty:true,previewModule:'clock',previewInstance:'1'.repeat(32),PAIRED_ACTION_SIGNAL:'1',configBody:()=>({name:'draft'}),selectedLavaPaletteDescriptor:()=>null,selectEditPreviewModule(){},selectEditedPreviewModule(){},validateAnnouncementBoard:()=>true,matrixRevisionETag:()=> '"revision-7"',dismissMatrixRevisionDialogThrough(){},setMessage(){},document:{querySelector:s=>elements[s],addEventListener(){}},window:{addEventListener(){}},fetch:async()=>({ok:true}),api:async(path,options={})=>{const body=options.body?JSON.parse(options.body):null;if(path==='/api/device-preview/clock'){startCalls++;if(startImmediate)return {generation:body.generation,expires_in:60,heartbeat_after_seconds:5};return new Promise(resolve=>{startResolve=()=>resolve({generation:body.generation,expires_in:60,heartbeat_after_seconds:5})})}if(path==='/api/device-preview/cancel'){cancelCalls++;cancelSignal=options.signal;return new Promise(resolve=>{cancelResolve=()=>resolve({cancelled:true})})}if(path==='/api/config'){persistence++;return {revision:8}}throw new Error(path)}};
+vm.createContext(context);vm.runInContext(process.argv[1]+'\n'+process.argv[2],context);(async()=>{const mode=process.argv[3];toggle.checked=true;toggle.listeners.change();await advance(0);let settled=false,value;const operation=mode==='replacement'?context.replaceDevicePreviewAfterSourceRemoval('clock'):mode==='save'?context.saveConfig():context.stopDevicePreview();operation.then(result=>{settled=true;value=result});await advance(2900);startResolve();await drain();await advance(3000);if(!settled)throw new Error(mode+' exceeded original deadline');if(mode==='save'){if(value.saved!==false||persistence!==0)throw new Error('save crossed deadline barrier')}else if(value!==false)throw new Error(mode+' did not resolve false');if(cancelCalls!==1||!cancelSignal?.aborted)throw new Error(mode+' cancellation was not aborted once');if(toggle.checked||status.dataset.state!=='error'||!status.textContent.includes('expire'))throw new Error(mode+' uncertainty state missing');startImmediate=true;toggle.checked=true;toggle.listeners.change();await advance(3000);if(startCalls!==2||status.dataset.state!=='active')throw new Error(mode+' later preview suppressed');cancelResolve();await drain();if(status.dataset.state!=='active')throw new Error(mode+' late completion overwrote newer state');console.log('DEVICE_PREVIEW_LATE_ADMISSION_DEADLINE_PASS '+mode)})().catch(error=>{console.error(error);process.exit(1)});
+'''
+        node = shutil.which("node")
+        assert node is not None
+        for mode in ("stop", "replacement", "save"):
+            with self.subTest(mode=mode):
+                result = subprocess.run([node, "-e", harness, lifecycle, save, mode], cwd=Path(__file__).parents[1], text=True, capture_output=True, check=False)
+                self.assertEqual(result.returncode, 0, result.stderr)
+                self.assertIn(f"DEVICE_PREVIEW_LATE_ADMISSION_DEADLINE_PASS {mode}", result.stdout)
+
+    @unittest.skipUnless(shutil.which("node"), "Node.js is required")
     def test_device_preview_cancel_transport_uses_shared_deadline(self):
         source = (Path(__file__).parents[1] / "app" / "templates" / "dashboard.html").read_text()
         lifecycle = source[source.index("let devicePreviewEnabled="):source.index("\nfunction editPreviewCurrent")]
