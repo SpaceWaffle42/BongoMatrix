@@ -460,14 +460,32 @@ class PreviewProvider:
                         worker_accounted = False
                         slot_acquired = False
                 else:
-                    if child_accounted:
-                        with type(self)._accounting_lock:
-                            type(self)._active_children -= 1
-                        child_accounted = False
                     try:
                         child.close()
                     except BaseException as error:
                         cleanup_error = self._retain_cleanup_error(cleanup_error, error)
+                        try:
+                            self._handoff_reaping_child(
+                                child,
+                                child_accounted=child_accounted,
+                                worker_accounted=worker_accounted,
+                                slot_acquired=slot_acquired,
+                            )
+                        except BaseException as handoff_error:
+                            cleanup_error = self._retain_cleanup_error(
+                                cleanup_error, handoff_error
+                            )
+                        else:
+                            child = None
+                            child_accounted = False
+                            worker_accounted = False
+                            slot_acquired = False
+                    else:
+                        child = None
+                        if child_accounted:
+                            with type(self)._accounting_lock:
+                                type(self)._active_children -= 1
+                            child_accounted = False
             if slot_acquired:
                 try:
                     self._worker_slots.release()

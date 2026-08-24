@@ -698,6 +698,73 @@ class PreviewProviderTests(unittest.TestCase):
         self.assertEqual(provider.active_worker_count, 0)
         self.assertEqual(provider.available_worker_slots, 2)
 
+    def test_prepare_hands_off_synchronously_reaped_child_after_close_fault(self):
+        class Connection:
+            def poll(self):
+                return True
+
+            def recv(self):
+                return ("returned", (("marker", "ready"),))
+
+            def close(self):
+                pass
+
+        class Child:
+            close_calls = 0
+
+            def start(self):
+                pass
+
+            def is_alive(self):
+                return False
+
+            def join(self, timeout=None):
+                pass
+
+            def terminate(self):
+                pass
+
+            def kill(self):
+                pass
+
+            def close(self):
+                self.close_calls += 1
+                if self.close_calls == 1:
+                    raise OSError("synchronous child close unavailable")
+
+        receiver = Connection()
+        sender = Connection()
+        child = Child()
+        provider = PreviewProvider()
+
+        class Context:
+            @staticmethod
+            def Pipe(**_kwargs):
+                return receiver, sender
+
+            @staticmethod
+            def Process(**_kwargs):
+                return child
+
+        with patch.object(provider, "_context", Context()):
+            with self.assertRaisesRegex(OSError, "synchronous child close unavailable"):
+                provider.prepare(
+                    provider_returns_recovery_marker,
+                    settings={"marker": "ignored"},
+                    credentials={"api_key": "server-held"},
+                    cancel_event=threading.Event(),
+                    request_deadline=1,
+                )
+
+        deadline = time.monotonic() + 1.0
+        while child.close_calls < 2 and time.monotonic() < deadline:
+            time.sleep(0.005)
+        self.assertEqual(child.close_calls, 2)
+        self.assertEqual(provider.active_child_count, 0)
+        self.assertEqual(provider.active_worker_count, 0)
+        self.assertEqual(provider.available_worker_slots, 2)
+        self.assertEqual(list(PreviewProvider._reaper_jobs), [])
+
     def test_result_is_not_published_when_child_reap_reaches_deadline(self):
         child_can_exit = threading.Event()
         outcome = {}

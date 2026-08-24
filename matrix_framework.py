@@ -120,7 +120,8 @@ def _reap_decoder(process):
     try:
         process.wait()
     except BaseException:
-        pass
+        return False
+    return True
 
 
 _DECODER_REAPER_STOP = object()
@@ -167,9 +168,13 @@ def _decoder_reaper_main(owner):
                     break
                 if owner.shutdown_requested:
                     return
-                owner.condition.wait()
-        if claimed.process is not None:
-            _reap_decoder(claimed.process)
+                owner.condition.wait(0.01)
+        if claimed.process is not None and not _reap_decoder(claimed.process):
+            with owner.condition:
+                owner.leases.remove(claimed)
+                claimed.claimed = False
+                owner.leases.append(claimed)
+            time.sleep(0.01)
 
 
 def _set_decoder_reaper_owner(owner):
@@ -229,6 +234,7 @@ def _ensure_decoder_reaper(deadline=None):
 
 def _release_decoder_reaper(lease, deferred_process=None, join_timeout=0.25):
     """Publish into a reserved slot; never detach a worker that may own a child."""
+    notification_error = None
     with _decoder_reaper_lock:
         owner = _decoder_reaper_owner
         if (
@@ -249,7 +255,10 @@ def _release_decoder_reaper(lease, deferred_process=None, join_timeout=0.25):
             final_release = owner.active_leases == 0
             if final_release:
                 owner.shutdown_requested = True
-            owner.condition.notify_all()
+            try:
+                owner.condition.notify_all()
+            except BaseException as error:
+                notification_error = error
         _set_decoder_reaper_owner(owner)
         reaper = owner.thread
         had_deferred = owner.had_deferred
@@ -259,6 +268,8 @@ def _release_decoder_reaper(lease, deferred_process=None, join_timeout=0.25):
         with _decoder_reaper_lock:
             if _decoder_reaper_owner is owner and not reaper.is_alive():
                 _set_decoder_reaper_owner(None)
+    if notification_error is not None:
+        raise notification_error
 
 
 def _reset_decoder_reaper_for_tests(timeout=1):

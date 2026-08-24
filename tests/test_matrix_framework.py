@@ -603,14 +603,62 @@ else:
         self.assertFalse(first_reaper.is_alive())
         self.assertFalse(framework._decoder_reaper_thread)
 
-    def test_decoder_reaper_survives_failed_child_and_reaps_later_child(self):
-        class FailedChild:
-            attempted = threading.Event()
+    def test_decoder_release_notification_fault_still_reaps_and_retires_owner(self):
+        class Child:
+            reaped = threading.Event()
 
             @classmethod
             def wait(cls):
+                cls.reaped.set()
+
+        framework._reset_decoder_reaper_for_tests()
+        lease = framework._ensure_decoder_reaper()
+        owner = lease.owner
+        reaper = owner.thread
+        real_notify = owner.condition.notify_all
+        try:
+            with patch.object(
+                owner.condition,
+                "notify_all",
+                side_effect=RuntimeError("decoder notification unavailable"),
+            ):
+                with self.assertRaisesRegex(
+                    RuntimeError, "decoder notification unavailable"
+                ):
+                    framework._release_decoder_reaper(
+                        lease, deferred_process=Child()
+                    )
+
+            self.assertTrue(Child.reaped.wait(0.25))
+            reaper.join(0.25)
+            self.assertFalse(reaper.is_alive())
+            next_lease = framework._ensure_decoder_reaper()
+            next_reaper = next_lease.owner.thread
+            framework._release_decoder_reaper(next_lease)
+            next_reaper.join(0.25)
+            self.assertFalse(next_reaper.is_alive())
+        finally:
+            if reaper.is_alive():
+                with owner.condition:
+                    real_notify()
+                reaper.join(0.5)
+            with framework._decoder_reaper_lock:
+                if framework._decoder_reaper_owner is owner:
+                    framework._set_decoder_reaper_owner(None)
+
+    def test_decoder_reaper_survives_failed_child_and_reaps_later_child(self):
+        class FailedChild:
+            attempted = threading.Event()
+            reaped = threading.Event()
+            wait_calls = 0
+
+            @classmethod
+            def wait(cls):
+                cls.wait_calls += 1
                 cls.attempted.set()
-                raise RuntimeError("deferred child wait failed")
+                if cls.wait_calls == 1:
+                    raise RuntimeError("deferred child wait failed")
+                cls.reaped.set()
 
         class LaterChild:
             reaped = threading.Event()
@@ -628,6 +676,8 @@ else:
             self.assertTrue(FailedChild.attempted.wait(0.5))
             framework._release_decoder_reaper(second_lease, deferred_process=LaterChild())
             self.assertTrue(LaterChild.reaped.wait(0.5))
+            self.assertTrue(FailedChild.reaped.wait(0.5))
+            self.assertEqual(FailedChild.wait_calls, 2)
             reaper.join(0.5)
             self.assertFalse(reaper.is_alive())
         finally:
