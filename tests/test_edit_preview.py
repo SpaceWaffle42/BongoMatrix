@@ -3362,6 +3362,116 @@ class EditPreviewTests(unittest.TestCase):
                 for frame in frames:
                     frame.close.assert_called_once_with()
 
+    def test_partial_gif_decode_cleanup_preserves_primary_and_attempts_all_candidates(self):
+        class CleanupBase(BaseException):
+            def __repr__(self):
+                raise RuntimeError("cleanup-repr-fault")
+
+        class DecodePrimary(RuntimeError):
+            def add_note(self, _note):
+                raise RuntimeError("primary-note-fault")
+
+        class Candidate:
+            def __init__(self, getter_error=None, close_error=None):
+                self.getter_error = getter_error
+                self.close_error = close_error
+                self.close_lookups = 0
+                self.close_calls = 0
+
+            @property
+            def close(self):
+                self.close_lookups += 1
+                if self.getter_error is not None:
+                    raise self.getter_error
+
+                def close_candidate():
+                    self.close_calls += 1
+                    if self.close_error is not None:
+                        raise self.close_error
+
+                return close_candidate
+
+        class Frame:
+            info = {"duration": 100}
+
+            def __init__(self, result=None, error=None):
+                self.result = result
+                self.error = error
+
+            def copy(self):
+                if self.error is not None:
+                    raise self.error
+                return self.result
+
+        class Opened:
+            def __init__(self, frames):
+                self.frames = frames
+                self.exit_calls = 0
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *_args):
+                self.exit_calls += 1
+
+        for scenario in ("first_callable", "first_getter_and_middle_callable"):
+            with self.subTest(scenario=scenario):
+                primary = DecodePrimary("third-copy-primary")
+                if scenario == "first_callable":
+                    candidates = [
+                        Candidate(close_error=CleanupBase("first-close")),
+                        Candidate(),
+                    ]
+                else:
+                    candidates = [
+                        Candidate(getter_error=CleanupBase("first-getter")),
+                        Candidate(close_error=CleanupBase("middle-close")),
+                    ]
+                opened = Opened([
+                    Frame(result=candidates[0]), Frame(result=candidates[1]),
+                    Frame(error=primary),
+                ])
+
+                iterator = edit_preview.media_preview_frames(
+                    CaptureMatrix(), "partial.gif", 1,
+                )
+                with (
+                    patch.object(Image, "open", return_value=opened),
+                    patch.object(
+                        ImageSequence, "Iterator",
+                        side_effect=lambda source: iter(source.frames),
+                    ),
+                ):
+                    with self.assertRaises(DecodePrimary) as raised:
+                        list(iterator)
+
+                self.assertIs(raised.exception, primary)
+                self.assertEqual(opened.exit_calls, 1)
+                self.assertEqual(
+                    [candidate.close_lookups for candidate in candidates], [1, 1],
+                )
+                self.assertEqual(
+                    [candidate.close_calls for candidate in candidates],
+                    [0, 1] if scenario != "first_callable" else [1, 1],
+                )
+
+        first_error = CleanupBase("first-cleanup")
+        later_error = CleanupBase("later-cleanup")
+        candidates = [
+            Candidate(close_error=first_error),
+            Candidate(close_error=later_error),
+            Candidate(),
+        ]
+        with self.assertRaises(CleanupBase) as raised:
+            edit_preview._close_preview_value(candidates)
+        self.assertIs(raised.exception, first_error)
+        self.assertEqual(
+            [candidate.close_lookups for candidate in candidates], [1, 1, 1],
+        )
+        self.assertEqual(
+            [candidate.close_calls for candidate in candidates], [1, 1, 1],
+        )
+
     def test_transferred_static_preview_image_closes_on_every_exit(self):
         for scenario in ("normal", "cancel", "draw_error"):
             with self.subTest(scenario=scenario):

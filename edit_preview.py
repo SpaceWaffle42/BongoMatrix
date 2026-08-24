@@ -9,6 +9,7 @@ import inspect
 import json
 import math
 import secrets
+import sys
 import threading
 import time
 from collections import OrderedDict, deque
@@ -208,12 +209,36 @@ class _PreviewDecodeCancelled(Exception):
 
 def _close_preview_value(value):
     """Close one worker-owned value or decoded-frame bundle."""
-    close = getattr(value, "close", None)
-    if close is not None:
-        close()
-    elif isinstance(value, (list, tuple)):
+    active_error = sys.exception()
+    first_cleanup_error = None
+
+    def retain(error):
+        nonlocal first_cleanup_error
+        if active_error is None:
+            if first_cleanup_error is None:
+                first_cleanup_error = error
+            return
+        try:
+            active_error.add_note("suppressed preview cleanup failure")
+        except BaseException:
+            pass
+
+    if isinstance(value, (list, tuple)):
         for item in value:
-            _close_preview_value(item)
+            try:
+                _close_preview_value(item)
+            except BaseException as error:
+                retain(error)
+    else:
+        try:
+            close = getattr(value, "close", None)
+            if callable(close):
+                close()
+        except BaseException as error:
+            retain(error)
+
+    if first_cleanup_error is not None:
+        raise first_cleanup_error
 
 
 class _DecodedGif:
