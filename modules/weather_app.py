@@ -184,9 +184,13 @@ def _render_error(matrix, message, duration, stop_event):
     matrix.draw_text_with_border(matrix.font("5x7"), 7, 12, red, black, "WEATHER", canvas=canvas)
     matrix.draw_text_with_border(matrix.font("4x6"), 2, 25, white, black, message[:15], canvas=canvas)
     if stop_event and stop_event.is_set():
-        return
+        return False
     matrix.swap(canvas)
+    admission = getattr(type(matrix), "last_swap_admitted", None)
+    if admission is not None and not admission(matrix):
+        return False
     _wait(stop_event, min(duration if duration > 0 else 5, 5))
+    return True
 
 
 def ticker_text(weather, units):
@@ -308,8 +312,7 @@ def run(matrix, config, duration=20, stop_event=None, client=None):
     except Exception as exc:
         if stop_event and stop_event.is_set():
             return False
-        _render_error(matrix, str(exc), duration, stop_event)
-        return False
+        return _render_error(matrix, str(exc), duration, stop_event)
 
     rendered = False
     for _canvas, frame_delay in weather_frames(matrix, config, weather, stop_event):

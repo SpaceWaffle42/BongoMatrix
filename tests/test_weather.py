@@ -132,6 +132,68 @@ class WeatherTests(unittest.TestCase):
         client.fetch.assert_not_called()
         matrix.matrix.CreateFrameCanvas.assert_not_called()
 
+    def test_admitted_weather_error_frame_is_reported_as_rendered(self):
+        from matrix_framework import Matrix
+
+        matrix = Matrix.__new__(Matrix)
+        canvas = Mock()
+        matrix.canvas = canvas
+        matrix.matrix = Mock(width=64, height=32)
+        matrix.matrix.CreateFrameCanvas.return_value = canvas
+        matrix.matrix.SwapOnVSync.return_value = canvas
+        matrix._frame_capture = Mock()
+        matrix._frame_capture.publish.return_value = 1
+        matrix._physical_swap_observer = None
+        matrix._publication_guard = lambda: True
+        matrix.clear = Mock()
+        matrix.colour = Mock(return_value=Mock())
+        matrix.font = Mock(return_value=Mock())
+        matrix.draw_text_with_border = Mock()
+        client = Mock()
+        client.fetch.side_effect = RuntimeError("provider failed")
+        stop_event = Mock()
+        stop_event.is_set.return_value = False
+        stop_event.wait.return_value = True
+
+        self.assertTrue(run(
+            matrix, {"weather": {}}, duration=5,
+            stop_event=stop_event, client=client,
+        ))
+
+        matrix.matrix.SwapOnVSync.assert_called_once_with(canvas)
+        matrix._frame_capture.publish.assert_called_once_with(canvas)
+
+    def test_rejected_weather_error_frame_is_not_reported_as_rendered(self):
+        from matrix_framework import Matrix
+
+        matrix = Matrix.__new__(Matrix)
+        canvas = Mock()
+        matrix.canvas = canvas
+        matrix.matrix = Mock(width=64, height=32)
+        matrix.matrix.CreateFrameCanvas.return_value = canvas
+        matrix.matrix.SwapOnVSync.return_value = canvas
+        matrix._frame_capture = Mock()
+        matrix._frame_capture.publish.return_value = 1
+        matrix._physical_swap_observer = None
+        matrix._publication_guard = lambda: False
+        matrix.clear = Mock()
+        matrix.colour = Mock(return_value=Mock())
+        matrix.font = Mock(return_value=Mock())
+        matrix.draw_text_with_border = Mock()
+        client = Mock()
+        client.fetch.side_effect = RuntimeError("provider failed")
+        stop_event = Mock()
+        stop_event.is_set.return_value = False
+
+        self.assertFalse(run(
+            matrix, {"weather": {}}, duration=5,
+            stop_event=stop_event, client=client,
+        ))
+
+        matrix.matrix.SwapOnVSync.assert_not_called()
+        matrix._frame_capture.publish.assert_not_called()
+        stop_event.wait.assert_not_called()
+
     def test_renderer_does_not_publish_error_after_provider_cancels(self):
         matrix = Mock()
         client = Mock()

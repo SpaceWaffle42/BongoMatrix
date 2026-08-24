@@ -100,6 +100,19 @@ else:
         matrix.set_brightness(0)
         self.assertEqual(matrix.matrix.brightness, 1)
 
+    def test_show_accepts_custom_swap_without_admission_capability(self):
+        class CustomSwapAdapter:
+            def __init__(self):
+                self.swaps = 0
+
+            def swap(self):
+                self.swaps += 1
+
+        adapter = CustomSwapAdapter()
+
+        self.assertTrue(Matrix.show(adapter))
+        self.assertEqual(adapter.swaps, 1)
+
     def test_show_image_cancelled_during_final_canvas_draw_is_not_published(self):
         matrix = Matrix.__new__(Matrix)
         matrix.canvas = Mock()

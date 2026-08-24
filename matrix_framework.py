@@ -275,6 +275,12 @@ def _reset_decoder_reaper_for_tests(timeout=1):
             _set_decoder_reaper_owner(None)
 
 
+def _swap_admitted(matrix):
+    """Treat swaps without a production admission capability as accepted."""
+    admission = getattr(type(matrix), "last_swap_admitted", None)
+    return True if admission is None else bool(admission(matrix))
+
+
 class Matrix:
     def __init__(
         self,
@@ -448,7 +454,7 @@ class Matrix:
     def show(self, delay=None):
         """Display the current canvas. delay=None means return immediately."""
         self.swap()
-        if not self._last_swap_admitted:
+        if not _swap_admitted(self):
             return False
 
         if delay is None:
@@ -944,7 +950,7 @@ class Matrix:
             if stop_event is not None and stop_event.is_set():
                 return shown
             self.swap()
-            if not self.last_swap_admitted():
+            if not _swap_admitted(self):
                 return shown
             shown = True
             if stop_event is not None:
@@ -1140,7 +1146,7 @@ class Matrix:
             if stop_event is not None and stop_event.is_set():
                 return shown
             self.swap()
-            if not self.last_swap_admitted():
+            if not _swap_admitted(self):
                 return shown
             shown = True
             if stop_event is not None:
