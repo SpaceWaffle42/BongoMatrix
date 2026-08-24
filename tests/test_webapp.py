@@ -4651,6 +4651,89 @@ try{
         and os.access(os.environ.get("MATRIX_CHROMIUM", ""), os.X_OK),
         "MATRIX_CHROMIUM browser is required",
     )
+    def test_active_device_preview_stop_and_status_remain_reachable_in_popped_strip(self):
+        self.pair_browser()
+        body = self.client.get("/").get_data(as_text=True)
+        probe = r"""
+const port=process.argv[1],pagePath=process.argv[2];let endpoint;
+for(let attempt=0;attempt<50;attempt++){try{endpoint=await fetch(`http://127.0.0.1:${port}/json/new`,{method:'PUT'}).then(r=>r.json());break}catch(_){await new Promise(r=>setTimeout(r,100))}}
+if(!endpoint)throw new Error('Chromium DevTools endpoint unavailable');
+const socket=new WebSocket(endpoint.webSocketDebuggerUrl),pending=new Map();let nextId=1,loadResolve,loaded=new Promise(resolve=>loadResolve=resolve);
+socket.onmessage=event=>{const message=JSON.parse(event.data);if(message.id&&pending.has(message.id)){const request=pending.get(message.id);pending.delete(message.id);message.error?request.reject(new Error(JSON.stringify(message.error))):request.resolve(message.result)}else if(message.method==='Page.loadEventFired')loadResolve()};
+await new Promise((resolve,reject)=>{socket.onopen=resolve;socket.onerror=reject});
+const send=(method,params={})=>{const id=nextId++;socket.send(JSON.stringify({id,method,params}));return new Promise((resolve,reject)=>pending.set(id,{resolve,reject}))};
+const evaluate=async expression=>{const result=await send('Runtime.evaluate',{expression,returnByValue:true,awaitPromise:true});if(result.exceptionDetails)throw new Error(JSON.stringify(result.exceptionDetails));return result.result.value};
+try{
+ await send('Runtime.enable');await send('Page.enable');loaded=new Promise(resolve=>loadResolve=resolve);await send('Page.navigate',{url:'file://'+pagePath});await Promise.race([loaded,new Promise((_,reject)=>setTimeout(()=>reject(new Error('load timeout')),5000))]);await evaluate(`document.documentElement.style.scrollBehavior='auto';globalThis.__deviceStopActivations=0;document.querySelector('#stop-device-preview').addEventListener('click',()=>__deviceStopActivations++)`);
+ const states=[];
+ for(const [width,height] of [[320,390],[320,500],[320,568],[360,800],[390,844],[412,915],[768,1024],[820,1180],[1024,768],[1280,720],[1440,900],[844,390]]){
+  await send('Emulation.setDeviceMetricsOverride',{width,height,deviceScaleFactor:1,mobile:width<1024});
+  states.push(await evaluate(`(()=>{const live=document.querySelector('.preview-live'),controls=document.querySelector('.device-preview-controls'),stop=document.querySelector('#stop-device-preview'),status=document.querySelector('#device-preview-status');setDevicePreviewStatus('Device preview active · 60s remaining.','active');scrollTo(0,document.documentElement.scrollHeight);resizePreviewPopout();stop.focus();const liveRect=live.getBoundingClientRect(),controlsRect=controls.getBoundingClientRect(),stopRect=stop.getBoundingClientRect(),statusRect=status.getBoundingClientRect(),hit=document.elementFromPoint(stopRect.left+stopRect.width/2,stopRect.top+stopRect.height/2),before=__deviceStopActivations;stop.click();return{viewport:[innerWidth,innerHeight],popped:live.classList.contains('is-popped'),display:getComputedStyle(controls).display,overflow:document.documentElement.scrollWidth-document.documentElement.clientWidth,live:[liveRect.left,liveRect.top,liveRect.right,liveRect.bottom],controls:[controlsRect.left,controlsRect.top,controlsRect.right,controlsRect.bottom,controlsRect.width,controlsRect.height],stop:[stopRect.left,stopRect.top,stopRect.right,stopRect.bottom,stopRect.width,stopRect.height],status:[statusRect.left,statusRect.top,statusRect.right,statusRect.bottom,statusRect.width,statusRect.height],statusText:status.textContent,stopText:stop.textContent.trim(),tabIndex:stop.tabIndex,focused:document.activeElement===stop,hit:hit===stop||stop.contains(hit),activated:__deviceStopActivations===before+1}})()`));
+ }
+ await send('Emulation.setDeviceMetricsOverride',{width:320,height:568,deviceScaleFactor:1,mobile:true});await send('Emulation.setPageScaleFactor',{pageScaleFactor:1});
+ const keyboardBefore=await evaluate(`(()=>{setDevicePreviewStatus('Device preview active · 60s remaining.','active');scrollTo(0,document.documentElement.scrollHeight);resizePreviewPopout();const stop=document.querySelector('#stop-device-preview');stop.focus();return __deviceStopActivations})()`);await send('Input.dispatchKeyEvent',{type:'keyDown',key:' ',code:'Space'});await send('Input.dispatchKeyEvent',{type:'keyUp',key:' ',code:'Space'});await new Promise(resolve=>setTimeout(resolve,20));const keyboardAfter=await evaluate(`__deviceStopActivations`);
+ const mouse=await evaluate(`(()=>{setDevicePreviewStatus('Device preview active · 60s remaining.','active');resizePreviewPopout();const stop=document.querySelector('#stop-device-preview'),rect=stop.getBoundingClientRect();return{x:rect.left+rect.width/2,y:rect.top+rect.height/2,before:__deviceStopActivations}})()`);await send('Input.dispatchMouseEvent',{type:'mousePressed',x:mouse.x,y:mouse.y,button:'left',clickCount:1});await send('Input.dispatchMouseEvent',{type:'mouseReleased',x:mouse.x,y:mouse.y,button:'left',clickCount:1});await new Promise(resolve=>setTimeout(resolve,20));const mouseAfter=await evaluate(`__deviceStopActivations`);
+ await send('Emulation.setPageScaleFactor',{pageScaleFactor:2});await new Promise(resolve=>setTimeout(resolve,20));const zoom=await evaluate(`(()=>{setDevicePreviewStatus('Device preview active · 60s remaining.','active');scrollTo(0,document.documentElement.scrollHeight);resizePreviewPopout();const live=document.querySelector('.preview-live'),controls=document.querySelector('.device-preview-controls'),stop=document.querySelector('#stop-device-preview'),status=document.querySelector('#device-preview-status'),modes=document.querySelector('.preview-modes'),screen=document.querySelector('.screen-wrap'),lr=live.getBoundingClientRect(),cr=controls.getBoundingClientRect(),sr=stop.getBoundingClientRect(),tr=status.getBoundingClientRect(),mr=modes.getBoundingClientRect(),left=visualViewport.offsetLeft,right=left+visualViewport.width,hit=document.elementFromPoint(sr.left+sr.width/2,sr.top+sr.height/2);return{scale:visualViewport.scale,visual:[left,right,visualViewport.width],narrow:live.classList.contains('is-visually-narrow'),live:[lr.left,lr.top,lr.right,lr.bottom],controls:[cr.left,cr.top,cr.right,cr.bottom,cr.width,cr.height],stop:[sr.left,sr.top,sr.right,sr.bottom,sr.width,sr.height],status:[tr.left,tr.top,tr.right,tr.bottom,tr.width,tr.height],modes:[mr.left,mr.top,mr.right,mr.bottom,mr.width,mr.height],screenDisplay:getComputedStyle(screen).display,hit:hit===stop||stop.contains(hit),overflow:document.documentElement.scrollWidth-document.documentElement.clientWidth}})()`);await send('Emulation.setPageScaleFactor',{pageScaleFactor:1});
+ console.log(JSON.stringify({states,keyboard:{before:keyboardBefore,after:keyboardAfter},mouse:{before:mouse.before,after:mouseAfter},zoom}));
+}finally{socket.close()}
+"""
+        report = self._run_dashboard_chromium_probe(body, probe, timeout=45)
+        expected = [[320, 390], [320, 500], [320, 568], [360, 800], [390, 844], [412, 915], [768, 1024], [820, 1180], [1024, 768], [1280, 720], [1440, 900], [844, 390]]
+        self.assertEqual([item["viewport"] for item in report["states"]], expected, report)
+        for item in report["states"]:
+            self.assertTrue(item["popped"], item)
+            self.assertNotEqual(item["display"], "none", item)
+            self.assertLessEqual(item["overflow"], 1, item)
+            live_left, live_top, live_right, live_bottom = item["live"]
+            for bounds in (item["controls"], item["stop"], item["status"]):
+                left, top, right, bottom, width, height = bounds
+                self.assertGreater(width, 0, item)
+                self.assertGreater(height, 0, item)
+                self.assertGreaterEqual(left, live_left - 1, item)
+                self.assertGreaterEqual(top, live_top - 1, item)
+                self.assertLessEqual(right, live_right + 1, item)
+                self.assertLessEqual(bottom, live_bottom + 1, item)
+            self.assertGreaterEqual(item["stop"][4], 44, item)
+            self.assertGreaterEqual(item["stop"][5], 44, item)
+            self.assertGreaterEqual(item["status"][4], 44, item)
+            self.assertIn("Device preview active", item["statusText"])
+            self.assertEqual(item["stopText"], "Stop device preview", item)
+            self.assertEqual(item["tabIndex"], 0, item)
+            self.assertTrue(item["focused"], item)
+            self.assertTrue(item["hit"], item)
+            self.assertTrue(item["activated"], item)
+        self.assertEqual(report["keyboard"]["after"], report["keyboard"]["before"] + 1, report)
+        self.assertEqual(report["mouse"]["after"], report["mouse"]["before"] + 1, report)
+        zoom = report["zoom"]
+        self.assertEqual(zoom["scale"], 2, report)
+        self.assertTrue(zoom["narrow"], report)
+        self.assertLess(zoom["visual"][2], 280, report)
+        self.assertEqual(zoom["screenDisplay"], "none", report)
+        self.assertLessEqual(zoom["overflow"], 1, report)
+        visual_left, visual_right, _ = zoom["visual"]
+        live_left, live_top, live_right, live_bottom = zoom["live"]
+        for bounds in (zoom["controls"], zoom["stop"], zoom["status"], zoom["modes"]):
+            left, top, right, bottom, width, height = bounds
+            self.assertGreater(width, 0, report)
+            self.assertGreater(height, 0, report)
+            self.assertGreaterEqual(left, max(visual_left, live_left) - 1, report)
+            self.assertGreaterEqual(top, live_top - 1, report)
+            self.assertLessEqual(right, min(visual_right, live_right) + 1, report)
+            self.assertLessEqual(bottom, live_bottom + 1, report)
+        self.assertGreaterEqual(zoom["status"][4], 44, report)
+        self.assertGreaterEqual(zoom["stop"][4], 44, report)
+        self.assertGreaterEqual(zoom["stop"][5], 44, report)
+        self.assertGreaterEqual(zoom["modes"][4], 88, report)
+        self.assertGreaterEqual(zoom["modes"][5], 44, report)
+        self.assertTrue(zoom["hit"], report)
+
+    @unittest.skipUnless(shutil.which("node"), "Node.js is required")
+    @unittest.skipUnless(
+        os.environ.get("MATRIX_CHROMIUM")
+        and Path(os.environ.get("MATRIX_CHROMIUM", "")).is_file()
+        and os.access(os.environ.get("MATRIX_CHROMIUM", ""), os.X_OK),
+        "MATRIX_CHROMIUM browser is required",
+    )
     def test_real_chromium_paired_sync_conflict_matrix(self):
         self.pair_browser()
         body = self.client.get("/").get_data(as_text=True)

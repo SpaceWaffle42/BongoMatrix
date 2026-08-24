@@ -182,6 +182,21 @@ Add a separate **Preview edits on device** checkbox beneath the browser preview.
 - Use adaptive debounce timing: 150 ms for simple controls and 500 ms for media changes or other expensive renders.
 - Cancel superseded draft work so an older slow render can never replace a newer edit on the device.
 
+#### Priority 1.3 post-completion whole-project remediation — In progress
+
+A fresh whole-project review rejected the earlier post-1.3 release candidate and opened the ordered F1–F12 remediation ledger in GitLab issue 2. Each finding is an independent immutable commit/review boundary; approval of one finding authorizes only the next finding in sequence and does not close the final whole-project release gate.
+
+Verified remediation approvals as of 2026-08-24:
+
+- **F1 approved:** commit `603154b0d7bd3417df610f8df6a33b2f26a46146` prevents cancelled custom-text and OpenWeather frames from publishing after their final cancellation-admission point.
+- **F2 approved:** commit `c1905c15aee6fffc2a87ee2f790875f8201db815` pins privileged release/acceptance service control to an absolute `systemctl`, fixes its environment, and bounds it under one aggregate monotonic deadline.
+- **F3 approved:** commit `6395cb68786798c1f8e69f5ea4ae4b140225bb28` rejects wildcard, weak, malformed, or multiple configuration mutation validators and requires exactly one strong current revision.
+- **F4 approved:** commit `4faa8c2db8d2e86a5a0409ca00d407baaca03b5a` moves physical OpenWeather overview/forecast preparation through the existing bounded spawned-provider lifecycle, with cancellation, reaping, aggregate deadline, remaining-deadline transport timeouts, configuration isolation, and secret isolation. Immutable review `deleg_ff55377b` reported **APPROVED** with no actionable P0/P1/P2 findings; GitLab evidence is recorded in issue 2 notes 357–358.
+
+**F5 is authorized and in progress, not yet approved:** correct the sticky popped physical draft-preview layout so an active lease retains a compact, visible status and an immediately reachable **Stop device preview** control. Acceptance requires deterministic real-Chromium phone, tablet, desktop, and landscape coverage for containment, meaningful status visibility, keyboard focus, hit testing/click activation, a minimum 44×44 CSS-pixel Stop target, no horizontal overflow, and preservation of the inactive popped strip and natural in-flow controls. F5 remains open until its exact committed artifact receives a fresh read-only immutable review with no actionable P0/P1/P2 findings.
+
+F6–F12, final whole-project review, merge request/CI, deployment, browser/physical acceptance, and Priority 1.4 remain blocked until every earlier remediation boundary is approved in order.
+
 ### 1.4 Add borders and backgrounds to basic custom modules
 
 Add an **Appearance** control group to the basic **Add custom module** editor for backgrounds and borders, matching the controls and executed rendering behavior already used by Announcement Board rather than creating a second styling model.
