@@ -226,8 +226,15 @@ class _DecodedGif:
         if self._closed:
             return
         self._closed = True
+        first_error = None
         for frame in self.frames:
-            frame.close()
+            try:
+                frame.close()
+            except BaseException as error:
+                if first_error is None:
+                    first_error = error
+        if first_error is not None:
+            raise first_error
 
 
 def _preview_decode(decode, stop_event, deadline, monotonic):

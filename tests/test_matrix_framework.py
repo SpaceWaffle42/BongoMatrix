@@ -1479,6 +1479,84 @@ else:
                 candidate.close.assert_called_once_with()
                 self.assertEqual(timeline.close_calls, 1)
 
+    def test_show_gif_cleanup_faults_preserve_primary_and_attempt_all_stages(self):
+        scenarios = (
+            ("draw_primary", "draw-primary"),
+            ("swap_primary", "swap-primary"),
+            ("wait_primary", "wait-primary"),
+            ("normal_cleanup", "candidate-close"),
+            ("cancel_cleanup", "candidate-close"),
+            ("admission_cleanup", "candidate-close"),
+            ("timeline_only", "timeline-close"),
+        )
+        for scenario, expected_error in scenarios:
+            with self.subTest(scenario=scenario):
+                matrix = Matrix.__new__(Matrix)
+                matrix.canvas = Mock()
+                matrix.matrix = Mock(width=64, height=32)
+                matrix.clear = Mock()
+                matrix.draw_image = Mock()
+                matrix.swap = Mock(return_value=matrix.canvas)
+                matrix._media_file = Mock(return_value=Mock())
+                candidate = Mock()
+                if scenario != "timeline_only":
+                    candidate.close.side_effect = OSError("candidate-close")
+
+                class Timeline:
+                    def __init__(self):
+                        self.emitted = False
+                        self.close_calls = 0
+
+                    def __iter__(self):
+                        return self
+
+                    def __next__(self):
+                        if self.emitted:
+                            raise StopIteration
+                        self.emitted = True
+                        return candidate, 0.01
+
+                    def close(self):
+                        self.close_calls += 1
+                        raise OSError("timeline-close")
+
+                timeline = Timeline()
+                stop = None
+                admitted = True
+                if scenario == "draw_primary":
+                    matrix.draw_image.side_effect = RuntimeError("draw-primary")
+                elif scenario == "swap_primary":
+                    matrix.swap.side_effect = RuntimeError("swap-primary")
+                elif scenario == "wait_primary":
+                    stop = Mock()
+                    stop.is_set.return_value = False
+                    stop.wait.side_effect = RuntimeError("wait-primary")
+                elif scenario == "cancel_cleanup":
+                    cancel_event = threading.Event()
+                    stop = cancel_event
+                    matrix.draw_image.side_effect = (
+                        lambda *_a, **_k: cancel_event.set()
+                    )
+                elif scenario == "admission_cleanup":
+                    admitted = False
+
+                with patch(
+                    "modules.media_player.gif_media_frames",
+                    return_value=timeline,
+                ), patch.object(
+                    framework, "_swap_admitted", return_value=admitted,
+                ), patch.object(framework.time, "sleep"), self.assertRaisesRegex(
+                    (RuntimeError if scenario.endswith("primary") else OSError),
+                    expected_error,
+                ):
+                    matrix.show_gif(
+                        "cleanup.gif", loops=1, stop_event=stop,
+                        max_duration=1,
+                    )
+
+                candidate.close.assert_called_once_with()
+                self.assertEqual(timeline.close_calls, 1)
+
     def test_show_gif_cancelled_during_final_draw_is_not_published(self):
         matrix = Matrix.__new__(Matrix)
         matrix.canvas = Mock()

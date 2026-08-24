@@ -3343,6 +3343,25 @@ class EditPreviewTests(unittest.TestCase):
         self.assertEqual(openweather_overview.run.__defaults__, (20, None, None, None, None))
         self.assertEqual(openweather_forecast.run.__defaults__, (30, None, None, None, None))
 
+    def test_decoded_gif_close_attempts_every_frame_before_raising_first_error(self):
+        for failing_indices in ((0,), (1,), (0, 1)):
+            with self.subTest(failing_indices=failing_indices):
+                frames = [Mock(), Mock(), Mock()]
+                for failing_index in failing_indices:
+                    frames[failing_index].close.side_effect = OSError(
+                        f"frame-{failing_index}-close"
+                    )
+                decoded = edit_preview._DecodedGif(frames)
+
+                with self.assertRaisesRegex(
+                    OSError, f"frame-{failing_indices[0]}-close",
+                ):
+                    decoded.close()
+                decoded.close()
+
+                for frame in frames:
+                    frame.close.assert_called_once_with()
+
     def test_transferred_static_preview_image_closes_on_every_exit(self):
         for scenario in ("normal", "cancel", "draw_error"):
             with self.subTest(scenario=scenario):

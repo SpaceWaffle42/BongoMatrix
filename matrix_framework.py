@@ -938,6 +938,20 @@ class Matrix:
                     media_file.close()
                     raise
 
+        def close_owned(value, label):
+            close = getattr(value, "close", None)
+            if not callable(close):
+                return
+            active_error = sys.exception()
+            try:
+                close()
+            except BaseException as cleanup_error:
+                if active_error is None:
+                    raise
+                active_error.add_note(
+                    f"suppressed {label} cleanup failure: {cleanup_error!r}"
+                )
+
         shown = False
         timeline = gif_media_frames(
             path, loops=loops, playback_rate=playback_rate,
@@ -965,14 +979,10 @@ class Matrix:
                     else:
                         time.sleep(frame_delay)
                 finally:
-                    close = getattr(image, "close", None)
-                    if close is not None:
-                        close()
+                    close_owned(image, "GIF candidate")
             return shown
         finally:
-            close = getattr(timeline, "close", None)
-            if close is not None:
-                close()
+            close_owned(timeline, "GIF timeline")
 
     def _video_frame_timeline(
         self, path, frame_width, frame_height, keep_aspect, stop_event=None,
