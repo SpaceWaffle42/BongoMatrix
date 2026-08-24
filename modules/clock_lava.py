@@ -29,14 +29,15 @@ EDGE_TABLE = {
     14: [(0, 0.5), (0.5, 0)],
 }
 
-NUM_BLOBS = random.randint(3, 4)
+# Non-cryptographic randomness controls visual blob variation only.
+NUM_BLOBS = random.randint(3, 4)  # nosemgrep: bandit.B311
 blobs = [
     {
-        "x": random.uniform(0, WIDTH),
-        "y": random.uniform(0, HEIGHT),
-        "vx": random.uniform(-0.25, 0.25),
-        "vy": random.uniform(-0.25, 0.25),
-        "r": random.uniform(5, 10),
+        "x": random.uniform(0, WIDTH),  # nosemgrep: bandit.B311
+        "y": random.uniform(0, HEIGHT),  # nosemgrep: bandit.B311
+        "vx": random.uniform(-0.25, 0.25),  # nosemgrep: bandit.B311
+        "vy": random.uniform(-0.25, 0.25),  # nosemgrep: bandit.B311
+        "r": random.uniform(5, 10),  # nosemgrep: bandit.B311
     }
     for _ in range(NUM_BLOBS)
 ]
@@ -50,11 +51,11 @@ def make_blobs(settings=None):
     speed = settings.get("blob_speed", 0.25)
     return [
         {
-            "x": random.uniform(0, WIDTH),
-            "y": random.uniform(0, HEIGHT),
-            "vx": random.uniform(-speed, speed),
-            "vy": random.uniform(-speed, speed),
-            "r": random.uniform(minimum_radius, maximum_radius),
+            "x": random.uniform(0, WIDTH),  # nosemgrep: bandit.B311
+            "y": random.uniform(0, HEIGHT),  # nosemgrep: bandit.B311
+            "vx": random.uniform(-speed, speed),  # nosemgrep: bandit.B311
+            "vy": random.uniform(-speed, speed),  # nosemgrep: bandit.B311
+            "r": random.uniform(minimum_radius, maximum_radius),  # nosemgrep: bandit.B311
         }
         for _ in range(count)
     ]
