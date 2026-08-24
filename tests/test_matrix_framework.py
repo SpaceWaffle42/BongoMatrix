@@ -1349,6 +1349,136 @@ else:
         matrix.canvas.SetImage.assert_not_called()
         matrix._media_file.assert_not_called()
 
+    def test_gif_playback_cancel_during_blocked_copy_returns_without_publication(self):
+        from modules.media_player import play_media
+
+        matrix = Matrix.__new__(Matrix)
+        matrix.canvas = Mock()
+        matrix.matrix = Mock(width=64, height=32)
+        matrix.clear = Mock()
+        matrix.draw_image = Mock()
+        matrix.swap = Mock(return_value=matrix.canvas)
+        matrix._media_file = Mock(return_value=Mock())
+        stop = threading.Event()
+        entered = threading.Event()
+        release = threading.Event()
+        returned = threading.Event()
+        candidate_closed = threading.Event()
+        gif = Mock()
+        frame = Mock(info={"duration": 100})
+        candidate = Mock()
+        candidate.close.side_effect = candidate_closed.set
+
+        def blocked_copy():
+            entered.set()
+            release.wait()
+            return candidate
+
+        frame.copy.side_effect = blocked_copy
+        result = {}
+
+        def consume():
+            try:
+                result["shown"] = play_media(
+                    matrix, "clip.gif", 8, stop_event=stop,
+                )
+            finally:
+                returned.set()
+
+        consumer = threading.Thread(target=consume)
+        with patch.object(framework.Image, "open", return_value=gif), patch.object(
+            framework.ImageSequence, "Iterator", return_value=iter((frame,)),
+        ):
+            consumer.start()
+            self.assertTrue(entered.wait(0.5))
+            stop.set()
+            prompt_return = returned.wait(0.2)
+            release.set()
+            self.assertTrue(returned.wait(0.5))
+            consumer.join(0.5)
+
+        self.assertTrue(prompt_return)
+        self.assertFalse(consumer.is_alive())
+        self.assertFalse(result["shown"])
+        matrix.clear.assert_not_called()
+        matrix.draw_image.assert_not_called()
+        matrix.swap.assert_not_called()
+        self.assertTrue(candidate_closed.wait(0.5))
+        candidate.close.assert_called_once_with()
+        gif.close.assert_called_once_with()
+
+    def test_show_gif_closes_transferred_candidate_and_timeline_on_all_exits(self):
+        scenarios = (
+            "normal", "cancel_during_draw", "draw_error",
+            "admission_rejection", "wait_error",
+        )
+        for scenario in scenarios:
+            with self.subTest(scenario=scenario):
+                matrix = Matrix.__new__(Matrix)
+                matrix.canvas = Mock()
+                matrix.matrix = Mock(width=64, height=32)
+                matrix.clear = Mock()
+                matrix.draw_image = Mock()
+                matrix.swap = Mock(return_value=matrix.canvas)
+                matrix._media_file = Mock(return_value=Mock())
+                candidate = Mock()
+
+                class Timeline:
+                    def __init__(self):
+                        self.emitted = False
+                        self.close_calls = 0
+
+                    def __iter__(self):
+                        return self
+
+                    def __next__(self):
+                        if self.emitted:
+                            raise StopIteration
+                        self.emitted = True
+                        return candidate, 0.01
+
+                    def close(self):
+                        self.close_calls += 1
+
+                timeline = Timeline()
+                stop = None
+                admitted = True
+                expected_error = None
+                if scenario == "cancel_during_draw":
+                    stop = threading.Event()
+                    matrix.draw_image.side_effect = lambda *_a, **_k: stop.set()
+                elif scenario == "draw_error":
+                    matrix.draw_image.side_effect = RuntimeError("draw failed")
+                    expected_error = "draw failed"
+                elif scenario == "admission_rejection":
+                    admitted = False
+                elif scenario == "wait_error":
+                    stop = Mock()
+                    stop.is_set.return_value = False
+                    stop.wait.side_effect = RuntimeError("wait failed")
+                    expected_error = "wait failed"
+
+                with patch(
+                    "modules.media_player.gif_media_frames",
+                    return_value=timeline,
+                ), patch.object(
+                    framework, "_swap_admitted", return_value=admitted,
+                ), patch.object(framework.time, "sleep"):
+                    if expected_error is None:
+                        matrix.show_gif(
+                            "owned.gif", loops=1, stop_event=stop,
+                            max_duration=1,
+                        )
+                    else:
+                        with self.assertRaisesRegex(RuntimeError, expected_error):
+                            matrix.show_gif(
+                                "owned.gif", loops=1, stop_event=stop,
+                                max_duration=1,
+                            )
+
+                candidate.close.assert_called_once_with()
+                self.assertEqual(timeline.close_calls, 1)
+
     def test_show_gif_cancelled_during_final_draw_is_not_published(self):
         matrix = Matrix.__new__(Matrix)
         matrix.canvas = Mock()
@@ -1514,7 +1644,7 @@ else:
 
         with patch.object(framework.Image, "open", return_value=Mock()), patch.object(
             framework.ImageSequence, "Iterator", return_value=[frame]
-        ), patch.object(framework.time, "monotonic", side_effect=[0.0, 0.0, 0.0]), patch.object(
+        ), patch.object(framework.time, "monotonic", return_value=0.0), patch.object(
             framework.time, "sleep"
         ) as sleep:
             self.assertTrue(

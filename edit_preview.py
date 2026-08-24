@@ -373,7 +373,7 @@ def media_preview_frames(
             stop_event=stop_event, max_duration=duration,
             monotonic=playback_monotonic, image_open=image_open,
             image_iterator=lambda decoded: iter(decoded.frames),
-            frame_copy=lambda frame: frame,
+            frame_copy=lambda frame: frame, bounded_pillow=False,
         )
     elif path.suffix.lower() == ".mp4":
         if video_decoder is None:

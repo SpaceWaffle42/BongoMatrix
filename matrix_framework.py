@@ -939,28 +939,40 @@ class Matrix:
                     raise
 
         shown = False
-        for image, frame_delay in gif_media_frames(
-            path, loops=loops, playback_rate=playback_rate, stop_event=stop_event,
-            max_duration=max_duration, monotonic=time.monotonic,
-            image_open=image_open, image_iterator=ImageSequence.Iterator,
-        ):
-            self.clear()
-            self.draw_image(
-                image, x=x, y=y, width=width, height=height,
-                keep_aspect=keep_aspect,
-            )
-            if stop_event is not None and stop_event.is_set():
-                return shown
-            self.swap()
-            if not _swap_admitted(self):
-                return shown
-            shown = True
-            if stop_event is not None:
-                if stop_event.wait(frame_delay):
-                    return True
-            else:
-                time.sleep(frame_delay)
-        return shown
+        timeline = gif_media_frames(
+            path, loops=loops, playback_rate=playback_rate,
+            stop_event=stop_event, max_duration=max_duration,
+            monotonic=time.monotonic, image_open=image_open,
+            image_iterator=ImageSequence.Iterator,
+        )
+        try:
+            for image, frame_delay in timeline:
+                try:
+                    self.clear()
+                    self.draw_image(
+                        image, x=x, y=y, width=width, height=height,
+                        keep_aspect=keep_aspect,
+                    )
+                    if stop_event is not None and stop_event.is_set():
+                        return shown
+                    self.swap()
+                    if not _swap_admitted(self):
+                        return shown
+                    shown = True
+                    if stop_event is not None:
+                        if stop_event.wait(frame_delay):
+                            return True
+                    else:
+                        time.sleep(frame_delay)
+                finally:
+                    close = getattr(image, "close", None)
+                    if close is not None:
+                        close()
+            return shown
+        finally:
+            close = getattr(timeline, "close", None)
+            if close is not None:
+                close()
 
     def _video_frame_timeline(
         self, path, frame_width, frame_height, keep_aspect, stop_event=None,
