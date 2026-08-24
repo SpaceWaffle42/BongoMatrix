@@ -1058,7 +1058,10 @@ class Matrix:
                         except OSError as error:
                             remember_cleanup_error(error)
                     wait_timeout = 2.0
-                    if stop_event is not None and stop_event.is_set():
+                    if stop_event is not None:
+                        # An interruptible invocation can be cancelled immediately
+                        # after any sampled event check. Never enter a synchronous
+                        # child wait on its renderer/display-owner path.
                         wait_timeout = 0.0
                     elif deadline is not None:
                         wait_timeout = min(

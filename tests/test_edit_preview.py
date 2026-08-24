@@ -15,7 +15,7 @@ import types
 import unittest
 import weakref
 from pathlib import Path
-from unittest.mock import Mock, patch
+from unittest.mock import MagicMock, Mock, patch
 
 from PIL import Image, ImageSequence
 
@@ -1777,6 +1777,144 @@ class EditPreviewTests(unittest.TestCase):
             StopIteration, "explicit new session is required to restart",
         ):
             session.page()
+
+    def test_pre_cancelled_gif_preview_skips_pinned_decode(self):
+        encoded = io.BytesIO()
+        Image.new("RGB", (2, 2), "red").save(encoded, format="GIF")
+        pinned = Mock()
+        pinned.dup_file.side_effect = lambda: io.BytesIO(encoded.getvalue())
+        stop = threading.Event()
+        stop.set()
+
+        frames = list(edit_preview.media_preview_frames(
+            CaptureMatrix(), "cancelled.gif", 1,
+            stop_event=stop, pinned_handle=pinned,
+        ))
+
+        self.assertEqual(frames, [])
+        pinned.dup_file.assert_not_called()
+
+    def test_gif_preview_cancelled_during_pinned_decode_draws_nothing(self):
+        encoded = io.BytesIO()
+        Image.new("RGB", (2, 2), "red").save(encoded, format="GIF")
+        pinned = Mock()
+        stop = threading.Event()
+        matrix = Mock()
+
+        def cancel_during_duplication():
+            stop.set()
+            return io.BytesIO(encoded.getvalue())
+
+        pinned.dup_file.side_effect = cancel_during_duplication
+        frames = list(edit_preview.media_preview_frames(
+            matrix, "cancelled.gif", 1,
+            stop_event=stop, pinned_handle=pinned,
+        ))
+
+        self.assertEqual(frames, [])
+        pinned.dup_file.assert_called_once_with()
+        matrix.clear.assert_not_called()
+        matrix.draw_image.assert_not_called()
+        matrix.snapshot.assert_not_called()
+        matrix.swap.assert_not_called()
+
+    def test_gif_preview_cancelled_during_draw_yields_nothing(self):
+        encoded = io.BytesIO()
+        Image.new("RGB", (2, 2), "red").save(encoded, format="GIF")
+        pinned = Mock()
+        pinned.dup_file.side_effect = lambda: io.BytesIO(encoded.getvalue())
+        stop = threading.Event()
+        matrix = Mock()
+        matrix.draw_image.side_effect = lambda *_args, **_kwargs: stop.set()
+
+        frames = list(edit_preview.media_preview_frames(
+            matrix, "cancelled.gif", 1,
+            stop_event=stop, pinned_handle=pinned,
+        ))
+
+        self.assertEqual(frames, [])
+        matrix.clear.assert_called_once_with()
+        matrix.draw_image.assert_called_once()
+        matrix.snapshot.assert_not_called()
+        matrix.swap.assert_not_called()
+
+    def test_gif_preview_cancelled_while_yielded_does_not_swap_on_resume(self):
+        encoded = io.BytesIO()
+        Image.new("RGB", (2, 2), "red").save(encoded, format="GIF")
+        pinned = Mock()
+        pinned.dup_file.side_effect = lambda: io.BytesIO(encoded.getvalue())
+        stop = threading.Event()
+        matrix = Mock()
+        iterator = edit_preview.media_preview_frames(
+            matrix, "cancelled.gif", 1,
+            stop_event=stop, pinned_handle=pinned,
+        )
+
+        first = next(iterator)
+        self.assertIn("png", first)
+        stop.set()
+        with self.assertRaises(StopIteration):
+            next(iterator)
+
+        matrix.swap.assert_not_called()
+
+    def test_pre_cancelled_static_preview_skips_pinned_decode(self):
+        pinned = Mock()
+        stop = threading.Event()
+        stop.set()
+
+        frames = list(edit_preview.media_preview_frames(
+            CaptureMatrix(), "cancelled.png", 1,
+            stop_event=stop, pinned_handle=pinned,
+        ))
+
+        self.assertEqual(frames, [])
+        pinned.dup_file.assert_not_called()
+
+    def test_static_preview_cancelled_during_decode_draws_nothing(self):
+        matrix = Mock()
+        pinned = Mock()
+        media_file = MagicMock()
+        pinned.dup_file.return_value = media_file
+        opened = MagicMock()
+        stop = threading.Event()
+
+        def cancel_during_copy():
+            stop.set()
+            return Image.new("RGB", (2, 2), "blue")
+
+        opened.__enter__.return_value.copy.side_effect = cancel_during_copy
+        with patch.object(Image, "open", return_value=opened):
+            frames = list(edit_preview.media_preview_frames(
+                matrix, "cancelled.png", 1,
+                stop_event=stop, pinned_handle=pinned,
+            ))
+
+        self.assertEqual(frames, [])
+        matrix.clear.assert_not_called()
+        matrix.draw_image.assert_not_called()
+        matrix.snapshot.assert_not_called()
+        matrix.swap.assert_not_called()
+
+    def test_static_preview_cancelled_during_draw_yields_nothing(self):
+        matrix = Mock()
+        stop = threading.Event()
+        opened = MagicMock()
+        opened.__enter__.return_value.copy.return_value = Image.new(
+            "RGB", (2, 2), "green"
+        )
+        matrix.draw_image.side_effect = lambda *_args, **_kwargs: stop.set()
+
+        with patch.object(Image, "open", return_value=opened):
+            frames = list(edit_preview.media_preview_frames(
+                matrix, "cancelled.png", 1, stop_event=stop,
+            ))
+
+        self.assertEqual(frames, [])
+        matrix.clear.assert_called_once_with()
+        matrix.draw_image.assert_called_once()
+        matrix.snapshot.assert_not_called()
+        matrix.swap.assert_not_called()
 
     def test_media_decode_cancel_closes_decoder_within_250_ms(self):
         class RecordingMatrix(CaptureMatrix):

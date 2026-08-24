@@ -207,6 +207,8 @@ def media_preview_frames(
     from modules.media_player import gif_media_frames, video_media_frames
 
     settings = settings or {}
+    if stop_event is not None and stop_event.is_set():
+        return
     path = Path(filename)
     if not path.is_absolute():
         path = Path(__file__).parent / "resources" / "media" / path
@@ -226,7 +228,7 @@ def media_preview_frames(
         timeline = gif_media_frames(
             source, loops=0,
             playback_rate=settings.get("gif_speed_percent", 100) / 100.0,
-            max_duration=duration, image_open=image_open,
+            stop_event=stop_event, max_duration=duration, image_open=image_open,
             image_iterator=ImageSequence.Iterator,
         )
     elif path.suffix.lower() == ".mp4":
@@ -249,6 +251,8 @@ def media_preview_frames(
         else:
             with Image.open(path) as opened:
                 image = opened.copy()
+        if stop_event is not None and stop_event.is_set():
+            return
         matrix.clear()
         matrix.draw_image(
             image,
@@ -256,6 +260,8 @@ def media_preview_frames(
             width=settings.get("width"), height=settings.get("height"),
             keep_aspect=settings.get("keep_aspect", True),
         )
+        if stop_event is not None and stop_event.is_set():
+            return
         if duration > 0:
             yield _png_frame(matrix.snapshot(), round(duration * 1000, 9))
         return
@@ -267,7 +273,11 @@ def media_preview_frames(
             width=settings.get("width"), height=settings.get("height"),
             keep_aspect=settings.get("keep_aspect", True),
         )
+        if stop_event is not None and stop_event.is_set():
+            return
         yield _png_frame(matrix.snapshot(), round(delay * 1000, 9))
+        if stop_event is not None and stop_event.is_set():
+            return
         matrix.swap()
 
 

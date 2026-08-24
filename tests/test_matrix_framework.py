@@ -699,6 +699,44 @@ else:
             owned_queue, deferred_process=process,
         )
 
+    def test_video_frame_timeline_late_cancellation_cannot_enter_wait(self):
+        matrix = Matrix.__new__(Matrix)
+        process = Mock()
+        process.stdout = Mock()
+        process.poll.return_value = None
+        owned_queue = Mock()
+        stop = threading.Event()
+
+        def cancel_inside_wait(*_args, **_kwargs):
+            stop.set()
+            return 0
+
+        process.wait.side_effect = cancel_inside_wait
+
+        with patch.object(
+            framework, "_ensure_decoder_reaper", return_value=owned_queue,
+        ), patch.object(
+            framework, "_release_decoder_reaper",
+        ) as release_reaper, patch.object(
+            framework.os, "open", return_value=9,
+        ), patch.object(
+            framework.os, "close",
+        ), patch.object(
+            framework.subprocess, "Popen", return_value=process,
+        ), patch.object(
+            framework, "_read_exact_interruptibly", return_value=b"",
+        ):
+            self.assertEqual(list(matrix._video_frame_timeline(
+                "video.mp4", 2, 2, True, stop_event=stop,
+            )), [])
+
+        process.terminate.assert_called_once_with()
+        process.wait.assert_not_called()
+        process.kill.assert_not_called()
+        release_reaper.assert_called_once_with(
+            owned_queue, deferred_process=process,
+        )
+
     def test_video_frame_timeline_timeout_transfers_reaping_to_existing_owner_across_process_races(self):
         matrix = Matrix.__new__(Matrix)
         for race in ("poll", "terminate"):
