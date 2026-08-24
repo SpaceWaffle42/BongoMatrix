@@ -358,6 +358,51 @@ class DisplayControllerTests(unittest.TestCase):
         controller._execute.assert_called_once_with("announcement_board", config, 0)
         self.assertEqual(waits, [0.25])
 
+    def test_scheduler_idles_when_splash_gif_admits_no_frame(self):
+        from matrix_framework import Matrix
+
+        matrix = Matrix.__new__(Matrix)
+        matrix.canvas = Mock()
+        matrix.matrix = Mock(width=64, height=32)
+        matrix.matrix.SwapOnVSync.return_value = matrix.canvas
+        matrix._frame_capture = Mock()
+        matrix._frame_capture.publish.return_value = 1
+        matrix._physical_swap_observer = None
+        matrix._publication_guard = lambda: False
+        matrix.clear = Mock()
+        matrix.draw_image = Mock()
+        matrix.set_brightness = Mock()
+        matrix._media_file = Mock(return_value=Mock())
+        config = copy.deepcopy(DEFAULT_CONFIG)
+        config["media"]["splash"] = "custom.gif"
+        config["playlist"] = [
+            {"module": "splash", "duration": 1, "enabled": True},
+        ]
+        store = Mock()
+        store.get.return_value = config
+        controller = DisplayController(matrix, store)
+        original_wait = controller._shutdown.wait
+        waits = []
+
+        def stop_after_idle(seconds):
+            waits.append(seconds)
+            controller._shutdown.set()
+            return original_wait(0)
+
+        with (
+            patch.object(controller, "_is_active", return_value=True),
+            patch.object(controller._shutdown, "wait", side_effect=stop_after_idle),
+            patch(
+                "modules.media_player.gif_media_frames",
+                return_value=[(Mock(), 0.0)],
+            ),
+        ):
+            controller._run_loop_unchecked()
+
+        matrix.matrix.SwapOnVSync.assert_not_called()
+        matrix._frame_capture.publish.assert_not_called()
+        self.assertEqual(waits, [0.25])
+
     def test_openweather_module_receives_secret_without_adding_it_to_config(self):
         matrix = Mock()
         store = Mock()

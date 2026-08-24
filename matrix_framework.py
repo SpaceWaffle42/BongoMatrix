@@ -439,7 +439,7 @@ class Matrix:
 
     def last_swap_admitted(self):
         """Report whether the most recent swap crossed the hardware guard."""
-        return getattr(self, "_last_swap_admitted", False)
+        return getattr(self, "_last_swap_admitted", True)
 
     def latest_frame_png(self):
         """Return the last frame submitted to the physical panel and its revision."""
@@ -941,14 +941,18 @@ class Matrix:
                 image, x=x, y=y, width=width, height=height,
                 keep_aspect=keep_aspect,
             )
+            if stop_event is not None and stop_event.is_set():
+                return shown
             self.swap()
+            if not self.last_swap_admitted():
+                return shown
             shown = True
             if stop_event is not None:
                 if stop_event.wait(frame_delay):
                     return True
             else:
                 time.sleep(frame_delay)
-        return shown or stop_event is not None and stop_event.is_set()
+        return shown
 
     def _video_frame_timeline(
         self, path, frame_width, frame_height, keep_aspect, stop_event=None,
@@ -1133,7 +1137,11 @@ class Matrix:
             self.clear()
             self.canvas.SetImage(image, x, y)
             self._frame_capture.set_image(self.canvas, image, x, y)
+            if stop_event is not None and stop_event.is_set():
+                return shown
             self.swap()
+            if not self.last_swap_admitted():
+                return shown
             shown = True
             if stop_event is not None:
                 if stop_event.wait(frame_delay):

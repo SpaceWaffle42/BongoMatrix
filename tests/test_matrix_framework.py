@@ -1202,7 +1202,7 @@ else:
         self.assertIs(popen.call_args.kwargs["stderr"], framework.subprocess.DEVNULL)
         self.assertNotIn("pass_fds", popen.call_args.kwargs)
 
-    def test_show_gif_can_be_interrupted(self):
+    def test_show_gif_pre_cancelled_returns_false_without_publication(self):
         matrix = Matrix.__new__(Matrix)
         matrix.canvas = Mock()
         matrix.matrix = Mock(width=64, height=32)
@@ -1216,8 +1216,91 @@ else:
         path = Mock()
         matrix._media_file = Mock(return_value=path)
         with patch.object(framework.Image, "open", return_value=Mock()), patch.object(framework.ImageSequence, "Iterator", return_value=[frame]):
-            self.assertTrue(matrix.show_gif("sleep.gif", loops=0, stop_event=stop, max_duration=10))
+            self.assertFalse(matrix.show_gif("sleep.gif", loops=0, stop_event=stop, max_duration=10))
         matrix.canvas.SetImage.assert_not_called()
+
+    def test_show_gif_cancelled_during_final_draw_is_not_published(self):
+        matrix = Matrix.__new__(Matrix)
+        matrix.canvas = Mock()
+        matrix.matrix = Mock(width=64, height=32)
+        matrix.matrix.SwapOnVSync.return_value = matrix.canvas
+        matrix._frame_capture = Mock()
+        matrix._frame_capture.publish.return_value = 1
+        matrix._physical_swap_observer = None
+        matrix._publication_guard = lambda: True
+        matrix.clear = Mock()
+        stop = threading.Event()
+        matrix.draw_image = Mock(side_effect=lambda *_args, **_kwargs: stop.set())
+        matrix._media_file = Mock(return_value=Mock())
+
+        with patch(
+            "modules.media_player.gif_media_frames",
+            return_value=[(Mock(), 0.1)],
+        ):
+            result = matrix.show_gif(
+                "sleep.gif", loops=1, stop_event=stop, max_duration=10,
+            )
+
+        self.assertFalse(result)
+        matrix.matrix.SwapOnVSync.assert_not_called()
+        matrix._frame_capture.publish.assert_not_called()
+
+    def test_gif_playback_propagates_first_hardware_guard_rejection(self):
+        from modules.media_player import play_media
+
+        matrix = Matrix.__new__(Matrix)
+        matrix.canvas = Mock()
+        matrix.matrix = Mock(width=64, height=32)
+        matrix.matrix.SwapOnVSync.return_value = matrix.canvas
+        matrix._frame_capture = Mock()
+        matrix._frame_capture.publish.return_value = 1
+        matrix._physical_swap_observer = None
+        matrix._publication_guard = lambda: False
+        matrix.clear = Mock()
+        matrix.draw_image = Mock()
+        matrix._media_file = Mock(return_value=Mock())
+        stop = threading.Event()
+
+        with patch(
+            "modules.media_player.gif_media_frames",
+            return_value=[(Mock(), 0.0)],
+        ):
+            result = play_media(
+                matrix, "clip.gif", 8, stop_event=stop,
+            )
+
+        self.assertFalse(result)
+        matrix.matrix.SwapOnVSync.assert_not_called()
+        matrix._frame_capture.publish.assert_not_called()
+
+    def test_gif_playback_preserves_true_after_one_admitted_frame(self):
+        from modules.media_player import play_media
+
+        matrix = Matrix.__new__(Matrix)
+        matrix.canvas = Mock()
+        matrix.matrix = Mock(width=64, height=32)
+        matrix.matrix.SwapOnVSync.return_value = matrix.canvas
+        matrix._frame_capture = Mock()
+        matrix._frame_capture.publish.return_value = 1
+        matrix._physical_swap_observer = None
+        admissions = iter((True, False))
+        matrix._publication_guard = lambda: next(admissions)
+        matrix.clear = Mock()
+        matrix.draw_image = Mock()
+        matrix._media_file = Mock(return_value=Mock())
+        stop = threading.Event()
+
+        with patch(
+            "modules.media_player.gif_media_frames",
+            return_value=[(Mock(), 0.0), (Mock(), 0.0)],
+        ):
+            result = play_media(
+                matrix, "clip.gif", 8, stop_event=stop,
+            )
+
+        self.assertTrue(result)
+        matrix.matrix.SwapOnVSync.assert_called_once_with(matrix.canvas)
+        matrix._frame_capture.publish.assert_called_once_with(matrix.canvas)
 
     def test_show_gif_playback_rate_scales_embedded_frame_duration(self):
         matrix = Matrix.__new__(Matrix)
@@ -1374,6 +1457,89 @@ else:
                 self.assertTrue(matrix.show_gif("sleep.gif", loops=1, playback_rate=2.0))
 
             self.assertEqual(path.read_bytes(), before)
+
+    def test_show_video_cancelled_during_capture_update_is_not_published(self):
+        matrix = Matrix.__new__(Matrix)
+        matrix.canvas = Mock()
+        matrix.matrix = Mock(width=64, height=32)
+        matrix.matrix.SwapOnVSync.return_value = matrix.canvas
+        matrix._frame_capture = Mock()
+        matrix._frame_capture.publish.return_value = 1
+        matrix._physical_swap_observer = None
+        matrix._publication_guard = lambda: True
+        matrix.clear = Mock()
+        matrix._media_file = Mock(return_value=Mock())
+        stop = threading.Event()
+        matrix._frame_capture.set_image.side_effect = (
+            lambda *_args: stop.set()
+        )
+
+        with patch(
+            "modules.media_player.video_media_frames",
+            return_value=[(Mock(), 0.1)],
+        ):
+            result = matrix.show_video(
+                "clip.mp4", stop_event=stop, max_duration=10,
+            )
+
+        self.assertFalse(result)
+        matrix.matrix.SwapOnVSync.assert_not_called()
+        matrix._frame_capture.publish.assert_not_called()
+
+    def test_video_playback_propagates_first_hardware_guard_rejection(self):
+        from modules.media_player import play_media
+
+        matrix = Matrix.__new__(Matrix)
+        matrix.canvas = Mock()
+        matrix.matrix = Mock(width=64, height=32)
+        matrix.matrix.SwapOnVSync.return_value = matrix.canvas
+        matrix._frame_capture = Mock()
+        matrix._frame_capture.publish.return_value = 1
+        matrix._physical_swap_observer = None
+        matrix._publication_guard = lambda: False
+        matrix.clear = Mock()
+        matrix._media_file = Mock(return_value=Mock())
+        stop = threading.Event()
+
+        with patch(
+            "modules.media_player.video_media_frames",
+            return_value=[(Mock(), 0.0)],
+        ):
+            result = play_media(
+                matrix, "clip.mp4", 8, stop_event=stop,
+            )
+
+        self.assertFalse(result)
+        matrix.matrix.SwapOnVSync.assert_not_called()
+        matrix._frame_capture.publish.assert_not_called()
+
+    def test_video_playback_preserves_true_after_one_admitted_frame(self):
+        from modules.media_player import play_media
+
+        matrix = Matrix.__new__(Matrix)
+        matrix.canvas = Mock()
+        matrix.matrix = Mock(width=64, height=32)
+        matrix.matrix.SwapOnVSync.return_value = matrix.canvas
+        matrix._frame_capture = Mock()
+        matrix._frame_capture.publish.return_value = 1
+        matrix._physical_swap_observer = None
+        admissions = iter((True, False))
+        matrix._publication_guard = lambda: next(admissions)
+        matrix.clear = Mock()
+        matrix._media_file = Mock(return_value=Mock())
+        stop = threading.Event()
+
+        with patch(
+            "modules.media_player.video_media_frames",
+            return_value=[(Mock(), 0.0), (Mock(), 0.0)],
+        ):
+            result = play_media(
+                matrix, "clip.mp4", 8, stop_event=stop,
+            )
+
+        self.assertTrue(result)
+        matrix.matrix.SwapOnVSync.assert_called_once_with(matrix.canvas)
+        matrix._frame_capture.publish.assert_called_once_with(matrix.canvas)
 
     def test_show_video_decodes_frames_into_hardware_and_live_preview(self):
         matrix = Matrix.__new__(Matrix)
