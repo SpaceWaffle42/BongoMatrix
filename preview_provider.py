@@ -9,6 +9,7 @@ from collections.abc import Mapping
 
 
 _CANCEL_POLL_SECONDS = 0.005
+_REAP_JOIN_SECONDS = 0.05
 _SENSITIVE_RESULT_KEYS = frozenset(
     {"api_key", "credential", "credentials", "password", "secret", "token"}
 )
@@ -102,15 +103,37 @@ class PreviewProvider:
             return self._shutdown
 
     @staticmethod
-    def _terminate_and_reap(child):
+    def _terminate_and_reap(child, deadline=None):
+        def join_within_budget():
+            timeout = _REAP_JOIN_SECONDS
+            if deadline is not None:
+                timeout = min(timeout, max(0.0, deadline - time.monotonic()))
+            child.join(timeout)
+
         if child.is_alive():
             child.terminate()
-            child.join(0.1)
+            join_within_budget()
         if child.is_alive():
             child.kill()
-            child.join(0.1)
-        if child.is_alive():
-            child.join()
+            join_within_budget()
+        return not child.is_alive()
+
+    def _handoff_reaping_child(self, child):
+        """Retain capacity ownership until a stubborn child is really gone."""
+        def reap():
+            while not self._terminate_and_reap(child):
+                time.sleep(_CANCEL_POLL_SECONDS)
+            child.close()
+            with type(self)._accounting_lock:
+                type(self)._active_children -= 1
+                type(self)._active_workers -= 1
+            self._worker_slots.release()
+
+        threading.Thread(
+            target=reap,
+            name="preview-provider-child-reaper",
+            daemon=True,
+        ).start()
 
     def _before_publication(self, _prepared):
         """Parent-side seam immediately before a prepared result is returned."""
@@ -182,14 +205,12 @@ class PreviewProvider:
                 if cancel_event.is_set() or shutdown_event.is_set():
                     result_receiver.close()
                     result_receiver = None
-                    self._terminate_and_reap(child)
                     raise PreviewProviderCancelled(
                         "preview provider preparation cancelled"
                     )
                 if time.monotonic() >= deadline:
                     result_receiver.close()
                     result_receiver = None
-                    self._terminate_and_reap(child)
                     raise PreviewProviderTimeout(
                         "preview provider preparation timed out"
                     )
@@ -197,12 +218,21 @@ class PreviewProvider:
                     message = result_receiver.recv()
                     result_receiver.close()
                     result_receiver = None
+                    if not self._terminate_and_reap(child, deadline):
+                        self._handoff_reaping_child(child)
+                        child = None
+                        child_accounted = False
+                        worker_accounted = False
+                        slot_acquired = False
+                    else:
+                        if child_accounted:
+                            with type(self)._accounting_lock:
+                                type(self)._active_children -= 1
+                            child_accounted = False
                     if cancel_event.is_set() or shutdown_event.is_set():
-                        self._terminate_and_reap(child)
                         raise PreviewProviderCancelled(
                             "preview provider preparation cancelled"
                         )
-                    child.join()
                     if message[0] != "returned":
                         raise PreviewProviderUnavailable(
                             "preview provider preparation failed"
@@ -215,7 +245,7 @@ class PreviewProvider:
                         )
                     return prepared
                 if not child.is_alive():
-                    child.join()
+                    child.join(0)
                     raise PreviewProviderUnavailable(
                         "preview provider child exited without a result"
                     )
@@ -226,11 +256,17 @@ class PreviewProvider:
             if result_sender is not None:
                 result_sender.close()
             if child is not None:
-                self._terminate_and_reap(child)
-                if child_accounted:
-                    with type(self)._accounting_lock:
-                        type(self)._active_children -= 1
-                child.close()
+                if not self._terminate_and_reap(child, deadline):
+                    self._handoff_reaping_child(child)
+                    child = None
+                    child_accounted = False
+                    worker_accounted = False
+                    slot_acquired = False
+                else:
+                    if child_accounted:
+                        with type(self)._accounting_lock:
+                            type(self)._active_children -= 1
+                    child.close()
             if worker_accounted:
                 with type(self)._accounting_lock:
                     type(self)._active_workers -= 1

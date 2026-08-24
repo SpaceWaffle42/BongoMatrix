@@ -57,6 +57,126 @@ def provider_returns_recovery_marker(settings, credentials, timeout):
 
 
 class PreviewProviderTests(unittest.TestCase):
+    def test_result_ready_child_handoff_retains_capacity_until_bounded_reap(self):
+        child_can_exit = threading.Event()
+        child_join_started = threading.Event()
+        prepared = {}
+        result_ready_at = {}
+
+        class Receiver:
+            closed = False
+
+            def poll(self):
+                return (
+                    "value" in result_ready_at
+                    and time.monotonic() >= result_ready_at["value"]
+                )
+
+            def recv(self):
+                return ("returned", (("marker", "ready"),))
+
+            def close(self):
+                self.closed = True
+
+        class Sender:
+            closed = False
+
+            def close(self):
+                self.closed = True
+
+        class Child:
+            def __init__(self):
+                self.alive = True
+                self.closed = False
+                self.joins = []
+                self.terminate_calls = 0
+                self.kill_calls = 0
+
+            def start(self):
+                pass
+
+            def is_alive(self):
+                if child_can_exit.is_set():
+                    self.alive = False
+                return self.alive
+
+            def join(self, timeout=None):
+                self.joins.append(timeout)
+                child_join_started.set()
+                child_can_exit.wait(timeout)
+                if child_can_exit.is_set():
+                    self.alive = False
+
+            def terminate(self):
+                self.terminate_calls += 1
+
+            def kill(self):
+                self.kill_calls += 1
+
+            def close(self):
+                self.closed = True
+
+        receiver = Receiver()
+        sender = Sender()
+        child = Child()
+        provider = PreviewProvider()
+
+        class Context:
+            @staticmethod
+            def Pipe(**_kwargs):
+                return receiver, sender
+
+            @staticmethod
+            def Process(**_kwargs):
+                return child
+
+        def run_prepare():
+            try:
+                prepared["result"] = provider.prepare(
+                    provider_returns_recovery_marker,
+                    settings={"marker": "ignored"},
+                    credentials={"api_key": "server-held"},
+                    cancel_event=threading.Event(),
+                    request_deadline=0.12,
+                )
+            except BaseException as error:
+                prepared["error"] = error
+
+        thread = threading.Thread(target=run_prepare)
+        started = time.monotonic()
+        result_ready_at["value"] = started + 0.09
+        with patch.object(provider, "_context", Context()):
+            thread.start()
+            try:
+                self.assertTrue(child_join_started.wait(0.14))
+                shutdown_thread = threading.Thread(target=provider.shutdown)
+                shutdown_thread.start()
+                thread.join(0.17)
+                shutdown_thread.join(0.17)
+                self.assertFalse(thread.is_alive(), "result-ready prepare exceeded deadline")
+                self.assertFalse(shutdown_thread.is_alive(), "provider shutdown exceeded deadline")
+                self.assertLess(time.monotonic() - started, 0.17)
+                self.assertIsInstance(prepared.get("error"), PreviewProviderCancelled)
+                self.assertNotIn("result", prepared)
+                self.assertNotIn(None, child.joins)
+                self.assertTrue(provider.is_closed)
+                self.assertEqual(provider.active_child_count, 1)
+                self.assertEqual(provider.active_worker_count, 1)
+                self.assertEqual(provider.available_worker_slots, 1)
+                self.assertFalse(child.closed)
+
+                child_can_exit.set()
+                deadline = time.monotonic() + 1.0
+                while provider.active_child_count and time.monotonic() < deadline:
+                    time.sleep(0.005)
+                self.assertEqual(provider.active_child_count, 0)
+                self.assertEqual(provider.active_worker_count, 0)
+                self.assertEqual(provider.available_worker_slots, 2)
+                self.assertTrue(child.closed)
+            finally:
+                child_can_exit.set()
+                thread.join(1.0)
+
     def test_provider_preserves_bounded_eight_second_cold_start_budget(self):
         provider = PreviewProvider()
 
@@ -179,6 +299,9 @@ class PreviewProviderTests(unittest.TestCase):
                     str(outcomes["timeout"]),
                     "preview provider preparation timed out",
                 )
+                reap_deadline = time.monotonic() + 1.0
+                while not created_children[0]._closed and time.monotonic() < reap_deadline:
+                    time.sleep(0.005)
                 self.assertTrue(created_children[0]._closed)
                 self.assertEqual(provider.active_child_count, 1)
                 self.assertEqual(provider.active_worker_count, 1)
