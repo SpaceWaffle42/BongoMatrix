@@ -25,6 +25,9 @@ data/
 *.pid
 *.lock
 
+# Hermes local plans, review caches, and session artifacts
+.hermes/
+
 # Local/editor files
 .DS_Store
 .idea/

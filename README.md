@@ -198,6 +198,8 @@ The pipeline deliberately does not deploy to the Matrix device. Deployment, roll
 
 See [`docs/CI.md`](docs/CI.md) for the focused local-test handoff, artifact policy, SAST baseline rules, and checks that must remain manual.
 
+For Priority 1.3 release-tree preparation, guarded execution, rollback, and evidence commands, follow [`docs/priority-1-3-release.md`](docs/priority-1-3-release.md).
+
 Useful service checks on a deployed Pi:
 
 ```bash

@@ -1,10 +1,12 @@
 import tempfile
+import threading
 import unittest
 from pathlib import Path
 
 from PIL import Image
 
 from frame_capture import BdfFont, FrameCapture
+from matrix_framework import Matrix
 
 
 class FakeColour:
@@ -57,6 +59,93 @@ class FrameCaptureTests(unittest.TestCase):
         self.assertEqual(image.getpixel((3, 0)), (255, 0, 0))
         self.assertEqual(image.getpixel((3, 4)), (0, 0, 0))
         self.assertEqual(image.getpixel((3, 5)), (255, 0, 0))
+
+
+    def test_stale_device_draft_is_guarded_immediately_before_matrix_swap(self):
+        class FakeHardware:
+            width = 4
+            height = 2
+
+            def __init__(self):
+                self.submissions = []
+
+            def SwapOnVSync(self, canvas):
+                self.submissions.append(canvas)
+                return object()
+
+        submitted = object()
+        hardware = FakeHardware()
+        matrix = Matrix.__new__(Matrix)
+        matrix.matrix = hardware
+        matrix.canvas = submitted
+        matrix._frame_capture = FrameCapture(4, 2)
+        matrix._frame_capture.register(submitted)
+        matrix._frame_capture.fill(submitted, 9, 8, 7)
+
+        guard_started = threading.Event()
+        release_guard = threading.Event()
+        authority = [True]
+
+        def publication_guard():
+            guard_started.set()
+            self.assertTrue(release_guard.wait(1))
+            return authority[0]
+
+        matrix.set_publication_guard(publication_guard)
+        result = []
+        worker = threading.Thread(target=lambda: result.append(matrix.swap()))
+        worker.start()
+        self.assertTrue(guard_started.wait(0.5))
+        authority[0] = False
+        release_guard.set()
+        worker.join(1)
+
+        self.assertFalse(worker.is_alive())
+        self.assertEqual(result, [submitted])
+        self.assertEqual(hardware.submissions, [])
+        self.assertEqual(matrix._frame_capture.revision, 0)
+
+        matrix.set_publication_guard(None)
+        matrix.swap()
+        self.assertEqual(hardware.submissions, [submitted])
+        self.assertEqual(matrix._frame_capture.revision, 1)
+
+
+    def test_physical_swap_observer_receives_exact_submitted_rgb_only_after_success(self):
+        class FakeHardware:
+            width = 4
+            height = 2
+
+            def __init__(self):
+                self.fail = True
+
+            def SwapOnVSync(self, canvas):
+                if self.fail:
+                    raise RuntimeError("physical swap failed")
+                return object()
+
+        submitted = object()
+        matrix = Matrix.__new__(Matrix)
+        matrix.matrix = FakeHardware()
+        matrix.canvas = submitted
+        matrix._frame_capture = FrameCapture(4, 2)
+        matrix._frame_capture.register(submitted)
+        matrix._frame_capture.fill(submitted, 9, 8, 7)
+        matrix._publication_guard = None
+        observed = []
+        matrix.set_physical_swap_observer(
+            lambda frame, revision: observed.append((frame, revision))
+        )
+
+        with self.assertRaises(RuntimeError):
+            matrix.swap()
+        self.assertEqual(observed, [])
+        self.assertEqual(matrix._frame_capture.revision, 0)
+
+        matrix.matrix.fail = False
+        matrix.swap()
+        self.assertEqual(observed, [(bytes((9, 8, 7)) * 8, 1)])
+        self.assertEqual(matrix.latest_frame_rgb(), (bytes((9, 8, 7)) * 8, 1))
 
 
 if __name__ == "__main__":

@@ -5,7 +5,9 @@ from __future__ import annotations
 import argparse
 import ctypes
 import errno
+import io
 import hashlib
+import http.client
 import json
 import os
 import re
@@ -13,11 +15,23 @@ import secrets
 import stat
 import subprocess
 import sys
+import tarfile
+import tempfile
+import time
+import urllib.parse
+import shutil
 from collections.abc import Callable
 from pathlib import Path, PurePosixPath
 from typing import NoReturn, Protocol
 
+for _argument_root in (Path(__file__).resolve().parents[1], Path(__file__).resolve().parent / "release"):
+    if (_argument_root / "release_argparse.py").is_file():
+        sys.path.insert(0, str(_argument_root))
+        break
+from release_argparse import add_store_once_argument
+
 _SHA256_RE = re.compile(r"[0-9a-f]{64}\Z")
+_SOURCE_SHA_RE = re.compile(r"[0-9a-f]{40}\Z")
 _MODE_RE = re.compile(r"0[0-7]{3}\Z")
 _MANIFEST_KEYS = {"version", "files"}
 _FILE_KEYS = {"path", "sha256", "uid", "gid", "mode"}
@@ -367,6 +381,45 @@ def _require_fresh_path(path: Path, label: str) -> None:
         _reject(f"{label} must be fresh")
     finally:
         os.close(parent_fd)
+
+
+def prepare_acceptance_manifest(
+    release_root: str | os.PathLike[str], source_sha: str,
+    candidate_tracked_files: list[str],
+) -> dict[str, object]:
+    """Publish the installed verifier manifest before the outer release spec is built."""
+    root = Path(release_root)
+    if not root.is_absolute() or not root.is_dir() or root.is_symlink():
+        _reject("acceptance release root must be a real absolute directory")
+    if not isinstance(source_sha, str) or not _SOURCE_SHA_RE.fullmatch(source_sha):
+        _reject("acceptance source SHA is invalid")
+    marker = root / ".matrix-release.json"
+    _require_fresh_path(marker, "installed acceptance manifest")
+    source_paths = _release_files(root)
+    if (
+        type(candidate_tracked_files) is not list
+        or any(type(path) is not str for path in candidate_tracked_files)
+        or candidate_tracked_files != sorted(source_paths)
+    ):
+        _reject("candidate tracked files do not match the complete release")
+    required = {"webapp.py", "scripts/verify_priority_1_3_remote.py"}
+    if not required.issubset(source_paths):
+        _reject("acceptance verifier topology is incomplete")
+    verifier = root / "scripts/verify_priority_1_3_remote.py"
+    if not stat.S_IMODE(verifier.lstat().st_mode) & 0o111:
+        _reject("remote acceptance verifier is not executable")
+    entries: list[dict[str, str]] = []
+    for relative in sorted(source_paths):
+        data = _read_regular_path(root.joinpath(*PurePosixPath(relative).parts))
+        entries.append({"path": relative, "sha256": hashlib.sha256(data).hexdigest()})
+    manifest: dict[str, object] = {
+        "schema": 1,
+        "source_sha": source_sha,
+        "candidate_tracked_files": candidate_tracked_files,
+        "files": entries,
+    }
+    _publish_new_path(marker, _canonical_json(manifest), mode=0o400)
+    return manifest
 
 
 def create_backup_manifest(
@@ -1212,6 +1265,12 @@ def _dry_run_lines(
 class _SystemdServiceControl:
     def __init__(self, name: str):
         self.name = _validate_service_name(name)
+        self._health: tuple[str, int, int] | None = None
+
+    def configure_health(self, url: str, status: int, timeout_seconds: int) -> None:
+        if (url, status, timeout_seconds) != ("http://127.0.0.1:5000/", 302, 30):
+            _reject("recovery health configuration is not exact")
+        self._health = (url, status, timeout_seconds)
 
     def _run(self, *arguments: str, check: bool = True) -> subprocess.CompletedProcess[str]:
         return subprocess.run(
@@ -1244,6 +1303,31 @@ class _SystemdServiceControl:
     def run_health_checks(self) -> None:
         if self._run("is-active", "--quiet", check=False).returncode != 0:
             _reject("service health check failed")
+        if self._health is None:
+            return
+        url, expected_status, timeout_seconds = self._health
+        parsed = urllib.parse.urlsplit(url)
+        if parsed.scheme != "http" or parsed.hostname != "127.0.0.1" or parsed.port != 5000:
+            _reject("recovery health URL is not exact loopback HTTP")
+        deadline = time.monotonic() + timeout_seconds
+        while True:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                _reject("application readiness deadline expired")
+            connection = http.client.HTTPConnection(
+                parsed.hostname, parsed.port, timeout=min(2.0, remaining)
+            )
+            try:
+                connection.request("GET", parsed.path or "/")
+                response = connection.getresponse()
+                response.read()
+                if response.status == expected_status:
+                    return
+            except OSError:
+                pass
+            finally:
+                connection.close()
+            time.sleep(min(0.1, max(0.0, deadline - time.monotonic())))
 
     def recovery_commands(self) -> tuple[str, ...]:
         return (
@@ -1919,6 +2003,92 @@ def _restore_release_indices(
     return diagnostics
 
 
+
+def recover_release(
+    staged_tool: str | os.PathLike[str],
+    release_root: str | os.PathLike[str],
+    destination_root: str | os.PathLike[str],
+    bundle: str | os.PathLike[str],
+    release_manifest_path: str | os.PathLike[str],
+    backup_manifest_path: str | os.PathLike[str],
+    *,
+    service: ServiceControl,
+    initially_active: bool,
+    after_boundary: Callable[[str], None] | None = None,
+) -> None:
+    """Idempotently restore a verified backup without trusting mixed destination bytes."""
+
+    destination_path = Path(destination_root)
+    release = Path(release_root)
+    bundle_path = Path(bundle)
+    _verify_bundle_provenance(
+        staged_tool, release, bundle_path, Path(release_manifest_path)
+    )
+    release_manifest = validate_release_manifest(release, release_manifest_path)
+    backup_manifest = _load_backup_manifest(bundle_path, backup_manifest_path)
+    _, backup_entries = _validate_backup_for_rollback(
+        release_manifest, backup_manifest, bundle_path
+    )
+    backup_records = _snapshot_backup_records(bundle_path, backup_entries)
+    try:
+        destination_fd = _open_absolute_directory(destination_path)
+    except OSError as error:
+        raise ReleaseManifestError("destination root is unsafe") from error
+    try:
+        _assert_pinned_root_identity(destination_path, destination_fd)
+        if service.is_active():
+            service.stop()
+            if after_boundary is not None:
+                after_boundary("stop")
+        _assert_pinned_root_identity(destination_path, destination_fd)
+        if service.is_active():
+            _reject("service remains active before recovery writes")
+        for index, record in enumerate(backup_records):
+            relative_path, present, content, uid, gid, mode = record
+            _assert_pinned_root_identity(destination_path, destination_fd)
+            if present:
+                if content is None or uid is None or gid is None or mode is None:
+                    _reject("immutable backup snapshot is invalid")
+                _atomic_replace_confined(
+                    destination_fd, relative_path, content, uid, gid, mode
+                )
+                boundary = f"restore:{index}"
+            else:
+                _remove_confined(destination_fd, relative_path)
+                boundary = f"remove:{index}"
+            if after_boundary is not None:
+                after_boundary(boundary)
+            backup_entry = backup_entries[index]
+            if not isinstance(backup_entry, dict):
+                _reject("backup manifest is invalid")
+            _verify_backup_record(destination_fd, bundle_path, backup_entry)
+        if service.daemon_reload_needed():
+            service.daemon_reload()
+            if after_boundary is not None:
+                after_boundary("daemon_reload")
+        _assert_pinned_root_identity(destination_path, destination_fd)
+        if initially_active:
+            if not service.is_active():
+                service.start()
+                if after_boundary is not None:
+                    after_boundary("start")
+            if not service.is_active():
+                _reject("service is inactive after recovery")
+            service.run_health_checks()
+            if after_boundary is not None:
+                after_boundary("readiness")
+        elif service.is_active():
+            service.stop()
+            if service.is_active():
+                _reject("service is active after inactive recovery")
+        _assert_pinned_root_identity(destination_path, destination_fd)
+        for backup_entry in backup_entries:
+            if not isinstance(backup_entry, dict):
+                _reject("backup manifest is invalid")
+            _verify_backup_record(destination_fd, bundle_path, backup_entry)
+    finally:
+        os.close(destination_fd)
+
 def rollback_release(
     release_root: str | os.PathLike[str],
     destination_root: str | os.PathLike[str],
@@ -2011,10 +2181,175 @@ def rollback_release(
         os.close(destination_fd)
 
 
+_RELEASE_EXPORT_REQUIRED = frozenset({
+    "acceptance_artifacts.py",
+    "release_argparse.py",
+    "webapp.py",
+    "requirements.txt",
+    "app/__init__.py",
+    "app/wsgi.py",
+    "deploy/release_bundle.py",
+    "deploy/guarded_priority_1_3_release.py",
+    "deploy/verify_priority_1_3_acceptance.py",
+    "scripts/verify_priority_1_3_remote.py",
+})
+_NON_PRODUCTION_EXPORT_ROOTS = frozenset({
+    ".git", ".github", ".gitlab", ".hermes", "ci", "data", "docs", "skills", "tests",
+})
+_NON_PRODUCTION_EXPORT_FILES = frozenset({
+    ".gitignore", ".gitlab-ci.yml", "README.md", "code_review.md",
+})
+
+
+def _exact_commit_archive(repository: Path, source_commit: str) -> bytes:
+    if not repository.is_absolute() or not repository.is_dir() or repository.is_symlink():
+        _reject("release repository must be a real absolute directory")
+    if not isinstance(source_commit, str) or _SOURCE_SHA_RE.fullmatch(source_commit) is None:
+        _reject("release source commit must be an exact lowercase Git SHA")
+    resolved = subprocess.run(
+        ["git", "rev-parse", "--verify", f"{source_commit}^{{commit}}"],
+        cwd=repository, check=False, text=True, capture_output=True, shell=False,
+    )
+    if resolved.returncode != 0 or resolved.stderr or resolved.stdout.strip() != source_commit:
+        _reject("release source commit is not an exact Git commit")
+    archived = subprocess.run(
+        ["git", "archive", "--format=tar", source_commit], cwd=repository,
+        check=False, capture_output=True, shell=False,
+    )
+    if archived.returncode != 0 or archived.stderr or not archived.stdout:
+        _reject("exact Git commit export failed")
+    return archived.stdout
+
+
+def _extract_exact_archive(archive: bytes, destination: Path) -> None:
+    destination.mkdir(mode=0o700)
+    try:
+        with tarfile.open(fileobj=io.BytesIO(archive), mode="r:") as exported:
+            for member in exported.getmembers():
+                path = PurePosixPath(member.name)
+                if (path.is_absolute() or any(part in {"", ".", ".."} for part in path.parts)
+                        or not (member.isdir() or member.isfile())):
+                    _reject("exact Git commit export contains unsafe topology")
+            exported.extractall(destination)
+    except (tarfile.TarError, OSError) as error:
+        raise ReleaseManifestError("exact Git commit export is unreadable") from error
+
+
+def _is_production_export_path(relative: str) -> bool:
+    path = PurePosixPath(relative)
+    return (
+        relative not in _NON_PRODUCTION_EXPORT_FILES
+        and path.parts[0] not in _NON_PRODUCTION_EXPORT_ROOTS
+        and not path.parts[0].startswith(".git")
+    )
+
+
+def _copy_production_export(export: Path, release_root: Path) -> list[str]:
+    release_root.mkdir(mode=0o700)
+    exported_files = _release_files(export)
+    selected = sorted(path for path in exported_files if _is_production_export_path(path))
+    if not _RELEASE_EXPORT_REQUIRED.issubset(selected):
+        _reject("required production file is absent from exact commit export")
+    for relative in selected:
+        source = export.joinpath(*PurePosixPath(relative).parts)
+        destination = release_root.joinpath(*PurePosixPath(relative).parts)
+        destination.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+        shutil.copy2(source, destination, follow_symlinks=False)
+    verifier = release_root / "scripts/verify_priority_1_3_remote.py"
+    if stat.S_IMODE(verifier.stat(follow_symlinks=False).st_mode) & 0o111 == 0:
+        _reject("remote acceptance verifier from exact commit export is not executable")
+    return selected
+
+
+def _exercise_installed_wsgi(release_root: Path, python: Path, scratch_parent: Path) -> None:
+    if not python.is_absolute():
+        _reject("production Python must be absolute")
+    with tempfile.TemporaryDirectory(prefix="matrix-wsgi-check-", dir=scratch_parent) as directory:
+        runtime_parent = Path(directory)
+        runtime_parent.chmod(0o755)
+        runtime = runtime_parent / "installed"
+        shutil.copytree(release_root, runtime)
+        environment = {
+            "HOME": str(runtime_parent), "LANG": "C.UTF-8", "LC_ALL": "C.UTF-8",
+            "PATH": "/usr/local/bin:/usr/bin:/bin", "PYTHONDONTWRITEBYTECODE": "1",
+            "PYTHONHASHSEED": "0", "MATRIX_LOCK_FILE": str(runtime_parent / "matrix-display.lock"),
+        }
+        command = [
+            str(python), "-I", "-B", "-c",
+            "import sys;sys.path.insert(0,sys.argv[1]);import app.wsgi as entry;assert entry.app is not None",
+            str(runtime),
+        ]
+        try:
+            completed = subprocess.run(
+                command, cwd="/", env=environment, check=False, text=True,
+                capture_output=True, timeout=60, shell=False,
+            )
+        except (OSError, subprocess.SubprocessError) as error:
+            raise ReleaseManifestError("installed WSGI production import failed") from error
+        if completed.returncode != 0 or completed.stdout or completed.stderr:
+            _reject("installed WSGI production import failed")
+
+
+def _freeze_outer_release_spec(release_root: Path, spec_path: Path, uid: int, gid: int) -> dict[str, object]:
+    if type(uid) is not int or uid < 0 or type(gid) is not int or gid < 0:
+        _reject("release destination owner is invalid")
+    marker = release_root / ".matrix-release.json"
+    try:
+        inner = json.loads(marker.read_text(encoding="utf-8"), object_pairs_hook=_json_object)
+    except (OSError, UnicodeError, json.JSONDecodeError) as error:
+        raise ReleaseManifestError("acceptance manifest must precede outer release spec") from error
+    source_files = _release_files(release_root) - {".matrix-release.json"}
+    entries = inner.get("files") if isinstance(inner, dict) else None
+    if (set(inner) != {"schema", "source_sha", "candidate_tracked_files", "files"}
+            or inner.get("schema") != 1
+            or not isinstance(entries, list)
+            or inner.get("candidate_tracked_files") != sorted(source_files)
+            or {entry.get("path") for entry in entries if isinstance(entry, dict)} != source_files
+            or len(entries) != len(source_files)):
+        _reject("acceptance manifest must precede outer release spec")
+    manifest_entries = []
+    for relative in sorted(_release_files(release_root)):
+        path = release_root.joinpath(*PurePosixPath(relative).parts)
+        manifest_entries.append({
+            "path": relative, "sha256": hashlib.sha256(_read_regular_path(path)).hexdigest(),
+            "uid": uid, "gid": gid, "mode": f"{stat.S_IMODE(path.stat(follow_symlinks=False).st_mode):04o}",
+        })
+    spec = {"version": 1, "files": manifest_entries}
+    _publish_new_path(spec_path, _canonical_json(spec), mode=0o400)
+    validate_release_manifest(release_root, spec_path)
+    return spec
+
+
+def prepare_release_tree(
+    repository: str | os.PathLike[str], source_commit: str, stage: str | os.PathLike[str],
+    python: str | os.PathLike[str], uid: int, gid: int,
+) -> dict[str, object]:
+    """Build one immutable release stage from one exact committed Git export."""
+    stage_path = Path(stage)
+    if not stage_path.is_absolute():
+        _reject("release stage must be absolute")
+    _require_fresh_path(stage_path, "release stage")
+    archive = _exact_commit_archive(Path(repository), source_commit)
+    stage_path.mkdir(mode=0o700)
+    try:
+        with tempfile.TemporaryDirectory(prefix="matrix-commit-export-", dir=stage_path.parent) as directory:
+            exported = Path(directory) / "export"
+            _extract_exact_archive(archive, exported)
+            release_root = stage_path / "release"
+            candidate_tracked_files = _copy_production_export(exported, release_root)
+        prepare_acceptance_manifest(release_root, source_commit, candidate_tracked_files)
+        _exercise_installed_wsgi(release_root, Path(python), stage_path.parent)
+        shutil.copy2(release_root / "deploy/release_bundle.py", stage_path / "release_bundle.py")
+        return _freeze_outer_release_spec(release_root, stage_path / "release-spec.json", uid, gid)
+    except BaseException:
+        shutil.rmtree(stage_path, ignore_errors=True)
+        raise
+
 def build_parser() -> argparse.ArgumentParser:
     options = (
         "required flags: --release-root --destination-root --bundle "
         "--release-manifest --backup-manifest; preflight/backup/deploy: --release-spec; "
+        "recover: --service --initial-service-state and active readiness; "
         "optional: --service --dry-run; verify: --mode deploy|rollback"
     )
     parser = argparse.ArgumentParser(
@@ -2022,24 +2357,62 @@ def build_parser() -> argparse.ArgumentParser:
         epilog=options,
     )
     subparsers = parser.add_subparsers(dest="command", required=True)
-    for command in ("backup", "preflight", "deploy", "rollback", "verify", "cleanup"):
+    prepare = subparsers.add_parser("prepare-acceptance-manifest", description=options)
+    add_store_once_argument(prepare, "--release-root", required=True)
+    add_store_once_argument(prepare, "--source-sha", required=True)
+    add_store_once_argument(prepare, "--candidate-tracked-files-json", required=True)
+    prepare_tree = subparsers.add_parser("prepare-release-tree", description=options)
+    for option in ("--repository", "--source-commit", "--stage", "--python"):
+        add_store_once_argument(prepare_tree, option, required=True)
+    add_store_once_argument(prepare_tree, "--uid", required=True, type=int)
+    add_store_once_argument(prepare_tree, "--gid", required=True, type=int)
+    common_commands = ("backup", "preflight", "deploy", "rollback", "verify", "cleanup")
+    for command in common_commands:
         subparser = subparsers.add_parser(command, description=options)
-        subparser.add_argument("--release-root", required=True)
-        subparser.add_argument("--destination-root", required=True)
-        subparser.add_argument("--bundle", required=True)
-        subparser.add_argument("--release-manifest", required=True)
-        subparser.add_argument("--backup-manifest", required=True)
-        subparser.add_argument("--service")
+        add_store_once_argument(subparser, "--release-root", required=True)
+        add_store_once_argument(subparser, "--destination-root", required=True)
+        add_store_once_argument(subparser, "--bundle", required=True)
+        add_store_once_argument(subparser, "--release-manifest", required=True)
+        add_store_once_argument(subparser, "--backup-manifest", required=True)
+        add_store_once_argument(subparser, "--service")
         subparser.add_argument("--dry-run", action="store_true")
         if command in ("backup", "preflight", "deploy"):
-            subparser.add_argument("--release-spec", required=True)
+            add_store_once_argument(subparser, "--release-spec", required=True)
         if command == "verify":
-            subparser.add_argument("--mode", choices=("deploy", "rollback"), required=True)
+            add_store_once_argument(subparser, "--mode", choices=("deploy", "rollback"), required=True)
+    recover = subparsers.add_parser("recover", description=options)
+    for option in (
+        "--release-root", "--destination-root", "--bundle", "--release-manifest",
+        "--backup-manifest", "--service",
+    ):
+        add_store_once_argument(recover, option, required=True)
+    add_store_once_argument(
+        recover, "--initial-service-state", required=True,
+        choices=("active", "inactive"),
+    )
+    add_store_once_argument(recover, "--health-url")
+    add_store_once_argument(recover, "--health-status", type=int)
+    add_store_once_argument(recover, "--health-timeout-seconds", type=int)
     return parser
 
 
 def main(argv: list[str] | None = None) -> int:
     arguments = build_parser().parse_args(argv)
+    if arguments.command == "prepare-acceptance-manifest":
+        try:
+            candidate_tracked_files = json.loads(arguments.candidate_tracked_files_json)
+        except json.JSONDecodeError as error:
+            raise ReleaseManifestError("candidate tracked files are invalid") from error
+        prepare_acceptance_manifest(
+            arguments.release_root, arguments.source_sha, candidate_tracked_files,
+        )
+        return 0
+    if arguments.command == "prepare-release-tree":
+        prepare_release_tree(
+            arguments.repository, arguments.source_commit, arguments.stage,
+            arguments.python, arguments.uid, arguments.gid,
+        )
+        return 0
     staged_tool = Path(__file__)
     release_root = Path(arguments.release_root)
     destination_root = Path(arguments.destination_root)
@@ -2050,6 +2423,28 @@ def main(argv: list[str] | None = None) -> int:
     release_spec_path = Path(release_spec_value) if release_spec_value else None
     if arguments.service is not None:
         _validate_service_name(arguments.service)
+
+    if arguments.command == "recover":
+        initially_active = arguments.initial_service_state == "active"
+        readiness = (
+            arguments.health_url, arguments.health_status,
+            arguments.health_timeout_seconds,
+        )
+        if not initially_active:
+            if any(value is not None for value in readiness):
+                _reject("inactive recovery forbids readiness arguments")
+        elif readiness != ("http://127.0.0.1:5000/", 302, 30):
+            _reject("active recovery requires exact loopback readiness arguments")
+        service = _service_control(arguments.service)
+        configure = getattr(service, "configure_health", None)
+        if initially_active and configure is not None:
+            configure(*readiness)
+        recover_release(
+            staged_tool, release_root, destination_root, bundle,
+            release_manifest_path, backup_manifest_path,
+            service=service, initially_active=initially_active,
+        )
+        return 0
 
     if arguments.command == "backup":
         if arguments.dry_run:

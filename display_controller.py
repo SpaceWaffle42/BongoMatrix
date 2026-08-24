@@ -11,6 +11,7 @@ import threading
 import time
 
 from modules.media_player import play_media
+from device_preview import DevicePreviewManager, PreviewAdmissionStatus
 
 LOGGER = logging.getLogger(__name__)
 MODULES = {
@@ -80,6 +81,14 @@ class DisplayController:
         self._stopping = False
         self._lifecycle_generation = 0
         self._module_stop = None
+        self.device_preview_manager = DevicePreviewManager(
+            on_expire=self._expire_device_draft,
+        )
+        self._device_draft_pending = None
+        self._device_draft_active_lease = None
+        self._device_draft_stop = None
+        self._acceptance_transaction = None
+        self._acceptance_completed = None
         self._preview_name = None
         self._media_preview_name = None
         self._announcement_preview = None
@@ -143,6 +152,7 @@ class DisplayController:
             self._shutdown.set()
             thread = self._thread
         try:
+            self._terminate_device_draft(wait=False)
             if not self._interrupt_module(timeout=max(0, deadline - time.monotonic())):
                 return False
             pairing_setup_active = self._pairing_setup.is_set()
@@ -155,6 +165,7 @@ class DisplayController:
                 if thread.is_alive():
                     LOGGER.error("Matrix display thread did not stop within %s seconds", timeout)
                     return False
+            self.device_preview_manager.close()
             if not self._display_lock.acquire(timeout=max(0, deadline - time.monotonic())):
                 LOGGER.error("Matrix display lock was not released within %s seconds", timeout)
                 return False
@@ -172,8 +183,260 @@ class DisplayController:
                 self._stopping = False
 
     def reload(self):
+        self._terminate_device_draft()
         self._reload_requested.set()
         self._interrupt_module()
+
+    def _terminate_device_draft(self, *, wait=True):
+        with self._state_lock:
+            stop_event = self._device_draft_stop
+            self._device_draft_pending = None
+            if stop_event is not None:
+                stop_event.set()
+        if wait:
+            with self._display_lock:
+                pass
+            self.device_preview_manager.close()
+
+    def shutdown_device_drafts(self):
+        self._terminate_device_draft()
+        self._reload_requested.set()
+
+    def begin_acceptance_transaction(self, publisher, owner, *, generation):
+        """Bind one release-only publisher to this exact admitted draft owner."""
+        if publisher.owner_generation != generation:
+            raise ValueError("acceptance publisher owner is stale")
+        with self._state_lock:
+            if self._acceptance_transaction is not None:
+                raise RuntimeError("an acceptance publisher is already active")
+            baseline_frame, baseline_revision = self.matrix.latest_frame_rgb()
+            if len(baseline_frame) != 64 * 32 * 3:
+                raise ValueError("physical acceptance requires a 64x32 matrix")
+            context = {
+                "publisher": publisher, "owner": owner, "generation": generation,
+                "baseline_revision": baseline_revision,
+                "foreign_rejected": False, "heartbeat_accepted": False,
+                "timeout_returned": False,
+            }
+            self._acceptance_transaction = context
+            self._acceptance_completed = None
+
+        def observe(frame, revision):
+            with self._state_lock:
+                if self._acceptance_transaction is not context:
+                    return
+                current = self.device_preview_manager.is_current(owner, generation)
+                state = publisher.state
+                if state == publisher.INIT:
+                    if not current:
+                        return
+                    publisher.publish_draft(frame, frame_revision=revision)
+                    return
+                if state != publisher.DRAFT_PUBLISHED or current:
+                    return
+                if not all(context[name] for name in (
+                    "foreign_rejected", "heartbeat_accepted", "timeout_returned",
+                )):
+                    return
+                publisher.publish_saved_rollback(
+                    frame, frame_revision=revision,
+                    saved_revision=context["baseline_revision"],
+                    foreign_rejected=True, timeout_returned=True,
+                    heartbeat_accepted=True,
+                )
+                self._acceptance_completed = {
+                    "owner": owner, "generation": generation,
+                    "status": publisher.status(),
+                }
+                self._acceptance_transaction = None
+                self.matrix.set_physical_swap_observer(None)
+
+        self.matrix.set_physical_swap_observer(observe)
+
+    def mark_acceptance_result(self, owner, *, generation, result):
+        if result not in {"foreign_rejected", "heartbeat_accepted", "timeout_returned"}:
+            raise ValueError("acceptance result is invalid")
+        with self._state_lock:
+            context = self._acceptance_transaction
+            if (context is None or context["owner"] != owner
+                    or context["generation"] != generation):
+                return False
+            context[result] = True
+            return True
+
+    def mark_acceptance_foreign_rejection(self, owner, *, generation):
+        with self._state_lock:
+            context = self._acceptance_transaction
+            if (context is None or context["generation"] != generation
+                    or context["owner"] == owner):
+                return False
+            context["foreign_rejected"] = True
+            return True
+
+    def acceptance_transaction_status(self, owner, *, generation):
+        with self._state_lock:
+            context = self._acceptance_transaction
+            if (context is not None and context["owner"] == owner
+                    and context["generation"] == generation):
+                return context["publisher"].status()
+            completed = self._acceptance_completed
+            if (completed is not None and completed["owner"] == owner
+                    and completed["generation"] == generation):
+                return dict(completed["status"])
+            return None
+
+    def submit_device_draft(self, request, *, renderer):
+        displaced = self.device_preview_manager.active_lease()
+        admission = self.device_preview_manager.submit(
+            request, close_displaced=False,
+        )
+        if admission.status is not PreviewAdmissionStatus.ACCEPTED:
+            return admission
+        with self._state_lock:
+            if self._device_draft_stop is not None:
+                self._device_draft_stop.set()
+            if self._module_stop is not None:
+                self._module_stop.set()
+        if displaced is not None:
+            with self._display_lock:
+                pass
+            self.device_preview_manager.finish(displaced)
+        with self._state_lock:
+            self._device_draft_pending = (admission.lease, renderer)
+            if self._module_stop is not None:
+                self._module_stop.set()
+        self.start()
+        return admission
+
+    def cancel_device_drafts_for_device(self, device_id):
+        lease = self.device_preview_manager.active_lease()
+        if lease is None or lease.owner.device_id != device_id:
+            return False
+        return self.cancel_device_draft(lease.owner, generation=lease.generation)
+
+    def heartbeat_device_draft(self, owner, *, generation):
+        return self.device_preview_manager.heartbeat(owner, generation=generation)
+
+    def _expire_device_draft(self, lease):
+        with self._state_lock:
+            if (
+                self._device_draft_pending is not None
+                and self._device_draft_pending[0] is lease
+            ):
+                self._device_draft_pending = None
+            if self._device_draft_active_lease is lease:
+                stop_event = self._device_draft_stop
+                if stop_event is not None:
+                    stop_event.set()
+        with self._display_lock:
+            pass
+        self._reload_requested.set()
+
+    def cancel_device_draft(self, owner, *, generation):
+        lease = self.device_preview_manager.cancel(
+            owner, generation=generation, close=False,
+        )
+        if lease is None:
+            return False
+        with self._state_lock:
+            if self._device_draft_stop is not None:
+                self._device_draft_stop.set()
+            if self._device_draft_pending is not None and self._device_draft_pending[0] is lease:
+                self._device_draft_pending = None
+        with self._display_lock:
+            pass
+        self.device_preview_manager.finish(lease)
+        self._reload_requested.set()
+        return True
+
+    def _execute_pending_device_draft(self):
+        with self._state_lock:
+            pending = self._device_draft_pending
+            self._device_draft_pending = None
+            if pending is None:
+                return False
+            lease, renderer = pending
+            stop_event = threading.Event()
+            self._device_draft_active_lease = lease
+            self._device_draft_stop = stop_event
+            self._module_stop = stop_event
+        request = lease.request
+        guard = lambda: (
+            not stop_event.is_set()
+            and self.device_preview_manager.is_current(request.owner, request.generation)
+        )
+        self.current_module = f"device-draft:{request.config.get('module', 'unknown')}"
+        try:
+            with self._display_lock:
+                guard_installed = hasattr(self.matrix, "set_publication_guard")
+                if guard_installed:
+                    self.matrix.set_publication_guard(guard)
+                try:
+                    if not guard():
+                        return False
+                    return bool(renderer(self.matrix, request, stop_event=stop_event))
+                finally:
+                    if guard_installed:
+                        self.matrix.set_publication_guard(None)
+        except Exception as exc:
+            self.last_error = f"{type(exc).__name__}: {exc}"
+            return False
+        finally:
+            self.current_module = None
+            with self._state_lock:
+                if self._device_draft_active_lease is lease:
+                    self._device_draft_active_lease = None
+                if self._device_draft_stop is stop_event:
+                    self._device_draft_stop = None
+                if self._module_stop is stop_event:
+                    self._module_stop = None
+            terminal = self.device_preview_manager.cancel(
+                request.owner, generation=request.generation, close=False,
+            )
+            if terminal is not None:
+                self.device_preview_manager.finish(terminal)
+                self._reload_requested.set()
+
+    def render_device_draft(
+        self, matrix, request, *, stop_event, prepared=None,
+    ):
+        """Render one validated transient request without consulting saved config."""
+        module_name = request.config["module"]
+        candidate = request.config["candidate"]
+        if stop_event.is_set():
+            return False
+        custom = custom_module(candidate, module_name)
+        if module_name in MODULES:
+            module = importlib.import_module(MODULES[module_name])
+        elif custom is not None:
+            module = importlib.import_module("modules.custom_text")
+        else:
+            raise KeyError(module_name)
+        options = {
+            "duration": request.timeout_seconds,
+            "stop_event": stop_event,
+        }
+        if module_name == "clock_lava":
+            options["selected_palette"] = request.config.get("selected_lava_palette")
+        if module_name in {"splash", "sleep"}:
+            filename = candidate["media"][module_name]
+            pinned_handle = request.pinned_media.get(filename)
+            if pinned_handle is None:
+                raise ValueError("built-in device draft media is not pinned")
+            options["pinned_handle"] = pinned_handle
+        elif custom is not None:
+            options["module_config"] = custom
+            options["pinned_handles"] = request.pinned_media
+        elif module_name == "weather" and prepared is not None:
+            class PreparedWeatherClient:
+                def fetch(self, *_args, **_kwargs):
+                    return prepared
+            options["client"] = PreparedWeatherClient()
+        elif module_name in {"openweather_overview", "openweather_forecast"}:
+            options["prepared"] = prepared
+        if stop_event.is_set():
+            return False
+        return module.run(matrix, candidate, **options)
 
     def preview(self, module_name):
         if module_name not in MODULES and custom_module(self.config_store.get(), module_name) is None:
@@ -220,6 +483,7 @@ class DisplayController:
         return self.matrix.latest_frame_png()
 
     def show_pairing_pin(self, pin, ttl_seconds=600):
+        self._terminate_device_draft()
         with self._lifecycle_lock:
             if self._shutdown.is_set():
                 return
@@ -472,7 +736,8 @@ class DisplayController:
         stop_event = threading.Event()
         with self._state_lock:
             if (
-                self._announcement_preview is not None
+                self._device_draft_pending is not None
+                or self._announcement_preview is not None
                 or self._media_preview_name is not None
                 or self._preview_name is not None
             ):
@@ -487,6 +752,7 @@ class DisplayController:
             if (
                 self._shutdown.is_set()
                 or self._pairing_pause.is_set()
+                or self._device_draft_pending is not None
                 or self._announcement_preview is not None
                 or self._media_preview_name is not None
                 or self._preview_name is not None
@@ -555,6 +821,12 @@ class DisplayController:
             if self._shutdown.is_set():
                 break
             self._reload_requested.clear()
+            with self._state_lock:
+                device_draft_pending = self._device_draft_pending is not None
+            if device_draft_pending:
+                self._execute_pending_device_draft()
+                self._mark_scheduler_healthy()
+                continue
             config = self.config_store.get()
 
             announcement_preview = self._take_announcement_preview()
@@ -608,6 +880,9 @@ class DisplayController:
                     or self._pairing_pause.is_set()
                 ):
                     break
+                with self._state_lock:
+                    if self._device_draft_pending is not None:
+                        break
                 announcement_preview = self._take_announcement_preview()
                 if announcement_preview:
                     cycle_rendered = bool(

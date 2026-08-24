@@ -1,3 +1,4 @@
+import copy
 import datetime
 import random
 import time
@@ -28,14 +29,15 @@ EDGE_TABLE = {
     14: [(0, 0.5), (0.5, 0)],
 }
 
-NUM_BLOBS = random.randint(3, 4)
+# Non-cryptographic randomness controls visual blob variation only.
+NUM_BLOBS = random.randint(3, 4)  # nosemgrep: bandit.B311
 blobs = [
     {
-        "x": random.uniform(0, WIDTH),
-        "y": random.uniform(0, HEIGHT),
-        "vx": random.uniform(-0.25, 0.25),
-        "vy": random.uniform(-0.25, 0.25),
-        "r": random.uniform(5, 10),
+        "x": random.uniform(0, WIDTH),  # nosemgrep: bandit.B311
+        "y": random.uniform(0, HEIGHT),  # nosemgrep: bandit.B311
+        "vx": random.uniform(-0.25, 0.25),  # nosemgrep: bandit.B311
+        "vy": random.uniform(-0.25, 0.25),  # nosemgrep: bandit.B311
+        "r": random.uniform(5, 10),  # nosemgrep: bandit.B311
     }
     for _ in range(NUM_BLOBS)
 ]
@@ -49,11 +51,11 @@ def make_blobs(settings=None):
     speed = settings.get("blob_speed", 0.25)
     return [
         {
-            "x": random.uniform(0, WIDTH),
-            "y": random.uniform(0, HEIGHT),
-            "vx": random.uniform(-speed, speed),
-            "vy": random.uniform(-speed, speed),
-            "r": random.uniform(minimum_radius, maximum_radius),
+            "x": random.uniform(0, WIDTH),  # nosemgrep: bandit.B311
+            "y": random.uniform(0, HEIGHT),  # nosemgrep: bandit.B311
+            "vx": random.uniform(-speed, speed),  # nosemgrep: bandit.B311
+            "vy": random.uniform(-speed, speed),  # nosemgrep: bandit.B311
+            "r": random.uniform(minimum_radius, maximum_radius),  # nosemgrep: bandit.B311
         }
         for _ in range(count)
     ]
@@ -176,6 +178,30 @@ def measure_text(matrix, font, y, colour, text, canvas):
     return matrix.draw_text(font, 0, y, colour, text, canvas=canvas)
 
 
+def selected_lava_config(lava_config, selected_palette):
+    """Prepare one exact inspected palette without mutating the accepted draft."""
+    lava = copy.deepcopy(lava_config)
+    kind = selected_palette["kind"]
+    palette_id = selected_palette["id"]
+    lava["custom_enabled"] = False
+    if kind == "built_in":
+        lava["enabled_palettes"] = [palette_id]
+        for palette in lava.get("custom_palettes", []):
+            palette["enabled"] = False
+        return lava
+    if kind == "custom":
+        lava["enabled_palettes"] = []
+        matched = False
+        for palette in lava.get("custom_palettes", []):
+            palette["enabled"] = palette["id"] == palette_id
+            if palette["enabled"]:
+                palette["colours"] = copy.deepcopy(selected_palette["colours"])
+                matched = True
+        if matched:
+            return lava
+    raise ValueError("selected Lava palette is not in the candidate")
+
+
 def prepare_lava_frame_state(matrix, lava_config=None):
     """Prepare one physical Lava invocation without changing palette selection."""
     settings = lava_config or {}
@@ -273,12 +299,15 @@ def clock(duration=300, matrix=None, stop_event=None, lava_config=None):
         matrix.swap(canvas)
 
 
-def run(matrix, config, duration=300, stop_event=None):
+def run(matrix, config, duration=300, stop_event=None, *, selected_palette=None):
+    lava_config = config.get("lava")
+    if selected_palette is not None:
+        lava_config = selected_lava_config(lava_config, selected_palette)
     return clock(
         duration=duration,
         matrix=matrix,
         stop_event=stop_event,
-        lava_config=config.get("lava"),
+        lava_config=lava_config,
     )
 
 

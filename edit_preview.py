@@ -309,27 +309,7 @@ def continuous_lava_preview_frames(matrix, config, selected_palette, stop_event=
     """Yield continuous physical Lava frames for one inspected palette."""
     from modules import clock_lava
 
-    lava = copy.deepcopy(config["lava"])
-    kind = selected_palette["kind"]
-    palette_id = selected_palette["id"]
-    lava["custom_enabled"] = False
-    if kind == "built_in":
-        lava["enabled_palettes"] = [palette_id]
-        for palette in lava.get("custom_palettes", []):
-            palette["enabled"] = False
-    elif kind == "custom":
-        lava["enabled_palettes"] = []
-        matched = False
-        for palette in lava.get("custom_palettes", []):
-            palette["enabled"] = palette["id"] == palette_id
-            if palette["enabled"]:
-                palette["colours"] = copy.deepcopy(selected_palette["colours"])
-                matched = True
-        if not matched:
-            raise ValueError("selected custom Lava palette is not in the candidate")
-    else:
-        raise ValueError("selected Lava palette kind is invalid")
-
+    lava = clock_lava.selected_lava_config(config["lava"], selected_palette)
     state = clock_lava.prepare_lava_frame_state(matrix, lava)
     canvas = matrix.matrix.CreateFrameCanvas()
     temp_canvas = matrix.matrix.CreateFrameCanvas()

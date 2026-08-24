@@ -30,6 +30,7 @@ from PIL import Image, UnidentifiedImageError
 from werkzeug.exceptions import HTTPException, RequestEntityTooLarge
 from werkzeug.utils import secure_filename
 
+from acceptance_artifacts import AcceptanceArtifactTransaction
 from config_store import (
     ALLOWED_MODULES, DEFAULT_CONFIG, ConfigConflictError, ConfigDurabilityError,
     validate_config,
@@ -52,6 +53,11 @@ from preview_provider import (
     PreviewProvider, PreviewProviderCancelled, PreviewProviderCapacityError,
     PreviewProviderTimeout, PreviewProviderUnavailable,
 )
+from device_preview import (
+    DevicePreviewOwner, DevicePreviewRequest, PreviewAdmissionStatus,
+    HEARTBEAT_INTERVAL_SECONDS,
+    PreviewHeartbeatStatus,
+)
 
 MEDIA_EXTENSIONS = {".gif", ".png", ".jpg", ".jpeg", ".webp", ".mp4"}
 Image.MAX_IMAGE_PIXELS = 1_000_000
@@ -64,7 +70,7 @@ MEDIA_METADATA_ERRORS = (
 CONFIG_REQUEST_LIMIT = 1_048_576
 CONDITIONAL_HEADER_LIMIT = 4096
 MINIMUM_CLIENT_CONTRACT = 2
-APPLICATION_VERSION = "0.3.57-preview"
+APPLICATION_VERSION = "0.3.58-preview"
 DEVICE_RESTART_PENDING_TTL_SECONDS = 60
 PAIRED_ACTION_HEADER = "X-Matrix-Action"
 PAIRED_ACTION_VALUE = "paired-request"
@@ -256,6 +262,41 @@ def _prepare_edit_preview_provider(provider, module_name, candidate, stop_event)
     )
 
 
+def _validate_current_lava_selection(module_name, candidate, selected_palette):
+    """Validate transient Lava inspection against the accepted current draft."""
+    if selected_palette is None:
+        return None
+    if module_name != "clock_lava" or not isinstance(selected_palette, dict):
+        raise ValueError("selected_lava_palette is invalid")
+    kind = selected_palette.get("kind")
+    palette_id = selected_palette.get("id")
+    if not isinstance(kind, str) or not isinstance(palette_id, str):
+        raise ValueError("selected_lava_palette is invalid")
+    lava = candidate["lava"]
+    if kind == "built_in":
+        if (
+            set(selected_palette) != {"kind", "id"}
+            or palette_id not in LAVA_PALETTES
+        ):
+            raise ValueError("selected_lava_palette is invalid")
+        return {"kind": kind, "id": palette_id}
+    if kind == "custom" and set(selected_palette) == {"kind", "id", "colours"}:
+        matched = next(
+            (
+                palette for palette in lava["custom_palettes"]
+                if palette["id"] == palette_id
+            ),
+            None,
+        )
+        if matched is not None and selected_palette["colours"] == matched["colours"]:
+            return {
+                "kind": kind,
+                "id": palette_id,
+                "colours": copy.deepcopy(matched["colours"]),
+            }
+    raise ValueError("selected_lava_palette is invalid")
+
+
 def _edit_preview_iterator(
     module_name, candidate, selected_palette, pinned_media, prepared, stop_event,
 ):
@@ -376,10 +417,42 @@ def create_app(
     openweather_secrets=None,
     scroll_timing_cache=None,
     device_restart_runner=None,
+    acceptance_authorization_file=None,
+    acceptance_runtime=None,
 ):
     session_generation = session_generation or secrets.token_hex(16)
     media_root = Path(media_dir or Path(__file__).resolve().parent / "resources" / "media")
     media_root.mkdir(parents=True, exist_ok=True)
+    acceptance_authorization = None
+    if (acceptance_authorization_file is None) != (acceptance_runtime is None):
+        raise ValueError(
+            "acceptance authorization and runtime must be configured together"
+        )
+    if acceptance_authorization_file is not None:
+        authorization_path = Path(acceptance_authorization_file)
+        info = authorization_path.lstat()
+        if (not stat.S_ISREG(info.st_mode) or authorization_path.is_symlink()
+                or info.st_uid != os.geteuid() or stat.S_IMODE(info.st_mode) != 0o600
+                or info.st_nlink != 1 or info.st_size > 256):
+            raise ValueError("acceptance authorization file is unsafe")
+        descriptor = os.open(authorization_path, os.O_RDONLY | os.O_CLOEXEC | os.O_NOFOLLOW)
+        try:
+            before = os.fstat(descriptor)
+            raw_authorization = os.read(descriptor, 257)
+            after = os.fstat(descriptor)
+        finally:
+            os.close(descriptor)
+        if (len(raw_authorization) > 256 or
+                (before.st_dev, before.st_ino, before.st_size, before.st_mtime_ns) !=
+                (after.st_dev, after.st_ino, after.st_size, after.st_mtime_ns)):
+            raise ValueError("acceptance authorization changed while read")
+        try:
+            acceptance_authorization = raw_authorization.decode("ascii").strip()
+        except UnicodeDecodeError as error:
+            raise ValueError("acceptance authorization is invalid") from error
+        if re.fullmatch(r"[0-9a-f]{64}", acceptance_authorization or "") is None:
+            raise ValueError("acceptance authorization is invalid")
+        acceptance_runtime = Path(acceptance_runtime)
     built_in_media_root = media_root / "built-in"
     media_lock = threading.RLock()
     media_timeline_slots = threading.BoundedSemaphore(2)
@@ -485,6 +558,9 @@ def create_app(
         )
 
     def pairing_expired_response():
+        device_id = session.get("device_id")
+        if device_id:
+            controller.cancel_device_drafts_for_device(device_id)
         session.clear()
         if request.path.startswith("/api/"):
             return jsonify({"error": "Pairing session expired."}), 401
@@ -511,7 +587,7 @@ def create_app(
     def advertise_client_contract(response):
         if request.path == "/api/config":
             response.headers["X-Matrix-Minimum-Client-Contract"] = str(MINIMUM_CLIENT_CONTRACT)
-        if request.path.startswith("/api/edit-preview"):
+        if request.path.startswith(("/api/edit-preview", "/api/device-preview")):
             response.headers["Cache-Control"] = "no-store"
             response.headers.pop("ETag", None)
         return response
@@ -913,6 +989,7 @@ def create_app(
             if not device_store.remove(device_id):
                 abort(404)
         except PairingDurabilityError:
+            controller.cancel_device_drafts_for_device(device_id)
             if current:
                 session.clear()
             return jsonify({
@@ -922,6 +999,7 @@ def create_app(
                 "durability_uncertain": True,
                 "error": DEVICE_REMOVAL_DURABILITY_WARNING,
             }), 503
+        controller.cancel_device_drafts_for_device(device_id)
         if current:
             session.clear()
         return jsonify({"removed": device_id, "current": current})
@@ -933,6 +1011,8 @@ def create_app(
             if device_id:
                 device_store.remove(device_id)
         except PairingDurabilityError:
+            if device_id:
+                controller.cancel_device_drafts_for_device(device_id)
             session.clear()
             return redirect(url_for("pair", warning="device-removal-durability"))
         except OSError:
@@ -941,6 +1021,8 @@ def create_app(
                 "pair.html", paired=True,
                 error="This device could not be removed, so this browser remains signed in.",
             ), 503
+        if device_id:
+            controller.cancel_device_drafts_for_device(device_id)
         session.clear()
         return redirect(url_for("pair"))
 
@@ -1803,6 +1885,232 @@ def create_app(
             return edit_preview_error("Preview request is invalid.", 400)
         except Exception:
             return edit_preview_error("Preview is temporarily unavailable.", 503)
+
+    def require_acceptance_authorization():
+        supplied = request.headers.get("X-Matrix-Acceptance-Authorization", "")
+        if (acceptance_authorization is None
+                or not secrets.compare_digest(supplied, acceptance_authorization)):
+            abort(403)
+
+    @app.post("/api/release-acceptance/transaction")
+    @requires_pairing
+    def stage_release_acceptance_transaction():
+        require_acceptance_authorization()
+        try:
+            request.max_content_length = 8193
+            raw = request.get_data(cache=True)
+            if len(raw) > 8192 or not request.is_json:
+                raise ValueError("acceptance request is invalid")
+            payload = request.get_json()
+            fields = {"attempt_id", "acceptance_operation_id", "evidence_id",
+                      "expected_source_sha", "expected_version", "mode", "nonce",
+                      "owner_revision", "generation", "preview_instance"}
+            if type(payload) is not dict or set(payload) != fields:
+                raise ValueError("acceptance request fields are invalid")
+            generation = payload["generation"]
+            operation_id = payload["acceptance_operation_id"]
+            if (type(generation) is not int or generation < 0
+                    or type(operation_id) is not str
+                    or re.fullmatch(r"[0-9a-f]{64}", operation_id) is None):
+                raise ValueError("acceptance identity is invalid")
+            owner = DevicePreviewOwner(*edit_preview_identity(payload))
+            transaction = {key: payload[key] for key in fields - {"generation", "preview_instance"}}
+            publisher = AcceptanceArtifactTransaction(
+                acceptance_runtime, transaction, owner_generation=generation,
+            )
+            try:
+                controller.begin_acceptance_transaction(
+                    publisher, owner, generation=generation,
+                )
+            except BaseException:
+                publisher.close()
+                raise
+            return jsonify(publisher.status()), 202
+        except RequestEntityTooLarge:
+            return edit_preview_error("Acceptance request exceeds 8 KiB.", 413)
+        except (KeyError, OSError, TypeError, ValueError, RuntimeError):
+            return edit_preview_error("Acceptance transaction is unavailable.", 409)
+
+    @app.post("/api/release-acceptance/transaction/status")
+    @requires_pairing
+    def release_acceptance_transaction_status():
+        require_acceptance_authorization()
+        try:
+            payload = edit_preview_json(
+                {"generation", "preview_instance", "nonce", "acceptance_operation_id"}
+            )
+            generation = payload["generation"]
+            operation_id = payload["acceptance_operation_id"]
+            if (type(generation) is not int or generation < 0
+                    or type(payload["nonce"]) is not str
+                    or re.fullmatch(r"[0-9a-f]{64}", payload["nonce"]) is None
+                    or type(operation_id) is not str
+                    or re.fullmatch(r"[0-9a-f]{64}", operation_id) is None):
+                raise ValueError("acceptance status identity is invalid")
+            owner = DevicePreviewOwner(*edit_preview_identity(payload))
+            status = controller.acceptance_transaction_status(owner, generation=generation)
+            if (status is None or status.get("nonce") != payload["nonce"]
+                    or status.get("acceptance_operation_id") != operation_id):
+                return edit_preview_error("Acceptance transaction was not found.", 404)
+            return jsonify(status), (200 if status.get("state") == "SAVED_ROLLBACK_PUBLISHED" else 202)
+        except (KeyError, TypeError, ValueError):
+            return edit_preview_error("Acceptance status request is invalid.", 400)
+
+    device_preview_operation = threading.BoundedSemaphore(1)
+
+    @app.post("/api/device-preview/<module_name>")
+    @requires_pairing
+    def start_device_preview(module_name):
+        if not device_preview_operation.acquire(blocking=False):
+            return edit_preview_error(
+                "Device preview capacity is temporarily exhausted.",
+                429, retry_after=2,
+            )
+        stack = ExitStack()
+        transferred = False
+        try:
+            payload = edit_preview_json(
+                {"config", "generation", "preview_instance"},
+                {"timeout_seconds", "selected_lava_palette"},
+            )
+            generation = payload["generation"]
+            timeout_seconds = payload.get("timeout_seconds", 60)
+            if (
+                isinstance(generation, bool) or not isinstance(generation, int)
+                or generation < 0
+                or isinstance(timeout_seconds, bool)
+                or not isinstance(timeout_seconds, int)
+                or not 5 <= timeout_seconds <= 3600
+            ):
+                raise ValueError("invalid transient preview values")
+            identity = edit_preview_identity(payload)
+            candidate = config_store.validate_candidate(payload["config"])
+            selected_palette = _validate_current_lava_selection(
+                module_name, candidate, payload.get("selected_lava_palette"),
+            )
+            custom_ids = {item["id"] for item in candidate["custom_modules"]}
+            if module_name not in ALLOWED_MODULES and module_name not in custom_ids:
+                stack.close()
+                return edit_preview_error("Device preview was not found.", 404)
+            owner = DevicePreviewOwner(*identity)
+            with media_lock:
+                pinned_media = stack.enter_context(pin_candidate_media(
+                    candidate, media_root, allow_missing=default_built_in_media,
+                ))
+            request_record = DevicePreviewRequest(
+                owner=owner,
+                generation=generation,
+                config={
+                    "module": module_name,
+                    "candidate": candidate,
+                    "selected_lava_palette": selected_palette,
+                },
+                timeout_seconds=timeout_seconds,
+                cleanup=stack.close,
+                pinned_media=pinned_media,
+            )
+            def render_device_draft(matrix, owned_request, *, stop_event):
+                prepared = None
+                if module_name in {
+                    "weather", "openweather_overview", "openweather_forecast",
+                }:
+                    _registry, provider = get_edit_preview_services()
+                    provider_candidate = copy.deepcopy(candidate)
+                    if module_name in {
+                        "openweather_overview", "openweather_forecast",
+                    }:
+                        provider_candidate["_preview_openweather_key"] = (
+                            openweather_secrets.get()
+                        )
+                    prepared = _prepare_edit_preview_provider(
+                        provider, module_name, provider_candidate, stop_event,
+                    )
+                    if stop_event.is_set():
+                        return False
+                return controller.render_device_draft(
+                    matrix, owned_request,
+                    stop_event=stop_event, prepared=prepared,
+                )
+
+            admission = controller.submit_device_draft(
+                request_record, renderer=render_device_draft,
+            )
+            if admission.status is not PreviewAdmissionStatus.ACCEPTED:
+                stack.close()
+                status = 409
+                return edit_preview_error("Device preview is not available.", status)
+            transferred = True
+            now = time.monotonic()
+            lease = admission.lease
+            return jsonify({
+                "generation": generation,
+                "active_module": module_name,
+                "timeout_seconds": timeout_seconds,
+                "heartbeat_after_seconds": HEARTBEAT_INTERVAL_SECONDS,
+                "expires_in": max(0, lease.content_deadline - now),
+                "connectivity_expires_in": max(0, lease.connectivity_deadline - now),
+            }), 202
+        except RequestEntityTooLarge:
+            return edit_preview_error("Device preview request exceeds 1 MiB.", 413)
+        except (KeyError, TypeError, ValueError):
+            return edit_preview_error("Device preview request is invalid.", 400)
+        except Exception:
+            return edit_preview_error("Device preview is temporarily unavailable.", 503)
+        finally:
+            if not transferred:
+                stack.close()
+            device_preview_operation.release()
+
+    def device_preview_control_payload():
+        payload = edit_preview_json({"generation", "preview_instance"})
+        generation = payload["generation"]
+        if isinstance(generation, bool) or not isinstance(generation, int) or generation < 0:
+            raise ValueError("generation is invalid")
+        return DevicePreviewOwner(*edit_preview_identity(payload)), generation
+
+    @app.post("/api/device-preview/heartbeat")
+    @requires_pairing
+    def heartbeat_device_preview():
+        try:
+            owner, generation = device_preview_control_payload()
+            outcome = controller.heartbeat_device_draft(owner, generation=generation)
+            if outcome.status is not PreviewHeartbeatStatus.ACCEPTED:
+                controller.mark_acceptance_foreign_rejection(owner, generation=generation)
+                return edit_preview_error("Device preview is no longer active.", 409)
+            controller.mark_acceptance_result(
+                owner, generation=generation, result="heartbeat_accepted",
+            )
+            now = time.monotonic()
+            return jsonify({
+                "active": True,
+                "generation": generation,
+                "expires_in": max(0, outcome.lease.content_deadline - now),
+                "connectivity_expires_in": max(0, outcome.lease.connectivity_deadline - now),
+            }), 202
+        except RequestEntityTooLarge:
+            return edit_preview_error("Device preview request exceeds 1 MiB.", 413)
+        except (KeyError, TypeError, ValueError):
+            return edit_preview_error("Device preview request is invalid.", 400)
+        except Exception:
+            return edit_preview_error("Device preview is temporarily unavailable.", 503)
+
+    @app.post("/api/device-preview/cancel")
+    @requires_pairing
+    def cancel_device_preview():
+        try:
+            owner, generation = device_preview_control_payload()
+            if not controller.cancel_device_draft(owner, generation=generation):
+                return edit_preview_error("Device preview is no longer active.", 409)
+            controller.mark_acceptance_result(
+                owner, generation=generation, result="timeout_returned",
+            )
+            return jsonify({"cancelled": True}), 202
+        except RequestEntityTooLarge:
+            return edit_preview_error("Device preview request exceeds 1 MiB.", 413)
+        except (KeyError, TypeError, ValueError):
+            return edit_preview_error("Device preview request is invalid.", 400)
+        except Exception:
+            return edit_preview_error("Device preview is temporarily unavailable.", 503)
 
     @app.post("/api/preview/announcement")
     @requires_pairing

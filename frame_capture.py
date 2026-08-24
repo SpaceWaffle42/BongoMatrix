@@ -172,6 +172,16 @@ class FrameCapture:
             self._revision += 1
             return self._revision
 
+    def raw_snapshot(self, canvas=None):
+        """Return immutable packed RGB bytes for a buffer or latest publication."""
+        with self._lock:
+            image = self._latest if canvas is None else self._buffer(canvas)
+            return image.tobytes("raw", "RGB")
+
+    def latest_rgb(self):
+        with self._lock:
+            return self._latest.tobytes("raw", "RGB"), self._revision
+
     def snapshot(self, canvas):
         """Return an isolated copy of a draw buffer without publishing it."""
         with self._lock:

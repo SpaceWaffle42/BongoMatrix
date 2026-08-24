@@ -514,7 +514,7 @@ try{
         body = self.client.get("/").get_data(as_text=True)
 
         application_version = getattr(webapp, "APPLICATION_VERSION", None)
-        self.assertEqual(application_version, "0.3.57-preview")
+        self.assertEqual(application_version, "0.3.58-preview")
         self.assertEqual(body.count(f"Version {application_version}"), 1)
         self.assertRegex(
             body,
@@ -966,10 +966,15 @@ try{
             ("POST", "/api/edit-preview/<module_name>"),
             ("POST", "/api/edit-preview/page"),
             ("POST", "/api/edit-preview/cancel"),
+            ("POST", "/api/device-preview/<module_name>"),
+            ("POST", "/api/device-preview/heartbeat"),
+            ("POST", "/api/device-preview/cancel"),
             ("POST", "/api/preview/announcement"),
             ("POST", "/api/preview/<module_name>"),
             ("POST", "/api/control/<action>"),
             ("POST", "/api/system/restart"),
+            ("POST", "/api/release-acceptance/transaction"),
+            ("POST", "/api/release-acceptance/transaction/status"),
         }
         self.assertEqual(unsafe_routes, expected_routes)
         concrete_routes = [
@@ -988,10 +993,15 @@ try{
             ("POST", "/api/edit-preview/clock_lava"),
             ("POST", "/api/edit-preview/page"),
             ("POST", "/api/edit-preview/cancel"),
+            ("POST", "/api/device-preview/clock_lava"),
+            ("POST", "/api/device-preview/heartbeat"),
+            ("POST", "/api/device-preview/cancel"),
             ("POST", "/api/preview/announcement"),
             ("POST", "/api/preview/clock_lava"),
             ("POST", "/api/control/stop"),
             ("POST", "/api/system/restart"),
+            ("POST", "/api/release-acceptance/transaction"),
+            ("POST", "/api/release-acceptance/transaction/status"),
         ]
         config_before = self.store.get()
         devices_before = self.device_store.list()
@@ -1027,6 +1037,138 @@ try{
         self.device_restart_runner.assert_not_called()
         self.assertIsNone(self.app.extensions.get("edit_preview_registry"))
         self.assertIsNone(self.app.extensions.get("edit_preview_provider"))
+
+    def test_release_acceptance_routes_require_exact_dedicated_header_before_publisher_side_effects(self):
+        self.pair_browser()
+        with self.client.session_transaction() as paired:
+            paired_session = dict(paired)
+        root = Path(self.temp.name)
+        authorization = root / "acceptance-authorization.key"
+        authorization.write_text("a" * 64, encoding="ascii")
+        authorization.chmod(0o600)
+        runtime = root / "acceptance-runtime"
+        runtime.mkdir(mode=0o700)
+        secured = create_app(
+            self.controller, self.store, self.pairing,
+            secret_key="acceptance-test", session_generation="generation-one",
+            media_dir=self.media_dir, location_search=self.location_search,
+            device_store=self.device_store, openweather_secrets=self.openweather_secrets,
+            acceptance_authorization_file=authorization,
+            acceptance_runtime=runtime,
+        )
+        self.controller.reset_mock()
+        for path in (
+            "/api/release-acceptance/transaction",
+            "/api/release-acceptance/transaction/status",
+        ):
+            for supplied in (None, "b" * 64, "a" * 63, "A" * 64):
+                with self.subTest(path=path, supplied=supplied):
+                    client = secured.test_client()
+                    with client.session_transaction() as session:
+                        session.update(paired_session)
+                    headers = {"X-Matrix-Action": "paired-request"}
+                    if supplied is not None:
+                        headers["X-Matrix-Acceptance-Authorization"] = supplied
+                    response = client.post(path, headers=headers, json={})
+                    self.assertEqual(response.status_code, 403, response.get_data(as_text=True))
+        self.controller.begin_acceptance_transaction.assert_not_called()
+        self.controller.acceptance_transaction_status.assert_not_called()
+        self.assertEqual(list(runtime.iterdir()), [])
+
+    def test_release_acceptance_routes_require_and_bind_canonical_operation_identity(self):
+        self.pair_browser()
+        with self.client.session_transaction() as paired:
+            paired_session = dict(paired)
+        root = Path(self.temp.name)
+        authorization = root / "acceptance-operation-authorization.key"
+        authorization.write_text("a" * 64, encoding="ascii")
+        authorization.chmod(0o600)
+        runtime = root / "acceptance-operation-runtime"
+        runtime.mkdir(mode=0o700)
+        secured = create_app(
+            self.controller, self.store, self.pairing,
+            secret_key="acceptance-operation-test", session_generation="generation-one",
+            media_dir=self.media_dir, location_search=self.location_search,
+            device_store=self.device_store, openweather_secrets=self.openweather_secrets,
+            acceptance_authorization_file=authorization, acceptance_runtime=runtime,
+        )
+        headers = {
+            "X-Matrix-Action": "paired-request",
+            "X-Matrix-Acceptance-Authorization": "a" * 64,
+        }
+        operation_id = "1" * 64
+        stage = {
+            "attempt_id": "b" * 32, "acceptance_operation_id": operation_id,
+            "evidence_id": "c" * 64, "expected_source_sha": "d" * 40,
+            "expected_version": "0.3.58-preview", "mode": "deploy",
+            "nonce": "e" * 64, "owner_revision": 7, "generation": 3,
+            "preview_instance": "f" * 32,
+        }
+        status = {
+            "generation": 3, "preview_instance": "f" * 32,
+            "nonce": "e" * 64, "acceptance_operation_id": operation_id,
+        }
+        def post(path, payload):
+            client = secured.test_client()
+            with client.session_transaction() as session:
+                session.update(paired_session)
+            return client.post(path, headers=headers, json=payload)
+
+        self.controller.reset_mock()
+        for invalid in (
+            {key: value for key, value in stage.items() if key != "acceptance_operation_id"},
+            {**stage, "acceptance_operation_id": "A" * 64},
+            {**stage, "extra": True},
+        ):
+            response = post("/api/release-acceptance/transaction", invalid)
+            self.assertEqual(response.status_code, 409, response.get_data(as_text=True))
+        self.controller.begin_acceptance_transaction.assert_not_called()
+        self.assertEqual(list(runtime.iterdir()), [])
+
+        response = post("/api/release-acceptance/transaction", stage)
+        self.assertEqual(response.status_code, 202, response.get_data(as_text=True))
+        publisher = self.controller.begin_acceptance_transaction.call_args.args[0]
+        self.assertEqual(publisher.status()["acceptance_operation_id"], operation_id)
+
+        self.controller.acceptance_transaction_status.reset_mock()
+        for invalid in (
+            {key: value for key, value in status.items() if key != "acceptance_operation_id"},
+            {**status, "acceptance_operation_id": "A" * 64},
+            {**status, "extra": True},
+        ):
+            response = post("/api/release-acceptance/transaction/status", invalid)
+            self.assertEqual(response.status_code, 400, response.get_data(as_text=True))
+        self.controller.acceptance_transaction_status.assert_not_called()
+
+        self.controller.acceptance_transaction_status.return_value = {
+            "state": "DRAFT_PUBLISHED", "nonce": status["nonce"],
+            "acceptance_operation_id": "2" * 64,
+        }
+        response = post("/api/release-acceptance/transaction/status", status)
+        self.assertEqual(response.status_code, 404, response.get_data(as_text=True))
+        self.controller.acceptance_transaction_status.assert_called_once()
+
+    def test_release_acceptance_configuration_is_explicit_and_disabled_as_a_pair(self):
+        root = Path(self.temp.name)
+        authorization = root / "acceptance-contract.key"
+        authorization.write_text("a" * 64, encoding="ascii")
+        authorization.chmod(0o600)
+        runtime = root / "acceptance-contract-runtime"
+        runtime.mkdir(mode=0o700)
+        with self.assertRaisesRegex(ValueError, "configured together"):
+            create_app(self.controller, self.store, self.pairing, secret_key="contract-test",
+                       acceptance_authorization_file=authorization)
+        with self.assertRaisesRegex(ValueError, "configured together"):
+            create_app(self.controller, self.store, self.pairing, secret_key="contract-test",
+                       acceptance_runtime=runtime)
+        self.pair_browser()
+        self.controller.reset_mock()
+        response = self.paired_request(
+            "POST", "/api/release-acceptance/transaction", json={},
+            headers={"X-Matrix-Acceptance-Authorization": "a" * 64},
+        )
+        self.assertEqual(response.status_code, 403)
+        self.controller.begin_acceptance_transaction.assert_not_called()
 
     def test_expired_paired_action_returns_auth_failure_before_action_validation(self):
         self.pair_browser()
@@ -3279,7 +3421,7 @@ try{
                 "id": "palette_sunset",
                 "name": "Saved sunset",
                 "colours": ["#101020", "#ff6600", "#ffee99"],
-                "enabled": True,
+                "enabled": False,
             }],
         }})
         self.pair_browser()
@@ -3329,6 +3471,7 @@ try{
   };
  `});
  loaded=new Promise(resolve=>loadResolve=resolve);await send('Page.navigate',{url:'file://'+pagePath});await Promise.race([loaded,new Promise((_,reject)=>setTimeout(()=>reject(new Error('load timeout')),5000))]);
+ await evaluate(`(()=>{const row=document.querySelector('.module-row[data-module="clock_lava"]'),edit=[...row.querySelectorAll('.module-actions button')].find(button=>button.textContent==='Edit');edit.click();const palettes=[...row.closest('.module-item').querySelectorAll('.editor-group')].find(group=>group.querySelector('summary')?.textContent==='Palettes');palettes.querySelector('summary').click()})()`);
  const initial=await evaluate(`(()=>{const radios=[...document.querySelectorAll('input[name="edit-preview-lava-palette"]')];return {count:radios.length,labels:radios.map(r=>r.labels?.[0]?.textContent.trim()),selected:radios.filter(r=>r.checked).map(r=>r.value)}})()`);
  if(initial.count){
   await evaluate(`(()=>{const select=document.querySelector('#preview-select');select.value='clock_lava';select.dispatchEvent(new Event('change',{bubbles:true}));const edit=document.querySelector('#preview-mode-edit');edit.checked=true;edit.dispatchEvent(new Event('change',{bubbles:true}))})()`);
@@ -3505,7 +3648,7 @@ try{
  await send('Page.navigate',{url:'file://'+pagePath});await waitFor(`document.readyState==='complete'`);
  await evaluate(`document.querySelector('#preview-mode-edit').click()`);await waitFor(`previewMode==='edit'`);await evaluate(`document.querySelector('#preview-mode-live').click()`);
  const clean=await evaluate(`({mode:previewMode,live:document.querySelector('#preview-mode-live').checked,dialogs:document.querySelectorAll('dialog[open]').length})`);
- await evaluate(`document.querySelector('#preview-mode-edit').click();(()=>{const input=document.querySelector('#device-name');input.value='UNSAVED SWITCH SENTINEL';input.dispatchEvent(new Event('input',{bubbles:true}));input.focus();input.setSelectionRange(2,8);document.querySelector('.palette-grid').scrollTop=31;const palette=document.querySelector('input[name="edit-preview-lava-palette"]');if(palette){palette.checked=true;palette.dispatchEvent(new Event('change',{bubbles:true}))}document.querySelector('#preview-mode-live').click()})()`);
+ await evaluate(`document.querySelector('#preview-mode-edit').click();(()=>{const row=document.querySelector('.module-row[data-module="clock_lava"]'),edit=[...row.querySelectorAll('.module-actions button')].find(button=>button.textContent==='Edit');edit.click();const palettes=[...row.closest('.module-item').querySelectorAll('.editor-group')].find(group=>group.querySelector('summary')?.textContent==='Palettes');palettes.querySelector('summary').click();const input=document.querySelector('#device-name');input.value='UNSAVED SWITCH SENTINEL';input.dispatchEvent(new Event('input',{bubbles:true}));input.focus();input.setSelectionRange(2,8);document.querySelector('.palette-grid').scrollTop=31;const palette=document.querySelector('input[name="edit-preview-lava-palette"]');if(palette){palette.checked=true;palette.dispatchEvent(new Event('change',{bubbles:true}))}document.querySelector('#preview-mode-live').click()})()`);
  const opened=await evaluate(`(()=>{const dialog=document.querySelector('.edit-preview-switch-dialog');return {mode:previewMode,edit:document.querySelector('#preview-mode-edit').checked,buttons:[...dialog?.querySelectorAll('button')||[]].map(b=>b.textContent),count:document.querySelectorAll('.edit-preview-switch-dialog').length,open:dialog?.open||false}})()`);
  if(opened.open){
  await send('Input.dispatchKeyEvent',{type:'keyDown',key:'Escape',code:'Escape'});await send('Input.dispatchKeyEvent',{type:'keyUp',key:'Escape',code:'Escape'});
@@ -3569,7 +3712,7 @@ const port=process.argv[1],path=process.argv[2];let target;
 for(let n=0;n<50;n++){try{target=await fetch(`http://127.0.0.1:${port}/json/new`,{method:'PUT'}).then(r=>r.json());break}catch(_){await new Promise(r=>setTimeout(r,50))}}
 const ws=new WebSocket(target.webSocketDebuggerUrl),pending=new Map();let id=0,resolveLoad,loaded=new Promise(r=>resolveLoad=r);ws.onmessage=e=>{const m=JSON.parse(e.data);if(m.id&&pending.has(m.id)){const p=pending.get(m.id);pending.delete(m.id);m.error?p.reject(m.error):p.resolve(m.result)}else if(m.method==='Page.loadEventFired')resolveLoad()};await new Promise((r,j)=>{ws.onopen=r;ws.onerror=j});const send=(method,params={})=>new Promise((resolve,reject)=>{const key=++id;pending.set(key,{resolve,reject});ws.send(JSON.stringify({id:key,method,params}))});const ev=async expression=>{const r=await send('Runtime.evaluate',{expression,returnByValue:true,awaitPromise:true});if(r.exceptionDetails)throw Error(JSON.stringify(r.exceptionDetails));return r.result.value};
 try{await send('Runtime.enable');await send('Page.enable');await send('Emulation.setDeviceMetricsOverride',{width:390,height:844,deviceScaleFactor:1,mobile:true});await send('Page.addScriptToEvaluateOnNewDocument',{source:`globalThis.__errors=[];addEventListener('error',e=>__errors.push(String(e.message)));addEventListener('unhandledrejection',e=>__errors.push(String(e.reason)));const png='iVBORw0KGgoAAAANSUhEUgAAAEAAAAAgCAIAAAAt/+nTAAAAT0lEQVR4nO3PUQkAIBTAwBfOClawfwRD+HEIgwW4zdrn64YLGtCCBrSgAS1oQAsa0IIGtKABLWhACxrQgga0oAEtaEALGtCCBrSgAS147AIqPPhqwA8fegAAAABJRU5ErkJggg==',bytes=Uint8Array.from(atob(png),c=>c.charCodeAt(0));globalThis.fetch=async(u,o={})=>String(u).startsWith('/api/display-frame')?new Response(new Blob([bytes],{type:'image/png'})):String(u).startsWith('/api/edit-preview/')?new Response(JSON.stringify({session:'2'.repeat(32),generation:1,page:0,frames:[{png,delay_ms:999}],next_token:null,complete:true}),{headers:{'Content-Type':'application/json'}}):String(u)==='/api/config'?new Response(null,{status:304,headers:{'X-Matrix-Minimum-Client-Contract':'2'}}):new Response(JSON.stringify({running:true,current_module:'clock_lava',minimum_client_contract:2}),{headers:{'Content-Type':'application/json'}})`});loaded=new Promise(r=>resolveLoad=r);await send('Page.navigate',{url:'file://'+path});await loaded;
-const edit=await ev(`(()=>{const r=document.querySelector('label[for="preview-mode-edit"]').getBoundingClientRect();return{x:r.x+r.width/2,y:r.y+r.height/2}})()`);await send('Input.dispatchTouchEvent',{type:'touchStart',touchPoints:[edit]});await send('Input.dispatchTouchEvent',{type:'touchEnd',touchPoints:[]});await ev(`(()=>{const i=document.querySelector('#device-name');i.value='RESPONSIVE DRAFT';i.dispatchEvent(new Event('input',{bubbles:true}));i.focus();i.setSelectionRange(3,9);document.querySelector('.palette-grid').scrollTop=37})()`);
+const edit=await ev(`(()=>{const r=document.querySelector('label[for="preview-mode-edit"]').getBoundingClientRect();return{x:r.x+r.width/2,y:r.y+r.height/2}})()`);await send('Input.dispatchTouchEvent',{type:'touchStart',touchPoints:[edit]});await send('Input.dispatchTouchEvent',{type:'touchEnd',touchPoints:[]});await ev(`(()=>{const row=document.querySelector('.module-row[data-module="clock_lava"]'),edit=[...row.querySelectorAll('.module-actions button')].find(button=>button.textContent==='Edit');edit.click();const palettes=[...row.closest('.module-item').querySelectorAll('.editor-group')].find(group=>group.querySelector('summary')?.textContent==='Palettes');palettes.querySelector('summary').click();const i=document.querySelector('#device-name');i.value='RESPONSIVE DRAFT';i.dispatchEvent(new Event('input',{bubbles:true}));i.focus();i.setSelectionRange(3,9);document.querySelector('.palette-grid').scrollTop=37})()`);
 const sizes=[[320,568],[360,800],[390,844],[412,915],[768,1024],[820,1180],[1024,768],[1280,720],[1440,900],[844,390],[599,800],[600,800],[601,800],[899,800],[900,800],[901,800]],geometry=[];for(const [width,height]of sizes){await send('Emulation.setDeviceMetricsOverride',{width,height,deviceScaleFactor:1,mobile:width<1024});await ev(`scrollTo(0,document.documentElement.scrollHeight);resizePreviewPopout()`);geometry.push(await ev(`(()=>{const i=document.querySelector('#device-name'),g=document.querySelector('.palette-grid'),c=document.querySelector('#matrix-preview'),live=document.querySelector('.preview-live'),details=document.querySelector('.preview-details'),modes=document.querySelector('.preview-modes'),inner=document.querySelector('.preview-live-inner'),lr=live.getBoundingClientRect(),dr=details.getBoundingClientRect(),mr=modes.getBoundingClientRect(),ir=inner.getBoundingClientRect(),below=document.elementFromPoint(Math.max(1,lr.left+1),Math.min(innerHeight-1,lr.bottom+2));return{viewport:[innerWidth,innerHeight],overflow:document.documentElement.scrollWidth-document.documentElement.clientWidth,targets:[...document.querySelectorAll('.preview-modes label')].map(e=>{const r=e.getBoundingClientRect();return[r.width,r.height]}),lavaTargets:[...document.querySelectorAll('.palette-inspect')].map(e=>{const r=e.getBoundingClientRect();return[r.width,r.height]}),containment:[dr.bottom-lr.bottom,mr.bottom-lr.bottom,ir.bottom-lr.bottom],interceptsBelow:live.contains(below),stack:[parseFloat(getComputedStyle(i).scrollMarginTop),lr.bottom],canvas:[document.querySelectorAll('#matrix-preview').length,c.width,c.height],draft:i.value,selection:[i.selectionStart,i.selectionEnd],scroll:g.scrollTop,focus:document.activeElement===i}})()`))}
 const dprs=[];for(const dpr of[1,2,3]){await send('Emulation.setDeviceMetricsOverride',{width:390,height:844,deviceScaleFactor:dpr,mobile:true});dprs.push(await ev(`devicePixelRatio`))}await send('Emulation.setEmulatedMedia',{features:[{name:'prefers-reduced-motion',value:'reduce'}]});const reduced=await ev(`getComputedStyle(document.querySelector('.preview-live')).animationDuration`);await send('Emulation.setPageScaleFactor',{pageScaleFactor:2});const zoom=await ev(`(()=>{resizePreviewPopout();scrollTo(0,document.documentElement.scrollHeight);syncPreviewPopout();const live=document.querySelector('.preview-live'),inner=document.querySelector('.preview-live-inner'),details=document.querySelector('.preview-details'),modes=document.querySelector('.preview-modes'),edit=document.querySelector('label[for="preview-mode-edit"]'),input=document.querySelector('#preview-mode-edit'),field=document.querySelector('#device-name'),lr=live.getBoundingClientRect(),rects=[inner,details,modes,edit].map(node=>{const r=node.getBoundingClientRect();return[r.left,r.right,r.top,r.bottom]}),left=visualViewport.offsetLeft,right=left+visualViewport.width,below=document.elementFromPoint(Math.max(left+1,lr.left+1),Math.min(visualViewport.offsetTop+visualViewport.height-1,lr.bottom+2));input.focus({preventScroll:false});const focused=input.getBoundingClientRect();return{scale:visualViewport.scale,visual:[left,right,visualViewport.width],layout:innerWidth,overflow:document.documentElement.scrollWidth-document.documentElement.clientWidth,live:[lr.left,lr.right,lr.top,lr.bottom],children:rects,contained:rects.every(r=>r[0]>=left-1&&r[1]<=right+1&&r[0]>=lr.left-1&&r[1]<=lr.right+1&&r[2]>=lr.top-1&&r[3]<=lr.bottom+1),interceptsBelow:live.contains(below),focus:document.activeElement===input&&focused.left>=left-1&&focused.right<=right+1,stack:[parseFloat(getComputedStyle(field).scrollMarginTop),lr.bottom]}})()`);await send('Emulation.setPageScaleFactor',{pageScaleFactor:1});const heights=[];for(const height of[430,844]){await send('Emulation.setDeviceMetricsOverride',{width:390,height,deviceScaleFactor:1,mobile:true});heights.push(await ev(`({height:innerHeight,draft:document.querySelector('#device-name').value,scroll:document.querySelector('.palette-grid').scrollTop})`))}await ev(`scrollTo(0,document.documentElement.scrollHeight);syncPreviewPopout()`);const popped=await ev(`({active:document.querySelector('.preview-live').classList.contains('is-popped'),count:document.querySelectorAll('#matrix-preview').length,overflow:document.documentElement.scrollWidth-document.documentElement.clientWidth})`);const live=await ev(`(()=>{const r=document.querySelector('label[for="preview-mode-live"]').getBoundingClientRect();return{x:r.x+r.width/2,y:r.y+r.height/2}})()`);await send('Input.dispatchMouseEvent',{type:'mousePressed',x:live.x,y:live.y,button:'left',clickCount:1});await send('Input.dispatchMouseEvent',{type:'mouseReleased',x:live.x,y:live.y,button:'left',clickCount:1});const modal=await ev(`(()=>{const d=document.querySelector('.edit-preview-switch-dialog');return{names:[...d.querySelectorAll('button')].map(b=>b.textContent),targets:[...d.querySelectorAll('button')].map(b=>{const r=b.getBoundingClientRect();return[r.width,r.height]})}})()`);await send('Input.dispatchKeyEvent',{type:'keyDown',key:'Tab',code:'Tab'});await send('Input.dispatchKeyEvent',{type:'keyUp',key:'Tab',code:'Tab'});await send('Input.dispatchKeyEvent',{type:'keyDown',key:'Tab',code:'Tab',modifiers:8});await send('Input.dispatchKeyEvent',{type:'keyUp',key:'Tab',code:'Tab',modifiers:8});await send('Input.dispatchKeyEvent',{type:'keyDown',key:'Enter',code:'Enter'});await send('Input.dispatchKeyEvent',{type:'keyUp',key:'Enter',code:'Enter'});await ev(`document.querySelector('#preview-mode-edit').focus()`);await send('Input.dispatchKeyEvent',{type:'keyDown',key:' ',code:'Space'});await send('Input.dispatchKeyEvent',{type:'keyUp',key:' ',code:'Space'});const final=await ev(`(()=>{const i=document.querySelector('#device-name');return{mode:document.querySelector('#preview-mode-edit').checked?'edit':'live',draft:i.value,selection:[i.selectionStart,i.selectionEnd],scroll:document.querySelector('.palette-grid').scrollTop,count:document.querySelectorAll('#matrix-preview').length,errors:__errors}})()`);console.log(JSON.stringify({geometry,dprs,reduced,zoom,heights,popped,modal,final}))}finally{ws.close()}
 """
@@ -8101,6 +8244,29 @@ console.log('ANNOUNCEMENT_HEADING_SYNC_PASS');
         self.assertIn("media_layout:{splash:builtInSettings.splash,sleep:builtInSettings.sleep}", body)
         self.assertIn("...builtInSettings.clock_lava", body)
 
+    def test_lava_palettes_are_the_dropdown_body_inside_the_lava_clock_editor(self):
+        self.pair_browser()
+
+        body = self.client.get("/").get_data(as_text=True)
+
+        self.assertIn('id="lava-palette-editor"', body)
+        self.assertIn("summary.textContent='Palettes'", body)
+        palette_capture = (
+            "paletteEditor=module==='clock_lava'?"
+            "document.querySelector('#lava-palette-editor'):null"
+        )
+        self.assertIn(palette_capture, body)
+        self.assertIn("fields.append(paletteEditor)", body)
+        render_start = body.index("function renderBuiltInEditor")
+        render_end = body.index("function renderBuiltInEditors", render_start)
+        render_source = body[render_start:render_end]
+        self.assertLess(
+            render_source.index(palette_capture),
+            render_source.index("container.replaceChildren()"),
+        )
+        self.assertNotIn("Edit lava palettes", body)
+        self.assertNotIn("#lava-palette-groups').scrollIntoView", body)
+
     def test_sleep_editor_exposes_bounded_gif_playback_speed_percentage(self):
         self.store.update({"media_layout": {"sleep": {"gif_speed_percent": 175}}})
         self.pair_browser()
@@ -8489,6 +8655,7 @@ try{
  const layouts=[];
  for(const [width,height,touch] of [[320,568,true],[390,844,true],[768,1024,true],[1280,720,false]]){
   await send('Emulation.setDeviceMetricsOverride',{width,height,deviceScaleFactor:1,mobile:false});await send('Emulation.setTouchEmulationEnabled',{enabled:touch,maxTouchPoints:1});loaded=new Promise(resolve=>loadResolve=resolve);await send('Page.navigate',{url:'file://'+pagePath});await loaded;await evaluate(`document.documentElement.style.scrollBehavior='auto';scrollTo(0,0);syncPreviewPopout()`);
+  await evaluate(`(()=>{const row=document.querySelector('.module-row[data-module="clock_lava"]'),edit=[...row.querySelectorAll('.module-actions button')].find(button=>button.textContent==='Edit');edit.click();const palettes=[...row.closest('.module-item').querySelectorAll('.editor-group')].find(group=>group.querySelector('summary')?.textContent==='Palettes');palettes.querySelector('summary').click()})()`);
   const live=await radioState();
   await activate(await revealMode('label[for="preview-mode-edit"]'),false);await waitFor(`previewMode==='edit'`);await new Promise(resolve=>setTimeout(resolve,50));const edit=await radioState();
   await evaluate(`document.querySelector('input[name="edit-preview-lava-palette"][value="built_in:ember_glow"]').focus()`);await send('Input.dispatchKeyEvent',{type:'keyDown',key:' ',code:'Space'});await send('Input.dispatchKeyEvent',{type:'keyUp',key:' ',code:'Space'});await waitFor(`document.querySelector('input[name="edit-preview-lava-palette"][value="built_in:ember_glow"]').checked`);const keyboard=await radioState();
@@ -8583,7 +8750,7 @@ try{
  const layouts=[];
  for(const [width,height] of [[320,568],[768,1024],[1280,720]]){
   await send('Emulation.setDeviceMetricsOverride',{width,height,deviceScaleFactor:1,mobile:false});loaded=new Promise(resolve=>loadResolve=resolve);await send('Page.navigate',{url:'file://'+pagePath});await loaded;
-  layouts.push(await evaluate(`(async()=>{const group=document.querySelector('.palette-bulk-actions'),buttons=[...group.querySelectorAll('button')],bounds=buttons.map(button=>{const rect=button.getBoundingClientRect();return{width:rect.width,height:rect.height,left:rect.left,right:rect.right}});document.querySelector('#device-name').value='Preserved lava draft';buttons[0].click();const selected=[...document.querySelectorAll('.lava-palette,[data-field="enabled"]')].every(input=>input.checked);buttons[1].focus();buttons[1].click();const deselected=[...document.querySelectorAll('.lava-palette,[data-field="enabled"]')].every(input=>!input.checked),payload=configBody(),focused=document.activeElement===buttons[1],overflow=document.documentElement.scrollWidth-document.documentElement.clientWidth;document.querySelector('#preview-select').value='clock_lava';document.querySelector('#preview-mode-edit').click();for(let attempt=0;attempt<40&&!__editPreviewPayloads.length;attempt++)await new Promise(resolve=>setTimeout(resolve,10));const editPreviewPayload=__editPreviewPayloads.at(-1);const first=document.querySelector('.lava-palette');first.checked=true;first.dispatchEvent(new Event('change',{bubbles:true}));const reselected=configBody().lava.enabled_palettes;resetBuiltInModule('clock_lava');const reset=configBody().lava.enabled_palettes;return{viewport:innerWidth,labels:buttons.map(button=>button.textContent.trim()),types:buttons.map(button=>button.type),role:group.getAttribute('role'),aria:group.getAttribute('aria-label'),bounds,selected,deselected,focused,reselected,reset,dirty:matrixDirty,payload,editPreviewPayload,overflow}})()`));
+  layouts.push(await evaluate(`(async()=>{const row=document.querySelector('.module-row[data-module="clock_lava"]'),edit=[...row.querySelectorAll('.module-actions button')].find(button=>button.textContent==='Edit');edit.click();const palettes=[...row.closest('.module-item').querySelectorAll('.editor-group')].find(group=>group.querySelector('summary')?.textContent==='Palettes');palettes.querySelector('summary').click();const group=document.querySelector('.palette-bulk-actions'),buttons=[...group.querySelectorAll('button')],bounds=buttons.map(button=>{const rect=button.getBoundingClientRect();return{width:rect.width,height:rect.height,left:rect.left,right:rect.right}});document.querySelector('#device-name').value='Preserved lava draft';buttons[0].click();const selected=[...document.querySelectorAll('.lava-palette,[data-field="enabled"]')].every(input=>input.checked);buttons[1].focus();buttons[1].click();const deselected=[...document.querySelectorAll('.lava-palette,[data-field="enabled"]')].every(input=>!input.checked),payload=configBody(),focused=document.activeElement===buttons[1],overflow=document.documentElement.scrollWidth-document.documentElement.clientWidth;document.querySelector('#preview-select').value='clock_lava';document.querySelector('#preview-mode-edit').click();for(let attempt=0;attempt<40&&!__editPreviewPayloads.length;attempt++)await new Promise(resolve=>setTimeout(resolve,10));const editPreviewPayload=__editPreviewPayloads.at(-1);const first=document.querySelector('.lava-palette');first.checked=true;first.dispatchEvent(new Event('change',{bubbles:true}));const reselected=configBody().lava.enabled_palettes;resetBuiltInModule('clock_lava');const reset=configBody().lava.enabled_palettes;return{viewport:innerWidth,labels:buttons.map(button=>button.textContent.trim()),types:buttons.map(button=>button.type),role:group.getAttribute('role'),aria:group.getAttribute('aria-label'),bounds,selected,deselected,focused,reselected,reset,dirty:matrixDirty,payload,editPreviewPayload,overflow}})()`));
  }
  console.log(JSON.stringify({layouts}));
 }finally{socket.close()}
@@ -13970,6 +14137,675 @@ try{
             "test_wsgi_import_owns_one_registry_and_atexit_closes_it",
         )(self)
 
+    def physical_draft_fixture(self, client=None, device_name="Browser"):
+        from device_preview import DevicePreviewManager
+        client = client or self.client
+        device_id = self.device_store.add(device_name, max_devices=8)["id"]
+        with client.session_transaction() as paired:
+            paired.update({"paired": True, "generation": "generation-one", "device_id": device_id})
+        manager = DevicePreviewManager()
+        controller = self.controller
+        controller.submit_device_draft.side_effect = lambda request, **_kwargs: manager.submit(request)
+        controller.heartbeat_device_draft.side_effect = lambda owner, generation: manager.heartbeat(owner, generation=generation)
+        controller.cancel_device_draft.side_effect = lambda owner, generation: manager.cancel(owner, generation=generation) is not None
+        controller.cancel_device_drafts_for_device.side_effect = lambda device: (
+            bool(manager.active_lease() and manager.active_lease().owner.device_id == device)
+            and manager.cancel(manager.active_lease().owner, generation=manager.active_lease().generation) is not None
+        )
+        controller.device_preview_manager = manager
+        return client, device_id, manager
+
+    def test_physical_draft_routes_are_paired_and_action_protected(self):
+        paths = (
+            ("/api/device-preview/weather", {"config": self.store.get(), "generation": 1, "preview_instance": "1" * 32, "timeout_seconds": 60}),
+            ("/api/device-preview/heartbeat", {"generation": 1, "preview_instance": "1" * 32}),
+            ("/api/device-preview/cancel", {"generation": 1, "preview_instance": "1" * 32}),
+        )
+        device_id = None
+        for path, payload in paths:
+            with self.client.session_transaction() as unpaired:
+                unpaired.clear()
+            with self.subTest(path=path, mode="unpaired"):
+                self.assertEqual(self.client.post(path, json=payload).status_code, 401)
+            if device_id is None:
+                device_id = self.device_store.add("Browser", max_devices=4)["id"]
+            with self.client.session_transaction() as paired:
+                paired.update({"paired": True, "generation": "generation-one", "device_id": device_id})
+            with self.subTest(path=path, mode="missing-action"):
+                self.assertEqual(self.client.post(path, json=payload).status_code, 403)
+            with self.subTest(path=path, mode="wrong-action"):
+                self.assertEqual(self.client.post(path, json=payload, headers={"X-Matrix-Action": "wrong"}).status_code, 403)
+            with self.subTest(path=path, mode="paired-action"):
+                response = self.paired_request("POST", path, json=payload)
+                self.assertNotEqual(response.status_code, 404)
+                self.assertEqual(response.headers.get("Cache-Control"), "no-store")
+                self.assertNotIn("ETag", response.headers)
+
+    def test_physical_draft_immediate_heartbeat_is_too_early_then_admitted_at_authoritative_boundary(self):
+        from device_preview import DevicePreviewManager
+
+        now = [100.0]
+        client = self.client
+        device_id = self.device_store.add("Browser", max_devices=8)["id"]
+        with client.session_transaction() as paired:
+            paired.update({"paired": True, "generation": "generation-one", "device_id": device_id})
+        manager = DevicePreviewManager(clock=lambda: now[0])
+        self.controller.submit_device_draft.side_effect = lambda request, **_kwargs: manager.submit(request)
+        self.controller.heartbeat_device_draft.side_effect = lambda owner, generation: manager.heartbeat(owner, generation=generation)
+        candidate = {key: copy.deepcopy(value) for key, value in self.store.get().items() if key != "revision"}
+        control = {"generation": 1, "preview_instance": "9" * 32}
+        started = self.paired_client_request("POST", client, "/api/device-preview/weather", json={
+            "config": candidate, **control, "timeout_seconds": 60,
+        })
+        self.assertEqual(started.status_code, 202, started.get_json())
+        self.assertEqual(started.get_json()["heartbeat_after_seconds"], 5)
+
+        immediate = self.paired_client_request(
+            "POST", client, "/api/device-preview/heartbeat", json=control,
+        )
+        self.assertEqual(immediate.status_code, 409, immediate.get_json())
+
+        now[0] += started.get_json()["heartbeat_after_seconds"]
+        admitted = self.paired_client_request(
+            "POST", client, "/api/device-preview/heartbeat", json=control,
+        )
+        self.assertEqual(admitted.status_code, 202, admitted.get_json())
+        manager.close()
+
+    def test_physical_draft_lava_selection_is_strict_fail_closed_and_blank_is_neutral(self):
+        client, _device_id, manager = self.physical_draft_fixture()
+        saved_bytes = Path(self.store.path).read_bytes()
+        saved_revision = self.store.get()["revision"]
+        candidate = {
+            key: copy.deepcopy(value)
+            for key, value in self.store.get().items()
+            if key != "revision"
+        }
+        candidate["lava"]["enabled_palettes"] = ["fire_burst"]
+        candidate["lava"]["custom_palettes"] = [
+            {
+                "id": "palette_enabled", "name": "Enabled",
+                "colours": ["#102030", "#405060", "#90a0b0"], "enabled": True,
+            },
+            {
+                "id": "palette_disabled", "name": "Disabled",
+                "colours": ["#112233", "#445566", "#778899"], "enabled": False,
+            },
+        ]
+        original_candidate = copy.deepcopy(candidate)
+        base = {
+            "config": candidate, "generation": 1,
+            "preview_instance": "a" * 32, "timeout_seconds": 60,
+        }
+        rejected = (
+            ("malformed", {}),
+            ("boolean", True),
+            ("numeric", 1),
+            ("object", {"kind": {}, "id": "fire_burst"}),
+            ("list", []),
+            ("unknown", {"kind": "built_in", "id": "not_a_palette"}),
+            ("stale", {"kind": "custom", "id": "palette_enabled", "colours": ["#000000", "#ffffff", "#ff00ff"]}),
+        )
+
+        with patch("webapp.pin_candidate_media") as pin_media:
+            self.controller.reset_mock()
+            for label, selection in rejected:
+                with self.subTest(selection=label):
+                    response = self.paired_client_request(
+                        "POST", client, "/api/device-preview/clock_lava",
+                        json={**base, "selected_lava_palette": selection},
+                    )
+                    self.assertEqual(response.status_code, 400, response.get_json())
+                    self.assertEqual(response.get_json(), {"error": "Device preview request is invalid."})
+                    self.assertIsNone(manager.active_lease())
+                    self.assertEqual(self.controller.method_calls, [])
+                    pin_media.assert_not_called()
+                    self.assertEqual(Path(self.store.path).read_bytes(), saved_bytes)
+                    self.assertEqual(self.store.get()["revision"], saved_revision)
+                    self.assertEqual(candidate, original_candidate)
+
+        for generation, selection in ((1, "absent"), (2, None)):
+            payload = {**base, "generation": generation}
+            if selection != "absent":
+                payload["selected_lava_palette"] = selection
+            response = self.paired_client_request(
+                "POST", client, "/api/device-preview/clock_lava", json=payload,
+            )
+            self.assertEqual(response.status_code, 202, response.get_json())
+            self.assertIsNone(manager.active_lease().request.config["selected_lava_palette"])
+            self.assertEqual(Path(self.store.path).read_bytes(), saved_bytes)
+            self.assertEqual(self.store.get()["revision"], saved_revision)
+            self.assertEqual(candidate, original_candidate)
+        transient_disabled = (
+            {"kind": "built_in", "id": "ocean_wave"},
+            {"kind": "custom", "id": "palette_disabled", "colours": ["#112233", "#445566", "#778899"]},
+        )
+        for generation, selection in enumerate(transient_disabled, start=3):
+            response = self.paired_client_request(
+                "POST", client, "/api/device-preview/clock_lava",
+                json={**base, "generation": generation, "selected_lava_palette": selection},
+            )
+            self.assertEqual(response.status_code, 202, response.get_json())
+            self.assertEqual(manager.active_lease().request.config["selected_lava_palette"], selection)
+            self.assertEqual(candidate, original_candidate)
+        manager.close()
+
+    def test_physical_draft_timeout_is_strict_transient_and_non_persistent(self):
+        client, _device_id, manager = self.physical_draft_fixture()
+        saved = self.store.get()
+        candidate = {key: value for key, value in saved.items() if key != "revision"}
+        baseline = json.dumps(saved, sort_keys=True)
+        instance = "2" * 32
+        valid = {"config": candidate, "generation": 1, "preview_instance": instance}
+        response = self.paired_client_request("POST", client, "/api/device-preview/weather", json=valid)
+        self.assertEqual(response.status_code, 202, response.get_json())
+        self.assertEqual(response.get_json()["timeout_seconds"], 60)
+        self.assertEqual(response.get_json()["generation"], 1)
+        self.assertEqual(response.get_json()["active_module"], "weather")
+        self.assertNotIn("device_id", response.get_json())
+        self.assertEqual(manager.active_lease().request.timeout_seconds, 60)
+        self.assertEqual(json.dumps(self.store.get(), sort_keys=True), baseline)
+        self.assertNotIn("timeout_seconds", self.store.get())
+
+        manager.close()
+        for timeout in (True, False, 4, 3601, 5.0, "60", None):
+            with self.subTest(timeout=timeout):
+                payload = {**valid, "generation": valid["generation"] + 1, "timeout_seconds": timeout}
+                result = self.paired_client_request("POST", client, "/api/device-preview/weather", json=payload)
+                self.assertEqual(result.status_code, 400, result.get_json())
+        for payload in (
+            {**valid, "extra": 1},
+            {**valid, "selected_lava_palette": []},
+            {"generation": 1, "preview_instance": instance, "timeout_seconds": 60},
+        ):
+            self.assertEqual(self.paired_client_request("POST", client, "/api/device-preview/weather", json=payload).status_code, 400)
+        oversized = b'{' + b' ' * 1_048_576 + b'}'
+        result = self.paired_client_request("POST", client, "/api/device-preview/weather", data=oversized, content_type="application/json")
+        self.assertEqual(result.status_code, 413)
+        self.assertEqual(json.dumps(self.store.get(), sort_keys=True), baseline)
+
+    def test_physical_draft_two_tabs_and_devices_obey_exact_owner_tuple(self):
+        owner, device_id, manager = self.physical_draft_fixture()
+        tab = self.app.test_client()
+        with tab.session_transaction() as paired:
+            paired.update({"paired": True, "generation": "generation-one", "device_id": device_id})
+        foreign = self.app.test_client()
+        foreign_id = self.device_store.add("Other device", max_devices=8)["id"]
+        with foreign.session_transaction() as paired:
+            paired.update({"paired": True, "generation": "generation-one", "device_id": foreign_id})
+        candidate = {k: v for k, v in self.store.get().items() if k != "revision"}
+        def payload(instance, generation=1):
+            return {"config": candidate, "generation": generation, "preview_instance": instance, "timeout_seconds": 60}
+        accepted = self.paired_client_request("POST", owner, "/api/device-preview/weather", json=payload("a" * 32))
+        self.assertEqual(accepted.status_code, 202)
+        self.assertEqual(self.paired_client_request("POST", tab, "/api/device-preview/weather", json=payload("b" * 32)).status_code, 409)
+        self.assertEqual(self.paired_client_request("POST", foreign, "/api/device-preview/weather", json=payload("a" * 32)).status_code, 409)
+        replacement = self.paired_client_request("POST", owner, "/api/device-preview/weather", json=payload("a" * 32, 2))
+        self.assertEqual(replacement.status_code, 202)
+        self.assertEqual(manager.active_lease().owner.device_id, device_id)
+        self.assertEqual(manager.active_lease().owner.preview_instance, "a" * 32)
+        for response in (accepted, replacement):
+            self.assertNotIn("device_id", response.get_json())
+            self.assertNotIn("preview_instance", response.get_json())
+
+    def test_physical_draft_never_changes_config_bytes_revision_or_publish(self):
+        client, _device_id, manager = self.physical_draft_fixture()
+        before_bytes = Path(self.store.path).read_bytes()
+        before_revision = self.store.get()["revision"]
+        candidate = {k: copy.deepcopy(v) for k, v in self.store.get().items() if k != "revision"}
+        candidate["weather"]["location"] = "Unsaved physical draft"
+        self.controller.reset_mock()
+        result = self.paired_client_request("POST", client, "/api/device-preview/weather", json={
+            "config": candidate, "generation": 1, "preview_instance": "c" * 32, "timeout_seconds": 30,
+        })
+        self.assertEqual(result.status_code, 202, result.get_json())
+        self.assertEqual(Path(self.store.path).read_bytes(), before_bytes)
+        self.assertEqual(self.store.get()["revision"], before_revision)
+        self.assertEqual(manager.active_lease().request.config["candidate"]["weather"]["location"], "Unsaved physical draft")
+        self.controller.reload.assert_not_called()
+        self.controller.preview.assert_not_called()
+        self.controller.preview_media.assert_not_called()
+        self.controller.preview_announcement.assert_not_called()
+
+    def test_physical_draft_stale_and_foreign_heartbeat_cancel_fail_closed(self):
+        owner, device_id, manager = self.physical_draft_fixture()
+        foreign = self.app.test_client()
+        foreign_id = self.device_store.add("Foreign", max_devices=8)["id"]
+        with foreign.session_transaction() as paired:
+            paired.update({"paired": True, "generation": "generation-one", "device_id": foreign_id})
+        candidate = {k: v for k, v in self.store.get().items() if k != "revision"}
+        instance = "d" * 32
+        start = self.paired_client_request("POST", owner, "/api/device-preview/weather", json={
+            "config": candidate, "generation": 2, "preview_instance": instance, "timeout_seconds": 60,
+        })
+        self.assertEqual(start.status_code, 202)
+        deadline = manager.active_lease().connectivity_deadline
+        for client, generation, route in (
+            (owner, 1, "heartbeat"), (foreign, 2, "heartbeat"),
+            (owner, 1, "cancel"), (foreign, 2, "cancel"),
+        ):
+            result = self.paired_client_request("POST", client, f"/api/device-preview/{route}", json={
+                "generation": generation, "preview_instance": instance,
+            })
+            self.assertEqual(result.status_code, 409, (route, result.get_json()))
+            self.assertEqual(set(result.get_json()), {"error"})
+            self.assertEqual(manager.active_lease().connectivity_deadline, deadline)
+        cancelled = self.paired_client_request("POST", owner, "/api/device-preview/cancel", json={
+            "generation": 2, "preview_instance": instance,
+        })
+        self.assertEqual(cancelled.status_code, 202, cancelled.get_json())
+        self.assertEqual(cancelled.get_json(), {"cancelled": True})
+        self.assertIsNone(manager.active_lease())
+        repeated = self.paired_client_request("POST", owner, "/api/device-preview/cancel", json={
+            "generation": 2, "preview_instance": instance,
+        })
+        self.assertEqual(repeated.status_code, 409)
+
+    def test_physical_draft_unpair_revoke_logout_release_owner(self):
+        candidate = {k: v for k, v in self.store.get().items() if k != "revision"}
+        def start(client, instance, generation):
+            return self.paired_client_request("POST", client, "/api/device-preview/weather", json={
+                "config": candidate, "generation": generation, "preview_instance": instance, "timeout_seconds": 60,
+            })
+
+        owner, owner_id, manager = self.physical_draft_fixture()
+        self.assertEqual(start(owner, "e" * 32, 1).status_code, 202)
+        removed = self.paired_client_request("DELETE", owner, f"/api/devices/{owner_id}")
+        self.assertEqual(removed.status_code, 200)
+        self.assertIsNone(manager.active_lease())
+
+        logout_client, _logout_id, manager = self.physical_draft_fixture(self.app.test_client(), "Logout")
+        self.assertEqual(start(logout_client, "f" * 32, 2).status_code, 202)
+        logged_out = self.paired_client_request("POST", logout_client, "/logout")
+        self.assertEqual(logged_out.status_code, 302)
+        self.assertIsNone(manager.active_lease())
+
+        victim, victim_id, manager = self.physical_draft_fixture(self.app.test_client(), "Victim")
+        self.assertEqual(start(victim, "1" * 32, 3).status_code, 202)
+        admin = self.app.test_client()
+        admin_id = self.device_store.add("Admin", max_devices=8)["id"]
+        with admin.session_transaction() as paired:
+            paired.update({"paired": True, "generation": "generation-one", "device_id": admin_id})
+        revoked = self.paired_client_request("DELETE", admin, f"/api/devices/{victim_id}")
+        self.assertEqual(revoked.status_code, 200)
+        self.assertIsNone(manager.active_lease())
+
+    def test_physical_draft_pins_accepted_media_inode_until_cleanup(self):
+        client, _device_id, manager = self.physical_draft_fixture()
+        media = self.media_dir / "draft.png"
+        media.write_bytes(b"accepted-inode")
+        candidate = {k: copy.deepcopy(v) for k, v in self.store.get().items() if k != "revision"}
+        candidate["media"]["splash"] = "draft.png"
+        instance = "2" * 32
+        started = self.paired_client_request("POST", client, "/api/device-preview/splash", json={
+            "config": candidate, "generation": 1, "preview_instance": instance, "timeout_seconds": 60,
+        })
+        self.assertEqual(started.status_code, 202, started.get_json())
+        request_record = manager.active_lease().request
+        handle = request_record.pinned_media["draft.png"]
+        replacement = self.media_dir / "replacement.png"
+        replacement.write_bytes(b"replacement-inode")
+        os.replace(replacement, media)
+        with handle.dup_file() as accepted:
+            self.assertEqual(accepted.read(), b"accepted-inode")
+        self.assertFalse(handle.closed)
+        cancelled = self.paired_client_request("POST", client, "/api/device-preview/cancel", json={
+            "generation": 1, "preview_instance": instance,
+        })
+        self.assertEqual(cancelled.status_code, 202)
+        self.assertTrue(handle.closed)
+        self.assertEqual(media.read_bytes(), b"replacement-inode")
+
+
+    def test_physical_draft_cancelled_provider_cannot_publish(self):
+        client, _device_id, manager = self.physical_draft_fixture()
+        captured = {}
+
+        def admit(request, *, renderer):
+            captured.update(request=request, renderer=renderer)
+            return manager.submit(request)
+
+        self.controller.submit_device_draft.side_effect = admit
+        self.controller.render_device_draft.reset_mock()
+        candidate = {
+            key: copy.deepcopy(value)
+            for key, value in self.store.get().items()
+            if key != "revision"
+        }
+        entered = threading.Event()
+        release = threading.Event()
+
+        def prepare(_provider, _module, _candidate, stop_event):
+            entered.set()
+            self.assertTrue(release.wait(1))
+            return {"temperature": 12}
+
+        with patch("webapp._prepare_edit_preview_provider", side_effect=prepare):
+            started = self.paired_client_request(
+                "POST", client, "/api/device-preview/weather", json={
+                    "config": candidate,
+                    "generation": 1,
+                    "preview_instance": "3" * 32,
+                    "timeout_seconds": 60,
+                },
+            )
+            self.assertEqual(started.status_code, 202, started.get_json())
+            stop_event = threading.Event()
+            matrix = Mock()
+            worker = threading.Thread(
+                target=lambda: captured["renderer"](
+                    matrix, captured["request"], stop_event=stop_event,
+                )
+            )
+            worker.start()
+            self.assertTrue(entered.wait(0.5))
+            stop_event.set()
+            release.set()
+            worker.join(1)
+
+        self.assertFalse(worker.is_alive())
+        self.controller.render_device_draft.assert_not_called()
+        matrix.swap.assert_not_called()
+        manager.close()
+
+
+    def test_physical_draft_errors_are_generic_and_capacity_is_bounded(self):
+        from contextlib import contextmanager
+
+        owner, device_id, manager = self.physical_draft_fixture()
+        peer = self.app.test_client()
+        with peer.session_transaction() as paired:
+            paired.update({
+                "paired": True,
+                "generation": "generation-one",
+                "device_id": device_id,
+            })
+        candidate = {
+            key: copy.deepcopy(value)
+            for key, value in self.store.get().items()
+            if key != "revision"
+        }
+        entered = threading.Event()
+        release = threading.Event()
+        calls = [0]
+
+        @contextmanager
+        def bounded_pin(*_args, **_kwargs):
+            calls[0] += 1
+            if calls[0] == 1:
+                entered.set()
+                self.assertTrue(release.wait(1))
+            yield {}
+
+        payload = lambda generation: {
+            "config": candidate,
+            "generation": generation,
+            "preview_instance": "4" * 32,
+            "timeout_seconds": 60,
+        }
+        first = []
+        with patch("webapp.pin_candidate_media", bounded_pin):
+            worker = threading.Thread(target=lambda: first.append(
+                self.paired_client_request(
+                    "POST", owner, "/api/device-preview/weather",
+                    json=payload(1),
+                )
+            ))
+            worker.start()
+            self.assertTrue(entered.wait(0.5))
+            excess = self.paired_client_request(
+                "POST", peer, "/api/device-preview/weather", json=payload(2),
+            )
+            self.assertEqual(excess.status_code, 429, excess.get_json())
+            self.assertEqual(excess.headers.get("Retry-After"), "2")
+            self.assertEqual(set(excess.get_json()), {"error"})
+            release.set()
+            worker.join(1)
+        self.assertFalse(worker.is_alive())
+        self.assertEqual(first[0].status_code, 202, first[0].get_json())
+        manager.close()
+
+        private = "PRIVATE-device-id-and-media-path"
+        self.controller.submit_device_draft.side_effect = RuntimeError(private)
+        failed = self.paired_client_request(
+            "POST", owner, "/api/device-preview/weather", json=payload(3),
+        )
+        self.assertEqual(failed.status_code, 503)
+        self.assertEqual(set(failed.get_json()), {"error"})
+        self.assertNotIn(private, failed.get_data(as_text=True))
+        self.assertNotIn(device_id, failed.get_data(as_text=True))
+        self.assertNotIn("preview_instance", failed.get_data(as_text=True))
+
+
+    def test_physical_draft_preview_api_is_paired_bounded_private_and_non_persistent(self):
+        from contextlib import contextmanager
+
+        owner, device_id, manager = self.physical_draft_fixture()
+        peer = self.app.test_client()
+        with peer.session_transaction() as paired:
+            paired.update({"paired": True, "generation": "generation-one", "device_id": device_id})
+        foreign = self.app.test_client()
+        foreign_id = self.device_store.add("Foreign closure device", max_devices=8)["id"]
+        with foreign.session_transaction() as paired:
+            paired.update({"paired": True, "generation": "generation-one", "device_id": foreign_id})
+
+        before_bytes = Path(self.store.path).read_bytes()
+        before_revision = self.store.get()["revision"]
+        candidate = {
+            key: copy.deepcopy(value)
+            for key, value in self.store.get().items()
+            if key != "revision"
+        }
+        candidate["weather"]["location"] = "Unsaved integration closure"
+        media = self.media_dir / "closure-draft.png"
+        media.write_bytes(b"accepted-closure-inode")
+        candidate["media"]["splash"] = media.name
+        owner_instance = "5" * 32
+        peer_instance = "6" * 32
+        base_payload = {
+            "config": candidate,
+            "generation": 1,
+            "preview_instance": owner_instance,
+            "timeout_seconds": 5,
+        }
+        self.controller.reset_mock()
+
+        def assert_private(response, *private_values):
+            body = response.get_data(as_text=True)
+            for value in (device_id, foreign_id, owner_instance, peer_instance, *private_values):
+                self.assertNotIn(value, body)
+
+        provider_release = threading.Event()
+        capacity_release = threading.Event()
+        provider_worker = None
+        capacity_worker = None
+        try:
+            unpaired = self.app.test_client()
+            unauthorized = self.paired_client_request(
+                "POST", unpaired, "/api/device-preview/splash", json=base_payload,
+            )
+            self.assertEqual(unauthorized.status_code, 401)
+            missing_action = owner.post("/api/device-preview/splash", json=base_payload)
+            self.assertEqual(missing_action.status_code, 403)
+            for invalid in (
+                {**base_payload, "timeout_seconds": True},
+                {**base_payload, "timeout_seconds": 4},
+                {**base_payload, "timeout_seconds": 3601},
+                {**base_payload, "unexpected": "private-contract-value"},
+            ):
+                rejected = self.paired_client_request(
+                    "POST", owner, "/api/device-preview/splash", json=invalid,
+                )
+                self.assertEqual(rejected.status_code, 400, rejected.get_json())
+                self.assertEqual(set(rejected.get_json()), {"error"})
+                assert_private(rejected, "private-contract-value", media.name)
+            oversized = self.paired_client_request(
+                "POST", owner, "/api/device-preview/splash",
+                data=b"{" + b" " * 1_048_576 + b"}", content_type="application/json",
+            )
+            self.assertEqual(oversized.status_code, 413)
+            self.assertEqual(set(oversized.get_json()), {"error"})
+            self.assertIsNone(manager.active_lease())
+
+            started = self.paired_client_request(
+                "POST", owner, "/api/device-preview/splash", json=base_payload,
+            )
+            self.assertEqual(started.status_code, 202, started.get_json())
+            self.assertEqual(started.headers.get("Cache-Control"), "no-store")
+            self.assertNotIn("ETag", started.headers)
+            self.assertEqual(
+                set(started.get_json()),
+                {"generation", "active_module", "timeout_seconds", "heartbeat_after_seconds", "expires_in", "connectivity_expires_in"},
+            )
+            self.assertEqual(started.get_json()["timeout_seconds"], 5)
+            assert_private(started, media.name)
+            accepted_lease = manager.active_lease()
+            self.assertEqual(accepted_lease.owner.device_id, device_id)
+            self.assertEqual(accepted_lease.owner.preview_instance, owner_instance)
+            self.assertEqual(
+                accepted_lease.request.config["candidate"]["weather"]["location"],
+                "Unsaved integration closure",
+            )
+            accepted_handle = accepted_lease.request.pinned_media[media.name]
+
+            for client, instance in ((peer, peer_instance), (foreign, owner_instance)):
+                conflict = self.paired_client_request(
+                    "POST", client, "/api/device-preview/splash",
+                    json={**base_payload, "preview_instance": instance},
+                )
+                self.assertEqual(conflict.status_code, 409, conflict.get_json())
+                self.assertEqual(set(conflict.get_json()), {"error"})
+                assert_private(conflict, media.name)
+
+            replacement = self.media_dir / "closure-replacement.png"
+            replacement.write_bytes(b"replacement-closure-inode")
+            os.replace(replacement, media)
+            with accepted_handle.dup_file() as pinned:
+                self.assertEqual(pinned.read(), b"accepted-closure-inode")
+            self.assertFalse(accepted_handle.closed)
+            cancelled = self.paired_client_request(
+                "POST", owner, "/api/device-preview/cancel", json={
+                    "generation": 1, "preview_instance": owner_instance,
+                },
+            )
+            self.assertEqual(cancelled.status_code, 202, cancelled.get_json())
+            self.assertEqual(cancelled.get_json(), {"cancelled": True})
+            self.assertTrue(accepted_handle.closed)
+            self.assertIsNone(manager.active_lease())
+            self.assertEqual(media.read_bytes(), b"replacement-closure-inode")
+
+            captured = {}
+            provider_stop = threading.Event()
+            provider_entered = threading.Event()
+
+            def admit(request, *, renderer):
+                captured.update(request=request, renderer=renderer)
+                return manager.submit(request)
+
+            def cancel_provider(owner_tuple, generation):
+                provider_stop.set()
+                return manager.cancel(owner_tuple, generation=generation) is not None
+
+            def prepare(_provider, module_name, provider_candidate, stop_event):
+                self.assertEqual(module_name, "weather")
+                self.assertEqual(provider_candidate["weather"]["location"], "Unsaved integration closure")
+                self.assertIs(stop_event, provider_stop)
+                provider_entered.set()
+                self.assertTrue(provider_release.wait(1))
+                return {"temperature": 12}
+
+            self.controller.submit_device_draft.side_effect = admit
+            self.controller.cancel_device_draft.side_effect = cancel_provider
+            self.controller.render_device_draft.reset_mock()
+            provider_payload = {**base_payload, "generation": 2, "timeout_seconds": 30}
+            with patch("webapp._prepare_edit_preview_provider", side_effect=prepare):
+                provider_start = self.paired_client_request(
+                    "POST", owner, "/api/device-preview/weather", json=provider_payload,
+                )
+                self.assertEqual(provider_start.status_code, 202, provider_start.get_json())
+                provider_handle = manager.active_lease().request.pinned_media[media.name]
+                matrix = Mock()
+                provider_worker = threading.Thread(target=lambda: captured["renderer"](
+                    matrix, captured["request"], stop_event=provider_stop,
+                ))
+                provider_worker.start()
+                self.assertTrue(provider_entered.wait(0.5))
+                provider_cancel = self.paired_client_request(
+                    "POST", owner, "/api/device-preview/cancel", json={
+                        "generation": 2, "preview_instance": owner_instance,
+                    },
+                )
+                self.assertEqual(provider_cancel.status_code, 202, provider_cancel.get_json())
+                self.assertTrue(provider_stop.is_set())
+                self.assertTrue(provider_handle.closed)
+                provider_release.set()
+                provider_worker.join(1)
+            self.assertFalse(provider_worker.is_alive())
+            self.controller.render_device_draft.assert_not_called()
+            matrix.swap.assert_not_called()
+            self.assertIsNone(manager.active_lease())
+
+            capacity_entered = threading.Event()
+            pin_calls = [0]
+
+            @contextmanager
+            def bounded_pin(*_args, **_kwargs):
+                pin_calls[0] += 1
+                if pin_calls[0] == 1:
+                    capacity_entered.set()
+                    self.assertTrue(capacity_release.wait(1))
+                yield {}
+
+            capacity_payload = {**base_payload, "generation": 3, "timeout_seconds": 3600}
+            first = []
+            with patch("webapp.pin_candidate_media", bounded_pin):
+                capacity_worker = threading.Thread(target=lambda: first.append(
+                    self.paired_client_request(
+                        "POST", owner, "/api/device-preview/weather", json=capacity_payload,
+                    )
+                ))
+                capacity_worker.start()
+                self.assertTrue(capacity_entered.wait(0.5))
+                excess = self.paired_client_request(
+                    "POST", peer, "/api/device-preview/weather", json={
+                        **capacity_payload,
+                        "generation": 4,
+                        "preview_instance": peer_instance,
+                    },
+                )
+                self.assertEqual(excess.status_code, 429, excess.get_json())
+                self.assertEqual(excess.headers.get("Retry-After"), "2")
+                self.assertEqual(set(excess.get_json()), {"error"})
+                assert_private(excess, media.name)
+                self.assertEqual(pin_calls[0], 1)
+                capacity_release.set()
+                capacity_worker.join(1)
+            self.assertFalse(capacity_worker.is_alive())
+            self.assertEqual(first[0].status_code, 202, first[0].get_json())
+            self.assertEqual(manager.active_lease().request.timeout_seconds, 3600)
+            final_cancel = self.paired_client_request(
+                "POST", owner, "/api/device-preview/cancel", json={
+                    "generation": 3, "preview_instance": owner_instance,
+                },
+            )
+            self.assertEqual(final_cancel.status_code, 202, final_cancel.get_json())
+            self.assertIsNone(manager.active_lease())
+
+            self.assertEqual(Path(self.store.path).read_bytes(), before_bytes)
+            self.assertEqual(self.store.get()["revision"], before_revision)
+            self.controller.reload.assert_not_called()
+            self.controller.preview.assert_not_called()
+            self.controller.preview_media.assert_not_called()
+            self.controller.preview_announcement.assert_not_called()
+        finally:
+            provider_release.set()
+            capacity_release.set()
+            if provider_worker is not None:
+                provider_worker.join(1)
+            if capacity_worker is not None:
+                capacity_worker.join(1)
+            manager.close()
+
 
 class WSGIImportTests(unittest.TestCase):
     def test_wsgi_import_owns_one_registry_and_atexit_closes_it(self):
@@ -14147,6 +14983,11 @@ with tempfile.TemporaryDirectory() as temp:
         importlib.reload(alias)
 
         assert len(create_calls) == 1, len(create_calls)
+        acceptance_kwargs = create_calls[0][1]
+        assert acceptance_kwargs["acceptance_authorization_file"] == runtime_data / "acceptance-authorization.key"
+        assert acceptance_kwargs["acceptance_runtime"] == runtime_data / "acceptance-runtime"
+        assert (runtime_data / "acceptance-authorization.key").stat().st_mode & 0o777 == 0o600
+        assert (runtime_data / "acceptance-runtime").stat().st_mode & 0o777 == 0o700
         assert entry.pairing.kwargs.get("testing_pin") == testing_pin
         assert entry.app is alias.app
         assert registries == [] and providers == []
@@ -14211,6 +15052,7 @@ print(json.dumps({
             "worker_alive": False,
             "child_returncode": -signal.SIGTERM,
         })
+
 
 
 if __name__ == "__main__":
