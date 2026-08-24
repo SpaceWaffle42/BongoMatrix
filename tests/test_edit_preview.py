@@ -1778,6 +1778,163 @@ class EditPreviewTests(unittest.TestCase):
         ):
             session.page()
 
+    def test_preview_pillow_workers_are_globally_bounded(self):
+        release = threading.Event()
+        fifth_worker = threading.Event()
+        lock = threading.Lock()
+        entered = [0]
+        stops = [threading.Event() for _ in range(5)]
+        callers = []
+
+        def blocked_decode():
+            with lock:
+                entered[0] += 1
+                if entered[0] >= 5:
+                    fifth_worker.set()
+            release.wait()
+            return Image.new("RGB", (1, 1))
+
+        def call_decode(stop):
+            try:
+                edit_preview._preview_decode(
+                    blocked_decode, stop, None, time.monotonic,
+                )
+            except edit_preview._PreviewDecodeCancelled:
+                pass
+
+        for stop in stops:
+            caller = threading.Thread(target=call_decode, args=(stop,))
+            callers.append(caller)
+            caller.start()
+        try:
+            self.assertFalse(
+                fifth_worker.wait(0.15),
+                "a fifth pathological Pillow worker was admitted",
+            )
+        finally:
+            for stop in stops:
+                stop.set()
+            for caller in callers:
+                caller.join(0.25)
+            release.set()
+            for caller in callers:
+                caller.join(1)
+
+        self.assertLessEqual(entered[0], 4)
+        self.assertFalse(any(caller.is_alive() for caller in callers))
+
+    def test_cancel_interrupts_blocked_pinned_static_preview_decode(self):
+        encoded = io.BytesIO()
+        Image.new("RGB", (2, 2), "blue").save(encoded, format="PNG")
+        original_open = Image.open
+        entered = threading.Event()
+        release = threading.Event()
+        stop = threading.Event()
+        pinned = Mock()
+        duplicate = io.BytesIO(encoded.getvalue())
+        pinned.dup_file.side_effect = lambda: duplicate
+
+        def blocked_open(source):
+            entered.set()
+            release.wait()
+            return original_open(source)
+
+        session = PreviewSession(edit_preview.media_preview_frames(
+            CaptureMatrix(), "blocked.png", 10,
+            stop_event=stop, pinned_handle=pinned,
+        ), stop_event=stop)
+        result = {}
+        thread = threading.Thread(target=lambda: result.update(session.page()))
+        with patch.object(Image, "open", side_effect=blocked_open):
+            thread.start()
+            self.assertTrue(entered.wait(1), "static decode did not block")
+            self.assertTrue(duplicate.closed, "pinned duplicate remained owned by Pillow")
+            session.cancel()
+            thread.join(0.15)
+            prompt = not thread.is_alive()
+            release.set()
+            thread.join(1)
+
+        self.assertTrue(prompt, "static preview cancellation waited for Pillow")
+        self.assertEqual(result.get("frames"), [])
+        self.assertEqual(session.state, "CLOSED")
+
+    def test_cancel_interrupts_blocked_pinned_gif_preview_decode(self):
+        encoded = io.BytesIO()
+        Image.new("RGB", (2, 2), "red").save(encoded, format="GIF")
+        original_open = Image.open
+        entered = threading.Event()
+        release = threading.Event()
+        stop = threading.Event()
+        pinned = Mock()
+        duplicate = io.BytesIO(encoded.getvalue())
+        pinned.dup_file.side_effect = lambda: duplicate
+
+        def blocked_open(source):
+            entered.set()
+            release.wait()
+            return original_open(source)
+
+        session = PreviewSession(edit_preview.media_preview_frames(
+            CaptureMatrix(), "blocked.gif", 10,
+            stop_event=stop, pinned_handle=pinned,
+        ), stop_event=stop)
+        result = {}
+        thread = threading.Thread(target=lambda: result.update(session.page()))
+        with patch.object(Image, "open", side_effect=blocked_open):
+            thread.start()
+            self.assertTrue(entered.wait(1), "GIF decode did not block")
+            self.assertTrue(duplicate.closed, "pinned duplicate remained owned by Pillow")
+            session.cancel()
+            thread.join(0.15)
+            prompt = not thread.is_alive()
+            release.set()
+            thread.join(1)
+
+        self.assertTrue(prompt, "GIF preview cancellation waited for Pillow")
+        self.assertEqual(result.get("frames"), [])
+        self.assertEqual(session.state, "CLOSED")
+
+    def test_media_preview_passes_monotonic_and_absolute_video_deadline(self):
+        clock = Mock(return_value=10.0)
+        decoder_options = []
+
+        def decoder(_path, _settings, **options):
+            decoder_options.append(options)
+            return iter(())
+
+        list(edit_preview.media_preview_frames(
+            CaptureMatrix(), "clip.mp4", 3,
+            video_decoder=decoder, stop_event=threading.Event(), monotonic=clock,
+        ))
+
+        self.assertEqual(len(decoder_options), 1)
+        self.assertIs(decoder_options[0]["stop_event"].is_set(), False)
+        self.assertEqual(decoder_options[0]["deadline"], 13.0)
+
+    def test_media_preview_gif_duration_uses_monotonic_decode_time(self):
+        encoded = io.BytesIO()
+        Image.new("RGB", (2, 2), "red").save(encoded, format="GIF")
+        pinned = Mock()
+        pinned.dup_file.side_effect = lambda: io.BytesIO(encoded.getvalue())
+        now = [10.0]
+        original_open = Image.open
+
+        def clock():
+            return now[0]
+
+        def consume_duration(source):
+            now[0] = 13.0
+            return original_open(source)
+
+        with patch.object(Image, "open", side_effect=consume_duration):
+            frames = list(edit_preview.media_preview_frames(
+                CaptureMatrix(), "slow.gif", 3,
+                pinned_handle=pinned, monotonic=clock,
+            ))
+
+        self.assertEqual(frames, [])
+
     def test_pre_cancelled_gif_preview_skips_pinned_decode(self):
         encoded = io.BytesIO()
         Image.new("RGB", (2, 2), "red").save(encoded, format="GIF")
@@ -1875,6 +2032,7 @@ class EditPreviewTests(unittest.TestCase):
         matrix = Mock()
         pinned = Mock()
         media_file = MagicMock()
+        media_file.__enter__.return_value.read.return_value = b"pinned-static"
         pinned.dup_file.return_value = media_file
         opened = MagicMock()
         stop = threading.Event()
