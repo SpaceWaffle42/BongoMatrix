@@ -72,6 +72,128 @@ class MediaModuleTests(unittest.TestCase):
         self.assertEqual(candidate.close_calls, 1)
         self.assertEqual(gif.close_calls, 1)
 
+    def test_gif_deadline_cleanup_preserves_candidate_before_source_failure(self):
+        class Clock:
+            def __init__(self):
+                self.elapsed = 0.0
+
+            def advance(self, seconds):
+                self.elapsed += seconds
+
+            def __call__(self):
+                return self.elapsed
+
+        class Owner:
+            def __init__(self, close_error=None, info=None):
+                self.close_error = close_error
+                self.close_calls = 0
+                self.info = info or {}
+
+            def close(self):
+                self.close_calls += 1
+                if self.close_error is not None:
+                    raise self.close_error
+
+        for scenario in ("candidate_only", "source_only", "both"):
+            with self.subTest(scenario=scenario):
+                clock = Clock()
+                source_error = (
+                    OSError("deadline-source-close")
+                    if scenario in ("source_only", "both") else None
+                )
+                candidate_error = (
+                    OSError("deadline-candidate-close")
+                    if scenario in ("candidate_only", "both") else None
+                )
+                gif = Owner(source_error)
+                frame = Owner(info={"duration": 100})
+                candidate = Owner(candidate_error)
+
+                def image_open(_path):
+                    clock.advance(0.002)
+                    return gif
+
+                def image_iterator(_gif):
+                    clock.advance(0.002)
+                    return iter((frame,))
+
+                def frame_copy(_frame):
+                    clock.advance(0.003)
+                    return candidate
+
+                expected = candidate_error or source_error
+                self.assertIsNotNone(expected)
+                with self.assertRaises(OSError) as raised:
+                    list(gif_media_frames(
+                        "deadline.gif", loops=1, max_duration=0.006,
+                        monotonic=clock, image_open=image_open,
+                        image_iterator=image_iterator, frame_copy=frame_copy,
+                    ))
+
+                self.assertIs(raised.exception, expected)
+                self.assertEqual(candidate.close_calls, 1)
+                self.assertEqual(gif.close_calls, 1)
+
+        class CleanupBase(BaseException):
+            pass
+
+        class GetterOwner:
+            def __init__(self, error, info=None):
+                self.error = error
+                self.info = info or {}
+                self.close_lookups = 0
+
+            @property
+            def close(self):
+                self.close_lookups += 1
+                raise self.error
+
+        clock = Clock()
+        source_getter_error = CleanupBase("deadline-source-getattr")
+        candidate_getter_error = CleanupBase("deadline-candidate-getattr")
+        gif = GetterOwner(source_getter_error)
+        frame = Owner(info={"duration": 100})
+        candidate = GetterOwner(candidate_getter_error)
+
+        def getter_open(_path):
+            clock.advance(0.002)
+            return gif
+
+        def getter_iterator(_gif):
+            clock.advance(0.002)
+            return iter((frame,))
+
+        def getter_copy(_frame):
+            clock.advance(0.003)
+            return candidate
+
+        with self.assertRaises(CleanupBase) as raised:
+            list(gif_media_frames(
+                "deadline-getter.gif", loops=1, max_duration=0.006,
+                monotonic=clock, image_open=getter_open,
+                image_iterator=getter_iterator, frame_copy=getter_copy,
+            ))
+        self.assertIs(raised.exception, candidate_getter_error)
+        self.assertEqual(candidate.close_lookups, 1)
+        self.assertEqual(gif.close_lookups, 1)
+
+        clock = Clock()
+        iterator_primary = RuntimeError("iterator-primary")
+        source_getter_error = CleanupBase("source-getattr")
+        gif = GetterOwner(source_getter_error)
+
+        def failing_iterator(_gif):
+            raise iterator_primary
+
+        with self.assertRaises(RuntimeError) as raised:
+            list(gif_media_frames(
+                "iterator.gif", loops=1, max_duration=1,
+                monotonic=clock, image_open=lambda _path: gif,
+                image_iterator=failing_iterator,
+            ))
+        self.assertIs(raised.exception, iterator_primary)
+        self.assertEqual(gif.close_lookups, 1)
+
     def test_gif_does_not_pull_another_frame_after_hold_consumes_deadline(self):
         class Clock:
             def __init__(self):

@@ -939,18 +939,20 @@ class Matrix:
                     raise
 
         def close_owned(value, label):
-            close = getattr(value, "close", None)
-            if not callable(close):
-                return
             active_error = sys.exception()
             try:
-                close()
-            except BaseException as cleanup_error:
+                close = getattr(value, "close", None)
+                if callable(close):
+                    close()
+            except BaseException:
                 if active_error is None:
                     raise
-                active_error.add_note(
-                    f"suppressed {label} cleanup failure: {cleanup_error!r}"
-                )
+                try:
+                    active_error.add_note(
+                        f"suppressed {label} cleanup failure"
+                    )
+                except BaseException:
+                    pass
 
         shown = False
         timeline = gif_media_frames(

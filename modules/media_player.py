@@ -2,6 +2,7 @@
 
 from pathlib import Path
 import math
+import sys
 import threading
 import time
 
@@ -17,8 +18,21 @@ class PillowWorkCancelled(Exception):
 
 def _close_media_value(value):
     close = getattr(value, "close", None)
-    if close is not None:
+    if callable(close):
         close()
+
+
+def _close_media_preserving_active_error(value, label):
+    active_error = sys.exception()
+    try:
+        _close_media_value(value)
+    except BaseException:
+        if active_error is None:
+            raise
+        try:
+            active_error.add_note(f"suppressed {label} cleanup failure")
+        except BaseException:
+            pass
 
 
 def _interruptible_pillow(
@@ -49,7 +63,7 @@ def _interruptible_pillow(
                 close_result(result)
         finally:
             if owner is not None:
-                _close_media_value(owner)
+                _close_media_preserving_active_error(owner, "Pillow owner")
 
     def worker():
         result_to_close = None
@@ -163,7 +177,7 @@ def gif_media_frames(
             try:
                 close_result(result)
             finally:
-                _close_media_value(owner)
+                _close_media_preserving_active_error(owner, "Pillow owner")
             raise PillowWorkCancelled()
         return result
 
@@ -240,7 +254,7 @@ def gif_media_frames(
         return
     finally:
         if source is not None:
-            source.close()
+            _close_media_preserving_active_error(source, "GIF source")
 
 
 def video_media_frames(

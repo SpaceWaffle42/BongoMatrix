@@ -1557,6 +1557,117 @@ else:
                 candidate.close.assert_called_once_with()
                 self.assertEqual(timeline.close_calls, 1)
 
+    def test_show_gif_cleanup_lookup_and_diagnostics_cannot_replace_primary(self):
+        class CleanupBase(BaseException):
+            pass
+
+        class GetterOwner:
+            def __init__(self, error):
+                self.error = error
+                self.close_lookups = 0
+
+            @property
+            def close(self):
+                self.close_lookups += 1
+                raise self.error
+
+        class HostilePrimary(RuntimeError):
+            def add_note(self, _note):
+                raise RuntimeError("note-fault")
+
+        class HostileCleanup(OSError):
+            def __repr__(self):
+                raise RuntimeError("repr-fault")
+
+        scenarios = (
+            "candidate_getter_with_primary",
+            "timeline_getter_with_primary",
+            "both_getters_without_primary",
+            "hostile_note",
+            "hostile_repr",
+        )
+        for scenario in scenarios:
+            with self.subTest(scenario=scenario):
+                matrix = Matrix.__new__(Matrix)
+                matrix.canvas = Mock()
+                matrix.matrix = Mock(width=64, height=32)
+                matrix.clear = Mock()
+                matrix.draw_image = Mock()
+                matrix.swap = Mock(return_value=matrix.canvas)
+                matrix._media_file = Mock(return_value=Mock())
+                candidate = Mock()
+                timeline_error = None
+                expected = None
+
+                if scenario == "candidate_getter_with_primary":
+                    candidate = GetterOwner(CleanupBase("candidate-getattr"))
+                    expected = RuntimeError("draw-primary")
+                    matrix.draw_image.side_effect = expected
+                elif scenario == "timeline_getter_with_primary":
+                    timeline_error = CleanupBase("timeline-getattr")
+                    expected = RuntimeError("draw-primary")
+                    matrix.draw_image.side_effect = expected
+                elif scenario == "both_getters_without_primary":
+                    candidate = GetterOwner(CleanupBase("candidate-getattr"))
+                    timeline_error = CleanupBase("timeline-getattr")
+                    expected = candidate.error
+                elif scenario == "hostile_note":
+                    expected = HostilePrimary("primary-note")
+                    matrix.draw_image.side_effect = expected
+                    candidate.close.side_effect = OSError("candidate-close")
+                else:
+                    expected = RuntimeError("draw-primary")
+                    matrix.draw_image.side_effect = expected
+                    candidate.close.side_effect = HostileCleanup("candidate-close")
+
+                class Timeline:
+                    def __init__(self):
+                        self.emitted = False
+                        self.close_calls = 0
+                        self.close_lookups = 0
+
+                    def __iter__(self):
+                        return self
+
+                    def __next__(self):
+                        if self.emitted:
+                            raise StopIteration
+                        self.emitted = True
+                        return candidate, 0.01
+
+                    @property
+                    def close(self):
+                        self.close_lookups += 1
+                        if timeline_error is not None:
+                            raise timeline_error
+
+                        def close_timeline():
+                            self.close_calls += 1
+
+                        return close_timeline
+
+                timeline = Timeline()
+                with patch(
+                    "modules.media_player.gif_media_frames",
+                    return_value=timeline,
+                ), patch.object(
+                    framework, "_swap_admitted", return_value=True,
+                ), patch.object(framework.time, "sleep"):
+                    try:
+                        matrix.show_gif("getter.gif", loops=1, max_duration=1)
+                    except BaseException as observed:
+                        self.assertIs(observed, expected)
+                    else:
+                        self.fail("expected primary or first cleanup error")
+
+                if isinstance(candidate, GetterOwner):
+                    self.assertEqual(candidate.close_lookups, 1)
+                else:
+                    candidate.close.assert_called_once_with()
+                self.assertEqual(timeline.close_lookups, 1)
+                if timeline_error is None:
+                    self.assertEqual(timeline.close_calls, 1)
+
     def test_show_gif_cancelled_during_final_draw_is_not_published(self):
         matrix = Matrix.__new__(Matrix)
         matrix.canvas = Mock()
