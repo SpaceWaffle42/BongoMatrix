@@ -10218,6 +10218,38 @@ try{
         ))).size, (64, 32))
         self.assertEqual(self.controller.method_calls, [])
 
+    def test_edit_preview_route_renders_static_custom_text_for_selected_duration(self):
+        self.pair_browser()
+        self.controller.reset_mock()
+        candidate = copy.deepcopy(self.store.get())
+        candidate.pop("revision")
+        module = {
+            "id": "custom_static", "name": "Static", "type": "text",
+            "font": "4x6", "colour": "#ffcc00", "background": "#001122",
+            "text": "HELLO", "x": 3, "y": 20,
+            "direction": "left", "speed": 0.05, "loops": 1,
+        }
+        candidate["custom_modules"] = [module]
+        candidate["playlist"] = [
+            {"module": module["id"], "duration": 7, "enabled": True},
+        ]
+
+        response = self.paired_request("POST", "/api/edit-preview/custom_static", json={
+            "config": candidate,
+            "generation": 1,
+            "preview_instance": "0123456789abcdef0123456789abcdef",
+        })
+
+        self.assertEqual(response.status_code, 200, response.get_data(as_text=True))
+        body = response.get_json()
+        self.assertTrue(body["complete"])
+        self.assertEqual(len(body["frames"]), 1)
+        self.assertEqual(body["frames"][0]["delay_ms"], 7000)
+        self.assertEqual(Image.open(io.BytesIO(base64.b64decode(
+            body["frames"][0]["png"]
+        ))).size, (64, 32))
+        self.assertEqual(self.controller.method_calls, [])
+
     def test_edit_preview_route_renders_default_weather_text_and_scroll(self):
         from modules.weather_app import WeatherSnapshot
 

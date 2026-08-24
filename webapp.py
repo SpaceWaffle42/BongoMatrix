@@ -351,7 +351,9 @@ def _edit_preview_iterator(
             matrix, custom, preview_duration(candidate, module_name), stop_event,
             pinned_handles=pinned_media,
         )
-    return custom_text_preview_frames(matrix, custom)
+    return custom_text_preview_frames(
+        matrix, custom, preview_duration(candidate, module_name),
+    )
 
 
 def _revision_etag(revision):

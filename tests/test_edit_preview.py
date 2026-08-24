@@ -4116,6 +4116,36 @@ class EditPreviewTests(unittest.TestCase):
                     with self.assertRaises(StopIteration):
                         session.page(consumed_tokens[0])
 
+    def test_static_custom_text_preview_matches_physical_frame_and_hold(self):
+        module = {
+            "id": "custom_static", "name": "Static", "type": "text",
+            "font": "4x6", "colour": "#ffcc00", "background": "#001122",
+            "text": "HELLO", "x": 3, "y": 20,
+        }
+
+        class RecordingCapture(CaptureMatrix):
+            submitted = None
+
+            def swap(self, canvas=None):
+                self.submitted = self.snapshot(canvas)
+                return super().swap(canvas)
+
+        physical = RecordingCapture()
+        with patch("modules.custom_text._wait", return_value=False):
+            self.assertTrue(custom_text.run(
+                physical, {}, duration=7, stop_event=Mock(is_set=Mock(return_value=False)),
+                module_config=module,
+            ))
+        self.assertIsNotNone(physical.submitted)
+
+        frames = custom_text_preview_frames(CaptureMatrix(), module, duration=7)
+        preview = next(frames)
+        with Image.open(io.BytesIO(base64.b64decode(preview["png"]))) as image:
+            self.assertEqual(tuple(image.convert("RGB").get_flattened_data()), tuple(physical.submitted.get_flattened_data()))
+        self.assertEqual(preview["delay_ms"], 7000)
+        with self.assertRaises(StopIteration):
+            next(frames)
+
     def test_maximum_width_custom_text_ten_loops_completes_without_history_growth(self):
         class WeakFrame(dict):
             pass
