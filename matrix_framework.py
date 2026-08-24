@@ -150,7 +150,7 @@ class _DecoderReaperOwner:
         self.active_leases = 0
         self.shutdown_requested = False
         self.had_deferred = False
-        self.thread = None
+        self.thread: threading.Thread | None = None
 
 
 def _decoder_reaper_main(owner):
@@ -183,39 +183,48 @@ def _set_decoder_reaper_owner(owner):
     _decoder_reaper_had_deferred = False if owner is None else owner.had_deferred
 
 
-def _ensure_decoder_reaper():
+def _ensure_decoder_reaper(deadline=None):
     """Reserve a handoff slot and verified daemon before decoder Popen."""
-    with _decoder_reaper_lock:
-        owner = _decoder_reaper_owner
-        if owner is not None and not owner.thread.is_alive():
-            _set_decoder_reaper_owner(None)
-            owner = None
-        if owner is not None:
-            if owner.shutdown_requested:
-                raise RuntimeError("decoder reaper is shutting down")
-            lease = _DecoderReaperLease(owner)
-            with owner.condition:
+    while True:
+        retiring_reaper = None
+        with _decoder_reaper_lock:
+            owner = _decoder_reaper_owner
+            if owner is not None and not owner.thread.is_alive():
+                _set_decoder_reaper_owner(None)
+                owner = None
+            if owner is not None and owner.shutdown_requested:
+                if deadline is None:
+                    raise RuntimeError("decoder reaper is shutting down")
+                retiring_reaper = owner.thread
+            elif owner is not None:
+                lease = _DecoderReaperLease(owner)
+                with owner.condition:
+                    owner.leases.append(lease)
+                    owner.active_leases += 1
+                _set_decoder_reaper_owner(owner)
+                return lease
+            else:
+                owner = _DecoderReaperOwner()
+                lease = _DecoderReaperLease(owner)
                 owner.leases.append(lease)
-                owner.active_leases += 1
-            _set_decoder_reaper_owner(owner)
-            return lease
+                owner.active_leases = 1
+                reaper = threading.Thread(
+                    target=_decoder_reaper_main,
+                    args=(owner,),
+                    name="matrix-decoder-reaper",
+                    daemon=True,
+                )
+                owner.thread = reaper
+                reaper.start()
+                if not reaper.is_alive():
+                    raise RuntimeError("decoder reaper failed to start")
+                _set_decoder_reaper_owner(owner)
+                return lease
 
-        owner = _DecoderReaperOwner()
-        lease = _DecoderReaperLease(owner)
-        owner.leases.append(lease)
-        owner.active_leases = 1
-        reaper = threading.Thread(
-            target=_decoder_reaper_main,
-            args=(owner,),
-            name="matrix-decoder-reaper",
-            daemon=True,
-        )
-        owner.thread = reaper
-        reaper.start()
-        if not reaper.is_alive():
-            raise RuntimeError("decoder reaper failed to start")
-        _set_decoder_reaper_owner(owner)
-        return lease
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            raise RuntimeError("decoder reaper did not retire before the deadline")
+        retiring_reaper.join(min(0.01, remaining))
 
 
 def _release_decoder_reaper(lease, deferred_process=None, join_timeout=0.25):
@@ -725,7 +734,9 @@ class Matrix:
         reaper_queue = None
         deferred_process = None
         try:
-            reaper_queue = _ensure_decoder_reaper()
+            reaper_queue = _ensure_decoder_reaper(deadline=deadline)
+            if stop_event is not None and stop_event.is_set():
+                return []
             command = [
                     "/usr/bin/ffmpeg", "-nostdin", "-v", "error", "-threads", "1",
                     "-i", "pipe:0",
@@ -1014,7 +1025,9 @@ class Matrix:
         reaper_queue = None
         deferred_process = None
         try:
-            reaper_queue = _ensure_decoder_reaper()
+            reaper_queue = _ensure_decoder_reaper(deadline=deadline)
+            if stop_event is not None and stop_event.is_set():
+                return
             process = subprocess.Popen(
                 [
                     "/usr/bin/ffmpeg", "-nostdin", "-v", "error", "-threads", "1",

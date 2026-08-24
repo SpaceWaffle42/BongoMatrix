@@ -566,6 +566,43 @@ else:
         self.assertFalse(first_reaper.is_alive())
         self.assertFalse(second_reaper.is_alive())
 
+    def test_decoder_reaper_deadline_acquire_waits_for_owned_child_exit(self):
+        framework._reset_decoder_reaper_for_tests()
+        release_wait = threading.Event()
+        process = Mock()
+        process.wait.side_effect = lambda: release_wait.wait(0.5)
+        first_lease = framework._ensure_decoder_reaper()
+        first_reaper = framework._decoder_reaper_thread
+        framework._release_decoder_reaper(first_lease, deferred_process=process)
+
+        acquired = []
+        errors = []
+
+        def acquire():
+            try:
+                acquired.append(framework._ensure_decoder_reaper(
+                    deadline=time.monotonic() + 0.5,
+                ))
+            except BaseException as error:
+                errors.append(error)
+
+        worker = threading.Thread(target=acquire)
+        worker.start()
+        time.sleep(0.02)
+        self.assertTrue(worker.is_alive())
+        self.assertEqual(acquired, [])
+
+        release_wait.set()
+        worker.join(0.5)
+        self.assertFalse(worker.is_alive())
+        self.assertEqual(errors, [])
+        self.assertEqual(len(acquired), 1)
+        self.assertIsNot(acquired[0], first_lease)
+        self.assertIsNot(acquired[0].owner.thread, first_reaper)
+        framework._release_decoder_reaper(acquired[0])
+        self.assertFalse(first_reaper.is_alive())
+        self.assertFalse(framework._decoder_reaper_thread)
+
     def test_decoder_reaper_release_join_fault_preserves_popen_failure(self):
         framework._reset_decoder_reaper_for_tests()
         matrix = Matrix.__new__(Matrix)
