@@ -407,24 +407,27 @@ def media_preview_frames(
             )
         except _PreviewDecodeCancelled:
             return
-        if stop_event is not None and stop_event.is_set():
-            return
-        matrix.clear()
-        matrix.draw_image(
-            image,
-            x=settings.get("x", 0), y=settings.get("y", 0),
-            width=settings.get("width"), height=settings.get("height"),
-            keep_aspect=settings.get("keep_aspect", True),
-        )
-        if stop_event is not None and stop_event.is_set():
-            return
-        remaining = max(0.0, duration - _preview_elapsed(monotonic, started))
-        if remaining > 0:
-            snapshot = matrix.snapshot()
+        try:
             if stop_event is not None and stop_event.is_set():
                 return
-            yield _png_frame(snapshot, round(remaining * 1000, 9))
-        return
+            matrix.clear()
+            matrix.draw_image(
+                image,
+                x=settings.get("x", 0), y=settings.get("y", 0),
+                width=settings.get("width"), height=settings.get("height"),
+                keep_aspect=settings.get("keep_aspect", True),
+            )
+            if stop_event is not None and stop_event.is_set():
+                return
+            remaining = max(0.0, duration - _preview_elapsed(monotonic, started))
+            if remaining > 0:
+                snapshot = matrix.snapshot()
+                if stop_event is not None and stop_event.is_set():
+                    return
+                yield _png_frame(snapshot, round(remaining * 1000, 9))
+            return
+        finally:
+            image.close()
     try:
         for image, delay in timeline:
             matrix.clear()

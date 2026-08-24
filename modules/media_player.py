@@ -25,6 +25,8 @@ def gif_media_frames(
         raise ValueError("GIF playback rate must be between 0.25 and 4.0")
     playback_rate = float(playback_rate)
     started = monotonic() if monotonic is not None else 0.0
+    playback_started = None
+    preparation_elapsed = 0.0
     elapsed_delays = 0.0
     gif = image_open(path)
     completed = 0
@@ -37,7 +39,13 @@ def gif_media_frames(
                     return
                 elapsed = elapsed_delays
                 if monotonic is not None:
-                    elapsed = max(elapsed, monotonic() - started)
+                    now = monotonic()
+                    if playback_started is None:
+                        playback_started = now
+                        preparation_elapsed = max(0.0, now - started)
+                    elapsed = preparation_elapsed + max(
+                        elapsed_delays, now - playback_started,
+                    )
                 if max_duration is not None and elapsed >= max_duration:
                     return
                 delay = max(

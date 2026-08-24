@@ -2061,10 +2061,10 @@ class EditPreviewTests(unittest.TestCase):
             ))
 
         self.assertGreaterEqual(len(frames), 1)
-        self.assertAlmostEqual(frames[0]["delay_ms"], 1.0, places=6)
-        self.assertAlmostEqual(
-            sum(frame["delay_ms"] for frame in frames), 6.0, places=6,
-        )
+        total_hold_ms = sum(frame["delay_ms"] for frame in frames)
+        self.assertTrue(all(frame["delay_ms"] > 0 for frame in frames))
+        self.assertLessEqual(total_hold_ms, 1.0 + 1e-6)
+        self.assertAlmostEqual(total_hold_ms, 1.0, places=6)
 
     def test_pre_cancelled_gif_preview_skips_pinned_decode(self):
         encoded = io.BytesIO()
@@ -2560,6 +2560,7 @@ class EditPreviewTests(unittest.TestCase):
                         "x": 0, "y": 0, "width": 64, "height": 32,
                         "keep_aspect": True, "gif_speed_percent": 200,
                     },
+                    monotonic=lambda: 0.0,
                 ),
             }
 
@@ -2721,6 +2722,7 @@ class EditPreviewTests(unittest.TestCase):
                         "keep_aspect": True, "gif_speed_percent": 200,
                         "video_fps": 20,
                     },
+                    monotonic=lambda: 0.0,
                 )
             )
             session.MAX_FRAMES = 2
@@ -2893,6 +2895,7 @@ class EditPreviewTests(unittest.TestCase):
                             None if filename.endswith(".gif") else
                             preview_video_decoder
                         ),
+                        monotonic=lambda: 0.0,
                     ))
                     session.MAX_FRAMES = 2
                     pages = []
@@ -3339,6 +3342,37 @@ class EditPreviewTests(unittest.TestCase):
         self.assertEqual(weather_app.run.__defaults__, (20, None, None))
         self.assertEqual(openweather_overview.run.__defaults__, (20, None, None, None, None))
         self.assertEqual(openweather_forecast.run.__defaults__, (30, None, None, None, None))
+
+    def test_transferred_static_preview_image_closes_on_every_exit(self):
+        for scenario in ("normal", "cancel", "draw_error"):
+            with self.subTest(scenario=scenario):
+                image = Mock()
+                image.close_calls = 0
+                image.close.side_effect = lambda image=image: setattr(
+                    image, "close_calls", image.close_calls + 1,
+                )
+                stop = threading.Event()
+                matrix = CaptureMatrix()
+                matrix.draw_image = Mock()
+                if scenario == "draw_error":
+                    matrix.draw_image.side_effect = RuntimeError("draw failed")
+
+                def transfer(*_args, **_kwargs):
+                    if scenario == "cancel":
+                        stop.set()
+                    return image
+
+                iterator = edit_preview.media_preview_frames(
+                    matrix, "owned.png", 1, stop_event=stop,
+                )
+                with patch.object(edit_preview, "_preview_decode", side_effect=transfer):
+                    if scenario == "draw_error":
+                        with self.assertRaisesRegex(RuntimeError, "draw failed"):
+                            list(iterator)
+                    else:
+                        list(iterator)
+
+                self.assertEqual(image.close_calls, 1)
 
     def test_static_hold_delay_is_clipped_to_invocation_deadline(self):
         class Clock:
