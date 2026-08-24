@@ -8,6 +8,7 @@ import shutil
 from pathlib import Path
 import stat
 import subprocess
+import sys
 import tempfile
 import unittest
 from unittest import mock
@@ -110,7 +111,7 @@ def _fake_commit_control(guarded, kind, request, terminals, *, committed_epoch=1
 class GuardedPriority13ReleaseTests(unittest.TestCase):
     def test_exported_run_help_is_a_real_cli_subcommand(self):
         script = Path(__file__).parents[1] / "deploy" / "guarded_priority_1_3_release.py"
-        interpreter = Path(__file__).parents[1] / ".venv" / "bin" / "python"
+        interpreter = Path(sys.executable)
         completed = subprocess.run(
             [str(interpreter), "-I", "-B", str(script), "run", "--help"],
             check=False, text=True, capture_output=True,
@@ -220,7 +221,7 @@ assert not hasattr(guarded,'run_three_attempts')
 print('EXPORTED_FULL_RUN_OK')
 """
             completed = subprocess.run(
-                [str(source / ".venv/bin/python"), "-I", "-B", "-c", harness, str(root)],
+                [sys.executable, "-I", "-B", "-c", harness, str(root)],
                 check=False, text=True, capture_output=True, timeout=30,
             )
             self.assertEqual(completed.returncode, 0, completed.stderr + completed.stdout)
@@ -265,7 +266,7 @@ print('EXPORTED_FULL_RUN_OK')
             shutil.copy2(source / "tests/fixtures/priority_1_3_fake_python.py", fake_python)
             (stage / "venv/bin/python").write_text(
                 "#!/bin/sh\nexec "
-                + shlex.quote(str(source / ".venv/bin/python"))
+                + shlex.quote(sys.executable)
                 + " "
                 + shlex.quote(str(fake_python))
                 + " \"$@\"\n",
@@ -349,7 +350,7 @@ rc=guarded.main(argv)
                 "ALL_PROXY": "http://poison",
             })
             completed = subprocess.run(
-                [str(source / ".venv/bin/python"), "-I", "-B", "-c", harness, str(root)],
+                [sys.executable, "-I", "-B", "-c", harness, str(root)],
                 check=False, text=True, capture_output=True, timeout=90, env=environment, shell=False,
             )
             self.assertEqual(completed.returncode, 0, completed.stderr + completed.stdout)
@@ -549,7 +550,7 @@ rc=guarded.main(argv)
 
     def test_shipped_privileged_cli_rejects_omitted_malformed_and_unsupported_requests(self):
         script = Path(__file__).parents[1] / "deploy" / "guarded_priority_1_3_release.py"
-        interpreter = Path(__file__).parents[1] / ".venv" / "bin" / "python"
+        interpreter = Path(sys.executable)
         invocations = (
             (),
             ("remote-recover", "--request-b64", "definitely-invalid"),
@@ -580,7 +581,7 @@ rc=guarded.main(argv)
                 f"{str(registry)!r}+'.outputs/{operation}.stdout',{str(registry)!r}+'.outputs/{operation}.stderr')"
             )
             first = subprocess.run(
-                [str(Path(__file__).parents[1] / ".venv/bin/python"), "-I", "-B", "-c",
+                [sys.executable, "-I", "-B", "-c",
                  "import sys;sys.path.insert(0," + repr(str(Path(__file__).parents[1])) + ");" + code],
                 check=False, text=True, capture_output=True,
             )
@@ -594,7 +595,7 @@ rc=guarded.main(argv)
                 "print(json.dumps(r.snapshot(),sort_keys=True,separators=(',',':')))"
             )
             second = subprocess.run(
-                [str(Path(__file__).parents[1] / ".venv/bin/python"), "-I", "-B", "-c",
+                [sys.executable, "-I", "-B", "-c",
                  "import sys;sys.path.insert(0," + repr(str(Path(__file__).parents[1])) + ");" + reader],
                 check=False, text=True, capture_output=True,
             )
@@ -639,7 +640,7 @@ rc=guarded.main(argv)
             create = {**common, "release_document": document, "execution_contract": execution,
                       "created_epoch": 1000, "original_deadline_epoch": 8200}
             script = Path(__file__).parents[1] / "deploy/guarded_priority_1_3_release.py"
-            python = Path(__file__).parents[1] / ".venv/bin/python"
+            python = Path(sys.executable)
 
             def payload(helper, request):
                 return guarded.encode_privileged_request(helper, request)
@@ -838,12 +839,12 @@ rc=guarded.main(argv)
             )
             prefix = "import sys;sys.path.insert(0," + repr(str(Path(__file__).parents[1])) + ");"
             seeded = subprocess.run(
-                [str(Path(__file__).parents[1] / ".venv/bin/python"), "-I", "-B", "-c", prefix + seed],
+                [sys.executable, "-I", "-B", "-c", prefix + seed],
                 check=False, text=True, capture_output=True,
             )
             self.assertEqual(seeded.returncode, 0, seeded.stderr)
             replay = subprocess.run(
-                [str(Path(__file__).parents[1] / ".venv/bin/python"),
+                [sys.executable,
                  str(Path(__file__).parents[1] / "deploy/guarded_priority_1_3_release.py"),
                  "remote-recover", "--request-b64", payload],
                 check=False, text=True, capture_output=True,

@@ -5,6 +5,7 @@ import json
 import os
 import shutil
 import subprocess
+import sys
 import tempfile
 import threading
 import time
@@ -15,6 +16,120 @@ from unittest import mock
 
 
 class Priority13AcceptanceTests(unittest.TestCase):
+    def test_exported_verifier_acceptance_runs_with_readme_venv_and_no_dot_venv(self):
+        repository = Path(__file__).resolve().parents[1]
+        with tempfile.TemporaryDirectory(dir=os.environ.get("TMPDIR")) as directory:
+            exported = Path(directory) / "readme-layout"
+            (exported / "tests").mkdir(parents=True)
+            (exported / "scripts").mkdir()
+            (exported / "venv/bin").mkdir(parents=True)
+            shutil.copy2(__file__, exported / "tests" / Path(__file__).name)
+            (exported / "tests/__init__.py").write_text("")
+            shutil.copy2(
+                repository / "scripts/verify_priority_1_3_remote.py",
+                exported / "scripts/verify_priority_1_3_remote.py",
+            )
+            shutil.copy2(repository / "release_argparse.py", exported / "release_argparse.py")
+            (exported / "venv/bin/python").symlink_to(Path(sys.executable).resolve())
+            self.assertFalse((exported / ".venv").exists())
+
+            completed = subprocess.run(
+                [
+                    str(exported / "venv/bin/python"),
+                    "-B",
+                    "-m",
+                    "unittest",
+                    "-v",
+                    "tests.test_priority_1_3_acceptance.Priority13AcceptanceTests."
+                    "test_exported_candidate_ships_executable_remote_verifier",
+                ],
+                cwd=exported,
+                text=True,
+                capture_output=True,
+                check=False,
+                env={**os.environ, "PYTHONDONTWRITEBYTECODE": "1"},
+            )
+
+        self.assertEqual(completed.returncode, 0, completed.stdout + completed.stderr)
+
+    def test_readme_venv_runs_all_remaining_release_fixtures_without_dot_venv(self):
+        repository = Path(__file__).resolve().parents[1]
+        with tempfile.TemporaryDirectory(dir=os.environ.get("TMPDIR")) as directory:
+            exported = Path(directory) / "readme-layout"
+            exported.mkdir()
+            tracked = subprocess.run(
+                ["git", "ls-files", "-z"],
+                cwd=repository,
+                check=True,
+                capture_output=True,
+            ).stdout.split(b"\0")
+            for encoded in tracked:
+                if not encoded:
+                    continue
+                relative = Path(encoded.decode("utf-8"))
+                source = repository / relative
+                if source.is_file():
+                    destination = exported / relative
+                    destination.parent.mkdir(parents=True, exist_ok=True)
+                    shutil.copy2(source, destination)
+            (exported / "venv/bin").mkdir(parents=True)
+            (exported / "venv/bin/python").symlink_to(Path(sys.executable).resolve())
+            self.assertFalse((exported / ".venv").exists())
+
+            completed = subprocess.run(
+                [
+                    str(exported / "venv/bin/python"),
+                    "-B",
+                    "-m",
+                    "unittest",
+                    "-v",
+                    "tests.test_production_test_verifier.ProductionTestVerifierTests."
+                    "test_standard_venv_runs_exact_real_tests_and_binds_bounded_stderr",
+                    "tests.test_slice1_identity_and_codec.Slice1IdentityAndCodecTests."
+                    "test_fresh_process_inspect_rejects_redigested_execution_service_mismatch",
+                    "tests.test_slice1_identity_and_codec.Slice1IdentityAndCodecTests."
+                    "test_fresh_process_inspect_rejects_every_coherently_redigested_schema_corruption",
+                    "tests.test_slice1_identity_and_codec.Slice1IdentityAndCodecTests."
+                    "test_exact_schema_v1_fresh_process_inspect_rejects_coherently_redigested_non_int_values",
+                ],
+                cwd=exported,
+                text=True,
+                capture_output=True,
+                check=False,
+                env={**os.environ, "PYTHONDONTWRITEBYTECODE": "1"},
+            )
+
+        self.assertEqual(completed.returncode, 0, completed.stdout + completed.stderr)
+
+    def test_acceptance_fixtures_do_not_hardcode_ci_dot_venv_alias(self):
+        repository = Path(__file__).resolve().parents[1]
+        fixtures = (
+            repository / "tests/test_priority_1_3_acceptance.py",
+            repository / "tests/test_guarded_priority_1_3_release.py",
+            repository / "tests/test_release_gate_cli_and_build.py",
+            repository / "tests/test_production_test_verifier.py",
+            repository / "tests/test_slice1_identity_and_codec.py",
+        )
+
+        forbidden = ".venv" + "/bin/python"
+        for fixture in fixtures:
+            with self.subTest(fixture=fixture.name):
+                self.assertNotIn(forbidden, fixture.read_text())
+
+    def test_readme_runtime_venv_and_ci_compatibility_alias_are_explicit(self):
+        repository = Path(__file__).resolve().parents[1]
+        readme = (repository / "README.md").read_text()
+        pipeline = (repository / ".gitlab-ci.yml").read_text()
+
+        self.assertIn("python3 -m venv venv", readme)
+        self.assertIn("./venv/bin/python -m pip install", readme)
+        self.assertIn("./venv/bin/python -B -m unittest", readme)
+        self.assertNotIn(".venv" + "/bin/python", readme)
+        self.assertIn("python3 -m venv .venv-ci", pipeline)
+        self.assertIn("ln -sT .venv-ci .venv", pipeline)
+        self.assertIn('test "$(readlink .venv)" = ".venv-ci"', pipeline)
+        self.assertIn(".venv-ci/bin/coverage run", pipeline)
+
     def test_exported_candidate_ships_executable_remote_verifier(self):
         repository = Path(__file__).resolve().parents[1]
         source = repository / "scripts" / "verify_priority_1_3_remote.py"
@@ -26,7 +141,7 @@ class Priority13AcceptanceTests(unittest.TestCase):
             shutil.copy2(repository / "release_argparse.py", exported / "release_argparse.py")
             verifier = exported / "scripts" / source.name
             completed = subprocess.run(
-                [str(repository / ".venv/bin/python"), "-I", "-B", str(verifier), "--help"],
+                [sys.executable, "-I", "-B", str(verifier), "--help"],
                 cwd=exported, text=True, capture_output=True, check=False,
             )
         self.assertEqual(completed.returncode, 0, completed.stderr)
@@ -55,7 +170,7 @@ class Priority13AcceptanceTests(unittest.TestCase):
             shutil.copy2(verifier_source, verifier)
             shutil.copy2(repository / "release_argparse.py", exported / "release_argparse.py")
             completed = subprocess.run(
-                [str(repository / ".venv/bin/python"), "-I", "-B",
+                [sys.executable, "-I", "-B",
                  str(exported / "deploy" / "verify_priority_1_3_acceptance.py"), "--help"],
                 cwd=exported, text=True, capture_output=True, check=False,
             )
@@ -64,7 +179,7 @@ class Priority13AcceptanceTests(unittest.TestCase):
             cookie.write_text("session=opaque", encoding="ascii")
             cookie.chmod(0o600)
             production = subprocess.run([
-                str(repository / ".venv/bin/python"), "-I", "-B",
+                sys.executable, "-I", "-B",
                 str(exported / "deploy" / "verify_priority_1_3_acceptance.py"),
                 "--boundary", "b1", "--mode", "deploy",
                 "--ssh-target", "admin@192.0.2.10",
@@ -105,7 +220,7 @@ class Priority13AcceptanceTests(unittest.TestCase):
             marker.write_text(json.dumps(manifest))
             marker.chmod(0o400)
             command = [
-                str(repository / ".venv/bin/python"), "-I", "-B", str(verifier),
+                sys.executable, "-I", "-B", str(verifier),
                 "--check", "protected-parity", "--mode", "deploy",
                 "--app-root", str(app_root), "--attempt-id", "a" * 32,
                 "--acceptance-operation-id", "1" * 64, "--evidence-id", "b" * 64,
@@ -182,7 +297,7 @@ class Priority13AcceptanceTests(unittest.TestCase):
                 }],
             }
             command = [
-                str(repository / ".venv/bin/python"), "-I", "-B", str(verifier),
+                sys.executable, "-I", "-B", str(verifier),
                 "--check", "protected-parity", "--mode", "deploy",
                 "--app-root", str(app_root), "--attempt-id", "a" * 32,
                 "--acceptance-operation-id", "1" * 64, "--evidence-id", "b" * 64,
@@ -275,7 +390,7 @@ class Priority13AcceptanceTests(unittest.TestCase):
             for attempt, evidence in (("a" * 32, "b" * 64), ("c" * 32, "d" * 64)):
                 for check in ("physical-journey", "rollback-parity"):
                     completed = subprocess.run([
-                        str(repository / ".venv/bin/python"), "-I", "-B", str(verifier),
+                        sys.executable, "-I", "-B", str(verifier),
                         "--check", check, "--mode", "deploy", "--app-root", str(app),
                         "--attempt-id", attempt, "--acceptance-operation-id", "1" * 64,
                         "--evidence-id", evidence,
@@ -330,7 +445,7 @@ class Priority13AcceptanceTests(unittest.TestCase):
             systemctl.chmod(0o755)
             env = dict(os.environ)
             env["PATH"] = str(fake_bin) + os.pathsep + env["PATH"]
-            base = [str(repository / ".venv/bin/python"), "-I", "-B", str(verifier),
+            base = [sys.executable, "-I", "-B", str(verifier),
                     "--mode", "deploy", "--app-root", str(app),
                     "--attempt-id", "a" * 32, "--acceptance-operation-id", "1" * 64,
                     "--evidence-id", "b" * 64,
