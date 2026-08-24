@@ -920,6 +920,8 @@ class Matrix:
             or not 0.25 <= playback_rate <= 4.0
         ):
             raise ValueError("GIF playback rate must be between 0.25 and 4.0")
+        if stop_event is not None and stop_event.is_set():
+            return False
         image_open = Image.open
         if pinned_handle is None:
             path = self._media_file(filename)
@@ -1055,29 +1057,48 @@ class Matrix:
                             pass
                         except OSError as error:
                             remember_cleanup_error(error)
-                    try:
-                        process.wait(timeout=2)
-                    except ProcessLookupError:
-                        pass
-                    except subprocess.TimeoutExpired:
+                    wait_timeout = 2.0
+                    if stop_event is not None and stop_event.is_set():
+                        wait_timeout = 0.0
+                    elif deadline is not None:
+                        wait_timeout = min(
+                            wait_timeout, max(0.0, deadline - time.monotonic())
+                        )
+                    if wait_timeout <= 0:
+                        deferred_process = process
+                    else:
                         try:
-                            process.kill()
-                        except ProcessLookupError:
-                            pass
-                        except OSError as error:
-                            remember_cleanup_error(error)
-                        try:
-                            process.wait(timeout=0.25)
+                            process.wait(timeout=wait_timeout)
                         except ProcessLookupError:
                             pass
                         except subprocess.TimeoutExpired:
-                            deferred_process = process
+                            try:
+                                process.kill()
+                            except ProcessLookupError:
+                                pass
+                            except OSError as error:
+                                remember_cleanup_error(error)
+                            final_wait_timeout = 0.25
+                            if deadline is not None:
+                                final_wait_timeout = min(
+                                    final_wait_timeout,
+                                    max(0.0, deadline - time.monotonic()),
+                                )
+                            if final_wait_timeout <= 0:
+                                deferred_process = process
+                            else:
+                                try:
+                                    process.wait(timeout=final_wait_timeout)
+                                except ProcessLookupError:
+                                    pass
+                                except subprocess.TimeoutExpired:
+                                    deferred_process = process
+                                except OSError as error:
+                                    remember_cleanup_error(error)
+                                    deferred_process = process
                         except OSError as error:
                             remember_cleanup_error(error)
                             deferred_process = process
-                    except OSError as error:
-                        remember_cleanup_error(error)
-                        deferred_process = process
             finally:
                 if input_fd is not None:
                     try:
@@ -1113,6 +1134,8 @@ class Matrix:
         """Decode a sanitized MP4 with FFmpeg, bounded and interruptible."""
         from modules.media_player import video_media_frames
 
+        if stop_event is not None and stop_event.is_set():
+            return False
         path = None if pinned_handle is not None else self._media_file(filename)
         if (
             path is None and pinned_handle is None

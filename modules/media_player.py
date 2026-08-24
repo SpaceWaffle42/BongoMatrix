@@ -64,6 +64,8 @@ def video_media_frames(
     elapsed_delays = 0.0
     completed = 0
     while loops == 0 or completed < loops:
+        if stop_event is not None and stop_event.is_set():
+            return
         decoded_frame = False
         decoder = iter(frame_decoder())
         try:

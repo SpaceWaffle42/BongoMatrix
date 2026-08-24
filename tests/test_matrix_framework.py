@@ -621,6 +621,84 @@ else:
         popen.assert_not_called()
         close_fd.assert_called_once_with(9)
 
+    def test_video_frame_timeline_exhausted_deadline_defers_without_waiting(self):
+        matrix = Matrix.__new__(Matrix)
+        process = Mock()
+        process.stdout = Mock()
+        process.poll.return_value = None
+        process.wait.side_effect = [
+            framework.subprocess.TimeoutExpired("ffmpeg", 2),
+            framework.subprocess.TimeoutExpired("ffmpeg", 0.25),
+        ]
+        owned_queue = Mock()
+
+        with patch.object(
+            framework, "_ensure_decoder_reaper", return_value=owned_queue,
+        ), patch.object(
+            framework, "_release_decoder_reaper",
+        ) as release_reaper, patch.object(
+            framework.os, "open", return_value=9,
+        ), patch.object(
+            framework.os, "close",
+        ), patch.object(
+            framework.subprocess, "Popen", return_value=process,
+        ), patch.object(
+            framework, "_read_exact_interruptibly", return_value=b"",
+        ):
+            self.assertEqual(list(matrix._video_frame_timeline(
+                "video.mp4", 2, 2, True, deadline=0.0,
+            )), [])
+
+        process.terminate.assert_called_once_with()
+        process.wait.assert_not_called()
+        process.kill.assert_not_called()
+        release_reaper.assert_called_once_with(
+            owned_queue, deferred_process=process,
+        )
+
+    def test_video_frame_timeline_cancellation_defers_without_waiting(self):
+        matrix = Matrix.__new__(Matrix)
+        process = Mock()
+        process.stdout = Mock()
+        process.poll.return_value = None
+        process.wait.side_effect = [
+            framework.subprocess.TimeoutExpired("ffmpeg", 2),
+            framework.subprocess.TimeoutExpired("ffmpeg", 0.25),
+        ]
+        owned_queue = Mock()
+        stop = threading.Event()
+
+        def cancel_during_read(*_args, **_kwargs):
+            stop.set()
+            return b""
+
+        with patch.object(
+            framework, "_ensure_decoder_reaper", return_value=owned_queue,
+        ), patch.object(
+            framework, "_release_decoder_reaper",
+        ) as release_reaper, patch.object(
+            framework.os, "open", return_value=9,
+        ), patch.object(
+            framework.os, "close",
+        ), patch.object(
+            framework.subprocess, "Popen", return_value=process,
+        ), patch.object(
+            framework, "_read_exact_interruptibly", side_effect=cancel_during_read,
+        ), patch.object(
+            framework.time, "monotonic", return_value=10.0,
+        ):
+            self.assertEqual(list(matrix._video_frame_timeline(
+                "video.mp4", 2, 2, True,
+                stop_event=stop, deadline=100.0,
+            )), [])
+
+        process.terminate.assert_called_once_with()
+        process.wait.assert_not_called()
+        process.kill.assert_not_called()
+        release_reaper.assert_called_once_with(
+            owned_queue, deferred_process=process,
+        )
+
     def test_video_frame_timeline_timeout_transfers_reaping_to_existing_owner_across_process_races(self):
         matrix = Matrix.__new__(Matrix)
         for race in ("poll", "terminate"):
@@ -1231,6 +1309,7 @@ else:
         with patch.object(framework.Image, "open", return_value=Mock()), patch.object(framework.ImageSequence, "Iterator", return_value=[frame]):
             self.assertFalse(matrix.show_gif("sleep.gif", loops=0, stop_event=stop, max_duration=10))
         matrix.canvas.SetImage.assert_not_called()
+        matrix._media_file.assert_not_called()
 
     def test_show_gif_cancelled_during_final_draw_is_not_published(self):
         matrix = Matrix.__new__(Matrix)
@@ -1470,6 +1549,21 @@ else:
                 self.assertTrue(matrix.show_gif("sleep.gif", loops=1, playback_rate=2.0))
 
             self.assertEqual(path.read_bytes(), before)
+
+    def test_show_video_pre_cancelled_skips_media_lookup_and_decoder(self):
+        matrix = Matrix.__new__(Matrix)
+        matrix.matrix = Mock(width=64, height=32)
+        matrix._media_file = Mock(return_value=Mock())
+        matrix._video_frame_timeline = Mock(return_value=iter(()))
+        stop = threading.Event()
+        stop.set()
+
+        self.assertFalse(matrix.show_video(
+            "clip.mp4", loops=1, stop_event=stop, max_duration=10,
+        ))
+
+        matrix._media_file.assert_not_called()
+        matrix._video_frame_timeline.assert_not_called()
 
     def test_show_video_cancelled_during_capture_update_is_not_published(self):
         matrix = Matrix.__new__(Matrix)

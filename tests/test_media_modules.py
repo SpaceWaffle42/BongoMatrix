@@ -3,9 +3,20 @@ import unittest
 from unittest.mock import Mock, patch
 
 from modules import sleep_screen, splash_screen
+from modules.media_player import video_media_frames
 
 
 class MediaModuleTests(unittest.TestCase):
+    def test_pre_cancelled_video_frames_do_not_construct_decoder(self):
+        decoder = Mock(return_value=iter(()))
+        stop = threading.Event()
+        stop.set()
+
+        self.assertEqual(list(video_media_frames(
+            decoder, stop_event=stop,
+        )), [])
+        decoder.assert_not_called()
+
     def test_splash_uses_configured_gif(self):
         matrix = Mock()
         matrix.show_gif.return_value = True
