@@ -14,8 +14,44 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from unittest import mock
 
+from scripts import verify_priority_1_3_remote as remote_verifier
+
 
 class Priority13AcceptanceTests(unittest.TestCase):
+    def test_remote_physical_verifier_pins_systemctl_and_environment(self):
+        completed = subprocess.CompletedProcess(
+            ["/usr/bin/systemctl"], 0, stdout="active\n", stderr="",
+        )
+        metadata = {
+            "nonce": "f" * 64,
+            "draft_sha256": "d" * 64,
+            "saved_sha256": "s" * 64,
+            "owner_generation": 4,
+        }
+        frames = {"draft": b"d" * 6144, "saved": b"s" * 6144}
+        with tempfile.TemporaryDirectory() as directory:
+            transaction = Path(directory)
+            with mock.patch.object(
+                remote_verifier.subprocess, "run", return_value=completed,
+            ) as run, mock.patch.object(
+                remote_verifier, "_canonical_transaction",
+                return_value=(metadata, frames, transaction),
+            ):
+                report = remote_verifier._physical(
+                    Path(directory), argparse.Namespace(),
+                )
+
+        self.assertTrue(report["service_active"])
+        run.assert_called_once_with(
+            ["/usr/bin/systemctl", "is-active", "matrix-web.service"],
+            check=False,
+            text=True,
+            capture_output=True,
+            timeout=15,
+            shell=False,
+            env={"PATH": "/usr/bin:/bin", "LANG": "C", "LC_ALL": "C"},
+        )
+
     def test_exported_verifier_acceptance_runs_with_readme_venv_and_no_dot_venv(self):
         repository = Path(__file__).resolve().parents[1]
         with tempfile.TemporaryDirectory(dir=os.environ.get("TMPDIR")) as directory:
@@ -383,8 +419,11 @@ class Priority13AcceptanceTests(unittest.TestCase):
             }))
             fake_bin = Path(directory) / "bin"
             fake_bin.mkdir()
+            marker = Path(directory) / "poisoned-systemctl"
             systemctl = fake_bin / "systemctl"
-            systemctl.write_text("#!/bin/sh\nprintf 'active\n'\n")
+            systemctl.write_text(
+                f"#!/bin/sh\nprintf 'poisoned' > {marker}\nprintf 'active\\n'\n"
+            )
             systemctl.chmod(0o755)
             env = {**os.environ, "PATH": str(fake_bin) + os.pathsep + os.environ["PATH"]}
             for attempt, evidence in (("a" * 32, "b" * 64), ("c" * 32, "d" * 64)):
@@ -398,6 +437,7 @@ class Priority13AcceptanceTests(unittest.TestCase):
                     ], text=True, capture_output=True, env=env, check=False)
                     self.assertNotEqual(completed.returncode, 0, (attempt, check, completed.stdout))
                     self.assertEqual(completed.stdout, "")
+            self.assertFalse(marker.exists())
 
     def test_remote_verifier_executes_real_tests_service_frames_and_state_checks(self):
         repository = Path(__file__).resolve().parents[1]
@@ -438,23 +478,33 @@ class Priority13AcceptanceTests(unittest.TestCase):
             }, owner_generation=4)
             publisher.publish_draft(b"d" * 6144, frame_revision=10)
             publisher.publish_saved_rollback(b"s" * 6144, frame_revision=11, saved_revision=9)
-            fake_bin = root / "bin"
-            fake_bin.mkdir()
-            systemctl = fake_bin / "systemctl"
-            systemctl.write_text("#!/bin/sh\nprintf 'active\n'\n")
-            systemctl.chmod(0o755)
             env = dict(os.environ)
-            env["PATH"] = str(fake_bin) + os.pathsep + env["PATH"]
             base = [sys.executable, "-I", "-B", str(verifier),
                     "--mode", "deploy", "--app-root", str(app),
                     "--attempt-id", "a" * 32, "--acceptance-operation-id", "1" * 64,
                     "--evidence-id", "b" * 64,
                     "--expected-sha", "1" * 40, "--expected-version", "9.8.7-test"]
             reports = {}
-            for check in ("production-tests", "persistent-state", "physical-journey", "rollback-parity"):
+            for check in ("production-tests", "persistent-state"):
                 completed = subprocess.run(base + ["--check", check], text=True, capture_output=True, env=env, check=False)
                 self.assertEqual(completed.returncode, 0, (check, completed.stderr))
                 reports[check] = json.loads(completed.stdout)
+            physical_arguments = remote_verifier.build_parser().parse_args(
+                base[4:] + ["--check", "physical-journey"]
+            )
+            active = subprocess.CompletedProcess(
+                ["/usr/bin/systemctl"], 0, stdout="active\n", stderr="",
+            )
+            with mock.patch.object(
+                remote_verifier.subprocess, "run", return_value=active,
+            ):
+                reports["physical-journey"] = remote_verifier.run(physical_arguments)
+            completed = subprocess.run(
+                base + ["--check", "rollback-parity"],
+                text=True, capture_output=True, env=env, check=False,
+            )
+            self.assertEqual(completed.returncode, 0, completed.stderr)
+            reports["rollback-parity"] = json.loads(completed.stdout)
             self.assertEqual((app / "focused.marker").read_text(), "ran")
             self.assertEqual((app / "full.marker").read_text(), "ran")
             self.assertGreater(reports["production-tests"]["focused"]["stderr_size"], 0)

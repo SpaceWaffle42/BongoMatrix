@@ -381,8 +381,15 @@ def _claim(transaction: Path, name: str, nonce: str) -> None:
 
 
 def _physical(root: Path, arguments: argparse.Namespace) -> dict[str, object]:
-    service = subprocess.run(["systemctl", "is-active", "matrix-web.service"], check=False,
-                             text=True, capture_output=True, timeout=15, shell=False)
+    service = subprocess.run(
+        ["/usr/bin/systemctl", "is-active", "matrix-web.service"],
+        check=False,
+        text=True,
+        capture_output=True,
+        timeout=15,
+        shell=False,
+        env={"PATH": "/usr/bin:/bin", "LANG": "C", "LC_ALL": "C"},
+    )
     if service.returncode != 0 or service.stdout.strip() != "active" or service.stderr:
         raise ValueError("service is not active")
     metadata, frames, transaction = _canonical_transaction(root, arguments)
