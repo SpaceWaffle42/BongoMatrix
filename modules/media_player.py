@@ -48,12 +48,23 @@ def gif_media_frames(
                     )
                 if max_duration is not None and elapsed >= max_duration:
                     return
+                candidate = frame_copy(frame)
+                if monotonic is not None:
+                    now = monotonic()
+                    elapsed = preparation_elapsed + max(
+                        elapsed_delays, now - playback_started,
+                    )
+                if max_duration is not None and elapsed >= max_duration:
+                    close = getattr(candidate, "close", None)
+                    if close is not None:
+                        close()
+                    return
                 delay = max(
                     0.01, frame.info.get("duration", 100) / 1000.0 / playback_rate
                 )
                 if max_duration is not None:
                     delay = min(delay, max_duration - elapsed)
-                yield frame_copy(frame), delay
+                yield candidate, delay
                 elapsed_delays += delay
             if not rendered_frame:
                 return

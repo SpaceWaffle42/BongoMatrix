@@ -3,10 +3,76 @@ import unittest
 from unittest.mock import Mock, patch
 
 from modules import sleep_screen, splash_screen
-from modules.media_player import video_media_frames
+from modules.media_player import gif_media_frames, video_media_frames
 
 
 class MediaModuleTests(unittest.TestCase):
+    @staticmethod
+    def _timed_gif_case(open_seconds, iteration_seconds, copy_seconds):
+        class Clock:
+            def __init__(self):
+                self.elapsed = 0.0
+
+            def advance(self, seconds):
+                self.elapsed += seconds
+
+            def __call__(self):
+                return self.elapsed
+
+        class Owned:
+            def __init__(self, info=None):
+                self.info = info or {}
+                self.close_calls = 0
+
+            def close(self):
+                self.close_calls += 1
+
+        clock = Clock()
+        gif = Owned()
+        source = Owned({"duration": 100})
+        candidate = Owned()
+
+        def image_open(_path):
+            clock.advance(open_seconds)
+            return gif
+
+        def image_iterator(_gif):
+            clock.advance(iteration_seconds)
+            return iter((source,))
+
+        def frame_copy(_frame):
+            clock.advance(copy_seconds)
+            return candidate
+
+        frames = list(gif_media_frames(
+            "timed.gif", loops=1, max_duration=0.006, monotonic=clock,
+            image_open=image_open, image_iterator=image_iterator,
+            frame_copy=frame_copy,
+        ))
+        return frames, clock, gif, candidate
+
+    def test_gif_frame_copy_time_is_charged_to_absolute_duration(self):
+        frames, clock, gif, candidate = self._timed_gif_case(
+            open_seconds=0.002, iteration_seconds=0.001, copy_seconds=0.002,
+        )
+
+        self.assertEqual(len(frames), 1)
+        self.assertIs(frames[0][0], candidate)
+        self.assertAlmostEqual(frames[0][1], 0.001, places=9)
+        self.assertLessEqual(clock.elapsed + frames[0][1], 0.006)
+        self.assertEqual(candidate.close_calls, 0)
+        self.assertEqual(gif.close_calls, 1)
+
+    def test_gif_frame_copy_exhausting_deadline_closes_candidate_without_yield(self):
+        frames, clock, gif, candidate = self._timed_gif_case(
+            open_seconds=0.002, iteration_seconds=0.002, copy_seconds=0.003,
+        )
+
+        self.assertEqual(frames, [])
+        self.assertGreaterEqual(clock.elapsed, 0.006)
+        self.assertEqual(candidate.close_calls, 1)
+        self.assertEqual(gif.close_calls, 1)
+
     def test_pre_cancelled_video_frames_do_not_construct_decoder(self):
         decoder = Mock(return_value=iter(()))
         stop = threading.Event()
