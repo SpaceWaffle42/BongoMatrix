@@ -268,6 +268,7 @@
     if (previousState) disposeTimelineState(previousState);
     editorState.delete(module.id);
     renderCustomModules();
+    globalThis.markMatrixDirty?.();
     publishCanvasDraftMutation(module.id);
     setMessage('Starter example loaded locally. Save configuration to apply.');
   }
@@ -285,6 +286,7 @@
       overrides: [],
     };
     renderCustomModules();
+    globalThis.markMatrixDirty?.();
     publishCanvasDraftMutation(source.id);
     setMessage('Converted to an advanced layered canvas. Save configuration to apply.');
   }
@@ -1225,7 +1227,7 @@
     if (previousState) disposeTimelineState(previousState);
     editorState.delete(id);
     for (const row of document.querySelectorAll('.module-row')) if (row.dataset.module === id) row.closest('.module-item').remove();
-    renderCustomModules(); globalThis.matrixCustomCanvasDraftRemoved?.(id); setMessage('Custom module removed. Save configuration to apply.');
+    globalThis.markMatrixDirty?.(); renderCustomModules(); globalThis.matrixCustomCanvasDraftRemoved?.(id); setMessage('Custom module removed. Save configuration to apply.');
   };
 
   setInterval(() => { if (customModules.some(module => module.type === 'canvas' && module.layers.some(layer => layer.type === 'time' && layer.visible))) redrawMediaCanvases(); }, 1000);

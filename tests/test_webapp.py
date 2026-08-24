@@ -649,7 +649,7 @@ try{
         for fragment in (
             "devicePreviewRequestPromise",
             "cancelDevicePreviewGeneration",
-            "await devicePreviewRequestPromise",
+            "await waitForDevicePreviewRequest()",
             "generation!==devicePreviewActiveGeneration",
             "Malformed device preview response",
             "globalThis.publishDeviceDraftMutation?.('announcement_board'",
@@ -746,6 +746,171 @@ console.log('PROGRAMMATIC_DEVICE_PREVIEW_PUBLICATION_PASS');
         )
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertIn("PROGRAMMATIC_DEVICE_PREVIEW_PUBLICATION_PASS", result.stdout)
+
+    @unittest.skipUnless(shutil.which("node"), "Node.js is required")
+    def test_save_config_blocks_when_device_preview_cancellation_is_unconfirmed(self):
+        source = (Path(__file__).parents[1] / "app" / "templates" / "dashboard.html").read_text()
+        save = source[source.index("async function saveConfig"):source.index("\nfunction updateOpenWeatherSecretStatus")]
+        harness = r'''
+let matrixEditorsReady=true,matrixRecoveryPending=false,matrixLoadedRevision=7,highestNotifiedRemoteRevision=7,matrixSavedSnapshot='saved-baseline',matrixDirty=true;
+const messages=[],requests=[];
+globalThis.cancelDevicePreviewForSave=async()=>false;
+globalThis.validateAnnouncementBoard=()=>true;
+globalThis.configBody=()=>({device:{name:'unsaved draft'}});
+globalThis.matrixRevisionETag=()=> '"revision-7"';
+globalThis.dismissMatrixRevisionDialogThrough=()=>{throw new Error('revision dialog changed')};
+globalThis.setMessage=(text,error=false)=>messages.push({text,error});
+globalThis.api=async(path,options)=>{requests.push({path,options});return {revision:8}};
+'''+save+r'''
+(async()=>{const result=await saveConfig();
+ if(result.saved!==false||requests.length!==0)throw new Error('save crossed unconfirmed cancellation barrier');
+ if(matrixLoadedRevision!==7||matrixSavedSnapshot!=='saved-baseline'||matrixDirty!==true)throw new Error('save state changed');
+ if(!result.warning||!messages.at(-1)?.error||!messages.at(-1).text.includes('preview'))throw new Error('visible cancellation warning missing');
+ console.log('SAVE_DEVICE_PREVIEW_CANCEL_BARRIER_PASS');
+})().catch(error=>{console.error(error);process.exit(1)});
+'''
+        node = shutil.which("node")
+        assert node is not None
+        result = subprocess.run([node, "-e", harness], cwd=Path(__file__).parents[1], text=True, capture_output=True, check=False)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("SAVE_DEVICE_PREVIEW_CANCEL_BARRIER_PASS", result.stdout)
+
+    @unittest.skipUnless(shutil.which("node"), "Node.js is required")
+    def test_device_preview_rejects_invalid_start_heartbeat_cadences(self):
+        source = (Path(__file__).parents[1] / "app" / "templates" / "dashboard.html").read_text()
+        lifecycle = source[source.index("let devicePreviewEnabled="):source.index("\nfunction editPreviewCurrent")]
+        harness = r'''
+const vm=require('node:vm');
+const scenarios=[['missing',undefined],['null',null],['string','bogus'],['nan',NaN],['infinite',Infinity],['zero',0],['negative',-1],['excessive',3601]];
+(async()=>{for(const [name,cadence] of scenarios){const calls=[],listeners={};
+ const control=extra=>Object.assign({addEventListener(type,handler){this.listeners??={};this.listeners[type]=handler}},extra);
+ const toggle=control({checked:false}),timeout=control({value:'60',focus(){}}),stop=control({disabled:true}),status={textContent:'',dataset:{}};
+ const elements={'#device-preview-enabled':toggle,'#device-preview-timeout':timeout,'#stop-device-preview':stop,'#device-preview-status':status};
+ const timers=new Map();let timerId=0;
+ const context={console,AbortController,Date,Number,Promise,Set,Math,encodeURIComponent,
+  setTimeout(fn,delay){const id=++timerId;if(delay===0)queueMicrotask(fn);else timers.set(id,{fn,delay});return id},clearTimeout:id=>timers.delete(id),setInterval(){return ++timerId},clearInterval(){},
+  matrixSyncStopped:false,matrixEditorsReady:true,previewModule:'clock',previewInstance:'b'.repeat(32),PAIRED_ACTION_SIGNAL:'1',configBody:()=>({}),selectedLavaPaletteDescriptor:()=>null,selectEditPreviewModule(){},selectEditedPreviewModule(){},
+  document:{querySelector:s=>elements[s],addEventListener(){}},window:{addEventListener(){}},fetch:async()=>({ok:true}),
+  api:async(path,options={})=>{const body=options.body?JSON.parse(options.body):null;calls.push({path,body});if(path==='/api/device-preview/clock'){const result={generation:body.generation,expires_in:60,active_module:'clock'};if(name!=='missing')result.heartbeat_after_seconds=cadence;return result}if(path==='/api/device-preview/cancel')return {cancelled:true};if(path==='/api/device-preview/heartbeat')return {active:true,generation:body.generation,expires_in:55};throw new Error(path)}};
+ vm.createContext(context);vm.runInContext(process.argv[1],context);toggle.checked=true;toggle.listeners.change();await new Promise(resolve=>setImmediate(resolve));await new Promise(resolve=>setImmediate(resolve));
+ if(toggle.checked||status.dataset.state!=='error')throw new Error(name+' cadence remained active');
+ if(calls.filter(call=>call.path==='/api/device-preview/cancel').length!==1)throw new Error(name+' cadence was not cancelled exactly once');
+ if(calls.some(call=>call.path==='/api/device-preview/heartbeat'))throw new Error(name+' cadence emitted heartbeat');
+ }
+ console.log('DEVICE_PREVIEW_INVALID_HEARTBEAT_CADENCE_PASS');
+})().catch(error=>{console.error(error);process.exit(1)});
+'''
+        node = shutil.which("node")
+        assert node is not None
+        result = subprocess.run([node, "-e", harness, lifecycle], cwd=Path(__file__).parents[1], text=True, capture_output=True, check=False)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("DEVICE_PREVIEW_INVALID_HEARTBEAT_CADENCE_PASS", result.stdout)
+
+    @unittest.skipUnless(shutil.which("node"), "Node.js is required")
+    def test_device_preview_stop_is_bounded_when_start_never_settles(self):
+        source = (Path(__file__).parents[1] / "app" / "templates" / "dashboard.html").read_text()
+        lifecycle = source[source.index("let devicePreviewEnabled="):source.index("\nfunction editPreviewCurrent")]
+        harness = r'''
+const vm=require('node:vm'),listeners={},calls=[];
+const control=extra=>Object.assign({addEventListener(type,handler){this.listeners??={};this.listeners[type]=handler}},extra);
+const toggle=control({checked:false}),timeout=control({value:'60',focus(){}}),stop=control({disabled:true}),status={textContent:'',dataset:{}};
+const elements={'#device-preview-enabled':toggle,'#device-preview-timeout':timeout,'#stop-device-preview':stop,'#device-preview-status':status};
+const context={console,AbortController,Date,Number,Promise,Set,Map,Math,encodeURIComponent,clearInterval,setInterval:()=>1,
+ setTimeout(fn,delay){if(delay===0)queueMicrotask(fn);else queueMicrotask(fn);return 1},clearTimeout(){},matrixSyncStopped:false,matrixEditorsReady:true,previewModule:'clock',previewInstance:'c'.repeat(32),PAIRED_ACTION_SIGNAL:'1',configBody:()=>({}),selectedLavaPaletteDescriptor:()=>null,selectEditPreviewModule(){},selectEditedPreviewModule(){},
+ document:{querySelector:s=>elements[s],addEventListener(){}},window:{addEventListener(n,h){listeners[n]=h}},fetch:async()=>({ok:false}),
+ api:async(path,options={})=>{calls.push(path);if(path==='/api/device-preview/clock')return new Promise(()=>{});if(path==='/api/device-preview/cancel')throw new Error('not admitted');throw new Error(path)}};
+vm.createContext(context);vm.runInContext(process.argv[1],context);(async()=>{toggle.checked=true;toggle.listeners.change();await new Promise(resolve=>setImmediate(resolve));
+ const result=await Promise.race([context.stopDevicePreview(),new Promise(resolve=>setTimeout(()=>resolve('hung'),50))]);
+ if(result==='hung'||result!==false)throw new Error('stop did not reach bounded uncertainty');
+ if(status.dataset.state!=='error'||!status.textContent.includes('expire'))throw new Error('uncertain stop was not visible');
+ console.log('DEVICE_PREVIEW_BOUNDED_STOP_PASS');
+})().catch(error=>{console.error(error);process.exit(1)});
+'''
+        node = shutil.which("node")
+        assert node is not None
+        result = subprocess.run([node, "-e", harness, lifecycle], cwd=Path(__file__).parents[1], text=True, capture_output=True, check=False)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("DEVICE_PREVIEW_BOUNDED_STOP_PASS", result.stdout)
+
+    @unittest.skipUnless(shutil.which("node"), "Node.js is required")
+    def test_device_preview_shares_inflight_cancellation_across_pagehide_and_start_completion(self):
+        source = (Path(__file__).parents[1] / "app" / "templates" / "dashboard.html").read_text()
+        lifecycle = source[source.index("let devicePreviewEnabled="):source.index("\nfunction editPreviewCurrent")]
+        harness = r'''
+const vm=require('node:vm'),listeners={};let startResolve,cancelFetchResolve,cancelCalls=0;
+const control=extra=>Object.assign({addEventListener(type,handler){this.listeners??={};this.listeners[type]=handler}},extra);
+const toggle=control({checked:false}),timeout=control({value:'60',focus(){}}),stop=control({disabled:true}),status={textContent:'',dataset:{}};
+const elements={'#device-preview-enabled':toggle,'#device-preview-timeout':timeout,'#stop-device-preview':stop,'#device-preview-status':status};
+const context={console,AbortController,Date,Number,Promise,Set,Map,Math,encodeURIComponent,setTimeout,clearTimeout,setInterval,clearInterval,matrixSyncStopped:false,matrixEditorsReady:true,previewModule:'clock',previewInstance:'d'.repeat(32),PAIRED_ACTION_SIGNAL:'1',configBody:()=>({}),selectedLavaPaletteDescriptor:()=>null,selectEditPreviewModule(){},selectEditedPreviewModule(){},
+ document:{querySelector:s=>elements[s],addEventListener(){}},window:{addEventListener(n,h){listeners[n]=h}},
+ fetch:async(path)=>{if(path==='/api/device-preview/cancel'){cancelCalls++;return new Promise(resolve=>{cancelFetchResolve=()=>resolve({ok:true})})}throw new Error(path)},
+ api:async(path,options={})=>{if(path==='/api/device-preview/clock')return new Promise(resolve=>{startResolve=resolve});if(path==='/api/device-preview/cancel'){cancelCalls++;return {cancelled:true}};throw new Error(path)}};
+vm.createContext(context);vm.runInContext(process.argv[1],context);(async()=>{toggle.checked=true;toggle.listeners.change();await new Promise(resolve=>setTimeout(resolve,5));if(typeof startResolve!=='function')throw new Error('start boundary not reached');listeners.pagehide();
+ startResolve({generation:1,expires_in:60,heartbeat_after_seconds:5,active_module:'clock'});await new Promise(resolve=>setImmediate(resolve));
+ if(cancelCalls!==1)throw new Error('overlapping cancellation count '+cancelCalls);
+ cancelFetchResolve();await new Promise(resolve=>setImmediate(resolve));console.log('DEVICE_PREVIEW_SHARED_CANCEL_PASS');
+})().catch(error=>{console.error(error);process.exit(1)});
+'''
+        node = shutil.which("node")
+        assert node is not None
+        result = subprocess.run([node, "-e", harness, lifecycle], cwd=Path(__file__).parents[1], text=True, capture_output=True, check=False)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("DEVICE_PREVIEW_SHARED_CANCEL_PASS", result.stdout)
+
+    @unittest.skipUnless(shutil.which("node"), "Node.js is required")
+    def test_shipped_custom_canvas_mutations_dirty_and_replace_removed_device_source(self):
+        root = Path(__file__).parents[1]
+        canvas = (root / "app" / "static" / "custom_canvas.js").read_text()
+        dashboard = (root / "app" / "templates" / "dashboard.html").read_text()
+        remove_override = canvas[canvas.index("window.removeCustomModule = function removeCustomModuleAdvanced"):canvas.index("\n\n  setInterval", canvas.index("window.removeCustomModule = function removeCustomModuleAdvanced"))]
+        removed_callback = dashboard[dashboard.index("window.matrixCustomCanvasDraftRemoved="):dashboard.index(";\nfunction customEditorForEvent") + 1]
+        harness = r'''
+let dirtyCalls=0,replacements=[],editSchedules=0,previewModule='custom_advanced',previewModulePinned=true,previewMode='edit';
+let customModules=[{id:'custom_advanced',name:'Advanced',type:'canvas',layers:[]}];
+const editorState=new Map(),select={value:'custom_advanced',options:[{value:'custom_advanced'},{value:'clock'}]};
+globalThis.window=globalThis;globalThis.confirm=()=>true;globalThis.customName=id=>'Advanced';globalThis.customModulesFromEditor=()=>structuredClone(customModules);globalThis.markMatrixDirty=()=>dirtyCalls++;globalThis.renderCustomModules=()=>{};globalThis.setMessage=()=>{};globalThis.cancelEditPreview=()=>{};globalThis.scheduleEditPreview=()=>editSchedules++;globalThis.syncLavaInspectionRadios=()=>{};globalThis.replaceDevicePreviewAfterSourceRemoval=module=>replacements.push(module);
+globalThis.document={querySelector:s=>s==='#preview-select'?select:{textContent:''},querySelectorAll:()=>[]};
+'''+removed_callback+'\n'+remove_override+r'''
+removeCustomModule('custom_advanced');
+if(dirtyCalls!==1)throw new Error('shipped override did not dirty exactly once: '+dirtyCalls);
+if(previewModule!=='clock'||select.value!=='clock')throw new Error('surviving fallback not selected');
+if(JSON.stringify(replacements)!==JSON.stringify(['clock']))throw new Error('fallback replacement count/payload '+JSON.stringify(replacements));
+if(editSchedules!==1)throw new Error('fallback Edit Preview schedule count '+editSchedules);
+console.log('SHIPPED_CUSTOM_CANVAS_REMOVAL_PASS');
+'''
+        node = shutil.which("node")
+        assert node is not None
+        result = subprocess.run([node, "-e", harness], cwd=root, text=True, capture_output=True, check=False)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("SHIPPED_CUSTOM_CANVAS_REMOVAL_PASS", result.stdout)
+        template_body = canvas[canvas.index("function applyTemplate"):canvas.index("window.canvasStarterExamples")]
+        convert_body = canvas[canvas.index("function convertToAdvanced"):canvas.index("function simpleModuleFromCard", canvas.index("function convertToAdvanced"))]
+        self.assertIn("markMatrixDirty", template_body)
+        self.assertIn("markMatrixDirty", convert_body)
+
+    @unittest.skipUnless(shutil.which("node"), "Node.js is required")
+    def test_removed_device_source_waits_for_admission_then_publishes_one_fallback(self):
+        source = (Path(__file__).parents[1] / "app" / "templates" / "dashboard.html").read_text()
+        lifecycle = source[source.index("let devicePreviewEnabled="):source.index("\nfunction editPreviewCurrent")]
+        harness = r'''
+const vm=require('node:vm');let startResolve,startSignal,admitted=false;const calls=[];
+const control=extra=>Object.assign({addEventListener(type,handler){this.listeners??={};this.listeners[type]=handler}},extra);
+const toggle=control({checked:false}),timeout=control({value:'60',focus(){}}),stop=control({disabled:true}),status={textContent:'',dataset:{}};
+const elements={'#device-preview-enabled':toggle,'#device-preview-timeout':timeout,'#stop-device-preview':stop,'#device-preview-status':status};
+const context={console,AbortController,Date,Number,Promise,Set,Map,Math,encodeURIComponent,setTimeout,clearTimeout,setInterval,clearInterval,matrixSyncStopped:false,matrixEditorsReady:true,previewModule:'custom_removed',previewInstance:'e'.repeat(32),PAIRED_ACTION_SIGNAL:'1',configBody:()=>({marker:'draft'}),selectedLavaPaletteDescriptor:()=>null,selectEditPreviewModule(){},selectEditedPreviewModule(){},document:{querySelector:s=>elements[s],addEventListener(){}},window:{addEventListener(){}},fetch:async()=>({ok:true}),api:async(path,options={})=>{const body=options.body?JSON.parse(options.body):null;calls.push({path,body});if(path==='/api/device-preview/custom_removed'){startSignal=options.signal;return new Promise(resolve=>{startResolve=value=>{admitted=true;resolve(value)}})}if(path==='/api/device-preview/cancel')return {cancelled:admitted};if(path==='/api/device-preview/clock')return {generation:body.generation,expires_in:60,heartbeat_after_seconds:5,active_module:'clock'};throw new Error(path)}};
+vm.createContext(context);vm.runInContext(process.argv[1],context);(async()=>{toggle.checked=true;toggle.listeners.change();await new Promise(resolve=>setTimeout(resolve,5));context.previewModule='clock';const replacing=context.replaceDevicePreviewAfterSourceRemoval('clock');
+ if(startSignal.aborted)throw new Error('pending admission was aborted before fencing');
+ startResolve({generation:1,expires_in:60,heartbeat_after_seconds:5,active_module:'custom_removed'});if(await replacing!==true)throw new Error('replacement did not recover');await new Promise(resolve=>setTimeout(resolve,5));
+ if(calls.filter(call=>call.path==='/api/device-preview/cancel'&&call.body.generation===1).length!==1)throw new Error('removed generation not cancelled once');
+ if(calls.filter(call=>call.path==='/api/device-preview/clock').length!==1)throw new Error('fallback publication count incorrect');
+ console.log('REMOVED_DEVICE_SOURCE_FALLBACK_PASS');
+})().catch(error=>{console.error(error);process.exit(1)});
+'''
+        node = shutil.which("node")
+        assert node is not None
+        result = subprocess.run([node, "-e", harness, lifecycle], cwd=Path(__file__).parents[1], text=True, capture_output=True, check=False)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("REMOVED_DEVICE_SOURCE_FALLBACK_PASS", result.stdout)
 
     def test_dashboard_groups_a_confirmed_whole_device_restart_action(self):
         self.pair_browser()
