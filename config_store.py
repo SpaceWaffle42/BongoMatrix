@@ -864,6 +864,8 @@ def validate_config(config, *, allow_legacy_announcements=True, enforce_save_bou
         }:
             duration = item.get("duration")
             if isinstance(duration, bool) or not isinstance(duration, (int, float)) or not 1 <= duration <= 3600:
+                if enforce_save_bounds:
+                    raise ValueError("module duration must be between 1 and 3600 seconds")
                 item["duration"] = 15
         elif custom_module is not None and custom_module["type"] == "text_scroll":
             item["duration"] = scrolling_text_duration(custom_module)

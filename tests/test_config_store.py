@@ -745,6 +745,98 @@ class ConfigStoreTests(unittest.TestCase):
             self.assertEqual(config["openweather_forecast"]["forecast_items"], 7)
             self.assertEqual(config["device"]["name"], "Preserved Matrix")
 
+    def test_current_saves_reject_malformed_automatic_playlist_durations_without_rewrite(self):
+        automatic_modules = (
+            "weather",
+            "openweather_overview",
+            "openweather_forecast",
+            "announcement_board",
+        )
+        malformed_durations = (True, False, -1, "9", float("nan"), float("inf"))
+
+        for module in automatic_modules:
+            for malformed in malformed_durations:
+                with self.subTest(module=module, duration=malformed):
+                    with tempfile.TemporaryDirectory() as directory:
+                        path = Path(directory) / "config.json"
+                        store = ConfigStore(path)
+                        original = path.read_bytes()
+                        playlist = json.loads(json.dumps(store.get()["playlist"]))
+                        next(
+                            item for item in playlist if item["module"] == module
+                        )["duration"] = malformed
+
+                        with self.assertRaisesRegex(ValueError, "duration"):
+                            store.update({"playlist": playlist})
+
+                        self.assertEqual(path.read_bytes(), original)
+
+    def test_legacy_load_canonicalizes_malformed_automatic_durations(self):
+        automatic_modules = (
+            "weather",
+            "openweather_overview",
+            "openweather_forecast",
+            "announcement_board",
+        )
+        malformed_durations = (True, False, -1, "9", float("nan"), float("inf"))
+
+        for module in automatic_modules:
+            for malformed in malformed_durations:
+                with self.subTest(module=module, duration=malformed):
+                    with tempfile.TemporaryDirectory() as directory:
+                        path = Path(directory) / "config.json"
+                        legacy = json.loads(json.dumps(DEFAULT_CONFIG))
+                        next(
+                            item for item in legacy["playlist"] if item["module"] == module
+                        )["duration"] = malformed
+                        path.write_text(json.dumps(legacy))
+
+                        loaded = ConfigStore(path).get()
+                        persisted = json.loads(path.read_text())
+
+                        self.assertEqual(
+                            next(
+                                item for item in loaded["playlist"]
+                                if item["module"] == module
+                            )["duration"],
+                            15,
+                        )
+                        self.assertEqual(
+                            next(
+                                item for item in persisted["playlist"]
+                                if item["module"] == module
+                            )["duration"],
+                            15,
+                        )
+
+    def test_current_saves_accept_automatic_playlist_duration_boundaries(self):
+        automatic_modules = (
+            "weather",
+            "openweather_overview",
+            "openweather_forecast",
+            "announcement_board",
+        )
+
+        for module in automatic_modules:
+            for boundary in (1, 3600):
+                with self.subTest(module=module, duration=boundary):
+                    with tempfile.TemporaryDirectory() as directory:
+                        store = ConfigStore(Path(directory) / "config.json")
+                        playlist = json.loads(json.dumps(store.get()["playlist"]))
+                        next(
+                            item for item in playlist if item["module"] == module
+                        )["duration"] = boundary
+
+                        saved = store.update({"playlist": playlist})
+
+                        self.assertEqual(
+                            next(
+                                item for item in saved["playlist"]
+                                if item["module"] == module
+                            )["duration"],
+                            boundary,
+                        )
+
     def test_weather_playlist_timing_is_automatic_from_ticker_loops(self):
         with tempfile.TemporaryDirectory() as directory:
             store = ConfigStore(Path(directory) / "config.json")
