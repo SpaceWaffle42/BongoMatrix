@@ -80,6 +80,7 @@ class PreviewProvider:
     _reaper_condition = threading.Condition()
     _reaper_jobs = deque()
     _reaper_thread = None
+    _REAPER_STOP = object()
 
     def __init__(self):
         self._context = multiprocessing.get_context("spawn")
@@ -173,37 +174,68 @@ class PreviewProvider:
             with cls._reaper_condition:
                 while not cls._reaper_jobs:
                     cls._reaper_condition.wait(_CANCEL_POLL_SECONDS)
+                job = cls._reaper_jobs.popleft()
+                if job is cls._REAPER_STOP:
+                    return
                 (
                     provider,
                     child,
                     child_accounted,
                     worker_accounted,
                     slot_acquired,
-                ) = cls._reaper_jobs.popleft()
+                    worker_slots,
+                ) = job
+
+            retry = False
             if child is not None:
-                while True:
+                try:
+                    reaped = provider._terminate_and_reap(child)
+                except BaseException:
+                    reaped = False
+                if reaped:
                     try:
-                        if provider._terminate_and_reap(child):
-                            break
+                        child.close()
+                    except BaseException:
+                        retry = True
+                    else:
+                        child = None
+                else:
+                    retry = True
+
+            if child is None and slot_acquired:
+                try:
+                    worker_slots.release()
+                except BaseException:
+                    retry = True
+                else:
+                    slot_acquired = False
+
+            if child is None and not slot_acquired:
+                with cls._accounting_lock:
+                    if child_accounted:
+                        cls._active_children -= 1
+                    if worker_accounted:
+                        cls._active_workers -= 1
+            else:
+                retry = True
+
+            if retry:
+                with cls._reaper_condition:
+                    cls._reaper_jobs.append(
+                        (
+                            provider,
+                            child,
+                            child_accounted,
+                            worker_accounted,
+                            slot_acquired,
+                            worker_slots,
+                        )
+                    )
+                    try:
+                        cls._reaper_condition.notify()
                     except BaseException:
                         pass
-                    time.sleep(_CANCEL_POLL_SECONDS)
-                try:
-                    child.close()
-                except BaseException:
-                    pass
-            if slot_acquired:
-                while True:
-                    try:
-                        provider._worker_slots.release()
-                        break
-                    except BaseException:
-                        time.sleep(_CANCEL_POLL_SECONDS)
-            with cls._accounting_lock:
-                if child_accounted:
-                    cls._active_children -= 1
-                if worker_accounted:
-                    cls._active_workers -= 1
+                time.sleep(_CANCEL_POLL_SECONDS)
 
     @classmethod
     def _ensure_reaper(cls):
@@ -220,13 +252,44 @@ class PreviewProvider:
                 raise RuntimeError("preview provider reaper failed to start")
             cls._reaper_thread = reaper
 
+    @classmethod
+    def _shutdown_reaper_for_tests(cls):
+        """Stop the exact idle global owner without discarding cleanup work."""
+        with cls._reaper_lock:
+            reaper = cls._reaper_thread
+            if reaper is not None:
+                with cls._reaper_condition:
+                    if cls._reaper_jobs:
+                        raise RuntimeError("preview provider reaper still owns cleanup")
+                    cls._reaper_jobs.append(cls._REAPER_STOP)
+                    cls._reaper_condition.notify_all()
+                reaper.join(1.0)
+                if reaper.is_alive():
+                    raise RuntimeError("preview provider reaper did not stop")
+                if cls._reaper_thread is not reaper:
+                    raise RuntimeError("preview provider reaper owner changed")
+                cls._reaper_thread = None
+            with cls._reaper_condition:
+                cls._reaper_jobs.clear()
+            with cls._accounting_lock:
+                if cls._active_children or cls._active_workers:
+                    raise RuntimeError("preview provider accounting is not idle")
+                cls._worker_slots = threading.BoundedSemaphore(cls.MAX_WORKERS)
+
     def _handoff_reaping_child(
         self, child, *, child_accounted, worker_accounted, slot_acquired
     ):
         """Transfer complete child ownership to the verified global reaper."""
         with type(self)._reaper_condition:
             type(self)._reaper_jobs.append(
-                (self, child, child_accounted, worker_accounted, slot_acquired)
+                (
+                    self,
+                    child,
+                    child_accounted,
+                    worker_accounted,
+                    slot_acquired,
+                    self._worker_slots,
+                )
             )
             try:
                 type(self)._reaper_condition.notify()
@@ -243,7 +306,7 @@ class PreviewProvider:
             for shutdown_event in self._preparations:
                 shutdown_event.set()
             while self._preparations:
-                self._lifecycle.wait()
+                self._lifecycle.wait(_CANCEL_POLL_SECONDS)
 
     def prepare(
         self, provider, *, settings, credentials, cancel_event, request_deadline

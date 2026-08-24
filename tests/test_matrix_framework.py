@@ -603,6 +603,42 @@ else:
         self.assertFalse(first_reaper.is_alive())
         self.assertFalse(framework._decoder_reaper_thread)
 
+    def test_decoder_reaper_survives_failed_child_and_reaps_later_child(self):
+        class FailedChild:
+            attempted = threading.Event()
+
+            @classmethod
+            def wait(cls):
+                cls.attempted.set()
+                raise RuntimeError("deferred child wait failed")
+
+        class LaterChild:
+            reaped = threading.Event()
+
+            @classmethod
+            def wait(cls):
+                cls.reaped.set()
+
+        framework._reset_decoder_reaper_for_tests()
+        first_lease = framework._ensure_decoder_reaper()
+        second_lease = framework._ensure_decoder_reaper()
+        reaper = first_lease.owner.thread
+        try:
+            framework._release_decoder_reaper(first_lease, deferred_process=FailedChild())
+            self.assertTrue(FailedChild.attempted.wait(0.5))
+            framework._release_decoder_reaper(second_lease, deferred_process=LaterChild())
+            self.assertTrue(LaterChild.reaped.wait(0.5))
+            reaper.join(0.5)
+            self.assertFalse(reaper.is_alive())
+        finally:
+            if reaper.is_alive():
+                with first_lease.owner.condition:
+                    first_lease.owner.shutdown_requested = True
+                    first_lease.owner.condition.notify_all()
+                reaper.join(0.5)
+            with framework._decoder_reaper_lock:
+                framework._set_decoder_reaper_owner(None)
+
     def test_decoder_reaper_release_join_fault_preserves_popen_failure(self):
         framework._reset_decoder_reaper_for_tests()
         matrix = Matrix.__new__(Matrix)
@@ -869,6 +905,215 @@ else:
         process.terminate.assert_called_once_with()
         process.wait.assert_called_once_with(timeout=2)
         close_fd.assert_called_once_with(9)
+
+    def test_media_frames_baseexception_cleanup_preserves_primary_and_attempts_all(self):
+        class HostileCleanup(BaseException):
+            pass
+
+        framework._reset_decoder_reaper_for_tests()
+        matrix = Matrix.__new__(Matrix)
+        matrix.matrix = Mock(width=2, height=2)
+        matrix._media_file = Mock(return_value=framework.pathlib.Path("/tmp/asset.gif"))
+        process = Mock()
+        process.stdout = Mock()
+        process.stdout.close.side_effect = HostileCleanup("stdout close hostile")
+        process.poll.return_value = None
+        process.wait.return_value = 0
+        lease = Mock()
+        primary = ValueError("primary decode failed")
+
+        with patch.object(framework.os, "geteuid", return_value=1), patch.object(
+            framework.os, "open", return_value=9,
+        ), patch.object(framework.os, "close") as close_fd, patch.object(
+            framework, "_ensure_decoder_reaper", return_value=lease,
+        ), patch.object(
+            framework, "_release_decoder_reaper",
+        ) as release_reaper, patch.object(
+            framework.subprocess, "Popen", return_value=process,
+        ), patch.object(
+            framework, "_read_exact_interruptibly", side_effect=primary,
+        ):
+            with self.assertRaises(BaseException) as raised:
+                matrix.media_frames("asset.gif", 1, 1, decode_timeout=1)
+
+        self.assertIs(raised.exception, primary)
+        process.stdout.close.assert_called_once_with()
+        process.kill.assert_called_once_with()
+        process.wait.assert_called_once()
+        close_fd.assert_called_once_with(9)
+        release_reaper.assert_called_once_with(lease, deferred_process=None)
+
+    def test_media_frames_baseexception_kill_preserves_primary_and_attempts_all(self):
+        class HostileCleanup(BaseException):
+            pass
+
+        matrix = Matrix.__new__(Matrix)
+        matrix.matrix = Mock(width=2, height=2)
+        matrix._media_file = Mock(return_value=framework.pathlib.Path("/tmp/asset.gif"))
+        process = Mock()
+        process.stdout = Mock()
+        process.poll.return_value = None
+        process.kill.side_effect = HostileCleanup("kill hostile")
+        process.wait.return_value = 0
+        lease = Mock()
+        primary = ValueError("primary decode failed")
+
+        with patch.object(framework.os, "geteuid", return_value=1), patch.object(
+            framework.os, "open", return_value=9,
+        ), patch.object(framework.os, "close") as close_fd, patch.object(
+            framework, "_ensure_decoder_reaper", return_value=lease,
+        ), patch.object(
+            framework, "_release_decoder_reaper",
+        ) as release_reaper, patch.object(
+            framework.subprocess, "Popen", return_value=process,
+        ), patch.object(
+            framework, "_read_exact_interruptibly", side_effect=primary,
+        ):
+            with self.assertRaises(BaseException) as raised:
+                matrix.media_frames("asset.gif", 1, 1, decode_timeout=1)
+
+        self.assertIs(raised.exception, primary)
+        process.kill.assert_called_once_with()
+        process.wait.assert_called_once()
+        close_fd.assert_called_once_with(9)
+        release_reaper.assert_called_once_with(lease, deferred_process=None)
+
+    def test_media_frames_baseexception_input_close_preserves_primary_and_releases_owner(self):
+        class HostileCleanup(BaseException):
+            pass
+
+        matrix = Matrix.__new__(Matrix)
+        matrix.matrix = Mock(width=2, height=2)
+        matrix._media_file = Mock(return_value=framework.pathlib.Path("/tmp/asset.gif"))
+        process = Mock()
+        process.stdout = Mock()
+        process.poll.return_value = 0
+        lease = Mock()
+        primary = ValueError("primary decode failed")
+
+        with patch.object(framework.os, "geteuid", return_value=1), patch.object(
+            framework.os, "open", return_value=9,
+        ), patch.object(
+            framework.os, "close", side_effect=HostileCleanup("input close hostile"),
+        ) as close_fd, patch.object(
+            framework, "_ensure_decoder_reaper", return_value=lease,
+        ), patch.object(
+            framework, "_release_decoder_reaper",
+        ) as release_reaper, patch.object(
+            framework.subprocess, "Popen", return_value=process,
+        ), patch.object(
+            framework, "_read_exact_interruptibly", side_effect=primary,
+        ):
+            with self.assertRaises(BaseException) as raised:
+                matrix.media_frames("asset.gif", 1, 1, decode_timeout=1)
+
+        self.assertIs(raised.exception, primary)
+        close_fd.assert_called_once_with(9)
+        release_reaper.assert_called_once_with(lease, deferred_process=None)
+
+    def test_video_timeline_baseexception_signal_preserves_primary_and_attempts_all(self):
+        class HostileCleanup(BaseException):
+            pass
+
+        matrix = Matrix.__new__(Matrix)
+        process = Mock()
+        process.stdout = Mock()
+        process.poll.return_value = None
+        process.terminate.side_effect = HostileCleanup("terminate hostile")
+        process.wait.side_effect = [
+            framework.subprocess.TimeoutExpired("ffmpeg", 2),
+            0,
+        ]
+        lease = Mock()
+        primary = ValueError("primary video decode failed")
+
+        with patch.object(framework.os, "geteuid", return_value=1), patch.object(
+            framework.os, "open", return_value=9,
+        ), patch.object(framework.os, "close") as close_fd, patch.object(
+            framework, "_ensure_decoder_reaper", return_value=lease,
+        ), patch.object(
+            framework, "_release_decoder_reaper",
+        ) as release_reaper, patch.object(
+            framework.subprocess, "Popen", return_value=process,
+        ), patch.object(
+            framework, "_read_exact_interruptibly", side_effect=primary,
+        ):
+            with self.assertRaises(BaseException) as raised:
+                list(matrix._video_frame_timeline("video.mp4", 2, 2, True))
+
+        self.assertIs(raised.exception, primary)
+        process.stdout.close.assert_called_once_with()
+        process.terminate.assert_called_once_with()
+        self.assertEqual(process.wait.call_count, 2)
+        process.kill.assert_called_once_with()
+        close_fd.assert_called_once_with(9)
+        release_reaper.assert_called_once_with(lease, deferred_process=None)
+
+    def test_video_timeline_baseexception_kill_preserves_primary_and_final_wait(self):
+        class HostileCleanup(BaseException):
+            pass
+
+        matrix = Matrix.__new__(Matrix)
+        process = Mock()
+        process.stdout = Mock()
+        process.poll.return_value = None
+        process.wait.side_effect = [
+            framework.subprocess.TimeoutExpired("ffmpeg", 2),
+            0,
+        ]
+        process.kill.side_effect = HostileCleanup("kill hostile")
+        lease = Mock()
+        primary = ValueError("primary video decode failed")
+
+        with patch.object(framework.os, "geteuid", return_value=1), patch.object(
+            framework.os, "open", return_value=9,
+        ), patch.object(framework.os, "close"), patch.object(
+            framework, "_ensure_decoder_reaper", return_value=lease,
+        ), patch.object(
+            framework, "_release_decoder_reaper",
+        ) as release_reaper, patch.object(
+            framework.subprocess, "Popen", return_value=process,
+        ), patch.object(
+            framework, "_read_exact_interruptibly", side_effect=primary,
+        ):
+            with self.assertRaises(BaseException) as raised:
+                list(matrix._video_frame_timeline("video.mp4", 2, 2, True))
+
+        self.assertIs(raised.exception, primary)
+        process.kill.assert_called_once_with()
+        self.assertEqual(process.wait.call_count, 2)
+        release_reaper.assert_called_once_with(lease, deferred_process=None)
+
+    def test_video_timeline_baseexception_wait_preserves_primary_and_defers_child(self):
+        class HostileCleanup(BaseException):
+            pass
+
+        matrix = Matrix.__new__(Matrix)
+        process = Mock()
+        process.stdout = Mock()
+        process.poll.return_value = None
+        process.wait.side_effect = HostileCleanup("wait hostile")
+        lease = Mock()
+        primary = ValueError("primary video decode failed")
+
+        with patch.object(framework.os, "geteuid", return_value=1), patch.object(
+            framework.os, "open", return_value=9,
+        ), patch.object(framework.os, "close"), patch.object(
+            framework, "_ensure_decoder_reaper", return_value=lease,
+        ), patch.object(
+            framework, "_release_decoder_reaper",
+        ) as release_reaper, patch.object(
+            framework.subprocess, "Popen", return_value=process,
+        ), patch.object(
+            framework, "_read_exact_interruptibly", side_effect=primary,
+        ):
+            with self.assertRaises(BaseException) as raised:
+                list(matrix._video_frame_timeline("video.mp4", 2, 2, True))
+
+        self.assertIs(raised.exception, primary)
+        process.terminate.assert_called_once_with()
+        process.wait.assert_called_once_with(timeout=2)
+        release_reaper.assert_called_once_with(lease, deferred_process=process)
 
     def test_video_frame_timeline_cleanup_preserves_primary_decoder_failure(self):
         matrix = Matrix.__new__(Matrix)

@@ -116,10 +116,10 @@ def _read_ppm_frame_interruptibly(stream, stop_event=None, deadline=None):
 
 
 def _reap_decoder(process):
-    """Collect a killed decoder outside the request path if bounded reaping expires."""
+    """Collect a killed decoder without letting one failed wait kill the owner."""
     try:
         process.wait()
-    except OSError:
+    except BaseException:
         pass
 
 
@@ -810,7 +810,7 @@ class Matrix:
             if process is not None and process.stdout is not None:
                 try:
                     process.stdout.close()
-                except Exception as error:
+                except BaseException as error:
                     remember_cleanup_error(error)
 
             if process is not None:
@@ -823,7 +823,7 @@ class Matrix:
                     running = process.poll() is None
                 except ProcessLookupError:
                     pass
-                except OSError as error:
+                except BaseException as error:
                     remember_cleanup_error(error)
                     running = True
                 if running:
@@ -831,7 +831,7 @@ class Matrix:
                         process.kill()
                     except ProcessLookupError:
                         pass
-                    except OSError as error:
+                    except BaseException as error:
                         remember_cleanup_error(error)
                     cleanup_remaining = deadline - time.monotonic()
                     reap_in_background = cleanup_remaining <= 0
@@ -842,7 +842,7 @@ class Matrix:
                             pass
                         except subprocess.TimeoutExpired:
                             reap_in_background = True
-                        except OSError as error:
+                        except BaseException as error:
                             remember_cleanup_error(error)
                             reap_in_background = True
                     if reap_in_background:
@@ -850,7 +850,7 @@ class Matrix:
 
             try:
                 os.close(input_fd)
-            except OSError as error:
+            except BaseException as error:
                 remember_cleanup_error(error)
 
             if reaper_queue is not None:
@@ -858,7 +858,7 @@ class Matrix:
                     _release_decoder_reaper(
                         reaper_queue, deferred_process=deferred_process,
                     )
-                except Exception as error:
+                except BaseException as error:
                     remember_cleanup_error(error)
 
             if primary_error is None and cleanup_error is not None:
@@ -1072,7 +1072,7 @@ class Matrix:
                 if process is not None and process.stdout is not None:
                     try:
                         process.stdout.close()
-                    except Exception as error:
+                    except BaseException as error:
                         remember_cleanup_error(error)
 
                 if process is not None:
@@ -1085,14 +1085,15 @@ class Matrix:
                         running = process.poll() is None
                     except ProcessLookupError:
                         pass
-                    except OSError as error:
+                    except BaseException as error:
                         remember_cleanup_error(error)
+                        running = True
                     if running:
                         try:
                             process.terminate()
                         except ProcessLookupError:
                             pass
-                        except OSError as error:
+                        except BaseException as error:
                             remember_cleanup_error(error)
                     wait_timeout = 2.0
                     if stop_event is not None:
@@ -1116,7 +1117,7 @@ class Matrix:
                                 process.kill()
                             except ProcessLookupError:
                                 pass
-                            except OSError as error:
+                            except BaseException as error:
                                 remember_cleanup_error(error)
                             final_wait_timeout = 0.25
                             if deadline is not None:
@@ -1133,24 +1134,24 @@ class Matrix:
                                     pass
                                 except subprocess.TimeoutExpired:
                                     deferred_process = process
-                                except OSError as error:
+                                except BaseException as error:
                                     remember_cleanup_error(error)
                                     deferred_process = process
-                        except OSError as error:
+                        except BaseException as error:
                             remember_cleanup_error(error)
                             deferred_process = process
             finally:
                 if input_fd is not None:
                     try:
                         os.close(input_fd)
-                    except OSError as error:
+                    except BaseException as error:
                         remember_cleanup_error(error)
                 if reaper_queue is not None:
                     try:
                         _release_decoder_reaper(
                             reaper_queue, deferred_process=deferred_process,
                         )
-                    except Exception as error:
+                    except BaseException as error:
                         remember_cleanup_error(error)
 
             if primary_error is None and cleanup_error is not None:
