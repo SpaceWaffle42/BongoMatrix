@@ -590,6 +590,61 @@ try{
                 self.assertLessEqual(scroll_height, child_height + 1, report)
             self.assertLessEqual(layout["overflow"], 1, report)
 
+    def test_dashboard_exposes_non_persistent_device_preview_controls(self):
+        self.pair_browser()
+
+        body = self.client.get("/").get_data(as_text=True)
+
+        preview = re.search(r'<article class="card preview-card">(.*?)</article>', body, re.DOTALL)
+        self.assertIsNotNone(preview)
+        markup = preview.group(1)
+        self.assertIn('id="device-preview-enabled"', markup)
+        self.assertIn('type="checkbox"', markup)
+        self.assertNotIn('id="device-preview-enabled" checked', markup)
+        self.assertIn('Preview edits on device', markup)
+        self.assertIn('id="device-preview-timeout"', markup)
+        self.assertIn('value="60"', markup)
+        self.assertIn('min="5"', markup)
+        self.assertIn('max="3600"', markup)
+        self.assertIn('id="stop-device-preview"', markup)
+        self.assertIn('Stop device preview', markup)
+        self.assertIn('id="device-preview-status"', markup)
+        self.assertIn('aria-live="polite"', markup)
+        self.assertNotRegex(
+            re.search(r"function configBody\(\).*?\n", body).group(0),
+            r"device-preview|device_preview",
+        )
+
+    def test_dashboard_device_preview_client_uses_transient_lifecycle_contract(self):
+        self.pair_browser()
+
+        body = self.client.get("/").get_data(as_text=True)
+
+        for fragment in (
+            "function scheduleDevicePreview(delay)",
+            "function startDevicePreview()",
+            "function stopDevicePreview",
+            "'/api/device-preview/'",
+            "'/api/device-preview/heartbeat'",
+            "'/api/device-preview/cancel'",
+            "timeout_seconds",
+            "selected_lava_palette",
+            "keepalive:true",
+            "devicePreviewDelay(event)",
+            "scheduleDevicePreview(delay??150)",
+            "cancelDevicePreviewForSave",
+            "pagehide",
+        ):
+            self.assertIn(fragment, body)
+        self.assertRegex(
+            body,
+            r"function devicePreviewDelay\(event\).*?\?500:150",
+        )
+        self.assertRegex(
+            body,
+            r"function setPreviewMode\(mode\).*?scheduleDevicePreview",
+        )
+
     def test_dashboard_groups_a_confirmed_whole_device_restart_action(self):
         self.pair_browser()
 
