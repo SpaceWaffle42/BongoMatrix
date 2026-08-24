@@ -1,6 +1,6 @@
 # Future development notes
 
-Last updated: 2026-08-21
+Last updated: 2026-08-24
 
 This file records requested Matrix features that are intentionally deferred. They are product requirements and design notes, not descriptions of current behavior. Do not treat an item as implemented until its code, tests, review, merge, deployment, and physical-device verification are complete.
 
@@ -164,7 +164,9 @@ Edit Preview should:
 
 When the user tries to switch from Edit Preview to Live with unsaved changes, warn them and offer exactly **Stay Editing** or **Discard Draft and switch to Live**. Do not silently preserve, save, or discard the draft.
 
-### 1.3 Add optional preview on the physical device
+### ~~1.3 Add optional preview on the physical device~~ — Completed
+
+**Completed 2026-08-24:** added an opt-in physical-device draft preview that is off by default, sends debounced unsaved edits through the existing single-owner display controller, supersedes older work, refreshes a configurable 60-second lease after accepted updates, and returns to saved playback on stop, expiry, disconnect, failure, or page exit without persisting the draft. The reviewed product artifact passed protected CI, preservation-safe deployment, focused appliance regressions, and a real 64×32 Lava Clock acceptance journey that proved exact non-black framebuffer publication, heartbeat renewal, explicit cancellation, normal-playback restoration, and byte-preservation of configuration, paired devices, and media.
 
 Add a separate **Preview edits on device** checkbox beneath the browser preview.
 
