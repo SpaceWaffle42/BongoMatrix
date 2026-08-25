@@ -4871,6 +4871,13 @@ const send=(method,params={})=>{const id=nextId++;socket.send(JSON.stringify({id
 const evaluate=async expression=>{const result=await send('Runtime.evaluate',{expression,returnByValue:true,awaitPromise:true});if(result.exceptionDetails)throw new Error(JSON.stringify(result.exceptionDetails));return result.result.value};
 try{
  await send('Runtime.enable');await send('Page.enable');loaded=new Promise(resolve=>loadResolve=resolve);await send('Page.navigate',{url:'file://'+pagePath});await Promise.race([loaded,new Promise((_,reject)=>setTimeout(()=>reject(new Error('load timeout')),5000))]);await evaluate(`document.documentElement.style.scrollBehavior='auto';globalThis.__deviceStopActivations=0;document.querySelector('#stop-device-preview').addEventListener('click',()=>__deviceStopActivations++)`);
+ const targets=[];
+ for(const [width,height] of [[320,568],[360,800],[390,844],[412,915],[768,1024],[820,1180],[844,390],[899,700],[900,700],[901,700],[1024,768],[1280,720],[1440,900]]){
+  await send('Emulation.setTouchEmulationEnabled',{enabled:false});await send('Emulation.setDeviceMetricsOverride',{width,height,deviceScaleFactor:1,mobile:width<1024});
+  targets.push(await evaluate(`(()=>{scrollTo(0,0);resizePreviewPopout();const timeout=document.querySelector('#device-preview-timeout').getBoundingClientRect(),stop=document.querySelector('#stop-device-preview').getBoundingClientRect();return{viewport:[innerWidth,innerHeight],coarse:matchMedia('(pointer: coarse)').matches,timeout:[timeout.width,timeout.height],stop:[stop.width,stop.height]}})()`));
+ }
+ await send('Emulation.setDeviceMetricsOverride',{width:1280,height:720,deviceScaleFactor:1,mobile:false});await send('Emulation.setTouchEmulationEnabled',{enabled:true,maxTouchPoints:1});
+ const coarse=await evaluate(`(()=>{scrollTo(0,0);resizePreviewPopout();const timeout=document.querySelector('#device-preview-timeout').getBoundingClientRect(),stop=document.querySelector('#stop-device-preview').getBoundingClientRect();return{viewport:[innerWidth,innerHeight],coarse:matchMedia('(pointer: coarse)').matches,timeout:[timeout.width,timeout.height],stop:[stop.width,stop.height]}})()`);await send('Emulation.setTouchEmulationEnabled',{enabled:false});
  const states=[];
  for(const [width,height] of [[320,390],[320,500],[320,568],[360,800],[390,844],[412,915],[768,1024],[820,1180],[1024,768],[1280,720],[1440,900],[844,390]]){
   await send('Emulation.setDeviceMetricsOverride',{width,height,deviceScaleFactor:1,mobile:width<1024});
@@ -4879,11 +4886,27 @@ try{
  await send('Emulation.setDeviceMetricsOverride',{width:320,height:568,deviceScaleFactor:1,mobile:true});await send('Emulation.setPageScaleFactor',{pageScaleFactor:1});
  const keyboardBefore=await evaluate(`(()=>{setDevicePreviewStatus('Device preview active · 60s remaining.','active');scrollTo(0,document.documentElement.scrollHeight);resizePreviewPopout();const stop=document.querySelector('#stop-device-preview');stop.focus();return __deviceStopActivations})()`);await send('Input.dispatchKeyEvent',{type:'keyDown',key:' ',code:'Space'});await send('Input.dispatchKeyEvent',{type:'keyUp',key:' ',code:'Space'});await new Promise(resolve=>setTimeout(resolve,20));const keyboardAfter=await evaluate(`__deviceStopActivations`);
  const mouse=await evaluate(`(()=>{setDevicePreviewStatus('Device preview active · 60s remaining.','active');resizePreviewPopout();const stop=document.querySelector('#stop-device-preview'),rect=stop.getBoundingClientRect();return{x:rect.left+rect.width/2,y:rect.top+rect.height/2,before:__deviceStopActivations}})()`);await send('Input.dispatchMouseEvent',{type:'mousePressed',x:mouse.x,y:mouse.y,button:'left',clickCount:1});await send('Input.dispatchMouseEvent',{type:'mouseReleased',x:mouse.x,y:mouse.y,button:'left',clickCount:1});await new Promise(resolve=>setTimeout(resolve,20));const mouseAfter=await evaluate(`__deviceStopActivations`);
+ const touch=await evaluate(`(()=>{setDevicePreviewStatus('Device preview active · 60s remaining.','active');const stop=document.querySelector('#stop-device-preview'),rect=stop.getBoundingClientRect();return{x:rect.left+rect.width/2,y:rect.top+rect.height/2,before:__deviceStopActivations}})()`);await send('Input.dispatchTouchEvent',{type:'touchStart',touchPoints:[{x:touch.x,y:touch.y,radiusX:1,radiusY:1,force:1,id:1}]});await send('Input.dispatchTouchEvent',{type:'touchEnd',touchPoints:[]});await new Promise(resolve=>setTimeout(resolve,20));const touchAfter=await evaluate(`__deviceStopActivations`);
  await send('Emulation.setPageScaleFactor',{pageScaleFactor:2});await new Promise(resolve=>setTimeout(resolve,20));const zoom=await evaluate(`(()=>{setDevicePreviewStatus('Device preview active · 60s remaining.','active');scrollTo(0,document.documentElement.scrollHeight);resizePreviewPopout();const live=document.querySelector('.preview-live'),controls=document.querySelector('.device-preview-controls'),stop=document.querySelector('#stop-device-preview'),status=document.querySelector('#device-preview-status'),modes=document.querySelector('.preview-modes'),screen=document.querySelector('.screen-wrap'),lr=live.getBoundingClientRect(),cr=controls.getBoundingClientRect(),sr=stop.getBoundingClientRect(),tr=status.getBoundingClientRect(),mr=modes.getBoundingClientRect(),left=visualViewport.offsetLeft,right=left+visualViewport.width,hit=document.elementFromPoint(sr.left+sr.width/2,sr.top+sr.height/2);return{scale:visualViewport.scale,visual:[left,right,visualViewport.width],narrow:live.classList.contains('is-visually-narrow'),live:[lr.left,lr.top,lr.right,lr.bottom],controls:[cr.left,cr.top,cr.right,cr.bottom,cr.width,cr.height],stop:[sr.left,sr.top,sr.right,sr.bottom,sr.width,sr.height],status:[tr.left,tr.top,tr.right,tr.bottom,tr.width,tr.height],modes:[mr.left,mr.top,mr.right,mr.bottom,mr.width,mr.height],screenDisplay:getComputedStyle(screen).display,hit:hit===stop||stop.contains(hit),overflow:document.documentElement.scrollWidth-document.documentElement.clientWidth}})()`);await send('Emulation.setPageScaleFactor',{pageScaleFactor:1});
- console.log(JSON.stringify({states,keyboard:{before:keyboardBefore,after:keyboardAfter},mouse:{before:mouse.before,after:mouseAfter},zoom}));
+ console.log(JSON.stringify({targets,coarse,states,keyboard:{before:keyboardBefore,after:keyboardAfter},mouse:{before:mouse.before,after:mouseAfter},touch:{before:touch.before,after:touchAfter},zoom}));
 }finally{socket.close()}
 """
         report = self._run_dashboard_chromium_probe(body, probe, timeout=45)
+        target_viewports = [[320, 568], [360, 800], [390, 844], [412, 915],
+                            [768, 1024], [820, 1180], [844, 390], [899, 700],
+                            [900, 700], [901, 700], [1024, 768], [1280, 720],
+                            [1440, 900]]
+        self.assertEqual([item["viewport"] for item in report["targets"]], target_viewports, report)
+        for item in report["targets"]:
+            for target in (item["timeout"], item["stop"]):
+                self.assertGreater(target[0], 0, item)
+                self.assertGreater(target[1], 0, item)
+                if item["viewport"][0] <= 900:
+                    self.assertGreaterEqual(target[1], 44, item)
+        self.assertTrue(report["coarse"]["coarse"], report)
+        self.assertEqual(report["coarse"]["viewport"], [1280, 720], report)
+        self.assertGreaterEqual(report["coarse"]["timeout"][1], 44, report)
+        self.assertGreaterEqual(report["coarse"]["stop"][1], 44, report)
         expected = [[320, 390], [320, 500], [320, 568], [360, 800], [390, 844], [412, 915], [768, 1024], [820, 1180], [1024, 768], [1280, 720], [1440, 900], [844, 390]]
         self.assertEqual([item["viewport"] for item in report["states"]], expected, report)
         for item in report["states"]:
@@ -4910,6 +4933,7 @@ try{
             self.assertTrue(item["activated"], item)
         self.assertEqual(report["keyboard"]["after"], report["keyboard"]["before"] + 1, report)
         self.assertEqual(report["mouse"]["after"], report["mouse"]["before"] + 1, report)
+        self.assertEqual(report["touch"]["after"], report["touch"]["before"] + 1, report)
         zoom = report["zoom"]
         self.assertEqual(zoom["scale"], 2, report)
         self.assertTrue(zoom["narrow"], report)
