@@ -494,6 +494,61 @@ try{
         self.assertNotIn(first_key, cache_keys)
         self.assertNotIn(second_key, cache_keys)
 
+    def test_openweather_secret_durability_uncertainty_rotates_generation_and_invalidates_cache(self):
+        self.pair_browser()
+        first_key = "first_key_material_123456"
+        second_key = "second_key_material_654321"
+        self.openweather_secrets.set(first_key)
+        settings = self.store.get()["openweather_overview"]
+        payload = {
+            "base_revision": self.store.get()["revision"],
+            "settings": settings,
+            "weather": self.store.get()["weather"],
+        }
+        plan = {
+            "frames_per_loop": 100,
+            "loops": settings["scroll_loops"],
+            "milliseconds": 5000,
+            "display": "5.0 s",
+        }
+
+        with patch("modules.openweather_overview.prepare_ticker_plan", return_value=plan) as prepare:
+            initial = self.paired_request(
+                "POST", "/api/scroll-timing/openweather_overview", json=payload
+            )
+            self.assertEqual(initial.status_code, 200, initial.get_data(as_text=True))
+            self.assertEqual(prepare.call_count, 1)
+            self.assertTrue(self.scroll_timing_cache._entries)
+
+            with patch("secret_store.os.fsync", side_effect=[None, OSError("fsync failed")]):
+                replaced = self.paired_request(
+                    "PUT", "/api/secrets/openweather", json={"api_key": second_key}
+                )
+            self.assertEqual(replaced.status_code, 503)
+            self.assertTrue(replaced.get_json()["configured"])
+            self.assertEqual(self.openweather_secrets.get(), second_key)
+            self.assertFalse(self.scroll_timing_cache._entries)
+
+            after_replace = self.paired_request(
+                "POST", "/api/scroll-timing/openweather_overview", json=payload
+            )
+            self.assertEqual(after_replace.status_code, 200, after_replace.get_data(as_text=True))
+            self.assertEqual(prepare.call_count, 2)
+            self.assertTrue(self.scroll_timing_cache._entries)
+
+            with patch("secret_store.os.fsync", side_effect=OSError("fsync failed")):
+                cleared = self.paired_request("DELETE", "/api/secrets/openweather")
+            self.assertEqual(cleared.status_code, 503)
+            self.assertFalse(cleared.get_json()["configured"])
+            self.assertIsNone(self.openweather_secrets.get())
+            self.assertFalse(self.scroll_timing_cache._entries)
+
+            after_clear = self.paired_request(
+                "POST", "/api/scroll-timing/openweather_overview", json=payload
+            )
+            self.assertEqual(after_clear.status_code, 200, after_clear.get_data(as_text=True))
+            self.assertEqual(prepare.call_count, 3)
+
     def test_dashboard_exposes_every_installed_font_to_all_font_editors(self):
         self.pair_browser()
 

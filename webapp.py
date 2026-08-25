@@ -1657,6 +1657,7 @@ def create_app(
         except ValueError as exc:
             return jsonify({"error": str(exc)}), 400
         except SecretDurabilityError as exc:
+            rotate_openweather_credentials()
             return jsonify({
                 "configured": exc.configured,
                 "error": str(exc),
@@ -1675,6 +1676,7 @@ def create_app(
             rotate_openweather_credentials()
             return jsonify(openweather_secrets.status())
         except SecretDurabilityError as exc:
+            rotate_openweather_credentials()
             return jsonify({
                 "configured": exc.configured,
                 "error": str(exc),
