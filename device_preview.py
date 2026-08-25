@@ -27,6 +27,12 @@ class PreviewHeartbeatStatus(Enum):
     NOT_ACTIVE = "not_active"
 
 
+class PreviewExpiryCause(Enum):
+    CONTENT = "content"
+    CONNECTIVITY = "connectivity"
+    AMBIGUOUS = "ambiguous"
+
+
 @dataclass(frozen=True)
 class DevicePreviewOwner:
     device_id: str
@@ -69,6 +75,14 @@ class DevicePreviewLease:
     @property
     def generation(self) -> int:
         return self.request.generation
+
+    @property
+    def expiry_cause(self) -> PreviewExpiryCause:
+        if self.content_deadline < self.connectivity_deadline:
+            return PreviewExpiryCause.CONTENT
+        if self.connectivity_deadline < self.content_deadline:
+            return PreviewExpiryCause.CONNECTIVITY
+        return PreviewExpiryCause.AMBIGUOUS
 
 
 @dataclass(frozen=True)

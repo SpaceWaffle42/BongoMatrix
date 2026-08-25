@@ -1611,6 +1611,22 @@ try{
         self.assertIsNone(self.app.extensions.get("edit_preview_registry"))
         self.assertIsNone(self.app.extensions.get("edit_preview_provider"))
 
+    def test_device_preview_explicit_cancel_does_not_mark_timeout_acceptance(self):
+        self.pair_browser()
+        self.controller.cancel_device_draft.return_value = True
+
+        response = self.paired_client_request(
+            "POST",
+            self.client,
+            "/api/device-preview/cancel",
+            json={"generation": 7, "preview_instance": "a" * 32},
+        )
+
+        self.assertEqual(response.status_code, 202, response.get_data(as_text=True))
+        self.assertEqual(response.get_json(), {"cancelled": True})
+        self.controller.cancel_device_draft.assert_called_once()
+        self.controller.mark_acceptance_result.assert_not_called()
+
     def test_release_acceptance_routes_require_exact_dedicated_header_before_publisher_side_effects(self):
         self.pair_browser()
         with self.client.session_transaction() as paired:

@@ -27,6 +27,9 @@ class Priority13AcceptanceTests(unittest.TestCase):
             "draft_sha256": "d" * 64,
             "saved_sha256": "s" * 64,
             "owner_generation": 4,
+            "foreign_rejected": True,
+            "timeout_returned": True,
+            "sleep_observed": True,
         }
         frames = {"draft": b"d" * 6144, "saved": b"s" * 6144}
         with tempfile.TemporaryDirectory() as directory:
@@ -42,6 +45,8 @@ class Priority13AcceptanceTests(unittest.TestCase):
                 )
 
         self.assertTrue(report["service_active"])
+        self.assertIs(report["sleep_observed"], True)
+        self.assertNotIn("sleep_returned", report)
         run.assert_called_once_with(
             ["/usr/bin/systemctl", "is-active", "matrix-web.service"],
             check=False,
@@ -469,6 +474,7 @@ class Priority13AcceptanceTests(unittest.TestCase):
             (app / "data/paired-devices.json").write_text("[]")
             (app / "resources/media/example.bin").write_bytes(b"media")
             from acceptance_artifacts import AcceptanceArtifactTransaction
+            from tests.test_acceptance_artifacts import complete_through_controller
             runtime = app / "data/acceptance-runtime"
             publisher = AcceptanceArtifactTransaction(runtime, {
                 "attempt_id": "a" * 32, "acceptance_operation_id": "1" * 64,
@@ -476,8 +482,9 @@ class Priority13AcceptanceTests(unittest.TestCase):
                 "expected_version": "9.8.7-test", "mode": "deploy",
                 "nonce": "f" * 64, "owner_revision": 1,
             }, owner_generation=4)
-            publisher.publish_draft(b"d" * 6144, frame_revision=10)
-            publisher.publish_saved_rollback(b"s" * 6144, frame_revision=11, saved_revision=9)
+            complete_through_controller(
+                publisher, b"d" * 6144, b"s" * 6144, generation=4,
+            )
             env = dict(os.environ)
             base = [sys.executable, "-I", "-B", str(verifier),
                     "--mode", "deploy", "--app-root", str(app),
@@ -550,20 +557,30 @@ class Priority13AcceptanceTests(unittest.TestCase):
                         "acceptance_operation_id": payload["acceptance_operation_id"],
                         "owner_generation": payload["generation"]})
                 if self.path == "/api/release-acceptance/transaction/status":
+                    if time.monotonic() < self.server.content_deadline:
+                        return self._send(202, {"state": "DRAFT_PUBLISHED"})
+                    if self.server.accepted_heartbeats < 2:
+                        return self._send(409, {"error": "connectivity expired first"})
                     return self._send(200, {"state": "SAVED_ROLLBACK_PUBLISHED", "nonce": payload["nonce"],
                         "acceptance_operation_id": "1" * 64,
                         "owner_generation": payload["generation"], "saved_revision": 9,
-                        "draft_revision": 10, "current_revision": 11})
+                        "draft_revision": 10, "current_revision": 11,
+                        "foreign_rejected": True, "timeout_returned": True,
+                        "sleep_observed": True, "rollback_complete": True})
                 if self.path.endswith("/clock_lava"):
                     if "schema_version" in payload["config"]:
                         return self._send(400, {"error": "schema_version is server-owned"})
                     self.server.owner = payload["preview_instance"]
                     self.server.heartbeat_admission_at = time.monotonic() + 5
-                    return self._send(202, {"generation": payload["generation"], "timeout_seconds": payload["timeout_seconds"], "heartbeat_after_seconds": 5})
+                    self.server.content_deadline = time.monotonic() + 10.5
+                    self.server.accepted_heartbeats = 0
+                    return self._send(202, {"generation": payload["generation"], "timeout_seconds": payload["timeout_seconds"], "heartbeat_after_seconds": 5, "expires_in": 10.5})
                 if self.path.endswith("/heartbeat") and payload["preview_instance"] == "foreign": return self._send(409, {"error": "foreign"})
                 if self.path.endswith("/heartbeat"):
                     admitted = payload["preview_instance"] == self.server.owner and time.monotonic() >= self.server.heartbeat_admission_at
-                    if admitted: self.server.heartbeat_admission_at = time.monotonic() + 5
+                    if admitted:
+                        self.server.heartbeat_admission_at = time.monotonic() + 5
+                        self.server.accepted_heartbeats += 1
                     return self._send(202 if admitted else 409, {"active": admitted})
                 if self.path.endswith("/cancel"): return self._send(202, {"cancelled": True})
                 return self._send(404, {})
@@ -580,9 +597,14 @@ class Priority13AcceptanceTests(unittest.TestCase):
                 "mode": "deploy"}
             with mock.patch.object(acceptance, "_LOCAL_BASE_URL", base), mock.patch("secrets.token_hex", side_effect=["owner", "d" * 64, "foreign"]):
                 http_report = acceptance.LocalHttpJourney(transaction, authorization).run(base, "session=browser-fixture", operation_timeout=300, aggregate_deadline=time.monotonic() + 30)
-            self.assertGreaterEqual(time.monotonic() - http_started, 5)
+            self.assertGreaterEqual(time.monotonic() - http_started, 10.5)
             self.assertEqual(http_report["foreign_rejected"], True)
-            self.assertEqual(sum(item[1].endswith("/heartbeat") for item in observed), 3)
+            self.assertEqual(http_report["timeout_returned"], True)
+            self.assertEqual(http_report["sleep_observed"], True)
+            self.assertGreaterEqual(sum(item[1].endswith("/heartbeat") for item in observed), 4)
+            self.assertFalse(any(item[1].endswith("/cancel") for item in observed), observed)
+            self.assertTrue(any(item[1] == "/api/device-preview/clock_lava" for item in observed), observed)
+            self.assertFalse(any(item[1] == "/api/device-preview/sleep" for item in observed), observed)
             with mock.patch.object(acceptance, "_LOCAL_BASE_URL", base):
                 chromium_report = acceptance.LocalChromiumJourney().run(base, "session=browser-fixture", operation_timeout=300, aggregate_deadline=time.monotonic() + 30)
             self.assertEqual(chromium_report, {"paired": True, "explicit_ipv4": True, "status_checked": True, "frame_checked": True})
@@ -748,7 +770,7 @@ class Priority13AcceptanceTests(unittest.TestCase):
                         "protected-parity": {**common, "source_sha": "1" * 40, "version": "9.8.7-test", "installed_digest": hashlib.sha256(json.dumps(protected, sort_keys=True, separators=(",", ":")).encode("ascii")).hexdigest(), **protected},
                         "production-tests": {**common, "focused": {"passed": True, "duration_ms": 1, "command_digest": "c" * 64, "stderr_size": 17, "stderr_digest": "e" * 64}, "full": {"passed": True, "duration_ms": 2, "command_digest": "d" * 64, "stderr_size": 23, "stderr_digest": "f" * 64}},
                         "persistent-state": {**common, "config": "c" * 64, "paired": "a" * 64, "media": "b" * 64},
-                        "physical-journey": {**common, "service_active": True, "draft_signature": "d" * 64, "saved_signature": "a" * 64, "width": 64, "height": 32, "owner_generation": 7, "foreign_rejected": True, "timeout_returned": True, "sleep_returned": True},
+                        "physical-journey": {**common, "service_active": True, "draft_signature": "d" * 64, "saved_signature": "a" * 64, "width": 64, "height": 32, "owner_generation": 7, "foreign_rejected": True, "timeout_returned": True, "sleep_observed": True},
                         "rollback-parity": {**common, "mode": "deploy", "saved_output": True, "saved_signature": "a" * 64},
                     }
                     return acceptance.RemoteResult(0, json.dumps(payloads[check]), "")
@@ -760,7 +782,7 @@ class Priority13AcceptanceTests(unittest.TestCase):
             http = Client({"owner_generation": 7, "nonce": "f" * 64,
                 "acceptance_operation_id": "1" * 64, "saved_revision": 9, "draft_revision": 10, "current_revision": 11,
                 "foreign_rejected": True, "timeout_returned": True,
-                "saved_output_returned": True})
+                "sleep_observed": True, "saved_output_returned": True})
             chromium = Client({"paired": True, "explicit_ipv4": True, "status_checked": True, "frame_checked": True})
             executor = Executor()
             self.assertEqual(acceptance.run_acceptance(arguments, executor, http_client=http, chromium_client=chromium), 0)

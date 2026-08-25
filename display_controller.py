@@ -15,7 +15,9 @@ import time
 from PIL import Image
 
 from modules.media_player import play_media
-from device_preview import DevicePreviewManager, PreviewAdmissionStatus
+from device_preview import (
+    DevicePreviewManager, PreviewAdmissionStatus, PreviewExpiryCause,
+)
 from preview_provider import (
     PreviewProvider,
     PreviewProviderCancelled,
@@ -301,6 +303,10 @@ class DisplayController:
 
     def begin_acceptance_transaction(self, publisher, owner, *, generation):
         """Bind one release-only publisher to this exact admitted draft owner."""
+        from acceptance_artifacts import AcceptanceArtifactTransaction
+
+        if type(publisher) is not AcceptanceArtifactTransaction:
+            raise TypeError("acceptance publisher type is invalid")
         if publisher.owner_generation != generation:
             raise ValueError("acceptance publisher owner is stale")
         with self._state_lock:
@@ -309,13 +315,24 @@ class DisplayController:
             baseline_frame, baseline_revision = self.matrix.latest_frame_rgb()
             if len(baseline_frame) != 64 * 32 * 3:
                 raise ValueError("physical acceptance requires a 64x32 matrix")
+            event_authority = object()
             context = {
-                "publisher": publisher, "owner": owner, "generation": generation,
+                "publisher": publisher, "event_authority": event_authority,
+                "owner": owner, "generation": generation,
                 "baseline_revision": baseline_revision,
                 "foreign_rejected": False, "heartbeat_accepted": False,
-                "timeout_returned": False,
+                "timeout_returned": False, "inactive_probe_pending": False,
+                "inactive_sleep_executing": False,
+                "draft_executing": False, "draft_execution_lease": None,
             }
             self._acceptance_transaction = context
+            try:
+                AcceptanceArtifactTransaction._bind_display_controller(
+                    publisher, self, event_authority,
+                )
+            except BaseException:
+                self._acceptance_transaction = None
+                raise
             self._acceptance_completed = None
 
         def observe(frame, revision):
@@ -325,7 +342,12 @@ class DisplayController:
                 current = self.device_preview_manager.is_current(owner, generation)
                 state = publisher.state
                 if state == publisher.INIT:
-                    if not current:
+                    draft_lease = context["draft_execution_lease"]
+                    if (
+                        not current or not context["draft_executing"]
+                        or draft_lease is None
+                        or self._device_draft_active_lease is not draft_lease
+                    ):
                         return
                     publisher.publish_draft(frame, frame_revision=revision)
                     return
@@ -333,13 +355,13 @@ class DisplayController:
                     return
                 if not all(context[name] for name in (
                     "foreign_rejected", "heartbeat_accepted", "timeout_returned",
+                    "inactive_sleep_executing",
                 )):
                     return
+                publisher._observe("sleep_observed", context["event_authority"])
                 publisher.publish_saved_rollback(
                     frame, frame_revision=revision,
                     saved_revision=context["baseline_revision"],
-                    foreign_rejected=True, timeout_returned=True,
-                    heartbeat_accepted=True,
                 )
                 self._acceptance_completed = {
                     "owner": owner, "generation": generation,
@@ -351,7 +373,7 @@ class DisplayController:
         self.matrix.set_physical_swap_observer(observe)
 
     def mark_acceptance_result(self, owner, *, generation, result):
-        if result not in {"foreign_rejected", "heartbeat_accepted", "timeout_returned"}:
+        if result != "heartbeat_accepted":
             raise ValueError("acceptance result is invalid")
         with self._state_lock:
             context = self._acceptance_transaction
@@ -359,6 +381,7 @@ class DisplayController:
                     or context["generation"] != generation):
                 return False
             context[result] = True
+            context["publisher"]._observe("heartbeat_accepted", context["event_authority"])
             return True
 
     def mark_acceptance_foreign_rejection(self, owner, *, generation):
@@ -368,6 +391,7 @@ class DisplayController:
                     or context["owner"] == owner):
                 return False
             context["foreign_rejected"] = True
+            context["publisher"]._observe("foreign_rejected", context["event_authority"])
             return True
 
     def acceptance_transaction_status(self, owner, *, generation):
@@ -416,18 +440,59 @@ class DisplayController:
 
     def _expire_device_draft(self, lease):
         with self._state_lock:
+            acceptance = self._acceptance_transaction
             if (
-                self._device_draft_pending is not None
-                and self._device_draft_pending[0] is lease
+                acceptance is not None
+                and acceptance["owner"] == lease.request.owner
+                and acceptance["generation"] == lease.request.generation
+                and lease.expiry_cause is PreviewExpiryCause.CONTENT
+                and acceptance["publisher"].state == acceptance["publisher"].DRAFT_PUBLISHED
             ):
+                acceptance["timeout_returned"] = True
+                acceptance["inactive_probe_pending"] = True
+                acceptance["publisher"]._observe(
+                    "timeout_returned", acceptance["event_authority"],
+                )
+            pending = self._device_draft_pending
+            if pending is not None and pending[0].request is lease.request:
                 self._device_draft_pending = None
-            if self._device_draft_active_lease is lease:
+            active = self._device_draft_active_lease
+            if active is not None and active.request is lease.request:
                 stop_event = self._device_draft_stop
                 if stop_event is not None:
                     stop_event.set()
         with self._display_lock:
             pass
         self._reload_requested.set()
+
+    def _acceptance_inactive_probe(self):
+        with self._state_lock:
+            context = self._acceptance_transaction
+            if (
+                context is None
+                or not context["inactive_probe_pending"]
+                or not all(context[name] for name in (
+                    "foreign_rejected", "heartbeat_accepted", "timeout_returned",
+                ))
+            ):
+                return None
+            return context
+
+    def _claim_acceptance_inactive_probe(self, context):
+        with self._state_lock:
+            if (
+                self._acceptance_transaction is not context
+                or not context["inactive_probe_pending"]
+            ):
+                return False
+            context["inactive_probe_pending"] = False
+            context["inactive_sleep_executing"] = True
+            return True
+
+    def _finish_acceptance_inactive_probe(self, context):
+        with self._state_lock:
+            if self._acceptance_transaction is context:
+                context["inactive_sleep_executing"] = False
 
     def cancel_device_draft(self, owner, *, generation):
         lease = self.device_preview_manager.cancel(
@@ -468,11 +533,28 @@ class DisplayController:
                 guard_installed = hasattr(self.matrix, "set_publication_guard")
                 if guard_installed:
                     self.matrix.set_publication_guard(guard)
+                acceptance_context = None
                 try:
                     if not guard():
                         return False
+                    with self._state_lock:
+                        context = self._acceptance_transaction
+                        if (
+                            context is not None
+                            and context["owner"] == request.owner
+                            and context["generation"] == request.generation
+                            and context["publisher"].state == context["publisher"].INIT
+                        ):
+                            context["draft_executing"] = True
+                            context["draft_execution_lease"] = lease
+                            acceptance_context = context
                     return bool(renderer(self.matrix, request, stop_event=stop_event))
                 finally:
+                    if acceptance_context is not None:
+                        with self._state_lock:
+                            if self._acceptance_transaction is acceptance_context:
+                                acceptance_context["draft_executing"] = False
+                                acceptance_context["draft_execution_lease"] = None
                     if guard_installed:
                         self.matrix.set_publication_guard(None)
         except Exception as exc:
@@ -965,7 +1047,8 @@ class DisplayController:
                 self._mark_scheduler_healthy()
                 continue
 
-            active = self._is_active(config)
+            acceptance_inactive = self._acceptance_inactive_probe()
+            active = False if acceptance_inactive is not None else self._is_active(config)
             brightness = (
                 config["display"]["day_brightness"]
                 if active
@@ -980,7 +1063,16 @@ class DisplayController:
                     continue
                 self.matrix.set_brightness(brightness)
             if not active:
-                self._execute("sleep", config, invocation_default_duration("sleep"))
+                if (
+                    acceptance_inactive is not None
+                    and not self._claim_acceptance_inactive_probe(acceptance_inactive)
+                ):
+                    continue
+                try:
+                    self._execute("sleep", config, invocation_default_duration("sleep"))
+                finally:
+                    if acceptance_inactive is not None:
+                        self._finish_acceptance_inactive_probe(acceptance_inactive)
                 self._mark_scheduler_healthy()
                 continue
 

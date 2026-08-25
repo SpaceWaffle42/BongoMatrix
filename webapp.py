@@ -2110,9 +2110,6 @@ def create_app(
             owner, generation = device_preview_control_payload()
             if not controller.cancel_device_draft(owner, generation=generation):
                 return edit_preview_error("Device preview is no longer active.", 409)
-            controller.mark_acceptance_result(
-                owner, generation=generation, result="timeout_returned",
-            )
             return jsonify({"cancelled": True}), 202
         except RequestEntityTooLarge:
             return edit_preview_error("Device preview request exceeds 1 MiB.", 413)

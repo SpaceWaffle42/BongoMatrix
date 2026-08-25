@@ -3281,12 +3281,12 @@ def _validate_reconciliation_authenticity(
             "evidence_digest": accepted["evidence_digest"],
             "success_record": f"/run/matrix-priority-1-3/{entry['attempt_id']}/success.json",
         }
-        remaining = min(int(entry["remaining_seconds"]),
-                        max(0, int(float(entry["deadline_epoch"]) - wall_clock())))
-        if remaining <= 0:
-            raise ValueError("reconciliation authenticity deadline expired")
         cached_terminal = cached.pop(entry["attempt_id"], None)
         if cached_terminal is None:
+            remaining = min(int(entry["remaining_seconds"]),
+                            max(0, int(float(entry["deadline_epoch"]) - wall_clock())))
+            if remaining <= 0:
+                raise ValueError("reconciliation authenticity deadline expired")
             discovered = executor.control_remote(
                 "remote-commit", query, operation_timeout=min(60, remaining),
             )
@@ -3827,12 +3827,17 @@ def run_release(
             ))):
                 raise ValueError("external final authority conflicts with reconciliation")
             allow_missing_final_evidence = True
+        authenticated_commit_terminals: dict[str, dict[str, object]] = {}
         def authenticate_reconciliation() -> dict[str, dict[str, object]]:
-            return _validate_reconciliation_authenticity(
+            validated = _validate_reconciliation_authenticity(
                 journal, arguments, executor, remote_attempts, wall_clock=wall_clock,
+                cached_commit_terminals=authenticated_commit_terminals,
                 allow_missing_final_evidence=allow_missing_final_evidence,
             )
-        authenticated_commit_terminals = authenticate_reconciliation()
+            authenticated_commit_terminals.clear()
+            authenticated_commit_terminals.update(validated)
+            return dict(authenticated_commit_terminals)
+        authenticate_reconciliation()
         authority = _synchronize_reconciliation_authority(
             arguments, executor, authority, journal, wall_clock=wall_clock,
             commit_terminals=authenticated_commit_terminals,

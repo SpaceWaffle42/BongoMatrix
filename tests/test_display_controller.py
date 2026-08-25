@@ -1812,6 +1812,352 @@ class DisplayControllerTests(unittest.TestCase):
         self.assertIsNone(controller.device_preview_manager.active_lease())
         self.assertGreaterEqual(controller.config_store.get.call_count, 1)
 
+    def test_acceptance_timeout_evidence_excludes_connectivity_expiry(self):
+        from device_preview import (
+            DevicePreviewLease, DevicePreviewOwner, DevicePreviewRequest,
+        )
+
+        controller = DisplayController(Mock(), Mock())
+        owner = DevicePreviewOwner("device-a", "a" * 32)
+        request = DevicePreviewRequest(owner, 4, {"module": "sleep"}, 60)
+        lease = DevicePreviewLease(
+            request=request, content_deadline=160.0,
+            connectivity_deadline=115.0, last_heartbeat_at=100.0,
+        )
+        controller._acceptance_transaction = {
+            "owner": owner, "generation": 4, "timeout_returned": False,
+        }
+
+        controller._expire_device_draft(lease)
+
+        self.assertIs(
+            controller._acceptance_transaction["timeout_returned"], False,
+        )
+        controller.device_preview_manager.close()
+
+    def test_acceptance_binding_failure_does_not_leave_active_controller_context(self):
+        from acceptance_artifacts import AcceptanceArtifactTransaction
+
+        matrix = Mock()
+        matrix.latest_frame_rgb.return_value = (bytes(64 * 32 * 3), 10)
+        controller = DisplayController(matrix, Mock())
+
+        with tempfile.TemporaryDirectory() as directory:
+            publisher = AcceptanceArtifactTransaction(Path(directory), {
+                "attempt_id": "a" * 32, "acceptance_operation_id": "1" * 64,
+                "evidence_id": "b" * 64, "expected_source_sha": "c" * 40,
+                "expected_version": "v", "mode": "deploy", "nonce": "d" * 64,
+                "owner_revision": 1,
+            }, owner_generation=4)
+            with patch.object(
+                AcceptanceArtifactTransaction, "_bind_display_controller",
+                side_effect=RuntimeError("binding unavailable"),
+            ):
+                with self.assertRaisesRegex(RuntimeError, "binding unavailable"):
+                    controller.begin_acceptance_transaction(
+                        publisher, object(), generation=4,
+                    )
+
+        self.assertIsNone(controller._acceptance_transaction)
+        controller.device_preview_manager.close()
+
+    def test_acceptance_transaction_transient_sleep_preview_does_not_certify_inactive_sleep(self):
+        from device_preview import DevicePreviewOwner, DevicePreviewRequest
+
+        class SwapMatrix:
+            def __init__(self):
+                self.observer = None
+
+            def latest_frame_rgb(self):
+                return bytes([17]) * (64 * 32 * 3), 10
+
+            def set_physical_swap_observer(self, observer):
+                self.observer = observer
+
+            def physical_swap(self, frame):
+                self.observer(frame, 11)
+
+        class Publisher:
+            INIT = "INIT"
+            DRAFT_PUBLISHED = "DRAFT_PUBLISHED"
+            owner_generation = 4
+
+            def __init__(self):
+                self.state = self.INIT
+                self.events = []
+
+            def publish_draft(self, frame, *, frame_revision):
+                self.draft = (frame, frame_revision)
+                self.state = self.DRAFT_PUBLISHED
+
+            def _bind_display_controller(self, authority, lifecycle_token):
+                self.authority = authority
+                self.lifecycle_token = lifecycle_token
+
+            def _observe(self, event, lifecycle_token):
+                assert lifecycle_token is self.lifecycle_token
+                self.events.append(event)
+
+        matrix = SwapMatrix()
+        controller = DisplayController(matrix, Mock())
+        owner = DevicePreviewOwner("device-a", "a" * 32)
+        controller.device_preview_manager.submit(
+            DevicePreviewRequest(owner, 4, {"module": "sleep"}, 30)
+        )
+        publisher = Publisher()
+        with patch("acceptance_artifacts.AcceptanceArtifactTransaction", Publisher):
+            controller.begin_acceptance_transaction(publisher, owner, generation=4)
+        sleep_frame = bytes([3]) * (64 * 32 * 3)
+
+        matrix.physical_swap(sleep_frame)
+
+        self.assertEqual(publisher.state, publisher.INIT)
+        self.assertFalse(hasattr(publisher, "draft"))
+        self.assertEqual(publisher.events, [])
+        controller.device_preview_manager.close()
+
+    def test_acceptance_draft_ignores_swap_between_lease_admission_and_renderer_claim(self):
+        from device_preview import DevicePreviewOwner, DevicePreviewRequest
+
+        class SwapMatrix:
+            def __init__(self):
+                self.observer = None
+                self.revision = 10
+
+            def latest_frame_rgb(self):
+                return bytes([17]) * (64 * 32 * 3), self.revision
+
+            def set_physical_swap_observer(self, observer):
+                self.observer = observer
+
+            def set_publication_guard(self, guard):
+                self.guard = guard
+
+            def physical_swap(self, frame):
+                self.revision += 1
+                assert self.observer is not None
+                self.observer(frame, self.revision)
+
+        class Publisher:
+            INIT = "INIT"
+            DRAFT_PUBLISHED = "DRAFT_PUBLISHED"
+            owner_generation = 4
+
+            def __init__(self):
+                self.state = self.INIT
+                self.drafts = []
+
+            def _bind_display_controller(self, _authority, lifecycle_token):
+                self.lifecycle_token = lifecycle_token
+
+            def publish_draft(self, frame, *, frame_revision):
+                self.drafts.append((frame, frame_revision))
+                self.state = self.DRAFT_PUBLISHED
+
+        matrix = SwapMatrix()
+        controller = DisplayController(matrix, Mock())
+        controller.start = Mock()
+        owner = DevicePreviewOwner("device-a", "a" * 32)
+        publisher = Publisher()
+        with patch("acceptance_artifacts.AcceptanceArtifactTransaction", Publisher):
+            controller.begin_acceptance_transaction(publisher, owner, generation=4)
+        request = DevicePreviewRequest(owner, 4, {"module": "clock_lava"}, 30)
+        unrelated = bytes([33]) * (64 * 32 * 3)
+        draft = bytes([91]) * (64 * 32 * 3)
+        admitted = controller.device_preview_manager.submit
+
+        def admit_then_swap(*args, **kwargs):
+            result = admitted(*args, **kwargs)
+            matrix.physical_swap(unrelated)
+            return result
+
+        controller.device_preview_manager.submit = admit_then_swap
+        rendered = []
+
+        def renderer(render_matrix, _request, *, stop_event):
+            rendered.append(True)
+            self.assertFalse(stop_event.is_set())
+            render_matrix.physical_swap(draft)
+            return True
+
+        controller.submit_device_draft(request, renderer=renderer)
+
+        self.assertEqual(publisher.state, publisher.INIT)
+        self.assertEqual(publisher.drafts, [])
+        self.assertTrue(controller._execute_pending_device_draft())
+        self.assertEqual(rendered, [True])
+        self.assertEqual(publisher.drafts, [(draft, 12)])
+        controller.device_preview_manager.close()
+
+    def test_acceptance_timeout_evidence_rejects_equal_content_and_connectivity_deadlines(self):
+        from device_preview import DevicePreviewLease, DevicePreviewOwner, DevicePreviewRequest
+
+        controller = DisplayController(Mock(), Mock())
+        owner = DevicePreviewOwner("device-a", "a" * 32)
+        lease = DevicePreviewLease(
+            request=DevicePreviewRequest(owner, 4, {"module": "clock_lava"}, 15),
+            content_deadline=115.0, connectivity_deadline=115.0,
+            last_heartbeat_at=100.0,
+        )
+        controller._acceptance_transaction = {
+            "owner": owner, "generation": 4, "timeout_returned": False,
+        }
+
+        controller._expire_device_draft(lease)
+
+        self.assertIs(controller._acceptance_transaction["timeout_returned"], False)
+        controller.device_preview_manager.close()
+
+    def test_content_expiry_after_heartbeat_renewal_stops_exact_active_renderer(self):
+        from device_preview import (
+            DevicePreviewOwner, DevicePreviewRequest, PreviewHeartbeatStatus,
+        )
+
+        controller = DisplayController(Mock(), Mock())
+        controller.start = Mock()
+        now = [0.0]
+        controller.device_preview_manager._clock = lambda: now[0]
+        owner = DevicePreviewOwner("device-a", "a" * 32)
+        started = threading.Event()
+        stopped = threading.Event()
+
+        def renderer(_matrix, _request, *, stop_event):
+            started.set()
+            if stop_event.wait(1):
+                stopped.set()
+            return True
+
+        admission = controller.submit_device_draft(
+            DevicePreviewRequest(owner, 4, {"module": "clock_lava"}, 10),
+            renderer=renderer,
+        )
+        worker = threading.Thread(target=controller._execute_pending_device_draft)
+        worker.start()
+        self.assertTrue(started.wait(1))
+        now[0] = 5.0
+        heartbeat = controller.heartbeat_device_draft(owner, generation=4)
+        self.assertIs(heartbeat.status, PreviewHeartbeatStatus.ACCEPTED)
+        now[0] = 10.0
+        self.assertIsNone(controller.device_preview_manager.active_lease())
+        worker.join(1)
+
+        self.assertFalse(worker.is_alive())
+        self.assertTrue(stopped.is_set())
+        controller.device_preview_manager.close()
+
+    def test_acceptance_transaction_natural_expiry_authorizes_only_scheduler_inactive_sleep_swap(self):
+        from device_preview import (
+            DevicePreviewOwner, DevicePreviewRequest, PreviewAdmissionStatus,
+        )
+
+        class SwapMatrix:
+            def __init__(self):
+                self.frame = bytes([17]) * (64 * 32 * 3)
+                self.revision = 10
+                self.observer = None
+
+            def latest_frame_rgb(self):
+                return self.frame, self.revision
+
+            def set_physical_swap_observer(self, observer):
+                self.observer = observer
+
+            def set_brightness(self, value):
+                self.brightness = value
+
+            def physical_swap(self, frame):
+                self.frame = frame
+                self.revision += 1
+                if self.observer is not None:
+                    self.observer(frame, self.revision)
+
+        class Publisher:
+            INIT = "INIT"
+            DRAFT_PUBLISHED = "DRAFT_PUBLISHED"
+            owner_generation = 4
+
+            def __init__(self):
+                self.state = self.INIT
+                self.saved_rollbacks = []
+                self.events = []
+
+            def publish_draft(self, _frame, *, frame_revision):
+                self.state = self.DRAFT_PUBLISHED
+                return {"draft_revision": frame_revision}
+
+            def _bind_display_controller(self, authority, lifecycle_token):
+                self.authority = authority
+                self.lifecycle_token = lifecycle_token
+
+            def _observe(self, event, lifecycle_token):
+                assert lifecycle_token is self.lifecycle_token
+                self.events.append(event)
+
+            def publish_saved_rollback(self, frame, **evidence):
+                self.saved_rollbacks.append((frame, evidence))
+                self.state = "SAVED_ROLLBACK_PUBLISHED"
+
+            def status(self):
+                return {"state": self.state}
+
+        now = [100.0]
+        matrix = SwapMatrix()
+        store = Mock()
+        store.get.return_value = {
+            "display": {"active_start": "00:00", "active_end": "00:00",
+                        "day_brightness": 70, "night_brightness": 5},
+            "playlist": [], "custom_modules": [],
+        }
+        controller = DisplayController(matrix, store)
+        controller.start = Mock()
+        controller.device_preview_manager._clock = lambda: now[0]
+        owner = DevicePreviewOwner("device-a", "a" * 32)
+        publisher = Publisher()
+        with patch("acceptance_artifacts.AcceptanceArtifactTransaction", Publisher):
+            controller.begin_acceptance_transaction(publisher, owner, generation=4)
+
+        draft = bytes([91]) * (64 * 32 * 3)
+        saved = bytes([17]) * (64 * 32 * 3)
+
+        def renderer(render_matrix, _request, *, stop_event):
+            render_matrix.physical_swap(draft)
+            self.assertTrue(controller.mark_acceptance_foreign_rejection(
+                DevicePreviewOwner("device-b", "b" * 32), generation=4,
+            ))
+            self.assertTrue(controller.mark_acceptance_result(
+                owner, generation=4, result="heartbeat_accepted",
+            ))
+            now[0] = 101.0
+            self.assertIsNone(controller.device_preview_manager.active_lease())
+            self.assertTrue(stop_event.is_set())
+            render_matrix.physical_swap(saved)
+            self.assertEqual(publisher.saved_rollbacks, [])
+            return True
+
+        admission = controller.submit_device_draft(
+            DevicePreviewRequest(owner, 4, {"module": "clock_lava"}, 1),
+            renderer=renderer,
+        )
+        self.assertIs(admission.status, PreviewAdmissionStatus.ACCEPTED)
+        self.assertTrue(controller._execute_pending_device_draft())
+
+        def execute(name, config, duration):
+            self.assertEqual(name, "sleep")
+            matrix.physical_swap(saved)
+            controller._shutdown.set()
+            return True
+
+        controller._execute = execute
+        controller._run_loop_unchecked()
+
+        self.assertEqual(len(publisher.saved_rollbacks), 1)
+        self.assertIn("timeout_returned", publisher.events)
+        self.assertIn("sleep_observed", publisher.events)
+        returned_frame, evidence = publisher.saved_rollbacks[0]
+        self.assertEqual(returned_frame, saved)
+        self.assertNotIn("timeout_returned", evidence)
+        controller.device_preview_manager.close()
+
     def test_acceptance_transaction_binds_exact_owner_and_finishes_only_after_later_saved_swap(self):
         import json
         import tempfile
@@ -1831,6 +2177,9 @@ class DisplayControllerTests(unittest.TestCase):
             def set_physical_swap_observer(self, observer):
                 self.observer = observer
 
+            def set_brightness(self, value):
+                self.brightness = value
+
             def physical_swap(self, frame):
                 self.frame = frame
                 self.revision += 1
@@ -1841,13 +2190,18 @@ class DisplayControllerTests(unittest.TestCase):
             runtime = Path(directory) / "runtime"
             runtime.mkdir(mode=0o700)
             matrix = SwapMatrix()
-            controller = DisplayController(matrix, Mock())
+            store = Mock()
+            store.get.return_value = {
+                "display": {"active_start": "00:00", "active_end": "00:00",
+                            "day_brightness": 70, "night_brightness": 5},
+                "playlist": [], "custom_modules": [],
+            }
+            controller = DisplayController(matrix, store)
+            controller.start = Mock()
+            now = [100.0]
+            controller.device_preview_manager._clock = lambda: now[0]
             owner = DevicePreviewOwner("device-a", "a" * 32)
             foreign = DevicePreviewOwner("device-b", "b" * 32)
-            admission = controller.device_preview_manager.submit(
-                DevicePreviewRequest(owner, 4, {"module": "clock_lava"}, 60)
-            )
-            self.assertIs(admission.status, PreviewAdmissionStatus.ACCEPTED)
             publisher = AcceptanceArtifactTransaction(runtime, {
                 "attempt_id": "1" * 32,
                 "acceptance_operation_id": "2" * 64,
@@ -1866,37 +2220,67 @@ class DisplayControllerTests(unittest.TestCase):
 
             draft = bytes([91]) * (64 * 32 * 3)
             saved = bytes([17]) * (64 * 32 * 3)
-            matrix.physical_swap(draft)
-            self.assertEqual(publisher.state, publisher.DRAFT_PUBLISHED)
-            self.assertTrue(controller.mark_acceptance_foreign_rejection(foreign, generation=4))
-            self.assertTrue(controller.mark_acceptance_result(
-                owner, generation=4, result="heartbeat_accepted",
-            ))
-            self.assertFalse(controller.mark_acceptance_result(
-                foreign, generation=4, result="timeout_returned",
-            ))
-            self.assertFalse(controller.mark_acceptance_result(
-                owner, generation=3, result="timeout_returned",
-            ))
-            self.assertTrue(controller.cancel_device_draft(owner, generation=4))
 
-            matrix.physical_swap(saved)
-            self.assertEqual(publisher.state, publisher.DRAFT_PUBLISHED)
-            self.assertTrue(controller.mark_acceptance_result(
-                owner, generation=4, result="timeout_returned",
-            ))
-            matrix.physical_swap(saved)
+            def renderer(render_matrix, _request, *, stop_event):
+                render_matrix.physical_swap(draft)
+                self.assertEqual(publisher.state, publisher.DRAFT_PUBLISHED)
+                self.assertTrue(controller.mark_acceptance_foreign_rejection(
+                    foreign, generation=4,
+                ))
+                self.assertTrue(controller.mark_acceptance_result(
+                    owner, generation=4, result="heartbeat_accepted",
+                ))
+                with self.assertRaisesRegex(ValueError, "acceptance result is invalid"):
+                    controller.mark_acceptance_result(
+                        foreign, generation=4, result="timeout_returned",
+                    )
+                with self.assertRaisesRegex(ValueError, "acceptance result is invalid"):
+                    controller.mark_acceptance_result(
+                        owner, generation=3, result="timeout_returned",
+                    )
+                render_matrix.physical_swap(saved)
+                self.assertEqual(publisher.state, publisher.DRAFT_PUBLISHED)
+                with self.assertRaisesRegex(ValueError, "acceptance result is invalid"):
+                    controller.mark_acceptance_result(
+                        owner, generation=4, result="timeout_returned",
+                    )
+                now[0] = 110.0
+                self.assertIsNone(controller.device_preview_manager.active_lease())
+                self.assertTrue(stop_event.is_set())
+                render_matrix.physical_swap(saved)
+                self.assertEqual(publisher.state, publisher.DRAFT_PUBLISHED)
+                return True
+
+            admission = controller.submit_device_draft(
+                DevicePreviewRequest(owner, 4, {"module": "clock_lava"}, 10),
+                renderer=renderer,
+            )
+            self.assertIs(admission.status, PreviewAdmissionStatus.ACCEPTED)
+            self.assertTrue(controller._execute_pending_device_draft())
+
+            def execute(name, config, duration):
+                self.assertEqual(name, "sleep")
+                matrix.physical_swap(saved)
+                controller._shutdown.set()
+                return True
+
+            controller._execute = execute
+            controller._run_loop_unchecked()
 
             expected = {
                 "state": "SAVED_ROLLBACK_PUBLISHED", "nonce": "4" * 64,
                 "acceptance_operation_id": "2" * 64,
                 "owner_generation": 4, "saved_revision": 10,
-                "draft_revision": 11, "current_revision": 13,
+                "draft_revision": 11, "current_revision": 14,
+                "foreign_rejected": True, "timeout_returned": True,
+                "sleep_observed": True, "rollback_complete": True,
             }
             self.assertEqual(controller.acceptance_transaction_status(owner, generation=4), expected)
             self.assertEqual(set(expected), {
                 "state", "nonce", "acceptance_operation_id", "owner_generation",
                 "saved_revision", "draft_revision", "current_revision",
+                "foreign_rejected", "timeout_returned", "sleep_observed",
+                "rollback_complete",
             })
             self.assertIsNone(controller.acceptance_transaction_status(foreign, generation=4))
             self.assertIsNone(controller.acceptance_transaction_status(owner, generation=3))
