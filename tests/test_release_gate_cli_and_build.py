@@ -5,6 +5,7 @@ import json
 import os
 import stat
 import subprocess
+import sys
 import tempfile
 import unittest
 from pathlib import Path
@@ -58,13 +59,42 @@ class ReleaseTreePreparationTests(unittest.TestCase):
         return [
             "prepare-release-tree", "--repository", str(repository),
             "--source-commit", source_sha, "--stage", str(stage),
-            "--python", str(project / ".venv/bin/python"),
+            "--python", sys.executable,
             "--uid", str(os.getuid()), "--gid", str(os.getgid()),
         ]
 
+    def test_release_tree_fixtures_use_tmpdir_and_preserve_checkout_status(self):
+        project = Path(__file__).resolve().parents[1]
+        before = subprocess.run(
+            ["git", "status", "--porcelain=v1", "-z"],
+            cwd=project,
+            check=True,
+            capture_output=True,
+        ).stdout
+
+        with tempfile.TemporaryDirectory(dir=os.environ.get("TMPDIR")) as directory:
+            root = Path(directory)
+            self.assertFalse(root.is_relative_to(project))
+            repository, source_sha = self._committed_repository(root)
+            stage = root / "stage"
+            self.assertEqual(
+                release_bundle.main(self._argv(project, repository, source_sha, stage)),
+                0,
+            )
+
+        after = subprocess.run(
+            ["git", "status", "--porcelain=v1", "-z"],
+            cwd=project,
+            check=True,
+            capture_output=True,
+        ).stdout
+        self.assertEqual(after, before)
+        forbidden = "TemporaryDirectory(" + "dir=project)"
+        self.assertNotIn(forbidden, Path(__file__).read_text())
+
     def test_exact_commit_export_prepares_inner_manifest_before_outer_spec(self):
         project = Path(__file__).resolve().parents[1]
-        with tempfile.TemporaryDirectory(dir=project) as directory:
+        with tempfile.TemporaryDirectory(dir=os.environ.get("TMPDIR")) as directory:
             root = Path(directory)
             repository, source_sha = self._committed_repository(root)
             stage = root / "stage"
@@ -103,7 +133,7 @@ class ReleaseTreePreparationTests(unittest.TestCase):
         def legacy_extractall(archive, path=".", members=None):
             return original_extractall(archive, path, members)
 
-        with tempfile.TemporaryDirectory(dir=project) as directory:
+        with tempfile.TemporaryDirectory(dir=os.environ.get("TMPDIR")) as directory:
             root = Path(directory)
             repository, source_sha = self._committed_repository(root)
             stage = root / "stage"
@@ -120,7 +150,7 @@ class ReleaseTreePreparationTests(unittest.TestCase):
 
     def test_builder_remote_proof_matches_the_approved_outer_release_spec(self):
         project = Path(__file__).resolve().parents[1]
-        with tempfile.TemporaryDirectory(dir=project) as directory:
+        with tempfile.TemporaryDirectory(dir=os.environ.get("TMPDIR")) as directory:
             root = Path(directory)
             repository, source_sha = self._committed_repository(root)
             stage = root / "stage"
@@ -162,7 +192,7 @@ class ReleaseTreePreparationTests(unittest.TestCase):
 
     def test_required_file_only_untracked_in_worktree_is_rejected_at_exact_commit_export(self):
         project = Path(__file__).resolve().parents[1]
-        with tempfile.TemporaryDirectory(dir=project) as directory:
+        with tempfile.TemporaryDirectory(dir=os.environ.get("TMPDIR")) as directory:
             root = Path(directory)
             repository, _ = self._committed_repository(root)
             verifier = repository / "scripts/verify_priority_1_3_remote.py"
@@ -177,7 +207,7 @@ class ReleaseTreePreparationTests(unittest.TestCase):
 
     def test_wsgi_import_failure_prevents_outer_spec_freeze(self):
         project = Path(__file__).resolve().parents[1]
-        with tempfile.TemporaryDirectory(dir=project) as directory:
+        with tempfile.TemporaryDirectory(dir=os.environ.get("TMPDIR")) as directory:
             root = Path(directory)
             repository, _ = self._committed_repository(root)
             (repository / "app/wsgi.py").write_text("import missing_runtime_dependency\n", encoding="utf-8")
@@ -190,7 +220,7 @@ class ReleaseTreePreparationTests(unittest.TestCase):
 
     def test_preseeded_inner_manifest_is_rejected_as_order_inversion(self):
         project = Path(__file__).resolve().parents[1]
-        with tempfile.TemporaryDirectory(dir=project) as directory:
+        with tempfile.TemporaryDirectory(dir=os.environ.get("TMPDIR")) as directory:
             root = Path(directory)
             repository, _ = self._committed_repository(root)
             (repository / ".matrix-release.json").write_text("{}\n", encoding="utf-8")

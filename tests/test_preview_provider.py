@@ -3,6 +3,7 @@ import os
 import threading
 import time
 import unittest
+from collections import deque
 from multiprocessing.connection import Connection
 from multiprocessing.process import BaseProcess
 from unittest.mock import patch
@@ -11,6 +12,7 @@ from preview_provider import (
     PreviewProvider,
     PreviewProviderCancelled,
     PreviewProviderTimeout,
+    PreviewProviderUnavailable,
 )
 
 
@@ -57,6 +59,921 @@ def provider_returns_recovery_marker(settings, credentials, timeout):
 
 
 class PreviewProviderTests(unittest.TestCase):
+    def setUp(self):
+        PreviewProvider._shutdown_reaper_for_tests()
+        self.assertEqual(list(PreviewProvider._reaper_jobs), [])
+        self.assertEqual(PreviewProvider._active_children, 0)
+        self.assertEqual(PreviewProvider._active_workers, 0)
+        PreviewProvider()._ensure_reaper()
+        reapers = [
+            thread
+            for thread in threading.enumerate()
+            if thread.name == "preview-provider-child-reaper"
+        ]
+        self.assertEqual(len(reapers), 1)
+
+    def tearDown(self):
+        deadline = time.monotonic() + 0.5
+        while PreviewProvider._reaper_jobs and time.monotonic() < deadline:
+            time.sleep(0.005)
+        PreviewProvider._shutdown_reaper_for_tests()
+        self.assertEqual(
+            [
+                thread
+                for thread in threading.enumerate()
+                if thread.name == "preview-provider-child-reaper"
+            ],
+            [],
+        )
+
+    def test_test_reaper_shutdown_joins_exact_global_owner(self):
+        provider = PreviewProvider()
+        provider._ensure_reaper()
+        reaper = PreviewProvider._reaper_thread
+        self.assertTrue(reaper.is_alive())
+
+        PreviewProvider._shutdown_reaper_for_tests()
+
+        self.assertFalse(reaper.is_alive())
+        self.assertIsNone(PreviewProvider._reaper_thread)
+        self.assertEqual(list(PreviewProvider._reaper_jobs), [])
+        self.assertEqual(PreviewProvider._active_children, 0)
+        self.assertEqual(PreviewProvider._active_workers, 0)
+        self.assertEqual(provider.available_worker_slots, 2)
+
+    def test_reaper_dead_after_start_precedes_pipe_and_child_creation(self):
+        context_calls = []
+        provider = PreviewProvider()
+
+        class DeadThread:
+            @staticmethod
+            def start():
+                pass
+
+            @staticmethod
+            def is_alive():
+                return False
+
+        class Context:
+            @staticmethod
+            def Pipe(**_kwargs):
+                context_calls.append("pipe")
+                raise AssertionError("pipe created without a live reaper")
+
+            @staticmethod
+            def Process(**_kwargs):
+                context_calls.append("process")
+                raise AssertionError("child created without a live reaper")
+
+        PreviewProvider._shutdown_reaper_for_tests()
+        with patch.object(provider, "_context", Context()), patch.object(
+            threading, "Thread", return_value=DeadThread()
+        ):
+            with self.assertRaisesRegex(RuntimeError, "failed to start"):
+                provider.prepare(
+                    provider_returns_recovery_marker,
+                    settings={"marker": "must-not-start"},
+                    credentials={"api_key": "server-held"},
+                    cancel_event=threading.Event(),
+                    request_deadline=0.25,
+                )
+
+        self.assertEqual(context_calls, [])
+        self.assertEqual(provider.active_child_count, 0)
+        self.assertEqual(provider.active_worker_count, 0)
+        self.assertEqual(provider.available_worker_slots, 2)
+        self.assertEqual(provider._preparations, set())
+
+    def test_shutdown_polls_after_lifecycle_notification_fault(self):
+        class FaultingCondition:
+            def __init__(self):
+                self.inner = threading.Condition()
+                self.wait_started = threading.Event()
+                self.notify_calls = 0
+
+            def __enter__(self):
+                return self.inner.__enter__()
+
+            def __exit__(self, *args):
+                return self.inner.__exit__(*args)
+
+            def wait(self, timeout=None):
+                self.wait_started.set()
+                return self.inner.wait(timeout)
+
+            def notify_all(self):
+                self.notify_calls += 1
+                if self.notify_calls == 1:
+                    raise OSError("lifecycle notification unavailable")
+                self.inner.notify_all()
+
+        lifecycle = FaultingCondition()
+        provider = PreviewProvider()
+        provider.__dict__["_lifecycle"] = lifecycle
+        preparation = threading.Event()
+        with lifecycle:
+            provider._preparations.add(preparation)
+
+        shutdown = threading.Thread(target=provider.shutdown)
+        shutdown.start()
+        self.assertTrue(lifecycle.wait_started.wait(0.25))
+        self.assertTrue(preparation.is_set())
+
+        with lifecycle:
+            provider._preparations.remove(preparation)
+            with self.assertRaisesRegex(OSError, "notification unavailable"):
+                lifecycle.notify_all()
+
+        shutdown.join(0.1)
+        stranded = shutdown.is_alive()
+        if stranded:
+            with lifecycle:
+                lifecycle.notify_all()
+            shutdown.join(0.25)
+        self.assertFalse(shutdown.is_alive())
+        self.assertFalse(
+            stranded,
+            "shutdown depended exclusively on the failed notification",
+        )
+        self.assertEqual(provider._preparations, set())
+
+    def test_provider_failure_precedes_receiver_cleanup_fault(self):
+        receiver_error = OSError("receiver close unavailable")
+
+        class Receiver:
+            close_calls = 0
+
+            @staticmethod
+            def poll():
+                return True
+
+            @staticmethod
+            def recv():
+                return ("raised", "provider failed")
+
+            def close(self):
+                self.close_calls += 1
+                raise receiver_error
+
+        class Sender:
+            @staticmethod
+            def close():
+                pass
+
+        class Child:
+            closed = False
+
+            @staticmethod
+            def start():
+                pass
+
+            @staticmethod
+            def is_alive():
+                return False
+
+            @staticmethod
+            def join(_timeout=None):
+                pass
+
+            def close(self):
+                self.closed = True
+
+        receiver = Receiver()
+        sender = Sender()
+        child = Child()
+        provider = PreviewProvider()
+
+        class Context:
+            @staticmethod
+            def Pipe(**_kwargs):
+                return receiver, sender
+
+            @staticmethod
+            def Process(**_kwargs):
+                return child
+
+        with patch.object(provider, "_context", Context()):
+            with self.assertRaises(PreviewProviderUnavailable) as raised:
+                provider.prepare(
+                    provider_returns_recovery_marker,
+                    settings={"marker": "ignored"},
+                    credentials={"api_key": "server-held"},
+                    cancel_event=threading.Event(),
+                    request_deadline=0.25,
+                )
+
+        self.assertEqual(str(raised.exception), "preview provider preparation failed")
+        self.assertEqual(receiver.close_calls, 1)
+        self.assertTrue(child.closed)
+        self.assertEqual(provider.active_child_count, 0)
+        self.assertEqual(provider.active_worker_count, 0)
+        self.assertEqual(provider.available_worker_slots, 2)
+        self.assertEqual(provider._preparations, set())
+
+    def test_parent_slot_release_fault_hands_off_without_replacing_primary(self):
+        pipe_error = OSError("pipe creation failed")
+
+        class FaultingSlots:
+            def __init__(self):
+                self.inner = threading.BoundedSemaphore(2)
+                self.release_calls = 0
+
+            def acquire(self, **kwargs):
+                return self.inner.acquire(**kwargs)
+
+            def release(self):
+                self.release_calls += 1
+                if self.release_calls == 1:
+                    raise OSError("slot release unavailable")
+                self.inner.release()
+
+        class Context:
+            @staticmethod
+            def Pipe(**_kwargs):
+                raise pipe_error
+
+        slots = FaultingSlots()
+        provider = PreviewProvider()
+        with patch.object(provider, "_context", Context()), patch.object(
+            PreviewProvider, "_worker_slots", slots
+        ):
+            with self.assertRaises(OSError) as raised:
+                provider.prepare(
+                    provider_returns_recovery_marker,
+                    settings={"marker": "ignored"},
+                    credentials={"api_key": "server-held"},
+                    cancel_event=threading.Event(),
+                    request_deadline=0.25,
+                )
+            self.assertIs(raised.exception, pipe_error)
+            deadline = time.monotonic() + 1.0
+            while slots.release_calls < 2 and time.monotonic() < deadline:
+                time.sleep(0.005)
+            self.assertEqual(slots.release_calls, 2)
+            self.assertEqual(provider.active_worker_count, 0)
+            self.assertEqual(provider.available_worker_slots, 2)
+            self.assertEqual(provider._preparations, set())
+            self.assertTrue(slots.acquire(blocking=False))
+            self.assertTrue(slots.acquire(blocking=False))
+
+    def test_persistent_slot_release_fault_does_not_block_later_child_cleanup(self):
+        class PersistentlyFaultingSlots:
+            release_calls = 0
+            faulting = True
+
+            @classmethod
+            def release(cls):
+                cls.release_calls += 1
+                if cls.faulting:
+                    raise OSError("slot release unavailable")
+
+        class DeadChild:
+            def __init__(self):
+                self.close_calls = 0
+                self.closed = threading.Event()
+
+            @staticmethod
+            def is_alive():
+                return False
+
+            def close(self):
+                self.close_calls += 1
+                self.closed.set()
+
+        first = DeadChild()
+        later = DeadChild()
+        first_provider = PreviewProvider()
+        later_provider = PreviewProvider()
+        with patch.object(
+            PreviewProvider, "_worker_slots", PersistentlyFaultingSlots()
+        ):
+            first_provider._ensure_reaper()
+            first_provider._handoff_reaping_child(
+                first,
+                child_accounted=False,
+                worker_accounted=False,
+                slot_acquired=True,
+            )
+            self.assertTrue(first.closed.wait(0.25))
+            later_provider._handoff_reaping_child(
+                later,
+                child_accounted=False,
+                worker_accounted=False,
+                slot_acquired=False,
+            )
+            self.assertTrue(
+                later.closed.wait(0.25),
+                "persistent cleanup fault monopolized the global reaper",
+            )
+            self.assertEqual(first.close_calls, 1)
+            self.assertEqual(later.close_calls, 1)
+            self.assertGreater(PersistentlyFaultingSlots.release_calls, 0)
+            with PreviewProvider._reaper_condition:
+                self.assertTrue(
+                    PreviewProvider._reaper_jobs,
+                    "failed slot ownership was not durably retained",
+                )
+            PersistentlyFaultingSlots.faulting = False
+            deadline = time.monotonic() + 0.5
+            while PreviewProvider._reaper_jobs and time.monotonic() < deadline:
+                time.sleep(0.005)
+            self.assertEqual(list(PreviewProvider._reaper_jobs), [])
+
+    def test_reaper_retries_one_shot_child_close_fault(self):
+        class DeadChild:
+            close_calls = 0
+            closed = threading.Event()
+
+            @staticmethod
+            def is_alive():
+                return False
+
+            def close(self):
+                self.close_calls += 1
+                if self.close_calls == 1:
+                    raise OSError("child handle close unavailable")
+                self.closed.set()
+
+        child = DeadChild()
+        provider = PreviewProvider()
+        provider._ensure_reaper()
+        provider._handoff_reaping_child(
+            child,
+            child_accounted=False,
+            worker_accounted=False,
+            slot_acquired=False,
+        )
+        self.assertTrue(child.closed.wait(0.5))
+        self.assertEqual(child.close_calls, 2)
+        with PreviewProvider._reaper_condition:
+            self.assertEqual(list(PreviewProvider._reaper_jobs), [])
+
+    def test_reaper_survives_one_shot_slot_release_fault(self):
+        class FaultingSlots:
+            def __init__(self):
+                self.inner = threading.BoundedSemaphore(2)
+                self.release_calls = 0
+                self.inner.acquire(blocking=False)
+
+            def acquire(self, **kwargs):
+                return self.inner.acquire(**kwargs)
+
+            def release(self):
+                self.release_calls += 1
+                if self.release_calls == 1:
+                    raise OSError("slot release unavailable")
+                self.inner.release()
+
+        class DeadChild:
+            close_calls = 0
+
+            @staticmethod
+            def is_alive():
+                return False
+
+            def close(self):
+                self.close_calls += 1
+
+        slots = FaultingSlots()
+        child = DeadChild()
+        provider = PreviewProvider()
+        with patch.object(PreviewProvider, "_worker_slots", slots):
+            provider._ensure_reaper()
+            reaper = PreviewProvider._reaper_thread
+            provider._handoff_reaping_child(
+                child,
+                child_accounted=False,
+                worker_accounted=False,
+                slot_acquired=True,
+            )
+            deadline = time.monotonic() + 1.0
+            while slots.release_calls < 2 and time.monotonic() < deadline:
+                time.sleep(0.005)
+            self.assertEqual(slots.release_calls, 2)
+            self.assertTrue(reaper.is_alive())
+            self.assertEqual(child.close_calls, 1)
+            self.assertTrue(slots.acquire(blocking=False))
+            self.assertTrue(slots.acquire(blocking=False))
+
+    def test_reaper_notification_fault_does_not_lose_registered_handoff(self):
+        jobs = deque()
+
+        class FaultingCondition:
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *_args):
+                return False
+
+            @staticmethod
+            def notify():
+                raise OSError("reaper notification unavailable")
+
+        provider = PreviewProvider()
+        child = object()
+        with patch.object(
+            PreviewProvider, "_reaper_jobs", jobs, create=True
+        ), patch.object(
+            PreviewProvider,
+            "_reaper_condition",
+            FaultingCondition(),
+            create=True,
+        ):
+            provider._handoff_reaping_child(
+                child,
+                child_accounted=False,
+                worker_accounted=True,
+                slot_acquired=True,
+            )
+
+        self.assertEqual(
+            list(jobs),
+            [(provider, child, False, True, True, provider._worker_slots)],
+        )
+
+    def test_terminate_fault_still_kills_and_preserves_first_cleanup_error(self):
+        terminate_error = OSError("terminate unavailable")
+        join_error = OSError("join unavailable")
+
+        class Connection:
+            def poll(self):
+                return True
+
+            def recv(self):
+                return ("returned", (("marker", "must-not-publish"),))
+
+            def close(self):
+                pass
+
+        class Child:
+            alive = False
+            terminate_calls = 0
+            join_calls = 0
+            kill_calls = 0
+            closed = False
+
+            def start(self):
+                self.alive = True
+
+            def is_alive(self):
+                return self.alive
+
+            def terminate(self):
+                self.terminate_calls += 1
+                raise terminate_error
+
+            def join(self, _timeout=None):
+                self.join_calls += 1
+                raise join_error
+
+            def kill(self):
+                self.kill_calls += 1
+                self.alive = False
+
+            def close(self):
+                self.closed = True
+
+        receiver = Connection()
+        sender = Connection()
+        child = Child()
+        provider = PreviewProvider()
+
+        class Context:
+            @staticmethod
+            def Pipe(**_kwargs):
+                return receiver, sender
+
+            @staticmethod
+            def Process(**_kwargs):
+                return child
+
+        with patch.object(provider, "_context", Context()):
+            with self.assertRaises(OSError) as raised:
+                provider.prepare(
+                    provider_returns_recovery_marker,
+                    settings={"marker": "ignored"},
+                    credentials={"api_key": "server-held"},
+                    cancel_event=threading.Event(),
+                    request_deadline=0.25,
+                )
+
+        self.assertIs(raised.exception, terminate_error)
+        self.assertGreaterEqual(child.terminate_calls, 1)
+        self.assertEqual(child.join_calls, 2)
+        self.assertEqual(child.kill_calls, 1)
+        self.assertTrue(child.closed)
+        self.assertEqual(provider.active_child_count, 0)
+        self.assertEqual(provider.active_worker_count, 0)
+        self.assertEqual(provider.available_worker_slots, 2)
+        self.assertEqual(provider._preparations, set())
+
+    def test_reaper_start_failure_precedes_pipe_and_child_creation(self):
+        context_calls = []
+        provider = PreviewProvider()
+
+        class Context:
+            @staticmethod
+            def Pipe(**_kwargs):
+                context_calls.append("pipe")
+                raise AssertionError("pipe created before durable reaper")
+
+            @staticmethod
+            def Process(**_kwargs):
+                context_calls.append("process")
+                raise AssertionError("child created before durable reaper")
+
+        PreviewProvider._shutdown_reaper_for_tests()
+        with patch.object(provider, "_context", Context()), patch.object(
+            threading.Thread, "start", side_effect=RuntimeError("reaper unavailable")
+        ):
+            with self.assertRaisesRegex(RuntimeError, "reaper unavailable"):
+                provider.prepare(
+                    provider_returns_recovery_marker,
+                    settings={"marker": "must-not-start"},
+                    credentials={"api_key": "server-held"},
+                    cancel_event=threading.Event(),
+                    request_deadline=0.25,
+                )
+
+        self.assertEqual(context_calls, [])
+        self.assertEqual(provider.active_child_count, 0)
+        self.assertEqual(provider.active_worker_count, 0)
+        self.assertEqual(provider.available_worker_slots, 2)
+        self.assertEqual(provider._preparations, set())
+        shutdown = threading.Thread(target=provider.shutdown)
+        shutdown.start()
+        shutdown.join(0.25)
+        self.assertFalse(shutdown.is_alive(), "reaper startup fault stranded shutdown")
+
+    def test_sender_close_fault_attempts_all_cleanup_without_child_underflow(self):
+        first_close_error = OSError("first sender close failure")
+        second_close_error = OSError("second sender close failure")
+        child_can_exit = threading.Event()
+
+        class Receiver:
+            closed = False
+
+            def close(self):
+                self.closed = True
+
+        class Sender:
+            close_calls = 0
+
+            def close(self):
+                self.close_calls += 1
+                if self.close_calls == 1:
+                    raise first_close_error
+                raise second_close_error
+
+        class Child:
+            alive = False
+            closed = False
+            terminate_calls = 0
+            kill_calls = 0
+
+            def start(self):
+                self.alive = True
+
+            def is_alive(self):
+                return self.alive and not child_can_exit.is_set()
+
+            def join(self, _timeout=None):
+                pass
+
+            def terminate(self):
+                self.terminate_calls += 1
+
+            def kill(self):
+                self.kill_calls += 1
+
+            def close(self):
+                self.closed = True
+
+        receiver = Receiver()
+        sender = Sender()
+        child = Child()
+        provider = PreviewProvider()
+
+        class Context:
+            @staticmethod
+            def Pipe(**_kwargs):
+                return receiver, sender
+
+            @staticmethod
+            def Process(**_kwargs):
+                return child
+
+        with patch.object(provider, "_context", Context()):
+            with self.assertRaises(OSError) as raised:
+                provider.prepare(
+                    provider_returns_recovery_marker,
+                    settings={"marker": "ignored"},
+                    credentials={"api_key": "server-held"},
+                    cancel_event=threading.Event(),
+                    request_deadline=0.02,
+                )
+
+        self.assertIs(raised.exception, first_close_error)
+        self.assertEqual(sender.close_calls, 2)
+        self.assertTrue(receiver.closed)
+        self.assertGreaterEqual(child.terminate_calls, 1)
+        self.assertGreaterEqual(child.kill_calls, 1)
+        self.assertFalse(child.closed)
+        self.assertEqual(provider.active_child_count, 0)
+        self.assertEqual(provider.active_worker_count, 1)
+        self.assertEqual(provider.available_worker_slots, 1)
+        self.assertEqual(provider._preparations, set())
+
+        shutdown = threading.Thread(target=provider.shutdown)
+        shutdown.start()
+        shutdown.join(0.25)
+        self.assertFalse(shutdown.is_alive(), "cleanup fault stranded shutdown")
+
+        child_can_exit.set()
+        deadline = time.monotonic() + 1.0
+        while provider.active_worker_count and time.monotonic() < deadline:
+            time.sleep(0.005)
+        self.assertTrue(child.closed)
+        self.assertEqual(provider.active_child_count, 0)
+        self.assertEqual(provider.active_worker_count, 0)
+        self.assertEqual(provider.available_worker_slots, 2)
+
+    def test_prepare_hands_off_synchronously_reaped_child_after_close_fault(self):
+        class Connection:
+            def poll(self):
+                return True
+
+            def recv(self):
+                return ("returned", (("marker", "ready"),))
+
+            def close(self):
+                pass
+
+        class Child:
+            close_calls = 0
+
+            def start(self):
+                pass
+
+            def is_alive(self):
+                return False
+
+            def join(self, timeout=None):
+                pass
+
+            def terminate(self):
+                pass
+
+            def kill(self):
+                pass
+
+            def close(self):
+                self.close_calls += 1
+                if self.close_calls == 1:
+                    raise OSError("synchronous child close unavailable")
+
+        receiver = Connection()
+        sender = Connection()
+        child = Child()
+        provider = PreviewProvider()
+
+        class Context:
+            @staticmethod
+            def Pipe(**_kwargs):
+                return receiver, sender
+
+            @staticmethod
+            def Process(**_kwargs):
+                return child
+
+        with patch.object(provider, "_context", Context()):
+            with self.assertRaisesRegex(OSError, "synchronous child close unavailable"):
+                provider.prepare(
+                    provider_returns_recovery_marker,
+                    settings={"marker": "ignored"},
+                    credentials={"api_key": "server-held"},
+                    cancel_event=threading.Event(),
+                    request_deadline=1,
+                )
+
+        deadline = time.monotonic() + 1.0
+        while child.close_calls < 2 and time.monotonic() < deadline:
+            time.sleep(0.005)
+        self.assertEqual(child.close_calls, 2)
+        self.assertEqual(provider.active_child_count, 0)
+        self.assertEqual(provider.active_worker_count, 0)
+        self.assertEqual(provider.available_worker_slots, 2)
+        self.assertEqual(list(PreviewProvider._reaper_jobs), [])
+
+    def test_result_is_not_published_when_child_reap_reaches_deadline(self):
+        child_can_exit = threading.Event()
+        outcome = {}
+
+        class Connection:
+            def poll(self):
+                return True
+
+            def recv(self):
+                return ("returned", (("marker", "late"),))
+
+            def close(self):
+                pass
+
+        class Child:
+            close_calls = 0
+
+            def start(self):
+                pass
+
+            def is_alive(self):
+                return not child_can_exit.is_set()
+
+            def join(self, timeout=None):
+                child_can_exit.wait(timeout)
+
+            def terminate(self):
+                pass
+
+            def kill(self):
+                pass
+
+            def close(self):
+                self.close_calls += 1
+                if self.close_calls == 1:
+                    raise OSError("child handle close unavailable")
+
+        receiver = Connection()
+        sender = Connection()
+        child = Child()
+        provider = PreviewProvider()
+
+        class Context:
+            @staticmethod
+            def Pipe(**_kwargs):
+                return receiver, sender
+
+            @staticmethod
+            def Process(**_kwargs):
+                return child
+
+        def prepare():
+            try:
+                outcome["result"] = provider.prepare(
+                    provider_returns_recovery_marker,
+                    settings={"marker": "ignored"},
+                    credentials={"api_key": "server-held"},
+                    cancel_event=threading.Event(),
+                    request_deadline=0.02,
+                )
+            except BaseException as error:
+                outcome["error"] = error
+
+        with patch.object(provider, "_context", Context()):
+            thread = threading.Thread(target=prepare)
+            started = time.monotonic()
+            thread.start()
+            try:
+                thread.join(0.10)
+                self.assertFalse(thread.is_alive(), "deadline did not settle")
+                self.assertLess(time.monotonic() - started, 0.10)
+                self.assertIsInstance(outcome.get("error"), PreviewProviderTimeout)
+                self.assertNotIn("result", outcome)
+                self.assertEqual(provider.active_child_count, 1)
+                self.assertEqual(provider.active_worker_count, 1)
+                self.assertEqual(child.close_calls, 0)
+
+                child_can_exit.set()
+                deadline = time.monotonic() + 1.0
+                while provider.active_child_count and time.monotonic() < deadline:
+                    time.sleep(0.005)
+                self.assertEqual(provider.active_child_count, 0)
+                self.assertEqual(provider.active_worker_count, 0)
+                self.assertEqual(provider.available_worker_slots, 2)
+                self.assertEqual(child.close_calls, 2)
+            finally:
+                child_can_exit.set()
+                thread.join(1.0)
+
+    def test_result_ready_child_handoff_retains_capacity_until_bounded_reap(self):
+        child_can_exit = threading.Event()
+        child_join_started = threading.Event()
+        prepared = {}
+        result_ready_at = {}
+
+        class Receiver:
+            closed = False
+
+            def poll(self):
+                return (
+                    "value" in result_ready_at
+                    and time.monotonic() >= result_ready_at["value"]
+                )
+
+            def recv(self):
+                return ("returned", (("marker", "ready"),))
+
+            def close(self):
+                self.closed = True
+
+        class Sender:
+            closed = False
+
+            def close(self):
+                self.closed = True
+
+        class Child:
+            def __init__(self):
+                self.alive = True
+                self.closed = False
+                self.joins = []
+                self.terminate_calls = 0
+                self.kill_calls = 0
+
+            def start(self):
+                pass
+
+            def is_alive(self):
+                if child_can_exit.is_set():
+                    self.alive = False
+                return self.alive
+
+            def join(self, timeout=None):
+                self.joins.append(timeout)
+                child_join_started.set()
+                child_can_exit.wait(timeout)
+                if child_can_exit.is_set():
+                    self.alive = False
+
+            def terminate(self):
+                self.terminate_calls += 1
+
+            def kill(self):
+                self.kill_calls += 1
+
+            def close(self):
+                self.closed = True
+
+        receiver = Receiver()
+        sender = Sender()
+        child = Child()
+        provider = PreviewProvider()
+
+        class Context:
+            @staticmethod
+            def Pipe(**_kwargs):
+                return receiver, sender
+
+            @staticmethod
+            def Process(**_kwargs):
+                return child
+
+        def run_prepare():
+            try:
+                prepared["result"] = provider.prepare(
+                    provider_returns_recovery_marker,
+                    settings={"marker": "ignored"},
+                    credentials={"api_key": "server-held"},
+                    cancel_event=threading.Event(),
+                    request_deadline=0.12,
+                )
+            except BaseException as error:
+                prepared["error"] = error
+
+        thread = threading.Thread(target=run_prepare)
+        started = time.monotonic()
+        result_ready_at["value"] = started + 0.09
+        with patch.object(provider, "_context", Context()):
+            thread.start()
+            try:
+                self.assertTrue(child_join_started.wait(0.14))
+                shutdown_thread = threading.Thread(target=provider.shutdown)
+                shutdown_thread.start()
+                thread.join(0.17)
+                shutdown_thread.join(0.17)
+                self.assertFalse(thread.is_alive(), "result-ready prepare exceeded deadline")
+                self.assertFalse(shutdown_thread.is_alive(), "provider shutdown exceeded deadline")
+                self.assertLess(time.monotonic() - started, 0.17)
+                self.assertIsInstance(prepared.get("error"), PreviewProviderCancelled)
+                self.assertNotIn("result", prepared)
+                self.assertNotIn(None, child.joins)
+                self.assertTrue(provider.is_closed)
+                self.assertEqual(provider.active_child_count, 1)
+                self.assertEqual(provider.active_worker_count, 1)
+                self.assertEqual(provider.available_worker_slots, 1)
+                self.assertFalse(child.closed)
+
+                child_can_exit.set()
+                deadline = time.monotonic() + 1.0
+                while provider.active_child_count and time.monotonic() < deadline:
+                    time.sleep(0.005)
+                self.assertEqual(provider.active_child_count, 0)
+                self.assertEqual(provider.active_worker_count, 0)
+                self.assertEqual(provider.available_worker_slots, 2)
+                self.assertTrue(child.closed)
+            finally:
+                child_can_exit.set()
+                thread.join(1.0)
+
     def test_provider_preserves_bounded_eight_second_cold_start_budget(self):
         provider = PreviewProvider()
 
@@ -179,6 +1096,9 @@ class PreviewProviderTests(unittest.TestCase):
                     str(outcomes["timeout"]),
                     "preview provider preparation timed out",
                 )
+                reap_deadline = time.monotonic() + 1.0
+                while not created_children[0]._closed and time.monotonic() < reap_deadline:
+                    time.sleep(0.005)
                 self.assertTrue(created_children[0]._closed)
                 self.assertEqual(provider.active_child_count, 1)
                 self.assertEqual(provider.active_worker_count, 1)
@@ -430,6 +1350,7 @@ class PreviewProviderTests(unittest.TestCase):
         publication_reached = threading.Event()
         release_publication = threading.Event()
         provider = PreviewProvider()
+        provider._ensure_reaper()
         children_before = {child.pid for child in multiprocessing.active_children()}
         threads_before = {thread.ident for thread in threading.enumerate()}
         descriptors_before = set(os.listdir("/proc/self/fd"))

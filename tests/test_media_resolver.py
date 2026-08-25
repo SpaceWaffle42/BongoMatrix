@@ -756,17 +756,23 @@ class MediaResolverTests(unittest.TestCase):
             try:
                 with self.subTest(consumer="splash"):
                     matrix, stop = matrix_with_physical_media_seams(), RecordingStop()
-                    self.assertTrue(splash_screen.run(
-                        matrix, config, duration=0.2, stop_event=stop,
-                        pinned_handle=handles["splash.gif"],
-                    ))
+                    with patch.object(
+                        framework.time, "monotonic", side_effect=lambda: stop.elapsed,
+                    ):
+                        self.assertTrue(splash_screen.run(
+                            matrix, config, duration=0.2, stop_event=stop,
+                            pinned_handle=handles["splash.gif"],
+                        ))
                     observed["splash"] = (matrix.submissions, stop.waits)
                 with self.subTest(consumer="sleep"):
                     matrix, stop = matrix_with_physical_media_seams(), RecordingStop()
-                    self.assertTrue(sleep_screen.run(
-                        matrix, config, duration=0.2, stop_event=stop,
-                        pinned_handle=handles["sleep.gif"],
-                    ))
+                    with patch.object(
+                        framework.time, "monotonic", side_effect=lambda: stop.elapsed,
+                    ):
+                        self.assertTrue(sleep_screen.run(
+                            matrix, config, duration=0.2, stop_event=stop,
+                            pinned_handle=handles["sleep.gif"],
+                        ))
                     observed["sleep"] = (matrix.submissions, stop.waits)
                 with self.subTest(consumer="announcement"):
                     matrix, stop = matrix_with_physical_media_seams(), RecordingStop()

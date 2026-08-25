@@ -5,6 +5,7 @@ import os
 from pathlib import Path
 import shutil
 import subprocess
+import sys
 import tempfile
 import unittest
 
@@ -499,7 +500,7 @@ class Slice1IdentityAndCodecTests(unittest.TestCase):
                 "transaction_id": record["transaction_id"],
             }
             script = Path(__file__).parents[1] / "deploy/guarded_priority_1_3_release.py"
-            python = Path(__file__).parents[1] / ".venv/bin/python"
+            python = Path(sys.executable)
             payload = guarded.encode_privileged_request("remote-transaction-inspect", inspect)
             completed = subprocess.run(
                 [str(python), "-I", "-B", str(script), "remote-transaction-inspect",
@@ -569,7 +570,7 @@ class Slice1IdentityAndCodecTests(unittest.TestCase):
                 "transaction_id": baseline["transaction_id"],
             }
             script = Path(__file__).parents[1] / "deploy/guarded_priority_1_3_release.py"
-            python = Path(__file__).parents[1] / ".venv/bin/python"
+            python = Path(sys.executable)
 
             def progressed() -> dict[str, object]:
                 value = copy.deepcopy(baseline)
@@ -711,7 +712,7 @@ class Slice1IdentityAndCodecTests(unittest.TestCase):
 
     def test_exact_schema_v1_fresh_process_inspect_rejects_coherently_redigested_non_int_values(self):
         script = Path(__file__).parents[1] / "deploy/guarded_priority_1_3_release.py"
-        python = Path(__file__).parents[1] / ".venv/bin/python"
+        python = Path(sys.executable)
         for location in ("record", "release_document", "execution_contract"):
             for schema_value in self._NON_EXACT_SCHEMA_V1_VALUES:
                 with self.subTest(location=location, schema_value=repr(schema_value)):

@@ -18,6 +18,39 @@ from deploy.release_bundle import (
 
 
 class ReleaseBundleTests(unittest.TestCase):
+    def test_systemd_service_control_pins_environment_and_shared_deadline(self):
+        clock = mock.Mock(side_effect=[100.0, 390.0, 399.0])
+        completed = mock.Mock(returncode=0)
+
+        with mock.patch.object(
+            release_bundle.subprocess, "run", return_value=completed,
+        ) as run:
+            service = release_bundle._SystemdServiceControl(
+                "matrix-web.service", deadline=400.0, monotonic=clock,
+            )
+            self.assertTrue(service.is_active())
+            service.stop()
+            service.daemon_reload()
+
+        self.assertEqual(
+            [entry.args[0] for entry in run.call_args_list],
+            [
+                ("/usr/bin/systemctl", "is-active", "--quiet", "matrix-web.service"),
+                ("/usr/bin/systemctl", "stop", "matrix-web.service"),
+                ("/usr/bin/systemctl", "daemon-reload"),
+            ],
+        )
+        self.assertEqual(
+            [entry.kwargs["timeout"] for entry in run.call_args_list],
+            [15.0, 10.0, 1.0],
+        )
+        for entry in run.call_args_list:
+            self.assertEqual(
+                entry.kwargs["env"],
+                {"PATH": "/usr/bin:/bin", "LANG": "C", "LC_ALL": "C"},
+            )
+            self.assertIs(entry.kwargs["shell"], False)
+
     def test_release_manifest_requires_source_hash_and_intended_owner_mode_for_every_file(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)

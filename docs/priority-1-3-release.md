@@ -2,6 +2,8 @@
 
 This is the authoritative, fail-closed build and release order for Priority 1.3. Run it only from a reviewed release commit and only in the approved production change window. The commands below deliberately separate commit/export, acceptance-manifest preparation, outer-spec freezing, backup, and guarded release.
 
+Operator commands use the README-supported `./venv/bin/python` environment. The CI-only `.venv` compatibility alias is not part of the local release contract.
+
 ## 1. Review and explicitly include release sources
 
 Required new production and test files must be explicitly included in the release commit. Review `git status --short`, then name every approved path after `git add --`. **Never use `git add -A` for a release.** In particular, verify that the reviewed commit contains:
@@ -30,11 +32,11 @@ Do not build from copied working-tree files. `prepare-release-tree` uses `git ar
 ## 2. Run the literal parser and build gate tests
 
 ```bash
-PYTHONDONTWRITEBYTECODE=1 ./.venv/bin/python -B -m unittest \
+PYTHONDONTWRITEBYTECODE=1 ./venv/bin/python -B -m unittest \
   tests.test_release_gate_cli_and_build.ReleaseTreePreparationTests \
   tests.test_release_gate_cli_and_build.DuplicateReleaseCliTests -v
 
-PYTHONDONTWRITEBYTECODE=1 ./.venv/bin/python -B -m unittest \
+PYTHONDONTWRITEBYTECODE=1 ./venv/bin/python -B -m unittest \
   tests.test_release_bundle \
   tests.test_guarded_priority_1_3_release \
   tests.test_priority_1_3_acceptance \
@@ -52,7 +54,7 @@ REPOSITORY="$(pwd -P)"
 STAGE="/root/matrix-priority-1-3-${SOURCE_SHA}"
 PRODUCTION_PYTHON="/home/admin/matrix/venv/bin/python"
 
-./.venv/bin/python -I -B deploy/release_bundle.py prepare-release-tree \
+./venv/bin/python -I -B deploy/release_bundle.py prepare-release-tree \
   --repository "$REPOSITORY" \
   --source-commit "$SOURCE_SHA" \
   --stage "$STAGE" \
@@ -105,7 +107,7 @@ Do not regenerate or edit the tree, inner manifest, outer spec, release manifest
 Set reviewed values for every placeholder. `ATTEMPT_BUDGET_SECONDS` must cover acceptance; the current guarded topology uses 6600 seconds with a 60-second commit reserve and a 7200-second watchdog.
 
 ```bash
-./.venv/bin/python -I -B deploy/guarded_priority_1_3_release.py run \
+./venv/bin/python -I -B deploy/guarded_priority_1_3_release.py run \
   --boundary b1 \
   --ssh-target "$SSH_TARGET" \
   --ssh-identity-file "$SSH_IDENTITY_FILE" \

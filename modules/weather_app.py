@@ -183,8 +183,14 @@ def _render_error(matrix, message, duration, stop_event):
     black = matrix.colour("black")
     matrix.draw_text_with_border(matrix.font("5x7"), 7, 12, red, black, "WEATHER", canvas=canvas)
     matrix.draw_text_with_border(matrix.font("4x6"), 2, 25, white, black, message[:15], canvas=canvas)
+    if stop_event and stop_event.is_set():
+        return False
     matrix.swap(canvas)
+    admission = getattr(type(matrix), "last_swap_admitted", None)
+    if admission is not None and not admission(matrix):
+        return False
     _wait(stop_event, min(duration if duration > 0 else 5, 5))
+    return True
 
 
 def ticker_text(weather, units):
@@ -281,8 +287,13 @@ def weather_frames(matrix, config, weather, stop_event=None):
             scroll, small, scroll_x, ticker_y, yellow,
             canvas=canvas, step=scroll_step, wrap=False,
         )
+        if stop_event and stop_event.is_set():
+            return
         submitted = canvas
         canvas = matrix.swap(canvas)
+        admission = getattr(type(matrix), "last_swap_admitted", None)
+        if admission is not None and not admission(matrix):
+            return
         yield submitted, frame_delay
 
 
@@ -299,13 +310,16 @@ def run(matrix, config, duration=20, stop_event=None, client=None):
             units=weather_config.get("units", "celsius"),
         )
     except Exception as exc:
-        _render_error(matrix, str(exc), duration, stop_event)
-        return False
+        if stop_event and stop_event.is_set():
+            return False
+        return _render_error(matrix, str(exc), duration, stop_event)
 
+    rendered = False
     for _canvas, frame_delay in weather_frames(matrix, config, weather, stop_event):
+        rendered = True
         if _wait(stop_event, frame_delay):
             break
-    return True
+    return rendered
 
 
 def overview(matrix, config, duration=20, stop_event=None):

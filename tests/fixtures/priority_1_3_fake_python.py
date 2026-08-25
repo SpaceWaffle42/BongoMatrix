@@ -8,6 +8,7 @@ from pathlib import Path
 import subprocess
 import sys
 import threading
+import time
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -55,12 +56,23 @@ class DeterministicSwapMatrix:
         self.frame = bytes([17]) * (64 * 32 * 3)
         self.revision = 10
         self.observer = None
+        self.after_sleep = None
 
     def latest_frame_rgb(self):
         return self.frame, self.revision
 
     def set_physical_swap_observer(self, observer):
         self.observer = observer
+
+    def set_brightness(self, value):
+        self.brightness = value
+
+    def show_gif(self, filename, **_options):
+        assert Path(filename).name == "sleep.gif"
+        self.physical_swap(bytes([17]) * (64 * 32 * 3))
+        if self.after_sleep is not None:
+            self.after_sleep()
+        return True
 
     def physical_swap(self, frame):
         assert type(frame) is bytes and len(frame) == 64 * 32 * 3
@@ -75,7 +87,24 @@ class AcceptanceController(DisplayController):
 
     def __init__(self, matrix, store):
         super().__init__(matrix, store)
+        self._fixture_clock_real = time.monotonic()
+        self._fixture_clock_value = self._fixture_clock_real
+        self._fixture_clock_scale = 1
+        self.device_preview_manager._clock = self._fixture_clock
         self._saved_swap_pending = False
+        self._draft_workers = []
+        self._draft_worker_errors = []
+
+    def _fixture_clock(self):
+        return self._fixture_clock_value + (
+            time.monotonic() - self._fixture_clock_real
+        ) * self._fixture_clock_scale
+
+    def _accelerate_fixture_clock(self):
+        current = self._fixture_clock()
+        self._fixture_clock_real = time.monotonic()
+        self._fixture_clock_value = current
+        self._fixture_clock_scale = 2
 
     def start(self):
         return True
@@ -84,24 +113,67 @@ class AcceptanceController(DisplayController):
         return True
 
     def submit_device_draft(self, request, *, renderer):
-        admission = super().submit_device_draft(request, renderer=renderer)
+        del renderer
+        draft_published = threading.Event()
+        worker_finished = threading.Event()
+
+        def deterministic_renderer(matrix, claimed_request, *, stop_event):
+            # Keep the deterministic fixture frame, but publish it only from the
+            # real pending-draft scheduler claim while its exact lease token is
+            # active. Natural content expiry releases this renderer.
+            matrix.physical_swap(bytes([91]) * (64 * 32 * 3))
+            self._accelerate_fixture_clock()
+            draft_published.set()
+            # Poll the real manager so its deterministic 2x fixture clock reaches
+            # the exact content deadline through the normal autonomous expiry
+            # path. Five-second verifier heartbeats still precede connectivity
+            # expiry and renew it beyond the content deadline.
+            while not stop_event.wait(0.05):
+                self.device_preview_manager.active_lease()
+            return True
+
+        def execute_claimed_draft():
+            try:
+                if not self._execute_pending_device_draft():
+                    raise RuntimeError("deterministic draft was not claimed")
+            except BaseException as exc:
+                self._draft_worker_errors.append(exc)
+            finally:
+                worker_finished.set()
+
+        admission = super().submit_device_draft(
+            request, renderer=deterministic_renderer,
+        )
         if admission.status is PreviewAdmissionStatus.ACCEPTED:
-            # Canonical unsaved draft is published at the real matrix observer seam.
-            self.matrix.physical_swap(bytes([91]) * (64 * 32 * 3))
+            worker = threading.Thread(target=execute_claimed_draft, daemon=True)
+            self._draft_workers.append(worker)
+            worker.start()
+            if not draft_published.wait(5):
+                worker_finished.wait(1)
+                if self._draft_worker_errors:
+                    raise RuntimeError("deterministic draft execution failed") from self._draft_worker_errors[0]
+                raise TimeoutError("deterministic draft publication deadline expired")
         return admission
 
-    def cancel_device_draft(self, owner, *, generation):
-        cancelled = super().cancel_device_draft(owner, generation=generation)
-        if cancelled:
-            self._saved_swap_pending = True
-        return cancelled
+    def _expire_device_draft(self, lease):
+        super()._expire_device_draft(lease)
+        self._saved_swap_pending = True
 
     def acceptance_transaction_status(self, owner, *, generation):
-        # The status poll is later than cancel/result marking. Publish the resumed
-        # saved/current frame through the same production observer, then read status.
+        # The status poll after natural content expiry runs the real scheduler
+        # inactive branch and real sleep-module dispatch through deterministic
+        # hardware primitives before reading status.
+        if self._draft_worker_errors:
+            raise RuntimeError("deterministic draft execution failed") from self._draft_worker_errors[0]
         if self._saved_swap_pending:
             self._saved_swap_pending = False
-            self.matrix.physical_swap(bytes([17]) * (64 * 32 * 3))
+            self._shutdown.clear()
+            self.matrix.after_sleep = self._shutdown.set
+            try:
+                self._run_loop_unchecked()
+            finally:
+                self.matrix.after_sleep = None
+                self._shutdown.clear()
         return super().acceptance_transaction_status(owner, generation=generation)
 
 
@@ -110,6 +182,16 @@ store = ConfigStore(data / "config.json")
 devices = PairedDeviceStore(data / "paired-devices.json")
 controller = AcceptanceController(matrix, store)
 pairing = PairingManager(testing_pin="731946")
+
+
+class FixtureAcceptanceTime:
+    """Keep client heartbeat scheduling in the controller's accelerated clock domain."""
+
+    monotonic = staticmethod(controller._fixture_clock)
+    sleep = staticmethod(time.sleep)
+
+
+acceptance.time = FixtureAcceptanceTime
 flask_app = create_app(
     controller, store, pairing,
     secret_key="guarded-export-acceptance-fixture",
@@ -185,4 +267,8 @@ finally:
     server.server_close()
     server_thread.join(timeout=5)
     controller.device_preview_manager.close()
+    for worker in controller._draft_workers:
+        worker.join(timeout=5)
+        if worker.is_alive():
+            raise RuntimeError("deterministic draft worker did not stop")
 raise SystemExit(result)

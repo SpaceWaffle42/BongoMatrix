@@ -2,16 +2,29 @@
 
 from __future__ import annotations
 
+import base64
 import copy
 import datetime as dt
 import importlib
+import io
 import logging
 import socket
 import threading
 import time
 
+from PIL import Image
+
 from modules.media_player import play_media
-from device_preview import DevicePreviewManager, PreviewAdmissionStatus
+from device_preview import (
+    DevicePreviewManager, PreviewAdmissionStatus, PreviewExpiryCause,
+)
+from preview_provider import (
+    PreviewProvider,
+    PreviewProviderCancelled,
+    PreviewProviderCapacityError,
+    PreviewProviderTimeout,
+    PreviewProviderUnavailable,
+)
 
 LOGGER = logging.getLogger(__name__)
 MODULES = {
@@ -36,6 +49,91 @@ MODULE_DEFAULT_DURATIONS = {
     "sleep": 60,
 }
 ONE_OFF_PREVIEW_DURATION = 15
+OPENWEATHER_PREPARATION_DEADLINE_SECONDS = 5.0
+
+
+def _provider_image(image):
+    output = io.BytesIO()
+    image.save(output, format="PNG")
+    return base64.b64encode(output.getvalue()).decode("ascii")
+
+
+def _openweather_provider_child(config, api_key, timeout):
+    """Prepare and serialize one physical OpenWeather invocation in a child."""
+    module_name = config.pop("_openweather_provider_module")
+    module = importlib.import_module(f"modules.{module_name}")
+    from modules.openweather_common import OpenWeatherClient
+
+    deadline = time.monotonic() + timeout
+    prepared = module.prepare(
+        config,
+        client=OpenWeatherClient(timeout=timeout, deadline=deadline),
+        api_key=api_key,
+    )
+    result = {"error": prepared.error, "cancelled": prepared.cancelled}
+    if prepared.error or prepared.cancelled:
+        return result
+    if module_name == "openweather_overview":
+        result.update({
+            "weather": vars(prepared.weather),
+            "icon": _provider_image(prepared.icon),
+        })
+    else:
+        result.update({
+            "periods": [vars(period) for period in prepared.periods],
+            "icons": {
+                icon_code: _provider_image(image)
+                for icon_code, image in prepared.icons.items()
+            },
+        })
+    return result
+
+
+def _provider_value(value):
+    if isinstance(value, tuple):
+        if all(
+            isinstance(item, tuple) and len(item) == 2 and isinstance(item[0], str)
+            for item in value
+        ):
+            return {key: _provider_value(item) for key, item in value}
+        return [_provider_value(item) for item in value]
+    return value
+
+
+def _prepared_openweather(module_name, transported):
+    prepared = _provider_value(transported)
+    if module_name == "openweather_overview":
+        from modules.openweather_common import OpenWeatherSnapshot
+        from modules.openweather_overview import PreparedOverview
+
+        if prepared["error"] or prepared["cancelled"]:
+            return PreparedOverview(
+                error=prepared["error"], cancelled=prepared["cancelled"]
+            )
+        icon = Image.open(io.BytesIO(base64.b64decode(prepared["icon"])))
+        icon.load()
+        return PreparedOverview(
+            weather=OpenWeatherSnapshot(**prepared["weather"]), icon=icon,
+        )
+
+    from modules.openweather_common import OpenWeatherForecastPeriod
+    from modules.openweather_forecast import PreparedForecast
+
+    if prepared["error"] or prepared["cancelled"]:
+        return PreparedForecast(
+            error=prepared["error"], cancelled=prepared["cancelled"]
+        )
+    icons = {}
+    for icon_code, encoded in prepared["icons"].items():
+        icon = Image.open(io.BytesIO(base64.b64decode(encoded)))
+        icon.load()
+        icons[icon_code] = icon
+    return PreparedForecast(
+        periods=[
+            OpenWeatherForecastPeriod(**period) for period in prepared["periods"]
+        ],
+        icons=icons,
+    )
 
 
 def invocation_default_duration(module_name):
@@ -100,6 +198,7 @@ class DisplayController:
         self._pairing_generation = 0
         self._ip_address_provider = ip_address_provider or local_ip_address
         self._openweather_secrets = openweather_secrets
+        self._openweather_provider = PreviewProvider()
         self.current_module = None
         self.last_error = None
         self._scheduler_fault_backoff = 0.25
@@ -204,6 +303,10 @@ class DisplayController:
 
     def begin_acceptance_transaction(self, publisher, owner, *, generation):
         """Bind one release-only publisher to this exact admitted draft owner."""
+        from acceptance_artifacts import AcceptanceArtifactTransaction
+
+        if type(publisher) is not AcceptanceArtifactTransaction:
+            raise TypeError("acceptance publisher type is invalid")
         if publisher.owner_generation != generation:
             raise ValueError("acceptance publisher owner is stale")
         with self._state_lock:
@@ -212,13 +315,24 @@ class DisplayController:
             baseline_frame, baseline_revision = self.matrix.latest_frame_rgb()
             if len(baseline_frame) != 64 * 32 * 3:
                 raise ValueError("physical acceptance requires a 64x32 matrix")
+            event_authority = object()
             context = {
-                "publisher": publisher, "owner": owner, "generation": generation,
+                "publisher": publisher, "event_authority": event_authority,
+                "owner": owner, "generation": generation,
                 "baseline_revision": baseline_revision,
                 "foreign_rejected": False, "heartbeat_accepted": False,
-                "timeout_returned": False,
+                "timeout_returned": False, "inactive_probe_pending": False,
+                "inactive_sleep_executing": False,
+                "draft_executing": False, "draft_execution_lease": None,
             }
             self._acceptance_transaction = context
+            try:
+                AcceptanceArtifactTransaction._bind_display_controller(
+                    publisher, self, event_authority,
+                )
+            except BaseException:
+                self._acceptance_transaction = None
+                raise
             self._acceptance_completed = None
 
         def observe(frame, revision):
@@ -228,7 +342,12 @@ class DisplayController:
                 current = self.device_preview_manager.is_current(owner, generation)
                 state = publisher.state
                 if state == publisher.INIT:
-                    if not current:
+                    draft_lease = context["draft_execution_lease"]
+                    if (
+                        not current or not context["draft_executing"]
+                        or draft_lease is None
+                        or self._device_draft_active_lease is not draft_lease
+                    ):
                         return
                     publisher.publish_draft(frame, frame_revision=revision)
                     return
@@ -236,13 +355,13 @@ class DisplayController:
                     return
                 if not all(context[name] for name in (
                     "foreign_rejected", "heartbeat_accepted", "timeout_returned",
+                    "inactive_sleep_executing",
                 )):
                     return
+                publisher._observe("sleep_observed", context["event_authority"])
                 publisher.publish_saved_rollback(
                     frame, frame_revision=revision,
                     saved_revision=context["baseline_revision"],
-                    foreign_rejected=True, timeout_returned=True,
-                    heartbeat_accepted=True,
                 )
                 self._acceptance_completed = {
                     "owner": owner, "generation": generation,
@@ -254,7 +373,7 @@ class DisplayController:
         self.matrix.set_physical_swap_observer(observe)
 
     def mark_acceptance_result(self, owner, *, generation, result):
-        if result not in {"foreign_rejected", "heartbeat_accepted", "timeout_returned"}:
+        if result != "heartbeat_accepted":
             raise ValueError("acceptance result is invalid")
         with self._state_lock:
             context = self._acceptance_transaction
@@ -262,6 +381,7 @@ class DisplayController:
                     or context["generation"] != generation):
                 return False
             context[result] = True
+            context["publisher"]._observe("heartbeat_accepted", context["event_authority"])
             return True
 
     def mark_acceptance_foreign_rejection(self, owner, *, generation):
@@ -271,6 +391,7 @@ class DisplayController:
                     or context["owner"] == owner):
                 return False
             context["foreign_rejected"] = True
+            context["publisher"]._observe("foreign_rejected", context["event_authority"])
             return True
 
     def acceptance_transaction_status(self, owner, *, generation):
@@ -319,18 +440,59 @@ class DisplayController:
 
     def _expire_device_draft(self, lease):
         with self._state_lock:
+            acceptance = self._acceptance_transaction
             if (
-                self._device_draft_pending is not None
-                and self._device_draft_pending[0] is lease
+                acceptance is not None
+                and acceptance["owner"] == lease.request.owner
+                and acceptance["generation"] == lease.request.generation
+                and lease.expiry_cause is PreviewExpiryCause.CONTENT
+                and acceptance["publisher"].state == acceptance["publisher"].DRAFT_PUBLISHED
             ):
+                acceptance["timeout_returned"] = True
+                acceptance["inactive_probe_pending"] = True
+                acceptance["publisher"]._observe(
+                    "timeout_returned", acceptance["event_authority"],
+                )
+            pending = self._device_draft_pending
+            if pending is not None and pending[0].request is lease.request:
                 self._device_draft_pending = None
-            if self._device_draft_active_lease is lease:
+            active = self._device_draft_active_lease
+            if active is not None and active.request is lease.request:
                 stop_event = self._device_draft_stop
                 if stop_event is not None:
                     stop_event.set()
         with self._display_lock:
             pass
         self._reload_requested.set()
+
+    def _acceptance_inactive_probe(self):
+        with self._state_lock:
+            context = self._acceptance_transaction
+            if (
+                context is None
+                or not context["inactive_probe_pending"]
+                or not all(context[name] for name in (
+                    "foreign_rejected", "heartbeat_accepted", "timeout_returned",
+                ))
+            ):
+                return None
+            return context
+
+    def _claim_acceptance_inactive_probe(self, context):
+        with self._state_lock:
+            if (
+                self._acceptance_transaction is not context
+                or not context["inactive_probe_pending"]
+            ):
+                return False
+            context["inactive_probe_pending"] = False
+            context["inactive_sleep_executing"] = True
+            return True
+
+    def _finish_acceptance_inactive_probe(self, context):
+        with self._state_lock:
+            if self._acceptance_transaction is context:
+                context["inactive_sleep_executing"] = False
 
     def cancel_device_draft(self, owner, *, generation):
         lease = self.device_preview_manager.cancel(
@@ -371,11 +533,28 @@ class DisplayController:
                 guard_installed = hasattr(self.matrix, "set_publication_guard")
                 if guard_installed:
                     self.matrix.set_publication_guard(guard)
+                acceptance_context = None
                 try:
                     if not guard():
                         return False
+                    with self._state_lock:
+                        context = self._acceptance_transaction
+                        if (
+                            context is not None
+                            and context["owner"] == request.owner
+                            and context["generation"] == request.generation
+                            and context["publisher"].state == context["publisher"].INIT
+                        ):
+                            context["draft_executing"] = True
+                            context["draft_execution_lease"] = lease
+                            acceptance_context = context
                     return bool(renderer(self.matrix, request, stop_event=stop_event))
                 finally:
+                    if acceptance_context is not None:
+                        with self._state_lock:
+                            if self._acceptance_transaction is acceptance_context:
+                                acceptance_context["draft_executing"] = False
+                                acceptance_context["draft_execution_lease"] = None
                     if guard_installed:
                         self.matrix.set_publication_guard(None)
         except Exception as exc:
@@ -771,13 +950,34 @@ class DisplayController:
             if name in {"openweather_overview", "openweather_forecast"}:
                 api_key = self._openweather_secrets.get() if self._openweather_secrets else None
                 options["api_key"] = api_key
-                options["prepared"] = module.prepare(
-                    config,
-                    stop_event=stop_event,
-                    api_key=api_key,
-                )
+                if not api_key:
+                    transported = {"error": "KEY NOT SET", "cancelled": False}
+                else:
+                    provider_config = copy.deepcopy(config)
+                    provider_config["_openweather_provider_module"] = name
+                    try:
+                        transported = self._openweather_provider.prepare(
+                            _openweather_provider_child,
+                            settings=provider_config,
+                            credentials=api_key,
+                            cancel_event=stop_event,
+                            request_deadline=OPENWEATHER_PREPARATION_DEADLINE_SECONDS,
+                        )
+                    except PreviewProviderCancelled:
+                        return False
+                    except PreviewProviderTimeout:
+                        transported = {
+                            "error": "OpenWeather request timed out",
+                            "cancelled": False,
+                        }
+                    except (PreviewProviderCapacityError, PreviewProviderUnavailable):
+                        transported = {
+                            "error": "OpenWeather unavailable",
+                            "cancelled": False,
+                        }
                 if stop_event.is_set():
                     return False
+                options["prepared"] = _prepared_openweather(name, transported)
             with self._display_lock:
                 return module.run(
                     self.matrix,
@@ -847,7 +1047,8 @@ class DisplayController:
                 self._mark_scheduler_healthy()
                 continue
 
-            active = self._is_active(config)
+            acceptance_inactive = self._acceptance_inactive_probe()
+            active = False if acceptance_inactive is not None else self._is_active(config)
             brightness = (
                 config["display"]["day_brightness"]
                 if active
@@ -862,7 +1063,16 @@ class DisplayController:
                     continue
                 self.matrix.set_brightness(brightness)
             if not active:
-                self._execute("sleep", config, invocation_default_duration("sleep"))
+                if (
+                    acceptance_inactive is not None
+                    and not self._claim_acceptance_inactive_probe(acceptance_inactive)
+                ):
+                    continue
+                try:
+                    self._execute("sleep", config, invocation_default_duration("sleep"))
+                finally:
+                    if acceptance_inactive is not None:
+                        self._finish_acceptance_inactive_probe(acceptance_inactive)
                 self._mark_scheduler_healthy()
                 continue
 

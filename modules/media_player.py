@@ -2,19 +2,146 @@
 
 from pathlib import Path
 import math
+import sys
 import threading
 import time
 
 from PIL import Image, ImageSequence
 
 
+_PILLOW_WORK_SLOTS = threading.BoundedSemaphore(4)
+
+
+class PillowWorkCancelled(Exception):
+    """Internal control flow for cancelled or expired Pillow work."""
+
+
+def _close_media_value(value):
+    close = getattr(value, "close", None)
+    if callable(close):
+        close()
+
+
+def _close_media_preserving_active_error(value, label):
+    active_error = sys.exception()
+    try:
+        _close_media_value(value)
+    except BaseException:
+        if active_error is None:
+            raise
+        try:
+            active_error.add_note(f"suppressed {label} cleanup failure")
+        except BaseException:
+            pass
+
+
+def _interruptible_pillow(
+    work, stop_event, deadline, monotonic, *, abandoned_owner=None,
+    close_result=_close_media_value,
+):
+    """Transfer a bounded Pillow result or abandon it for worker cleanup."""
+    def cancelled():
+        return ((stop_event is not None and stop_event.is_set()) or
+                (deadline is not None and monotonic() >= deadline))
+
+    while not _PILLOW_WORK_SLOTS.acquire(timeout=0.01):
+        if cancelled():
+            _close_media_value(abandoned_owner)
+            raise PillowWorkCancelled()
+    if cancelled():
+        _PILLOW_WORK_SLOTS.release()
+        _close_media_value(abandoned_owner)
+        raise PillowWorkCancelled()
+
+    done = threading.Event()
+    ownership_lock = threading.Lock()
+    state = {"abandoned": False, "outcome": None}
+
+    def cleanup(result, owner):
+        try:
+            if result is not None:
+                close_result(result)
+        finally:
+            if owner is not None:
+                _close_media_preserving_active_error(owner, "Pillow owner")
+
+    def worker():
+        result_to_close = None
+        owner_to_close = None
+        try:
+            try:
+                outcome = (True, work())
+            except BaseException as error:
+                outcome = (False, error)
+            with ownership_lock:
+                if state["abandoned"]:
+                    if outcome[0]:
+                        result_to_close = outcome[1]
+                    owner_to_close = abandoned_owner
+                else:
+                    state["outcome"] = outcome
+            cleanup(result_to_close, owner_to_close)
+        finally:
+            done.set()
+            _PILLOW_WORK_SLOTS.release()
+
+    thread = threading.Thread(
+        target=worker, name="matrix-pillow", daemon=True,
+    )
+    try:
+        thread.start()
+    except BaseException:
+        _PILLOW_WORK_SLOTS.release()
+        raise
+
+    def abandon():
+        result_to_close = None
+        owner_to_close = None
+        with ownership_lock:
+            state["abandoned"] = True
+            outcome = state["outcome"]
+            state["outcome"] = None
+            if outcome is not None:
+                owner_to_close = abandoned_owner
+                if outcome[0]:
+                    result_to_close = outcome[1]
+        cleanup(result_to_close, owner_to_close)
+        raise PillowWorkCancelled()
+
+    while not done.wait(0.01):
+        if cancelled():
+            abandon()
+    if cancelled():
+        abandon()
+    with ownership_lock:
+        outcome = state["outcome"]
+        state["outcome"] = None
+    succeeded, value = outcome
+    if not succeeded:
+        raise value
+    return value
+
+
+class _GifSource:
+    def __init__(self, gif):
+        self.gif = gif
+        self._closed = False
+
+    def close(self):
+        if not self._closed:
+            self._closed = True
+            self.gif.close()
+
+
 def gif_media_frames(
     path, loops=1, playback_rate=1.0, stop_event=None, max_duration=None,
-    monotonic=None, image_open=None, image_iterator=None,
+    monotonic=None, image_open=None, image_iterator=None, frame_copy=None,
+    *, bounded_pillow=True,
 ):
     """Yield the finite GIF timeline shared by physical and preview playback."""
     image_open = image_open or Image.open
     image_iterator = image_iterator or ImageSequence.Iterator
+    frame_copy = frame_copy or (lambda frame: frame.copy())
     if (
         isinstance(playback_rate, bool)
         or not isinstance(playback_rate, (int, float))
@@ -24,33 +151,110 @@ def gif_media_frames(
         raise ValueError("GIF playback rate must be between 0.25 and 4.0")
     playback_rate = float(playback_rate)
     started = monotonic() if monotonic is not None else 0.0
+    deadline = (
+        started + max_duration
+        if monotonic is not None and max_duration is not None else None
+    )
+    playback_started = None
+    preparation_elapsed = 0.0
     elapsed_delays = 0.0
-    gif = image_open(path)
-    completed = 0
+
+    def cancelled():
+        return ((stop_event is not None and stop_event.is_set()) or
+                (deadline is not None and monotonic() >= deadline))
+
+    def run_pillow(work, *, owner=None, close_result=_close_media_value):
+        if bounded_pillow:
+            return _interruptible_pillow(
+                work, stop_event, deadline, monotonic or time.monotonic,
+                abandoned_owner=owner, close_result=close_result,
+            )
+        if cancelled():
+            _close_media_value(owner)
+            raise PillowWorkCancelled()
+        result = work()
+        if cancelled():
+            try:
+                close_result(result)
+            finally:
+                _close_media_preserving_active_error(owner, "Pillow owner")
+            raise PillowWorkCancelled()
+        return result
+
+    source = None
     try:
+        source = run_pillow(lambda: _GifSource(image_open(path)))
+        completed = 0
         while loops == 0 or completed < loops:
             rendered_frame = False
-            for frame in image_iterator(gif):
-                rendered_frame = True
+            iterator = None
+            while True:
                 if stop_event is not None and stop_event.is_set():
                     return
                 elapsed = elapsed_delays
                 if monotonic is not None:
-                    elapsed = max(elapsed, monotonic() - started)
+                    now = monotonic()
+                    if playback_started is None:
+                        playback_started = now
+                        preparation_elapsed = max(0.0, now - started)
+                    elapsed = preparation_elapsed + max(
+                        elapsed_delays, now - playback_started,
+                    )
                 if max_duration is not None and elapsed >= max_duration:
                     return
+
+                owned_source = source
+                frame_state = {"frame": None}
+
+                def copy_next_frame():
+                    nonlocal iterator
+                    if iterator is None:
+                        iterator = iter(image_iterator(owned_source.gif))
+                    frame = next(iterator)
+                    frame_state["frame"] = frame
+                    return frame_copy(frame)
+
+                def close_abandoned_candidate(candidate):
+                    if candidate is not frame_state["frame"]:
+                        _close_media_value(candidate)
+
+                try:
+                    candidate = run_pillow(
+                        copy_next_frame, owner=owned_source,
+                        close_result=close_abandoned_candidate,
+                    )
+                except StopIteration:
+                    break
+                except PillowWorkCancelled:
+                    source = None
+                    return
+                rendered_frame = True
+                if monotonic is not None:
+                    now = monotonic()
+                    elapsed = preparation_elapsed + max(
+                        elapsed_delays, now - playback_started,
+                    )
+                if max_duration is not None and elapsed >= max_duration:
+                    _close_media_value(candidate)
+                    return
                 delay = max(
-                    0.01, frame.info.get("duration", 100) / 1000.0 / playback_rate
+                    0.01,
+                    frame_state["frame"].info.get("duration", 100)
+                    / 1000.0 / playback_rate,
                 )
                 if max_duration is not None:
                     delay = min(delay, max_duration - elapsed)
-                yield frame.copy(), delay
+                yield candidate, delay
                 elapsed_delays += delay
             if not rendered_frame:
                 return
             completed += 1
+    except PillowWorkCancelled:
+        source = None
+        return
     finally:
-        gif.close()
+        if source is not None:
+            _close_media_preserving_active_error(source, "GIF source")
 
 
 def video_media_frames(
@@ -64,6 +268,8 @@ def video_media_frames(
     elapsed_delays = 0.0
     completed = 0
     while loops == 0 or completed < loops:
+        if stop_event is not None and stop_event.is_set():
+            return
         decoded_frame = False
         decoder = iter(frame_decoder())
         try:
@@ -91,6 +297,8 @@ def video_media_frames(
 
 
 def play_media(matrix, filename, duration, stop_event=None, settings=None):
+    if stop_event is not None and stop_event.is_set():
+        return False
     geometry = {}
     if settings:
         geometry = {
@@ -128,7 +336,7 @@ def play_media(matrix, filename, duration, stop_event=None, settings=None):
     frame_iterator = static_media_frames(
         filename, duration, settings,
         render=lambda frame_filename, frame_geometry: matrix.show_image(
-            frame_filename, delay=None, **frame_geometry,
+            frame_filename, delay=None, stop_event=stop_event, **frame_geometry,
         ),
         monotonic=time.monotonic,
     )

@@ -494,6 +494,61 @@ try{
         self.assertNotIn(first_key, cache_keys)
         self.assertNotIn(second_key, cache_keys)
 
+    def test_openweather_secret_durability_uncertainty_rotates_generation_and_invalidates_cache(self):
+        self.pair_browser()
+        first_key = "first_key_material_123456"
+        second_key = "second_key_material_654321"
+        self.openweather_secrets.set(first_key)
+        settings = self.store.get()["openweather_overview"]
+        payload = {
+            "base_revision": self.store.get()["revision"],
+            "settings": settings,
+            "weather": self.store.get()["weather"],
+        }
+        plan = {
+            "frames_per_loop": 100,
+            "loops": settings["scroll_loops"],
+            "milliseconds": 5000,
+            "display": "5.0 s",
+        }
+
+        with patch("modules.openweather_overview.prepare_ticker_plan", return_value=plan) as prepare:
+            initial = self.paired_request(
+                "POST", "/api/scroll-timing/openweather_overview", json=payload
+            )
+            self.assertEqual(initial.status_code, 200, initial.get_data(as_text=True))
+            self.assertEqual(prepare.call_count, 1)
+            self.assertTrue(self.scroll_timing_cache._entries)
+
+            with patch("secret_store.os.fsync", side_effect=[None, OSError("fsync failed")]):
+                replaced = self.paired_request(
+                    "PUT", "/api/secrets/openweather", json={"api_key": second_key}
+                )
+            self.assertEqual(replaced.status_code, 503)
+            self.assertTrue(replaced.get_json()["configured"])
+            self.assertEqual(self.openweather_secrets.get(), second_key)
+            self.assertFalse(self.scroll_timing_cache._entries)
+
+            after_replace = self.paired_request(
+                "POST", "/api/scroll-timing/openweather_overview", json=payload
+            )
+            self.assertEqual(after_replace.status_code, 200, after_replace.get_data(as_text=True))
+            self.assertEqual(prepare.call_count, 2)
+            self.assertTrue(self.scroll_timing_cache._entries)
+
+            with patch("secret_store.os.fsync", side_effect=OSError("fsync failed")):
+                cleared = self.paired_request("DELETE", "/api/secrets/openweather")
+            self.assertEqual(cleared.status_code, 503)
+            self.assertFalse(cleared.get_json()["configured"])
+            self.assertIsNone(self.openweather_secrets.get())
+            self.assertFalse(self.scroll_timing_cache._entries)
+
+            after_clear = self.paired_request(
+                "POST", "/api/scroll-timing/openweather_overview", json=payload
+            )
+            self.assertEqual(after_clear.status_code, 200, after_clear.get_data(as_text=True))
+            self.assertEqual(prepare.call_count, 3)
+
     def test_dashboard_exposes_every_installed_font_to_all_font_editors(self):
         self.pair_browser()
 
@@ -589,6 +644,714 @@ try{
                 self.assertLessEqual(scroll_width, child_width + 1, report)
                 self.assertLessEqual(scroll_height, child_height + 1, report)
             self.assertLessEqual(layout["overflow"], 1, report)
+
+    def test_dashboard_exposes_non_persistent_device_preview_controls(self):
+        self.pair_browser()
+
+        body = self.client.get("/").get_data(as_text=True)
+
+        preview = re.search(r'<article class="card preview-card">(.*?)</article>', body, re.DOTALL)
+        self.assertIsNotNone(preview)
+        markup = preview.group(1)
+        self.assertIn('id="device-preview-enabled"', markup)
+        self.assertIn('type="checkbox"', markup)
+        self.assertNotIn('id="device-preview-enabled" checked', markup)
+        self.assertIn('Preview edits on device', markup)
+        self.assertIn('id="device-preview-timeout"', markup)
+        self.assertIn('value="60"', markup)
+        self.assertIn('min="5"', markup)
+        self.assertIn('max="3600"', markup)
+        self.assertIn('id="stop-device-preview"', markup)
+        self.assertIn('Stop device preview', markup)
+        self.assertIn('id="device-preview-status"', markup)
+        self.assertIn('aria-live="polite"', markup)
+        self.assertNotRegex(
+            re.search(r"function configBody\(\).*?\n", body).group(0),
+            r"device-preview|device_preview",
+        )
+
+    def test_dashboard_device_preview_client_uses_transient_lifecycle_contract(self):
+        self.pair_browser()
+
+        body = self.client.get("/").get_data(as_text=True)
+
+        for fragment in (
+            "function scheduleDevicePreview(delay)",
+            "function startDevicePreview()",
+            "function stopDevicePreview",
+            "'/api/device-preview/'",
+            "'/api/device-preview/heartbeat'",
+            "'/api/device-preview/cancel'",
+            "timeout_seconds",
+            "selected_lava_palette",
+            "keepalive:true",
+            "devicePreviewDelay(event)",
+            "scheduleDevicePreview(delay??150)",
+            "cancelDevicePreviewForSave",
+            "pagehide",
+        ):
+            self.assertIn(fragment, body)
+        self.assertRegex(
+            body,
+            r"function devicePreviewDelay\(event\).*?\?500:150",
+        )
+
+    def test_dashboard_device_preview_closes_lifecycle_and_mutation_races(self):
+        self.pair_browser()
+
+        body = self.client.get("/").get_data(as_text=True)
+
+        for fragment in (
+            "devicePreviewRequestPromise",
+            "cancelDevicePreviewGeneration",
+            "await waitForDevicePreviewRequest(deadline)",
+            "generation!==devicePreviewActiveGeneration",
+            "Malformed device preview response",
+            "globalThis.publishDeviceDraftMutation?.('announcement_board'",
+            "globalThis.publishDeviceDraftMutation?.(module",
+            "globalThis.publishDeviceDraftMutation?.('clock_lava'",
+            "globalThis.publishDeviceDraftMutation?.(id",
+            "globalThis.devicePreviewToggle.disabled=false",
+        ):
+            self.assertIn(fragment, body)
+        self.assertNotRegex(
+            body,
+            r"function setPreviewMode\(mode\).*?scheduleDevicePreview\(0\)",
+        )
+
+    @unittest.skipUnless(shutil.which("node"), "Node.js is required")
+    def test_dashboard_device_preview_executes_serialized_cancel_lifecycle(self):
+        source = (Path(__file__).parents[1] / "app" / "templates" / "dashboard.html").read_text()
+        start = source.index("let devicePreviewEnabled=")
+        end = source.index("\nfunction editPreviewCurrent", start)
+        lifecycle = source[start:end]
+        harness = r'''
+const vm=require('node:vm');
+const listeners={},calls=[],pending=[];let heartbeatDeferred=false,heartbeatWait=null;
+const control=extra=>Object.assign({addEventListener(name,handler){this.listeners??={};this.listeners[name]=handler}},extra);
+const toggle=control({checked:false,disabled:false}),timeout=control({value:'60',focus(){}}),stop=control({disabled:true}),status={textContent:'',dataset:{}};
+const elements={'#device-preview-enabled':toggle,'#device-preview-timeout':timeout,'#stop-device-preview':stop,'#device-preview-status':status};
+const context={console,AbortController,Date,Number,Promise,Set,Math,encodeURIComponent,clearTimeout,clearInterval,setTimeout,setInterval,
+ matrixSyncStopped:false,matrixEditorsReady:true,previewModule:'weather',previewInstance:'a'.repeat(32),PAIRED_ACTION_SIGNAL:'1',
+ configBody:()=>({device:{name:'draft'}}),selectedLavaPaletteDescriptor:()=>null,selectEditPreviewModule(){},selectEditedPreviewModule(){},
+ document:{querySelector:s=>elements[s],addEventListener(n,h){listeners[n]=h}},window:{addEventListener(n,h){listeners[n]=h}},
+ api:async(path,options={})=>{const body=options.body?JSON.parse(options.body):null;calls.push({path,body});if(path.startsWith('/api/device-preview/')&&!path.endsWith('/cancel')&&!path.endsWith('/heartbeat'))return new Promise(resolve=>pending.push({resolve,body}));if(path==='/api/device-preview/cancel')return {cancelled:true};if(path==='/api/device-preview/heartbeat'){if(heartbeatDeferred)return new Promise((resolve,reject)=>{heartbeatWait={resolve,reject,body}});return {heartbeat_after_seconds:60}}throw new Error('unexpected '+path)},
+ fetch:async()=>({ok:true})};
+vm.createContext(context);vm.runInContext(process.argv[1],context,{filename:'dashboard-device-preview.js'});
+(async()=>{
+ toggle.checked=true;toggle.listeners.change();await new Promise(r=>setTimeout(r,5));
+ context.startDevicePreview();
+ if(calls.filter(c=>c.path==='/api/device-preview/weather').length!==1)throw new Error('render requests were concurrent');
+ const stopping=context.stopDevicePreview();pending.shift().resolve({generation:1,expires_in:60,heartbeat_after_seconds:60});await stopping;
+ const firstCancels=calls.filter(c=>c.path==='/api/device-preview/cancel'&&c.body.generation===1);
+ if(firstCancels.length!==1||status.dataset.state!=='off')throw new Error('pending generation was not cancelled exactly once');
+ toggle.checked=true;toggle.listeners.change();await new Promise(r=>setTimeout(r,5));pending.shift().resolve({generation:999,expires_in:60});await new Promise(r=>setTimeout(r,10));
+ const secondCancels=calls.filter(c=>c.path==='/api/device-preview/cancel'&&c.body.generation===2);
+ if(toggle.checked||status.dataset.state!=='error'||secondCancels.length!==1)throw new Error('malformed success did not fail closed');
+ toggle.checked=true;toggle.listeners.change();await new Promise(r=>setTimeout(r,5));pending.shift().resolve({generation:3,expires_in:60,heartbeat_after_seconds:1});await new Promise(r=>setTimeout(r,1100));
+ const thirdHeartbeats=calls.filter(c=>c.path==='/api/device-preview/heartbeat'&&c.body.generation===3),thirdCancels=calls.filter(c=>c.path==='/api/device-preview/cancel'&&c.body.generation===3);
+ if(thirdHeartbeats.length!==1||thirdCancels.length!==1||toggle.checked||status.dataset.state!=='error')throw new Error('malformed heartbeat did not terminate exactly once');
+ heartbeatDeferred=true;toggle.checked=true;toggle.listeners.change();await new Promise(r=>setTimeout(r,5));pending.shift().resolve({generation:4,expires_in:60,heartbeat_after_seconds:1});await new Promise(r=>setTimeout(r,1050));
+ if(!heartbeatWait||heartbeatWait.body.generation!==4)throw new Error('older heartbeat did not enter flight');
+ context.startDevicePreview();await new Promise(r=>setTimeout(r,5));pending.shift().resolve({generation:5,expires_in:60,heartbeat_after_seconds:60});await new Promise(r=>setTimeout(r,10));heartbeatWait.reject(new Error('old heartbeat failed'));await new Promise(r=>setTimeout(r,10));
+ if(!toggle.checked||status.dataset.state!=='active'||calls.some(c=>c.path==='/api/device-preview/cancel'&&(c.body.generation===4||c.body.generation===5)))throw new Error('older heartbeat failure terminated newer generation');
+ heartbeatDeferred=false;await context.stopDevicePreview();
+ console.log('DEVICE_PREVIEW_SERIALIZED_CANCEL_PASS');
+})().catch(error=>{console.error(error);process.exit(1)});
+'''
+        result = subprocess.run(
+            [shutil.which("node"), "-e", harness, lifecycle],
+            text=True, capture_output=True, check=False,
+            cwd=Path(__file__).parents[1],
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("DEVICE_PREVIEW_SERIALIZED_CANCEL_PASS", result.stdout)
+
+    @unittest.skipUnless(shutil.which("node"), "Node.js is required")
+    def test_programmatic_mutations_publish_exact_device_preview_modules(self):
+        source = (Path(__file__).parents[1] / "app" / "templates" / "dashboard.html").read_text()
+        reset = source[source.index("function resetBuiltInModule"):source.index("\nasync function toggleModuleEditor")]
+        palettes = source[source.index("function addCustomLavaPalette"):source.index("\nfor(const input of document.querySelectorAll('.lava-palette')")]
+        customs = source[source.index("function addCustomModule"):source.index("\nfunction updateStatus")]
+        harness = r'''
+const publications=[],playlistAdds=[];
+globalThis.publishDeviceDraftMutation=(module,delay)=>publications.push({module,delay});
+const previewSelect={value:'clock',options:[{value:'clock'}]};
+globalThis.document={querySelector(selector){if(selector==='#playlist')return{append:item=>playlistAdds.push(item)};if(selector==='[data-palette-group="custom"]')return{open:false};if(selector==='#preview-select')return previewSelect;throw new Error('unexpected selector '+selector)},querySelectorAll(){return[]}};
+globalThis.setMessage=()=>{};globalThis.markMatrixDirty=()=>{};globalThis.renderBuiltInEditor=()=>{};globalThis.renderCustomLavaPalettes=()=>{};globalThis.renderCustomModules=()=>{};
+globalThis.automaticWeatherModules=new Set();globalThis.builtInDefaults={clock:{format:'24h'}};globalThis.builtInSettings={clock:{format:'12h'}};
+globalThis.customLavaPalettes=[];globalThis.legacyCustomLavaColours=['#000000','#111111','#222222'];globalThis.editPreviewLavaPalette=null;globalThis.previewMode='live';globalThis.previewModule='clock';
+globalThis.customLavaPalettesFromEditor=()=>structuredClone(customLavaPalettes);globalThis.confirm=()=>true;globalThis.scheduleEditPreview=()=>{};
+globalThis.matrixEditorsReady=true;globalThis.customModules=[];globalThis.customName=id=>customModules.find(item=>item.id===id)?.name||id;globalThis.customModulesFromEditor=()=>structuredClone(customModules);globalThis.createPlaylistRow=item=>item;globalThis.selectEditPreviewSource=id=>{previewModule=id};
+'''+reset+'\n'+palettes+'\n'+customs+r'''
+resetBuiltInModule('clock');
+customLavaPalettes=[];addCustomLavaPalette();
+customLavaPalettes=[{id:'p1',name:'P1',colours:['#000000','#111111','#222222'],enabled:true}];removeCustomLavaPalette('p1');
+customModules=[];if(!addCustomModule())throw new Error('custom add failed');const customId=customModules[0].id;
+customModules=[{id:customId,name:'Custom'}];previewModule=customId;previewSelect.value=customId;previewSelect.options=[{value:customId},{value:'clock'}];removeCustomModule(customId);
+const expected=[{module:'clock',delay:150},{module:'clock_lava',delay:150},{module:'clock_lava',delay:150},{module:customId,delay:150},{module:'clock',delay:150}];
+if(JSON.stringify(publications)!==JSON.stringify(expected))throw new Error('unexpected publications '+JSON.stringify(publications));
+console.log('PROGRAMMATIC_DEVICE_PREVIEW_PUBLICATION_PASS');
+'''
+        node = shutil.which("node")
+        assert node is not None
+        result = subprocess.run(
+            [node, "-e", harness], cwd=Path(__file__).parents[1],
+            text=True, capture_output=True, check=False,
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("PROGRAMMATIC_DEVICE_PREVIEW_PUBLICATION_PASS", result.stdout)
+
+    @unittest.skipUnless(shutil.which("node"), "Node.js is required")
+    def test_save_config_blocks_when_device_preview_cancellation_is_unconfirmed(self):
+        source = (Path(__file__).parents[1] / "app" / "templates" / "dashboard.html").read_text()
+        save = source[source.index("async function saveConfig"):source.index("\nfunction updateOpenWeatherSecretStatus")]
+        harness = r'''
+let matrixEditorsReady=true,matrixRecoveryPending=false,matrixLoadedRevision=7,highestNotifiedRemoteRevision=7,matrixSavedSnapshot='saved-baseline',matrixDirty=true;
+const messages=[],requests=[];
+globalThis.cancelDevicePreviewForSave=async()=>false;
+globalThis.validateAnnouncementBoard=()=>true;
+globalThis.configBody=()=>({device:{name:'unsaved draft'}});
+globalThis.matrixRevisionETag=()=> '"revision-7"';
+globalThis.dismissMatrixRevisionDialogThrough=()=>{throw new Error('revision dialog changed')};
+globalThis.setMessage=(text,error=false)=>messages.push({text,error});
+globalThis.api=async(path,options)=>{requests.push({path,options});return {revision:8}};
+'''+save+r'''
+(async()=>{const result=await saveConfig();
+ if(result.saved!==false||requests.length!==0)throw new Error('save crossed unconfirmed cancellation barrier');
+ if(matrixLoadedRevision!==7||matrixSavedSnapshot!=='saved-baseline'||matrixDirty!==true)throw new Error('save state changed');
+ if(!result.warning||!messages.at(-1)?.error||!messages.at(-1).text.includes('preview'))throw new Error('visible cancellation warning missing');
+ console.log('SAVE_DEVICE_PREVIEW_CANCEL_BARRIER_PASS');
+})().catch(error=>{console.error(error);process.exit(1)});
+'''
+        node = shutil.which("node")
+        assert node is not None
+        result = subprocess.run([node, "-e", harness], cwd=Path(__file__).parents[1], text=True, capture_output=True, check=False)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("SAVE_DEVICE_PREVIEW_CANCEL_BARRIER_PASS", result.stdout)
+
+    @unittest.skipUnless(shutil.which("node"), "Node.js is required")
+    def test_device_preview_rejects_invalid_start_heartbeat_cadences(self):
+        source = (Path(__file__).parents[1] / "app" / "templates" / "dashboard.html").read_text()
+        lifecycle = source[source.index("let devicePreviewEnabled="):source.index("\nfunction editPreviewCurrent")]
+        harness = r'''
+const vm=require('node:vm');
+const scenarios=[['missing',undefined],['null',null],['string','bogus'],['nan',NaN],['infinite',Infinity],['zero',0],['negative',-1],['excessive',3601]];
+(async()=>{for(const [name,cadence] of scenarios){const calls=[],listeners={};
+ const control=extra=>Object.assign({addEventListener(type,handler){this.listeners??={};this.listeners[type]=handler}},extra);
+ const toggle=control({checked:false}),timeout=control({value:'60',focus(){}}),stop=control({disabled:true}),status={textContent:'',dataset:{}};
+ const elements={'#device-preview-enabled':toggle,'#device-preview-timeout':timeout,'#stop-device-preview':stop,'#device-preview-status':status};
+ const timers=new Map();let timerId=0;
+ const context={console,AbortController,Date,Number,Promise,Set,Math,encodeURIComponent,
+  setTimeout(fn,delay){const id=++timerId;if(delay===0)queueMicrotask(fn);else timers.set(id,{fn,delay});return id},clearTimeout:id=>timers.delete(id),setInterval(){return ++timerId},clearInterval(){},
+  matrixSyncStopped:false,matrixEditorsReady:true,previewModule:'clock',previewInstance:'b'.repeat(32),PAIRED_ACTION_SIGNAL:'1',configBody:()=>({}),selectedLavaPaletteDescriptor:()=>null,selectEditPreviewModule(){},selectEditedPreviewModule(){},
+  document:{querySelector:s=>elements[s],addEventListener(){}},window:{addEventListener(){}},fetch:async()=>({ok:true}),
+  api:async(path,options={})=>{const body=options.body?JSON.parse(options.body):null;calls.push({path,body});if(path==='/api/device-preview/clock'){const result={generation:body.generation,expires_in:60,active_module:'clock'};if(name!=='missing')result.heartbeat_after_seconds=cadence;return result}if(path==='/api/device-preview/cancel')return {cancelled:true};if(path==='/api/device-preview/heartbeat')return {active:true,generation:body.generation,expires_in:55};throw new Error(path)}};
+ vm.createContext(context);vm.runInContext(process.argv[1],context);toggle.checked=true;toggle.listeners.change();await new Promise(resolve=>setImmediate(resolve));await new Promise(resolve=>setImmediate(resolve));
+ if(toggle.checked||status.dataset.state!=='error')throw new Error(name+' cadence remained active');
+ if(calls.filter(call=>call.path==='/api/device-preview/cancel').length!==1)throw new Error(name+' cadence was not cancelled exactly once');
+ if(calls.some(call=>call.path==='/api/device-preview/heartbeat'))throw new Error(name+' cadence emitted heartbeat');
+ }
+ console.log('DEVICE_PREVIEW_INVALID_HEARTBEAT_CADENCE_PASS');
+})().catch(error=>{console.error(error);process.exit(1)});
+'''
+        node = shutil.which("node")
+        assert node is not None
+        result = subprocess.run([node, "-e", harness, lifecycle], cwd=Path(__file__).parents[1], text=True, capture_output=True, check=False)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("DEVICE_PREVIEW_INVALID_HEARTBEAT_CADENCE_PASS", result.stdout)
+
+    @unittest.skipUnless(shutil.which("node"), "Node.js is required")
+    def test_device_preview_stop_is_bounded_when_start_never_settles(self):
+        source = (Path(__file__).parents[1] / "app" / "templates" / "dashboard.html").read_text()
+        lifecycle = source[source.index("let devicePreviewEnabled="):source.index("\nfunction editPreviewCurrent")]
+        harness = r'''
+const vm=require('node:vm'),listeners={},calls=[];
+const control=extra=>Object.assign({addEventListener(type,handler){this.listeners??={};this.listeners[type]=handler}},extra);
+const toggle=control({checked:false}),timeout=control({value:'60',focus(){}}),stop=control({disabled:true}),status={textContent:'',dataset:{}};
+const elements={'#device-preview-enabled':toggle,'#device-preview-timeout':timeout,'#stop-device-preview':stop,'#device-preview-status':status};
+const context={console,AbortController,Date,Number,Promise,Set,Map,Math,encodeURIComponent,clearInterval,setInterval:()=>1,
+ setTimeout(fn,delay){if(delay===0)queueMicrotask(fn);else queueMicrotask(fn);return 1},clearTimeout(){},matrixSyncStopped:false,matrixEditorsReady:true,previewModule:'clock',previewInstance:'c'.repeat(32),PAIRED_ACTION_SIGNAL:'1',configBody:()=>({}),selectedLavaPaletteDescriptor:()=>null,selectEditPreviewModule(){},selectEditedPreviewModule(){},
+ document:{querySelector:s=>elements[s],addEventListener(){}},window:{addEventListener(n,h){listeners[n]=h}},fetch:async()=>({ok:false}),
+ api:async(path,options={})=>{calls.push(path);if(path==='/api/device-preview/clock')return new Promise(()=>{});if(path==='/api/device-preview/cancel')throw new Error('not admitted');throw new Error(path)}};
+vm.createContext(context);vm.runInContext(process.argv[1],context);(async()=>{toggle.checked=true;toggle.listeners.change();await new Promise(resolve=>setImmediate(resolve));
+ const result=await Promise.race([context.stopDevicePreview(),new Promise(resolve=>setTimeout(()=>resolve('hung'),50))]);
+ if(result==='hung'||result!==false)throw new Error('stop did not reach bounded uncertainty');
+ if(status.dataset.state!=='error'||!status.textContent.includes('expire'))throw new Error('uncertain stop was not visible');
+ console.log('DEVICE_PREVIEW_BOUNDED_STOP_PASS');
+})().catch(error=>{console.error(error);process.exit(1)});
+'''
+        node = shutil.which("node")
+        assert node is not None
+        result = subprocess.run([node, "-e", harness, lifecycle], cwd=Path(__file__).parents[1], text=True, capture_output=True, check=False)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("DEVICE_PREVIEW_BOUNDED_STOP_PASS", result.stdout)
+
+    @unittest.skipUnless(shutil.which("node"), "Node.js is required")
+    def test_device_preview_late_admission_keeps_original_cleanup_deadline(self):
+        source = (Path(__file__).parents[1] / "app" / "templates" / "dashboard.html").read_text()
+        lifecycle = source[source.index("let devicePreviewEnabled="):source.index("\nfunction editPreviewCurrent")]
+        save = source[source.index("async function saveConfig"):source.index("\nfunction updateOpenWeatherSecretStatus")]
+        harness = r'''
+const vm=require('node:vm');let now=0,nextTimer=0,startResolve,cancelResolve,cancelSignal,startCalls=0,cancelCalls=0,persistence=0,startImmediate=false;
+const timers=new Map(),setTimeout=(fn,delay=0)=>{const id=++nextTimer;timers.set(id,{at:now+Math.max(0,Number(delay)||0),fn});return id},clearTimeout=id=>timers.delete(id);
+async function drain(){for(let i=0;i<8;i++)await Promise.resolve()}
+async function advance(target){while(true){const due=[...timers].filter(([,timer])=>timer.at<=target).sort((a,b)=>a[1].at-b[1].at||a[0]-b[0]);if(!due.length)break;const [id,timer]=due[0];timers.delete(id);now=timer.at;timer.fn();await drain()}now=target;await drain()}
+const control=extra=>Object.assign({addEventListener(type,handler){this.listeners??={};this.listeners[type]=handler}},extra),toggle=control({checked:false}),timeout=control({value:'60',focus(){}}),stop=control({disabled:true}),status={textContent:'',dataset:{}};
+const elements={'#device-preview-enabled':toggle,'#device-preview-timeout':timeout,'#stop-device-preview':stop,'#device-preview-status':status};
+const context={console,AbortController,Date:{now:()=>now},Number,Promise,Set,Map,Math,encodeURIComponent,setTimeout,clearTimeout,setInterval:()=>++nextTimer,clearInterval(){},matrixSyncStopped:false,matrixEditorsReady:true,matrixRecoveryPending:false,matrixLoadedRevision:7,highestNotifiedRemoteRevision:7,matrixSavedSnapshot:'saved',matrixDirty:true,previewModule:'clock',previewInstance:'1'.repeat(32),PAIRED_ACTION_SIGNAL:'1',configBody:()=>({name:'draft'}),selectedLavaPaletteDescriptor:()=>null,selectEditPreviewModule(){},selectEditedPreviewModule(){},validateAnnouncementBoard:()=>true,matrixRevisionETag:()=> '"revision-7"',dismissMatrixRevisionDialogThrough(){},setMessage(){},document:{querySelector:s=>elements[s],addEventListener(){}},window:{addEventListener(){}},fetch:async()=>({ok:true}),api:async(path,options={})=>{const body=options.body?JSON.parse(options.body):null;if(path==='/api/device-preview/clock'){startCalls++;if(startImmediate)return {generation:body.generation,expires_in:60,heartbeat_after_seconds:5};return new Promise(resolve=>{startResolve=()=>resolve({generation:body.generation,expires_in:60,heartbeat_after_seconds:5})})}if(path==='/api/device-preview/cancel'){cancelCalls++;cancelSignal=options.signal;return new Promise(resolve=>{cancelResolve=()=>resolve({cancelled:true})})}if(path==='/api/config'){persistence++;return {revision:8}}throw new Error(path)}};
+vm.createContext(context);vm.runInContext(process.argv[1]+'\n'+process.argv[2],context);(async()=>{const mode=process.argv[3];toggle.checked=true;toggle.listeners.change();await advance(0);let settled=false,value;const operation=mode==='replacement'?context.replaceDevicePreviewAfterSourceRemoval('clock'):mode==='save'?context.saveConfig():context.stopDevicePreview();operation.then(result=>{settled=true;value=result});await advance(2900);startResolve();await drain();await advance(3000);if(!settled)throw new Error(mode+' exceeded original deadline');if(mode==='save'){if(value.saved!==false||persistence!==0)throw new Error('save crossed deadline barrier')}else if(value!==false)throw new Error(mode+' did not resolve false');if(cancelCalls!==1||!cancelSignal?.aborted)throw new Error(mode+' cancellation was not aborted once');if(toggle.checked||status.dataset.state!=='error'||!status.textContent.includes('expire'))throw new Error(mode+' uncertainty state missing');startImmediate=true;toggle.checked=true;toggle.listeners.change();await advance(3000);if(startCalls!==2||status.dataset.state!=='active')throw new Error(mode+' later preview suppressed');cancelResolve();await drain();if(status.dataset.state!=='active')throw new Error(mode+' late completion overwrote newer state');console.log('DEVICE_PREVIEW_LATE_ADMISSION_DEADLINE_PASS '+mode)})().catch(error=>{console.error(error);process.exit(1)});
+'''
+        node = shutil.which("node")
+        assert node is not None
+        for mode in ("stop", "replacement", "save"):
+            with self.subTest(mode=mode):
+                result = subprocess.run([node, "-e", harness, lifecycle, save, mode], cwd=Path(__file__).parents[1], text=True, capture_output=True, check=False)
+                self.assertEqual(result.returncode, 0, result.stderr)
+                self.assertIn(f"DEVICE_PREVIEW_LATE_ADMISSION_DEADLINE_PASS {mode}", result.stdout)
+
+    @unittest.skipUnless(shutil.which("node"), "Node.js is required")
+    def test_device_preview_cancel_transport_uses_shared_deadline(self):
+        source = (Path(__file__).parents[1] / "app" / "templates" / "dashboard.html").read_text()
+        lifecycle = source[source.index("let devicePreviewEnabled="):source.index("\nfunction editPreviewCurrent")]
+        harness = r'''
+const vm=require('node:vm');let cancelSignal,cancelResolve,cancelCalls=0,startCalls=0;
+const control=extra=>Object.assign({addEventListener(type,handler){this.listeners??={};this.listeners[type]=handler}},extra);
+const toggle=control({checked:false}),timeout=control({value:'60',focus(){}}),stop=control({disabled:true}),status={textContent:'',dataset:{}};
+const elements={'#device-preview-enabled':toggle,'#device-preview-timeout':timeout,'#stop-device-preview':stop,'#device-preview-status':status};
+const context={console,AbortController,Date,Number,Promise,Set,Map,Math,encodeURIComponent,clearInterval,setInterval:()=>1,setTimeout,clearTimeout,matrixSyncStopped:false,matrixEditorsReady:true,previewModule:'clock',previewInstance:'f'.repeat(32),PAIRED_ACTION_SIGNAL:'1',configBody:()=>({}),selectedLavaPaletteDescriptor:()=>null,selectEditPreviewModule(){},selectEditedPreviewModule(){},document:{querySelector:s=>elements[s],addEventListener(){}},window:{addEventListener(){}},fetch:async()=>({ok:true}),api:async(path,options={})=>{const body=options.body?JSON.parse(options.body):null;if(path==='/api/device-preview/clock'){startCalls++;return {generation:body.generation,expires_in:60,heartbeat_after_seconds:5,active_module:'clock'}}if(path==='/api/device-preview/cancel'){cancelCalls++;cancelSignal=options.signal;return new Promise(resolve=>{cancelResolve=()=>resolve({cancelled:true})})}throw new Error(path)}};
+vm.createContext(context);vm.runInContext(process.argv[1],context);(async()=>{const mode=process.argv[2];toggle.checked=true;toggle.listeners.change();await new Promise(resolve=>setTimeout(resolve,5));let operation;if(mode==='replacement')operation=context.replaceDevicePreviewAfterSourceRemoval('clock');else if(mode==='save')operation=context.cancelDevicePreviewForSave();else operation=context.stopDevicePreview();const result=await Promise.race([operation,new Promise(resolve=>setTimeout(()=>resolve('hung'),3500))]);if(result!=='hung'&&result!==false)throw new Error('unexpected '+mode+' result '+result);if(result==='hung')throw new Error(mode+' cancel transport was unbounded');if(cancelCalls!==1)throw new Error('cancel call count '+cancelCalls);if(!cancelSignal?.aborted)throw new Error('timed-out cancel transport was not aborted');if(toggle.checked||status.dataset.state!=='error'||!status.textContent.includes('expire'))throw new Error('safe uncertainty state missing');toggle.checked=true;toggle.listeners.change();await new Promise(resolve=>setTimeout(resolve,5));if(startCalls!==2||status.dataset.state!=='active')throw new Error('later preview was suppressed');cancelResolve();await new Promise(resolve=>setImmediate(resolve));if(status.dataset.state!=='active')throw new Error('late cancellation overwrote newer state');console.log('DEVICE_PREVIEW_CANCEL_DEADLINE_PASS '+mode)})().catch(error=>{console.error(error);process.exit(1)});
+'''
+        node = shutil.which("node")
+        assert node is not None
+        for mode in ("stop", "replacement", "save"):
+            with self.subTest(mode=mode):
+                result = subprocess.run([node, "-e", harness, lifecycle, mode], cwd=Path(__file__).parents[1], text=True, capture_output=True, check=False)
+                self.assertEqual(result.returncode, 0, result.stderr)
+                self.assertIn(f"DEVICE_PREVIEW_CANCEL_DEADLINE_PASS {mode}", result.stdout)
+
+    @unittest.skipUnless(shutil.which("node"), "Node.js is required")
+    def test_device_preview_shares_inflight_cancellation_across_pagehide_and_start_completion(self):
+        source = (Path(__file__).parents[1] / "app" / "templates" / "dashboard.html").read_text()
+        lifecycle = source[source.index("let devicePreviewEnabled="):source.index("\nfunction editPreviewCurrent")]
+        harness = r'''
+const vm=require('node:vm'),listeners={};let startResolve,cancelFetchResolve,cancelCalls=0;
+const control=extra=>Object.assign({addEventListener(type,handler){this.listeners??={};this.listeners[type]=handler}},extra);
+const toggle=control({checked:false}),timeout=control({value:'60',focus(){}}),stop=control({disabled:true}),status={textContent:'',dataset:{}};
+const elements={'#device-preview-enabled':toggle,'#device-preview-timeout':timeout,'#stop-device-preview':stop,'#device-preview-status':status};
+const context={console,AbortController,Date,Number,Promise,Set,Map,Math,encodeURIComponent,setTimeout,clearTimeout,setInterval,clearInterval,matrixSyncStopped:false,matrixEditorsReady:true,previewModule:'clock',previewInstance:'d'.repeat(32),PAIRED_ACTION_SIGNAL:'1',configBody:()=>({}),selectedLavaPaletteDescriptor:()=>null,selectEditPreviewModule(){},selectEditedPreviewModule(){},
+ document:{querySelector:s=>elements[s],addEventListener(){}},window:{addEventListener(n,h){listeners[n]=h}},
+ fetch:async(path)=>{if(path==='/api/device-preview/cancel'){cancelCalls++;return new Promise(resolve=>{cancelFetchResolve=()=>resolve({ok:true})})}throw new Error(path)},
+ api:async(path,options={})=>{if(path==='/api/device-preview/clock')return new Promise(resolve=>{startResolve=resolve});if(path==='/api/device-preview/cancel'){cancelCalls++;return {cancelled:true}};throw new Error(path)}};
+vm.createContext(context);vm.runInContext(process.argv[1],context);(async()=>{toggle.checked=true;toggle.listeners.change();await new Promise(resolve=>setTimeout(resolve,5));if(typeof startResolve!=='function')throw new Error('start boundary not reached');listeners.pagehide();
+ startResolve({generation:1,expires_in:60,heartbeat_after_seconds:5,active_module:'clock'});await new Promise(resolve=>setImmediate(resolve));
+ if(cancelCalls!==1)throw new Error('overlapping cancellation count '+cancelCalls);
+ cancelFetchResolve();await new Promise(resolve=>setImmediate(resolve));console.log('DEVICE_PREVIEW_SHARED_CANCEL_PASS');
+})().catch(error=>{console.error(error);process.exit(1)});
+'''
+        node = shutil.which("node")
+        assert node is not None
+        result = subprocess.run([node, "-e", harness, lifecycle], cwd=Path(__file__).parents[1], text=True, capture_output=True, check=False)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("DEVICE_PREVIEW_SHARED_CANCEL_PASS", result.stdout)
+
+    @unittest.skipUnless(shutil.which("node"), "Node.js is required")
+    @unittest.skipUnless(
+        os.environ.get("MATRIX_CHROMIUM")
+        and Path(os.environ.get("MATRIX_CHROMIUM", "")).is_file()
+        and os.access(os.environ.get("MATRIX_CHROMIUM", ""), os.X_OK),
+        "MATRIX_CHROMIUM browser is required",
+    )
+    def test_preview_on_matrix_tracks_unsaved_editor_and_always_returns_to_saved_playback(self):
+        from flask import request
+        from device_preview import (
+            DevicePreviewAdmission, DevicePreviewHeartbeat, DevicePreviewLease,
+            PreviewAdmissionStatus, PreviewHeartbeatStatus,
+        )
+
+        self.pairing.verify.return_value = True
+        shutil.copytree(
+            Path(__file__).parents[1] / "resources" / "media" / "built-in",
+            self.media_dir / "built-in",
+        )
+        before_config = Path(self.store.path).read_bytes()
+        saved_name = self.store.get()["device"]["name"]
+        route_records = []
+        record_lock = threading.Lock()
+        active = {"lease": None}
+
+        @self.app.after_request
+        def record_device_preview_response(response):
+            if request.path.startswith("/api/device-preview"):
+                with record_lock:
+                    route_records.append({
+                        "method": request.method,
+                        "path": request.path,
+                        "action": request.headers.get("X-Matrix-Action"),
+                        "content_type": request.content_type,
+                        "status": response.status_code,
+                        "response": response.get_json(silent=True),
+                        "response_content_type": response.content_type,
+                    })
+            return response
+
+        def submit_device_draft(preview_request, *, renderer):
+            previous = active["lease"]
+            if previous is not None:
+                previous.request.cleanup()
+            now = time.monotonic()
+            lease = DevicePreviewLease(
+                request=preview_request,
+                content_deadline=now + preview_request.timeout_seconds,
+                connectivity_deadline=now + 15,
+                last_heartbeat_at=now,
+            )
+            active["lease"] = lease
+            return DevicePreviewAdmission(PreviewAdmissionStatus.ACCEPTED, lease)
+
+        def heartbeat_device_draft(owner, *, generation):
+            lease = active["lease"]
+            if lease is None or lease.owner != owner or lease.generation != generation:
+                return DevicePreviewHeartbeat(PreviewHeartbeatStatus.NOT_ACTIVE, None)
+            now = time.monotonic()
+            renewed = DevicePreviewLease(
+                request=lease.request,
+                content_deadline=lease.content_deadline,
+                connectivity_deadline=now + 15,
+                last_heartbeat_at=now,
+            )
+            active["lease"] = renewed
+            return DevicePreviewHeartbeat(PreviewHeartbeatStatus.ACCEPTED, renewed)
+
+        def cancel_device_draft(owner, *, generation):
+            lease = active["lease"]
+            if lease is None or lease.owner != owner or lease.generation != generation:
+                return False
+            active["lease"] = None
+            lease.request.cleanup()
+            return True
+
+        self.controller.submit_device_draft.side_effect = submit_device_draft
+        self.controller.heartbeat_device_draft.side_effect = heartbeat_device_draft
+        self.controller.cancel_device_draft.side_effect = cancel_device_draft
+        self.controller.status.return_value = {
+            "running": True, "current_module": "splash", "last_error": None,
+        }
+        frame_png = base64.b64decode(
+            "iVBORw0KGgoAAAANSUhEUgAAAEAAAAAgCAIAAAAt/+nTAAAAT0lEQVR4nO3PUQkAIBTAwBfOClawfwRD+HEIgwW4zdrn64YLGtCCBrSgAS1oQAsa0IIGtKABLWhACxrQgga0oAEtaEALGtCCBrSgAS147AIqPPhqwA8fegAAAABJRU5ErkJggg=="
+        )
+        self.controller.frame_png.side_effect = lambda: (io.BytesIO(frame_png), 1)
+
+        probe = r"""
+const debugPort=process.argv[1],appPort=process.argv[2],sleep=ms=>new Promise(resolve=>setTimeout(resolve,ms));let endpoint;
+for(let attempt=0;attempt<50;attempt++){try{endpoint=await fetch(`http://127.0.0.1:${debugPort}/json/new`,{method:'PUT'}).then(response=>response.json());break}catch(_){await sleep(100)}}
+if(!endpoint)throw Error('Chromium DevTools endpoint unavailable');
+const socket=new WebSocket(endpoint.webSocketDebuggerUrl),pending=new Map(),networkRequests=[];let id=0;
+socket.onmessage=event=>{const message=JSON.parse(event.data);if(message.method==='Network.requestWillBeSent'){const request=message.params.request,url=new URL(request.url);if(url.pathname.startsWith('/api/device-preview'))networkRequests.push({method:request.method,path:url.pathname,headers:request.headers,payload:request.postData?JSON.parse(request.postData):null})}if(message.id&&pending.has(message.id)){const operation=pending.get(message.id);pending.delete(message.id);message.error?operation.reject(Error(JSON.stringify(message.error))):operation.resolve(message.result)}};
+await new Promise((resolve,reject)=>{socket.onopen=resolve;socket.onerror=reject});
+const send=(method,params={})=>new Promise((resolve,reject)=>{const request=++id;pending.set(request,{resolve,reject});socket.send(JSON.stringify({id:request,method,params}))});
+const evaluate=async(expression,awaitPromise=false)=>{const result=await send('Runtime.evaluate',{expression,returnByValue:true,awaitPromise});if(result.exceptionDetails)throw Error(JSON.stringify(result.exceptionDetails));return result.result.value};
+const waitFor=async(expression,timeout=8000)=>{const deadline=Date.now()+timeout;while(Date.now()<deadline){try{const value=await evaluate(expression);if(value)return value}catch(_){}await sleep(25)}throw Error('timeout: '+expression)};
+const click=async selector=>{const point=await evaluate(`(()=>{const node=document.querySelector(${JSON.stringify(selector)});if(!node)throw Error('missing ${selector}');node.scrollIntoView({block:'center'});const rect=node.getBoundingClientRect();return{x:rect.left+rect.width/2,y:rect.top+rect.height/2}})()`);await send('Input.dispatchMouseEvent',{type:'mousePressed',x:point.x,y:point.y,button:'left',clickCount:1});await send('Input.dispatchMouseEvent',{type:'mouseReleased',x:point.x,y:point.y,button:'left',clickCount:1})};
+const countResources=suffix=>`performance.getEntriesByType('resource').filter(entry=>new URL(entry.name).pathname===${JSON.stringify(suffix)}).length`;
+try{
+ await send('Runtime.enable');await send('Page.enable');await send('Network.enable');await send('Emulation.setDeviceMetricsOverride',{width:390,height:844,deviceScaleFactor:1,mobile:true});
+ await send('Page.addScriptToEvaluateOnNewDocument',{source:`globalThis.__browserErrors=[];addEventListener('error',event=>__browserErrors.push(String(event.message)));addEventListener('unhandledrejection',event=>__browserErrors.push(String(event.reason)))`});
+ await send('Page.navigate',{url:`http://127.0.0.1:${appPort}/pair`});
+ await waitFor(`document.readyState==='complete'`);
+ await evaluate(`fetch('/pair',{method:'POST',headers:{'Content-Type':'application/x-www-form-urlencoded','X-Matrix-Action':'paired-request'},body:new URLSearchParams({device_name:'R5 Chromium closure',pin:'123456'})}).then(response=>response.ok)`,true);
+ await send('Page.navigate',{url:`http://127.0.0.1:${appPort}/`});
+ await waitFor(`document.readyState==='complete'&&!document.querySelector('#device-preview-enabled').disabled`);
+ const initial=await evaluate(`(()=>{const toggle=document.querySelector('#device-preview-enabled'),status=document.querySelector('#device-preview-status');return{origin:location.origin,checked:toggle.checked,status:status.textContent,state:status.dataset.state||'',mode:document.querySelector('input[name="preview-mode"]:checked').value}})()`);
+ await evaluate(`(()=>{const input=document.querySelector('#device-name');input.scrollIntoView({block:'center'});input.focus();input.select();return true})()`);
+ await send('Input.insertText',{text:'UNSAVED DEVICE DRAFT'});
+ await evaluate(`scrollTo(0,0);syncPreviewPopout()`);
+ await waitFor(`getComputedStyle(document.querySelector('.device-preview-controls')).display!=='none'`);
+ await click('.device-preview-opt-in');
+ await waitFor(countResources('/api/device-preview/splash')+`>=1`);
+ await waitFor(`document.querySelector('#device-preview-status').dataset.state==='active'`);
+ const first=await evaluate(`(()=>{const toggle=document.querySelector('#device-preview-enabled'),status=document.querySelector('#device-preview-status');return{checked:toggle.checked,state:status.dataset.state,text:status.textContent,mode:document.querySelector('input[name="preview-mode"]:checked').value}})()`);
+ await click('label[for="preview-mode-edit"]');
+ await waitFor(`document.querySelector('#preview-mode-edit').checked`);
+ const afterMode=await evaluate(`({checked:document.querySelector('#device-preview-enabled').checked,state:document.querySelector('#device-preview-status').dataset.state,mode:document.querySelector('input[name="preview-mode"]:checked').value,cancels:performance.getEntriesByType('resource').filter(entry=>new URL(entry.name).pathname==='/api/device-preview/cancel').length})`);
+ await evaluate(`(()=>{const input=document.querySelector('#device-name');input.scrollIntoView({block:'center'});input.focus();input.select();return true})()`);
+ await send('Input.insertText',{text:'STRICTLY NEWER UNSAVED DRAFT'});
+ const preservedBefore=await evaluate(`(()=>{const input=document.querySelector('#device-name');input.setSelectionRange(4,12);scrollBy(0,40);return{value:input.value,selection:[input.selectionStart,input.selectionEnd],scrollY,focused:document.activeElement===input}})()`);
+ await waitFor(countResources('/api/device-preview/splash')+`>=2`);
+ await waitFor(countResources('/api/device-preview/heartbeat')+`>=1`,8000);
+ const preservedAfter=await evaluate(`(()=>{const input=document.querySelector('#device-name');return{value:input.value,selection:[input.selectionStart,input.selectionEnd],scrollY,focused:document.activeElement===input,checked:document.querySelector('#device-preview-enabled').checked,state:document.querySelector('#device-preview-status').dataset.state,mode:document.querySelector('input[name="preview-mode"]:checked').value,starts:performance.getEntriesByType('resource').filter(entry=>new URL(entry.name).pathname==='/api/device-preview/splash').length,heartbeats:performance.getEntriesByType('resource').filter(entry=>new URL(entry.name).pathname==='/api/device-preview/heartbeat').length}})()`);
+ await evaluate(`scrollTo(0,0);syncPreviewPopout()`);
+ await waitFor(`getComputedStyle(document.querySelector('.device-preview-controls')).display!=='none'`);
+ await click('#stop-device-preview');
+ await waitFor(`!document.querySelector('#device-preview-enabled').checked&&document.querySelector('#device-preview-status').dataset.state==='off'`);
+ const stopped=await evaluate(`({checked:document.querySelector('#device-preview-enabled').checked,state:document.querySelector('#device-preview-status').dataset.state,text:document.querySelector('#device-preview-status').textContent,cancels:performance.getEntriesByType('resource').filter(entry=>new URL(entry.name).pathname==='/api/device-preview/cancel').length,errors:__browserErrors})`);
+ console.log(JSON.stringify({initial,first,afterMode,preservedBefore,preservedAfter,stopped,networkRequests}));
+}finally{socket.close()}
+"""
+        report = self.run_live_chromium_probe(probe, timeout=30)
+
+        self.assertTrue(report["initial"]["origin"].startswith("http://127.0.0.1:"), report)
+        self.assertEqual(report["initial"], {
+            **report["initial"], "checked": False,
+            "status": "Device preview is off.", "state": "", "mode": "live",
+        })
+        self.assertEqual(
+            (report["first"]["checked"], report["first"]["state"], report["first"]["mode"]),
+            (True, "active", "live"), report,
+        )
+        self.assertIn("unsaved draft", report["first"]["text"].lower())
+        self.assertEqual(report["afterMode"], {
+            "checked": True, "state": "active", "mode": "edit", "cancels": 0,
+        }, report)
+        self.assertEqual(report["preservedAfter"]["value"], "STRICTLY NEWER UNSAVED DRAFT", report)
+        self.assertEqual(
+            {key: report["preservedAfter"][key] for key in ("value", "selection", "scrollY", "focused")},
+            report["preservedBefore"], report,
+        )
+        self.assertTrue(report["preservedAfter"]["checked"], report)
+        self.assertEqual(report["preservedAfter"]["state"], "active", report)
+        self.assertEqual(report["preservedAfter"]["mode"], "edit", report)
+        self.assertEqual(report["preservedAfter"]["starts"], 2, report)
+        self.assertGreaterEqual(report["preservedAfter"]["heartbeats"], 1, report)
+        self.assertEqual(report["stopped"], {
+            "checked": False, "state": "off",
+            "text": "Device preview stopped; saved playback resumed.",
+            "cancels": 1, "errors": [],
+        }, report)
+
+        network = report["networkRequests"]
+        start_requests = [record for record in network if record["path"] == "/api/device-preview/splash"]
+        heartbeat_requests = [record for record in network if record["path"] == "/api/device-preview/heartbeat"]
+        cancel_requests = [record for record in network if record["path"] == "/api/device-preview/cancel"]
+        starts = [record for record in route_records if record["path"] == "/api/device-preview/splash"]
+        heartbeats = [record for record in route_records if record["path"] == "/api/device-preview/heartbeat"]
+        cancels = [record for record in route_records if record["path"] == "/api/device-preview/cancel"]
+        self.assertEqual((len(start_requests), len(starts)), (2, 2), (network, route_records))
+        self.assertGreaterEqual(len(heartbeat_requests), 1, network)
+        self.assertGreaterEqual(len(heartbeats), 1, route_records)
+        self.assertEqual((len(cancel_requests), len(cancels)), (1, 1), (network, route_records))
+        start_payloads = [record["payload"] for record in start_requests]
+        self.assertEqual([payload["generation"] for payload in start_payloads], [1, 2])
+        self.assertLess(start_payloads[0]["generation"], start_payloads[1]["generation"])
+        self.assertEqual(start_payloads[0]["config"]["device"]["name"], "UNSAVED DEVICE DRAFT")
+        self.assertEqual(start_payloads[1]["config"]["device"]["name"], "STRICTLY NEWER UNSAVED DRAFT")
+        self.assertNotEqual(start_payloads[1]["config"]["device"]["name"], saved_name)
+        control_requests = start_requests + heartbeat_requests + cancel_requests
+        preview_instances = {record["payload"]["preview_instance"] for record in control_requests}
+        self.assertEqual(len(preview_instances), 1, network)
+        self.assertRegex(preview_instances.pop(), r"^[0-9a-f]{32}$")
+        for record in control_requests:
+            headers = {key.lower(): value for key, value in record["headers"].items()}
+            self.assertEqual(record["method"], "POST", record)
+            self.assertEqual(headers.get("x-matrix-action"), "paired-request", record)
+            self.assertEqual(headers.get("content-type"), "application/json", record)
+        for record in starts + heartbeats + cancels:
+            self.assertEqual(record["method"], "POST", record)
+            self.assertEqual(record["action"], "paired-request", record)
+            self.assertEqual(record["content_type"], "application/json", record)
+            self.assertEqual(record["status"], 202, record)
+            self.assertTrue(record["response_content_type"].startswith("application/json"), record)
+        self.assertEqual([record["response"]["generation"] for record in starts], [1, 2])
+        self.assertTrue(all(record["response"]["active"] for record in heartbeats))
+        self.assertEqual(cancel_requests[0]["payload"]["generation"], 2)
+        self.assertEqual(cancels[0]["response"], {"cancelled": True})
+        self.assertEqual(Path(self.store.path).read_bytes(), before_config)
+        self.controller.render_device_draft.assert_not_called()
+        self.assertIsNone(active["lease"])
+
+    @unittest.skipUnless(shutil.which("node"), "Node.js is required")
+    def test_shipped_custom_canvas_mutations_dirty_and_replace_removed_device_source(self):
+        root = Path(__file__).parents[1]
+        canvas = (root / "app" / "static" / "custom_canvas.js").read_text()
+        dashboard = (root / "app" / "templates" / "dashboard.html").read_text()
+        remove_start = canvas.index("window.removeCustomModule = function removeCustomModuleAdvanced")
+        timer_callback = canvas.index("customModules.some(module => module.type === 'canvas'", remove_start)
+        remove_override = canvas[remove_start:canvas.rfind("\n", 0, timer_callback)]
+        removed_callback = dashboard[dashboard.index("window.matrixCustomCanvasDraftRemoved="):dashboard.index(";\nfunction customEditorForEvent") + 1]
+        harness = r'''
+let dirtyCalls=0,replacements=[],editSchedules=0,previewModule='custom_advanced',previewModulePinned=true,previewMode='edit';
+let customModules=[{id:'custom_advanced',name:'Advanced',type:'canvas',layers:[]}];
+const editorState=new Map(),select={value:'custom_advanced',options:[{value:'custom_advanced'},{value:'clock'}]};
+globalThis.window=globalThis;globalThis.confirm=()=>true;globalThis.customName=id=>'Advanced';globalThis.customModulesFromEditor=()=>structuredClone(customModules);globalThis.markMatrixDirty=()=>dirtyCalls++;globalThis.renderCustomModules=()=>{};globalThis.setMessage=()=>{};globalThis.cancelEditPreview=()=>{};globalThis.scheduleEditPreview=()=>editSchedules++;globalThis.syncLavaInspectionRadios=()=>{};globalThis.replaceDevicePreviewAfterSourceRemoval=module=>replacements.push(module);
+globalThis.document={querySelector:s=>s==='#preview-select'?select:{textContent:''},querySelectorAll:()=>[]};
+'''+removed_callback+'\n'+remove_override+r'''
+removeCustomModule('custom_advanced');
+if(dirtyCalls!==1)throw new Error('shipped override did not dirty exactly once: '+dirtyCalls);
+if(previewModule!=='clock'||select.value!=='clock')throw new Error('surviving fallback not selected');
+if(JSON.stringify(replacements)!==JSON.stringify(['clock']))throw new Error('fallback replacement count/payload '+JSON.stringify(replacements));
+if(editSchedules!==1)throw new Error('fallback Edit Preview schedule count '+editSchedules);
+console.log('SHIPPED_CUSTOM_CANVAS_REMOVAL_PASS');
+'''
+        node = shutil.which("node")
+        assert node is not None
+        result = subprocess.run([node, "-e", harness], cwd=root, text=True, capture_output=True, check=False)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("SHIPPED_CUSTOM_CANVAS_REMOVAL_PASS", result.stdout)
+        template_body = canvas[canvas.index("function applyTemplate"):canvas.index("window.canvasStarterExamples")]
+        convert_body = canvas[canvas.index("function convertToAdvanced"):canvas.index("function simpleModuleFromCard", canvas.index("function convertToAdvanced"))]
+        self.assertIn("markMatrixDirty", template_body)
+        self.assertIn("markMatrixDirty", convert_body)
+
+    @unittest.skipUnless(shutil.which("node"), "Node.js is required")
+    def test_shipped_custom_canvas_module_removal_stops_active_playback(self):
+        root = Path(__file__).parents[1]
+        source = (root / "app" / "static" / "custom_canvas.js").read_text()
+        state_and_disposal = source[
+            source.index("  const stateFor = module => {"):
+            source.index("\n\n  const editorCleanupObserver")
+        ]
+        advance = source[
+            source.index("  window.advanceCanvasPlaybackFrame ="):
+            source.index("\n\n  function playBrowserPreview")
+        ]
+        playback = source[
+            source.index("  function playBrowserPreview"):
+            source.index("\n\n  function captureTimelineViewState")
+        ]
+        remove_start = source.index("  window.removeCustomModule = function removeCustomModuleAdvanced")
+        timer_callback = source.index("customModules.some(module => module.type === 'canvas'", remove_start)
+        removal = source[remove_start:source.rfind("\n", 0, timer_callback)]
+        harness = r'''
+let nextTimer=0,draws=0;const timers=new Map();
+const setInterval=(callback,delay)=>{const id=++nextTimer;timers.set(id,{callback,delay});return id};
+const clearInterval=id=>timers.delete(id);
+let customModules=[{id:'canvas_active',name:'Active canvas',type:'canvas',frame_count:3,fps:10,playback:'loop',layers:[],overrides:[]}];
+const editorState=new Map();
+globalThis.window=globalThis;globalThis.CSS={escape:value=>value};globalThis.confirm=()=>true;
+globalThis.cancelTimelineDrag=()=>{};globalThis.disposeTimelineResize=()=>{};globalThis.refreshAdvanced=()=>{};
+globalThis.drawEditor=()=>draws++;globalThis.updateTimelineSelection=()=>{};
+globalThis.customName=()=> 'Active canvas';globalThis.customModulesFromEditor=()=>structuredClone(customModules);
+globalThis.renderCustomModules=()=>{};globalThis.setMessage=()=>{};globalThis.markMatrixDirty=()=>{};
+globalThis.matrixCustomCanvasDraftRemoved=()=>{};
+globalThis.document={querySelector:()=>({querySelector:()=>({})}),querySelectorAll:()=>[]};
+'''+state_and_disposal+'\n'+advance+'\n'+playback+'\n'+removal+r'''
+const module=customModules[0];const state=stateFor(module);const initialFrame=state.frame;
+playBrowserPreview(module);
+if(timers.size!==1||!state.playing)throw new Error('playback interval was not started');
+removeCustomModule('canvas_active');
+for(const timer of [...timers.values()])timer.callback();
+if(timers.size!==0)throw new Error('removed module retained playback interval');
+if(state.playing||state.timer!==null)throw new Error('removed module retained playback ownership');
+if(state.frame!==initialFrame)throw new Error('removed module playback callback still advanced');
+console.log('SHIPPED_CUSTOM_CANVAS_REMOVAL_TIMER_PASS');
+'''
+        node = shutil.which("node")
+        assert node is not None
+        result = subprocess.run(
+            [node, "-e", harness], cwd=root, text=True, capture_output=True, check=False
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("SHIPPED_CUSTOM_CANVAS_REMOVAL_TIMER_PASS", result.stdout)
+
+    @unittest.skipUnless(shutil.which("node"), "Node.js is required")
+    def test_shipped_custom_canvas_template_replacement_stops_active_playback(self):
+        root = Path(__file__).parents[1]
+        source = (root / "app" / "static" / "custom_canvas.js").read_text()
+        disposal = source[
+            source.index("  function disposeTimelineState"):
+            source.index("\n\n  const editorCleanupObserver")
+        ]
+        apply_template = source[
+            source.index("  function applyTemplate"):
+            source.index("\n  window.canvasStarterExamples")
+        ]
+        harness = r'''
+let nextTimer=0,ticks=0;const timers=new Map();
+const setInterval=callback=>{const id=++nextTimer;timers.set(id,callback);return id};
+const clearInterval=id=>timers.delete(id);const editorState=new Map();
+const module={id:'canvas_template',name:'Template canvas',layers:[],frame_count:2};
+globalThis.window=globalThis;globalThis.confirm=()=>true;globalThis.byId=()=>module;
+globalThis.cancelTimelineDrag=()=>{};globalThis.disposeTimelineResize=()=>{};
+globalThis.canvasTemplateBuilders={replacement:value=>{value.frame_count=4}};
+globalThis.renderCustomModules=()=>{};globalThis.setMessage=()=>{};globalThis.publishCanvasDraftMutation=()=>{};
+globalThis.markMatrixDirty=()=>{};
+'''+disposal+'\n'+apply_template+r'''
+const state={timer:setInterval(()=>ticks++),playing:true,timelineContainer:null};editorState.set(module.id,state);
+applyTemplate(module.id,'replacement');
+for(const callback of [...timers.values()])callback();
+if(timers.size!==0||ticks!==0)throw new Error('template replacement retained playback callback');
+if(state.playing||state.timer!==null)throw new Error('template replacement retained playback ownership');
+if(editorState.has(module.id))throw new Error('template replacement retained disposed editor state');
+console.log('SHIPPED_CUSTOM_CANVAS_TEMPLATE_TIMER_PASS');
+'''
+        node = shutil.which("node")
+        assert node is not None
+        result = subprocess.run(
+            [node, "-e", harness], cwd=root, text=True, capture_output=True, check=False
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("SHIPPED_CUSTOM_CANVAS_TEMPLATE_TIMER_PASS", result.stdout)
+
+    @unittest.skipUnless(shutil.which("node"), "Node.js is required")
+    def test_shipped_custom_canvas_pagehide_stops_state_and_global_timers(self):
+        root = Path(__file__).parents[1]
+        source = (root / "app" / "static" / "custom_canvas.js").read_text()
+        lifecycle = source[
+            source.index("  const stateFor = module => {"):
+            source.index("\n\n  function ease")
+        ]
+        timer_callback = source.index("customModules.some(module => module.type === 'canvas'")
+        global_timer = source[
+            source.rfind("\n", 0, timer_callback) + 1:
+            source.index("\n  renderCustomModules();", timer_callback)
+        ]
+        harness = r'''
+let nextTimer=0,stateTicks=0,redraws=0;const timers=new Map(),listeners={};
+const setInterval=(callback,delay)=>{const id=++nextTimer;timers.set(id,{callback,delay});return id};
+const clearInterval=id=>timers.delete(id);const clearTimeout=()=>{};const cancelAnimationFrame=()=>{};
+const editorState=new Map();
+class MutationObserver{constructor(callback){this.callback=callback;this.disconnected=false}observe(){}disconnect(){this.disconnected=true}}
+globalThis.window=globalThis;window.addEventListener=(name,handler)=>listeners[name]=handler;window.removeEventListener=()=>{};
+globalThis.document={documentElement:{},querySelectorAll:()=>[]};globalThis.cancelTimelineDrag=()=>{};
+globalThis.customModules=[{id:'canvas_clock',type:'canvas',layers:[{type:'time',visible:true}]}];
+globalThis.redrawMediaCanvases=()=>redraws++;
+'''+lifecycle+r'''
+const state={timer:setInterval(()=>stateTicks++,100),playing:true,timelineContainer:null};editorState.set('canvas_clock',state);
+'''+global_timer+r'''
+if(timers.size!==2)throw new Error('expected state and global intervals, got '+timers.size);
+if(typeof listeners.pagehide!=='function')throw new Error('pagehide handler was not registered');
+listeners.pagehide();
+for(const timer of [...timers.values()])timer.callback();
+if(timers.size!==0)throw new Error('pagehide retained '+timers.size+' interval(s)');
+if(stateTicks!==0||redraws!==0)throw new Error('callback ran after pagehide: '+stateTicks+'/'+redraws);
+if(state.playing||state.timer!==null)throw new Error('state playback ownership survived pagehide');
+console.log('SHIPPED_CUSTOM_CANVAS_PAGEHIDE_TIMER_PASS');
+'''
+        node = shutil.which("node")
+        assert node is not None
+        result = subprocess.run(
+            [node, "-e", harness], cwd=root, text=True, capture_output=True, check=False
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("SHIPPED_CUSTOM_CANVAS_PAGEHIDE_TIMER_PASS", result.stdout)
+
+    @unittest.skipUnless(shutil.which("node"), "Node.js is required")
+    def test_removed_device_source_waits_for_admission_then_publishes_one_fallback(self):
+        source = (Path(__file__).parents[1] / "app" / "templates" / "dashboard.html").read_text()
+        lifecycle = source[source.index("let devicePreviewEnabled="):source.index("\nfunction editPreviewCurrent")]
+        harness = r'''
+const vm=require('node:vm');let startResolve,startSignal,admitted=false;const calls=[];
+const control=extra=>Object.assign({addEventListener(type,handler){this.listeners??={};this.listeners[type]=handler}},extra);
+const toggle=control({checked:false}),timeout=control({value:'60',focus(){}}),stop=control({disabled:true}),status={textContent:'',dataset:{}};
+const elements={'#device-preview-enabled':toggle,'#device-preview-timeout':timeout,'#stop-device-preview':stop,'#device-preview-status':status};
+const context={console,AbortController,Date,Number,Promise,Set,Map,Math,encodeURIComponent,setTimeout,clearTimeout,setInterval,clearInterval,matrixSyncStopped:false,matrixEditorsReady:true,previewModule:'custom_removed',previewInstance:'e'.repeat(32),PAIRED_ACTION_SIGNAL:'1',configBody:()=>({marker:'draft'}),selectedLavaPaletteDescriptor:()=>null,selectEditPreviewModule(){},selectEditedPreviewModule(){},document:{querySelector:s=>elements[s],addEventListener(){}},window:{addEventListener(){}},fetch:async()=>({ok:true}),api:async(path,options={})=>{const body=options.body?JSON.parse(options.body):null;calls.push({path,body});if(path==='/api/device-preview/custom_removed'){startSignal=options.signal;return new Promise(resolve=>{startResolve=value=>{admitted=true;resolve(value)}})}if(path==='/api/device-preview/cancel')return {cancelled:admitted};if(path==='/api/device-preview/clock')return {generation:body.generation,expires_in:60,heartbeat_after_seconds:5,active_module:'clock'};throw new Error(path)}};
+vm.createContext(context);vm.runInContext(process.argv[1],context);(async()=>{toggle.checked=true;toggle.listeners.change();await new Promise(resolve=>setTimeout(resolve,5));context.previewModule='clock';const mode=process.argv[2];let replacing;
+ if(mode==='before'){context.startDevicePreview();replacing=context.replaceDevicePreviewAfterSourceRemoval('clock')}
+ else {replacing=context.replaceDevicePreviewAfterSourceRemoval('clock');if(mode==='during')context.startDevicePreview()}
+ if(startSignal.aborted)throw new Error('pending admission was aborted before fencing');
+ startResolve({generation:1,expires_in:60,heartbeat_after_seconds:5,active_module:'custom_removed'});if(await replacing!==true)throw new Error('replacement did not recover');if(mode==='after')context.startDevicePreview();await new Promise(resolve=>setTimeout(resolve,5));
+ if(calls.filter(call=>call.path==='/api/device-preview/cancel'&&call.body.generation===1).length!==1)throw new Error('removed generation not cancelled once');
+ if(calls.filter(call=>call.path==='/api/device-preview/clock').length!==1)throw new Error('fallback publication count incorrect');
+ console.log('REMOVED_DEVICE_SOURCE_FALLBACK_PASS '+mode);
+})().catch(error=>{console.error(error);process.exit(1)});
+'''
+        node = shutil.which("node")
+        assert node is not None
+        for mode in ("before", "during", "after"):
+            with self.subTest(mode=mode):
+                result = subprocess.run([node, "-e", harness, lifecycle, mode], cwd=Path(__file__).parents[1], text=True, capture_output=True, check=False)
+                self.assertEqual(result.returncode, 0, result.stderr)
+                self.assertIn(f"REMOVED_DEVICE_SOURCE_FALLBACK_PASS {mode}", result.stdout)
 
     def test_dashboard_groups_a_confirmed_whole_device_restart_action(self):
         self.pair_browser()
@@ -1037,6 +1800,22 @@ try{
         self.device_restart_runner.assert_not_called()
         self.assertIsNone(self.app.extensions.get("edit_preview_registry"))
         self.assertIsNone(self.app.extensions.get("edit_preview_provider"))
+
+    def test_device_preview_explicit_cancel_does_not_mark_timeout_acceptance(self):
+        self.pair_browser()
+        self.controller.cancel_device_draft.return_value = True
+
+        response = self.paired_client_request(
+            "POST",
+            self.client,
+            "/api/device-preview/cancel",
+            json={"generation": 7, "preview_instance": "a" * 32},
+        )
+
+        self.assertEqual(response.status_code, 202, response.get_data(as_text=True))
+        self.assertEqual(response.get_json(), {"cancelled": True})
+        self.controller.cancel_device_draft.assert_called_once()
+        self.controller.mark_acceptance_result.assert_not_called()
 
     def test_release_acceptance_routes_require_exact_dedicated_header_before_publisher_side_effects(self):
         self.pair_browser()
@@ -1809,7 +2588,7 @@ console.log('PAIR_NETWORK_PASS');
     def test_optional_conditional_config_save_rejects_stale_revision(self):
         self.pair_browser()
         committed = self.post_config( json={"device": {"name": "Winner"}},
-            headers={"If-Match": '"opaque", "0"'},
+            headers={"If-Match": '"0"'},
         )
 
         self.assertEqual(committed.status_code, 200)
@@ -1855,7 +2634,7 @@ console.log('PAIR_NETWORK_PASS');
                 stale = self.post_config( json={}, headers={"If-Match": validator},
                 )
                 self.assertEqual(changed.status_code, 200)
-                self.assertEqual(stale.status_code, 412)
+                self.assertEqual(stale.status_code, 400 if validator.startswith("W/") else 412)
         for header in ("If-None-Match", "If-Match"):
             with self.subTest(header=header):
                 response = self.client.open(
@@ -1870,11 +2649,15 @@ console.log('PAIR_NETWORK_PASS');
 
         weak_write = self.post_config( json={}, headers={"If-Match": 'W/"0"'})
         stale_list = self.post_config( json={}, headers={"If-Match": '"8", "9"'})
-        self.assertEqual(weak_write.status_code, 412)
-        self.assertEqual(stale_list.status_code, 412)
+        self.assertEqual(weak_write.status_code, 400)
+        self.assertEqual(stale_list.status_code, 400)
+        before_wildcard = self.store.get()
+        self.controller.reset_mock()
         wildcard = self.post_config( json={"device": {"name": "Wildcard"}}, headers={"If-Match": "*"},
         )
-        self.assertEqual((wildcard.status_code, wildcard.headers["ETag"]), (200, '"1"'))
+        self.assertEqual((wildcard.status_code, wildcard.headers["ETag"]), (400, '"0"'))
+        self.assertEqual(self.store.get(), before_wildcard)
+        self.assertEqual(self.controller.method_calls, [])
 
         oversized = self.post_config( data=b"{" + (b" " * 1_048_576),
             content_type="application/json",
@@ -1886,6 +2669,45 @@ console.log('PAIR_NETWORK_PASS');
             environ_overrides={"CONTENT_LENGTH": "", "wsgi.input_terminated": True},
         )
         self.assertEqual(streamed_oversized.status_code, 413)
+
+    def test_config_save_requires_one_strong_current_revision_validator(self):
+        self.pair_browser()
+        invalid_validators = (
+            ("wildcard", lambda _revision: "*"),
+            ("weak", lambda revision: f'W/"{revision}"'),
+            ("multiple", lambda revision: f'"{revision}", "other"'),
+        )
+
+        for label, make_validator in invalid_validators:
+            with self.subTest(validator=label):
+                before = self.store.get()
+                validator = make_validator(before["revision"])
+                self.controller.reset_mock()
+
+                response = self.post_config(
+                    json={"device": {"name": f"Rejected {label}"}},
+                    headers={"If-Match": validator},
+                )
+
+                self.assertEqual(response.status_code, 400)
+                self.assertEqual(response.get_json(), {
+                    "error": "If-Match must contain exactly one strong configuration revision.",
+                    "revision": before["revision"],
+                })
+                self.assertEqual(response.headers["ETag"], f'"{before["revision"]}"')
+                self.assertEqual(self.store.get(), before)
+                self.assertEqual(self.controller.method_calls, [])
+
+        current_revision = self.store.get()["revision"]
+        self.controller.reset_mock()
+        accepted = self.post_config(
+            json={"device": {"name": "Strong current revision"}},
+            headers={"If-Match": f'"{current_revision}"'},
+        )
+        self.assertEqual(accepted.status_code, 200)
+        self.assertEqual(accepted.headers["ETag"], f'"{current_revision + 1}"')
+        self.assertEqual(self.store.get()["device"]["name"], "Strong current revision")
+        self.assertEqual(self.controller.reload.call_count, 1)
 
     def test_dashboard_is_never_reused_from_browser_cache(self):
         self.pair_browser()
@@ -3181,18 +4003,19 @@ const waitFor=async expression=>{for(let attempt=0;attempt<160;attempt++){if(awa
 try{
  await send('Runtime.enable');await send('Page.enable');await send('Emulation.setDeviceMetricsOverride',{width:390,height:844,deviceScaleFactor:1,mobile:true});
  await send('Page.addScriptToEvaluateOnNewDocument',{source:`
-  globalThis.__requests=[];globalThis.__aborted=[];globalThis.__errors=[];globalThis.__releaseSleepFrame=null;globalThis.__continuationMode=false;globalThis.__decodeCalls=0;globalThis.__decodeEntered=0;globalThis.__holdDecodeAt=null;globalThis.__decodeRelease=null;
-  const nativeCreateImageBitmap=globalThis.createImageBitmap.bind(globalThis);globalThis.createImageBitmap=async(...args)=>{const bitmap=await nativeCreateImageBitmap(...args),call=++__decodeCalls;if(call===__holdDecodeAt){__decodeEntered++;await new Promise(resolve=>__decodeRelease=resolve)}return bitmap};
+  globalThis.__requests=[];globalThis.__aborted=[];globalThis.__errors=[];globalThis.__draws=[];globalThis.__sessionSources=new Map();globalThis.__releaseSleepFrame=null;globalThis.__continuationMode=false;globalThis.__decodeCalls=0;globalThis.__decodeEntered=0;globalThis.__holdDecodeAt=null;globalThis.__decodeRelease=null;
+  const png='iVBORw0KGgoAAAANSUhEUgAAAEAAAAAgCAIAAAAt/+nTAAAAT0lEQVR4nO3PUQkAIBTAwBfOClawfwRD+HEIgwW4zdrn64YLGtCCBrSgAS1oQAsa0IIGtKABLWhACxrQgga0oAEtaEALGtCCBrSgAS147AIqPPhqwA8fegAAAABJRU5ErkJggg==',stalePng='iVBORw0KGgoAAAANSUhEUgAAAEAAAAAgCAIAAAAt/+nTAAAARUlEQVR4nO3PQQ3AIADAQMABFvBvBFcTweOypKegnXef8WdLB7xqQGtAa0BrQGtAa0BrQGtAa0BrQGtAa0BrQGtAa0D7ANvVATxp0LdQAAAAAElFTkSuQmCC',fallbackPng='iVBORw0KGgoAAAANSUhEUgAAAEAAAAAgCAIAAAAt/+nTAAAARUlEQVR4nO3PQQ3AIADAQEAKFvAvAFcTweOypKegnfue8WdLB7xqQGtAa0BrQGtAa0BrQGtAa0BrQGtAa0BrQGtAa0D7AA9VAV5IfYI+AAAAAElFTkSuQmCC',bytes=Uint8Array.from(atob(png),character=>character.charCodeAt(0)),pngSources=new Map([[stalePng,'retired-custom'],[fallbackPng,'announcement_board']]),bitmapSources=new WeakMap();
+  const nativeCreateImageBitmap=globalThis.createImageBitmap.bind(globalThis);globalThis.createImageBitmap=async(...args)=>{let source='other';if(args[0]&&typeof args[0].arrayBuffer==='function'){const encoded=btoa(String.fromCharCode(...new Uint8Array(await args[0].arrayBuffer())));source=pngSources.get(encoded)||source}const bitmap=await nativeCreateImageBitmap(...args),call=++__decodeCalls;bitmapSources.set(bitmap,{source,decode:call});if(call===__holdDecodeAt){__decodeEntered++;await new Promise(resolve=>__decodeRelease=resolve)}return bitmap};
+  const nativeDrawImage=CanvasRenderingContext2D.prototype.drawImage;CanvasRenderingContext2D.prototype.drawImage=function(image,...args){const identity=bitmapSources.get(image);if(identity&&identity.source!=='other')__draws.push({...identity});return nativeDrawImage.call(this,image,...args)};
   addEventListener('error',event=>__errors.push(String(event.error||event.message)));addEventListener('unhandledrejection',event=>__errors.push(String(event.reason)));
-  const png='iVBORw0KGgoAAAANSUhEUgAAAEAAAAAgCAIAAAAt/+nTAAAAT0lEQVR4nO3PUQkAIBTAwBfOClawfwRD+HEIgwW4zdrn64YLGtCCBrSgAS1oQAsa0IIGtKABLWhACxrQgga0oAEtaEALGtCCBrSgAS147AIqPPhqwA8fegAAAABJRU5ErkJggg==',bytes=Uint8Array.from(atob(png),character=>character.charCodeAt(0));
   globalThis.confirm=()=>true;
   globalThis.fetch=async(input,options={})=>{const url=String(input),method=options.method||'GET',payload=options.body?JSON.parse(options.body):null,record={url,method,payload,aborted:false};__requests.push(record);
    if(url.startsWith('/api/display-frame'))return await new Promise(resolve=>{__releaseSleepFrame=()=>resolve(new Response(new Blob([bytes],{type:'image/png'}),{headers:{'X-Matrix-Frame':'sleep'}}))});
    if(url==='/api/config')return new Response(null,{status:304,headers:{'X-Matrix-Minimum-Client-Contract':'2'}});
    if(url.startsWith('/api/status'))return new Response(JSON.stringify({running:true,current_module:'weather',minimum_client_contract:2}),{headers:{'Content-Type':'application/json'}});
    if(url==='/api/edit-preview/cancel')return new Response(JSON.stringify({cancelled:true}),{headers:{'Content-Type':'application/json'}});
-   if(url==='/api/edit-preview/page'){const generation=Number(payload.session);return new Response(JSON.stringify({session:payload.session,generation,page:1,frames:[{png,delay_ms:10000}],next_token:null,complete:true}),{headers:{'Content-Type':'application/json'}})}
-   if(url.startsWith('/api/edit-preview/')){const samePath=__requests.filter(item=>item.url===url).length;if(url.endsWith('/custom_basic_source')&&samePath===1)await new Promise((resolve,reject)=>{const timer=setTimeout(resolve,500);options.signal?.addEventListener('abort',()=>{clearTimeout(timer);record.aborted=true;__aborted.push(payload.generation);reject(new DOMException('Aborted','AbortError'))},{once:true})});return new Response(JSON.stringify({session:String(payload.generation).padStart(32,'0'),generation:payload.generation,page:0,frames:[{png,delay_ms:10000}],next_token:__continuationMode?'a'.repeat(64):null,complete:!__continuationMode}),{headers:{'Content-Type':'application/json'}})}
+   if(url==='/api/edit-preview/page'){const generation=Number(payload.session),source=__sessionSources.get(String(payload.session))||'other',framePng=source==='announcement_board'?fallbackPng:source.startsWith('custom_')?stalePng:png;return new Response(JSON.stringify({session:payload.session,generation,page:1,frames:[{png:framePng,delay_ms:10000}],next_token:null,complete:true}),{headers:{'Content-Type':'application/json'}})}
+   if(url.startsWith('/api/edit-preview/')){const samePath=__requests.filter(item=>item.url===url).length;if(url.endsWith('/custom_basic_source')&&samePath===1)await new Promise((resolve,reject)=>{const timer=setTimeout(resolve,500);options.signal?.addEventListener('abort',()=>{clearTimeout(timer);record.aborted=true;__aborted.push(payload.generation);reject(new DOMException('Aborted','AbortError'))},{once:true})});const source=url.split('/').at(-1),session=String(payload.generation).padStart(32,'0'),framePng=source==='announcement_board'?fallbackPng:source.startsWith('custom_')?stalePng:png;__sessionSources.set(session,source);return new Response(JSON.stringify({session,generation:payload.generation,page:0,frames:[{png:framePng,delay_ms:10000}],next_token:__continuationMode?'a'.repeat(64):null,complete:!__continuationMode}),{headers:{'Content-Type':'application/json'}})}
    return new Response(JSON.stringify({error:'fixture endpoint unavailable'}),{status:503,headers:{'Content-Type':'application/json'}})
   };
  `});
@@ -3219,11 +4042,11 @@ try{
  const starts=()=>evaluate(`__requests.filter(request=>request.url.startsWith('/api/edit-preview/')&&!['/api/edit-preview/page','/api/edit-preview/cancel'].includes(request.url)).length`);
  const beforeNoop=await starts();await evaluate(`(()=>{const card=document.querySelector('.custom-module-card[data-id="custom_canvas_source"]'),play=[...card.querySelectorAll('button')].find(button=>button.textContent==='Play browser preview'),onion=card.querySelector('[data-control="Onion skin"]');play.focus();play.click();onion.checked=!onion.checked;onion.dispatchEvent(new Event('change',{bubbles:true}))})()`);await sleep(250);const afterNoop=await starts();
  const cancelsBefore=await evaluate(`__requests.filter(request=>request.url==='/api/edit-preview/cancel').length`);
- const initialDecodeBefore=await evaluate(`__decodeEntered`);await evaluate(`(()=>{const context=document.querySelector('#matrix-preview').getContext('2d');context.fillStyle='rgb(9, 10, 11)';context.fillRect(0,0,1,1);__holdDecodeAt=__decodeCalls+1;const control=document.querySelector('.custom-module-card[data-id="custom_canvas_source"] [data-control="Background"]');control.value='#556677';control.dispatchEvent(new Event('input',{bubbles:true}))})()`);await waitFor(`__decodeEntered>${initialDecodeBefore}`);const initialStartsBefore=await starts();
- const initialDecodeRemoval=await evaluate(`(()=>{const card=document.querySelector('.custom-module-card[data-id="custom_canvas_source"]');[...card.querySelectorAll('button')].find(button=>button.textContent==='Remove').click();const context=document.querySelector('#matrix-preview').getContext('2d');return{before:{pixel:[...context.getImageData(0,0,1,1).data],selected:document.querySelector('#preview-select').value,label:document.querySelector('#preview-module').textContent,status:document.querySelector('#preview-frame').textContent}}})()`);await waitFor(`__requests.filter(request=>request.url==='/api/edit-preview/cancel').length>${cancelsBefore}`);await evaluate(`__decodeRelease()`);await sleep(250);initialDecodeRemoval.after=await evaluate(`(()=>{const context=document.querySelector('#matrix-preview').getContext('2d');return{pixel:[...context.getImageData(0,0,1,1).data],selected:document.querySelector('#preview-select').value,label:document.querySelector('#preview-module').textContent,status:document.querySelector('#preview-frame').textContent}})()`);const afterRemovalStarts=await starts();
- initialDecodeRemoval.starts={before:initialStartsBefore,after:afterRemovalStarts};
- const continuationDecodeBefore=await evaluate(`__decodeEntered`);await evaluate(`(()=>{__continuationMode=true;__holdDecodeAt=__decodeCalls+2;const text=document.querySelector('.custom-module-card[data-id="custom_basic_source"] [data-field="text"]');text.value='CONTINUATION RACE';text.dispatchEvent(new Event('input',{bubbles:true}))})()`);await waitFor(`__decodeEntered>${continuationDecodeBefore}`);const continuationStartsBefore=await starts();
- const continuationDecodeRemoval=await evaluate(`(()=>{const card=document.querySelector('.custom-module-card[data-id="custom_basic_source"]');[...card.querySelectorAll('button')].find(button=>button.textContent==='Remove').click();const context=document.querySelector('#matrix-preview').getContext('2d');return{before:{pixel:[...context.getImageData(0,0,1,1).data],selected:document.querySelector('#preview-select').value,label:document.querySelector('#preview-module').textContent,status:document.querySelector('#preview-frame').textContent}}})()`);await evaluate(`__decodeRelease()`);await sleep(300);continuationDecodeRemoval.after=await evaluate(`(()=>{const context=document.querySelector('#matrix-preview').getContext('2d');return{pixel:[...context.getImageData(0,0,1,1).data],selected:document.querySelector('#preview-select').value,label:document.querySelector('#preview-module').textContent,status:document.querySelector('#preview-frame').textContent}})()`);continuationDecodeRemoval.starts={before:continuationStartsBefore,after:await starts()};
+ const initialDecodeBefore=await evaluate(`__decodeEntered`);await evaluate(`(()=>{const context=document.querySelector('#matrix-preview').getContext('2d');context.fillStyle='rgb(9, 10, 11)';context.fillRect(0,0,1,1);__holdDecodeAt=__decodeCalls+1;const control=document.querySelector('.custom-module-card[data-id="custom_canvas_source"] [data-control="Background"]');control.value='#556677';control.dispatchEvent(new Event('input',{bubbles:true}))})()`);await waitFor(`__decodeEntered>${initialDecodeBefore}`);await evaluate(`__draws=[]`);const initialStartsBefore=await starts();
+ const initialDecodeRemoval=await evaluate(`(()=>{const card=document.querySelector('.custom-module-card[data-id="custom_canvas_source"]');[...card.querySelectorAll('button')].find(button=>button.textContent==='Remove').click();const context=document.querySelector('#matrix-preview').getContext('2d');return{before:{pixel:[...context.getImageData(0,0,1,1).data],selected:document.querySelector('#preview-select').value,label:document.querySelector('#preview-module').textContent,status:document.querySelector('#preview-frame').textContent}}})()`);await waitFor(`__requests.filter(request=>request.url==='/api/edit-preview/cancel').length>${cancelsBefore}`);await waitFor(`__draws.filter(draw=>draw.source==='announcement_board').length===1`);initialDecodeRemoval.fallback=await evaluate(`(()=>{const context=document.querySelector('#matrix-preview').getContext('2d');return{pixel:[...context.getImageData(0,0,1,1).data],selected:document.querySelector('#preview-select').value,label:document.querySelector('#preview-module').textContent,status:document.querySelector('#preview-frame').textContent,draws:__draws.map(draw=>({...draw}))}})()`);await evaluate(`__decodeRelease()`);await sleep(100);initialDecodeRemoval.afterStaleRelease=await evaluate(`(()=>{const context=document.querySelector('#matrix-preview').getContext('2d');return{pixel:[...context.getImageData(0,0,1,1).data],selected:document.querySelector('#preview-select').value,label:document.querySelector('#preview-module').textContent,status:document.querySelector('#preview-frame').textContent,draws:__draws.map(draw=>({...draw}))}})()`);const afterRemovalStarts=await starts();
+ initialDecodeRemoval.starts={before:initialStartsBefore,after:afterRemovalStarts};initialDecodeRemoval.startedPaths=await evaluate(`__requests.filter(request=>request.url.startsWith('/api/edit-preview/')&&!['/api/edit-preview/page','/api/edit-preview/cancel'].includes(request.url)).slice(${initialStartsBefore}).map(request=>request.url)`);
+ const continuationDecodeBefore=await evaluate(`__decodeEntered`);await evaluate(`(()=>{__continuationMode=true;__holdDecodeAt=__decodeCalls+2;const text=document.querySelector('.custom-module-card[data-id="custom_basic_source"] [data-field="text"]');text.value='CONTINUATION RACE';text.dispatchEvent(new Event('input',{bubbles:true}))})()`);await waitFor(`__decodeEntered>${continuationDecodeBefore}`);await evaluate(`__draws=[]`);const continuationStartsBefore=await starts();
+ const continuationDecodeRemoval=await evaluate(`(()=>{const card=document.querySelector('.custom-module-card[data-id="custom_basic_source"]');[...card.querySelectorAll('button')].find(button=>button.textContent==='Remove').click();const context=document.querySelector('#matrix-preview').getContext('2d');return{before:{pixel:[...context.getImageData(0,0,1,1).data],selected:document.querySelector('#preview-select').value,label:document.querySelector('#preview-module').textContent,status:document.querySelector('#preview-frame').textContent}}})()`);await waitFor(`__draws.filter(draw=>draw.source==='announcement_board').length===1`);continuationDecodeRemoval.fallback=await evaluate(`(()=>{const context=document.querySelector('#matrix-preview').getContext('2d');return{pixel:[...context.getImageData(0,0,1,1).data],selected:document.querySelector('#preview-select').value,label:document.querySelector('#preview-module').textContent,status:document.querySelector('#preview-frame').textContent,draws:__draws.map(draw=>({...draw}))}})()`);await evaluate(`__decodeRelease()`);await sleep(100);continuationDecodeRemoval.afterStaleRelease=await evaluate(`(()=>{const context=document.querySelector('#matrix-preview').getContext('2d');return{pixel:[...context.getImageData(0,0,1,1).data],selected:document.querySelector('#preview-select').value,label:document.querySelector('#preview-module').textContent,status:document.querySelector('#preview-frame').textContent,draws:__draws.map(draw=>({...draw}))}})()`);continuationDecodeRemoval.starts={before:continuationStartsBefore,after:await starts()};continuationDecodeRemoval.startedPaths=await evaluate(`__requests.filter(request=>request.url.startsWith('/api/edit-preview/')&&!['/api/edit-preview/page','/api/edit-preview/cancel'].includes(request.url)).slice(${continuationStartsBefore}).map(request=>request.url)`);
  const removal=await evaluate(`({customCards:document.querySelectorAll('.custom-module-card').length,selected:document.querySelector('#preview-select').value,label:document.querySelector('#preview-module').textContent,status:document.querySelector('#preview-frame').textContent,cancels:__requests.filter(request=>request.url==='/api/edit-preview/cancel').length})`);removal.starts=await starts();removal.afterRemovalStarts=afterRemovalStarts;
  console.log(JSON.stringify({basic,final,sleepOwnership,geometry,noops:{before:beforeNoop,after:afterNoop},initialDecodeRemoval,continuationDecodeRemoval,removal}));
 }finally{socket.close()}
@@ -3282,14 +4105,37 @@ try{
         self.assertTrue(all(item["source"] == "custom_canvas_source" for item in report["geometry"]), report)
         self.assertTrue(all(item["canvasCount"] == 1 for item in report["geometry"]), report)
         self.assertEqual(report["noops"]["before"], report["noops"]["after"], report)
-        self.assertEqual(report["initialDecodeRemoval"]["after"], report["initialDecodeRemoval"]["before"], report)
-        self.assertEqual(report["continuationDecodeRemoval"]["after"], report["continuationDecodeRemoval"]["before"], report)
-        self.assertEqual(report["initialDecodeRemoval"]["starts"]["after"], report["initialDecodeRemoval"]["starts"]["before"], report)
-        self.assertEqual(report["continuationDecodeRemoval"]["starts"]["after"], report["continuationDecodeRemoval"]["starts"]["before"], report)
+        for key in ("initialDecodeRemoval", "continuationDecodeRemoval"):
+            removal = report[key]
+            with self.subTest(removal=key):
+                self.assertEqual(
+                    removal["startedPaths"],
+                    ["/api/edit-preview/announcement_board"],
+                    report,
+                )
+                self.assertEqual(
+                    removal["starts"]["after"],
+                    removal["starts"]["before"] + 1,
+                    report,
+                )
+                self.assertEqual(removal["fallback"]["pixel"], [34, 201, 51, 255], report)
+                self.assertEqual(
+                    [draw["source"] for draw in removal["fallback"]["draws"]],
+                    ["announcement_board"],
+                    report,
+                )
+                self.assertEqual(removal["fallback"]["selected"], "announcement_board", report)
+                self.assertIn("Unsaved draft · announcement_board", removal["fallback"]["label"])
+                self.assertIn("Unsaved draft frame", removal["fallback"]["status"])
+                self.assertEqual(
+                    removal["afterStaleRelease"],
+                    removal["fallback"],
+                    report,
+                )
         self.assertEqual(report["removal"]["customCards"], 0, report)
-        self.assertFalse(report["removal"]["selected"].startswith("custom_"), report)
-        self.assertIn("select an editor", report["removal"]["label"])
-        self.assertIn("awaiting draft source", report["removal"]["status"])
+        self.assertEqual(report["removal"]["selected"], "announcement_board", report)
+        self.assertIn("Unsaved draft · announcement_board", report["removal"]["label"])
+        self.assertIn("Unsaved draft frame", report["removal"]["status"])
         self.assertGreaterEqual(report["removal"]["cancels"], 1, report)
         self.assertEqual(Path(self.store.path).read_bytes(), before_config)
         self.assertEqual(device_path.read_bytes(), before_devices)
@@ -4003,6 +4849,113 @@ try{
         self.assertTrue(report["zoom"]["reachable"])
         self.assertTrue(report["zoom"]["saveVisible"])
         self.assertEqual(report["reduced"], {"matches": True, "position": "fixed"})
+
+    @unittest.skipUnless(shutil.which("node"), "Node.js is required")
+    @unittest.skipUnless(
+        os.environ.get("MATRIX_CHROMIUM")
+        and Path(os.environ.get("MATRIX_CHROMIUM", "")).is_file()
+        and os.access(os.environ.get("MATRIX_CHROMIUM", ""), os.X_OK),
+        "MATRIX_CHROMIUM browser is required",
+    )
+    def test_active_device_preview_stop_and_status_remain_reachable_in_popped_strip(self):
+        self.pair_browser()
+        body = self.client.get("/").get_data(as_text=True)
+        probe = r"""
+const port=process.argv[1],pagePath=process.argv[2];let endpoint;
+for(let attempt=0;attempt<50;attempt++){try{endpoint=await fetch(`http://127.0.0.1:${port}/json/new`,{method:'PUT'}).then(r=>r.json());break}catch(_){await new Promise(r=>setTimeout(r,100))}}
+if(!endpoint)throw new Error('Chromium DevTools endpoint unavailable');
+const socket=new WebSocket(endpoint.webSocketDebuggerUrl),pending=new Map();let nextId=1,loadResolve,loaded=new Promise(resolve=>loadResolve=resolve);
+socket.onmessage=event=>{const message=JSON.parse(event.data);if(message.id&&pending.has(message.id)){const request=pending.get(message.id);pending.delete(message.id);message.error?request.reject(new Error(JSON.stringify(message.error))):request.resolve(message.result)}else if(message.method==='Page.loadEventFired')loadResolve()};
+await new Promise((resolve,reject)=>{socket.onopen=resolve;socket.onerror=reject});
+const send=(method,params={})=>{const id=nextId++;socket.send(JSON.stringify({id,method,params}));return new Promise((resolve,reject)=>pending.set(id,{resolve,reject}))};
+const evaluate=async expression=>{const result=await send('Runtime.evaluate',{expression,returnByValue:true,awaitPromise:true});if(result.exceptionDetails)throw new Error(JSON.stringify(result.exceptionDetails));return result.result.value};
+try{
+ await send('Runtime.enable');await send('Page.enable');loaded=new Promise(resolve=>loadResolve=resolve);await send('Page.navigate',{url:'file://'+pagePath});await Promise.race([loaded,new Promise((_,reject)=>setTimeout(()=>reject(new Error('load timeout')),5000))]);await evaluate(`document.documentElement.style.scrollBehavior='auto';globalThis.__deviceStopActivations=0;document.querySelector('#stop-device-preview').addEventListener('click',()=>__deviceStopActivations++)`);
+ const targets=[];
+ for(const [width,height] of [[320,568],[360,800],[390,844],[412,915],[768,1024],[820,1180],[844,390],[899,700],[900,700],[901,700],[1024,768],[1280,720],[1440,900]]){
+  await send('Emulation.setTouchEmulationEnabled',{enabled:false});await send('Emulation.setDeviceMetricsOverride',{width,height,deviceScaleFactor:1,mobile:width<1024});
+  targets.push(await evaluate(`(()=>{scrollTo(0,0);resizePreviewPopout();const timeout=document.querySelector('#device-preview-timeout').getBoundingClientRect(),stop=document.querySelector('#stop-device-preview').getBoundingClientRect();return{viewport:[innerWidth,innerHeight],coarse:matchMedia('(pointer: coarse)').matches,timeout:[timeout.width,timeout.height],stop:[stop.width,stop.height]}})()`));
+ }
+ await send('Emulation.setDeviceMetricsOverride',{width:1280,height:720,deviceScaleFactor:1,mobile:false});await send('Emulation.setTouchEmulationEnabled',{enabled:true,maxTouchPoints:1});
+ const coarse=await evaluate(`(()=>{scrollTo(0,0);resizePreviewPopout();const timeout=document.querySelector('#device-preview-timeout').getBoundingClientRect(),stop=document.querySelector('#stop-device-preview').getBoundingClientRect();return{viewport:[innerWidth,innerHeight],coarse:matchMedia('(pointer: coarse)').matches,timeout:[timeout.width,timeout.height],stop:[stop.width,stop.height]}})()`);await send('Emulation.setTouchEmulationEnabled',{enabled:false});
+ const states=[];
+ for(const [width,height] of [[320,390],[320,500],[320,568],[360,800],[390,844],[412,915],[768,1024],[820,1180],[1024,768],[1280,720],[1440,900],[844,390]]){
+  await send('Emulation.setDeviceMetricsOverride',{width,height,deviceScaleFactor:1,mobile:width<1024});
+  states.push(await evaluate(`(()=>{const live=document.querySelector('.preview-live'),controls=document.querySelector('.device-preview-controls'),stop=document.querySelector('#stop-device-preview'),status=document.querySelector('#device-preview-status');setDevicePreviewStatus('Device preview active · 60s remaining.','active');scrollTo(0,document.documentElement.scrollHeight);resizePreviewPopout();stop.focus();const liveRect=live.getBoundingClientRect(),controlsRect=controls.getBoundingClientRect(),stopRect=stop.getBoundingClientRect(),statusRect=status.getBoundingClientRect(),hit=document.elementFromPoint(stopRect.left+stopRect.width/2,stopRect.top+stopRect.height/2),before=__deviceStopActivations;stop.click();return{viewport:[innerWidth,innerHeight],popped:live.classList.contains('is-popped'),display:getComputedStyle(controls).display,overflow:document.documentElement.scrollWidth-document.documentElement.clientWidth,live:[liveRect.left,liveRect.top,liveRect.right,liveRect.bottom],controls:[controlsRect.left,controlsRect.top,controlsRect.right,controlsRect.bottom,controlsRect.width,controlsRect.height],stop:[stopRect.left,stopRect.top,stopRect.right,stopRect.bottom,stopRect.width,stopRect.height],status:[statusRect.left,statusRect.top,statusRect.right,statusRect.bottom,statusRect.width,statusRect.height],statusText:status.textContent,stopText:stop.textContent.trim(),tabIndex:stop.tabIndex,focused:document.activeElement===stop,hit:hit===stop||stop.contains(hit),activated:__deviceStopActivations===before+1}})()`));
+ }
+ await send('Emulation.setDeviceMetricsOverride',{width:320,height:568,deviceScaleFactor:1,mobile:true});await send('Emulation.setPageScaleFactor',{pageScaleFactor:1});
+ const keyboardBefore=await evaluate(`(()=>{setDevicePreviewStatus('Device preview active · 60s remaining.','active');scrollTo(0,document.documentElement.scrollHeight);resizePreviewPopout();const stop=document.querySelector('#stop-device-preview');stop.focus();return __deviceStopActivations})()`);await send('Input.dispatchKeyEvent',{type:'keyDown',key:' ',code:'Space'});await send('Input.dispatchKeyEvent',{type:'keyUp',key:' ',code:'Space'});await new Promise(resolve=>setTimeout(resolve,20));const keyboardAfter=await evaluate(`__deviceStopActivations`);
+ const mouse=await evaluate(`(()=>{setDevicePreviewStatus('Device preview active · 60s remaining.','active');resizePreviewPopout();const stop=document.querySelector('#stop-device-preview'),rect=stop.getBoundingClientRect();return{x:rect.left+rect.width/2,y:rect.top+rect.height/2,before:__deviceStopActivations}})()`);await send('Input.dispatchMouseEvent',{type:'mousePressed',x:mouse.x,y:mouse.y,button:'left',clickCount:1});await send('Input.dispatchMouseEvent',{type:'mouseReleased',x:mouse.x,y:mouse.y,button:'left',clickCount:1});await new Promise(resolve=>setTimeout(resolve,20));const mouseAfter=await evaluate(`__deviceStopActivations`);
+ const touch=await evaluate(`(()=>{setDevicePreviewStatus('Device preview active · 60s remaining.','active');const stop=document.querySelector('#stop-device-preview'),rect=stop.getBoundingClientRect();return{x:rect.left+rect.width/2,y:rect.top+rect.height/2,before:__deviceStopActivations}})()`);await send('Input.dispatchTouchEvent',{type:'touchStart',touchPoints:[{x:touch.x,y:touch.y,radiusX:1,radiusY:1,force:1,id:1}]});await send('Input.dispatchTouchEvent',{type:'touchEnd',touchPoints:[]});await new Promise(resolve=>setTimeout(resolve,20));const touchAfter=await evaluate(`__deviceStopActivations`);
+ await send('Emulation.setPageScaleFactor',{pageScaleFactor:2});await new Promise(resolve=>setTimeout(resolve,20));const zoom=await evaluate(`(()=>{setDevicePreviewStatus('Device preview active · 60s remaining.','active');scrollTo(0,document.documentElement.scrollHeight);resizePreviewPopout();const live=document.querySelector('.preview-live'),controls=document.querySelector('.device-preview-controls'),stop=document.querySelector('#stop-device-preview'),status=document.querySelector('#device-preview-status'),modes=document.querySelector('.preview-modes'),screen=document.querySelector('.screen-wrap'),lr=live.getBoundingClientRect(),cr=controls.getBoundingClientRect(),sr=stop.getBoundingClientRect(),tr=status.getBoundingClientRect(),mr=modes.getBoundingClientRect(),left=visualViewport.offsetLeft,right=left+visualViewport.width,hit=document.elementFromPoint(sr.left+sr.width/2,sr.top+sr.height/2);return{scale:visualViewport.scale,visual:[left,right,visualViewport.width],narrow:live.classList.contains('is-visually-narrow'),live:[lr.left,lr.top,lr.right,lr.bottom],controls:[cr.left,cr.top,cr.right,cr.bottom,cr.width,cr.height],stop:[sr.left,sr.top,sr.right,sr.bottom,sr.width,sr.height],status:[tr.left,tr.top,tr.right,tr.bottom,tr.width,tr.height],modes:[mr.left,mr.top,mr.right,mr.bottom,mr.width,mr.height],screenDisplay:getComputedStyle(screen).display,hit:hit===stop||stop.contains(hit),overflow:document.documentElement.scrollWidth-document.documentElement.clientWidth}})()`);await send('Emulation.setPageScaleFactor',{pageScaleFactor:1});
+ console.log(JSON.stringify({targets,coarse,states,keyboard:{before:keyboardBefore,after:keyboardAfter},mouse:{before:mouse.before,after:mouseAfter},touch:{before:touch.before,after:touchAfter},zoom}));
+}finally{socket.close()}
+"""
+        report = self._run_dashboard_chromium_probe(body, probe, timeout=45)
+        target_viewports = [[320, 568], [360, 800], [390, 844], [412, 915],
+                            [768, 1024], [820, 1180], [844, 390], [899, 700],
+                            [900, 700], [901, 700], [1024, 768], [1280, 720],
+                            [1440, 900]]
+        self.assertEqual([item["viewport"] for item in report["targets"]], target_viewports, report)
+        for item in report["targets"]:
+            for target in (item["timeout"], item["stop"]):
+                self.assertGreater(target[0], 0, item)
+                self.assertGreater(target[1], 0, item)
+                if item["viewport"][0] <= 900:
+                    self.assertGreaterEqual(target[1], 44, item)
+        self.assertTrue(report["coarse"]["coarse"], report)
+        self.assertEqual(report["coarse"]["viewport"], [1280, 720], report)
+        self.assertGreaterEqual(report["coarse"]["timeout"][1], 44, report)
+        self.assertGreaterEqual(report["coarse"]["stop"][1], 44, report)
+        expected = [[320, 390], [320, 500], [320, 568], [360, 800], [390, 844], [412, 915], [768, 1024], [820, 1180], [1024, 768], [1280, 720], [1440, 900], [844, 390]]
+        self.assertEqual([item["viewport"] for item in report["states"]], expected, report)
+        for item in report["states"]:
+            self.assertTrue(item["popped"], item)
+            self.assertNotEqual(item["display"], "none", item)
+            self.assertLessEqual(item["overflow"], 1, item)
+            live_left, live_top, live_right, live_bottom = item["live"]
+            for bounds in (item["controls"], item["stop"], item["status"]):
+                left, top, right, bottom, width, height = bounds
+                self.assertGreater(width, 0, item)
+                self.assertGreater(height, 0, item)
+                self.assertGreaterEqual(left, live_left - 1, item)
+                self.assertGreaterEqual(top, live_top - 1, item)
+                self.assertLessEqual(right, live_right + 1, item)
+                self.assertLessEqual(bottom, live_bottom + 1, item)
+            self.assertGreaterEqual(item["stop"][4], 44, item)
+            self.assertGreaterEqual(item["stop"][5], 44, item)
+            self.assertGreaterEqual(item["status"][4], 44, item)
+            self.assertIn("Device preview active", item["statusText"])
+            self.assertEqual(item["stopText"], "Stop device preview", item)
+            self.assertEqual(item["tabIndex"], 0, item)
+            self.assertTrue(item["focused"], item)
+            self.assertTrue(item["hit"], item)
+            self.assertTrue(item["activated"], item)
+        self.assertEqual(report["keyboard"]["after"], report["keyboard"]["before"] + 1, report)
+        self.assertEqual(report["mouse"]["after"], report["mouse"]["before"] + 1, report)
+        self.assertEqual(report["touch"]["after"], report["touch"]["before"] + 1, report)
+        zoom = report["zoom"]
+        self.assertEqual(zoom["scale"], 2, report)
+        self.assertTrue(zoom["narrow"], report)
+        self.assertLess(zoom["visual"][2], 280, report)
+        self.assertEqual(zoom["screenDisplay"], "none", report)
+        self.assertLessEqual(zoom["overflow"], 1, report)
+        visual_left, visual_right, _ = zoom["visual"]
+        live_left, live_top, live_right, live_bottom = zoom["live"]
+        for bounds in (zoom["controls"], zoom["stop"], zoom["status"], zoom["modes"]):
+            left, top, right, bottom, width, height = bounds
+            self.assertGreater(width, 0, report)
+            self.assertGreater(height, 0, report)
+            self.assertGreaterEqual(left, max(visual_left, live_left) - 1, report)
+            self.assertGreaterEqual(top, live_top - 1, report)
+            self.assertLessEqual(right, min(visual_right, live_right) + 1, report)
+            self.assertLessEqual(bottom, live_bottom + 1, report)
+        self.assertGreaterEqual(zoom["status"][4], 44, report)
+        self.assertGreaterEqual(zoom["stop"][4], 44, report)
+        self.assertGreaterEqual(zoom["stop"][5], 44, report)
+        self.assertGreaterEqual(zoom["modes"][4], 88, report)
+        self.assertGreaterEqual(zoom["modes"][5], 44, report)
+        self.assertTrue(zoom["hit"], report)
 
     @unittest.skipUnless(shutil.which("node"), "Node.js is required")
     @unittest.skipUnless(
@@ -5335,31 +6288,28 @@ globalThis.reconcileMediaRemoval=()=>{throw new Error('Local reconciliation fail
         self.assertIn("MEDIA_REMOVAL_SUCCESS_REFRESH_FAILURE_PASS", result.stdout)
 
     @unittest.skipUnless(shutil.which("node"), "Node.js is required")
-    def test_silent_committed_save_warning_survives_custom_preview(self):
+    def test_custom_preview_uses_saved_config_without_committing_draft(self):
         source = (Path(__file__).parents[1] / "app" / "templates" / "dashboard.html").read_text()
-        save_start = source.index("async function saveConfig")
-        save_end = source.index("\nfunction updateOpenWeatherSecretStatus", save_start)
         preview_start = source.index("async function preview(name)")
         preview_end = source.index("\nfunction previewSelected", preview_start)
-        function_source = source[save_start:save_end] + "\n" + source[preview_start:preview_end]
+        function_source = source[preview_start:preview_end]
         harness = r"""
-let messages=[],previewCalls=0,previewModule='',matrixLoadedRevision=0,matrixDirty=true,matrixEditorsReady=true,matrixRecoveryPending=false,highestNotifiedRemoteRevision=0;
-function matrixRevisionETag(){return '"'+matrixLoadedRevision+'"';}
-function configBody(){return {};}
+let apiCalls=[],messages=[],previewModule='',matrixDirty=true,saveCalls=0;
+const previewSelect={value:''};
+globalThis.document={querySelector(selector){if(selector==='#preview-select')return previewSelect;throw new Error('unexpected selector '+selector);}};
 function setMessage(text,error=false){messages.push({text,error});}
-function dismissMatrixRevisionDialogThrough(){}
-global.document={querySelector(){return {value:''};}};
-async function api(path){
-  if(path==='/api/config'){const error=new Error('Configuration saved, but display reload failed.');error.data={committed:true,display_reloaded:false,config:{revision:1}};throw error;}
-  previewCalls++;return {};
-}
+async function saveConfig(){saveCalls++;return {saved:true,warning:null};}
+async function api(path,options){apiCalls.push({path,method:options?.method});return {};}
 """ + function_source + r"""
 (async()=>{
-  await preview('custom_test');
-  if(previewCalls!==1) throw new Error('preview did not continue after committed save');
+  await preview('custom_saved');
+  if(saveCalls!==0)throw new Error('custom preview silently committed the dashboard draft');
+  if(JSON.stringify(apiCalls)!==JSON.stringify([{path:'/api/preview/custom_saved',method:'POST'}]))throw new Error('unexpected preview requests '+JSON.stringify(apiCalls));
+  if(!matrixDirty)throw new Error('custom preview cleared the unsaved draft state');
+  if(previewModule!=='custom_saved'||previewSelect.value!=='custom_saved')throw new Error('saved custom module was not selected for preview');
   const final=messages.at(-1);
-  if(!final.error || !final.text.includes('reload failed') || !final.text.includes('Previewing custom_test')) throw new Error('preview overwrote the committed-save warning');
-  console.log('SILENT_COMMITTED_SAVE_PASS');
+  if(final.error||!final.text.includes('saved version')||!final.text.includes('Unsaved changes were not applied'))throw new Error('custom preview did not explain the saved/draft boundary');
+  console.log('CUSTOM_PREVIEW_SAVED_BOUNDARY_PASS');
 })().catch(error=>{console.error(error);process.exit(1)});
 """
         result = subprocess.run(
@@ -5367,33 +6317,81 @@ async function api(path){
             text=True, capture_output=True, check=False,
         )
         self.assertEqual(result.returncode, 0, result.stderr)
-        self.assertIn("SILENT_COMMITTED_SAVE_PASS", result.stdout)
+        self.assertIn("CUSTOM_PREVIEW_SAVED_BOUNDARY_PASS", result.stdout)
 
     @unittest.skipUnless(shutil.which("node"), "Node.js is required")
-    def test_failed_preview_preserves_committed_save_warning(self):
+    @unittest.skipUnless(
+        os.environ.get("MATRIX_CHROMIUM")
+        and Path(os.environ.get("MATRIX_CHROMIUM", "")).is_file()
+        and os.access(os.environ.get("MATRIX_CHROMIUM", ""), os.X_OK),
+        "MATRIX_CHROMIUM browser is required",
+    )
+    def test_custom_preview_click_keeps_unsaved_browser_draft_uncommitted(self):
+        custom = {
+            "id": "custom_saved", "name": "Saved custom", "type": "text_scroll",
+            "text": "SAVED", "font": "5x7", "colour": "#ffffff",
+            "background": "#000000", "x": 0, "y": 20,
+            "direction": "left", "speed": 0.05, "loops": 1,
+        }
+        self.store.update({
+            "custom_modules": [custom],
+            "playlist": [{"module": "custom_saved", "duration": 10, "enabled": True}],
+        })
+        self.pair_browser()
+        body = self.client.get("/").get_data(as_text=True)
+        probe = r"""
+const port=process.argv[1],pagePath=process.argv[2],sleep=ms=>new Promise(resolve=>setTimeout(resolve,ms));let endpoint;
+for(let attempt=0;attempt<50;attempt++){try{endpoint=await fetch(`http://127.0.0.1:${port}/json/new`,{method:'PUT'}).then(response=>response.json());break}catch(_){await sleep(50)}}
+if(!endpoint)throw new Error('Chromium DevTools endpoint unavailable');
+const socket=new WebSocket(endpoint.webSocketDebuggerUrl),pending=new Map();let nextId=1,loadResolve,loaded=new Promise(resolve=>loadResolve=resolve);
+socket.onmessage=event=>{const message=JSON.parse(event.data);if(message.id&&pending.has(message.id)){const request=pending.get(message.id);pending.delete(message.id);message.error?request.reject(new Error(JSON.stringify(message.error))):request.resolve(message.result)}else if(message.method==='Page.loadEventFired')loadResolve()};
+await new Promise((resolve,reject)=>{socket.onopen=resolve;socket.onerror=reject});
+const send=(method,params={})=>{const id=nextId++;socket.send(JSON.stringify({id,method,params}));return new Promise((resolve,reject)=>pending.set(id,{resolve,reject}))};
+const evaluate=async expression=>{const result=await send('Runtime.evaluate',{expression,returnByValue:true,awaitPromise:true});if(result.exceptionDetails)throw new Error(JSON.stringify(result.exceptionDetails));return result.result.value};
+try{
+ await send('Runtime.enable');await send('Page.enable');loaded=new Promise(resolve=>loadResolve=resolve);await send('Page.navigate',{url:'file://'+pagePath});await loaded;
+ await evaluate(`globalThis.stopMatrixConfigSync?.();globalThis.__previewCalls=[];globalThis.__saveCalls=0;globalThis.__messages=[];setMessage=(text,error=false)=>{globalThis.__messages.push({text,error});const status=document.querySelector('#message');status.textContent=text;status.setAttribute('role',error?'alert':'status')};matrixDirty=true;saveConfig=async()=>{globalThis.__saveCalls++;return{saved:true,warning:null}};api=async(path,options)=>{globalThis.__previewCalls.push({path,method:options?.method});return{}};(()=>{const input=document.querySelector('.custom-module-card[data-id="custom_saved"] [data-field="text"]');input.value='UNSAVED BROWSER DRAFT';input.dispatchEvent(new Event('input',{bubbles:true}));const row=document.querySelector('.module-row[data-module="custom_saved"]');[...row.querySelectorAll('button')].find(item=>item.textContent==='Preview').scrollIntoView({block:'center'})})()`);await sleep(20);
+ const point=await evaluate(`(()=>{const row=document.querySelector('.module-row[data-module="custom_saved"]'),button=[...row.querySelectorAll('button')].find(item=>item.textContent==='Preview'),rect=button.getBoundingClientRect(),x=rect.left+rect.width/2,y=rect.top+rect.height/2;return{x,y,hit:document.elementFromPoint(x,y)===button}})()`);
+ if(!point.hit)throw new Error('custom Preview center is not hit-testable: '+JSON.stringify(point));
+ await send('Input.dispatchMouseEvent',{type:'mousePressed',x:point.x,y:point.y,button:'left',clickCount:1});await send('Input.dispatchMouseEvent',{type:'mouseReleased',x:point.x,y:point.y,button:'left',clickCount:1});
+ for(let attempt=0;attempt<50&&!await evaluate(`globalThis.__previewCalls.length===1`);attempt++)await sleep(20);
+ const report=await evaluate(`({saveCalls:globalThis.__saveCalls,calls:globalThis.__previewCalls,dirty:matrixDirty,draft:document.querySelector('.custom-module-card[data-id="custom_saved"] [data-field="text"]').value,message:globalThis.__messages.at(-1)?.text||'',messageError:globalThis.__messages.at(-1)?.error??null})`);
+ console.log(JSON.stringify(report));
+}finally{socket.close()}
+"""
+        report = self._run_dashboard_chromium_probe(body, probe, timeout=30)
+        self.assertEqual(report["saveCalls"], 0, report)
+        self.assertEqual(report["calls"], [{"path": "/api/preview/custom_saved", "method": "POST"}], report)
+        self.assertTrue(report["dirty"], report)
+        self.assertEqual(report["draft"], "UNSAVED BROWSER DRAFT", report)
+        self.assertIn("saved version", report["message"], report)
+        self.assertIn("Unsaved changes were not applied", report["message"], report)
+        self.assertFalse(report["messageError"], report)
+
+    @unittest.skipUnless(shutil.which("node"), "Node.js is required")
+    def test_failed_custom_preview_preserves_unsaved_draft_without_saving(self):
         source = (Path(__file__).parents[1] / "app" / "templates" / "dashboard.html").read_text()
-        save_start = source.index("async function saveConfig")
-        save_end = source.index("\nfunction updateOpenWeatherSecretStatus", save_start)
         preview_start = source.index("async function preview(name)")
         preview_end = source.index("\nfunction previewSelected", preview_start)
-        function_source = source[save_start:save_end] + "\n" + source[preview_start:preview_end]
+        function_source = source[preview_start:preview_end]
         harness = r"""
-let messages=[],previewModule='',matrixLoadedRevision=0,matrixDirty=true,matrixEditorsReady=true,matrixRecoveryPending=false,highestNotifiedRemoteRevision=0;
-function matrixRevisionETag(){return '"'+matrixLoadedRevision+'"';}
-function configBody(){return {};}
+let messages=[],previewModule='',matrixDirty=true,saveCalls=0,apiCalls=[];
 function setMessage(text,error=false){messages.push({text,error});}
-function dismissMatrixRevisionDialogThrough(){}
 global.document={querySelector(){return {value:''};}};
+async function saveConfig(){saveCalls++;throw new Error('save path must not run');}
 async function api(path){
-  if(path==='/api/config'){const error=new Error('Configuration saved, but display reload failed.');error.data={committed:true,config:{revision:1}};throw error;}
+  apiCalls.push(path);
   throw new Error('Preview hardware unavailable.');
 }
 """ + function_source + r"""
 (async()=>{
   await preview('custom_test');
   const final=messages.at(-1);
-  if(!final.error || !final.text.includes('display reload failed') || !final.text.includes('Preview hardware unavailable'))throw new Error('failed preview overwrote committed-save warning');
-  console.log('FAILED_PREVIEW_COMMITTED_WARNING_PASS');
+  if(saveCalls!==0)throw new Error('failed custom preview invoked save');
+  if(JSON.stringify(apiCalls)!==JSON.stringify(['/api/preview/custom_test']))throw new Error('unexpected requests '+JSON.stringify(apiCalls));
+  if(!matrixDirty)throw new Error('failed custom preview cleared the unsaved draft');
+  if(!final.error||final.text!=='Preview hardware unavailable.')throw new Error('failed preview message was not preserved');
+  console.log('FAILED_CUSTOM_PREVIEW_DRAFT_PASS');
 })().catch(error=>{console.error(error);process.exit(1)});
 """
         node = shutil.which("node")
@@ -5403,7 +6401,7 @@ async function api(path){
             text=True, capture_output=True, check=False,
         )
         self.assertEqual(result.returncode, 0, result.stderr)
-        self.assertIn("FAILED_PREVIEW_COMMITTED_WARNING_PASS", result.stdout)
+        self.assertIn("FAILED_CUSTOM_PREVIEW_DRAFT_PASS", result.stdout)
 
     @unittest.skipUnless(shutil.which("node"), "Node.js is required")
     def test_playlist_uses_one_physical_time_format_for_every_row(self):
@@ -8201,10 +9199,13 @@ let announcementTimingPlan={};
 const syncPlaylistDurations=()=>{};
 const scheduleAnnouncementTiming=()=>{};
 const validateAnnouncementBoard=()=>true;
+const devicePublications=[];
+globalThis.publishDeviceDraftMutation=(module,delay)=>devicePublications.push({module,delay});
 announcementControl(announcement,'Name','name','text');
 control.value='Updated heading';control.listeners.input();
 if(announcement.name!=='Updated heading')throw new Error('model stale');
 if(heading.textContent!=='Updated heading')throw new Error('heading stale');
+if(JSON.stringify(devicePublications)!==JSON.stringify([{module:'announcement_board',delay:150}]))throw new Error('announcement device publication missing');
 console.log('ANNOUNCEMENT_HEADING_SYNC_PASS');
 """.replace("__ANNOUNCEMENT_JSON__", json.dumps(announcement))
         node = shutil.which("node")
@@ -8533,7 +9534,7 @@ console.log('MODULE_EDITOR_EDIT_PREVIEW_SELECTION_PASS');
 const builtIns=[{checked:false},{checked:true}];
 const customEnabled=[{checked:false},{checked:true}];
 const customCards=customEnabled.map(input=>({querySelector(selector){if(selector!=='[data-field=enabled]')throw new Error('unexpected custom selector');return input;}}));
-let counts=0,dirty=0,inspection=[],previewSchedules=[],messages=[];
+let counts=0,dirty=0,inspection=[],previewSchedules=[],devicePublications=[],messages=[];
 global.document={querySelectorAll(selector){
   if(selector==='.lava-palette')return builtIns;
   if(selector==='.custom-lava-card')return customCards;
@@ -8543,6 +9544,7 @@ global.updatePaletteGroupCounts=()=>{counts++};
 global.markMatrixDirty=()=>{dirty++};
 global.syncLavaInspectionRadios=options=>{inspection.push(options)};
 global.scheduleEditPreview=delay=>{previewSchedules.push(delay)};
+global.publishDeviceDraftMutation=(module,delay)=>{devicePublications.push({module,delay})};
 global.setMessage=text=>{messages.push(text)};
 global.previewMode='edit';
 global.previewModule='clock_lava';
@@ -8554,6 +9556,7 @@ if(builtIns.some(input=>input.checked) || customEnabled.some(input=>input.checke
 if(counts!==2 || dirty!==2)throw new Error('bulk actions did not refresh counts and mark the draft dirty');
 if(inspection.length!==2||inspection.some(options=>options!==undefined))throw new Error('bulk actions automatically selected an inspection palette');
 if(JSON.stringify(previewSchedules)!==JSON.stringify([150,150]))throw new Error('Edit Preview was not refreshed');
+if(JSON.stringify(devicePublications)!==JSON.stringify([{module:'clock_lava',delay:150},{module:'clock_lava',delay:150}]))throw new Error('physical device preview was not refreshed');
 if(messages.length!==2 || !messages[0].includes('Save configuration') || !messages[1].includes('Save configuration'))throw new Error('bulk actions did not explain unsaved state');
 console.log('LAVA_PALETTE_BULK_CONTROLS_PASS');
 """
@@ -9664,6 +10667,7 @@ try{
         preview_instance = "0123456789abcdef0123456789abcdef"
         candidate = copy.deepcopy(self.store.get())
         candidate.pop("revision")
+        candidate.pop("schema_version")
         start_payload = {
             "config": candidate,
             "generation": 1,
@@ -9827,6 +10831,7 @@ try{
         self.controller.reset_mock()
         candidate = copy.deepcopy(self.store.get())
         candidate.pop("revision")
+        candidate.pop("schema_version")
         self.assertTrue(candidate["lava"]["show_time"])
         self.assertTrue(candidate["lava"]["show_date"])
 
@@ -9844,6 +10849,39 @@ try{
         ))).size, (64, 32))
         self.assertEqual(self.controller.method_calls, [])
 
+    def test_edit_preview_route_renders_static_custom_text_for_selected_duration(self):
+        self.pair_browser()
+        self.controller.reset_mock()
+        candidate = copy.deepcopy(self.store.get())
+        candidate.pop("revision")
+        candidate.pop("schema_version")
+        module = {
+            "id": "custom_static", "name": "Static", "type": "text",
+            "font": "4x6", "colour": "#ffcc00", "background": "#001122",
+            "text": "HELLO", "x": 3, "y": 20,
+            "direction": "left", "speed": 0.05, "loops": 1,
+        }
+        candidate["custom_modules"] = [module]
+        candidate["playlist"] = [
+            {"module": module["id"], "duration": 7, "enabled": True},
+        ]
+
+        response = self.paired_request("POST", "/api/edit-preview/custom_static", json={
+            "config": candidate,
+            "generation": 1,
+            "preview_instance": "0123456789abcdef0123456789abcdef",
+        })
+
+        self.assertEqual(response.status_code, 200, response.get_data(as_text=True))
+        body = response.get_json()
+        self.assertTrue(body["complete"])
+        self.assertEqual(len(body["frames"]), 1)
+        self.assertEqual(body["frames"][0]["delay_ms"], 7000)
+        self.assertEqual(Image.open(io.BytesIO(base64.b64decode(
+            body["frames"][0]["png"]
+        ))).size, (64, 32))
+        self.assertEqual(self.controller.method_calls, [])
+
     def test_edit_preview_route_renders_default_weather_text_and_scroll(self):
         from modules.weather_app import WeatherSnapshot
 
@@ -9851,6 +10889,7 @@ try{
         self.controller.reset_mock()
         candidate = copy.deepcopy(self.store.get())
         candidate.pop("revision")
+        candidate.pop("schema_version")
         prepared = WeatherSnapshot(
             location="Brighton, England, GB", status="Clear sky",
             temperature=20, feels_like=19, high=23, low=12, humidity=50,
@@ -9911,6 +10950,7 @@ try{
 
         base = copy.deepcopy(self.store.get())
         base.pop("revision")
+        base.pop("schema_version")
         base["media"] = {"splash": "splash.gif", "sleep": "sleep.gif"}
         base["playlist"] = [
             {"module": "splash", "duration": 1, "enabled": True},
@@ -10006,6 +11046,7 @@ try{
         instance = "a" * 32
         candidate = copy.deepcopy(self.store.get())
         candidate.pop("revision")
+        candidate.pop("schema_version")
         payload = json.dumps({
             "config": candidate,
             "generation": 1,
@@ -10182,6 +11223,7 @@ try{
         def payload(generation, *, location="singleton"):
             candidate = copy.deepcopy(self.store.get())
             candidate.pop("revision")
+            candidate.pop("schema_version")
             candidate["weather"]["location"] = location
             return {
                 "config": candidate,
@@ -10576,6 +11618,7 @@ try{
         def payload(index):
             candidate = copy.deepcopy(self.store.get())
             candidate.pop("revision")
+            candidate.pop("schema_version")
             return {
                 "config": candidate,
                 "generation": index,
@@ -10870,6 +11913,7 @@ try{
         def payload(label, generation):
             candidate = copy.deepcopy(self.store.get())
             candidate.pop("revision")
+            candidate.pop("schema_version")
             candidate["weather"]["location"] = label
             return {
                 "config": candidate,
@@ -11098,6 +12142,7 @@ try{
         def payload(label, preview_instance):
             candidate = copy.deepcopy(self.store.get())
             candidate.pop("revision")
+            candidate.pop("schema_version")
             candidate["weather"]["location"] = label
             return {
                 "config": candidate,
@@ -11304,6 +12349,7 @@ try{
         def payload(label, generation):
             candidate = copy.deepcopy(self.store.get())
             candidate.pop("revision")
+            candidate.pop("schema_version")
             candidate["weather"]["location"] = label
             return {
                 "config": candidate,
@@ -11586,6 +12632,7 @@ try{
         def payload(label):
             candidate = copy.deepcopy(self.store.get())
             candidate.pop("revision")
+            candidate.pop("schema_version")
             candidate["weather"]["location"] = label
             return {
                 "config": candidate,
@@ -11809,6 +12856,7 @@ try{
         def payload(label, generation, preview_instance):
             candidate = copy.deepcopy(self.store.get())
             candidate.pop("revision")
+            candidate.pop("schema_version")
             candidate["weather"]["location"] = label
             return {
                 "config": candidate,
@@ -12072,6 +13120,7 @@ try{
         tabs_b = [tab_client(identity_b) for _ in range(6)]
         candidate = copy.deepcopy(self.store.get())
         candidate.pop("revision")
+        candidate.pop("schema_version")
         candidate["weather"]["location"] = private
 
         def payload(instance, generation=1):
@@ -12501,6 +13550,7 @@ try{
 
         candidate = copy.deepcopy(self.store.get())
         candidate.pop("revision")
+        candidate.pop("schema_version")
         candidate["weather"]["location"] = "blocked-decoder-private"
         payload = {
             "config": candidate,
@@ -12812,6 +13862,7 @@ try{
 
         candidate = copy.deepcopy(self.store.get())
         candidate.pop("revision")
+        candidate.pop("schema_version")
         candidate["weather"]["location"] = "private-active-page-location"
         preview_instance = "cd" * 16
         payload = {
@@ -13138,6 +14189,7 @@ try{
         tabs = [[tab(device) for _ in range(6)] for device in range(3)]
         candidate = copy.deepcopy(self.store.get())
         candidate.pop("revision")
+        candidate.pop("schema_version")
 
         def payload(label, instance, generation=1):
             value = copy.deepcopy(candidate)
@@ -13560,6 +14612,7 @@ try{
 
         candidate = copy.deepcopy(self.store.get())
         candidate.pop("revision")
+        candidate.pop("schema_version")
         candidate["weather"]["location"] = private_values[1]
         start_payload = {
             "config": candidate,
@@ -13899,6 +14952,7 @@ try{
         private_sentinel = f"{self.temp.name}/private?credential=https://secret.invalid/key"
         candidate = copy.deepcopy(self.store.get())
         candidate.pop("revision")
+        candidate.pop("schema_version")
         candidate["weather"]["location"] = private_sentinel
 
         self.pair_browser()
@@ -14192,7 +15246,7 @@ try{
         manager = DevicePreviewManager(clock=lambda: now[0])
         self.controller.submit_device_draft.side_effect = lambda request, **_kwargs: manager.submit(request)
         self.controller.heartbeat_device_draft.side_effect = lambda owner, generation: manager.heartbeat(owner, generation=generation)
-        candidate = {key: copy.deepcopy(value) for key, value in self.store.get().items() if key != "revision"}
+        candidate = {key: copy.deepcopy(value) for key, value in self.store.get().items() if key not in {"revision", "schema_version"}}
         control = {"generation": 1, "preview_instance": "9" * 32}
         started = self.paired_client_request("POST", client, "/api/device-preview/weather", json={
             "config": candidate, **control, "timeout_seconds": 60,
@@ -14219,7 +15273,7 @@ try{
         candidate = {
             key: copy.deepcopy(value)
             for key, value in self.store.get().items()
-            if key != "revision"
+            if key not in {"revision", "schema_version"}
         }
         candidate["lava"]["enabled_palettes"] = ["fire_burst"]
         candidate["lava"]["custom_palettes"] = [
@@ -14293,7 +15347,7 @@ try{
     def test_physical_draft_timeout_is_strict_transient_and_non_persistent(self):
         client, _device_id, manager = self.physical_draft_fixture()
         saved = self.store.get()
-        candidate = {key: value for key, value in saved.items() if key != "revision"}
+        candidate = {key: value for key, value in saved.items() if key not in {"revision", "schema_version"}}
         baseline = json.dumps(saved, sort_keys=True)
         instance = "2" * 32
         valid = {"config": candidate, "generation": 1, "preview_instance": instance}
@@ -14333,7 +15387,7 @@ try{
         foreign_id = self.device_store.add("Other device", max_devices=8)["id"]
         with foreign.session_transaction() as paired:
             paired.update({"paired": True, "generation": "generation-one", "device_id": foreign_id})
-        candidate = {k: v for k, v in self.store.get().items() if k != "revision"}
+        candidate = {k: v for k, v in self.store.get().items() if k not in {"revision", "schema_version"}}
         def payload(instance, generation=1):
             return {"config": candidate, "generation": generation, "preview_instance": instance, "timeout_seconds": 60}
         accepted = self.paired_client_request("POST", owner, "/api/device-preview/weather", json=payload("a" * 32))
@@ -14352,7 +15406,7 @@ try{
         client, _device_id, manager = self.physical_draft_fixture()
         before_bytes = Path(self.store.path).read_bytes()
         before_revision = self.store.get()["revision"]
-        candidate = {k: copy.deepcopy(v) for k, v in self.store.get().items() if k != "revision"}
+        candidate = {k: copy.deepcopy(v) for k, v in self.store.get().items() if k not in {"revision", "schema_version"}}
         candidate["weather"]["location"] = "Unsaved physical draft"
         self.controller.reset_mock()
         result = self.paired_client_request("POST", client, "/api/device-preview/weather", json={
@@ -14373,7 +15427,7 @@ try{
         foreign_id = self.device_store.add("Foreign", max_devices=8)["id"]
         with foreign.session_transaction() as paired:
             paired.update({"paired": True, "generation": "generation-one", "device_id": foreign_id})
-        candidate = {k: v for k, v in self.store.get().items() if k != "revision"}
+        candidate = {k: v for k, v in self.store.get().items() if k not in {"revision", "schema_version"}}
         instance = "d" * 32
         start = self.paired_client_request("POST", owner, "/api/device-preview/weather", json={
             "config": candidate, "generation": 2, "preview_instance": instance, "timeout_seconds": 60,
@@ -14402,7 +15456,7 @@ try{
         self.assertEqual(repeated.status_code, 409)
 
     def test_physical_draft_unpair_revoke_logout_release_owner(self):
-        candidate = {k: v for k, v in self.store.get().items() if k != "revision"}
+        candidate = {k: v for k, v in self.store.get().items() if k not in {"revision", "schema_version"}}
         def start(client, instance, generation):
             return self.paired_client_request("POST", client, "/api/device-preview/weather", json={
                 "config": candidate, "generation": generation, "preview_instance": instance, "timeout_seconds": 60,
@@ -14434,7 +15488,7 @@ try{
         client, _device_id, manager = self.physical_draft_fixture()
         media = self.media_dir / "draft.png"
         media.write_bytes(b"accepted-inode")
-        candidate = {k: copy.deepcopy(v) for k, v in self.store.get().items() if k != "revision"}
+        candidate = {k: copy.deepcopy(v) for k, v in self.store.get().items() if k not in {"revision", "schema_version"}}
         candidate["media"]["splash"] = "draft.png"
         instance = "2" * 32
         started = self.paired_client_request("POST", client, "/api/device-preview/splash", json={
@@ -14470,7 +15524,7 @@ try{
         candidate = {
             key: copy.deepcopy(value)
             for key, value in self.store.get().items()
-            if key != "revision"
+            if key not in {"revision", "schema_version"}
         }
         entered = threading.Event()
         release = threading.Event()
@@ -14523,7 +15577,7 @@ try{
         candidate = {
             key: copy.deepcopy(value)
             for key, value in self.store.get().items()
-            if key != "revision"
+            if key not in {"revision", "schema_version"}
         }
         entered = threading.Event()
         release = threading.Event()
@@ -14594,7 +15648,7 @@ try{
         candidate = {
             key: copy.deepcopy(value)
             for key, value in self.store.get().items()
-            if key != "revision"
+            if key not in {"revision", "schema_version"}
         }
         candidate["weather"]["location"] = "Unsaved integration closure"
         media = self.media_dir / "closure-draft.png"

@@ -5,6 +5,7 @@ import json
 import os
 import shutil
 import subprocess
+import sys
 import tempfile
 import threading
 import time
@@ -13,8 +14,183 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from unittest import mock
 
+from scripts import verify_priority_1_3_remote as remote_verifier
+
 
 class Priority13AcceptanceTests(unittest.TestCase):
+    def test_remote_physical_verifier_pins_systemctl_and_environment(self):
+        completed = subprocess.CompletedProcess(
+            ["/usr/bin/systemctl"], 0, stdout="active\n", stderr="",
+        )
+        metadata = {
+            "nonce": "f" * 64,
+            "draft_sha256": "d" * 64,
+            "saved_sha256": "s" * 64,
+            "owner_generation": 4,
+            "foreign_rejected": True,
+            "timeout_returned": True,
+            "sleep_observed": True,
+        }
+        frames = {"draft": b"d" * 6144, "saved": b"s" * 6144}
+        with tempfile.TemporaryDirectory() as directory:
+            transaction = Path(directory)
+            with mock.patch.object(
+                remote_verifier.subprocess, "run", return_value=completed,
+            ) as run, mock.patch.object(
+                remote_verifier, "_canonical_transaction",
+                return_value=(metadata, frames, transaction),
+            ):
+                report = remote_verifier._physical(
+                    Path(directory), argparse.Namespace(),
+                )
+
+        self.assertTrue(report["service_active"])
+        self.assertIs(report["sleep_observed"], True)
+        self.assertNotIn("sleep_returned", report)
+        run.assert_called_once_with(
+            ["/usr/bin/systemctl", "is-active", "matrix-web.service"],
+            check=False,
+            text=True,
+            capture_output=True,
+            timeout=15,
+            shell=False,
+            env={"PATH": "/usr/bin:/bin", "LANG": "C", "LC_ALL": "C"},
+        )
+
+    def test_exported_verifier_acceptance_runs_with_readme_venv_and_no_dot_venv(self):
+        repository = Path(__file__).resolve().parents[1]
+        with tempfile.TemporaryDirectory(dir=os.environ.get("TMPDIR")) as directory:
+            exported = Path(directory) / "readme-layout"
+            (exported / "tests").mkdir(parents=True)
+            (exported / "scripts").mkdir()
+            (exported / "venv/bin").mkdir(parents=True)
+            shutil.copy2(__file__, exported / "tests" / Path(__file__).name)
+            (exported / "tests/__init__.py").write_text("")
+            shutil.copy2(
+                repository / "scripts/verify_priority_1_3_remote.py",
+                exported / "scripts/verify_priority_1_3_remote.py",
+            )
+            shutil.copy2(repository / "release_argparse.py", exported / "release_argparse.py")
+            (exported / "venv/bin/python").symlink_to(Path(sys.executable).resolve())
+            self.assertFalse((exported / ".venv").exists())
+
+            completed = subprocess.run(
+                [
+                    str(exported / "venv/bin/python"),
+                    "-B",
+                    "-m",
+                    "unittest",
+                    "-v",
+                    "tests.test_priority_1_3_acceptance.Priority13AcceptanceTests."
+                    "test_exported_candidate_ships_executable_remote_verifier",
+                ],
+                cwd=exported,
+                text=True,
+                capture_output=True,
+                check=False,
+                env={**os.environ, "PYTHONDONTWRITEBYTECODE": "1"},
+            )
+
+        self.assertEqual(completed.returncode, 0, completed.stdout + completed.stderr)
+
+    def test_readme_venv_runs_all_remaining_release_fixtures_without_dot_venv(self):
+        repository = Path(__file__).resolve().parents[1]
+        with tempfile.TemporaryDirectory(dir=os.environ.get("TMPDIR")) as directory:
+            exported = Path(directory) / "readme-layout"
+            exported.mkdir()
+            tracked = subprocess.run(
+                ["git", "ls-files", "-z"],
+                cwd=repository,
+                check=True,
+                capture_output=True,
+            ).stdout.split(b"\0")
+            for encoded in tracked:
+                if not encoded:
+                    continue
+                relative = Path(encoded.decode("utf-8"))
+                source = repository / relative
+                if source.is_file():
+                    destination = exported / relative
+                    destination.parent.mkdir(parents=True, exist_ok=True)
+                    shutil.copy2(source, destination)
+            (exported / "venv/bin").mkdir(parents=True)
+            (exported / "venv/bin/python").symlink_to(Path(sys.executable).resolve())
+            self.assertFalse((exported / ".venv").exists())
+
+            completed = subprocess.run(
+                [
+                    str(exported / "venv/bin/python"),
+                    "-B",
+                    "-m",
+                    "unittest",
+                    "-v",
+                    "tests.test_production_test_verifier.ProductionTestVerifierTests."
+                    "test_standard_venv_runs_exact_real_tests_and_binds_bounded_stderr",
+                    "tests.test_slice1_identity_and_codec.Slice1IdentityAndCodecTests."
+                    "test_fresh_process_inspect_rejects_redigested_execution_service_mismatch",
+                    "tests.test_slice1_identity_and_codec.Slice1IdentityAndCodecTests."
+                    "test_fresh_process_inspect_rejects_every_coherently_redigested_schema_corruption",
+                    "tests.test_slice1_identity_and_codec.Slice1IdentityAndCodecTests."
+                    "test_exact_schema_v1_fresh_process_inspect_rejects_coherently_redigested_non_int_values",
+                ],
+                cwd=exported,
+                text=True,
+                capture_output=True,
+                check=False,
+                env={**os.environ, "PYTHONDONTWRITEBYTECODE": "1"},
+            )
+
+        self.assertEqual(completed.returncode, 0, completed.stdout + completed.stderr)
+
+    def test_acceptance_fixtures_do_not_hardcode_ci_dot_venv_alias(self):
+        repository = Path(__file__).resolve().parents[1]
+        fixtures = (
+            repository / "tests/test_priority_1_3_acceptance.py",
+            repository / "tests/test_guarded_priority_1_3_release.py",
+            repository / "tests/test_release_gate_cli_and_build.py",
+            repository / "tests/test_production_test_verifier.py",
+            repository / "tests/test_slice1_identity_and_codec.py",
+        )
+
+        forbidden = ".venv" + "/bin/python"
+        for fixture in fixtures:
+            with self.subTest(fixture=fixture.name):
+                self.assertNotIn(forbidden, fixture.read_text())
+
+    def test_readme_runtime_venv_and_ci_compatibility_alias_are_explicit(self):
+        repository = Path(__file__).resolve().parents[1]
+        readme = (repository / "README.md").read_text()
+        pipeline = (repository / ".gitlab-ci.yml").read_text()
+
+        self.assertIn("python3 -m venv venv", readme)
+        self.assertIn("./venv/bin/python -m pip install", readme)
+        self.assertIn("./venv/bin/python -B -m unittest", readme)
+        self.assertNotIn(".venv" + "/bin/python", readme)
+        self.assertIn("python3 -m venv .venv-ci", pipeline)
+        self.assertIn("ln -sT .venv-ci .venv", pipeline)
+        self.assertIn('test "$(readlink .venv)" = ".venv-ci"', pipeline)
+        self.assertIn(".venv-ci/bin/coverage run", pipeline)
+
+    def test_authoritative_release_runbook_uses_readme_supported_venv(self):
+        repository = Path(__file__).resolve().parents[1]
+        runbook = (repository / "docs/priority-1-3-release.md").read_text()
+
+        forbidden = "./.venv" + "/bin/python"
+        self.assertNotIn(forbidden, runbook)
+        for command in (
+            "PYTHONDONTWRITEBYTECODE=1 ./venv/bin/python -B -m unittest",
+            "./venv/bin/python -I -B deploy/release_bundle.py prepare-release-tree",
+            "./venv/bin/python -I -B deploy/guarded_priority_1_3_release.py run",
+        ):
+            with self.subTest(command=command):
+                self.assertIn(command, runbook)
+        operator_lines = [
+            line for line in runbook.splitlines()
+            if line.startswith("PYTHONDONTWRITEBYTECODE=1 ./venv/bin/python")
+            or line.startswith("./venv/bin/python")
+        ]
+        self.assertEqual(len(operator_lines), 4)
+
     def test_exported_candidate_ships_executable_remote_verifier(self):
         repository = Path(__file__).resolve().parents[1]
         source = repository / "scripts" / "verify_priority_1_3_remote.py"
@@ -26,7 +202,7 @@ class Priority13AcceptanceTests(unittest.TestCase):
             shutil.copy2(repository / "release_argparse.py", exported / "release_argparse.py")
             verifier = exported / "scripts" / source.name
             completed = subprocess.run(
-                [str(repository / ".venv/bin/python"), "-I", "-B", str(verifier), "--help"],
+                [sys.executable, "-I", "-B", str(verifier), "--help"],
                 cwd=exported, text=True, capture_output=True, check=False,
             )
         self.assertEqual(completed.returncode, 0, completed.stderr)
@@ -55,7 +231,7 @@ class Priority13AcceptanceTests(unittest.TestCase):
             shutil.copy2(verifier_source, verifier)
             shutil.copy2(repository / "release_argparse.py", exported / "release_argparse.py")
             completed = subprocess.run(
-                [str(repository / ".venv/bin/python"), "-I", "-B",
+                [sys.executable, "-I", "-B",
                  str(exported / "deploy" / "verify_priority_1_3_acceptance.py"), "--help"],
                 cwd=exported, text=True, capture_output=True, check=False,
             )
@@ -64,7 +240,7 @@ class Priority13AcceptanceTests(unittest.TestCase):
             cookie.write_text("session=opaque", encoding="ascii")
             cookie.chmod(0o600)
             production = subprocess.run([
-                str(repository / ".venv/bin/python"), "-I", "-B",
+                sys.executable, "-I", "-B",
                 str(exported / "deploy" / "verify_priority_1_3_acceptance.py"),
                 "--boundary", "b1", "--mode", "deploy",
                 "--ssh-target", "admin@192.0.2.10",
@@ -105,7 +281,7 @@ class Priority13AcceptanceTests(unittest.TestCase):
             marker.write_text(json.dumps(manifest))
             marker.chmod(0o400)
             command = [
-                str(repository / ".venv/bin/python"), "-I", "-B", str(verifier),
+                sys.executable, "-I", "-B", str(verifier),
                 "--check", "protected-parity", "--mode", "deploy",
                 "--app-root", str(app_root), "--attempt-id", "a" * 32,
                 "--acceptance-operation-id", "1" * 64, "--evidence-id", "b" * 64,
@@ -182,7 +358,7 @@ class Priority13AcceptanceTests(unittest.TestCase):
                 }],
             }
             command = [
-                str(repository / ".venv/bin/python"), "-I", "-B", str(verifier),
+                sys.executable, "-I", "-B", str(verifier),
                 "--check", "protected-parity", "--mode", "deploy",
                 "--app-root", str(app_root), "--attempt-id", "a" * 32,
                 "--acceptance-operation-id", "1" * 64, "--evidence-id", "b" * 64,
@@ -268,14 +444,17 @@ class Priority13AcceptanceTests(unittest.TestCase):
             }))
             fake_bin = Path(directory) / "bin"
             fake_bin.mkdir()
+            marker = Path(directory) / "poisoned-systemctl"
             systemctl = fake_bin / "systemctl"
-            systemctl.write_text("#!/bin/sh\nprintf 'active\n'\n")
+            systemctl.write_text(
+                f"#!/bin/sh\nprintf 'poisoned' > {marker}\nprintf 'active\\n'\n"
+            )
             systemctl.chmod(0o755)
             env = {**os.environ, "PATH": str(fake_bin) + os.pathsep + os.environ["PATH"]}
             for attempt, evidence in (("a" * 32, "b" * 64), ("c" * 32, "d" * 64)):
                 for check in ("physical-journey", "rollback-parity"):
                     completed = subprocess.run([
-                        str(repository / ".venv/bin/python"), "-I", "-B", str(verifier),
+                        sys.executable, "-I", "-B", str(verifier),
                         "--check", check, "--mode", "deploy", "--app-root", str(app),
                         "--attempt-id", attempt, "--acceptance-operation-id", "1" * 64,
                         "--evidence-id", evidence,
@@ -283,6 +462,7 @@ class Priority13AcceptanceTests(unittest.TestCase):
                     ], text=True, capture_output=True, env=env, check=False)
                     self.assertNotEqual(completed.returncode, 0, (attempt, check, completed.stdout))
                     self.assertEqual(completed.stdout, "")
+            self.assertFalse(marker.exists())
 
     def test_remote_verifier_executes_real_tests_service_frames_and_state_checks(self):
         repository = Path(__file__).resolve().parents[1]
@@ -314,6 +494,7 @@ class Priority13AcceptanceTests(unittest.TestCase):
             (app / "data/paired-devices.json").write_text("[]")
             (app / "resources/media/example.bin").write_bytes(b"media")
             from acceptance_artifacts import AcceptanceArtifactTransaction
+            from tests.test_acceptance_artifacts import complete_through_controller
             runtime = app / "data/acceptance-runtime"
             publisher = AcceptanceArtifactTransaction(runtime, {
                 "attempt_id": "a" * 32, "acceptance_operation_id": "1" * 64,
@@ -321,25 +502,36 @@ class Priority13AcceptanceTests(unittest.TestCase):
                 "expected_version": "9.8.7-test", "mode": "deploy",
                 "nonce": "f" * 64, "owner_revision": 1,
             }, owner_generation=4)
-            publisher.publish_draft(b"d" * 6144, frame_revision=10)
-            publisher.publish_saved_rollback(b"s" * 6144, frame_revision=11, saved_revision=9)
-            fake_bin = root / "bin"
-            fake_bin.mkdir()
-            systemctl = fake_bin / "systemctl"
-            systemctl.write_text("#!/bin/sh\nprintf 'active\n'\n")
-            systemctl.chmod(0o755)
+            complete_through_controller(
+                publisher, b"d" * 6144, b"s" * 6144, generation=4,
+            )
             env = dict(os.environ)
-            env["PATH"] = str(fake_bin) + os.pathsep + env["PATH"]
-            base = [str(repository / ".venv/bin/python"), "-I", "-B", str(verifier),
+            base = [sys.executable, "-I", "-B", str(verifier),
                     "--mode", "deploy", "--app-root", str(app),
                     "--attempt-id", "a" * 32, "--acceptance-operation-id", "1" * 64,
                     "--evidence-id", "b" * 64,
                     "--expected-sha", "1" * 40, "--expected-version", "9.8.7-test"]
             reports = {}
-            for check in ("production-tests", "persistent-state", "physical-journey", "rollback-parity"):
+            for check in ("production-tests", "persistent-state"):
                 completed = subprocess.run(base + ["--check", check], text=True, capture_output=True, env=env, check=False)
                 self.assertEqual(completed.returncode, 0, (check, completed.stderr))
                 reports[check] = json.loads(completed.stdout)
+            physical_arguments = remote_verifier.build_parser().parse_args(
+                base[4:] + ["--check", "physical-journey"]
+            )
+            active = subprocess.CompletedProcess(
+                ["/usr/bin/systemctl"], 0, stdout="active\n", stderr="",
+            )
+            with mock.patch.object(
+                remote_verifier.subprocess, "run", return_value=active,
+            ):
+                reports["physical-journey"] = remote_verifier.run(physical_arguments)
+            completed = subprocess.run(
+                base + ["--check", "rollback-parity"],
+                text=True, capture_output=True, env=env, check=False,
+            )
+            self.assertEqual(completed.returncode, 0, completed.stderr)
+            reports["rollback-parity"] = json.loads(completed.stdout)
             self.assertEqual((app / "focused.marker").read_text(), "ran")
             self.assertEqual((app / "full.marker").read_text(), "ran")
             self.assertGreater(reports["production-tests"]["focused"]["stderr_size"], 0)
@@ -356,7 +548,10 @@ class Priority13AcceptanceTests(unittest.TestCase):
     def test_real_local_http_and_chromium_journeys_use_explicit_ipv4_and_cookie(self):
         acceptance = self._module()
         observed = []
-        config = {"revision": 1, "schedule": [], "custom_modules": [], "media": {}}
+        config = {
+            "schema_version": 1, "revision": 1,
+            "schedule": [], "custom_modules": [], "media": {},
+        }
         class Handler(BaseHTTPRequestHandler):
             def log_message(self, *_args): pass
             def _send(self, status, payload, content_type="application/json"):
@@ -382,18 +577,30 @@ class Priority13AcceptanceTests(unittest.TestCase):
                         "acceptance_operation_id": payload["acceptance_operation_id"],
                         "owner_generation": payload["generation"]})
                 if self.path == "/api/release-acceptance/transaction/status":
+                    if time.monotonic() < self.server.content_deadline:
+                        return self._send(202, {"state": "DRAFT_PUBLISHED"})
+                    if self.server.accepted_heartbeats < 2:
+                        return self._send(409, {"error": "connectivity expired first"})
                     return self._send(200, {"state": "SAVED_ROLLBACK_PUBLISHED", "nonce": payload["nonce"],
                         "acceptance_operation_id": "1" * 64,
                         "owner_generation": payload["generation"], "saved_revision": 9,
-                        "draft_revision": 10, "current_revision": 11})
+                        "draft_revision": 10, "current_revision": 11,
+                        "foreign_rejected": True, "timeout_returned": True,
+                        "sleep_observed": True, "rollback_complete": True})
                 if self.path.endswith("/clock_lava"):
+                    if "schema_version" in payload["config"]:
+                        return self._send(400, {"error": "schema_version is server-owned"})
                     self.server.owner = payload["preview_instance"]
                     self.server.heartbeat_admission_at = time.monotonic() + 5
-                    return self._send(202, {"generation": payload["generation"], "timeout_seconds": payload["timeout_seconds"], "heartbeat_after_seconds": 5})
+                    self.server.content_deadline = time.monotonic() + 10.5
+                    self.server.accepted_heartbeats = 0
+                    return self._send(202, {"generation": payload["generation"], "timeout_seconds": payload["timeout_seconds"], "heartbeat_after_seconds": 5, "expires_in": 10.5})
                 if self.path.endswith("/heartbeat") and payload["preview_instance"] == "foreign": return self._send(409, {"error": "foreign"})
                 if self.path.endswith("/heartbeat"):
                     admitted = payload["preview_instance"] == self.server.owner and time.monotonic() >= self.server.heartbeat_admission_at
-                    if admitted: self.server.heartbeat_admission_at = time.monotonic() + 5
+                    if admitted:
+                        self.server.heartbeat_admission_at = time.monotonic() + 5
+                        self.server.accepted_heartbeats += 1
                     return self._send(202 if admitted else 409, {"active": admitted})
                 if self.path.endswith("/cancel"): return self._send(202, {"cancelled": True})
                 return self._send(404, {})
@@ -410,9 +617,14 @@ class Priority13AcceptanceTests(unittest.TestCase):
                 "mode": "deploy"}
             with mock.patch.object(acceptance, "_LOCAL_BASE_URL", base), mock.patch("secrets.token_hex", side_effect=["owner", "d" * 64, "foreign"]):
                 http_report = acceptance.LocalHttpJourney(transaction, authorization).run(base, "session=browser-fixture", operation_timeout=300, aggregate_deadline=time.monotonic() + 30)
-            self.assertGreaterEqual(time.monotonic() - http_started, 5)
+            self.assertGreaterEqual(time.monotonic() - http_started, 10.5)
             self.assertEqual(http_report["foreign_rejected"], True)
-            self.assertEqual(sum(item[1].endswith("/heartbeat") for item in observed), 3)
+            self.assertEqual(http_report["timeout_returned"], True)
+            self.assertEqual(http_report["sleep_observed"], True)
+            self.assertGreaterEqual(sum(item[1].endswith("/heartbeat") for item in observed), 4)
+            self.assertFalse(any(item[1].endswith("/cancel") for item in observed), observed)
+            self.assertTrue(any(item[1] == "/api/device-preview/clock_lava" for item in observed), observed)
+            self.assertFalse(any(item[1] == "/api/device-preview/sleep" for item in observed), observed)
             with mock.patch.object(acceptance, "_LOCAL_BASE_URL", base):
                 chromium_report = acceptance.LocalChromiumJourney().run(base, "session=browser-fixture", operation_timeout=300, aggregate_deadline=time.monotonic() + 30)
             self.assertEqual(chromium_report, {"paired": True, "explicit_ipv4": True, "status_checked": True, "frame_checked": True})
@@ -578,7 +790,7 @@ class Priority13AcceptanceTests(unittest.TestCase):
                         "protected-parity": {**common, "source_sha": "1" * 40, "version": "9.8.7-test", "installed_digest": hashlib.sha256(json.dumps(protected, sort_keys=True, separators=(",", ":")).encode("ascii")).hexdigest(), **protected},
                         "production-tests": {**common, "focused": {"passed": True, "duration_ms": 1, "command_digest": "c" * 64, "stderr_size": 17, "stderr_digest": "e" * 64}, "full": {"passed": True, "duration_ms": 2, "command_digest": "d" * 64, "stderr_size": 23, "stderr_digest": "f" * 64}},
                         "persistent-state": {**common, "config": "c" * 64, "paired": "a" * 64, "media": "b" * 64},
-                        "physical-journey": {**common, "service_active": True, "draft_signature": "d" * 64, "saved_signature": "a" * 64, "width": 64, "height": 32, "owner_generation": 7, "foreign_rejected": True, "timeout_returned": True, "sleep_returned": True},
+                        "physical-journey": {**common, "service_active": True, "draft_signature": "d" * 64, "saved_signature": "a" * 64, "width": 64, "height": 32, "owner_generation": 7, "foreign_rejected": True, "timeout_returned": True, "sleep_observed": True},
                         "rollback-parity": {**common, "mode": "deploy", "saved_output": True, "saved_signature": "a" * 64},
                     }
                     return acceptance.RemoteResult(0, json.dumps(payloads[check]), "")
@@ -590,7 +802,7 @@ class Priority13AcceptanceTests(unittest.TestCase):
             http = Client({"owner_generation": 7, "nonce": "f" * 64,
                 "acceptance_operation_id": "1" * 64, "saved_revision": 9, "draft_revision": 10, "current_revision": 11,
                 "foreign_rejected": True, "timeout_returned": True,
-                "saved_output_returned": True})
+                "sleep_observed": True, "saved_output_returned": True})
             chromium = Client({"paired": True, "explicit_ipv4": True, "status_checked": True, "frame_checked": True})
             executor = Executor()
             self.assertEqual(acceptance.run_acceptance(arguments, executor, http_client=http, chromium_client=chromium), 0)

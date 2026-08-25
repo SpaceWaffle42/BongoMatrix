@@ -37,6 +37,10 @@ _MANIFEST_KEYS = {"version", "files"}
 _FILE_KEYS = {"path", "sha256", "uid", "gid", "mode"}
 _BACKUP_ABSENT_KEYS = {"path", "present_before"}
 _BACKUP_PRESENT_KEYS = _BACKUP_ABSENT_KEYS | {"sha256", "uid", "gid", "mode"}
+_SYSTEMCTL = "/usr/bin/systemctl"
+_SYSTEMD_ENV = {"PATH": "/usr/bin:/bin", "LANG": "C", "LC_ALL": "C"}
+_SYSTEMD_CONTROL_BUDGET_SECONDS = 300.0
+_SYSTEMD_CALL_TIMEOUT_SECONDS = 15.0
 _FORBIDDEN_DIRECTORY_PARTS = {
     "data",
     "secrets",
@@ -1263,22 +1267,47 @@ def _dry_run_lines(
 
 
 class _SystemdServiceControl:
-    def __init__(self, name: str):
+    def __init__(
+        self,
+        name: str,
+        *,
+        deadline: float | None = None,
+        monotonic: Callable[[], float] | None = None,
+    ):
         self.name = _validate_service_name(name)
         self._health: tuple[str, int, int] | None = None
+        self._monotonic = monotonic or time.monotonic
+        self._deadline = (
+            self._monotonic() + _SYSTEMD_CONTROL_BUDGET_SECONDS
+            if deadline is None else float(deadline)
+        )
 
     def configure_health(self, url: str, status: int, timeout_seconds: int) -> None:
         if (url, status, timeout_seconds) != ("http://127.0.0.1:5000/", 302, 30):
             _reject("recovery health configuration is not exact")
         self._health = (url, status, timeout_seconds)
 
-    def _run(self, *arguments: str, check: bool = True) -> subprocess.CompletedProcess[str]:
+    def _remaining_timeout(self) -> float:
+        remaining = self._deadline - self._monotonic()
+        if remaining <= 0:
+            _reject("service control deadline expired")
+        return min(_SYSTEMD_CALL_TIMEOUT_SECONDS, remaining)
+
+    def _invoke(
+        self, arguments: tuple[str, ...], *, check: bool = True,
+    ) -> subprocess.CompletedProcess[str]:
         return subprocess.run(
-            ("systemctl", *arguments, self.name),
+            (_SYSTEMCTL, *arguments),
             check=check,
             text=True,
             capture_output=True,
+            timeout=self._remaining_timeout(),
+            shell=False,
+            env=dict(_SYSTEMD_ENV),
         )
+
+    def _run(self, *arguments: str, check: bool = True) -> subprocess.CompletedProcess[str]:
+        return self._invoke((*arguments, self.name), check=check)
 
     def is_active(self) -> bool:
         result = self._run("is-active", "--quiet", check=False)
@@ -1293,9 +1322,7 @@ class _SystemdServiceControl:
         return True
 
     def daemon_reload(self) -> None:
-        subprocess.run(
-            ("systemctl", "daemon-reload"), check=True, text=True, capture_output=True
-        )
+        self._invoke(("daemon-reload",))
 
     def start(self) -> None:
         self._run("start")
@@ -1309,9 +1336,9 @@ class _SystemdServiceControl:
         parsed = urllib.parse.urlsplit(url)
         if parsed.scheme != "http" or parsed.hostname != "127.0.0.1" or parsed.port != 5000:
             _reject("recovery health URL is not exact loopback HTTP")
-        deadline = time.monotonic() + timeout_seconds
+        deadline = min(self._deadline, self._monotonic() + timeout_seconds)
         while True:
-            remaining = deadline - time.monotonic()
+            remaining = deadline - self._monotonic()
             if remaining <= 0:
                 _reject("application readiness deadline expired")
             connection = http.client.HTTPConnection(
@@ -1327,12 +1354,12 @@ class _SystemdServiceControl:
                 pass
             finally:
                 connection.close()
-            time.sleep(min(0.1, max(0.0, deadline - time.monotonic())))
+            time.sleep(min(0.1, max(0.0, deadline - self._monotonic())))
 
     def recovery_commands(self) -> tuple[str, ...]:
         return (
-            f"systemctl start {self.name}",
-            f"systemctl is-active --quiet {self.name}",
+            f"{_SYSTEMCTL} start {self.name}",
+            f"{_SYSTEMCTL} is-active --quiet {self.name}",
         )
 
 

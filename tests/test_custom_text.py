@@ -88,6 +88,26 @@ class CustomTextModuleTests(unittest.TestCase):
         matrix.swap.assert_called_once_with("canvas")
         stop.wait.assert_called_once_with(4)
 
+    def test_canvas_cancellation_after_frame_yield_prevents_publication(self):
+        matrix = self.matrix()
+        stop = threading.Event()
+
+        def cancelled_frame(*_args, **_kwargs):
+            stop.set()
+            yield "canvas", 0.1
+
+        with patch.object(custom_text, "canvas_timeline_frames", side_effect=cancelled_frame):
+            result = custom_text.run(
+                matrix,
+                {},
+                duration=1,
+                stop_event=stop,
+                module_config=self.canvas_options(),
+            )
+
+        self.assertFalse(result)
+        matrix.swap.assert_not_called()
+
     def test_scrolling_custom_text_moves_left_using_saved_speed(self):
         matrix = self.matrix()
         matrix.draw_text.return_value = 24

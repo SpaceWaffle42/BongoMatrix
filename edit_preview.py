@@ -5,9 +5,11 @@ from __future__ import annotations
 import base64
 import copy
 import io
+import inspect
 import json
 import math
 import secrets
+import sys
 import threading
 import time
 from collections import OrderedDict, deque
@@ -157,6 +159,7 @@ class CaptureMatrix:
 
     def _video_frame_timeline(
         self, path, settings, stop_event=None, *, pinned_handle=None,
+        deadline=None,
     ):
         """Use the physical MP4 decoder while publishing only capture frames."""
         from matrix_framework import Matrix
@@ -166,7 +169,7 @@ class CaptureMatrix:
             int(settings.get("width") or self.width),
             int(settings.get("height") or self.height),
             settings.get("keep_aspect", True), stop_event=stop_event,
-            pinned_handle=pinned_handle,
+            deadline=deadline, pinned_handle=pinned_handle,
         )
 
 
@@ -197,9 +200,165 @@ def static_media_frames(
         yield filename, remaining * 1000, geometry
 
 
+_PREVIEW_DECODE_SLOTS = threading.BoundedSemaphore(4)
+
+
+class _PreviewDecodeCancelled(Exception):
+    """Internal control flow for a cancelled or expired Pillow decode."""
+
+
+def _close_preview_value(value):
+    """Close one worker-owned value or decoded-frame bundle."""
+    active_error = sys.exception()
+    first_cleanup_error = None
+
+    def retain(error):
+        nonlocal first_cleanup_error
+        if active_error is None:
+            if first_cleanup_error is None:
+                first_cleanup_error = error
+            return
+        try:
+            active_error.add_note("suppressed preview cleanup failure")
+        except BaseException:
+            pass
+
+    if isinstance(value, (list, tuple)):
+        for item in value:
+            try:
+                _close_preview_value(item)
+            except BaseException as error:
+                retain(error)
+    else:
+        try:
+            close = getattr(value, "close", None)
+            if callable(close):
+                close()
+        except BaseException as error:
+            retain(error)
+
+    if first_cleanup_error is not None:
+        raise first_cleanup_error
+
+
+class _DecodedGif:
+    """Own fully decoded GIF frames without retaining the source decoder."""
+    def __init__(self, frames):
+        self.frames = frames
+        self._closed = False
+
+    def close(self):
+        if self._closed:
+            return
+        self._closed = True
+        first_error = None
+        for frame in self.frames:
+            try:
+                frame.close()
+            except BaseException as error:
+                if first_error is None:
+                    first_error = error
+        if first_error is not None:
+            raise first_error
+
+
+def _preview_decode(decode, stop_event, deadline, monotonic):
+    """Transfer one Pillow result atomically or abandon it for worker cleanup."""
+    while not _PREVIEW_DECODE_SLOTS.acquire(timeout=0.01):
+        if ((stop_event is not None and stop_event.is_set()) or
+                (deadline is not None and monotonic() >= deadline)):
+            raise _PreviewDecodeCancelled()
+    if ((stop_event is not None and stop_event.is_set()) or
+            (deadline is not None and monotonic() >= deadline)):
+        _PREVIEW_DECODE_SLOTS.release()
+        raise _PreviewDecodeCancelled()
+
+    done = threading.Event()
+    ownership_lock = threading.Lock()
+    state = {"abandoned": False, "outcome": None}
+
+    def worker():
+        value_to_close = None
+        try:
+            outcome = (True, decode())
+        except BaseException as error:
+            outcome = (False, error)
+        try:
+            with ownership_lock:
+                if state["abandoned"]:
+                    if outcome[0]:
+                        value_to_close = outcome[1]
+                else:
+                    state["outcome"] = outcome
+            if value_to_close is not None:
+                _close_preview_value(value_to_close)
+        finally:
+            done.set()
+            _PREVIEW_DECODE_SLOTS.release()
+
+    thread = threading.Thread(
+        target=worker, name="matrix-preview-pillow", daemon=True,
+    )
+    try:
+        thread.start()
+    except BaseException:
+        _PREVIEW_DECODE_SLOTS.release()
+        raise
+
+    def abandon():
+        value_to_close = None
+        with ownership_lock:
+            state["abandoned"] = True
+            outcome = state["outcome"]
+            state["outcome"] = None
+            if outcome is not None and outcome[0]:
+                value_to_close = outcome[1]
+        if value_to_close is not None:
+            _close_preview_value(value_to_close)
+        raise _PreviewDecodeCancelled()
+
+    while not done.wait(0.01):
+        if ((stop_event is not None and stop_event.is_set()) or
+                (deadline is not None and monotonic() >= deadline)):
+            abandon()
+    if ((stop_event is not None and stop_event.is_set()) or
+            (deadline is not None and monotonic() >= deadline)):
+        abandon()
+    with ownership_lock:
+        outcome = state["outcome"]
+        state["outcome"] = None
+    succeeded, value = outcome
+    if not succeeded:
+        raise value
+    return value
+
+
+def _pinned_preview_bytes(pinned_handle):
+    """Release the pinned duplicate before potentially unbounded Pillow work."""
+    with pinned_handle.dup_file() as media_file:
+        return media_file.read()
+
+
+def _preview_decoder_options(decoder, options):
+    """Preserve fixed-signature injected decoders while enriching production seams."""
+    try:
+        parameters = inspect.signature(decoder).parameters.values()
+    except (TypeError, ValueError):
+        return options
+    if any(parameter.kind == inspect.Parameter.VAR_KEYWORD for parameter in parameters):
+        return options
+    accepted = {parameter.name for parameter in parameters}
+    return {key: value for key, value in options.items() if key in accepted}
+
+
+def _preview_elapsed(monotonic, started):
+    """Return exact nonnegative elapsed invocation time."""
+    return max(0.0, monotonic() - started)
+
+
 def media_preview_frames(
     matrix, filename, duration, settings=None, *, video_decoder=None,
-    stop_event=None, pinned_handle=None,
+    stop_event=None, pinned_handle=None, monotonic=time.monotonic,
 ):
     """Render the shared production animated-media timeline into PNG frames."""
     from PIL import Image, ImageSequence
@@ -207,68 +366,138 @@ def media_preview_frames(
     from modules.media_player import gif_media_frames, video_media_frames
 
     settings = settings or {}
+    duration = max(0.0, float(duration))
+    started = monotonic()
+    deadline = started + duration
+
+    def playback_monotonic():
+        return started + _preview_elapsed(monotonic, started)
+
+    if duration <= 0 or stop_event is not None and stop_event.is_set():
+        return
     path = Path(filename)
     if not path.is_absolute():
         path = Path(__file__).parent / "resources" / "media" / path
     if path.suffix.lower() == ".gif":
         source = path
-        image_open = Image.open
         if pinned_handle is not None:
-            source = pinned_handle
+            source = io.BytesIO(_pinned_preview_bytes(pinned_handle))
 
-            def image_open(handle):
-                media_file = handle.dup_file()
+        def decode_gif():
+            frames = []
+            try:
+                manager = Image.open(source)
+                opened = manager.__enter__()
                 try:
-                    return Image.open(media_file)
-                except BaseException:
-                    media_file.close()
+                    for frame in ImageSequence.Iterator(opened):
+                        frames.append(frame.copy())
+                except BaseException as primary_error:
+                    try:
+                        manager.__exit__(
+                            type(primary_error), primary_error,
+                            primary_error.__traceback__,
+                        )
+                    except BaseException:
+                        try:
+                            primary_error.add_note(
+                                "suppressed GIF source cleanup failure"
+                            )
+                        except BaseException:
+                            pass
                     raise
+                else:
+                    manager.__exit__(None, None, None)
+                return _DecodedGif(frames)
+            except BaseException:
+                _close_preview_value(frames)
+                raise
+
+        def image_open(_gif_source):
+            return _preview_decode(
+                decode_gif, stop_event, deadline, monotonic,
+            )
+
         timeline = gif_media_frames(
             source, loops=0,
             playback_rate=settings.get("gif_speed_percent", 100) / 100.0,
-            max_duration=duration, image_open=image_open,
-            image_iterator=ImageSequence.Iterator,
+            stop_event=stop_event, max_duration=duration,
+            monotonic=playback_monotonic, image_open=image_open,
+            image_iterator=lambda decoded: iter(decoded.frames),
+            frame_copy=lambda frame: frame, bounded_pillow=False,
         )
     elif path.suffix.lower() == ".mp4":
         if video_decoder is None:
             video_decoder = getattr(matrix, "_video_frame_timeline", None)
         if video_decoder is None:
             raise ValueError("MP4 preview requires the production video decoder seam")
-        decoder_options = {"stop_event": stop_event}
+        decoder_options = {"stop_event": stop_event, "deadline": deadline}
         if pinned_handle is not None:
             decoder_options["pinned_handle"] = pinned_handle
+        decoder_options = _preview_decoder_options(
+            video_decoder, decoder_options,
+        )
         timeline = video_media_frames(
             lambda: video_decoder(path, settings, **decoder_options),
             fps=settings.get("video_fps", 20), loops=0,
             stop_event=stop_event, max_duration=duration,
+            monotonic=playback_monotonic,
         )
     else:
+        source = path
         if pinned_handle is not None:
-            with pinned_handle.dup_file() as media_file, Image.open(media_file) as opened:
-                image = opened.copy()
-        else:
-            with Image.open(path) as opened:
-                image = opened.copy()
-        matrix.clear()
-        matrix.draw_image(
-            image,
-            x=settings.get("x", 0), y=settings.get("y", 0),
-            width=settings.get("width"), height=settings.get("height"),
-            keep_aspect=settings.get("keep_aspect", True),
-        )
-        if duration > 0:
-            yield _png_frame(matrix.snapshot(), round(duration * 1000, 9))
+            source = io.BytesIO(_pinned_preview_bytes(pinned_handle))
+
+        def decode_static():
+            with Image.open(source) as opened:
+                return opened.copy()
+
+        try:
+            image = _preview_decode(
+                decode_static, stop_event, deadline, monotonic,
+            )
+        except _PreviewDecodeCancelled:
+            return
+        try:
+            if stop_event is not None and stop_event.is_set():
+                return
+            matrix.clear()
+            matrix.draw_image(
+                image,
+                x=settings.get("x", 0), y=settings.get("y", 0),
+                width=settings.get("width"), height=settings.get("height"),
+                keep_aspect=settings.get("keep_aspect", True),
+            )
+            if stop_event is not None and stop_event.is_set():
+                return
+            remaining = max(0.0, duration - _preview_elapsed(monotonic, started))
+            if remaining > 0:
+                snapshot = matrix.snapshot()
+                if stop_event is not None and stop_event.is_set():
+                    return
+                yield _png_frame(snapshot, round(remaining * 1000, 9))
+            return
+        finally:
+            image.close()
+    try:
+        for image, delay in timeline:
+            matrix.clear()
+            matrix.draw_image(
+                image,
+                x=settings.get("x", 0), y=settings.get("y", 0),
+                width=settings.get("width"), height=settings.get("height"),
+                keep_aspect=settings.get("keep_aspect", True),
+            )
+            if stop_event is not None and stop_event.is_set():
+                return
+            snapshot = matrix.snapshot()
+            if stop_event is not None and stop_event.is_set():
+                return
+            yield _png_frame(snapshot, round(delay * 1000, 9))
+            if stop_event is not None and stop_event.is_set():
+                return
+            matrix.swap()
+    except _PreviewDecodeCancelled:
         return
-    for image, delay in timeline:
-        matrix.clear()
-        matrix.draw_image(
-            image,
-            x=settings.get("x", 0), y=settings.get("y", 0),
-            width=settings.get("width"), height=settings.get("height"),
-            keep_aspect=settings.get("keep_aspect", True),
-        )
-        yield _png_frame(matrix.snapshot(), round(delay * 1000, 9))
-        matrix.swap()
 
 
 def preview_frames(iterator):
@@ -342,13 +571,22 @@ def advanced_canvas_preview_frames(
         yield _png_frame(matrix.snapshot(canvas), round(delay * 1000, 9))
 
 
-def custom_text_preview_frames(matrix, module_config):
-    """Yield exact ticker capture frames using physical scroll positions."""
+def custom_text_preview_frames(matrix, module_config, duration=None):
+    """Yield exact static or ticker frames using physical custom-text semantics."""
     from modules.custom_text import scroll_positions
 
     font = matrix.font(module_config["font"])
     foreground = matrix.colour_rgb(module_config["colour"])
     background = matrix.colour_rgb(module_config["background"])
+    if module_config["type"] == "text":
+        canvas = matrix.matrix.CreateFrameCanvas()
+        matrix.fill(background.red, background.green, background.blue, canvas=canvas)
+        matrix.draw_text(
+            font, module_config["x"], module_config["y"], foreground,
+            module_config["text"], canvas=canvas,
+        )
+        yield _png_frame(matrix.snapshot(canvas), float(duration) * 1000)
+        return
     measure_canvas = matrix.matrix.CreateFrameCanvas()
     matrix.clear(measure_canvas)
     text_width = matrix.draw_text(

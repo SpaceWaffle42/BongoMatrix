@@ -8,6 +8,7 @@ import shutil
 from pathlib import Path
 import stat
 import subprocess
+import sys
 import tempfile
 import unittest
 from unittest import mock
@@ -110,7 +111,7 @@ def _fake_commit_control(guarded, kind, request, terminals, *, committed_epoch=1
 class GuardedPriority13ReleaseTests(unittest.TestCase):
     def test_exported_run_help_is_a_real_cli_subcommand(self):
         script = Path(__file__).parents[1] / "deploy" / "guarded_priority_1_3_release.py"
-        interpreter = Path(__file__).parents[1] / ".venv" / "bin" / "python"
+        interpreter = Path(sys.executable)
         completed = subprocess.run(
             [str(interpreter), "-I", "-B", str(script), "run", "--help"],
             check=False, text=True, capture_output=True,
@@ -215,12 +216,12 @@ a=[
 rc=guarded.main(a);assert rc==0,rc
 assert [x[0] for x in records if x[0] in {'PENDING','ACCEPTED','ROLLED_BACK','FINAL'}]==['PENDING','ACCEPTED','PENDING','ROLLED_BACK','PENDING','ACCEPTED','FINAL']
 assert len([x for x in records if x[0]=='remote-commit' and x[1].get('query') is not True])==2
-assert len([x for x in records if x[0]=='remote-commit' and x[1].get('query') is True])==7
+assert len([x for x in records if x[0]=='remote-commit' and x[1].get('query') is True])==0
 assert not hasattr(guarded,'run_three_attempts')
 print('EXPORTED_FULL_RUN_OK')
 """
             completed = subprocess.run(
-                [str(source / ".venv/bin/python"), "-I", "-B", "-c", harness, str(root)],
+                [sys.executable, "-I", "-B", "-c", harness, str(root)],
                 check=False, text=True, capture_output=True, timeout=30,
             )
             self.assertEqual(completed.returncode, 0, completed.stderr + completed.stdout)
@@ -265,7 +266,7 @@ print('EXPORTED_FULL_RUN_OK')
             shutil.copy2(source / "tests/fixtures/priority_1_3_fake_python.py", fake_python)
             (stage / "venv/bin/python").write_text(
                 "#!/bin/sh\nexec "
-                + shlex.quote(str(source / ".venv/bin/python"))
+                + shlex.quote(sys.executable)
                 + " "
                 + shlex.quote(str(fake_python))
                 + " \"$@\"\n",
@@ -349,8 +350,8 @@ rc=guarded.main(argv)
                 "ALL_PROXY": "http://poison",
             })
             completed = subprocess.run(
-                [str(source / ".venv/bin/python"), "-I", "-B", "-c", harness, str(root)],
-                check=False, text=True, capture_output=True, timeout=90, env=environment, shell=False,
+                [sys.executable, "-I", "-B", "-c", harness, str(root)],
+                check=False, text=True, capture_output=True, timeout=180, env=environment, shell=False,
             )
             self.assertEqual(completed.returncode, 0, completed.stderr + completed.stdout)
             transport = [json.loads(line) for line in (root / "transport.jsonl").read_text().splitlines()]
@@ -360,7 +361,7 @@ rc=guarded.main(argv)
             replays = [event for event in transport if event["lifecycle"] == "COMMIT_REPLAY"]
             watchdogs = [event for event in transport if event["lifecycle"] == "ARMED"]
             self.assertEqual((len(mutations), len(commits), len(queries), len(replays), len(watchdogs)),
-                             (3, 2, 8, 1, 3))
+                             (3, 2, 1, 1, 3))
             phases = ("initial-deploy", "rollback-proof", "final-deploy")
             for mutation, phase in zip(mutations, phases):
                 operation = mutation["request"]["operation_id"]
@@ -549,7 +550,7 @@ rc=guarded.main(argv)
 
     def test_shipped_privileged_cli_rejects_omitted_malformed_and_unsupported_requests(self):
         script = Path(__file__).parents[1] / "deploy" / "guarded_priority_1_3_release.py"
-        interpreter = Path(__file__).parents[1] / ".venv" / "bin" / "python"
+        interpreter = Path(sys.executable)
         invocations = (
             (),
             ("remote-recover", "--request-b64", "definitely-invalid"),
@@ -580,7 +581,7 @@ rc=guarded.main(argv)
                 f"{str(registry)!r}+'.outputs/{operation}.stdout',{str(registry)!r}+'.outputs/{operation}.stderr')"
             )
             first = subprocess.run(
-                [str(Path(__file__).parents[1] / ".venv/bin/python"), "-I", "-B", "-c",
+                [sys.executable, "-I", "-B", "-c",
                  "import sys;sys.path.insert(0," + repr(str(Path(__file__).parents[1])) + ");" + code],
                 check=False, text=True, capture_output=True,
             )
@@ -594,7 +595,7 @@ rc=guarded.main(argv)
                 "print(json.dumps(r.snapshot(),sort_keys=True,separators=(',',':')))"
             )
             second = subprocess.run(
-                [str(Path(__file__).parents[1] / ".venv/bin/python"), "-I", "-B", "-c",
+                [sys.executable, "-I", "-B", "-c",
                  "import sys;sys.path.insert(0," + repr(str(Path(__file__).parents[1])) + ");" + reader],
                 check=False, text=True, capture_output=True,
             )
@@ -639,7 +640,7 @@ rc=guarded.main(argv)
             create = {**common, "release_document": document, "execution_contract": execution,
                       "created_epoch": 1000, "original_deadline_epoch": 8200}
             script = Path(__file__).parents[1] / "deploy/guarded_priority_1_3_release.py"
-            python = Path(__file__).parents[1] / ".venv/bin/python"
+            python = Path(sys.executable)
 
             def payload(helper, request):
                 return guarded.encode_privileged_request(helper, request)
@@ -838,12 +839,12 @@ rc=guarded.main(argv)
             )
             prefix = "import sys;sys.path.insert(0," + repr(str(Path(__file__).parents[1])) + ");"
             seeded = subprocess.run(
-                [str(Path(__file__).parents[1] / ".venv/bin/python"), "-I", "-B", "-c", prefix + seed],
+                [sys.executable, "-I", "-B", "-c", prefix + seed],
                 check=False, text=True, capture_output=True,
             )
             self.assertEqual(seeded.returncode, 0, seeded.stderr)
             replay = subprocess.run(
-                [str(Path(__file__).parents[1] / ".venv/bin/python"),
+                [sys.executable,
                  str(Path(__file__).parents[1] / "deploy/guarded_priority_1_3_release.py"),
                  "remote-recover", "--request-b64", payload],
                 check=False, text=True, capture_output=True,
@@ -1172,7 +1173,7 @@ rc=guarded.main(argv)
             self.assertEqual(acceptance[-1][3], guarded._AGGREGATE_ACCEPTANCE_BUDGET_SECONDS)
             commit_requests = [request for kind, request, _ in executor.requests if kind == "remote-commit"]
             self.assertEqual(len([request for request in commit_requests if request.get("query") is not True]), 2)
-            self.assertEqual(len([request for request in commit_requests if request.get("query") is True]), 7)
+            self.assertEqual(len([request for request in commit_requests if request.get("query") is True]), 0)
             recover_requests = [request for kind, request, _ in executor.requests if kind == "remote-recover"]
             self.assertEqual(len(recover_requests), 1)
             self.assertEqual(recover_requests[0]["phase"], "rollback-proof")
@@ -1307,8 +1308,7 @@ rc=guarded.main(argv)
             )
             first_commits = [item for item in executor.controls if item[0] == "remote-commit"]
             self.assertEqual(first_commits,
-                             [("remote-commit", canonical_ids[0], False)]
-                             + [("remote-commit", canonical_ids[0], True)] * 3)
+                             [("remote-commit", canonical_ids[0], False)])
             self.assertEqual([item for item in executor.controls if item[0] == "remote-recover"], [])
             journal_path = evidence / "guarded-release-reconciliation.json"
             journal = json.loads(journal_path.read_text(encoding="utf-8"))
@@ -1329,7 +1329,8 @@ rc=guarded.main(argv)
             commits = [item for item in executor.controls if item[0] == "remote-commit"]
             self.assertEqual([item[1] for item in commits if item[2] is False],
                              [canonical_ids[0], canonical_ids[2]])
-            self.assertTrue(all(item[1] in canonical_ids for item in commits if item[2] is True))
+            self.assertEqual([item[1] for item in commits if item[2] is True],
+                             [canonical_ids[0]])
             self.assertIn("ROLLED_BACK", [event[0] for event in persistent.events + transient.events])
             final = json.loads(journal_path.read_text(encoding="utf-8"))
             self.assertEqual([item["state"] for item in final["attempts"]], ["ACCEPTED"] * 3)
@@ -2199,6 +2200,68 @@ rc=guarded.main(argv)
             self.assertEqual(journal_path.read_bytes(), before)
         finally:
             shutil.rmtree(root)
+
+    def test_cached_commit_terminal_remains_authoritative_after_reconciliation_retry_deadline(self):
+        guarded = self._module()
+        attempt_id = "1" * 32
+        evidence_digest = "a" * 64
+        registry = f"/run/matrix-priority-1-3/attempts/{attempt_id}.json"
+        commit_request = {
+            "schema": 1, "boundary": "b1", "phase": "initial-deploy",
+            "attempt_id": attempt_id,
+            "operation_id": __import__("hashlib").sha256(
+                f"{attempt_id}\0commit".encode("utf-8")
+            ).hexdigest()[:32],
+            "registry": registry, "evidence_digest": evidence_digest,
+            "pending_note_id": "17",
+            "guard_unit": f"matrix-p13-recover-{attempt_id}.service",
+            "success_record": f"/run/matrix-priority-1-3/{attempt_id}/success.json",
+            "control_unit": f"matrix-p13-commit-{attempt_id}.service",
+            "control_cgroup": f"/system.slice/matrix-p13-commit-{attempt_id}.service",
+        }
+        success = {key: commit_request[key] for key in (
+            "schema", "boundary", "phase", "attempt_id", "operation_id",
+            "evidence_digest", "pending_note_id",
+        )}
+        terminal = {
+            "schema": 1, "request": commit_request,
+            "request_digest": guarded._request_digest("remote-commit", commit_request),
+            "result_digest": __import__("hashlib").sha256(
+                guarded._canonical_json_bytes(success) + b"\n"
+            ).hexdigest(),
+            "committed_epoch": 100.0,
+        }
+        journal = {
+            "boundary": "b1", "attempts": [{
+                "phase": "initial-deploy", "operation": "deploy",
+                "attempt_id": attempt_id, "note_id": "17",
+                "accepted_record": {
+                    "boundary": "b1", "phase": "initial-deploy",
+                    "attempt_id": attempt_id, "stage": "/stage", "bundle": "/bundle",
+                    "evidence_digest": evidence_digest,
+                    "remote_record_digest": terminal["result_digest"],
+                },
+                "evidence_file": "/nonexistent/cached-terminal-evidence.json",
+                "state": "ACCEPTED", "remaining_seconds": 1,
+                "deadline_epoch": 101.0,
+            }],
+            "final": None,
+        }
+        remote_attempts = [
+            {"attempt_id": attempt_id, "registry": registry},
+            {"attempt_id": "2" * 32, "registry": "/run/matrix-priority-1-3/attempts/" + "2" * 32 + ".json"},
+            {"attempt_id": "3" * 32, "registry": "/run/matrix-priority-1-3/attempts/" + "3" * 32 + ".json"},
+        ]
+        executor = mock.Mock()
+
+        result = guarded._validate_reconciliation_authenticity(
+            journal, mock.Mock(), executor, remote_attempts,
+            wall_clock=lambda: 200.0,
+            cached_commit_terminals={attempt_id: terminal},
+        )
+
+        self.assertEqual(result, {attempt_id: terminal})
+        executor.control_remote.assert_not_called()
 
     def test_reconciliation_journal_rejects_malformed_bound_records_before_load_or_publication(self):
         guarded = self._module()

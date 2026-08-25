@@ -15,7 +15,7 @@ import types
 import unittest
 import weakref
 from pathlib import Path
-from unittest.mock import Mock, patch
+from unittest.mock import MagicMock, Mock, patch
 
 from PIL import Image, ImageSequence
 
@@ -1778,6 +1778,433 @@ class EditPreviewTests(unittest.TestCase):
         ):
             session.page()
 
+    def test_cancel_interrupts_blocked_gif_frame_copy_and_releases_capacity(self):
+        entered = threading.Event()
+        release = threading.Event()
+        stop = threading.Event()
+        result = {}
+
+        class Frame:
+            info = {"duration": 100}
+
+            def copy(self):
+                entered.set()
+                release.wait()
+                return Image.new("RGB", (2, 2), "red")
+
+        opened = MagicMock()
+        opened.__enter__.return_value = opened
+        capacity = edit_preview.PreviewSessionCapacity()
+        with (
+            patch.object(Image, "open", return_value=opened),
+            patch.object(ImageSequence, "Iterator", return_value=iter([Frame()])),
+        ):
+            session = capacity.admit(
+                lambda: edit_preview.media_preview_frames(
+                    CaptureMatrix(), "blocked.gif", 10, stop_event=stop,
+                ),
+                stop_event=stop,
+            )
+            thread = threading.Thread(target=lambda: result.update(session.page()))
+            thread.start()
+            self.assertTrue(entered.wait(1), "GIF frame copy did not block")
+            session.cancel()
+            thread.join(0.15)
+            prompt = not thread.is_alive()
+            state = session.state
+            active = capacity.active_count
+            release.set()
+            thread.join(1)
+
+        self.assertTrue(prompt, "GIF frame copy blocked page cancellation")
+        self.assertEqual(state, "CLOSED")
+        self.assertEqual(active, 0)
+        self.assertEqual(result.get("frames"), [])
+
+    def test_pinned_mp4_preserves_fixed_signature_decoder_compatibility(self):
+        calls = []
+        pinned = Mock()
+
+        def legacy_decoder(path, settings, stop_event=None):
+            calls.append((path, settings, stop_event))
+            return iter(())
+
+        stop = threading.Event()
+        frames = list(edit_preview.media_preview_frames(
+            CaptureMatrix(), "legacy.mp4", 1,
+            video_decoder=legacy_decoder, stop_event=stop, pinned_handle=pinned,
+        ))
+
+        self.assertEqual(frames, [])
+        self.assertEqual(len(calls), 1)
+        self.assertIs(calls[0][2], stop)
+
+    def test_preview_decode_completion_cancel_race_closes_result_once(self):
+        real_event = threading.Event
+        checked = real_event()
+        release = real_event()
+        stop = real_event()
+        returned = real_event()
+        closed = real_event()
+        event_count = [0]
+
+        class Value:
+            close_calls = 0
+
+            def close(self):
+                self.close_calls += 1
+                closed.set()
+
+        value = Value()
+
+        class GatedAbandonedEvent:
+            def __init__(self):
+                self._set = real_event()
+
+            def is_set(self):
+                if threading.current_thread().name == "matrix-preview-pillow":
+                    checked.set()
+                    release.wait()
+                    return False
+                return self._set.is_set()
+
+            def set(self):
+                self._set.set()
+
+        def event_factory():
+            event_count[0] += 1
+            return real_event() if event_count[0] == 1 else GatedAbandonedEvent()
+
+        def decode():
+            if event_count[0] == 1:  # Lock-based implementation: pause before transfer.
+                checked.set()
+                release.wait()
+            return value
+
+        threading_proxy = types.SimpleNamespace(
+            Event=event_factory, Lock=threading.Lock, Thread=threading.Thread,
+        )
+
+        def call_decode():
+            try:
+                edit_preview._preview_decode(decode, stop, None, time.monotonic)
+            except edit_preview._PreviewDecodeCancelled:
+                pass
+            finally:
+                returned.set()
+
+        with patch.object(edit_preview, "threading", threading_proxy):
+            caller = threading.Thread(target=call_decode)
+            caller.start()
+            self.assertTrue(checked.wait(1), "worker did not reach transfer boundary")
+            stop.set()
+            self.assertTrue(returned.wait(0.15), "cancel did not return promptly")
+            release.set()
+            caller.join(1)
+            self.assertTrue(closed.wait(1), "abandoned result was not closed")
+
+        self.assertEqual(value.close_calls, 1)
+
+    def test_preview_pillow_workers_are_globally_bounded(self):
+        release = threading.Event()
+        fifth_worker = threading.Event()
+        lock = threading.Lock()
+        entered = [0]
+        stops = [threading.Event() for _ in range(5)]
+        callers = []
+
+        def blocked_decode():
+            with lock:
+                entered[0] += 1
+                if entered[0] >= 5:
+                    fifth_worker.set()
+            release.wait()
+            return Image.new("RGB", (1, 1))
+
+        def call_decode(stop):
+            try:
+                edit_preview._preview_decode(
+                    blocked_decode, stop, None, time.monotonic,
+                )
+            except edit_preview._PreviewDecodeCancelled:
+                pass
+
+        for stop in stops:
+            caller = threading.Thread(target=call_decode, args=(stop,))
+            callers.append(caller)
+            caller.start()
+        try:
+            self.assertFalse(
+                fifth_worker.wait(0.15),
+                "a fifth pathological Pillow worker was admitted",
+            )
+        finally:
+            for stop in stops:
+                stop.set()
+            for caller in callers:
+                caller.join(0.25)
+            release.set()
+            for caller in callers:
+                caller.join(1)
+
+        self.assertLessEqual(entered[0], 4)
+        self.assertFalse(any(caller.is_alive() for caller in callers))
+
+    def test_cancel_interrupts_blocked_pinned_static_preview_decode(self):
+        encoded = io.BytesIO()
+        Image.new("RGB", (2, 2), "blue").save(encoded, format="PNG")
+        original_open = Image.open
+        entered = threading.Event()
+        release = threading.Event()
+        stop = threading.Event()
+        pinned = Mock()
+        duplicate = io.BytesIO(encoded.getvalue())
+        pinned.dup_file.side_effect = lambda: duplicate
+
+        def blocked_open(source):
+            entered.set()
+            release.wait()
+            return original_open(source)
+
+        session = PreviewSession(edit_preview.media_preview_frames(
+            CaptureMatrix(), "blocked.png", 10,
+            stop_event=stop, pinned_handle=pinned,
+        ), stop_event=stop)
+        result = {}
+        thread = threading.Thread(target=lambda: result.update(session.page()))
+        with patch.object(Image, "open", side_effect=blocked_open):
+            thread.start()
+            self.assertTrue(entered.wait(1), "static decode did not block")
+            self.assertTrue(duplicate.closed, "pinned duplicate remained owned by Pillow")
+            session.cancel()
+            thread.join(0.15)
+            prompt = not thread.is_alive()
+            release.set()
+            thread.join(1)
+
+        self.assertTrue(prompt, "static preview cancellation waited for Pillow")
+        self.assertEqual(result.get("frames"), [])
+        self.assertEqual(session.state, "CLOSED")
+
+    def test_cancel_interrupts_blocked_pinned_gif_preview_decode(self):
+        encoded = io.BytesIO()
+        Image.new("RGB", (2, 2), "red").save(encoded, format="GIF")
+        original_open = Image.open
+        entered = threading.Event()
+        release = threading.Event()
+        stop = threading.Event()
+        pinned = Mock()
+        duplicate = io.BytesIO(encoded.getvalue())
+        pinned.dup_file.side_effect = lambda: duplicate
+
+        def blocked_open(source):
+            entered.set()
+            release.wait()
+            return original_open(source)
+
+        session = PreviewSession(edit_preview.media_preview_frames(
+            CaptureMatrix(), "blocked.gif", 10,
+            stop_event=stop, pinned_handle=pinned,
+        ), stop_event=stop)
+        result = {}
+        thread = threading.Thread(target=lambda: result.update(session.page()))
+        with patch.object(Image, "open", side_effect=blocked_open):
+            thread.start()
+            self.assertTrue(entered.wait(1), "GIF decode did not block")
+            self.assertTrue(duplicate.closed, "pinned duplicate remained owned by Pillow")
+            session.cancel()
+            thread.join(0.15)
+            prompt = not thread.is_alive()
+            release.set()
+            thread.join(1)
+
+        self.assertTrue(prompt, "GIF preview cancellation waited for Pillow")
+        self.assertEqual(result.get("frames"), [])
+        self.assertEqual(session.state, "CLOSED")
+
+    def test_media_preview_passes_monotonic_and_absolute_video_deadline(self):
+        clock = Mock(return_value=10.0)
+        decoder_options = []
+
+        def decoder(_path, _settings, **options):
+            decoder_options.append(options)
+            return iter(())
+
+        list(edit_preview.media_preview_frames(
+            CaptureMatrix(), "clip.mp4", 3,
+            video_decoder=decoder, stop_event=threading.Event(), monotonic=clock,
+        ))
+
+        self.assertEqual(len(decoder_options), 1)
+        self.assertIs(decoder_options[0]["stop_event"].is_set(), False)
+        self.assertEqual(decoder_options[0]["deadline"], 13.0)
+
+    def test_media_preview_gif_duration_uses_monotonic_decode_time(self):
+        encoded = io.BytesIO()
+        Image.new("RGB", (2, 2), "red").save(encoded, format="GIF")
+        pinned = Mock()
+        pinned.dup_file.side_effect = lambda: io.BytesIO(encoded.getvalue())
+        now = [10.0]
+        original_open = Image.open
+
+        def clock():
+            return now[0]
+
+        def consume_five_ms(source):
+            now[0] = 10.005
+            return original_open(source)
+
+        with patch.object(Image, "open", side_effect=consume_five_ms):
+            frames = list(edit_preview.media_preview_frames(
+                CaptureMatrix(), "slow.gif", 0.006,
+                pinned_handle=pinned, monotonic=clock,
+            ))
+
+        self.assertGreaterEqual(len(frames), 1)
+        total_hold_ms = sum(frame["delay_ms"] for frame in frames)
+        self.assertTrue(all(frame["delay_ms"] > 0 for frame in frames))
+        self.assertLessEqual(total_hold_ms, 1.0 + 1e-6)
+        self.assertAlmostEqual(total_hold_ms, 1.0, places=6)
+
+    def test_pre_cancelled_gif_preview_skips_pinned_decode(self):
+        encoded = io.BytesIO()
+        Image.new("RGB", (2, 2), "red").save(encoded, format="GIF")
+        pinned = Mock()
+        pinned.dup_file.side_effect = lambda: io.BytesIO(encoded.getvalue())
+        stop = threading.Event()
+        stop.set()
+
+        frames = list(edit_preview.media_preview_frames(
+            CaptureMatrix(), "cancelled.gif", 1,
+            stop_event=stop, pinned_handle=pinned,
+        ))
+
+        self.assertEqual(frames, [])
+        pinned.dup_file.assert_not_called()
+
+    def test_gif_preview_cancelled_during_pinned_decode_draws_nothing(self):
+        encoded = io.BytesIO()
+        Image.new("RGB", (2, 2), "red").save(encoded, format="GIF")
+        pinned = Mock()
+        stop = threading.Event()
+        matrix = Mock()
+
+        def cancel_during_duplication():
+            stop.set()
+            return io.BytesIO(encoded.getvalue())
+
+        pinned.dup_file.side_effect = cancel_during_duplication
+        frames = list(edit_preview.media_preview_frames(
+            matrix, "cancelled.gif", 1,
+            stop_event=stop, pinned_handle=pinned,
+        ))
+
+        self.assertEqual(frames, [])
+        pinned.dup_file.assert_called_once_with()
+        matrix.clear.assert_not_called()
+        matrix.draw_image.assert_not_called()
+        matrix.snapshot.assert_not_called()
+        matrix.swap.assert_not_called()
+
+    def test_gif_preview_cancelled_during_draw_yields_nothing(self):
+        encoded = io.BytesIO()
+        Image.new("RGB", (2, 2), "red").save(encoded, format="GIF")
+        pinned = Mock()
+        pinned.dup_file.side_effect = lambda: io.BytesIO(encoded.getvalue())
+        stop = threading.Event()
+        matrix = Mock()
+        matrix.draw_image.side_effect = lambda *_args, **_kwargs: stop.set()
+
+        frames = list(edit_preview.media_preview_frames(
+            matrix, "cancelled.gif", 1,
+            stop_event=stop, pinned_handle=pinned,
+        ))
+
+        self.assertEqual(frames, [])
+        matrix.clear.assert_called_once_with()
+        matrix.draw_image.assert_called_once()
+        matrix.snapshot.assert_not_called()
+        matrix.swap.assert_not_called()
+
+    def test_gif_preview_cancelled_while_yielded_does_not_swap_on_resume(self):
+        encoded = io.BytesIO()
+        Image.new("RGB", (2, 2), "red").save(encoded, format="GIF")
+        pinned = Mock()
+        pinned.dup_file.side_effect = lambda: io.BytesIO(encoded.getvalue())
+        stop = threading.Event()
+        matrix = Mock()
+        iterator = edit_preview.media_preview_frames(
+            matrix, "cancelled.gif", 1,
+            stop_event=stop, pinned_handle=pinned,
+        )
+
+        first = next(iterator)
+        self.assertIn("png", first)
+        stop.set()
+        with self.assertRaises(StopIteration):
+            next(iterator)
+
+        matrix.swap.assert_not_called()
+
+    def test_pre_cancelled_static_preview_skips_pinned_decode(self):
+        pinned = Mock()
+        stop = threading.Event()
+        stop.set()
+
+        frames = list(edit_preview.media_preview_frames(
+            CaptureMatrix(), "cancelled.png", 1,
+            stop_event=stop, pinned_handle=pinned,
+        ))
+
+        self.assertEqual(frames, [])
+        pinned.dup_file.assert_not_called()
+
+    def test_static_preview_cancelled_during_decode_draws_nothing(self):
+        matrix = Mock()
+        pinned = Mock()
+        media_file = MagicMock()
+        media_file.__enter__.return_value.read.return_value = b"pinned-static"
+        pinned.dup_file.return_value = media_file
+        opened = MagicMock()
+        stop = threading.Event()
+
+        def cancel_during_copy():
+            stop.set()
+            return Image.new("RGB", (2, 2), "blue")
+
+        opened.__enter__.return_value.copy.side_effect = cancel_during_copy
+        with patch.object(Image, "open", return_value=opened):
+            frames = list(edit_preview.media_preview_frames(
+                matrix, "cancelled.png", 1,
+                stop_event=stop, pinned_handle=pinned,
+            ))
+
+        self.assertEqual(frames, [])
+        matrix.clear.assert_not_called()
+        matrix.draw_image.assert_not_called()
+        matrix.snapshot.assert_not_called()
+        matrix.swap.assert_not_called()
+
+    def test_static_preview_cancelled_during_draw_yields_nothing(self):
+        matrix = Mock()
+        stop = threading.Event()
+        opened = MagicMock()
+        opened.__enter__.return_value.copy.return_value = Image.new(
+            "RGB", (2, 2), "green"
+        )
+        matrix.draw_image.side_effect = lambda *_args, **_kwargs: stop.set()
+
+        with patch.object(Image, "open", return_value=opened):
+            frames = list(edit_preview.media_preview_frames(
+                matrix, "cancelled.png", 1, stop_event=stop,
+            ))
+
+        self.assertEqual(frames, [])
+        matrix.clear.assert_called_once_with()
+        matrix.draw_image.assert_called_once()
+        matrix.snapshot.assert_not_called()
+        matrix.swap.assert_not_called()
+
     def test_media_decode_cancel_closes_decoder_within_250_ms(self):
         class RecordingMatrix(CaptureMatrix):
             def __init__(self):
@@ -2133,6 +2560,7 @@ class EditPreviewTests(unittest.TestCase):
                         "x": 0, "y": 0, "width": 64, "height": 32,
                         "keep_aspect": True, "gif_speed_percent": 200,
                     },
+                    monotonic=lambda: 0.0,
                 ),
             }
 
@@ -2294,6 +2722,7 @@ class EditPreviewTests(unittest.TestCase):
                         "keep_aspect": True, "gif_speed_percent": 200,
                         "video_fps": 20,
                     },
+                    monotonic=lambda: 0.0,
                 )
             )
             session.MAX_FRAMES = 2
@@ -2466,6 +2895,7 @@ class EditPreviewTests(unittest.TestCase):
                             None if filename.endswith(".gif") else
                             preview_video_decoder
                         ),
+                        monotonic=lambda: 0.0,
                     ))
                     session.MAX_FRAMES = 2
                     pages = []
@@ -2693,13 +3123,16 @@ class EditPreviewTests(unittest.TestCase):
             def __init__(self):
                 self.shown = []
 
-            def show_image(self, filename, delay=None, **geometry):
+            def show_image(self, filename, delay=None, *, stop_event=None, **geometry):
                 self.shown.append((filename, delay, geometry))
                 return True
 
         class FakeStopEvent:
             def __init__(self):
                 self.waits = []
+
+            def is_set(self):
+                return False
 
             def wait(self, delay):
                 self.waits.append(delay)
@@ -2910,6 +3343,229 @@ class EditPreviewTests(unittest.TestCase):
         self.assertEqual(openweather_overview.run.__defaults__, (20, None, None, None, None))
         self.assertEqual(openweather_forecast.run.__defaults__, (30, None, None, None, None))
 
+    def test_decoded_gif_close_attempts_every_frame_before_raising_first_error(self):
+        for failing_indices in ((0,), (1,), (0, 1)):
+            with self.subTest(failing_indices=failing_indices):
+                frames = [Mock(), Mock(), Mock()]
+                for failing_index in failing_indices:
+                    frames[failing_index].close.side_effect = OSError(
+                        f"frame-{failing_index}-close"
+                    )
+                decoded = edit_preview._DecodedGif(frames)
+
+                with self.assertRaisesRegex(
+                    OSError, f"frame-{failing_indices[0]}-close",
+                ):
+                    decoded.close()
+                decoded.close()
+
+                for frame in frames:
+                    frame.close.assert_called_once_with()
+
+    def test_partial_gif_decode_cleanup_preserves_primary_and_attempts_all_candidates(self):
+        class CleanupBase(BaseException):
+            def __repr__(self):
+                raise RuntimeError("cleanup-repr-fault")
+
+            def __str__(self):
+                raise RuntimeError("cleanup-str-fault")
+
+        class DecodePrimary(RuntimeError):
+            def add_note(self, _note):
+                raise RuntimeError("primary-note-fault")
+
+        class Candidate:
+            def __init__(self, getter_error=None, close_error=None):
+                self.getter_error = getter_error
+                self.close_error = close_error
+                self.close_lookups = 0
+                self.close_calls = 0
+
+            @property
+            def close(self):
+                self.close_lookups += 1
+                if self.getter_error is not None:
+                    raise self.getter_error
+
+                def close_candidate():
+                    self.close_calls += 1
+                    if self.close_error is not None:
+                        raise self.close_error
+
+                return close_candidate
+
+        class Frame:
+            info = {"duration": 100}
+
+            def __init__(self, result=None, error=None):
+                self.result = result
+                self.error = error
+
+            def copy(self):
+                if self.error is not None:
+                    raise self.error
+                return self.result
+
+        class Opened:
+            def __init__(self, frames, exit_error=None):
+                self.frames = frames
+                self.exit_error = exit_error
+                self.exit_calls = 0
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *_args):
+                self.exit_calls += 1
+                if self.exit_error is not None:
+                    raise self.exit_error
+
+        for scenario in ("first_callable", "first_getter_and_middle_callable"):
+            with self.subTest(scenario=scenario):
+                primary = DecodePrimary("third-copy-primary")
+                if scenario == "first_callable":
+                    candidates = [
+                        Candidate(close_error=CleanupBase("first-close")),
+                        Candidate(),
+                    ]
+                else:
+                    candidates = [
+                        Candidate(getter_error=CleanupBase("first-getter")),
+                        Candidate(close_error=CleanupBase("middle-close")),
+                    ]
+                opened = Opened([
+                    Frame(result=candidates[0]), Frame(result=candidates[1]),
+                    Frame(error=primary),
+                ])
+
+                iterator = edit_preview.media_preview_frames(
+                    CaptureMatrix(), "partial.gif", 1,
+                )
+                with (
+                    patch.object(Image, "open", return_value=opened),
+                    patch.object(
+                        ImageSequence, "Iterator",
+                        side_effect=lambda source: iter(source.frames),
+                    ),
+                ):
+                    with self.assertRaises(DecodePrimary) as raised:
+                        list(iterator)
+
+                self.assertIs(raised.exception, primary)
+                self.assertEqual(opened.exit_calls, 1)
+                self.assertEqual(
+                    [candidate.close_lookups for candidate in candidates], [1, 1],
+                )
+                self.assertEqual(
+                    [candidate.close_calls for candidate in candidates],
+                    [0, 1] if scenario != "first_callable" else [1, 1],
+                )
+
+        primary = DecodePrimary("third-copy-primary-with-source-cleanup")
+        source_error = CleanupBase("source-exit")
+        candidates = [
+            Candidate(close_error=CleanupBase("first-close")),
+            Candidate(close_error=CleanupBase("middle-close")),
+        ]
+        opened = Opened([
+            Frame(result=candidates[0]), Frame(result=candidates[1]),
+            Frame(error=primary),
+        ], exit_error=source_error)
+        iterator = edit_preview.media_preview_frames(
+            CaptureMatrix(), "partial-source.gif", 1,
+        )
+        with (
+            patch.object(Image, "open", return_value=opened),
+            patch.object(
+                ImageSequence, "Iterator",
+                side_effect=lambda source: iter(source.frames),
+            ),
+        ):
+            try:
+                list(iterator)
+            except BaseException as observed:
+                if observed is not primary:
+                    self.fail("source cleanup replaced copy primary")
+            else:
+                self.fail("expected copy primary")
+        self.assertEqual(opened.exit_calls, 1)
+        self.assertEqual(
+            [candidate.close_calls for candidate in candidates], [1, 1],
+        )
+
+        source_error = CleanupBase("source-exit-without-operation-error")
+        candidates = [
+            Candidate(close_error=CleanupBase("candidate-close")), Candidate(),
+        ]
+        opened = Opened([
+            Frame(result=candidates[0]), Frame(result=candidates[1]),
+        ], exit_error=source_error)
+        iterator = edit_preview.media_preview_frames(
+            CaptureMatrix(), "source-cleanup.gif", 1,
+        )
+        with (
+            patch.object(Image, "open", return_value=opened),
+            patch.object(
+                ImageSequence, "Iterator",
+                side_effect=lambda source: iter(source.frames),
+            ),
+        ):
+            with self.assertRaises(CleanupBase) as raised:
+                list(iterator)
+        self.assertIs(raised.exception, source_error)
+        self.assertEqual(opened.exit_calls, 1)
+        self.assertEqual(
+            [candidate.close_calls for candidate in candidates], [1, 1],
+        )
+
+        first_error = CleanupBase("first-cleanup")
+        later_error = CleanupBase("later-cleanup")
+        candidates = [
+            Candidate(close_error=first_error),
+            Candidate(close_error=later_error),
+            Candidate(),
+        ]
+        with self.assertRaises(CleanupBase) as raised:
+            edit_preview._close_preview_value(candidates)
+        self.assertIs(raised.exception, first_error)
+        self.assertEqual(
+            [candidate.close_lookups for candidate in candidates], [1, 1, 1],
+        )
+        self.assertEqual(
+            [candidate.close_calls for candidate in candidates], [1, 1, 1],
+        )
+
+    def test_transferred_static_preview_image_closes_on_every_exit(self):
+        for scenario in ("normal", "cancel", "draw_error"):
+            with self.subTest(scenario=scenario):
+                image = Mock()
+                image.close_calls = 0
+                image.close.side_effect = lambda image=image: setattr(
+                    image, "close_calls", image.close_calls + 1,
+                )
+                stop = threading.Event()
+                matrix = CaptureMatrix()
+                matrix.draw_image = Mock()
+                if scenario == "draw_error":
+                    matrix.draw_image.side_effect = RuntimeError("draw failed")
+
+                def transfer(*_args, **_kwargs):
+                    if scenario == "cancel":
+                        stop.set()
+                    return image
+
+                iterator = edit_preview.media_preview_frames(
+                    matrix, "owned.png", 1, stop_event=stop,
+                )
+                with patch.object(edit_preview, "_preview_decode", side_effect=transfer):
+                    if scenario == "draw_error":
+                        with self.assertRaisesRegex(RuntimeError, "draw failed"):
+                            list(iterator)
+                    else:
+                        list(iterator)
+
+                self.assertEqual(image.close_calls, 1)
+
     def test_static_hold_delay_is_clipped_to_invocation_deadline(self):
         class Clock:
             def __init__(self):
@@ -2925,7 +3581,7 @@ class EditPreviewTests(unittest.TestCase):
                 self.clock = clock
                 self.submissions = []
 
-            def show_image(self, filename, delay=None, **geometry):
+            def show_image(self, filename, delay=None, *, stop_event=None, **geometry):
                 self.clock.elapsed += 0.03
                 with Image.open(self.path) as image:
                     self.clear()
@@ -2937,6 +3593,9 @@ class EditPreviewTests(unittest.TestCase):
             def __init__(self, clock):
                 self.clock = clock
                 self.waits = []
+
+            def is_set(self):
+                return False
 
             def wait(self, delay):
                 self.waits.append(delay)
@@ -3456,6 +4115,36 @@ class EditPreviewTests(unittest.TestCase):
                 if consumed_tokens:
                     with self.assertRaises(StopIteration):
                         session.page(consumed_tokens[0])
+
+    def test_static_custom_text_preview_matches_physical_frame_and_hold(self):
+        module = {
+            "id": "custom_static", "name": "Static", "type": "text",
+            "font": "4x6", "colour": "#ffcc00", "background": "#001122",
+            "text": "HELLO", "x": 3, "y": 20,
+        }
+
+        class RecordingCapture(CaptureMatrix):
+            submitted = None
+
+            def swap(self, canvas=None):
+                self.submitted = self.snapshot(canvas)
+                return super().swap(canvas)
+
+        physical = RecordingCapture()
+        with patch("modules.custom_text._wait", return_value=False):
+            self.assertTrue(custom_text.run(
+                physical, {}, duration=7, stop_event=Mock(is_set=Mock(return_value=False)),
+                module_config=module,
+            ))
+        self.assertIsNotNone(physical.submitted)
+
+        frames = custom_text_preview_frames(CaptureMatrix(), module, duration=7)
+        preview = next(frames)
+        with Image.open(io.BytesIO(base64.b64decode(preview["png"]))) as image:
+            self.assertEqual(tuple(image.convert("RGB").get_flattened_data()), tuple(physical.submitted.get_flattened_data()))
+        self.assertEqual(preview["delay_ms"], 7000)
+        with self.assertRaises(StopIteration):
+            next(frames)
 
     def test_maximum_width_custom_text_ten_loops_completes_without_history_growth(self):
         class WeakFrame(dict):

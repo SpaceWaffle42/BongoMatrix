@@ -112,6 +112,13 @@ class AcceptanceArtifactTransaction:
         self._state = self.INIT
         self._draft_revision: int | None = None
         self._draft_digest: str | None = None
+        self._observed = {
+            "foreign_rejected": False,
+            "heartbeat_accepted": False,
+            "timeout_returned": False,
+            "sleep_observed": False,
+        }
+        self._event_authority = None
         self._completion: dict[str, object] = {}
         self._closed = False
 
@@ -196,10 +203,35 @@ class AcceptanceArtifactTransaction:
             return {"state": self._state, "draft_revision": revision,
                     "draft_sha256": self._draft_digest}
 
+    def _bind_display_controller(self, authority: object, lifecycle_token: object) -> None:
+        from display_controller import DisplayController
+
+        if not isinstance(authority, DisplayController):
+            raise ValueError("acceptance event authority is invalid")
+        context = authority._acceptance_transaction
+        if (
+            context is None
+            or context.get("publisher") is not self
+            or context.get("event_authority") is not lifecycle_token
+        ):
+            raise RuntimeError("acceptance controller lifecycle is not active")
+        with self._lock:
+            if self._state != self.INIT or self._closed or self._event_authority is not None:
+                raise RuntimeError("acceptance event authority is already bound")
+            self._event_authority = lifecycle_token
+
+    def _observe(self, event: str, authority: object) -> None:
+        with self._lock:
+            if authority is not self._event_authority:
+                raise PermissionError("acceptance event authority does not match")
+            if self._closed or self._state not in {self.INIT, self.DRAFT_PUBLISHED}:
+                raise RuntimeError("acceptance journey event is out of order")
+            if event in {"timeout_returned", "sleep_observed"} and self._state != self.DRAFT_PUBLISHED:
+                raise RuntimeError("acceptance journey event is out of order")
+            self._observed[event] = True
+
     def publish_saved_rollback(
         self, frame: bytes, *, frame_revision: int, saved_revision: int | None = None,
-        foreign_rejected: bool = True, timeout_returned: bool = True,
-        heartbeat_accepted: bool = True,
     ) -> dict[str, object]:
         frame = self._frame(frame)
         current_revision = _exact_int(frame_revision, positive=True)
@@ -211,9 +243,8 @@ class AcceptanceArtifactTransaction:
             baseline_revision = self._draft_revision - 1 if saved_revision is None else _exact_int(saved_revision)
             if not baseline_revision < self._draft_revision:
                 raise ValueError("saved baseline revision must precede draft")
-            if any(type(item) is not bool or item is not True for item in
-                   (foreign_rejected, timeout_returned, heartbeat_accepted)):
-                raise ValueError("acceptance journey assertions are incomplete")
+            if not all(self._observed.values()):
+                raise ValueError("acceptance journey evidence is incomplete")
             saved_digest = hashlib.sha256(frame).hexdigest()
             if saved_digest == self._draft_digest:
                 raise ValueError("draft did not differ from saved output")
@@ -234,8 +265,11 @@ class AcceptanceArtifactTransaction:
                 "draft_sha256": self._draft_digest,
                 "current_sha256": saved_digest,
                 "width": 64, "height": 32,
-                "foreign_rejected": True, "timeout_returned": True,
-                "heartbeat_accepted": True, "rollback_complete": True,
+                "foreign_rejected": self._observed["foreign_rejected"],
+                "timeout_returned": self._observed["timeout_returned"],
+                "heartbeat_accepted": self._observed["heartbeat_accepted"],
+                "rollback_complete": True,
+                "sleep_observed": self._observed["sleep_observed"],
             }
             raw = (json.dumps(metadata, sort_keys=True, separators=(",", ":")) + "\n").encode("utf-8")
             self._atomic_file("metadata.json", raw)
@@ -243,6 +277,10 @@ class AcceptanceArtifactTransaction:
             self._completion = {
                 "saved_revision": baseline_revision,
                 "current_revision": current_revision,
+                "foreign_rejected": self._observed["foreign_rejected"],
+                "timeout_returned": self._observed["timeout_returned"],
+                "sleep_observed": self._observed["sleep_observed"],
+                "rollback_complete": True,
             }
             self._closed = True
             return self.status_unlocked()
@@ -259,7 +297,10 @@ class AcceptanceArtifactTransaction:
         return result
 
     def close(self) -> None:
-        with self._lock:
+        lock = getattr(self, "_lock", None)
+        if lock is None:
+            return
+        with lock:
             if not self._closed:
                 self._closed = True
             for name in ("_operation_fd", "_attempt_fd", "_transactions_fd", "_runtime_fd"):

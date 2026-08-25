@@ -343,6 +343,8 @@ def _run_canvas(matrix, duration, stop_event, module_config, pinned_handles=None
         matrix, duration, stop_event, module_config, monotonic=time.monotonic,
         pinned_handles=pinned_handles,
     ):
+        if stop_event is not None and stop_event.is_set() is True:
+            break
         matrix.swap(canvas)
         rendered = True
         if _wait(stop_event, delay):

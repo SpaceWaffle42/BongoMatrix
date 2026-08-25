@@ -332,6 +332,7 @@ def _canonical_transaction(root: Path, arguments: argparse.Namespace) -> tuple[d
         "owner_revision", "saved_revision", "draft_revision", "current_revision",
         "saved_sha256", "draft_sha256", "current_sha256", "width", "height",
         "foreign_rejected", "timeout_returned", "heartbeat_accepted", "rollback_complete",
+        "sleep_observed",
     }
     canonical = (json.dumps(metadata, sort_keys=True, separators=(",", ":")) + "\n").encode("utf-8")
     if type(metadata) is not dict or set(metadata) != fields or raw != canonical:
@@ -349,7 +350,10 @@ def _canonical_transaction(root: Path, arguments: argparse.Namespace) -> tuple[d
             or type(metadata["owner_generation"]) is not int or metadata["owner_generation"] < 0
             or type(metadata["owner_revision"]) is not int or metadata["owner_revision"] < 0
             or metadata["width"] != 64 or metadata["height"] != 32
-            or any(metadata[key] is not True for key in ("foreign_rejected", "timeout_returned", "heartbeat_accepted", "rollback_complete"))):
+            or any(metadata[key] is not True for key in (
+                "foreign_rejected", "timeout_returned", "heartbeat_accepted",
+                "rollback_complete", "sleep_observed",
+            ))):
         raise ValueError("transaction authority does not match this verification")
     revisions = [metadata[key] for key in ("saved_revision", "draft_revision", "current_revision")]
     if any(type(value) is not int for value in revisions) or not revisions[0] < revisions[1] < revisions[2]:
@@ -381,8 +385,15 @@ def _claim(transaction: Path, name: str, nonce: str) -> None:
 
 
 def _physical(root: Path, arguments: argparse.Namespace) -> dict[str, object]:
-    service = subprocess.run(["systemctl", "is-active", "matrix-web.service"], check=False,
-                             text=True, capture_output=True, timeout=15, shell=False)
+    service = subprocess.run(
+        ["/usr/bin/systemctl", "is-active", "matrix-web.service"],
+        check=False,
+        text=True,
+        capture_output=True,
+        timeout=15,
+        shell=False,
+        env={"PATH": "/usr/bin:/bin", "LANG": "C", "LC_ALL": "C"},
+    )
     if service.returncode != 0 or service.stdout.strip() != "active" or service.stderr:
         raise ValueError("service is not active")
     metadata, frames, transaction = _canonical_transaction(root, arguments)
@@ -391,7 +402,9 @@ def _physical(root: Path, arguments: argparse.Namespace) -> dict[str, object]:
             "draft_signature": metadata["draft_sha256"],
             "saved_signature": metadata["saved_sha256"],
             "owner_generation": metadata["owner_generation"],
-            "foreign_rejected": True, "timeout_returned": True, "sleep_returned": True}
+            "foreign_rejected": metadata["foreign_rejected"],
+            "timeout_returned": metadata["timeout_returned"],
+            "sleep_observed": metadata["sleep_observed"]}
 
 
 def _rollback(root: Path, arguments: argparse.Namespace) -> dict[str, object]:

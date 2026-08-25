@@ -464,6 +464,7 @@ class LocalHttpJourney:
             raise ValueError("acceptance transaction staging failed")
         candidate_config = dict(config)
         candidate_config.pop("revision", None)
+        candidate_config.pop("schema_version", None)
         request = {"config": candidate_config, "generation": generation,
                    "preview_instance": owner, "timeout_seconds": 30}
         started, result = _request_json(base_url, "/api/device-preview/clock_lava", cookie_value,
@@ -474,19 +475,32 @@ class LocalHttpJourney:
         foreign_status, _ = _request_json(base_url, "/api/device-preview/heartbeat", cookie_value, timeout(), method="POST", payload=foreign)
         if (started != 202 or type(result) is not dict or result.get("generation") != generation
                 or result.get("timeout_seconds") != 30 or result.get("heartbeat_after_seconds") != 5
+                or type(result.get("expires_in")) not in {int, float}
+                or isinstance(result.get("expires_in"), bool)
+                or not 5 < float(result["expires_in"]) <= 30
                 or immediate_heartbeat != 409 or foreign_status != 409):
             raise ValueError("paired HTTP device-preview journey failed")
+        content_deadline = time.monotonic() + float(result["expires_in"])
         _wait_until_heartbeat_admission(result["heartbeat_after_seconds"], aggregate_deadline=aggregate_deadline)
         heartbeat, _ = _request_json(base_url, "/api/device-preview/heartbeat", cookie_value, timeout(), method="POST", payload=control)
-        cancelled, _ = _request_json(base_url, "/api/device-preview/cancel", cookie_value, timeout(), method="POST", payload=control)
         saved_status, saved = _request_json(base_url, "/api/config", cookie_value, timeout())
-        if heartbeat != 202 or cancelled != 202 or saved_status != 200 or saved != config:
+        if heartbeat != 202 or saved_status != 200 or saved != config:
             raise ValueError("paired HTTP device-preview journey failed")
         status_request = {
             **control, "nonce": nonce,
             "acceptance_operation_id": transaction["acceptance_operation_id"],
         }
+        next_heartbeat = time.monotonic() + float(result["heartbeat_after_seconds"])
         while True:
+            now = time.monotonic()
+            if now >= next_heartbeat and now < content_deadline:
+                maintained, _ = _request_json(
+                    base_url, "/api/device-preview/heartbeat", cookie_value,
+                    timeout(), method="POST", payload=control,
+                )
+                if maintained != 202:
+                    raise ValueError("acceptance heartbeat maintenance failed")
+                next_heartbeat = time.monotonic() + float(result["heartbeat_after_seconds"])
             completion_status, completion = _request_json(
                 base_url, "/api/release-acceptance/transaction/status", cookie_value,
                 timeout(), method="POST", payload=status_request,
@@ -501,12 +515,18 @@ class LocalHttpJourney:
                 raise TimeoutError("acceptance transaction did not physically complete")
             time.sleep(min(0.1, remaining))
         expected_fields = {"state", "nonce", "acceptance_operation_id", "owner_generation",
-                           "draft_revision", "saved_revision", "current_revision"}
+                           "draft_revision", "saved_revision", "current_revision",
+                           "foreign_rejected", "timeout_returned", "sleep_observed",
+                           "rollback_complete"}
         if (type(completion) is not dict or set(completion) != expected_fields
                 or completion["state"] != "SAVED_ROLLBACK_PUBLISHED"
                 or completion["nonce"] != nonce
                 or completion["acceptance_operation_id"] != transaction["acceptance_operation_id"]
                 or completion["owner_generation"] != generation
+                or any(completion[key] is not True for key in (
+                    "foreign_rejected", "timeout_returned", "sleep_observed",
+                    "rollback_complete",
+                ))
                 or any(type(completion[key]) is not int for key in ("saved_revision", "draft_revision", "current_revision"))
                 or not completion["saved_revision"] < completion["draft_revision"] < completion["current_revision"]):
             raise ValueError("acceptance transaction completion is invalid")
@@ -515,8 +535,10 @@ class LocalHttpJourney:
                 "saved_revision": completion["saved_revision"],
                 "draft_revision": completion["draft_revision"],
                 "current_revision": completion["current_revision"],
-                "foreign_rejected": True, "timeout_returned": True,
-                "saved_output_returned": True}
+                "foreign_rejected": completion["foreign_rejected"],
+                "timeout_returned": completion["timeout_returned"],
+                "sleep_observed": completion["sleep_observed"],
+                "saved_output_returned": completion["rollback_complete"]}
 
 
 class LocalChromiumJourney:
@@ -708,10 +730,10 @@ def _validated_payload(operation, raw, arguments, evidence_id):
         if set(value) != {"config", "paired", "media"} or any(not _digest(v) for v in value.values()):
             raise ValueError("persistent state invalid")
     elif operation == "physical-journey":
-        required = {"service_active", "draft_signature", "saved_signature", "width", "height", "owner_generation", "foreign_rejected", "timeout_returned", "sleep_returned"}
+        required = {"service_active", "draft_signature", "saved_signature", "width", "height", "owner_generation", "foreign_rejected", "timeout_returned", "sleep_observed"}
         if (set(value) != required or value["service_active"] is not True or value["width"] != 64 or value["height"] != 32
                 or type(value["owner_generation"]) is not int or value["owner_generation"] < 0
-                or any(value[k] is not True for k in ("foreign_rejected", "timeout_returned", "sleep_returned"))
+                or any(value[k] is not True for k in ("foreign_rejected", "timeout_returned", "sleep_observed"))
                 or not _digest(value["draft_signature"]) or not _digest(value["saved_signature"])):
             raise ValueError("physical journey invalid")
     else:
@@ -798,12 +820,12 @@ def run_acceptance(arguments, executor, *, http_client=None, chromium_client=Non
         authorization_file = Path(arguments.app_root) / "data" / "acceptance-authorization.key"
         local_http = (http_client or LocalHttpJourney(local_transaction, authorization_file)).run(_LOCAL_BASE_URL, cookie, operation_timeout=300, aggregate_deadline=aggregate_deadline)
         local_chromium = (chromium_client or LocalChromiumJourney()).run(_LOCAL_BASE_URL, cookie, operation_timeout=300, aggregate_deadline=aggregate_deadline)
-        if (type(local_http) is not dict or set(local_http) != {"owner_generation", "nonce", "acceptance_operation_id", "saved_revision", "draft_revision", "current_revision", "foreign_rejected", "timeout_returned", "saved_output_returned"}
+        if (type(local_http) is not dict or set(local_http) != {"owner_generation", "nonce", "acceptance_operation_id", "saved_revision", "draft_revision", "current_revision", "foreign_rejected", "timeout_returned", "sleep_observed", "saved_output_returned"}
                 or type(local_http["owner_generation"]) is not int or not _digest(local_http["nonce"])
                 or local_http["acceptance_operation_id"] != arguments.acceptance_operation_id
                 or any(type(local_http[k]) is not int for k in ("saved_revision", "draft_revision", "current_revision"))
                 or not local_http["saved_revision"] < local_http["draft_revision"] < local_http["current_revision"]
-                or any(local_http[k] is not True for k in ("foreign_rejected", "timeout_returned", "saved_output_returned"))):
+                or any(local_http[k] is not True for k in ("foreign_rejected", "timeout_returned", "sleep_observed", "saved_output_returned"))):
             raise ValueError("local HTTP journey incomplete")
         if local_chromium != {"paired": True, "explicit_ipv4": True, "status_checked": True, "frame_checked": True}:
             raise ValueError("local Chromium journey incomplete")

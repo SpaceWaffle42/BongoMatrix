@@ -246,14 +246,23 @@ class DevicePreviewTests(unittest.TestCase):
         import threading
         from unittest.mock import Mock
 
-        from device_preview import DevicePreviewManager, DevicePreviewOwner, DevicePreviewRequest
+        from device_preview import (
+            DevicePreviewManager, DevicePreviewOwner, DevicePreviewRequest,
+            PreviewExpiryCause,
+        )
 
         now = [700.0]
         expired = threading.Event()
+        expired_leases = []
         cleanup = Mock()
+
+        def expire(lease):
+            expired_leases.append(lease)
+            expired.set()
+
         manager = DevicePreviewManager(
             clock=lambda: now[0],
-            on_expire=lambda _lease: expired.set(),
+            on_expire=expire,
         )
         owner = DevicePreviewOwner("device-a", "tab-a")
         manager.submit(
@@ -269,6 +278,7 @@ class DevicePreviewTests(unittest.TestCase):
 
         now[0] = 706.0
         self.assertTrue(expired.wait(0.5))
+        self.assertIs(expired_leases[0].expiry_cause, PreviewExpiryCause.CONTENT)
         cleanup.assert_called_once_with()
         self.assertIsNone(manager.active_lease())
         manager.close()

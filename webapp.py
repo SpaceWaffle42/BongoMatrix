@@ -351,7 +351,9 @@ def _edit_preview_iterator(
             matrix, custom, preview_duration(candidate, module_name), stop_event,
             pinned_handles=pinned_media,
         )
-    return custom_text_preview_frames(matrix, custom)
+    return custom_text_preview_frames(
+        matrix, custom, preview_duration(candidate, module_name),
+    )
 
 
 def _revision_etag(revision):
@@ -1493,21 +1495,28 @@ def create_app(
                 response.status_code = 428
                 response.headers["ETag"] = _revision_etag(current_revision)
                 return response
-            elif validators == "*":
-                base_revision = None
-            else:
-                if not any(
-                    not weak and opaque == str(current_revision)
-                    for weak, opaque in validators
-                ):
-                    response = jsonify({
-                        "error": "Configuration has changed since this client loaded it.",
-                        "revision": current_revision,
-                    })
-                    response.status_code = 412
-                    response.headers["ETag"] = _revision_etag(current_revision)
-                    return response
-                base_revision = current_revision
+            if (
+                validators == "*"
+                or len(validators) != 1
+                or validators[0][0]
+            ):
+                response = jsonify({
+                    "error": "If-Match must contain exactly one strong configuration revision.",
+                    "revision": current_revision,
+                })
+                response.status_code = 400
+                response.headers["ETag"] = _revision_etag(current_revision)
+                return response
+            _weak, opaque_revision = validators[0]
+            if opaque_revision != str(current_revision):
+                response = jsonify({
+                    "error": "Configuration has changed since this client loaded it.",
+                    "revision": current_revision,
+                })
+                response.status_code = 412
+                response.headers["ETag"] = _revision_etag(current_revision)
+                return response
+            base_revision = current_revision
             if not request.is_json:
                 abort(415, description="Content-Type must be application/json.")
             changes = request.get_json()
@@ -1648,6 +1657,7 @@ def create_app(
         except ValueError as exc:
             return jsonify({"error": str(exc)}), 400
         except SecretDurabilityError as exc:
+            rotate_openweather_credentials()
             return jsonify({
                 "configured": exc.configured,
                 "error": str(exc),
@@ -1666,6 +1676,7 @@ def create_app(
             rotate_openweather_credentials()
             return jsonify(openweather_secrets.status())
         except SecretDurabilityError as exc:
+            rotate_openweather_credentials()
             return jsonify({
                 "configured": exc.configured,
                 "error": str(exc),
@@ -2101,9 +2112,6 @@ def create_app(
             owner, generation = device_preview_control_payload()
             if not controller.cancel_device_draft(owner, generation=generation):
                 return edit_preview_error("Device preview is no longer active.", 409)
-            controller.mark_acceptance_result(
-                owner, generation=generation, result="timeout_returned",
-            )
             return jsonify({"cancelled": True}), 202
         except RequestEntityTooLarge:
             return edit_preview_error("Device preview request exceeds 1 MiB.", 413)

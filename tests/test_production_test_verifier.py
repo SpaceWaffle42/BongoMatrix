@@ -4,6 +4,7 @@ import json
 import os
 import stat
 import subprocess
+import sys
 import tempfile
 import unittest
 from pathlib import Path
@@ -58,7 +59,7 @@ class ProductionTestVerifierTests(unittest.TestCase):
 
     def _command(self, root: Path) -> list[str]:
         return [
-            str(_REPOSITORY / ".venv/bin/python"), "-I", "-B", str(_VERIFIER_PATH),
+            sys.executable, "-I", "-B", str(_VERIFIER_PATH),
             "--check", "production-tests", "--mode", "deploy",
             "--app-root", str(root), "--attempt-id", "a" * 32,
             "--acceptance-operation-id", "c" * 64, "--evidence-id", "b" * 64,
