@@ -171,6 +171,26 @@ class Priority13AcceptanceTests(unittest.TestCase):
         self.assertIn('test "$(readlink .venv)" = ".venv-ci"', pipeline)
         self.assertIn(".venv-ci/bin/coverage run", pipeline)
 
+    def test_authoritative_release_runbook_uses_readme_supported_venv(self):
+        repository = Path(__file__).resolve().parents[1]
+        runbook = (repository / "docs/priority-1-3-release.md").read_text()
+
+        forbidden = "./.venv" + "/bin/python"
+        self.assertNotIn(forbidden, runbook)
+        for command in (
+            "PYTHONDONTWRITEBYTECODE=1 ./venv/bin/python -B -m unittest",
+            "./venv/bin/python -I -B deploy/release_bundle.py prepare-release-tree",
+            "./venv/bin/python -I -B deploy/guarded_priority_1_3_release.py run",
+        ):
+            with self.subTest(command=command):
+                self.assertIn(command, runbook)
+        operator_lines = [
+            line for line in runbook.splitlines()
+            if line.startswith("PYTHONDONTWRITEBYTECODE=1 ./venv/bin/python")
+            or line.startswith("./venv/bin/python")
+        ]
+        self.assertEqual(len(operator_lines), 4)
+
     def test_exported_candidate_ships_executable_remote_verifier(self):
         repository = Path(__file__).resolve().parents[1]
         source = repository / "scripts" / "verify_priority_1_3_remote.py"

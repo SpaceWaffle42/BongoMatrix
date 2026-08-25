@@ -204,9 +204,11 @@ Verified remediation approvals as of 2026-08-25:
 
 **F11-G1 approved:** commit `205b8b3c09aba0655f4f4d690f96cd50b94716e8` gives decoder-reaper acquisition a separate bounded 250ms lifecycle window while decoder reads and frame publication remain bound to the original content deadline, preserving exact ownership, cancellation cleanup, GIF/MP4 repeat timing, and the required final clipped frame. The first generation that skipped a sub-frame repeat remains rejected because it omitted that clipped frame. Immutable review `deleg_65b864b9` reported **APPROVED** with no findings, security concerns, suggestions, or limitations; final approval and F11 resumption authorization are recorded in GitLab issue 2 note 376.
 
-**F11 is authorized and in progress, not yet approved:** the physical-preview timeout input and **Stop device preview** action now enforce a 44 CSS-pixel minimum height on clients through 900px wide or with a coarse pointer while preserving desktop mouse layout. The real-Chrome regression covers blocking phone/tablet/desktop viewports, 899/900/901px breakpoint probes, desktop coarse pointer, touch/mouse/keyboard activation, the popped active strip, and 200% zoom.
+**F11 approved:** commit `1596137cccacfbdb93a661df4444d1ca0be277c6` enforces at least 44 CSS-pixel target height for the physical-preview timeout and **Stop device preview** action through 900px width and under coarse pointers while preserving desktop mouse layout, active popped-strip reachability, touch/mouse/keyboard activation, and 200% zoom. Immutable review `deleg_12964e22` reported **APPROVED** with no findings, security concerns, suggestions, or limitations; final approval and F12 authorization are recorded in GitLab issue 2 note 378.
 
-F12, final whole-project review, merge request/CI, deployment, production browser/physical acceptance, and Priority 1.4 remain blocked until F11 and every later remediation boundary are approved in order.
+**F12 is authorized and in progress, not yet approved:** the authoritative Priority 1.3 release procedure is being aligned with the README-supported `./venv/bin/python` operator environment while retaining the CI-only `.venv` compatibility alias solely inside CI.
+
+Final whole-project review, merge request/CI, deployment, production browser/physical acceptance, and Priority 1.4 remain blocked until F12 and every final closure gate are approved in order.
 
 ### 1.4 Add borders and backgrounds to basic custom modules
 
