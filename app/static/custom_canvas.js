@@ -11,6 +11,7 @@
   const mediaLoadQueue = [];
   let activeMediaLoads = 0;
   let layerSerial = 0;
+  let mediaRedrawTimer = null;
 
   const clone = value => structuredClone(value);
   const byId = id => customModules.find(module => module.id === id);
@@ -40,6 +41,9 @@
   function disposeTimelineState(state) {
     cancelTimelineDrag(state);
     disposeTimelineResize(state);
+    if (state.timer !== null) clearInterval(state.timer);
+    state.timer = null;
+    state.playing = false;
     state.timelineContainer = null;
   }
 
@@ -54,6 +58,8 @@
   window.addEventListener?.('pagehide', () => {
     editorCleanupObserver?.disconnect();
     for (const state of editorState.values()) disposeTimelineState(state);
+    if (mediaRedrawTimer !== null) clearInterval(mediaRedrawTimer);
+    mediaRedrawTimer = null;
   }, {once: true});
 
   function ease(value, kind) {
@@ -1230,7 +1236,7 @@
     globalThis.markMatrixDirty?.(); renderCustomModules(); globalThis.matrixCustomCanvasDraftRemoved?.(id); setMessage('Custom module removed. Save configuration to apply.');
   };
 
-  setInterval(() => { if (customModules.some(module => module.type === 'canvas' && module.layers.some(layer => layer.type === 'time' && layer.visible))) redrawMediaCanvases(); }, 1000);
+  mediaRedrawTimer = setInterval(() => { if (customModules.some(module => module.type === 'canvas' && module.layers.some(layer => layer.type === 'time' && layer.visible))) redrawMediaCanvases(); }, 1000);
   renderCustomModules();
   globalThis.matrixCustomCanvasReady = true;
 })();

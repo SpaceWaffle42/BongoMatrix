@@ -1164,7 +1164,9 @@ try{
         root = Path(__file__).parents[1]
         canvas = (root / "app" / "static" / "custom_canvas.js").read_text()
         dashboard = (root / "app" / "templates" / "dashboard.html").read_text()
-        remove_override = canvas[canvas.index("window.removeCustomModule = function removeCustomModuleAdvanced"):canvas.index("\n\n  setInterval", canvas.index("window.removeCustomModule = function removeCustomModuleAdvanced"))]
+        remove_start = canvas.index("window.removeCustomModule = function removeCustomModuleAdvanced")
+        timer_callback = canvas.index("customModules.some(module => module.type === 'canvas'", remove_start)
+        remove_override = canvas[remove_start:canvas.rfind("\n", 0, timer_callback)]
         removed_callback = dashboard[dashboard.index("window.matrixCustomCanvasDraftRemoved="):dashboard.index(";\nfunction customEditorForEvent") + 1]
         harness = r'''
 let dirtyCalls=0,replacements=[],editSchedules=0,previewModule='custom_advanced',previewModulePinned=true,previewMode='edit';
@@ -1189,6 +1191,139 @@ console.log('SHIPPED_CUSTOM_CANVAS_REMOVAL_PASS');
         convert_body = canvas[canvas.index("function convertToAdvanced"):canvas.index("function simpleModuleFromCard", canvas.index("function convertToAdvanced"))]
         self.assertIn("markMatrixDirty", template_body)
         self.assertIn("markMatrixDirty", convert_body)
+
+    @unittest.skipUnless(shutil.which("node"), "Node.js is required")
+    def test_shipped_custom_canvas_module_removal_stops_active_playback(self):
+        root = Path(__file__).parents[1]
+        source = (root / "app" / "static" / "custom_canvas.js").read_text()
+        state_and_disposal = source[
+            source.index("  const stateFor = module => {"):
+            source.index("\n\n  const editorCleanupObserver")
+        ]
+        advance = source[
+            source.index("  window.advanceCanvasPlaybackFrame ="):
+            source.index("\n\n  function playBrowserPreview")
+        ]
+        playback = source[
+            source.index("  function playBrowserPreview"):
+            source.index("\n\n  function captureTimelineViewState")
+        ]
+        remove_start = source.index("  window.removeCustomModule = function removeCustomModuleAdvanced")
+        timer_callback = source.index("customModules.some(module => module.type === 'canvas'", remove_start)
+        removal = source[remove_start:source.rfind("\n", 0, timer_callback)]
+        harness = r'''
+let nextTimer=0,draws=0;const timers=new Map();
+const setInterval=(callback,delay)=>{const id=++nextTimer;timers.set(id,{callback,delay});return id};
+const clearInterval=id=>timers.delete(id);
+let customModules=[{id:'canvas_active',name:'Active canvas',type:'canvas',frame_count:3,fps:10,playback:'loop',layers:[],overrides:[]}];
+const editorState=new Map();
+globalThis.window=globalThis;globalThis.CSS={escape:value=>value};globalThis.confirm=()=>true;
+globalThis.cancelTimelineDrag=()=>{};globalThis.disposeTimelineResize=()=>{};globalThis.refreshAdvanced=()=>{};
+globalThis.drawEditor=()=>draws++;globalThis.updateTimelineSelection=()=>{};
+globalThis.customName=()=> 'Active canvas';globalThis.customModulesFromEditor=()=>structuredClone(customModules);
+globalThis.renderCustomModules=()=>{};globalThis.setMessage=()=>{};globalThis.markMatrixDirty=()=>{};
+globalThis.matrixCustomCanvasDraftRemoved=()=>{};
+globalThis.document={querySelector:()=>({querySelector:()=>({})}),querySelectorAll:()=>[]};
+'''+state_and_disposal+'\n'+advance+'\n'+playback+'\n'+removal+r'''
+const module=customModules[0];const state=stateFor(module);const initialFrame=state.frame;
+playBrowserPreview(module);
+if(timers.size!==1||!state.playing)throw new Error('playback interval was not started');
+removeCustomModule('canvas_active');
+for(const timer of [...timers.values()])timer.callback();
+if(timers.size!==0)throw new Error('removed module retained playback interval');
+if(state.playing||state.timer!==null)throw new Error('removed module retained playback ownership');
+if(state.frame!==initialFrame)throw new Error('removed module playback callback still advanced');
+console.log('SHIPPED_CUSTOM_CANVAS_REMOVAL_TIMER_PASS');
+'''
+        node = shutil.which("node")
+        assert node is not None
+        result = subprocess.run(
+            [node, "-e", harness], cwd=root, text=True, capture_output=True, check=False
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("SHIPPED_CUSTOM_CANVAS_REMOVAL_TIMER_PASS", result.stdout)
+
+    @unittest.skipUnless(shutil.which("node"), "Node.js is required")
+    def test_shipped_custom_canvas_template_replacement_stops_active_playback(self):
+        root = Path(__file__).parents[1]
+        source = (root / "app" / "static" / "custom_canvas.js").read_text()
+        disposal = source[
+            source.index("  function disposeTimelineState"):
+            source.index("\n\n  const editorCleanupObserver")
+        ]
+        apply_template = source[
+            source.index("  function applyTemplate"):
+            source.index("\n  window.canvasStarterExamples")
+        ]
+        harness = r'''
+let nextTimer=0,ticks=0;const timers=new Map();
+const setInterval=callback=>{const id=++nextTimer;timers.set(id,callback);return id};
+const clearInterval=id=>timers.delete(id);const editorState=new Map();
+const module={id:'canvas_template',name:'Template canvas',layers:[],frame_count:2};
+globalThis.window=globalThis;globalThis.confirm=()=>true;globalThis.byId=()=>module;
+globalThis.cancelTimelineDrag=()=>{};globalThis.disposeTimelineResize=()=>{};
+globalThis.canvasTemplateBuilders={replacement:value=>{value.frame_count=4}};
+globalThis.renderCustomModules=()=>{};globalThis.setMessage=()=>{};globalThis.publishCanvasDraftMutation=()=>{};
+globalThis.markMatrixDirty=()=>{};
+'''+disposal+'\n'+apply_template+r'''
+const state={timer:setInterval(()=>ticks++),playing:true,timelineContainer:null};editorState.set(module.id,state);
+applyTemplate(module.id,'replacement');
+for(const callback of [...timers.values()])callback();
+if(timers.size!==0||ticks!==0)throw new Error('template replacement retained playback callback');
+if(state.playing||state.timer!==null)throw new Error('template replacement retained playback ownership');
+if(editorState.has(module.id))throw new Error('template replacement retained disposed editor state');
+console.log('SHIPPED_CUSTOM_CANVAS_TEMPLATE_TIMER_PASS');
+'''
+        node = shutil.which("node")
+        assert node is not None
+        result = subprocess.run(
+            [node, "-e", harness], cwd=root, text=True, capture_output=True, check=False
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("SHIPPED_CUSTOM_CANVAS_TEMPLATE_TIMER_PASS", result.stdout)
+
+    @unittest.skipUnless(shutil.which("node"), "Node.js is required")
+    def test_shipped_custom_canvas_pagehide_stops_state_and_global_timers(self):
+        root = Path(__file__).parents[1]
+        source = (root / "app" / "static" / "custom_canvas.js").read_text()
+        lifecycle = source[
+            source.index("  const stateFor = module => {"):
+            source.index("\n\n  function ease")
+        ]
+        timer_callback = source.index("customModules.some(module => module.type === 'canvas'")
+        global_timer = source[
+            source.rfind("\n", 0, timer_callback) + 1:
+            source.index("\n  renderCustomModules();", timer_callback)
+        ]
+        harness = r'''
+let nextTimer=0,stateTicks=0,redraws=0;const timers=new Map(),listeners={};
+const setInterval=(callback,delay)=>{const id=++nextTimer;timers.set(id,{callback,delay});return id};
+const clearInterval=id=>timers.delete(id);const clearTimeout=()=>{};const cancelAnimationFrame=()=>{};
+const editorState=new Map();
+class MutationObserver{constructor(callback){this.callback=callback;this.disconnected=false}observe(){}disconnect(){this.disconnected=true}}
+globalThis.window=globalThis;window.addEventListener=(name,handler)=>listeners[name]=handler;window.removeEventListener=()=>{};
+globalThis.document={documentElement:{},querySelectorAll:()=>[]};globalThis.cancelTimelineDrag=()=>{};
+globalThis.customModules=[{id:'canvas_clock',type:'canvas',layers:[{type:'time',visible:true}]}];
+globalThis.redrawMediaCanvases=()=>redraws++;
+'''+lifecycle+r'''
+const state={timer:setInterval(()=>stateTicks++,100),playing:true,timelineContainer:null};editorState.set('canvas_clock',state);
+'''+global_timer+r'''
+if(timers.size!==2)throw new Error('expected state and global intervals, got '+timers.size);
+if(typeof listeners.pagehide!=='function')throw new Error('pagehide handler was not registered');
+listeners.pagehide();
+for(const timer of [...timers.values()])timer.callback();
+if(timers.size!==0)throw new Error('pagehide retained '+timers.size+' interval(s)');
+if(stateTicks!==0||redraws!==0)throw new Error('callback ran after pagehide: '+stateTicks+'/'+redraws);
+if(state.playing||state.timer!==null)throw new Error('state playback ownership survived pagehide');
+console.log('SHIPPED_CUSTOM_CANVAS_PAGEHIDE_TIMER_PASS');
+'''
+        node = shutil.which("node")
+        assert node is not None
+        result = subprocess.run(
+            [node, "-e", harness], cwd=root, text=True, capture_output=True, check=False
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("SHIPPED_CUSTOM_CANVAS_PAGEHIDE_TIMER_PASS", result.stdout)
 
     @unittest.skipUnless(shutil.which("node"), "Node.js is required")
     def test_removed_device_source_waits_for_admission_then_publishes_one_fallback(self):
