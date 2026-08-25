@@ -69,7 +69,7 @@ class OpenWeatherClient:
             headers={"User-Agent": "MatrixDisplay/2.0", "Accept": "application/json"},
         )
         try:
-            with urlopen(
+            with urlopen(  # nosemgrep: bandit.B310-1 -- fixed reviewed HTTPS provider URL
                 request,
                 timeout=self._remaining_timeout("OpenWeather request timed out"),
             ) as response:
@@ -105,7 +105,7 @@ class OpenWeatherClient:
             headers={"User-Agent": "MatrixDisplay/2.0", "Accept": "image/png"},
         )
         try:
-            with urlopen(
+            with urlopen(  # nosemgrep: bandit.B310-1 -- fixed reviewed HTTPS provider URL
                 request,
                 timeout=self._remaining_timeout("OpenWeather icon timed out"),
             ) as response:
