@@ -521,7 +521,10 @@ class Priority13AcceptanceTests(unittest.TestCase):
     def test_real_local_http_and_chromium_journeys_use_explicit_ipv4_and_cookie(self):
         acceptance = self._module()
         observed = []
-        config = {"revision": 1, "schedule": [], "custom_modules": [], "media": {}}
+        config = {
+            "schema_version": 1, "revision": 1,
+            "schedule": [], "custom_modules": [], "media": {},
+        }
         class Handler(BaseHTTPRequestHandler):
             def log_message(self, *_args): pass
             def _send(self, status, payload, content_type="application/json"):
@@ -552,6 +555,8 @@ class Priority13AcceptanceTests(unittest.TestCase):
                         "owner_generation": payload["generation"], "saved_revision": 9,
                         "draft_revision": 10, "current_revision": 11})
                 if self.path.endswith("/clock_lava"):
+                    if "schema_version" in payload["config"]:
+                        return self._send(400, {"error": "schema_version is server-owned"})
                     self.server.owner = payload["preview_instance"]
                     self.server.heartbeat_admission_at = time.monotonic() + 5
                     return self._send(202, {"generation": payload["generation"], "timeout_seconds": payload["timeout_seconds"], "heartbeat_after_seconds": 5})

@@ -10437,6 +10437,7 @@ try{
         preview_instance = "0123456789abcdef0123456789abcdef"
         candidate = copy.deepcopy(self.store.get())
         candidate.pop("revision")
+        candidate.pop("schema_version")
         start_payload = {
             "config": candidate,
             "generation": 1,
@@ -10600,6 +10601,7 @@ try{
         self.controller.reset_mock()
         candidate = copy.deepcopy(self.store.get())
         candidate.pop("revision")
+        candidate.pop("schema_version")
         self.assertTrue(candidate["lava"]["show_time"])
         self.assertTrue(candidate["lava"]["show_date"])
 
@@ -10622,6 +10624,7 @@ try{
         self.controller.reset_mock()
         candidate = copy.deepcopy(self.store.get())
         candidate.pop("revision")
+        candidate.pop("schema_version")
         module = {
             "id": "custom_static", "name": "Static", "type": "text",
             "font": "4x6", "colour": "#ffcc00", "background": "#001122",
@@ -10656,6 +10659,7 @@ try{
         self.controller.reset_mock()
         candidate = copy.deepcopy(self.store.get())
         candidate.pop("revision")
+        candidate.pop("schema_version")
         prepared = WeatherSnapshot(
             location="Brighton, England, GB", status="Clear sky",
             temperature=20, feels_like=19, high=23, low=12, humidity=50,
@@ -10716,6 +10720,7 @@ try{
 
         base = copy.deepcopy(self.store.get())
         base.pop("revision")
+        base.pop("schema_version")
         base["media"] = {"splash": "splash.gif", "sleep": "sleep.gif"}
         base["playlist"] = [
             {"module": "splash", "duration": 1, "enabled": True},
@@ -10811,6 +10816,7 @@ try{
         instance = "a" * 32
         candidate = copy.deepcopy(self.store.get())
         candidate.pop("revision")
+        candidate.pop("schema_version")
         payload = json.dumps({
             "config": candidate,
             "generation": 1,
@@ -10987,6 +10993,7 @@ try{
         def payload(generation, *, location="singleton"):
             candidate = copy.deepcopy(self.store.get())
             candidate.pop("revision")
+            candidate.pop("schema_version")
             candidate["weather"]["location"] = location
             return {
                 "config": candidate,
@@ -11381,6 +11388,7 @@ try{
         def payload(index):
             candidate = copy.deepcopy(self.store.get())
             candidate.pop("revision")
+            candidate.pop("schema_version")
             return {
                 "config": candidate,
                 "generation": index,
@@ -11675,6 +11683,7 @@ try{
         def payload(label, generation):
             candidate = copy.deepcopy(self.store.get())
             candidate.pop("revision")
+            candidate.pop("schema_version")
             candidate["weather"]["location"] = label
             return {
                 "config": candidate,
@@ -11903,6 +11912,7 @@ try{
         def payload(label, preview_instance):
             candidate = copy.deepcopy(self.store.get())
             candidate.pop("revision")
+            candidate.pop("schema_version")
             candidate["weather"]["location"] = label
             return {
                 "config": candidate,
@@ -12109,6 +12119,7 @@ try{
         def payload(label, generation):
             candidate = copy.deepcopy(self.store.get())
             candidate.pop("revision")
+            candidate.pop("schema_version")
             candidate["weather"]["location"] = label
             return {
                 "config": candidate,
@@ -12391,6 +12402,7 @@ try{
         def payload(label):
             candidate = copy.deepcopy(self.store.get())
             candidate.pop("revision")
+            candidate.pop("schema_version")
             candidate["weather"]["location"] = label
             return {
                 "config": candidate,
@@ -12614,6 +12626,7 @@ try{
         def payload(label, generation, preview_instance):
             candidate = copy.deepcopy(self.store.get())
             candidate.pop("revision")
+            candidate.pop("schema_version")
             candidate["weather"]["location"] = label
             return {
                 "config": candidate,
@@ -12877,6 +12890,7 @@ try{
         tabs_b = [tab_client(identity_b) for _ in range(6)]
         candidate = copy.deepcopy(self.store.get())
         candidate.pop("revision")
+        candidate.pop("schema_version")
         candidate["weather"]["location"] = private
 
         def payload(instance, generation=1):
@@ -13306,6 +13320,7 @@ try{
 
         candidate = copy.deepcopy(self.store.get())
         candidate.pop("revision")
+        candidate.pop("schema_version")
         candidate["weather"]["location"] = "blocked-decoder-private"
         payload = {
             "config": candidate,
@@ -13617,6 +13632,7 @@ try{
 
         candidate = copy.deepcopy(self.store.get())
         candidate.pop("revision")
+        candidate.pop("schema_version")
         candidate["weather"]["location"] = "private-active-page-location"
         preview_instance = "cd" * 16
         payload = {
@@ -13943,6 +13959,7 @@ try{
         tabs = [[tab(device) for _ in range(6)] for device in range(3)]
         candidate = copy.deepcopy(self.store.get())
         candidate.pop("revision")
+        candidate.pop("schema_version")
 
         def payload(label, instance, generation=1):
             value = copy.deepcopy(candidate)
@@ -14365,6 +14382,7 @@ try{
 
         candidate = copy.deepcopy(self.store.get())
         candidate.pop("revision")
+        candidate.pop("schema_version")
         candidate["weather"]["location"] = private_values[1]
         start_payload = {
             "config": candidate,
@@ -14704,6 +14722,7 @@ try{
         private_sentinel = f"{self.temp.name}/private?credential=https://secret.invalid/key"
         candidate = copy.deepcopy(self.store.get())
         candidate.pop("revision")
+        candidate.pop("schema_version")
         candidate["weather"]["location"] = private_sentinel
 
         self.pair_browser()
@@ -14997,7 +15016,7 @@ try{
         manager = DevicePreviewManager(clock=lambda: now[0])
         self.controller.submit_device_draft.side_effect = lambda request, **_kwargs: manager.submit(request)
         self.controller.heartbeat_device_draft.side_effect = lambda owner, generation: manager.heartbeat(owner, generation=generation)
-        candidate = {key: copy.deepcopy(value) for key, value in self.store.get().items() if key != "revision"}
+        candidate = {key: copy.deepcopy(value) for key, value in self.store.get().items() if key not in {"revision", "schema_version"}}
         control = {"generation": 1, "preview_instance": "9" * 32}
         started = self.paired_client_request("POST", client, "/api/device-preview/weather", json={
             "config": candidate, **control, "timeout_seconds": 60,
@@ -15024,7 +15043,7 @@ try{
         candidate = {
             key: copy.deepcopy(value)
             for key, value in self.store.get().items()
-            if key != "revision"
+            if key not in {"revision", "schema_version"}
         }
         candidate["lava"]["enabled_palettes"] = ["fire_burst"]
         candidate["lava"]["custom_palettes"] = [
@@ -15098,7 +15117,7 @@ try{
     def test_physical_draft_timeout_is_strict_transient_and_non_persistent(self):
         client, _device_id, manager = self.physical_draft_fixture()
         saved = self.store.get()
-        candidate = {key: value for key, value in saved.items() if key != "revision"}
+        candidate = {key: value for key, value in saved.items() if key not in {"revision", "schema_version"}}
         baseline = json.dumps(saved, sort_keys=True)
         instance = "2" * 32
         valid = {"config": candidate, "generation": 1, "preview_instance": instance}
@@ -15138,7 +15157,7 @@ try{
         foreign_id = self.device_store.add("Other device", max_devices=8)["id"]
         with foreign.session_transaction() as paired:
             paired.update({"paired": True, "generation": "generation-one", "device_id": foreign_id})
-        candidate = {k: v for k, v in self.store.get().items() if k != "revision"}
+        candidate = {k: v for k, v in self.store.get().items() if k not in {"revision", "schema_version"}}
         def payload(instance, generation=1):
             return {"config": candidate, "generation": generation, "preview_instance": instance, "timeout_seconds": 60}
         accepted = self.paired_client_request("POST", owner, "/api/device-preview/weather", json=payload("a" * 32))
@@ -15157,7 +15176,7 @@ try{
         client, _device_id, manager = self.physical_draft_fixture()
         before_bytes = Path(self.store.path).read_bytes()
         before_revision = self.store.get()["revision"]
-        candidate = {k: copy.deepcopy(v) for k, v in self.store.get().items() if k != "revision"}
+        candidate = {k: copy.deepcopy(v) for k, v in self.store.get().items() if k not in {"revision", "schema_version"}}
         candidate["weather"]["location"] = "Unsaved physical draft"
         self.controller.reset_mock()
         result = self.paired_client_request("POST", client, "/api/device-preview/weather", json={
@@ -15178,7 +15197,7 @@ try{
         foreign_id = self.device_store.add("Foreign", max_devices=8)["id"]
         with foreign.session_transaction() as paired:
             paired.update({"paired": True, "generation": "generation-one", "device_id": foreign_id})
-        candidate = {k: v for k, v in self.store.get().items() if k != "revision"}
+        candidate = {k: v for k, v in self.store.get().items() if k not in {"revision", "schema_version"}}
         instance = "d" * 32
         start = self.paired_client_request("POST", owner, "/api/device-preview/weather", json={
             "config": candidate, "generation": 2, "preview_instance": instance, "timeout_seconds": 60,
@@ -15207,7 +15226,7 @@ try{
         self.assertEqual(repeated.status_code, 409)
 
     def test_physical_draft_unpair_revoke_logout_release_owner(self):
-        candidate = {k: v for k, v in self.store.get().items() if k != "revision"}
+        candidate = {k: v for k, v in self.store.get().items() if k not in {"revision", "schema_version"}}
         def start(client, instance, generation):
             return self.paired_client_request("POST", client, "/api/device-preview/weather", json={
                 "config": candidate, "generation": generation, "preview_instance": instance, "timeout_seconds": 60,
@@ -15239,7 +15258,7 @@ try{
         client, _device_id, manager = self.physical_draft_fixture()
         media = self.media_dir / "draft.png"
         media.write_bytes(b"accepted-inode")
-        candidate = {k: copy.deepcopy(v) for k, v in self.store.get().items() if k != "revision"}
+        candidate = {k: copy.deepcopy(v) for k, v in self.store.get().items() if k not in {"revision", "schema_version"}}
         candidate["media"]["splash"] = "draft.png"
         instance = "2" * 32
         started = self.paired_client_request("POST", client, "/api/device-preview/splash", json={
@@ -15275,7 +15294,7 @@ try{
         candidate = {
             key: copy.deepcopy(value)
             for key, value in self.store.get().items()
-            if key != "revision"
+            if key not in {"revision", "schema_version"}
         }
         entered = threading.Event()
         release = threading.Event()
@@ -15328,7 +15347,7 @@ try{
         candidate = {
             key: copy.deepcopy(value)
             for key, value in self.store.get().items()
-            if key != "revision"
+            if key not in {"revision", "schema_version"}
         }
         entered = threading.Event()
         release = threading.Event()
@@ -15399,7 +15418,7 @@ try{
         candidate = {
             key: copy.deepcopy(value)
             for key, value in self.store.get().items()
-            if key != "revision"
+            if key not in {"revision", "schema_version"}
         }
         candidate["weather"]["location"] = "Unsaved integration closure"
         media = self.media_dir / "closure-draft.png"

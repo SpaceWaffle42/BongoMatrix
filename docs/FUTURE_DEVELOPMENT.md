@@ -186,17 +186,18 @@ Add a separate **Preview edits on device** checkbox beneath the browser preview.
 
 A fresh whole-project review rejected the earlier post-1.3 release candidate and opened the ordered F1–F12 remediation ledger in GitLab issue 2. Each finding is an independent immutable commit/review boundary; approval of one finding authorizes only the next finding in sequence and does not close the final whole-project release gate.
 
-Verified remediation approvals as of 2026-08-24:
+Verified remediation approvals as of 2026-08-25:
 
 - **F1 approved:** commit `603154b0d7bd3417df610f8df6a33b2f26a46146` prevents cancelled custom-text and OpenWeather frames from publishing after their final cancellation-admission point.
 - **F2 approved:** commit `c1905c15aee6fffc2a87ee2f790875f8201db815` pins privileged release/acceptance service control to an absolute `systemctl`, fixes its environment, and bounds it under one aggregate monotonic deadline.
 - **F3 approved:** commit `6395cb68786798c1f8e69f5ea4ae4b140225bb28` rejects wildcard, weak, malformed, or multiple configuration mutation validators and requires exactly one strong current revision.
 - **F4 approved:** commit `4faa8c2db8d2e86a5a0409ca00d407baaca03b5a` moves physical OpenWeather overview/forecast preparation through the existing bounded spawned-provider lifecycle, with cancellation, reaping, aggregate deadline, remaining-deadline transport timeouts, configuration isolation, and secret isolation. Immutable review `deleg_ff55377b` reported **APPROVED** with no actionable P0/P1/P2 findings; GitLab evidence is recorded in issue 2 notes 357–358.
 - **F5 approved:** commit `2595829680805a51be7c54f719640db7ddb0114b` keeps authoritative active physical-draft status and the native **Stop device preview** action reachable in the popped sticky strip across combined narrow/short states and active 200% zoom while preserving inactive and natural-flow layouts. Immutable review `deleg_dd49116e` reported **APPROVED** with no actionable P0/P1/P2 or P3 findings; GitLab evidence is recorded in issue 2 notes 359–360.
+- **F6 approved:** commit `dcf04c9517a2ae65f8403b6df779f26af6ec76c9` stops ordinary custom-module **Preview** from committing the dashboard draft. It previews only the already-saved custom module, performs no configuration mutation, preserves unsaved controls and dirty state on success or failure, and reports that unsaved changes were not applied. Immutable review `deleg_6f63dc23` reported **APPROVED** with no actionable findings; GitLab evidence is recorded in issue 2 notes 363–364.
 
-**F6 is authorized and in progress, not yet approved:** stop custom-module **Preview** from silently committing the complete dashboard draft. The ordinary physical Preview path must use only the already-saved custom module, perform no configuration mutation, preserve unsaved controls and dirty state on success or failure, and explicitly tell the user that unsaved changes were not applied. Unsaved values may reach the physical Matrix only through the separate **Preview edits on device** opt-in. GitLab issue 2 note 362 records the strict RED/GREEN and 309/309 pre-commit evidence.
+**F7 is authorized and in progress, not yet approved:** make persisted configuration schema evolution explicit. New and migrated snapshots carry a server-owned `schema_version`; current-version snapshots are validated strictly and rejected without migration or rewrite when malformed; version-zero snapshots remain migratable, advance to the current version, and increment revision exactly once. Invalid and future versions fail closed without changing persisted bytes. Legacy and full-snapshot test fixtures must explicitly omit the server-owned schema field rather than restoring permissive production behavior.
 
-F7–F12, final whole-project review, merge request/CI, deployment, browser/physical acceptance, and Priority 1.4 remain blocked until every earlier remediation boundary is approved in order.
+F8–F12, final whole-project review, merge request/CI, deployment, browser/physical acceptance, and Priority 1.4 remain blocked until every earlier remediation boundary is approved in order.
 
 ### 1.4 Add borders and backgrounds to basic custom modules
 

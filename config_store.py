@@ -38,6 +38,7 @@ ALLOWED_MODULES = {
 }
 PLAYLIST_LIMIT = 256
 CONFIG_SNAPSHOT_LIMIT = 1_048_576
+CURRENT_CONFIG_SCHEMA_VERSION = 1
 AVAILABLE_FONTS = frozenset(available_font_names())
 
 
@@ -52,6 +53,7 @@ def scrolling_text_duration(module, matrix_width=64):
     return duration_milliseconds(frames_per_loop, module["loops"], module["speed"]) / 1000
 
 DEFAULT_CONFIG = {
+    "schema_version": CURRENT_CONFIG_SCHEMA_VERSION,
     "revision": 0,
     "device": {"name": "Matrix"},
     "pairing": {"max_devices": 4},
@@ -176,6 +178,18 @@ def _validate_update_keys(changes, schema, prefix=""):
             if not isinstance(schema[key], dict):
                 raise ValueError(f"{prefix}{key} must not be an object")
             _validate_update_keys(value, schema[key], f"{prefix}{key}.")
+
+
+def _validate_required_config_keys(config, schema, prefix=""):
+    if not isinstance(config, dict):
+        raise ValueError(f"current configuration field {prefix or '<root>'} must be an object")
+    missing = set(schema) - set(config)
+    if missing:
+        names = ", ".join(f"{prefix}{key}" for key in sorted(missing))
+        raise ValueError(f"current configuration has missing fields: {names}")
+    for key, expected in schema.items():
+        if isinstance(expected, dict):
+            _validate_required_config_keys(config[key], expected, f"{prefix}{key}.")
 
 
 def _is_hex_colour(value):
@@ -602,7 +616,18 @@ def _validate_announcement_board(board, *, allow_legacy=True):
             )
 
 
-def validate_config(config, *, allow_legacy_announcements=True, enforce_save_bounds=False):
+def validate_config(
+    config, *, allow_legacy_announcements=True, allow_missing_custom_loops=True,
+    enforce_save_bounds=False,
+):
+
+    schema_version = config["schema_version"]
+    if (
+        isinstance(schema_version, bool)
+        or not isinstance(schema_version, int)
+        or schema_version != CURRENT_CONFIG_SCHEMA_VERSION
+    ):
+        raise ValueError("schema_version must identify the current configuration schema")
 
     revision = config["revision"]
     if isinstance(revision, bool) or not isinstance(revision, int) or revision < 0:
@@ -817,7 +842,8 @@ def validate_config(config, *, allow_legacy_announcements=True, enforce_save_bou
         if item.get("type") == "canvas":
             _validate_canvas_module(item)
             continue
-        item.setdefault("loops", 1)
+        if allow_missing_custom_loops:
+            item.setdefault("loops", 1)
         if set(item) != required_simple_keys:
             raise ValueError("custom text modules have invalid fields")
         if item["type"] not in {"text", "text_scroll"}:
@@ -920,6 +946,25 @@ class ConfigStore:
             current = json.loads(self.path.read_text())
             if not isinstance(current, dict):
                 raise ValueError("configuration file must contain a JSON object")
+            schema_version = current.get("schema_version", 0)
+            if (
+                isinstance(schema_version, bool)
+                or not isinstance(schema_version, int)
+                or schema_version < 0
+            ):
+                raise ValueError("configuration schema_version must be a nonnegative integer")
+            if schema_version > CURRENT_CONFIG_SCHEMA_VERSION:
+                raise ValueError("configuration schema_version is not supported")
+            if schema_version == CURRENT_CONFIG_SCHEMA_VERSION:
+                _validate_update_keys(current, DEFAULT_CONFIG)
+                _validate_required_config_keys(current, DEFAULT_CONFIG)
+                validate_config(
+                    copy.deepcopy(current),
+                    allow_legacy_announcements=False,
+                    allow_missing_custom_loops=False,
+                    enforce_save_bounds=True,
+                )
+                return
             current_playlist = current.get("playlist")
             if (
                 isinstance(current_playlist, list)
@@ -941,6 +986,12 @@ class ConfigStore:
                 ):
                     module_settings["scroll_speed"] = legacy_speed_delays[module_settings["scroll_speed"]]
             current.setdefault("revision", 0)
+            if (
+                isinstance(current["revision"], bool)
+                or not isinstance(current["revision"], int)
+                or current["revision"] < 0
+            ):
+                raise ValueError("revision must be a nonnegative integer")
             _validate_update_keys(current, DEFAULT_CONFIG)
             lava = current.get("lava")
             if (
@@ -994,7 +1045,10 @@ class ConfigStore:
             _replace_canvas_media_references(
                 current.get("custom_modules", []), available_migrations
             )
-            self._write(validate_config(_merge(DEFAULT_CONFIG, current)))
+            migrated = _merge(DEFAULT_CONFIG, current)
+            migrated["schema_version"] = CURRENT_CONFIG_SCHEMA_VERSION
+            migrated["revision"] = current["revision"] + 1
+            self._write(validate_config(migrated))
 
     def _write(self, config):
         self.path.parent.mkdir(parents=True, exist_ok=True)
@@ -1028,8 +1082,8 @@ class ConfigStore:
         """Validate and canonicalize an unsaved draft without persisting it."""
         if not isinstance(changes, dict):
             raise ValueError("configuration candidate must be a JSON object")
-        if "revision" in changes:
-            raise ValueError("revision is server-owned")
+        if "revision" in changes or "schema_version" in changes:
+            raise ValueError("revision and schema_version are server-owned")
         _validate_update_keys(changes, DEFAULT_CONFIG)
         with self._lock:
             current = self.get()
@@ -1046,8 +1100,8 @@ class ConfigStore:
         if not isinstance(changes, dict):
             raise ValueError("configuration update must be a JSON object")
 
-        if "revision" in changes:
-            raise ValueError("revision is server-owned")
+        if "revision" in changes or "schema_version" in changes:
+            raise ValueError("revision and schema_version are server-owned")
         if (
             base_revision is not None
             and (isinstance(base_revision, bool) or not isinstance(base_revision, int) or base_revision < 0)

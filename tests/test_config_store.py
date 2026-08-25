@@ -16,6 +16,7 @@ class ConfigStoreTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / "config.json"
             legacy = json.loads(json.dumps(DEFAULT_CONFIG))
+            legacy.pop("schema_version")
             legacy.pop("revision")
             legacy["device"]["name"] = "Migration sentinel"
             legacy["display"]["day_brightness"] = 37
@@ -23,10 +24,137 @@ class ConfigStoreTests(unittest.TestCase):
 
             config = ConfigStore(path).get()
 
-            self.assertEqual(config["revision"], 0)
-            without_revision = dict(config)
-            without_revision.pop("revision")
-            self.assertEqual(without_revision, legacy)
+            self.assertEqual(config["schema_version"], 1)
+            self.assertEqual(config["revision"], 1)
+            without_server_fields = dict(config)
+            without_server_fields.pop("schema_version")
+            without_server_fields.pop("revision")
+            self.assertEqual(without_server_fields, legacy)
+            migrated_bytes = path.read_bytes()
+            self.assertNotEqual(migrated_bytes, json.dumps(legacy).encode("utf-8"))
+            self.assertEqual(ConfigStore(path).get()["revision"], 1)
+            self.assertEqual(path.read_bytes(), migrated_bytes)
+
+    def test_malformed_current_schema_is_rejected_without_migration_or_rewrite(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "config.json"
+            store = ConfigStore(path)
+            custom = {
+                "id": "custom_saved", "name": "Saved", "type": "text_scroll",
+                "text": "SAVED", "font": "5x7", "colour": "#ffffff",
+                "background": "#000000", "x": 0, "y": 20,
+                "direction": "left", "speed": 0.05, "loops": 2,
+            }
+            store.update({
+                "custom_modules": [custom],
+                "playlist": [{
+                    "module": "custom_saved", "duration": 1,
+                    "enabled": True,
+                }],
+            }, base_revision=0)
+            malformed = store.get()
+            malformed["custom_modules"][0].pop("loops")
+            original = json.dumps(malformed).encode("utf-8")
+            path.write_bytes(original)
+
+            with self.assertRaisesRegex(ValueError, "custom text modules have invalid fields"):
+                ConfigStore(path)
+
+            self.assertEqual(path.read_bytes(), original)
+
+    def test_current_schema_missing_nested_field_is_rejected_without_rewrite(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "config.json"
+            store = ConfigStore(path)
+            malformed = store.get()
+            malformed["device"].pop("name")
+            original = json.dumps(malformed).encode("utf-8")
+            path.write_bytes(original)
+
+            with self.assertRaisesRegex(ValueError, "current configuration has missing fields"):
+                ConfigStore(path)
+
+            self.assertEqual(path.read_bytes(), original)
+
+    def test_invalid_schema_versions_are_rejected_without_rewrite(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "config.json"
+            store = ConfigStore(path)
+            for schema_version in (True, -1, 1.5, "1", 2):
+                with self.subTest(schema_version=schema_version):
+                    invalid = store.get()
+                    invalid["schema_version"] = schema_version
+                    original = json.dumps(invalid).encode("utf-8")
+                    path.write_bytes(original)
+
+                    with self.assertRaisesRegex(ValueError, "schema_version"):
+                        ConfigStore(path)
+
+                    self.assertEqual(path.read_bytes(), original)
+
+    def test_invalid_legacy_revisions_are_rejected_without_rewrite(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "config.json"
+            for revision in (True, -1, 1.5, "1"):
+                with self.subTest(revision=revision):
+                    invalid = json.loads(json.dumps(DEFAULT_CONFIG))
+                    invalid.pop("schema_version")
+                    invalid["revision"] = revision
+                    original = json.dumps(invalid).encode("utf-8")
+                    path.write_bytes(original)
+
+                    with self.assertRaisesRegex(ValueError, "revision"):
+                        ConfigStore(path)
+
+                    self.assertEqual(path.read_bytes(), original)
+                    valid = json.loads(json.dumps(DEFAULT_CONFIG))
+                    path.write_text(json.dumps(valid))
+
+    def test_schema_version_is_server_owned(self):
+        with tempfile.TemporaryDirectory() as directory:
+            store = ConfigStore(Path(directory) / "config.json")
+
+            with self.assertRaisesRegex(ValueError, "server-owned"):
+                store.update({"schema_version": 1})
+            with self.assertRaisesRegex(ValueError, "server-owned"):
+                store.validate_candidate({"schema_version": 1})
+
+    def test_explicit_legacy_schema_migrates_once_and_increments_revision_once(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "config.json"
+            legacy = json.loads(json.dumps(DEFAULT_CONFIG))
+            legacy["schema_version"] = 0
+            legacy["revision"] = 7
+            legacy["device"]["name"] = "Version zero sentinel"
+            original = json.dumps(legacy).encode("utf-8")
+            path.write_bytes(original)
+
+            migrated = ConfigStore(path).get()
+
+            self.assertEqual(migrated["schema_version"], 1)
+            self.assertEqual(migrated["revision"], 8)
+            self.assertEqual(migrated["device"]["name"], "Version zero sentinel")
+            migrated_bytes = path.read_bytes()
+            self.assertNotEqual(migrated_bytes, original)
+
+            reloaded = ConfigStore(path).get()
+
+            self.assertEqual(reloaded, migrated)
+            self.assertEqual(reloaded["revision"], 8)
+            self.assertEqual(path.read_bytes(), migrated_bytes)
+
+    def test_current_schema_reload_preserves_exact_bytes(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "config.json"
+            store = ConfigStore(path)
+            store.update({"device": {"name": "Current sentinel"}}, base_revision=0)
+            original = path.read_bytes()
+
+            reloaded = ConfigStore(path).get()
+
+            self.assertEqual(reloaded["schema_version"], 1)
+            self.assertEqual(reloaded["revision"], 1)
+            self.assertEqual(path.read_bytes(), original)
 
     def test_read_only_preview_candidate_is_strict_bounded_and_does_not_change_store(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -40,6 +168,7 @@ class ConfigStoreTests(unittest.TestCase):
             original = store.get()
             changes = json.loads(json.dumps(original))
             changes.pop("revision")
+            changes.pop("schema_version")
             changes["device"]["name"] = "Unsaved preview"
             changes["display"]["day_brightness"] = 37
 
@@ -218,11 +347,13 @@ class ConfigStoreTests(unittest.TestCase):
         item = {"module": "splash", "duration": 1, "enabled": True}
         cases = []
         playlist_legacy = json.loads(json.dumps(DEFAULT_CONFIG))
+        playlist_legacy.pop("schema_version")
         playlist_legacy.pop("revision")
         playlist_legacy["playlist"] = [item] * 257
         cases.append(("playlist", playlist_legacy))
 
         snapshot_legacy = json.loads(json.dumps(DEFAULT_CONFIG))
+        snapshot_legacy.pop("schema_version")
         snapshot_legacy.pop("revision")
         modules = []
         for module_index in range(8):
@@ -279,6 +410,7 @@ class ConfigStoreTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / "config.json"
             legacy = json.loads(json.dumps(DEFAULT_CONFIG))
+            legacy.pop("schema_version")
             legacy.pop("openweather_overview", None)
             legacy.pop("openweather_forecast", None)
             legacy["playlist"] = [
@@ -303,6 +435,7 @@ class ConfigStoreTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / "config.json"
             legacy = json.loads(json.dumps(DEFAULT_CONFIG))
+            legacy.pop("schema_version")
             legacy.pop("announcement_board", None)
             legacy["playlist"] = [
                 item for item in legacy["playlist"]
@@ -323,6 +456,7 @@ class ConfigStoreTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / "config.json"
             legacy = json.loads(json.dumps(DEFAULT_CONFIG))
+            legacy.pop("schema_version")
             legacy["media_layout"]["sleep"].pop("gif_speed_percent", None)
             expected_layout = json.loads(json.dumps(legacy["media_layout"]["sleep"]))
             path.write_text(json.dumps(legacy))
@@ -460,6 +594,7 @@ class ConfigStoreTests(unittest.TestCase):
             path = Path(directory) / "config.json"
             store = ConfigStore(path)
             historical = store.get()
+            historical.pop("schema_version")
             legacy = self.announcement()
             legacy.pop("enabled")
             legacy.pop("name")
@@ -487,6 +622,7 @@ class ConfigStoreTests(unittest.TestCase):
             legacy.pop("name")
             legacy["schedule"].pop("days")
             historical = store.get()
+            historical.pop("schema_version")
             historical["announcement_board"]["announcements"] = [legacy]
             path.write_text(json.dumps(historical))
             updated = ConfigStore(path).get()
@@ -601,6 +737,7 @@ class ConfigStoreTests(unittest.TestCase):
             (built_in / "squares_tb.gif").write_bytes(b"bundled")
             (built_in / "sleep.gif").write_bytes(b"bundled")
             legacy = json.loads(json.dumps(DEFAULT_CONFIG))
+            legacy.pop("schema_version")
             legacy["media"] = {"splash": "squares_tb.gif", "sleep": "sleep.gif"}
             legacy["custom_modules"] = [{
                 "id": "custom_media", "name": "Legacy media", "type": "canvas",
@@ -734,6 +871,7 @@ class ConfigStoreTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / "config.json"
             legacy = json.loads(json.dumps(DEFAULT_CONFIG))
+            legacy.pop("schema_version")
             legacy["openweather_forecast"]["card_seconds"] = 5
             legacy["openweather_forecast"]["forecast_items"] = 7
             legacy["device"]["name"] = "Preserved Matrix"
@@ -786,6 +924,7 @@ class ConfigStoreTests(unittest.TestCase):
                     with tempfile.TemporaryDirectory() as directory:
                         path = Path(directory) / "config.json"
                         legacy = json.loads(json.dumps(DEFAULT_CONFIG))
+                        legacy.pop("schema_version")
                         next(
                             item for item in legacy["playlist"] if item["module"] == module
                         )["duration"] = malformed
@@ -842,6 +981,7 @@ class ConfigStoreTests(unittest.TestCase):
             store = ConfigStore(Path(directory) / "config.json")
             updated = store.get()
             updated.pop("revision")
+            updated.pop("schema_version")
             updated["weather"]["scroll_loops"] = 2
             updated["openweather_overview"]["scroll_loops"] = 3
             updated["openweather_forecast"]["scroll_loops"] = 4
@@ -879,6 +1019,7 @@ class ConfigStoreTests(unittest.TestCase):
                         store = ConfigStore(Path(directory) / "config.json")
                         updated = store.get()
                         updated.pop("revision")
+                        updated.pop("schema_version")
                         updated[section]["scroll_loops"] = invalid
                         with self.assertRaisesRegex(ValueError, "scroll loops"):
                             store.update(updated)
@@ -932,6 +1073,7 @@ class ConfigStoreTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / "config.json"
             saved = json.loads(json.dumps(DEFAULT_CONFIG))
+            saved.pop("schema_version")
             saved["weather"].update({
                 "location": "Cheltenham, England, GB",
                 "latitude": 51.90006,
@@ -995,6 +1137,7 @@ class ConfigStoreTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / "config.json"
             saved = json.loads(json.dumps(DEFAULT_CONFIG))
+            saved.pop("schema_version")
             saved["device"]["name"] = "Migration sentinel"
             saved["display"]["day_brightness"] = 37
             presets = {
@@ -1116,6 +1259,7 @@ class ConfigStoreTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / "config.json"
             legacy = json.loads(json.dumps(DEFAULT_CONFIG))
+            legacy.pop("schema_version")
             legacy["lava"].pop("custom_palettes")
             legacy["lava"]["custom_enabled"] = True
             legacy["lava"]["custom_colours"] = ["#102030", "#A0B0C0", "#ffffff"]
@@ -1270,6 +1414,7 @@ class ConfigStoreTests(unittest.TestCase):
             path = Path(directory) / "config.json"
             store = ConfigStore(path)
             legacy = store.get()
+            legacy.pop("schema_version")
             legacy["custom_modules"] = [{
                 "id": "custom_legacy", "name": "Legacy message", "type": "text_scroll",
                 "text": "LEGACY", "font": "5x7", "colour": "#ffffff",

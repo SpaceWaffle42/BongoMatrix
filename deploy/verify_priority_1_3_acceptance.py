@@ -464,6 +464,7 @@ class LocalHttpJourney:
             raise ValueError("acceptance transaction staging failed")
         candidate_config = dict(config)
         candidate_config.pop("revision", None)
+        candidate_config.pop("schema_version", None)
         request = {"config": candidate_config, "generation": generation,
                    "preview_instance": owner, "timeout_seconds": 30}
         started, result = _request_json(base_url, "/api/device-preview/clock_lava", cookie_value,
