@@ -182,6 +182,16 @@ store = ConfigStore(data / "config.json")
 devices = PairedDeviceStore(data / "paired-devices.json")
 controller = AcceptanceController(matrix, store)
 pairing = PairingManager(testing_pin="731946")
+
+
+class FixtureAcceptanceTime:
+    """Keep client heartbeat scheduling in the controller's accelerated clock domain."""
+
+    monotonic = staticmethod(controller._fixture_clock)
+    sleep = staticmethod(time.sleep)
+
+
+acceptance.time = FixtureAcceptanceTime
 flask_app = create_app(
     controller, store, pairing,
     secret_key="guarded-export-acceptance-fixture",
