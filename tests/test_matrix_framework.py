@@ -744,6 +744,40 @@ else:
         popen.assert_not_called()
         close_fd.assert_called_once_with(9)
 
+    def test_video_frame_timeline_reaper_acquire_has_bounded_ownership_grace(self):
+        matrix = Matrix.__new__(Matrix)
+        process = Mock()
+        process.stdout = Mock()
+        process.poll.return_value = None
+        owned_lease = Mock()
+
+        with patch.object(
+            framework, "_ensure_decoder_reaper", return_value=owned_lease,
+        ) as ensure_reaper, patch.object(
+            framework, "_release_decoder_reaper",
+        ) as release_reaper, patch.object(
+            framework.os, "open", return_value=9,
+        ), patch.object(
+            framework.os, "close",
+        ), patch.object(
+            framework.subprocess, "Popen", return_value=process,
+        ), patch.object(
+            framework, "_read_exact_interruptibly", return_value=b"",
+        ) as read_frame, patch.object(
+            framework.time, "monotonic", return_value=10.0,
+        ):
+            self.assertEqual(list(matrix._video_frame_timeline(
+                "video.mp4", 2, 2, True, deadline=10.0,
+            )), [])
+
+        ensure_reaper.assert_called_once_with(deadline=10.25)
+        read_frame.assert_called_once_with(
+            process.stdout, 12, stop_event=None, deadline=10.0,
+        )
+        release_reaper.assert_called_once_with(
+            owned_lease, deferred_process=process,
+        )
+
     def test_video_frame_timeline_exhausted_deadline_defers_without_waiting(self):
         matrix = Matrix.__new__(Matrix)
         process = Mock()

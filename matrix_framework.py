@@ -125,6 +125,7 @@ def _reap_decoder(process):
 
 
 _DECODER_REAPER_STOP = object()
+_DECODER_REAPER_RETIRE_TIMEOUT = 0.25
 _decoder_reaper_lock = threading.Lock()
 _decoder_reaper_owner = None
 # Compatibility/debug mirrors: they always identify the currently reachable owner.
@@ -1036,7 +1037,12 @@ class Matrix:
         reaper_queue = None
         deferred_process = None
         try:
-            reaper_queue = _ensure_decoder_reaper(deadline=deadline)
+            reaper_deadline = deadline
+            if deadline is not None:
+                reaper_deadline = max(
+                    deadline, time.monotonic() + _DECODER_REAPER_RETIRE_TIMEOUT,
+                )
+            reaper_queue = _ensure_decoder_reaper(deadline=reaper_deadline)
             if stop_event is not None and stop_event.is_set():
                 return
             process = subprocess.Popen(
