@@ -220,6 +220,35 @@ class ReleaseTreePreparationTests(unittest.TestCase):
                 release_bundle.main(self._argv(project, repository, self._head(repository), stage))
             self.assertFalse((stage / "release-spec.json").exists())
 
+    def test_wsgi_smoke_uses_isolated_paired_state_without_exporting_it(self):
+        project = Path(__file__).resolve().parents[1]
+        with tempfile.TemporaryDirectory(dir=os.environ.get("TMPDIR")) as directory:
+            root = Path(directory)
+            repository, _ = self._committed_repository(root)
+            (repository / "app/wsgi.py").write_text(
+                "import json\n"
+                "from pathlib import Path\n"
+                "root = Path(__file__).resolve().parents[1]\n"
+                "devices = json.loads((root / 'data/paired-devices.json').read_text())\n"
+                "assert len(devices) == 1\n"
+                "assert set(devices[0]) == {'id', 'name', 'paired_at'}\n"
+                "app = object()\n",
+                encoding="utf-8",
+            )
+            subprocess.run(["git", "add", "app/wsgi.py"], cwd=repository, check=True)
+            subprocess.run([
+                "git", "commit", "-q", "-m", "require isolated paired WSGI state",
+            ], cwd=repository, check=True)
+            stage = root / "stage"
+
+            self.assertEqual(
+                release_bundle.main(self._argv(
+                    project, repository, self._head(repository), stage,
+                )),
+                0,
+            )
+            self.assertFalse((stage / "release/data").exists())
+
     def test_preseeded_inner_manifest_is_rejected_as_order_inversion(self):
         project = Path(__file__).resolve().parents[1]
         with tempfile.TemporaryDirectory(dir=os.environ.get("TMPDIR")) as directory:
