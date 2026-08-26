@@ -44,7 +44,7 @@ class DevicePreviewRequest:
     owner: DevicePreviewOwner
     generation: int
     config: Mapping[str, object]
-    timeout_seconds: int = 60
+    timeout_seconds: int | None = 60
     cleanup: Callable[[], None] | None = None
     pinned_media: Mapping[str, object] | None = None
 
@@ -205,7 +205,11 @@ class DevicePreviewManager:
             )
             lease = DevicePreviewLease(
                 request=request,
-                content_deadline=now + request.timeout_seconds,
+                content_deadline=(
+                    float("inf")
+                    if request.timeout_seconds is None
+                    else now + request.timeout_seconds
+                ),
                 connectivity_deadline=connectivity_deadline,
                 last_heartbeat_at=last_heartbeat_at,
             )
