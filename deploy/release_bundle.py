@@ -2298,6 +2298,17 @@ def _exercise_installed_wsgi(release_root: Path, python: Path, scratch_parent: P
         runtime_parent.chmod(0o755)
         runtime = runtime_parent / "installed"
         shutil.copytree(release_root, runtime)
+        runtime_data = runtime / "data"
+        runtime_data.mkdir(mode=0o700)
+        _publish_new_path(
+            runtime_data / "paired-devices.json",
+            _canonical_json([{
+                "id": "A" * 32,
+                "name": "release WSGI smoke",
+                "paired_at": 0,
+            }]),
+            mode=0o600,
+        )
         environment = {
             "HOME": str(runtime_parent), "LANG": "C.UTF-8", "LC_ALL": "C.UTF-8",
             "PATH": "/usr/local/bin:/usr/bin:/bin", "PYTHONDONTWRITEBYTECODE": "1",
@@ -2305,7 +2316,16 @@ def _exercise_installed_wsgi(release_root: Path, python: Path, scratch_parent: P
         }
         command = [
             str(python), "-I", "-B", "-c",
-            "import sys;sys.path.insert(0,sys.argv[1]);import app.wsgi as entry;assert entry.app is not None",
+            (
+                "import sys;sys.path.insert(0,sys.argv[1]);"
+                "import rgbmatrix;"
+                "import display_controller,matrix_framework;"
+                "smoke_matrix=type('_ReleaseWsgiSmokeMatrix',(),{"
+                "'release_wsgi_smoke':True,'clear':lambda self:None,'swap':lambda self:None});"
+                "matrix_framework.Matrix=smoke_matrix;"
+                "display_controller.DisplayController.start=lambda self:True;"
+                "import app.wsgi as entry;assert entry.app is not None"
+            ),
             str(runtime),
         ]
         try:

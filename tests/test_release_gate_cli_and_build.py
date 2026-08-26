@@ -25,6 +25,20 @@ class ReleaseTreePreparationTests(unittest.TestCase):
             "acceptance_artifacts.py": "VALUE = 'acceptance'\n",
             "release_argparse.py": "VALUE = 'parser'\n",
             "webapp.py": 'APPLICATION_VERSION = "9.8.7-test"\n',
+            "matrix_framework.py": (
+                "class Matrix:\n"
+                "    def clear(self): pass\n"
+                "    def swap(self): pass\n"
+            ),
+            "display_controller.py": (
+                "class DisplayController:\n"
+                "    def start(self): return True\n"
+            ),
+            "rgbmatrix.py": (
+                "class RGBMatrix: pass\n"
+                "class RGBMatrixOptions: pass\n"
+                "graphics = object()\n"
+            ),
             "requirements.txt": "Flask==3.1.2\n",
             "app/__init__.py": "\n",
             "app/runtime.py": "APPLICATION = object()\n",
@@ -219,6 +233,105 @@ class ReleaseTreePreparationTests(unittest.TestCase):
             with self.assertRaisesRegex(ReleaseManifestError, "WSGI"):
                 release_bundle.main(self._argv(project, repository, self._head(repository), stage))
             self.assertFalse((stage / "release-spec.json").exists())
+
+    def test_wsgi_smoke_uses_isolated_paired_state_without_exporting_it(self):
+        project = Path(__file__).resolve().parents[1]
+        with tempfile.TemporaryDirectory(dir=os.environ.get("TMPDIR")) as directory:
+            root = Path(directory)
+            repository, _ = self._committed_repository(root)
+            (repository / "app/wsgi.py").write_text(
+                "import json\n"
+                "from pathlib import Path\n"
+                "root = Path(__file__).resolve().parents[1]\n"
+                "devices = json.loads((root / 'data/paired-devices.json').read_text())\n"
+                "assert len(devices) == 1\n"
+                "assert set(devices[0]) == {'id', 'name', 'paired_at'}\n"
+                "app = object()\n",
+                encoding="utf-8",
+            )
+            subprocess.run(["git", "add", "app/wsgi.py"], cwd=repository, check=True)
+            subprocess.run([
+                "git", "commit", "-q", "-m", "require isolated paired WSGI state",
+            ], cwd=repository, check=True)
+            stage = root / "stage"
+
+            self.assertEqual(
+                release_bundle.main(self._argv(
+                    project, repository, self._head(repository), stage,
+                )),
+                0,
+            )
+            self.assertFalse((stage / "release/data").exists())
+
+    def test_wsgi_smoke_does_not_construct_the_physical_matrix(self):
+        project = Path(__file__).resolve().parents[1]
+        with tempfile.TemporaryDirectory(dir=os.environ.get("TMPDIR")) as directory:
+            root = Path(directory)
+            repository, _ = self._committed_repository(root)
+            (repository / "matrix_framework.py").write_text(
+                "class Matrix:\n"
+                "    release_wsgi_smoke = False\n"
+                "    def clear(self): pass\n"
+                "    def swap(self): pass\n",
+                encoding="utf-8",
+            )
+            (repository / "display_controller.py").write_text(
+                "class DisplayController:\n"
+                "    def start(self): return False\n",
+                encoding="utf-8",
+            )
+            (repository / "app/wsgi.py").write_text(
+                "import json\n"
+                "from pathlib import Path\n"
+                "import display_controller\n"
+                "import matrix_framework\n"
+                "root = Path(__file__).resolve().parents[1]\n"
+                "assert json.loads((root / 'data/paired-devices.json').read_text())\n"
+                "matrix = matrix_framework.Matrix()\n"
+                "assert type(matrix).release_wsgi_smoke is True\n"
+                "assert display_controller.DisplayController.start(None) is True\n"
+                "matrix.clear()\n"
+                "matrix.swap()\n"
+                "app = object()\n",
+                encoding="utf-8",
+            )
+            subprocess.run([
+                "git", "add", "app/wsgi.py", "display_controller.py", "matrix_framework.py",
+            ], cwd=repository, check=True)
+            subprocess.run([
+                "git", "commit", "-q", "-m", "require non-hardware WSGI smoke",
+            ], cwd=repository, check=True)
+            stage = root / "stage"
+
+            self.assertEqual(
+                release_bundle.main(self._argv(
+                    project, repository, self._head(repository), stage,
+                )),
+                0,
+            )
+            self.assertFalse((stage / "release/data").exists())
+
+    def test_wsgi_smoke_requires_the_real_rgbmatrix_binding(self):
+        project = Path(__file__).resolve().parents[1]
+        with tempfile.TemporaryDirectory(dir=os.environ.get("TMPDIR")) as directory:
+            root = Path(directory)
+            repository, _ = self._committed_repository(root)
+            subprocess.run(
+                ["git", "rm", "-q", "rgbmatrix.py"], cwd=repository, check=True,
+            )
+            subprocess.run([
+                "git", "commit", "-q", "-m", "remove production RGB binding",
+            ], cwd=repository, check=True)
+            stage = root / "stage"
+
+            with self.assertRaisesRegex(
+                release_bundle.ReleaseManifestError,
+                "installed WSGI production import failed",
+            ):
+                release_bundle.main(self._argv(
+                    project, repository, self._head(repository), stage,
+                ))
+            self.assertFalse(stage.exists())
 
     def test_preseeded_inner_manifest_is_rejected_as_order_inversion(self):
         project = Path(__file__).resolve().parents[1]
