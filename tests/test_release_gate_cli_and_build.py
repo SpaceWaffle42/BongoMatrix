@@ -31,6 +31,8 @@ class ReleaseTreePreparationTests(unittest.TestCase):
             "app/wsgi.py": "from app.runtime import APPLICATION\napp = APPLICATION\n",
             "deploy/release_bundle.py": "# exact staged release tool\n",
             "deploy/guarded_priority_1_3_release.py": "# guarded release\n",
+            "deploy/install_priority_1_3_remote.py": "# bootstrap installer\n",
+            "deploy/matrix_priority_1_3_remote.py": "# fixed dispatcher\n",
             "deploy/verify_priority_1_3_acceptance.py": "# acceptance runner\n",
             "scripts/verify_priority_1_3_remote.py": "#!/usr/bin/env python3\n# remote verifier\n",
         }

@@ -2217,6 +2217,8 @@ _RELEASE_EXPORT_REQUIRED = frozenset({
     "app/wsgi.py",
     "deploy/release_bundle.py",
     "deploy/guarded_priority_1_3_release.py",
+    "deploy/install_priority_1_3_remote.py",
+    "deploy/matrix_priority_1_3_remote.py",
     "deploy/verify_priority_1_3_acceptance.py",
     "scripts/verify_priority_1_3_remote.py",
 })
