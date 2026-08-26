@@ -6,6 +6,18 @@ from font_catalog import available_font_names, font_advance_catalog, font_key, t
 
 
 class FontCatalogTests(unittest.TestCase):
+    def test_every_shipped_bdf_declares_its_exact_complete_glyph_count(self):
+        fonts = Path(__file__).resolve().parents[1] / "resources" / "fonts"
+        for path in sorted(fonts.glob("*.bdf")):
+            with self.subTest(font=path.name):
+                lines = path.read_text(encoding="ascii").splitlines()
+                declarations = [line for line in lines if line.startswith("CHARS ")]
+                self.assertEqual(len(declarations), 1)
+                declared = int(declarations[0].split()[1])
+                starts = sum(line.startswith("STARTCHAR ") for line in lines)
+                ends = sum(line == "ENDCHAR" for line in lines)
+                self.assertEqual((declared, starts, ends), (starts, starts, starts))
+
     def test_discovers_every_bdf_file_and_normalizes_keys_like_the_renderer(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)

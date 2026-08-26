@@ -14,6 +14,8 @@ Required new production and test files must be explicitly included in the releas
 - executable `scripts/verify_priority_1_3_remote.py`
 - `deploy/release_bundle.py`
 - `deploy/guarded_priority_1_3_release.py`
+- executable `deploy/install_priority_1_3_remote.py`
+- executable `deploy/matrix_priority_1_3_remote.py`
 - `deploy/verify_priority_1_3_acceptance.py`
 - their owning tests, including `tests/test_release_gate_cli_and_build.py`
 - this procedure and the README link
@@ -44,6 +46,59 @@ PYTHONDONTWRITEBYTECODE=1 ./venv/bin/python -B -m unittest \
 ```
 
 The first command is the parser-test literal: it exhaustively duplicates every value-bearing option owned by the release bundle subcommands, guarded release, privileged helper request envelopes, acceptance collector, and installed remote verifier. Every duplicate must terminate parsing with `SystemExit(2)`; the same suite also proves positive dispatch.
+
+## 2a. Preflight and install the fixed privileged endpoint
+
+Complete this before preparing a release tree or invoking the guarded coordinator. The dedicated key is a credential: provision a new release-only Ed25519 public key through the approved credential channel. Never reuse the administrator key or physical-CI key, and never copy a private key into the repository or appliance source tree.
+
+The reviewed coordinator address must be expressed as one canonical host network (for example `192.168.1.123/32`), not a subnet. Freeze expected digests from the exact reviewed commit before installation:
+
+```bash
+BOOTSTRAP_PUBLIC_KEY=/root/reviewed-matrix-priority-1-3.pub
+COORDINATOR_SOURCE=192.168.1.123/32
+SSHD_SOURCE_ADDRESS=192.168.1.123
+SSHD_SOURCE_HOST=192.168.1.123
+SSHD_LOCAL_ADDRESS=192.168.1.4
+SSHD_LOCAL_PORT=22
+SSHD_RDOMAIN=none
+DISPATCHER_SHA256="$(sha256sum deploy/matrix_priority_1_3_remote.py | cut -d' ' -f1)"
+GUARDED_SHA256="$(sha256sum deploy/guarded_priority_1_3_release.py | cut -d' ' -f1)"
+ARGPARSE_SHA256="$(sha256sum release_argparse.py | cut -d' ' -f1)"
+
+/usr/bin/python3 -I -B deploy/install_priority_1_3_remote.py install \
+  --source-root "$(pwd -P)" \
+  --install-root / \
+  --public-key "$BOOTSTRAP_PUBLIC_KEY" \
+  --source-restriction "$COORDINATOR_SOURCE" \
+  --sshd-source-address "$SSHD_SOURCE_ADDRESS" \
+  --sshd-source-host "$SSHD_SOURCE_HOST" \
+  --sshd-local-address "$SSHD_LOCAL_ADDRESS" \
+  --sshd-local-port "$SSHD_LOCAL_PORT" \
+  --sshd-rdomain "$SSHD_RDOMAIN" \
+  --expected-sha256 "dispatcher=$DISPATCHER_SHA256" \
+  --expected-sha256 "guarded=$GUARDED_SHA256" \
+  --expected-sha256 "argparse=$ARGPARSE_SHA256"
+
+/usr/bin/python3 -I -B deploy/install_priority_1_3_remote.py verify \
+  --source-root "$(pwd -P)" \
+  --install-root / \
+  --public-key "$BOOTSTRAP_PUBLIC_KEY" \
+  --source-restriction "$COORDINATOR_SOURCE" \
+  --sshd-source-address "$SSHD_SOURCE_ADDRESS" \
+  --sshd-source-host "$SSHD_SOURCE_HOST" \
+  --sshd-local-address "$SSHD_LOCAL_ADDRESS" \
+  --sshd-local-port "$SSHD_LOCAL_PORT" \
+  --sshd-rdomain "$SSHD_RDOMAIN" \
+  --expected-sha256 "dispatcher=$DISPATCHER_SHA256" \
+  --expected-sha256 "guarded=$GUARDED_SHA256" \
+  --expected-sha256 "argparse=$ARGPARSE_SHA256"
+```
+
+The installer validates all digests, every privileged destination parent, the complete installation-root → `root` → `.ssh` ancestry, the existing root SSH authority, and the live effective sshd policy before writing. All existing destinations and active-key completeness are decided before any destination directory is created. It publishes fixed library files first, the endpoint second, and the exact source-restricted key last; interrupted pre-key installs are not remotely admitted and exact retries preserve installed inodes. It refuses symlinks, mismatched installed bytes, unsafe or writable ownership/modes/ancestry, unrestricted or duplicate reuse of the dedicated key, non-host source ranges, and repair while the forced key exposes an incomplete runtime. Dedicated-key admission re-reads and appends through a locked pinned descriptor, preserving unrelated concurrent authorized-key additions rather than replacing the file.
+
+Both install and verify execute fixed `/usr/sbin/sshd -t` and context-complete `/usr/sbin/sshd -T -C` before the requested operation. The effective policy must resolve only `/root/.ssh/authorized_keys`, `AuthorizedKeysCommand none`, `PermitRootLogin forced-commands-only`, no trusted CA/principal/hostbased authority, and normal public-key authentication. After installation, test the dedicated private key from the coordinator: shell, PTY, forwarding, SCP, and SFTP must fail; only canonical guarded helper requests may reach the fixed dispatcher. Record endpoint/library checksums, owners/modes, dedicated key fingerprint, source restriction, exact sshd context, and read-only verification output without recording key material.
+
+Fail closed if the endpoint, a new dedicated credential, the paired-session cookie, owner-only GitLab token, or identical coordinator/appliance stage topology is unavailable. Do not improvise a helper or reuse another credential.
 
 ## 3. Prepare the exact release tree
 
