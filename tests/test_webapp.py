@@ -713,6 +713,45 @@ vm.createContext(context);vm.runInContext(process.argv[1],context);
         self.assertEqual(report["paused"], {"checked": True, "stored": "true"}, report)
         self.assertEqual(report["stopped"], {"checked": False, "stored": "false"}, report)
 
+    @unittest.skipUnless(shutil.which("node"), "Node.js is required")
+    def test_sticky_reload_retries_owner_conflict_until_old_connectivity_lease_expires(self):
+        source = (Path(__file__).parents[1] / "app" / "templates" / "dashboard.html").read_text()
+        start = source.index("let devicePreviewEnabled=")
+        end = source.index("\nfunction editPreviewCurrent", start)
+        lifecycle = source[start:end]
+        harness = r'''
+const vm=require('node:vm'),stored=new Map([['matrix-device-preview-enabled','true']]),calls=[],timers=[];
+let nextTimer=1,starts=0;
+const setTimer=(fn,delay=0)=>{const timer={id:nextTimer++,fn,delay,active:true};timers.push(timer);return timer.id};
+const clearTimer=id=>{const timer=timers.find(item=>item.id===id);if(timer)timer.active=false};
+const runNext=async()=>{const timer=timers.filter(item=>item.active).sort((a,b)=>a.delay-b.delay||a.id-b.id)[0];if(!timer)throw new Error('expected timer');timer.active=false;timer.fn();await new Promise(resolve=>setImmediate(resolve));await new Promise(resolve=>setImmediate(resolve));return timer.delay};
+const control=extra=>Object.assign({addEventListener(type,handler){this.listeners??={};this.listeners[type]=handler}},extra);
+const toggle=control({checked:false,disabled:false}),stop=control({disabled:true}),status={textContent:'',dataset:{}};
+const elements={'#device-preview-enabled':toggle,'#stop-device-preview':stop,'#device-preview-status':status};
+const context={console,AbortController,Date,Number,Promise,Set,Map,Math,encodeURIComponent,setTimeout:setTimer,clearTimeout:clearTimer,clearInterval:clearTimer,setInterval:setTimer,
+ matrixSyncStopped:false,matrixEditorsReady:true,previewModule:'clock',previewInstance:'b'.repeat(32),PAIRED_ACTION_SIGNAL:'1',
+ configBody:()=>({device:{name:'reloaded sticky draft'}}),selectedLavaPaletteDescriptor:()=>null,selectEditPreviewModule(){},selectEditedPreviewModule(){},
+ localStorage:{getItem:key=>stored.get(key)??null,setItem:(key,value)=>stored.set(key,String(value)),removeItem:key=>stored.delete(key)},
+ document:{querySelector:selector=>elements[selector],addEventListener(){}},window:{addEventListener(){}},fetch:async()=>({ok:false}),
+ api:async(path,options={})=>{const body=options.body?JSON.parse(options.body):null;calls.push({path,body});if(path==='/api/device-preview/clock'){starts+=1;if(starts===1){const error=new Error('Device preview is not available.');error.status=409;throw error}return {generation:body.generation,heartbeat_after_seconds:5,connectivity_expires_in:15}}if(path==='/api/device-preview/cancel'){if(starts<2){const error=new Error('Device preview is no longer active.');error.status=409;throw error}return {cancelled:true}}if(path==='/api/device-preview/heartbeat')return {active:true,generation:body.generation,connectivity_expires_in:15};throw new Error(path)}};
+context.globalThis=context;vm.createContext(context);vm.runInContext(process.argv[1],context);
+(async()=>{
+ context.resumeStickyDevicePreview();const initialDelay=await runNext();
+ if(initialDelay!==0||starts!==1||!toggle.checked||stored.get('matrix-device-preview-enabled')!=='true'||status.dataset.state!=='active')throw new Error('owner conflict did not preserve sticky reconnect state '+JSON.stringify({initialDelay,starts,checked:toggle.checked,stored:stored.get('matrix-device-preview-enabled'),state:status.dataset.state,text:status.textContent}));
+ const retryDelay=await runNext();
+ if(retryDelay<1000||starts!==2||status.dataset.state!=='active'||stop.disabled||!toggle.checked||stored.get('matrix-device-preview-enabled')!=='true')throw new Error('sticky owner conflict did not retry to active '+JSON.stringify({retryDelay,starts,state:status.dataset.state,stop:stop.disabled,checked:toggle.checked,stored:stored.get('matrix-device-preview-enabled')}));
+ stop.listeners.click();await new Promise(resolve=>setImmediate(resolve));await new Promise(resolve=>setImmediate(resolve));
+ if(toggle.checked||stored.get('matrix-device-preview-enabled')!=='false'||status.dataset.state!=='off'||timers.some(timer=>timer.active))throw new Error('explicit Stop did not clear retry/heartbeat lifecycle');
+ console.log('STICKY_RELOAD_OWNER_CONFLICT_RETRY_PASS');
+})().catch(error=>{console.error(error);process.exit(1)});
+'''
+        result = subprocess.run(
+            [shutil.which("node"), "-e", harness, lifecycle],
+            cwd=Path(__file__).parents[1], text=True, capture_output=True, check=False,
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("STICKY_RELOAD_OWNER_CONFLICT_RETRY_PASS", result.stdout)
+
     def test_dashboard_device_preview_client_uses_transient_lifecycle_contract(self):
         self.pair_browser()
 
