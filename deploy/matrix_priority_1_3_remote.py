@@ -36,7 +36,7 @@ def main(*, environment: dict[str, str] | None = None) -> int:
     source = os.environ if environment is None else environment
     try:
         argv, clean_environment = build_exec(source.get("SSH_ORIGINAL_COMMAND", ""))
-        os.execve(argv[0], argv, clean_environment)
+        os.execve("/home/admin/matrix/venv/bin/python", argv, clean_environment)
     except (OSError, ValueError, TypeError):
         return 2
     return 2

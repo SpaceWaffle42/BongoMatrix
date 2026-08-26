@@ -1,3 +1,4 @@
+import ast
 import base64
 import hashlib
 import os
@@ -83,6 +84,22 @@ class Priority13RemoteBootstrapTests(unittest.TestCase):
             with self.subTest(invalid=invalid):
                 with self.assertRaises(ValueError):
                     remote.build_exec(invalid)
+
+    def test_dispatcher_exec_boundary_uses_literal_fixed_executable(self):
+        tree = ast.parse(Path(remote.__file__).read_text())
+        calls = [
+            node for node in ast.walk(tree)
+            if isinstance(node, ast.Call)
+            and isinstance(node.func, ast.Attribute)
+            and isinstance(node.func.value, ast.Name)
+            and node.func.value.id == "os"
+            and node.func.attr == "execve"
+        ]
+        self.assertEqual(len(calls), 1)
+        executable = calls[0].args[0]
+        if not isinstance(executable, ast.Constant):
+            self.fail("execve executable must be a literal constant")
+        self.assertEqual(executable.value, remote.PYTHON)
 
     def test_digest_pinned_install_is_idempotent_and_preserves_unrelated_keys(self):
         result = installer.install(
