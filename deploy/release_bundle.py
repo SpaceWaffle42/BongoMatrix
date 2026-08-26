@@ -2316,7 +2316,16 @@ def _exercise_installed_wsgi(release_root: Path, python: Path, scratch_parent: P
         }
         command = [
             str(python), "-I", "-B", "-c",
-            "import sys;sys.path.insert(0,sys.argv[1]);import app.wsgi as entry;assert entry.app is not None",
+            (
+                "import sys;sys.path.insert(0,sys.argv[1]);"
+                "import rgbmatrix;"
+                "import display_controller,matrix_framework;"
+                "smoke_matrix=type('_ReleaseWsgiSmokeMatrix',(),{"
+                "'release_wsgi_smoke':True,'clear':lambda self:None,'swap':lambda self:None});"
+                "matrix_framework.Matrix=smoke_matrix;"
+                "display_controller.DisplayController.start=lambda self:True;"
+                "import app.wsgi as entry;assert entry.app is not None"
+            ),
             str(runtime),
         ]
         try:
