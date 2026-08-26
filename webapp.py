@@ -1985,13 +1985,16 @@ def create_app(
                 {"timeout_seconds", "selected_lava_palette"},
             )
             generation = payload["generation"]
-            timeout_seconds = payload.get("timeout_seconds", 60)
+            has_timeout = "timeout_seconds" in payload
+            timeout_seconds = payload.get("timeout_seconds")
             if (
                 isinstance(generation, bool) or not isinstance(generation, int)
                 or generation < 0
-                or isinstance(timeout_seconds, bool)
-                or not isinstance(timeout_seconds, int)
-                or not 5 <= timeout_seconds <= 3600
+                or (has_timeout and (
+                    isinstance(timeout_seconds, bool)
+                    or not isinstance(timeout_seconds, int)
+                    or not 5 <= timeout_seconds <= 3600
+                ))
             ):
                 raise ValueError("invalid transient preview values")
             identity = edit_preview_identity(payload)
@@ -2053,14 +2056,18 @@ def create_app(
             transferred = True
             now = time.monotonic()
             lease = admission.lease
-            return jsonify({
+            response = {
                 "generation": generation,
                 "active_module": module_name,
-                "timeout_seconds": timeout_seconds,
                 "heartbeat_after_seconds": HEARTBEAT_INTERVAL_SECONDS,
-                "expires_in": max(0, lease.content_deadline - now),
                 "connectivity_expires_in": max(0, lease.connectivity_deadline - now),
-            }), 202
+            }
+            if timeout_seconds is not None:
+                response.update({
+                    "timeout_seconds": timeout_seconds,
+                    "expires_in": max(0, lease.content_deadline - now),
+                })
+            return jsonify(response), 202
         except RequestEntityTooLarge:
             return edit_preview_error("Device preview request exceeds 1 MiB.", 413)
         except (KeyError, TypeError, ValueError):
@@ -2095,7 +2102,6 @@ def create_app(
             return jsonify({
                 "active": True,
                 "generation": generation,
-                "expires_in": max(0, outcome.lease.content_deadline - now),
                 "connectivity_expires_in": max(0, outcome.lease.connectivity_deadline - now),
             }), 202
         except RequestEntityTooLarge:

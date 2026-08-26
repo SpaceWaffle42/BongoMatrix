@@ -47,6 +47,39 @@ class DevicePreviewTests(unittest.TestCase):
         self.assertEqual(active.content_deadline, 160.0)
         self.assertEqual(active.connectivity_deadline, 115.0)
 
+    def test_explicitly_unbounded_preview_continues_while_heartbeats_arrive(self):
+        from device_preview import (
+            DevicePreviewManager,
+            DevicePreviewOwner,
+            DevicePreviewRequest,
+            PreviewAdmissionStatus,
+            PreviewHeartbeatStatus,
+        )
+
+        now = [100.0]
+        manager = DevicePreviewManager(clock=lambda: now[0])
+        owner = DevicePreviewOwner("device-a", "preview-a")
+        admitted = manager.submit(DevicePreviewRequest(
+            owner, 1, {"modules": []}, timeout_seconds=None,
+        ))
+        self.assertEqual(admitted.status, PreviewAdmissionStatus.ACCEPTED)
+        self.assertIsNotNone(admitted.lease)
+        self.assertEqual(admitted.lease.content_deadline, float("inf"))
+
+        outcome = None
+        for heartbeat_at in range(105, 175, 5):
+            now[0] = float(heartbeat_at)
+            outcome = manager.heartbeat(owner, generation=1)
+            self.assertEqual(outcome.status, PreviewHeartbeatStatus.ACCEPTED)
+            self.assertIsNotNone(outcome.lease)
+            self.assertEqual(outcome.lease.content_deadline, float("inf"))
+
+        self.assertIsNotNone(outcome)
+        active = manager.active_lease()
+        self.assertIsNotNone(active)
+        assert active is not None
+        self.assertEqual(active.generation, 1)
+
     def test_newer_generation_supersedes_and_stale_equal_do_not_mutate(self):
         from device_preview import (
             DevicePreviewManager,

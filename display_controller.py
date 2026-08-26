@@ -49,6 +49,7 @@ MODULE_DEFAULT_DURATIONS = {
     "sleep": 60,
 }
 ONE_OFF_PREVIEW_DURATION = 15
+UNBOUNDED_DEVICE_PREVIEW_SLICE_SECONDS = 3600
 OPENWEATHER_PREPARATION_DEADLINE_SECONDS = 5.0
 
 
@@ -592,7 +593,11 @@ class DisplayController:
         else:
             raise KeyError(module_name)
         options = {
-            "duration": request.timeout_seconds,
+            "duration": (
+                UNBOUNDED_DEVICE_PREVIEW_SLICE_SECONDS
+                if request.timeout_seconds is None
+                else request.timeout_seconds
+            ),
             "stop_event": stop_event,
         }
         if module_name == "clock_lava":
@@ -615,7 +620,14 @@ class DisplayController:
             options["prepared"] = prepared
         if stop_event.is_set():
             return False
-        return module.run(matrix, candidate, **options)
+        rendered = False
+        while not stop_event.is_set():
+            rendered = module.run(matrix, candidate, **options)
+            if request.timeout_seconds is not None or rendered is False:
+                return rendered
+            if stop_event.is_set() or stop_event.wait(0.01):
+                break
+        return rendered
 
     def preview(self, module_name):
         if module_name not in MODULES and custom_module(self.config_store.get(), module_name) is None:
