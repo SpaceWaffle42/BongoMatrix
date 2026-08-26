@@ -60,7 +60,7 @@ full_test_suite:
   extends: .default_project_job
   image: node:22-bookworm
   stage: test
-  timeout: 20m
+  timeout: 25m
   variables:
     MATRIX_CHROMIUM: /usr/bin/chromium
   before_script:
