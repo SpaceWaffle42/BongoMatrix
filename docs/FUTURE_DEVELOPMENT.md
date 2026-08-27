@@ -168,25 +168,25 @@ When the user tries to switch from Edit Preview to Live with unsaved changes, wa
 
 **Completed 2026-08-24:** added an opt-in physical-device draft preview that is off by default, sends debounced unsaved edits through the existing single-owner display controller, supersedes older work, refreshes a configurable 60-second lease after accepted updates, and returns to saved playback on stop, expiry, disconnect, failure, or page exit without persisting the draft. The reviewed product artifact passed protected CI, preservation-safe deployment, focused appliance regressions, and a real 64×32 Lava Clock acceptance journey that proved exact non-black framebuffer publication, heartbeat renewal, explicit cancellation, normal-playback restoration, and byte-preservation of configuration, paired devices, and media.
 
-Add a separate **Preview edits on device** checkbox beneath the browser preview.
+~~Add a separate **Preview edits on device** checkbox beneath the browser preview.~~
 
-- Keep it off by default.
-- When enabled, send the current unsaved draft to the physical Matrix temporarily.
-- Clearly indicate that the device is showing draft content.
-- Provide an obvious **Stop device preview** action.
-- Do not mutate or persist the saved configuration.
-- Return to normal playback when preview stops, expires, disconnects, fails, or the user leaves the page.
-- Preserve the single-owner hardware-lock model; preview must run through the existing display controller rather than starting another Matrix process.
-- Make the preview timeout configurable, with a 60-second default that restarts after each accepted draft update.
-- While device preview is enabled, send each later edit automatically after debouncing rather than requiring a separate Apply action.
-- Use adaptive debounce timing: 150 ms for simple controls and 500 ms for media changes or other expensive renders.
-- Cancel superseded draft work so an older slow render can never replace a newer edit on the device.
+- ~~Keep it off by default.~~
+- ~~When enabled, send the current unsaved draft to the physical Matrix temporarily.~~
+- ~~Clearly indicate that the device is showing draft content.~~
+- ~~Provide an obvious **Stop device preview** action.~~
+- ~~Do not mutate or persist the saved configuration.~~
+- ~~Return to normal playback when preview stops, expires, disconnects, fails, or the user leaves the page.~~
+- ~~Preserve the single-owner hardware-lock model; preview must run through the existing display controller rather than starting another Matrix process.~~
+- ~~Make the preview timeout configurable, with a 60-second default that restarts after each accepted draft update.~~
+- ~~While device preview is enabled, send each later edit automatically after debouncing rather than requiring a separate Apply action.~~
+- ~~Use adaptive debounce timing: 150 ms for simple controls and 500 ms for media changes or other expensive renders.~~
+- ~~Cancel superseded draft work so an older slow render can never replace a newer edit on the device.~~
 
 #### Priority 1.3 post-completion whole-project remediation — In progress
 
-A fresh whole-project review rejected the earlier post-1.3 release candidate and opened the ordered F1–F12 remediation ledger in GitLab issue 2. Each finding is an independent immutable commit/review boundary; approval of one finding authorizes only the next finding in sequence and does not close the final whole-project release gate.
+A fresh whole-project review rejected the earlier post-1.3 release candidate and opened the ordered remediation ledger in GitLab issue 2. F1–F15 were subsequently reproduced, remediated under strict TDD, independently reviewed, and merged through protected CI. The complete remediated artifacts passed the applicable protected-CI and production-acceptance gates recorded in that issue, but later release-path validation reopened the final closure gate. The historical finding-by-finding record is retained below.
 
-Verified remediation approvals as of 2026-08-25:
+Verified remediation approvals:
 
 - **F1 approved:** commit `603154b0d7bd3417df610f8df6a33b2f26a46146` prevents cancelled custom-text and OpenWeather frames from publishing after their final cancellation-admission point.
 - **F2 approved:** commit `c1905c15aee6fffc2a87ee2f790875f8201db815` pins privileged release/acceptance service control to an absolute `systemctl`, fixes its environment, and bounds it under one aggregate monotonic deadline.
@@ -206,9 +206,17 @@ Verified remediation approvals as of 2026-08-25:
 
 **F11 approved:** commit `1596137cccacfbdb93a661df4444d1ca0be277c6` enforces at least 44 CSS-pixel target height for the physical-preview timeout and **Stop device preview** action through 900px width and under coarse pointers while preserving desktop mouse layout, active popped-strip reachability, touch/mouse/keyboard activation, and 200% zoom. Immutable review `deleg_12964e22` reported **APPROVED** with no findings, security concerns, suggestions, or limitations; final approval and F12 authorization are recorded in GitLab issue 2 note 378.
 
-**F12 is authorized and in progress, not yet approved:** the authoritative Priority 1.3 release procedure is being aligned with the README-supported `./venv/bin/python` operator environment while retaining the CI-only `.venv` compatibility alias solely inside CI.
+**F12 approved:** commit `f27026f738b2426031aeb4bf63d87ea3987e11d8` aligns the authoritative Priority 1.3 release procedure with the README-supported `./venv/bin/python` operator environment while retaining the CI-only `.venv` compatibility alias solely inside CI.
 
-Final whole-project review, merge request/CI, deployment, production browser/physical acceptance, and Priority 1.4 remain blocked until F12 and every final closure gate are approved in order.
+**F13 approved:** commit `961e9ebdbc97feb5a82d53239569e60a62b5269d` binds the exported Python 3.11 acceptance fixture to one accelerated monotonic authority while retaining real sleeping.
+
+**F14 approved:** commit `5302d31462f9404f0fdf7d16b779506c696e40a8` scopes the two reviewed fixed-provider OpenWeather SAST suppressions without changing transport behavior.
+
+**F15 approved at commit `568f4fc8953d3e6fd96f2546c868370c4a76265a`:** the reviewed artifact contains the tracked, idempotent privileged bootstrap installer; protected merge `478a876e6cb9bc90ee2171296d545c9ef3c30871` admitted the exact reviewed tree.
+
+**Latest acceptance evidence 2026-08-27:** sticky-preview, reconnect, module-normalization, and maximum paired-device recovery blockers were independently closed through protected merges ending at `07a484b96cdcdb20a50e2fc76854af840c4686f4`. Protected-main pipeline 248 and its dedicated physical-device job passed. The production 64×32 appliance then passed a real 320×568 Chromium recovery-and-replacement journey at configured capacity: one explicitly selected old pairing was revoked, a fresh authoritative browser pairing was committed, registry cardinality stayed 10, the other nine records remained byte-for-byte unchanged, configuration and media stayed unchanged, and service/display-lock health remained clean.
+
+**Remaining final gate:** GitLab issue 2 note 438 records the restricted release-preparation transport as blocked before immutable review, and protected history through `07a484b96cdcdb20a50e2fc76854af840c4686f4` contains no superseding merge for that remediation. Final whole-project release closure and the Priority 1.4 gate therefore remain blocked pending an independently reviewed transport remediation, protected CI, deployment, and applicable production acceptance.
 
 ### 1.4 Add borders and backgrounds to basic custom modules
 
