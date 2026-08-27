@@ -4,7 +4,10 @@ import tempfile
 from pathlib import Path
 from unittest.mock import Mock, patch
 
-from pairing import PairedDeviceStore, PairingManager, initialize_pairing_display
+from pairing import (
+    PairedDeviceStore, PairingDurabilityError, PairingManager,
+    initialize_pairing_display,
+)
 
 
 class FakeClock:
@@ -121,6 +124,29 @@ class PairingManagerTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "maximum paired devices reached"):
             store.add("Second phone", max_devices=1)
 
+    def test_paired_device_registry_atomically_replaces_one_device_at_capacity(self):
+        store = PairedDeviceStore()
+        first = store.add("Primary browser", max_devices=3)
+        stale = store.add("Returning phone", max_devices=3)
+        third = store.add("Kitchen tablet", max_devices=3)
+
+        replacement = store.replace(stale["id"], "Returning phone", max_devices=3)
+
+        self.assertNotEqual(replacement["id"], stale["id"])
+        self.assertEqual(replacement["name"], "Returning phone")
+        self.assertEqual(store.list(), [first, replacement, third])
+        self.assertFalse(store.contains(stale["id"]))
+        self.assertTrue(store.contains(replacement["id"]))
+
+    def test_paired_device_registry_rejects_replacement_below_capacity(self):
+        store = PairedDeviceStore()
+        existing = store.add("Primary browser", max_devices=2)
+
+        with self.assertRaisesRegex(ValueError, "replacement is not required"):
+            store.replace(existing["id"], "Returning phone", max_devices=2)
+
+        self.assertEqual(store.list(), [existing])
+
     def test_paired_device_registry_rejects_malformed_or_duplicate_entries(self):
         valid_id = "A" * 32
         cases = [
@@ -179,6 +205,25 @@ class PairingManagerTests(unittest.TestCase):
 
             self.assertEqual(store.list(), [])
             self.assertEqual(PairedDeviceStore(path).list(), [])
+
+    def test_paired_device_replacement_reports_committed_state_when_directory_sync_fails(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "paired-devices.json"
+            store = PairedDeviceStore(path)
+            primary = store.add("Primary browser", max_devices=2)
+            stale = store.add("Returning phone", max_devices=2)
+
+            with patch(
+                "pairing.os.fsync",
+                side_effect=[None, OSError("directory sync unavailable")],
+            ), self.assertRaises(PairingDurabilityError) as raised:
+                store.replace(stale["id"], "Returning phone", max_devices=2)
+
+            replacement = raised.exception.device
+            assert replacement is not None
+            self.assertNotEqual(replacement["id"], stale["id"])
+            self.assertEqual(store.list(), [primary, replacement])
+            self.assertEqual(PairedDeviceStore(path).list(), [primary, replacement])
 
     def test_paired_device_registry_removes_devices(self):
         store = PairedDeviceStore()

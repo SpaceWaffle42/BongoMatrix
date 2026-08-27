@@ -74,6 +74,7 @@ APPLICATION_VERSION = "0.3.58-preview"
 DEVICE_RESTART_PENDING_TTL_SECONDS = 60
 PAIRED_ACTION_HEADER = "X-Matrix-Action"
 PAIRED_ACTION_VALUE = "paired-request"
+PAIRING_RECOVERY_TTL_SECONDS = 300
 ETAG_ITEM = re.compile(r'(?P<weak>W/)?"(?P<opaque>[\x21\x23-\x7e\x80-\xff]*)"')
 EDIT_PREVIEW_INSTANCE = re.compile(r"[0-9a-f]{32}")
 EDIT_PREVIEW_SESSION = re.compile(r"[0-9a-f]{32}")
@@ -476,6 +477,7 @@ def create_app(
     edit_preview_services_initializing = False
     device_restart_lock = threading.Lock()
     device_restart_pending_until = 0.0
+    pairing_pin_display_lock = threading.Lock()
 
     def get_edit_preview_services():
         """Lazily publish one healthy registry/provider pair per app process."""
@@ -549,8 +551,83 @@ def create_app(
         SESSION_COOKIE_HTTPONLY=True,
         SESSION_COOKIE_SAMESITE="Strict",
         PERMANENT_SESSION_LIFETIME=timedelta(days=365),
+        PAIRING_RECOVERY_CLOCK=time.time,
         MAX_CONTENT_LENGTH=128 * 1024 * 1024,
     )
+
+    def device_registry_digest(devices):
+        encoded = json.dumps(
+            devices, sort_keys=True, separators=(",", ":"), ensure_ascii=True,
+        ).encode("ascii")
+        return hashlib.sha256(encoded).hexdigest()
+
+    def begin_pairing_recovery_start():
+        recovery_start = {
+            "expires_at": int(app.config["PAIRING_RECOVERY_CLOCK"]()) + PAIRING_RECOVERY_TTL_SECONDS,
+            "generation": session_generation,
+            "nonce": secrets.token_urlsafe(24),
+        }
+        session["pairing_recovery_start"] = recovery_start
+        return recovery_start
+
+    def pairing_recovery_restart_response(error, status):
+        session.pop("pairing_recovery", None)
+        recovery_start = begin_pairing_recovery_start()
+        return render_template(
+            "pair.html",
+            error=error,
+            recovery_start=True,
+            recovery_start_nonce=recovery_start["nonce"],
+        ), status
+
+    def replacement_device_view(device, choice_number):
+        try:
+            paired_at = dt.datetime.fromtimestamp(device["paired_at"], tz=dt.UTC)
+        except (OverflowError, OSError, ValueError):
+            paired_iso = None
+            paired_label = "date unavailable"
+        else:
+            paired_iso = paired_at.isoformat().replace("+00:00", "Z")
+            paired_label = paired_at.strftime("%Y-%m-%d %H:%M UTC")
+        return {
+            **device,
+            "paired_iso": paired_iso,
+            "paired_label": paired_label,
+            "replacement_action_label": (
+                f"Replace pairing {device['name']}, paired {paired_label}, "
+                f"choice {choice_number}; signs out this old browser"
+            ),
+        }
+
+    def current_pairing_recovery():
+        recovery = session.get("pairing_recovery")
+        required = {"device_name", "expires_at", "generation", "registry_digest", "nonce"}
+        if not isinstance(recovery, dict) or set(recovery) != required:
+            return None
+        device_name = recovery["device_name"]
+        if (
+            not isinstance(device_name, str)
+            or device_name != device_name.strip()
+            or not 1 <= len(device_name) <= 40
+            or any(not character.isprintable() for character in device_name)
+            or isinstance(recovery["expires_at"], bool)
+            or not isinstance(recovery["expires_at"], int)
+            or recovery["generation"] != session_generation
+            or not isinstance(recovery["registry_digest"], str)
+            or re.fullmatch(r"[0-9a-f]{64}", recovery["registry_digest"]) is None
+            or not isinstance(recovery["nonce"], str)
+            or re.fullmatch(r"[A-Za-z0-9_-]{32}", recovery["nonce"]) is None
+            or int(app.config["PAIRING_RECOVERY_CLOCK"]()) >= recovery["expires_at"]
+        ):
+            return None
+        return recovery
+
+    def establish_paired_session(device):
+        session.clear()
+        session["paired"] = True
+        session["generation"] = session_generation
+        session["device_id"] = device["id"]
+        session.permanent = True
 
     def pairing_session_is_current():
         return (
@@ -869,11 +946,23 @@ def create_app(
 
     def begin_additional_pairing():
         max_devices = config_store.get()["pairing"]["max_devices"]
-        if len(device_store.list()) >= max_devices:
-            return False
-        pin = pairing.issue_pin()
-        controller.show_pairing_pin(pin, ttl_seconds=pairing.remaining_seconds())
-        return True
+        replacement_required = len(device_store.list()) >= max_devices
+        with pairing_pin_display_lock:
+            pin = pairing.issue_pin()
+            remaining_seconds = pairing.remaining_seconds()
+            controller.show_pairing_pin(pin, ttl_seconds=remaining_seconds)
+        return replacement_required
+
+    def begin_recovery_pairing():
+        max_devices = config_store.get()["pairing"]["max_devices"]
+        replacement_required = len(device_store.list()) >= max_devices
+        with pairing_pin_display_lock:
+            pin = pairing.active_pin()
+            if pin is None:
+                pin = pairing.issue_pin()
+            remaining_seconds = pairing.remaining_seconds()
+            controller.show_pairing_pin(pin, ttl_seconds=remaining_seconds)
+        return replacement_required
 
     @app.get("/pair")
     def pair():
@@ -885,18 +974,27 @@ def create_app(
         )
         if session.get("paired") and device_store.contains(session.get("device_id")):
             return render_template("pair.html", paired=True, error=warning)
-        pin = pairing.active_pin()
-        testing_pin_available = pairing.has_testing_pin()
-        if pin is None and device_store.list() and not testing_pin_available:
-            pairing_gate = "Pairing another browser must be started from an already paired device."
+        with pairing_pin_display_lock:
+            pin = pairing.active_pin()
+            testing_pin_available = pairing.has_testing_pin()
+            recovery_start_required = (
+                pin is None and bool(device_store.list()) and not testing_pin_available
+            )
+            if not recovery_start_required:
+                if pin is None and not testing_pin_available:
+                    pin = pairing.issue_pin()
+                if pin is not None:
+                    controller.show_pairing_pin(
+                        pin, ttl_seconds=pairing.remaining_seconds()
+                    )
+        if recovery_start_required:
+            recovery_start = begin_pairing_recovery_start()
             return render_template(
                 "pair.html",
-                error=f"{warning} {pairing_gate}" if warning else pairing_gate,
-            ), 403
-        if pin is None and not testing_pin_available:
-            pin = pairing.issue_pin()
-        if pin is not None:
-            controller.show_pairing_pin(pin, ttl_seconds=pairing.remaining_seconds())
+                recovery_start=True,
+                recovery_start_nonce=recovery_start["nonce"],
+                error=warning,
+            )
         return render_template("pair.html", error=warning)
 
     @app.post("/pair")
@@ -905,45 +1003,90 @@ def create_app(
         if not 1 <= len(device_name) <= 40 or any(not character.isprintable() for character in device_name):
             return render_template("pair.html", error="Device name must be 1-40 characters."), 400
         durability_uncertain = False
-        with device_store.transaction():
+        display_cleanup_failures = []
+        replacement_devices = None
+        recovery = None
+        with pairing_pin_display_lock, device_store.transaction():
             max_devices = config_store.get()["pairing"]["max_devices"]
-            if len(device_store.list()) >= max_devices:
-                return render_template(
-                    "pair.html",
-                    error="The Matrix has reached its paired-device limit. Remove a device before pairing another.",
-                ), 409
             if pairing.verify(request.form.get("pin", "").strip()):
-                try:
-                    device = device_store.add(device_name, max_devices=max_devices)
-                except PairingDurabilityError as error:
-                    if error.device is None:
-                        raise
-                    device = error.device
-                    durability_uncertain = True
-                except ValueError:
-                    return render_template(
-                        "pair.html",
-                        error="The Matrix has reached its paired-device limit. Remove a device before pairing another.",
-                    ), 409
+                devices = device_store.list()
+                if len(devices) >= max_devices:
+                    replacement_devices = devices
+                    recovery = {
+                        "device_name": device_name,
+                        "expires_at": int(app.config["PAIRING_RECOVERY_CLOCK"]()) + PAIRING_RECOVERY_TTL_SECONDS,
+                        "generation": session_generation,
+                        "registry_digest": device_registry_digest(devices),
+                        "nonce": secrets.token_urlsafe(24),
+                    }
+                    device = None
+                else:
+                    try:
+                        device = device_store.add(device_name, max_devices=max_devices)
+                    except PairingDurabilityError as error:
+                        if error.device is None:
+                            raise
+                        device = error.device
+                        durability_uncertain = True
+                    except ValueError:
+                        return render_template(
+                            "pair.html",
+                            error="The Matrix has reached its paired-device limit. Try pairing again to replace an existing device.",
+                        ), 409
+                for action_name, action in (
+                    ("pairing display cleanup", controller.end_pairing),
+                    ("display restart", controller.start),
+                ):
+                    try:
+                        action()
+                    except Exception:
+                        display_cleanup_failures.append(action_name)
+                        LOGGER.exception(
+                            "Pairing PIN was consumed but %s failed", action_name
+                        )
             else:
                 device = None
+        if replacement_devices is not None and recovery is not None:
+            session.clear()
+            session["pairing_recovery"] = recovery
+            display_devices = [
+                replacement_device_view(item, index)
+                for index, item in enumerate(replacement_devices, start=1)
+            ]
+            response = render_template(
+                "pair.html",
+                replacement=True,
+                replacement_devices=display_devices,
+                recovery_nonce=recovery["nonce"],
+                error=(
+                    "The PIN was accepted, but display cleanup could not be completed. "
+                    "You can still choose the pairing to replace."
+                    if display_cleanup_failures else None
+                ),
+            )
+            return (response, 503) if display_cleanup_failures else response
         if device is not None:
             session.clear()
             session["paired"] = True
             session["generation"] = session_generation
             session["device_id"] = device["id"]
             session.permanent = True
-            controller.end_pairing()
-            controller.start()
-            if durability_uncertain:
+            if durability_uncertain or display_cleanup_failures:
+                warnings = []
+                if durability_uncertain:
+                    warnings.append(
+                        "storage durability could not be confirmed; verify the device remains "
+                        "listed after the next restart."
+                    )
+                if display_cleanup_failures:
+                    warnings.append(
+                        "display cleanup could not be completed; restart the Matrix if the old "
+                        "pairing screen remains."
+                    )
                 return render_template(
                     "pair.html",
                     paired=True,
-                    error=(
-                        "This browser is already paired, but storage durability could not be "
-                        "confirmed. You can continue to Matrix settings; verify the device "
-                        "remains listed after the next restart."
-                    ),
+                    error="This browser is already paired, but " + " ".join(warnings),
                 ), 503
             return redirect(url_for("dashboard"))
         error = (
@@ -953,22 +1096,142 @@ def create_app(
         )
         return render_template("pair.html", error=error), 401
 
+    @app.post("/pair/recover")
+    def pair_recover():
+        recovery_start = session.get("pairing_recovery_start")
+        submitted_nonce = request.form.get("recovery_start_nonce", "")
+        if (
+            not isinstance(recovery_start, dict)
+            or set(recovery_start) != {"expires_at", "generation", "nonce"}
+            or not isinstance(recovery_start["nonce"], str)
+            or re.fullmatch(r"[A-Za-z0-9_-]{32}", recovery_start["nonce"]) is None
+            or isinstance(recovery_start["expires_at"], bool)
+            or not isinstance(recovery_start["expires_at"], int)
+            or recovery_start["generation"] != session_generation
+            or int(app.config["PAIRING_RECOVERY_CLOCK"]()) >= recovery_start["expires_at"]
+            or not secrets.compare_digest(submitted_nonce, recovery_start["nonce"])
+        ):
+            return pairing_recovery_restart_response(
+                "Recovery request is invalid or expired. Show a new recovery PIN.",
+                403,
+            )
+        session.pop("pairing_recovery_start", None)
+        replacement_required = begin_recovery_pairing()
+        return render_template(
+            "pair.html",
+            recovery_started=True,
+            replacement_required=replacement_required,
+        ), 202
+
+    @app.post("/pair/replace")
+    def pair_replace():
+        recovery = current_pairing_recovery()
+        submitted_nonce = request.form.get("recovery_nonce", "")
+        if recovery is None or not secrets.compare_digest(submitted_nonce, recovery["nonce"]):
+            return pairing_recovery_restart_response(
+                "Replacement authorization is invalid or expired. Show a new recovery PIN.",
+                403,
+            )
+
+        replaced_id = request.form.get("device_id", "")
+        durability_uncertain = False
+        with device_store.transaction():
+            devices = device_store.list()
+            expected_digest = recovery.get("registry_digest")
+            if (
+                not isinstance(expected_digest, str)
+                or not secrets.compare_digest(device_registry_digest(devices), expected_digest)
+            ):
+                return pairing_recovery_restart_response(
+                    "The paired-device list changed. Show a new recovery PIN before choosing again.",
+                    409,
+                )
+            max_devices = config_store.get()["pairing"]["max_devices"]
+            if len(devices) < max_devices:
+                return pairing_recovery_restart_response(
+                    "The Matrix is no longer at its paired-device limit. Show a new recovery PIN to pair without replacing a device.",
+                    409,
+                )
+            try:
+                replacement = device_store.replace(
+                    replaced_id,
+                    recovery["device_name"],
+                    max_devices=max_devices,
+                )
+            except KeyError:
+                return pairing_recovery_restart_response(
+                    "The selected pairing no longer exists. Show a new recovery PIN.",
+                    409,
+                )
+            except PairingDurabilityError as error:
+                if error.device is None:
+                    raise
+                replacement = error.device
+                durability_uncertain = True
+            except OSError:
+                LOGGER.exception("Paired-device replacement failed before commit")
+                return render_template(
+                    "pair.html",
+                    error="The replacement could not be stored. Check storage and try again.",
+                ), 503
+
+        lifecycle_failures = []
+        with pairing_pin_display_lock:
+            actions = [
+                ("preview cleanup", lambda: controller.cancel_device_drafts_for_device(replaced_id)),
+            ]
+            if pairing.active_pin() is None:
+                actions.extend((
+                    ("pairing display cleanup", controller.end_pairing),
+                    ("display restart", controller.start),
+                ))
+            for action_name, action in actions:
+                try:
+                    action()
+                except Exception:
+                    lifecycle_failures.append(action_name)
+                    LOGGER.exception(
+                        "Paired-device replacement committed but %s failed", action_name
+                    )
+        establish_paired_session(replacement)
+        warnings = []
+        if durability_uncertain:
+            warnings.append(
+                "storage durability could not be confirmed; verify the device remains listed "
+                "after the next restart."
+            )
+        if lifecycle_failures:
+            warnings.append(
+                "The replacement was committed, but display cleanup could not be completed; "
+                "restart the Matrix if the old preview or pairing screen remains."
+            )
+        if warnings:
+            return render_template(
+                "pair.html",
+                paired=True,
+                error="This browser replaced the selected pairing. " + " ".join(warnings),
+            ), 503
+        return redirect(url_for("dashboard"))
+
     @app.post("/pair/new")
     @requires_pairing
     def pair_new():
-        if not begin_additional_pairing():
-            return render_template(
-                "pair.html", paired=True,
-                error="The paired-device limit has been reached. Remove a device or raise the limit first.",
-            ), 409
-        return render_template("pair.html", paired=True, pairing_ready=True), 202
+        replacement_required = begin_additional_pairing()
+        return render_template(
+            "pair.html",
+            paired=True,
+            pairing_ready=True,
+            replacement_required=replacement_required,
+        ), 202
 
     @app.post("/api/devices/pair")
     @requires_pairing
     def pair_new_api():
-        if not begin_additional_pairing():
-            return jsonify({"error": "The paired-device limit has been reached."}), 409
-        return jsonify({"pairing": "ready"}), 202
+        replacement_required = begin_additional_pairing()
+        payload: dict[str, object] = {"pairing": "ready"}
+        if replacement_required:
+            payload["replacement_required"] = True
+        return jsonify(payload), 202
 
     @app.get("/api/devices")
     @requires_pairing
