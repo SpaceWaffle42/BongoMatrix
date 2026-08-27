@@ -5214,7 +5214,7 @@ await send('Runtime.enable');await send('Page.enable');const loaded=new Promise(
 const viewports=[[320,568],[360,800],[390,844],[412,915],[768,1024],[820,1180],[844,390],[899,700],[900,700],[901,700],[1024,768],[1280,720],[1440,900]],states=[];
 for(const [width,height] of viewports){
  await send('Emulation.setTouchEmulationEnabled',{enabled:false});await send('Emulation.setDeviceMetricsOverride',{width,height,deviceScaleFactor:1,mobile:width<1024});
- const state=await evaluate(`(async()=>{setPreviewMode('live');await new Promise(r=>setTimeout(r,10));const controls=document.querySelector('.device-preview-controls'),stop=document.querySelector('#stop-device-preview');const liveDisplay=getComputedStyle(controls).display;setPreviewMode('edit');devicePreviewToggle.disabled=false;setDevicePreviewStatus('Device is showing unsaved draft.','active');let spacer=document.querySelector('[data-preview-pop-test-spacer]');if(!spacer){spacer=document.createElement('div');spacer.dataset.previewPopTestSpacer='';spacer.style.height='2000px';document.body.append(spacer)}const popY=document.querySelector('.preview-card').offsetTop+1;document.scrollingElement.scrollTop=popY;await new Promise(resolve=>requestAnimationFrame(()=>resolve()));syncPreviewPopout();await new Promise(r=>setTimeout(r,20));const live=document.querySelector('.preview-live'),optIn=document.querySelector('.device-preview-opt-in'),status=document.querySelector('#device-preview-status'),rect=value=>{const r=value.getBoundingClientRect();return[r.left,r.top,r.right,r.bottom,r.width,r.height]},hit=document.elementFromPoint(...(()=>{const r=optIn.getBoundingClientRect();return[r.left+r.width/2,r.top+r.height/2]})());return{viewport:[innerWidth,innerHeight],scrollY,cardTop:document.querySelector('.preview-card').offsetTop,liveDisplay,editDisplay:getComputedStyle(controls).display,stopMissing:stop===null,popped:live.classList.contains('is-popped'),overflow:document.documentElement.scrollWidth-document.documentElement.clientWidth,coarse:matchMedia('(pointer: coarse)').matches,live:rect(live),controls:rect(controls),optIn:rect(optIn),status:rect(status),statusText:status.textContent,hit:hit===optIn||optIn.contains(hit)}})()`);states.push(state)
+ const state=await evaluate(`(async()=>{setPreviewMode('live');await new Promise(r=>setTimeout(r,10));const controls=document.querySelector('.device-preview-controls'),stop=document.querySelector('#stop-device-preview');const liveDisplay=getComputedStyle(controls).display;setPreviewMode('edit');devicePreviewToggle.disabled=false;setDevicePreviewStatus('Device is showing unsaved draft.','active');let spacer=document.querySelector('[data-preview-pop-test-spacer]');if(!spacer){spacer=document.createElement('div');spacer.dataset.previewPopTestSpacer='';spacer.style.height='2000px';document.body.append(spacer)}const popY=document.querySelector('.preview-card').offsetTop+1;document.scrollingElement.scrollTop=popY;await new Promise(resolve=>requestAnimationFrame(()=>resolve()));syncPreviewPopout();await new Promise(r=>setTimeout(r,20));const live=document.querySelector('.preview-live'),optIn=document.querySelector('.device-preview-opt-in'),status=document.querySelector('#device-preview-status'),modes=document.querySelector('.preview-modes'),rect=value=>{const r=value.getBoundingClientRect();return[r.left,r.top,r.right,r.bottom,r.width,r.height]},hit=document.elementFromPoint(...(()=>{const r=optIn.getBoundingClientRect();return[r.left+r.width/2,r.top+r.height/2]})()),activeControls=rect(controls),activeOptIn=rect(optIn),activeStatus=rect(status),activeModes=rect(modes),activeStatusText=status.textContent;devicePreviewToggle.checked=false;setDevicePreviewStatus('Saved playback restored.','off');await new Promise(r=>setTimeout(r,10));const offControls=rect(controls),offOptIn=rect(optIn),offStatus=rect(status),offModes=rect(modes);return{viewport:[innerWidth,innerHeight],scrollY,cardTop:document.querySelector('.preview-card').offsetTop,liveDisplay,editDisplay:getComputedStyle(controls).display,stopMissing:stop===null,popped:live.classList.contains('is-popped'),overflow:document.documentElement.scrollWidth-document.documentElement.clientWidth,coarse:matchMedia('(pointer: coarse)').matches,live:rect(live),controls:activeControls,optIn:activeOptIn,status:activeStatus,modes:activeModes,offControls,offOptIn,offStatus,offModes,statusText:activeStatusText,hit:hit===optIn||optIn.contains(hit)}})()`);states.push(state)
 }
 await send('Emulation.setDeviceMetricsOverride',{width:1280,height:720,deviceScaleFactor:1,mobile:false});await send('Emulation.setTouchEmulationEnabled',{enabled:true,maxTouchPoints:1});
 const coarse=await evaluate(`(()=>{const optIn=document.querySelector('.device-preview-opt-in').getBoundingClientRect();return{matches:matchMedia('(pointer: coarse)').matches,size:[optIn.width,optIn.height]}})()`);
@@ -5251,6 +5251,24 @@ console.log(JSON.stringify({states,coarse,keyboard:{before:keyboardBefore,after:
                 self.assertLessEqual(bottom, live_bottom + 1, item)
             self.assertGreaterEqual(item["optIn"][5], 44, item)
             self.assertIn("unsaved draft", item["statusText"])
+            controls_left, controls_top, controls_right, controls_bottom, _, _ = item["controls"]
+            modes_left, modes_top, modes_right, modes_bottom, _, _ = item["modes"]
+            self.assertTrue(
+                controls_right <= modes_left + 1
+                or modes_right <= controls_left + 1
+                or controls_bottom <= modes_top + 1
+                or modes_bottom <= controls_top + 1,
+                item,
+            )
+            off_left, off_top, off_right, off_bottom, _, _ = item["offControls"]
+            off_modes_left, off_modes_top, off_modes_right, off_modes_bottom, _, _ = item["offModes"]
+            self.assertTrue(
+                off_right <= off_modes_left + 1
+                or off_modes_right <= off_left + 1
+                or off_bottom <= off_modes_top + 1
+                or off_modes_bottom <= off_top + 1,
+                item,
+            )
             self.assertTrue(item["hit"], item)
         self.assertTrue(report["coarse"]["matches"], report)
         self.assertGreaterEqual(report["coarse"]["size"][1], 44, report)
