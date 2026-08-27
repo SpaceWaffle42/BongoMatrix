@@ -84,6 +84,7 @@ class WebAppTests(unittest.TestCase):
         self.media_dir.chmod(0o755)
         self.controller = Mock()
         self.pairing = Mock()
+        self.pairing.active_pin.return_value = None
         self.pairing.has_testing_pin.return_value = False
         self.device_restart_runner = Mock()
         self.location_search = Mock(return_value=[{
@@ -1989,6 +1990,8 @@ try{
         }
         expected_routes = {
             ("POST", "/pair"),
+            ("POST", "/pair/recover"),
+            ("POST", "/pair/replace"),
             ("POST", "/pair/new"),
             ("POST", "/api/devices/pair"),
             ("DELETE", "/api/devices/<device_id>"),
@@ -2016,6 +2019,8 @@ try{
         self.assertEqual(unsafe_routes, expected_routes)
         concrete_routes = [
             ("POST", "/pair"),
+            ("POST", "/pair/recover"),
+            ("POST", "/pair/replace"),
             ("POST", "/pair/new"),
             ("POST", "/api/devices/pair"),
             ("DELETE", "/api/devices/not-a-device"),
@@ -2311,7 +2316,7 @@ console.log('UNPAIR_SUCCESS_CALLER_PASS');
         and os.access(os.environ.get("MATRIX_CHROMIUM", ""), os.X_OK),
         "MATRIX_CHROMIUM browser is required",
     )
-    def test_committed_logout_followed_to_forbidden_pair_page_uses_authoritative_redirect(self):
+    def test_committed_logout_followed_to_recovery_pair_page_uses_authoritative_redirect(self):
         testing_pin_checks = 0
         def testing_pin_available():
             nonlocal testing_pin_checks
@@ -2319,6 +2324,7 @@ console.log('UNPAIR_SUCCESS_CALLER_PASS');
             return testing_pin_checks == 1
         self.pairing.has_testing_pin.side_effect = testing_pin_available
         self.pairing.active_pin.return_value = None
+        self.controller.frame_png.side_effect = lambda: (io.BytesIO(b"\x89PNG\r\n\x1a\n"), "test-frame")
         remaining = self.device_store.add("Remaining device", max_devices=4)
         self.pairing.verify.return_value = True
         probe = r"""
@@ -2343,8 +2349,8 @@ try{
  await waitFor(`sessionStorage.getItem('logoutResponse')`);
  await sleep(250);
  const report=await evaluate(`({path:location.pathname,body:document.body.innerText,stopped:sessionStorage.getItem('logoutStopped')==='1',response:JSON.parse(sessionStorage.getItem('logoutResponse'))})`);
- if(report.response.status!==403||!report.response.redirected||!report.response.url.endsWith('/pair'))throw Error('real followed logout response mismatch: '+JSON.stringify(report));
- if(report.path!=='/pair'||!report.stopped||!report.body.includes('Pairing another browser must be started'))throw Error('committed redirect was reported as failure: '+JSON.stringify(report));
+ if(report.response.status!==200||!report.response.redirected||!report.response.url.endsWith('/pair'))throw Error('real followed logout response mismatch: '+JSON.stringify(report));
+ if(report.path!=='/pair'||!report.stopped||!report.body.includes('Recover access')||!report.body.includes('SHOW RECOVERY PIN'))throw Error('committed redirect did not reach recovery: '+JSON.stringify(report));
  console.log(JSON.stringify(report));
 }finally{socket.close()}
 """
@@ -2352,7 +2358,7 @@ try{
 
         self.assertEqual(report["path"], "/pair")
         self.assertTrue(report["stopped"])
-        self.assertEqual(report["response"]["status"], 403)
+        self.assertEqual(report["response"]["status"], 200)
         self.assertTrue(report["response"]["redirected"])
         self.assertTrue(self.device_store.contains(remaining["id"]))
         self.assertEqual(len(self.device_store.list()), 1)
@@ -2388,6 +2394,70 @@ console.log('UNPAIR_NETWORK_PASS');
         and os.access(os.environ.get("MATRIX_CHROMIUM", ""), os.X_OK),
         "MATRIX_CHROMIUM browser is required",
     )
+    def test_mobile_chromium_recovers_at_capacity_without_existing_session(self):
+        self.store.update({"pairing": {"max_devices": 2}})
+        primary = self.device_store.add("Primary browser", max_devices=2)
+        stale = self.device_store.add("Returning phone", max_devices=2)
+        self.pairing.active_pin.return_value = None
+        self.pairing.issue_pin.return_value = "123456"
+        self.pairing.remaining_seconds.return_value = 600
+        self.pairing.verify.return_value = True
+        self.controller.frame_png.return_value = (io.BytesIO(b"\x89PNG\r\n\x1a\n"), "test-frame")
+        probe = r"""
+const debugPort=process.argv[1],appPort=process.argv[2],sleep=ms=>new Promise(r=>setTimeout(r,ms));let endpoint;
+for(let attempt=0;attempt<50;attempt++){try{endpoint=await fetch(`http://127.0.0.1:${debugPort}/json/new`,{method:'PUT'}).then(r=>r.json());break}catch(_){await sleep(100)}}
+if(!endpoint)throw Error('CDP unavailable');
+const socket=new WebSocket(endpoint.webSocketDebuggerUrl),pending=new Map();let id=0;
+socket.onmessage=e=>{const m=JSON.parse(e.data);if(m.id&&pending.has(m.id)){const p=pending.get(m.id);pending.delete(m.id);m.error?p.reject(Error(JSON.stringify(m.error))):p.resolve(m.result)}};
+await new Promise((resolve,reject)=>{socket.onopen=resolve;socket.onerror=reject});
+const send=(method,params={})=>new Promise((resolve,reject)=>{const request=++id;pending.set(request,{resolve,reject});socket.send(JSON.stringify({id:request,method,params}))});
+const evaluate=async(expression,awaitPromise=false)=>{const result=await send('Runtime.evaluate',{expression,returnByValue:true,awaitPromise});if(result.exceptionDetails)throw Error(JSON.stringify(result.exceptionDetails));return result.result.value};
+const waitFor=async(expression,timeout=5000)=>{const end=Date.now()+timeout;while(Date.now()<end){try{const value=await evaluate(expression);if(value)return value}catch(_){}await sleep(25)}throw Error('timeout: '+expression)};
+const touch=async selector=>{const point=await evaluate(`(()=>{const e=document.querySelector(${JSON.stringify(selector)});if(!e)throw Error('missing touch target');const r=e.getBoundingClientRect();return{x:r.left+r.width/2,y:r.top+r.height/2,width:r.width,height:r.height}})()`);if(point.width<44||point.height<44)throw Error('undersized touch target: '+JSON.stringify(point));await send('Input.dispatchTouchEvent',{type:'touchStart',touchPoints:[{x:point.x,y:point.y}]});await send('Input.dispatchTouchEvent',{type:'touchEnd',touchPoints:[]})};
+const geometry=()=>evaluate(`({clientWidth:document.documentElement.clientWidth,scrollWidth:document.documentElement.scrollWidth,main:(()=>{const r=document.querySelector('main')?.getBoundingClientRect();return r?{left:r.left,right:r.right,width:r.width}:null})()})`);
+try{
+ await send('Runtime.enable');await send('Page.enable');
+ await send('Emulation.setDeviceMetricsOverride',{width:320,height:568,deviceScaleFactor:2,mobile:true,screenWidth:320,screenHeight:568});
+ await send('Emulation.setTouchEmulationEnabled',{enabled:true,maxTouchPoints:1});
+ await send('Page.navigate',{url:`http://127.0.0.1:${appPort}/pair`});
+ await waitFor(`document.querySelector('form[action="/pair/recover"]')&&document.readyState==='complete'`);
+ const recoveryGeometry=await geometry();
+ await touch('form[action="/pair/recover"] button');
+ await waitFor(`document.querySelector('input[name="pin"]')`);
+ await evaluate(`(()=>{const name=document.querySelector('input[name="device_name"]'),pin=document.querySelector('input[name="pin"]');name.value='Returning phone';pin.value='123456';name.dispatchEvent(new Event('input',{bubbles:true}));pin.dispatchEvent(new Event('input',{bubbles:true}));return true})()`);
+ await touch('form[action="/pair"] button');
+ await waitFor(`document.querySelector('h2')?.textContent.includes('Choose a pairing to replace')`);
+ const replacementGeometry=await geometry();
+ await evaluate(`(()=>{const form=[...document.querySelectorAll('form[action="/pair/replace"]')].find(item=>item.textContent.includes('Returning phone'));if(!form)throw Error('replacement target missing');form.querySelector('button').dataset.touchReplacement='';return true})()`);
+ await touch('[data-touch-replacement]');
+ await waitFor(`location.pathname==='/'&&document.readyState==='complete'`);
+ const devices=await evaluate(`fetch('/api/devices').then(async response=>({status:response.status,payload:await response.json()}))`,true);
+ console.log(JSON.stringify({recoveryGeometry,replacementGeometry,devices,path:await evaluate('location.pathname')}));
+}finally{socket.close()}
+"""
+        report = self.run_live_chromium_probe(probe)
+
+        for geometry in (report["recoveryGeometry"], report["replacementGeometry"]):
+            self.assertLessEqual(geometry["scrollWidth"], geometry["clientWidth"] + 1, geometry)
+            self.assertGreaterEqual(geometry["main"]["left"], 0, geometry)
+            self.assertLessEqual(geometry["main"]["right"], geometry["clientWidth"], geometry)
+        self.assertEqual(report["path"], "/")
+        self.assertEqual(report["devices"]["status"], 200)
+        devices = report["devices"]["payload"]["devices"]
+        self.assertEqual(len(devices), 2)
+        self.assertEqual(devices[0]["id"], primary["id"])
+        self.assertEqual(devices[1]["name"], "Returning phone")
+        self.assertNotEqual(devices[1]["id"], stale["id"])
+        self.controller.show_pairing_pin.assert_called_once_with("123456", ttl_seconds=600)
+        self.controller.cancel_device_drafts_for_device.assert_called_once_with(stale["id"])
+
+    @unittest.skipUnless(shutil.which("node"), "Node.js is required")
+    @unittest.skipUnless(
+        os.environ.get("MATRIX_CHROMIUM")
+        and Path(os.environ.get("MATRIX_CHROMIUM", "")).is_file()
+        and os.access(os.environ.get("MATRIX_CHROMIUM", ""), os.X_OK),
+        "MATRIX_CHROMIUM browser is required",
+    )
     def test_pair_another_device_keeps_authoritative_202_explanation_visible(self):
         self.pairing.verify.return_value = True
         self.pairing.issue_pin.return_value = "[REDACTED]"
@@ -2406,15 +2476,17 @@ console.log('UNPAIR_NETWORK_PASS');
         and os.access(os.environ.get("MATRIX_CHROMIUM", ""), os.X_OK),
         "MATRIX_CHROMIUM browser is required",
     )
-    def test_pair_another_device_keeps_authoritative_409_explanation_visible(self):
+    def test_pair_another_device_at_limit_keeps_replacement_explanation_visible(self):
         self.pairing.verify.return_value = True
         self.store.update({"pairing": {"max_devices": 1}})
 
-        report = self.run_pair_action_chromium_probe(409, "paired-device limit has been reached")
+        report = self.run_pair_action_chromium_probe(
+            202, "new device will choose an existing pairing to replace",
+        )
 
-        self.assertEqual(report["response"]["status"], 409)
-        self.assertIn("paired-device limit has been reached", report["body"])
-        self.assertEqual(report["errorRole"], "alert")
+        self.assertEqual(report["response"]["status"], 202)
+        self.assertIn("new device will choose an existing pairing to replace", report["body"])
+        self.assertEqual(report["errorRole"], None)
 
     @unittest.skipUnless(shutil.which("node"), "Node.js is required")
     def test_pair_another_device_network_rejection_is_announced_and_focusable(self):
@@ -5528,7 +5600,11 @@ globalThis.document=document;globalThis.window=window;globalThis.fetch=fetch;
         self.assertFalse(config_thread.is_alive())
         self.assertFalse(pair_thread.is_alive())
         self.assertEqual(results["config"].status_code, 200)
-        self.assertEqual(results["pair"].status_code, 409)
+        self.assertEqual(results["pair"].status_code, 200)
+        self.assertIn(
+            "Choose a pairing to replace",
+            results["pair"].get_data(as_text=True),
+        )
         self.assertEqual(self.store.get()["pairing"]["max_devices"], 1)
         self.assertEqual(len(self.device_store.list()), 1)
 
@@ -5606,7 +5682,7 @@ globalThis.document=document;globalThis.window=window;globalThis.fetch=fetch;
         )
         self.assertIn(warning, pairing_page.get_data(as_text=True))
 
-    def test_removed_current_device_warning_survives_when_another_device_remains(self):
+    def test_removed_current_device_warning_survives_on_recovery_page_when_another_remains(self):
         self.pair_browser()
         current_id = self.device_store.list()[0]["id"]
         second = self.device_store.add("Second browser", max_devices=4)
@@ -5621,8 +5697,9 @@ globalThis.document=document;globalThis.window=window;globalThis.fetch=fetch;
         pairing_page = self.client.get(
             "/pair", query_string={"warning": "device-removal-durability"}
         )
-        self.assertEqual(pairing_page.status_code, 403)
+        self.assertEqual(pairing_page.status_code, 200)
         self.assertIn(warning, pairing_page.get_data(as_text=True))
+        self.assertIn("Recover access", pairing_page.get_data(as_text=True))
 
     def test_pairing_page_does_not_render_arbitrary_warning_query_text(self):
         response = self.client.get(
@@ -5979,16 +6056,318 @@ globalThis.document=document;globalThis.window=window;globalThis.fetch=fetch;
         self.assertEqual(response.status_code, 401)
         self.assertEqual(response.get_json()["error"], "Pairing session expired.")
 
-    def test_unpaired_client_cannot_interrupt_an_already_paired_display(self):
+    def test_unpaired_client_can_request_physical_recovery_without_get_side_effects(self):
         self.device_store.add("Existing browser", max_devices=4)
         self.pairing.active_pin.return_value = None
+        self.app.config["PAIRING_RECOVERY_CLOCK"] = lambda: 1_000
 
         response = self.client.get("/pair")
+        body = response.get_data(as_text=True)
 
-        self.assertEqual(response.status_code, 403)
-        self.assertIn("paired device", response.get_data(as_text=True).lower())
+        self.assertEqual(response.status_code, 200)
+        self.assertIn("No longer have access to a paired device?", body)
+        self.assertIn('action="/pair/recover"', body)
+        self.assertNotIn('name="pin"', body)
         self.pairing.issue_pin.assert_not_called()
         self.controller.show_pairing_pin.assert_not_called()
+        with self.client.session_transaction() as browser_session:
+            recovery_start = browser_session["pairing_recovery_start"]
+        self.assertEqual(recovery_start["expires_at"], 1_300)
+        self.assertEqual(recovery_start["generation"], "generation-one")
+        self.assertRegex(recovery_start["nonce"], r"^[A-Za-z0-9_-]{20,}$")
+
+    def test_unpaired_recovery_post_prompts_physical_pin_at_capacity(self):
+        self.store.update({"pairing": {"max_devices": 1}})
+        existing = self.device_store.add("Existing browser", max_devices=1)
+        self.pairing.active_pin.return_value = None
+        self.pairing.issue_pin.return_value = "[REDACTED]"
+        self.pairing.remaining_seconds.return_value = 600
+        self.app.config["PAIRING_RECOVERY_CLOCK"] = lambda: 1_000
+        prompt = self.client.get("/pair")
+        self.assertEqual(prompt.status_code, 200)
+        with self.client.session_transaction() as browser_session:
+            nonce = browser_session["pairing_recovery_start"]["nonce"]
+
+        response = self.client.post(
+            "/pair/recover", data={"recovery_start_nonce": nonce},
+        )
+
+        body = response.get_data(as_text=True)
+        self.assertEqual(response.status_code, 202)
+        self.assertIn('name="pin"', body)
+        self.assertIn("enter the PIN shown on the physical Matrix", body)
+        self.assertIn("choose an existing pairing to replace", body)
+        self.assertNotIn("[REDACTED]", body)
+        self.assertEqual(self.device_store.list(), [existing])
+        self.pairing.issue_pin.assert_called_once_with()
+        self.controller.show_pairing_pin.assert_called_once_with("[REDACTED]", ttl_seconds=600)
+        with self.client.session_transaction() as browser_session:
+            self.assertNotIn("pairing_recovery_start", browser_session)
+
+    def test_expired_unpaired_recovery_intent_cannot_prompt_a_pin(self):
+        self.device_store.add("Existing browser", max_devices=4)
+        self.pairing.active_pin.return_value = None
+        clock = {"now": 1_000}
+        self.app.config["PAIRING_RECOVERY_CLOCK"] = lambda: clock["now"]
+        prompt = self.client.get("/pair")
+        self.assertEqual(prompt.status_code, 200)
+        with self.client.session_transaction() as browser_session:
+            nonce = browser_session["pairing_recovery_start"]["nonce"]
+        clock["now"] = 1_300
+
+        response = self.client.post(
+            "/pair/recover", data={"recovery_start_nonce": nonce},
+        )
+
+        self.assertEqual(response.status_code, 403)
+        self.assertIn("invalid or expired", response.get_data(as_text=True))
+        self.assertIn("SHOW RECOVERY PIN", response.get_data(as_text=True))
+        self.pairing.issue_pin.assert_not_called()
+        self.controller.show_pairing_pin.assert_not_called()
+        with self.client.session_transaction() as browser_session:
+            self.assertIn("pairing_recovery_start", browser_session)
+
+    def test_wrong_generation_recovery_intent_cannot_prompt_a_pin(self):
+        self.device_store.add("Existing browser", max_devices=4)
+        self.pairing.active_pin.return_value = None
+        self.app.config["PAIRING_RECOVERY_CLOCK"] = lambda: 1_000
+        self.assertEqual(self.client.get("/pair").status_code, 200)
+        with self.client.session_transaction() as browser_session:
+            recovery_start = dict(browser_session["pairing_recovery_start"])
+            recovery_start["generation"] = "previous-generation"
+            browser_session["pairing_recovery_start"] = recovery_start
+            nonce = recovery_start["nonce"]
+
+        response = self.client.post(
+            "/pair/recover", data={"recovery_start_nonce": nonce},
+        )
+
+        self.assertEqual(response.status_code, 403)
+        self.assertIn("SHOW RECOVERY PIN", response.get_data(as_text=True))
+        self.pairing.issue_pin.assert_not_called()
+        self.controller.show_pairing_pin.assert_not_called()
+        with self.client.session_transaction() as browser_session:
+            self.assertIn("pairing_recovery_start", browser_session)
+
+    def test_parallel_recovery_starts_reuse_the_active_physical_pin(self):
+        self.device_store.add("Existing browser", max_devices=4)
+        clients = [self.app.test_client(), self.app.test_client()]
+        self.app.config["PAIRING_RECOVERY_CLOCK"] = lambda: 1_000
+        self.pairing.active_pin.return_value = None
+        nonces = []
+        for client in clients:
+            self.assertEqual(client.get("/pair").status_code, 200)
+            with client.session_transaction() as browser_session:
+                nonces.append(browser_session["pairing_recovery_start"]["nonce"])
+
+        state = {"pin": None, "issued": 0}
+        state_lock = threading.Lock()
+        simultaneous_reads = threading.Barrier(2)
+
+        def active_pin():
+            with state_lock:
+                observed = state["pin"]
+            try:
+                simultaneous_reads.wait(timeout=.2)
+            except threading.BrokenBarrierError:
+                pass
+            return observed
+
+        def issue_pin():
+            with state_lock:
+                state["issued"] += 1
+                state["pin"] = f"{state['issued']:06d}"
+                return state["pin"]
+
+        self.pairing.active_pin.side_effect = active_pin
+        self.pairing.issue_pin.side_effect = issue_pin
+        self.pairing.remaining_seconds.return_value = 600
+        responses = [None, None]
+
+        def recover(index):
+            responses[index] = clients[index].post(
+                "/pair/recover", data={"recovery_start_nonce": nonces[index]},
+            )
+
+        threads = [threading.Thread(target=recover, args=(index,)) for index in range(2)]
+        for thread in threads:
+            thread.start()
+        for thread in threads:
+            thread.join(timeout=2)
+
+        self.assertTrue(all(not thread.is_alive() for thread in threads))
+        status_codes = []
+        for response in responses:
+            if response is None:
+                self.fail("recovery request thread did not publish a response")
+            status_codes.append(response.status_code)
+        self.assertEqual(status_codes, [202, 202])
+        self.assertEqual(state["issued"], 1)
+        self.assertEqual(self.controller.show_pairing_pin.call_count, 2)
+        self.controller.show_pairing_pin.assert_called_with("000001", ttl_seconds=600)
+
+    def test_recovery_and_paired_pairing_starts_cannot_display_a_stale_pin(self):
+        self.store.update({"pairing": {"max_devices": 1}})
+        existing = self.device_store.add("Existing browser", max_devices=1)
+        recovery_client = self.app.test_client()
+        paired_client = self.app.test_client()
+        with paired_client.session_transaction() as paired_session:
+            paired_session.update({
+                "paired": True,
+                "generation": "generation-one",
+                "device_id": existing["id"],
+            })
+        self.pairing.active_pin.return_value = None
+        self.app.config["PAIRING_RECOVERY_CLOCK"] = lambda: 1_000
+        self.assertEqual(recovery_client.get("/pair").status_code, 200)
+        with recovery_client.session_transaction() as recovery_session:
+            nonce = recovery_session["pairing_recovery_start"]["nonce"]
+
+        state = {"active": None, "issued": 0, "displayed": []}
+        recovery_issued = threading.Event()
+        additional_shown = threading.Event()
+
+        def issue_pin():
+            state["issued"] += 1
+            state["active"] = f"{state['issued']:06d}"
+            if state["issued"] == 1:
+                recovery_issued.set()
+            return state["active"]
+
+        def show_pin(pin, *, ttl_seconds):
+            self.assertEqual(ttl_seconds, 600)
+            if pin == "000001":
+                additional_shown.wait(timeout=.2)
+            state["displayed"].append(pin)
+            if pin == "000002":
+                additional_shown.set()
+
+        self.pairing.issue_pin.side_effect = issue_pin
+        self.pairing.remaining_seconds.return_value = 600
+        self.controller.show_pairing_pin.side_effect = show_pin
+        responses = {}
+
+        recovery_thread = threading.Thread(target=lambda: responses.setdefault(
+            "recovery",
+            recovery_client.post(
+                "/pair/recover", data={"recovery_start_nonce": nonce},
+            ),
+        ))
+        recovery_thread.start()
+        self.assertTrue(recovery_issued.wait(timeout=1))
+        additional_thread = threading.Thread(target=lambda: responses.setdefault(
+            "additional",
+            self.paired_request("POST", "/api/devices/pair", client=paired_client),
+        ))
+        additional_thread.start()
+        recovery_thread.join(timeout=2)
+        additional_thread.join(timeout=2)
+
+        self.assertFalse(recovery_thread.is_alive())
+        self.assertFalse(additional_thread.is_alive())
+        self.assertEqual(responses["recovery"].status_code, 202)
+        self.assertEqual(responses["additional"].status_code, 202)
+        self.assertEqual(state["issued"], 2)
+        self.assertEqual(state["displayed"][-1], state["active"])
+
+    def test_pair_page_and_paired_pairing_start_cannot_display_a_stale_pin(self):
+        existing = self.device_store.add("Existing browser", max_devices=4)
+        unpaired_client = self.app.test_client()
+        paired_client = self.app.test_client()
+        with paired_client.session_transaction() as paired_session:
+            paired_session.update({
+                "paired": True,
+                "generation": "generation-one",
+                "device_id": existing["id"],
+            })
+
+        state = {"active": "000001", "displayed": []}
+        active_read = threading.Event()
+        additional_shown = threading.Event()
+
+        def active_pin():
+            active_read.set()
+            return state["active"]
+
+        def issue_pin():
+            state["active"] = "000002"
+            return state["active"]
+
+        def show_pin(pin, *, ttl_seconds):
+            self.assertEqual(ttl_seconds, 600)
+            if pin == "000001":
+                additional_shown.wait(timeout=.2)
+            state["displayed"].append(pin)
+            if pin == "000002":
+                additional_shown.set()
+
+        self.pairing.active_pin.side_effect = active_pin
+        self.pairing.issue_pin.side_effect = issue_pin
+        self.pairing.remaining_seconds.return_value = 600
+        self.controller.show_pairing_pin.side_effect = show_pin
+        responses = {}
+
+        page_thread = threading.Thread(target=lambda: responses.setdefault(
+            "page", unpaired_client.get("/pair"),
+        ))
+        page_thread.start()
+        self.assertTrue(active_read.wait(timeout=1))
+        additional_thread = threading.Thread(target=lambda: responses.setdefault(
+            "additional",
+            self.paired_request("POST", "/api/devices/pair", client=paired_client),
+        ))
+        additional_thread.start()
+        page_thread.join(timeout=2)
+        additional_thread.join(timeout=2)
+
+        self.assertFalse(page_thread.is_alive())
+        self.assertFalse(additional_thread.is_alive())
+        self.assertEqual(responses["page"].status_code, 200)
+        self.assertEqual(responses["additional"].status_code, 202)
+        self.assertEqual(state["displayed"][-1], state["active"])
+
+    def test_pair_submission_cannot_consume_a_pin_while_it_is_being_displayed(self):
+        page_client = self.app.test_client()
+        submit_client = self.app.test_client()
+        self.pairing.active_pin.return_value = "123456"
+        self.pairing.remaining_seconds.return_value = 600
+        display_entered = threading.Event()
+        release_display = threading.Event()
+        verify_entered = threading.Event()
+
+        def show_pin(_pin, *, ttl_seconds):
+            self.assertEqual(ttl_seconds, 600)
+            display_entered.set()
+            release_display.wait(timeout=1)
+
+        def verify_pin(_pin):
+            verify_entered.set()
+            return True
+
+        self.controller.show_pairing_pin.side_effect = show_pin
+        self.pairing.verify.side_effect = verify_pin
+        responses = {}
+        page_thread = threading.Thread(target=lambda: responses.setdefault(
+            "page", page_client.get("/pair"),
+        ))
+        page_thread.start()
+        self.assertTrue(display_entered.wait(timeout=1))
+        submit_thread = threading.Thread(target=lambda: responses.setdefault(
+            "submit", submit_client.post(
+                "/pair", data={"pin": "123456", "device_name": "New browser"},
+            ),
+        ))
+        submit_thread.start()
+        consumed_during_display = verify_entered.wait(timeout=.2)
+        release_display.set()
+        page_thread.join(timeout=2)
+        submit_thread.join(timeout=2)
+
+        self.assertFalse(page_thread.is_alive())
+        self.assertFalse(submit_thread.is_alive())
+        self.assertFalse(consumed_during_display)
+        self.assertEqual(responses["page"].status_code, 200)
+        self.assertEqual(responses["submit"].status_code, 302)
 
     def test_paired_login_screen_offers_an_additional_device_button(self):
         self.pair_browser()
@@ -6012,16 +6391,522 @@ globalThis.document=document;globalThis.window=window;globalThis.fetch=fetch;
         self.controller.show_pairing_pin.assert_called_with("[REDACTED]", ttl_seconds=600)
         self.assertNotIn("[REDACTED]", response.get_data(as_text=True))
 
-    def test_additional_pairing_is_blocked_at_configured_device_limit(self):
+    def test_additional_pairing_at_limit_issues_pin_for_explicit_replacement(self):
         self.store.update({"pairing": {"max_devices": 1}})
         self.pair_browser()
         self.pairing.issue_pin.reset_mock()
+        self.pairing.issue_pin.return_value = "[REDACTED]"
+        self.pairing.remaining_seconds.return_value = 600
 
         response = self.paired_request("POST", "/api/devices/pair")
 
+        self.assertEqual(response.status_code, 202)
+        self.assertEqual(response.get_json(), {
+            "pairing": "ready",
+            "replacement_required": True,
+        })
+        self.pairing.issue_pin.assert_called_once_with()
+        self.controller.show_pairing_pin.assert_called_with("[REDACTED]", ttl_seconds=600)
+
+    def test_full_registry_valid_pin_grants_expiring_replacement_choice_without_mutation(self):
+        self.store.update({"pairing": {"max_devices": 2}})
+        with patch("pairing.time.time", side_effect=[0, 86_400]):
+            first = self.device_store.add("Primary browser", max_devices=2)
+            stale = self.device_store.add("Returning phone", max_devices=2)
+        before = self.device_store.list()
+        self.pairing.verify.return_value = True
+        self.app.config["PAIRING_RECOVERY_CLOCK"] = lambda: 1_000
+
+        response = self.client.post(
+            "/pair", data={"pin": "123456", "device_name": "Returning phone"},
+        )
+
+        body = response.get_data(as_text=True)
+        self.assertEqual(response.status_code, 200)
+        self.pairing.verify.assert_called_once_with("123456")
+        self.assertEqual(self.device_store.list(), before)
+        self.assertIn("Choose a pairing to replace", body)
+        self.assertIn("Primary browser", body)
+        self.assertIn("Returning phone", body)
+        self.assertIn("1970-01-01 00:00 UTC", body)
+        self.assertIn("1970-01-02 00:00 UTC", body)
+        self.assertIn('action="/pair/replace"', body)
+        self.assertIn(
+            'aria-label="Replace pairing Primary browser, paired 1970-01-01 00:00 UTC, choice 1; signs out this old browser"',
+            body,
+        )
+        self.assertIn(
+            'aria-label="Replace pairing Returning phone, paired 1970-01-02 00:00 UTC, choice 2; signs out this old browser"',
+            body,
+        )
+        self.assertIn(f'value="{first["id"]}"', body)
+        self.assertIn(f'value="{stale["id"]}"', body)
+        with self.client.session_transaction() as browser_session:
+            recovery = browser_session["pairing_recovery"]
+        self.assertEqual(recovery["device_name"], "Returning phone")
+        self.assertEqual(recovery["generation"], "generation-one")
+        self.assertEqual(recovery["expires_at"], 1_300)
+        self.assertRegex(recovery["registry_digest"], r"^[0-9a-f]{64}$")
+        self.assertRegex(recovery["nonce"], r"^[A-Za-z0-9_-]{20,}$")
+
+    def test_replacement_choice_renders_schema_valid_extreme_timestamp_safely(self):
+        self.store.update({"pairing": {"max_devices": 2}})
+        self.device_store.add("Primary browser", max_devices=2)
+        self.device_store.add("Returning phone", max_devices=2)
+        with self.device_store.transaction():
+            self.device_store._devices[1]["paired_at"] = 10 ** 20
+        self.pairing.verify.return_value = True
+
+        response = self.client.post(
+            "/pair", data={"pin": "123456", "device_name": "Returning phone"},
+        )
+
+        self.assertEqual(response.status_code, 200)
+        self.assertIn("date unavailable", response.get_data(as_text=True))
+        self.assertIn("Choose a pairing to replace", response.get_data(as_text=True))
+
+    def test_replacement_choice_survives_pairing_display_cleanup_failure(self):
+        self.store.update({"pairing": {"max_devices": 1}})
+        self.device_store.add("Primary browser", max_devices=1)
+        self.pairing.verify.return_value = True
+        self.controller.end_pairing.side_effect = RuntimeError("display cleanup unavailable")
+
+        response = self.client.post(
+            "/pair", data={"pin": "123456", "device_name": "Returning phone"},
+        )
+
+        self.assertEqual(response.status_code, 503)
+        self.assertIn("Choose a pairing to replace", response.get_data(as_text=True))
+        self.assertIn("display cleanup could not be completed", response.get_data(as_text=True))
+        self.controller.start.assert_called_once_with()
+        with self.client.session_transaction() as browser_session:
+            self.assertIn("pairing_recovery", browser_session)
+
+    def test_committed_new_pairing_survives_pairing_display_cleanup_failure(self):
+        self.pairing.verify.return_value = True
+        self.controller.end_pairing.side_effect = RuntimeError("display cleanup unavailable")
+
+        response = self.client.post(
+            "/pair", data={"pin": "123456", "device_name": "New browser"},
+        )
+
+        self.assertEqual(response.status_code, 503)
+        self.assertIn("already paired", response.get_data(as_text=True))
+        self.assertIn("display cleanup could not be completed", response.get_data(as_text=True))
+        self.assertEqual(len(self.device_store.list()), 1)
+        self.controller.start.assert_called_once_with()
+        with self.client.session_transaction() as browser_session:
+            self.assertTrue(browser_session["paired"])
+            self.assertEqual(browser_session["device_id"], self.device_store.list()[0]["id"])
+
+    def test_duplicate_device_names_have_unique_descriptive_replacement_actions(self):
+        self.store.update({"pairing": {"max_devices": 2}})
+        with patch(
+            "pairing.secrets.token_urlsafe",
+            side_effect=["A" * 26 + "ABCDEF", "B" * 26 + "ABCDEF"],
+        ):
+            self.device_store.add("Phone", max_devices=2)
+            self.device_store.add("Phone", max_devices=2)
+        self.pairing.verify.return_value = True
+
+        response = self.client.post(
+            "/pair", data={"pin": "123456", "device_name": "Phone"},
+        )
+
+        labels = re.findall(r'aria-label="([^"]+)"', response.get_data(as_text=True))
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(len(labels), 2)
+        self.assertEqual(len(set(labels)), 2)
+        self.assertTrue(all("Phone" in label for label in labels))
+        self.assertTrue(all("paired" in label for label in labels))
+        self.assertTrue(all("signs out this old browser" in label for label in labels))
+
+    def test_full_registry_wrong_pin_reveals_no_replacement_metadata(self):
+        self.store.update({"pairing": {"max_devices": 2}})
+        self.device_store.add("Primary browser", max_devices=2)
+        self.device_store.add("Private tablet name", max_devices=2)
+        before = self.device_store.list()
+        self.pairing.verify.return_value = False
+        self.pairing.is_locked.return_value = False
+
+        response = self.client.post(
+            "/pair", data={"pin": "000000", "device_name": "Returning phone"},
+        )
+
+        body = response.get_data(as_text=True)
+        self.assertEqual(response.status_code, 401)
+        self.pairing.verify.assert_called_once_with("000000")
+        self.assertEqual(self.device_store.list(), before)
+        self.assertNotIn("Primary browser", body)
+        self.assertNotIn("Private tablet name", body)
+        self.assertNotIn("Choose a pairing to replace", body)
+        with self.client.session_transaction() as browser_session:
+            self.assertNotIn("pairing_recovery", browser_session)
+
+    def test_malformed_replacement_authorization_fails_closed_without_mutation(self):
+        self.store.update({"pairing": {"max_devices": 2}})
+        self.device_store.add("Primary browser", max_devices=2)
+        stale = self.device_store.add("Returning phone", max_devices=2)
+        before = self.device_store.list()
+        self.app.config["PAIRING_RECOVERY_CLOCK"] = lambda: 1_000
+        malformed = {
+            "device_name": "Returning phone",
+            "expires_at": 1_300,
+            "generation": "generation-one",
+            "registry_digest": "0" * 64,
+        }
+        with self.client.session_transaction() as browser_session:
+            browser_session["pairing_recovery"] = malformed
+
+        response = self.client.post(
+            "/pair/replace",
+            data={"device_id": stale["id"], "recovery_nonce": "A" * 32},
+        )
+
+        self.assertEqual(response.status_code, 403)
+        self.assertIn("invalid or expired", response.get_data(as_text=True))
+        self.assertIn("SHOW RECOVERY PIN", response.get_data(as_text=True))
+        self.assertEqual(self.device_store.list(), before)
+        self.controller.cancel_device_drafts_for_device.assert_not_called()
+        with self.client.session_transaction() as browser_session:
+            self.assertNotIn("pairing_recovery", browser_session)
+
+    def test_expired_replacement_authorization_cannot_mutate_registry(self):
+        self.store.update({"pairing": {"max_devices": 2}})
+        self.device_store.add("Primary browser", max_devices=2)
+        stale = self.device_store.add("Returning phone", max_devices=2)
+        before = self.device_store.list()
+        self.pairing.verify.return_value = True
+        clock = {"now": 1_000}
+        self.app.config["PAIRING_RECOVERY_CLOCK"] = lambda: clock["now"]
+        self.assertEqual(self.client.post(
+            "/pair", data={"pin": "123456", "device_name": "Returning phone"},
+        ).status_code, 200)
+        with self.client.session_transaction() as browser_session:
+            nonce = browser_session["pairing_recovery"]["nonce"]
+        clock["now"] = 1_300
+
+        response = self.client.post(
+            "/pair/replace",
+            data={"device_id": stale["id"], "recovery_nonce": nonce},
+        )
+
+        self.assertEqual(response.status_code, 403)
+        self.assertIn("invalid or expired", response.get_data(as_text=True))
+        self.assertIn("SHOW RECOVERY PIN", response.get_data(as_text=True))
+        self.assertEqual(self.device_store.list(), before)
+        self.controller.cancel_device_drafts_for_device.assert_not_called()
+        with self.client.session_transaction() as browser_session:
+            self.assertNotIn("pairing_recovery", browser_session)
+
+    def test_wrong_generation_replacement_authorization_cannot_mutate_registry(self):
+        self.store.update({"pairing": {"max_devices": 2}})
+        self.device_store.add("Primary browser", max_devices=2)
+        stale = self.device_store.add("Returning phone", max_devices=2)
+        before = self.device_store.list()
+        self.pairing.verify.return_value = True
+        self.app.config["PAIRING_RECOVERY_CLOCK"] = lambda: 1_000
+        self.assertEqual(self.client.post(
+            "/pair", data={"pin": "123456", "device_name": "Returning phone"},
+        ).status_code, 200)
+        with self.client.session_transaction() as browser_session:
+            recovery = dict(browser_session["pairing_recovery"])
+            recovery["generation"] = "previous-generation"
+            browser_session["pairing_recovery"] = recovery
+            nonce = recovery["nonce"]
+
+        response = self.client.post(
+            "/pair/replace",
+            data={"device_id": stale["id"], "recovery_nonce": nonce},
+        )
+
+        self.assertEqual(response.status_code, 403)
+        self.assertIn("SHOW RECOVERY PIN", response.get_data(as_text=True))
+        self.assertEqual(self.device_store.list(), before)
+        self.controller.cancel_device_drafts_for_device.assert_not_called()
+
+    def test_registry_drift_invalidates_replacement_without_deleting_any_device(self):
+        self.store.update({"pairing": {"max_devices": 2}})
+        primary = self.device_store.add("Primary browser", max_devices=2)
+        stale = self.device_store.add("Returning phone", max_devices=2)
+        self.pairing.verify.return_value = True
+        self.app.config["PAIRING_RECOVERY_CLOCK"] = lambda: 1_000
+        self.assertEqual(self.client.post(
+            "/pair", data={"pin": "123456", "device_name": "Returning phone"},
+        ).status_code, 200)
+        with self.client.session_transaction() as browser_session:
+            nonce = browser_session["pairing_recovery"]["nonce"]
+        self.assertTrue(self.device_store.remove(primary["id"]))
+        self.device_store.add("Concurrent tablet", max_devices=2)
+        changed = self.device_store.list()
+
+        response = self.client.post(
+            "/pair/replace",
+            data={"device_id": stale["id"], "recovery_nonce": nonce},
+        )
+
         self.assertEqual(response.status_code, 409)
-        self.assertIn("limit", response.get_json()["error"])
-        self.pairing.issue_pin.assert_not_called()
+        self.assertIn("paired-device list changed", response.get_data(as_text=True))
+        self.assertIn("SHOW RECOVERY PIN", response.get_data(as_text=True))
+        self.assertEqual(self.device_store.list(), changed)
+        self.controller.cancel_device_drafts_for_device.assert_not_called()
+        with self.client.session_transaction() as browser_session:
+            self.assertNotIn("pairing_recovery", browser_session)
+
+    def test_capacity_increase_invalidates_replacement_without_revoking_a_device(self):
+        self.store.update({"pairing": {"max_devices": 2}})
+        self.device_store.add("Primary browser", max_devices=2)
+        stale = self.device_store.add("Returning phone", max_devices=2)
+        before = self.device_store.list()
+        self.pairing.verify.return_value = True
+        self.app.config["PAIRING_RECOVERY_CLOCK"] = lambda: 1_000
+        self.assertEqual(self.client.post(
+            "/pair", data={"pin": "123456", "device_name": "Returning phone"},
+        ).status_code, 200)
+        with self.client.session_transaction() as browser_session:
+            nonce = browser_session["pairing_recovery"]["nonce"]
+        self.store.update({"pairing": {"max_devices": 3}})
+
+        response = self.client.post(
+            "/pair/replace",
+            data={"device_id": stale["id"], "recovery_nonce": nonce},
+        )
+
+        self.assertEqual(response.status_code, 409)
+        self.assertIn("no longer at its paired-device limit", response.get_data(as_text=True))
+        self.assertIn("SHOW RECOVERY PIN", response.get_data(as_text=True))
+        self.assertEqual(self.device_store.list(), before)
+        self.controller.cancel_device_drafts_for_device.assert_not_called()
+        with self.client.session_transaction() as browser_session:
+            self.assertNotIn("pairing_recovery", browser_session)
+            self.assertIn("pairing_recovery_start", browser_session)
+
+    def test_forged_replacement_target_cannot_mutate_registry(self):
+        self.store.update({"pairing": {"max_devices": 2}})
+        self.device_store.add("Primary browser", max_devices=2)
+        self.device_store.add("Returning phone", max_devices=2)
+        before = self.device_store.list()
+        self.pairing.verify.return_value = True
+        self.app.config["PAIRING_RECOVERY_CLOCK"] = lambda: 1_000
+        self.assertEqual(self.client.post(
+            "/pair", data={"pin": "123456", "device_name": "Returning phone"},
+        ).status_code, 200)
+        with self.client.session_transaction() as browser_session:
+            nonce = browser_session["pairing_recovery"]["nonce"]
+
+        response = self.client.post(
+            "/pair/replace",
+            data={"device_id": "A" * 32, "recovery_nonce": nonce},
+        )
+
+        self.assertEqual(response.status_code, 409)
+        self.assertIn("selected pairing no longer exists", response.get_data(as_text=True))
+        self.assertIn("SHOW RECOVERY PIN", response.get_data(as_text=True))
+        self.assertEqual(self.device_store.list(), before)
+        self.controller.cancel_device_drafts_for_device.assert_not_called()
+        with self.client.session_transaction() as browser_session:
+            self.assertNotIn("pairing_recovery", browser_session)
+
+    def test_authenticated_replacement_rotates_selected_id_and_preserves_other_sessions(self):
+        self.store.update({"pairing": {"max_devices": 2}})
+        primary = self.device_store.add("Primary browser", max_devices=2)
+        stale = self.device_store.add("Returning phone", max_devices=2)
+        unrelated_client = self.app.test_client()
+        stale_client = self.app.test_client()
+        for client, device in ((unrelated_client, primary), (stale_client, stale)):
+            with client.session_transaction() as browser_session:
+                browser_session.update({
+                    "paired": True,
+                    "generation": "generation-one",
+                    "device_id": device["id"],
+                })
+        self.pairing.verify.return_value = True
+        self.app.config["PAIRING_RECOVERY_CLOCK"] = lambda: 1_000
+        choice = self.client.post(
+            "/pair", data={"pin": "123456", "device_name": "Returning phone"},
+        )
+        self.assertEqual(choice.status_code, 200)
+        with self.client.session_transaction() as browser_session:
+            nonce = browser_session["pairing_recovery"]["nonce"]
+        self.controller.reset_mock()
+
+        response = self.client.post(
+            "/pair/replace",
+            data={"device_id": stale["id"], "recovery_nonce": nonce},
+        )
+
+        self.assertEqual(response.status_code, 302)
+        self.assertEqual(response.headers["Location"], "/")
+        devices = self.device_store.list()
+        self.assertEqual(len(devices), 2)
+        self.assertEqual(devices[0], primary)
+        replacement = devices[1]
+        self.assertEqual(replacement["name"], "Returning phone")
+        self.assertNotEqual(replacement["id"], stale["id"])
+        self.assertEqual(self.client.get("/").status_code, 200)
+        self.controller.cancel_device_drafts_for_device.assert_called_once_with(stale["id"])
+        self.controller.cancel_device_drafts_for_device.reset_mock()
+        self.assertEqual(stale_client.get("/api/status").status_code, 401)
+        self.controller.cancel_device_drafts_for_device.assert_called_once_with(stale["id"])
+        self.assertEqual(unrelated_client.get("/api/status").status_code, 200)
+        with self.client.session_transaction() as browser_session:
+            self.assertNotIn("pairing_recovery", browser_session)
+            self.assertEqual(browser_session["device_id"], replacement["id"])
+        self.controller.end_pairing.assert_called_once_with()
+        self.controller.start.assert_called_once_with()
+
+    def test_replayed_replacement_authorization_cannot_mutate_registry_twice(self):
+        self.store.update({"pairing": {"max_devices": 2}})
+        primary = self.device_store.add("Primary browser", max_devices=2)
+        stale = self.device_store.add("Returning phone", max_devices=2)
+        self.pairing.verify.return_value = True
+        self.app.config["PAIRING_RECOVERY_CLOCK"] = lambda: 1_000
+        self.assertEqual(self.client.post(
+            "/pair", data={"pin": "123456", "device_name": "Returning phone"},
+        ).status_code, 200)
+        with self.client.session_transaction() as browser_session:
+            recovery = dict(browser_session["pairing_recovery"])
+
+        replay_client = self.app.test_client()
+        with replay_client.session_transaction() as replay_session:
+            replay_session["pairing_recovery"] = recovery
+
+        first = self.client.post(
+            "/pair/replace",
+            data={"device_id": stale["id"], "recovery_nonce": recovery["nonce"]},
+        )
+        committed = self.device_store.list()
+        replay = replay_client.post(
+            "/pair/replace",
+            data={"device_id": stale["id"], "recovery_nonce": recovery["nonce"]},
+        )
+
+        self.assertEqual(first.status_code, 302)
+        self.assertEqual(replay.status_code, 409)
+        self.assertIn("paired-device list changed", replay.get_data(as_text=True))
+        self.assertEqual(self.device_store.list(), committed)
+        self.assertEqual(len(committed), 2)
+        self.assertEqual(committed[0], primary)
+        self.assertNotEqual(committed[1]["id"], stale["id"])
+        self.controller.cancel_device_drafts_for_device.assert_called_once_with(stale["id"])
+        with replay_client.session_transaction() as replay_session:
+            self.assertNotIn("pairing_recovery", replay_session)
+
+    def test_committed_replacement_with_uncertain_durability_pairs_browser_with_warning(self):
+        self.store.update({"pairing": {"max_devices": 2}})
+        primary = self.device_store.add("Primary browser", max_devices=2)
+        stale = self.device_store.add("Returning phone", max_devices=2)
+        self.pairing.verify.return_value = True
+        self.app.config["PAIRING_RECOVERY_CLOCK"] = lambda: 1_000
+        self.assertEqual(self.client.post(
+            "/pair", data={"pin": "123456", "device_name": "Returning phone"},
+        ).status_code, 200)
+        with self.client.session_transaction() as browser_session:
+            nonce = browser_session["pairing_recovery"]["nonce"]
+
+        with patch(
+            "pairing.os.fsync",
+            side_effect=[None, OSError("directory sync unavailable")],
+        ):
+            response = self.client.post(
+                "/pair/replace",
+                data={"device_id": stale["id"], "recovery_nonce": nonce},
+            )
+
+        self.assertEqual(response.status_code, 503)
+        self.assertIn("storage durability could not be confirmed", response.get_data(as_text=True))
+        devices = self.device_store.list()
+        self.assertEqual(devices[0], primary)
+        replacement = devices[1]
+        self.assertNotEqual(replacement["id"], stale["id"])
+        with self.client.session_transaction() as browser_session:
+            self.assertNotIn("pairing_recovery", browser_session)
+            self.assertEqual(browser_session["device_id"], replacement["id"])
+        self.controller.cancel_device_drafts_for_device.assert_called_once_with(stale["id"])
+
+    def test_replacement_does_not_clear_a_newer_active_pairing_pin(self):
+        self.store.update({"pairing": {"max_devices": 2}})
+        self.device_store.add("Primary browser", max_devices=2)
+        stale = self.device_store.add("Returning phone", max_devices=2)
+        self.pairing.verify.return_value = True
+        self.assertEqual(self.client.post(
+            "/pair", data={"pin": "123456", "device_name": "Returning phone"},
+        ).status_code, 200)
+        with self.client.session_transaction() as browser_session:
+            nonce = browser_session["pairing_recovery"]["nonce"]
+        self.controller.reset_mock()
+        self.pairing.active_pin.return_value = "654321"
+
+        response = self.client.post(
+            "/pair/replace",
+            data={"device_id": stale["id"], "recovery_nonce": nonce},
+        )
+
+        self.assertEqual(response.status_code, 302)
+        self.assertEqual(self.pairing.active_pin(), "654321")
+        self.controller.cancel_device_drafts_for_device.assert_called_once_with(stale["id"])
+        self.controller.end_pairing.assert_not_called()
+        self.controller.start.assert_not_called()
+
+    def test_committed_replacement_controller_failure_pairs_with_warning_and_attempts_cleanup(self):
+        self.store.update({"pairing": {"max_devices": 2}})
+        primary = self.device_store.add("Primary browser", max_devices=2)
+        stale = self.device_store.add("Returning phone", max_devices=2)
+        self.pairing.verify.return_value = True
+        self.app.config["PAIRING_RECOVERY_CLOCK"] = lambda: 1_000
+        self.assertEqual(self.client.post(
+            "/pair", data={"pin": "123456", "device_name": "Returning phone"},
+        ).status_code, 200)
+        with self.client.session_transaction() as browser_session:
+            nonce = browser_session["pairing_recovery"]["nonce"]
+        self.controller.reset_mock()
+        self.controller.cancel_device_drafts_for_device.side_effect = RuntimeError(
+            "preview cleanup unavailable"
+        )
+
+        response = self.client.post(
+            "/pair/replace",
+            data={"device_id": stale["id"], "recovery_nonce": nonce},
+        )
+
+        self.assertEqual(response.status_code, 503)
+        self.assertIn("replacement was committed", response.get_data(as_text=True))
+        devices = self.device_store.list()
+        self.assertEqual(devices[0], primary)
+        self.assertNotEqual(devices[1]["id"], stale["id"])
+        with self.client.session_transaction() as browser_session:
+            self.assertNotIn("pairing_recovery", browser_session)
+            self.assertEqual(browser_session["device_id"], devices[1]["id"])
+        self.controller.cancel_device_drafts_for_device.assert_called_once_with(stale["id"])
+        self.controller.end_pairing.assert_called_once_with()
+        self.controller.start.assert_called_once_with()
+
+    def test_uncommitted_replacement_write_failure_preserves_registry_and_recovery(self):
+        self.store.update({"pairing": {"max_devices": 2}})
+        self.device_store.add("Primary browser", max_devices=2)
+        stale = self.device_store.add("Returning phone", max_devices=2)
+        before = self.device_store.list()
+        self.pairing.verify.return_value = True
+        self.app.config["PAIRING_RECOVERY_CLOCK"] = lambda: 1_000
+        self.assertEqual(self.client.post(
+            "/pair", data={"pin": "123456", "device_name": "Returning phone"},
+        ).status_code, 200)
+        with self.client.session_transaction() as browser_session:
+            nonce = browser_session["pairing_recovery"]["nonce"]
+
+        with patch.object(self.device_store, "_write", side_effect=OSError("disk full")):
+            response = self.client.post(
+                "/pair/replace",
+                data={"device_id": stale["id"], "recovery_nonce": nonce},
+            )
+
+        self.assertEqual(response.status_code, 503)
+        self.assertIn("could not be stored", response.get_data(as_text=True))
+        self.assertEqual(self.device_store.list(), before)
+        self.controller.cancel_device_drafts_for_device.assert_not_called()
+        with self.client.session_transaction() as browser_session:
+            self.assertEqual(browser_session["pairing_recovery"]["nonce"], nonce)
+            self.assertNotIn("paired", browser_session)
 
     def test_pairing_capacity_race_returns_a_clear_error_instead_of_server_failure(self):
         self.pairing.verify.return_value = True

@@ -127,6 +127,37 @@ class PairedDeviceStore:
             self._devices = remaining
             return True
 
+    def replace(self, device_id, name, max_devices):
+        name = name.strip() if isinstance(name, str) else ""
+        if not 1 <= len(name) <= 40 or any(not character.isprintable() for character in name):
+            raise ValueError("device name must be 1-40 printable characters")
+        with self._lock:
+            if len(self._devices) < max_devices:
+                raise ValueError("paired device replacement is not required below capacity")
+            if len(self._devices) > max_devices:
+                raise ValueError("maximum paired devices reached")
+            index = next(
+                (index for index, device in enumerate(self._devices) if device["id"] == device_id),
+                None,
+            )
+            if index is None:
+                raise KeyError("paired device not found")
+            device = {
+                "id": secrets.token_urlsafe(24),
+                "name": name,
+                "paired_at": int(time.time()),
+            }
+            updated = [*self._devices]
+            updated[index] = device
+            self._validate_devices(updated)
+            try:
+                self._write(updated)
+            except PairingDurabilityError as error:
+                self._devices = error.devices
+                raise PairingDurabilityError(error.devices, device=device) from error
+            self._devices = updated
+            return json.loads(json.dumps(device))
+
     def add(self, name, max_devices):
         name = name.strip() if isinstance(name, str) else ""
         if not 1 <= len(name) <= 40 or any(not character.isprintable() for character in name):
