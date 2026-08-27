@@ -645,6 +645,93 @@ try{
                 self.assertLessEqual(scroll_height, child_height + 1, report)
             self.assertLessEqual(layout["overflow"], 1, report)
 
+    @unittest.skipUnless(shutil.which("node"), "Node.js is required")
+    def test_dashboard_normalizes_device_draft_runtime_module_before_sticky_preview(self):
+        self.controller.status.return_value = {
+            "running": True,
+            "current_module": "device-draft:openweather_forecast",
+            "last_error": None,
+        }
+        self.pair_browser()
+        body = self.client.get("/").get_data(as_text=True)
+        start = body.index("function dashboardPreviewModule")
+        function = body[start:body.index("\nlet builtInSettings", start)]
+        script = function + "\nconsole.log(JSON.stringify([dashboardPreviewModule('device-draft:openweather_forecast'),dashboardPreviewModule('device-draft:'),dashboardPreviewModule('clock_lava'),dashboardPreviewModule(null)]))"
+        completed = subprocess.run(
+            ["node", "-e", script], capture_output=True, text=True, timeout=10,
+        )
+        self.assertEqual(completed.returncode, 0, completed.stderr)
+        self.assertEqual(
+            json.loads(completed.stdout),
+            ["openweather_forecast", "clock_lava", "clock_lava", "clock_lava"],
+        )
+        self.assertIn(
+            'previewModule=dashboardPreviewModule("device-draft:openweather_forecast")',
+            body,
+        )
+
+    @unittest.skipUnless(shutil.which("node"), "Node.js is required")
+    def test_status_poll_keeps_private_runtime_label_out_of_sticky_retry_route(self):
+        self.controller.status.return_value = {
+            "running": True,
+            "current_module": "device-draft:openweather_forecast",
+            "last_error": None,
+        }
+        self.pair_browser()
+        body = self.client.get("/").get_data(as_text=True)
+        status_badge = re.search(r'id="status"[^>]*>([^<]*)</span>', body)
+        self.assertIsNotNone(status_badge)
+        self.assertEqual(status_badge.group(1), "openweather_forecast")
+        self.controller.status.return_value = {
+            "running": True, "current_module": "device-draft:", "last_error": None,
+        }
+        empty_status_body = self.client.get("/").get_data(as_text=True)
+        empty_status_badge = re.search(r'id="status"[^>]*>([^<]*)</span>', empty_status_body)
+        self.assertIsNotNone(empty_status_badge)
+        self.assertEqual(empty_status_badge.group(1), "clock_lava")
+        helper_start = body.index("function dashboardPreviewModule")
+        helper = body[helper_start:body.index("\nlet builtInSettings", helper_start)]
+        status_start = body.index("function updateStatus")
+        status_function = body[status_start:body.index("\nasync function refreshDisplayFrame", status_start)]
+        lifecycle_start = body.index("let devicePreviewEnabled=")
+        lifecycle = body[lifecycle_start:body.index("\nfunction editPreviewCurrent", lifecycle_start)]
+        script = "\n".join((helper, status_function, lifecycle))
+        harness = r'''
+const vm=require('node:vm'),stored=new Map([['matrix-device-preview-enabled','true']]),calls=[],timers=[];
+let nextTimer=1,starts=0;
+const setTimer=(fn,delay=0)=>{const timer={id:nextTimer++,fn,delay,active:true};timers.push(timer);return timer.id};
+const clearTimer=id=>{const timer=timers.find(item=>item.id===id);if(timer)timer.active=false};
+const runNext=async()=>{const timer=timers.filter(item=>item.active).sort((a,b)=>a.delay-b.delay||a.id-b.id)[0];if(!timer)throw new Error('expected timer');timer.active=false;timer.fn();await new Promise(resolve=>setImmediate(resolve));await new Promise(resolve=>setImmediate(resolve));return timer.delay};
+const control=extra=>Object.assign({addEventListener(type,handler){this.listeners??={};this.listeners[type]=handler}},extra);
+const toggle=control({checked:false,disabled:false}),stop=control({disabled:true}),deviceStatus={textContent:'',dataset:{}},badge={textContent:'',dataset:{}},currentLabel={textContent:''},previewSelect={value:'clock_lava'},previewLabel={textContent:''};
+const elements={'#device-preview-enabled':toggle,'#stop-device-preview':stop,'#device-preview-status':deviceStatus,'#status':badge,'#current-label':currentLabel,'#preview-select':previewSelect,'#preview-module':previewLabel};
+const context={console,AbortController,Date,Number,Promise,Set,Map,Math,encodeURIComponent,setTimeout:setTimer,clearTimeout:clearTimer,clearInterval:clearTimer,setInterval:setTimer,
+ matrixSyncStopped:false,matrixEditorsReady:true,previewMode:'live',previewModule:'openweather_forecast',previewModulePinned:false,previewInstance:'c'.repeat(32),PAIRED_ACTION_SIGNAL:'1',
+ configBody:()=>({device:{name:'polled sticky draft'}}),selectedLavaPaletteDescriptor:()=>null,selectEditPreviewModule(){},selectEditedPreviewModule(){},
+ localStorage:{getItem:key=>stored.get(key)??null,setItem:(key,value)=>stored.set(key,String(value)),removeItem:key=>stored.delete(key)},
+ document:{querySelector:selector=>elements[selector],addEventListener(){}},window:{addEventListener(){}},fetch:async()=>({ok:false}),
+ api:async(path,options={})=>{const payload=options.body?JSON.parse(options.body):null;calls.push({path,payload});if(path==='/api/device-preview/openweather_forecast'){starts+=1;if(starts===1){const error=new Error('Device preview is not available.');error.status=409;throw error}return {generation:payload.generation,heartbeat_after_seconds:5,connectivity_expires_in:15}}if(path==='/api/device-preview/cancel')return {cancelled:true};if(path==='/api/device-preview/heartbeat')return {active:true,generation:payload.generation,connectivity_expires_in:15};throw new Error('private runtime label entered public route: '+path)}};
+context.globalThis=context;vm.createContext(context);vm.runInContext(process.argv[1],context);
+(async()=>{
+ context.updateStatus({running:true,current_module:'device-draft:',last_error:null});
+ if(context.previewModule!=='clock_lava'||previewSelect.value!=='clock_lava'||badge.textContent!=='clock_lava'||currentLabel.textContent!=='Showing clock_lava')throw new Error('empty private runtime suffix escaped normalization '+JSON.stringify({previewModule:context.previewModule,select:previewSelect.value,badge:badge.textContent,currentLabel:currentLabel.textContent}));
+ context.updateStatus({running:true,current_module:'device-draft:openweather_forecast',last_error:null});
+ if(context.previewModule!=='openweather_forecast'||previewSelect.value!=='openweather_forecast'||badge.textContent!=='openweather_forecast'||currentLabel.textContent!=='Showing openweather_forecast')throw new Error('status poll exposed private runtime label '+JSON.stringify({previewModule:context.previewModule,select:previewSelect.value,badge:badge.textContent,currentLabel:currentLabel.textContent}));
+ context.previewMode='edit';
+ if(!context.resumeStickyDevicePreview())throw new Error('sticky preview did not resume');
+ const initialDelay=await runNext(),retryDelay=await runNext();
+ const startPaths=calls.filter(call=>call.path.startsWith('/api/device-preview/')&&!call.path.endsWith('/cancel')&&!call.path.endsWith('/heartbeat')).map(call=>call.path);
+ if(initialDelay!==0||retryDelay!==5000||starts!==2||startPaths.length!==2||startPaths.some(path=>path!=='/api/device-preview/openweather_forecast'))throw new Error('sticky retry used contaminated route '+JSON.stringify({initialDelay,retryDelay,starts,startPaths,calls}));
+ console.log('STATUS_POLL_STICKY_RETRY_PUBLIC_ROUTE_PASS');
+})().catch(error=>{console.error(error);process.exit(1)});
+'''
+        result = subprocess.run(
+            [shutil.which("node"), "-e", harness, script],
+            cwd=Path(__file__).parents[1], text=True, capture_output=True, check=False,
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("STATUS_POLL_STICKY_RETRY_PUBLIC_ROUTE_PASS", result.stdout)
+
     def test_dashboard_exposes_unbounded_device_preview_controls(self):
         self.pair_browser()
 
@@ -653,20 +740,23 @@ try{
         preview = re.search(r'<article class="card preview-card">(.*?)</article>', body, re.DOTALL)
         self.assertIsNotNone(preview)
         markup = preview.group(1)
+        self.assertIn('<div class="device-preview-controls" hidden>', markup)
         self.assertIn('id="device-preview-enabled"', markup)
         self.assertIn('type="checkbox"', markup)
         self.assertNotIn('id="device-preview-enabled" checked', markup)
         self.assertIn('Preview edits on device', markup)
         self.assertNotIn('id="device-preview-timeout"', markup)
         self.assertNotIn('Preview timeout', markup)
-        self.assertIn('id="stop-device-preview"', markup)
-        self.assertIn('Stop device preview', markup)
+        self.assertNotIn('id="stop-device-preview"', markup)
+        self.assertNotIn('Stop device preview', markup)
         self.assertIn('id="device-preview-status"', markup)
         self.assertIn('aria-live="polite"', markup)
         lifecycle = body[body.index("let devicePreviewEnabled="):body.index("\nfunction editPreviewCurrent")]
         self.assertNotIn("devicePreviewTimeout", lifecycle)
         self.assertNotIn("timeout_seconds", lifecycle)
         self.assertNotIn("s remaining", lifecycle)
+        self.assertNotIn("document.querySelector('#stop-device-preview')", lifecycle)
+        self.assertNotIn("devicePreviewStop.addEventListener", lifecycle)
         self.assertNotRegex(
             re.search(r"function configBody\(\).*?\n", body).group(0),
             r"device-preview|device_preview",
@@ -684,7 +774,7 @@ const control=extra=>Object.assign({addEventListener(type,handler){this.listener
 const toggle=control({checked:false,disabled:false}),stop=control({disabled:true}),status={textContent:'',dataset:{}};
 const elements={'#device-preview-enabled':toggle,'#stop-device-preview':stop,'#device-preview-status':status};
 const context={console,AbortController,Date,Number,Promise,Set,Map,Math,encodeURIComponent,clearTimeout,clearInterval,setTimeout,setInterval,
- matrixSyncStopped:false,matrixEditorsReady:true,previewModule:'clock',previewInstance:'a'.repeat(32),PAIRED_ACTION_SIGNAL:'1',
+ matrixSyncStopped:false,matrixEditorsReady:true,previewMode:'edit',previewModule:'clock',previewInstance:'a'.repeat(32),PAIRED_ACTION_SIGNAL:'1',
  configBody:()=>({device:{name:'sticky draft'}}),selectedLavaPaletteDescriptor:()=>null,selectEditPreviewModule(){},selectEditedPreviewModule(){},
  localStorage:{getItem:key=>stored.get(key)??null,setItem:(key,value)=>stored.set(key,String(value))},
  document:{querySelector:selector=>elements[selector],addEventListener(){}},window:{addEventListener(){}},fetch:async()=>({ok:true}),
@@ -694,7 +784,7 @@ vm.createContext(context);vm.runInContext(process.argv[1],context);
  const restored={checked:toggle.checked,stored:stored.get('matrix-device-preview-enabled'),start:calls.find(call=>call.path==='/api/device-preview/clock')};
  await context.cancelDevicePreviewForSave();
  const paused={checked:toggle.checked,stored:stored.get('matrix-device-preview-enabled')};
- stop.listeners.click();await new Promise(resolve=>setTimeout(resolve,5));
+ toggle.checked=false;toggle.listeners.change();await new Promise(resolve=>setTimeout(resolve,5));
  console.log(JSON.stringify({restored,paused,stopped:{checked:toggle.checked,stored:stored.get('matrix-device-preview-enabled')}}))})().catch(error=>{console.error(error);process.exit(1)});
 '''
         result = subprocess.run(
@@ -714,6 +804,55 @@ vm.createContext(context);vm.runInContext(process.argv[1],context);
         self.assertEqual(report["stopped"], {"checked": False, "stored": "false"}, report)
 
     @unittest.skipUnless(shutil.which("node"), "Node.js is required")
+    def test_device_preview_is_edit_only_and_unchecking_is_the_only_stop_control(self):
+        source = (Path(__file__).parents[1] / "app" / "templates" / "dashboard.html").read_text()
+        lifecycle_start = source.index("let devicePreviewEnabled=")
+        lifecycle = source[lifecycle_start:source.index("\nfunction editPreviewCurrent", lifecycle_start)]
+        mode_start = source.index("function setPreviewMode")
+        mode_function = source[mode_start:source.index("\nfunction syncPreviewModeControls", mode_start)]
+        script = lifecycle + "\n" + mode_function
+        harness = r'''
+const vm=require('node:vm'),stored=new Map([['matrix-device-preview-enabled','true']]),calls=[];
+const control=extra=>Object.assign({addEventListener(type,handler){this.listeners??={};this.listeners[type]=handler}},extra);
+const toggle=control({checked:false,disabled:false}),status={textContent:'',dataset:{}},controls={hidden:true},previewLabel={textContent:''},frameLabel={textContent:''};
+const elements={'#device-preview-enabled':toggle,'#device-preview-status':status,'.device-preview-controls':controls,'#preview-module':previewLabel,'#preview-frame':frameLabel};
+let simulatedStarts=0,liveStarts=0,pendingStarts=[],pendingCancels=[];
+const context={console,AbortController,Date,Number,Promise,Set,Map,Math,encodeURIComponent,setTimeout,clearTimeout,setInterval,clearInterval,
+ matrixSyncStopped:false,matrixEditorsReady:true,previewMode:'live',previewModule:'clock_lava',previewModulePinned:false,previewInstance:'d'.repeat(32),PAIRED_ACTION_SIGNAL:'1',matrixFrameTimer:null,matrixFrameController:null,
+ configBody:()=>({device:{name:'edit-only draft'}}),selectedLavaPaletteDescriptor:()=>null,selectEditPreviewModule(){},selectEditedPreviewModule(){},syncLavaInspectionRadios(){},onCustomEditorFocus(){},onEditPreviewDraftEvent(){},startEditPreview(){simulatedStarts++},cancelEditPreview(){},refreshDisplayFrame(){liveStarts++},
+ localStorage:{getItem:key=>stored.get(key)??null,setItem:(key,value)=>stored.set(key,String(value)),removeItem:key=>stored.delete(key)},
+ document:{querySelector:selector=>elements[selector]??null,addEventListener(){},removeEventListener(){}},window:{addEventListener(){}},fetch:async()=>({ok:false}),
+ api:async(path,options={})=>{const payload=options.body?JSON.parse(options.body):null;calls.push({path,payload});if(path==='/api/device-preview/clock_lava'){if(payload.generation===1)return await new Promise(resolve=>pendingStarts.push(resolve));return {generation:payload.generation,heartbeat_after_seconds:60,connectivity_expires_in:15}}if(path==='/api/device-preview/cancel')return await new Promise(resolve=>pendingCancels.push(resolve));if(path==='/api/device-preview/heartbeat')return {active:true,generation:payload.generation,connectivity_expires_in:15};throw new Error(path)}};
+context.globalThis=context;vm.createContext(context);vm.runInContext(process.argv[1],context);
+const sleep=ms=>new Promise(resolve=>setTimeout(resolve,ms));
+(async()=>{
+ if(context.resumeStickyDevicePreview()!==false||!controls.hidden||calls.length)throw new Error('sticky device preview was available in Live mode');
+ context.setPreviewMode('edit');await sleep(10);
+ if(controls.hidden||simulatedStarts!==1||calls.filter(call=>call.path==='/api/device-preview/clock_lava').length!==1||!toggle.checked)throw new Error('Edit Preview did not expose and resume device preview '+JSON.stringify({hidden:controls.hidden,simulatedStarts,calls,checked:toggle.checked}));
+ context.setPreviewMode('live');
+ context.setPreviewMode('edit');await sleep(10);
+ if(calls.filter(call=>call.path==='/api/device-preview/clock_lava').length!==1||calls.some(call=>call.path==='/api/device-preview/cancel'))throw new Error('pending generation changed before its render completed');
+ pendingStarts.shift()({generation:1,heartbeat_after_seconds:60,connectivity_expires_in:15});await sleep(10);
+ let startsAfterRapidTransition=calls.filter(call=>call.path==='/api/device-preview/clock_lava').length,cancelCalls=calls.filter(call=>call.path==='/api/device-preview/cancel');
+ if(controls.hidden||startsAfterRapidTransition!==2||cancelCalls.length!==0||stored.get('matrix-device-preview-enabled')!=='true'||!toggle.checked||status.dataset.state!=='active')throw new Error('old Live stop captured newly queued Edit generation '+JSON.stringify({hidden:controls.hidden,startsAfterRapidTransition,cancelCalls,stored:stored.get('matrix-device-preview-enabled'),checked:toggle.checked,state:status.dataset.state,calls}));
+ await sleep(10);
+ cancelCalls=calls.filter(call=>call.path==='/api/device-preview/cancel');
+ if(cancelCalls.length!==0||!toggle.checked||status.dataset.state!=='active')throw new Error('stale Live stop overwrote resumed Edit preview '+JSON.stringify({cancelCalls,checked:toggle.checked,state:status.dataset.state,calls}));
+ toggle.checked=false;toggle.listeners.change();await sleep(1);
+ if(pendingCancels.length!==1)throw new Error('unchecking did not issue sole current-generation stop');
+ pendingCancels.shift()({cancelled:true});await sleep(10);
+ if(stored.get('matrix-device-preview-enabled')!=='false'||calls.filter(call=>call.path==='/api/device-preview/cancel').length!==1||status.dataset.state!=='off')throw new Error('unchecking was not the sole current-generation stop path '+JSON.stringify({stored:stored.get('matrix-device-preview-enabled'),calls,state:status.dataset.state}));
+ console.log('EDIT_ONLY_DEVICE_PREVIEW_CHECKBOX_STOP_PASS');
+})().catch(error=>{console.error(error);process.exit(1)});
+'''
+        result = subprocess.run(
+            [shutil.which("node"), "-e", harness, script],
+            cwd=Path(__file__).parents[1], text=True, capture_output=True, check=False,
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("EDIT_ONLY_DEVICE_PREVIEW_CHECKBOX_STOP_PASS", result.stdout)
+
+    @unittest.skipUnless(shutil.which("node"), "Node.js is required")
     def test_sticky_reload_retries_owner_conflict_until_old_connectivity_lease_expires(self):
         source = (Path(__file__).parents[1] / "app" / "templates" / "dashboard.html").read_text()
         start = source.index("let devicePreviewEnabled=")
@@ -726,10 +865,10 @@ const setTimer=(fn,delay=0)=>{const timer={id:nextTimer++,fn,delay,active:true};
 const clearTimer=id=>{const timer=timers.find(item=>item.id===id);if(timer)timer.active=false};
 const runNext=async()=>{const timer=timers.filter(item=>item.active).sort((a,b)=>a.delay-b.delay||a.id-b.id)[0];if(!timer)throw new Error('expected timer');timer.active=false;timer.fn();await new Promise(resolve=>setImmediate(resolve));await new Promise(resolve=>setImmediate(resolve));return timer.delay};
 const control=extra=>Object.assign({addEventListener(type,handler){this.listeners??={};this.listeners[type]=handler}},extra);
-const toggle=control({checked:false,disabled:false}),stop=control({disabled:true}),status={textContent:'',dataset:{}};
-const elements={'#device-preview-enabled':toggle,'#stop-device-preview':stop,'#device-preview-status':status};
+const toggle=control({checked:false,disabled:false}),status={textContent:'',dataset:{}};
+const elements={'#device-preview-enabled':toggle,'#device-preview-status':status};
 const context={console,AbortController,Date,Number,Promise,Set,Map,Math,encodeURIComponent,setTimeout:setTimer,clearTimeout:clearTimer,clearInterval:clearTimer,setInterval:setTimer,
- matrixSyncStopped:false,matrixEditorsReady:true,previewModule:'clock',previewInstance:'b'.repeat(32),PAIRED_ACTION_SIGNAL:'1',
+ matrixSyncStopped:false,matrixEditorsReady:true,previewMode:'edit',previewModule:'clock',previewInstance:'b'.repeat(32),PAIRED_ACTION_SIGNAL:'1',
  configBody:()=>({device:{name:'reloaded sticky draft'}}),selectedLavaPaletteDescriptor:()=>null,selectEditPreviewModule(){},selectEditedPreviewModule(){},
  localStorage:{getItem:key=>stored.get(key)??null,setItem:(key,value)=>stored.set(key,String(value)),removeItem:key=>stored.delete(key)},
  document:{querySelector:selector=>elements[selector],addEventListener(){}},window:{addEventListener(){}},fetch:async()=>({ok:false}),
@@ -739,9 +878,9 @@ context.globalThis=context;vm.createContext(context);vm.runInContext(process.arg
  context.resumeStickyDevicePreview();const initialDelay=await runNext();
  if(initialDelay!==0||starts!==1||!toggle.checked||stored.get('matrix-device-preview-enabled')!=='true'||status.dataset.state!=='active')throw new Error('owner conflict did not preserve sticky reconnect state '+JSON.stringify({initialDelay,starts,checked:toggle.checked,stored:stored.get('matrix-device-preview-enabled'),state:status.dataset.state,text:status.textContent}));
  const retryDelay=await runNext();
- if(retryDelay<1000||starts!==2||status.dataset.state!=='active'||stop.disabled||!toggle.checked||stored.get('matrix-device-preview-enabled')!=='true')throw new Error('sticky owner conflict did not retry to active '+JSON.stringify({retryDelay,starts,state:status.dataset.state,stop:stop.disabled,checked:toggle.checked,stored:stored.get('matrix-device-preview-enabled')}));
- stop.listeners.click();await new Promise(resolve=>setImmediate(resolve));await new Promise(resolve=>setImmediate(resolve));
- if(toggle.checked||stored.get('matrix-device-preview-enabled')!=='false'||status.dataset.state!=='off'||timers.some(timer=>timer.active))throw new Error('explicit Stop did not clear retry/heartbeat lifecycle');
+ if(retryDelay<1000||starts!==2||status.dataset.state!=='active'||!toggle.checked||stored.get('matrix-device-preview-enabled')!=='true')throw new Error('sticky owner conflict did not retry to active '+JSON.stringify({retryDelay,starts,state:status.dataset.state,checked:toggle.checked,stored:stored.get('matrix-device-preview-enabled')}));
+ toggle.checked=false;toggle.listeners.change();await new Promise(resolve=>setImmediate(resolve));await new Promise(resolve=>setImmediate(resolve));
+ if(toggle.checked||stored.get('matrix-device-preview-enabled')!=='false'||status.dataset.state!=='off'||timers.some(timer=>timer.active))throw new Error('unchecking did not clear retry/heartbeat lifecycle');
  console.log('STICKY_RELOAD_OWNER_CONFLICT_RETRY_PASS');
 })().catch(error=>{console.error(error);process.exit(1)});
 '''
@@ -814,7 +953,7 @@ const control=extra=>Object.assign({addEventListener(name,handler){this.listener
 const toggle=control({checked:false,disabled:false}),timeout=control({value:'60',focus(){}}),stop=control({disabled:true}),status={textContent:'',dataset:{}};
 const elements={'#device-preview-enabled':toggle,'#device-preview-timeout':timeout,'#stop-device-preview':stop,'#device-preview-status':status};
 const context={console,AbortController,Date,Number,Promise,Set,Math,encodeURIComponent,clearTimeout,clearInterval,setTimeout,setInterval,localStorage,
- matrixSyncStopped:false,matrixEditorsReady:true,previewModule:'weather',previewInstance:'a'.repeat(32),PAIRED_ACTION_SIGNAL:'1',
+ matrixSyncStopped:false,matrixEditorsReady:true,previewMode:'edit',previewModule:'weather',previewInstance:'a'.repeat(32),PAIRED_ACTION_SIGNAL:'1',
  configBody:()=>({device:{name:'draft'}}),selectedLavaPaletteDescriptor:()=>null,selectEditPreviewModule(){},selectEditedPreviewModule(){},
  document:{querySelector:s=>elements[s],addEventListener(n,h){listeners[n]=h}},window:{addEventListener(n,h){listeners[n]=h}},
  api:async(path,options={})=>{const body=options.body?JSON.parse(options.body):null;calls.push({path,body});if(path.startsWith('/api/device-preview/')&&!path.endsWith('/cancel')&&!path.endsWith('/heartbeat'))return new Promise(resolve=>pending.push({resolve,body}));if(path==='/api/device-preview/cancel')return {cancelled:true};if(path==='/api/device-preview/heartbeat'){if(heartbeatDeferred)return new Promise((resolve,reject)=>{heartbeatWait={resolve,reject,body}});return {heartbeat_after_seconds:60}}throw new Error('unexpected '+path)},
@@ -873,7 +1012,7 @@ const api=async(path,options={})=>{
  starts+=1;return {generation:body.generation,active_module:'clock',heartbeat_after_seconds:1,connectivity_expires_in:15};
 };
 const elements={'#device-preview-enabled':toggle,'#stop-device-preview':stop,'#device-preview-status':status};
-const context={console,api,AbortController,localStorage,crypto:{randomUUID:()=> 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa'},devicePreviewToggle:toggle,devicePreviewStatus:status,stopDevicePreviewButton:stop,previewModule:'clock',previewInstance:'a'.repeat(32),PAIRED_ACTION_SIGNAL:'1',matrixSyncStopped:false,matrixEditorsReady:true,selectedLavaPaletteDescriptor:()=>null,configBody:()=>({}),selectEditPreviewModule(){},selectEditedPreviewModule(){},document:{querySelector:selector=>elements[selector],addEventListener(){}},window:{addEventListener(){}},setTimeout:fn=>{timers.push(fn);return timers.length},clearTimeout(){},Date,Promise,Number,Set,Math,encodeURIComponent};
+const context={console,api,AbortController,localStorage,crypto:{randomUUID:()=> 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa'},devicePreviewToggle:toggle,devicePreviewStatus:status,stopDevicePreviewButton:stop,previewMode:'edit',previewModule:'clock',previewInstance:'a'.repeat(32),PAIRED_ACTION_SIGNAL:'1',matrixSyncStopped:false,matrixEditorsReady:true,selectedLavaPaletteDescriptor:()=>null,configBody:()=>({}),selectEditPreviewModule(){},selectEditedPreviewModule(){},document:{querySelector:selector=>elements[selector],addEventListener(){}},window:{addEventListener(){}},setTimeout:fn=>{timers.push(fn);return timers.length},clearTimeout(){},Date,Promise,Number,Set,Math,encodeURIComponent};
 context.globalThis=context;vm.createContext(context);vm.runInContext(source,context);
 (async()=>{
  await vm.runInContext('startDevicePreview()',context);
@@ -973,7 +1112,7 @@ const scenarios=[['missing',undefined],['null',null],['string','bogus'],['nan',N
  const timers=new Map();let timerId=0;
  const context={console,AbortController,Date,Number,Promise,Set,Math,encodeURIComponent,
   setTimeout(fn,delay){const id=++timerId;if(delay===0)queueMicrotask(fn);else timers.set(id,{fn,delay});return id},clearTimeout:id=>timers.delete(id),setInterval(){return ++timerId},clearInterval(){},
-  matrixSyncStopped:false,matrixEditorsReady:true,previewModule:'clock',previewInstance:'b'.repeat(32),PAIRED_ACTION_SIGNAL:'1',configBody:()=>({}),selectedLavaPaletteDescriptor:()=>null,selectEditPreviewModule(){},selectEditedPreviewModule(){},
+  matrixSyncStopped:false,matrixEditorsReady:true,previewMode:'edit',previewModule:'clock',previewInstance:'b'.repeat(32),PAIRED_ACTION_SIGNAL:'1',configBody:()=>({}),selectedLavaPaletteDescriptor:()=>null,selectEditPreviewModule(){},selectEditedPreviewModule(){},
   document:{querySelector:s=>elements[s],addEventListener(){}},window:{addEventListener(){}},fetch:async()=>({ok:true}),
   api:async(path,options={})=>{const body=options.body?JSON.parse(options.body):null;calls.push({path,body});if(path==='/api/device-preview/clock'){const result={generation:body.generation,expires_in:60,active_module:'clock'};if(name!=='missing')result.heartbeat_after_seconds=cadence;return result}if(path==='/api/device-preview/cancel')return {cancelled:true};if(path==='/api/device-preview/heartbeat')return {active:true,generation:body.generation,expires_in:55};throw new Error(path)}};
  vm.createContext(context);vm.runInContext(process.argv[1],context);toggle.checked=true;toggle.listeners.change();await new Promise(resolve=>setImmediate(resolve));await new Promise(resolve=>setImmediate(resolve));
@@ -1000,7 +1139,7 @@ const control=extra=>Object.assign({addEventListener(type,handler){this.listener
 const toggle=control({checked:false}),timeout=control({value:'60',focus(){}}),stop=control({disabled:true}),status={textContent:'',dataset:{}};
 const elements={'#device-preview-enabled':toggle,'#device-preview-timeout':timeout,'#stop-device-preview':stop,'#device-preview-status':status};
 const context={console,AbortController,Date,Number,Promise,Set,Map,Math,encodeURIComponent,clearInterval,setInterval:()=>1,
- setTimeout(fn,delay){if(delay===0)queueMicrotask(fn);else queueMicrotask(fn);return 1},clearTimeout(){},matrixSyncStopped:false,matrixEditorsReady:true,previewModule:'clock',previewInstance:'c'.repeat(32),PAIRED_ACTION_SIGNAL:'1',configBody:()=>({}),selectedLavaPaletteDescriptor:()=>null,selectEditPreviewModule(){},selectEditedPreviewModule(){},
+ setTimeout(fn,delay){if(delay===0)queueMicrotask(fn);else queueMicrotask(fn);return 1},clearTimeout(){},matrixSyncStopped:false,matrixEditorsReady:true,previewMode:'edit',previewModule:'clock',previewInstance:'c'.repeat(32),PAIRED_ACTION_SIGNAL:'1',configBody:()=>({}),selectedLavaPaletteDescriptor:()=>null,selectEditPreviewModule(){},selectEditedPreviewModule(){},
  document:{querySelector:s=>elements[s],addEventListener(){}},window:{addEventListener(n,h){listeners[n]=h}},fetch:async()=>({ok:false}),
  api:async(path,options={})=>{calls.push(path);if(path==='/api/device-preview/clock')return new Promise(()=>{});if(path==='/api/device-preview/cancel')throw new Error('not admitted');throw new Error(path)}};
 vm.createContext(context);vm.runInContext(process.argv[1],context);(async()=>{toggle.checked=true;toggle.listeners.change();await new Promise(resolve=>setImmediate(resolve));
@@ -1028,7 +1167,7 @@ async function drain(){for(let i=0;i<8;i++)await Promise.resolve()}
 async function advance(target){while(true){const due=[...timers].filter(([,timer])=>timer.at<=target).sort((a,b)=>a[1].at-b[1].at||a[0]-b[0]);if(!due.length)break;const [id,timer]=due[0];timers.delete(id);now=timer.at;timer.fn();await drain()}now=target;await drain()}
 const control=extra=>Object.assign({addEventListener(type,handler){this.listeners??={};this.listeners[type]=handler}},extra),toggle=control({checked:false}),timeout=control({value:'60',focus(){}}),stop=control({disabled:true}),status={textContent:'',dataset:{}};
 const elements={'#device-preview-enabled':toggle,'#device-preview-timeout':timeout,'#stop-device-preview':stop,'#device-preview-status':status};
-const context={console,AbortController,Date:{now:()=>now},Number,Promise,Set,Map,Math,encodeURIComponent,setTimeout,clearTimeout,setInterval:()=>++nextTimer,clearInterval(){},matrixSyncStopped:false,matrixEditorsReady:true,matrixRecoveryPending:false,matrixLoadedRevision:7,highestNotifiedRemoteRevision:7,matrixSavedSnapshot:'saved',matrixDirty:true,previewModule:'clock',previewInstance:'1'.repeat(32),PAIRED_ACTION_SIGNAL:'1',configBody:()=>({name:'draft'}),selectedLavaPaletteDescriptor:()=>null,selectEditPreviewModule(){},selectEditedPreviewModule(){},validateAnnouncementBoard:()=>true,matrixRevisionETag:()=> '"revision-7"',dismissMatrixRevisionDialogThrough(){},setMessage(){},document:{querySelector:s=>elements[s],addEventListener(){}},window:{addEventListener(){}},fetch:async()=>({ok:true}),api:async(path,options={})=>{const body=options.body?JSON.parse(options.body):null;if(path==='/api/device-preview/clock'){startCalls++;if(startImmediate)return {generation:body.generation,expires_in:60,heartbeat_after_seconds:5};return new Promise(resolve=>{startResolve=()=>resolve({generation:body.generation,expires_in:60,heartbeat_after_seconds:5})})}if(path==='/api/device-preview/cancel'){cancelCalls++;cancelSignal=options.signal;return new Promise(resolve=>{cancelResolve=()=>resolve({cancelled:true})})}if(path==='/api/config'){persistence++;return {revision:8}}throw new Error(path)}};
+const context={console,AbortController,Date:{now:()=>now},Number,Promise,Set,Map,Math,encodeURIComponent,setTimeout,clearTimeout,setInterval:()=>++nextTimer,clearInterval(){},matrixSyncStopped:false,matrixEditorsReady:true,previewMode:'edit',matrixRecoveryPending:false,matrixLoadedRevision:7,highestNotifiedRemoteRevision:7,matrixSavedSnapshot:'saved',matrixDirty:true,previewModule:'clock',previewInstance:'1'.repeat(32),PAIRED_ACTION_SIGNAL:'1',configBody:()=>({name:'draft'}),selectedLavaPaletteDescriptor:()=>null,selectEditPreviewModule(){},selectEditedPreviewModule(){},validateAnnouncementBoard:()=>true,matrixRevisionETag:()=> '"revision-7"',dismissMatrixRevisionDialogThrough(){},setMessage(){},document:{querySelector:s=>elements[s],addEventListener(){}},window:{addEventListener(){}},fetch:async()=>({ok:true}),api:async(path,options={})=>{const body=options.body?JSON.parse(options.body):null;if(path==='/api/device-preview/clock'){startCalls++;if(startImmediate)return {generation:body.generation,expires_in:60,heartbeat_after_seconds:5};return new Promise(resolve=>{startResolve=()=>resolve({generation:body.generation,expires_in:60,heartbeat_after_seconds:5})})}if(path==='/api/device-preview/cancel'){cancelCalls++;cancelSignal=options.signal;return new Promise(resolve=>{cancelResolve=()=>resolve({cancelled:true})})}if(path==='/api/config'){persistence++;return {revision:8}}throw new Error(path)}};
 vm.createContext(context);vm.runInContext(process.argv[1]+'\n'+process.argv[2],context);(async()=>{const mode=process.argv[3];toggle.checked=true;toggle.listeners.change();await advance(0);let settled=false,value;const operation=mode==='replacement'?context.replaceDevicePreviewAfterSourceRemoval('clock'):mode==='save'?context.saveConfig():context.stopDevicePreview();operation.then(result=>{settled=true;value=result});await advance(2900);startResolve();await drain();await advance(3000);if(!settled)throw new Error(mode+' exceeded original deadline');if(mode==='save'){if(value.saved!==false||persistence!==0)throw new Error('save crossed deadline barrier')}else if(value!==false)throw new Error(mode+' did not resolve false');if(cancelCalls!==1||!cancelSignal?.aborted)throw new Error(mode+' cancellation was not aborted once');const expectedChecked=mode==='replacement';if(toggle.checked!==expectedChecked||status.dataset.state!=='error'||!status.textContent.includes('connection is lost'))throw new Error(mode+' uncertainty state missing');startImmediate=true;toggle.checked=true;toggle.listeners.change();await advance(3000);if(startCalls!==2||status.dataset.state!=='active')throw new Error(mode+' later preview suppressed');cancelResolve();await drain();if(status.dataset.state!=='active')throw new Error(mode+' late completion overwrote newer state');console.log('DEVICE_PREVIEW_LATE_ADMISSION_DEADLINE_PASS '+mode)})().catch(error=>{console.error(error);process.exit(1)});
 '''
         node = shutil.which("node")
@@ -1048,7 +1187,7 @@ const vm=require('node:vm');let cancelSignal,cancelResolve,cancelCalls=0,startCa
 const control=extra=>Object.assign({addEventListener(type,handler){this.listeners??={};this.listeners[type]=handler}},extra);
 const toggle=control({checked:false}),timeout=control({value:'60',focus(){}}),stop=control({disabled:true}),status={textContent:'',dataset:{}};
 const elements={'#device-preview-enabled':toggle,'#device-preview-timeout':timeout,'#stop-device-preview':stop,'#device-preview-status':status};
-const context={console,AbortController,Date,Number,Promise,Set,Map,Math,encodeURIComponent,clearInterval,setInterval:()=>1,setTimeout,clearTimeout,matrixSyncStopped:false,matrixEditorsReady:true,previewModule:'clock',previewInstance:'f'.repeat(32),PAIRED_ACTION_SIGNAL:'1',configBody:()=>({}),selectedLavaPaletteDescriptor:()=>null,selectEditPreviewModule(){},selectEditedPreviewModule(){},document:{querySelector:s=>elements[s],addEventListener(){}},window:{addEventListener(){}},fetch:async()=>({ok:true}),api:async(path,options={})=>{const body=options.body?JSON.parse(options.body):null;if(path==='/api/device-preview/clock'){startCalls++;return {generation:body.generation,expires_in:60,heartbeat_after_seconds:5,active_module:'clock'}}if(path==='/api/device-preview/cancel'){cancelCalls++;cancelSignal=options.signal;return new Promise(resolve=>{cancelResolve=()=>resolve({cancelled:true})})}throw new Error(path)}};
+const context={console,AbortController,Date,Number,Promise,Set,Map,Math,encodeURIComponent,clearInterval,setInterval:()=>1,setTimeout,clearTimeout,matrixSyncStopped:false,matrixEditorsReady:true,previewMode:'edit',previewModule:'clock',previewInstance:'f'.repeat(32),PAIRED_ACTION_SIGNAL:'1',configBody:()=>({}),selectedLavaPaletteDescriptor:()=>null,selectEditPreviewModule(){},selectEditedPreviewModule(){},document:{querySelector:s=>elements[s],addEventListener(){}},window:{addEventListener(){}},fetch:async()=>({ok:true}),api:async(path,options={})=>{const body=options.body?JSON.parse(options.body):null;if(path==='/api/device-preview/clock'){startCalls++;return {generation:body.generation,expires_in:60,heartbeat_after_seconds:5,active_module:'clock'}}if(path==='/api/device-preview/cancel'){cancelCalls++;cancelSignal=options.signal;return new Promise(resolve=>{cancelResolve=()=>resolve({cancelled:true})})}throw new Error(path)}};
 vm.createContext(context);vm.runInContext(process.argv[1],context);(async()=>{const mode=process.argv[2];toggle.checked=true;toggle.listeners.change();await new Promise(resolve=>setTimeout(resolve,5));let operation;if(mode==='replacement')operation=context.replaceDevicePreviewAfterSourceRemoval('clock');else if(mode==='save')operation=context.cancelDevicePreviewForSave();else operation=context.stopDevicePreview();const result=await Promise.race([operation,new Promise(resolve=>setTimeout(()=>resolve('hung'),3500))]);if(result!=='hung'&&result!==false)throw new Error('unexpected '+mode+' result '+result);if(result==='hung')throw new Error(mode+' cancel transport was unbounded');if(cancelCalls!==1)throw new Error('cancel call count '+cancelCalls);if(!cancelSignal?.aborted)throw new Error('timed-out cancel transport was not aborted');const expectedChecked=mode==='replacement';if(toggle.checked!==expectedChecked||status.dataset.state!=='error'||!status.textContent.includes('connection is lost'))throw new Error('safe uncertainty state missing');toggle.checked=true;toggle.listeners.change();await new Promise(resolve=>setTimeout(resolve,5));if(startCalls!==2||status.dataset.state!=='active')throw new Error('later preview was suppressed');cancelResolve();await new Promise(resolve=>setImmediate(resolve));if(status.dataset.state!=='active')throw new Error('late cancellation overwrote newer state');console.log('DEVICE_PREVIEW_CANCEL_DEADLINE_PASS '+mode)})().catch(error=>{console.error(error);process.exit(1)});
 '''
         node = shutil.which("node")
@@ -1068,7 +1207,7 @@ const vm=require('node:vm'),listeners={};let startResolve,cancelFetchResolve,can
 const control=extra=>Object.assign({addEventListener(type,handler){this.listeners??={};this.listeners[type]=handler}},extra);
 const toggle=control({checked:false}),timeout=control({value:'60',focus(){}}),stop=control({disabled:true}),status={textContent:'',dataset:{}};
 const elements={'#device-preview-enabled':toggle,'#device-preview-timeout':timeout,'#stop-device-preview':stop,'#device-preview-status':status};
-const context={console,AbortController,Date,Number,Promise,Set,Map,Math,encodeURIComponent,setTimeout,clearTimeout,setInterval,clearInterval,matrixSyncStopped:false,matrixEditorsReady:true,previewModule:'clock',previewInstance:'d'.repeat(32),PAIRED_ACTION_SIGNAL:'1',configBody:()=>({}),selectedLavaPaletteDescriptor:()=>null,selectEditPreviewModule(){},selectEditedPreviewModule(){},
+const context={console,AbortController,Date,Number,Promise,Set,Map,Math,encodeURIComponent,setTimeout,clearTimeout,setInterval,clearInterval,matrixSyncStopped:false,matrixEditorsReady:true,previewMode:'edit',previewModule:'clock',previewInstance:'d'.repeat(32),PAIRED_ACTION_SIGNAL:'1',configBody:()=>({}),selectedLavaPaletteDescriptor:()=>null,selectEditPreviewModule(){},selectEditedPreviewModule(){},
  document:{querySelector:s=>elements[s],addEventListener(){}},window:{addEventListener(n,h){listeners[n]=h}},
  fetch:async(path)=>{if(path==='/api/device-preview/cancel'){cancelCalls++;return new Promise(resolve=>{cancelFetchResolve=()=>resolve({ok:true})})}throw new Error(path)},
  api:async(path,options={})=>{if(path==='/api/device-preview/clock')return new Promise(resolve=>{startResolve=resolve});if(path==='/api/device-preview/cancel'){cancelCalls++;return {cancelled:true}};throw new Error(path)}};
@@ -1191,30 +1330,31 @@ try{
  await evaluate(`fetch('/pair',{method:'POST',headers:{'Content-Type':'application/x-www-form-urlencoded','X-Matrix-Action':'paired-request'},body:new URLSearchParams({device_name:'R5 Chromium closure',pin:'123456'})}).then(response=>response.ok)`,true);
  await send('Page.navigate',{url:`http://127.0.0.1:${appPort}/`});
  await waitFor(`document.readyState==='complete'&&!document.querySelector('#device-preview-enabled').disabled`);
- const initial=await evaluate(`(()=>{const toggle=document.querySelector('#device-preview-enabled'),status=document.querySelector('#device-preview-status');return{origin:location.origin,checked:toggle.checked,status:status.textContent,state:status.dataset.state||'',mode:document.querySelector('input[name="preview-mode"]:checked').value}})()`);
+ const initial=await evaluate(`(()=>{const toggle=document.querySelector('#device-preview-enabled'),status=document.querySelector('#device-preview-status'),controls=document.querySelector('.device-preview-controls');return{origin:location.origin,checked:toggle.checked,status:status.textContent,state:status.dataset.state||'',mode:document.querySelector('input[name="preview-mode"]:checked').value,controlsDisplay:getComputedStyle(controls).display,stopMissing:document.querySelector('#stop-device-preview')===null}})()`);
+ await click('label[for="preview-mode-edit"]');
+ await waitFor(`document.querySelector('#preview-mode-edit').checked&&getComputedStyle(document.querySelector('.device-preview-controls')).display!=='none'`);
  await evaluate(`(()=>{const input=document.querySelector('#device-name');input.scrollIntoView({block:'center'});input.focus();input.select();return true})()`);
  await send('Input.insertText',{text:'UNSAVED DEVICE DRAFT'});
  await evaluate(`scrollTo(0,0);syncPreviewPopout()`);
- await waitFor(`getComputedStyle(document.querySelector('.device-preview-controls')).display!=='none'`);
+ await waitFor(`document.querySelector('#preview-module').textContent.startsWith('Unsaved draft')`);
+ const simulatedBeforeDevice=await evaluate(`({value:document.querySelector('#device-name').value,mode:document.querySelector('input[name="preview-mode"]:checked').value,module:document.querySelector('#preview-module').textContent,frame:document.querySelector('#preview-frame').textContent,starts:performance.getEntriesByType('resource').filter(entry=>new URL(entry.name).pathname==='/api/device-preview/splash').length})`);
  await click('.device-preview-opt-in');
  await waitFor(countResources('/api/device-preview/splash')+`>=1`);
  await waitFor(`document.querySelector('#device-preview-status').dataset.state==='active'`);
  const first=await evaluate(`(()=>{const toggle=document.querySelector('#device-preview-enabled'),status=document.querySelector('#device-preview-status');return{checked:toggle.checked,state:status.dataset.state,text:status.textContent,mode:document.querySelector('input[name="preview-mode"]:checked').value,preference:localStorage.getItem('matrix-device-preview-enabled')}})()`);
- await click('label[for="preview-mode-edit"]');
- await waitFor(`document.querySelector('#preview-mode-edit').checked`);
  const afterMode=await evaluate(`({checked:document.querySelector('#device-preview-enabled').checked,state:document.querySelector('#device-preview-status').dataset.state,mode:document.querySelector('input[name="preview-mode"]:checked').value,cancels:performance.getEntriesByType('resource').filter(entry=>new URL(entry.name).pathname==='/api/device-preview/cancel').length})`);
  await evaluate(`(()=>{const input=document.querySelector('#device-name');input.scrollIntoView({block:'center'});input.focus();input.select();return true})()`);
  await send('Input.insertText',{text:'STRICTLY NEWER UNSAVED DRAFT'});
- const preservedBefore=await evaluate(`(()=>{const input=document.querySelector('#device-name');input.setSelectionRange(4,12);scrollBy(0,40);return{value:input.value,selection:[input.selectionStart,input.selectionEnd],scrollY,focused:document.activeElement===input}})()`);
+ const preservedBefore=await evaluate(`(()=>{const input=document.querySelector('#device-name');input.setSelectionRange(4,12);scrollBy(0,40);return{value:input.value,selection:[input.selectionStart,input.selectionEnd],inputTop:Math.round(input.getBoundingClientRect().top),focused:document.activeElement===input}})()`);
  await waitFor(countResources('/api/device-preview/splash')+`>=2`);
  await waitFor(countResources('/api/device-preview/heartbeat')+`>=1`,8000);
- const preservedAfter=await evaluate(`(()=>{const input=document.querySelector('#device-name');return{value:input.value,selection:[input.selectionStart,input.selectionEnd],scrollY,focused:document.activeElement===input,checked:document.querySelector('#device-preview-enabled').checked,state:document.querySelector('#device-preview-status').dataset.state,mode:document.querySelector('input[name="preview-mode"]:checked').value,starts:performance.getEntriesByType('resource').filter(entry=>new URL(entry.name).pathname==='/api/device-preview/splash').length,heartbeats:performance.getEntriesByType('resource').filter(entry=>new URL(entry.name).pathname==='/api/device-preview/heartbeat').length}})()`);
+ const preservedAfter=await evaluate(`(()=>{const input=document.querySelector('#device-name');return{value:input.value,selection:[input.selectionStart,input.selectionEnd],inputTop:Math.round(input.getBoundingClientRect().top),focused:document.activeElement===input,checked:document.querySelector('#device-preview-enabled').checked,state:document.querySelector('#device-preview-status').dataset.state,mode:document.querySelector('input[name="preview-mode"]:checked').value,starts:performance.getEntriesByType('resource').filter(entry=>new URL(entry.name).pathname==='/api/device-preview/splash').length,heartbeats:performance.getEntriesByType('resource').filter(entry=>new URL(entry.name).pathname==='/api/device-preview/heartbeat').length}})()`);
  await evaluate(`scrollTo(0,0);syncPreviewPopout()`);
  await waitFor(`getComputedStyle(document.querySelector('.device-preview-controls')).display!=='none'`);
- await evaluate(`document.querySelector('#stop-device-preview').click()`);
+ await click('.device-preview-opt-in');
  await waitFor(`!document.querySelector('#device-preview-enabled').checked&&document.querySelector('#device-preview-status').dataset.state==='off'`);
  const stopped=await evaluate(`({checked:document.querySelector('#device-preview-enabled').checked,state:document.querySelector('#device-preview-status').dataset.state,text:document.querySelector('#device-preview-status').textContent,cancels:performance.getEntriesByType('resource').filter(entry=>new URL(entry.name).pathname==='/api/device-preview/cancel').length,preference:localStorage.getItem('matrix-device-preview-enabled'),errors:__browserErrors})`);
- console.log(JSON.stringify({initial,first,afterMode,preservedBefore,preservedAfter,stopped,networkRequests}));
+ console.log(JSON.stringify({initial,simulatedBeforeDevice,first,afterMode,preservedBefore,preservedAfter,stopped,networkRequests}));
 }finally{socket.close()}
 """
         report = self.run_live_chromium_probe(probe, timeout=30)
@@ -1223,10 +1363,15 @@ try{
         self.assertEqual(report["initial"], {
             **report["initial"], "checked": False,
             "status": "Device preview is off.", "state": "", "mode": "live",
+            "controlsDisplay": "none", "stopMissing": True,
         })
+        self.assertEqual(report["simulatedBeforeDevice"]["value"], "UNSAVED DEVICE DRAFT", report)
+        self.assertEqual(report["simulatedBeforeDevice"]["mode"], "edit", report)
+        self.assertTrue(report["simulatedBeforeDevice"]["module"].startswith("Unsaved draft"), report)
+        self.assertEqual(report["simulatedBeforeDevice"]["starts"], 0, report)
         self.assertEqual(
             (report["first"]["checked"], report["first"]["state"], report["first"]["mode"], report["first"]["preference"]),
-            (True, "active", "live", "true"), report,
+            (True, "active", "edit", "true"), report,
         )
         self.assertIn("unsaved draft", report["first"]["text"].lower())
         self.assertEqual(report["afterMode"], {
@@ -1234,7 +1379,7 @@ try{
         }, report)
         self.assertEqual(report["preservedAfter"]["value"], "STRICTLY NEWER UNSAVED DRAFT", report)
         self.assertEqual(
-            {key: report["preservedAfter"][key] for key in ("value", "selection", "scrollY", "focused")},
+            {key: report["preservedAfter"][key] for key in ("value", "selection", "inputTop", "focused")},
             report["preservedBefore"], report,
         )
         self.assertTrue(report["preservedAfter"]["checked"], report)
@@ -1463,7 +1608,7 @@ const vm=require('node:vm');let startResolve,startSignal,admitted=false;const ca
 const control=extra=>Object.assign({addEventListener(type,handler){this.listeners??={};this.listeners[type]=handler}},extra);
 const toggle=control({checked:false}),timeout=control({value:'60',focus(){}}),stop=control({disabled:true}),status={textContent:'',dataset:{}};
 const elements={'#device-preview-enabled':toggle,'#device-preview-timeout':timeout,'#stop-device-preview':stop,'#device-preview-status':status};
-const context={console,AbortController,Date,Number,Promise,Set,Map,Math,encodeURIComponent,setTimeout,clearTimeout,setInterval,clearInterval,matrixSyncStopped:false,matrixEditorsReady:true,previewModule:'custom_removed',previewInstance:'e'.repeat(32),PAIRED_ACTION_SIGNAL:'1',configBody:()=>({marker:'draft'}),selectedLavaPaletteDescriptor:()=>null,selectEditPreviewModule(){},selectEditedPreviewModule(){},document:{querySelector:s=>elements[s],addEventListener(){}},window:{addEventListener(){}},fetch:async()=>({ok:true}),api:async(path,options={})=>{const body=options.body?JSON.parse(options.body):null;calls.push({path,body});if(path==='/api/device-preview/custom_removed'){startSignal=options.signal;return new Promise(resolve=>{startResolve=value=>{admitted=true;resolve(value)}})}if(path==='/api/device-preview/cancel')return {cancelled:admitted};if(path==='/api/device-preview/clock')return {generation:body.generation,expires_in:60,heartbeat_after_seconds:5,active_module:'clock'};throw new Error(path)}};
+const context={console,AbortController,Date,Number,Promise,Set,Map,Math,encodeURIComponent,setTimeout,clearTimeout,setInterval,clearInterval,matrixSyncStopped:false,matrixEditorsReady:true,previewMode:'edit',previewModule:'custom_removed',previewInstance:'e'.repeat(32),PAIRED_ACTION_SIGNAL:'1',configBody:()=>({marker:'draft'}),selectedLavaPaletteDescriptor:()=>null,selectEditPreviewModule(){},selectEditedPreviewModule(){},document:{querySelector:s=>elements[s],addEventListener(){}},window:{addEventListener(){}},fetch:async()=>({ok:true}),api:async(path,options={})=>{const body=options.body?JSON.parse(options.body):null;calls.push({path,body});if(path==='/api/device-preview/custom_removed'){startSignal=options.signal;return new Promise(resolve=>{startResolve=value=>{admitted=true;resolve(value)}})}if(path==='/api/device-preview/cancel')return {cancelled:admitted};if(path==='/api/device-preview/clock')return {generation:body.generation,expires_in:60,heartbeat_after_seconds:5,active_module:'clock'};throw new Error(path)}};
 vm.createContext(context);vm.runInContext(process.argv[1],context);(async()=>{toggle.checked=true;toggle.listeners.change();await new Promise(resolve=>setTimeout(resolve,5));context.previewModule='clock';const mode=process.argv[2];let replacing;
  if(mode==='before'){context.startDevicePreview();replacing=context.replaceDevicePreviewAfterSourceRemoval('clock')}
  else {replacing=context.replaceDevicePreviewAfterSourceRemoval('clock');if(mode==='during')context.startDevicePreview()}
@@ -4986,79 +5131,45 @@ try{
         and os.access(os.environ.get("MATRIX_CHROMIUM", ""), os.X_OK),
         "MATRIX_CHROMIUM browser is required",
     )
-    def test_active_device_preview_stop_and_status_remain_reachable_in_popped_strip(self):
+    def test_edit_only_device_preview_checkbox_and_status_remain_reachable_in_popped_strip(self):
         self.pair_browser()
         body = self.client.get("/").get_data(as_text=True)
         probe = r"""
 const port=process.argv[1],pagePath=process.argv[2];let endpoint;
 for(let attempt=0;attempt<50;attempt++){try{endpoint=await fetch(`http://127.0.0.1:${port}/json/new`,{method:'PUT'}).then(r=>r.json());break}catch(_){await new Promise(r=>setTimeout(r,100))}}
-if(!endpoint)throw new Error('Chromium DevTools endpoint unavailable');
-const socket=new WebSocket(endpoint.webSocketDebuggerUrl),pending=new Map();let nextId=1,loadResolve,loaded=new Promise(resolve=>loadResolve=resolve);
-socket.onmessage=event=>{const message=JSON.parse(event.data);if(message.id&&pending.has(message.id)){const request=pending.get(message.id);pending.delete(message.id);message.error?request.reject(new Error(JSON.stringify(message.error))):request.resolve(message.result)}else if(message.method==='Page.loadEventFired')loadResolve()};
-await new Promise((resolve,reject)=>{socket.onopen=resolve;socket.onerror=reject});
-const send=(method,params={})=>{const id=nextId++;socket.send(JSON.stringify({id,method,params}));return new Promise((resolve,reject)=>pending.set(id,{resolve,reject}))};
-const evaluate=async expression=>{const result=await send('Runtime.evaluate',{expression,returnByValue:true,awaitPromise:true});if(result.exceptionDetails)throw new Error(JSON.stringify(result.exceptionDetails));return result.result.value};
-try{
- await send('Runtime.enable');await send('Page.enable');loaded=new Promise(resolve=>loadResolve=resolve);await send('Page.navigate',{url:'file://'+pagePath});await Promise.race([loaded,new Promise((_,reject)=>setTimeout(()=>reject(new Error('load timeout')),5000))]);await evaluate(`document.documentElement.style.scrollBehavior='auto';globalThis.__deviceStopActivations=0;document.querySelector('#stop-device-preview').addEventListener('click',()=>__deviceStopActivations++)`);
- const targets=[];
- for(const [width,height] of [[320,568],[360,800],[390,844],[412,915],[768,1024],[820,1180],[844,390],[899,700],[900,700],[901,700],[1024,768],[1280,720],[1440,900]]){
-  await send('Emulation.setTouchEmulationEnabled',{enabled:false});await send('Emulation.setDeviceMetricsOverride',{width,height,deviceScaleFactor:1,mobile:width<1024});
-  targets.push(await evaluate(`(()=>{scrollTo(0,0);resizePreviewPopout();const optIn=document.querySelector('.device-preview-opt-in').getBoundingClientRect(),stop=document.querySelector('#stop-device-preview').getBoundingClientRect();return{viewport:[innerWidth,innerHeight],coarse:matchMedia('(pointer: coarse)').matches,optIn:[optIn.width,optIn.height],stop:[stop.width,stop.height]}})()`));
- }
- await send('Emulation.setDeviceMetricsOverride',{width:1280,height:720,deviceScaleFactor:1,mobile:false});await send('Emulation.setTouchEmulationEnabled',{enabled:true,maxTouchPoints:1});
- const coarse=await evaluate(`(()=>{scrollTo(0,0);resizePreviewPopout();const optIn=document.querySelector('.device-preview-opt-in').getBoundingClientRect(),stop=document.querySelector('#stop-device-preview').getBoundingClientRect();return{viewport:[innerWidth,innerHeight],coarse:matchMedia('(pointer: coarse)').matches,optIn:[optIn.width,optIn.height],stop:[stop.width,stop.height]}})()`);await send('Emulation.setTouchEmulationEnabled',{enabled:false});
- const offStates=[],states=[];
- for(const [width,height] of [[320,390],[320,500],[320,568],[360,800],[390,844],[412,915],[768,1024],[820,1180],[1024,768],[1280,720],[1440,900],[844,390]]){
-  await send('Emulation.setDeviceMetricsOverride',{width,height,deviceScaleFactor:1,mobile:width<1024});
-  offStates.push(await evaluate(`(()=>{const live=document.querySelector('.preview-live'),controls=document.querySelector('.device-preview-controls'),optIn=document.querySelector('.device-preview-opt-in'),status=document.querySelector('#device-preview-status');setDevicePreviewStatus('Device preview is off.','off');scrollTo(0,document.documentElement.scrollHeight);resizePreviewPopout();const lr=live.getBoundingClientRect(),cr=controls.getBoundingClientRect(),or=optIn.getBoundingClientRect();return{viewport:[innerWidth,innerHeight],popped:live.classList.contains('is-popped'),display:getComputedStyle(controls).display,overflow:document.documentElement.scrollWidth-document.documentElement.clientWidth,live:[lr.left,lr.top,lr.right,lr.bottom],controls:[cr.left,cr.top,cr.right,cr.bottom,cr.width,cr.height],optIn:[or.left,or.top,or.right,or.bottom,or.width,or.height]}})()`));
-  states.push(await evaluate(`(()=>{const live=document.querySelector('.preview-live'),controls=document.querySelector('.device-preview-controls'),optIn=document.querySelector('.device-preview-opt-in'),stop=document.querySelector('#stop-device-preview'),status=document.querySelector('#device-preview-status');setDevicePreviewStatus('Device preview active.','active');scrollTo(0,document.documentElement.scrollHeight);resizePreviewPopout();stop.focus();const liveRect=live.getBoundingClientRect(),controlsRect=controls.getBoundingClientRect(),optInRect=optIn.getBoundingClientRect(),stopRect=stop.getBoundingClientRect(),statusRect=status.getBoundingClientRect(),hit=document.elementFromPoint(stopRect.left+stopRect.width/2,stopRect.top+stopRect.height/2),before=__deviceStopActivations;stop.click();return{viewport:[innerWidth,innerHeight],popped:live.classList.contains('is-popped'),display:getComputedStyle(controls).display,overflow:document.documentElement.scrollWidth-document.documentElement.clientWidth,live:[liveRect.left,liveRect.top,liveRect.right,liveRect.bottom],controls:[controlsRect.left,controlsRect.top,controlsRect.right,controlsRect.bottom,controlsRect.width,controlsRect.height],optIn:[optInRect.left,optInRect.top,optInRect.right,optInRect.bottom,optInRect.width,optInRect.height],stop:[stopRect.left,stopRect.top,stopRect.right,stopRect.bottom,stopRect.width,stopRect.height],status:[statusRect.left,statusRect.top,statusRect.right,statusRect.bottom,statusRect.width,statusRect.height],statusText:status.textContent,stopText:stop.textContent.trim(),tabIndex:stop.tabIndex,focused:document.activeElement===stop,hit:hit===stop||stop.contains(hit),activated:__deviceStopActivations===before+1}})()`));
- }
- await send('Emulation.setDeviceMetricsOverride',{width:320,height:568,deviceScaleFactor:1,mobile:true});await send('Emulation.setPageScaleFactor',{pageScaleFactor:1});
- const keyboardBefore=await evaluate(`(()=>{setDevicePreviewStatus('Device preview active · 60s remaining.','active');scrollTo(0,document.documentElement.scrollHeight);resizePreviewPopout();const stop=document.querySelector('#stop-device-preview');stop.focus();return __deviceStopActivations})()`);await send('Input.dispatchKeyEvent',{type:'keyDown',key:' ',code:'Space'});await send('Input.dispatchKeyEvent',{type:'keyUp',key:' ',code:'Space'});await new Promise(resolve=>setTimeout(resolve,20));const keyboardAfter=await evaluate(`__deviceStopActivations`);
- const mouse=await evaluate(`(()=>{setDevicePreviewStatus('Device preview active · 60s remaining.','active');resizePreviewPopout();const stop=document.querySelector('#stop-device-preview'),rect=stop.getBoundingClientRect();return{x:rect.left+rect.width/2,y:rect.top+rect.height/2,before:__deviceStopActivations}})()`);await send('Input.dispatchMouseEvent',{type:'mousePressed',x:mouse.x,y:mouse.y,button:'left',clickCount:1});await send('Input.dispatchMouseEvent',{type:'mouseReleased',x:mouse.x,y:mouse.y,button:'left',clickCount:1});await new Promise(resolve=>setTimeout(resolve,20));const mouseAfter=await evaluate(`__deviceStopActivations`);
- const touch=await evaluate(`(()=>{setDevicePreviewStatus('Device preview active · 60s remaining.','active');const stop=document.querySelector('#stop-device-preview'),rect=stop.getBoundingClientRect();return{x:rect.left+rect.width/2,y:rect.top+rect.height/2,before:__deviceStopActivations}})()`);await send('Input.dispatchTouchEvent',{type:'touchStart',touchPoints:[{x:touch.x,y:touch.y,radiusX:1,radiusY:1,force:1,id:1}]});await send('Input.dispatchTouchEvent',{type:'touchEnd',touchPoints:[]});await new Promise(resolve=>setTimeout(resolve,20));const touchAfter=await evaluate(`__deviceStopActivations`);
- await send('Emulation.setPageScaleFactor',{pageScaleFactor:2});await new Promise(resolve=>setTimeout(resolve,20));const zoom=await evaluate(`(()=>{setDevicePreviewStatus('Device preview active · 60s remaining.','active');scrollTo(0,document.documentElement.scrollHeight);resizePreviewPopout();const live=document.querySelector('.preview-live'),controls=document.querySelector('.device-preview-controls'),stop=document.querySelector('#stop-device-preview'),status=document.querySelector('#device-preview-status'),modes=document.querySelector('.preview-modes'),screen=document.querySelector('.screen-wrap'),lr=live.getBoundingClientRect(),cr=controls.getBoundingClientRect(),sr=stop.getBoundingClientRect(),tr=status.getBoundingClientRect(),mr=modes.getBoundingClientRect(),left=visualViewport.offsetLeft,right=left+visualViewport.width,hit=document.elementFromPoint(sr.left+sr.width/2,sr.top+sr.height/2);return{scale:visualViewport.scale,visual:[left,right,visualViewport.width],narrow:live.classList.contains('is-visually-narrow'),live:[lr.left,lr.top,lr.right,lr.bottom],controls:[cr.left,cr.top,cr.right,cr.bottom,cr.width,cr.height],stop:[sr.left,sr.top,sr.right,sr.bottom,sr.width,sr.height],status:[tr.left,tr.top,tr.right,tr.bottom,tr.width,tr.height],modes:[mr.left,mr.top,mr.right,mr.bottom,mr.width,mr.height],screenDisplay:getComputedStyle(screen).display,hit:hit===stop||stop.contains(hit),overflow:document.documentElement.scrollWidth-document.documentElement.clientWidth}})()`);await send('Emulation.setPageScaleFactor',{pageScaleFactor:1});
- console.log(JSON.stringify({targets,coarse,offStates,states,keyboard:{before:keyboardBefore,after:keyboardAfter},mouse:{before:mouse.before,after:mouseAfter},touch:{before:touch.before,after:touchAfter},zoom}));
-}finally{socket.close()}
+if(!endpoint)throw new Error('CDP endpoint unavailable');const ws=new WebSocket(endpoint.webSocketDebuggerUrl);await new Promise((resolve,reject)=>{ws.onopen=resolve;ws.onerror=reject});let id=0,loadResolve;const pending=new Map();ws.onmessage=event=>{const message=JSON.parse(event.data);if(message.id){const request=pending.get(message.id);if(!request)return;pending.delete(message.id);message.error?request.reject(new Error(JSON.stringify(message.error))):request.resolve(message.result)}else if(message.method==='Page.loadEventFired')loadResolve?.()};const send=(method,params={})=>new Promise((resolve,reject)=>{const request=++id;pending.set(request,{resolve,reject});ws.send(JSON.stringify({id:request,method,params}))});const evaluate=async expression=>(await send('Runtime.evaluate',{expression,awaitPromise:true,returnByValue:true})).result.value;
+await send('Runtime.enable');await send('Page.enable');const loaded=new Promise(resolve=>loadResolve=resolve);await send('Page.navigate',{url:'file://'+pagePath});await Promise.race([loaded,new Promise((_,reject)=>setTimeout(()=>reject(new Error('load timeout')),5000))]);await evaluate(`document.documentElement.style.scrollBehavior='auto'`);
+const viewports=[[320,568],[360,800],[390,844],[412,915],[768,1024],[820,1180],[844,390],[899,700],[900,700],[901,700],[1024,768],[1280,720],[1440,900]],states=[];
+for(const [width,height] of viewports){
+ await send('Emulation.setTouchEmulationEnabled',{enabled:false});await send('Emulation.setDeviceMetricsOverride',{width,height,deviceScaleFactor:1,mobile:width<1024});
+ const state=await evaluate(`(async()=>{setPreviewMode('live');await new Promise(r=>setTimeout(r,10));const controls=document.querySelector('.device-preview-controls'),stop=document.querySelector('#stop-device-preview');const liveDisplay=getComputedStyle(controls).display;setPreviewMode('edit');devicePreviewToggle.disabled=false;setDevicePreviewStatus('Device is showing unsaved draft.','active');let spacer=document.querySelector('[data-preview-pop-test-spacer]');if(!spacer){spacer=document.createElement('div');spacer.dataset.previewPopTestSpacer='';spacer.style.height='2000px';document.body.append(spacer)}const popY=document.querySelector('.preview-card').offsetTop+1;document.scrollingElement.scrollTop=popY;await new Promise(resolve=>requestAnimationFrame(()=>resolve()));syncPreviewPopout();await new Promise(r=>setTimeout(r,20));const live=document.querySelector('.preview-live'),optIn=document.querySelector('.device-preview-opt-in'),status=document.querySelector('#device-preview-status'),rect=value=>{const r=value.getBoundingClientRect();return[r.left,r.top,r.right,r.bottom,r.width,r.height]},hit=document.elementFromPoint(...(()=>{const r=optIn.getBoundingClientRect();return[r.left+r.width/2,r.top+r.height/2]})());return{viewport:[innerWidth,innerHeight],scrollY,cardTop:document.querySelector('.preview-card').offsetTop,liveDisplay,editDisplay:getComputedStyle(controls).display,stopMissing:stop===null,popped:live.classList.contains('is-popped'),overflow:document.documentElement.scrollWidth-document.documentElement.clientWidth,coarse:matchMedia('(pointer: coarse)').matches,live:rect(live),controls:rect(controls),optIn:rect(optIn),status:rect(status),statusText:status.textContent,hit:hit===optIn||optIn.contains(hit)}})()`);states.push(state)
+}
+await send('Emulation.setDeviceMetricsOverride',{width:1280,height:720,deviceScaleFactor:1,mobile:false});await send('Emulation.setTouchEmulationEnabled',{enabled:true,maxTouchPoints:1});
+const coarse=await evaluate(`(()=>{const optIn=document.querySelector('.device-preview-opt-in').getBoundingClientRect();return{matches:matchMedia('(pointer: coarse)').matches,size:[optIn.width,optIn.height]}})()`);
+await send('Emulation.setDeviceMetricsOverride',{width:320,height:568,deviceScaleFactor:1,mobile:true});await send('Emulation.setTouchEmulationEnabled',{enabled:false});
+const keyboardBefore=await evaluate(`(()=>{globalThis.__deviceToggleChanges=0;devicePreviewToggle.addEventListener('change',()=>__deviceToggleChanges++);devicePreviewToggle.checked=false;devicePreviewToggle.focus();return __deviceToggleChanges})()`);
+await send('Input.dispatchKeyEvent',{type:'keyDown',key:' ',code:'Space'});await send('Input.dispatchKeyEvent',{type:'keyUp',key:' ',code:'Space'});await new Promise(resolve=>setTimeout(resolve,20));const keyboardAfter=await evaluate(`__deviceToggleChanges`);
+const mouse=await evaluate(`(()=>{const rect=devicePreviewToggle.getBoundingClientRect();return{x:rect.left+rect.width/2,y:rect.top+rect.height/2,before:__deviceToggleChanges}})()`);await send('Input.dispatchMouseEvent',{type:'mousePressed',x:mouse.x,y:mouse.y,button:'left',clickCount:1});await send('Input.dispatchMouseEvent',{type:'mouseReleased',x:mouse.x,y:mouse.y,button:'left',clickCount:1});await new Promise(resolve=>setTimeout(resolve,20));const mouseAfter=await evaluate(`__deviceToggleChanges`);
+await send('Emulation.setTouchEmulationEnabled',{enabled:true,maxTouchPoints:1});const touch=await evaluate(`(()=>{const rect=devicePreviewToggle.getBoundingClientRect();return{x:rect.left+rect.width/2,y:rect.top+rect.height/2,before:__deviceToggleChanges}})()`);await send('Input.dispatchTouchEvent',{type:'touchStart',touchPoints:[{x:touch.x,y:touch.y,radiusX:1,radiusY:1,force:1,id:1}]});await send('Input.dispatchTouchEvent',{type:'touchEnd',touchPoints:[]});await new Promise(resolve=>setTimeout(resolve,20));const touchAfter=await evaluate(`__deviceToggleChanges`);
+await send('Emulation.setPageScaleFactor',{pageScaleFactor:2});await new Promise(resolve=>setTimeout(resolve,20));const zoom=await evaluate(`(()=>{setDevicePreviewStatus('Device is showing unsaved draft.','active');document.scrollingElement.scrollTop=previewCard.offsetTop+1;resizePreviewPopout();const live=document.querySelector('.preview-live'),controls=document.querySelector('.device-preview-controls'),optIn=document.querySelector('.device-preview-opt-in'),status=document.querySelector('#device-preview-status'),modes=document.querySelector('.preview-modes'),screen=live.querySelector('.screen-wrap'),rect=value=>{const r=value.getBoundingClientRect();return[r.left,r.top,r.right,r.bottom,r.width,r.height]},left=visualViewport.offsetLeft,right=left+visualViewport.width,hit=document.elementFromPoint(...(()=>{const r=optIn.getBoundingClientRect();return[r.left+r.width/2,r.top+r.height/2]})());return{scale:visualViewport.scale,visual:[left,right,visualViewport.width],narrow:live.classList.contains('is-visually-narrow'),live:rect(live),controls:rect(controls),optIn:rect(optIn),status:rect(status),modes:rect(modes),screenDisplay:getComputedStyle(screen).display,hit:hit===optIn||optIn.contains(hit),overflow:document.documentElement.scrollWidth-document.documentElement.clientWidth}})()`);const zoomUncheck=await evaluate(`(()=>{devicePreviewGeneration=0;devicePreviewRequestGeneration=null;devicePreviewActiveGeneration=null;devicePreviewRequestPromise=null;devicePreviewEnabled=true;devicePreviewToggle.checked=true;writeDevicePreviewPreference(true);setDevicePreviewStatus('Device is showing unsaved draft.','active');const rect=devicePreviewToggle.getBoundingClientRect();return{x:rect.left+rect.width/2,y:rect.top+rect.height/2}})()`);await send('Input.dispatchMouseEvent',{type:'mousePressed',x:zoomUncheck.x,y:zoomUncheck.y,button:'left',clickCount:1});await send('Input.dispatchMouseEvent',{type:'mouseReleased',x:zoomUncheck.x,y:zoomUncheck.y,button:'left',clickCount:1});await new Promise(resolve=>setTimeout(resolve,50));const zoomOff=await evaluate(`(()=>{const live=document.querySelector('.preview-live'),optIn=document.querySelector('.device-preview-opt-in'),rect=optIn.getBoundingClientRect(),left=visualViewport.offsetLeft,right=left+visualViewport.width,hit=document.elementFromPoint(rect.left+rect.width/2,rect.top+rect.height/2);return{checked:devicePreviewToggle.checked,stored:localStorage.getItem('matrix-device-preview-enabled'),state:devicePreviewStatus.dataset.state,visual:[left,right,visualViewport.width],live:(()=>{const value=live.getBoundingClientRect();return[value.left,value.top,value.right,value.bottom]})(),optIn:[rect.left,rect.top,rect.right,rect.bottom,rect.width,rect.height],hit:hit===optIn||optIn.contains(hit),overflow:document.documentElement.scrollWidth-document.documentElement.clientWidth}})()`);await send('Emulation.setPageScaleFactor',{pageScaleFactor:1});
+const resetAfter=await evaluate(`__deviceToggleChanges`),checkbox=await evaluate(`({checked:devicePreviewToggle.checked,stored:localStorage.getItem('matrix-device-preview-enabled')})`);
+console.log(JSON.stringify({states,coarse,keyboard:{before:keyboardBefore,after:keyboardAfter},mouse:{before:mouse.before,after:mouseAfter},touch:{before:touch.before,after:touchAfter},resetAfter,checkbox,zoom,zoomOff}));ws.close();
 """
         report = self._run_dashboard_chromium_probe(body, probe, timeout=45)
-        target_viewports = [[320, 568], [360, 800], [390, 844], [412, 915],
-                            [768, 1024], [820, 1180], [844, 390], [899, 700],
-                            [900, 700], [901, 700], [1024, 768], [1280, 720],
-                            [1440, 900]]
-        self.assertEqual([item["viewport"] for item in report["targets"]], target_viewports, report)
-        for item in report["targets"]:
-            for target in (item["optIn"], item["stop"]):
-                self.assertGreater(target[0], 0, item)
-                self.assertGreater(target[1], 0, item)
-                if item["viewport"][0] <= 900:
-                    self.assertGreaterEqual(target[1], 44, item)
-        self.assertTrue(report["coarse"]["coarse"], report)
-        self.assertEqual(report["coarse"]["viewport"], [1280, 720], report)
-        self.assertGreaterEqual(report["coarse"]["optIn"][1], 44, report)
-        self.assertGreaterEqual(report["coarse"]["stop"][1], 44, report)
-        expected = [[320, 390], [320, 500], [320, 568], [360, 800], [390, 844], [412, 915], [768, 1024], [820, 1180], [1024, 768], [1280, 720], [1440, 900], [844, 390]]
-        self.assertEqual([item["viewport"] for item in report["offStates"]], expected, report)
-        for item in report["offStates"]:
-            self.assertTrue(item["popped"], item)
-            self.assertNotEqual(item["display"], "none", item)
-            self.assertLessEqual(item["overflow"], 1, item)
-            live_left, live_top, live_right, live_bottom = item["live"]
-            for bounds in (item["optIn"],):
-                left, top, right, bottom, width, height = bounds
-                self.assertGreater(width, 0, item)
-                self.assertGreater(height, 0, item)
-                self.assertGreaterEqual(left, live_left - 1, item)
-                self.assertGreaterEqual(top, live_top - 1, item)
-                self.assertLessEqual(right, live_right + 1, item)
-                self.assertLessEqual(bottom, live_bottom + 1, item)
+        expected = [[320, 568], [360, 800], [390, 844], [412, 915],
+                    [768, 1024], [820, 1180], [844, 390], [899, 700],
+                    [900, 700], [901, 700], [1024, 768], [1280, 720],
+                    [1440, 900]]
         self.assertEqual([item["viewport"] for item in report["states"]], expected, report)
         for item in report["states"]:
+            self.assertEqual(item["liveDisplay"], "none", item)
+            self.assertNotEqual(item["editDisplay"], "none", item)
+            self.assertTrue(item["stopMissing"], item)
+            self.assertGreater(item["scrollY"], item["cardTop"], item)
             self.assertTrue(item["popped"], item)
-            self.assertNotEqual(item["display"], "none", item)
             self.assertLessEqual(item["overflow"], 1, item)
-            live_left, live_top, live_right, live_bottom = item["live"]
-            for bounds in (item["controls"], item["optIn"], item["stop"], item["status"]):
+            live_left, live_top, live_right, live_bottom, _, _ = item["live"]
+            for bounds in (item["controls"], item["optIn"], item["status"]):
                 left, top, right, bottom, width, height = bounds
                 self.assertGreater(width, 0, item)
                 self.assertGreater(height, 0, item)
@@ -5066,18 +5177,16 @@ try{
                 self.assertGreaterEqual(top, live_top - 1, item)
                 self.assertLessEqual(right, live_right + 1, item)
                 self.assertLessEqual(bottom, live_bottom + 1, item)
-            self.assertGreaterEqual(item["stop"][4], 44, item)
-            self.assertGreaterEqual(item["stop"][5], 44, item)
-            self.assertGreaterEqual(item["status"][4], 44, item)
-            self.assertIn("Device preview active", item["statusText"])
-            self.assertEqual(item["stopText"], "Stop device preview", item)
-            self.assertEqual(item["tabIndex"], 0, item)
-            self.assertTrue(item["focused"], item)
+            self.assertGreaterEqual(item["optIn"][5], 44, item)
+            self.assertIn("unsaved draft", item["statusText"])
             self.assertTrue(item["hit"], item)
-            self.assertTrue(item["activated"], item)
+        self.assertTrue(report["coarse"]["matches"], report)
+        self.assertGreaterEqual(report["coarse"]["size"][1], 44, report)
         self.assertEqual(report["keyboard"]["after"], report["keyboard"]["before"] + 1, report)
         self.assertEqual(report["mouse"]["after"], report["mouse"]["before"] + 1, report)
         self.assertEqual(report["touch"]["after"], report["touch"]["before"] + 1, report)
+        self.assertEqual(report["resetAfter"], report["touch"]["after"] + 1, report)
+        self.assertEqual(report["checkbox"], {"checked": False, "stored": "false"}, report)
         zoom = report["zoom"]
         self.assertEqual(zoom["scale"], 2, report)
         self.assertTrue(zoom["narrow"], report)
@@ -5085,8 +5194,8 @@ try{
         self.assertEqual(zoom["screenDisplay"], "none", report)
         self.assertLessEqual(zoom["overflow"], 1, report)
         visual_left, visual_right, _ = zoom["visual"]
-        live_left, live_top, live_right, live_bottom = zoom["live"]
-        for bounds in (zoom["controls"], zoom["stop"], zoom["status"], zoom["modes"]):
+        live_left, live_top, live_right, live_bottom, _, _ = zoom["live"]
+        for bounds in (zoom["controls"], zoom["optIn"], zoom["status"], zoom["modes"]):
             left, top, right, bottom, width, height = bounds
             self.assertGreater(width, 0, report)
             self.assertGreater(height, 0, report)
@@ -5094,13 +5203,23 @@ try{
             self.assertGreaterEqual(top, live_top - 1, report)
             self.assertLessEqual(right, min(visual_right, live_right) + 1, report)
             self.assertLessEqual(bottom, live_bottom + 1, report)
-        self.assertGreaterEqual(zoom["status"][4], 44, report)
-        self.assertGreaterEqual(zoom["stop"][4], 44, report)
-        self.assertGreaterEqual(zoom["stop"][5], 44, report)
-        self.assertGreaterEqual(zoom["modes"][4], 88, report)
-        self.assertGreaterEqual(zoom["modes"][5], 44, report)
+        self.assertGreaterEqual(zoom["optIn"][5], 44, report)
         self.assertTrue(zoom["hit"], report)
-
+        zoom_off = report["zoomOff"]
+        self.assertFalse(zoom_off["checked"], report)
+        self.assertEqual(zoom_off["stored"], "false", report)
+        self.assertEqual(zoom_off["state"], "off", report)
+        self.assertLessEqual(zoom_off["overflow"], 1, report)
+        visual_left, visual_right, _ = zoom_off["visual"]
+        live_left, live_top, live_right, live_bottom = zoom_off["live"]
+        left, top, right, bottom, width, height = zoom_off["optIn"]
+        self.assertGreaterEqual(left, max(visual_left, live_left) - 1, report)
+        self.assertGreaterEqual(top, live_top - 1, report)
+        self.assertLessEqual(right, min(visual_right, live_right) + 1, report)
+        self.assertLessEqual(bottom, live_bottom + 1, report)
+        self.assertGreaterEqual(width, 44, report)
+        self.assertGreaterEqual(height, 44, report)
+        self.assertTrue(zoom_off["hit"], report)
     @unittest.skipUnless(shutil.which("node"), "Node.js is required")
     @unittest.skipUnless(
         os.environ.get("MATRIX_CHROMIUM")
@@ -9533,9 +9652,11 @@ console.log('REMOVED_CUSTOM_PREVIEW_TARGET_RELEASED_PASS');
         select_end = source.index("\nfunction cyclePreview", select_start)
         status_start = source.index("function updateStatus")
         status_end = source.index("\nasync function refreshDisplayFrame", status_start)
+        helper_start = source.index("function dashboardPreviewModule")
+        helper_end = source.index("\n", helper_start)
         inspect_start = source.index("function inspectLavaPalette")
         inspect_end = source.index("\nfunction selectedLavaPaletteDescriptor", inspect_start)
-        function_source = source[select_start:select_end] + "\n" + source[status_start:status_end] + "\n" + source[inspect_start:inspect_end]
+        function_source = source[select_start:select_end] + "\n" + source[helper_start:helper_end] + "\n" + source[status_start:status_end] + "\n" + source[inspect_start:inspect_end]
         harness = r"""
 const options=['clock_lava','weather'].map(value=>({value})),select={value:'clock_lava',options};
 const elements={
