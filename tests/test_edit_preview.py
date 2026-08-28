@@ -3192,15 +3192,15 @@ class EditPreviewTests(unittest.TestCase):
             def draw_text(self, font, x, y, colour, text, canvas=None, rotation=0):
                 result = super().draw_text(font, x, y, colour, text, canvas=canvas, rotation=rotation)
                 if x == -10000:
-                    self.measurements.append(result - x)
+                    self.measurements.append(result)
                 return result
 
             def widget_scroll(
                 self, text, font, x, y, colour, canvas=None, step=1, wrap=True,
             ):
                 self.positions.append(x)
-                text_end = self.draw_text(font, x, y, colour, text, canvas=canvas)
-                return x - step, text_end - x
+                text_width = self.draw_text(font, x, y, colour, text, canvas=canvas)
+                return x - step, text_width
 
             def swap(self, canvas=None):
                 self.submissions.append(self.snapshot(canvas))
@@ -3919,9 +3919,9 @@ class EditPreviewTests(unittest.TestCase):
 
         frames = [frame for page in pages for frame in page["frames"]]
         font = BdfFont(Path(__file__).parents[1] / "resources" / "fonts" / "5x7.bdf")
-        # Preserve the physical renderer's left-ticker reset boundary: its first
-        # draw reports x plus the glyph advance from the initial x=64 position.
-        text_width = 64 + font.text_pixels(0, options["y"], options["text"])[0]
+        # Preserve the physical renderer's left-ticker reset boundary using the
+        # width returned by rgbmatrix.graphics.DrawText.
+        text_width = font.text_pixels(0, options["y"], options["text"])[0]
         frames_per_loop = 64 + text_width + 1
         self.assertEqual(len(frames), frames_per_loop * options["loops"])
         self.assertTrue(all(len(page["frames"]) == 32 for page in pages[:-1]))
@@ -4215,7 +4215,7 @@ class EditPreviewTests(unittest.TestCase):
         font = BdfFont(
             Path(__file__).parents[1] / "resources" / "fonts" / f"{options['font']}.bdf"
         )
-        text_width = 64 + font.text_pixels(0, options["y"], options["text"])[0]
+        text_width = font.text_pixels(0, options["y"], options["text"])[0]
         frames_per_loop = 64 + text_width + 1
         expected_frames = frames_per_loop * options["loops"]
         source = (

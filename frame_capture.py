@@ -162,7 +162,7 @@ class FrameCapture:
             for px, py in points:
                 if 0 <= px < self.width and 0 <= py < self.height:
                     image.putpixel((px, py), rgb)
-        return int(x) + advance
+        return advance
 
     def publish(self, canvas):
         with self._lock:
