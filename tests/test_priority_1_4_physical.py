@@ -118,6 +118,20 @@ class Priority14PhysicalTests(unittest.TestCase):
             mutate(tampered)
             with self.assertRaises(ValueError):
                 physical.verify_report(tampered, SOURCE_SHA)
+
+    def test_verify_report_rejects_forged_frame_hash_even_with_recomputed_self_digest(self):
+        from scripts import verify_priority_1_4_physical as physical
+
+        report = physical.exercise(CaptureMatrix(), SOURCE_SHA, deadline_seconds=5)
+        forged = copy.deepcopy(report)
+        ticker = next(item for item in forged["fixtures"] if item["name"] == "ticker_left_solid")
+        ticker["frame_sha256"][17] = "0" * 64
+        forged.pop("evidence_digest")
+        forged["evidence_digest"] = hashlib.sha256(physical._canonical(forged)).hexdigest()
+
+        with self.assertRaisesRegex(ValueError, "frame hash"):
+            physical.verify_report(forged, SOURCE_SHA)
+
     def test_exercise_is_dimension_bound_and_cancellable_before_publication(self):
         from scripts import verify_priority_1_4_physical as physical
 

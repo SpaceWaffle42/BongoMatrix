@@ -456,8 +456,10 @@ class Priority14Transaction:
         self.preflight()
         manifest, config = self._load_state()
         p = self.paths
-        self._stop()
+        mutation_started = False
         try:
+            self._stop()
+            mutation_started = True
             self.release_api.deploy_release(
                 p.staged_tool, p.release_root, p.destination_root, p.source_bundle,
                 p.release_manifest, p.backup_manifest, service=self.service,
@@ -465,6 +467,14 @@ class Priority14Transaction:
             self._start_ready()
             self._assert_mutable_hashes(manifest)
         except BaseException as primary:
+            if not mutation_started:
+                try:
+                    self._start_ready()
+                except BaseException as recovery_error:
+                    raise RuntimeError(
+                        f"deployment stop failed and service recovery failed: {recovery_error}"
+                    ) from primary
+                raise
             recovery_error = None
             try:
                 self._stop()
@@ -493,12 +503,14 @@ class Priority14Transaction:
         self._deploy()
 
     def rollback(self, *, after_boundary: Callable[[str], None] | None = None) -> None:
-        self.preflight()
+        self._validate_stage()
         manifest, config = self._load_state()
         p = self.paths
         candidate, candidate_stat = _read_regular(p.destination_root / "data/config.json")
-        self._stop()
+        mutation_started = False
         try:
+            self._stop()
+            mutation_started = True
             self.release_api.rollback_release(
                 p.release_root, p.destination_root, p.source_bundle,
                 p.release_manifest, p.backup_manifest, service=self.service,
@@ -511,6 +523,14 @@ class Priority14Transaction:
             self._start_ready()
             self._assert_mutable_hashes(manifest)
         except BaseException as primary:
+            if not mutation_started:
+                try:
+                    self._start_ready()
+                except BaseException as recovery_error:
+                    raise RuntimeError(
+                        f"rollback stop failed and service recovery failed: {recovery_error}"
+                    ) from primary
+                raise
             recovery_error = None
             try:
                 self._stop()
@@ -580,9 +600,9 @@ class Priority14Transaction:
         self.verify(phase)
         from scripts import verify_priority_1_4_physical as physical
         from matrix_framework import Matrix
-        self._stop()
         descriptor = None
         try:
+            self._stop()
             metadata = display_lock.lstat()
             if not stat.S_ISREG(metadata.st_mode) or stat.S_ISLNK(metadata.st_mode):
                 raise ValueError("display lock is unsafe")

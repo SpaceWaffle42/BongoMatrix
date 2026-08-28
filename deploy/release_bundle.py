@@ -532,8 +532,12 @@ def backup_release(
 ) -> dict[str, object]:
     """Create one fresh backup bundle and its immutable provenance."""
 
-    _require_fresh_path(Path(bundle), "bundle")
-    _require_fresh_path(Path(release_manifest_path), "release manifest")
+    bundle_path = Path(bundle)
+    release_manifest_target = Path(release_manifest_path)
+    embedded_release_manifest = release_manifest_target.parent == bundle_path
+    _require_fresh_path(bundle_path, "bundle")
+    if not embedded_release_manifest:
+        _require_fresh_path(release_manifest_target, "release manifest")
     spec_bytes = _read_regular_path(Path(release_spec_path))
     release_manifest = validate_release_manifest(release_root, release_spec_path)
     try:
@@ -550,7 +554,8 @@ def backup_release(
         _reject_forbidden_release_path(_validate_relative_path(entry["path"]))
     verify_staged_release(staged_tool, release_root, release_spec_path)
     canonical_manifest = _canonical_json(release_manifest)
-    _publish_new_path(Path(release_manifest_path), canonical_manifest)
+    if not embedded_release_manifest:
+        _publish_new_path(release_manifest_target, canonical_manifest)
     result = create_backup_manifest(
         destination_root,
         bundle,
@@ -559,10 +564,13 @@ def backup_release(
         owner_uid=owner_uid,
         owner_gid=owner_gid,
     )
-    bundle_fd = _open_absolute_directory(Path(bundle))
+    if embedded_release_manifest:
+        _publish_new_path(release_manifest_target, canonical_manifest)
+    bundle_fd = _open_absolute_directory(bundle_path)
     try:
         _publish_new_confined(bundle_fd, "release-spec.json", spec_bytes)
-        _publish_new_confined(bundle_fd, "release-manifest.json", canonical_manifest)
+        if release_manifest_target != bundle_path / "release-manifest.json":
+            _publish_new_confined(bundle_fd, "release-manifest.json", canonical_manifest)
         tool_data = _read_confined_regular(
             Path(staged_tool).parent, Path(staged_tool).name, missing_ok=False
         )

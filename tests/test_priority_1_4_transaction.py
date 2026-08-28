@@ -62,6 +62,9 @@ class FakeReleaseAPI:
 
     def preflight_release(self, *_args, **_kwargs):
         self.events.append("api.preflight")
+        destination = Path(_args[2])
+        if destination.joinpath("app.py").read_bytes() == b"new source\n":
+            raise ValueError("destination no longer matches recorded pre-backup state")
         return {"version": 1, "files": []}, {"version": 1, "files": []}
 
     def deploy_release(self, _tool, release, destination, *_args, service, **_kwargs):
@@ -187,6 +190,216 @@ class Priority14TransactionTests(unittest.TestCase):
         metadata = destination.joinpath("data/config.json").stat()
         self.assertEqual(stat.S_IMODE(metadata.st_mode), 0o640)
 
+    def test_rollback_recovers_candidate_and_service_when_stop_transitions_inactive_then_raises(self):
+        temporary, tx, events, service, config_bytes = self.make_transaction()
+        self.addCleanup(temporary.cleanup)
+        tx.prepare()
+        destination = tx.paths.destination_root
+        destination.joinpath("app.py").write_bytes(b"new source\n")
+        migrated = json.loads(config_bytes)
+        migrated.update(schema_version=2, revision=8)
+        candidate_config = json.dumps(migrated).encode()
+        destination.joinpath("data/config.json").write_bytes(candidate_config)
+
+        original_stop = service.stop
+        calls = 0
+
+        def stop_then_raise():
+            nonlocal calls
+            calls += 1
+            original_stop()
+            if calls == 1:
+                raise RuntimeError("rollback stop failed after transition")
+
+        service.stop = stop_then_raise
+        with self.assertRaisesRegex(RuntimeError, "rollback stop failed after transition"):
+            tx.rollback()
+
+        self.assertNotIn("api.deploy", events)
+        self.assertEqual(destination.joinpath("app.py").read_bytes(), b"new source\n")
+        self.assertEqual(destination.joinpath("data/config.json").read_bytes(), candidate_config)
+        self.assertTrue(service.is_active())
+
+    def test_deploy_recovers_source_config_and_service_when_stop_transitions_inactive_then_raises(self):
+        temporary, tx, events, service, config_bytes = self.make_transaction()
+        self.addCleanup(temporary.cleanup)
+        tx.prepare()
+
+        original_stop = service.stop
+        calls = 0
+
+        def stop_then_raise():
+            nonlocal calls
+            calls += 1
+            original_stop()
+            if calls == 1:
+                raise RuntimeError("stop failed after transition")
+
+        service.stop = stop_then_raise
+        with self.assertRaisesRegex(RuntimeError, "stop failed after transition"):
+            tx.deploy()
+
+        self.assertNotIn("api.recover", events)
+        self.assertEqual(tx.paths.destination_root.joinpath("app.py").read_bytes(), b"old source\n")
+        self.assertEqual(tx.paths.destination_root.joinpath("data/config.json").read_bytes(), config_bytes)
+        self.assertTrue(service.is_active())
+
+    def test_deploy_recovers_when_post_stop_active_check_raises(self):
+        temporary, tx, events, service, config_bytes = self.make_transaction()
+        self.addCleanup(temporary.cleanup)
+        tx.prepare()
+
+        original_is_active = service.is_active
+        calls = 0
+
+        def fail_post_stop_check():
+            nonlocal calls
+            calls += 1
+            if calls == 2:
+                raise RuntimeError("post-stop status failure")
+            return original_is_active()
+
+        service.is_active = fail_post_stop_check
+        with self.assertRaisesRegex(RuntimeError, "post-stop status failure"):
+            tx.deploy()
+
+        self.assertNotIn("api.recover", events)
+        self.assertEqual(tx.paths.destination_root.joinpath("app.py").read_bytes(), b"old source\n")
+        self.assertEqual(tx.paths.destination_root.joinpath("data/config.json").read_bytes(), config_bytes)
+        self.assertTrue(service.is_active())
+
+    def test_deploy_recovers_old_pair_when_release_fails_after_source_mutation(self):
+        temporary, tx, events, service, config_bytes = self.make_transaction()
+        self.addCleanup(temporary.cleanup)
+        tx.prepare()
+        api = tx.release_api
+        self.assertIsInstance(api, FakeReleaseAPI)
+        assert isinstance(api, FakeReleaseAPI)
+        original_deploy = api.deploy_release
+
+        def deploy_then_raise(*args, **kwargs):
+            original_deploy(*args, **kwargs)
+            raise RuntimeError("candidate install failed after mutation")
+
+        api.deploy_release = deploy_then_raise
+        with self.assertRaisesRegex(RuntimeError, "candidate install failed after mutation"):
+            tx.deploy()
+
+        self.assertIn("api.recover", events)
+        self.assertEqual(tx.paths.destination_root.joinpath("app.py").read_bytes(), b"old source\n")
+        self.assertEqual(tx.paths.destination_root.joinpath("data/config.json").read_bytes(), config_bytes)
+        self.assertTrue(service.is_active())
+
+    def test_real_release_bundle_rehearses_candidate_rollback_and_final_with_mutable_authorities(self):
+        from deploy import priority_1_4_transaction as transaction
+        from deploy import release_bundle
+
+        temporary = tempfile.TemporaryDirectory()
+        self.addCleanup(temporary.cleanup)
+        root = Path(temporary.name)
+        stage = root / "stage"
+        release = stage / "release"
+        destination = root / "destination"
+        release.joinpath("deploy").mkdir(parents=True)
+        destination.joinpath("deploy").mkdir(parents=True)
+        destination.joinpath("data").mkdir()
+        destination.joinpath("resources/media").mkdir(parents=True)
+
+        tool_bytes = Path(release_bundle.__file__).read_bytes()
+        new_sources = {
+            "app.py": b"candidate source\n",
+            "deploy/release_bundle.py": tool_bytes,
+        }
+        marker = {
+            "schema": 1,
+            "source_sha": SOURCE_SHA,
+            "candidate_tracked_files": sorted(new_sources),
+            "files": [
+                {"path": name, "sha256": hashlib.sha256(content).hexdigest()}
+                for name, content in sorted(new_sources.items())
+            ],
+        }
+        new_sources[".matrix-release.json"] = (
+            json.dumps(marker, sort_keys=True, separators=(",", ":")) + "\n"
+        ).encode()
+        for name, content in new_sources.items():
+            path = release / name
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_bytes(content)
+        stage.joinpath("release_bundle.py").write_bytes(tool_bytes)
+        entries = [
+            {
+                "path": name,
+                "sha256": hashlib.sha256(content).hexdigest(),
+                "uid": os.geteuid(), "gid": os.getegid(), "mode": "0644",
+            }
+            for name, content in sorted(new_sources.items())
+        ]
+        stage.joinpath("release-spec.json").write_text(json.dumps({"version": 1, "files": entries}))
+
+        old_sources = {
+            ".matrix-release.json": b"prior marker\n",
+            "app.py": b"prior source\n",
+            "deploy/release_bundle.py": b"prior tool\n",
+        }
+        for name, content in old_sources.items():
+            path = destination / name
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_bytes(content)
+        destination.chmod(0o750)
+        config_v1 = json.dumps({
+            "schema_version": 1, "revision": 7, "custom_modules": [],
+            "sentinel": {"mutable": "preserved"},
+        }, sort_keys=True, separators=(",", ":")).encode()
+        config_path = destination / "data/config.json"
+        config_path.write_bytes(config_v1)
+        config_path.chmod(0o640)
+        paired_bytes = b'{"devices":[{"id":"paired-sentinel"}]}'
+        media_bytes = b"GIF89a mutable media sentinel"
+        destination.joinpath("data/paired-devices.json").write_bytes(paired_bytes)
+        destination.joinpath("resources/media/user.gif").write_bytes(media_bytes)
+
+        events = []
+
+        class MigratingService(FakeService):
+            def run_health_checks(self):
+                super().run_health_checks()
+                if destination.joinpath("app.py").read_bytes() == new_sources["app.py"]:
+                    current = json.loads(config_path.read_bytes())
+                    if current["schema_version"] == 1:
+                        current.update(schema_version=2, revision=current["revision"] + 1)
+                        config_path.write_text(json.dumps(current))
+
+        service = MigratingService(events)
+        paths = transaction.TransactionPaths(
+            source_sha=SOURCE_SHA, stage=stage, destination_root=destination,
+            source_bundle=root / "source-bundle", state_bundle=root / "state-bundle",
+            service_name="matrix-web.service", health_url="http://127.0.0.1:5000/pair",
+            health_status=200, health_timeout_seconds=30,
+        )
+        tx = transaction.Priority14Transaction(paths, release_api=release_bundle, service=service)
+
+        tx.prepare()
+        tx.deploy()
+        tx.verify("candidate")
+        self.assertEqual(destination.joinpath("app.py").read_bytes(), new_sources["app.py"])
+        self.assertEqual(json.loads(config_path.read_bytes())["schema_version"], 2)
+
+        tx.rollback()
+        tx.verify("rollback")
+        for name, content in old_sources.items():
+            self.assertEqual(destination.joinpath(name).read_bytes(), content)
+        self.assertEqual(config_path.read_bytes(), config_v1)
+
+        tx.redeploy()
+        tx.verify("final")
+        for name, content in new_sources.items():
+            self.assertEqual(destination.joinpath(name).read_bytes(), content)
+        self.assertEqual(json.loads(config_path.read_bytes())["revision"], 8)
+        self.assertEqual(destination.joinpath("data/paired-devices.json").read_bytes(), paired_bytes)
+        self.assertEqual(destination.joinpath("resources/media/user.gif").read_bytes(), media_bytes)
+        self.assertTrue(service.is_active())
+
     def test_physical_phase_owns_display_exclusively_and_always_recovers_service(self):
         from tests.test_priority_1_4_physical import CaptureMatrix
 
@@ -209,6 +422,55 @@ class Priority14TransactionTests(unittest.TestCase):
         self.assertEqual((report["width"], report["height"]), (64, 32))
         self.assertTrue(service.is_active())
         self.assertEqual(events[-3:], ["service.stop", "service.start", "service.health"])
+
+    def test_physical_recovers_service_when_stop_transitions_inactive_then_raises(self):
+        from tests.test_priority_1_4_physical import CaptureMatrix
+
+        temporary, tx, _events, service, config_bytes = self.make_transaction(
+            physical_factory=CaptureMatrix,
+        )
+        self.addCleanup(temporary.cleanup)
+        tx.prepare()
+        destination = tx.paths.destination_root
+        destination.chmod(0o750)
+        destination.joinpath("app.py").write_bytes(b"new source\n")
+        migrated = json.loads(config_bytes)
+        migrated.update(schema_version=2, revision=8)
+        destination.joinpath("data/config.json").write_text(json.dumps(migrated))
+        display_lock = Path(temporary.name) / "matrix-display.lock"
+        display_lock.touch(mode=0o600)
+
+        original_stop = service.stop
+
+        def stop_then_raise():
+            original_stop()
+            raise RuntimeError("physical stop failed after transition")
+
+        service.stop = stop_then_raise
+        with self.assertRaisesRegex(RuntimeError, "physical stop failed after transition"):
+            tx.physical("candidate", display_lock, 64, 32)
+        self.assertTrue(service.is_active())
+
+    def test_physical_lock_rejection_recovers_service_without_hardware_access(self):
+        from tests.test_priority_1_4_physical import CaptureMatrix
+
+        temporary, tx, _events, service, config_bytes = self.make_transaction(
+            physical_factory=CaptureMatrix,
+        )
+        self.addCleanup(temporary.cleanup)
+        tx.prepare()
+        destination = tx.paths.destination_root
+        destination.chmod(0o750)
+        destination.joinpath("app.py").write_bytes(b"new source\n")
+        migrated = json.loads(config_bytes)
+        migrated.update(schema_version=2, revision=8)
+        destination.joinpath("data/config.json").write_text(json.dumps(migrated))
+        unsafe_lock = Path(temporary.name) / "matrix-display.lock"
+        unsafe_lock.mkdir()
+
+        with self.assertRaisesRegex(ValueError, "display lock is unsafe"):
+            tx.physical("candidate", unsafe_lock, 64, 32)
+        self.assertTrue(service.is_active())
 
 
 if __name__ == "__main__":

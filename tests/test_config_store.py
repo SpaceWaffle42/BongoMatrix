@@ -28,7 +28,13 @@ class ConfigStoreTests(unittest.TestCase):
             legacy["schema_version"] = 1
             legacy["revision"] = 7
             legacy["device"]["name"] = "untouched"
-            legacy["custom_modules"] = [self._simple()]
+            canvas_sentinel = self.advanced_module()
+            canvas_sentinel["layers"][0]["keyframes"].append({
+                "frame": 17, "easing": "ease_in_out",
+                "properties": {"rotation": 271, "colour": "#123abc"},
+            })
+            canvas_before = json.loads(json.dumps(canvas_sentinel))
+            legacy["custom_modules"] = [self._simple(), canvas_sentinel]
             path.write_text(json.dumps(legacy))
 
             migrated = ConfigStore(path).get()
@@ -38,6 +44,7 @@ class ConfigStoreTests(unittest.TestCase):
             self.assertEqual(migrated["device"]["name"], "untouched")
             self.assertEqual(migrated["custom_modules"][0]["border"], "none")
             self.assertEqual(migrated["custom_modules"][0]["border_colour"], "#ffffff")
+            self.assertEqual(migrated["custom_modules"][1], canvas_before)
             migrated_bytes = path.read_bytes()
             self.assertEqual(ConfigStore(path).get(), migrated)
             self.assertEqual(path.read_bytes(), migrated_bytes)
@@ -82,6 +89,7 @@ class ConfigStoreTests(unittest.TestCase):
             legacy.pop("revision")
             legacy["device"]["name"] = "Migration sentinel"
             legacy["display"]["day_brightness"] = 37
+            legacy["custom_modules"] = [self._simple("custom_v0_simple", "text_scroll")]
             path.write_text(json.dumps(legacy))
 
             config = ConfigStore(path).get()
@@ -91,7 +99,11 @@ class ConfigStoreTests(unittest.TestCase):
             without_server_fields = dict(config)
             without_server_fields.pop("schema_version")
             without_server_fields.pop("revision")
-            self.assertEqual(without_server_fields, legacy)
+            expected = json.loads(json.dumps(legacy))
+            expected["custom_modules"][0].update(
+                colour="#abcdef", border="none", border_colour="#ffffff",
+            )
+            self.assertEqual(without_server_fields, expected)
             migrated_bytes = path.read_bytes()
             self.assertNotEqual(migrated_bytes, json.dumps(legacy).encode("utf-8"))
             self.assertEqual(ConfigStore(path).get()["revision"], 1)

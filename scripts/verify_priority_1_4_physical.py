@@ -19,6 +19,7 @@ if str(_RELEASE_ROOT) not in sys.path:
     sys.path.insert(0, str(_RELEASE_ROOT))
 
 from modules import custom_text
+from frame_capture import BdfFont, FrameCapture
 
 
 _SHA_RE = re.compile(r"[0-9a-f]{40}")
@@ -59,6 +60,74 @@ _FIXTURES = (
     _fixture("ticker_left_solid", "text_scroll", "solid", "left"),
     _fixture("ticker_right_inset", "text_scroll", "inset", "right"),
 )
+
+
+class _AuthorityHardware:
+    width = 64
+    height = 32
+
+    def __init__(self, capture: FrameCapture):
+        self._capture = capture
+
+    def CreateFrameCanvas(self) -> object:
+        canvas = object()
+        self._capture.register(canvas)
+        return canvas
+
+
+class _AuthorityMatrix:
+    """Software-only authority for deterministic fixture frame bytes."""
+
+    def __init__(self):
+        self.capture = FrameCapture(64, 32)
+        self.matrix = _AuthorityHardware(self.capture)
+        self._font = BdfFont(_RELEASE_ROOT / "resources/fonts/5x7.bdf")
+
+    def font(self, name: str) -> object:
+        if name != "5x7":
+            raise KeyError(name)
+        return self._font
+
+    @staticmethod
+    def colour_rgb(value: str) -> object:
+        return type("Colour", (), {
+            "red": int(value[1:3], 16),
+            "green": int(value[3:5], 16),
+            "blue": int(value[5:7], 16),
+        })()
+
+    def clear(self, canvas: object) -> None:
+        self.capture.clear(canvas)
+
+    def fill(self, red: int, green: int, blue: int, *, canvas: object) -> None:
+        self.capture.fill(canvas, red, green, blue)
+
+    def draw_text(
+        self, font: object, x: int, y: int, colour: object, text: str,
+        *, canvas: object,
+    ) -> int:
+        return self.capture.text(canvas, font, x, y, colour, text)
+
+    def draw_line(
+        self, x0: int, y0: int, x1: int, y1: int, colour: object,
+        width: int = 1, *, canvas: object,
+    ) -> None:
+        self.capture.line(canvas, x0, y0, x1, y1, colour, width)
+
+
+def _expected_frame_hashes() -> dict[str, list[str]]:
+    """Render fixture authority to bytes independently of a supplied report."""
+
+    matrix = _AuthorityMatrix()
+    expected: dict[str, list[str]] = {}
+    for fixture in _FIXTURES:
+        expected[fixture["name"]] = [
+            hashlib.sha256(matrix.capture.raw_snapshot(canvas)).hexdigest()
+            for canvas, _delay in custom_text.basic_text_frames(
+                matrix, fixture["config"], fixture["duration"], None,
+            )
+        ]
+    return expected
 
 
 def _canonical(value: object) -> bytes:
@@ -236,7 +305,7 @@ def _expected_edge_pixels(border: str) -> dict[str, str]:
 
 
 def verify_report(value: object, expected_source_sha: str) -> dict[str, object]:
-    """Fail closed on noncanonical, unbound, malformed, or tampered evidence."""
+    """Fail closed on noncanonical, unbound, malformed, or inconsistent evidence."""
 
     if not isinstance(expected_source_sha, str) or _SHA_RE.fullmatch(expected_source_sha) is None:
         raise ValueError("expected source SHA is invalid")
@@ -261,6 +330,7 @@ def verify_report(value: object, expected_source_sha: str) -> dict[str, object]:
         raise ValueError("physical fixture records are incomplete")
     if [item.get("name") if isinstance(item, dict) else None for item in fixtures] != [item["name"] for item in _FIXTURES]:
         raise ValueError("physical fixture names are missing, duplicate, or reordered")
+    expected_hashes = _expected_frame_hashes()
     for record, fixture in zip(fixtures, _FIXTURES, strict=True):
         if not isinstance(record, dict) or set(record) != _FIXTURE_KEYS:
             raise ValueError("physical fixture record fields are not exact")
@@ -288,6 +358,8 @@ def verify_report(value: object, expected_source_sha: str) -> dict[str, object]:
             raise ValueError("physical frame count does not match deterministic fixture")
         if any(not isinstance(item, str) or _HASH_RE.fullmatch(item) is None for item in hashes):
             raise ValueError("physical frame hash is invalid")
+        if hashes != expected_hashes[fixture["name"]]:
+            raise ValueError("physical frame hash does not match deterministic frame bytes")
         if revisions != list(range(1, count + 1)):
             raise ValueError("physical relative revisions are invalid")
         expected_delay = round((config["speed"] if config["type"] == "text_scroll" else fixture["duration"]) * 1000)
