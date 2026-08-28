@@ -446,7 +446,8 @@ class Priority14Transaction:
 
     def _restore_legacy_config(self, manifest: dict[str, object], config: bytes) -> None:
         record = manifest["config"]
-        assert isinstance(record, dict)
+        if not isinstance(record, dict):
+            raise ValueError("state config record is invalid")
         _atomic_restore(
             self.paths.destination_root / "data/config.json", config,
             record["uid"], record["gid"], record["mode"],
@@ -594,13 +595,14 @@ class Priority14Transaction:
         )
         current, metadata = _read_regular(p.destination_root / "data/config.json")
         record = manifest["config"]
-        assert isinstance(record, dict)
+        if not isinstance(record, dict):
+            raise ValueError("state config record is invalid")
         if phase == "rollback":
             if current != config or (
                 metadata.st_uid != record["uid"] or metadata.st_gid != record["gid"]
                 or f"{stat.S_IMODE(metadata.st_mode):04o}" != record["mode"]
             ):
-                raise ValueError("rollback config does not match immutable schema-v1 authority")
+                raise ValueError("rollback config does not match immutable legacy authority")
         else:
             try:
                 parsed = json.loads(current, object_pairs_hook=_unique_object)
