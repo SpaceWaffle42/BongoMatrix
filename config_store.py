@@ -38,7 +38,7 @@ ALLOWED_MODULES = {
 }
 PLAYLIST_LIMIT = 256
 CONFIG_SNAPSHOT_LIMIT = 1_048_576
-CURRENT_CONFIG_SCHEMA_VERSION = 1
+CURRENT_CONFIG_SCHEMA_VERSION = 2
 AVAILABLE_FONTS = frozenset(available_font_names())
 
 
@@ -826,7 +826,7 @@ def validate_config(
     custom_ids = set()
     required_simple_keys = {
         "id", "name", "type", "text", "font", "colour", "background",
-        "x", "y", "direction", "speed", "loops",
+        "border", "border_colour", "x", "y", "direction", "speed", "loops",
     }
     for item in custom_modules:
         if not isinstance(item, dict):
@@ -856,10 +856,17 @@ def validate_config(
             raise ValueError("custom module text must be 1-200 printable characters")
         if item["font"] not in AVAILABLE_FONTS:
             raise ValueError("custom module font is not supported")
-        if not _is_hex_colour(item["colour"]) or not _is_hex_colour(item["background"]):
+        if (
+            not _is_hex_colour(item["colour"])
+            or not _is_hex_colour(item["background"])
+            or not _is_hex_colour(item["border_colour"])
+        ):
             raise ValueError("custom module colours must use #RRGGBB format")
         item["colour"] = item["colour"].lower()
         item["background"] = item["background"].lower()
+        item["border_colour"] = item["border_colour"].lower()
+        if item["border"] not in {"none", "solid", "inset"}:
+            raise ValueError("custom module border must be none, solid, or inset")
         if isinstance(item["x"], bool) or not isinstance(item["x"], int) or not -128 <= item["x"] <= 63:
             raise ValueError("custom module x must be between -128 and 63")
         if isinstance(item["y"], bool) or not isinstance(item["y"], int) or not 5 <= item["y"] <= 31:
@@ -992,6 +999,10 @@ class ConfigStore:
                 or current["revision"] < 0
             ):
                 raise ValueError("revision must be a nonnegative integer")
+            for custom_module in current.get("custom_modules", []):
+                if isinstance(custom_module, dict) and custom_module.get("type") != "canvas":
+                    custom_module.setdefault("border", "none")
+                    custom_module.setdefault("border_colour", "#ffffff")
             _validate_update_keys(current, DEFAULT_CONFIG)
             lava = current.get("lava")
             if (
