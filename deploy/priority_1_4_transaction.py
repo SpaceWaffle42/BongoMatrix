@@ -452,6 +452,24 @@ class Priority14Transaction:
         ):
             raise ValueError("schema-v1 config restoration failed")
 
+    def _source_phase(self) -> str:
+        """Classify an exact candidate or rollback source; reject mixed state."""
+
+        p = self.paths
+        matches: list[str] = []
+        for phase, mode in (("candidate", "deploy"), ("rollback", "rollback")):
+            try:
+                self.release_api.verify_release(
+                    p.staged_tool, p.release_root, p.destination_root, p.source_bundle,
+                    p.release_manifest, p.backup_manifest, mode=mode,
+                )
+            except BaseException:
+                continue
+            matches.append(phase)
+        if len(matches) != 1:
+            raise ValueError("rollback recovery source state is mixed or ambiguous")
+        return matches[0]
+
     def _deploy(self) -> None:
         self.preflight()
         manifest, config = self._load_state()
@@ -533,16 +551,17 @@ class Priority14Transaction:
                 raise
             recovery_error = None
             try:
-                self._stop()
-                self.release_api.deploy_release(
-                    p.staged_tool, p.release_root, p.destination_root, p.source_bundle,
-                    p.release_manifest, p.backup_manifest, service=self.service,
-                )
-                _atomic_restore(
-                    p.destination_root / "data/config.json", candidate,
-                    candidate_stat.st_uid, candidate_stat.st_gid,
-                    f"{stat.S_IMODE(candidate_stat.st_mode):04o}",
-                )
+                if self.service.is_active():
+                    self._stop()
+                source_phase = self._source_phase()
+                if source_phase == "candidate":
+                    _atomic_restore(
+                        p.destination_root / "data/config.json", candidate,
+                        candidate_stat.st_uid, candidate_stat.st_gid,
+                        f"{stat.S_IMODE(candidate_stat.st_mode):04o}",
+                    )
+                else:
+                    self._restore_v1_config(manifest, config)
                 self._start_ready()
                 self._assert_mutable_hashes(manifest)
             except BaseException as error:

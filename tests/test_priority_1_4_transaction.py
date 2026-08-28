@@ -74,6 +74,10 @@ class FakeReleaseAPI:
 
     def verify_release(self, *_args, mode, **_kwargs):
         self.events.append(f"api.verify-{mode}")
+        destination = Path(_args[2])
+        expected = b"new source\n" if mode == "deploy" else b"old source\n"
+        if destination.joinpath("app.py").read_bytes() != expected:
+            raise ValueError(f"source does not match {mode} phase")
 
     def rollback_release(self, _release, destination, *_args, service, **_kwargs):
         self.events.append("api.rollback")
@@ -189,6 +193,76 @@ class Priority14TransactionTests(unittest.TestCase):
         self.assertTrue(service.is_active())
         metadata = destination.joinpath("data/config.json").stat()
         self.assertEqual(stat.S_IMODE(metadata.st_mode), 0o640)
+
+    def test_rollback_failure_before_source_write_restarts_coherent_candidate(self):
+        temporary, tx, events, service, config_bytes = self.make_transaction()
+        self.addCleanup(temporary.cleanup)
+        tx.prepare()
+        destination = tx.paths.destination_root
+        destination.joinpath("app.py").write_bytes(b"new source\n")
+        migrated = json.loads(config_bytes)
+        migrated.update(schema_version=2, revision=8)
+        candidate_config = json.dumps(migrated).encode()
+        destination.joinpath("data/config.json").write_bytes(candidate_config)
+        api = tx.release_api
+        assert isinstance(api, FakeReleaseAPI)
+
+        def reject_before_write(*_args, **_kwargs):
+            events.append("api.rollback-rejected")
+            raise RuntimeError("rollback rejected before source write")
+
+        api.rollback_release = reject_before_write
+        with self.assertRaisesRegex(RuntimeError, "rollback rejected before source write"):
+            tx.rollback()
+
+        self.assertEqual(destination.joinpath("app.py").read_bytes(), b"new source\n")
+        self.assertEqual(destination.joinpath("data/config.json").read_bytes(), candidate_config)
+        self.assertTrue(service.is_active())
+        self.assertNotIn("api.deploy", events)
+
+    def test_rollback_failure_after_source_write_completes_coherent_rollback(self):
+        temporary, tx, _events, service, config_bytes = self.make_transaction()
+        self.addCleanup(temporary.cleanup)
+        tx.prepare()
+        destination = tx.paths.destination_root
+        destination.joinpath("app.py").write_bytes(b"new source\n")
+        migrated = json.loads(config_bytes)
+        migrated.update(schema_version=2, revision=8)
+        destination.joinpath("data/config.json").write_text(json.dumps(migrated))
+
+        def fail_after_source(boundary):
+            if boundary == "source-restored":
+                raise RuntimeError("failure after rollback source write")
+
+        with self.assertRaisesRegex(RuntimeError, "failure after rollback source write"):
+            tx.rollback(after_boundary=fail_after_source)
+
+        self.assertEqual(destination.joinpath("app.py").read_bytes(), b"old source\n")
+        self.assertEqual(destination.joinpath("data/config.json").read_bytes(), config_bytes)
+        self.assertTrue(service.is_active())
+
+    def test_rollback_failure_with_mixed_source_stays_stopped(self):
+        temporary, tx, _events, service, config_bytes = self.make_transaction()
+        self.addCleanup(temporary.cleanup)
+        tx.prepare()
+        destination = tx.paths.destination_root
+        destination.joinpath("app.py").write_bytes(b"new source\n")
+        migrated = json.loads(config_bytes)
+        migrated.update(schema_version=2, revision=8)
+        destination.joinpath("data/config.json").write_text(json.dumps(migrated))
+        api = tx.release_api
+        assert isinstance(api, FakeReleaseAPI)
+
+        def write_mixed_then_fail(_release, destination, *_args, **_kwargs):
+            Path(destination, "app.py").write_bytes(b"mixed source\n")
+            raise RuntimeError("rollback left mixed source")
+
+        api.rollback_release = write_mixed_then_fail
+        with self.assertRaisesRegex(RuntimeError, "rollback failed and candidate recovery failed"):
+            tx.rollback()
+
+        self.assertEqual(destination.joinpath("app.py").read_bytes(), b"mixed source\n")
+        self.assertFalse(service.is_active())
 
     def test_rollback_recovers_candidate_and_service_when_stop_transitions_inactive_then_raises(self):
         temporary, tx, events, service, config_bytes = self.make_transaction()
