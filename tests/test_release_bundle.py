@@ -18,22 +18,27 @@ from deploy.release_bundle import (
 
 
 class ReleaseBundleTests(unittest.TestCase):
-    def test_production_export_matches_validator_for_systemd_units(self):
+    def test_production_export_matches_validator_for_forbidden_paths(self):
         for path in (
             "deploy/matrix-web.service",
             "deploy/matrix-web.SoCkEt",
             "deploy/matrix-web.TIMER",
+            "resources/media/built-in/sleep.gif",
+            "data/config.json",
+            "secrets/provider-token",
+            "nested/secret_store.py",
+            "Secret_Store.py",
         ):
             with self.subTest(path=path):
-                with self.assertRaisesRegex(
-                    ReleaseManifestError, "release path targets a systemd unit"
-                ):
+                with self.assertRaises(ReleaseManifestError):
                     release_bundle._reject_forbidden_release_path(path)
                 self.assertFalse(release_bundle._is_production_export_path(path))
 
-        self.assertTrue(
-            release_bundle._is_production_export_path("deploy/release_bundle.py")
-        )
+        for path in ("deploy/release_bundle.py", "secret_store.py"):
+            with self.subTest(path=path):
+                release_bundle._reject_forbidden_release_path(path)
+                self.assertTrue(release_bundle._is_production_export_path(path))
+                self.assertIn(path, release_bundle._RELEASE_EXPORT_REQUIRED)
 
     def test_systemd_service_control_pins_environment_and_shared_deadline(self):
         clock = mock.Mock(side_effect=[100.0, 390.0, 399.0])

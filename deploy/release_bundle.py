@@ -42,6 +42,7 @@ _SYSTEMD_ENV = {"PATH": "/usr/bin:/bin", "LANG": "C", "LC_ALL": "C"}
 _SYSTEMD_CONTROL_BUDGET_SECONDS = 300.0
 _SYSTEMD_CALL_TIMEOUT_SECONDS = 15.0
 _SYSTEMD_UNIT_SUFFIXES = (".service", ".socket", ".timer")
+_SECRET_NAMED_PRODUCTION_CODE = frozenset({"secret_store.py"})
 _FORBIDDEN_DIRECTORY_PARTS = {
     "data",
     "secrets",
@@ -656,8 +657,10 @@ def _reject_forbidden_release_path(relative_path: str) -> None:
     if (
         name == ".env"
         or name.endswith((".key", ".pem"))
-        or "credential" in name
-        or "secret" in name
+        or (
+            relative_path not in _SECRET_NAMED_PRODUCTION_CODE
+            and ("credential" in name or "secret" in name)
+        )
     ):
         _reject("release path targets secrets or credentials")
     if "paired_device" in name or "paired-device" in name:
@@ -2222,6 +2225,7 @@ _RELEASE_EXPORT_REQUIRED = frozenset({
     "release_argparse.py",
     "webapp.py",
     "requirements.txt",
+    "secret_store.py",
     "app/__init__.py",
     "app/wsgi.py",
     "deploy/release_bundle.py",
@@ -2275,12 +2279,17 @@ def _extract_exact_archive(archive: bytes, destination: Path) -> None:
 
 def _is_production_export_path(relative: str) -> bool:
     path = PurePosixPath(relative)
-    return (
-        relative not in _NON_PRODUCTION_EXPORT_FILES
-        and path.parts[0] not in _NON_PRODUCTION_EXPORT_ROOTS
-        and not path.parts[0].startswith(".git")
-        and not relative.lower().endswith(_SYSTEMD_UNIT_SUFFIXES)
-    )
+    if (
+        relative in _NON_PRODUCTION_EXPORT_FILES
+        or path.parts[0] in _NON_PRODUCTION_EXPORT_ROOTS
+        or path.parts[0].startswith(".git")
+    ):
+        return False
+    try:
+        _reject_forbidden_release_path(relative)
+    except ReleaseManifestError:
+        return False
+    return True
 
 
 def _copy_production_export(export: Path, release_root: Path) -> list[str]:
