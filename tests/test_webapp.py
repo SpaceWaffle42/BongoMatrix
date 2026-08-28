@@ -117,6 +117,26 @@ class WebAppTests(unittest.TestCase):
     def paired_client_request(self, method, client, path, **kwargs):
         return self.paired_request(method, path, client=client, **kwargs)
 
+    def test_basic_custom_edit_preview_passes_request_cancellation_to_shared_frames(self):
+        candidate = self.store.get()
+        custom = {
+            "id": "custom_cancel", "name": "Cancel", "type": "text_scroll",
+            "text": "Cancel me", "font": "5x7", "colour": "#ffffff",
+            "background": "#000000", "border": "none",
+            "border_colour": "#ffffff", "x": 0, "y": 7,
+            "direction": "left", "speed": 0.05, "loops": 1,
+        }
+        candidate["custom_modules"] = [custom]
+        stop_event = object()
+        expected = iter(())
+        with patch("edit_preview.custom_text_preview_frames", return_value=expected) as frames:
+            actual = webapp._edit_preview_iterator(
+                custom["id"], candidate, None, {}, None, stop_event,
+            )
+
+        self.assertIs(actual, expected)
+        self.assertIs(frames.call_args.args[3], stop_event)
+
     def run_live_chromium_probe(self, probe, timeout=30):
         server = make_server("127.0.0.1", 0, self.app, threaded=True)
         server_thread = threading.Thread(target=server.serve_forever, daemon=True)

@@ -398,7 +398,8 @@ def basic_text_frames(matrix, module_config, duration, stop_event=None):
         _fill_background(matrix, canvas, background)
         width = matrix.draw_text(font, position, y, foreground, text, canvas=canvas)
         draw_frame_border(
-            matrix, canvas, module_config["border"], module_config["border_colour"],
+            matrix, canvas, module_config.get("border", "none"),
+            module_config.get("border_colour", "#ffffff"),
         )
         if stop_event is not None and stop_event.is_set() is True:
             return None

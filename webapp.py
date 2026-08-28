@@ -353,7 +353,7 @@ def _edit_preview_iterator(
             pinned_handles=pinned_media,
         )
     return custom_text_preview_frames(
-        matrix, custom, preview_duration(candidate, module_name),
+        matrix, custom, preview_duration(candidate, module_name), stop_event,
     )
 
 

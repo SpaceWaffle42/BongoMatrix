@@ -3919,7 +3919,9 @@ class EditPreviewTests(unittest.TestCase):
 
         frames = [frame for page in pages for frame in page["frames"]]
         font = BdfFont(Path(__file__).parents[1] / "resources" / "fonts" / "5x7.bdf")
-        text_width = font.text_pixels(0, options["y"], options["text"])[0]
+        # Preserve the physical renderer's left-ticker reset boundary: its first
+        # draw reports x plus the glyph advance from the initial x=64 position.
+        text_width = 64 + font.text_pixels(0, options["y"], options["text"])[0]
         frames_per_loop = 64 + text_width + 1
         self.assertEqual(len(frames), frames_per_loop * options["loops"])
         self.assertTrue(all(len(page["frames"]) == 32 for page in pages[:-1]))
@@ -4116,6 +4118,44 @@ class EditPreviewTests(unittest.TestCase):
                     with self.assertRaises(StopIteration):
                         session.page(consumed_tokens[0])
 
+    def test_basic_custom_appearance_frames_match_physical_static_and_scrolling_output(self):
+        class RecordingCapture(CaptureMatrix):
+            def __init__(self):
+                super().__init__()
+                self.submissions = []
+
+            def swap(self, canvas=None):
+                self.submissions.append(self.snapshot(canvas))
+                return super().swap(canvas)
+
+        for module_type, direction, border in (
+            ("text", "left", "solid"),
+            ("text_scroll", "left", "inset"),
+            ("text_scroll", "right", "solid"),
+        ):
+            with self.subTest(module_type=module_type, direction=direction, border=border):
+                module = {
+                    "id": "custom_parity", "name": "Parity", "type": module_type,
+                    "font": "5x7", "colour": "#ffcc00", "background": "#001122",
+                    "border": border, "border_colour": "#00ff66",
+                    "text": "EDGE", "x": 0, "y": 7, "direction": direction,
+                    "speed": 0.05, "loops": 1,
+                }
+                physical = RecordingCapture()
+                stop = Mock(is_set=Mock(return_value=False))
+                stop.wait.side_effect = [False, True] if module_type == "text_scroll" else [False]
+                self.assertTrue(custom_text.run(
+                    physical, {}, duration=7, stop_event=stop, module_config=module,
+                ))
+                previews = list(custom_text_preview_frames(
+                    CaptureMatrix(), module, duration=7,
+                ))[:len(physical.submissions)]
+                images = [Image.open(io.BytesIO(base64.b64decode(frame["png"]))).convert("RGB") for frame in previews]
+                self.assertEqual(
+                    [image.tobytes() for image in images],
+                    [image.convert("RGB").tobytes() for image in physical.submissions],
+                )
+
     def test_static_custom_text_preview_matches_physical_frame_and_hold(self):
         module = {
             "id": "custom_static", "name": "Static", "type": "text",
@@ -4156,6 +4196,8 @@ class EditPreviewTests(unittest.TestCase):
             "font": "helvR12",
             "colour": "#ffffff",
             "background": "#000000",
+            "border": "none",
+            "border_colour": "#ffffff",
             "y": 31,
             "direction": "left",
             "speed": 0.01,
@@ -4173,7 +4215,7 @@ class EditPreviewTests(unittest.TestCase):
         font = BdfFont(
             Path(__file__).parents[1] / "resources" / "fonts" / f"{options['font']}.bdf"
         )
-        text_width = font.text_pixels(0, options["y"], options["text"])[0]
+        text_width = 64 + font.text_pixels(0, options["y"], options["text"])[0]
         frames_per_loop = 64 + text_width + 1
         expected_frames = frames_per_loop * options["loops"]
         source = (
