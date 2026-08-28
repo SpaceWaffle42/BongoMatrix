@@ -810,27 +810,28 @@ vm.createContext(context);vm.runInContext(process.argv[1],context);
         lifecycle_start = source.index("let devicePreviewEnabled=")
         lifecycle = source[lifecycle_start:source.index("\nfunction editPreviewCurrent", lifecycle_start)]
         mode_start = source.index("function setPreviewMode")
-        mode_function = source[mode_start:source.index("\nfunction syncPreviewModeControls", mode_start)]
-        script = lifecycle + "\n" + mode_function
+        mode_functions = source[mode_start:source.index("\nlet editPreviewLastFocus", mode_start)]
+        script = lifecycle + "\n" + mode_functions
         harness = r'''
 const vm=require('node:vm'),stored=new Map([['matrix-device-preview-enabled','true']]),calls=[];
 const control=extra=>Object.assign({addEventListener(type,handler){this.listeners??={};this.listeners[type]=handler}},extra);
-const toggle=control({checked:false,disabled:false}),status={textContent:'',dataset:{}},controls={hidden:true},previewLabel={textContent:''},frameLabel={textContent:''};
+const toggle=control({checked:false,disabled:false}),status={textContent:'',dataset:{}},controls={hidden:true},previewLabel={textContent:''},frameLabel={textContent:''},liveMode={value:'live',checked:true},editMode={value:'edit',checked:false};
 const elements={'#device-preview-enabled':toggle,'#device-preview-status':status,'.device-preview-controls':controls,'#preview-module':previewLabel,'#preview-frame':frameLabel};
 let simulatedStarts=0,liveStarts=0,pendingStarts=[],pendingCancels=[];
 const context={console,AbortController,Date,Number,Promise,Set,Map,Math,encodeURIComponent,setTimeout,clearTimeout,setInterval,clearInterval,
  matrixSyncStopped:false,matrixEditorsReady:true,previewMode:'live',previewModule:'clock_lava',previewModulePinned:false,previewInstance:'d'.repeat(32),PAIRED_ACTION_SIGNAL:'1',matrixFrameTimer:null,matrixFrameController:null,
  configBody:()=>({device:{name:'edit-only draft'}}),selectedLavaPaletteDescriptor:()=>null,selectEditPreviewModule(){},selectEditedPreviewModule(){},syncLavaInspectionRadios(){},onCustomEditorFocus(){},onEditPreviewDraftEvent(){},startEditPreview(){simulatedStarts++},cancelEditPreview(){},refreshDisplayFrame(){liveStarts++},
  localStorage:{getItem:key=>stored.get(key)??null,setItem:(key,value)=>stored.set(key,String(value)),removeItem:key=>stored.delete(key)},
- document:{documentElement:{classList:{toggle(){}}},querySelector:selector=>elements[selector]??null,addEventListener(){},removeEventListener(){}},window:{addEventListener(){}},fetch:async()=>({ok:false}),
+ document:{documentElement:{classList:{toggle(){}}},querySelector:selector=>elements[selector]??null,querySelectorAll:selector=>selector==='input[name="preview-mode"]'?[liveMode,editMode]:[],addEventListener(){},removeEventListener(){}},window:{addEventListener(){}},fetch:async()=>({ok:false}),
  api:async(path,options={})=>{const payload=options.body?JSON.parse(options.body):null;calls.push({path,payload});if(path==='/api/device-preview/clock_lava'){if(payload.generation===1)return await new Promise(resolve=>pendingStarts.push(resolve));return {generation:payload.generation,heartbeat_after_seconds:60,connectivity_expires_in:15}}if(path==='/api/device-preview/cancel')return await new Promise(resolve=>pendingCancels.push(resolve));if(path==='/api/device-preview/heartbeat')return {active:true,generation:payload.generation,connectivity_expires_in:15};throw new Error(path)}};
 context.globalThis=context;vm.createContext(context);vm.runInContext(process.argv[1],context);
 const sleep=ms=>new Promise(resolve=>setTimeout(resolve,ms));
 (async()=>{
  if(context.resumeStickyDevicePreview()!==false||!controls.hidden||calls.length)throw new Error('sticky device preview was available in Live mode');
  context.setPreviewMode('edit');await sleep(10);
- if(controls.hidden||simulatedStarts!==1||calls.filter(call=>call.path==='/api/device-preview/clock_lava').length!==1||!toggle.checked)throw new Error('Edit Preview did not expose and resume device preview '+JSON.stringify({hidden:controls.hidden,simulatedStarts,calls,checked:toggle.checked}));
+ if(controls.hidden||simulatedStarts!==1||calls.filter(call=>call.path==='/api/device-preview/clock_lava').length!==1||!toggle.checked||liveMode.checked||!editMode.checked)throw new Error('Edit Preview did not expose and atomically resume device preview '+JSON.stringify({hidden:controls.hidden,simulatedStarts,calls,checked:toggle.checked,liveMode:liveMode.checked,editMode:editMode.checked}));
  context.setPreviewMode('live');
+ if(!liveMode.checked||editMode.checked)throw new Error('Live mode controls did not synchronize '+JSON.stringify({liveMode:liveMode.checked,editMode:editMode.checked}));
  context.setPreviewMode('edit');await sleep(10);
  if(calls.filter(call=>call.path==='/api/device-preview/clock_lava').length!==1||calls.some(call=>call.path==='/api/device-preview/cancel'))throw new Error('pending generation changed before its render completed');
  pendingStarts.shift()({generation:1,heartbeat_after_seconds:60,connectivity_expires_in:15});await sleep(10);
