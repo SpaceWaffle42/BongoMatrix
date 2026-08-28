@@ -41,6 +41,7 @@ _SYSTEMCTL = "/usr/bin/systemctl"
 _SYSTEMD_ENV = {"PATH": "/usr/bin:/bin", "LANG": "C", "LC_ALL": "C"}
 _SYSTEMD_CONTROL_BUDGET_SECONDS = 300.0
 _SYSTEMD_CALL_TIMEOUT_SECONDS = 15.0
+_SYSTEMD_UNIT_SUFFIXES = (".service", ".socket", ".timer")
 _FORBIDDEN_DIRECTORY_PARTS = {
     "data",
     "secrets",
@@ -667,7 +668,7 @@ def _reject_forbidden_release_path(relative_path: str) -> None:
         or "runtime-state" in name
     ):
         _reject("release path targets mutable configuration or revision state")
-    if name.endswith((".service", ".socket", ".timer")):
+    if name.endswith(_SYSTEMD_UNIT_SUFFIXES):
         _reject("release path targets a systemd unit")
 
 
@@ -2278,6 +2279,7 @@ def _is_production_export_path(relative: str) -> bool:
         relative not in _NON_PRODUCTION_EXPORT_FILES
         and path.parts[0] not in _NON_PRODUCTION_EXPORT_ROOTS
         and not path.parts[0].startswith(".git")
+        and not relative.lower().endswith(_SYSTEMD_UNIT_SUFFIXES)
     )
 
 
