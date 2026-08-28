@@ -12,6 +12,75 @@ from config_store import (
 
 
 class ConfigStoreTests(unittest.TestCase):
+    @staticmethod
+    def _simple(module_id="custom_static", module_type="text"):
+        return {
+            "id": module_id, "name": "Simple", "type": module_type,
+            "text": "HELLO", "font": "5x7", "colour": "#ABCDEF",
+            "background": "#123456", "x": 0, "y": 20,
+            "direction": "left", "speed": 0.05, "loops": 2,
+        }
+
+    def test_v1_simple_custom_appearance_migrates_once_without_touching_unrelated_state(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "config.json"
+            legacy = json.loads(json.dumps(DEFAULT_CONFIG))
+            legacy["schema_version"] = 1
+            legacy["revision"] = 7
+            legacy["device"]["name"] = "untouched"
+            canvas_sentinel = self.advanced_module()
+            canvas_sentinel["layers"][0]["keyframes"].append({
+                "frame": 17, "easing": "ease_in_out",
+                "properties": {"rotation": 271, "colour": "#123abc"},
+            })
+            canvas_before = json.loads(json.dumps(canvas_sentinel))
+            legacy["custom_modules"] = [self._simple(), canvas_sentinel]
+            path.write_text(json.dumps(legacy))
+
+            migrated = ConfigStore(path).get()
+
+            self.assertEqual(migrated["schema_version"], 2)
+            self.assertEqual(migrated["revision"], 8)
+            self.assertEqual(migrated["device"]["name"], "untouched")
+            self.assertEqual(migrated["custom_modules"][0]["border"], "none")
+            self.assertEqual(migrated["custom_modules"][0]["border_colour"], "#ffffff")
+            self.assertEqual(migrated["custom_modules"][1], canvas_before)
+            migrated_bytes = path.read_bytes()
+            self.assertEqual(ConfigStore(path).get(), migrated)
+            self.assertEqual(path.read_bytes(), migrated_bytes)
+
+    def test_current_v2_custom_appearance_requires_exact_valid_fields_without_rewrite(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "config.json"
+            current = json.loads(json.dumps(DEFAULT_CONFIG))
+            current["schema_version"] = 2
+            simple = self._simple()
+            simple.update(border="solid", border_colour="#A1B2C3")
+            current["custom_modules"] = [simple]
+            path.write_text(json.dumps(current))
+            loaded = ConfigStore(path).get()
+            self.assertEqual(loaded["custom_modules"][0]["border_colour"], "#A1B2C3")
+            for mutation in (lambda item: item.pop("border"), lambda item: item.update(extra=True)):
+                malformed = json.loads(json.dumps(current))
+                mutation(malformed["custom_modules"][0])
+                original = json.dumps(malformed).encode()
+                path.write_bytes(original)
+                with self.assertRaisesRegex(ValueError, "invalid fields"):
+                    ConfigStore(path)
+                self.assertEqual(path.read_bytes(), original)
+
+    def test_current_save_rejects_invalid_custom_border_style_and_colour_without_changing_bytes(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "config.json"
+            store = ConfigStore(path)
+            before = path.read_bytes()
+            for border, colour in (("double", "#ffffff"), ("solid", "red"), (True, "#ffffff")):
+                simple = self._simple()
+                simple.update(border=border, border_colour=colour)
+                with self.assertRaises(ValueError):
+                    store.update({"custom_modules": [simple]}, base_revision=0)
+                self.assertEqual(path.read_bytes(), before)
+
     def test_legacy_config_gains_revision_without_changing_unrelated_state(self):
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / "config.json"
@@ -20,16 +89,21 @@ class ConfigStoreTests(unittest.TestCase):
             legacy.pop("revision")
             legacy["device"]["name"] = "Migration sentinel"
             legacy["display"]["day_brightness"] = 37
+            legacy["custom_modules"] = [self._simple("custom_v0_simple", "text_scroll")]
             path.write_text(json.dumps(legacy))
 
             config = ConfigStore(path).get()
 
-            self.assertEqual(config["schema_version"], 1)
+            self.assertEqual(config["schema_version"], 2)
             self.assertEqual(config["revision"], 1)
             without_server_fields = dict(config)
             without_server_fields.pop("schema_version")
             without_server_fields.pop("revision")
-            self.assertEqual(without_server_fields, legacy)
+            expected = json.loads(json.dumps(legacy))
+            expected["custom_modules"][0].update(
+                colour="#abcdef", border="none", border_colour="#ffffff",
+            )
+            self.assertEqual(without_server_fields, expected)
             migrated_bytes = path.read_bytes()
             self.assertNotEqual(migrated_bytes, json.dumps(legacy).encode("utf-8"))
             self.assertEqual(ConfigStore(path).get()["revision"], 1)
@@ -42,7 +116,7 @@ class ConfigStoreTests(unittest.TestCase):
             custom = {
                 "id": "custom_saved", "name": "Saved", "type": "text_scroll",
                 "text": "SAVED", "font": "5x7", "colour": "#ffffff",
-                "background": "#000000", "x": 0, "y": 20,
+                "background": "#000000", "border": "none", "border_colour": "#ffffff", "x": 0, "y": 20,
                 "direction": "left", "speed": 0.05, "loops": 2,
             }
             store.update({
@@ -80,7 +154,7 @@ class ConfigStoreTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / "config.json"
             store = ConfigStore(path)
-            for schema_version in (True, -1, 1.5, "1", 2):
+            for schema_version in (True, -1, 1.5, "1", 3):
                 with self.subTest(schema_version=schema_version):
                     invalid = store.get()
                     invalid["schema_version"] = schema_version
@@ -131,7 +205,7 @@ class ConfigStoreTests(unittest.TestCase):
 
             migrated = ConfigStore(path).get()
 
-            self.assertEqual(migrated["schema_version"], 1)
+            self.assertEqual(migrated["schema_version"], 2)
             self.assertEqual(migrated["revision"], 8)
             self.assertEqual(migrated["device"]["name"], "Version zero sentinel")
             migrated_bytes = path.read_bytes()
@@ -152,7 +226,7 @@ class ConfigStoreTests(unittest.TestCase):
 
             reloaded = ConfigStore(path).get()
 
-            self.assertEqual(reloaded["schema_version"], 1)
+            self.assertEqual(reloaded["schema_version"], 2)
             self.assertEqual(reloaded["revision"], 1)
             self.assertEqual(path.read_bytes(), original)
 
@@ -237,7 +311,7 @@ class ConfigStoreTests(unittest.TestCase):
             custom = {
                 "id": "custom_welcome", "name": "Welcome", "type": "text",
                 "text": "HELLO", "font": "5x7", "colour": "#ffffff",
-                "background": "#000000", "x": 0, "y": 20,
+                "background": "#000000", "border": "none", "border_colour": "#ffffff", "x": 0, "y": 20,
                 "direction": "left", "speed": 0.05, "loops": 1,
             }
 
@@ -1335,6 +1409,8 @@ class ConfigStoreTests(unittest.TestCase):
                 "font": "5x7",
                 "colour": "#ffcc00",
                 "background": "#001122",
+                "border": "none",
+                "border_colour": "#ffffff",
                 "x": 2,
                 "y": 20,
                 "direction": "left",
@@ -1369,7 +1445,7 @@ class ConfigStoreTests(unittest.TestCase):
             custom = {
                 "id": "custom_looped", "name": "Looped message", "type": "text_scroll",
                 "text": "LOOP", "font": "5x7", "colour": "#ffffff",
-                "background": "#000000", "x": 2, "y": 20,
+                "background": "#000000", "border": "none", "border_colour": "#ffffff", "x": 2, "y": 20,
                 "direction": "left", "speed": 0.05,
             }
 
@@ -1391,7 +1467,7 @@ class ConfigStoreTests(unittest.TestCase):
             custom = {
                 "id": "custom_timed", "name": "Timed message", "type": "text_scroll",
                 "text": "HI", "font": "5x7", "colour": "#ffffff",
-                "background": "#000000", "x": 2, "y": 20,
+                "background": "#000000", "border": "none", "border_colour": "#ffffff", "x": 2, "y": 20,
                 "direction": "left", "speed": 0.2, "loops": 3,
             }
 
@@ -1418,7 +1494,7 @@ class ConfigStoreTests(unittest.TestCase):
             legacy["custom_modules"] = [{
                 "id": "custom_legacy", "name": "Legacy message", "type": "text_scroll",
                 "text": "LEGACY", "font": "5x7", "colour": "#ffffff",
-                "background": "#000000", "x": 2, "y": 20,
+                "background": "#000000", "border": "none", "border_colour": "#ffffff", "x": 2, "y": 20,
                 "direction": "left", "speed": 0.05,
             }]
             legacy["playlist"].append({"module": "custom_legacy", "duration": 15, "enabled": True})
@@ -1659,7 +1735,7 @@ class ConfigStoreTests(unittest.TestCase):
             simple = {
                 "id": "custom_font", "name": "Installed font", "type": "text",
                 "text": "HELLO", "font": font, "colour": "#ffffff",
-                "background": "#000000", "x": 0, "y": 20,
+                "background": "#000000", "border": "none", "border_colour": "#ffffff", "x": 0, "y": 20,
                 "direction": "left", "speed": 0.05, "loops": 1,
             }
             canvas = self.advanced_module(layers=[{
@@ -1689,7 +1765,7 @@ class ConfigStoreTests(unittest.TestCase):
             module = {
                 "id": "custom_font", "name": "Installed font", "type": "text_scroll",
                 "text": "HELLO", "font": "tom_thumb", "colour": "#ffffff",
-                "background": "#000000", "x": 0, "y": 20,
+                "background": "#000000", "border": "none", "border_colour": "#ffffff", "x": 0, "y": 20,
                 "direction": "left", "speed": 0.05, "loops": 1,
             }
             playlist = store.get()["playlist"] + [

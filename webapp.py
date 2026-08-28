@@ -69,7 +69,7 @@ MEDIA_METADATA_ERRORS = (
 )
 CONFIG_REQUEST_LIMIT = 1_048_576
 CONDITIONAL_HEADER_LIMIT = 4096
-MINIMUM_CLIENT_CONTRACT = 2
+MINIMUM_CLIENT_CONTRACT = 3
 APPLICATION_VERSION = "0.3.58-preview"
 DEVICE_RESTART_PENDING_TTL_SECONDS = 60
 PAIRED_ACTION_HEADER = "X-Matrix-Action"
@@ -353,7 +353,7 @@ def _edit_preview_iterator(
             pinned_handles=pinned_media,
         )
     return custom_text_preview_frames(
-        matrix, custom, preview_duration(candidate, module_name),
+        matrix, custom, preview_duration(candidate, module_name), stop_event,
     )
 
 

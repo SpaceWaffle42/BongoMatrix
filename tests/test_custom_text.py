@@ -19,6 +19,8 @@ class CustomTextModuleTests(unittest.TestCase):
             "font": "5x7",
             "colour": "#ffcc00",
             "background": "#001122",
+            "border": "none",
+            "border_colour": "#ffffff",
             "x": 3,
             "y": 20,
             "direction": "left",
@@ -87,6 +89,41 @@ class CustomTextModuleTests(unittest.TestCase):
         )
         matrix.swap.assert_called_once_with("canvas")
         stop.wait.assert_called_once_with(4)
+
+    def test_static_custom_text_fills_then_draws_text_then_solid_border(self):
+        matrix = self.matrix()
+        stop = Mock()
+        stop.is_set.return_value = False
+        stop.wait.return_value = False
+        custom_text.run(matrix, {}, duration=4, stop_event=stop, module_config=self.module_options(border="solid"))
+        names = [entry[0] for entry in matrix.method_calls]
+        self.assertLess(names.index("fill"), names.index("draw_text"))
+        self.assertLess(names.index("draw_text"), names.index("draw_line"))
+        self.assertEqual([entry.args[:4] for entry in matrix.draw_line.call_args_list],
+                         [(0, 0, 63, 0), (63, 0, 63, 31), (63, 31, 0, 31), (0, 31, 0, 0)])
+
+    def test_scrolling_custom_text_keeps_inset_border_stationary_on_every_frame(self):
+        matrix = self.matrix()
+        matrix.draw_text.return_value = 24
+        stop = Mock()
+        stop.is_set.return_value = False
+        stop.wait.side_effect = [False, True]
+        custom_text.run(matrix, {}, stop_event=stop,
+                        module_config=self.module_options(type="text_scroll", border="inset"))
+        lines = [entry.args[:4] for entry in matrix.draw_line.call_args_list]
+        expected = [(1, 1, 62, 1), (62, 1, 62, 30), (62, 30, 1, 30), (1, 30, 1, 1)]
+        self.assertEqual(lines, expected * 2)
+        self.assertEqual([entry.args[1] for entry in matrix.draw_text.call_args_list], [64, 63])
+
+    def test_cancellation_after_border_draw_still_prevents_swap(self):
+        matrix = self.matrix()
+        stop = threading.Event()
+        matrix.draw_line.side_effect = lambda *_args, **_kwargs: stop.set()
+        result = custom_text.run(matrix, {}, stop_event=stop,
+                                 module_config=self.module_options(border="solid"))
+        self.assertFalse(result)
+        matrix.draw_line.assert_called()
+        matrix.swap.assert_not_called()
 
     def test_canvas_cancellation_after_frame_yield_prevents_publication(self):
         matrix = self.matrix()

@@ -8,6 +8,8 @@ import time
 
 from PIL import Image
 
+from modules.frame_appearance import draw_frame_border
+
 CANVAS_MEDIA_PREPARE_TIMEOUT = 5
 CANVAS_MEDIA_CACHE_BYTES = 32 * 1024 * 1024
 
@@ -383,6 +385,63 @@ def scroll_positions(canvas_width, text_width, loops, direction="left"):
         )
 
 
+def basic_text_frames(matrix, module_config, duration, stop_event=None):
+    """Yield the finite physical frame sequence for a basic custom module."""
+    font = matrix.font(module_config["font"])
+    foreground = matrix.colour_rgb(module_config["colour"])
+    background = matrix.colour_rgb(module_config["background"])
+    text = module_config["text"]
+    y = module_config["y"]
+
+    def frame(position, delay):
+        canvas = matrix.matrix.CreateFrameCanvas()
+        _fill_background(matrix, canvas, background)
+        width = matrix.draw_text(font, position, y, foreground, text, canvas=canvas)
+        draw_frame_border(
+            matrix, canvas, module_config.get("border", "none"),
+            module_config.get("border_colour", "#ffffff"),
+        )
+        if stop_event is not None and stop_event.is_set() is True:
+            return None
+        return canvas, delay, width
+
+    if module_config["type"] == "text":
+        rendered = frame(module_config["x"], duration)
+        if rendered is not None:
+            yield rendered[0], rendered[1]
+        return
+
+    direction = module_config["direction"]
+    loops = module_config.get("loops", 1)
+    if direction == "right":
+        measure_canvas = matrix.matrix.CreateFrameCanvas()
+        matrix.clear(measure_canvas)
+        width = matrix.draw_text(font, 0, y, foreground, text, canvas=measure_canvas)
+        positions = scroll_positions(matrix.matrix.width, width, loops, direction)
+    else:
+        positions = None
+        position = matrix.matrix.width
+        completed_loops = 0
+        width = None
+    while direction == "right" or completed_loops < loops:
+        if stop_event is not None and stop_event.is_set() is True:
+            return
+        if direction == "right":
+            try:
+                position = next(positions)
+            except StopIteration:
+                return
+        rendered = frame(position, module_config["speed"])
+        if rendered is None:
+            return
+        yield rendered[0], rendered[1]
+        if direction == "left":
+            width = width or rendered[2]
+            position, completed_loops = advance_left_scroll(
+                position, width, matrix.matrix.width, completed_loops, loops,
+            )
+
+
 def run(
     matrix, config, duration=15, stop_event=None, module_config=None,
     *, pinned_handles=None,
@@ -398,61 +457,12 @@ def run(
             pinned_handles=pinned_handles,
         )
 
-    font = matrix.font(module_config["font"])
-    foreground = matrix.colour_rgb(module_config["colour"])
-    background = matrix.colour_rgb(module_config["background"])
-    canvas = matrix.matrix.CreateFrameCanvas()
-    text = module_config["text"]
-    y = module_config["y"]
-
-    if module_config["type"] == "text":
-        _fill_background(matrix, canvas, background)
-        matrix.draw_text(font, module_config["x"], y, foreground, text, canvas=canvas)
-        if stop_event is not None and stop_event.is_set() is True:
-            return False
-        matrix.swap(canvas)
-        _wait(stop_event, duration)
-        return True
-
-    direction = module_config["direction"]
-    if direction == "left":
-        position = matrix.matrix.width
-        text_width = None
-        positions = None
-    else:
-        measure_canvas = matrix.matrix.CreateFrameCanvas()
-        matrix.clear(measure_canvas)
-        text_width = matrix.draw_text(font, 0, y, foreground, text, canvas=measure_canvas)
-        positions = iter(scroll_positions(
-            matrix.matrix.width, text_width, module_config.get("loops", 1), direction,
-        ))
-        position = next(positions)
-
-    completed_loops = 0
-    loop_limit = module_config.get("loops", 1)
     rendered = False
-    while completed_loops < loop_limit:
+    for canvas, delay in basic_text_frames(matrix, module_config, duration, stop_event):
         if stop_event is not None and stop_event.is_set() is True:
-            return rendered
-        _fill_background(matrix, canvas, background)
-        drawn_width = matrix.draw_text(font, position, y, foreground, text, canvas=canvas)
-        if stop_event is not None and stop_event.is_set() is True:
-            return rendered
-        canvas = matrix.swap(canvas)
+            break
+        matrix.swap(canvas)
         rendered = True
-        text_width = text_width or drawn_width
-        loop_finished = False
-        if direction == "left":
-            position, completed_loops = advance_left_scroll(
-                position, text_width, matrix.matrix.width, completed_loops, loop_limit,
-            )
-            loop_finished = completed_loops >= loop_limit
-        else:
-            try:
-                position = next(positions)
-            except StopIteration:
-                completed_loops = loop_limit
-                loop_finished = True
-        if _wait(stop_event, module_config["speed"]) or loop_finished:
+        if _wait(stop_event, delay):
             break
     return rendered

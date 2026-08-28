@@ -571,40 +571,14 @@ def advanced_canvas_preview_frames(
         yield _png_frame(matrix.snapshot(canvas), round(delay * 1000, 9))
 
 
-def custom_text_preview_frames(matrix, module_config, duration=None):
+def custom_text_preview_frames(matrix, module_config, duration=None, stop_event=None):
     """Yield exact static or ticker frames using physical custom-text semantics."""
-    from modules.custom_text import scroll_positions
+    from modules.custom_text import basic_text_frames
 
-    font = matrix.font(module_config["font"])
-    foreground = matrix.colour_rgb(module_config["colour"])
-    background = matrix.colour_rgb(module_config["background"])
-    if module_config["type"] == "text":
-        canvas = matrix.matrix.CreateFrameCanvas()
-        matrix.fill(background.red, background.green, background.blue, canvas=canvas)
-        matrix.draw_text(
-            font, module_config["x"], module_config["y"], foreground,
-            module_config["text"], canvas=canvas,
-        )
-        yield _png_frame(matrix.snapshot(canvas), float(duration) * 1000)
-        return
-    measure_canvas = matrix.matrix.CreateFrameCanvas()
-    matrix.clear(measure_canvas)
-    text_width = matrix.draw_text(
-        font, 0, module_config["y"], foreground, module_config["text"],
-        canvas=measure_canvas,
-    )
-    canvas = matrix.matrix.CreateFrameCanvas()
-    for position in scroll_positions(
-        matrix.width, text_width, module_config.get("loops", 1),
-        module_config.get("direction", "left"),
+    for canvas, delay in basic_text_frames(
+        matrix, module_config, duration, stop_event=stop_event,
     ):
-        matrix.fill(background.red, background.green, background.blue, canvas=canvas)
-        matrix.draw_text(
-            font, position, module_config["y"], foreground, module_config["text"],
-            canvas=canvas,
-        )
-        yield _png_frame(matrix.snapshot(canvas), module_config["speed"] * 1000)
-        canvas = matrix.swap(canvas)
+        yield _png_frame(matrix.snapshot(canvas), round(delay * 1000, 9))
 
 
 def _weather_preview_frames(matrix, iterator):

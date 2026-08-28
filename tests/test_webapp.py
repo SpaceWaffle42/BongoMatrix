@@ -117,6 +117,164 @@ class WebAppTests(unittest.TestCase):
     def paired_client_request(self, method, client, path, **kwargs):
         return self.paired_request(method, path, client=client, **kwargs)
 
+    def test_basic_custom_appearance_round_trips_saved_edit_and_device_preview_paths(self):
+        from device_preview import DevicePreviewManager
+
+        self.pair_browser()
+        before = self.store.get()
+        before_bytes = self.store.path.read_bytes()
+        candidate = {"custom_modules": []}
+        module = {
+            "id": "custom_api_appearance", "name": "API appearance",
+            "type": "text_scroll", "text": "EDGE", "font": "5x7",
+            "colour": "#fedcba", "background": "#123456",
+            "border": "inset", "border_colour": "#abcdef",
+            "x": -2, "y": 7, "direction": "right", "speed": 0.05,
+            "loops": 1,
+        }
+        candidate["custom_modules"] = [module]
+        identity = "a" * 32
+
+        edit = self.paired_request(
+            "POST", f"/api/edit-preview/{module['id']}",
+            json={"config": candidate, "generation": 1, "preview_instance": identity},
+        )
+        self.assertEqual(edit.status_code, 200, edit.get_data(as_text=True))
+        self.assertTrue(edit.get_json()["frames"])
+        self.assertEqual(self.store.path.read_bytes(), before_bytes)
+
+        manager = DevicePreviewManager()
+        observed = {}
+
+        def submit(request, **kwargs):
+            observed["request"] = request
+            observed["renderer"] = kwargs["renderer"]
+            return manager.submit(request)
+
+        self.controller.submit_device_draft.side_effect = submit
+        device = self.paired_request(
+            "POST", f"/api/device-preview/{module['id']}",
+            json={"config": candidate, "generation": 2, "preview_instance": identity},
+        )
+        self.assertEqual(device.status_code, 202, device.get_data(as_text=True))
+        self.assertEqual(
+            observed["request"].config["candidate"]["custom_modules"], [module],
+        )
+        self.assertEqual(self.store.get(), before)
+        self.controller.reload.assert_not_called()
+
+        saved = self.post_config(json={"custom_modules": [module]})
+        self.assertEqual(saved.status_code, 200, saved.get_data(as_text=True))
+        self.assertEqual(saved.get_json()["custom_modules"], [module])
+        self.assertEqual(saved.get_json()["revision"], before["revision"] + 1)
+
+        stale = self.paired_request(
+            "POST", "/api/config", json={"custom_modules": []},
+            headers={"If-Match": f'"{before["revision"]}"'},
+        )
+        self.assertEqual(stale.status_code, 412)
+        self.assertEqual(self.store.get()["custom_modules"], [module])
+
+    def test_basic_custom_edit_preview_passes_request_cancellation_to_shared_frames(self):
+        candidate = self.store.get()
+        custom = {
+            "id": "custom_cancel", "name": "Cancel", "type": "text_scroll",
+            "text": "Cancel me", "font": "5x7", "colour": "#ffffff",
+            "background": "#000000", "border": "none",
+            "border_colour": "#ffffff", "x": 0, "y": 7,
+            "direction": "left", "speed": 0.05, "loops": 1,
+        }
+        candidate["custom_modules"] = [custom]
+        stop_event = object()
+        expected = iter(())
+        with patch("edit_preview.custom_text_preview_frames", return_value=expected) as frames:
+            actual = webapp._edit_preview_iterator(
+                custom["id"], candidate, None, {}, None, stop_event,
+            )
+
+        self.assertIs(actual, expected)
+        self.assertIs(frames.call_args.args[3], stop_event)
+
+    def test_basic_custom_appearance_controls_serialize_defaults_reset_and_preserve_hidden_colour(self):
+        self.pair_browser()
+        body = self.client.get("/").get_data(as_text=True)
+        canvas = (Path(__file__).parents[1] / "app/static/custom_canvas.js").read_text()
+
+        for source in (body, canvas):
+            self.assertIn("border_colour", source)
+            self.assertIn("Border style", source)
+            self.assertIn("Border colour", source)
+            self.assertIn("Reset appearance", source)
+            self.assertIn("data-simple-appearance", source)
+        self.assertIn("border:'none',border_colour:'#ffffff'", body)
+        self.assertIn("border:card.querySelector('[data-field=border]').value", body)
+        self.assertIn("border: card.querySelector('[data-field=border]').value", canvas)
+        self.assertIn("control.disabled = border.value === 'none'", canvas)
+        self.assertIn("MINIMUM_CLIENT_CONTRACT = 3", Path(webapp.__file__).read_text())
+        self.assertIn("const MATRIX_CLIENT_CONTRACT=3", body)
+
+    def test_basic_border_conversion_to_canvas_is_explicit_and_drops_no_undisclosed_state(self):
+        source = (Path(__file__).parents[1] / "app/static/custom_canvas.js").read_text()
+        self.assertIn(
+            "Basic border styling is not carried into Advanced Canvas.", source,
+        )
+        conversion = source[source.index("function convertToAdvanced"):source.index("function simpleModuleFromCard")]
+        self.assertNotIn("border:", conversion)
+        self.assertNotIn("border_colour:", conversion)
+
+    def test_stale_basic_serializer_contract_forces_reload(self):
+        self.assertEqual(webapp.MINIMUM_CLIENT_CONTRACT, 3)
+        self.pair_browser()
+        response = self.client.get("/api/config")
+        self.assertEqual(response.headers["X-Matrix-Minimum-Client-Contract"], "3")
+
+    @unittest.skipUnless(shutil.which("node"), "Node.js is required")
+    @unittest.skipUnless(
+        os.environ.get("MATRIX_CHROMIUM")
+        and Path(os.environ.get("MATRIX_CHROMIUM", "")).is_file()
+        and os.access(os.environ.get("MATRIX_CHROMIUM", ""), os.X_OK),
+        "MATRIX_CHROMIUM browser is required",
+    )
+    def test_basic_custom_appearance_journey_is_responsive_and_preserves_draft_state(self):
+        module = {
+            "id": "custom_appearance", "name": "Appearance", "type": "text_scroll",
+            "text": "HELLO", "font": "5x7", "colour": "#ffffff",
+            "background": "#112233", "border": "none",
+            "border_colour": "#abcdef", "x": 2, "y": 20,
+            "direction": "left", "speed": .05, "loops": 1,
+        }
+        self.store.update({"custom_modules": [module]})
+        self.pair_browser()
+        body = self.client.get("/").get_data(as_text=True)
+        probe = r"""
+const port=process.argv[1],pagePath=process.argv[2];let endpoint;
+for(let attempt=0;attempt<50;attempt++){try{endpoint=await fetch(`http://127.0.0.1:${port}/json/new`,{method:'PUT'}).then(r=>r.json());break}catch(_){await new Promise(r=>setTimeout(r,50))}}
+if(!endpoint)throw new Error('Chromium DevTools endpoint unavailable');
+const socket=new WebSocket(endpoint.webSocketDebuggerUrl),pending=new Map();let nextId=1,loadResolve,loaded=new Promise(resolve=>loadResolve=resolve);
+socket.onmessage=event=>{const message=JSON.parse(event.data);if(message.id&&pending.has(message.id)){const request=pending.get(message.id);pending.delete(message.id);message.error?request.reject(new Error(JSON.stringify(message.error))):request.resolve(message.result)}else if(message.method==='Page.loadEventFired')loadResolve()};
+await new Promise((resolve,reject)=>{socket.onopen=resolve;socket.onerror=reject});
+const send=(method,params={})=>{const id=nextId++;socket.send(JSON.stringify({id,method,params}));return new Promise((resolve,reject)=>pending.set(id,{resolve,reject}))};
+const evaluate=async expression=>{const result=await send('Runtime.evaluate',{expression,returnByValue:true,awaitPromise:true});if(result.exceptionDetails)throw new Error(JSON.stringify(result.exceptionDetails));return result.result.value};
+try{await send('Runtime.enable');await send('Page.enable');loaded=new Promise(resolve=>loadResolve=resolve);await send('Page.navigate',{url:'file://'+pagePath});await loaded;
+for(let attempt=0;attempt<100;attempt++){if(await evaluate(`globalThis.matrixCustomCanvasReady===true&&!!document.querySelector('[data-simple-appearance]')`))break;await new Promise(r=>setTimeout(r,20))}
+await evaluate(`(()=>{const card=document.querySelector('[data-editor-type="simple"]'),border=card.querySelector('[data-field="border"]'),colour=card.querySelector('[data-field="border_colour"]');border.value='solid';border.dispatchEvent(new Event('input',{bubbles:true}));colour.value='#123456';colour.dispatchEvent(new Event('input',{bubbles:true}));border.value='none';border.dispatchEvent(new Event('input',{bubbles:true}));border.focus()})()`);
+const layouts=[];for(const [width,height]of[[320,568],[360,800],[390,844],[412,915],[599,800],[600,800],[601,800],[768,1024],[820,1180],[844,390],[899,800],[900,800],[901,800],[1024,768],[1280,720],[1440,900]]){await send('Emulation.setDeviceMetricsOverride',{width,height,deviceScaleFactor:1,mobile:width<1100});layouts.push(await evaluate(`(()=>{const card=document.querySelector('[data-editor-type="simple"]'),reset=[...card.querySelectorAll('button')].find(button=>button.textContent==='Reset appearance'),draft=customModulesFromEditor()[0],box=reset.getBoundingClientRect();return{viewport:[innerWidth,innerHeight],draft,disabled:card.querySelector('[data-field="border_colour"]').disabled,focused:document.activeElement?.dataset?.field||null,reset:[box.width,box.height],overflow:document.documentElement.scrollWidth-document.documentElement.clientWidth}})()`))}
+const reset=await evaluate(`(()=>{const card=document.querySelector('[data-editor-type="simple"]');[...card.querySelectorAll('button')].find(button=>button.textContent==='Reset appearance').click();return customModulesFromEditor()[0]})()`);
+console.log(JSON.stringify({layouts,reset}));}finally{socket.close()}
+"""
+        report = self._run_dashboard_chromium_probe(body, probe, timeout=45)
+        for layout in report["layouts"]:
+            self.assertEqual(layout["draft"]["border"], "none", report)
+            self.assertEqual(layout["draft"]["border_colour"], "#123456", report)
+            self.assertTrue(layout["disabled"], report)
+            self.assertEqual(layout["focused"], "border", report)
+            self.assertGreaterEqual(layout["reset"][0], 44, report)
+            self.assertGreaterEqual(layout["reset"][1], 44, report)
+            self.assertLessEqual(layout["overflow"], 1, report)
+        self.assertEqual(report["reset"]["background"], "#000000", report)
+        self.assertEqual(report["reset"]["border"], "none", report)
+        self.assertEqual(report["reset"]["border_colour"], "#ffffff", report)
+
     def run_live_chromium_probe(self, probe, timeout=30):
         server = make_server("127.0.0.1", 0, self.app, threaded=True)
         server_thread = threading.Thread(target=server.serve_forever, daemon=True)
@@ -2928,7 +3086,7 @@ console.log('PAIR_NETWORK_PASS');
 
         self.assertEqual(response.status_code, 428)
         self.assertLessEqual(len(response.data), 1024)
-        self.assertEqual(response.headers["X-Matrix-Minimum-Client-Contract"], "2")
+        self.assertEqual(response.headers["X-Matrix-Minimum-Client-Contract"], "3")
         self.assertEqual(self.store.get(), before)
         self.controller.reload.assert_not_called()
 
@@ -3078,7 +3236,7 @@ console.log('PAIR_NETWORK_PASS');
         self.pair_browser()
         body = self.client.get("/").get_data(as_text=True)
 
-        self.assertIn("const MATRIX_CLIENT_CONTRACT=2", body)
+        self.assertIn("const MATRIX_CLIENT_CONTRACT=3", body)
         self.assertIn("let matrixLoadedRevision=0", body)
         self.assertIn("'If-Match':matrixRevisionETag()", body)
         self.assertIn("matrixLoadedRevision=saved.revision", body)
@@ -3088,7 +3246,7 @@ console.log('PAIR_NETWORK_PASS');
     def test_dashboard_preload_edit_remains_dirty_when_sync_starts(self):
         self.pair_browser()
         body = self.client.get("/").get_data(as_text=True)
-        sync_start = body.index("const MATRIX_CLIENT_CONTRACT=2")
+        sync_start = body.index("const MATRIX_CLIENT_CONTRACT=3")
         sync_end = body.index("const customFontAdvances", sync_start)
         save_start = body.index("async function saveConfig(")
         save_end = body.index("\nfunction updateOpenWeatherSecretStatus", save_start)
@@ -3386,7 +3544,8 @@ try{
         }
         basic_text = {
             "id": "custom_basic_text", "name": "Basic text", "type": "text", "text": "KEEP ME",
-            "font": "5x7", "colour": "#ffffff", "background": "#000000", "x": 2, "y": 20,
+            "font": "5x7", "colour": "#ffffff", "background": "#000000",
+            "border": "none", "border_colour": "#ffffff", "x": 2, "y": 20,
             "direction": "left", "speed": .05, "loops": 1,
         }
         expected_basic = {
@@ -3617,7 +3776,8 @@ try{
         }
         basic_text = {
             "id": "custom_failed_basic", "name": "Failed basic", "type": "text", "text": "KEEP ME",
-            "font": "5x7", "colour": "#ffffff", "background": "#000000", "x": 2, "y": 20,
+            "font": "5x7", "colour": "#ffffff", "background": "#000000",
+            "border": "none", "border_colour": "#ffffff", "x": 2, "y": 20,
             "direction": "left", "speed": .05, "loops": 1,
         }
         self.store.update({"custom_modules": [advanced_canvas, basic_text]})
@@ -3997,7 +4157,7 @@ async function api(path,options){request={path,options};const error=new Error('C
             with self.subTest(source=source):
                 self.assertIn(source, body)
 
-        start = body.index("const MATRIX_CLIENT_CONTRACT=2")
+        start = body.index("const MATRIX_CLIENT_CONTRACT=3")
         end = body.index("const customFontAdvances", start)
         synchronization = body[start:end]
         save_start = body.index("async function saveConfig(")
@@ -4135,8 +4295,8 @@ globalThis.document=document;globalThis.window=window;globalThis.fetch=fetch;
         module = {
             "id": "custom_sync", "name": "Created", "type": "text",
             "text": "PAIR", "font": "5x7", "colour": "#ffffff",
-            "background": "#000000", "x": 2, "y": 20,
-            "direction": "left", "speed": 0.05, "loops": 1,
+            "background": "#000000", "border": "none", "border_colour": "#ffffff",
+            "x": 2, "y": 20, "direction": "left", "speed": 0.05, "loops": 1,
         }
         created = self.paired_client_request("POST", client_a,
             "/api/config",
@@ -4310,8 +4470,8 @@ globalThis.document=document;globalThis.window=window;globalThis.fetch=fetch;
         basic = {
             "id": "custom_basic_source", "name": "Basic source", "type": "text_scroll",
             "text": "SAVED BASIC", "font": "5x7", "colour": "#ffffff",
-            "background": "#000000", "x": 2, "y": 20, "direction": "left",
-            "speed": .05, "loops": 1,
+            "background": "#000000", "border": "none", "border_colour": "#ffffff",
+            "x": 2, "y": 20, "direction": "left", "speed": .05, "loops": 1,
         }
         canvas = {
             "id": "custom_canvas_source", "name": "Canvas source", "type": "canvas",
@@ -5486,7 +5646,7 @@ try{
         self.pair_browser()
         body = self.client.get("/").get_data(as_text=True)
 
-        self.assertIn("const MATRIX_CLIENT_CONTRACT=2", body)
+        self.assertIn("const MATRIX_CLIENT_CONTRACT=3", body)
         self.assertIn("let matrixLoadedRevision=0", body)
         self.assertIn("'X-Matrix-Client-Contract':String(MATRIX_CLIENT_CONTRACT)", body)
         self.assertIn("'If-Match':matrixRevisionETag()", body)
@@ -5500,7 +5660,7 @@ try{
         self.assertIn("width:min(32rem,calc(100vw - 2rem))", body)
         self.assertIn("min-height:44px", body)
 
-        frozen_b1 = body.replace("const MATRIX_CLIENT_CONTRACT=2", "const MATRIX_CLIENT_CONTRACT=1", 1)
+        frozen_b1 = body.replace("const MATRIX_CLIENT_CONTRACT=3", "const MATRIX_CLIENT_CONTRACT=1", 1)
         start = frozen_b1.index("const MATRIX_CLIENT_CONTRACT=1")
         end = frozen_b1.index("const customFontAdvances", start)
         bridge = frozen_b1[start:end]
@@ -7530,8 +7690,8 @@ async function api(path,options){apiCalls.push({path,method:options?.method});re
         custom = {
             "id": "custom_saved", "name": "Saved custom", "type": "text_scroll",
             "text": "SAVED", "font": "5x7", "colour": "#ffffff",
-            "background": "#000000", "x": 0, "y": 20,
-            "direction": "left", "speed": 0.05, "loops": 1,
+            "background": "#000000", "border": "none", "border_colour": "#ffffff",
+            "x": 0, "y": 20, "direction": "left", "speed": 0.05, "loops": 1,
         }
         self.store.update({
             "custom_modules": [custom],
@@ -7762,8 +7922,8 @@ console.log(JSON.stringify({result:JSON.parse(evaluated.result.value),exceptions
         self.store.update({"custom_modules": [{
             "id": "custom_timing_fixture", "name": "Timing fixture", "type": "text_scroll",
             "text": "TIMING", "font": "5x7", "colour": "#ffffff",
-            "background": "#000000", "x": 2, "y": 20, "direction": "left",
-            "speed": .05, "loops": 1,
+            "background": "#000000", "border": "none", "border_colour": "#ffffff",
+            "x": 2, "y": 20, "direction": "left", "speed": .05, "loops": 1,
         }], "playlist": [*current_playlist, {
             "module": "custom_timing_fixture", "duration": 15, "enabled": True,
         }]})
@@ -7823,7 +7983,8 @@ const result=await send('Runtime.evaluate',{expression,returnByValue:true,awaitP
         self.store.update({"custom_modules": [{
             "id": "custom_responsive_fixture", "name": "Responsive fixture",
             "type": "text_scroll", "text": "RESPONSIVE", "font": "5x7",
-            "colour": "#ffffff", "background": "#000000", "x": 2, "y": 20,
+            "colour": "#ffffff", "background": "#000000",
+            "border": "none", "border_colour": "#ffffff", "x": 2, "y": 20,
             "direction": "left", "speed": .05, "loops": 1,
         }]})
         self.pair_browser()
@@ -12060,6 +12221,7 @@ try{
         module = {
             "id": "custom_static", "name": "Static", "type": "text",
             "font": "4x6", "colour": "#ffcc00", "background": "#001122",
+            "border": "none", "border_colour": "#ffffff",
             "text": "HELLO", "x": 3, "y": 20,
             "direction": "left", "speed": 0.05, "loops": 1,
         }
@@ -14276,8 +14438,8 @@ try{
         custom = {
             "id": "custom_welcome", "name": "Welcome", "type": "text_scroll",
             "text": "HELLO", "font": "5x7", "colour": "#ffffff",
-            "background": "#000000", "x": 0, "y": 20,
-            "direction": "left", "speed": 0.05,
+            "background": "#000000", "border": "none", "border_colour": "#ffffff",
+            "x": 0, "y": 20, "direction": "left", "speed": 0.05, "loops": 1,
         }
         self.store.update({
             "custom_modules": [custom],

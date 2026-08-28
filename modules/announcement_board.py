@@ -10,6 +10,7 @@ from decimal import Decimal, ROUND_HALF_UP
 from PIL import Image
 
 from font_catalog import text_width
+from modules.frame_appearance import draw_frame_border
 from modules.scroll_timing import duration_milliseconds, format_duration_seconds, scroll_frames
 
 
@@ -150,30 +151,9 @@ def _aligned_text_x(
 
 
 def _draw_border(matrix, canvas, style, x_offset=0):
-    if style["border"] == "none":
-        return
-    if style["border"] not in {"solid", "inset"}:
-        raise NotImplementedError("announcement border is not implemented")
-    colour = matrix.colour_rgb(style["border_colour"])
-    offset = 1 if style["border"] == "inset" else 0
-    left = offset + x_offset
-    right = matrix.matrix.width - 1 - offset + x_offset
-    bottom = matrix.matrix.height - 1 - offset
-    for x1, y1, x2, y2 in (
-        (left, offset, right, offset),
-        (right, offset, right, bottom),
-        (right, bottom, left, bottom),
-        (left, bottom, left, offset),
-    ):
-        if x1 == x2:
-            if not 0 <= x1 < matrix.matrix.width:
-                continue
-        else:
-            if max(x1, x2) < 0 or min(x1, x2) >= matrix.matrix.width:
-                continue
-            x1 = min(matrix.matrix.width - 1, max(0, x1))
-            x2 = min(matrix.matrix.width - 1, max(0, x2))
-        matrix.draw_line(x1, y1, x2, y2, colour, canvas=canvas)
+    draw_frame_border(
+        matrix, canvas, style["border"], style["border_colour"], x_offset=x_offset,
+    )
 
 
 def _render_text_notice(matrix, canvas, announcement, x_offset=0):
