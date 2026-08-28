@@ -2226,6 +2226,7 @@ _RELEASE_EXPORT_REQUIRED = frozenset({
     "webapp.py",
     "requirements.txt",
     "secret_store.py",
+    "hardware_lock.py",
     "app/__init__.py",
     "app/wsgi.py",
     "deploy/release_bundle.py",
@@ -2338,10 +2339,11 @@ def _exercise_installed_wsgi(release_root: Path, python: Path, scratch_parent: P
             (
                 "import sys;sys.path.insert(0,sys.argv[1]);"
                 "import rgbmatrix;"
-                "import display_controller,matrix_framework;"
+                "import display_controller,hardware_lock,matrix_framework;"
                 "smoke_matrix=type('_ReleaseWsgiSmokeMatrix',(),{"
                 "'release_wsgi_smoke':True,'clear':lambda self:None,'swap':lambda self:None});"
                 "matrix_framework.Matrix=smoke_matrix;"
+                "hardware_lock.DisplayOwnershipLock.acquire=lambda self:self;"
                 "display_controller.DisplayController.start=lambda self:True;"
                 "import app.wsgi as entry;assert entry.app is not None"
             ),

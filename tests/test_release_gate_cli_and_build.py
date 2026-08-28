@@ -41,6 +41,10 @@ class ReleaseTreePreparationTests(unittest.TestCase):
             ),
             "requirements.txt": "Flask==3.1.2\n",
             "secret_store.py": "class SecretStore: pass\n",
+            "hardware_lock.py": (
+                "class DisplayOwnershipLock:\n"
+                "    def acquire(self): return self\n"
+            ),
             "app/__init__.py": "\n",
             "app/runtime.py": "APPLICATION = object()\n",
             "app/wsgi.py": "from app.runtime import APPLICATION\napp = APPLICATION\n",
@@ -333,6 +337,39 @@ class ReleaseTreePreparationTests(unittest.TestCase):
                     project, repository, self._head(repository), stage,
                 ))
             self.assertFalse(stage.exists())
+
+    def test_wsgi_smoke_does_not_acquire_the_physical_display_lock(self):
+        project = Path(__file__).resolve().parents[1]
+        with tempfile.TemporaryDirectory(dir=os.environ.get("TMPDIR")) as directory:
+            root = Path(directory)
+            repository, _ = self._committed_repository(root)
+            (repository / "hardware_lock.py").write_text(
+                "class DisplayOwnershipLock:\n"
+                "    def acquire(self): raise RuntimeError('physical lock acquired')\n",
+                encoding="utf-8",
+            )
+            (repository / "app/wsgi.py").write_text(
+                "import hardware_lock\n"
+                "assert hardware_lock.DisplayOwnershipLock().acquire() is not None\n"
+                "app = object()\n",
+                encoding="utf-8",
+            )
+            subprocess.run(
+                ["git", "add", "app/wsgi.py", "hardware_lock.py"],
+                cwd=repository, check=True,
+            )
+            subprocess.run([
+                "git", "commit", "-q", "-m", "forbid physical lock in WSGI smoke",
+            ], cwd=repository, check=True)
+            stage = root / "stage"
+
+            self.assertEqual(
+                release_bundle.main(self._argv(
+                    project, repository, self._head(repository), stage,
+                )),
+                0,
+            )
+            self.assertFalse((stage / "release/data").exists())
 
     def test_preseeded_inner_manifest_is_rejected_as_order_inversion(self):
         project = Path(__file__).resolve().parents[1]

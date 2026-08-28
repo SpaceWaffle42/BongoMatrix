@@ -34,7 +34,9 @@ class ReleaseBundleTests(unittest.TestCase):
                     release_bundle._reject_forbidden_release_path(path)
                 self.assertFalse(release_bundle._is_production_export_path(path))
 
-        for path in ("deploy/release_bundle.py", "secret_store.py"):
+        for path in (
+            "deploy/release_bundle.py", "secret_store.py", "hardware_lock.py",
+        ):
             with self.subTest(path=path):
                 release_bundle._reject_forbidden_release_path(path)
                 self.assertTrue(release_bundle._is_production_export_path(path))
