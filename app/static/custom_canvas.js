@@ -284,7 +284,7 @@
   function convertToAdvanced(id) {
     const index = customModules.findIndex(module => module.id === id);
     const source = customModulesFromEditor().find(module => module.id === id);
-    if (index < 0 || !source || !confirm('Convert ' + source.name + ' to the advanced canvas? This cannot be changed back to simple text.')) return;
+    if (index < 0 || !source || !confirm('Convert ' + source.name + ' to the advanced canvas? This cannot be changed back to simple text. Basic border styling is not carried into Advanced Canvas.')) return;
     customModules[index] = {
       id: source.id, name: source.name, type: 'canvas', background: source.background,
       frame_count: 1, fps: Math.max(1, Math.min(60, Math.round(1 / source.speed))), playback: 'hold',
@@ -298,7 +298,7 @@
   }
 
   function simpleModuleFromCard(card) {
-    return {id: card.dataset.id, name: card.querySelector('[data-field=name]').value.trim(), type: card.querySelector('[data-field=type]').value, text: card.querySelector('[data-field=text]').value, font: card.querySelector('[data-field=font]').value, colour: card.querySelector('[data-field=colour]').value, background: card.querySelector('[data-field=background]').value, x: Number(card.querySelector('[data-field=x]').value), y: Number(card.querySelector('[data-field=y]').value), direction: card.querySelector('[data-field=direction]').value, speed: Number(card.querySelector('[data-field=speed]').value), loops: Number(card.querySelector('[data-field=loops]').value)};
+    return {id: card.dataset.id, name: card.querySelector('[data-field=name]').value.trim(), type: card.querySelector('[data-field=type]').value, text: card.querySelector('[data-field=text]').value, font: card.querySelector('[data-field=font]').value, colour: card.querySelector('[data-field=colour]').value, background: card.querySelector('[data-field=background]').value, border: card.querySelector('[data-field=border]').value, border_colour: card.querySelector('[data-field=border_colour]').value, x: Number(card.querySelector('[data-field=x]').value), y: Number(card.querySelector('[data-field=y]').value), direction: card.querySelector('[data-field=direction]').value, speed: Number(card.querySelector('[data-field=speed]').value), loops: Number(card.querySelector('[data-field=loops]').value)};
   }
 
   const provisionalSimpleDrafts = new Map([...document.querySelectorAll('.custom-module-card')]
@@ -331,12 +331,24 @@
     const name = customControl('Name', 'name', 'text', module.name); name.classList.add('wide');
     name.querySelector('input').addEventListener('input', event => { module.name = event.target.value; title.textContent = event.target.value; syncCustomModuleUI(); });
     const text = customControl('Text', 'text', 'text', module.text); text.classList.add('wide');
-    fields.append(name, text, customControl('Mode', 'type', 'select', module.type, ['text', 'text_scroll']), customControl('Font', 'font', 'select', module.font, fonts), customControl('Text colour', 'colour', 'color', module.colour), customControl('Background', 'background', 'color', module.background), customControl('X position', 'x', 'number', module.x), customControl('Baseline Y', 'y', 'number', module.y), customControl('Scroll direction', 'direction', 'select', module.direction, ['left', 'right']), customControl('Frame delay (seconds)', 'speed', 'number', module.speed), customControl('Scroll loops', 'loops', 'number', module.loops ?? 1));
+    fields.append(name, text, customControl('Mode', 'type', 'select', module.type, ['text', 'text_scroll']), customControl('Font', 'font', 'select', module.font, fonts), customControl('Text colour', 'colour', 'color', module.colour), customControl('X position', 'x', 'number', module.x), customControl('Baseline Y', 'y', 'number', module.y), customControl('Scroll direction', 'direction', 'select', module.direction, ['left', 'right']), customControl('Frame delay (seconds)', 'speed', 'number', module.speed), customControl('Scroll loops', 'loops', 'number', module.loops ?? 1));
     for (const control of fields.querySelectorAll('[data-field]')) control.addEventListener('input', syncPlaylistDurations);
+    const appearance = document.createElement('details'); appearance.className = 'editor-group'; appearance.open = true; appearance.setAttribute('data-simple-appearance', '');
+    const appearanceSummary = document.createElement('summary'); appearanceSummary.textContent = 'Appearance';
+    const appearanceFields = document.createElement('div'); appearanceFields.className = 'editor-fields';
+    const background = customControl('Background colour', 'background', 'color', module.background ?? '#000000');
+    const borderLabel = customControl('Border style', 'border', 'select', module.border ?? 'none', ['none', 'solid', 'inset']);
+    const colourLabel = customControl('Border colour', 'border_colour', 'color', module.border_colour ?? '#ffffff');
+    const border = borderLabel.querySelector('select'), control = colourLabel.querySelector('input');
+    const syncAppearance = () => { control.disabled = border.value === 'none'; colourLabel.hidden = border.value === 'none'; control.setAttribute('aria-disabled', String(control.disabled)); };
+    border.addEventListener('input', syncAppearance);
+    const resetAppearance = makeButton('Reset appearance', () => { background.querySelector('input').value = '#000000'; border.value = 'none'; control.value = '#ffffff'; for (const item of [background.querySelector('input'), border, control]) item.dispatchEvent(new Event('input', {bubbles: true})); syncAppearance(); }, 'btn danger');
+    resetAppearance.style.minHeight = '44px'; resetAppearance.style.minWidth = '44px';
+    appearanceFields.append(background, borderLabel, colourLabel, resetAppearance); appearance.append(appearanceSummary, appearanceFields); syncAppearance();
     const convert = makeButton('Convert to advanced canvas', () => convertToAdvanced(module.id), 'btn primary'); convert.style.marginTop = '12px';
     const runtime = scrollPhysicalTimeReadout(module.type === 'text_scroll' ? calculatedScrollDuration(module) : Number.NaN);
     runtime.hidden = module.type !== 'text_scroll';
-    card.append(fields, runtime, convert); list.append(card);
+    card.append(fields, appearance, runtime, convert); list.append(card);
   }
 
   function moduleControl(labelText, value, type, handler, options) {
