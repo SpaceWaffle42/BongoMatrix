@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Couple Priority 1.4 source deployment to its mutable schema-v1 config authority."""
+"""Couple Priority 1.4 deployment to its mutable legacy-config authority."""
 
 from __future__ import annotations
 
@@ -41,7 +41,7 @@ _STATE_KEYS = {"version", "source_sha", "config", "paired", "media"}
 _CONFIG_KEYS = {"path", "sha256", "uid", "gid", "mode", "schema_version", "revision"}
 _OPTIONAL_HASH_KEYS = {"path", "present", "sha256"}
 _MEDIA_KEYS = {"path", "tree_sha256"}
-_STATE_FILES = {"config-v1.json", "state-manifest.json"}
+_STATE_FILES = {"config-pre-migration.json", "state-manifest.json"}
 _SYSTEMCTL = "/usr/bin/systemctl"
 
 
@@ -149,8 +149,11 @@ def _config_record(path: Path) -> tuple[bytes, dict[str, object]]:
         parsed = json.loads(data, object_pairs_hook=_unique_object)
     except (UnicodeError, json.JSONDecodeError) as error:
         raise ValueError("config snapshot is not valid JSON") from error
-    if type(parsed) is not dict or parsed.get("schema_version") != 1:
-        raise ValueError("prepare requires an exact schema-v1 config")
+    if type(parsed) is not dict:
+        raise ValueError("prepare requires an exact legacy config object")
+    schema_version = parsed.get("schema_version", 0)
+    if type(schema_version) is not int or schema_version not in (0, 1):
+        raise ValueError("prepare requires an exact schema-v0 or schema-v1 config")
     revision = parsed.get("revision")
     if type(revision) is not int or revision < 0:
         raise ValueError("config revision is invalid")
@@ -158,7 +161,7 @@ def _config_record(path: Path) -> tuple[bytes, dict[str, object]]:
         "path": "data/config.json", "sha256": _sha(data),
         "uid": metadata.st_uid, "gid": metadata.st_gid,
         "mode": f"{stat.S_IMODE(metadata.st_mode):04o}",
-        "schema_version": 1, "revision": revision,
+        "schema_version": schema_version, "revision": revision,
     }
 
 
@@ -335,7 +338,7 @@ class Priority14Transaction:
         if {path.name for path in p.state_bundle.iterdir()} != _STATE_FILES:
             raise ValueError("state bundle scope is not exact")
         raw, state_stat = _read_regular(p.state_bundle / "state-manifest.json")
-        config, config_stat = _read_regular(p.state_bundle / "config-v1.json")
+        config, config_stat = _read_regular(p.state_bundle / "config-pre-migration.json")
         if stat.S_IMODE(state_stat.st_mode) != 0o400 or stat.S_IMODE(config_stat.st_mode) != 0o400:
             raise ValueError("state authority files must be mode 0400")
         try:
@@ -355,7 +358,11 @@ class Priority14Transaction:
             raise ValueError("state paired record is invalid")
         if type(media) is not dict or set(media) != _MEDIA_KEYS:
             raise ValueError("state media record is invalid")
-        if config_record["sha256"] != _sha(config) or config_record["schema_version"] != 1:
+        if (
+            config_record["sha256"] != _sha(config)
+            or type(config_record["schema_version"]) is not int
+            or config_record["schema_version"] not in (0, 1)
+        ):
             raise ValueError("state config bytes mismatch")
         if not isinstance(config_record["sha256"], str) or _HASH_RE.fullmatch(config_record["sha256"]) is None:
             raise ValueError("state config hash is invalid")
@@ -387,7 +394,7 @@ class Priority14Transaction:
             p.state_bundle.mkdir(mode=0o700)
             os.chmod(p.state_bundle, 0o700)
             os.chown(p.state_bundle, os.geteuid(), os.getegid())
-            config_path = p.state_bundle / "config-v1.json"
+            config_path = p.state_bundle / "config-pre-migration.json"
             config_path.write_bytes(config)
             os.chmod(config_path, 0o400)
             manifest = {
@@ -437,7 +444,7 @@ class Priority14Transaction:
             raise RuntimeError("service did not start")
         self.service.run_health_checks()
 
-    def _restore_v1_config(self, manifest: dict[str, object], config: bytes) -> None:
+    def _restore_legacy_config(self, manifest: dict[str, object], config: bytes) -> None:
         record = manifest["config"]
         assert isinstance(record, dict)
         _atomic_restore(
@@ -450,7 +457,7 @@ class Priority14Transaction:
             or metadata.st_gid != record["gid"]
             or f"{stat.S_IMODE(metadata.st_mode):04o}" != record["mode"]
         ):
-            raise ValueError("schema-v1 config restoration failed")
+            raise ValueError("legacy config restoration failed")
 
     def _source_phase(self) -> str:
         """Classify an exact candidate or rollback source; reject mixed state."""
@@ -501,7 +508,7 @@ class Priority14Transaction:
                     p.release_manifest, p.backup_manifest,
                     service=self.service, initially_active=False,
                 )
-                self._restore_v1_config(manifest, config)
+                self._restore_legacy_config(manifest, config)
                 self._start_ready()
                 self._assert_mutable_hashes(manifest)
             except BaseException as error:
@@ -535,7 +542,7 @@ class Priority14Transaction:
             )
             if after_boundary is not None:
                 after_boundary("source-restored")
-            self._restore_v1_config(manifest, config)
+            self._restore_legacy_config(manifest, config)
             if after_boundary is not None:
                 after_boundary("config-restored")
             self._start_ready()
@@ -561,7 +568,7 @@ class Priority14Transaction:
                         f"{stat.S_IMODE(candidate_stat.st_mode):04o}",
                     )
                 else:
-                    self._restore_v1_config(manifest, config)
+                    self._restore_legacy_config(manifest, config)
                 self._start_ready()
                 self._assert_mutable_hashes(manifest)
             except BaseException as error:

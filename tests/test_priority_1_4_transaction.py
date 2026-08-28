@@ -194,6 +194,46 @@ class Priority14TransactionTests(unittest.TestCase):
         metadata = destination.joinpath("data/config.json").stat()
         self.assertEqual(stat.S_IMODE(metadata.st_mode), 0o640)
 
+    def test_prepare_and_rollback_preserve_exact_missing_version_v0_config(self):
+        temporary, tx, _events, service, config_bytes = self.make_transaction()
+        self.addCleanup(temporary.cleanup)
+        destination = tx.paths.destination_root
+        legacy = json.loads(config_bytes)
+        legacy.pop("schema_version")
+        legacy_bytes = json.dumps(legacy, separators=(",", ":")).encode()
+        config_path = destination.joinpath("data/config.json")
+        config_path.write_bytes(legacy_bytes)
+        os.chmod(config_path, 0o640)
+
+        manifest = tx.prepare()
+        config_record = manifest["config"]
+        self.assertIsInstance(config_record, dict)
+        assert isinstance(config_record, dict)
+        self.assertEqual(config_record["schema_version"], 0)
+        self.assertEqual(
+            tx.paths.state_bundle.joinpath("config-pre-migration.json").read_bytes(),
+            legacy_bytes,
+        )
+
+        destination.joinpath("app.py").write_bytes(b"new source\n")
+        migrated = dict(legacy, schema_version=2, revision=legacy["revision"] + 1)
+        config_path.write_text(json.dumps(migrated))
+        tx.rollback()
+
+        self.assertEqual(destination.joinpath("app.py").read_bytes(), b"old source\n")
+        self.assertEqual(config_path.read_bytes(), legacy_bytes)
+        self.assertEqual(stat.S_IMODE(config_path.stat().st_mode), 0o640)
+        self.assertTrue(service.is_active())
+
+    def test_prepare_rejects_nonlegacy_config_authority(self):
+        temporary, tx, _events, _service, config_bytes = self.make_transaction()
+        self.addCleanup(temporary.cleanup)
+        invalid = json.loads(config_bytes)
+        invalid["schema_version"] = 2
+        tx.paths.destination_root.joinpath("data/config.json").write_text(json.dumps(invalid))
+        with self.assertRaisesRegex(ValueError, "schema-v0 or schema-v1"):
+            tx.prepare()
+
     def test_rollback_failure_before_source_write_restarts_coherent_candidate(self):
         temporary, tx, events, service, config_bytes = self.make_transaction()
         self.addCleanup(temporary.cleanup)
