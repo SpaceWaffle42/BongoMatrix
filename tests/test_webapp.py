@@ -117,6 +117,64 @@ class WebAppTests(unittest.TestCase):
     def paired_client_request(self, method, client, path, **kwargs):
         return self.paired_request(method, path, client=client, **kwargs)
 
+    def test_basic_custom_appearance_round_trips_saved_edit_and_device_preview_paths(self):
+        from device_preview import DevicePreviewManager
+
+        self.pair_browser()
+        before = self.store.get()
+        before_bytes = self.store.path.read_bytes()
+        candidate = {"custom_modules": []}
+        module = {
+            "id": "custom_api_appearance", "name": "API appearance",
+            "type": "text_scroll", "text": "EDGE", "font": "5x7",
+            "colour": "#fedcba", "background": "#123456",
+            "border": "inset", "border_colour": "#abcdef",
+            "x": -2, "y": 7, "direction": "right", "speed": 0.05,
+            "loops": 1,
+        }
+        candidate["custom_modules"] = [module]
+        identity = "a" * 32
+
+        edit = self.paired_request(
+            "POST", f"/api/edit-preview/{module['id']}",
+            json={"config": candidate, "generation": 1, "preview_instance": identity},
+        )
+        self.assertEqual(edit.status_code, 200, edit.get_data(as_text=True))
+        self.assertTrue(edit.get_json()["frames"])
+        self.assertEqual(self.store.path.read_bytes(), before_bytes)
+
+        manager = DevicePreviewManager()
+        observed = {}
+
+        def submit(request, **kwargs):
+            observed["request"] = request
+            observed["renderer"] = kwargs["renderer"]
+            return manager.submit(request)
+
+        self.controller.submit_device_draft.side_effect = submit
+        device = self.paired_request(
+            "POST", f"/api/device-preview/{module['id']}",
+            json={"config": candidate, "generation": 2, "preview_instance": identity},
+        )
+        self.assertEqual(device.status_code, 202, device.get_data(as_text=True))
+        self.assertEqual(
+            observed["request"].config["candidate"]["custom_modules"], [module],
+        )
+        self.assertEqual(self.store.get(), before)
+        self.controller.reload.assert_not_called()
+
+        saved = self.post_config(json={"custom_modules": [module]})
+        self.assertEqual(saved.status_code, 200, saved.get_data(as_text=True))
+        self.assertEqual(saved.get_json()["custom_modules"], [module])
+        self.assertEqual(saved.get_json()["revision"], before["revision"] + 1)
+
+        stale = self.paired_request(
+            "POST", "/api/config", json={"custom_modules": []},
+            headers={"If-Match": f'"{before["revision"]}"'},
+        )
+        self.assertEqual(stale.status_code, 412)
+        self.assertEqual(self.store.get()["custom_modules"], [module])
+
     def test_basic_custom_edit_preview_passes_request_cancellation_to_shared_frames(self):
         candidate = self.store.get()
         custom = {
@@ -3486,7 +3544,8 @@ try{
         }
         basic_text = {
             "id": "custom_basic_text", "name": "Basic text", "type": "text", "text": "KEEP ME",
-            "font": "5x7", "colour": "#ffffff", "background": "#000000", "x": 2, "y": 20,
+            "font": "5x7", "colour": "#ffffff", "background": "#000000",
+            "border": "none", "border_colour": "#ffffff", "x": 2, "y": 20,
             "direction": "left", "speed": .05, "loops": 1,
         }
         expected_basic = {
@@ -3717,7 +3776,8 @@ try{
         }
         basic_text = {
             "id": "custom_failed_basic", "name": "Failed basic", "type": "text", "text": "KEEP ME",
-            "font": "5x7", "colour": "#ffffff", "background": "#000000", "x": 2, "y": 20,
+            "font": "5x7", "colour": "#ffffff", "background": "#000000",
+            "border": "none", "border_colour": "#ffffff", "x": 2, "y": 20,
             "direction": "left", "speed": .05, "loops": 1,
         }
         self.store.update({"custom_modules": [advanced_canvas, basic_text]})
@@ -4235,8 +4295,8 @@ globalThis.document=document;globalThis.window=window;globalThis.fetch=fetch;
         module = {
             "id": "custom_sync", "name": "Created", "type": "text",
             "text": "PAIR", "font": "5x7", "colour": "#ffffff",
-            "background": "#000000", "x": 2, "y": 20,
-            "direction": "left", "speed": 0.05, "loops": 1,
+            "background": "#000000", "border": "none", "border_colour": "#ffffff",
+            "x": 2, "y": 20, "direction": "left", "speed": 0.05, "loops": 1,
         }
         created = self.paired_client_request("POST", client_a,
             "/api/config",
@@ -4410,8 +4470,8 @@ globalThis.document=document;globalThis.window=window;globalThis.fetch=fetch;
         basic = {
             "id": "custom_basic_source", "name": "Basic source", "type": "text_scroll",
             "text": "SAVED BASIC", "font": "5x7", "colour": "#ffffff",
-            "background": "#000000", "x": 2, "y": 20, "direction": "left",
-            "speed": .05, "loops": 1,
+            "background": "#000000", "border": "none", "border_colour": "#ffffff",
+            "x": 2, "y": 20, "direction": "left", "speed": .05, "loops": 1,
         }
         canvas = {
             "id": "custom_canvas_source", "name": "Canvas source", "type": "canvas",
@@ -7630,8 +7690,8 @@ async function api(path,options){apiCalls.push({path,method:options?.method});re
         custom = {
             "id": "custom_saved", "name": "Saved custom", "type": "text_scroll",
             "text": "SAVED", "font": "5x7", "colour": "#ffffff",
-            "background": "#000000", "x": 0, "y": 20,
-            "direction": "left", "speed": 0.05, "loops": 1,
+            "background": "#000000", "border": "none", "border_colour": "#ffffff",
+            "x": 0, "y": 20, "direction": "left", "speed": 0.05, "loops": 1,
         }
         self.store.update({
             "custom_modules": [custom],
@@ -7862,8 +7922,8 @@ console.log(JSON.stringify({result:JSON.parse(evaluated.result.value),exceptions
         self.store.update({"custom_modules": [{
             "id": "custom_timing_fixture", "name": "Timing fixture", "type": "text_scroll",
             "text": "TIMING", "font": "5x7", "colour": "#ffffff",
-            "background": "#000000", "x": 2, "y": 20, "direction": "left",
-            "speed": .05, "loops": 1,
+            "background": "#000000", "border": "none", "border_colour": "#ffffff",
+            "x": 2, "y": 20, "direction": "left", "speed": .05, "loops": 1,
         }], "playlist": [*current_playlist, {
             "module": "custom_timing_fixture", "duration": 15, "enabled": True,
         }]})
@@ -7923,7 +7983,8 @@ const result=await send('Runtime.evaluate',{expression,returnByValue:true,awaitP
         self.store.update({"custom_modules": [{
             "id": "custom_responsive_fixture", "name": "Responsive fixture",
             "type": "text_scroll", "text": "RESPONSIVE", "font": "5x7",
-            "colour": "#ffffff", "background": "#000000", "x": 2, "y": 20,
+            "colour": "#ffffff", "background": "#000000",
+            "border": "none", "border_colour": "#ffffff", "x": 2, "y": 20,
             "direction": "left", "speed": .05, "loops": 1,
         }]})
         self.pair_browser()
@@ -12160,6 +12221,7 @@ try{
         module = {
             "id": "custom_static", "name": "Static", "type": "text",
             "font": "4x6", "colour": "#ffcc00", "background": "#001122",
+            "border": "none", "border_colour": "#ffffff",
             "text": "HELLO", "x": 3, "y": 20,
             "direction": "left", "speed": 0.05, "loops": 1,
         }
@@ -14376,8 +14438,8 @@ try{
         custom = {
             "id": "custom_welcome", "name": "Welcome", "type": "text_scroll",
             "text": "HELLO", "font": "5x7", "colour": "#ffffff",
-            "background": "#000000", "x": 0, "y": 20,
-            "direction": "left", "speed": 0.05,
+            "background": "#000000", "border": "none", "border_colour": "#ffffff",
+            "x": 0, "y": 20, "direction": "left", "speed": 0.05, "loops": 1,
         }
         self.store.update({
             "custom_modules": [custom],
