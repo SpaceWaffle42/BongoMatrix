@@ -40,6 +40,7 @@ class ReleaseTreePreparationTests(unittest.TestCase):
                 "graphics = object()\n"
             ),
             "requirements.txt": "Flask==3.1.2\n",
+            "secret_store.py": "class SecretStore: pass\n",
             "app/__init__.py": "\n",
             "app/runtime.py": "APPLICATION = object()\n",
             "app/wsgi.py": "from app.runtime import APPLICATION\napp = APPLICATION\n",
