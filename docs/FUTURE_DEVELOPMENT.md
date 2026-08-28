@@ -1,6 +1,6 @@
 # Future development notes
 
-Last updated: 2026-08-24
+Last updated: 2026-08-28
 
 This file records requested Matrix features that are intentionally deferred. They are product requirements and design notes, not descriptions of current behavior. Do not treat an item as implemented until its code, tests, review, merge, deployment, and physical-device verification are complete.
 
@@ -182,9 +182,9 @@ When the user tries to switch from Edit Preview to Live with unsaved changes, wa
 - ~~Use adaptive debounce timing: 150 ms for simple controls and 500 ms for media changes or other expensive renders.~~
 - ~~Cancel superseded draft work so an older slow render can never replace a newer edit on the device.~~
 
-#### Priority 1.3 post-completion whole-project remediation — In progress
+#### Priority 1.3 post-completion whole-project remediation — Deferred to v1.0
 
-A fresh whole-project review rejected the earlier post-1.3 release candidate and opened the ordered remediation ledger in GitLab issue 2. F1–F15 were subsequently reproduced, remediated under strict TDD, independently reviewed, and merged through protected CI. The complete remediated artifacts passed the applicable protected-CI and production-acceptance gates recorded in that issue, but later release-path validation reopened the final closure gate. The historical finding-by-finding record is retained below.
+A fresh whole-project review rejected the earlier post-1.3 release candidate and opened the ordered remediation ledger in GitLab issue 2. F1–F15 were subsequently reproduced, remediated under strict TDD, independently reviewed, and merged through protected CI. The complete remediated artifacts passed the applicable protected-CI and production-acceptance gates recorded in that issue, but later release-path validation found additional restricted release-preparation issues. Priority 1.3's shipped product behavior has passed its functional browser, physical-device, configuration-preservation, and saved-playback acceptance. The remaining release-reliability findings are retained in issue 2 and explicitly deferred to the v1.0 hardening milestone; they do not block the ordinary pre-v1 product roadmap unless a current functional bug, data-loss risk, unsafe production mutation, or broken rollback/state-preservation path is demonstrated.
 
 Verified remediation approvals:
 
@@ -216,7 +216,7 @@ Verified remediation approvals:
 
 **Latest acceptance evidence 2026-08-27:** sticky-preview, reconnect, module-normalization, and maximum paired-device recovery blockers were independently closed through protected merges ending at `07a484b96cdcdb20a50e2fc76854af840c4686f4`. Protected-main pipeline 248 and its dedicated physical-device job passed. The production 64×32 appliance then passed a real 320×568 Chromium recovery-and-replacement journey at configured capacity: one explicitly selected old pairing was revoked, a fresh authoritative browser pairing was committed, registry cardinality stayed 10, the other nine records remained byte-for-byte unchanged, configuration and media stayed unchanged, and service/display-lock health remained clean.
 
-**Remaining final gate:** GitLab issue 2 note 438 records the restricted release-preparation transport as blocked before immutable review, and protected history through `07a484b96cdcdb20a50e2fc76854af840c4686f4` contains no superseding merge for that remediation. Final whole-project release closure and the Priority 1.4 gate therefore remain blocked pending an independently reviewed transport remediation, protected CI, deployment, and applicable production acceptance.
+**v1.0 deferred findings register:** GitLab issue 2 note 496 consolidates the remaining restricted release-preparation and release-reliability findings, including their accepted, rejected, and open states. Owner decision note 497 defers the open findings to v1.0 without closing or waiving them. Issue 2 remains open as their durable register. Priority 1.4 is released to proceed; any newly demonstrated current functional bug, data-loss risk, unsafe production mutation, or broken rollback/state-preservation path still takes precedence over feature work.
 
 ### 1.4 Add borders and backgrounds to basic custom modules
 
