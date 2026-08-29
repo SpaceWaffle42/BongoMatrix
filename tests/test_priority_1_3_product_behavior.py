@@ -107,6 +107,15 @@ class Priority13ProductBehaviorTests(unittest.TestCase):
             "playlist": [{"module": "splash", "duration": 1, "enabled": True}],
         }
         matrix = CaptureMatrix()
+        first_frame = threading.Event()
+        capture_swap = matrix.swap
+
+        def observe_swap(canvas=None):
+            result = capture_swap(canvas)
+            first_frame.set()
+            return result
+
+        matrix.swap = observe_swap
         setattr(matrix, "set_brightness", Mock())
         controller = DisplayController(matrix, Mock(get=Mock(return_value=saved_config)))
         controller.device_preview_manager._clock = lambda: now[0]
@@ -129,9 +138,7 @@ class Priority13ProductBehaviorTests(unittest.TestCase):
 
         rendered = threading.Thread(target=controller._execute_pending_device_draft)
         rendered.start()
-        deadline = time.monotonic() + 1
-        while controller.current_module != "device-draft:clock_lava" and time.monotonic() < deadline:
-            time.sleep(0.005)
+        self.assertTrue(first_frame.wait(1), "real Lava renderer did not publish a frame")
         self.assertEqual(controller.current_module, "device-draft:clock_lava")
 
         now[0] = 215.0
