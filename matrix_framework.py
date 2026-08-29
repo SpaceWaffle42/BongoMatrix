@@ -989,9 +989,9 @@ class Matrix:
             isinstance(playback_rate, bool)
             or not isinstance(playback_rate, (int, float))
             or not math.isfinite(playback_rate)
-            or not 0.25 <= playback_rate <= 4.0
+            or not 0.1 <= playback_rate <= 4.0
         ):
-            raise ValueError("GIF playback rate must be between 0.25 and 4.0")
+            raise ValueError("GIF playback rate must be between 0.1 and 4.0")
         if stop_event is not None and stop_event.is_set():
             return False
         image_open = Image.open
@@ -1233,6 +1233,7 @@ class Matrix:
         width=None,
         height=None,
         keep_aspect=True,
+        playback_rate=1.0,
         stop_event=None,
         max_duration=None,
         *,
@@ -1241,6 +1242,13 @@ class Matrix:
         """Decode a sanitized MP4 with FFmpeg, bounded and interruptible."""
         from modules.media_player import video_media_frames
 
+        if (
+            isinstance(playback_rate, bool)
+            or not isinstance(playback_rate, (int, float))
+            or not math.isfinite(playback_rate)
+            or not 0.1 <= playback_rate <= 4.0
+        ):
+            raise ValueError("video playback rate must be between 0.1 and 4.0")
         if stop_event is not None and stop_event.is_set():
             return False
         path = None if pinned_handle is not None else self._media_file(filename)
@@ -1269,6 +1277,7 @@ class Matrix:
         for image, frame_delay in video_media_frames(
             decode, fps=fps, loops=loops, stop_event=stop_event,
             max_duration=max_duration, monotonic=time.monotonic,
+            playback_rate=playback_rate,
         ):
             self.clear()
             self.canvas.SetImage(image, x, y)
