@@ -1,5 +1,6 @@
 import copy
 import threading
+import time
 import unittest
 from unittest.mock import Mock, patch
 
@@ -98,6 +99,76 @@ class Priority13ProductBehaviorTests(unittest.TestCase):
         self.assertIsNone(rendered)
         self.assertTrue(stop.is_set())
         self.assertEqual(stop.waits, 3)
+
+    def test_process_loss_expires_active_lava_and_restores_saved_playback_for_later_owner(self):
+        now = [200.0]
+        saved_config = {
+            **copy.deepcopy(DEFAULT_CONFIG),
+            "playlist": [{"module": "splash", "duration": 1, "enabled": True}],
+        }
+        matrix = CaptureMatrix()
+        setattr(matrix, "set_brightness", Mock())
+        controller = DisplayController(matrix, Mock(get=Mock(return_value=saved_config)))
+        controller.device_preview_manager._clock = lambda: now[0]
+        controller.start = Mock()
+        first_owner = DevicePreviewOwner("paired-device", "lost-browser")
+        first = controller.submit_device_draft(
+            DevicePreviewRequest(
+                owner=first_owner,
+                generation=1,
+                config={
+                    "module": "clock_lava",
+                    "candidate": copy.deepcopy(DEFAULT_CONFIG),
+                    "selected_lava_palette": None,
+                },
+                timeout_seconds=None,
+            ),
+            renderer=controller.render_device_draft,
+        )
+        self.assertIs(first.status, PreviewAdmissionStatus.ACCEPTED)
+
+        rendered = threading.Thread(target=controller._execute_pending_device_draft)
+        rendered.start()
+        deadline = time.monotonic() + 1
+        while controller.current_module != "device-draft:clock_lava" and time.monotonic() < deadline:
+            time.sleep(0.005)
+        self.assertEqual(controller.current_module, "device-draft:clock_lava")
+
+        now[0] = 215.0
+        rendered.join(1)
+        self.assertFalse(rendered.is_alive(), "connectivity expiry left the Lava renderer active")
+        deadline = time.monotonic() + 1
+        while controller.device_preview_manager._closing is not None and time.monotonic() < deadline:
+            time.sleep(0.005)
+        self.assertIsNone(controller.device_preview_manager._closing)
+        self.assertIsNone(controller.device_preview_manager.active_lease())
+        self.assertIsNone(controller.current_module)
+        self.assertTrue(controller._reload_requested.is_set())
+
+        saved = []
+
+        def execute_saved(name, config, duration):
+            del config
+            saved.append((name, duration))
+            controller._shutdown.set()
+            return True
+
+        controller._is_active = Mock(return_value=True)
+        controller._execute = execute_saved
+        controller._run_loop_unchecked()
+        self.assertEqual(saved, [("splash", 1)])
+
+        later = controller.submit_device_draft(
+            DevicePreviewRequest(
+                owner=DevicePreviewOwner("paired-device-2", "replacement-browser"),
+                generation=1,
+                config={"module": "weather", "candidate": copy.deepcopy(DEFAULT_CONFIG)},
+                timeout_seconds=None,
+            ),
+            renderer=Mock(),
+        )
+        self.assertIs(later.status, PreviewAdmissionStatus.ACCEPTED)
+        controller.shutdown_device_drafts()
 
 
 if __name__ == "__main__":
