@@ -1,6 +1,6 @@
 # Future development notes
 
-Last updated: 2026-08-28
+Last updated: 2026-08-29
 
 This file records requested Matrix features that are intentionally deferred. They are product requirements and design notes, not descriptions of current behavior. Do not treat an item as implemented until its code, tests, review, merge, deployment, and physical-device verification are complete.
 
@@ -76,46 +76,46 @@ Complete these before usability enhancements or new modules unless an explicit d
 
 **Completed 2026-08-10:** implemented, tested, independently reviewed, merged, deployed, and verified with paired clients and the physical Matrix.
 
-Treat the Matrix server's saved configuration as the single source of truth and synchronize each committed display change to every currently paired browser or device. This must prevent one paired client from showing an outdated playlist, missing a custom module referenced by the playlist, or exposing controls that no longer match the physical display.
+~~Treat the Matrix server's saved configuration as the single source of truth and synchronize each committed display change to every currently paired browser or device. This must prevent one paired client from showing an outdated playlist, missing a custom module referenced by the playlist, or exposing controls that no longer match the physical display.~~
 
-- Publish one revisioned, atomic configuration update after every successful save, covering the playlist, custom-module definitions, module settings, media references, and other dependent state together.
-- Ensure dependent records such as custom modules are available in the same synchronized revision as playlist entries that reference them; never expose a partially updated playlist.
-- Update open paired clients promptly without requiring a manual page refresh, including module pickers, playlist rows, editors, Live preview state, and any cached client-side catalogs derived from configuration.
-- On reconnect, page focus, or recovery from a missed update, compare revisions and fetch the latest complete saved state before permitting another save.
-- Do not silently overwrite an unsaved draft on another paired device. Clearly report that the saved display changed elsewhere and offer that user a safe choice to reload the latest saved state or remain with their unsaved draft for review.
-- Reject or reconcile stale saves using the revision they were based on so an older client cannot unknowingly replace newer changes.
-- Synchronize saved changes only; do not broadcast another user's temporary Edit Preview or opt-in on-device draft as if it were committed configuration.
-- Stop sending updates immediately when a device is unpaired or its session is no longer authorized.
-- Add multi-client tests using at least two independently paired sessions, including custom-module creation, playlist insertion, editing, deletion, stale drafts, reconnect recovery, and update-order interruption.
+- ~~Publish one revisioned, atomic configuration update after every successful save, covering the playlist, custom-module definitions, module settings, media references, and other dependent state together.~~
+- ~~Ensure dependent records such as custom modules are available in the same synchronized revision as playlist entries that reference them; never expose a partially updated playlist.~~
+- ~~Update open paired clients promptly without requiring a manual page refresh, including module pickers, playlist rows, editors, Live preview state, and any cached client-side catalogs derived from configuration.~~
+- ~~On reconnect, page focus, or recovery from a missed update, compare revisions and fetch the latest complete saved state before permitting another save.~~
+- ~~Do not silently overwrite an unsaved draft on another paired device. Clearly report that the saved display changed elsewhere and offer that user a safe choice to reload the latest saved state or remain with their unsaved draft for review.~~
+- ~~Reject or reconcile stale saves using the revision they were based on so an older client cannot unknowingly replace newer changes.~~
+- ~~Synchronize saved changes only; do not broadcast another user's temporary Edit Preview or opt-in on-device draft as if it were committed configuration.~~
+- ~~Stop sending updates immediately when a device is unpaired or its session is no longer authorized.~~
+- ~~Add multi-client tests using at least two independently paired sessions, including custom-module creation, playlist insertion, editing, deletion, stale drafts, reconnect recovery, and update-order interruption.~~
 
 ### ~~0.2 Fix the mobile Advanced Canvas layer timeline~~ — Completed
 
 **Completed 2026-08-11:** implemented, tested in real Chromium, independently reviewed, merged, deployed, and accepted after visual inspection on Billy PC.
 
-Revise the Advanced Canvas layer timeline for mobile and narrow-screen users. The current responsive layout can compress the layer timeline until tracks, controls, and timing positions appear squashed and are difficult to understand or operate.
+~~Revise the Advanced Canvas layer timeline for mobile and narrow-screen users. The current responsive layout can compress the layer timeline until tracks, controls, and timing positions appear squashed and are difficult to understand or operate.~~
 
-- Preserve readable layer rows and sufficiently large touch targets instead of shrinking the complete timeline to fit the viewport.
-- Prefer a deliberate mobile layout and bounded horizontal timeline scrolling over compressing timing tracks and handles into unusable widths.
-- Keep the active layer identity and essential timeline controls visible while the timing area scrolls.
-- Ensure selecting layers, seeking, dragging timeline items, and editing keyframes remain practical with touch input.
-- Preserve the existing desktop experience and verify the revised timeline in real browsers at representative narrow mobile widths.
+- ~~Preserve readable layer rows and sufficiently large touch targets instead of shrinking the complete timeline to fit the viewport.~~
+- ~~Prefer a deliberate mobile layout and bounded horizontal timeline scrolling over compressing timing tracks and handles into unusable widths.~~
+- ~~Keep the active layer identity and essential timeline controls visible while the timing area scrolls.~~
+- ~~Ensure selecting layers, seeking, dragging timeline items, and editing keyframes remain practical with touch input.~~
+- ~~Preserve the existing desktop experience and verify the revised timeline in real browsers at representative narrow mobile widths.~~
 
 ### ~~0.3 Standardize scrolling-text timing in seconds~~ — Completed
 
 **Completed 2026-08-12:** implemented, tested in real Chromium and on the production Pi, independently reviewed, merged, deployed, and verified against the live physical framebuffer.
 
-Every scrolling-text module should display its calculated runtime in seconds, consistent with the duration shown for Lava Clock and Splash.
+~~Every scrolling-text module should display its calculated runtime in seconds, consistent with the duration shown for Lava Clock and Splash.~~
 
-- Calculate runtime from the configured tick/frame speed and number of scrolls.
-- Keep scroll count as an independent user choice.
-- If the user edits the displayed seconds, change tick speed to achieve that runtime.
-- Editing seconds must never change the number of scrolls.
-- Do not add another manual duration source that can disagree with physical playback.
-- Browser values and physical runtime must use the same calculation and rounding rules.
-- Display every calculated duration with one decimal place in both module editors and playlist rows.
-- If an edited duration requires an unsupported tick speed, clamp to the nearest achievable duration and explain the adjustment beside the control.
-- Provider-backed scrolling modules must fetch content before opening the editor so their duration is calculated and displayed like any other module.
-- Bound the pre-editor fetch. If it fails, use the last valid cached content and mark it stale; when neither fresh nor cached content exists, open the editor with timing explicitly unavailable rather than displaying zero or a fabricated estimate.
+- ~~Calculate runtime from the configured tick/frame speed and number of scrolls.~~
+- ~~Keep scroll count as an independent user choice.~~
+- ~~If the user edits the displayed seconds, change tick speed to achieve that runtime.~~
+- ~~Editing seconds must never change the number of scrolls.~~
+- ~~Do not add another manual duration source that can disagree with physical playback.~~
+- ~~Browser values and physical runtime must use the same calculation and rounding rules.~~
+- ~~Display every calculated duration with one decimal place in both module editors and playlist rows.~~
+- ~~If an edited duration requires an unsupported tick speed, clamp to the nearest achievable duration and explain the adjustment beside the control.~~
+- ~~Provider-backed scrolling modules must fetch content before opening the editor so their duration is calculated and displayed like any other module.~~
+- ~~Bound the pre-editor fetch. If it fails, use the last valid cached content and mark it stale; when neither fresh nor cached content exists, open the editor with timing explicitly unavailable rather than displaying zero or a fabricated estimate.~~
 
 ## Priority 1 — Improvements to existing workflows
 
@@ -125,13 +125,13 @@ Begin these after Priority 0 is clear. They improve existing editing, preview, m
 
 **Completed 2026-08-21:** added grouped Select all and Deselect all actions that update only the unsaved draft, preserve unrelated edits, remain individually adjustable, and persist through normal Save. A saved zero-palette selection is explicit: physical playback and Edit Preview render a neutral Lava background without silently enabling a palette, while configured time and date remain visible. Mobile, keyboard, save/reload, validator, runtime, and preview behavior are covered by automated tests.
 
-- **Select all** selects every available Lava Clock pattern.
-- **Deselect all** clears every selected Lava Clock pattern.
-- Apply either action immediately to the current unsaved editor state without changing other Lava Clock settings.
-- Keep the individual pattern controls synchronized so the result is visible and can still be adjusted one pattern at a time.
-- Persist the resulting pattern selection only through the normal Save action; the bulk controls must not save automatically.
-- Keep the separate Edit Preview inspection radio buttons unselected until the user deliberately chooses one; bulk selection must never choose an inspection palette.
-- Keep both actions usable and clearly labelled on mobile, tablet, and desktop, including keyboard and assistive-technology access.
+- ~~**Select all** selects every available Lava Clock pattern.~~
+- ~~**Deselect all** clears every selected Lava Clock pattern.~~
+- ~~Apply either action immediately to the current unsaved editor state without changing other Lava Clock settings.~~
+- ~~Keep the individual pattern controls synchronized so the result is visible and can still be adjusted one pattern at a time.~~
+- ~~Persist the resulting pattern selection only through the normal Save action; the bulk controls must not save automatically.~~
+- ~~Keep the separate Edit Preview inspection radio buttons unselected until the user deliberately chooses one; bulk selection must never choose an inspection palette.~~
+- ~~Keep both actions usable and clearly labelled on mobile, tablet, and desktop, including keyboard and assistive-technology access.~~
 
 ### ~~1.1 Keep the Matrix preview sticky~~ — Completed
 
@@ -141,28 +141,28 @@ Begin these after Priority 0 is clear. They improve existing editing, preview, m
 
 **Completed 2026-08-22:** added mutually exclusive Live and Edit Preview modes. Live continues to show the physical framebuffer, while Edit Preview renders the selected module from current unsaved controls with bounded debouncing, explicit draft status, no automatic save, deterministic custom-module source selection, deliberate single-palette Lava inspection, browser/physical parity coverage, and a two-choice warning before discarding a draft. The exact reviewed artifact passed protected CI and physical acceptance, merged through MR !69, and was deployed with preservation and rollback evidence.
 
-Add a mode control below the preview with two mutually exclusive states:
+~~Add a mode control below the preview with two mutually exclusive states:~~
 
-- **Live** shows the current physical Matrix framebuffer.
-- **Edit Preview** renders the selected module from its current unsaved editor values.
+- ~~**Live** shows the current physical Matrix framebuffer.~~
+- ~~**Edit Preview** renders the selected module from its current unsaved editor values.~~
 
-A two-option segmented control is preferred over a checkbox because the modes are mutually exclusive.
+~~A two-option segmented control is preferred over a checkbox because the modes are mutually exclusive.~~
 
-Edit Preview should:
+~~Edit Preview should:~~
 
-- be available for every module, with opening a module editor making that module the active Edit Preview target without switching preview mode automatically;
-- update as module controls change;
-- use a short debounce for sliders, position controls, and rapid input;
-- accurately render position, colour, ticker, icon, timing, and other supported changes;
-- in the Lava Clock palette editor, render the currently selected built-in or custom palette immediately as a complete animated 64×32 Lava Clock preview, updating as each colour control changes without requiring Save;
-- leave every Lava palette inspection radio unselected initially and use normal configured Lava rendering until the user deliberately selects a palette;
-- after a palette is selected, preview only that palette rather than rotating through every enabled palette, so the user can inspect that exact colour combination deliberately;
-- use the same palette order, interpolation, animation frame generation, clipping, and colour conversion as physical Lava Clock rendering, with browser/physical parity fixtures;
-- keep the Lava Clock colour preview in the browser unless the user separately enables the opt-in physical-device draft preview;
-- avoid saving configuration automatically; and
-- clearly distinguish draft output from saved live output.
+- ~~be available for every module, with opening a module editor making that module the active Edit Preview target without switching preview mode automatically;~~
+- ~~update as module controls change;~~
+- ~~use a short debounce for sliders, position controls, and rapid input;~~
+- ~~accurately render position, colour, ticker, icon, timing, and other supported changes;~~
+- ~~in the Lava Clock palette editor, render the currently selected built-in or custom palette immediately as a complete animated 64×32 Lava Clock preview, updating as each colour control changes without requiring Save;~~
+- ~~leave every Lava palette inspection radio unselected initially and use normal configured Lava rendering until the user deliberately selects a palette;~~
+- ~~after a palette is selected, preview only that palette rather than rotating through every enabled palette, so the user can inspect that exact colour combination deliberately;~~
+- ~~use the same palette order, interpolation, animation frame generation, clipping, and colour conversion as physical Lava Clock rendering, with browser/physical parity fixtures;~~
+- ~~keep the Lava Clock colour preview in the browser unless the user separately enables the opt-in physical-device draft preview;~~
+- ~~avoid saving configuration automatically; and~~
+- ~~clearly distinguish draft output from saved live output.~~
 
-When the user tries to switch from Edit Preview to Live with unsaved changes, warn them and offer exactly **Stay Editing** or **Discard Draft and switch to Live**. Do not silently preserve, save, or discard the draft.
+~~When the user tries to switch from Edit Preview to Live with unsaved changes, warn them and offer exactly **Stay Editing** or **Discard Draft and switch to Live**. Do not silently preserve, save, or discard the draft.~~
 
 ### ~~1.3 Add optional preview on the physical device~~ — Completed
 
@@ -218,18 +218,18 @@ Verified remediation approvals:
 
 **v1.0 deferred findings register:** GitLab issue 2 note 496 consolidates the remaining restricted release-preparation and release-reliability findings, including their accepted, rejected, and open states. Owner decision note 497 defers the open findings to v1.0 without closing or waiving them. Issue 2 remains open as their durable register. Priority 1.4 is released to proceed; any newly demonstrated current functional bug, data-loss risk, unsafe production mutation, or broken rollback/state-preservation path still takes precedence over feature work.
 
-### ~~1.4 Add borders and backgrounds to basic custom modules~~
+### ~~1.4 Add borders and backgrounds to basic custom modules~~ — Completed
 
-Add an **Appearance** control group to the basic **Add custom module** editor for backgrounds and borders, matching the controls and executed rendering behavior already used by Announcement Board rather than creating a second styling model.
+~~Add an **Appearance** control group to the basic **Add custom module** editor for backgrounds and borders, matching the controls and executed rendering behavior already used by Announcement Board rather than creating a second styling model.~~
 
-- Provide **Background colour**, **Border style**, and **Border colour** controls.
-- Use the same Announcement Board border choices and labels: **None**, **Solid**, and **Inset**.
-- Keep **None** as the default border style and preserve the existing default background for newly created modules.
-- Apply these controls to both static-text and scrolling-text basic custom modules, including the complete physical rendering path rather than preview-only decoration.
-- Reuse the Announcement Board border geometry, clipping, colour validation, and reset behavior so equivalent settings render identically.
-- Fill the complete 64×32 module background before drawing its text and border.
-- Hide or disable the border-colour control when **None** is selected without discarding the user's previously chosen colour.
-- Include background and border changes in Live/Draft preview, reset defaults, persistence, playlist playback, and browser-versus-physical parity tests.
+- ~~Provide **Background colour**, **Border style**, and **Border colour** controls.~~
+- ~~Use the same Announcement Board border choices and labels: **None**, **Solid**, and **Inset**.~~
+- ~~Keep **None** as the default border style and preserve the existing default background for newly created modules.~~
+- ~~Apply these controls to both static-text and scrolling-text basic custom modules, including the complete physical rendering path rather than preview-only decoration.~~
+- ~~Reuse the Announcement Board border geometry, clipping, colour validation, and reset behavior so equivalent settings render identically.~~
+- ~~Fill the complete 64×32 module background before drawing its text and border.~~
+- ~~Hide or disable the border-colour control when **None** is selected without discarding the user's previously chosen colour.~~
+- ~~Include background and border changes in Live/Draft preview, reset defaults, persistence, playlist playback, and browser-versus-physical parity tests.~~
 
 **Completed 2026-08-29:** protected merge `c4f40d5e3ec1ccb02be3940a8684a3acf4c460f4` passed protected-main pipeline 281, including source-bound physical-device acceptance and recovery. Production then passed a preservation-safe deploy/candidate/physical/rollback/rollback-verification/redeploy transaction: exact schema-v0 revision-53 bytes and metadata were restored during rollback, the accepted release migrated deterministically to schema v2 revision 54, and the final real 64×32 acceptance produced one static frame plus 85 frames for each left- and right-scrolling fixture. A live Chrome 151 journey at 390×844 and 1440×900 verified the pair-page version, Basic text/static-and-scroll controls, left/right direction, background and None/Solid/Inset border behavior, 64×32 preview, touch target, responsive layout, and zero save/preview mutations; temporary pairing and test residue were removed with the paired-device registry and final configuration independently re-attested.
 
