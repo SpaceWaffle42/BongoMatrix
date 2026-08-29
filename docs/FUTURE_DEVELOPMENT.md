@@ -218,7 +218,7 @@ Verified remediation approvals:
 
 **v1.0 deferred findings register:** GitLab issue 2 note 496 consolidates the remaining restricted release-preparation and release-reliability findings, including their accepted, rejected, and open states. Owner decision note 497 defers the open findings to v1.0 without closing or waiving them. Issue 2 remains open as their durable register. Priority 1.4 is released to proceed; any newly demonstrated current functional bug, data-loss risk, unsafe production mutation, or broken rollback/state-preservation path still takes precedence over feature work.
 
-### 1.4 Add borders and backgrounds to basic custom modules
+### ~~1.4 Add borders and backgrounds to basic custom modules~~
 
 Add an **Appearance** control group to the basic **Add custom module** editor for backgrounds and borders, matching the controls and executed rendering behavior already used by Announcement Board rather than creating a second styling model.
 
@@ -230,6 +230,8 @@ Add an **Appearance** control group to the basic **Add custom module** editor fo
 - Fill the complete 64×32 module background before drawing its text and border.
 - Hide or disable the border-colour control when **None** is selected without discarding the user's previously chosen colour.
 - Include background and border changes in Live/Draft preview, reset defaults, persistence, playlist playback, and browser-versus-physical parity tests.
+
+**Completed 2026-08-29:** protected merge `c4f40d5e3ec1ccb02be3940a8684a3acf4c460f4` passed protected-main pipeline 281, including source-bound physical-device acceptance and recovery. Production then passed a preservation-safe deploy/candidate/physical/rollback/rollback-verification/redeploy transaction: exact schema-v0 revision-53 bytes and metadata were restored during rollback, the accepted release migrated deterministically to schema v2 revision 54, and the final real 64×32 acceptance produced one static frame plus 85 frames for each left- and right-scrolling fixture. A live Chrome 151 journey at 390×844 and 1440×900 verified the pair-page version, Basic text/static-and-scroll controls, left/right direction, background and None/Solid/Inset border behavior, 64×32 preview, touch target, responsive layout, and zero save/preview mutations; temporary pairing and test residue were removed with the paired-device registry and final configuration independently re-attested.
 
 ### 1.5 Add GIF and video support to basic custom modules
 
