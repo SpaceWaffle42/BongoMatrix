@@ -9310,6 +9310,44 @@ console.log(JSON.stringify({report,exceptions}));}finally{socket.close()}
         self.assertTrue(all(item["drag_resize"] == interaction["drag_resize"] for item in report["viewports"]))
         self.assertTrue(all(item["pointercancel"] == interaction["pointercancel"] for item in report["viewports"]))
 
+    def test_foundation_browser_verifier_pins_node_and_contains_cookie(self):
+        script = Path(__file__).parents[1] / "scripts/verify_priority_1_5_foundation_browser.py"
+        spec = importlib.util.spec_from_file_location("priority15_browser_node_test", script)
+        if spec is None or spec.loader is None:
+            self.fail("browser verifier module is not importable")
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        secret = b"session=private-sentinel"
+        completed = subprocess.CompletedProcess([], 0, stdout=b'{"reports":[],"errors":[]}\n', stderr=b"")
+        with patch.object(module.subprocess, "run", return_value=completed) as run, patch.dict(
+            os.environ, {"PATH": "/tmp/attacker-path"}, clear=False,
+        ):
+            actual = module._run_node_probe(secret, "12345", "http://127.0.0.1/")
+        self.assertIs(actual, completed)
+        invocation = run.call_args
+        self.assertTrue(invocation.args[0][0].startswith("/proc/self/fd/"))
+        self.assertNotIn(secret.decode(), " ".join(invocation.args[0]))
+        self.assertNotIn(secret.decode(), " ".join(invocation.kwargs["env"].values()))
+        self.assertEqual(invocation.kwargs["input"], secret)
+        self.assertEqual(invocation.kwargs["env"], {
+            "PATH": "/usr/bin:/bin", "LANG": "C", "LC_ALL": "C",
+        })
+        self.assertFalse(invocation.kwargs["shell"])
+        self.assertTrue(invocation.kwargs["pass_fds"])
+
+        with tempfile.TemporaryDirectory() as directory:
+            unsafe = Path(directory) / "node"
+            unsafe.write_bytes(b"unsafe")
+            unsafe.chmod(0o777)
+            with patch.object(module, "_NODE", unsafe), self.assertRaisesRegex(
+                ValueError, "identity is unsafe",
+            ):
+                module._run_node_probe(secret, "1", "http://127.0.0.1/")
+            unsafe.unlink()
+            unsafe.symlink_to("/usr/bin/node")
+            with patch.object(module, "_NODE", unsafe), self.assertRaisesRegex(ValueError, "unsafe"):
+                module._run_node_probe(secret, "1", "http://127.0.0.1/")
+
     @unittest.skipUnless(shutil.which("node"), "Node.js is required")
     def test_browser_rotated_aspect_media_uses_fitted_origin_centre_and_clip(self):
         asset = (Path(__file__).parents[1] / "app/static/custom_canvas.js").read_text()

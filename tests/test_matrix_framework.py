@@ -2576,7 +2576,13 @@ else:
             "text": True, "capture_output": True, "check": False,
             "shell": False,
             "env": {"PATH": "/usr/bin:/bin", "LANG": "C", "LC_ALL": "C"},
+            "timeout": 10,
         })
+        with patch.object(
+            verifier.subprocess, "run",
+            side_effect=subprocess.TimeoutExpired(["/usr/bin/systemctl"], 10),
+        ), self.assertRaisesRegex(RuntimeError, "timed out"):
+            verifier._run_command(["/usr/bin/systemctl", "is-active", "matrix-web.service"])
 
     def test_foundation_physical_verifier_binds_identity_and_restores_service(self):
         from deploy import priority_1_5_transaction as transaction
@@ -2718,9 +2724,12 @@ else:
                 "--report", str(report_path),
             ])
             commands = []
+            require_report_absent = [True]
 
             def command_runner(command):
                 commands.append(tuple(command))
+                if require_report_absent[0]:
+                    self.assertFalse(report_path.exists(), "report published before service restoration")
                 return types.SimpleNamespace(returncode=0, stdout="active\n", stderr="")
 
             class TestLock:
@@ -2737,6 +2746,7 @@ else:
                 version_reader=lambda: "0.3.58-preview",
                 lock_factory=lambda _path: TestLock(),
             )
+            require_report_absent[0] = False
 
             self.assertTrue(all(item[0] == "/usr/bin/systemctl" for item in commands))
             self.assertEqual([item[1] for item in commands], [
@@ -2780,6 +2790,22 @@ else:
                     lock_factory=lambda _path: TestLock(),
                 )
             self.assertIn(("/usr/bin/systemctl", "start", "matrix-web.service"), commands)
+
+            prior_report = b"preexisting report must survive\n"
+            report_path.write_bytes(prior_report)
+            def restore_failure(command):
+                if command[1] == "start":
+                    return types.SimpleNamespace(returncode=1, stdout="", stderr="failed")
+                return types.SimpleNamespace(returncode=0, stdout="active\n", stderr="")
+            with self.assertRaisesRegex(RuntimeError, "restore"):
+                verifier.execute(
+                    arguments, matrix_factory=lambda: object(),
+                    exercise=lambda *_args: evidence,
+                    command_runner=restore_failure,
+                    version_reader=lambda: "0.3.58-preview",
+                    lock_factory=lambda _path: TestLock(),
+                )
+            self.assertEqual(report_path.read_bytes(), prior_report)
 
             unsafe_lock = root / "unsafe-lock"
             unsafe_lock.symlink_to(lock_path)

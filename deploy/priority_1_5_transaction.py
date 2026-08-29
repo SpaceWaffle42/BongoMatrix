@@ -397,6 +397,59 @@ def _read_at(parent_fd: int, name: str, *, allow_absent: bool = False):
         os.close(fd)
 
 
+def _unlink_exact_candidate_at(parent_fd: int, name: str, release_entry: dict,
+                               owner: dict):
+    """Unlink an absent-baseline path only while it is the approved candidate."""
+    try:
+        before = os.stat(name, dir_fd=parent_fd, follow_symlinks=False)
+    except FileNotFoundError:
+        return
+    if not stat.S_ISREG(before.st_mode) or stat.S_ISLNK(before.st_mode):
+        raise ValueError("rollback unlink target is unsafe")
+    try:
+        descriptor = os.open(
+            name, os.O_RDONLY | os.O_CLOEXEC | os.O_NOFOLLOW | os.O_NONBLOCK,
+            dir_fd=parent_fd,
+        )
+    except OSError as error:
+        raise ValueError("rollback unlink target is unsafe") from error
+    try:
+        opened = os.fstat(descriptor)
+        if (opened.st_dev, opened.st_ino) != (before.st_dev, before.st_ino):
+            raise ValueError("rollback unlink target is unsafe")
+        try:
+            data, verified = _read_descriptor(descriptor)
+        except ValueError as error:
+            raise ValueError("rollback unlink target is unsafe") from error
+        expected = (
+            release_entry["sha256"], release_entry["size"], release_entry["mode"],
+            owner["uid"], owner["gid"],
+        )
+        observed = (
+            _sha(data), len(data), f"{stat.S_IMODE(verified.st_mode):04o}",
+            verified.st_uid, verified.st_gid,
+        )
+        if observed != expected:
+            raise ValueError("rollback unlink target is unsafe")
+        current = os.stat(name, dir_fd=parent_fd, follow_symlinks=False)
+        pinned_metadata = (
+            verified.st_dev, verified.st_ino, verified.st_uid, verified.st_gid,
+            verified.st_mode, verified.st_nlink, verified.st_size,
+            verified.st_mtime_ns, verified.st_ctime_ns,
+        )
+        current_metadata = (
+            current.st_dev, current.st_ino, current.st_uid, current.st_gid,
+            current.st_mode, current.st_nlink, current.st_size,
+            current.st_mtime_ns, current.st_ctime_ns,
+        )
+        if current_metadata != pinned_metadata:
+            raise ValueError("rollback unlink target is unsafe")
+        os.unlink(name, dir_fd=parent_fd)
+        os.fsync(parent_fd)
+    finally:
+        os.close(descriptor)
+
+
 def _atomic_write_at(parent_fd: int, name: str, data: bytes, mode: int, *, uid: int, gid: int):
     temporary = f".{name}.{os.getpid()}.{secrets.token_hex(8)}"
     fd = os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_CLOEXEC | os.O_NOFOLLOW,
@@ -1289,16 +1342,9 @@ class Priority15Transaction:
                                      int(baseline_entry["mode"], 8),
                                      uid=owner["uid"], gid=owner["gid"])
                 else:
-                    try:
-                        info = os.stat(destination_name, dir_fd=destination_parent,
-                                       follow_symlinks=False)
-                    except FileNotFoundError:
-                        pass
-                    else:
-                        if not stat.S_ISREG(info.st_mode) or stat.S_ISLNK(info.st_mode):
-                            raise ValueError("rollback unlink target is unsafe")
-                        os.unlink(destination_name, dir_fd=destination_parent)
-                        os.fsync(destination_parent)
+                    _unlink_exact_candidate_at(
+                        destination_parent, destination_name, release_entry, owner,
+                    )
                 if after_boundary is not None:
                     after_boundary(f"{relative}:published")
             for relative, _release, _baseline, destination_parent, _name, source_parent, _source_name in pinned:

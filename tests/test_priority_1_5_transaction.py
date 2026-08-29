@@ -69,6 +69,10 @@ class Priority15TransactionTests(unittest.TestCase):
         baseline_tree = self._git(repository, "rev-parse", "HEAD^{tree}")
         (repository / "app.py").write_bytes(b"candidate\n")
         (repository / "pkg/module.py").write_bytes(b"candidate module\n")
+        (repository / "candidate-only.py").write_bytes(b"candidate only\n")
+        subprocess.run([
+            "/usr/bin/git", "-C", str(repository), "add", "candidate-only.py",
+        ], check=True)
         candidate_dates = {**dates, "GIT_AUTHOR_DATE": "2000-01-01T00:00:01+0000",
                            "GIT_COMMITTER_DATE": "2000-01-01T00:00:01+0000"}
         subprocess.run(["/usr/bin/git", "-C", str(repository), "commit", "-qam", "candidate"],
@@ -146,6 +150,187 @@ class Priority15TransactionTests(unittest.TestCase):
             os._exit(0)
         return pid
 
+    def test_candidate_only_rollback_and_recovery_preserve_unknown_regular_files(self):
+        from deploy import priority_1_5_transaction as transaction
+
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            fixture = self._build_prepare_fixture(transaction, root)
+
+            for operation in ("rollback", "recover"):
+                for mutation in ("replacement", "content", "mode"):
+                    with self.subTest(operation=operation, mutation=mutation):
+                        name = f"unknown-{operation}-{mutation}"
+                        arguments, destination, _backup, state, _private = self._prepare_arguments(
+                            root, *fixture, name,
+                        )
+                        service = _Service()
+                        with patch.object(transaction, "SystemdService", return_value=service):
+                            transaction.prepare_b1(arguments)
+                        tx = transaction.Priority15Transaction.load(state, service=service)
+                        candidate_only = destination / "candidate-only.py"
+                        try:
+                            tx.transition("candidate", operation="deploy")
+                            installed = candidate_only.stat()
+                            installed_inode = (installed.st_dev, installed.st_ino)
+                            if mutation == "replacement":
+                                substitute = destination / "unknown.tmp"
+                                substitute.write_bytes(b"unknown replacement bytes\n")
+                                substitute.chmod(stat.S_IMODE(installed.st_mode))
+                                os.replace(substitute, candidate_only)
+                                self.assertNotEqual(
+                                    (candidate_only.stat().st_dev, candidate_only.stat().st_ino),
+                                    installed_inode,
+                                )
+                            elif mutation == "content":
+                                candidate_only.write_bytes(b"unknown in-place bytes\n")
+                                self.assertEqual(
+                                    (candidate_only.stat().st_dev, candidate_only.stat().st_ino),
+                                    installed_inode,
+                                )
+                            else:
+                                candidate_only.chmod(0o600)
+                                self.assertEqual(
+                                    (candidate_only.stat().st_dev, candidate_only.stat().st_ino),
+                                    installed_inode,
+                                )
+
+                            unknown = (
+                                candidate_only.stat().st_dev,
+                                candidate_only.stat().st_ino,
+                                candidate_only.read_bytes(),
+                                stat.S_IMODE(candidate_only.stat().st_mode),
+                            )
+                            def action():
+                                if operation == "rollback":
+                                    tx.transition("baseline", operation="rollback")
+                                else:
+                                    tx.recover("baseline")
+                            with self.assertRaisesRegex(ValueError, "rollback unlink target"):
+                                action()
+                            self.assertFalse(service.active)
+                            self.assertEqual(
+                                (
+                                    candidate_only.stat().st_dev,
+                                    candidate_only.stat().st_ino,
+                                    candidate_only.read_bytes(),
+                                    stat.S_IMODE(candidate_only.stat().st_mode),
+                                ),
+                                unknown,
+                            )
+                        finally:
+                            tx.close()
+
+    def test_candidate_only_exact_candidate_rollback_and_crash_recovery_converge(self):
+        from deploy import priority_1_5_transaction as transaction
+
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            fixture = self._build_prepare_fixture(transaction, root)
+            for operation in ("rollback", "recover-after-crash"):
+                with self.subTest(operation=operation):
+                    arguments, destination, _backup, state, private = self._prepare_arguments(
+                        root, *fixture, operation,
+                    )
+                    service = _Service()
+                    with patch.object(transaction, "SystemdService", return_value=service):
+                        transaction.prepare_b1(arguments)
+                    tx = transaction.Priority15Transaction.load(state, service=service)
+                    candidate_only = destination / "candidate-only.py"
+                    real_open = transaction.os.open
+                    private_names = {"config.json", "paired-devices.json", "private.bin"}
+                    def reject_private_open(path, *args, **kwargs):
+                        if Path(os.fsdecode(path)).name in private_names:
+                            raise AssertionError("transaction opened a private runtime path")
+                        return real_open(path, *args, **kwargs)
+                    try:
+                        with patch.object(transaction.os, "open", side_effect=reject_private_open):
+                            tx.transition("candidate", operation="deploy")
+                        if operation == "rollback":
+                            original_inode = candidate_only.stat().st_ino
+                            approved_replacement = destination / "approved.tmp"
+                            approved_replacement.write_bytes(b"candidate only\n")
+                            approved_replacement.chmod(0o644)
+                            os.replace(approved_replacement, candidate_only)
+                            self.assertNotEqual(candidate_only.stat().st_ino, original_inode)
+                            with patch.object(transaction.os, "open", side_effect=reject_private_open):
+                                tx.transition("baseline", operation="rollback")
+                        else:
+                            crashed = False
+                            def interrupt(point):
+                                nonlocal crashed
+                                if point.endswith(":published") and not crashed:
+                                    crashed = True
+                                    raise transaction.InjectedCrash(point)
+                            with (
+                                patch.object(transaction.os, "open", side_effect=reject_private_open),
+                                self.assertRaises(transaction.InjectedCrash),
+                            ):
+                                tx.transition(
+                                    "baseline", operation="rollback", after_boundary=interrupt,
+                                )
+                            self.assertFalse(service.active)
+                            tx.close()
+                            tx = transaction.Priority15Transaction.load(state, service=service)
+                            with patch.object(transaction.os, "open", side_effect=reject_private_open):
+                                tx.recover("baseline")
+                        self.assertFalse(candidate_only.exists())
+                        self.assertEqual((destination / "app.py").read_bytes(), b"baseline\n")
+                        self.assertEqual(
+                            (destination / "pkg/module.py").read_bytes(), b"baseline module\n",
+                        )
+                        self.assertTrue(service.active)
+                        for relative, expected in private.items():
+                            self.assertEqual((destination / relative).read_bytes(), expected)
+                    finally:
+                        tx.close()
+
+    def test_candidate_only_rollback_preserves_unsupported_objects(self):
+        from deploy import priority_1_5_transaction as transaction
+
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            fixture = self._build_prepare_fixture(transaction, root)
+            for object_type in ("symlink", "fifo", "device"):
+                with self.subTest(object_type=object_type):
+                    arguments, destination, _backup, state, _private = self._prepare_arguments(
+                        root, *fixture, f"unsafe-{object_type}",
+                    )
+                    service = _Service()
+                    with patch.object(transaction, "SystemdService", return_value=service):
+                        transaction.prepare_b1(arguments)
+                    tx = transaction.Priority15Transaction.load(state, service=service)
+                    candidate_only = destination / "candidate-only.py"
+                    try:
+                        tx.transition("candidate", operation="deploy")
+                        candidate_only.unlink()
+                        sentinel = None
+                        if object_type == "symlink":
+                            sentinel = destination / "symlink-sentinel"
+                            sentinel.write_bytes(b"unknown symlink target\n")
+                            candidate_only.symlink_to(sentinel)
+                        elif object_type == "fifo":
+                            os.mkfifo(candidate_only, 0o600)
+                        else:
+                            os.mknod(candidate_only, stat.S_IFCHR | 0o600, os.makedev(1, 3))
+                        before = candidate_only.lstat()
+                        identity = (
+                            before.st_dev, before.st_ino, before.st_mode, before.st_rdev,
+                        )
+                        with self.assertRaisesRegex(ValueError, "rollback unlink target"):
+                            tx.transition("baseline", operation="rollback")
+                        self.assertFalse(service.active)
+                        after = candidate_only.lstat()
+                        self.assertEqual(
+                            (after.st_dev, after.st_ino, after.st_mode, after.st_rdev), identity,
+                        )
+                        if object_type == "symlink":
+                            if sentinel is None:
+                                raise AssertionError("symlink sentinel was not created")
+                            self.assertEqual(sentinel.read_bytes(), b"unknown symlink target\n")
+                    finally:
+                        tx.close()
+
     def test_prepare_publication_converges_after_real_process_crashes(self):
         from deploy import priority_1_5_transaction as transaction
 
@@ -195,7 +380,7 @@ class Priority15TransactionTests(unittest.TestCase):
                     )
                     self.assertEqual(
                         [item["sha256"] for item in baseline_manifest["files"]],
-                        [hashlib.sha256(b"baseline\n").hexdigest(),
+                        [hashlib.sha256(b"baseline\n").hexdigest(), None,
                          hashlib.sha256(b"baseline module\n").hexdigest()],
                     )
                     for relative, expected in private.items():

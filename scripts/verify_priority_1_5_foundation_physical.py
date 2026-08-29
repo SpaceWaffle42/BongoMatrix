@@ -32,6 +32,7 @@ _VERSION_RE = re.compile(r"[0-9]+\.[0-9]+\.[0-9]+-preview")
 _FFPROBE = "/usr/bin/ffprobe"
 _SYSTEMCTL = "/usr/bin/systemctl"
 _COMMAND_ENV = {"PATH": "/usr/bin:/bin", "LANG": "C", "LC_ALL": "C"}
+_SERVICE_TIMEOUT_SECONDS = 10
 _MANIFEST_KEYS = {"version", "boundary", "source_sha", "tree_sha", "fixtures"}
 _FIXTURE_KEYS = {
     "path", "sha256", "size", "kind", "width", "height", "frames",
@@ -245,10 +246,13 @@ def _default_version_reader() -> str:
 
 
 def _run_command(command: list[str]) -> object:
-    return subprocess.run(
-        command, text=True, capture_output=True, check=False, shell=False,
-        env=_COMMAND_ENV,
-    )
+    try:
+        return subprocess.run(
+            command, text=True, capture_output=True, check=False, shell=False,
+            env=_COMMAND_ENV, timeout=_SERVICE_TIMEOUT_SECONDS,
+        )
+    except subprocess.TimeoutExpired as error:
+        raise RuntimeError("service command timed out") from error
 
 
 def _require_command(result: object, operation: str, expected_stdout: str | None = None) -> None:
@@ -612,14 +616,20 @@ def execute(
     if version_reader() != arguments.expected_version:
         raise ValueError("deployed application version mismatch")
 
-    active = command_runner([_SYSTEMCTL, "is-active", arguments.service])
-    _require_command(active, "precheck", "active\n")
-    stopped = False
+    initial = command_runner([_SYSTEMCTL, "is-active", arguments.service])
+    initial_stdout = getattr(initial, "stdout", "")
+    initial_returncode = getattr(initial, "returncode", 1)
+    if (initial_returncode, initial_stdout) == (0, "active\n"):
+        initially_active = True
+    elif initial_returncode != 0 and initial_stdout == "inactive\n":
+        initially_active = False
+    else:
+        raise RuntimeError("service precheck returned unexpected state")
     primary: BaseException | None = None
     report: dict[str, object] | None = None
     try:
-        _require_command(command_runner([_SYSTEMCTL, "stop", arguments.service]), "stop")
-        stopped = True
+        if initially_active:
+            _require_command(command_runner([_SYSTEMCTL, "stop", arguments.service]), "stop")
         if lock_factory is None:
             from hardware_lock import DisplayOwnershipLock
             lock_factory = DisplayOwnershipLock
@@ -638,25 +648,29 @@ def execute(
         }
         report["evidence_sha256"] = hashlib.sha256(canonical_json(report)).hexdigest()
         verify_report(report, arguments.source_sha, arguments.tree_sha, manifest)
-        _atomic_report(report_path, canonical_json(report))
     except BaseException as error:
         primary = error
     finally:
-        if stopped:
-            try:
+        try:
+            if initially_active:
                 _require_command(command_runner([_SYSTEMCTL, "start", arguments.service]), "restore")
                 _require_command(
                     command_runner([_SYSTEMCTL, "is-active", arguments.service]),
                     "postcheck", "active\n",
                 )
-            except BaseException as restore_error:
-                if primary is None:
-                    primary = restore_error
-                else:
-                    primary.add_note(f"service restoration also failed: {restore_error}")
+            else:
+                postcheck = command_runner([_SYSTEMCTL, "is-active", arguments.service])
+                if getattr(postcheck, "returncode", 0) == 0 or getattr(postcheck, "stdout", "") != "inactive\n":
+                    raise RuntimeError("service postcheck returned unexpected state")
+        except BaseException as restore_error:
+            if primary is None:
+                primary = restore_error
+            else:
+                primary.add_note(f"service restoration also failed: {restore_error}")
     if primary is not None:
         raise primary
     assert report is not None
+    _atomic_report(report_path, canonical_json(report))
     return report
 
 

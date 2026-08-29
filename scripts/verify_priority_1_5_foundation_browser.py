@@ -8,7 +8,6 @@ import json
 import math
 import os
 import re
-import shutil
 import signal
 import stat
 import subprocess
@@ -26,6 +25,8 @@ _VIEWPORTS = (
     (599, 800), (600, 800), (601, 800), (899, 800), (900, 800), (901, 800),
 )
 _TOUCH_VIEWPORTS = frozenset(viewport for viewport in _VIEWPORTS if viewport[0] <= 1024)
+_NODE = Path("/usr/bin/node")
+_COMMAND_ENV = {"PATH": "/usr/bin:/bin", "LANG": "C", "LC_ALL": "C"}
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -250,21 +251,53 @@ try{await send('Runtime.enable');await send('Page.enable');await send('Network.e
  console.log(JSON.stringify({reports,errors}))}finally{socket.close()}
 """
 
+def _run_node_probe(cookie: bytes, port: str, base_url: str) -> subprocess.CompletedProcess[bytes]:
+    before = _NODE.lstat()
+    if (
+        _NODE.resolve(strict=True) != _NODE
+        or not stat.S_ISREG(before.st_mode)
+        or before.st_uid != 0
+        or before.st_mode & 0o022
+        or before.st_mode & 0o111 == 0
+    ):
+        raise ValueError("Node.js executable identity is unsafe")
+    descriptor = os.open(_NODE, os.O_RDONLY | os.O_CLOEXEC | os.O_NOFOLLOW)
+    try:
+        opened = os.fstat(descriptor)
+        current = _NODE.lstat()
+        identity = lambda value: (
+            value.st_dev, value.st_ino, value.st_uid, value.st_gid,
+            value.st_mode, value.st_nlink, value.st_size,
+            value.st_mtime_ns, value.st_ctime_ns,
+        )
+        if identity(before) != identity(opened) or identity(opened) != identity(current):
+            raise ValueError("Node.js executable identity changed")
+        completed = subprocess.run(
+            [f"/proc/self/fd/{descriptor}", "--input-type=module", "-e", _CDP_PROBE,
+             port, base_url],
+            input=cookie, capture_output=True, timeout=120, check=False, shell=False,
+            env=_COMMAND_ENV, pass_fds=(descriptor,),
+        )
+        if identity(os.fstat(descriptor)) != identity(opened) or identity(_NODE.lstat()) != identity(opened):
+            raise ValueError("Node.js executable identity changed")
+        return completed
+    finally:
+        os.close(descriptor)
+
+
 def run_browser(base_url: str, cookie: str, chromium: Path) -> list[dict[str, object]]:
     parsed = urlsplit(base_url)
     if parsed.scheme not in {"http", "https"} or not parsed.netloc or parsed.username or parsed.password or parsed.query or parsed.fragment:
         raise ValueError("base URL must be an origin or path without credentials/query/fragment")
     if not chromium.is_absolute() or chromium.resolve(strict=True) != chromium or not os.access(chromium, os.X_OK):
         raise ValueError("chromium must be an absolute executable nonsymlink path")
-    node = shutil.which("node")
-    if node is None:
-        raise RuntimeError("Node.js is required for the raw CDP harness")
     with tempfile.TemporaryDirectory(prefix="matrix-b1-browser-") as directory:
         profile = Path(directory) / "profile"
         browser = subprocess.Popen([
             str(chromium), "--headless", "--no-sandbox", "--disable-gpu",
             "--remote-debugging-port=0", f"--user-data-dir={profile}", "about:blank",
-        ], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, start_new_session=True)
+        ], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, start_new_session=True,
+            shell=False, env=_COMMAND_ENV)
         try:
             active = profile / "DevToolsActivePort"
             for _ in range(100):
@@ -275,15 +308,19 @@ def run_browser(base_url: str, cookie: str, chromium: Path) -> list[dict[str, ob
                 time.sleep(.05)
             if not active.is_file():
                 raise RuntimeError("Chromium CDP port unavailable")
-            completed = subprocess.run(
-                [node, "--input-type=module", "-e", _CDP_PROBE, active.read_text().splitlines()[0], base_url.rstrip("/") + "/"],
-                input=cookie, text=True, capture_output=True, timeout=120, check=False,
+            completed = _run_node_probe(
+                cookie.encode("utf-8"), active.read_text().splitlines()[0],
+                base_url.rstrip("/") + "/",
             )
         finally:
             _terminate(browser)
     if completed.returncode != 0:
         raise RuntimeError("authenticated browser acceptance failed")
-    result = json.loads(completed.stdout.strip().splitlines()[-1])
+    try:
+        stdout = completed.stdout.decode("utf-8")
+    except UnicodeDecodeError as error:
+        raise RuntimeError("browser evidence encoding is invalid") from error
+    result = json.loads(stdout.strip().splitlines()[-1])
     if result.get("errors") or not isinstance(result.get("reports"), list):
         raise RuntimeError("browser errors or malformed evidence")
     return result["reports"]
