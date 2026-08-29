@@ -8935,9 +8935,136 @@ console.log(JSON.stringify({
         )
 
     @unittest.skipUnless(shutil.which("node"), "Node.js is required")
+    @unittest.skipUnless(
+        os.environ.get("MATRIX_CHROMIUM")
+        and Path(os.environ.get("MATRIX_CHROMIUM", "")).is_file()
+        and os.access(os.environ.get("MATRIX_CHROMIUM", ""), os.X_OK),
+        "MATRIX_CHROMIUM browser is required",
+    )
+    def test_shared_media_transform_executes_for_advanced_canvas(self):
+        module = {
+            "id": "custom_media_transform", "name": "Media transform", "type": "canvas",
+            "background": "#000000", "frame_count": 1, "fps": 10, "playback": "hold",
+            "layers": [{
+                "id": "layer_media", "name": "Media", "type": "media", "visible": True,
+                "properties": {
+                    "present": True, "source": "missing.png", "x": 10.25, "y": 6.5,
+                    "width": 15.5, "height": 7.5, "rotation": 17,
+                    "keep_aspect": False,
+                },
+                "keyframes": [],
+            }],
+            "overrides": [],
+        }
+        self.store.update({"custom_modules": [module]})
+        self.pair_browser()
+        body = self.client.get("/").get_data(as_text=True)
+        probe = r"""
+const port=process.argv[1],pagePath=process.argv[2],sleep=ms=>new Promise(r=>setTimeout(r,ms));let endpoint;
+for(let attempt=0;attempt<50;attempt++){try{endpoint=await fetch(`http://127.0.0.1:${port}/json/new`,{method:'PUT'}).then(r=>r.json());break}catch(_){await sleep(50)}}
+if(!endpoint)throw new Error('Chromium DevTools endpoint unavailable');
+const socket=new WebSocket(endpoint.webSocketDebuggerUrl),pending=new Map();let nextId=1,loadResolve,loaded=new Promise(resolve=>loadResolve=resolve),exceptions=[];
+socket.onmessage=event=>{const message=JSON.parse(event.data);if(message.id&&pending.has(message.id)){const request=pending.get(message.id);pending.delete(message.id);message.error?request.reject(new Error(JSON.stringify(message.error))):request.resolve(message.result)}else if(message.method==='Page.loadEventFired')loadResolve();else if(message.method==='Runtime.exceptionThrown')exceptions.push(message.params.exceptionDetails.text)};
+await new Promise((resolve,reject)=>{socket.onopen=resolve;socket.onerror=reject});
+const send=(method,params={})=>{const id=nextId++;socket.send(JSON.stringify({id,method,params}));return new Promise((resolve,reject)=>pending.set(id,{resolve,reject}))};
+const evaluate=async expression=>{const result=await send('Runtime.evaluate',{expression,returnByValue:true,awaitPromise:true});if(result.exceptionDetails)throw new Error(JSON.stringify(result.exceptionDetails));return result.result.value};
+try{await send('Runtime.enable');await send('Page.enable');loaded=new Promise(resolve=>loadResolve=resolve);await send('Page.navigate',{url:'file://'+pagePath});await loaded;
+for(let attempt=0;attempt<100;attempt++){if(await evaluate(`globalThis.matrixCustomCanvasReady===true&&!!document.querySelector('.advanced-card canvas')`))break;await sleep(20)}
+const report=await evaluate(`(async()=>{
+ const api=globalThis.matrixMediaCanvasTransforms;
+ if(!api||typeof api.drawMediaFrame!=='function'||typeof api.bindCanvasPointerTransforms!=='function')throw new Error('shared media transform API absent');
+ const draw=(naturalWidth,naturalHeight,properties)=>{const calls=[],context={beginPath(){calls.push(['beginPath'])},rect(...v){calls.push(['rect',...v])},clip(){calls.push(['clip'])},translate(...v){calls.push(['translate',...v])},rotate(v){calls.push(['rotate',Math.round(v*1000)/1000])},drawImage(...v){calls.push(['drawImage',...v.slice(5)])}};api.drawMediaFrame(context,{naturalWidth,naturalHeight},properties,0,1);return calls};
+ const geometry=[
+  draw(1,4,{x:2.5,y:3.5,width:5.5,height:3.5,rotation:90,keep_aspect:true}),
+  draw(20,10,{x:-2.5,y:-3.5,width:15,height:15,rotation:17,keep_aspect:true}),
+  draw(8,13,{x:1.5,y:2.5,width:9.5,height:5.5,rotation:-31,keep_aspect:false}),
+ ];
+ const eventAt=(canvas,x,y,type,pointerId=1)=>{const box=canvas.getBoundingClientRect();canvas.dispatchEvent(new PointerEvent(type,{bubbles:true,pointerId,clientX:box.left+x*box.width/64,clientY:box.top+y*box.height/32,buttons:type==='pointerup'?0:1}))};
+ const drafts=[];globalThis.matrixCustomCanvasDraftChanged=(_id,delay)=>drafts.push(delay);document.querySelector('[data-property="rotation"]').focus();
+ let canvas=document.querySelector('.advanced-card canvas');canvas.setPointerCapture=()=>{};
+ eventAt(canvas,12,8,'pointerdown');eventAt(canvas,17.25,10.5,'pointermove');eventAt(canvas,17.25,10.5,'pointerup');
+ await new Promise(resolve=>requestAnimationFrame(()=>requestAnimationFrame(resolve)));
+ canvas=document.querySelector('.advanced-card canvas');canvas.setPointerCapture=()=>{};
+ eventAt(canvas,31,16.5,'pointerdown',2);eventAt(canvas,34.6,18.9,'pointermove',2);eventAt(canvas,34.6,18.9,'pointerup',2);
+ await new Promise(resolve=>requestAnimationFrame(()=>requestAnimationFrame(resolve)));
+ const draft=customModulesFromEditor()[0],properties=draft.layers[0].properties,active=document.querySelector('.layer-track-label.active');
+ return {api:Object.keys(api).sort(),geometry,properties,selection:active?.dataset.layerId||null,rotation:properties.rotation,focused:document.activeElement?.dataset?.property||null,drafts};
+})()`);
+console.log(JSON.stringify({report,exceptions}));}finally{socket.close()}
+"""
+        result = self._run_dashboard_chromium_probe(body, probe, timeout=45)
+        self.assertEqual(result["exceptions"], [], result)
+        self.assertEqual(
+            result["report"]["geometry"],
+            [
+                [["beginPath"], ["rect", 2, 4, 1, 4], ["clip"], ["translate", 2.5, 6], ["rotate", 1.571], ["drawImage", -.5, -2, 1, 4]],
+                [["beginPath"], ["rect", -2, -4, 15, 8], ["clip"], ["translate", 5.5, 0], ["rotate", .297], ["drawImage", -7.5, -4, 15, 8]],
+                [["beginPath"], ["rect", 2, 2, 10, 6], ["clip"], ["translate", 7, 5], ["rotate", -.541], ["drawImage", -5, -3, 10, 6]],
+            ],
+        )
+        properties = result["report"]["properties"]
+        self.assertEqual(properties["x"], 15.5, result)
+        self.assertEqual(properties["y"], 9, result)
+        self.assertEqual(properties["width"], 19, result)
+        self.assertEqual(properties["height"], 10, result)
+        self.assertEqual(properties["rotation"], 17, result)
+        self.assertFalse(properties["keep_aspect"], result)
+        self.assertEqual(result["report"]["selection"], "layer_media", result)
+        self.assertEqual(result["report"]["focused"], "rotation", result)
+        self.assertEqual(result["report"]["drafts"], [150, 150], result)
+
+    def test_foundation_browser_verifier_parser_and_report_are_fail_closed(self):
+        script = Path(__file__).parents[1] / "scripts/verify_priority_1_5_foundation_browser.py"
+        spec = importlib.util.spec_from_file_location("foundation_browser_verifier", script)
+        module = importlib.util.module_from_spec(spec)
+        assert spec.loader is not None
+        spec.loader.exec_module(module)
+        parser = module.build_parser()
+        required = {"base_url", "session_cookie_file", "expected_source_sha", "expected_version", "chromium", "report"}
+        self.assertTrue(required.issubset({action.dest for action in parser._actions if action.required}))
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            cookie = root / "cookie"
+            cookie.write_text("session=private-value\n", encoding="utf-8")
+            cookie.chmod(0o600)
+            report_path = root / "report.json"
+            report = module.build_report(
+                source_sha="a" * 40, version="1.5.0-preview",
+                viewports=[
+                    {"viewport": [390, 844], "frame": [2, 4, 15, 8], "geometry": [15.5, 9, 19, 10], "frame_sha256": "a" * 64},
+                    {"viewport": [1280, 720], "frame": [2, 4, 15, 8], "geometry": [15.5, 9, 19, 10], "frame_sha256": "a" * 64},
+                ],
+            )
+            module.write_report(report_path, report)
+            raw = report_path.read_text(encoding="utf-8")
+            self.assertEqual(report_path.stat().st_mode & 0o777, 0o600)
+            self.assertNotIn("private-value", raw)
+            self.assertNotIn("session", raw.lower())
+            self.assertEqual(json.loads(raw), report)
+            malformed = [dict(item) for item in report["viewports"]]
+            malformed[0].pop("frame_sha256")
+            with self.assertRaisesRegex(ValueError, "fields"):
+                module.build_report(source_sha="a" * 40, version="1.5.0-preview", viewports=malformed)
+            module.validate_session_cookie_file(cookie)
+            cookie.chmod(0o640)
+            with self.assertRaisesRegex(ValueError, "owner-only"):
+                module.validate_session_cookie_file(cookie)
+            failed = subprocess.run([
+                sys.executable, str(script),
+                "--base-url", "http://127.0.0.1/",
+                "--session-cookie-file", str(cookie),
+                "--expected-source-sha", "a" * 40,
+                "--expected-version", "1.5.0-preview",
+                "--chromium", "/usr/bin/google-chrome",
+                "--report", str(report_path),
+            ], text=True, capture_output=True)
+            self.assertNotEqual(failed.returncode, 0)
+            self.assertNotIn("private-value", failed.stderr)
+
+    @unittest.skipUnless(shutil.which("node"), "Node.js is required")
     def test_browser_rotated_aspect_media_uses_fitted_origin_centre_and_clip(self):
         asset = (Path(__file__).parents[1] / "app/static/custom_canvas.js").read_text()
-        start = asset.index("  function drawShape(")
+        start = asset.index("  function drawMediaFrame(")
         end = asset.index("\n\n  function drawEditor(", start)
         function_source = asset[start:end]
         harness = f"""
@@ -8982,7 +9109,7 @@ console.log(JSON.stringify({{square:probe(32,32),tall:probe(16,32),wide:probe(64
     @unittest.skipUnless(shutil.which("node"), "Node.js is required")
     def test_browser_aspect_media_geometry_matches_complete_physical_path(self):
         asset = (Path(__file__).parents[1] / "app/static/custom_canvas.js").read_text()
-        start = asset.index("  function drawShape(")
+        start = asset.index("  function drawMediaFrame(")
         end = asset.index("\n\n  function drawEditor(", start)
         function_source = asset[start:end]
         cases = [
