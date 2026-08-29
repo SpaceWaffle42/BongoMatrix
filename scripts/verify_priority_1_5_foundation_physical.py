@@ -30,6 +30,8 @@ _HASH_RE = re.compile(r"[0-9a-f]{64}")
 _SERVICE_RE = re.compile(r"[A-Za-z0-9_.@-]+\.service")
 _VERSION_RE = re.compile(r"[0-9]+\.[0-9]+\.[0-9]+-preview")
 _FFPROBE = "/usr/bin/ffprobe"
+_SYSTEMCTL = "/usr/bin/systemctl"
+_COMMAND_ENV = {"PATH": "/usr/bin:/bin", "LANG": "C", "LC_ALL": "C"}
 _MANIFEST_KEYS = {"version", "boundary", "source_sha", "tree_sha", "fixtures"}
 _FIXTURE_KEYS = {
     "path", "sha256", "size", "kind", "width", "height", "frames",
@@ -37,12 +39,19 @@ _FIXTURE_KEYS = {
 }
 _REPORT_KEYS = {
     "version", "source_sha", "tree_sha", "fixture_manifest_sha256",
-    "expected_version", "service", "width", "height", "fit_sha256",
-    "gif_delay_ms", "mp4_delay_ms", "cancelled_before_swap",
-    "evidence_sha256",
+    "expected_version", "service", "width", "height", "fixture_cases",
+    "cancellation", "evidence_sha256",
 }
 _RATE_KEYS = {"10.0", "100.0", "400.0"}
-_FIT_KEYS = {"contain", "cover", "stretch", "manual"}
+_GEOMETRY_KEYS = {"contain", "cover", "stretch", "manual-negative"}
+_CASE_KEYS = {
+    "kind", "width", "height", "frames", "durations_ms", "categories",
+    "timing_ms", "frame_sha256", "loop_frame_sha256", "geometry_sha256",
+}
+_CANCELLATION_KEYS = {
+    "fixture", "draws", "submissions", "prior_submission_count",
+    "prior_revision", "prior_sha256", "history_unchanged",
+}
 _MAX_JSON_BYTES = 256 * 1024
 
 
@@ -140,8 +149,12 @@ def load_fixture_manifest(path: Path, source_sha: str, tree_sha: str) -> dict[st
             raise ValueError("fixture bytes do not match manifest")
         if item["kind"] not in {"gif", "mp4"}:
             raise ValueError("fixture kind is invalid")
-        integers = (item["width"], item["height"], item["frames"])
-        if any(type(number) is not int or not 1 <= number <= 10000 for number in integers):
+        dimensions = (item["width"], item["height"])
+        if (
+            any(type(number) is not int or not 1 <= number <= 10000
+                for number in dimensions)
+            or type(item["frames"]) is not int or not 1 <= item["frames"] <= 120
+        ):
             raise ValueError("fixture dimensions/frame count are invalid")
         durations = item["durations_ms"]
         if (
@@ -194,6 +207,30 @@ def load_fixture_manifest(path: Path, source_sha: str, tree_sha: str) -> dict[st
                 raise ValueError("MP4 fixture decoder mismatch") from error
             if actual != (item["width"], item["height"], item["frames"], durations):
                 raise ValueError("MP4 fixture metadata mismatch")
+
+    fixtures_by_kind = {
+        kind: [item for item in fixtures if item["kind"] == kind]
+        for kind in ("gif", "mp4")
+    }
+    dimensions = [(item["width"], item["height"]) for item in fixtures]
+    required_geometry = {
+        "small": any(width < 64 and height < 32 for width, height in dimensions),
+        "odd": any(width % 2 or height % 2 for width, height in dimensions),
+        "portrait": any(width < height for width, height in dimensions),
+        "landscape": any(width > height for width, height in dimensions),
+        "oversized": any(width > 64 or height > 32 for width, height in dimensions),
+    }
+    if (
+        any(not fixtures_by_kind[kind] for kind in fixtures_by_kind)
+        or any(not any(item["frames"] >= 2 for item in fixtures_by_kind[kind])
+               for kind in fixtures_by_kind)
+        or any(len(set(item["durations_ms"])) != 1
+               or item["durations_ms"][0] > 1000
+               for item in fixtures_by_kind["mp4"])
+        or len({delay for item in fixtures for delay in item["durations_ms"]}) < 2
+        or not all(required_geometry.values())
+    ):
+        raise ValueError("fixture corpus lacks required GIF/MP4 timing or geometry diversity")
     validated = dict(manifest)
     validated["_fixture_root"] = str(path.parent)
     return validated
@@ -208,7 +245,10 @@ def _default_version_reader() -> str:
 
 
 def _run_command(command: list[str]) -> object:
-    return subprocess.run(command, text=True, capture_output=True, check=False)
+    return subprocess.run(
+        command, text=True, capture_output=True, check=False, shell=False,
+        env=_COMMAND_ENV,
+    )
 
 
 def _require_command(result: object, operation: str, expected_stdout: str | None = None) -> None:
@@ -218,55 +258,205 @@ def _require_command(result: object, operation: str, expected_stdout: str | None
         raise RuntimeError(f"service {operation} returned unexpected state")
 
 
+def _fixture_categories(width: int, height: int) -> list[str]:
+    categories = []
+    if width < 64 and height < 32:
+        categories.append("small")
+    if width % 2 or height % 2:
+        categories.append("odd")
+    if width < height:
+        categories.append("portrait")
+    if width > height:
+        categories.append("landscape")
+    if width > 64 or height > 32:
+        categories.append("oversized")
+    return categories
+
+
+def _frame_sha256(image: Image.Image) -> str:
+    prepared = image.convert("RGB")
+    try:
+        return hashlib.sha256(prepared.tobytes("raw", "RGB")).hexdigest()
+    finally:
+        if prepared is not image:
+            prepared.close()
+
+
 def exercise_foundation(matrix: object, manifest: dict[str, object]) -> dict[str, object]:
     hardware = getattr(matrix, "matrix", None)
     if (getattr(hardware, "width", None), getattr(hardware, "height", None)) != (64, 32):
         raise ValueError("physical Matrix must be exactly 64x32")
-    source = Image.new("RGB", (5, 3))
-    source.putdata([
-        ((x * 47 + y * 13) % 256, (x * 19 + y * 61) % 256,
-         (x * 83 + y * 7) % 256)
-        for y in range(3) for x in range(5)
-    ])
-    fits: dict[str, str] = {}
-    for fit, geometry in (
-        ("contain", {}), ("cover", {}), ("stretch", {}),
-        ("manual", {"x": -2, "y": 30, "width": 7, "height": 9}),
-    ):
-        matrix.clear()
-        matrix.draw_image(source, fit=fit, **geometry)
-        matrix.swap()
-        frame, _revision = matrix.latest_frame_rgb()
-        if not isinstance(frame, bytes) or len(frame) != 64 * 32 * 3:
-            raise ValueError("physical frame bytes are invalid")
-        fits[fit] = hashlib.sha256(frame).hexdigest()
 
     from modules.media_player import gif_media_frames, video_media_frames
 
-    gif_items = [item for item in manifest["fixtures"] if item["kind"] == "gif"]
-    if not gif_items:
-        raise ValueError("fixture manifest has no GIF timing authority")
-    gif_path = Path(manifest["_fixture_root"]) / gif_items[0]["path"]
-    gif_delays: dict[str, float] = {}
-    mp4_delays: dict[str, float] = {}
-    for label, rate in (("10.0", 0.1), ("100.0", 1.0), ("400.0", 4.0)):
-        timeline = gif_media_frames(gif_path, loops=1, playback_rate=rate, bounded_pillow=False)
-        candidate, delay = next(timeline)
-        candidate.close()
-        timeline.close()
-        gif_delays[label] = delay * 1000
-        _frame, video_delay = next(video_media_frames(
-            lambda: iter((object(),)), fps=20, loops=1, playback_rate=rate,
-        ))
-        mp4_delays[label] = video_delay * 1000
+    fixture_root = Path(manifest["_fixture_root"])
+    fixtures = manifest["fixtures"]
+    successful_history: list[tuple[str, int]] = []
+    matrix.set_physical_swap_observer(lambda raw, revision: successful_history.append(
+        (hashlib.sha256(raw).hexdigest(), revision)
+    ))
+    cases: dict[str, object] = {}
 
-    stop = threading.Event()
-    stop.set()
-    cancelled = list(video_media_frames(lambda: iter((object(),)), stop_event=stop)) == []
+    for item in fixtures:
+        relative = item["path"]
+        path = fixture_root / relative
+        timing: dict[str, list[float]] = {}
+        native_frames: list[Image.Image] = []
+        frame_hashes: list[str] = []
+        loop_hashes: list[str] = []
+
+        if item["kind"] == "gif":
+            for label, rate in (("10.0", 0.1), ("100.0", 1.0), ("400.0", 4.0)):
+                timeline = gif_media_frames(
+                    path, loops=2, playback_rate=rate, bounded_pillow=False,
+                )
+                hashes: list[str] = []
+                delays: list[float] = []
+                try:
+                    for index, (candidate, delay) in enumerate(timeline):
+                        try:
+                            hashes.append(_frame_sha256(candidate))
+                            if index < item["frames"]:
+                                delays.append(delay * 1000)
+                                if label == "100.0":
+                                    native_frames.append(candidate.copy().convert("RGB"))
+                        finally:
+                            candidate.close()
+                finally:
+                    timeline.close()
+                if len(hashes) != item["frames"] * 2:
+                    raise ValueError("GIF fixture did not execute two complete loops")
+                timing[label] = delays
+                if label == "100.0":
+                    loop_hashes = hashes
+                    frame_hashes = hashes[:item["frames"]]
+        else:
+            durations = item["durations_ms"]
+            if len(set(durations)) != 1:
+                raise ValueError("MP4 fixture cadence must be uniform")
+            fps = 1000.0 / durations[0]
+            native_frames = matrix.media_frames(
+                relative, item["frames"], fps, preserve_size=True,
+                resolved_path=path,
+            )
+            if len(native_frames) != item["frames"]:
+                raise ValueError("MP4 fixture did not decode every manifested frame")
+            for label, rate in (("10.0", 0.1), ("100.0", 1.0), ("400.0", 4.0)):
+                timeline = video_media_frames(
+                    lambda: iter(native_frames), fps=fps, loops=2,
+                    playback_rate=rate,
+                )
+                hashes: list[str] = []
+                delays: list[float] = []
+                for index, (candidate, delay) in enumerate(timeline):
+                    hashes.append(_frame_sha256(candidate))
+                    if index < item["frames"]:
+                        delays.append(delay * 1000)
+                if len(hashes) != item["frames"] * 2:
+                    raise ValueError("MP4 fixture did not execute two complete loops")
+                timing[label] = delays
+                if label == "100.0":
+                    loop_hashes = hashes
+                    frame_hashes = hashes[:item["frames"]]
+
+        expected_timing = {
+            label: [delay / rate for delay in item["durations_ms"]]
+            for label, rate in (("10.0", 0.1), ("100.0", 1.0), ("400.0", 4.0))
+        }
+        if any(
+            len(timing[label]) != len(expected_timing[label])
+            or any(not math.isclose(actual, expected, rel_tol=0, abs_tol=1e-9)
+                   for actual, expected in zip(timing[label], expected_timing[label]))
+            for label in _RATE_KEYS
+        ):
+            raise ValueError("fixture timing changed native cadence")
+        timing = expected_timing
+        if item["frames"] >= 2 and len(set(frame_hashes)) < 2:
+            raise ValueError("fixture lacks visible multi-frame edge progression")
+        if loop_hashes[:item["frames"]] != loop_hashes[item["frames"]:]:
+            raise ValueError("fixture loop progression is not repeatable")
+
+        geometry_hashes: dict[str, str] = {}
+        first = native_frames[0]
+        for fit, geometry in (
+            ("contain", {}), ("cover", {}), ("stretch", {}),
+            ("manual-negative", {
+                "fit": "manual", "x": -max(1, first.width // 2),
+                "y": -max(1, first.height // 2),
+                "width": first.width, "height": first.height,
+            }),
+        ):
+            matrix.clear()
+            matrix.draw_image(first, fit=geometry.pop("fit", fit), **geometry)
+            matrix.swap()
+            frame, _revision = matrix.latest_frame_rgb()
+            if not isinstance(frame, bytes) or len(frame) != 64 * 32 * 3:
+                raise ValueError("physical frame bytes are invalid")
+            geometry_hashes[fit] = hashlib.sha256(frame).hexdigest()
+
+        cases[relative] = {
+            "kind": item["kind"], "width": item["width"],
+            "height": item["height"], "frames": item["frames"],
+            "durations_ms": list(item["durations_ms"]),
+            "categories": _fixture_categories(item["width"], item["height"]),
+            "timing_ms": timing, "frame_sha256": frame_hashes,
+            "loop_frame_sha256": loop_hashes,
+            "geometry_sha256": geometry_hashes,
+        }
+        for candidate in native_frames:
+            candidate.close()
+
+    cancellation: dict[str, object] = {}
+    for item in fixtures:
+        stop = threading.Event()
+        draws = 0
+        original_set_image = matrix._frame_capture.set_image
+        original_media_file = matrix._media_file
+
+        def cancel_after_draw(*args: object, **kwargs: object) -> object:
+            nonlocal draws
+            result = original_set_image(*args, **kwargs)
+            draws += 1
+            stop.set()
+            return result
+
+        before_frame, before_revision = matrix.latest_frame_rgb()
+        before_history = list(successful_history)
+        matrix._frame_capture.set_image = cancel_after_draw
+        matrix._media_file = lambda filename: (
+            fixture_root / item["path"] if filename == item["path"] else None
+        )
+        try:
+            if item["kind"] == "gif":
+                shown = matrix.show_gif(item["path"], loops=1, stop_event=stop)
+            else:
+                shown = matrix.show_video(
+                    item["path"], loops=1,
+                    fps_override=1000.0 / item["durations_ms"][0],
+                    stop_event=stop,
+                )
+        finally:
+            matrix._frame_capture.set_image = original_set_image
+            matrix._media_file = original_media_file
+        after_frame, after_revision = matrix.latest_frame_rgb()
+        unchanged = (
+            successful_history == before_history
+            and (after_frame, after_revision) == (before_frame, before_revision)
+        )
+        if shown or not stop.is_set() or draws != 1 or not unchanged:
+            raise ValueError("post-draw pre-framebuffer cancellation was not preserved")
+        cancellation[item["path"]] = {
+            "fixture": item["path"], "draws": draws,
+            "submissions": len(successful_history) - len(before_history),
+            "prior_submission_count": len(before_history),
+            "prior_revision": before_revision,
+            "prior_sha256": hashlib.sha256(before_frame).hexdigest(),
+            "history_unchanged": unchanged,
+        }
+
     return {
-        "width": 64, "height": 32, "fit_sha256": fits,
-        "gif_delay_ms": gif_delays, "mp4_delay_ms": mp4_delays,
-        "cancelled_before_swap": cancelled,
+        "width": 64, "height": 32, "fixture_cases": cases,
+        "cancellation": cancellation,
     }
 
 
@@ -294,7 +484,9 @@ def _atomic_report(path: Path, raw: bytes) -> None:
             pass
 
 
-def verify_report(value: object, source_sha: str, tree_sha: str) -> dict[str, object]:
+def verify_report(
+    value: object, source_sha: str, tree_sha: str, manifest: dict[str, object],
+) -> dict[str, object]:
     if isinstance(value, (bytes, bytearray)):
         raw = bytes(value)
         if len(raw) > _MAX_JSON_BYTES:
@@ -304,7 +496,7 @@ def verify_report(value: object, source_sha: str, tree_sha: str) -> dict[str, ob
             raise ValueError("physical report is not canonical JSON")
     else:
         report = value
-    if type(report) is not dict or set(report) != _REPORT_KEYS or report.get("version") != 1:
+    if type(report) is not dict or set(report) != _REPORT_KEYS or report.get("version") != 2:
         raise ValueError("physical report fields are not exact")
     if report.get("source_sha") != source_sha or report.get("tree_sha") != tree_sha:
         raise ValueError("physical report identity mismatch")
@@ -319,30 +511,74 @@ def verify_report(value: object, source_sha: str, tree_sha: str) -> dict[str, ob
         or _SERVICE_RE.fullmatch(report["service"]) is None
     ):
         raise ValueError("physical report authority is invalid")
-    if set(report.get("fit_sha256", {})) != _FIT_KEYS or any(
-        not isinstance(value, str) or _HASH_RE.fullmatch(value) is None
-        for value in report["fit_sha256"].values()
-    ):
-        raise ValueError("physical fit evidence is invalid")
-    for field in ("gif_delay_ms", "mp4_delay_ms"):
-        values = report.get(field)
-        if type(values) is not dict or set(values) != _RATE_KEYS or any(
-            isinstance(value, bool) or not isinstance(value, (int, float))
-            or not math.isfinite(value) or value <= 0 for value in values.values()
+
+    expected_items = {item["path"]: item for item in manifest["fixtures"]}
+    cases = report.get("fixture_cases")
+    if type(cases) is not dict or set(cases) != set(expected_items):
+        raise ValueError("physical fixture evidence omits or adds manifest entries")
+    for relative, item in expected_items.items():
+        case = cases[relative]
+        if type(case) is not dict or set(case) != _CASE_KEYS:
+            raise ValueError("physical fixture case fields are not exact")
+        if (
+            case["kind"] != item["kind"] or case["width"] != item["width"]
+            or case["height"] != item["height"] or case["frames"] != item["frames"]
+            or case["durations_ms"] != item["durations_ms"]
+            or case["categories"] != _fixture_categories(item["width"], item["height"])
         ):
-            raise ValueError("physical timing evidence is invalid")
-    gif = report["gif_delay_ms"]
-    mp4 = report["mp4_delay_ms"]
-    if not (
-        math.isclose(gif["10.0"], gif["100.0"] * 10, rel_tol=0, abs_tol=1e-9)
-        and math.isclose(gif["400.0"], gif["100.0"] / 4, rel_tol=0, abs_tol=1e-9)
-        and math.isclose(mp4["10.0"], 500.0, rel_tol=0, abs_tol=1e-9)
-        and math.isclose(mp4["100.0"], 50.0, rel_tol=0, abs_tol=1e-9)
-        and math.isclose(mp4["400.0"], 12.5, rel_tol=0, abs_tol=1e-9)
-    ):
-        raise ValueError("physical timing evidence changed exact cadence")
-    if report.get("cancelled_before_swap") is not True:
-        raise ValueError("physical cancellation evidence is invalid")
+            raise ValueError("physical fixture case does not attest its manifest entry")
+        timing = case["timing_ms"]
+        if type(timing) is not dict or set(timing) != _RATE_KEYS:
+            raise ValueError("physical fixture timing rates are incomplete")
+        for label, divisor in (("10.0", 0.1), ("100.0", 1.0), ("400.0", 4.0)):
+            expected = [delay / divisor for delay in item["durations_ms"]]
+            values = timing[label]
+            if (
+                type(values) is not list or len(values) != item["frames"]
+                or any(isinstance(number, bool) or not isinstance(number, (int, float))
+                       or not math.isfinite(number) or number <= 0 for number in values)
+                or any(not math.isclose(actual, wanted, rel_tol=0, abs_tol=1e-9)
+                       for actual, wanted in zip(values, expected))
+            ):
+                raise ValueError("physical fixture timing changed native cadence")
+        frames = case["frame_sha256"]
+        loops = case["loop_frame_sha256"]
+        if (
+            type(frames) is not list or len(frames) != item["frames"]
+            or type(loops) is not list or len(loops) != item["frames"] * 2
+            or any(type(digest) is not str or _HASH_RE.fullmatch(digest) is None
+                   for digest in frames + loops)
+            or item["frames"] >= 2 and len(set(frames)) < 2
+            or loops[:item["frames"]] != frames
+            or loops[item["frames"]:] != frames
+        ):
+            raise ValueError("physical fixture loop or edge progression is invalid")
+        geometry = case["geometry_sha256"]
+        if type(geometry) is not dict or set(geometry) != _GEOMETRY_KEYS or any(
+            type(digest) is not str or _HASH_RE.fullmatch(digest) is None
+            for digest in geometry.values()
+        ):
+            raise ValueError("physical fixture geometry evidence is invalid")
+
+    cancellation = report.get("cancellation")
+    if type(cancellation) is not dict or set(cancellation) != set(expected_items):
+        raise ValueError("physical cancellation fixture matrix is incomplete")
+    for relative, evidence in cancellation.items():
+        if type(evidence) is not dict or set(evidence) != _CANCELLATION_KEYS:
+            raise ValueError("physical cancellation fields are not exact")
+        fixture = expected_items[relative]
+        if (
+            evidence["fixture"] != relative
+            or evidence["draws"] != 1 or evidence["submissions"] != 0
+            or type(evidence["prior_submission_count"]) is not int
+            or evidence["prior_submission_count"] < 1
+            or type(evidence["prior_revision"]) is not int
+            or evidence["prior_revision"] < 1
+            or type(evidence["prior_sha256"]) is not str
+            or _HASH_RE.fullmatch(evidence["prior_sha256"]) is None
+            or evidence["history_unchanged"] is not True
+        ):
+            raise ValueError("physical cancellation evidence is invalid")
     digest = report.get("evidence_sha256")
     unsigned = dict(report)
     unsigned.pop("evidence_sha256")
@@ -376,13 +612,13 @@ def execute(
     if version_reader() != arguments.expected_version:
         raise ValueError("deployed application version mismatch")
 
-    active = command_runner(["systemctl", "is-active", arguments.service])
+    active = command_runner([_SYSTEMCTL, "is-active", arguments.service])
     _require_command(active, "precheck", "active\n")
     stopped = False
     primary: BaseException | None = None
     report: dict[str, object] | None = None
     try:
-        _require_command(command_runner(["systemctl", "stop", arguments.service]), "stop")
+        _require_command(command_runner([_SYSTEMCTL, "stop", arguments.service]), "stop")
         stopped = True
         if lock_factory is None:
             from hardware_lock import DisplayOwnershipLock
@@ -394,23 +630,23 @@ def execute(
                 factory = lambda: Matrix(rows=32, cols=64)
             evidence = exercise(factory(), manifest)
         report = {
-            "version": 1, "source_sha": arguments.source_sha,
+            "version": 2, "source_sha": arguments.source_sha,
             "tree_sha": arguments.tree_sha,
             "fixture_manifest_sha256": hashlib.sha256(manifest_path.read_bytes()).hexdigest(),
             "expected_version": arguments.expected_version,
             "service": arguments.service, **evidence,
         }
         report["evidence_sha256"] = hashlib.sha256(canonical_json(report)).hexdigest()
-        verify_report(report, arguments.source_sha, arguments.tree_sha)
+        verify_report(report, arguments.source_sha, arguments.tree_sha, manifest)
         _atomic_report(report_path, canonical_json(report))
     except BaseException as error:
         primary = error
     finally:
         if stopped:
             try:
-                _require_command(command_runner(["systemctl", "start", arguments.service]), "restore")
+                _require_command(command_runner([_SYSTEMCTL, "start", arguments.service]), "restore")
                 _require_command(
-                    command_runner(["systemctl", "is-active", arguments.service]),
+                    command_runner([_SYSTEMCTL, "is-active", arguments.service]),
                     "postcheck", "active\n",
                 )
             except BaseException as restore_error:

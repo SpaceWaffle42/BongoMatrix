@@ -2514,6 +2514,70 @@ else:
                 matrix.show_video("clip.mp4", playback_rate=rate)
         matrix._media_file.assert_not_called()
 
+    def test_foundation_physical_verifier_rejects_a_weak_fixture_corpus(self):
+        from deploy import priority_1_5_transaction as transaction
+        from scripts import verify_priority_1_5_foundation_physical as verifier
+
+        source_sha = "a" * 40
+        tree_sha = "b" * 40
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            fixtures = root / "fixtures"
+            fixtures.mkdir()
+            gif_path = fixtures / "single.gif"
+            PillowImage.new("RGB", (1, 1), "red").save(
+                gif_path, format="GIF", duration=100,
+            )
+            mp4_path = fixtures / "single.mp4"
+            canonical_mp4 = next(
+                raw for _relative, kind, _digest, raw in transaction._FIXTURE_SPECS
+                if kind == "mp4"
+            )
+            mp4_path.write_bytes(canonical_mp4)
+            mp4_width, mp4_height, mp4_frames, mp4_durations = (
+                transaction._decoded_fixture_metadata(mp4_path, "mp4")
+            )
+            records = []
+            for path, kind, width, height, frames, durations in (
+                (gif_path, "gif", 1, 1, 1, [100]),
+                (mp4_path, "mp4", mp4_width, mp4_height, mp4_frames, mp4_durations),
+            ):
+                records.append({
+                    "path": f"fixtures/{path.name}",
+                    "sha256": hashlib.sha256(path.read_bytes()).hexdigest(),
+                    "size": path.stat().st_size, "kind": kind,
+                    "width": width, "height": height, "frames": frames,
+                    "durations_ms": durations,
+                })
+            manifest_path = root / "physical-fixtures.json"
+            manifest_path.write_bytes(verifier.canonical_json({
+                "version": 1, "boundary": "b1", "source_sha": source_sha,
+                "tree_sha": tree_sha, "fixtures": records,
+            }))
+
+            with self.assertRaisesRegex(ValueError, "fixture corpus"):
+                verifier.load_fixture_manifest(manifest_path, source_sha, tree_sha)
+
+    def test_foundation_physical_verifier_isolates_absolute_systemctl(self):
+        from scripts import verify_priority_1_5_foundation_physical as verifier
+
+        response = types.SimpleNamespace(returncode=0, stdout="active\n", stderr="")
+        with patch.object(verifier.subprocess, "run", return_value=response) as run:
+            self.assertIs(
+                verifier._run_command([
+                    "/usr/bin/systemctl", "is-active", "matrix-web.service",
+                ]),
+                response,
+            )
+        self.assertEqual(run.call_args.args[0], [
+            "/usr/bin/systemctl", "is-active", "matrix-web.service",
+        ])
+        self.assertEqual(run.call_args.kwargs, {
+            "text": True, "capture_output": True, "check": False,
+            "shell": False,
+            "env": {"PATH": "/usr/bin:/bin", "LANG": "C", "LC_ALL": "C"},
+        })
+
     def test_foundation_physical_verifier_binds_identity_and_restores_service(self):
         from deploy import priority_1_5_transaction as transaction
         from scripts import verify_priority_1_5_foundation_physical as verifier
@@ -2524,31 +2588,123 @@ else:
             root = Path(directory)
             fixtures = root / "fixtures"
             fixtures.mkdir()
-            gif_path = fixtures / "timing.gif"
-            frame = PillowImage.new("RGB", (5, 3), "red")
-            frame.save(gif_path, format="GIF", duration=100)
-            fixture = {
-                "path": "fixtures/timing.gif",
-                "sha256": hashlib.sha256(gif_path.read_bytes()).hexdigest(),
-                "size": gif_path.stat().st_size,
-                "kind": "gif", "width": 5, "height": 3,
-                "frames": 1, "durations_ms": [100],
-            }
-            mp4_path = fixtures / "timing.mp4"
-            mp4_path.write_bytes(transaction._MP4)
-            mp4_fixture = {
-                "path": "fixtures/timing.mp4",
-                "sha256": hashlib.sha256(mp4_path.read_bytes()).hexdigest(),
-                "size": mp4_path.stat().st_size,
-                "kind": "mp4", "width": 2, "height": 2,
-                "frames": 1, "durations_ms": [100],
-            }
+            fixture_specs = []
+            for name, size, durations, colours in (
+                ("portrait.gif", (31, 65), [60, 180], ("red", "blue")),
+                ("small.gif", (5, 3), [40, 120], ("green", "yellow")),
+            ):
+                path = fixtures / name
+                frames = [PillowImage.new("RGB", size, colour) for colour in colours]
+                frames[0].save(
+                    path, format="GIF", save_all=True, append_images=frames[1:],
+                    duration=durations, loop=0,
+                )
+                fixture_specs.append((path, "gif", size, durations))
+            mp4_path = fixtures / "landscape.mp4"
+            encoded = subprocess.run([
+                "/usr/bin/ffmpeg", "-nostdin", "-v", "error", "-f", "lavfi",
+                "-i", "testsrc2=size=66x34:rate=10:duration=0.3",
+                "-frames:v", "3", "-c:v", "libx264", "-pix_fmt", "yuv420p",
+                "-y", str(mp4_path),
+            ], capture_output=True, text=True, check=False,
+               env={"PATH": "/usr/bin:/bin", "LANG": "C", "LC_ALL": "C"})
+            self.assertEqual(encoded.returncode, 0, encoded.stderr)
+            fixture_specs.append((mp4_path, "mp4", (66, 34), [100, 100, 100]))
+            fixture_records = []
+            for path, kind, size, durations in sorted(
+                fixture_specs, key=lambda value: value[0].name,
+            ):
+                fixture_records.append({
+                    "path": f"fixtures/{path.name}",
+                    "sha256": hashlib.sha256(path.read_bytes()).hexdigest(),
+                    "size": path.stat().st_size, "kind": kind,
+                    "width": size[0], "height": size[1],
+                    "frames": len(durations), "durations_ms": durations,
+                })
             manifest = {
                 "version": 1, "boundary": "b1", "source_sha": source_sha,
-                "tree_sha": tree_sha, "fixtures": [fixture, mp4_fixture],
+                "tree_sha": tree_sha, "fixtures": fixture_records,
             }
             manifest_path = root / "physical-fixtures.json"
             manifest_path.write_bytes(verifier.canonical_json(manifest))
+
+            real_framework = importlib.import_module("matrix_framework")
+            real_capture = importlib.reload(importlib.import_module("frame_capture"))
+
+            class Canvas:
+                width = 64
+                height = 32
+
+                def Clear(self):
+                    return None
+
+                def SetImage(self, *_args):
+                    return None
+
+            class Hardware:
+                width = 64
+                height = 32
+
+                def __init__(self):
+                    self.submissions = 0
+
+                def SwapOnVSync(self, _canvas):
+                    self.submissions += 1
+                    return Canvas()
+
+            physical = real_framework.Matrix.__new__(real_framework.Matrix)
+            physical.matrix = Hardware()
+            physical.canvas = Canvas()
+            physical._frame_capture = real_capture.FrameCapture(64, 32)
+            physical._frame_capture.register(physical.canvas)
+            physical._capture_fonts = {}
+            physical._publication_guard = None
+            physical._physical_swap_observer = None
+            physical._media_file = lambda _filename: None
+
+            loaded_manifest = verifier.load_fixture_manifest(
+                manifest_path, source_sha, tree_sha,
+            )
+            evidence = verifier.exercise_foundation(physical, loaded_manifest)
+            self.assertEqual(
+                set(evidence["fixture_cases"]),
+                {item["path"] for item in fixture_records},
+            )
+            observed_categories = set()
+            for item in fixture_records:
+                case = evidence["fixture_cases"][item["path"]]
+                observed_categories.update(case["categories"])
+                self.assertEqual(case["durations_ms"], item["durations_ms"])
+                self.assertEqual(set(case["timing_ms"]), {"10.0", "100.0", "400.0"})
+                for rate in (10.0, 100.0, 400.0):
+                    self.assertEqual(
+                        case["timing_ms"][str(rate)],
+                        [delay / (rate / 100.0) for delay in item["durations_ms"]],
+                    )
+                frame_count = item["frames"]
+                self.assertEqual(
+                    case["loop_frame_sha256"][:frame_count],
+                    case["loop_frame_sha256"][frame_count:],
+                )
+                self.assertGreater(len(set(case["frame_sha256"])), 1)
+                self.assertEqual(
+                    set(case["geometry_sha256"]),
+                    {"contain", "cover", "stretch", "manual-negative"},
+                )
+            self.assertTrue(
+                {"small", "odd", "portrait", "landscape", "oversized"}
+                <= observed_categories
+            )
+            self.assertEqual(
+                set(evidence["cancellation"]),
+                {item["path"] for item in fixture_records},
+            )
+            for cancellation in evidence["cancellation"].values():
+                self.assertEqual(cancellation["draws"], 1)
+                self.assertEqual(cancellation["submissions"], 0)
+                self.assertTrue(cancellation["history_unchanged"])
+                self.assertGreater(cancellation["prior_submission_count"], 0)
+
             lock_path = root / "matrix-display.lock"
             lock_path.write_bytes(b"")
             report_path = root / "physical-report.json"
@@ -2574,14 +2730,6 @@ else:
                 def __exit__(self, *_args):
                     return None
 
-            evidence = {
-                "width": 64, "height": 32,
-                "fit_sha256": {"contain": "c" * 64, "cover": "d" * 64,
-                               "stretch": "e" * 64, "manual": "f" * 64},
-                "gif_delay_ms": {"10.0": 1000, "100.0": 100, "400.0": 25},
-                "mp4_delay_ms": {"10.0": 500, "100.0": 50, "400.0": 12.5},
-                "cancelled_before_swap": True,
-            }
             report = verifier.execute(
                 arguments, matrix_factory=lambda: object(),
                 exercise=lambda _matrix, _manifest: evidence,
@@ -2590,6 +2738,7 @@ else:
                 lock_factory=lambda _path: TestLock(),
             )
 
+            self.assertTrue(all(item[0] == "/usr/bin/systemctl" for item in commands))
             self.assertEqual([item[1] for item in commands], [
                 "is-active", "stop", "start", "is-active",
             ])
@@ -2598,10 +2747,22 @@ else:
             self.assertEqual(report["fixture_manifest_sha256"],
                              hashlib.sha256(manifest_path.read_bytes()).hexdigest())
             self.assertEqual(report_path.read_bytes(), verifier.canonical_json(report))
-            verifier.verify_report(report_path.read_bytes(), source_sha, tree_sha)
+            self.assertNotIn(str(root).encode(), report_path.read_bytes())
+            verifier.verify_report(
+                report_path.read_bytes(), source_sha, tree_sha, loaded_manifest,
+            )
+
+            omitted = json.loads(verifier.canonical_json(report))
+            omitted["fixture_cases"].pop(fixture_records[0]["path"])
+            omitted.pop("evidence_sha256")
+            omitted["evidence_sha256"] = hashlib.sha256(
+                verifier.canonical_json(omitted)
+            ).hexdigest()
+            with self.assertRaisesRegex(ValueError, "omits"):
+                verifier.verify_report(omitted, source_sha, tree_sha, loaded_manifest)
 
             tampered_manifest = json.loads(manifest_path.read_bytes())
-            tampered_manifest["fixtures"][1]["width"] = 3
+            tampered_manifest["fixtures"][0]["width"] = 3
             manifest_path.write_bytes(verifier.canonical_json(tampered_manifest))
             with self.assertRaisesRegex(ValueError, "MP4 fixture metadata mismatch"):
                 verifier.load_fixture_manifest(manifest_path, source_sha, tree_sha)
@@ -2618,7 +2779,7 @@ else:
                     version_reader=lambda: "0.3.58-preview",
                     lock_factory=lambda _path: TestLock(),
                 )
-            self.assertIn(("systemctl", "start", "matrix-web.service"), commands)
+            self.assertIn(("/usr/bin/systemctl", "start", "matrix-web.service"), commands)
 
             unsafe_lock = root / "unsafe-lock"
             unsafe_lock.symlink_to(lock_path)

@@ -65,13 +65,226 @@ PUBLIC_FINAL_KEYS = {
     "release_manifest_sha256", "baseline_manifest_sha256", "status",
 }
 
-# Generated once with a bit-exact one-frame ffmpeg invocation.  Embedding makes
-# the committed-object builder independent of host encoders and their metadata.
-_GIF = base64.b64decode("R0lGODlhAQABAIAAAAAAAP///ywAAAAAAQABAAACAUwAOw==")
-_MP4 = base64.b64decode(
-    "AAAAIGZ0eXBpc29tAAACAGlzb21pc28yYXZjMW1wNDEAAALybW9vdgAAAGxtdmhkAAAAAAAAAAAAAAAAAAAD6AAAAGQAAQAAAQAAAAAAAAAAAAAAAAEAAAAAAAAAAAAAAAAAAAABAAAAAAAAAAAAAAAAAABAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAgAAAkF0cmFrAAAAXHRraGQAAAADAAAAAAAAAAAAAAABAAAAAAAAAGQAAAAAAAAAAAAAAAAAAAAAAAEAAAAAAAAAAAAAAAAAAAABAAAAAAAAAAAAAAAAAABAAAAAAAIAAAACAAAAAAAkZWR0cwAAABxlbHN0AAAAAAAAAAEAAABkAAAAAAABAAAAAAG5bWRpYQAAACBtZGhkAAAAAAAAAAAAAAAAAAAoAAAABABVxAAAAAAALWhkbHIAAAAAAAAAAHZpZGUAAAAAAAAAAAAAAABWaWRlb0hhbmRsZXIAAAABZG1pbmYAAAAUdm1oZAAAAAEAAAAAAAAAAAAAACRkaW5mAAAAHGRyZWYAAAAAAAAAAQAAAAx1cmwgAAAAAQAAASRzdGJsAAAAwHN0c2QAAAAAAAAAAQAAALBhdmMxAAAAAAAAAAEAAAAAAAAAAAAAAAAAAAAAAAIAAgBIAAAASAAAAAAAAAABDExhdmMgbGlieDI2NAAAAAAAAAAAAAAAAAAAAAAAAAAAGP//AAAANmF2Y0MBZAAK/+EAGWdkAAqs2V+IiMBEAAADAAQAAAMAUDxIllgBAAZo6+PLIsD9+PgAAAAAEHBhc3AAAAABAAAAAQAAABRidHJ0AAAAAAAA2xAAAAAAAAAAGHN0dHMAAAAAAAAAAQAAAAEAAAQAAAAAHHN0c2MAAAAAAAAAAQAAAAEAAAABAAAAAQAAABRzdHN6AAAAAAAAAr0AAAABAAAAFHN0Y28AAAAAAAAAAQAAAyIAAAA9dWR0YQAAADVtZXRhAAAAAAAAACFoZGxyAAAAAAAAAABtZGlyYXBwbAAAAAAAAAAAAAAAAAhpbHN0AAAACGZyZWUAAALFbWRhdAAAAqAGBf//nNxF6b3m2Ui3lizYINkj7u94MjY0IC0gY29yZSAxNjUgLSBILjI2NC9NUEVHLTQgQVZDIGNvZGVjIC0gQ29weWxlZnQgMjAwMy0yMDI1IC0gaHR0cDovL3d3dy52aWRlb2xhbi5vcmcveDI2NC5odG1sIC0gb3B0aW9uczogY2FiYWM9MSByZWY9MyBkZWJsb2NrPTE6MDowIGFuYWx5c2U9MHgzOjB4MTEzIG1lPWhleCBzdWJtZT03IHBzeT0xIHBzeV9yZD0xLjAwOjAuMDAgbWl4ZWRfcmVmPTEgbWVfcmFuZ2U9MTYgY2hyb21hX21lPTEgdHJlbGxpcz0xIDh4OGRjdD0xIGNxbT0wIGRlYWR6b25lPTIxLDExIGZhc3RfcHNraXA9MSBjaHJvbWFfcXBfb2Zmc2V0PS0yIHRocmVhZHM9MSBsb29rYWhlYWRfdGhyZWFkcz0xIHNsaWNlZF90aHJlYWRzPTAgbnI9MCBkZWNpbWF0ZT0xIGludGVybGFjZWQ9MCBibHVyYXlfY29tcGF0PTAgY29uc3RyYWluZWRfaW50cmE9MCBiZnJhbWVzPTMgYl9weXJhbWlkPTIgYl9hZGFwdD0xIGJfYmlhcz0wIGRpcmVjdD0xIHdlaWdodGI9MSBvcGVuX2dvcD0wIHdlaWdodHA9MiBrZXlpbnQ9MjUwIGtleWludF9taW49MTAgc2NlbmVjdXQ9NDAgaW50cmFfcmVmcmVzaD0wIHJjX2xvb2thaGVhZD00MCByYz1jcmYgbWJ0cmVlPTEgY3JmPTIzLjAgcWNvbXA9MC42MCBxcG1pbj0wIHFwbWF4PTY5IHFwc3RlcD00IGlwX3JhdGlvPTEuNDAgYXE9MToxLjAwAIAAAAAVZYiEADf//uED+BTPe/mMat1RZaZB"
+# Canonical multi-frame media, generated once and embedded so build-b1 never
+# depends on a host encoder, Pillow writer, or encoder-version metadata.
+_FIXTURE_SPECS = (
+    ('fixtures/b1-landscape-loop.gif', 'gif', 'a9badf8d2309a4a7d0cf20b16c3249c9934c5ea47f37a8caaa266e7086ab2b96', base64.b64decode(
+        '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'
+        'XL2CFUtWQAA7'
+    )),
+    ('fixtures/b1-landscape.mp4', 'mp4', '93a4b38eaf4e1fb6036c5f735958637bcb954bc1f3897f843bc84459051ae7de', base64.b64decode(
+        'AAAAJGZ0eXBpc29tAAACAGlzb21pc282aXNvMmF2YzFtcDQxAAACvW1vb3YAAABsbXZoZAAAAAAAAAAAAAAAAAAAA+gAAAAAAAEA'
+        'AAEAAAAAAAAAAAAAAAABAAAAAAAAAAAAAAAAAAAAAQAAAAAAAAAAAAAAAAAAQAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA'
+        'AAIAAAHkdHJhawAAAFx0a2hkAAAAAwAAAAAAAAAAAAAAAQAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAABAAAAAAAAAAAAAAAAAAAA'
+        'AQAAAAAAAAAAAAAAAAAAQAAAAAALAAAABQAAAAABgG1kaWEAAAAgbWRoZAAAAAAAAAAAAAAAAAAAKAAAAAAAVcQAAAAAAC1oZGxy'
+        'AAAAAAAAAAB2aWRlAAAAAAAAAAAAAAAAVmlkZW9IYW5kbGVyAAAAASttaW5mAAAAFHZtaGQAAAABAAAAAAAAAAAAAAAkZGluZgAA'
+        'ABxkcmVmAAAAAAAAAAEAAAAMdXJsIAAAAAEAAADrc3RibAAAAJ9zdHNkAAAAAAAAAAEAAACPYXZjMQAAAAAAAAABAAAAAAAAAAAA'
+        'AAAAAAAAAAALAAUASAAAAEgAAAAAAAAAAQ9MYXZjIGxpYngyNjRyZ2IAAAAAAAAAAAAAAAAAAAAAABj//wAAADlhdmNDAfQACv/h'
+        'ABxn9AAKkcmEX5oybgQEAIAAAAMAgAAABQeJEwjAAQAGaOhDAa8s//j4AAAAABBzdHRzAAAAAAAAAAAAAAAQc3RzYwAAAAAAAAAA'
+        'AAAAFHN0c3oAAAAAAAAAAAAAAAAAAAAQc3RjbwAAAAAAAAAAAAAAKG12ZXgAAAAgdHJleAAAAAAAAAABAAAAAQAAAAAAAAAAAAAA'
+        'AAAAAD11ZHRhAAAANW1ldGEAAAAAAAAAIWhkbHIAAAAAAAAAAG1kaXJhcHBsAAAAAAAAAAAAAAAACGlsc3QAAAB8bW9vZgAAABBt'
+        'ZmhkAAAAAAAAAAEAAABkdHJhZgAAACR0ZmhkAAAAOQAAAAEAAAAAAAAC4QAACAAAAALTAQEAAAAAABR0ZmR0AQAAAAAAAAAAAAAA'
+        'AAAAJHRydW4AAAIFAAAAAwAAAIQCAAAAAAAC0wAAANAAAADZAAAEhG1kYXQAAAIABgX//NxF6b3m2Ui3lizYINkj7u94MjY0IC0g'
+        'Y29yZSAxNjUgLSBILjI2NC9NUEVHLTQgQVZDIGNvZGVjIC0gQ29weWxlZnQgMjAwMy0yMDI1IC0gaHR0cDovL3d3dy52aWRlb2xh'
+        'bi5vcmcveDI2NC5odG1sIC0gb3B0aW9uczogY2FiYWM9MSByZWY9MTYgZGVibG9jaz0xOjA6MCBhbmFseXNlPTB4MzoweDEzMyBt'
+        'ZT11bWggc3VibWU9OSBwc3k9MCBtaXhlZF9yZWY9MSBtZV9yYW5nZT0yNCBjaHJvbWFfbWU9MSB0cmVsbGlzPTAgOHg4ZGN0PTEg'
+        'Y3FtPTAgZGVhZHpvbmU9MjEsMTEgZmFzdF9wc2tpcD0wIGNocm9tYV9xcF9vZmZzZXQ9MCB0aHJlYWRzPTEgbG9va2FoZWFkX3Ro'
+        'cmVhZHM9MSBzbGljZWRfdGhyZWFkcz0wIG5yPTAgZGVjaW1hdGU9MSBpbnRlcmxhY2VkPTAgYmx1cmF5X2NvbXBhdD0wIGNvbnN0'
+        'cmFpbmVkX2ludHJhPTAgYmZyYW1lcz0wIHdlaWdodHA9MiBrZXlpbnQ9OTk5OSBrZXlpbnRfbWluPTUgc2NlbmVjdXQ9NDAgaW50'
+        'cmFfcmVmcmVzaD0wIHJjPWNxcCBtYnRyZWU9MCBxcD0wAIAAAADLZYiCV9hfX+O/lINK8MT31rtH3pe32is3XK1rrmuVaB64Mer4'
+        'Btvx0oaACPymw3C9DBtvYhcDGi1j+MK7RXQAjDTMtFDpIpbQPO1TmPSEwazFA/QsdKj8XvPa6sIAvmRXTtt/sorxHhMKf909YX0u'
+        'aWqfNuy8yiB4qp/8oZgDWvvmOOLF7gFhfVIItKEShzVBTtvBzxssgubtscWmjec7+R4SH8hfxcMb6pB2qZTGBPRlUNUwKxeKxOPE'
+        '+XC1C652ZprrG/hzuLovP8EAAADMQYiFX9hfX+O/lINLixxbbdEgayd81TKsckITXQWhlfNvLK1/a9V1ZXAwTlT7X5o8ilNenNiy'
+        'MJVa07EpYuPOACsf+HOCARVE9Qxr8wx0iAbuDtdauv/qJwkluQnksl3RLkJd3xlF478SyrCQu+zxnsWHOu5Tf+Cb/k6NTnPzafQU'
+        '6FlCgZoIccWNBwYc7l+vgJjbxQccE3eHec/LYr+6ZU7x23f2Lyl/VRx81F92okaQ6Gqw2MovFYnHifLhahdc7M011jfw53F0Xn+A'
+        'AAAA1UGIiV/YX1/jv5SDS6M94A+KWVNZqnvkwvpZ1RirOXrVle8e11V1ZULkPU4nRGATXMqZP9u4M/li19cBiy+kNxVFIpj0ToYC'
+        '9tIltvCR/EzLNEF7liekg6nV3JSW3sQSbytkOI2mTusQVky8p8SyrXiibFksZ7G0UwtNuCiyX/rq4ZTlCgZoIccWNGYWzaVQ9V91'
+        'L5yxQ5TAAwRmy7iX87pIWPOMTplTvHbc+LEzpRSjljv6JwQxM23nmwf6tLqxOSx+KlV81C658sryl3nG/hzuLovP8QAAAENtZnJh'
+        'AAAAK3RmcmEBAAAAAAAAAQAAAAAAAAABAAAAAAAAAAAAAAAAAAAC4QEBAQAAABBtZnJvAAAAAAAAAEM='
+    )),
+    ('fixtures/b1-portrait-finite.gif', 'gif', '4ac60e3e0b6d5dd62113c45deda6d3ada52e4f9c362ce17b348d31b9941acbd9', base64.b64decode(
+        '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'
+    )),
+    ('fixtures/b1-portrait.mp4', 'mp4', 'f462de666a87cc665d4b6786206ff04ecae9a4375e9dc8a1aa3d61653123f8fc', base64.b64decode(
+        'AAAAJGZ0eXBpc29tAAACAGlzb21pc282aXNvMmF2YzFtcDQxAAACvm1vb3YAAABsbXZoZAAAAAAAAAAAAAAAAAAAA+gAAAAAAAEA'
+        'AAEAAAAAAAAAAAAAAAABAAAAAAAAAAAAAAAAAAAAAQAAAAAAAAAAAAAAAAAAQAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA'
+        'AAIAAAHldHJhawAAAFx0a2hkAAAAAwAAAAAAAAAAAAAAAQAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAABAAAAAAAAAAAAAAAAAAAA'
+        'AQAAAAAAAAAAAAAAAAAAQAAAAAAFAAAACQAAAAABgW1kaWEAAAAgbWRoZAAAAAAAAAAAAAAAAAAAKAAAAAAAVcQAAAAAAC1oZGxy'
+        'AAAAAAAAAAB2aWRlAAAAAAAAAAAAAAAAVmlkZW9IYW5kbGVyAAAAASxtaW5mAAAAFHZtaGQAAAABAAAAAAAAAAAAAAAkZGluZgAA'
+        'ABxkcmVmAAAAAAAAAAEAAAAMdXJsIAAAAAEAAADsc3RibAAAAKBzdHNkAAAAAAAAAAEAAACQYXZjMQAAAAAAAAABAAAAAAAAAAAA'
+        'AAAAAAAAAAAFAAkASAAAAEgAAAAAAAAAAQ9MYXZjIGxpYngyNjRyZ2IAAAAAAAAAAAAAAAAAAAAAABj//wAAADphdmNDAfQACv/h'
+        'AB1n9AAKkcmEX4yIm4EBACAAAAMAIAAAAwKB4kTCMAEABmjoQwGvLP/4+AAAAAAQc3R0cwAAAAAAAAAAAAAAEHN0c2MAAAAAAAAA'
+        'AAAAABRzdHN6AAAAAAAAAAAAAAAAAAAAEHN0Y28AAAAAAAAAAAAAAChtdmV4AAAAIHRyZXgAAAAAAAAAAQAAAAEAAAAAAAAAAAAA'
+        'AAAAAAA9dWR0YQAAADVtZXRhAAAAAAAAACFoZGxyAAAAAAAAAABtZGlyYXBwbAAAAAAAAAAAAAAAAAhpbHN0AAAAgG1vb2YAAAAQ'
+        'bWZoZAAAAAAAAAABAAAAaHRyYWYAAAAkdGZoZAAAADkAAAABAAAAAAAAAuIAAAQAAAACzQEBAAAAAAAUdGZkdAEAAAAAAAAAAAAA'
+        'AAAAACh0cnVuAAACBQAAAAQAAACIAgAAAAAAAs0AAADGAAAA2AAAANEAAAVEbWRhdAAAAgEGBf/93EXpvebZSLeWLNgg2SPu73gy'
+        'NjQgLSBjb3JlIDE2NSAtIEguMjY0L01QRUctNCBBVkMgY29kZWMgLSBDb3B5bGVmdCAyMDAzLTIwMjUgLSBodHRwOi8vd3d3LnZp'
+        'ZGVvbGFuLm9yZy94MjY0Lmh0bWwgLSBvcHRpb25zOiBjYWJhYz0xIHJlZj0xNiBkZWJsb2NrPTE6MDowIGFuYWx5c2U9MHgzOjB4'
+        'MTMzIG1lPXVtaCBzdWJtZT05IHBzeT0wIG1peGVkX3JlZj0xIG1lX3JhbmdlPTI0IGNocm9tYV9tZT0xIHRyZWxsaXM9MCA4eDhk'
+        'Y3Q9MSBjcW09MCBkZWFkem9uZT0yMSwxMSBmYXN0X3Bza2lwPTAgY2hyb21hX3FwX29mZnNldD0wIHRocmVhZHM9MSBsb29rYWhl'
+        'YWRfdGhyZWFkcz0xIHNsaWNlZF90aHJlYWRzPTAgbnI9MCBkZWNpbWF0ZT0xIGludGVybGFjZWQ9MCBibHVyYXlfY29tcGF0PTAg'
+        'Y29uc3RyYWluZWRfaW50cmE9MCBiZnJhbWVzPTAgd2VpZ2h0cD0yIGtleWludD05OTk5IGtleWludF9taW49MTAgc2NlbmVjdXQ9'
+        'NDAgaW50cmFfcmVmcmVzaD0wIHJjPWNxcCBtYnRyZWU9MCBxcD0wAIAAAADEZYiCV9fjwAr/19mQeLwwgDqDJ0lk0ZZuuVrXXNcq'
+        '0D1wY9XsuB0oaACPy/XQP3YjzX8xcbL5XnNzqbAxkKr/UQer2lEySeyfxhoAXEF5rfbr8XDU8wG2VPnfAi6BSlvBm+R65kVJtf5d'
+        'p4KKAMk5SKTcQ2ZUPUm/eA9wIv5ux/7oj6GnEdoSiVREH1Si1HE3lRsuFLmdKvykWjg6kMieme5O9dBSrhA+L1f5gdMqd47b4stf'
+        'p6ABElOCsy/mjnJyZSNb+QAAAMJBiIVf1+PACv/X2ZFgdTrFlBHVPgqNlBJsI1vFWsGwqZe1SWGA7gdKGgbjy0Qphw5Q4ru/+B0m'
+        'IfwT0Z+5ljm6a7ir2lK3tp1yyskG2TN5Lc6tHWYspcDU61bg56lkEN+lQ7idf3A6794idQ+Q+vpekh5WDHzeGUlLLi9tXll//u2N'
+        'rSV1bIwMQk1lkJvzSe3wE30hhkitu+UyeXTQRQol5wTkZX5exX+YHTKneO2+LLX6egARJTgrMv5o5ycmUjW/gAAAANRBiIlf1+PA'
+        'fxviBQujPeAPillTWap75ML6WdUYqzl61ZXvHtbI04GCcqfBOiLkgdx35fGM9AVSrdIDJ+zlOZVbxoXtKJkk+2BTeOcbH8gLT4mX'
+        '7TQikUx6J0MBe2kS23hI/iZlmiC9yxPSQdTq7kpLb3qu/y+m/pY+t76kJMvDRI5Ex+xnC/lz9eVJohv/1zMqMtFYGaCHF1GnFxd0'
+        'mLzGjMLZtKoeq+6l85YocpgAYIzZdxL+d0kLHozK/uFchBOxFuB0kw6n3+n9TTs2sU0iSXL/8QAAAM1BiI1f1+PAfxviBQtRS0Fk'
+        '5UWUaFO30rHoAYMNGX/DsxBotVYl0fmlst46OyBCi8TI/z+GbRZH4riRL3ap87kEfLpfmU2K17DqXcbH77EpNZ15zl2DTHszxSDg'
+        '4J+KPdCjh7E0y0fTFC0LYev8uqPhCc/Iy9bse2smWsPVbXaPJ2O2l9j/uZqU3NFJfHSdVVaywL1f1PfgSTnib6WQOsbRyUhTHCrB'
+        '5AFOFwFHmLZhXvetXTt6NtAN66/zA6ZU7x23xZa/T0ACJKcFdf+AAAAAQ21mcmEAAAArdGZyYQEAAAAAAAABAAAAAAAAAAEAAAAA'
+        'AAAAAAAAAAAAAALiAQEBAAAAEG1mcm8AAAAAAAAAQw=='
+    )),
+    ('fixtures/b1-small-loop.gif', 'gif', 'e9e51ceb101da4c184c88b6ee9fe84aebedb0dd57371631907cc2edfd2b67ab9', base64.b64decode(
+        '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'
+        'fKlh3caWPuPLnwgHAA0dQpQoIAA7'
+    )),
+    ('fixtures/b1-small.mp4', 'mp4', '6ee2813bb3ec914898e3c710f189fe8f73cb29cbcbff3e91eb01e4758ff858eb', base64.b64decode(
+        'AAAAJGZ0eXBpc29tAAACAGlzb21pc282aXNvMmF2YzFtcDQxAAACvW1vb3YAAABsbXZoZAAAAAAAAAAAAAAAAAAAA+gAAAAAAAEA'
+        'AAEAAAAAAAAAAAAAAAABAAAAAAAAAAAAAAAAAAAAAQAAAAAAAAAAAAAAAAAAQAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA'
+        'AAIAAAHkdHJhawAAAFx0a2hkAAAAAwAAAAAAAAAAAAAAAQAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAABAAAAAAAAAAAAAAAAAAAA'
+        'AQAAAAAAAAAAAAAAAAAAQAAAAAADAAAAAwAAAAABgG1kaWEAAAAgbWRoZAAAAAAAAAAAAAAAAAAAMgAAAAAAVcQAAAAAAC1oZGxy'
+        'AAAAAAAAAAB2aWRlAAAAAAAAAAAAAAAAVmlkZW9IYW5kbGVyAAAAASttaW5mAAAAFHZtaGQAAAABAAAAAAAAAAAAAAAkZGluZgAA'
+        'ABxkcmVmAAAAAAAAAAEAAAAMdXJsIAAAAAEAAADrc3RibAAAAJ9zdHNkAAAAAAAAAAEAAACPYXZjMQAAAAAAAAABAAAAAAAAAAAA'
+        'AAAAAAAAAAADAAMASAAAAEgAAAAAAAAAAQ9MYXZjIGxpYngyNjRyZ2IAAAAAAAAAAAAAAAAAAAAAABj//wAAADlhdmNDAfQACv/h'
+        'ABxn9AAKkcmEX46Om4EBACAAAAMAIAAABkHiRMIwAQAGaOhDAa8s//j4AAAAABBzdHRzAAAAAAAAAAAAAAAQc3RzYwAAAAAAAAAA'
+        'AAAAFHN0c3oAAAAAAAAAAAAAAAAAAAAQc3RjbwAAAAAAAAAAAAAAKG12ZXgAAAAgdHJleAAAAAAAAAABAAAAAQAAAAAAAAAAAAAA'
+        'AAAAAD11ZHRhAAAANW1ldGEAAAAAAAAAIWhkbHIAAAAAAAAAAG1kaXJhcHBsAAAAAAAAAAAAAAAACGlsc3QAAAB8bW9vZgAAABBt'
+        'ZmhkAAAAAAAAAAEAAABkdHJhZgAAACR0ZmhkAAAAOQAAAAEAAAAAAAAC4QAAAgAAAAJoAQEAAAAAABR0ZmR0AQAAAAAAAAAAAAAA'
+        'AAAAJHRydW4AAAIFAAAAAwAAAIQCAAAAAAACaAAAAE8AAABnAAADJm1kYXQAAAIBBgX//dxF6b3m2Ui3lizYINkj7u94MjY0IC0g'
+        'Y29yZSAxNjUgLSBILjI2NC9NUEVHLTQgQVZDIGNvZGVjIC0gQ29weWxlZnQgMjAwMy0yMDI1IC0gaHR0cDovL3d3dy52aWRlb2xh'
+        'bi5vcmcveDI2NC5odG1sIC0gb3B0aW9uczogY2FiYWM9MSByZWY9MTYgZGVibG9jaz0xOjA6MCBhbmFseXNlPTB4MzoweDEzMyBt'
+        'ZT11bWggc3VibWU9OSBwc3k9MCBtaXhlZF9yZWY9MSBtZV9yYW5nZT0yNCBjaHJvbWFfbWU9MSB0cmVsbGlzPTAgOHg4ZGN0PTEg'
+        'Y3FtPTAgZGVhZHpvbmU9MjEsMTEgZmFzdF9wc2tpcD0wIGNocm9tYV9xcF9vZmZzZXQ9MCB0aHJlYWRzPTEgbG9va2FoZWFkX3Ro'
+        'cmVhZHM9MSBzbGljZWRfdGhyZWFkcz0wIG5yPTAgZGVjaW1hdGU9MSBpbnRlcmxhY2VkPTAgYmx1cmF5X2NvbXBhdD0wIGNvbnN0'
+        'cmFpbmVkX2ludHJhPTAgYmZyYW1lcz0wIHdlaWdodHA9MiBrZXlpbnQ9OTk5OSBrZXlpbnRfbWluPTI1IHNjZW5lY3V0PTQwIGlu'
+        'dHJhX3JlZnJlc2g9MCByYz1jcXAgbWJ0cmVlPTAgcXA9MACAAAAAX2WIglfYX2pQp8a4Ux4HUHCbllrkGwczTdLxpfVfcllOFrow'
+        'g1bWSCKQ0TaZT+VzbI38L2V6PAwRo5ru2gfH3N5K7gL1LBfvvWjIwJtUBho5wXIEjq3bYZuBLT5LGH/9AAAAS0GIhV/YX2pQp8a3'
+        '+Ndl7mYNnZQEIE4aGEnGsdLbyUwqtwB6fm8lKJj6C4N7qT82inB0EN+lQ7oeFrDsh86M8umgXEvOCcjK/L9//gAAAGNBiIlf2F9q'
+        'UKfGt/lK2nQwvYqenKJeVH4uFAphOe2Spqpjnx4ObyXZNHF8Z1OkMTD3HVXD+CzcXMeXHo6GLYH0IRfYexdZEil4JtKnyJ8lb85Y'
+        'ocpgAYItndxL+d0kLHo///EAAABDbWZyYQAAACt0ZnJhAQAAAAAAAAEAAAAAAAAAAQAAAAAAAAAAAAAAAAAAAuEBAQEAAAAQbWZy'
+        'bwAAAAAAAABD'
+    )),
 )
 
+
+def _canonical_fixtures():
+    fixtures = []
+    for path, kind, expected_sha256, data in _FIXTURE_SPECS:
+        if _sha(data) != expected_sha256:
+            raise RuntimeError("embedded fixture digest mismatch")
+        fixtures.append((path, kind, data))
+    return fixtures
 
 class InjectedCrash(RuntimeError):
     """Deterministic test-only interruption raised at a durable boundary."""
@@ -152,6 +365,98 @@ def _read_regular(path: Path, *, max_bytes: int = 256 * 1024 * 1024):
         return b"".join(chunks), after
     finally:
         os.close(fd)
+
+
+def _read_descriptor(fd: int, *, max_bytes: int = 256 * 1024 * 1024):
+    metadata = os.fstat(fd)
+    if not stat.S_ISREG(metadata.st_mode) or metadata.st_nlink != 1:
+        raise ValueError("unsafe regular file descriptor")
+    os.lseek(fd, 0, os.SEEK_SET)
+    chunks, total = [], 0
+    while True:
+        chunk = os.read(fd, min(1024 * 1024, max_bytes + 1 - total))
+        if not chunk:
+            break
+        chunks.append(chunk)
+        total += len(chunk)
+        if total > max_bytes:
+            raise ValueError("file descriptor exceeds bound")
+    after = os.fstat(fd)
+    if (metadata.st_dev, metadata.st_ino, metadata.st_size, metadata.st_mtime_ns) != (
+            after.st_dev, after.st_ino, after.st_size, after.st_mtime_ns):
+        raise ValueError("file descriptor changed while read")
+    return b"".join(chunks), after
+
+
+def _open_directory(path: Path) -> int:
+    return os.open(path, os.O_RDONLY | os.O_DIRECTORY | os.O_CLOEXEC | os.O_NOFOLLOW)
+
+
+def _open_parent_at(root_fd: int, relative: str) -> tuple[int, str]:
+    parts = PurePosixPath(_safe_relative(relative)).parts
+    current = os.dup(root_fd)
+    try:
+        for part in parts[:-1]:
+            following = os.open(
+                part, os.O_RDONLY | os.O_DIRECTORY | os.O_CLOEXEC | os.O_NOFOLLOW,
+                dir_fd=current,
+            )
+            os.close(current)
+            current = following
+        return current, parts[-1]
+    except BaseException:
+        os.close(current)
+        raise
+
+
+def _read_at(parent_fd: int, name: str, *, allow_absent: bool = False):
+    try:
+        fd = os.open(name, os.O_RDONLY | os.O_CLOEXEC | os.O_NOFOLLOW | os.O_NONBLOCK,
+                     dir_fd=parent_fd)
+    except FileNotFoundError:
+        if allow_absent:
+            return None
+        raise
+    try:
+        return _read_descriptor(fd)
+    finally:
+        os.close(fd)
+
+
+def _atomic_write_at(parent_fd: int, name: str, data: bytes, mode: int, *, uid: int, gid: int):
+    temporary = f".{name}.{os.getpid()}.{secrets.token_hex(8)}"
+    fd = os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_CLOEXEC | os.O_NOFOLLOW,
+                 mode, dir_fd=parent_fd)
+    published = False
+    try:
+        view = memoryview(data)
+        while view:
+            count = os.write(fd, view)
+            if count <= 0:
+                raise OSError("short durable write")
+            view = view[count:]
+        os.fchmod(fd, mode)
+        os.fchown(fd, uid, gid)
+        os.fsync(fd)
+        os.close(fd)
+        fd = -1
+        os.rename(temporary, name, src_dir_fd=parent_fd, dst_dir_fd=parent_fd)
+        published = True
+        os.fsync(parent_fd)
+    finally:
+        if fd >= 0:
+            os.close(fd)
+        if not published:
+            try:
+                os.unlink(temporary, dir_fd=parent_fd)
+            except FileNotFoundError:
+                pass
+
+
+def _same_namespace_inode(fd: int, path: Path) -> bool:
+    opened = os.fstat(fd)
+    current = path.lstat()
+    return (opened.st_dev, opened.st_ino) == (current.st_dev, current.st_ino)
 
 
 def _fsync_dir(path: Path):
@@ -241,42 +546,29 @@ def _state_digest(state: dict) -> str:
     return _sha(canonical_json(unsigned))
 
 
-def _publish_state(path: Path, state: dict):
-    """Populate self-authority from one fresh inode, then rename that inode once."""
-    parent = path.parent
-    temporary = parent / f".{path.name}.{os.getpid()}.{secrets.token_hex(8)}"
-    fd = os.open(temporary, os.O_RDWR | os.O_CREAT | os.O_EXCL | os.O_CLOEXEC | os.O_NOFOLLOW, 0o600)
-    published = False
+def _populate_state_fd(path: Path, state: dict, fd: int):
+    """Populate the already locked, sole durable state inode."""
+    metadata = os.fstat(fd)
+    state["self"] = {
+        "path": str(path), "dev": metadata.st_dev, "ino": metadata.st_ino,
+        "uid": metadata.st_uid, "gid": metadata.st_gid, "mode": "0600", "sha256": "",
+    }
+    state["self"]["sha256"] = _state_digest(state)
+    raw = canonical_json(state)
+    os.ftruncate(fd, 0)
+    os.lseek(fd, 0, os.SEEK_SET)
+    view = memoryview(raw)
+    while view:
+        count = os.write(fd, view)
+        if count <= 0:
+            raise OSError("short durable state write")
+        view = view[count:]
+    os.fsync(fd)
+    parent_fd = _open_directory(path.parent)
     try:
-        os.fchmod(fd, 0o600)
-        os.fchown(fd, os.geteuid(), os.getegid())
-        metadata = os.fstat(fd)
-        state["self"] = {
-            "path": str(path), "dev": metadata.st_dev, "ino": metadata.st_ino,
-            "uid": metadata.st_uid, "gid": metadata.st_gid, "mode": "0600", "sha256": "",
-        }
-        state["self"]["sha256"] = _state_digest(state)
-        raw = canonical_json(state)
-        view = memoryview(raw)
-        while view:
-            count = os.write(fd, view)
-            if count <= 0:
-                raise OSError("short durable state write")
-            view = view[count:]
-        os.fsync(fd)
-        os.close(fd)
-        fd = -1
-        os.replace(temporary, path)
-        published = True
-        _fsync_dir(parent)
+        os.fsync(parent_fd)
     finally:
-        if fd >= 0:
-            os.close(fd)
-        if not published:
-            try:
-                temporary.unlink()
-            except FileNotFoundError:
-                pass
+        os.close(parent_fd)
 
 
 def _mkdir_fresh(path: Path, mode: int = 0o700):
@@ -294,7 +586,8 @@ def _git(repository: Path, *args: str, binary: bool = False):
     result = subprocess.run(
         [GIT, "-C", str(repository), *args], check=True, capture_output=True,
         text=not binary, timeout=30, shell=False,
-        env={"PATH": "/usr/bin:/bin", "LANG": "C", "LC_ALL": "C", "GIT_CONFIG_NOSYSTEM": "1"},
+        env={"PATH": "/usr/bin:/bin", "LANG": "C", "LC_ALL": "C", "GIT_CONFIG_NOSYSTEM": "1",
+             "GIT_NO_REPLACE_OBJECTS": "1", "GIT_OPTIONAL_LOCKS": "0"},
     )
     return result.stdout
 
@@ -309,6 +602,52 @@ def _commit(repository: Path, value: str) -> tuple[str, str]:
     if SHA1.fullmatch(tree) is None:
         raise ValueError("commit tree identity is invalid")
     return commit, tree
+
+
+def _approved_baseline_snapshot(destination: Path, release: dict, baseline_sha: str,
+                                baseline_tree_sha: str, owner: dict) -> list[dict]:
+    """Prove changed predecessors from Git objects, then capture matching live bytes."""
+    git_dir = destination / ".git"
+    if not git_dir.is_dir() or git_dir.is_symlink():
+        raise ValueError("destination must be a preserved Git checkout")
+    commit, tree = _commit(destination, baseline_sha)
+    if (commit, tree) != (baseline_sha, baseline_tree_sha):
+        raise ValueError("destination Git object database lacks the approved baseline tree")
+    if _git(destination, "rev-parse", "--verify", "HEAD^{commit}").strip() != baseline_sha:
+        raise ValueError("destination checkout is not at the approved baseline commit")
+    root_fd = _open_directory(destination)
+    records = []
+    try:
+        for entry in release["files"]:
+            relative = entry["path"]
+            line = _git(destination, "ls-tree", baseline_sha, "--", relative).strip()
+            parent_fd, name = _open_parent_at(root_fd, relative)
+            try:
+                live = _read_at(parent_fd, name, allow_absent=True)
+            finally:
+                os.close(parent_fd)
+            if not line:
+                if live is not None:
+                    raise ValueError("live predecessor does not equal approved baseline")
+                records.append({"path": relative, "present": False, "sha256": None,
+                                "size": 0, "mode": None, "data": None})
+                continue
+            mode_value, object_type, object_sha, object_path = line.split(None, 3)
+            if object_type != "blob" or object_path != relative or mode_value not in ("100644", "100755"):
+                raise ValueError("approved baseline path object is unsupported")
+            expected_data = _git(destination, "cat-file", "blob", object_sha, binary=True)
+            expected_mode = "0755" if mode_value == "100755" else "0644"
+            if live is None:
+                raise ValueError("live predecessor does not equal approved baseline")
+            data, metadata = live
+            if (data, f"{stat.S_IMODE(metadata.st_mode):04o}", metadata.st_uid, metadata.st_gid) != (
+                    expected_data, expected_mode, owner["uid"], owner["gid"]):
+                raise ValueError("live predecessor does not equal approved baseline")
+            records.append({"path": relative, "present": True, "sha256": _sha(data),
+                            "size": len(data), "mode": expected_mode, "data": data})
+    finally:
+        os.close(root_fd)
+    return records
 
 
 def _manifest_file(path: Path, expected_path: str | None = None):
@@ -556,7 +895,7 @@ def build_b1(arguments) -> dict[str, object]:
             destination.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
             _durable_new_file(destination, data, int(mode, 8))
             records.append({"mode": mode, "path": relative, "sha256": _sha(data), "size": len(data)})
-        fixture_specs = (("fixtures/b1-reference.gif", "gif", _GIF), ("fixtures/b1-reference.mp4", "mp4", _MP4))
+        fixture_specs = _canonical_fixtures()
         fixture_records = []
         for relative, kind, data in fixture_specs:
             path = stage.joinpath(*PurePosixPath(relative).parts)
@@ -738,9 +1077,10 @@ class SystemdService:
 
 
 class Priority15Transaction:
-    def __init__(self, state_path: Path, state: dict, *, service=None):
+    def __init__(self, state_path: Path, state: dict, *, service=None, state_fd: int = -1):
         self.state_path = state_path
         self.state = state
+        self._state_fd = state_fd
         self.service = service or SystemdService(state["service"])
         self.release_manifest = None
         self.baseline_manifest = None
@@ -748,7 +1088,20 @@ class Priority15Transaction:
     @classmethod
     def load(cls, state_path, *, service=None):
         path = _absolute(str(state_path), "state", must_exist=True)
-        raw, metadata = _read_regular(path)
+        fd = os.open(path, os.O_RDWR | os.O_CLOEXEC | os.O_NOFOLLOW | os.O_NONBLOCK)
+        try:
+            try:
+                fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            except BlockingIOError as error:
+                raise RuntimeError("transaction state is locked by another command") from error
+            metadata = os.fstat(fd)
+            current = path.lstat()
+            if (metadata.st_dev, metadata.st_ino) != (current.st_dev, current.st_ino):
+                raise ValueError("state identity changed after lock")
+            raw, metadata = _read_descriptor(fd)
+        except BaseException:
+            os.close(fd)
+            raise
         if metadata.st_uid != os.geteuid() or metadata.st_gid != os.getegid() or stat.S_IMODE(metadata.st_mode) != 0o600:
             raise ValueError("state must be owner-bound mode 0600")
         state = _parse_json(raw, "transaction state")
@@ -772,11 +1125,32 @@ class Priority15Transaction:
         )
         if actual != expected:
             raise ValueError("state identity mismatch")
-        tx = cls(path, state, service=service)
-        tx._revalidate()
-        return tx
+        tx = cls(path, state, service=service, state_fd=fd)
+        try:
+            tx._revalidate()
+            return tx
+        except BaseException:
+            tx.close()
+            raise
+
+    def close(self):
+        if self._state_fd >= 0:
+            os.close(self._state_fd)
+            self._state_fd = -1
+
+    def __del__(self):
+        self.close()
+
+    def _validate_state_lock(self):
+        if self._state_fd < 0:
+            raise RuntimeError("transaction state lock is not held")
+        metadata = os.fstat(self._state_fd)
+        current = self.state_path.lstat()
+        if (metadata.st_dev, metadata.st_ino) != (current.st_dev, current.st_ino):
+            raise ValueError("state identity changed after lock")
 
     def _revalidate(self):
+        self._validate_state_lock()
         release_raw, _ = _validate_file_authority(self.state["release_manifest"])
         fixture_raw, _ = _validate_file_authority(self.state["fixture_manifest"])
         baseline_raw, _ = _validate_file_authority(self.state["baseline_manifest"])
@@ -843,31 +1217,43 @@ class Priority15Transaction:
     def backup_root(self):
         return Path(self.state["backup_root"]["path"])
 
-    def _phase(self):
+    def _phase(self, destination_root_fd: int | None = None):
         if self.release_manifest is None or self.baseline_manifest is None:
             raise RuntimeError("transaction manifests were not validated")
         candidate = True
         baseline = True
-        for release_entry, baseline_entry in zip(self.release_manifest["files"], self.baseline_manifest["files"]):
-            path = _contained_path(self.destination, release_entry["path"])
-            try:
-                data, metadata = _read_regular(path)
-                observed = (
-                    _sha(data), len(data), f"{stat.S_IMODE(metadata.st_mode):04o}",
-                    metadata.st_uid, metadata.st_gid,
+        owns_root_fd = destination_root_fd is None
+        root_fd = _open_directory(self.destination) if owns_root_fd else destination_root_fd
+        try:
+            for release_entry, baseline_entry in zip(self.release_manifest["files"], self.baseline_manifest["files"]):
+                relative = release_entry["path"]
+                parent_fd, name = _open_parent_at(root_fd, relative)
+                try:
+                    live = _read_at(parent_fd, name, allow_absent=True)
+                    observed = None if live is None else (
+                        _sha(live[0]), len(live[0]), f"{stat.S_IMODE(live[1].st_mode):04o}",
+                        live[1].st_uid, live[1].st_gid,
+                    )
+                    parent_path = self.destination.joinpath(*PurePosixPath(relative).parts[:-1])
+                    if not _same_namespace_inode(parent_fd, parent_path):
+                        raise ValueError("destination namespace changed")
+                finally:
+                    os.close(parent_fd)
+                owner = self.state["destination_owner"]
+                candidate &= observed == (
+                    release_entry["sha256"], release_entry["size"], release_entry["mode"],
+                    owner["uid"], owner["gid"],
                 )
-            except FileNotFoundError:
-                observed = None
-            owner = self.state["destination_owner"]
-            candidate &= observed == (
-                release_entry["sha256"], release_entry["size"], release_entry["mode"],
-                owner["uid"], owner["gid"],
-            )
-            baseline_expected = None if not baseline_entry["present"] else (
-                baseline_entry["sha256"], baseline_entry["size"], baseline_entry["mode"],
-                owner["uid"], owner["gid"],
-            )
-            baseline &= observed == baseline_expected
+                baseline_expected = None if not baseline_entry["present"] else (
+                    baseline_entry["sha256"], baseline_entry["size"], baseline_entry["mode"],
+                    owner["uid"], owner["gid"],
+                )
+                baseline &= observed == baseline_expected
+            if not _same_namespace_inode(root_fd, self.destination):
+                raise ValueError("destination namespace changed")
+        finally:
+            if owns_root_fd:
+                os.close(root_fd)
         if candidate == baseline:
             raise ValueError("source tree is mixed or ambiguous")
         return "candidate" if candidate else "baseline"
@@ -882,47 +1268,86 @@ class Priority15Transaction:
         if target not in ("candidate", "baseline") or operation not in ("deploy", "rollback", "redeploy", "recover"):
             raise ValueError("transaction target or operation is invalid")
         self._revalidate()
-        self._stop()
         if self.release_manifest is None or self.baseline_manifest is None:
             raise RuntimeError("transaction manifests were not validated")
+        destination_root_fd = _open_directory(self.destination)
+        release_root_fd = _open_directory(self.release_root)
+        backup_source_fd = _open_directory(self.backup_root / "source")
+        pinned = []
         try:
-            owner = self.state["destination_owner"]
             for release_entry, baseline_entry in zip(self.release_manifest["files"], self.baseline_manifest["files"]):
                 relative = release_entry["path"]
-                destination = _contained_path(self.destination, relative)
+                destination_parent, destination_name = _open_parent_at(destination_root_fd, relative)
+                source_parent = None
+                source_name = None
+                if target == "candidate" or baseline_entry["present"]:
+                    source_root_fd = release_root_fd if target == "candidate" else backup_source_fd
+                    source_parent, source_name = _open_parent_at(source_root_fd, relative)
+                pinned.append((relative, release_entry, baseline_entry, destination_parent,
+                               destination_name, source_parent, source_name))
+            self._stop()
+            owner = self.state["destination_owner"]
+            for (relative, release_entry, baseline_entry, destination_parent, destination_name,
+                 source_parent, source_name) in pinned:
                 if target == "candidate":
-                    data, _ = _read_regular(_contained_path(self.release_root, relative))
-                    mode = int(release_entry["mode"], 8)
-                    _atomic_write(destination, data, mode, uid=owner["uid"], gid=owner["gid"])
+                    data, _ = _read_at(source_parent, source_name)
+                    _atomic_write_at(destination_parent, destination_name, data,
+                                     int(release_entry["mode"], 8),
+                                     uid=owner["uid"], gid=owner["gid"])
                 elif baseline_entry["present"]:
-                    data, _ = _read_regular(_contained_path(self.backup_root / "source", relative))
-                    _atomic_write(
-                        destination, data, int(baseline_entry["mode"], 8),
-                        uid=owner["uid"], gid=owner["gid"],
-                    )
+                    data, _ = _read_at(source_parent, source_name)
+                    _atomic_write_at(destination_parent, destination_name, data,
+                                     int(baseline_entry["mode"], 8),
+                                     uid=owner["uid"], gid=owner["gid"])
                 else:
                     try:
-                        info = destination.lstat()
+                        info = os.stat(destination_name, dir_fd=destination_parent,
+                                       follow_symlinks=False)
                     except FileNotFoundError:
                         pass
                     else:
                         if not stat.S_ISREG(info.st_mode) or stat.S_ISLNK(info.st_mode):
                             raise ValueError("rollback unlink target is unsafe")
-                        destination.unlink()
-                        _fsync_dir(destination.parent)
+                        os.unlink(destination_name, dir_fd=destination_parent)
+                        os.fsync(destination_parent)
                 if after_boundary is not None:
                     after_boundary(f"{relative}:published")
-            if self._phase() != target:
+            for relative, _release, _baseline, destination_parent, _name, source_parent, _source_name in pinned:
+                destination_parent_path = self.destination.joinpath(*PurePosixPath(relative).parts[:-1])
+                if not _same_namespace_inode(destination_parent, destination_parent_path):
+                    raise ValueError("destination namespace changed")
+                if source_parent is not None:
+                    source_root = self.release_root if target == "candidate" else self.backup_root / "source"
+                    source_parent_path = source_root.joinpath(*PurePosixPath(relative).parts[:-1])
+                    if not _same_namespace_inode(source_parent, source_parent_path):
+                        raise ValueError("source namespace changed")
+            if self._phase(destination_root_fd) != target:
                 raise RuntimeError("requested source phase did not verify")
+            if not _same_namespace_inode(destination_root_fd, self.destination):
+                raise ValueError("destination namespace changed")
             self.service.start_ready()
             if not self.service.is_active():
                 raise RuntimeError("service is inactive after readiness")
+            if not _same_namespace_inode(destination_root_fd, self.destination):
+                raise ValueError("destination namespace changed")
+            for relative, _release, _baseline, destination_parent, _name, _source_parent, _source_name in pinned:
+                destination_parent_path = self.destination.joinpath(*PurePosixPath(relative).parts[:-1])
+                if not _same_namespace_inode(destination_parent, destination_parent_path):
+                    raise ValueError("destination namespace changed")
         except BaseException:
             try:
                 self._stop()
             except BaseException:
                 pass
             raise
+        finally:
+            for item in pinned:
+                os.close(item[3])
+                if item[5] is not None:
+                    os.close(item[5])
+            os.close(destination_root_fd)
+            os.close(release_root_fd)
+            os.close(backup_source_fd)
 
     def recover(self, target: str):
         self.transition(target, operation="recover")
@@ -1019,6 +1444,12 @@ def prepare_b1(arguments):
     if (fixture["source_sha"], fixture["tree_sha"], _sha(fixture_raw)) != (
             arguments.expected_source_sha, arguments.expected_tree_sha, release["fixture_manifest_sha256"]):
         raise ValueError("fixture manifest expected identity mismatch")
+    destination_info = destination.lstat()
+    destination_owner = {"uid": destination_info.st_uid, "gid": destination_info.st_gid}
+    approved = _approved_baseline_snapshot(
+        destination, release, arguments.expected_baseline_source_sha,
+        arguments.expected_baseline_tree_sha, destination_owner,
+    )
     if state_path.exists() or state_path.is_symlink():
         raise ValueError("state authority must be fresh")
     if not state_path.parent.exists():
@@ -1032,41 +1463,41 @@ def prepare_b1(arguments):
         raise ValueError("state parent is unsafe")
     if state_path.parent.resolve(strict=True) != state_path.parent:
         raise ValueError("state ancestry is unsafe")
-    service = SystemdService(arguments.service)
-    if not service.is_active():
-        raise ValueError("prepare-b1 requires the baseline service active")
-    initial_service = service.status()
-    if (type(initial_service) is not dict or initial_service.get("service") != arguments.service
-            or type(initial_service.get("n_restarts")) is not int
-            or initial_service["n_restarts"] < 0):
-        raise ValueError("baseline service evidence is invalid")
-    service_baseline = {
-        "n_restarts": initial_service["n_restarts"], "warning_since": int(time.time()),
-    }
-    destination_info = destination.lstat()
-    destination_owner = {"uid": destination_info.st_uid, "gid": destination_info.st_gid}
+    state_fd = -1
     created_backup = False
     try:
+        state_fd = os.open(
+            state_path, os.O_RDWR | os.O_CREAT | os.O_EXCL | os.O_CLOEXEC | os.O_NOFOLLOW,
+            0o600,
+        )
+        os.fchmod(state_fd, 0o600)
+        os.fchown(state_fd, os.geteuid(), os.getegid())
+        fcntl.flock(state_fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        if not _same_namespace_inode(state_fd, state_path):
+            raise ValueError("state identity changed after lock")
+        service = SystemdService(arguments.service)
+        if not service.is_active():
+            raise ValueError("prepare-b1 requires the baseline service active")
+        initial_service = service.status()
+        if (type(initial_service) is not dict or initial_service.get("service") != arguments.service
+                or type(initial_service.get("n_restarts")) is not int
+                or initial_service["n_restarts"] < 0):
+            raise ValueError("baseline service evidence is invalid")
+        service_baseline = {
+            "n_restarts": initial_service["n_restarts"], "warning_since": int(time.time()),
+        }
         _mkdir_fresh(backup)
         created_backup = True
         source_backup = backup / "source"
         source_backup.mkdir(mode=0o700)
         baseline_files = []
-        for entry in release["files"]:
-            relative = entry["path"]
-            source = _contained_path(destination, relative)
-            try:
-                data, metadata = _read_regular(source)
-            except FileNotFoundError:
+        for captured in approved:
+            relative = captured["path"]
+            if not captured["present"]:
                 baseline_files.append({"path": relative, "present": False, "sha256": None,
                                        "size": 0, "mode": None})
             else:
-                mode = f"{stat.S_IMODE(metadata.st_mode):04o}"
-                if mode not in ("0644", "0755"):
-                    raise ValueError("baseline source mode is unsupported")
-                if (metadata.st_uid, metadata.st_gid) != (
-                        destination_owner["uid"], destination_owner["gid"]):
-                    raise ValueError("baseline source ownership mismatches destination authority")
+                data, mode = captured["data"], captured["mode"]
                 saved = source_backup / relative
                 saved.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
                 _durable_new_file(saved, data, int(mode, 8))
@@ -1092,10 +1523,17 @@ def prepare_b1(arguments):
             "service_baseline": service_baseline, "interpreter": str(interpreter),
             "state_path": str(state_path), "self": None,
         }
-        _publish_state(state_path, state)
-        Priority15Transaction.load(state_path, service=service)
+        _populate_state_fd(state_path, state, state_fd)
+        tx = Priority15Transaction(state_path, state, service=service, state_fd=state_fd)
+        state_fd = -1
+        try:
+            tx._revalidate()
+        finally:
+            tx.close()
         return state
     except BaseException:
+        if state_fd >= 0:
+            os.close(state_fd)
         try:
             state_path.unlink()
         except FileNotFoundError:

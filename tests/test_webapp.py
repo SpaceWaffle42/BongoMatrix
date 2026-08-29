@@ -9131,12 +9131,62 @@ console.log(JSON.stringify({report,exceptions}));}finally{socket.close()}
             cookie.write_text("session=private-value\n", encoding="utf-8")
             cookie.chmod(0o600)
             report_path = root / "report.json"
+            expected_viewports = [
+                [320, 568], [360, 800], [390, 844], [412, 915],
+                [768, 1024], [820, 1180], [1024, 768], [1280, 720],
+                [1440, 900], [599, 800], [600, 800], [601, 800],
+                [899, 800], [900, 800], [901, 800],
+            ]
+
+            def viewport_evidence(viewport):
+                width, height = viewport
+                touch = width <= 1024
+                return {
+                    "viewport": viewport,
+                    "interaction_exercised": viewport == [412, 915],
+                    "touch": touch,
+                    "orientation": "landscape" if width > height else "portrait",
+                    "document_overflow_x": 0,
+                    "sticky_preview_inside_viewport": True,
+                    "mode_controls_inside_viewport": True,
+                    "sticky_mode_overlap": False,
+                    "touch_targets": ([
+                        {"name": "preview-live", "width": 44, "height": 44},
+                        {"name": "preview-edit", "width": 44, "height": 44},
+                        {"name": "selected-layer", "width": 120, "height": 44},
+                    ] if touch else []),
+                    "state": {
+                        "selected_layer": "layer_media",
+                        "focus": "rotation",
+                        "draft_sha256": "b" * 64,
+                        "zoom": 2,
+                        "local_scroll": [47, 31],
+                        "preserved": True,
+                    },
+                    "drag_resize": {
+                        "before": [10, 8, 16, 8],
+                        "after_drag": [12, 10, 16, 8],
+                        "expected_after_drag": [12, 10, 16, 8],
+                        "after_resize": [12, 10, 18, 9],
+                        "expected_after_resize": [12, 10, 18, 9],
+                    },
+                    "pointercancel": {
+                        "capture_before": True,
+                        "capture_after": False,
+                        "geometry_unchanged": True,
+                    },
+                    "frame_sha256": "a" * 64,
+                }
+
+            evidence = [viewport_evidence(viewport) for viewport in expected_viewports]
             report = module.build_report(
-                source_sha="a" * 40, version="1.5.0-preview",
-                viewports=[
-                    {"viewport": [390, 844], "frame": [2, 4, 15, 8], "geometry": [15.5, 9, 19, 10], "frame_sha256": "a" * 64},
-                    {"viewport": [1280, 720], "frame": [2, 4, 15, 8], "geometry": [15.5, 9, 19, 10], "frame_sha256": "a" * 64},
-                ],
+                source_sha="a" * 40, version="1.5.0-preview", viewports=evidence,
+            )
+            self.assertEqual(report["version"], 2)
+            self.assertEqual([item["viewport"] for item in report["viewports"]], expected_viewports)
+            self.assertEqual(
+                [item["viewport"] for item in report["viewports"] if item["interaction_exercised"]],
+                [[412, 915]],
             )
             module.write_report(report_path, report)
             raw = report_path.read_text(encoding="utf-8")
@@ -9148,6 +9198,16 @@ console.log(JSON.stringify({report,exceptions}));}finally{socket.close()}
             malformed[0].pop("frame_sha256")
             with self.assertRaisesRegex(ValueError, "fields"):
                 module.build_report(source_sha="a" * 40, version="1.5.0-preview", viewports=malformed)
+            with self.assertRaisesRegex(ValueError, "exact responsive viewport evidence"):
+                module.build_report(source_sha="a" * 40, version="1.5.0-preview", viewports=evidence[:-1])
+            duplicate = [dict(item) for item in evidence]
+            duplicate[-1]["viewport"] = list(expected_viewports[-2])
+            with self.assertRaisesRegex(ValueError, "exact responsive viewport evidence"):
+                module.build_report(source_sha="a" * 40, version="1.5.0-preview", viewports=duplicate)
+            undersized = json.loads(json.dumps(evidence))
+            undersized[0]["touch_targets"][0]["width"] = 43.999
+            with self.assertRaisesRegex(ValueError, "touch target"):
+                module.build_report(source_sha="a" * 40, version="1.5.0-preview", viewports=undersized)
             module.validate_session_cookie_file(cookie)
             cookie.chmod(0o640)
             with self.assertRaisesRegex(ValueError, "owner-only"):
@@ -9163,6 +9223,92 @@ console.log(JSON.stringify({report,exceptions}));}finally{socket.close()}
             ], text=True, capture_output=True)
             self.assertNotEqual(failed.returncode, 0)
             self.assertNotIn("private-value", failed.stderr)
+
+    @unittest.skipUnless(
+        os.environ.get("MATRIX_CHROMIUM")
+        and Path(os.environ.get("MATRIX_CHROMIUM", "")).is_file()
+        and os.access(os.environ.get("MATRIX_CHROMIUM", ""), os.X_OK),
+        "MATRIX_CHROMIUM browser is required",
+    )
+    def test_foundation_browser_verifier_runs_real_chromium_across_exact_matrix(self):
+        script = Path(__file__).parents[1] / "scripts/verify_priority_1_5_foundation_browser.py"
+        spec = importlib.util.spec_from_file_location("foundation_browser_verifier_integration", script)
+        assert spec is not None
+        verifier = importlib.util.module_from_spec(spec)
+        assert spec.loader is not None
+        spec.loader.exec_module(verifier)
+        Image.new("RGB", (8, 4), "#39c5bb").save(self.media_dir / "b1-fixture.png")
+        advanced = {
+            "id": "custom_b1_verifier", "name": "B1 verifier", "type": "canvas",
+            "background": "#000000", "frame_count": 30, "fps": 10, "playback": "hold",
+            "layers": [{
+                "id": "layer_media", "name": "Media", "type": "media", "visible": True,
+                "properties": {
+                    "present": True, "source": "b1-fixture.png", "x": 8, "y": 6,
+                    "width": 16, "height": 8, "rotation": 0, "keep_aspect": False,
+                },
+                "keyframes": [],
+            }],
+            "overrides": [],
+        }
+        advanced["layers"].extend({
+            "id": f"layer_rectangle_{index}", "name": f"Rectangle {index}",
+            "type": "rectangle", "visible": True,
+            "properties": {
+                "present": True, "x": index, "y": index, "width": 2, "height": 2,
+                "rotation": 0, "colour": "#ffffff", "filled": True,
+            },
+            "keyframes": [],
+        } for index in range(1, 10))
+        fixture_frame = Image.new("RGB", (8, 4), "#39c5bb")
+        self.controller.matrix.media_frames.return_value = [fixture_frame.copy() for _ in range(30)]
+        frame_bytes = io.BytesIO()
+        Image.new("RGB", (64, 32), "black").save(frame_bytes, format="PNG")
+        frame_payload = frame_bytes.getvalue()
+        self.controller.frame_png.side_effect = lambda: (io.BytesIO(frame_payload), "b1-frame")
+        self.store.update({"custom_modules": [advanced]})
+        self.pair_browser()
+        session_cookie = self.client.get_cookie(self.app.config["SESSION_COOKIE_NAME"])
+        self.assertIsNotNone(session_cookie)
+        assert session_cookie is not None
+        cookie_path = Path(self.temp.name) / "b1-session-cookie"
+        cookie_path.write_text(
+            f"{self.app.config['SESSION_COOKIE_NAME']}={session_cookie.value}\n", encoding="utf-8",
+        )
+        cookie_path.chmod(0o600)
+        paired_cookie = verifier.validate_session_cookie_file(cookie_path.resolve(strict=True))
+        server = make_server("127.0.0.1", 0, self.app, threaded=True)
+        server_thread = threading.Thread(target=server.serve_forever, daemon=True)
+        server_thread.start()
+        try:
+            evidence = verifier.run_browser(
+                f"http://127.0.0.1:{server.server_port}", paired_cookie,
+                Path(os.environ["MATRIX_CHROMIUM"]).resolve(strict=True),
+            )
+        finally:
+            server.shutdown()
+            server.server_close()
+            server_thread.join(timeout=5)
+        public = [{key: value for key, value in item.items() if key != "version"} for item in evidence]
+        report = verifier.build_report(
+            source_sha="a" * 40, version=webapp.APPLICATION_VERSION, viewports=public,
+        )
+        self.assertEqual(report, {
+            "version": 2, "source_sha": "a" * 40,
+            "application_version": webapp.APPLICATION_VERSION, "viewports": public,
+        })
+        expected_viewports = [list(viewport) for viewport in verifier._VIEWPORTS]
+        self.assertEqual(report["version"], 2)
+        self.assertEqual(report["application_version"], webapp.APPLICATION_VERSION)
+        self.assertEqual([item["viewport"] for item in report["viewports"]], expected_viewports)
+        self.assertEqual(
+            [item["viewport"] for item in report["viewports"] if item["interaction_exercised"]],
+            [[412, 915]],
+        )
+        self.assertEqual(len({item["frame_sha256"] for item in report["viewports"]}), 1)
+        interaction = next(item for item in report["viewports"] if item["interaction_exercised"])
+        self.assertTrue(all(item["drag_resize"] == interaction["drag_resize"] for item in report["viewports"]))
+        self.assertTrue(all(item["pointercancel"] == interaction["pointercancel"] for item in report["viewports"]))
 
     @unittest.skipUnless(shutil.which("node"), "Node.js is required")
     def test_browser_rotated_aspect_media_uses_fitted_origin_centre_and_clip(self):

@@ -17,6 +17,7 @@ class _Service:
     def __init__(self):
         self.active = True
         self.events = []
+        self.ready_hook = lambda: None
 
     def is_active(self):
         return self.active
@@ -28,6 +29,7 @@ class _Service:
     def start_ready(self):
         self.events.append("start-ready")
         self.active = True
+        self.ready_hook()
 
     def status(self, *, warning_since=None):
         return {
@@ -84,12 +86,21 @@ class Priority15TransactionTests(unittest.TestCase):
             subprocess.run(["/usr/bin/git", "-C", str(repository), "config", "user.name", "test"], check=True)
             subprocess.run(["/usr/bin/git", "-C", str(repository), "config", "user.email", "test@example.invalid"], check=True)
             (repository / "app.py").write_bytes(b"baseline\n")
-            subprocess.run(["/usr/bin/git", "-C", str(repository), "add", "app.py"], check=True)
-            subprocess.run(["/usr/bin/git", "-C", str(repository), "commit", "-qm", "baseline"], check=True)
+            (repository / "pkg").mkdir()
+            (repository / "pkg/module.py").write_bytes(b"baseline module\n")
+            subprocess.run(["/usr/bin/git", "-C", str(repository), "add", "app.py", "pkg/module.py"], check=True)
+            git_dates = {**os.environ, "GIT_AUTHOR_DATE": "2000-01-01T00:00:00+0000",
+                         "GIT_COMMITTER_DATE": "2000-01-01T00:00:00+0000"}
+            subprocess.run(["/usr/bin/git", "-C", str(repository), "commit", "-qm", "baseline"],
+                           check=True, env=git_dates)
             baseline = self._git(repository, "rev-parse", "HEAD^{commit}")
             baseline_tree = self._git(repository, "rev-parse", "HEAD^{tree}")
             (repository / "app.py").write_bytes(b"candidate\n")
-            subprocess.run(["/usr/bin/git", "-C", str(repository), "commit", "-qam", "candidate"], check=True)
+            (repository / "pkg/module.py").write_bytes(b"candidate module\n")
+            candidate_dates = {**git_dates, "GIT_AUTHOR_DATE": "2000-01-01T00:00:01+0000",
+                               "GIT_COMMITTER_DATE": "2000-01-01T00:00:01+0000"}
+            subprocess.run(["/usr/bin/git", "-C", str(repository), "commit", "-qam", "candidate"],
+                           check=True, env=candidate_dates)
             source = self._git(repository, "rev-parse", "HEAD^{commit}")
             source_tree = self._git(repository, "rev-parse", "HEAD^{tree}")
             diff = subprocess.check_output([
@@ -103,7 +114,15 @@ class Priority15TransactionTests(unittest.TestCase):
                 "--source-commit", source, "--expected-reviewed-diff-sha256", reviewed,
                 "--stage-root", str(stage), "--python", sys.executable,
             ]
-            self.assertEqual(transaction.main(build_argv), 0)
+            real_subprocess_run = subprocess.run
+            def build_without_host_encoder(argv):
+                def reject_ffmpeg(command, *args, **kwargs):
+                    if command and command[0] == "/usr/bin/ffmpeg":
+                        raise AssertionError("build-b1 invoked a host ffmpeg encoder")
+                    return real_subprocess_run(command, *args, **kwargs)
+                with patch.object(transaction.subprocess, "run", side_effect=reject_ffmpeg):
+                    return transaction.main(argv)
+            self.assertEqual(build_without_host_encoder(build_argv), 0)
             release_manifest_bytes = (stage / "release-manifest.json").read_bytes()
             release_manifest = json.loads(release_manifest_bytes)
             self.assertEqual(release_manifest["files"][0]["path"], "app.py")
@@ -124,7 +143,56 @@ class Priority15TransactionTests(unittest.TestCase):
 
             fixture_path = stage / "physical-fixtures.json"
             fixture_manifest = json.loads(fixture_path.read_bytes())
-            for field, wrong in (("width", 99), ("durations_ms", [200])):
+            fixtures = fixture_manifest["fixtures"]
+            expected_fixtures = [
+                {"path": "fixtures/b1-landscape-loop.gif", "sha256": "a9badf8d2309a4a7d0cf20b16c3249c9934c5ea47f37a8caaa266e7086ab2b96", "size": 2559, "kind": "gif", "width": 9, "height": 5, "frames": 3, "durations_ms": [60, 140, 300]},
+                {"path": "fixtures/b1-landscape.mp4", "sha256": "93a4b38eaf4e1fb6036c5f735958637bcb954bc1f3897f843bc84459051ae7de", "size": 2084, "kind": "mp4", "width": 11, "height": 5, "frames": 3, "durations_ms": [200, 200, 200]},
+                {"path": "fixtures/b1-portrait-finite.gif", "sha256": "4ac60e3e0b6d5dd62113c45deda6d3ada52e4f9c362ce17b348d31b9941acbd9", "size": 3293, "kind": "gif", "width": 3, "height": 7, "frames": 4, "durations_ms": [20, 80, 200, 400]},
+                {"path": "fixtures/b1-portrait.mp4", "sha256": "f462de666a87cc665d4b6786206ff04ecae9a4375e9dc8a1aa3d61653123f8fc", "size": 2281, "kind": "mp4", "width": 5, "height": 9, "frames": 4, "durations_ms": [100, 100, 100, 100]},
+                {"path": "fixtures/b1-small-loop.gif", "sha256": "e9e51ceb101da4c184c88b6ee9fe84aebedb0dd57371631907cc2edfd2b67ab9", "size": 2421, "kind": "gif", "width": 2, "height": 2, "frames": 3, "durations_ms": [40, 120, 240]},
+                {"path": "fixtures/b1-small.mp4", "sha256": "6ee2813bb3ec914898e3c710f189fe8f73cb29cbcbff3e91eb01e4758ff858eb", "size": 1734, "kind": "mp4", "width": 3, "height": 3, "frames": 3, "durations_ms": [40, 40, 40]},
+            ]
+            self.assertEqual(fixtures, expected_fixtures)
+            expected_fixture_manifest = transaction.canonical_json({
+                "version": 1, "boundary": "b1", "source_sha": source,
+                "tree_sha": source_tree, "fixtures": expected_fixtures,
+            })
+            self.assertEqual(fixture_path.read_bytes(), expected_fixture_manifest)
+            self.assertEqual(
+                hashlib.sha256(fixture_path.read_bytes()).hexdigest(),
+                "4c04116948ba59bfe7a99c1f9d62c3313292ac980250db00b45d2a2839604912",
+            )
+            self.assertGreaterEqual(len(fixtures), 6)
+            self.assertTrue(all(entry["frames"] > 1 for entry in fixtures))
+            self.assertTrue(any(entry["width"] < entry["height"] for entry in fixtures))
+            self.assertTrue(any(entry["width"] > entry["height"] for entry in fixtures))
+            self.assertTrue(any(entry["width"] <= 3 and entry["height"] <= 3 for entry in fixtures))
+            self.assertTrue(any(entry["width"] % 2 or entry["height"] % 2 for entry in fixtures))
+            self.assertGreater(len({duration for entry in fixtures for duration in entry["durations_ms"]}), 2)
+            gif_loops = []
+            from PIL import Image
+            for entry in fixtures:
+                if entry["kind"] == "gif":
+                    with Image.open(stage / entry["path"]) as image:
+                        gif_loops.append(image.info.get("loop"))
+            self.assertIn(0, gif_loops)
+            self.assertIn(1, gif_loops)
+            repeat_stage = root / "repeat-stage"
+            repeat_argv = list(build_argv)
+            repeat_argv[repeat_argv.index("--stage-root") + 1] = str(repeat_stage)
+            self.assertEqual(build_without_host_encoder(repeat_argv), 0)
+            repeat_manifest = json.loads((repeat_stage / "physical-fixtures.json").read_bytes())
+            self.assertEqual(repeat_manifest["fixtures"], fixtures)
+            self.assertEqual(
+                (repeat_stage / "physical-fixtures.json").read_bytes(),
+                fixture_path.read_bytes(),
+            )
+            for entry in fixtures:
+                self.assertEqual(
+                    (repeat_stage / entry["path"]).read_bytes(),
+                    (stage / entry["path"]).read_bytes(),
+                )
+            for field, wrong in (("width", 99), ("durations_ms", [200] * fixtures[0]["frames"])):
                 tampered = json.loads(json.dumps(fixture_manifest))
                 tampered["fixtures"][0][field] = wrong
                 with self.subTest(fixture_tamper=field), self.assertRaisesRegex(
@@ -142,13 +210,9 @@ class Priority15TransactionTests(unittest.TestCase):
             self.assertFalse(bad_stage.exists())
 
             destination = root / "destination"
-            destination.mkdir()
-            (destination / "app.py").write_bytes(b"baseline\n")
+            subprocess.run(["/usr/bin/git", "clone", "-q", "--no-hardlinks", str(repository), str(destination)], check=True)
+            subprocess.run(["/usr/bin/git", "-C", str(destination), "checkout", "-q", baseline], check=True)
             authority_uid, authority_gid = os.geteuid(), os.getegid()
-            if os.geteuid() == 0:
-                authority_uid = authority_gid = 65534
-                os.chown(destination, authority_uid, authority_gid)
-                os.chown(destination / "app.py", authority_uid, authority_gid)
             private = {}
             for relative, value in (("data/config.json", b"config-private"), ("data/paired-devices.json", b"paired-private"), ("resources/media/private.bin", b"media-private")):
                 path = destination / relative
@@ -169,6 +233,13 @@ class Priority15TransactionTests(unittest.TestCase):
                 "--state", str(state),
             ]
             service = _Service()
+            (destination / "app.py").write_bytes(b"arbitrary unapproved predecessor\n")
+            with patch.object(transaction, "SystemdService", return_value=service), self.assertRaisesRegex(
+                    ValueError, "approved baseline"):
+                transaction.main(prepare)
+            self.assertFalse(state.exists())
+            self.assertFalse(backup.exists())
+            subprocess.run(["/usr/bin/git", "-C", str(destination), "checkout", "-q", "--", "app.py"], check=True)
             with patch.object(transaction, "SystemdService", return_value=service):
                 self.assertEqual(transaction.main(prepare), 0)
             self.assertEqual(stat.S_IMODE(state.stat().st_mode), 0o600)
@@ -182,8 +253,29 @@ class Priority15TransactionTests(unittest.TestCase):
                 "uid": authority_uid, "gid": authority_gid,
             })
             baseline_manifest = json.loads((backup / "baseline-source-manifest.json").read_bytes())
-            self.assertEqual([entry["path"] for entry in baseline_manifest["files"]], ["app.py"])
+            self.assertEqual([entry["path"] for entry in baseline_manifest["files"]], ["app.py", "pkg/module.py"])
             self.assertFalse(any(name in state.read_text() for name in ("config-private", "paired-private", "media-private")))
+
+            # A real competing process holding the state inode rejects admission
+            # before any service or source transition can occur.
+            holder = subprocess.Popen(
+                [sys.executable, "-c", (
+                    "import fcntl,os,sys,time; fd=os.open(sys.argv[1],os.O_RDWR|os.O_NOFOLLOW); "
+                    "fcntl.flock(fd,fcntl.LOCK_EX|fcntl.LOCK_NB); print('locked',flush=True); time.sleep(10)"
+                ), str(state)], stdout=subprocess.PIPE, text=True,
+            )
+            try:
+                self.assertEqual(holder.stdout.readline().strip(), "locked")
+                before_events = list(service.events)
+                before_app = (destination / "app.py").read_bytes()
+                with self.assertRaisesRegex(RuntimeError, "transaction state is locked"):
+                    transaction.Priority15Transaction.load(state, service=service)
+                self.assertEqual(service.events, before_events)
+                self.assertEqual((destination / "app.py").read_bytes(), before_app)
+            finally:
+                holder.terminate()
+                holder.wait(timeout=5)
+                holder.stdout.close()
 
             # Every interruption after a source publication remains inactive and recoverable.
             tx = transaction.Priority15Transaction.load(state, service=service)
@@ -202,6 +294,7 @@ class Priority15TransactionTests(unittest.TestCase):
                     with self.assertRaises(transaction.InjectedCrash):
                         tx.transition(target, operation=requested, after_boundary=interrupt)
                     self.assertFalse(service.active)
+                    tx.close()
                     tx = transaction.Priority15Transaction.load(state, service=service)
                     tx.recover(target)
                     self.assertEqual((destination / "app.py").read_bytes(), expected_bytes)
@@ -211,6 +304,65 @@ class Priority15TransactionTests(unittest.TestCase):
                     self.assertTrue(service.active)
                     for relative, value in private.items():
                         self.assertEqual((destination / relative).read_bytes(), value)
+
+            # Publication verification must consume the already admitted root,
+            # not reopen the destination pathname after mutation.
+            real_phase = getattr(tx, "_phase")
+            def phase_through_pinned_root(destination_root_fd):
+                self.assertIsInstance(destination_root_fd, int)
+                return real_phase(destination_root_fd)
+            with patch.object(tx, "_phase", side_effect=phase_through_pinned_root):
+                tx.transition("candidate", operation="redeploy")
+
+            # Swap an admitted parent at a deterministic publication barrier.
+            # Mutation must remain pinned to the original parent and namespace
+            # disagreement must fail closed while the service stays inactive.
+            original_pkg = destination / "pkg"
+            displaced_pkg = destination / "pkg.displaced"
+            attacker_pkg = destination / "pkg.attacker"
+            attacker_pkg.mkdir()
+            (attacker_pkg / "module.py").write_bytes(b"attacker sentinel\n")
+            swapped = False
+            def substitute_parent(point):
+                nonlocal swapped
+                if point == "app.py:published" and not swapped:
+                    swapped = True
+                    original_pkg.rename(displaced_pkg)
+                    attacker_pkg.rename(original_pkg)
+            with self.assertRaisesRegex(ValueError, "destination namespace changed"):
+                tx.transition("candidate", operation="redeploy", after_boundary=substitute_parent)
+            self.assertFalse(service.active)
+            self.assertEqual((original_pkg / "module.py").read_bytes(), b"attacker sentinel\n")
+            shutil.rmtree(original_pkg)
+            displaced_pkg.rename(original_pkg)
+            tx.close()
+            tx = transaction.Priority15Transaction.load(state, service=service)
+            tx.recover("candidate")
+
+            # Substitution after all publications but during readiness must be
+            # detected before success; the substitute remains untouched and
+            # the newly started service is stopped again.
+            readiness_displaced = root / "destination.readiness-displaced"
+            readiness_substitute = root / "destination.readiness-substitute"
+            readiness_substitute.mkdir()
+            (readiness_substitute / "app.py").write_bytes(b"readiness attacker app\n")
+            (readiness_substitute / "pkg").mkdir()
+            (readiness_substitute / "pkg/module.py").write_bytes(b"readiness attacker module\n")
+            def substitute_root_after_readiness():
+                destination.rename(readiness_displaced)
+                readiness_substitute.rename(destination)
+            service.ready_hook = substitute_root_after_readiness
+            with self.assertRaisesRegex(ValueError, "destination namespace changed"):
+                tx.transition("candidate", operation="redeploy")
+            service.ready_hook = lambda: None
+            self.assertFalse(service.active)
+            self.assertEqual((destination / "app.py").read_bytes(), b"readiness attacker app\n")
+            self.assertEqual((destination / "pkg/module.py").read_bytes(), b"readiness attacker module\n")
+            shutil.rmtree(destination)
+            readiness_displaced.rename(destination)
+            tx.close()
+            tx = transaction.Priority15Transaction.load(state, service=service)
+            tx.recover("candidate")
 
             status = tx.status()
             self.assertEqual(status["source"], "candidate")
@@ -226,6 +378,7 @@ class Priority15TransactionTests(unittest.TestCase):
             destination.rename(displaced_destination)
             destination.mkdir()
             (destination / "app.py").write_bytes(b"candidate\n")
+            tx.close()
             with self.assertRaisesRegex(ValueError, "destination identity"):
                 transaction.Priority15Transaction.load(state, service=service)
             shutil.rmtree(destination)
