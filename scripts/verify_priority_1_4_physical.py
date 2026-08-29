@@ -351,7 +351,7 @@ def verify_report(value: object, expected_source_sha: str) -> dict[str, object]:
         if config["type"] == "text":
             expected_count = 1
         elif config["direction"] == "left":
-            expected_count = 149
+            expected_count = 85
         else:
             expected_count = 85
         if count != expected_count or not isinstance(hashes, list) or len(hashes) != count:

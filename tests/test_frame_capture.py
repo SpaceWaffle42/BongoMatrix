@@ -51,11 +51,11 @@ class FrameCaptureTests(unittest.TestCase):
         canvas = object()
         capture.register(canvas)
 
-        advance = capture.text(canvas, font, 1, 6, FakeColour(255, 0, 0), "!")
+        width = capture.text(canvas, font, 1, 6, FakeColour(255, 0, 0), "!")
         capture.publish(canvas)
         image = Image.open(capture.png())
 
-        self.assertEqual(advance, 6)
+        self.assertEqual(width, 5)
         self.assertEqual(image.getpixel((3, 0)), (255, 0, 0))
         self.assertEqual(image.getpixel((3, 4)), (0, 0, 0))
         self.assertEqual(image.getpixel((3, 5)), (255, 0, 0))

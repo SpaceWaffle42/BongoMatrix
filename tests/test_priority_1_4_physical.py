@@ -74,6 +74,17 @@ class CaptureMatrix:
 
 
 class Priority14PhysicalTests(unittest.TestCase):
+    def test_capture_text_returns_width_independent_of_nonzero_position(self):
+        matrix = CaptureMatrix()
+        canvas = matrix.create_canvas()
+
+        width = matrix.draw_text(
+            matrix.font("5x7"), 64, 7, matrix.colour_rgb("#fedcba"), "EDGE",
+            canvas=canvas,
+        )
+
+        self.assertEqual(width, 20)
+
     def test_exercise_report_proves_exact_static_and_ticker_frames_and_rejects_tampering(self):
         from scripts import verify_priority_1_4_physical as physical
 
@@ -92,6 +103,8 @@ class Priority14PhysicalTests(unittest.TestCase):
         })
         self.assertEqual({item["direction"] for item in fixtures.values()}, {"none", "left", "right"})
         self.assertEqual({item["border"] for item in fixtures.values()}, {"none", "solid", "inset"})
+        self.assertEqual(fixtures["ticker_left_solid"]["frame_count"], 85)
+        self.assertEqual(fixtures["ticker_right_inset"]["frame_count"], 85)
         for item in fixtures.values():
             self.assertEqual(item["frame_count"], len(item["frame_sha256"]))
             self.assertTrue(item["frame_sha256"])
