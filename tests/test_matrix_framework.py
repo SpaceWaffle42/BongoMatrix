@@ -1,4 +1,5 @@
 import importlib
+import hashlib
 import os
 import subprocess
 import sys
@@ -236,6 +237,56 @@ else:
         prepared.rotate.assert_called_once_with(-30, expand=False)
         canvas.SetImage.assert_called_once_with(rotated, 4, 5)
         matrix._frame_capture.set_image.assert_called_once_with(canvas, rotated, 4, 5)
+
+    def test_media_fit_modes_match_executed_pillow_geometry(self):
+        matrix = Matrix.__new__(Matrix)
+        matrix.matrix = Mock(width=64, height=32)
+        matrix._frame_capture = Mock()
+        canvas = Mock(width=64, height=32)
+        source = PillowImage.new("RGB", (5, 3))
+        source.putdata([
+            ((x * 47 + y * 13) % 256, (x * 19 + y * 61) % 256,
+             (x * 83 + y * 7) % 256)
+            for y in range(3) for x in range(5)
+        ])
+
+        cases = (
+            ("contain", source, {}, (5, 3), (29, 14)),
+            ("cover", source, {}, (64, 38), (0, -3)),
+            ("stretch", source, {}, (64, 32), (0, 0)),
+            ("manual", source, {"x": -2, "y": 30, "width": 7, "height": 9},
+             (7, 9), (-2, 30)),
+            ("contain", PillowImage.new("RGB", (80, 20)), {}, (64, 16), (0, 8)),
+            ("cover", PillowImage.new("RGB", (3, 5)), {}, (64, 107), (0, -38)),
+        )
+        for fit, image, geometry, expected_size, expected_position in cases:
+            with self.subTest(fit=fit, source=image.size, geometry=geometry):
+                canvas.reset_mock()
+                matrix._frame_capture.reset_mock()
+                prepared = matrix.draw_image(image, fit=fit, canvas=canvas, **geometry)
+                self.assertEqual(prepared.size, expected_size)
+                canvas.SetImage.assert_called_once_with(prepared, *expected_position)
+                matrix._frame_capture.set_image.assert_called_once_with(
+                    canvas, prepared, *expected_position,
+                )
+
+        with self.assertRaisesRegex(ValueError, "unknown media fit"):
+            matrix.draw_image(source, fit="tile", canvas=canvas)
+
+        legacy_aspect = matrix.draw_image(
+            source, width=9, height=9, keep_aspect=True, canvas=canvas,
+        )
+        legacy_stretch = matrix.draw_image(
+            source, width=9, height=9, keep_aspect=False, canvas=canvas,
+        )
+        self.assertEqual(
+            hashlib.sha256(legacy_aspect.tobytes()).hexdigest(),
+            "c489c3244053c2a91469831f4b8541f30766eed333398b071f239688fe7b70c3",
+        )
+        self.assertEqual(
+            hashlib.sha256(legacy_stretch.tobytes()).hexdigest(),
+            "254a747eb5324279a43a68444757e197c3dad5e02f426f18ba8c747e37ddde25",
+        )
 
     def test_media_frames_cancellation_interrupts_blocked_image_decoder(self):
         matrix = Matrix.__new__(Matrix)

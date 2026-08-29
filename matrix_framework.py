@@ -686,19 +686,68 @@ class Matrix:
             return None
         return candidate
 
+    def _prepare_media_fit(
+        self, image, fit, target_width, target_height, *, x=0, y=0,
+        width=None, height=None,
+    ):
+        """Return the fitted image and its top-left panel placement."""
+        image = image.convert("RGB")
+        source_width, source_height = image.size
+        if fit == "contain":
+            scale = min(1, target_width / source_width, target_height / source_height)
+            draw_width = max(1, round(source_width * scale))
+            draw_height = max(1, round(source_height * scale))
+            draw_x = (target_width - draw_width) // 2
+            draw_y = (target_height - draw_height) // 2
+        elif fit == "cover":
+            scale = max(target_width / source_width, target_height / source_height)
+            draw_width = max(target_width, round(source_width * scale))
+            draw_height = max(target_height, round(source_height * scale))
+            draw_x = (target_width - draw_width) // 2
+            draw_y = (target_height - draw_height) // 2
+        elif fit == "stretch":
+            draw_width, draw_height = target_width, target_height
+            draw_x, draw_y = 0, 0
+        elif fit == "manual":
+            if (
+                isinstance(x, bool) or not isinstance(x, int)
+                or isinstance(y, bool) or not isinstance(y, int)
+                or isinstance(width, bool) or not isinstance(width, int) or width < 1
+                or isinstance(height, bool) or not isinstance(height, int) or height < 1
+            ):
+                raise ValueError("manual media fit requires integer geometry")
+            draw_width, draw_height = width, height
+            draw_x, draw_y = x, y
+        else:
+            raise ValueError(f"unknown media fit: {fit}")
+
+        if image.size != (draw_width, draw_height):
+            image = image.resize(
+                (draw_width, draw_height), Image.Resampling.LANCZOS,
+            )
+        return image, draw_x, draw_y
+
     def draw_image(
         self, image, x=0, y=0, width=None, height=None, keep_aspect=True,
-        rotation=0, canvas=None,
+        rotation=0, canvas=None, fit=None,
     ):
         """Resize/rotate an image and mirror the exact canvas submission."""
         canvas = canvas or self.canvas
-        prepared = self._prepare_image(
-            image, width=width, height=height, keep_aspect=keep_aspect
-        )
+        if fit is None:
+            prepared = self._prepare_image(
+                image, width=width, height=height, keep_aspect=keep_aspect
+            )
+            draw_x, draw_y = int(x), int(y)
+        else:
+            target_width, target_height = int(canvas.width), int(canvas.height)
+            prepared, draw_x, draw_y = self._prepare_media_fit(
+                image, fit, target_width, target_height,
+                x=x, y=y, width=width, height=height,
+            )
         if rotation:
             prepared = prepared.rotate(-rotation, expand=False)
-        canvas.SetImage(prepared, int(x), int(y))
-        self._frame_capture.set_image(canvas, prepared, int(x), int(y))
+        canvas.SetImage(prepared, draw_x, draw_y)
+        self._frame_capture.set_image(canvas, prepared, draw_x, draw_y)
         return prepared
 
     def media_frames(
