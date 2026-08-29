@@ -422,6 +422,9 @@ def create_app(
     device_restart_runner=None,
     acceptance_authorization_file=None,
     acceptance_runtime=None,
+    config_exclusion_sentinel="/var/lib/matrix-release/active-config-exclusion-v1.json",
+    config_exclusion_marker="/run/matrix-release/config-write.lock",
+    config_exclusion_authority="/run/matrix-release/config-write-authority-v1.json",
 ):
     session_generation = session_generation or secrets.token_hex(16)
     media_root = Path(media_dir or Path(__file__).resolve().parent / "resources" / "media")
@@ -554,6 +557,90 @@ def create_app(
         PAIRING_RECOVERY_CLOCK=time.time,
         MAX_CONTENT_LENGTH=128 * 1024 * 1024,
     )
+
+    exclusion_sentinel = Path(config_exclusion_sentinel)
+    exclusion_marker = Path(config_exclusion_marker)
+    # B1 deliberately has no release-authority bypass.  Keep the canonical
+    # authority path in the factory contract so B2 can add a bounded exception
+    # without changing the rollback baseline's WSGI wiring.
+    _config_exclusion_authority = Path(config_exclusion_authority)
+
+    def config_write_exclusion_status():
+        """Revalidate canonical durable/volatile exclusion without following links."""
+        def unique_object(pairs):
+            value = {}
+            for key, item in pairs:
+                if key in value:
+                    raise ValueError("duplicate sentinel field")
+                value[key] = item
+            return value
+
+        def canonical_regular(path, expected):
+            try:
+                before = path.lstat()
+            except FileNotFoundError:
+                return "absent"
+            except OSError:
+                return "malformed"
+            if (not stat.S_ISREG(before.st_mode) or stat.S_ISLNK(before.st_mode)
+                    or before.st_nlink != 1):
+                return "malformed"
+            try:
+                descriptor = os.open(
+                    path, os.O_RDONLY | os.O_CLOEXEC | os.O_NOFOLLOW | os.O_NONBLOCK,
+                )
+                try:
+                    opened = os.fstat(descriptor)
+                    raw = os.read(descriptor, 4097)
+                    after = os.fstat(descriptor)
+                finally:
+                    os.close(descriptor)
+            except OSError:
+                return "malformed"
+            if (
+                len(raw) > 4096
+                or (before.st_dev, before.st_ino) != (opened.st_dev, opened.st_ino)
+                or (opened.st_dev, opened.st_ino, opened.st_size, opened.st_mtime_ns)
+                != (after.st_dev, after.st_ino, after.st_size, after.st_mtime_ns)
+                or stat.S_IMODE(opened.st_mode) != 0o640
+                or (opened.st_uid, opened.st_gid) != (os.geteuid(), os.getegid())
+                or opened.st_nlink != 1
+            ):
+                return "malformed"
+            if expected is None:
+                return "healthy" if raw == b"" else "malformed"
+            try:
+                parsed = json.loads(raw, object_pairs_hook=unique_object)
+            except (UnicodeError, json.JSONDecodeError, ValueError):
+                return "malformed"
+            canonical = (json.dumps(parsed, sort_keys=True, separators=(",", ":")) + "\n").encode()
+            return "healthy" if type(parsed) is dict and parsed == expected and raw == canonical else "malformed"
+
+        sentinel = canonical_regular(
+            exclusion_sentinel, {"boundary": "b2", "state": "active", "version": 1},
+        )
+        marker = canonical_regular(exclusion_marker, None)
+        if sentinel == "absent" and marker == "absent":
+            return "inactive"
+        if sentinel == "malformed" or marker == "malformed":
+            return "recovery-required"
+        if sentinel == "healthy" and marker == "healthy":
+            return "active"
+        # Either half of an exclusion chain survived alone (including /run loss).
+        return "recovery-required"
+
+    app.extensions["config_write_exclusion"] = config_write_exclusion_status()
+
+    @app.before_request
+    def reject_config_write_during_release():
+        if request.method == "POST" and request.path == "/api/config":
+            status = config_write_exclusion_status()
+            app.extensions["config_write_exclusion"] = status
+            if status != "inactive":
+                return jsonify({
+                    "error": "Configuration writes are locked for release recovery."
+                }), 423
+        return None
 
     def device_registry_digest(devices):
         encoded = json.dumps(

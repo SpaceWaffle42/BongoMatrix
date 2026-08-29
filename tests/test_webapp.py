@@ -2,6 +2,7 @@ import base64
 import copy
 import hashlib
 import importlib.util
+import inspect
 import io
 import json
 import re
@@ -116,6 +117,108 @@ class WebAppTests(unittest.TestCase):
 
     def paired_client_request(self, method, client, path, **kwargs):
         return self.paired_request(method, path, client=client, **kwargs)
+
+    def test_b1_durable_exclusion_rejects_config_before_body_parsing(self):
+        release_root = Path(self.temp.name) / "release-authority"
+        persistent = release_root / "var/active-config-exclusion-v1.json"
+        volatile_root = release_root / "run"
+        marker = volatile_root / "config-write.lock"
+        authority = volatile_root / "config-write-authority-v1.json"
+        persistent.parent.mkdir(parents=True)
+        volatile_root.mkdir(parents=True)
+        before = self.store.path.read_bytes()
+
+        def fresh_app():
+            return create_app(
+                self.controller, self.store, self.pairing,
+                secret_key="guard-test", session_generation="generation-one",
+                media_dir=self.media_dir, location_search=self.location_search,
+                device_store=self.device_store,
+                openweather_secrets=self.openweather_secrets,
+                scroll_timing_cache=self.scroll_timing_cache,
+                config_exclusion_sentinel=persistent,
+                config_exclusion_marker=marker,
+                config_exclusion_authority=authority,
+            )
+
+        unlocked = fresh_app().test_client().post(
+            "/api/config", data=b'{"would":"parse"}', content_type="application/json",
+        )
+        self.assertEqual(unlocked.status_code, 401)
+        self.assertEqual(self.store.path.read_bytes(), before)
+
+        persistent.write_bytes(b'{"boundary":"b2","state":"active","version":1}\n')
+        persistent.chmod(0o640)
+        shutil.rmtree(volatile_root)  # simulated reboot: all injected /run authority is gone
+        rebooted = fresh_app()
+        self.assertEqual(rebooted.extensions["config_write_exclusion"], "recovery-required")
+        self.pairing.reset_mock()
+        locked = rebooted.test_client().post(
+            "/api/config", data=b'{not-json', content_type="application/json",
+        )
+        self.assertEqual(locked.status_code, 423)
+        self.assertEqual(locked.get_json(), {"error": "Configuration writes are locked for release recovery."})
+        self.assertEqual(self.store.path.read_bytes(), before)
+        self.pairing.assert_not_called()
+
+        # Malformed, symlinked, or identity-mismatched durable authority remains denied.
+        for specimen in (
+            b"not-json\n",
+            b'{"boundary":"wrong","state":"active","version":1}\n',
+        ):
+            with self.subTest(specimen=specimen):
+                persistent.unlink()
+                persistent.write_bytes(specimen)
+                persistent.chmod(0o640)
+                self.assertEqual(fresh_app().test_client().post("/api/config").status_code, 423)
+        persistent.unlink()
+        target = persistent.with_name("sentinel-target")
+        target.write_text("{}\n")
+        persistent.symlink_to(target)
+        self.assertEqual(fresh_app().test_client().post("/api/config").status_code, 423)
+
+        persistent.unlink()
+        persistent.write_bytes(b'{"boundary":"b2","state":"active","version":1}\n')
+        persistent.chmod(0o640)
+        volatile_root.mkdir(parents=True)
+        marker.write_bytes(b"")
+        marker.chmod(0o640)
+        marker_app = fresh_app()
+        self.assertEqual(marker_app.extensions["config_write_exclusion"], "active")
+        self.assertEqual(marker_app.test_client().post("/api/config").status_code, 423)
+        marker.unlink()
+        # Per-request revalidation closes marker creation after factory construction.
+        race_app = fresh_app()
+        marker.write_bytes(b"")
+        marker.chmod(0o640)
+        self.assertEqual(race_app.test_client().post("/api/config").status_code, 423)
+        marker.unlink()
+        persistent.unlink()
+        self.assertEqual(fresh_app().test_client().post("/api/config").status_code, 401)
+        self.assertEqual(self.store.path.read_bytes(), before)
+
+        # Every malformed/nonregular volatile marker is recovery authority, never healthy.
+        for specimen in (b"not-empty\n", b"{}\n"):
+            marker.write_bytes(specimen)
+            marker.chmod(0o640)
+            malformed = fresh_app()
+            self.assertEqual(malformed.extensions["config_write_exclusion"], "recovery-required")
+            self.assertEqual(malformed.test_client().post("/api/config").status_code, 423)
+            marker.unlink()
+        marker.mkdir()
+        nonregular = fresh_app()
+        self.assertEqual(nonregular.extensions["config_write_exclusion"], "recovery-required")
+        self.assertEqual(nonregular.test_client().post("/api/config").status_code, 423)
+
+    def test_b1_exclusion_authority_default_and_wsgi_wiring_are_exact(self):
+        default = inspect.signature(create_app).parameters["config_exclusion_authority"].default
+        self.assertEqual(default, "/run/matrix-release/config-write-authority-v1.json")
+        source = (Path(__file__).parents[1] / "app/wsgi.py").read_text()
+        self.assertIn(
+            'config_exclusion_authority="/run/matrix-release/config-write-authority-v1.json"',
+            source,
+        )
+        self.assertNotIn('config-write-authority.json"', source)
 
     def test_basic_custom_appearance_round_trips_saved_edit_and_device_preview_paths(self):
         from device_preview import DevicePreviewManager

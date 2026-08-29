@@ -15,6 +15,7 @@ import subprocess
 import sys
 import tempfile
 import threading
+from fractions import Fraction
 from pathlib import Path
 from typing import Any, Callable
 
@@ -28,6 +29,7 @@ _SHA_RE = re.compile(r"[0-9a-f]{40}")
 _HASH_RE = re.compile(r"[0-9a-f]{64}")
 _SERVICE_RE = re.compile(r"[A-Za-z0-9_.@-]+\.service")
 _VERSION_RE = re.compile(r"[0-9]+\.[0-9]+\.[0-9]+-preview")
+_FFPROBE = "/usr/bin/ffprobe"
 _MANIFEST_KEYS = {"version", "boundary", "source_sha", "tree_sha", "fixtures"}
 _FIXTURE_KEYS = {
     "path", "sha256", "size", "kind", "width", "height", "frames",
@@ -157,6 +159,41 @@ def load_fixture_manifest(path: Path, source_sha: str, tree_sha: str) -> dict[st
                     raise ValueError("GIF fixture dimensions mismatch")
                 if len(actual_durations) != item["frames"] or actual_durations != durations:
                     raise ValueError("GIF fixture timeline mismatch")
+        else:
+            probe_result = subprocess.run(
+                [
+                    _FFPROBE, "-v", "error", "-select_streams", "v:0",
+                    "-show_entries",
+                    "stream=width,height,nb_frames,avg_frame_rate:frame=duration_time",
+                    "-of", "json", str(fixture_path),
+                ],
+                check=False, capture_output=True, text=True, timeout=15, shell=False,
+                env={"PATH": "/usr/bin:/bin", "LANG": "C", "LC_ALL": "C"},
+            )
+            if probe_result.returncode != 0 or len(probe_result.stdout) > 1024 * 1024:
+                raise ValueError("MP4 fixture decoder mismatch")
+            try:
+                probe = json.loads(probe_result.stdout, object_pairs_hook=_unique_object)
+                streams = probe["streams"]
+                frames = probe["frames"]
+                if type(streams) is not list or len(streams) != 1 or type(frames) is not list or not frames:
+                    raise ValueError
+                stream = streams[0]
+                fallback = Fraction(1, 1) / Fraction(stream["avg_frame_rate"])
+                actual_durations = []
+                for frame in frames:
+                    seconds = Fraction(frame.get("duration_time")) if frame.get("duration_time") else fallback
+                    milliseconds = seconds * 1000
+                    if milliseconds.denominator != 1:
+                        raise ValueError
+                    actual_durations.append(milliseconds.numerator)
+                actual = (stream["width"], stream["height"], len(frames), actual_durations)
+                if "nb_frames" in stream and int(stream["nb_frames"]) != len(frames):
+                    raise ValueError
+            except (KeyError, TypeError, ValueError, ZeroDivisionError) as error:
+                raise ValueError("MP4 fixture decoder mismatch") from error
+            if actual != (item["width"], item["height"], item["frames"], durations):
+                raise ValueError("MP4 fixture metadata mismatch")
     validated = dict(manifest)
     validated["_fixture_root"] = str(path.parent)
     return validated

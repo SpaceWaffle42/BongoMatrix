@@ -90,6 +90,9 @@ with _entrypoint_owner._wsgi_runtime_lock:
             sanitizer_identity=(nobody.pw_uid, nobody.pw_gid) if nobody else None,
             acceptance_authorization_file=acceptance_authorization_file,
             acceptance_runtime=acceptance_runtime,
+            config_exclusion_sentinel="/var/lib/matrix-release/active-config-exclusion-v1.json",
+            config_exclusion_marker="/run/matrix-release/config-write.lock",
+            config_exclusion_authority="/run/matrix-release/config-write-authority-v1.json",
             device_restart_runner=(
                 RestartRequest("/run/matrix-device-restart/submit/request")
                 if os.environ.get("MATRIX_DEVICE_RESTART_ENABLED") == "1"

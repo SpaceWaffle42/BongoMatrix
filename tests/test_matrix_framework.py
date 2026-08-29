@@ -1,5 +1,6 @@
 import importlib
 import hashlib
+import json
 import os
 import subprocess
 import sys
@@ -2514,6 +2515,7 @@ else:
         matrix._media_file.assert_not_called()
 
     def test_foundation_physical_verifier_binds_identity_and_restores_service(self):
+        from deploy import priority_1_5_transaction as transaction
         from scripts import verify_priority_1_5_foundation_physical as verifier
 
         source_sha = "a" * 40
@@ -2532,9 +2534,18 @@ else:
                 "kind": "gif", "width": 5, "height": 3,
                 "frames": 1, "durations_ms": [100],
             }
+            mp4_path = fixtures / "timing.mp4"
+            mp4_path.write_bytes(transaction._MP4)
+            mp4_fixture = {
+                "path": "fixtures/timing.mp4",
+                "sha256": hashlib.sha256(mp4_path.read_bytes()).hexdigest(),
+                "size": mp4_path.stat().st_size,
+                "kind": "mp4", "width": 2, "height": 2,
+                "frames": 1, "durations_ms": [100],
+            }
             manifest = {
                 "version": 1, "boundary": "b1", "source_sha": source_sha,
-                "tree_sha": tree_sha, "fixtures": [fixture],
+                "tree_sha": tree_sha, "fixtures": [fixture, mp4_fixture],
             }
             manifest_path = root / "physical-fixtures.json"
             manifest_path.write_bytes(verifier.canonical_json(manifest))
@@ -2588,6 +2599,13 @@ else:
                              hashlib.sha256(manifest_path.read_bytes()).hexdigest())
             self.assertEqual(report_path.read_bytes(), verifier.canonical_json(report))
             verifier.verify_report(report_path.read_bytes(), source_sha, tree_sha)
+
+            tampered_manifest = json.loads(manifest_path.read_bytes())
+            tampered_manifest["fixtures"][1]["width"] = 3
+            manifest_path.write_bytes(verifier.canonical_json(tampered_manifest))
+            with self.assertRaisesRegex(ValueError, "MP4 fixture metadata mismatch"):
+                verifier.load_fixture_manifest(manifest_path, source_sha, tree_sha)
+            manifest_path.write_bytes(verifier.canonical_json(manifest))
 
             commands.clear()
             with self.assertRaisesRegex(RuntimeError, "exercise failed"):
