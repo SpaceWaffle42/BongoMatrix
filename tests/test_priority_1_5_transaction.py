@@ -51,6 +51,304 @@ class Priority15TransactionTests(unittest.TestCase):
             env={**os.environ, "GIT_CONFIG_NOSYSTEM": "1"},
         ).strip()
 
+    def _build_prepare_fixture(self, transaction, root):
+        repository = root / "repository"
+        repository.mkdir()
+        subprocess.run(["/usr/bin/git", "init", "-q", str(repository)], check=True)
+        subprocess.run(["/usr/bin/git", "-C", str(repository), "config", "user.name", "test"], check=True)
+        subprocess.run(["/usr/bin/git", "-C", str(repository), "config", "user.email", "test@example.invalid"], check=True)
+        (repository / "app.py").write_bytes(b"baseline\n")
+        (repository / "pkg").mkdir()
+        (repository / "pkg/module.py").write_bytes(b"baseline module\n")
+        subprocess.run(["/usr/bin/git", "-C", str(repository), "add", "app.py", "pkg/module.py"], check=True)
+        dates = {**os.environ, "GIT_AUTHOR_DATE": "2000-01-01T00:00:00+0000",
+                 "GIT_COMMITTER_DATE": "2000-01-01T00:00:00+0000"}
+        subprocess.run(["/usr/bin/git", "-C", str(repository), "commit", "-qm", "baseline"],
+                       check=True, env=dates)
+        baseline = self._git(repository, "rev-parse", "HEAD^{commit}")
+        baseline_tree = self._git(repository, "rev-parse", "HEAD^{tree}")
+        (repository / "app.py").write_bytes(b"candidate\n")
+        (repository / "pkg/module.py").write_bytes(b"candidate module\n")
+        candidate_dates = {**dates, "GIT_AUTHOR_DATE": "2000-01-01T00:00:01+0000",
+                           "GIT_COMMITTER_DATE": "2000-01-01T00:00:01+0000"}
+        subprocess.run(["/usr/bin/git", "-C", str(repository), "commit", "-qam", "candidate"],
+                       check=True, env=candidate_dates)
+        source = self._git(repository, "rev-parse", "HEAD^{commit}")
+        tree = self._git(repository, "rev-parse", "HEAD^{tree}")
+        diff = subprocess.check_output([
+            "/usr/bin/git", "-C", str(repository), "diff", "--binary", "--full-index",
+            "--no-ext-diff", f"{baseline}...{source}",
+        ])
+        stage = root / "stage"
+        build = types.SimpleNamespace(
+            repository=str(repository), baseline_commit=baseline, source_commit=source,
+            expected_reviewed_diff_sha256=hashlib.sha256(diff).hexdigest(),
+            stage_root=str(stage), python=sys.executable,
+        )
+        transaction.build_b1(build)
+        return repository, stage, baseline, baseline_tree, source, tree
+
+    def _prepare_arguments(self, root, repository, stage, baseline, baseline_tree,
+                           source, tree, name):
+        destination = root / f"destination-{name}"
+        subprocess.run(["/usr/bin/git", "clone", "-q", "--no-hardlinks",
+                        str(repository), str(destination)], check=True)
+        subprocess.run(["/usr/bin/git", "-C", str(destination), "checkout", "-q", baseline], check=True)
+        private = {}
+        for relative, value in (("data/config.json", b"config-private"),
+                                ("data/paired-devices.json", b"paired-private"),
+                                ("resources/media/private.bin", b"media-private")):
+            path = destination / relative
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_bytes(value)
+            private[relative] = value
+        backup = root / f"backup-{name}"
+        state = root / f"authority-{name}/state.json"
+        arguments = types.SimpleNamespace(
+            release_root=str(stage / "release"),
+            release_manifest=str(stage / "release-manifest.json"),
+            fixture_manifest=str(stage / "physical-fixtures.json"),
+            expected_baseline_source_sha=baseline,
+            expected_baseline_tree_sha=baseline_tree,
+            expected_source_sha=source, expected_tree_sha=tree,
+            destination=str(destination), backup_root=str(backup),
+            service="matrix-web.service", interpreter=sys.executable, state=str(state),
+        )
+        return arguments, destination, backup, state, private
+
+    def _fork_prepare(self, transaction, arguments, populate=None, start_fd=None):
+        pid = os.fork()
+        if pid == 0:
+            try:
+                if start_fd is not None:
+                    os.read(start_fd, 1)
+                private_names = {"config.json", "paired-devices.json", "private.bin"}
+                real_open = transaction.os.open
+                def reject_private_open(path, *args, **kwargs):
+                    if Path(os.fsdecode(path)).name in private_names:
+                        os._exit(97)
+                    return real_open(path, *args, **kwargs)
+                patches = [
+                    patch.object(transaction, "SystemdService", return_value=_Service()),
+                    patch.object(transaction.os, "open", side_effect=reject_private_open),
+                ]
+                if populate is not None:
+                    patches.append(patch.object(transaction, "_populate_state_fd", side_effect=populate))
+                for active in patches:
+                    active.start()
+                try:
+                    transaction.prepare_b1(arguments)
+                finally:
+                    for active in reversed(patches):
+                        active.stop()
+            except BaseException:
+                os._exit(98)
+            os._exit(0)
+        return pid
+
+    def test_prepare_publication_converges_after_real_process_crashes(self):
+        from deploy import priority_1_5_transaction as transaction
+
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            fixture = self._build_prepare_fixture(transaction, root)
+            real_populate = transaction._populate_state_fd
+
+            def partial_state(_path, _state, descriptor):
+                os.write(descriptor, b"partial")
+                os.fsync(descriptor)
+                os._exit(71)
+
+            def after_state_fsync(path, state_value, descriptor):
+                real_populate(path, state_value, descriptor)
+                os._exit(72)
+
+            def after_backup_before_state(_path, _state, _descriptor):
+                os._exit(73)
+
+            for name, crash, expected_exit in (
+                ("partial-state", partial_state, 71),
+                ("state-fsynced", after_state_fsync, 72),
+                ("backup-published", after_backup_before_state, 73),
+            ):
+                with self.subTest(crash=name):
+                    arguments, destination, backup, state, private = self._prepare_arguments(
+                        root, *fixture, name,
+                    )
+                    pid = self._fork_prepare(transaction, arguments, crash)
+                    waited, status = os.waitpid(pid, 0)
+                    self.assertEqual(waited, pid)
+                    self.assertTrue(os.WIFEXITED(status))
+                    self.assertEqual(os.WEXITSTATUS(status), expected_exit)
+                    self.assertFalse(state.exists(), "a pre-publication state became visible")
+                    self.assertFalse(Path(str(state) + ".identity").exists())
+
+                    service = _Service()
+                    with patch.object(transaction, "SystemdService", return_value=service):
+                        prepared = transaction.prepare_b1(arguments)
+                    self.assertTrue(state.is_file())
+                    self.assertEqual(state.read_bytes(), transaction.canonical_json(prepared))
+                    tx = transaction.Priority15Transaction.load(state, service=service)
+                    tx.close()
+                    baseline_manifest = json.loads(
+                        (backup / "baseline-source-manifest.json").read_bytes()
+                    )
+                    self.assertEqual(
+                        [item["sha256"] for item in baseline_manifest["files"]],
+                        [hashlib.sha256(b"baseline\n").hexdigest(),
+                         hashlib.sha256(b"baseline module\n").hexdigest()],
+                    )
+                    for relative, expected in private.items():
+                        self.assertEqual((destination / relative).read_bytes(), expected)
+
+    def test_concurrent_prepare_never_overwrites_state_or_backup(self):
+        from deploy import priority_1_5_transaction as transaction
+
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            fixture = self._build_prepare_fixture(transaction, root)
+            arguments, _destination, backup, state, _private = self._prepare_arguments(
+                root, *fixture, "concurrent",
+            )
+            read_end, write_end = os.pipe()
+            try:
+                children = [self._fork_prepare(transaction, arguments, start_fd=read_end)
+                            for _ in range(2)]
+                os.write(write_end, b"xx")
+                results = []
+                for child in children:
+                    _waited, status = os.waitpid(child, 0)
+                    results.append(os.WEXITSTATUS(status))
+            finally:
+                os.close(read_end)
+                os.close(write_end)
+            self.assertEqual(sorted(results), [0, 98])
+            before = (state.stat().st_dev, state.stat().st_ino, state.read_bytes())
+            tx = transaction.Priority15Transaction.load(state, service=_Service())
+            tx.close()
+            self.assertEqual(
+                (state.stat().st_dev, state.stat().st_ino, state.read_bytes()), before,
+            )
+            self.assertTrue((backup / "baseline-source-manifest.json").is_file())
+            self.assertEqual(list(backup.parent.glob(f".{backup.name}.*")), [])
+            self.assertEqual(list(state.parent.glob(f".{state.name}.*")), [])
+
+    def test_orphan_backup_root_substitution_during_state_construction_fails_closed(self):
+        from deploy import priority_1_5_transaction as transaction
+
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            fixture = self._build_prepare_fixture(transaction, root)
+            arguments, _destination, backup, state, _private = self._prepare_arguments(
+                root, *fixture, "adopt-root-swap",
+            )
+
+            def leave_orphan(_path, _state, _descriptor):
+                os._exit(73)
+
+            child = self._fork_prepare(transaction, arguments, leave_orphan)
+            _waited, status = os.waitpid(child, 0)
+            self.assertEqual(os.WEXITSTATUS(status), 73)
+            self.assertTrue(backup.is_dir())
+            self.assertFalse(state.exists())
+
+            admitted = backup.with_name("admitted-backup")
+            real_populate = transaction._populate_state_fd
+
+            def substitute(path, state_value, descriptor):
+                real_populate(path, state_value, descriptor)
+                backup.rename(admitted)
+                backup.mkdir(mode=0o700)
+                (backup / "unknown-sentinel").write_bytes(b"substitute")
+
+            with (
+                patch.object(transaction, "SystemdService", return_value=_Service()),
+                patch.object(transaction, "_populate_state_fd", side_effect=substitute),
+                self.assertRaisesRegex(ValueError, "backup namespace changed"),
+            ):
+                transaction.prepare_b1(arguments)
+
+            self.assertFalse(state.exists())
+            self.assertEqual((backup / "unknown-sentinel").read_bytes(), b"substitute")
+            self.assertEqual((admitted / "source/app.py").read_bytes(), b"baseline\n")
+
+    def test_orphan_backup_nested_parent_substitution_during_state_construction_fails_closed(self):
+        from deploy import priority_1_5_transaction as transaction
+
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            fixture = self._build_prepare_fixture(transaction, root)
+            arguments, _destination, backup, state, _private = self._prepare_arguments(
+                root, *fixture, "adopt-nested-swap",
+            )
+
+            def leave_orphan(_path, _state, _descriptor):
+                os._exit(73)
+
+            child = self._fork_prepare(transaction, arguments, leave_orphan)
+            _waited, status = os.waitpid(child, 0)
+            self.assertEqual(os.WEXITSTATUS(status), 73)
+
+            admitted_parent = backup / "source/admitted-pkg"
+            nested_parent = backup / "source/pkg"
+            real_populate = transaction._populate_state_fd
+
+            def substitute(path, state_value, descriptor):
+                real_populate(path, state_value, descriptor)
+                nested_parent.rename(admitted_parent)
+                nested_parent.mkdir(mode=0o700)
+                (nested_parent / "unknown-sentinel").write_bytes(b"substitute")
+
+            with (
+                patch.object(transaction, "SystemdService", return_value=_Service()),
+                patch.object(transaction, "_populate_state_fd", side_effect=substitute),
+                self.assertRaisesRegex(ValueError, "backup namespace changed"),
+            ):
+                transaction.prepare_b1(arguments)
+
+            self.assertFalse(state.exists())
+            self.assertEqual((nested_parent / "unknown-sentinel").read_bytes(), b"substitute")
+            self.assertEqual((admitted_parent / "module.py").read_bytes(), b"baseline module\n")
+
+    def test_orphan_backup_nested_parent_substitution_after_state_publication_removes_only_state(self):
+        from deploy import priority_1_5_transaction as transaction
+
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            fixture = self._build_prepare_fixture(transaction, root)
+            arguments, _destination, backup, state, _private = self._prepare_arguments(
+                root, *fixture, "adopt-post-publication-swap",
+            )
+
+            def leave_orphan(_path, _state, _descriptor):
+                os._exit(73)
+
+            child = self._fork_prepare(transaction, arguments, leave_orphan)
+            _waited, status = os.waitpid(child, 0)
+            self.assertEqual(os.WEXITSTATUS(status), 73)
+
+            admitted_parent = backup / "source/admitted-pkg"
+            nested_parent = backup / "source/pkg"
+            real_rename = transaction._rename_noreplace
+
+            def publish_then_substitute(source_name, destination_name, *, parent_fd):
+                real_rename(source_name, destination_name, parent_fd=parent_fd)
+                if destination_name == state.name:
+                    nested_parent.rename(admitted_parent)
+                    nested_parent.mkdir(mode=0o700)
+                    (nested_parent / "unknown-sentinel").write_bytes(b"substitute")
+
+            with (
+                patch.object(transaction, "SystemdService", return_value=_Service()),
+                patch.object(transaction, "_rename_noreplace", side_effect=publish_then_substitute),
+                self.assertRaisesRegex(ValueError, "backup namespace changed"),
+            ):
+                transaction.prepare_b1(arguments)
+
+            self.assertFalse(state.exists())
+            self.assertEqual((nested_parent / "unknown-sentinel").read_bytes(), b"substitute")
+            self.assertEqual((admitted_parent / "module.py").read_bytes(), b"baseline module\n")
+
     def test_b1_cli_is_exact_and_source_rollback_is_crash_safe(self):
         source_script = Path(__file__).parents[1] / "deploy/priority_1_5_transaction.py"
         with tempfile.TemporaryDirectory() as isolated_temporary:
@@ -120,7 +418,13 @@ class Priority15TransactionTests(unittest.TestCase):
                     if command and command[0] == "/usr/bin/ffmpeg":
                         raise AssertionError("build-b1 invoked a host ffmpeg encoder")
                     return real_subprocess_run(command, *args, **kwargs)
-                with patch.object(transaction.subprocess, "run", side_effect=reject_ffmpeg):
+                with (
+                    patch.object(transaction.subprocess, "run", side_effect=reject_ffmpeg),
+                    patch.object(
+                        transaction.Image.Image, "save",
+                        side_effect=AssertionError("build-b1 invoked a Pillow writer"),
+                    ),
+                ):
                     return transaction.main(argv)
             self.assertEqual(build_without_host_encoder(build_argv), 0)
             release_manifest_bytes = (stage / "release-manifest.json").read_bytes()
@@ -145,7 +449,7 @@ class Priority15TransactionTests(unittest.TestCase):
             fixture_manifest = json.loads(fixture_path.read_bytes())
             fixtures = fixture_manifest["fixtures"]
             expected_fixtures = [
-                {"path": "fixtures/b1-landscape-loop.gif", "sha256": "a9badf8d2309a4a7d0cf20b16c3249c9934c5ea47f37a8caaa266e7086ab2b96", "size": 2559, "kind": "gif", "width": 9, "height": 5, "frames": 3, "durations_ms": [60, 140, 300]},
+                {"path": "fixtures/b1-landscape-loop.gif", "sha256": "eeca6314667ff792803738970918d13bb967f1855a9eb35cfaf7e2c0435b1483", "size": 561, "kind": "gif", "width": 65, "height": 33, "frames": 3, "durations_ms": [60, 140, 300]},
                 {"path": "fixtures/b1-landscape.mp4", "sha256": "93a4b38eaf4e1fb6036c5f735958637bcb954bc1f3897f843bc84459051ae7de", "size": 2084, "kind": "mp4", "width": 11, "height": 5, "frames": 3, "durations_ms": [200, 200, 200]},
                 {"path": "fixtures/b1-portrait-finite.gif", "sha256": "4ac60e3e0b6d5dd62113c45deda6d3ada52e4f9c362ce17b348d31b9941acbd9", "size": 3293, "kind": "gif", "width": 3, "height": 7, "frames": 4, "durations_ms": [20, 80, 200, 400]},
                 {"path": "fixtures/b1-portrait.mp4", "sha256": "f462de666a87cc665d4b6786206ff04ecae9a4375e9dc8a1aa3d61653123f8fc", "size": 2281, "kind": "mp4", "width": 5, "height": 9, "frames": 4, "durations_ms": [100, 100, 100, 100]},
@@ -160,7 +464,7 @@ class Priority15TransactionTests(unittest.TestCase):
             self.assertEqual(fixture_path.read_bytes(), expected_fixture_manifest)
             self.assertEqual(
                 hashlib.sha256(fixture_path.read_bytes()).hexdigest(),
-                "4c04116948ba59bfe7a99c1f9d62c3313292ac980250db00b45d2a2839604912",
+                "5397f8925ce97930ef597496985417e8bdc174a086840d695f36eb1ada687d80",
             )
             self.assertGreaterEqual(len(fixtures), 6)
             self.assertTrue(all(entry["frames"] > 1 for entry in fixtures))
@@ -168,7 +472,24 @@ class Priority15TransactionTests(unittest.TestCase):
             self.assertTrue(any(entry["width"] > entry["height"] for entry in fixtures))
             self.assertTrue(any(entry["width"] <= 3 and entry["height"] <= 3 for entry in fixtures))
             self.assertTrue(any(entry["width"] % 2 or entry["height"] % 2 for entry in fixtures))
+            self.assertTrue(any(entry["width"] > 64 or entry["height"] > 32 for entry in fixtures))
             self.assertGreater(len({duration for entry in fixtures for duration in entry["durations_ms"]}), 2)
+            from scripts import verify_priority_1_5_foundation_physical as physical_verifier
+            loaded = physical_verifier.load_fixture_manifest(fixture_path, source, source_tree)
+            self.assertEqual(loaded["fixtures"], fixtures)
+            without_oversized = [
+                entry for entry in fixtures
+                if entry["width"] <= 64 and entry["height"] <= 32
+            ]
+            no_oversized_path = stage / "physical-fixtures-no-oversized.json"
+            no_oversized_path.write_bytes(transaction.canonical_json({
+                "version": 1, "boundary": "b1", "source_sha": source,
+                "tree_sha": source_tree, "fixtures": without_oversized,
+            }))
+            with self.assertRaisesRegex(ValueError, "fixture corpus"):
+                physical_verifier.load_fixture_manifest(
+                    no_oversized_path, source, source_tree,
+                )
             gif_loops = []
             from PIL import Image
             for entry in fixtures:
@@ -240,6 +561,15 @@ class Priority15TransactionTests(unittest.TestCase):
             self.assertFalse(state.exists())
             self.assertFalse(backup.exists())
             subprocess.run(["/usr/bin/git", "-C", str(destination), "checkout", "-q", "--", "app.py"], check=True)
+            backup.mkdir(mode=0o700)
+            unknown = backup / "unknown-sentinel"
+            unknown.write_bytes(b"do-not-delete")
+            with patch.object(transaction, "SystemdService", return_value=service), self.assertRaisesRegex(
+                    ValueError, "published backup"):
+                transaction.main(prepare)
+            self.assertEqual(unknown.read_bytes(), b"do-not-delete")
+            self.assertFalse(state.exists())
+            shutil.rmtree(backup)
             with patch.object(transaction, "SystemdService", return_value=service):
                 self.assertEqual(transaction.main(prepare), 0)
             self.assertEqual(stat.S_IMODE(state.stat().st_mode), 0o600)

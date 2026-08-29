@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import base64
+import ctypes
 import errno
 import fcntl
 import hashlib
@@ -68,42 +69,15 @@ PUBLIC_FINAL_KEYS = {
 # Canonical multi-frame media, generated once and embedded so build-b1 never
 # depends on a host encoder, Pillow writer, or encoder-version metadata.
 _FIXTURE_SPECS = (
-    ('fixtures/b1-landscape-loop.gif', 'gif', 'a9badf8d2309a4a7d0cf20b16c3249c9934c5ea47f37a8caaa266e7086ab2b96', base64.b64decode(
-        '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'
-        'XL2CFUtWQAA7'
+    ('fixtures/b1-landscape-loop.gif', 'gif', 'eeca6314667ff792803738970918d13bb967f1855a9eb35cfaf7e2c0435b1483', base64.b64decode(
+        'R0lGODlhQQAhAIEAACPh4dweHgAAAAAAACH/C05FVFNDQVBFMi4wAwEAAAAh+QQIBgAAACwAAAAAQQAhAAAIkAABBBhIsKDAgggP'
+        'IiSocGGAhgshOpxIsaLFixgzatzIkWFFiQY/iqQIsqPJkyhTqhw5seRAlw9ZOoS5sqbNmzhh6pQZkSfOn0CDctxJ0mfIokKTKl2a'
+        '0KhHpC2dMp1KFSXRqFBnSq3KtavFq1qz9hTrtazZsVjThlWL9qxbt2Dbym1K9q3dqnHpstV7ty/VgAAh+QQIDgAAACwAAAAAQQAh'
+        'AIHrS8MUtDwAAAAAAAAIjgADCBxIsKDBgwgTKlyIEIBChwkhNnxIkaHFixgzatzIEaPEgx8Nhiw4kmDJjihTqlyp8qRAlwFgyqzIs'
+        'qbNmzgHzoxIE2TPnECDCv1JkqhJozqHKl2qdOdEnlCfMp1KdaVTn1GxSq3KtevFqyKRvhTrtWxZsEWzhlVrtu1ZsmiPsnVLl2rcp'
+        'HPxbq1rMSAAIfkECB4AAAAsAAAAAEEAIQCB4bkjHkbcAAAAAAAACI8AAwgcSLCgwYMIEypcyLChw4cQAwBQODFhRYQXD2Y0uDGix'
+        '48gQ4r02JFgyYEnBaaUSHGky5cwYz5cSbOlRZsyc+rcCbLmzZ8YeQodSpQjTo1HjQItyrQpTJ9BlyqN6rSqVZJJC0JFKvWq169Tu'
+        'VIVSzYs2LNgt5rVmtUk2rdp26KUq5Iu3Ls81bLt6hZoQAA7'
     )),
     ('fixtures/b1-landscape.mp4', 'mp4', '93a4b38eaf4e1fb6036c5f735958637bcb954bc1f3897f843bc84459051ae7de', base64.b64decode(
         'AAAAJGZ0eXBpc29tAAACAGlzb21pc282aXNvMmF2YzFtcDQxAAACvW1vb3YAAABsbXZoZAAAAAAAAAAAAAAAAAAAA+gAAAAAAAEA'
@@ -467,6 +441,26 @@ def _fsync_dir(path: Path):
         os.close(fd)
 
 
+def _rename_noreplace(source: str, destination: str, *, parent_fd: int):
+    """Atomically publish one sibling without ever replacing an existing name."""
+    try:
+        renameat2 = ctypes.CDLL(None, use_errno=True).renameat2
+    except (AttributeError, OSError) as error:
+        raise OSError(errno.ENOSYS, "renameat2 RENAME_NOREPLACE is unavailable") from error
+    renameat2.argtypes = (
+        ctypes.c_int, ctypes.c_char_p, ctypes.c_int, ctypes.c_char_p, ctypes.c_uint,
+    )
+    renameat2.restype = ctypes.c_int
+    if renameat2(parent_fd, os.fsencode(source), parent_fd,
+                 os.fsencode(destination), 1) != 0:
+        error_number = ctypes.get_errno()
+        raise OSError(error_number, os.strerror(error_number), destination)
+
+
+def _fresh_sibling_name(path: Path) -> str:
+    return f".{path.name}.{os.getpid()}.{secrets.token_hex(16)}"
+
+
 def _atomic_write(path: Path, data: bytes, mode: int, *, uid=None, gid=None):
     parent = path.parent
     info = parent.lstat()
@@ -547,7 +541,7 @@ def _state_digest(state: dict) -> str:
 
 
 def _populate_state_fd(path: Path, state: dict, fd: int):
-    """Populate the already locked, sole durable state inode."""
+    """Populate and sync the locked state inode before it becomes visible."""
     metadata = os.fstat(fd)
     state["self"] = {
         "path": str(path), "dev": metadata.st_dev, "ino": metadata.st_ino,
@@ -564,11 +558,6 @@ def _populate_state_fd(path: Path, state: dict, fd: int):
             raise OSError("short durable state write")
         view = view[count:]
     os.fsync(fd)
-    parent_fd = _open_directory(path.parent)
-    try:
-        os.fsync(parent_fd)
-    finally:
-        os.close(parent_fd)
 
 
 def _mkdir_fresh(path: Path, mode: int = 0o700):
@@ -1408,6 +1397,330 @@ class Priority15Transaction:
         return report
 
 
+def _baseline_manifest(approved: list[dict], baseline_sha: str, baseline_tree_sha: str):
+    files = []
+    for captured in approved:
+        if captured["present"]:
+            files.append({
+                "path": captured["path"], "present": True,
+                "sha256": captured["sha256"], "size": captured["size"],
+                "mode": captured["mode"],
+            })
+        else:
+            files.append({
+                "path": captured["path"], "present": False,
+                "sha256": None, "size": 0, "mode": None,
+            })
+    return {
+        "version": 1, "boundary": "b1", "source_sha": baseline_sha,
+        "tree_sha": baseline_tree_sha, "files": files,
+    }
+
+
+def _backup_metadata(metadata: os.stat_result, *, digest: str | None = None):
+    return (
+        metadata.st_dev, metadata.st_ino, metadata.st_uid, metadata.st_gid,
+        metadata.st_mode, metadata.st_nlink, metadata.st_size,
+        metadata.st_mtime_ns, metadata.st_ctime_ns, digest,
+    )
+
+
+def _snapshot_backup_tree(root_fd: int):
+    """Capture one complete tree only through an already admitted root descriptor."""
+    records = {}
+
+    def visit(directory_fd: int, prefix: PurePosixPath):
+        for name in sorted(os.listdir(directory_fd)):
+            relative = (prefix / name).as_posix()
+            before = os.stat(name, dir_fd=directory_fd, follow_symlinks=False)
+            if stat.S_ISDIR(before.st_mode):
+                child_fd = os.open(
+                    name, os.O_RDONLY | os.O_DIRECTORY | os.O_CLOEXEC | os.O_NOFOLLOW,
+                    dir_fd=directory_fd,
+                )
+                try:
+                    opened = os.fstat(child_fd)
+                    if _backup_metadata(opened) != _backup_metadata(before):
+                        raise ValueError("published backup namespace changed")
+                    records[relative] = ("directory", _backup_metadata(opened), None)
+                    visit(child_fd, prefix / name)
+                    if _backup_metadata(os.fstat(child_fd)) != _backup_metadata(opened):
+                        raise ValueError("published backup changed while traversed")
+                finally:
+                    os.close(child_fd)
+            elif stat.S_ISREG(before.st_mode):
+                fd = os.open(
+                    name, os.O_RDONLY | os.O_CLOEXEC | os.O_NOFOLLOW | os.O_NONBLOCK,
+                    dir_fd=directory_fd,
+                )
+                try:
+                    data, opened = _read_descriptor(fd)
+                finally:
+                    os.close(fd)
+                if _backup_metadata(opened) != _backup_metadata(before):
+                    raise ValueError("published backup namespace changed")
+                records[relative] = ("file", _backup_metadata(opened, digest=_sha(data)), data)
+            else:
+                raise ValueError("published backup contains an unsafe object")
+
+    visit(root_fd, PurePosixPath())
+    return records
+
+
+def _revalidate_backup_namespace(backup: Path, root_fd: int, root_metadata: tuple,
+                                 snapshot: dict):
+    if not _same_namespace_inode(root_fd, backup):
+        raise ValueError("backup namespace changed")
+    if _backup_metadata(os.fstat(root_fd)) != root_metadata:
+        raise ValueError("backup namespace changed")
+    if _snapshot_backup_tree(root_fd) != snapshot:
+        raise ValueError("backup namespace changed")
+
+
+def _directory_authority_fd(path: Path, fd: int):
+    metadata = os.fstat(fd)
+    return {
+        "path": str(path), "dev": metadata.st_dev, "ino": metadata.st_ino,
+        "uid": metadata.st_uid, "gid": metadata.st_gid,
+        "mode": f"{stat.S_IMODE(metadata.st_mode):04o}",
+    }
+
+
+def _file_authority_snapshot(path: Path, record: tuple):
+    kind, metadata, data = record
+    if kind != "file":
+        raise ValueError("backup manifest is not a regular file")
+    dev, ino, uid, gid, mode, _nlink, _size, _mtime, _ctime, digest = metadata
+    return {
+        "path": str(path), "dev": dev, "ino": ino, "uid": uid, "gid": gid,
+        "mode": f"{stat.S_IMODE(mode):04o}", "sha256": digest,
+    }, data
+
+
+def _validate_prepared_backup(backup: Path, approved: list[dict], baseline_manifest: dict,
+                              *, root_fd: int | None = None):
+    """Descriptor-pin and validate a published orphan through state publication."""
+    if root_fd is None:
+        root_fd = _open_directory(backup)
+    root_info = os.fstat(root_fd)
+    authority_owner = (os.geteuid(), os.getegid())
+    if (not stat.S_ISDIR(root_info.st_mode) or stat.S_ISLNK(root_info.st_mode)
+            or (root_info.st_uid, root_info.st_gid) != authority_owner
+            or stat.S_IMODE(root_info.st_mode) != 0o700):
+        os.close(root_fd)
+        raise ValueError("published backup root is unsafe")
+    try:
+        root_metadata = _backup_metadata(root_info)
+        snapshot = _snapshot_backup_tree(root_fd)
+        expected_directories = {"source"}
+        expected_files = {"baseline-source-manifest.json"}
+        for captured in approved:
+            if not captured["present"]:
+                continue
+            relative = PurePosixPath(captured["path"])
+            expected_files.add((PurePosixPath("source") / relative).as_posix())
+            parent = PurePosixPath("source")
+            for part in relative.parts[:-1]:
+                parent /= part
+                expected_directories.add(parent.as_posix())
+        actual_directories = {path for path, record in snapshot.items() if record[0] == "directory"}
+        actual_files = {path for path, record in snapshot.items() if record[0] == "file"}
+        if actual_directories != expected_directories or actual_files != expected_files:
+            raise ValueError("published backup tree is incomplete or contains extras")
+        for relative in expected_directories:
+            metadata = snapshot[relative][1]
+            if ((metadata[2], metadata[3]) != authority_owner
+                    or stat.S_IMODE(metadata[4]) != 0o700):
+                raise ValueError("published backup directory metadata mismatch")
+        manifest_path = backup / "baseline-source-manifest.json"
+        manifest_authority, raw = _file_authority_snapshot(
+            manifest_path, snapshot["baseline-source-manifest.json"],
+        )
+        manifest_metadata = snapshot["baseline-source-manifest.json"][1]
+        if ((manifest_metadata[2], manifest_metadata[3]) != authority_owner
+                or stat.S_IMODE(manifest_metadata[4]) != 0o600
+                or raw != canonical_json(baseline_manifest)):
+            raise ValueError("published backup manifest mismatch")
+        for captured in approved:
+            if not captured["present"]:
+                continue
+            record = snapshot[(PurePosixPath("source") / captured["path"]).as_posix()]
+            metadata, data = record[1], record[2]
+            if ((metadata[2], metadata[3]) != authority_owner
+                    or f"{stat.S_IMODE(metadata[4]):04o}" != captured["mode"]
+                    or len(data) != captured["size"] or _sha(data) != captured["sha256"]):
+                raise ValueError("published backup source mismatch")
+        _revalidate_backup_namespace(backup, root_fd, root_metadata, snapshot)
+        return {
+            "fd": root_fd, "root_metadata": root_metadata, "snapshot": snapshot,
+            "root_authority": _directory_authority_fd(backup, root_fd),
+            "manifest_authority": manifest_authority,
+        }
+    except BaseException:
+        os.close(root_fd)
+        raise
+
+
+def _remove_exact_backup_tree(root_fd: int, parent_fd: int, name: str, snapshot: dict):
+    """Remove only the caller-owned tree still bound to its pinned descriptor."""
+    root = os.fstat(root_fd)
+    current = os.stat(name, dir_fd=parent_fd, follow_symlinks=False)
+    if (root.st_dev, root.st_ino) != (current.st_dev, current.st_ino):
+        return False
+    if _snapshot_backup_tree(root_fd) != snapshot:
+        return False
+    files = [path for path, record in snapshot.items() if record[0] == "file"]
+    directories = [path for path, record in snapshot.items() if record[0] == "directory"]
+    for relative in sorted(files, key=lambda value: len(PurePosixPath(value).parts), reverse=True):
+        directory_fd, leaf = _open_parent_at(root_fd, relative)
+        try:
+            current = os.stat(leaf, dir_fd=directory_fd, follow_symlinks=False)
+            if _backup_metadata(current, digest=snapshot[relative][1][-1]) != snapshot[relative][1]:
+                return False
+            os.unlink(leaf, dir_fd=directory_fd)
+        finally:
+            os.close(directory_fd)
+    for relative in sorted(directories, key=lambda value: len(PurePosixPath(value).parts), reverse=True):
+        directory_fd, leaf = _open_parent_at(root_fd, relative)
+        try:
+            current = os.stat(leaf, dir_fd=directory_fd, follow_symlinks=False)
+            if (current.st_dev, current.st_ino) != (snapshot[relative][1][0], snapshot[relative][1][1]):
+                return False
+            os.rmdir(leaf, dir_fd=directory_fd)
+        finally:
+            os.close(directory_fd)
+    current = os.stat(name, dir_fd=parent_fd, follow_symlinks=False)
+    if (root.st_dev, root.st_ino) != (current.st_dev, current.st_ino):
+        return False
+    os.rmdir(name, dir_fd=parent_fd)
+    os.fsync(parent_fd)
+    return True
+
+
+def _ensure_backup_parent_at(root_fd: int, relative: str):
+    """Create/open one mode-0700 parent chain beneath a pinned private root."""
+    parts = PurePosixPath(_safe_relative(relative)).parts[:-1]
+    current = os.dup(root_fd)
+    try:
+        for part in parts:
+            try:
+                os.mkdir(part, mode=0o700, dir_fd=current)
+            except FileExistsError:
+                pass
+            child = os.open(
+                part, os.O_RDONLY | os.O_DIRECTORY | os.O_CLOEXEC | os.O_NOFOLLOW,
+                dir_fd=current,
+            )
+            metadata = os.fstat(child)
+            if ((metadata.st_uid, metadata.st_gid) != (os.geteuid(), os.getegid())
+                    or stat.S_IMODE(metadata.st_mode) != 0o700):
+                os.close(child)
+                raise ValueError("temporary backup directory metadata mismatch")
+            os.fsync(current)
+            os.close(current)
+            current = child
+        return current, PurePosixPath(relative).name
+    except BaseException:
+        os.close(current)
+        raise
+
+
+def _fsync_backup_tree_at(root_fd: int):
+    """Durably flush every admitted directory from leaves to the pinned root."""
+    for name in sorted(os.listdir(root_fd)):
+        metadata = os.stat(name, dir_fd=root_fd, follow_symlinks=False)
+        if stat.S_ISDIR(metadata.st_mode):
+            child = os.open(
+                name, os.O_RDONLY | os.O_DIRECTORY | os.O_CLOEXEC | os.O_NOFOLLOW,
+                dir_fd=root_fd,
+            )
+            try:
+                _fsync_backup_tree_at(child)
+            finally:
+                os.close(child)
+        elif not stat.S_ISREG(metadata.st_mode):
+            raise ValueError("temporary backup contains an unsafe object")
+    os.fsync(root_fd)
+
+
+def _build_and_publish_backup(backup: Path, approved: list[dict], baseline_manifest: dict):
+    parent = backup.parent
+    parent_fd = _open_directory(parent)
+    temporary_name = _fresh_sibling_name(backup)
+    temporary_fd = -1
+    published = False
+    authority = None
+    try:
+        if not _same_namespace_inode(parent_fd, parent):
+            raise ValueError("backup parent namespace changed")
+        os.mkdir(temporary_name, mode=0o700, dir_fd=parent_fd)
+        os.fsync(parent_fd)
+        temporary_fd = os.open(
+            temporary_name,
+            os.O_RDONLY | os.O_DIRECTORY | os.O_CLOEXEC | os.O_NOFOLLOW,
+            dir_fd=parent_fd,
+        )
+        root = os.fstat(temporary_fd)
+        if ((root.st_uid, root.st_gid) != (os.geteuid(), os.getegid())
+                or stat.S_IMODE(root.st_mode) != 0o700):
+            raise ValueError("temporary backup root metadata mismatch")
+        os.mkdir("source", mode=0o700, dir_fd=temporary_fd)
+        os.fsync(temporary_fd)
+        for captured in approved:
+            if not captured["present"]:
+                continue
+            relative = (PurePosixPath("source") / captured["path"]).as_posix()
+            destination_parent, destination_name = _ensure_backup_parent_at(
+                temporary_fd, relative,
+            )
+            try:
+                _atomic_write_at(
+                    destination_parent, destination_name, captured["data"],
+                    int(captured["mode"], 8), uid=os.geteuid(), gid=os.getegid(),
+                )
+            finally:
+                os.close(destination_parent)
+        _atomic_write_at(
+            temporary_fd, "baseline-source-manifest.json",
+            canonical_json(baseline_manifest), 0o600,
+            uid=os.geteuid(), gid=os.getegid(),
+        )
+        _fsync_backup_tree_at(temporary_fd)
+        temporary_snapshot = _snapshot_backup_tree(temporary_fd)
+        if not _same_namespace_inode(parent_fd, parent):
+            raise ValueError("backup parent namespace changed")
+        try:
+            _rename_noreplace(temporary_name, backup.name, parent_fd=parent_fd)
+        except FileExistsError:
+            _remove_exact_backup_tree(temporary_fd, parent_fd, temporary_name, temporary_snapshot)
+        else:
+            published = True
+            os.fsync(parent_fd)
+        if not _same_namespace_inode(parent_fd, parent):
+            raise ValueError("backup parent namespace changed")
+        if published:
+            admitted_fd = temporary_fd
+            temporary_fd = -1
+            authority = _validate_prepared_backup(
+                backup, approved, baseline_manifest, root_fd=admitted_fd,
+            )
+    except BaseException:
+        if temporary_fd >= 0 and not published:
+            try:
+                snapshot = _snapshot_backup_tree(temporary_fd)
+                _remove_exact_backup_tree(temporary_fd, parent_fd, temporary_name, snapshot)
+            except (FileNotFoundError, OSError, ValueError):
+                pass
+        raise
+    finally:
+        if temporary_fd >= 0:
+            os.close(temporary_fd)
+        os.close(parent_fd)
+    if authority is not None:
+        return authority
+    return _validate_prepared_backup(backup, approved, baseline_manifest)
+
+
 def prepare_b1(arguments):
     release_root = _absolute(arguments.release_root, "release root", must_exist=True)
     release_manifest_path = _absolute(arguments.release_manifest, "release manifest", must_exist=True)
@@ -1457,90 +1770,116 @@ def prepare_b1(arguments):
         parent_info = parent_parent.lstat()
         if not stat.S_ISDIR(parent_info.st_mode) or stat.S_ISLNK(parent_info.st_mode):
             raise ValueError("state ancestry is unsafe")
-        state_path.parent.mkdir(mode=0o700)
-        _fsync_dir(state_path.parent.parent)
-    elif state_path.parent.is_symlink() or not state_path.parent.is_dir():
+        try:
+            state_path.parent.mkdir(mode=0o700)
+        except FileExistsError:
+            pass
+        else:
+            _fsync_dir(state_path.parent.parent)
+    if state_path.parent.is_symlink() or not state_path.parent.is_dir():
         raise ValueError("state parent is unsafe")
     if state_path.parent.resolve(strict=True) != state_path.parent:
         raise ValueError("state ancestry is unsafe")
+
+    baseline_manifest = _baseline_manifest(
+        approved, arguments.expected_baseline_source_sha,
+        arguments.expected_baseline_tree_sha,
+    )
+    service = SystemdService(arguments.service)
+    if not service.is_active():
+        raise ValueError("prepare-b1 requires the baseline service active")
+    initial_service = service.status()
+    if (type(initial_service) is not dict or initial_service.get("service") != arguments.service
+            or type(initial_service.get("n_restarts")) is not int
+            or initial_service["n_restarts"] < 0):
+        raise ValueError("baseline service evidence is invalid")
+    service_baseline = {
+        "n_restarts": initial_service["n_restarts"], "warning_since": int(time.time()),
+    }
+
+    if backup.exists() or backup.is_symlink():
+        backup_authority = _validate_prepared_backup(backup, approved, baseline_manifest)
+    else:
+        backup_authority = _build_and_publish_backup(backup, approved, baseline_manifest)
+
+    try:
+        parent_fd = _open_directory(state_path.parent)
+    except BaseException:
+        os.close(backup_authority["fd"])
+        raise
     state_fd = -1
-    created_backup = False
+    temporary_name = _fresh_sibling_name(state_path)
+    temporary_identity = None
+    state_published = False
+    completed = False
     try:
         state_fd = os.open(
-            state_path, os.O_RDWR | os.O_CREAT | os.O_EXCL | os.O_CLOEXEC | os.O_NOFOLLOW,
-            0o600,
+            temporary_name,
+            os.O_RDWR | os.O_CREAT | os.O_EXCL | os.O_CLOEXEC | os.O_NOFOLLOW,
+            0o600, dir_fd=parent_fd,
         )
         os.fchmod(state_fd, 0o600)
         os.fchown(state_fd, os.geteuid(), os.getegid())
+        temporary_metadata = os.fstat(state_fd)
+        temporary_identity = (temporary_metadata.st_dev, temporary_metadata.st_ino)
         fcntl.flock(state_fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
-        if not _same_namespace_inode(state_fd, state_path):
-            raise ValueError("state identity changed after lock")
-        service = SystemdService(arguments.service)
-        if not service.is_active():
-            raise ValueError("prepare-b1 requires the baseline service active")
-        initial_service = service.status()
-        if (type(initial_service) is not dict or initial_service.get("service") != arguments.service
-                or type(initial_service.get("n_restarts")) is not int
-                or initial_service["n_restarts"] < 0):
-            raise ValueError("baseline service evidence is invalid")
-        service_baseline = {
-            "n_restarts": initial_service["n_restarts"], "warning_since": int(time.time()),
-        }
-        _mkdir_fresh(backup)
-        created_backup = True
-        source_backup = backup / "source"
-        source_backup.mkdir(mode=0o700)
-        baseline_files = []
-        for captured in approved:
-            relative = captured["path"]
-            if not captured["present"]:
-                baseline_files.append({"path": relative, "present": False, "sha256": None,
-                                       "size": 0, "mode": None})
-            else:
-                data, mode = captured["data"], captured["mode"]
-                saved = source_backup / relative
-                saved.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
-                _durable_new_file(saved, data, int(mode, 8))
-                baseline_files.append({"path": relative, "present": True, "sha256": _sha(data),
-                                       "size": len(data), "mode": mode})
-        baseline_manifest = {
-            "version": 1, "boundary": "b1", "source_sha": arguments.expected_baseline_source_sha,
-            "tree_sha": arguments.expected_baseline_tree_sha, "files": baseline_files,
-        }
-        baseline_path = backup / "baseline-source-manifest.json"
-        _durable_new_file(baseline_path, canonical_json(baseline_manifest), 0o600)
-        for path in (source_backup, backup):
-            _fsync_dir(path)
         state = {
             "version": 1, "boundary": "b1", "baseline_sha": arguments.expected_baseline_source_sha,
             "baseline_tree_sha": arguments.expected_baseline_tree_sha,
             "source_sha": arguments.expected_source_sha, "tree_sha": arguments.expected_tree_sha,
             "release_root": _directory_authority(release_root), "release_manifest": _manifest_file(release_manifest_path),
             "fixture_manifest": _manifest_file(fixture_manifest_path),
-            "baseline_manifest": _manifest_file(baseline_path), "destination": _directory_authority(destination),
+            "baseline_manifest": backup_authority["manifest_authority"],
+            "destination": _directory_authority(destination),
             "destination_owner": destination_owner,
-            "backup_root": _directory_authority(backup), "service": arguments.service,
+            "backup_root": backup_authority["root_authority"], "service": arguments.service,
             "service_baseline": service_baseline, "interpreter": str(interpreter),
             "state_path": str(state_path), "self": None,
         }
         _populate_state_fd(state_path, state, state_fd)
+        _revalidate_backup_namespace(
+            backup, backup_authority["fd"], backup_authority["root_metadata"],
+            backup_authority["snapshot"],
+        )
+        _rename_noreplace(temporary_name, state_path.name, parent_fd=parent_fd)
+        state_published = True
+        _revalidate_backup_namespace(
+            backup, backup_authority["fd"], backup_authority["root_metadata"],
+            backup_authority["snapshot"],
+        )
+        if not _same_namespace_inode(state_fd, state_path):
+            raise ValueError("state identity changed after publication")
+        os.fsync(parent_fd)
         tx = Priority15Transaction(state_path, state, service=service, state_fd=state_fd)
         state_fd = -1
         try:
             tx._revalidate()
         finally:
             tx.close()
+        completed = True
         return state
-    except BaseException:
+    finally:
+        if state_published and not completed:
+            try:
+                current = os.stat(state_path.name, dir_fd=parent_fd, follow_symlinks=False)
+            except FileNotFoundError:
+                pass
+            else:
+                if (current.st_dev, current.st_ino) == temporary_identity:
+                    os.unlink(state_path.name, dir_fd=parent_fd)
+                    os.fsync(parent_fd)
         if state_fd >= 0:
             os.close(state_fd)
-        try:
-            state_path.unlink()
-        except FileNotFoundError:
-            pass
-        if created_backup:
-            shutil.rmtree(backup, ignore_errors=True)
-        raise
+        if temporary_identity is not None:
+            try:
+                current = os.stat(temporary_name, dir_fd=parent_fd, follow_symlinks=False)
+            except FileNotFoundError:
+                pass
+            else:
+                if (current.st_dev, current.st_ino) == temporary_identity:
+                    os.unlink(temporary_name, dir_fd=parent_fd)
+        os.close(parent_fd)
+        os.close(backup_authority["fd"])
 
 
 def build_parser():
