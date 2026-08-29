@@ -164,27 +164,28 @@ Begin these after Priority 0 is clear. They improve existing editing, preview, m
 
 ~~When the user tries to switch from Edit Preview to Live with unsaved changes, warn them and offer exactly **Stay Editing** or **Discard Draft and switch to Live**. Do not silently preserve, save, or discard the draft.~~
 
-### ~~1.3 Add optional preview on the physical device~~ — Completed
+### 1.3 Add optional preview on the physical device — Partially completed; blocked by issue #4
 
-**Completed 2026-08-24:** added an opt-in physical-device draft preview that is off by default, sends debounced unsaved edits through the existing single-owner display controller, supersedes older work, refreshes a configurable 60-second lease after accepted updates, and returns to saved playback on stop, expiry, disconnect, failure, or page exit without persisting the draft. The reviewed product artifact passed protected CI, preservation-safe deployment, focused appliance regressions, and a real 64×32 Lava Clock acceptance journey that proved exact non-black framebuffer publication, heartbeat renewal, explicit cancellation, normal-playback restoration, and byte-preservation of configuration, paired devices, and media.
+**Partially completed 2026-08-24; blocker confirmed 2026-08-27:** the opt-in physical-device draft preview is off by default, sends debounced unsaved edits through the existing single-owner display controller, remains active without a content timeout while enabled and connected, and restores saved playback after explicit checkbox cancellation without persisting the draft. The reviewed product artifact passed protected CI, preservation-safe deployment, focused appliance regressions, and a real 64×32 Lava Clock acceptance journey for framebuffer publication, heartbeat renewal, explicit cancellation, normal-playback restoration, and byte-preservation of configuration, paired devices, and media. A later mandatory production gate proved that abrupt Chromium/process loss did not release the active draft and restore saved playback; GitLab issue #4 remains the open functional blocker. Completed points stay struck below, while the unresolved process/connectivity-loss point remains unstruck.
 
 ~~Add a separate **Preview edits on device** checkbox beneath the browser preview.~~
 
 - ~~Keep it off by default.~~
 - ~~When enabled, send the current unsaved draft to the physical Matrix temporarily.~~
 - ~~Clearly indicate that the device is showing draft content.~~
-- ~~Provide an obvious **Stop device preview** action.~~
+- ~~Use unchecking the Edit-only **Preview edits on device** checkbox as the sole explicit stop action; do not add a separate Stop button.~~
 - ~~Do not mutate or persist the saved configuration.~~
-- ~~Return to normal playback when preview stops, expires, disconnects, fails, or the user leaves the page.~~
+- ~~Return to normal playback after explicit uncheck, render failure, or a clean page-exit cancellation.~~
+- Restore saved playback after abrupt browser/process or connectivity loss, release renderer/display-lock ownership, close the lease, and admit a later owner. **Open functional blocker: GitLab issue #4.**
 - ~~Preserve the single-owner hardware-lock model; preview must run through the existing display controller rather than starting another Matrix process.~~
-- ~~Make the preview timeout configurable, with a 60-second default that restarts after each accepted draft update.~~
+- ~~Keep accepted device-preview content active without a content timeout while the checkbox remains enabled and the client remains connected; do not silently expire it after 60 seconds.~~
 - ~~While device preview is enabled, send each later edit automatically after debouncing rather than requiring a separate Apply action.~~
 - ~~Use adaptive debounce timing: 150 ms for simple controls and 500 ms for media changes or other expensive renders.~~
 - ~~Cancel superseded draft work so an older slow render can never replace a newer edit on the device.~~
 
 #### Priority 1.3 post-completion whole-project remediation — Deferred to v1.0
 
-A fresh whole-project review rejected the earlier post-1.3 release candidate and opened the ordered remediation ledger in GitLab issue 2. F1–F15 were subsequently reproduced, remediated under strict TDD, independently reviewed, and merged through protected CI. The complete remediated artifacts passed the applicable protected-CI and production-acceptance gates recorded in that issue, but later release-path validation found additional restricted release-preparation issues. Priority 1.3's shipped product behavior has passed its functional browser, physical-device, configuration-preservation, and saved-playback acceptance. The remaining release-reliability findings are retained in issue 2 and explicitly deferred to the v1.0 hardening milestone; they do not block the ordinary pre-v1 product roadmap unless a current functional bug, data-loss risk, unsafe production mutation, or broken rollback/state-preservation path is demonstrated.
+A fresh whole-project review rejected the earlier post-1.3 release candidate and opened the ordered remediation ledger in GitLab issue 2. F1–F15 were subsequently reproduced, remediated under strict TDD, independently reviewed, and merged through protected CI. The complete remediated artifacts passed the applicable protected-CI and production-acceptance gates recorded in that issue, but later release-path validation found additional restricted release-preparation issues. Most shipped Priority 1.3 behavior passed functional browser, physical-device, configuration-preservation, explicit-stop, and saved-playback acceptance; however, GitLab issue #4 records a separate failed abrupt browser/process-loss restoration gate and remains a current functional blocker. The remaining release-reliability findings in issue 2 are explicitly deferred to the v1.0 hardening milestone, but issue #4 is not part of that deferral.
 
 Verified remediation approvals:
 
@@ -214,9 +215,9 @@ Verified remediation approvals:
 
 **F15 approved at commit `568f4fc8953d3e6fd96f2546c868370c4a76265a`:** the reviewed artifact contains the tracked, idempotent privileged bootstrap installer; protected merge `478a876e6cb9bc90ee2171296d545c9ef3c30871` admitted the exact reviewed tree.
 
-**Latest acceptance evidence 2026-08-27:** sticky-preview, reconnect, module-normalization, and maximum paired-device recovery blockers were independently closed through protected merges ending at `07a484b96cdcdb20a50e2fc76854af840c4686f4`. Protected-main pipeline 248 and its dedicated physical-device job passed. The production 64×32 appliance then passed a real 320×568 Chromium recovery-and-replacement journey at configured capacity: one explicitly selected old pairing was revoked, a fresh authoritative browser pairing was committed, registry cardinality stayed 10, the other nine records remained byte-for-byte unchanged, configuration and media stayed unchanged, and service/display-lock health remained clean.
+**Latest acceptance evidence 2026-08-27:** sticky-preview layout, reconnect presentation, module normalization, and maximum paired-device recovery work merged through protected history ending at `07a484b96cdcdb20a50e2fc76854af840c4686f4`. Protected-main pipeline 248 and its dedicated physical-device job passed. The production 64×32 appliance then passed a real 320×568 Chromium recovery-and-replacement journey at configured capacity: one explicitly selected old pairing was revoked, a fresh authoritative browser pairing was committed, registry cardinality stayed 10, the other nine records remained byte-for-byte unchanged, configuration and media stayed unchanged, and service/display-lock health remained clean. That journey did not rerun or close issue #4's separate abrupt browser/process-loss draft-restoration gate.
 
-**v1.0 deferred findings register:** GitLab issue 2 note 496 consolidates the remaining restricted release-preparation and release-reliability findings, including their accepted, rejected, and open states. Owner decision note 497 defers the open findings to v1.0 without closing or waiving them. Issue 2 remains open as their durable register. Priority 1.4 is released to proceed; any newly demonstrated current functional bug, data-loss risk, unsafe production mutation, or broken rollback/state-preservation path still takes precedence over feature work.
+**v1.0 deferred findings register:** GitLab issue 2 note 496 consolidates the remaining restricted release-preparation and release-reliability findings, including their accepted, rejected, and open states. Owner decision note 497 defers those findings to v1.0 without closing or waiving them. Issue 2 remains open as their durable register. Issue #4 is a demonstrated functional bug outside that deferral and remains blocking. Priority 1.4 has already completed, but Priority 1.5 must not begin until issue #4 is implemented, independently reviewed, merged, deployed, and accepted through its recorded live process-loss gate.
 
 ### ~~1.4 Add borders and backgrounds to basic custom modules~~ — Completed
 
