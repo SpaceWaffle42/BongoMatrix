@@ -15,6 +15,7 @@ import subprocess
 import sys
 import tempfile
 import threading
+import time
 from fractions import Fraction
 from pathlib import Path
 from typing import Any, Callable
@@ -33,6 +34,8 @@ _FFPROBE = "/usr/bin/ffprobe"
 _SYSTEMCTL = "/usr/bin/systemctl"
 _COMMAND_ENV = {"PATH": "/usr/bin:/bin", "LANG": "C", "LC_ALL": "C"}
 _SERVICE_TIMEOUT_SECONDS = 10
+_RESTORED_READINESS_TIMEOUT_SECONDS = 30
+_RESTORED_READINESS_POLL_SECONDS = 0.1
 _MANIFEST_KEYS = {"version", "boundary", "source_sha", "tree_sha", "fixtures"}
 _FIXTURE_KEYS = {
     "path", "sha256", "size", "kind", "width", "height", "frames",
@@ -594,18 +597,31 @@ def verify_report(
 def _restored_service_readiness(service: str, lock_path: Path) -> None:
     from deploy.priority_1_5_transaction import SystemdService
 
-    status = SystemdService(service).status()
-    lock = status.get("display_lock") if isinstance(status, dict) else None
-    if (
-        status.get("service") != service
-        or status.get("active") is not True
-        or status.get("substate") != "running"
-        or status.get("http_status") != 302
-        or not isinstance(lock, dict)
-        or lock.get("path") != str(lock_path)
-        or lock.get("locked") is not True
-    ):
-        raise RuntimeError("restored service readiness is incomplete")
+    checked_service = SystemdService(service)
+    deadline = time.monotonic() + _RESTORED_READINESS_TIMEOUT_SECONDS
+    last_error: BaseException | None = None
+    while True:
+        try:
+            status = checked_service.status()
+            lock = status.get("display_lock") if isinstance(status, dict) else None
+            if (
+                not isinstance(status, dict)
+                or status.get("service") != service
+                or status.get("active") is not True
+                or status.get("substate") != "running"
+                or status.get("http_status") != 302
+                or not isinstance(lock, dict)
+                or lock.get("path") != str(lock_path)
+                or lock.get("locked") is not True
+            ):
+                raise RuntimeError("restored service readiness is incomplete")
+            return
+        except (OSError, RuntimeError, ValueError, subprocess.SubprocessError) as error:
+            last_error = error
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            raise RuntimeError("restored service readiness timed out") from last_error
+        time.sleep(min(_RESTORED_READINESS_POLL_SECONDS, remaining))
 
 
 def execute(
