@@ -1,4 +1,5 @@
 from pathlib import Path
+import ast
 import os
 import re
 import subprocess
@@ -395,6 +396,12 @@ class GitLabPipelineContractTests(unittest.TestCase):
         self.assertIn("ci-summary.json", summary)
         self.assertIn("ci-summary.txt", summary)
         self.assertIn("expire_in: 14 days", summary)
+
+    def test_physical_verifier_has_no_optimized_away_assertions(self):
+        path = ROOT / "scripts" / "verify_priority_1_5_foundation_physical.py"
+        tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+        assertions = [node.lineno for node in ast.walk(tree) if isinstance(node, ast.Assert)]
+        self.assertEqual(assertions, [])
 
     def test_expected_top_level_jobs_and_controls_are_present(self):
         required = {

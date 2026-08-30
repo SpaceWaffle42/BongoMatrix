@@ -705,7 +705,8 @@ def execute(
                 primary.add_note(f"service restoration also failed: {restore_error}")
     if primary is not None:
         raise primary
-    assert report is not None
+    if report is None:
+        raise RuntimeError("physical report was not produced")
     _atomic_report(report_path, canonical_json(report))
     return report
 
