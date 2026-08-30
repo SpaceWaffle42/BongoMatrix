@@ -578,7 +578,7 @@ try{
                 raise OSError("selector unavailable")
 
             def close(self):
-                raise OSError("selector close unavailable")
+                raise KeyboardInterrupt("selector close unavailable")
 
         def launch(*args, **kwargs):
             tracked = TrackingProcess(real_popen(*args, **kwargs))
@@ -601,8 +601,64 @@ try{
             self.assertTrue(all(value is not None and value >= 0 for value in wait_timeouts))
         finally:
             for process in launched:
-                if process.poll() is None:
+                if process._process.poll() is None:
                     process.kill()
+                    process._process.wait(timeout=2)
+
+    def test_bounded_process_stdout_reaps_child_that_closes_stdout_before_timeout(self):
+        launched = []
+        wait_timeouts = []
+        real_popen = subprocess.Popen
+
+        class DeferredReapProcess:
+            def __init__(self, process):
+                self._process = process
+                self.stdout = process.stdout
+                self._wait_calls = 0
+
+            def __getattr__(self, name):
+                return getattr(self._process, name)
+
+            def wait(self, *, timeout):
+                self._wait_calls += 1
+                wait_timeouts.append(timeout)
+                if self._wait_calls == 2:
+                    raise subprocess.TimeoutExpired(self.args, timeout)
+                return self._process.wait(timeout=timeout)
+
+        def launch(*args, **kwargs):
+            process = DeferredReapProcess(real_popen(*args, **kwargs))
+            launched.append(process)
+            return process
+
+        try:
+            with patch.object(webapp.subprocess, "Popen", side_effect=launch):
+                started = time.monotonic()
+                with self.assertRaises(subprocess.TimeoutExpired):
+                    webapp._bounded_process_stdout(
+                        [
+                            sys.executable, "-c",
+                            "import os,time;os.close(1);time.sleep(5)",
+                        ],
+                        timeout=0.1, limit=65_536, env=os.environ.copy(),
+                    )
+            self.assertLess(time.monotonic() - started, 1)
+            self.assertEqual(len(launched), 1)
+            status = Path(f"/proc/{launched[0].pid}/status")
+            reaper_deadline = time.monotonic() + 1
+            while status.exists() and time.monotonic() < reaper_deadline:
+                time.sleep(0.01)
+            self.assertFalse(status.exists(), status.read_text() if status.exists() else "")
+            self.assertGreaterEqual(len(wait_timeouts), 3)
+            self.assertTrue(all(value is not None and value >= 0 for value in wait_timeouts))
+        finally:
+            for process in launched:
+                status = Path(f"/proc/{process.pid}/status")
+                if status.exists():
+                    try:
+                        process.kill()
+                    except ProcessLookupError:
+                        pass
                     process._process.wait(timeout=2)
 
     def test_navigation_logs_api_sanitizes_journal_failure(self):

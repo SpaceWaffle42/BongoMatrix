@@ -455,7 +455,7 @@ def _bounded_process_stdout(argv, *, timeout, limit, env):
             if not chunk:
                 break
             _append_bounded_tail(tail, chunk, limit)
-        remaining = deadline - time.monotonic()
+        remaining = read_deadline - time.monotonic()
         if remaining <= 0:
             raise subprocess.TimeoutExpired(argv, timeout, output=bytes(tail))
         returncode = process.wait(timeout=remaining)
@@ -470,7 +470,7 @@ def _bounded_process_stdout(argv, *, timeout, limit, env):
             nonlocal cleanup_error
             try:
                 operation()
-            except Exception as error:
+            except BaseException as error:
                 if cleanup_error is None:
                     cleanup_error = error
 
@@ -479,14 +479,39 @@ def _bounded_process_stdout(argv, *, timeout, limit, env):
         running = True
         try:
             running = process.poll() is None
-        except Exception as error:
+        except BaseException as error:
             if cleanup_error is None:
                 cleanup_error = error
         if running:
             cleanup(process.kill)
         if stream is not None:
             cleanup(stream.close)
-        cleanup(lambda: process.wait(timeout=max(0, deadline - time.monotonic())))
+        reaped = True
+        try:
+            process.wait(timeout=max(0, deadline - time.monotonic()))
+        except BaseException as error:
+            reaped = False
+            if cleanup_error is None:
+                cleanup_error = error
+        if not reaped:
+            def deferred_reap():
+                while True:
+                    try:
+                        process.wait(timeout=0.25)
+                        return
+                    except subprocess.TimeoutExpired:
+                        try:
+                            process.kill()
+                        except ProcessLookupError:
+                            pass
+                    except BaseException:
+                        return
+
+            threading.Thread(
+                target=deferred_reap,
+                name="matrix-journal-reaper",
+                daemon=True,
+            ).start()
         if primary_error is None and cleanup_error is not None:
             raise cleanup_error
 
