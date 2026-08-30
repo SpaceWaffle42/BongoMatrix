@@ -1096,8 +1096,19 @@ class SystemdService:
                 except ValueError as error:
                     raise RuntimeError("display lock owner is malformed") from error
                 break
+        if holder_pid is None:
+            raise RuntimeError("display lock has no owner")
         if holder_pid != main_pid:
-            raise RuntimeError("display lock is not owned by the service main process")
+            try:
+                cgroup_raw, _ = _read_regular(
+                    Path(f"/proc/{holder_pid}/cgroup"), max_bytes=64 * 1024,
+                )
+                cgroup_lines = cgroup_raw.decode("ascii").splitlines()
+            except (OSError, UnicodeError, ValueError) as error:
+                raise RuntimeError("display lock owner cgroup evidence is invalid") from error
+            expected_cgroup = f"0::{properties['ControlGroup']}"
+            if cgroup_lines != [expected_cgroup]:
+                raise RuntimeError("display lock is not owned by service cgroup")
 
         warning_count = 0
         if warning_since is not None:
