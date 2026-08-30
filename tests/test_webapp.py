@@ -5837,14 +5837,14 @@ try{
         self.assertEqual(
             [(item["width"], item["grid"], item["nav"]) for item in report["breakpoint"]],
             [
-                (599, "block", "none"), (600, "block", "none"),
-                (601, "grid", "none"), (899, "grid", "none"),
-                (900, "grid", "none"), (901, "grid", "grid"),
+                (599, "block", "block"), (600, "block", "block"),
+                (601, "grid", "block"), (899, "grid", "block"),
+                (900, "grid", "block"), (901, "grid", "grid"),
             ],
         )
         self.assertEqual(report["dynamicBefore"]["width"], 899)
         self.assertEqual(report["dynamicAfter"]["width"], 901)
-        self.assertEqual(report["dynamicBefore"]["nav"], "none")
+        self.assertEqual(report["dynamicBefore"]["nav"], "block")
         self.assertEqual(report["dynamicAfter"]["nav"], "grid")
         for key in ("value", "start", "end", "scroll"):
             self.assertEqual(report["dynamicBefore"][key], report["dynamicAfter"][key])
