@@ -1240,3 +1240,65 @@ class Priority15TransactionTests(unittest.TestCase):
             with self.subTest(rows=rows.__name__):
                 with self.assertRaisesRegex(RuntimeError, message):
                     self._run_adversarial_lock_status(lock_rows=rows)
+
+    @unittest.skipUnless(os.geteuid() == 0, "requires root to reproduce sudo-owned checkout")
+    def test_git_accepts_repository_owned_by_validated_sudo_uid(self):
+        from deploy import priority_1_5_transaction as transaction
+
+        with tempfile.TemporaryDirectory() as temporary:
+            repository = Path(temporary) / "repository"
+            subprocess.run(["/usr/bin/git", "init", "-q", str(repository)], check=True)
+            subprocess.run(["/usr/bin/git", "-C", str(repository), "config", "user.name", "test"], check=True)
+            subprocess.run(["/usr/bin/git", "-C", str(repository), "config", "user.email", "test@example.invalid"], check=True)
+            (repository / "tracked.txt").write_bytes(b"baseline\n")
+            subprocess.run(["/usr/bin/git", "-C", str(repository), "add", "tracked.txt"], check=True)
+            subprocess.run(["/usr/bin/git", "-C", str(repository), "commit", "-qm", "baseline"], check=True)
+            expected = subprocess.check_output(
+                ["/usr/bin/git", "-C", str(repository), "rev-parse", "HEAD^{commit}"],
+                text=True,
+            ).strip()
+            validated_uid = 65534
+            for path in [repository, *repository.rglob("*")]:
+                os.chown(path, validated_uid, path.stat().st_gid, follow_symlinks=False)
+
+            with self.assertRaises(subprocess.CalledProcessError):
+                transaction._git(repository, "rev-parse", "HEAD^{commit}")
+            actual = transaction._git(
+                repository, "rev-parse", "HEAD^{commit}",
+                validated_owner_uid=validated_uid,
+            ).strip()
+
+            self.assertEqual(actual, expected)
+
+    @unittest.skipUnless(os.geteuid() == 0, "requires root to reproduce sudo-owned checkout")
+    def test_prepare_accepts_checkout_owned_by_validated_destination_owner(self):
+        from deploy import priority_1_5_transaction as transaction
+
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            fixture = self._build_prepare_fixture(transaction, root)
+            arguments, destination, _backup, state, _private = self._prepare_arguments(
+                root, *fixture, "sudo-owner",
+            )
+            validated_uid = 65534
+            for path in [destination, *destination.rglob("*")]:
+                os.chown(path, validated_uid, path.stat().st_gid, follow_symlinks=False)
+
+            with patch.object(transaction, "SystemdService", return_value=_Service()):
+                prepared = transaction.prepare_b1(arguments)
+
+            self.assertEqual(prepared["destination_owner"]["uid"], validated_uid)
+            self.assertTrue(state.is_file())
+
+    def test_git_rejects_invalid_validated_owner_authority(self):
+        from deploy import priority_1_5_transaction as transaction
+
+        with tempfile.TemporaryDirectory() as temporary:
+            repository = Path(temporary)
+            for invalid in (True, -1, repository.stat().st_uid + 1):
+                with self.subTest(invalid=invalid):
+                    with self.assertRaisesRegex(ValueError, "Git repository owner authority is invalid"):
+                        transaction._git(
+                            repository, "rev-parse", "HEAD^{commit}",
+                            validated_owner_uid=invalid,
+                        )
