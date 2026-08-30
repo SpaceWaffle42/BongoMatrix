@@ -2601,7 +2601,8 @@ else:
         ]
 
         class DelayedService:
-            def status(self):
+            def status(self, *, deadline=None):
+                self.deadline = deadline
                 outcome = attempts.pop(0)
                 if isinstance(outcome, BaseException):
                     raise outcome
@@ -2618,7 +2619,8 @@ else:
         class UnreadyService:
             calls = 0
 
-            def status(self):
+            def status(self, *, deadline=None):
+                self.deadline = deadline
                 self.calls += 1
                 raise ConnectionRefusedError("still starting")
 
@@ -2635,6 +2637,33 @@ else:
         self.assertEqual(service.calls, 2)
         sleep.assert_called_once_with(0.1)
         self.assertIsInstance(raised.exception.__cause__, ConnectionRefusedError)
+
+    def test_foundation_physical_restored_readiness_rejects_late_healthy_status(self):
+        from deploy import priority_1_5_transaction as transaction
+        from scripts import verify_priority_1_5_foundation_physical as verifier
+
+        lock_path = Path("/run/matrix-display/matrix-display.lock")
+        healthy = {
+            "service": "matrix-web.service", "active": True, "substate": "running",
+            "http_status": 302,
+            "display_lock": {"path": str(lock_path), "locked": True},
+        }
+
+        class LateHealthyService:
+            calls = 0
+
+            def status(self, **_kwargs):
+                self.calls += 1
+                return healthy
+
+        service = LateHealthyService()
+        with (
+            patch.object(transaction, "SystemdService", return_value=service),
+            patch.object(verifier.time, "monotonic", side_effect=[0.0, 31.0, 31.0]),
+            self.assertRaisesRegex(RuntimeError, "readiness timed out"),
+        ):
+            verifier._restored_service_readiness("matrix-web.service", lock_path)
+        self.assertEqual(service.calls, 1)
 
     def test_foundation_physical_verifier_binds_identity_and_restores_service(self):
         from deploy import priority_1_5_transaction as transaction

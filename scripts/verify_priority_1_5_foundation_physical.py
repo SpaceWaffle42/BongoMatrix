@@ -602,7 +602,7 @@ def _restored_service_readiness(service: str, lock_path: Path) -> None:
     last_error: BaseException | None = None
     while True:
         try:
-            status = checked_service.status()
+            status = checked_service.status(deadline=deadline)
             lock = status.get("display_lock") if isinstance(status, dict) else None
             if (
                 not isinstance(status, dict)
@@ -615,6 +615,8 @@ def _restored_service_readiness(service: str, lock_path: Path) -> None:
                 or lock.get("locked") is not True
             ):
                 raise RuntimeError("restored service readiness is incomplete")
+            if time.monotonic() >= deadline:
+                raise TimeoutError("restored service readiness deadline expired")
             return
         except (OSError, RuntimeError, ValueError, subprocess.SubprocessError) as error:
             last_error = error

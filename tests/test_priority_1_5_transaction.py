@@ -967,15 +967,21 @@ class Priority15TransactionTests(unittest.TestCase):
             try:
                 with (
                     patch.object(transaction, "DISPLAY_LOCK", lock_path),
-                    patch.object(service, "_run", return_value=properties),
-                    patch.object(transaction.http.client, "HTTPConnection", return_value=Connection()),
+                    patch.object(service, "_run", return_value=properties) as service_run,
+                    patch.object(
+                        transaction.http.client, "HTTPConnection", return_value=Connection(),
+                    ) as connection_factory,
                     patch.object(transaction.subprocess, "run", return_value=journal) as run,
+                    patch.object(transaction.time, "monotonic", side_effect=[90.0, 91.0, 92.0]),
                 ):
-                    evidence = service.status(warning_since=1)
+                    evidence = service.status(warning_since=1, deadline=100.0)
             finally:
                 fcntl.flock(descriptor, fcntl.LOCK_UN)
                 os.close(descriptor)
             self.assertTrue(evidence["display_lock"]["locked"])
             self.assertEqual(evidence["main_pid"], os.getpid())
             self.assertEqual(evidence["warning_count"], 0)
+            self.assertEqual(service_run.call_args.kwargs["deadline"], 100.0)
+            self.assertEqual(connection_factory.call_args.kwargs["timeout"], 2)
             self.assertEqual(run.call_args.args[0][0], "/usr/bin/journalctl")
+            self.assertEqual(run.call_args.kwargs["timeout"], 9.0)

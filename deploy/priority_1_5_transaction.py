@@ -982,16 +982,27 @@ def build_b1(arguments) -> dict[str, object]:
         raise
 
 
+def _remaining_service_timeout(deadline, cap):
+    if deadline is None:
+        return cap
+    if type(deadline) not in (int, float) or deadline != deadline:
+        raise ValueError("service observation deadline is invalid")
+    remaining = deadline - time.monotonic()
+    if remaining <= 0:
+        raise TimeoutError("service observation deadline expired")
+    return min(cap, remaining)
+
+
 class SystemdService:
     def __init__(self, service: str):
         if SERVICE.fullmatch(service) is None:
             raise ValueError("service name is invalid")
         self.name = service
 
-    def _run(self, *args, check=True):
+    def _run(self, *args, check=True, deadline=None):
         return subprocess.run(
             [SYSTEMCTL, *args, self.name], check=check, capture_output=True, text=True,
-            timeout=15, shell=False,
+            timeout=_remaining_service_timeout(deadline, 15), shell=False,
             env={"PATH": "/usr/sbin:/usr/bin:/sbin:/bin", "LANG": "C", "LC_ALL": "C"},
         )
 
@@ -1025,10 +1036,11 @@ class SystemdService:
             time.sleep(0.1)
         raise RuntimeError("bounded service readiness failed")
 
-    def status(self, *, warning_since=None):
+    def status(self, *, warning_since=None, deadline=None):
         properties_result = self._run(
             "show",
             "--property=Id,ActiveState,SubState,MainPID,NRestarts,ControlGroup",
+            deadline=deadline,
         )
         properties = {}
         for line in properties_result.stdout.splitlines():
@@ -1056,7 +1068,9 @@ class SystemdService:
         ):
             raise RuntimeError("service identity or active state is invalid")
 
-        connection = http.client.HTTPConnection("127.0.0.1", 5000, timeout=2)
+        connection = http.client.HTTPConnection(
+            "127.0.0.1", 5000, timeout=_remaining_service_timeout(deadline, 2),
+        )
         try:
             connection.request("GET", "/")
             response = connection.getresponse()
@@ -1094,13 +1108,15 @@ class SystemdService:
                     JOURNALCTL, "--unit", self.name, "--since", f"@{warning_since}",
                     "--priority", "warning", "--output", "cat", "--no-pager",
                 ],
-                check=True, capture_output=True, timeout=15, shell=False,
+                check=True, capture_output=True,
+                timeout=_remaining_service_timeout(deadline, 15), shell=False,
                 env={"PATH": "/usr/sbin:/usr/bin:/sbin:/bin", "LANG": "C", "LC_ALL": "C"},
             )
             if len(journal.stdout) > 1024 * 1024:
                 raise RuntimeError("service warning evidence exceeds bound")
             warning_count = sum(bool(line) for line in journal.stdout.splitlines())
 
+        _remaining_service_timeout(deadline, 15)
         return {
             "service": self.name,
             "active": True,
