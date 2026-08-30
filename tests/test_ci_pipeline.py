@@ -227,6 +227,9 @@ class GitLabPipelineContractTests(unittest.TestCase):
         )
         self.assertIn("python3-pil", job)
         self.assertIn("python3-opencv", job)
+        self.assertIn("nodejs", job)
+        self.assertIn("test -x /usr/bin/node", job)
+        self.assertLess(job.index("test -x /usr/bin/node"), job.index("coverage run"))
         self.assertIn(
             "coverage run --source=. --omit='tests/*' -m xmlrunner discover -s tests",
             job,
