@@ -1082,33 +1082,46 @@ class SystemdService:
         lock_raw, lock_metadata = _read_regular(DISPLAY_LOCK, max_bytes=1)
         if lock_raw:
             raise RuntimeError("display lock marker is not empty")
-        holder_pid = None
-        locks_raw, _ = _read_regular(Path("/proc/locks"), max_bytes=1024 * 1024)
-        expected_device = f"{os.major(lock_metadata.st_dev):02x}:{os.minor(lock_metadata.st_dev):02x}"
-        for line in locks_raw.decode("ascii").splitlines():
-            fields = line.split()
-            if len(fields) < 6 or fields[1] != "FLOCK":
-                continue
-            device, separator, inode = fields[5].rpartition(":")
-            if separator and device.lower() == expected_device and inode == str(lock_metadata.st_ino):
-                try:
-                    holder_pid = int(fields[4])
-                except ValueError as error:
-                    raise RuntimeError("display lock owner is malformed") from error
-                break
+        def display_lock_holder():
+            locks_raw, _ = _read_regular(Path("/proc/locks"), max_bytes=1024 * 1024)
+            expected_device = f"{os.major(lock_metadata.st_dev):02x}:{os.minor(lock_metadata.st_dev):02x}"
+            owner = None
+            for line in locks_raw.decode("ascii").splitlines():
+                fields = line.split()
+                if len(fields) < 6 or fields[1] != "FLOCK":
+                    continue
+                device, separator, inode = fields[5].rpartition(":")
+                if separator and device.lower() == expected_device and inode == str(lock_metadata.st_ino):
+                    try:
+                        owner = int(fields[4])
+                    except ValueError as error:
+                        raise RuntimeError("display lock owner is malformed") from error
+                    break
+            return owner
+
+        holder_pid = display_lock_holder()
         if holder_pid is None:
             raise RuntimeError("display lock has no owner")
         if holder_pid != main_pid:
-            try:
-                cgroup_raw, _ = _read_regular(
-                    Path(f"/proc/{holder_pid}/cgroup"), max_bytes=64 * 1024,
-                )
-                cgroup_lines = cgroup_raw.decode("ascii").splitlines()
-            except (OSError, UnicodeError, ValueError) as error:
-                raise RuntimeError("display lock owner cgroup evidence is invalid") from error
             expected_cgroup = f"0::{properties['ControlGroup']}"
-            if cgroup_lines != [expected_cgroup]:
-                raise RuntimeError("display lock is not owned by service cgroup")
+
+            def validate_holder_cgroup():
+                try:
+                    cgroup_raw, _ = _read_regular(
+                        Path(f"/proc/{holder_pid}/cgroup"), max_bytes=64 * 1024,
+                    )
+                    cgroup_lines = cgroup_raw.decode("ascii").splitlines()
+                except (OSError, UnicodeError, ValueError) as error:
+                    raise RuntimeError("display lock owner cgroup evidence is invalid") from error
+                if cgroup_lines != [expected_cgroup]:
+                    raise RuntimeError("display lock is not owned by service cgroup")
+
+            validate_holder_cgroup()
+            if display_lock_holder() != holder_pid:
+                raise RuntimeError("display lock ownership changed during validation")
+            validate_holder_cgroup()
+        if display_lock_holder() != holder_pid:
+            raise RuntimeError("display lock ownership changed during validation")
 
         warning_count = 0
         if warning_since is not None:

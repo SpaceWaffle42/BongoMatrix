@@ -1084,3 +1084,51 @@ class Priority15TransactionTests(unittest.TestCase):
             ):
                 with self.assertRaisesRegex(RuntimeError, "display lock is not owned by service cgroup"):
                     service.status()
+
+    def test_systemd_status_rejects_worker_lock_lost_during_cgroup_validation(self):
+        from deploy import priority_1_5_transaction as transaction
+
+        with tempfile.TemporaryDirectory() as temporary:
+            lock_path = Path(temporary) / "matrix-display.lock"
+            lock_path.write_bytes(b"")
+            metadata = lock_path.stat()
+            device = f"{os.major(metadata.st_dev):02x}:{os.minor(metadata.st_dev):02x}"
+            holder_pid = 424242
+            properties = types.SimpleNamespace(stdout=(
+                "Id=matrix-web.service\nActiveState=active\nSubState=running\n"
+                "MainPID=424200\nNRestarts=0\n"
+                "ControlGroup=/system.slice/matrix-web.service\n"
+            ))
+
+            class Response:
+                status = 302
+                def read(self): return b""
+
+            class Connection:
+                def request(self, *_args): return None
+                def getresponse(self): return Response()
+                def close(self): return None
+
+            lock_reads = 0
+            original_read = transaction._read_regular
+            def read_regular(path, **kwargs):
+                nonlocal lock_reads
+                if path == Path("/proc/locks"):
+                    lock_reads += 1
+                    if lock_reads > 1:
+                        return b"", metadata
+                    line = f"1: FLOCK ADVISORY WRITE {holder_pid} {device}:{metadata.st_ino} 0 EOF\n"
+                    return line.encode("ascii"), metadata
+                if path == Path(f"/proc/{holder_pid}/cgroup"):
+                    return b"0::/system.slice/matrix-web.service\n", metadata
+                return original_read(path, **kwargs)
+
+            service = transaction.SystemdService("matrix-web.service")
+            with (
+                patch.object(transaction, "DISPLAY_LOCK", lock_path),
+                patch.object(service, "_run", return_value=properties),
+                patch.object(transaction, "_read_regular", side_effect=read_regular),
+                patch.object(transaction.http.client, "HTTPConnection", return_value=Connection()),
+            ):
+                with self.assertRaisesRegex(RuntimeError, "display lock ownership changed during validation"):
+                    service.status()
