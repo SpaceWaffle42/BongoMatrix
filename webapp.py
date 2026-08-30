@@ -486,32 +486,39 @@ def _bounded_process_stdout(argv, *, timeout, limit, env):
             cleanup(process.kill)
         if stream is not None:
             cleanup(stream.close)
-        reaped = True
-        try:
-            process.wait(timeout=max(0, deadline - time.monotonic()))
-        except BaseException as error:
-            reaped = False
-            if cleanup_error is None:
-                cleanup_error = error
+        reaped = False
+        while True:
+            remaining = deadline - time.monotonic()
+            wait_timeout = min(0.05, max(0, remaining))
+            try:
+                process.wait(timeout=wait_timeout)
+                reaped = True
+                break
+            except subprocess.TimeoutExpired as error:
+                if remaining <= 0:
+                    if cleanup_error is None:
+                        cleanup_error = error
+                    break
+            except BaseException as error:
+                if cleanup_error is None:
+                    cleanup_error = error
+                if remaining <= 0:
+                    break
+                time.sleep(min(0.005, remaining))
         if not reaped:
-            def deferred_reap():
-                while True:
-                    try:
-                        process.wait(timeout=0.25)
-                        return
-                    except subprocess.TimeoutExpired:
-                        try:
-                            process.kill()
-                        except ProcessLookupError:
-                            pass
-                    except BaseException:
-                        return
-
-            threading.Thread(
-                target=deferred_reap,
-                name="matrix-journal-reaper",
-                daemon=True,
-            ).start()
+            for _ in range(3):
+                try:
+                    waited_pid, _ = os.waitpid(process.pid, os.WNOHANG)
+                    if waited_pid == process.pid:
+                        reaped = True
+                        break
+                    time.sleep(0.001)
+                except ChildProcessError:
+                    reaped = True
+                    break
+                except BaseException as error:
+                    if cleanup_error is None:
+                        cleanup_error = error
         if primary_error is None and cleanup_error is not None:
             raise cleanup_error
 

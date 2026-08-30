@@ -624,6 +624,8 @@ try{
                 wait_timeouts.append(timeout)
                 if self._wait_calls == 2:
                     raise subprocess.TimeoutExpired(self.args, timeout)
+                if self._wait_calls == 3:
+                    raise KeyboardInterrupt("transient deferred wait fault")
                 return self._process.wait(timeout=timeout)
 
         def launch(*args, **kwargs):
@@ -651,6 +653,55 @@ try{
             self.assertFalse(status.exists(), status.read_text() if status.exists() else "")
             self.assertGreaterEqual(len(wait_timeouts), 3)
             self.assertTrue(all(value is not None and value >= 0 for value in wait_timeouts))
+        finally:
+            for process in launched:
+                status = Path(f"/proc/{process.pid}/status")
+                if status.exists():
+                    try:
+                        process.kill()
+                    except ProcessLookupError:
+                        pass
+                    process._process.wait(timeout=2)
+
+    def test_bounded_process_stdout_does_not_depend_on_reaper_thread_start(self):
+        launched = []
+        real_popen = subprocess.Popen
+
+        class FailedSynchronousReapProcess:
+            def __init__(self, process):
+                self._process = process
+                self.stdout = process.stdout
+                self._wait_calls = 0
+
+            def __getattr__(self, name):
+                return getattr(self._process, name)
+
+            def wait(self, *, timeout):
+                self._wait_calls += 1
+                if self._wait_calls == 2:
+                    raise subprocess.TimeoutExpired(self.args, timeout)
+                return self._process.wait(timeout=timeout)
+
+        def launch(*args, **kwargs):
+            process = FailedSynchronousReapProcess(real_popen(*args, **kwargs))
+            launched.append(process)
+            return process
+
+        try:
+            with patch.object(webapp.subprocess, "Popen", side_effect=launch), patch.object(
+                webapp.threading.Thread, "start", side_effect=RuntimeError("reaper start failed"),
+            ):
+                with self.assertRaises(subprocess.TimeoutExpired):
+                    webapp._bounded_process_stdout(
+                        [
+                            sys.executable, "-c",
+                            "import os,time;os.close(1);time.sleep(5)",
+                        ],
+                        timeout=0.1, limit=65_536, env=os.environ.copy(),
+                    )
+            self.assertEqual(len(launched), 1)
+            status = Path(f"/proc/{launched[0].pid}/status")
+            self.assertFalse(status.exists(), status.read_text() if status.exists() else "")
         finally:
             for process in launched:
                 status = Path(f"/proc/{process.pid}/status")
