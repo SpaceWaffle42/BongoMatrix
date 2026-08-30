@@ -503,12 +503,8 @@ try{
 
     def test_navigation_logs_api_returns_bounded_matrix_service_journal(self):
         self.pair_browser()
-        completed = subprocess.CompletedProcess(
-            args=[], returncode=0,
-            stdout=b"2026-08-30T15:00:00+00:00 matrix-web started\nrenderer ready\n",
-            stderr=b"",
-        )
-        with patch.object(webapp.subprocess, "run", return_value=completed) as run:
+        journal = b"2026-08-30T15:00:00+00:00 matrix-web started\nrenderer ready\n"
+        with patch.object(webapp, "_bounded_process_stdout", return_value=journal) as read:
             response = self.client.get("/api/logs")
 
         self.assertEqual(response.status_code, 200)
@@ -517,19 +513,46 @@ try{
             "source": "matrix-web.service",
         })
         self.assertEqual(response.headers["Cache-Control"], "no-store")
-        run.assert_called_once_with(
+        read.assert_called_once_with(
             [
                 "/usr/bin/journalctl", "--unit", "matrix-web.service",
                 "--lines", "200", "--no-pager", "--quiet", "--output", "short-iso",
             ],
-            check=True, capture_output=True, timeout=3, shell=False,
+            timeout=3, limit=65_536,
             env={"PATH": "/usr/sbin:/usr/bin:/sbin:/bin", "LANG": "C.UTF-8", "LC_ALL": "C.UTF-8"},
         )
+
+    def test_bounded_process_stdout_never_retains_more_than_limit_and_reaps_timeout(self):
+        tail = bytearray()
+        for chunk in (b"A" * 100_000, b"B" * 8192, b"END"):
+            webapp._append_bounded_tail(tail, chunk, 65_536)
+            self.assertLessEqual(len(tail), 65_536)
+        self.assertTrue(tail.endswith(b"END"))
+
+        output = webapp._bounded_process_stdout(
+            [sys.executable, "-c", "import os;os.write(1,b'A'*100000+b'END')"],
+            timeout=3, limit=65_536, env=os.environ.copy(),
+        )
+        self.assertEqual(len(output), 65_536)
+        self.assertTrue(output.endswith(b"END"))
+        multibyte_tail = bytearray()
+        webapp._append_bounded_tail(multibyte_tail, ("α" * 40_000).encode() + b"x", 65_536)
+        decoded = webapp._decode_utf8_tail(bytes(multibyte_tail))
+        self.assertNotIn("�", decoded)
+        self.assertTrue(decoded.endswith("x"))
+        self.assertLessEqual(len(decoded.encode()), 65_536)
+        started = time.monotonic()
+        with self.assertRaises(subprocess.TimeoutExpired):
+            webapp._bounded_process_stdout(
+                [sys.executable, "-c", "import time;time.sleep(5)"],
+                timeout=0.1, limit=65_536, env=os.environ.copy(),
+            )
+        self.assertLess(time.monotonic() - started, 2)
 
     def test_navigation_logs_api_sanitizes_journal_failure(self):
         self.pair_browser()
         with patch.object(
-            webapp.subprocess, "run",
+            webapp, "_bounded_process_stdout",
             side_effect=subprocess.TimeoutExpired(["/usr/bin/journalctl"], 3, stderr=b"private"),
         ):
             response = self.client.get("/api/logs")
@@ -540,16 +563,14 @@ try{
         self.assertNotIn(b"private", response.data)
 
     def test_navigation_logs_api_requires_pairing_and_caps_output_bytes(self):
-        with patch.object(webapp.subprocess, "run") as run:
+        with patch.object(webapp, "_bounded_process_stdout") as read:
             unpaired = self.client.get("/api/logs")
         self.assertEqual(unpaired.status_code, 401)
-        run.assert_not_called()
+        read.assert_not_called()
 
         self.pair_browser()
-        completed = subprocess.CompletedProcess(
-            args=[], returncode=0, stdout=b"discard" + b"L" * 65_536, stderr=b"",
-        )
-        with patch.object(webapp.subprocess, "run", return_value=completed):
+        journal = b"discard" + b"L" * 65_536
+        with patch.object(webapp, "_bounded_process_stdout", return_value=journal[-65_536:]):
             paired = self.client.get("/api/logs")
         self.assertEqual(paired.status_code, 200)
         self.assertEqual(paired.get_json()["logs"], "L" * 65_536)
@@ -566,11 +587,13 @@ try{
         self.assertNotIn('id="logs-nav-button"', re.sub(r'<nav class="nav"[^>]*>.*?</nav>', '', body, flags=re.DOTALL))
         self.assertRegex(body, r'<dialog[^>]+id="logs-dialog"[^>]+aria-labelledby="logs-title"')
         self.assertIn('id="logs-output"', body)
+        self.assertNotRegex(body, r'id="logs-output"[^>]+aria-live=')
+        self.assertRegex(body, r'id="logs-status"[^>]+role="status"[^>]+aria-live="polite"')
         self.assertIn('id="logs-refresh"', body)
         self.assertIn('id="logs-close"', body)
         self.assertIn("logsOutput.textContent=payload.logs", body)
         self.assertNotIn("logsOutput.innerHTML", body)
-        self.assertIn("await api('/api/logs')", body)
+        self.assertIn("await api('/api/logs',{signal:controller.signal})", body)
 
     @unittest.skipUnless(shutil.which("node"), "Node.js is required")
     @unittest.skipUnless(
@@ -594,10 +617,15 @@ const evaluate=async expression=>{const result=await send('Runtime.evaluate',{ex
 try{
  await send('Runtime.enable');await send('Page.enable');await send('Emulation.setDeviceMetricsOverride',{width:320,height:568,deviceScaleFactor:1,mobile:false});loaded=new Promise(resolve=>loadResolve=resolve);await send('Page.navigate',{url:'file://'+pagePath});await loaded;
  const mobile=await evaluate(`(()=>{const button=document.querySelector('#logs-nav-button'),rect=button.getBoundingClientRect();return{count:document.querySelectorAll('#logs-nav-button').length,insideNav:!!button.closest('nav.nav'),display:getComputedStyle(button).display,rect:[rect.left,rect.top,rect.right,rect.bottom],overflow:document.documentElement.scrollWidth-document.documentElement.clientWidth}})()`);
- const opened=await evaluate(`(async()=>{let calls=0;globalThis.fetch=async path=>{calls++;return{status:200,redirected:false,ok:true,json:async()=>({logs:calls===1?'<img id="log-injection" src=x> first':'second refresh',source:'matrix-web.service'})}};document.querySelector('#logs-nav-button').click();for(let attempt=0;attempt<100&&document.querySelector('#logs-output').getAttribute('aria-busy')!=='false';attempt++)await new Promise(resolve=>setTimeout(resolve,10));const dialog=document.querySelector('#logs-dialog'),first={open:dialog.open,text:document.querySelector('#logs-output').textContent,injected:!!document.querySelector('#log-injection'),calls};document.querySelector('#logs-refresh').click();for(let attempt=0;attempt<100&&document.querySelector('#logs-output').getAttribute('aria-busy')!=='false';attempt++)await new Promise(resolve=>setTimeout(resolve,10));const refreshed={text:document.querySelector('#logs-output').textContent,calls};document.querySelector('#logs-close').click();return{first,refreshed,closed:!dialog.open}})()`);
+ await evaluate(`(()=>{globalThis.__logCalls=0;globalThis.__logAborted=false;globalThis.fetch=async(path,options={})=>{if(path!=='/api/logs')return{status:200,redirected:false,ok:true,json:async()=>({})};globalThis.__logCalls++;if(__logCalls===3){globalThis.__logSignal=options.signal;return new Promise((resolve,reject)=>options.signal.addEventListener('abort',()=>{globalThis.__logAborted=true;reject(new DOMException('Aborted','AbortError'))},{once:true}))};return{status:200,redirected:false,ok:true,json:async()=>({logs:__logCalls===1?'<img id="log-injection" src=x> first':'second refresh',source:'matrix-web.service'})}};return true})()`);
+ await evaluate(`document.querySelector('#logs-nav-button').click()`);await evaluate(`(async()=>{for(let attempt=0;attempt<100&&document.querySelector('#logs-dialog').hasAttribute('aria-busy');attempt++)await new Promise(resolve=>setTimeout(resolve,10))})()`);
+ const first=await evaluate(`(()=>{const dialog=document.querySelector('#logs-dialog'),rect=dialog.getBoundingClientRect(),sizes=[...dialog.querySelectorAll('button')].map(button=>{const r=button.getBoundingClientRect();return[r.width,r.height]});return{open:dialog.open,text:document.querySelector('#logs-output').textContent,injected:!!document.querySelector('#log-injection'),calls:__logCalls,focus:document.activeElement.id,rect:[rect.left,rect.top,rect.right,rect.bottom],sizes}})()`);
+ await evaluate(`document.querySelector('#logs-refresh').click()`);await evaluate(`(async()=>{for(let attempt=0;attempt<100&&document.querySelector('#logs-dialog').hasAttribute('aria-busy');attempt++)await new Promise(resolve=>setTimeout(resolve,10))})()`);const refreshed=await evaluate(`({text:document.querySelector('#logs-output').textContent,calls:__logCalls})`);
+ await send('Input.dispatchKeyEvent',{type:'keyDown',key:'Escape',code:'Escape',windowsVirtualKeyCode:27,nativeVirtualKeyCode:27});await send('Input.dispatchKeyEvent',{type:'keyUp',key:'Escape',code:'Escape',windowsVirtualKeyCode:27,nativeVirtualKeyCode:27});await new Promise(resolve=>setTimeout(resolve,20));const escaped=await evaluate(`({closed:!document.querySelector('#logs-dialog').open,focus:document.activeElement.id})`);
+ await evaluate(`document.querySelector('#logs-nav-button').click()`);await evaluate(`(async()=>{await new Promise(resolve=>setTimeout(resolve,20));globalThis.__hadLogController=!!logsRequestController;document.querySelector('#logs-close').click();await new Promise(resolve=>setTimeout(resolve,20))})()`);const buttonClosed=await evaluate(`({closed:!document.querySelector('#logs-dialog').open,focus:document.activeElement.id,calls:__logCalls,hadController:__hadLogController,aborted:__logAborted,signalAborted:__logSignal?.aborted===true,text:document.querySelector('#logs-output').textContent})`);
  await send('Emulation.setDeviceMetricsOverride',{width:1280,height:720,deviceScaleFactor:1,mobile:false});
  const desktop=await evaluate(`(()=>{const button=document.querySelector('#logs-nav-button'),rect=button.getBoundingClientRect();return{display:getComputedStyle(button).display,rect:[rect.left,rect.top,rect.right,rect.bottom],overflow:document.documentElement.scrollWidth-document.documentElement.clientWidth}})()`);
- console.log(JSON.stringify({mobile,opened,desktop}));
+ console.log(JSON.stringify({mobile,first,refreshed,escaped,buttonClosed,desktop}));
 }finally{socket.close()}
 """
         report = self._run_dashboard_chromium_probe(body, probe, timeout=30)
@@ -606,12 +634,24 @@ try{
         self.assertTrue(report["mobile"]["insideNav"], report)
         self.assertNotEqual(report["mobile"]["display"], "none", report)
         self.assertLessEqual(report["mobile"]["overflow"], 1, report)
-        self.assertTrue(report["opened"]["first"]["open"], report)
-        self.assertEqual(report["opened"]["first"]["text"], '<img id="log-injection" src=x> first', report)
-        self.assertFalse(report["opened"]["first"]["injected"], report)
-        self.assertEqual(report["opened"]["first"]["calls"], 1, report)
-        self.assertEqual(report["opened"]["refreshed"], {"text": "second refresh", "calls": 2}, report)
-        self.assertTrue(report["opened"]["closed"], report)
+        self.assertTrue(report["first"]["open"], report)
+        self.assertEqual(report["first"]["text"], '<img id="log-injection" src=x> first', report)
+        self.assertFalse(report["first"]["injected"], report)
+        self.assertEqual(report["first"]["calls"], 1, report)
+        self.assertEqual(report["first"]["focus"], "logs-close", report)
+        self.assertTrue(all(width >= 44 and height >= 44 for width, height in report["first"]["sizes"]), report)
+        dialog_left, dialog_top, dialog_right, dialog_bottom = report["first"]["rect"]
+        self.assertGreaterEqual(dialog_left, 0, report)
+        self.assertGreaterEqual(dialog_top, 0, report)
+        self.assertLessEqual(dialog_right, 320, report)
+        self.assertLessEqual(dialog_bottom, 568, report)
+        self.assertEqual(report["refreshed"], {"text": "second refresh", "calls": 2}, report)
+        self.assertEqual(report["escaped"], {"closed": True, "focus": "logs-nav-button"}, report)
+        self.assertEqual(
+            report["buttonClosed"],
+            {"closed": True, "focus": "logs-nav-button", "calls": 3, "hadController": True, "aborted": True, "signalAborted": True, "text": "second refresh"},
+            report,
+        )
         self.assertNotEqual(report["desktop"]["display"], "none", report)
         self.assertLessEqual(report["desktop"]["overflow"], 1, report)
         for layout in (report["mobile"], report["desktop"]):

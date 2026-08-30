@@ -12,6 +12,7 @@ import secrets
 import logging
 import os
 import re
+import selectors
 import stat
 import subprocess
 import sys
@@ -407,19 +408,83 @@ class MediaSanitizerError(ValueError):
         self.cleanup_failed = cleanup_failed
 
 
+def _append_bounded_tail(tail, chunk, limit):
+    if limit < 1:
+        raise ValueError("process output limit must be positive")
+    if len(chunk) >= limit:
+        tail[:] = chunk[-limit:]
+        return
+    overflow = len(tail) + len(chunk) - limit
+    if overflow > 0:
+        del tail[:overflow]
+    tail.extend(chunk)
+
+
+def _bounded_process_stdout(argv, *, timeout, limit, env):
+    process = subprocess.Popen(
+        argv,
+        stdin=subprocess.DEVNULL,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.DEVNULL,
+        shell=False,
+        close_fds=True,
+        env=env,
+    )
+    if process.stdout is None:
+        process.kill()
+        process.wait()
+        raise RuntimeError("bounded process stdout was not created")
+    stream = process.stdout
+    selector = selectors.DefaultSelector()
+    selector.register(stream, selectors.EVENT_READ)
+    deadline = time.monotonic() + timeout
+    tail = bytearray()
+    try:
+        while True:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                raise subprocess.TimeoutExpired(argv, timeout, output=bytes(tail))
+            if not selector.select(remaining):
+                raise subprocess.TimeoutExpired(argv, timeout, output=bytes(tail))
+            chunk = os.read(stream.fileno(), 8192)
+            if not chunk:
+                break
+            _append_bounded_tail(tail, chunk, limit)
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            raise subprocess.TimeoutExpired(argv, timeout, output=bytes(tail))
+        returncode = process.wait(timeout=remaining)
+        if returncode:
+            raise subprocess.CalledProcessError(returncode, argv, output=bytes(tail))
+        return bytes(tail)
+    finally:
+        selector.close()
+        stream.close()
+        if process.poll() is None:
+            process.kill()
+        process.wait()
+
+
+def _decode_utf8_tail(output):
+    start = 0
+    while start < len(output) and output[start] & 0xC0 == 0x80:
+        start += 1
+    return output[start:].decode("utf-8", errors="replace")
+
+
 def _read_matrix_service_logs():
-    completed = subprocess.run(
+    output = _bounded_process_stdout(
         [
             "/usr/bin/journalctl", "--unit", MATRIX_SERVICE,
             "--lines", "200", "--no-pager", "--quiet", "--output", "short-iso",
         ],
-        check=True, capture_output=True, timeout=3, shell=False,
+        timeout=3, limit=JOURNAL_LOG_BYTES,
         env={
             "PATH": "/usr/sbin:/usr/bin:/sbin:/bin",
             "LANG": "C.UTF-8", "LC_ALL": "C.UTF-8",
         },
     )
-    return completed.stdout[-JOURNAL_LOG_BYTES:].decode("utf-8", errors="replace")
+    return _decode_utf8_tail(output)
 
 
 def create_app(
