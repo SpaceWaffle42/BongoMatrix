@@ -549,6 +549,62 @@ try{
             )
         self.assertLess(time.monotonic() - started, 2)
 
+    def test_bounded_process_stdout_owns_cleanup_before_selector_registration(self):
+        launched = []
+        wait_timeouts = []
+        real_popen = subprocess.Popen
+
+        class TrackingProcess:
+            def __init__(self, process):
+                self._process = process
+                self.stdout = process.stdout
+                self._poll_failed = False
+
+            def __getattr__(self, name):
+                return getattr(self._process, name)
+
+            def poll(self):
+                if not self._poll_failed:
+                    self._poll_failed = True
+                    raise OSError("poll unavailable")
+                return self._process.poll()
+
+            def wait(self, *, timeout):
+                wait_timeouts.append(timeout)
+                return self._process.wait(timeout=timeout)
+
+        class BrokenSelector:
+            def register(self, _stream, _event):
+                raise OSError("selector unavailable")
+
+            def close(self):
+                raise OSError("selector close unavailable")
+
+        def launch(*args, **kwargs):
+            tracked = TrackingProcess(real_popen(*args, **kwargs))
+            launched.append(tracked)
+            return tracked
+
+        try:
+            with patch.object(webapp.subprocess, "Popen", side_effect=launch), patch.object(
+                webapp.selectors, "DefaultSelector", return_value=BrokenSelector(),
+            ):
+                with self.assertRaisesRegex(OSError, "selector unavailable"):
+                    webapp._bounded_process_stdout(
+                        [sys.executable, "-c", "import time;time.sleep(5)"],
+                        timeout=1, limit=65_536, env=os.environ.copy(),
+                    )
+            self.assertEqual(len(launched), 1)
+            self.assertIsNotNone(launched[0].poll())
+            self.assertTrue(launched[0].stdout.closed)
+            self.assertTrue(wait_timeouts)
+            self.assertTrue(all(value is not None and value >= 0 for value in wait_timeouts))
+        finally:
+            for process in launched:
+                if process.poll() is None:
+                    process.kill()
+                    process._process.wait(timeout=2)
+
     def test_navigation_logs_api_sanitizes_journal_failure(self):
         self.pair_browser()
         with patch.object(

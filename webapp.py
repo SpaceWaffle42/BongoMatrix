@@ -421,6 +421,13 @@ def _append_bounded_tail(tail, chunk, limit):
 
 
 def _bounded_process_stdout(argv, *, timeout, limit, env):
+    if timeout <= 0:
+        raise ValueError("process timeout must be positive")
+    if limit < 1:
+        raise ValueError("process output limit must be positive")
+    deadline = time.monotonic() + timeout
+    cleanup_reserve = min(0.25, timeout / 2)
+    read_deadline = deadline - cleanup_reserve
     process = subprocess.Popen(
         argv,
         stdin=subprocess.DEVNULL,
@@ -430,18 +437,16 @@ def _bounded_process_stdout(argv, *, timeout, limit, env):
         close_fds=True,
         env=env,
     )
-    if process.stdout is None:
-        process.kill()
-        process.wait()
-        raise RuntimeError("bounded process stdout was not created")
     stream = process.stdout
-    selector = selectors.DefaultSelector()
-    selector.register(stream, selectors.EVENT_READ)
-    deadline = time.monotonic() + timeout
-    tail = bytearray()
+    selector = None
     try:
+        if stream is None:
+            raise RuntimeError("bounded process stdout was not created")
+        selector = selectors.DefaultSelector()
+        selector.register(stream, selectors.EVENT_READ)
+        tail = bytearray()
         while True:
-            remaining = deadline - time.monotonic()
+            remaining = read_deadline - time.monotonic()
             if remaining <= 0:
                 raise subprocess.TimeoutExpired(argv, timeout, output=bytes(tail))
             if not selector.select(remaining):
@@ -458,11 +463,32 @@ def _bounded_process_stdout(argv, *, timeout, limit, env):
             raise subprocess.CalledProcessError(returncode, argv, output=bytes(tail))
         return bytes(tail)
     finally:
-        selector.close()
-        stream.close()
-        if process.poll() is None:
-            process.kill()
-        process.wait()
+        primary_error = sys.exc_info()[1]
+        cleanup_error = None
+
+        def cleanup(operation):
+            nonlocal cleanup_error
+            try:
+                operation()
+            except Exception as error:
+                if cleanup_error is None:
+                    cleanup_error = error
+
+        if selector is not None:
+            cleanup(selector.close)
+        running = True
+        try:
+            running = process.poll() is None
+        except Exception as error:
+            if cleanup_error is None:
+                cleanup_error = error
+        if running:
+            cleanup(process.kill)
+        if stream is not None:
+            cleanup(stream.close)
+        cleanup(lambda: process.wait(timeout=max(0, deadline - time.monotonic())))
+        if primary_error is None and cleanup_error is not None:
+            raise cleanup_error
 
 
 def _decode_utf8_tail(output):
