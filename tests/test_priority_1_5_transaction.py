@@ -171,6 +171,10 @@ class Priority15TransactionTests(unittest.TestCase):
                         candidate_only = destination / "candidate-only.py"
                         try:
                             tx.transition("candidate", operation="deploy")
+                            candidate_snapshot = {
+                                relative: (destination / relative).read_bytes()
+                                for relative in ("app.py", "pkg/module.py", "candidate-only.py")
+                            }
                             installed = candidate_only.stat()
                             installed_inode = (installed.st_dev, installed.st_ino)
                             if mutation == "replacement":
@@ -208,7 +212,17 @@ class Priority15TransactionTests(unittest.TestCase):
                                     tx.recover("baseline")
                             with self.assertRaisesRegex(ValueError, "rollback unlink target"):
                                 action()
-                            self.assertFalse(service.active)
+                            self.assertTrue(service.active)
+                            self.assertEqual(
+                                {
+                                    relative: (destination / relative).read_bytes()
+                                    for relative in ("app.py", "pkg/module.py", "candidate-only.py")
+                                },
+                                {
+                                    **candidate_snapshot,
+                                    "candidate-only.py": unknown[2],
+                                },
+                            )
                             self.assertEqual(
                                 (
                                     candidate_only.stat().st_dev,
@@ -303,6 +317,10 @@ class Priority15TransactionTests(unittest.TestCase):
                     candidate_only = destination / "candidate-only.py"
                     try:
                         tx.transition("candidate", operation="deploy")
+                        candidate_snapshot = {
+                            relative: (destination / relative).read_bytes()
+                            for relative in ("app.py", "pkg/module.py")
+                        }
                         candidate_only.unlink()
                         sentinel = None
                         if object_type == "symlink":
@@ -319,7 +337,14 @@ class Priority15TransactionTests(unittest.TestCase):
                         )
                         with self.assertRaisesRegex(ValueError, "rollback unlink target"):
                             tx.transition("baseline", operation="rollback")
-                        self.assertFalse(service.active)
+                        self.assertTrue(service.active)
+                        self.assertEqual(
+                            {
+                                relative: (destination / relative).read_bytes()
+                                for relative in ("app.py", "pkg/module.py")
+                            },
+                            candidate_snapshot,
+                        )
                         after = candidate_only.lstat()
                         self.assertEqual(
                             (after.st_dev, after.st_ino, after.st_mode, after.st_rdev), identity,

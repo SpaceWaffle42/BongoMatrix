@@ -591,6 +591,23 @@ def verify_report(
     return report
 
 
+def _restored_service_readiness(service: str, lock_path: Path) -> None:
+    from deploy.priority_1_5_transaction import SystemdService
+
+    status = SystemdService(service).status()
+    lock = status.get("display_lock") if isinstance(status, dict) else None
+    if (
+        status.get("service") != service
+        or status.get("active") is not True
+        or status.get("substate") != "running"
+        or status.get("http_status") != 302
+        or not isinstance(lock, dict)
+        or lock.get("path") != str(lock_path)
+        or lock.get("locked") is not True
+    ):
+        raise RuntimeError("restored service readiness is incomplete")
+
+
 def execute(
     arguments: argparse.Namespace, *, matrix_factory: Callable[[], object] | None = None,
     exercise: Callable[[object, dict[str, object]], dict[str, object]] = exercise_foundation,
@@ -658,6 +675,7 @@ def execute(
                     command_runner([_SYSTEMCTL, "is-active", arguments.service]),
                     "postcheck", "active\n",
                 )
+                _restored_service_readiness(arguments.service, lock_path)
             else:
                 postcheck = command_runner([_SYSTEMCTL, "is-active", arguments.service])
                 if getattr(postcheck, "returncode", 0) == 0 or getattr(postcheck, "stdout", "") != "inactive\n":

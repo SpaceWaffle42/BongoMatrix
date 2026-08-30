@@ -398,8 +398,8 @@ def _read_at(parent_fd: int, name: str, *, allow_absent: bool = False):
 
 
 def _unlink_exact_candidate_at(parent_fd: int, name: str, release_entry: dict,
-                               owner: dict):
-    """Unlink an absent-baseline path only while it is the approved candidate."""
+                               owner: dict, *, remove: bool = True):
+    """Validate an absent-baseline path and optionally unlink the exact candidate."""
     try:
         before = os.stat(name, dir_fd=parent_fd, follow_symlinks=False)
     except FileNotFoundError:
@@ -444,8 +444,9 @@ def _unlink_exact_candidate_at(parent_fd: int, name: str, release_entry: dict,
         )
         if current_metadata != pinned_metadata:
             raise ValueError("rollback unlink target is unsafe")
-        os.unlink(name, dir_fd=parent_fd)
-        os.fsync(parent_fd)
+        if remove:
+            os.unlink(name, dir_fd=parent_fd)
+            os.fsync(parent_fd)
     finally:
         os.close(descriptor)
 
@@ -1316,6 +1317,7 @@ class Priority15Transaction:
         release_root_fd = _open_directory(self.release_root)
         backup_source_fd = _open_directory(self.backup_root / "source")
         pinned = []
+        mutation_started = False
         try:
             for release_entry, baseline_entry in zip(self.release_manifest["files"], self.baseline_manifest["files"]):
                 relative = release_entry["path"]
@@ -1327,6 +1329,16 @@ class Priority15Transaction:
                     source_parent, source_name = _open_parent_at(source_root_fd, relative)
                 pinned.append((relative, release_entry, baseline_entry, destination_parent,
                                destination_name, source_parent, source_name))
+            if target == "baseline":
+                owner = self.state["destination_owner"]
+                for (_relative, release_entry, baseline_entry, destination_parent,
+                     destination_name, _source_parent, _source_name) in pinned:
+                    if not baseline_entry["present"]:
+                        _unlink_exact_candidate_at(
+                            destination_parent, destination_name, release_entry, owner,
+                            remove=False,
+                        )
+            mutation_started = True
             self._stop()
             owner = self.state["destination_owner"]
             for (relative, release_entry, baseline_entry, destination_parent, destination_name,
@@ -1370,10 +1382,11 @@ class Priority15Transaction:
                 if not _same_namespace_inode(destination_parent, destination_parent_path):
                     raise ValueError("destination namespace changed")
         except BaseException:
-            try:
-                self._stop()
-            except BaseException:
-                pass
+            if mutation_started:
+                try:
+                    self._stop()
+                except BaseException:
+                    pass
             raise
         finally:
             for item in pinned:

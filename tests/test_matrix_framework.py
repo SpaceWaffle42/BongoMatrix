@@ -2714,6 +2714,18 @@ else:
             lock_path = root / "matrix-display.lock"
             lock_path.write_bytes(b"")
             report_path = root / "physical-report.json"
+            readiness_calls = []
+
+            def restored_service_readiness(service, restored_lock):
+                self.assertFalse(report_path.exists(), "report published before service readiness")
+                readiness_calls.append((service, restored_lock))
+
+            readiness_patch = patch.object(
+                verifier, "_restored_service_readiness",
+                side_effect=restored_service_readiness, create=True,
+            )
+            readiness_mock = readiness_patch.start()
+            self.addCleanup(readiness_patch.stop)
 
             arguments = verifier.build_parser().parse_args([
                 "--source-sha", source_sha, "--tree-sha", tree_sha,
@@ -2752,6 +2764,7 @@ else:
             self.assertEqual([item[1] for item in commands], [
                 "is-active", "stop", "start", "is-active",
             ])
+            self.assertEqual(readiness_calls, [("matrix-web.service", lock_path)])
             self.assertEqual(report["source_sha"], source_sha)
             self.assertEqual(report["tree_sha"], tree_sha)
             self.assertEqual(report["fixture_manifest_sha256"],
@@ -2806,6 +2819,18 @@ else:
                     lock_factory=lambda _path: TestLock(),
                 )
             self.assertEqual(report_path.read_bytes(), prior_report)
+
+            readiness_mock.side_effect = RuntimeError("readiness failed")
+            with self.assertRaisesRegex(RuntimeError, "readiness failed"):
+                verifier.execute(
+                    arguments, matrix_factory=lambda: object(),
+                    exercise=lambda *_args: evidence,
+                    command_runner=command_runner,
+                    version_reader=lambda: "0.3.58-preview",
+                    lock_factory=lambda _path: TestLock(),
+                )
+            self.assertEqual(report_path.read_bytes(), prior_report)
+            readiness_mock.side_effect = restored_service_readiness
 
             unsafe_lock = root / "unsafe-lock"
             unsafe_lock.symlink_to(lock_path)
