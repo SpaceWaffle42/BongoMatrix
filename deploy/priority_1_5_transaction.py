@@ -1088,7 +1088,7 @@ class SystemdService:
             owner = None
             for line in locks_raw.decode("ascii").splitlines():
                 fields = line.split()
-                if len(fields) < 6 or fields[1] != "FLOCK":
+                if len(fields) < 6 or fields[1:4] != ["FLOCK", "ADVISORY", "WRITE"]:
                     continue
                 device, separator, inode = fields[5].rpartition(":")
                 if separator and device.lower() == expected_device and inode == str(lock_metadata.st_ino):
@@ -1103,25 +1103,32 @@ class SystemdService:
         if holder_pid is None:
             raise RuntimeError("display lock has no owner")
         if holder_pid != main_pid:
-            expected_cgroup = f"0::{properties['ControlGroup']}"
+            expected_cgroup = f"0::{properties['ControlGroup']}\n".encode("ascii")
 
             def validate_holder_cgroup():
                 try:
                     cgroup_raw, _ = _read_regular(
                         Path(f"/proc/{holder_pid}/cgroup"), max_bytes=64 * 1024,
                     )
-                    cgroup_lines = cgroup_raw.decode("ascii").splitlines()
                 except (OSError, UnicodeError, ValueError) as error:
                     raise RuntimeError("display lock owner cgroup evidence is invalid") from error
-                if cgroup_lines != [expected_cgroup]:
+                if cgroup_raw != expected_cgroup:
                     raise RuntimeError("display lock is not owned by service cgroup")
 
             validate_holder_cgroup()
             if display_lock_holder() != holder_pid:
                 raise RuntimeError("display lock ownership changed during validation")
             validate_holder_cgroup()
+
         if display_lock_holder() != holder_pid:
             raise RuntimeError("display lock ownership changed during validation")
+        closing_raw, closing_metadata = _read_regular(DISPLAY_LOCK, max_bytes=1)
+        identity_fields = ("st_dev", "st_ino", "st_mode", "st_uid", "st_gid")
+        if closing_raw or any(
+            getattr(closing_metadata, field) != getattr(lock_metadata, field)
+            for field in identity_fields
+        ):
+            raise RuntimeError("display lock path changed during validation")
 
         warning_count = 0
         if warning_since is not None:
