@@ -67,10 +67,11 @@ full_test_suite:
     - apt-get update -qq
     # The sanitizer tests invoke /usr/bin/python3 directly, outside .venv-ci.
     # Keep Pillow and OpenCV available to that deliberately unprivileged process.
-    # Bind the verifier's deliberate absolute path to the Node 22 runtime from this image.
     - DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends chromium ffmpeg openssh-server python3 python3-venv python3-pil python3-opencv
-    - ln -sf /usr/local/bin/node /usr/bin/node
-    - test "$(readlink -f /usr/bin/node)" = /usr/local/bin/node
+    # Install a regular copy because the verifier pins and O_NOFOLLOW-opens /usr/bin/node.
+    - install -o root -g root -m 0755 /usr/local/bin/node /usr/bin/node
+    - test ! -L /usr/bin/node
+    - cmp -s /usr/local/bin/node /usr/bin/node
     - /usr/bin/node -e "if (typeof WebSocket !== 'function') process.exit(1)"
     - install -d -m 0755 /run/sshd
     - rm -rf -- .venv .venv-ci
