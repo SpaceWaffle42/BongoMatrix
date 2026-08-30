@@ -985,3 +985,258 @@ class Priority15TransactionTests(unittest.TestCase):
             self.assertEqual(connection_factory.call_args.kwargs["timeout"], 2)
             self.assertEqual(run.call_args.args[0][0], "/usr/bin/journalctl")
             self.assertEqual(run.call_args.kwargs["timeout"], 9.0)
+
+    def test_systemd_status_accepts_worker_lock_only_inside_exact_service_cgroup(self):
+        from deploy import priority_1_5_transaction as transaction
+
+        with tempfile.TemporaryDirectory() as temporary:
+            lock_path = Path(temporary) / "matrix-display.lock"
+            lock_path.write_bytes(b"")
+            metadata = lock_path.stat()
+            device = f"{os.major(metadata.st_dev):02x}:{os.minor(metadata.st_dev):02x}"
+            holder_pid = 424242
+            properties = types.SimpleNamespace(
+                stdout=(
+                    "Id=matrix-web.service\nActiveState=active\nSubState=running\n"
+                    "MainPID=424200\nNRestarts=0\n"
+                    "ControlGroup=/system.slice/matrix-web.service\n"
+                )
+            )
+
+            class Response:
+                status = 302
+                def read(self):
+                    return b""
+
+            class Connection:
+                def request(self, *_args):
+                    return None
+                def getresponse(self):
+                    return Response()
+                def close(self):
+                    return None
+
+            original_read = transaction._read_regular
+            def read_regular(path, **kwargs):
+                if path == Path("/proc/locks"):
+                    line = f"1: FLOCK ADVISORY WRITE {holder_pid} {device}:{metadata.st_ino} 0 EOF\n"
+                    return line.encode("ascii"), metadata
+                if path == Path(f"/proc/{holder_pid}/cgroup"):
+                    return b"0::/system.slice/matrix-web.service\n", metadata
+                return original_read(path, **kwargs)
+
+            service = transaction.SystemdService("matrix-web.service")
+            with (
+                patch.object(transaction, "DISPLAY_LOCK", lock_path),
+                patch.object(service, "_run", return_value=properties),
+                patch.object(transaction, "_read_regular", side_effect=read_regular),
+                patch.object(transaction.http.client, "HTTPConnection", return_value=Connection()),
+            ):
+                evidence = service.status()
+            self.assertEqual(evidence["main_pid"], 424200)
+            self.assertTrue(evidence["display_lock"]["locked"])
+
+    def test_systemd_status_rejects_worker_lock_outside_exact_service_cgroup(self):
+        from deploy import priority_1_5_transaction as transaction
+
+        with tempfile.TemporaryDirectory() as temporary:
+            lock_path = Path(temporary) / "matrix-display.lock"
+            lock_path.write_bytes(b"")
+            metadata = lock_path.stat()
+            device = f"{os.major(metadata.st_dev):02x}:{os.minor(metadata.st_dev):02x}"
+            holder_pid = 424242
+            properties = types.SimpleNamespace(
+                stdout=(
+                    "Id=matrix-web.service\nActiveState=active\nSubState=running\n"
+                    "MainPID=424200\nNRestarts=0\n"
+                    "ControlGroup=/system.slice/matrix-web.service\n"
+                )
+            )
+
+            class Response:
+                status = 302
+                def read(self):
+                    return b""
+
+            class Connection:
+                def request(self, *_args):
+                    return None
+                def getresponse(self):
+                    return Response()
+                def close(self):
+                    return None
+
+            original_read = transaction._read_regular
+            def read_regular(path, **kwargs):
+                if path == Path("/proc/locks"):
+                    line = f"1: FLOCK ADVISORY WRITE {holder_pid} {device}:{metadata.st_ino} 0 EOF\n"
+                    return line.encode("ascii"), metadata
+                if path == Path(f"/proc/{holder_pid}/cgroup"):
+                    return b"0::/user.slice/user-1000.slice/session.scope\n", metadata
+                return original_read(path, **kwargs)
+
+            service = transaction.SystemdService("matrix-web.service")
+            with (
+                patch.object(transaction, "DISPLAY_LOCK", lock_path),
+                patch.object(service, "_run", return_value=properties),
+                patch.object(transaction, "_read_regular", side_effect=read_regular),
+                patch.object(transaction.http.client, "HTTPConnection", return_value=Connection()),
+            ):
+                with self.assertRaisesRegex(RuntimeError, "display lock is not owned by service cgroup"):
+                    service.status()
+
+    def test_systemd_status_rejects_worker_lock_lost_during_cgroup_validation(self):
+        from deploy import priority_1_5_transaction as transaction
+
+        with tempfile.TemporaryDirectory() as temporary:
+            lock_path = Path(temporary) / "matrix-display.lock"
+            lock_path.write_bytes(b"")
+            metadata = lock_path.stat()
+            device = f"{os.major(metadata.st_dev):02x}:{os.minor(metadata.st_dev):02x}"
+            holder_pid = 424242
+            properties = types.SimpleNamespace(stdout=(
+                "Id=matrix-web.service\nActiveState=active\nSubState=running\n"
+                "MainPID=424200\nNRestarts=0\n"
+                "ControlGroup=/system.slice/matrix-web.service\n"
+            ))
+
+            class Response:
+                status = 302
+                def read(self): return b""
+
+            class Connection:
+                def request(self, *_args): return None
+                def getresponse(self): return Response()
+                def close(self): return None
+
+            lock_reads = 0
+            original_read = transaction._read_regular
+            def read_regular(path, **kwargs):
+                nonlocal lock_reads
+                if path == Path("/proc/locks"):
+                    lock_reads += 1
+                    if lock_reads > 1:
+                        return b"", metadata
+                    line = f"1: FLOCK ADVISORY WRITE {holder_pid} {device}:{metadata.st_ino} 0 EOF\n"
+                    return line.encode("ascii"), metadata
+                if path == Path(f"/proc/{holder_pid}/cgroup"):
+                    return b"0::/system.slice/matrix-web.service\n", metadata
+                return original_read(path, **kwargs)
+
+            service = transaction.SystemdService("matrix-web.service")
+            with (
+                patch.object(transaction, "DISPLAY_LOCK", lock_path),
+                patch.object(service, "_run", return_value=properties),
+                patch.object(transaction, "_read_regular", side_effect=read_regular),
+                patch.object(transaction.http.client, "HTTPConnection", return_value=Connection()),
+            ):
+                with self.assertRaisesRegex(RuntimeError, "display lock ownership changed during validation"):
+                    service.status()
+
+    def _run_adversarial_lock_status(
+        self, *, lock_kind="WRITE", cgroup_record=None, replace_path=False,
+        lock_rows=None, drop_after_journal=False,
+    ):
+        from deploy import priority_1_5_transaction as transaction
+
+        with tempfile.TemporaryDirectory() as temporary:
+            lock_path = Path(temporary) / "matrix-display.lock"
+            lock_path.write_bytes(b"")
+            metadata = lock_path.stat()
+            changed_values = list(metadata)
+            changed_values[1] += 1
+            changed_metadata = os.stat_result(changed_values)
+            device = f"{os.major(metadata.st_dev):02x}:{os.minor(metadata.st_dev):02x}"
+            holder_pid = 434343
+            main_pid = holder_pid if cgroup_record is None else 434300
+            properties = types.SimpleNamespace(stdout=(
+                "Id=matrix-web.service\nActiveState=active\nSubState=running\n"
+                f"MainPID={main_pid}\nNRestarts=0\n"
+                "ControlGroup=/system.slice/matrix-web.service\n"
+            ))
+
+            class Response:
+                status = 302
+                def read(self): return b""
+
+            class Connection:
+                def request(self, *_args): return None
+                def getresponse(self): return Response()
+                def close(self): return None
+
+            path_reads = 0
+            journal_seen = False
+            original_read = transaction._read_regular
+            def read_regular(path, **kwargs):
+                nonlocal path_reads
+                if path == lock_path:
+                    path_reads += 1
+                    current = changed_metadata if replace_path and path_reads > 1 else metadata
+                    return b"", current
+                if path == Path("/proc/locks"):
+                    if drop_after_journal and journal_seen:
+                        return b"", metadata
+                    if lock_rows is not None:
+                        return lock_rows(device, metadata.st_ino, holder_pid), metadata
+                    line = f"1: FLOCK ADVISORY {lock_kind} {holder_pid} {device}:{metadata.st_ino} 0 EOF\n"
+                    return line.encode("ascii"), metadata
+                if path == Path(f"/proc/{holder_pid}/cgroup"):
+                    return cgroup_record, metadata
+                return original_read(path, **kwargs)
+
+            def run_journal(*_args, **_kwargs):
+                nonlocal journal_seen
+                journal_seen = True
+                return types.SimpleNamespace(stdout="")
+
+            service = transaction.SystemdService("matrix-web.service")
+            with (
+                patch.object(transaction, "DISPLAY_LOCK", lock_path),
+                patch.object(service, "_run", return_value=properties),
+                patch.object(transaction, "_read_regular", side_effect=read_regular),
+                patch.object(transaction.subprocess, "run", side_effect=run_journal),
+                patch.object(transaction.http.client, "HTTPConnection", return_value=Connection()),
+            ):
+                warning_since = 0 if drop_after_journal else None
+                return service.status(warning_since=warning_since)
+
+    def test_systemd_status_rejects_shared_display_lock(self):
+        with self.assertRaisesRegex(RuntimeError, "display lock has no owner"):
+            self._run_adversarial_lock_status(lock_kind="READ")
+
+    def test_systemd_status_rejects_noncanonical_cgroup_record_framing(self):
+        for record in (
+            b"0::/system.slice/matrix-web.service",
+            b"0::/system.slice/matrix-web.service\r\n",
+        ):
+            with self.subTest(record=record):
+                with self.assertRaisesRegex(RuntimeError, "display lock is not owned by service cgroup"):
+                    self._run_adversarial_lock_status(cgroup_record=record)
+
+    def test_systemd_status_rejects_display_lock_path_inode_replacement(self):
+        with self.assertRaisesRegex(RuntimeError, "display lock path changed during validation"):
+            self._run_adversarial_lock_status(replace_path=True)
+
+    def test_systemd_status_rejects_lock_loss_during_journal_validation(self):
+        with self.assertRaisesRegex(RuntimeError, "display lock ownership changed during validation"):
+            self._run_adversarial_lock_status(drop_after_journal=True)
+
+    def test_systemd_status_rejects_malformed_and_duplicate_matching_lock_rows(self):
+        def invalid_range(device, inode, holder):
+            return f"1: FLOCK ADVISORY WRITE {holder} {device}:{inode} 1 EOF\n".encode("ascii")
+
+        def extra_field(device, inode, holder):
+            return f"1: FLOCK ADVISORY WRITE {holder} {device}:{inode} 0 EOF EXTRA\n".encode("ascii")
+
+        def duplicate(device, inode, holder):
+            line = f"1: FLOCK ADVISORY WRITE {holder} {device}:{inode} 0 EOF\n"
+            return (line + line.replace("1:", "2:", 1)).encode("ascii")
+
+        for rows, message in (
+            (invalid_range, "display lock record is malformed"),
+            (extra_field, "display lock record is malformed"),
+            (duplicate, "display lock record is duplicated"),
+        ):
+            with self.subTest(rows=rows.__name__):
+                with self.assertRaisesRegex(RuntimeError, message):
+                    self._run_adversarial_lock_status(lock_rows=rows)
