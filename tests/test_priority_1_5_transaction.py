@@ -1133,7 +1133,10 @@ class Priority15TransactionTests(unittest.TestCase):
                 with self.assertRaisesRegex(RuntimeError, "display lock ownership changed during validation"):
                     service.status()
 
-    def _run_adversarial_lock_status(self, *, lock_kind="WRITE", cgroup_record=None, replace_path=False):
+    def _run_adversarial_lock_status(
+        self, *, lock_kind="WRITE", cgroup_record=None, replace_path=False,
+        lock_rows=None, drop_after_journal=False,
+    ):
         from deploy import priority_1_5_transaction as transaction
 
         with tempfile.TemporaryDirectory() as temporary:
@@ -1162,6 +1165,7 @@ class Priority15TransactionTests(unittest.TestCase):
                 def close(self): return None
 
             path_reads = 0
+            journal_seen = False
             original_read = transaction._read_regular
             def read_regular(path, **kwargs):
                 nonlocal path_reads
@@ -1170,20 +1174,31 @@ class Priority15TransactionTests(unittest.TestCase):
                     current = changed_metadata if replace_path and path_reads > 1 else metadata
                     return b"", current
                 if path == Path("/proc/locks"):
+                    if drop_after_journal and journal_seen:
+                        return b"", metadata
+                    if lock_rows is not None:
+                        return lock_rows(device, metadata.st_ino, holder_pid), metadata
                     line = f"1: FLOCK ADVISORY {lock_kind} {holder_pid} {device}:{metadata.st_ino} 0 EOF\n"
                     return line.encode("ascii"), metadata
                 if path == Path(f"/proc/{holder_pid}/cgroup"):
                     return cgroup_record, metadata
                 return original_read(path, **kwargs)
 
+            def run_journal(*_args, **_kwargs):
+                nonlocal journal_seen
+                journal_seen = True
+                return types.SimpleNamespace(stdout="")
+
             service = transaction.SystemdService("matrix-web.service")
             with (
                 patch.object(transaction, "DISPLAY_LOCK", lock_path),
                 patch.object(service, "_run", return_value=properties),
                 patch.object(transaction, "_read_regular", side_effect=read_regular),
+                patch.object(transaction.subprocess, "run", side_effect=run_journal),
                 patch.object(transaction.http.client, "HTTPConnection", return_value=Connection()),
             ):
-                return service.status()
+                warning_since = 0 if drop_after_journal else None
+                return service.status(warning_since=warning_since)
 
     def test_systemd_status_rejects_shared_display_lock(self):
         with self.assertRaisesRegex(RuntimeError, "display lock has no owner"):
@@ -1201,3 +1216,27 @@ class Priority15TransactionTests(unittest.TestCase):
     def test_systemd_status_rejects_display_lock_path_inode_replacement(self):
         with self.assertRaisesRegex(RuntimeError, "display lock path changed during validation"):
             self._run_adversarial_lock_status(replace_path=True)
+
+    def test_systemd_status_rejects_lock_loss_during_journal_validation(self):
+        with self.assertRaisesRegex(RuntimeError, "display lock ownership changed during validation"):
+            self._run_adversarial_lock_status(drop_after_journal=True)
+
+    def test_systemd_status_rejects_malformed_and_duplicate_matching_lock_rows(self):
+        def invalid_range(device, inode, holder):
+            return f"1: FLOCK ADVISORY WRITE {holder} {device}:{inode} 1 EOF\n".encode("ascii")
+
+        def extra_field(device, inode, holder):
+            return f"1: FLOCK ADVISORY WRITE {holder} {device}:{inode} 0 EOF EXTRA\n".encode("ascii")
+
+        def duplicate(device, inode, holder):
+            line = f"1: FLOCK ADVISORY WRITE {holder} {device}:{inode} 0 EOF\n"
+            return (line + line.replace("1:", "2:", 1)).encode("ascii")
+
+        for rows, message in (
+            (invalid_range, "display lock record is malformed"),
+            (extra_field, "display lock record is malformed"),
+            (duplicate, "display lock record is duplicated"),
+        ):
+            with self.subTest(rows=rows.__name__):
+                with self.assertRaisesRegex(RuntimeError, message):
+                    self._run_adversarial_lock_status(lock_rows=rows)

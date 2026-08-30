@@ -1086,26 +1086,40 @@ class SystemdService:
             locks_raw, _ = _read_regular(Path("/proc/locks"), max_bytes=1024 * 1024)
             expected_device = f"{os.major(lock_metadata.st_dev):02x}:{os.minor(lock_metadata.st_dev):02x}"
             owner = None
+            matching_records = 0
             for line in locks_raw.decode("ascii").splitlines():
                 fields = line.split()
-                if len(fields) < 6 or fields[1:4] != ["FLOCK", "ADVISORY", "WRITE"]:
+                if len(fields) < 6:
                     continue
                 device, separator, inode = fields[5].rpartition(":")
-                if separator and device.lower() == expected_device and inode == str(lock_metadata.st_ino):
-                    try:
-                        owner = int(fields[4])
-                    except ValueError as error:
-                        raise RuntimeError("display lock owner is malformed") from error
-                    break
+                if not separator or device.lower() != expected_device or inode != str(lock_metadata.st_ino):
+                    continue
+                if fields[1] != "FLOCK":
+                    continue
+                if (
+                    len(fields) != 8
+                    or re.fullmatch(r"[0-9]+:", fields[0]) is None
+                    or fields[2] != "ADVISORY"
+                    or fields[3] not in {"READ", "WRITE"}
+                    or re.fullmatch(r"[1-9][0-9]*", fields[4]) is None
+                    or fields[6:] != ["0", "EOF"]
+                ):
+                    raise RuntimeError("display lock record is malformed")
+                matching_records += 1
+                if matching_records != 1:
+                    raise RuntimeError("display lock record is duplicated")
+                if fields[3] == "WRITE":
+                    owner = int(fields[4])
             return owner
 
         holder_pid = display_lock_holder()
         if holder_pid is None:
             raise RuntimeError("display lock has no owner")
+        validate_holder_cgroup: Callable[[], None] | None = None
         if holder_pid != main_pid:
             expected_cgroup = f"0::{properties['ControlGroup']}\n".encode("ascii")
 
-            def validate_holder_cgroup():
+            def _validate_holder_cgroup_impl():
                 try:
                     cgroup_raw, _ = _read_regular(
                         Path(f"/proc/{holder_pid}/cgroup"), max_bytes=64 * 1024,
@@ -1115,20 +1129,11 @@ class SystemdService:
                 if cgroup_raw != expected_cgroup:
                     raise RuntimeError("display lock is not owned by service cgroup")
 
+            validate_holder_cgroup = _validate_holder_cgroup_impl
             validate_holder_cgroup()
             if display_lock_holder() != holder_pid:
                 raise RuntimeError("display lock ownership changed during validation")
             validate_holder_cgroup()
-
-        if display_lock_holder() != holder_pid:
-            raise RuntimeError("display lock ownership changed during validation")
-        closing_raw, closing_metadata = _read_regular(DISPLAY_LOCK, max_bytes=1)
-        identity_fields = ("st_dev", "st_ino", "st_mode", "st_uid", "st_gid")
-        if closing_raw or any(
-            getattr(closing_metadata, field) != getattr(lock_metadata, field)
-            for field in identity_fields
-        ):
-            raise RuntimeError("display lock path changed during validation")
 
         warning_count = 0
         if warning_since is not None:
@@ -1146,6 +1151,23 @@ class SystemdService:
             if len(journal.stdout) > 1024 * 1024:
                 raise RuntimeError("service warning evidence exceeds bound")
             warning_count = sum(bool(line) for line in journal.stdout.splitlines())
+
+        if holder_pid != main_pid:
+            if validate_holder_cgroup is None:
+                raise RuntimeError("display lock owner cgroup validator is unavailable")
+            validate_holder_cgroup()
+            if display_lock_holder() != holder_pid:
+                raise RuntimeError("display lock ownership changed during validation")
+            validate_holder_cgroup()
+        if display_lock_holder() != holder_pid:
+            raise RuntimeError("display lock ownership changed during validation")
+        closing_raw, closing_metadata = _read_regular(DISPLAY_LOCK, max_bytes=1)
+        identity_fields = ("st_dev", "st_ino", "st_mode", "st_uid", "st_gid")
+        if closing_raw or any(
+            getattr(closing_metadata, field) != getattr(lock_metadata, field)
+            for field in identity_fields
+        ):
+            raise RuntimeError("display lock path changed during validation")
 
         _remaining_service_timeout(deadline, 15)
         return {
