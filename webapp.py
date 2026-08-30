@@ -75,6 +75,8 @@ DEVICE_RESTART_PENDING_TTL_SECONDS = 60
 PAIRED_ACTION_HEADER = "X-Matrix-Action"
 PAIRED_ACTION_VALUE = "paired-request"
 PAIRING_RECOVERY_TTL_SECONDS = 300
+MATRIX_SERVICE = "matrix-web.service"
+JOURNAL_LOG_BYTES = 65_536
 ETAG_ITEM = re.compile(r'(?P<weak>W/)?"(?P<opaque>[\x21\x23-\x7e\x80-\xff]*)"')
 EDIT_PREVIEW_INSTANCE = re.compile(r"[0-9a-f]{32}")
 EDIT_PREVIEW_SESSION = re.compile(r"[0-9a-f]{32}")
@@ -403,6 +405,21 @@ class MediaSanitizerError(ValueError):
         super().__init__("invalid or unsafe media")
         self.output = output
         self.cleanup_failed = cleanup_failed
+
+
+def _read_matrix_service_logs():
+    completed = subprocess.run(
+        [
+            "/usr/bin/journalctl", "--unit", MATRIX_SERVICE,
+            "--lines", "200", "--no-pager", "--quiet", "--output", "short-iso",
+        ],
+        check=True, capture_output=True, timeout=3, shell=False,
+        env={
+            "PATH": "/usr/sbin:/usr/bin:/sbin:/bin",
+            "LANG": "C.UTF-8", "LC_ALL": "C.UTF-8",
+        },
+    )
+    return completed.stdout[-JOURNAL_LOG_BYTES:].decode("utf-8", errors="replace")
 
 
 def create_app(
@@ -1973,6 +1990,19 @@ def create_app(
         payload = dict(current) if isinstance(current, dict) else {}
         payload["minimum_client_contract"] = MINIMUM_CLIENT_CONTRACT
         return jsonify(payload)
+
+    @app.get("/api/logs")
+    @requires_pairing
+    def service_logs():
+        try:
+            logs = _read_matrix_service_logs()
+        except (OSError, subprocess.SubprocessError):
+            response = jsonify({"error": "Service logs are temporarily unavailable."})
+            response.status_code = 503
+        else:
+            response = jsonify({"logs": logs, "source": MATRIX_SERVICE})
+        response.headers["Cache-Control"] = "no-store"
+        return response
 
     @app.get("/api/locations")
     @requires_pairing

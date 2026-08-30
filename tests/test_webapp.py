@@ -501,6 +501,126 @@ try{
         self.pairing.verify.return_value = True
         self.client.post("/pair", data={"pin": "123456", "device_name": "Test browser"})
 
+    def test_navigation_logs_api_returns_bounded_matrix_service_journal(self):
+        self.pair_browser()
+        completed = subprocess.CompletedProcess(
+            args=[], returncode=0,
+            stdout=b"2026-08-30T15:00:00+00:00 matrix-web started\nrenderer ready\n",
+            stderr=b"",
+        )
+        with patch.object(webapp.subprocess, "run", return_value=completed) as run:
+            response = self.client.get("/api/logs")
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.get_json(), {
+            "logs": "2026-08-30T15:00:00+00:00 matrix-web started\nrenderer ready\n",
+            "source": "matrix-web.service",
+        })
+        self.assertEqual(response.headers["Cache-Control"], "no-store")
+        run.assert_called_once_with(
+            [
+                "/usr/bin/journalctl", "--unit", "matrix-web.service",
+                "--lines", "200", "--no-pager", "--quiet", "--output", "short-iso",
+            ],
+            check=True, capture_output=True, timeout=3, shell=False,
+            env={"PATH": "/usr/sbin:/usr/bin:/sbin:/bin", "LANG": "C.UTF-8", "LC_ALL": "C.UTF-8"},
+        )
+
+    def test_navigation_logs_api_sanitizes_journal_failure(self):
+        self.pair_browser()
+        with patch.object(
+            webapp.subprocess, "run",
+            side_effect=subprocess.TimeoutExpired(["/usr/bin/journalctl"], 3, stderr=b"private"),
+        ):
+            response = self.client.get("/api/logs")
+
+        self.assertEqual(response.status_code, 503)
+        self.assertEqual(response.get_json(), {"error": "Service logs are temporarily unavailable."})
+        self.assertEqual(response.headers["Cache-Control"], "no-store")
+        self.assertNotIn(b"private", response.data)
+
+    def test_navigation_logs_api_requires_pairing_and_caps_output_bytes(self):
+        with patch.object(webapp.subprocess, "run") as run:
+            unpaired = self.client.get("/api/logs")
+        self.assertEqual(unpaired.status_code, 401)
+        run.assert_not_called()
+
+        self.pair_browser()
+        completed = subprocess.CompletedProcess(
+            args=[], returncode=0, stdout=b"discard" + b"L" * 65_536, stderr=b"",
+        )
+        with patch.object(webapp.subprocess, "run", return_value=completed):
+            paired = self.client.get("/api/logs")
+        self.assertEqual(paired.status_code, 200)
+        self.assertEqual(paired.get_json()["logs"], "L" * 65_536)
+        self.assertEqual(paired.headers["Cache-Control"], "no-store")
+
+    def test_logs_popup_is_accessible_only_from_navigation_and_renders_text_safely(self):
+        self.pair_browser()
+        body = self.client.get("/").get_data(as_text=True)
+        navigation = re.search(r'<nav class="nav"[^>]*>(.*?)</nav>', body, re.DOTALL)
+
+        self.assertIsNotNone(navigation)
+        self.assertEqual(body.count('id="logs-nav-button"'), 1)
+        self.assertIn('id="logs-nav-button"', navigation.group(1))
+        self.assertNotIn('id="logs-nav-button"', re.sub(r'<nav class="nav"[^>]*>.*?</nav>', '', body, flags=re.DOTALL))
+        self.assertRegex(body, r'<dialog[^>]+id="logs-dialog"[^>]+aria-labelledby="logs-title"')
+        self.assertIn('id="logs-output"', body)
+        self.assertIn('id="logs-refresh"', body)
+        self.assertIn('id="logs-close"', body)
+        self.assertIn("logsOutput.textContent=payload.logs", body)
+        self.assertNotIn("logsOutput.innerHTML", body)
+        self.assertIn("await api('/api/logs')", body)
+
+    @unittest.skipUnless(shutil.which("node"), "Node.js is required")
+    @unittest.skipUnless(
+        os.environ.get("MATRIX_CHROMIUM")
+        and Path(os.environ.get("MATRIX_CHROMIUM", "")).is_file()
+        and os.access(os.environ.get("MATRIX_CHROMIUM", ""), os.X_OK),
+        "MATRIX_CHROMIUM browser is required",
+    )
+    def test_logs_popup_opens_refreshes_and_closes_in_real_chromium(self):
+        self.pair_browser()
+        body = self.client.get("/").get_data(as_text=True)
+        probe = r"""
+const port=process.argv[1],pagePath=process.argv[2];let endpoint;
+for(let attempt=0;attempt<50;attempt++){try{endpoint=await fetch(`http://127.0.0.1:${port}/json/new`,{method:'PUT'}).then(r=>r.json());break}catch(_){await new Promise(r=>setTimeout(r,50))}}
+if(!endpoint)throw new Error('Chromium DevTools endpoint unavailable');
+const socket=new WebSocket(endpoint.webSocketDebuggerUrl),pending=new Map();let nextId=1,loadResolve,loaded=new Promise(resolve=>loadResolve=resolve);
+socket.onmessage=event=>{const message=JSON.parse(event.data);if(message.id&&pending.has(message.id)){const request=pending.get(message.id);pending.delete(message.id);message.error?request.reject(new Error(JSON.stringify(message.error))):request.resolve(message.result)}else if(message.method==='Page.loadEventFired')loadResolve()};
+await new Promise((resolve,reject)=>{socket.onopen=resolve;socket.onerror=reject});
+const send=(method,params={})=>{const id=nextId++;socket.send(JSON.stringify({id,method,params}));return new Promise((resolve,reject)=>pending.set(id,{resolve,reject}))};
+const evaluate=async expression=>{const result=await send('Runtime.evaluate',{expression,returnByValue:true,awaitPromise:true});if(result.exceptionDetails)throw new Error(JSON.stringify(result.exceptionDetails));return result.result.value};
+try{
+ await send('Runtime.enable');await send('Page.enable');await send('Emulation.setDeviceMetricsOverride',{width:320,height:568,deviceScaleFactor:1,mobile:false});loaded=new Promise(resolve=>loadResolve=resolve);await send('Page.navigate',{url:'file://'+pagePath});await loaded;
+ const mobile=await evaluate(`(()=>{const button=document.querySelector('#logs-nav-button'),rect=button.getBoundingClientRect();return{count:document.querySelectorAll('#logs-nav-button').length,insideNav:!!button.closest('nav.nav'),display:getComputedStyle(button).display,rect:[rect.left,rect.top,rect.right,rect.bottom],overflow:document.documentElement.scrollWidth-document.documentElement.clientWidth}})()`);
+ const opened=await evaluate(`(async()=>{let calls=0;globalThis.fetch=async path=>{calls++;return{status:200,redirected:false,ok:true,json:async()=>({logs:calls===1?'<img id="log-injection" src=x> first':'second refresh',source:'matrix-web.service'})}};document.querySelector('#logs-nav-button').click();for(let attempt=0;attempt<100&&document.querySelector('#logs-output').getAttribute('aria-busy')!=='false';attempt++)await new Promise(resolve=>setTimeout(resolve,10));const dialog=document.querySelector('#logs-dialog'),first={open:dialog.open,text:document.querySelector('#logs-output').textContent,injected:!!document.querySelector('#log-injection'),calls};document.querySelector('#logs-refresh').click();for(let attempt=0;attempt<100&&document.querySelector('#logs-output').getAttribute('aria-busy')!=='false';attempt++)await new Promise(resolve=>setTimeout(resolve,10));const refreshed={text:document.querySelector('#logs-output').textContent,calls};document.querySelector('#logs-close').click();return{first,refreshed,closed:!dialog.open}})()`);
+ await send('Emulation.setDeviceMetricsOverride',{width:1280,height:720,deviceScaleFactor:1,mobile:false});
+ const desktop=await evaluate(`(()=>{const button=document.querySelector('#logs-nav-button'),rect=button.getBoundingClientRect();return{display:getComputedStyle(button).display,rect:[rect.left,rect.top,rect.right,rect.bottom],overflow:document.documentElement.scrollWidth-document.documentElement.clientWidth}})()`);
+ console.log(JSON.stringify({mobile,opened,desktop}));
+}finally{socket.close()}
+"""
+        report = self._run_dashboard_chromium_probe(body, probe, timeout=30)
+
+        self.assertEqual(report["mobile"]["count"], 1, report)
+        self.assertTrue(report["mobile"]["insideNav"], report)
+        self.assertNotEqual(report["mobile"]["display"], "none", report)
+        self.assertLessEqual(report["mobile"]["overflow"], 1, report)
+        self.assertTrue(report["opened"]["first"]["open"], report)
+        self.assertEqual(report["opened"]["first"]["text"], '<img id="log-injection" src=x> first', report)
+        self.assertFalse(report["opened"]["first"]["injected"], report)
+        self.assertEqual(report["opened"]["first"]["calls"], 1, report)
+        self.assertEqual(report["opened"]["refreshed"], {"text": "second refresh", "calls": 2}, report)
+        self.assertTrue(report["opened"]["closed"], report)
+        self.assertNotEqual(report["desktop"]["display"], "none", report)
+        self.assertLessEqual(report["desktop"]["overflow"], 1, report)
+        for layout in (report["mobile"], report["desktop"]):
+            left, top, right, bottom = layout["rect"]
+            self.assertGreaterEqual(left, 0, report)
+            self.assertGreaterEqual(top, 0, report)
+            self.assertLessEqual(right, 1280 if layout is report["desktop"] else 320, report)
+            self.assertGreater(bottom - top, 0, report)
+
     def test_provider_scroll_timing_is_bounded_cached_and_paired(self):
         from modules.weather_app import WeatherSnapshot
 
