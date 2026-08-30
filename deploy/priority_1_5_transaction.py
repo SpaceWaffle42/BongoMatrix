@@ -625,23 +625,45 @@ def _mkdir_fresh(path: Path, mode: int = 0o700):
     _fsync_dir(parent)
 
 
-def _git(repository: Path, *args: str, binary: bool = False):
+def _git(repository: Path, *args: str, binary: bool = False,
+         validated_owner_uid: int | None = None):
+    environment = {
+        "PATH": "/usr/bin:/bin", "LANG": "C", "LC_ALL": "C", "GIT_CONFIG_NOSYSTEM": "1",
+        "GIT_NO_REPLACE_OBJECTS": "1", "GIT_OPTIONAL_LOCKS": "0",
+    }
+    if validated_owner_uid is not None:
+        metadata = repository.lstat()
+        if (
+            type(validated_owner_uid) is not int
+            or validated_owner_uid < 0
+            or os.geteuid() != 0
+            or not stat.S_ISDIR(metadata.st_mode)
+            or stat.S_ISLNK(metadata.st_mode)
+            or metadata.st_uid != validated_owner_uid
+        ):
+            raise ValueError("Git repository owner authority is invalid")
+        environment["SUDO_UID"] = str(validated_owner_uid)
     result = subprocess.run(
         [GIT, "-C", str(repository), *args], check=True, capture_output=True,
         text=not binary, timeout=30, shell=False,
-        env={"PATH": "/usr/bin:/bin", "LANG": "C", "LC_ALL": "C", "GIT_CONFIG_NOSYSTEM": "1",
-             "GIT_NO_REPLACE_OBJECTS": "1", "GIT_OPTIONAL_LOCKS": "0"},
+        env=environment,
     )
     return result.stdout
 
 
-def _commit(repository: Path, value: str) -> tuple[str, str]:
+def _commit(repository: Path, value: str, *, validated_owner_uid: int | None = None) -> tuple[str, str]:
     if SHA1.fullmatch(value) is None:
         raise ValueError("commit identity must be lowercase full SHA")
-    commit = _git(repository, "rev-parse", "--verify", f"{value}^{{commit}}").strip()
+    commit = _git(
+        repository, "rev-parse", "--verify", f"{value}^{{commit}}",
+        validated_owner_uid=validated_owner_uid,
+    ).strip()
     if commit != value:
         raise ValueError("requested identity is not an exact commit")
-    tree = _git(repository, "rev-parse", "--verify", f"{value}^{{tree}}").strip()
+    tree = _git(
+        repository, "rev-parse", "--verify", f"{value}^{{tree}}",
+        validated_owner_uid=validated_owner_uid,
+    ).strip()
     if SHA1.fullmatch(tree) is None:
         raise ValueError("commit tree identity is invalid")
     return commit, tree
@@ -653,17 +675,24 @@ def _approved_baseline_snapshot(destination: Path, release: dict, baseline_sha: 
     git_dir = destination / ".git"
     if not git_dir.is_dir() or git_dir.is_symlink():
         raise ValueError("destination must be a preserved Git checkout")
-    commit, tree = _commit(destination, baseline_sha)
+    owner_uid = owner["uid"]
+    commit, tree = _commit(destination, baseline_sha, validated_owner_uid=owner_uid)
     if (commit, tree) != (baseline_sha, baseline_tree_sha):
         raise ValueError("destination Git object database lacks the approved baseline tree")
-    if _git(destination, "rev-parse", "--verify", "HEAD^{commit}").strip() != baseline_sha:
+    if _git(
+        destination, "rev-parse", "--verify", "HEAD^{commit}",
+        validated_owner_uid=owner_uid,
+    ).strip() != baseline_sha:
         raise ValueError("destination checkout is not at the approved baseline commit")
     root_fd = _open_directory(destination)
     records = []
     try:
         for entry in release["files"]:
             relative = entry["path"]
-            line = _git(destination, "ls-tree", baseline_sha, "--", relative).strip()
+            line = _git(
+                destination, "ls-tree", baseline_sha, "--", relative,
+                validated_owner_uid=owner_uid,
+            ).strip()
             parent_fd, name = _open_parent_at(root_fd, relative)
             try:
                 live = _read_at(parent_fd, name, allow_absent=True)
@@ -678,7 +707,10 @@ def _approved_baseline_snapshot(destination: Path, release: dict, baseline_sha: 
             mode_value, object_type, object_sha, object_path = line.split(None, 3)
             if object_type != "blob" or object_path != relative or mode_value not in ("100644", "100755"):
                 raise ValueError("approved baseline path object is unsupported")
-            expected_data = _git(destination, "cat-file", "blob", object_sha, binary=True)
+            expected_data = _git(
+                destination, "cat-file", "blob", object_sha, binary=True,
+                validated_owner_uid=owner_uid,
+            )
             expected_mode = "0755" if mode_value == "100755" else "0644"
             if live is None:
                 raise ValueError("live predecessor does not equal approved baseline")
