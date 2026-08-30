@@ -1,4 +1,5 @@
 from pathlib import Path
+import ast
 import os
 import re
 import subprocess
@@ -227,6 +228,18 @@ class GitLabPipelineContractTests(unittest.TestCase):
         )
         self.assertIn("python3-pil", job)
         self.assertIn("python3-opencv", job)
+        self.assertIn("install -o root -g root -m 0755 /usr/local/bin/node /usr/bin/node", job)
+        self.assertIn("test ! -L /usr/bin/node", job)
+        self.assertIn("cmp -s /usr/local/bin/node /usr/bin/node", job)
+        self.assertIn(
+            "/usr/bin/node -e \"if (typeof WebSocket !== 'function') process.exit(1)\"",
+            job,
+        )
+        self.assertLess(
+            job.index("install -o root -g root -m 0755 /usr/local/bin/node /usr/bin/node"),
+            job.index("coverage run"),
+        )
+        self.assertLess(job.index("typeof WebSocket"), job.index("coverage run"))
         self.assertIn(
             "coverage run --source=. --omit='tests/*' -m xmlrunner discover -s tests",
             job,
@@ -383,6 +396,12 @@ class GitLabPipelineContractTests(unittest.TestCase):
         self.assertIn("ci-summary.json", summary)
         self.assertIn("ci-summary.txt", summary)
         self.assertIn("expire_in: 14 days", summary)
+
+    def test_physical_verifier_has_no_optimized_away_assertions(self):
+        path = ROOT / "scripts" / "verify_priority_1_5_foundation_physical.py"
+        tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+        assertions = [node.lineno for node in ast.walk(tree) if isinstance(node, ast.Assert)]
+        self.assertEqual(assertions, [])
 
     def test_expected_top_level_jobs_and_controls_are_present(self):
         required = {

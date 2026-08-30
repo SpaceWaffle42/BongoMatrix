@@ -12,6 +12,7 @@ import secrets
 import logging
 import os
 import re
+import selectors
 import stat
 import subprocess
 import sys
@@ -75,6 +76,8 @@ DEVICE_RESTART_PENDING_TTL_SECONDS = 60
 PAIRED_ACTION_HEADER = "X-Matrix-Action"
 PAIRED_ACTION_VALUE = "paired-request"
 PAIRING_RECOVERY_TTL_SECONDS = 300
+MATRIX_SERVICE = "matrix-web.service"
+JOURNAL_LOG_BYTES = 65_536
 ETAG_ITEM = re.compile(r'(?P<weak>W/)?"(?P<opaque>[\x21\x23-\x7e\x80-\xff]*)"')
 EDIT_PREVIEW_INSTANCE = re.compile(r"[0-9a-f]{32}")
 EDIT_PREVIEW_SESSION = re.compile(r"[0-9a-f]{32}")
@@ -405,6 +408,143 @@ class MediaSanitizerError(ValueError):
         self.cleanup_failed = cleanup_failed
 
 
+def _append_bounded_tail(tail, chunk, limit):
+    if limit < 1:
+        raise ValueError("process output limit must be positive")
+    if len(chunk) >= limit:
+        tail[:] = chunk[-limit:]
+        return
+    overflow = len(tail) + len(chunk) - limit
+    if overflow > 0:
+        del tail[:overflow]
+    tail.extend(chunk)
+
+
+def _bounded_process_stdout(argv, *, timeout, limit, env):
+    if timeout <= 0:
+        raise ValueError("process timeout must be positive")
+    if limit < 1:
+        raise ValueError("process output limit must be positive")
+    deadline = time.monotonic() + timeout
+    cleanup_reserve = min(0.25, timeout / 2)
+    read_deadline = deadline - cleanup_reserve
+    process = subprocess.Popen(
+        argv,
+        stdin=subprocess.DEVNULL,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.DEVNULL,
+        shell=False,
+        close_fds=True,
+        env=env,
+    )
+    stream = process.stdout
+    selector = None
+    try:
+        if stream is None:
+            raise RuntimeError("bounded process stdout was not created")
+        selector = selectors.DefaultSelector()
+        selector.register(stream, selectors.EVENT_READ)
+        tail = bytearray()
+        while True:
+            remaining = read_deadline - time.monotonic()
+            if remaining <= 0:
+                raise subprocess.TimeoutExpired(argv, timeout, output=bytes(tail))
+            if not selector.select(remaining):
+                raise subprocess.TimeoutExpired(argv, timeout, output=bytes(tail))
+            chunk = os.read(stream.fileno(), 8192)
+            if not chunk:
+                break
+            _append_bounded_tail(tail, chunk, limit)
+        remaining = read_deadline - time.monotonic()
+        if remaining <= 0:
+            raise subprocess.TimeoutExpired(argv, timeout, output=bytes(tail))
+        returncode = process.wait(timeout=remaining)
+        if returncode:
+            raise subprocess.CalledProcessError(returncode, argv, output=bytes(tail))
+        return bytes(tail)
+    finally:
+        primary_error = sys.exc_info()[1]
+        cleanup_error = None
+
+        def cleanup(operation):
+            nonlocal cleanup_error
+            try:
+                operation()
+            except BaseException as error:
+                if cleanup_error is None:
+                    cleanup_error = error
+
+        if selector is not None:
+            cleanup(selector.close)
+        running = True
+        try:
+            running = process.poll() is None
+        except BaseException as error:
+            if cleanup_error is None:
+                cleanup_error = error
+        if running:
+            cleanup(process.kill)
+        if stream is not None:
+            cleanup(stream.close)
+        reaped = False
+        while True:
+            remaining = deadline - time.monotonic()
+            wait_timeout = min(0.05, max(0, remaining))
+            try:
+                process.wait(timeout=wait_timeout)
+                reaped = True
+                break
+            except subprocess.TimeoutExpired as error:
+                if remaining <= 0:
+                    if cleanup_error is None:
+                        cleanup_error = error
+                    break
+            except BaseException as error:
+                if cleanup_error is None:
+                    cleanup_error = error
+                if remaining <= 0:
+                    break
+                time.sleep(min(0.005, remaining))
+        if not reaped:
+            for _ in range(3):
+                try:
+                    waited_pid, _ = os.waitpid(process.pid, os.WNOHANG)
+                    if waited_pid == process.pid:
+                        reaped = True
+                        break
+                    time.sleep(0.001)
+                except ChildProcessError:
+                    reaped = True
+                    break
+                except BaseException as error:
+                    if cleanup_error is None:
+                        cleanup_error = error
+        if primary_error is None and cleanup_error is not None:
+            raise cleanup_error
+
+
+def _decode_utf8_tail(output):
+    start = 0
+    while start < len(output) and output[start] & 0xC0 == 0x80:
+        start += 1
+    return output[start:].decode("utf-8", errors="replace")
+
+
+def _read_matrix_service_logs():
+    output = _bounded_process_stdout(
+        [
+            "/usr/bin/journalctl", "--unit", MATRIX_SERVICE,
+            "--lines", "200", "--no-pager", "--quiet", "--output", "short-iso",
+        ],
+        timeout=3, limit=JOURNAL_LOG_BYTES,
+        env={
+            "PATH": "/usr/sbin:/usr/bin:/sbin:/bin",
+            "LANG": "C.UTF-8", "LC_ALL": "C.UTF-8",
+        },
+    )
+    return _decode_utf8_tail(output)
+
+
 def create_app(
     controller,
     config_store,
@@ -422,6 +562,9 @@ def create_app(
     device_restart_runner=None,
     acceptance_authorization_file=None,
     acceptance_runtime=None,
+    config_exclusion_sentinel="/var/lib/matrix-release/active-config-exclusion-v1.json",
+    config_exclusion_marker="/run/matrix-release/config-write.lock",
+    config_exclusion_authority="/run/matrix-release/config-write-authority-v1.json",
 ):
     session_generation = session_generation or secrets.token_hex(16)
     media_root = Path(media_dir or Path(__file__).resolve().parent / "resources" / "media")
@@ -554,6 +697,90 @@ def create_app(
         PAIRING_RECOVERY_CLOCK=time.time,
         MAX_CONTENT_LENGTH=128 * 1024 * 1024,
     )
+
+    exclusion_sentinel = Path(config_exclusion_sentinel)
+    exclusion_marker = Path(config_exclusion_marker)
+    # B1 deliberately has no release-authority bypass.  Keep the canonical
+    # authority path in the factory contract so B2 can add a bounded exception
+    # without changing the rollback baseline's WSGI wiring.
+    _config_exclusion_authority = Path(config_exclusion_authority)
+
+    def config_write_exclusion_status():
+        """Revalidate canonical durable/volatile exclusion without following links."""
+        def unique_object(pairs):
+            value = {}
+            for key, item in pairs:
+                if key in value:
+                    raise ValueError("duplicate sentinel field")
+                value[key] = item
+            return value
+
+        def canonical_regular(path, expected):
+            try:
+                before = path.lstat()
+            except FileNotFoundError:
+                return "absent"
+            except OSError:
+                return "malformed"
+            if (not stat.S_ISREG(before.st_mode) or stat.S_ISLNK(before.st_mode)
+                    or before.st_nlink != 1):
+                return "malformed"
+            try:
+                descriptor = os.open(
+                    path, os.O_RDONLY | os.O_CLOEXEC | os.O_NOFOLLOW | os.O_NONBLOCK,
+                )
+                try:
+                    opened = os.fstat(descriptor)
+                    raw = os.read(descriptor, 4097)
+                    after = os.fstat(descriptor)
+                finally:
+                    os.close(descriptor)
+            except OSError:
+                return "malformed"
+            if (
+                len(raw) > 4096
+                or (before.st_dev, before.st_ino) != (opened.st_dev, opened.st_ino)
+                or (opened.st_dev, opened.st_ino, opened.st_size, opened.st_mtime_ns)
+                != (after.st_dev, after.st_ino, after.st_size, after.st_mtime_ns)
+                or stat.S_IMODE(opened.st_mode) != 0o640
+                or (opened.st_uid, opened.st_gid) != (os.geteuid(), os.getegid())
+                or opened.st_nlink != 1
+            ):
+                return "malformed"
+            if expected is None:
+                return "healthy" if raw == b"" else "malformed"
+            try:
+                parsed = json.loads(raw, object_pairs_hook=unique_object)
+            except (UnicodeError, json.JSONDecodeError, ValueError):
+                return "malformed"
+            canonical = (json.dumps(parsed, sort_keys=True, separators=(",", ":")) + "\n").encode()
+            return "healthy" if type(parsed) is dict and parsed == expected and raw == canonical else "malformed"
+
+        sentinel = canonical_regular(
+            exclusion_sentinel, {"boundary": "b2", "state": "active", "version": 1},
+        )
+        marker = canonical_regular(exclusion_marker, None)
+        if sentinel == "absent" and marker == "absent":
+            return "inactive"
+        if sentinel == "malformed" or marker == "malformed":
+            return "recovery-required"
+        if sentinel == "healthy" and marker == "healthy":
+            return "active"
+        # Either half of an exclusion chain survived alone (including /run loss).
+        return "recovery-required"
+
+    app.extensions["config_write_exclusion"] = config_write_exclusion_status()
+
+    @app.before_request
+    def reject_config_write_during_release():
+        if request.method == "POST" and request.path == "/api/config":
+            status = config_write_exclusion_status()
+            app.extensions["config_write_exclusion"] = status
+            if status != "inactive":
+                return jsonify({
+                    "error": "Configuration writes are locked for release recovery."
+                }), 423
+        return None
 
     def device_registry_digest(devices):
         encoded = json.dumps(
@@ -1886,6 +2113,19 @@ def create_app(
         payload = dict(current) if isinstance(current, dict) else {}
         payload["minimum_client_contract"] = MINIMUM_CLIENT_CONTRACT
         return jsonify(payload)
+
+    @app.get("/api/logs")
+    @requires_pairing
+    def service_logs():
+        try:
+            logs = _read_matrix_service_logs()
+        except (OSError, subprocess.SubprocessError):
+            response = jsonify({"error": "Service logs are temporarily unavailable."})
+            response.status_code = 503
+        else:
+            response = jsonify({"logs": logs, "source": MATRIX_SERVICE})
+        response.headers["Cache-Control"] = "no-store"
+        return response
 
     @app.get("/api/locations")
     @requires_pairing

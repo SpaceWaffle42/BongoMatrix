@@ -146,9 +146,9 @@ def gif_media_frames(
         isinstance(playback_rate, bool)
         or not isinstance(playback_rate, (int, float))
         or not math.isfinite(playback_rate)
-        or not 0.25 <= playback_rate <= 4.0
+        or not 0.1 <= playback_rate <= 4.0
     ):
-        raise ValueError("GIF playback rate must be between 0.25 and 4.0")
+        raise ValueError("GIF playback rate must be between 0.1 and 4.0")
     playback_rate = float(playback_rate)
     started = monotonic() if monotonic is not None else 0.0
     deadline = (
@@ -259,11 +259,19 @@ def gif_media_frames(
 
 def video_media_frames(
     frame_decoder, fps=20, loops=1, stop_event=None, max_duration=None,
-    monotonic=None,
+    monotonic=None, playback_rate=1.0,
 ):
     """Yield one decoded video timeline repeatedly with deadline-clipped waits."""
     fps = max(1.0, min(60.0, float(fps)))
-    frame_delay = 1.0 / fps
+    if (
+        isinstance(playback_rate, bool)
+        or not isinstance(playback_rate, (int, float))
+        or not math.isfinite(playback_rate)
+        or not 0.1 <= playback_rate <= 4.0
+    ):
+        raise ValueError("video playback rate must be between 0.1 and 4.0")
+    playback_rate = float(playback_rate)
+    frame_delay = 1.0 / fps / playback_rate
     started = monotonic() if monotonic is not None else 0.0
     elapsed_delays = 0.0
     completed = 0

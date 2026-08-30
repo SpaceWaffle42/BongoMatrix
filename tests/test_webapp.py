@@ -2,6 +2,7 @@ import base64
 import copy
 import hashlib
 import importlib.util
+import inspect
 import io
 import json
 import re
@@ -116,6 +117,108 @@ class WebAppTests(unittest.TestCase):
 
     def paired_client_request(self, method, client, path, **kwargs):
         return self.paired_request(method, path, client=client, **kwargs)
+
+    def test_b1_durable_exclusion_rejects_config_before_body_parsing(self):
+        release_root = Path(self.temp.name) / "release-authority"
+        persistent = release_root / "var/active-config-exclusion-v1.json"
+        volatile_root = release_root / "run"
+        marker = volatile_root / "config-write.lock"
+        authority = volatile_root / "config-write-authority-v1.json"
+        persistent.parent.mkdir(parents=True)
+        volatile_root.mkdir(parents=True)
+        before = self.store.path.read_bytes()
+
+        def fresh_app():
+            return create_app(
+                self.controller, self.store, self.pairing,
+                secret_key="guard-test", session_generation="generation-one",
+                media_dir=self.media_dir, location_search=self.location_search,
+                device_store=self.device_store,
+                openweather_secrets=self.openweather_secrets,
+                scroll_timing_cache=self.scroll_timing_cache,
+                config_exclusion_sentinel=persistent,
+                config_exclusion_marker=marker,
+                config_exclusion_authority=authority,
+            )
+
+        unlocked = fresh_app().test_client().post(
+            "/api/config", data=b'{"would":"parse"}', content_type="application/json",
+        )
+        self.assertEqual(unlocked.status_code, 401)
+        self.assertEqual(self.store.path.read_bytes(), before)
+
+        persistent.write_bytes(b'{"boundary":"b2","state":"active","version":1}\n')
+        persistent.chmod(0o640)
+        shutil.rmtree(volatile_root)  # simulated reboot: all injected /run authority is gone
+        rebooted = fresh_app()
+        self.assertEqual(rebooted.extensions["config_write_exclusion"], "recovery-required")
+        self.pairing.reset_mock()
+        locked = rebooted.test_client().post(
+            "/api/config", data=b'{not-json', content_type="application/json",
+        )
+        self.assertEqual(locked.status_code, 423)
+        self.assertEqual(locked.get_json(), {"error": "Configuration writes are locked for release recovery."})
+        self.assertEqual(self.store.path.read_bytes(), before)
+        self.pairing.assert_not_called()
+
+        # Malformed, symlinked, or identity-mismatched durable authority remains denied.
+        for specimen in (
+            b"not-json\n",
+            b'{"boundary":"wrong","state":"active","version":1}\n',
+        ):
+            with self.subTest(specimen=specimen):
+                persistent.unlink()
+                persistent.write_bytes(specimen)
+                persistent.chmod(0o640)
+                self.assertEqual(fresh_app().test_client().post("/api/config").status_code, 423)
+        persistent.unlink()
+        target = persistent.with_name("sentinel-target")
+        target.write_text("{}\n")
+        persistent.symlink_to(target)
+        self.assertEqual(fresh_app().test_client().post("/api/config").status_code, 423)
+
+        persistent.unlink()
+        persistent.write_bytes(b'{"boundary":"b2","state":"active","version":1}\n')
+        persistent.chmod(0o640)
+        volatile_root.mkdir(parents=True)
+        marker.write_bytes(b"")
+        marker.chmod(0o640)
+        marker_app = fresh_app()
+        self.assertEqual(marker_app.extensions["config_write_exclusion"], "active")
+        self.assertEqual(marker_app.test_client().post("/api/config").status_code, 423)
+        marker.unlink()
+        # Per-request revalidation closes marker creation after factory construction.
+        race_app = fresh_app()
+        marker.write_bytes(b"")
+        marker.chmod(0o640)
+        self.assertEqual(race_app.test_client().post("/api/config").status_code, 423)
+        marker.unlink()
+        persistent.unlink()
+        self.assertEqual(fresh_app().test_client().post("/api/config").status_code, 401)
+        self.assertEqual(self.store.path.read_bytes(), before)
+
+        # Every malformed/nonregular volatile marker is recovery authority, never healthy.
+        for specimen in (b"not-empty\n", b"{}\n"):
+            marker.write_bytes(specimen)
+            marker.chmod(0o640)
+            malformed = fresh_app()
+            self.assertEqual(malformed.extensions["config_write_exclusion"], "recovery-required")
+            self.assertEqual(malformed.test_client().post("/api/config").status_code, 423)
+            marker.unlink()
+        marker.mkdir()
+        nonregular = fresh_app()
+        self.assertEqual(nonregular.extensions["config_write_exclusion"], "recovery-required")
+        self.assertEqual(nonregular.test_client().post("/api/config").status_code, 423)
+
+    def test_b1_exclusion_authority_default_and_wsgi_wiring_are_exact(self):
+        default = inspect.signature(create_app).parameters["config_exclusion_authority"].default
+        self.assertEqual(default, "/run/matrix-release/config-write-authority-v1.json")
+        source = (Path(__file__).parents[1] / "app/wsgi.py").read_text()
+        self.assertIn(
+            'config_exclusion_authority="/run/matrix-release/config-write-authority-v1.json"',
+            source,
+        )
+        self.assertNotIn('config-write-authority.json"', source)
 
     def test_basic_custom_appearance_round_trips_saved_edit_and_device_preview_paths(self):
         from device_preview import DevicePreviewManager
@@ -397,6 +500,329 @@ try{
     def pair_browser(self):
         self.pairing.verify.return_value = True
         self.client.post("/pair", data={"pin": "123456", "device_name": "Test browser"})
+
+    def test_navigation_logs_api_returns_bounded_matrix_service_journal(self):
+        self.pair_browser()
+        journal = b"2026-08-30T15:00:00+00:00 matrix-web started\nrenderer ready\n"
+        with patch.object(webapp, "_bounded_process_stdout", return_value=journal) as read:
+            response = self.client.get("/api/logs")
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.get_json(), {
+            "logs": "2026-08-30T15:00:00+00:00 matrix-web started\nrenderer ready\n",
+            "source": "matrix-web.service",
+        })
+        self.assertEqual(response.headers["Cache-Control"], "no-store")
+        read.assert_called_once_with(
+            [
+                "/usr/bin/journalctl", "--unit", "matrix-web.service",
+                "--lines", "200", "--no-pager", "--quiet", "--output", "short-iso",
+            ],
+            timeout=3, limit=65_536,
+            env={"PATH": "/usr/sbin:/usr/bin:/sbin:/bin", "LANG": "C.UTF-8", "LC_ALL": "C.UTF-8"},
+        )
+
+    def test_bounded_process_stdout_never_retains_more_than_limit_and_reaps_timeout(self):
+        tail = bytearray()
+        for chunk in (b"A" * 100_000, b"B" * 8192, b"END"):
+            webapp._append_bounded_tail(tail, chunk, 65_536)
+            self.assertLessEqual(len(tail), 65_536)
+        self.assertTrue(tail.endswith(b"END"))
+
+        output = webapp._bounded_process_stdout(
+            [sys.executable, "-c", "import os;os.write(1,b'A'*100000+b'END')"],
+            timeout=3, limit=65_536, env=os.environ.copy(),
+        )
+        self.assertEqual(len(output), 65_536)
+        self.assertTrue(output.endswith(b"END"))
+        multibyte_tail = bytearray()
+        webapp._append_bounded_tail(multibyte_tail, ("α" * 40_000).encode() + b"x", 65_536)
+        decoded = webapp._decode_utf8_tail(bytes(multibyte_tail))
+        self.assertNotIn("�", decoded)
+        self.assertTrue(decoded.endswith("x"))
+        self.assertLessEqual(len(decoded.encode()), 65_536)
+        started = time.monotonic()
+        with self.assertRaises(subprocess.TimeoutExpired):
+            webapp._bounded_process_stdout(
+                [sys.executable, "-c", "import time;time.sleep(5)"],
+                timeout=0.1, limit=65_536, env=os.environ.copy(),
+            )
+        self.assertLess(time.monotonic() - started, 2)
+
+    def test_bounded_process_stdout_owns_cleanup_before_selector_registration(self):
+        launched = []
+        wait_timeouts = []
+        real_popen = subprocess.Popen
+
+        class TrackingProcess:
+            def __init__(self, process):
+                self._process = process
+                self.stdout = process.stdout
+                self._poll_failed = False
+
+            def __getattr__(self, name):
+                return getattr(self._process, name)
+
+            def poll(self):
+                if not self._poll_failed:
+                    self._poll_failed = True
+                    raise OSError("poll unavailable")
+                return self._process.poll()
+
+            def wait(self, *, timeout):
+                wait_timeouts.append(timeout)
+                return self._process.wait(timeout=timeout)
+
+        class BrokenSelector:
+            def register(self, _stream, _event):
+                raise OSError("selector unavailable")
+
+            def close(self):
+                raise KeyboardInterrupt("selector close unavailable")
+
+        def launch(*args, **kwargs):
+            tracked = TrackingProcess(real_popen(*args, **kwargs))
+            launched.append(tracked)
+            return tracked
+
+        try:
+            with patch.object(webapp.subprocess, "Popen", side_effect=launch), patch.object(
+                webapp.selectors, "DefaultSelector", return_value=BrokenSelector(),
+            ):
+                with self.assertRaisesRegex(OSError, "selector unavailable"):
+                    webapp._bounded_process_stdout(
+                        [sys.executable, "-c", "import time;time.sleep(5)"],
+                        timeout=1, limit=65_536, env=os.environ.copy(),
+                    )
+            self.assertEqual(len(launched), 1)
+            self.assertIsNotNone(launched[0].poll())
+            self.assertTrue(launched[0].stdout.closed)
+            self.assertTrue(wait_timeouts)
+            self.assertTrue(all(value is not None and value >= 0 for value in wait_timeouts))
+        finally:
+            for process in launched:
+                if process._process.poll() is None:
+                    process.kill()
+                    process._process.wait(timeout=2)
+
+    def test_bounded_process_stdout_reaps_child_that_closes_stdout_before_timeout(self):
+        launched = []
+        wait_timeouts = []
+        real_popen = subprocess.Popen
+
+        class DeferredReapProcess:
+            def __init__(self, process):
+                self._process = process
+                self.stdout = process.stdout
+                self._wait_calls = 0
+
+            def __getattr__(self, name):
+                return getattr(self._process, name)
+
+            def wait(self, *, timeout):
+                self._wait_calls += 1
+                wait_timeouts.append(timeout)
+                if self._wait_calls == 2:
+                    raise subprocess.TimeoutExpired(self.args, timeout)
+                if self._wait_calls == 3:
+                    raise KeyboardInterrupt("transient deferred wait fault")
+                return self._process.wait(timeout=timeout)
+
+        def launch(*args, **kwargs):
+            process = DeferredReapProcess(real_popen(*args, **kwargs))
+            launched.append(process)
+            return process
+
+        try:
+            with patch.object(webapp.subprocess, "Popen", side_effect=launch):
+                started = time.monotonic()
+                with self.assertRaises(subprocess.TimeoutExpired):
+                    webapp._bounded_process_stdout(
+                        [
+                            sys.executable, "-c",
+                            "import os,time;os.close(1);time.sleep(5)",
+                        ],
+                        timeout=0.1, limit=65_536, env=os.environ.copy(),
+                    )
+            self.assertLess(time.monotonic() - started, 1)
+            self.assertEqual(len(launched), 1)
+            status = Path(f"/proc/{launched[0].pid}/status")
+            reaper_deadline = time.monotonic() + 1
+            while status.exists() and time.monotonic() < reaper_deadline:
+                time.sleep(0.01)
+            self.assertFalse(status.exists(), status.read_text() if status.exists() else "")
+            self.assertGreaterEqual(len(wait_timeouts), 3)
+            self.assertTrue(all(value is not None and value >= 0 for value in wait_timeouts))
+        finally:
+            for process in launched:
+                status = Path(f"/proc/{process.pid}/status")
+                if status.exists():
+                    try:
+                        process.kill()
+                    except ProcessLookupError:
+                        pass
+                    process._process.wait(timeout=2)
+
+    def test_bounded_process_stdout_does_not_depend_on_reaper_thread_start(self):
+        launched = []
+        real_popen = subprocess.Popen
+
+        class FailedSynchronousReapProcess:
+            def __init__(self, process):
+                self._process = process
+                self.stdout = process.stdout
+                self._wait_calls = 0
+
+            def __getattr__(self, name):
+                return getattr(self._process, name)
+
+            def wait(self, *, timeout):
+                self._wait_calls += 1
+                if self._wait_calls == 2:
+                    raise subprocess.TimeoutExpired(self.args, timeout)
+                return self._process.wait(timeout=timeout)
+
+        def launch(*args, **kwargs):
+            process = FailedSynchronousReapProcess(real_popen(*args, **kwargs))
+            launched.append(process)
+            return process
+
+        try:
+            with patch.object(webapp.subprocess, "Popen", side_effect=launch), patch.object(
+                webapp.threading.Thread, "start", side_effect=RuntimeError("reaper start failed"),
+            ):
+                with self.assertRaises(subprocess.TimeoutExpired):
+                    webapp._bounded_process_stdout(
+                        [
+                            sys.executable, "-c",
+                            "import os,time;os.close(1);time.sleep(5)",
+                        ],
+                        timeout=0.1, limit=65_536, env=os.environ.copy(),
+                    )
+            self.assertEqual(len(launched), 1)
+            status = Path(f"/proc/{launched[0].pid}/status")
+            self.assertFalse(status.exists(), status.read_text() if status.exists() else "")
+        finally:
+            for process in launched:
+                status = Path(f"/proc/{process.pid}/status")
+                if status.exists():
+                    try:
+                        process.kill()
+                    except ProcessLookupError:
+                        pass
+                    process._process.wait(timeout=2)
+
+    def test_navigation_logs_api_sanitizes_journal_failure(self):
+        self.pair_browser()
+        with patch.object(
+            webapp, "_bounded_process_stdout",
+            side_effect=subprocess.TimeoutExpired(["/usr/bin/journalctl"], 3, stderr=b"private"),
+        ):
+            response = self.client.get("/api/logs")
+
+        self.assertEqual(response.status_code, 503)
+        self.assertEqual(response.get_json(), {"error": "Service logs are temporarily unavailable."})
+        self.assertEqual(response.headers["Cache-Control"], "no-store")
+        self.assertNotIn(b"private", response.data)
+
+    def test_navigation_logs_api_requires_pairing_and_caps_output_bytes(self):
+        with patch.object(webapp, "_bounded_process_stdout") as read:
+            unpaired = self.client.get("/api/logs")
+        self.assertEqual(unpaired.status_code, 401)
+        read.assert_not_called()
+
+        self.pair_browser()
+        journal = b"discard" + b"L" * 65_536
+        with patch.object(webapp, "_bounded_process_stdout", return_value=journal[-65_536:]):
+            paired = self.client.get("/api/logs")
+        self.assertEqual(paired.status_code, 200)
+        self.assertEqual(paired.get_json()["logs"], "L" * 65_536)
+        self.assertEqual(paired.headers["Cache-Control"], "no-store")
+
+    def test_logs_popup_is_accessible_only_from_navigation_and_renders_text_safely(self):
+        self.pair_browser()
+        body = self.client.get("/").get_data(as_text=True)
+        navigation = re.search(r'<nav class="nav"[^>]*>(.*?)</nav>', body, re.DOTALL)
+
+        self.assertIsNotNone(navigation)
+        self.assertEqual(body.count('id="logs-nav-button"'), 1)
+        self.assertIn('id="logs-nav-button"', navigation.group(1))
+        self.assertNotIn('id="logs-nav-button"', re.sub(r'<nav class="nav"[^>]*>.*?</nav>', '', body, flags=re.DOTALL))
+        self.assertRegex(body, r'<dialog[^>]+id="logs-dialog"[^>]+aria-labelledby="logs-title"')
+        self.assertIn('id="logs-output"', body)
+        self.assertNotRegex(body, r'id="logs-output"[^>]+aria-live=')
+        self.assertRegex(body, r'id="logs-status"[^>]+role="status"[^>]+aria-live="polite"')
+        self.assertIn('id="logs-refresh"', body)
+        self.assertIn('id="logs-close"', body)
+        self.assertIn("logsOutput.textContent=payload.logs", body)
+        self.assertNotIn("logsOutput.innerHTML", body)
+        self.assertIn("await api('/api/logs',{signal:controller.signal})", body)
+
+    @unittest.skipUnless(shutil.which("node"), "Node.js is required")
+    @unittest.skipUnless(
+        os.environ.get("MATRIX_CHROMIUM")
+        and Path(os.environ.get("MATRIX_CHROMIUM", "")).is_file()
+        and os.access(os.environ.get("MATRIX_CHROMIUM", ""), os.X_OK),
+        "MATRIX_CHROMIUM browser is required",
+    )
+    def test_logs_popup_opens_refreshes_and_closes_in_real_chromium(self):
+        self.pair_browser()
+        body = self.client.get("/").get_data(as_text=True)
+        probe = r"""
+const port=process.argv[1],pagePath=process.argv[2];let endpoint;
+for(let attempt=0;attempt<50;attempt++){try{endpoint=await fetch(`http://127.0.0.1:${port}/json/new`,{method:'PUT'}).then(r=>r.json());break}catch(_){await new Promise(r=>setTimeout(r,50))}}
+if(!endpoint)throw new Error('Chromium DevTools endpoint unavailable');
+const socket=new WebSocket(endpoint.webSocketDebuggerUrl),pending=new Map();let nextId=1,loadResolve,loaded=new Promise(resolve=>loadResolve=resolve);
+socket.onmessage=event=>{const message=JSON.parse(event.data);if(message.id&&pending.has(message.id)){const request=pending.get(message.id);pending.delete(message.id);message.error?request.reject(new Error(JSON.stringify(message.error))):request.resolve(message.result)}else if(message.method==='Page.loadEventFired')loadResolve()};
+await new Promise((resolve,reject)=>{socket.onopen=resolve;socket.onerror=reject});
+const send=(method,params={})=>{const id=nextId++;socket.send(JSON.stringify({id,method,params}));return new Promise((resolve,reject)=>pending.set(id,{resolve,reject}))};
+const evaluate=async expression=>{const result=await send('Runtime.evaluate',{expression,returnByValue:true,awaitPromise:true});if(result.exceptionDetails)throw new Error(JSON.stringify(result.exceptionDetails));return result.result.value};
+try{
+ await send('Runtime.enable');await send('Page.enable');await send('Emulation.setDeviceMetricsOverride',{width:320,height:568,deviceScaleFactor:1,mobile:false});loaded=new Promise(resolve=>loadResolve=resolve);await send('Page.navigate',{url:'file://'+pagePath});await loaded;
+ const mobile=await evaluate(`(()=>{const button=document.querySelector('#logs-nav-button'),rect=button.getBoundingClientRect();return{count:document.querySelectorAll('#logs-nav-button').length,insideNav:!!button.closest('nav.nav'),display:getComputedStyle(button).display,rect:[rect.left,rect.top,rect.right,rect.bottom],overflow:document.documentElement.scrollWidth-document.documentElement.clientWidth}})()`);
+ await evaluate(`(()=>{globalThis.__logCalls=0;globalThis.__logAborted=false;globalThis.fetch=async(path,options={})=>{if(path!=='/api/logs')return{status:200,redirected:false,ok:true,json:async()=>({})};globalThis.__logCalls++;if(__logCalls===3){globalThis.__logSignal=options.signal;return new Promise((resolve,reject)=>options.signal.addEventListener('abort',()=>{globalThis.__logAborted=true;reject(new DOMException('Aborted','AbortError'))},{once:true}))};return{status:200,redirected:false,ok:true,json:async()=>({logs:__logCalls===1?'<img id="log-injection" src=x> first':'second refresh',source:'matrix-web.service'})}};return true})()`);
+ await evaluate(`document.querySelector('#logs-nav-button').click()`);await evaluate(`(async()=>{for(let attempt=0;attempt<100&&document.querySelector('#logs-dialog').hasAttribute('aria-busy');attempt++)await new Promise(resolve=>setTimeout(resolve,10))})()`);
+ const first=await evaluate(`(()=>{const dialog=document.querySelector('#logs-dialog'),rect=dialog.getBoundingClientRect(),sizes=[...dialog.querySelectorAll('button')].map(button=>{const r=button.getBoundingClientRect();return[r.width,r.height]});return{open:dialog.open,text:document.querySelector('#logs-output').textContent,injected:!!document.querySelector('#log-injection'),calls:__logCalls,focus:document.activeElement.id,rect:[rect.left,rect.top,rect.right,rect.bottom],sizes}})()`);
+ await evaluate(`document.querySelector('#logs-refresh').click()`);await evaluate(`(async()=>{for(let attempt=0;attempt<100&&document.querySelector('#logs-dialog').hasAttribute('aria-busy');attempt++)await new Promise(resolve=>setTimeout(resolve,10))})()`);const refreshed=await evaluate(`({text:document.querySelector('#logs-output').textContent,calls:__logCalls})`);
+ await send('Input.dispatchKeyEvent',{type:'keyDown',key:'Escape',code:'Escape',windowsVirtualKeyCode:27,nativeVirtualKeyCode:27});await send('Input.dispatchKeyEvent',{type:'keyUp',key:'Escape',code:'Escape',windowsVirtualKeyCode:27,nativeVirtualKeyCode:27});await new Promise(resolve=>setTimeout(resolve,20));const escaped=await evaluate(`({closed:!document.querySelector('#logs-dialog').open,focus:document.activeElement.id})`);
+ await evaluate(`document.querySelector('#logs-nav-button').click()`);await evaluate(`(async()=>{await new Promise(resolve=>setTimeout(resolve,20));globalThis.__hadLogController=!!logsRequestController;document.querySelector('#logs-close').click();await new Promise(resolve=>setTimeout(resolve,20))})()`);const buttonClosed=await evaluate(`({closed:!document.querySelector('#logs-dialog').open,focus:document.activeElement.id,calls:__logCalls,hadController:__hadLogController,aborted:__logAborted,signalAborted:__logSignal?.aborted===true,text:document.querySelector('#logs-output').textContent})`);
+ await send('Emulation.setDeviceMetricsOverride',{width:1280,height:720,deviceScaleFactor:1,mobile:false});
+ const desktop=await evaluate(`(()=>{const button=document.querySelector('#logs-nav-button'),rect=button.getBoundingClientRect();return{display:getComputedStyle(button).display,rect:[rect.left,rect.top,rect.right,rect.bottom],overflow:document.documentElement.scrollWidth-document.documentElement.clientWidth}})()`);
+ console.log(JSON.stringify({mobile,first,refreshed,escaped,buttonClosed,desktop}));
+}finally{socket.close()}
+"""
+        report = self._run_dashboard_chromium_probe(body, probe, timeout=30)
+
+        self.assertEqual(report["mobile"]["count"], 1, report)
+        self.assertTrue(report["mobile"]["insideNav"], report)
+        self.assertNotEqual(report["mobile"]["display"], "none", report)
+        self.assertLessEqual(report["mobile"]["overflow"], 1, report)
+        self.assertTrue(report["first"]["open"], report)
+        self.assertEqual(report["first"]["text"], '<img id="log-injection" src=x> first', report)
+        self.assertFalse(report["first"]["injected"], report)
+        self.assertEqual(report["first"]["calls"], 1, report)
+        self.assertEqual(report["first"]["focus"], "logs-close", report)
+        self.assertTrue(all(width >= 44 and height >= 44 for width, height in report["first"]["sizes"]), report)
+        dialog_left, dialog_top, dialog_right, dialog_bottom = report["first"]["rect"]
+        self.assertGreaterEqual(dialog_left, 0, report)
+        self.assertGreaterEqual(dialog_top, 0, report)
+        self.assertLessEqual(dialog_right, 320, report)
+        self.assertLessEqual(dialog_bottom, 568, report)
+        self.assertEqual(report["refreshed"], {"text": "second refresh", "calls": 2}, report)
+        self.assertEqual(report["escaped"], {"closed": True, "focus": "logs-nav-button"}, report)
+        self.assertEqual(
+            report["buttonClosed"],
+            {"closed": True, "focus": "logs-nav-button", "calls": 3, "hadController": True, "aborted": True, "signalAborted": True, "text": "second refresh"},
+            report,
+        )
+        self.assertNotEqual(report["desktop"]["display"], "none", report)
+        self.assertLessEqual(report["desktop"]["overflow"], 1, report)
+        for layout in (report["mobile"], report["desktop"]):
+            left, top, right, bottom = layout["rect"]
+            self.assertGreaterEqual(left, 0, report)
+            self.assertGreaterEqual(top, 0, report)
+            self.assertLessEqual(right, 1280 if layout is report["desktop"] else 320, report)
+            self.assertGreater(bottom - top, 0, report)
 
     def test_provider_scroll_timing_is_bounded_cached_and_paired(self):
         from modules.weather_app import WeatherSnapshot
@@ -5614,14 +6040,14 @@ try{
         self.assertEqual(
             [(item["width"], item["grid"], item["nav"]) for item in report["breakpoint"]],
             [
-                (599, "block", "none"), (600, "block", "none"),
-                (601, "grid", "none"), (899, "grid", "none"),
-                (900, "grid", "none"), (901, "grid", "grid"),
+                (599, "block", "block"), (600, "block", "block"),
+                (601, "grid", "block"), (899, "grid", "block"),
+                (900, "grid", "block"), (901, "grid", "grid"),
             ],
         )
         self.assertEqual(report["dynamicBefore"]["width"], 899)
         self.assertEqual(report["dynamicAfter"]["width"], 901)
-        self.assertEqual(report["dynamicBefore"]["nav"], "none")
+        self.assertEqual(report["dynamicBefore"]["nav"], "block")
         self.assertEqual(report["dynamicAfter"]["nav"], "grid")
         for key in ("value", "start", "end", "scroll"):
             self.assertEqual(report["dynamicBefore"][key], report["dynamicAfter"][key])
@@ -8935,9 +9361,320 @@ console.log(JSON.stringify({
         )
 
     @unittest.skipUnless(shutil.which("node"), "Node.js is required")
+    @unittest.skipUnless(
+        os.environ.get("MATRIX_CHROMIUM")
+        and Path(os.environ.get("MATRIX_CHROMIUM", "")).is_file()
+        and os.access(os.environ.get("MATRIX_CHROMIUM", ""), os.X_OK),
+        "MATRIX_CHROMIUM browser is required",
+    )
+    def test_shared_media_transform_executes_for_advanced_canvas(self):
+        module = {
+            "id": "custom_media_transform", "name": "Media transform", "type": "canvas",
+            "background": "#000000", "frame_count": 1, "fps": 10, "playback": "hold",
+            "layers": [{
+                "id": "layer_media", "name": "Media", "type": "media", "visible": True,
+                "properties": {
+                    "present": True, "source": "missing.png", "x": 10.25, "y": 6.5,
+                    "width": 15.5, "height": 7.5, "rotation": 17,
+                    "keep_aspect": False,
+                },
+                "keyframes": [],
+            }],
+            "overrides": [],
+        }
+        self.store.update({"custom_modules": [module]})
+        self.pair_browser()
+        body = self.client.get("/").get_data(as_text=True)
+        probe = r"""
+const port=process.argv[1],pagePath=process.argv[2],sleep=ms=>new Promise(r=>setTimeout(r,ms));let endpoint;
+for(let attempt=0;attempt<50;attempt++){try{endpoint=await fetch(`http://127.0.0.1:${port}/json/new`,{method:'PUT'}).then(r=>r.json());break}catch(_){await sleep(50)}}
+if(!endpoint)throw new Error('Chromium DevTools endpoint unavailable');
+const socket=new WebSocket(endpoint.webSocketDebuggerUrl),pending=new Map();let nextId=1,loadResolve,loaded=new Promise(resolve=>loadResolve=resolve),exceptions=[];
+socket.onmessage=event=>{const message=JSON.parse(event.data);if(message.id&&pending.has(message.id)){const request=pending.get(message.id);pending.delete(message.id);message.error?request.reject(new Error(JSON.stringify(message.error))):request.resolve(message.result)}else if(message.method==='Page.loadEventFired')loadResolve();else if(message.method==='Runtime.exceptionThrown')exceptions.push(message.params.exceptionDetails.text)};
+await new Promise((resolve,reject)=>{socket.onopen=resolve;socket.onerror=reject});
+const send=(method,params={})=>{const id=nextId++;socket.send(JSON.stringify({id,method,params}));return new Promise((resolve,reject)=>pending.set(id,{resolve,reject}))};
+const evaluate=async expression=>{const result=await send('Runtime.evaluate',{expression,returnByValue:true,awaitPromise:true});if(result.exceptionDetails)throw new Error(JSON.stringify(result.exceptionDetails));return result.result.value};
+try{await send('Runtime.enable');await send('Page.enable');loaded=new Promise(resolve=>loadResolve=resolve);await send('Page.navigate',{url:'file://'+pagePath});await loaded;
+for(let attempt=0;attempt<100;attempt++){if(await evaluate(`globalThis.matrixCustomCanvasReady===true&&!!document.querySelector('.advanced-card canvas')`))break;await sleep(20)}
+const report=await evaluate(`(async()=>{
+ const api=globalThis.matrixMediaCanvasTransforms;
+ if(!api||typeof api.drawMediaFrame!=='function'||typeof api.bindCanvasPointerTransforms!=='function')throw new Error('shared media transform API absent');
+ const draw=(naturalWidth,naturalHeight,properties)=>{const calls=[],context={beginPath(){calls.push(['beginPath'])},rect(...v){calls.push(['rect',...v])},clip(){calls.push(['clip'])},translate(...v){calls.push(['translate',...v])},rotate(v){calls.push(['rotate',Math.round(v*1000)/1000])},drawImage(...v){calls.push(['drawImage',...v.slice(5)])}};api.drawMediaFrame(context,{naturalWidth,naturalHeight},properties,0,1);return calls};
+ const geometry=[
+  draw(1,4,{x:2.5,y:3.5,width:5.5,height:3.5,rotation:90,keep_aspect:true}),
+  draw(20,10,{x:-2.5,y:-3.5,width:15,height:15,rotation:17,keep_aspect:true}),
+  draw(8,13,{x:1.5,y:2.5,width:9.5,height:5.5,rotation:-31,keep_aspect:false}),
+ ];
+ const eventAt=(canvas,x,y,type,pointerId=1)=>{const box=canvas.getBoundingClientRect();canvas.dispatchEvent(new PointerEvent(type,{bubbles:true,pointerId,clientX:box.left+x*box.width/64,clientY:box.top+y*box.height/32,buttons:type==='pointerup'?0:1}))};
+ const drafts=[];globalThis.matrixCustomCanvasDraftChanged=(_id,delay)=>drafts.push(delay);document.querySelector('[data-property="rotation"]').focus();
+ let canvas=document.querySelector('.advanced-card canvas');canvas.setPointerCapture=()=>{};
+ eventAt(canvas,12,8,'pointerdown');eventAt(canvas,17.25,10.5,'pointermove');eventAt(canvas,17.25,10.5,'pointerup');
+ await new Promise(resolve=>requestAnimationFrame(()=>requestAnimationFrame(resolve)));
+ canvas=document.querySelector('.advanced-card canvas');canvas.setPointerCapture=()=>{};
+ eventAt(canvas,31,16.5,'pointerdown',2);eventAt(canvas,34.6,18.9,'pointermove',2);eventAt(canvas,34.6,18.9,'pointerup',2);
+ await new Promise(resolve=>requestAnimationFrame(()=>requestAnimationFrame(resolve)));
+ const draft=customModulesFromEditor()[0],properties=draft.layers[0].properties,active=document.querySelector('.layer-track-label.active');
+ return {api:Object.keys(api).sort(),geometry,properties,selection:active?.dataset.layerId||null,rotation:properties.rotation,focused:document.activeElement?.dataset?.property||null,drafts};
+})()`);
+console.log(JSON.stringify({report,exceptions}));}finally{socket.close()}
+"""
+        result = self._run_dashboard_chromium_probe(body, probe, timeout=45)
+        self.assertEqual(result["exceptions"], [], result)
+        self.assertEqual(
+            result["report"]["geometry"],
+            [
+                [["beginPath"], ["rect", 2, 4, 1, 4], ["clip"], ["translate", 2.5, 6], ["rotate", 1.571], ["drawImage", -.5, -2, 1, 4]],
+                [["beginPath"], ["rect", -2, -4, 15, 8], ["clip"], ["translate", 5.5, 0], ["rotate", .297], ["drawImage", -7.5, -4, 15, 8]],
+                [["beginPath"], ["rect", 2, 2, 10, 6], ["clip"], ["translate", 7, 5], ["rotate", -.541], ["drawImage", -5, -3, 10, 6]],
+            ],
+        )
+        properties = result["report"]["properties"]
+        self.assertEqual(properties["x"], 15.5, result)
+        self.assertEqual(properties["y"], 9, result)
+        self.assertEqual(properties["width"], 19, result)
+        self.assertEqual(properties["height"], 10, result)
+        self.assertEqual(properties["rotation"], 17, result)
+        self.assertFalse(properties["keep_aspect"], result)
+        self.assertEqual(result["report"]["selection"], "layer_media", result)
+        self.assertEqual(result["report"]["focused"], "rotation", result)
+        self.assertEqual(result["report"]["drafts"], [150, 150], result)
+
+    def test_foundation_browser_verifier_parser_and_report_are_fail_closed(self):
+        script = Path(__file__).parents[1] / "scripts/verify_priority_1_5_foundation_browser.py"
+        spec = importlib.util.spec_from_file_location("foundation_browser_verifier", script)
+        module = importlib.util.module_from_spec(spec)
+        assert spec.loader is not None
+        spec.loader.exec_module(module)
+        parser = module.build_parser()
+        required = {"base_url", "session_cookie_file", "expected_source_sha", "expected_version", "chromium", "report"}
+        self.assertTrue(required.issubset({action.dest for action in parser._actions if action.required}))
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            cookie = root / "cookie"
+            cookie.write_text("session=private-value\n", encoding="utf-8")
+            cookie.chmod(0o600)
+            report_path = root / "report.json"
+            expected_viewports = [
+                [320, 568], [360, 800], [390, 844], [412, 915],
+                [768, 1024], [820, 1180], [1024, 768], [1280, 720],
+                [1440, 900], [599, 800], [600, 800], [601, 800],
+                [899, 800], [900, 800], [901, 800],
+            ]
+
+            def viewport_evidence(viewport):
+                width, height = viewport
+                touch = width <= 1024
+                return {
+                    "viewport": viewport,
+                    "interaction_exercised": viewport == [412, 915],
+                    "touch": touch,
+                    "orientation": "landscape" if width > height else "portrait",
+                    "document_overflow_x": 0,
+                    "sticky_preview_inside_viewport": True,
+                    "mode_controls_inside_viewport": True,
+                    "sticky_mode_overlap": False,
+                    "touch_targets": ([
+                        {"name": "preview-live", "width": 44, "height": 44},
+                        {"name": "preview-edit", "width": 44, "height": 44},
+                        {"name": "selected-layer", "width": 120, "height": 44},
+                    ] if touch else []),
+                    "state": {
+                        "selected_layer": "layer_media",
+                        "focus": "rotation",
+                        "draft_sha256": "b" * 64,
+                        "zoom": 2,
+                        "local_scroll": [47, 31],
+                        "preserved": True,
+                    },
+                    "drag_resize": {
+                        "before": [10, 8, 16, 8],
+                        "after_drag": [12, 10, 16, 8],
+                        "expected_after_drag": [12, 10, 16, 8],
+                        "after_resize": [12, 10, 18, 9],
+                        "expected_after_resize": [12, 10, 18, 9],
+                    },
+                    "pointercancel": {
+                        "capture_before": True,
+                        "capture_after": False,
+                        "geometry_unchanged": True,
+                    },
+                    "frame_sha256": "a" * 64,
+                }
+
+            evidence = [viewport_evidence(viewport) for viewport in expected_viewports]
+            report = module.build_report(
+                source_sha="a" * 40, version="1.5.0-preview", viewports=evidence,
+            )
+            self.assertEqual(report["version"], 2)
+            self.assertEqual([item["viewport"] for item in report["viewports"]], expected_viewports)
+            self.assertEqual(
+                [item["viewport"] for item in report["viewports"] if item["interaction_exercised"]],
+                [[412, 915]],
+            )
+            module.write_report(report_path, report)
+            raw = report_path.read_text(encoding="utf-8")
+            self.assertEqual(report_path.stat().st_mode & 0o777, 0o600)
+            self.assertNotIn("private-value", raw)
+            self.assertNotIn("session", raw.lower())
+            self.assertEqual(json.loads(raw), report)
+            malformed = [dict(item) for item in report["viewports"]]
+            malformed[0].pop("frame_sha256")
+            with self.assertRaisesRegex(ValueError, "fields"):
+                module.build_report(source_sha="a" * 40, version="1.5.0-preview", viewports=malformed)
+            with self.assertRaisesRegex(ValueError, "exact responsive viewport evidence"):
+                module.build_report(source_sha="a" * 40, version="1.5.0-preview", viewports=evidence[:-1])
+            duplicate = [dict(item) for item in evidence]
+            duplicate[-1]["viewport"] = list(expected_viewports[-2])
+            with self.assertRaisesRegex(ValueError, "exact responsive viewport evidence"):
+                module.build_report(source_sha="a" * 40, version="1.5.0-preview", viewports=duplicate)
+            undersized = json.loads(json.dumps(evidence))
+            undersized[0]["touch_targets"][0]["width"] = 43.999
+            with self.assertRaisesRegex(ValueError, "touch target"):
+                module.build_report(source_sha="a" * 40, version="1.5.0-preview", viewports=undersized)
+            module.validate_session_cookie_file(cookie)
+            cookie.chmod(0o640)
+            with self.assertRaisesRegex(ValueError, "owner-only"):
+                module.validate_session_cookie_file(cookie)
+            failed = subprocess.run([
+                sys.executable, str(script),
+                "--base-url", "http://127.0.0.1/",
+                "--session-cookie-file", str(cookie),
+                "--expected-source-sha", "a" * 40,
+                "--expected-version", "1.5.0-preview",
+                "--chromium", "/usr/bin/google-chrome",
+                "--report", str(report_path),
+            ], text=True, capture_output=True)
+            self.assertNotEqual(failed.returncode, 0)
+            self.assertNotIn("private-value", failed.stderr)
+
+    @unittest.skipUnless(
+        os.environ.get("MATRIX_CHROMIUM")
+        and Path(os.environ.get("MATRIX_CHROMIUM", "")).is_file()
+        and os.access(os.environ.get("MATRIX_CHROMIUM", ""), os.X_OK),
+        "MATRIX_CHROMIUM browser is required",
+    )
+    def test_foundation_browser_verifier_runs_real_chromium_across_exact_matrix(self):
+        script = Path(__file__).parents[1] / "scripts/verify_priority_1_5_foundation_browser.py"
+        spec = importlib.util.spec_from_file_location("foundation_browser_verifier_integration", script)
+        assert spec is not None
+        verifier = importlib.util.module_from_spec(spec)
+        assert spec.loader is not None
+        spec.loader.exec_module(verifier)
+        Image.new("RGB", (8, 4), "#39c5bb").save(self.media_dir / "b1-fixture.png")
+        advanced = {
+            "id": "custom_b1_verifier", "name": "B1 verifier", "type": "canvas",
+            "background": "#000000", "frame_count": 30, "fps": 10, "playback": "hold",
+            "layers": [{
+                "id": "layer_media", "name": "Media", "type": "media", "visible": True,
+                "properties": {
+                    "present": True, "source": "b1-fixture.png", "x": 8, "y": 6,
+                    "width": 16, "height": 8, "rotation": 0, "keep_aspect": False,
+                },
+                "keyframes": [],
+            }],
+            "overrides": [],
+        }
+        advanced["layers"].extend({
+            "id": f"layer_rectangle_{index}", "name": f"Rectangle {index}",
+            "type": "rectangle", "visible": True,
+            "properties": {
+                "present": True, "x": index, "y": index, "width": 2, "height": 2,
+                "rotation": 0, "colour": "#ffffff", "filled": True,
+            },
+            "keyframes": [],
+        } for index in range(1, 10))
+        fixture_frame = Image.new("RGB", (8, 4), "#39c5bb")
+        self.controller.matrix.media_frames.return_value = [fixture_frame.copy() for _ in range(30)]
+        frame_bytes = io.BytesIO()
+        Image.new("RGB", (64, 32), "black").save(frame_bytes, format="PNG")
+        frame_payload = frame_bytes.getvalue()
+        self.controller.frame_png.side_effect = lambda: (io.BytesIO(frame_payload), "b1-frame")
+        self.store.update({"custom_modules": [advanced]})
+        self.pair_browser()
+        session_cookie = self.client.get_cookie(self.app.config["SESSION_COOKIE_NAME"])
+        self.assertIsNotNone(session_cookie)
+        assert session_cookie is not None
+        cookie_path = Path(self.temp.name) / "b1-session-cookie"
+        cookie_path.write_text(
+            f"{self.app.config['SESSION_COOKIE_NAME']}={session_cookie.value}\n", encoding="utf-8",
+        )
+        cookie_path.chmod(0o600)
+        paired_cookie = verifier.validate_session_cookie_file(cookie_path.resolve(strict=True))
+        server = make_server("127.0.0.1", 0, self.app, threaded=True)
+        server_thread = threading.Thread(target=server.serve_forever, daemon=True)
+        server_thread.start()
+        try:
+            evidence = verifier.run_browser(
+                f"http://127.0.0.1:{server.server_port}", paired_cookie,
+                Path(os.environ["MATRIX_CHROMIUM"]).resolve(strict=True),
+            )
+        finally:
+            server.shutdown()
+            server.server_close()
+            server_thread.join(timeout=5)
+        public = [{key: value for key, value in item.items() if key != "version"} for item in evidence]
+        report = verifier.build_report(
+            source_sha="a" * 40, version=webapp.APPLICATION_VERSION, viewports=public,
+        )
+        self.assertEqual(report, {
+            "version": 2, "source_sha": "a" * 40,
+            "application_version": webapp.APPLICATION_VERSION, "viewports": public,
+        })
+        expected_viewports = [list(viewport) for viewport in verifier._VIEWPORTS]
+        self.assertEqual(report["version"], 2)
+        self.assertEqual(report["application_version"], webapp.APPLICATION_VERSION)
+        self.assertEqual([item["viewport"] for item in report["viewports"]], expected_viewports)
+        self.assertEqual(
+            [item["viewport"] for item in report["viewports"] if item["interaction_exercised"]],
+            [[412, 915]],
+        )
+        self.assertEqual(len({item["frame_sha256"] for item in report["viewports"]}), 1)
+        interaction = next(item for item in report["viewports"] if item["interaction_exercised"])
+        self.assertTrue(all(item["drag_resize"] == interaction["drag_resize"] for item in report["viewports"]))
+        self.assertTrue(all(item["pointercancel"] == interaction["pointercancel"] for item in report["viewports"]))
+
+    def test_foundation_browser_verifier_pins_node_and_contains_cookie(self):
+        script = Path(__file__).parents[1] / "scripts/verify_priority_1_5_foundation_browser.py"
+        spec = importlib.util.spec_from_file_location("priority15_browser_node_test", script)
+        if spec is None or spec.loader is None:
+            self.fail("browser verifier module is not importable")
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        secret = b"session=private-sentinel"
+        completed = subprocess.CompletedProcess([], 0, stdout=b'{"reports":[],"errors":[]}\n', stderr=b"")
+        with patch.object(module.subprocess, "run", return_value=completed) as run, patch.dict(
+            os.environ, {"PATH": "/tmp/attacker-path"}, clear=False,
+        ):
+            actual = module._run_node_probe(secret, "12345", "http://127.0.0.1/")
+        self.assertIs(actual, completed)
+        invocation = run.call_args
+        self.assertTrue(invocation.args[0][0].startswith("/proc/self/fd/"))
+        self.assertNotIn(secret.decode(), " ".join(invocation.args[0]))
+        self.assertNotIn(secret.decode(), " ".join(invocation.kwargs["env"].values()))
+        self.assertEqual(invocation.kwargs["input"], secret)
+        self.assertEqual(invocation.kwargs["env"], {
+            "PATH": "/usr/bin:/bin", "LANG": "C", "LC_ALL": "C",
+        })
+        self.assertFalse(invocation.kwargs["shell"])
+        self.assertTrue(invocation.kwargs["pass_fds"])
+
+        with tempfile.TemporaryDirectory() as directory:
+            unsafe = Path(directory) / "node"
+            unsafe.write_bytes(b"unsafe")
+            unsafe.chmod(0o777)
+            with patch.object(module, "_NODE", unsafe), self.assertRaisesRegex(
+                ValueError, "identity is unsafe",
+            ):
+                module._run_node_probe(secret, "1", "http://127.0.0.1/")
+            unsafe.unlink()
+            unsafe.symlink_to("/usr/bin/node")
+            with patch.object(module, "_NODE", unsafe), self.assertRaisesRegex(ValueError, "unsafe"):
+                module._run_node_probe(secret, "1", "http://127.0.0.1/")
+
+    @unittest.skipUnless(shutil.which("node"), "Node.js is required")
     def test_browser_rotated_aspect_media_uses_fitted_origin_centre_and_clip(self):
         asset = (Path(__file__).parents[1] / "app/static/custom_canvas.js").read_text()
-        start = asset.index("  function drawShape(")
+        start = asset.index("  function drawMediaFrame(")
         end = asset.index("\n\n  function drawEditor(", start)
         function_source = asset[start:end]
         harness = f"""
@@ -8982,7 +9719,7 @@ console.log(JSON.stringify({{square:probe(32,32),tall:probe(16,32),wide:probe(64
     @unittest.skipUnless(shutil.which("node"), "Node.js is required")
     def test_browser_aspect_media_geometry_matches_complete_physical_path(self):
         asset = (Path(__file__).parents[1] / "app/static/custom_canvas.js").read_text()
-        start = asset.index("  function drawShape(")
+        start = asset.index("  function drawMediaFrame(")
         end = asset.index("\n\n  function drawEditor(", start)
         function_source = asset[start:end]
         cases = [

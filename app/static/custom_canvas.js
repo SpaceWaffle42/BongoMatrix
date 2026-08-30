@@ -522,6 +522,45 @@
     }
   }
 
+  function drawMediaFrame(context, media, properties, mediaFrame, frameCount) {
+    const naturalWidth = media.naturalWidth, naturalHeight = media.naturalHeight / frameCount;
+    if (!naturalWidth || !naturalHeight) return null;
+    const pythonRound = value => {
+      const lower = Math.floor(value), fraction = value - lower;
+      if (fraction < .5) return lower;
+      if (fraction > .5) return lower + 1;
+      return lower % 2 === 0 ? lower : lower + 1;
+    };
+    const x = pythonRound(properties.x), y = pythonRound(properties.y);
+    let width = pythonRound(properties.width), height = pythonRound(properties.height);
+    if (properties.keep_aspect) {
+      const boxWidth = width, boxHeight = height;
+      if (boxWidth >= naturalWidth && boxHeight >= naturalHeight) {
+        width = naturalWidth; height = naturalHeight;
+      } else {
+        const aspect = naturalWidth / naturalHeight;
+        if (boxWidth / boxHeight >= aspect) {
+          height = boxHeight;
+          const exactWidth = height * aspect;
+          const lower = Math.floor(exactWidth), upper = Math.ceil(exactWidth);
+          width = Math.max(1,
+            Math.abs(aspect - lower / height) <= Math.abs(aspect - upper / height)
+              ? lower : upper);
+        } else {
+          width = boxWidth;
+          const exactHeight = width / aspect;
+          const lower = Math.floor(exactHeight), upper = Math.ceil(exactHeight);
+          const error = candidate => candidate === 0 ? 0 : Math.abs(aspect - width / candidate);
+          height = Math.max(1, error(lower) <= error(upper) ? lower : upper);
+        }
+      }
+    }
+    context.beginPath(); context.rect(x, y, width, height); context.clip();
+    context.translate(x + width / 2, y + height / 2); context.rotate(properties.rotation * Math.PI / 180);
+    context.drawImage(media, 0, mediaFrame * naturalHeight, naturalWidth, naturalHeight, -width / 2, -height / 2, width, height);
+    return {x, y, width, height};
+  }
+
   function drawShape(context, layer, properties, alpha = 1, frame = 0, fps = 1, frameCount = 1) {
     context.save(); context.globalAlpha = alpha; context.strokeStyle = properties.colour; context.fillStyle = properties.colour; context.lineWidth = Math.max(.12, properties.width || .12);
     beginLayerRotation(context, properties, layer.type);
@@ -535,43 +574,7 @@
     else if (layer.type === 'media' && properties.source) {
       const media = mediaTimelineElement(properties.source, frameCount, fps);
       if (!media) { context.restore(); return; }
-      const naturalWidth = media.naturalWidth, naturalHeight = media.naturalHeight / frameCount;
-      if (naturalWidth && naturalHeight) {
-        const mediaFrame = mediaFrameIndex(layer, frame) % frameCount;
-        const pythonRound = value => {
-          const lower = Math.floor(value), fraction = value - lower;
-          if (fraction < .5) return lower;
-          if (fraction > .5) return lower + 1;
-          return lower % 2 === 0 ? lower : lower + 1;
-        };
-        const x = pythonRound(properties.x), y = pythonRound(properties.y);
-        let width = pythonRound(properties.width), height = pythonRound(properties.height);
-        if (properties.keep_aspect) {
-          const boxWidth = width, boxHeight = height;
-          if (boxWidth >= naturalWidth && boxHeight >= naturalHeight) {
-            width = naturalWidth; height = naturalHeight;
-          } else {
-            const aspect = naturalWidth / naturalHeight;
-            if (boxWidth / boxHeight >= aspect) {
-              height = boxHeight;
-              const exactWidth = height * aspect;
-              const lower = Math.floor(exactWidth), upper = Math.ceil(exactWidth);
-              width = Math.max(1,
-                Math.abs(aspect - lower / height) <= Math.abs(aspect - upper / height)
-                  ? lower : upper);
-            } else {
-              width = boxWidth;
-              const exactHeight = width / aspect;
-              const lower = Math.floor(exactHeight), upper = Math.ceil(exactHeight);
-              const error = candidate => candidate === 0 ? 0 : Math.abs(aspect - width / candidate);
-              height = Math.max(1, error(lower) <= error(upper) ? lower : upper);
-            }
-          }
-        }
-        context.beginPath(); context.rect(x, y, width, height); context.clip();
-        context.translate(x + width / 2, y + height / 2); context.rotate(properties.rotation * Math.PI / 180);
-        context.drawImage(media, 0, mediaFrame * naturalHeight, naturalWidth, naturalHeight, -width / 2, -height / 2, width, height);
-      }
+      drawMediaFrame(context, media, properties, mediaFrameIndex(layer, frame) % frameCount, frameCount);
     }
     context.restore();
   }
@@ -593,9 +596,31 @@
     else properties.points = properties.points.map(([x, y]) => [x + dx, y + dy]);
   }
 
-  function bindCanvas(module, canvas) {
+  function canvasPointerPoint(canvas, event) {
+    const box = canvas.getBoundingClientRect();
+    return {
+      x: Math.max(-128, Math.min(191, (event.clientX - box.left) * 64 / box.width)),
+      y: Math.max(-128, Math.min(191, (event.clientY - box.top) * 32 / box.height)),
+    };
+  }
+
+  function resizeProperties(properties, type, current, dx, dy) {
+    if (type === 'rectangle' || type === 'media') {
+      if (type === 'media' && properties.keep_aspect) {
+        const scale = Math.max(.01, Math.max((properties.width + dx) / properties.width, (properties.height + dy) / properties.height));
+        properties.width = Math.max(1, Math.round(properties.width * scale)); properties.height = Math.max(1, Math.round(properties.height * scale));
+      } else {
+        properties.width = Math.max(1, Math.round(properties.width + dx)); properties.height = Math.max(1, Math.round(properties.height + dy));
+      }
+    }
+    else if (type === 'circle') properties.radius = Math.max(1, Math.round(Math.hypot(current.x - properties.x, current.y - properties.y)));
+    else if (type === 'ellipse') { properties.radius_x = Math.max(1, Math.round(Math.abs(current.x - properties.x))); properties.radius_y = Math.max(1, Math.round(Math.abs(current.y - properties.y))); }
+    else if (type === 'line') { properties.x2 = current.x; properties.y2 = current.y; }
+  }
+
+  function bindCanvasPointerTransforms(module, canvas) {
     const state = stateFor(module);
-    const point = event => { const box = canvas.getBoundingClientRect(); return {x: Math.max(-128, Math.min(191, (event.clientX - box.left) * 64 / box.width)), y: Math.max(-128, Math.min(191, (event.clientY - box.top) * 32 / box.height))}; };
+    const point = event => canvasPointerPoint(canvas, event);
     canvas.addEventListener('pointerdown', event => {
       const layer = module.layers.find(item => item.id === state.selected); if (!layer) return;
       canvas.setPointerCapture(event.pointerId); const current = point(event), properties = resolvedProperties(module, layer, state.frame), box = bounds(properties, layer.type), centre = {x: (box.minX + box.maxX) / 2, y: (box.minY + box.maxY) / 2};
@@ -611,20 +636,20 @@
       if (drag.mode === 'move') moveProperties(properties, layer.type, dx, dy);
       else if (drag.mode === 'freehand') { const live = resolvedProperties(module, layer, state.frame); const last = live.points.at(-1); if (!last || Math.round(current.x) !== last[0] || Math.round(current.y) !== last[1]) saveFrameProperties(module, layer, {points: [...live.points, [Math.round(current.x), Math.round(current.y)]]}); drawEditor(module, canvas); return; }
       else if (drag.mode === 'rotate' && Object.hasOwn(properties, 'rotation')) { const rawRotation = Math.atan2(current.y - drag.centre.y, current.x - drag.centre.x) * 180 / Math.PI + 90; properties.rotation = snapRotation(rawRotation, state.rotationSnap); }
-      else if (drag.mode === 'resize') {
-        if (layer.type === 'rectangle' || layer.type === 'media') {
-          if (layer.type === 'media' && properties.keep_aspect) { const scale = Math.max(.01, Math.max((properties.width + dx) / properties.width, (properties.height + dy) / properties.height)); properties.width = Math.max(1, Math.round(properties.width * scale)); properties.height = Math.max(1, Math.round(properties.height * scale)); }
-          else { properties.width = Math.max(1, Math.round(properties.width + dx)); properties.height = Math.max(1, Math.round(properties.height + dy)); }
-        }
-        else if (layer.type === 'circle') properties.radius = Math.max(1, Math.round(Math.hypot(current.x - properties.x, current.y - properties.y)));
-        else if (layer.type === 'ellipse') { properties.radius_x = Math.max(1, Math.round(Math.abs(current.x - properties.x))); properties.radius_y = Math.max(1, Math.round(Math.abs(current.y - properties.y))); }
-        else if (layer.type === 'line') { properties.x2 = current.x; properties.y2 = current.y; }
-      }
+      else if (drag.mode === 'resize') resizeProperties(properties, layer.type, current, dx, dy);
       saveFrameProperties(module, layer, properties); drawEditor(module, canvas); syncPropertyInputs(module);
     });
     const end = () => { if (state.drag) { state.drag = null; refreshAdvanced(module.id, true); } };
     canvas.addEventListener('pointerup', end); canvas.addEventListener('pointercancel', end);
   }
+
+  globalThis.matrixMediaCanvasTransforms = Object.freeze({
+    drawMediaFrame,
+    canvasPointerPoint,
+    moveProperties,
+    resizeProperties,
+    bindCanvasPointerTransforms,
+  });
 
   const fieldDefinitions = {
     text: [['text', 'Text', 'text'], ['font', 'Font', 'select'], ['x', 'X', 'number'], ['y', 'Baseline Y', 'number'], ['rotation', 'Rotation', 'number'], ['colour', 'Colour', 'color']],
@@ -1225,7 +1250,7 @@
     const timelineTools = document.createElement('div'); timelineTools.className = 'timeline-toolbar'; const onion = moduleControl('Onion skin', state.onion, 'checkbox', value => { state.onion = value; drawEditor(module, canvas); }); timelineTools.append(onion, makeButton(state.playing ? 'Stop browser preview' : 'Play browser preview', () => playBrowserPreview(module), 'btn primary'), makeButton('Copy frame', () => copyFrame(module)), makeButton('Paste frame', () => pasteFrame(module)), makeButton('Duplicate frame', () => duplicateFrame(module)));
     const timeline = document.createElement('div'); timeline.className = 'timeline';
     stage.append(nameRow, templateRow, canvasWrap, help, timelineTools, timeline); const layers = document.createElement('div'); const properties = document.createElement('div'); properties.className = 'advanced-section'; sidebar.append(layers, properties); layout.append(stage, sidebar); card.append(layout);
-    renderTimeline(module, timeline); renderLayers(module, layers); renderProperties(module, properties); bindCanvas(module, canvas); drawEditor(module, canvas); restoreEditorViewState(card, state);
+    renderTimeline(module, timeline); renderLayers(module, layers); renderProperties(module, properties); bindCanvasPointerTransforms(module, canvas); drawEditor(module, canvas); restoreEditorViewState(card, state);
   }
 
   function renderAdvanced(module, list) { const card = document.createElement('div'); list.append(card); renderAdvancedInto(module, card); }

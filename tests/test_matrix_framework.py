@@ -1,4 +1,6 @@
 import importlib
+import hashlib
+import json
 import os
 import subprocess
 import sys
@@ -236,6 +238,56 @@ else:
         prepared.rotate.assert_called_once_with(-30, expand=False)
         canvas.SetImage.assert_called_once_with(rotated, 4, 5)
         matrix._frame_capture.set_image.assert_called_once_with(canvas, rotated, 4, 5)
+
+    def test_media_fit_modes_match_executed_pillow_geometry(self):
+        matrix = Matrix.__new__(Matrix)
+        matrix.matrix = Mock(width=64, height=32)
+        matrix._frame_capture = Mock()
+        canvas = Mock(width=64, height=32)
+        source = PillowImage.new("RGB", (5, 3))
+        source.putdata([
+            ((x * 47 + y * 13) % 256, (x * 19 + y * 61) % 256,
+             (x * 83 + y * 7) % 256)
+            for y in range(3) for x in range(5)
+        ])
+
+        cases = (
+            ("contain", source, {}, (5, 3), (29, 14)),
+            ("cover", source, {}, (64, 38), (0, -3)),
+            ("stretch", source, {}, (64, 32), (0, 0)),
+            ("manual", source, {"x": -2, "y": 30, "width": 7, "height": 9},
+             (7, 9), (-2, 30)),
+            ("contain", PillowImage.new("RGB", (80, 20)), {}, (64, 16), (0, 8)),
+            ("cover", PillowImage.new("RGB", (3, 5)), {}, (64, 107), (0, -38)),
+        )
+        for fit, image, geometry, expected_size, expected_position in cases:
+            with self.subTest(fit=fit, source=image.size, geometry=geometry):
+                canvas.reset_mock()
+                matrix._frame_capture.reset_mock()
+                prepared = matrix.draw_image(image, fit=fit, canvas=canvas, **geometry)
+                self.assertEqual(prepared.size, expected_size)
+                canvas.SetImage.assert_called_once_with(prepared, *expected_position)
+                matrix._frame_capture.set_image.assert_called_once_with(
+                    canvas, prepared, *expected_position,
+                )
+
+        with self.assertRaisesRegex(ValueError, "unknown media fit"):
+            matrix.draw_image(source, fit="tile", canvas=canvas)
+
+        legacy_aspect = matrix.draw_image(
+            source, width=9, height=9, keep_aspect=True, canvas=canvas,
+        )
+        legacy_stretch = matrix.draw_image(
+            source, width=9, height=9, keep_aspect=False, canvas=canvas,
+        )
+        self.assertEqual(
+            hashlib.sha256(legacy_aspect.tobytes()).hexdigest(),
+            "c489c3244053c2a91469831f4b8541f30766eed333398b071f239688fe7b70c3",
+        )
+        self.assertEqual(
+            hashlib.sha256(legacy_stretch.tobytes()).hexdigest(),
+            "254a747eb5324279a43a68444757e197c3dad5e02f426f18ba8c747e37ddde25",
+        )
 
     def test_media_frames_cancellation_interrupts_blocked_image_decoder(self):
         matrix = Matrix.__new__(Matrix)
@@ -2129,7 +2181,7 @@ else:
         matrix._prepare_image = Mock(return_value=frame)
         matrix._media_file = Mock(return_value=Mock())
 
-        for rate, expected_delay in ((0.5, 0.4), (1.0, 0.2), (2.0, 0.1)):
+        for rate, expected_delay in ((0.1, 2.0), (1.0, 0.2), (4.0, 0.05)):
             matrix.canvas.SetImage.reset_mock()
             matrix._frame_capture.set_image.reset_mock()
             matrix.swap.reset_mock()
@@ -2148,7 +2200,7 @@ else:
         matrix = Matrix.__new__(Matrix)
         matrix._media_file = Mock(side_effect=AssertionError("media lookup must not run"))
 
-        for rate in (False, 0, -1, 0.24, 4.01, float("nan"), float("inf"), "1"):
+        for rate in (False, 0, -1, 0.09, 4.01, float("nan"), float("inf"), "1"):
             with self.subTest(rate=rate), self.assertRaises(ValueError):
                 matrix.show_gif("sleep.gif", playback_rate=rate)
 
@@ -2405,6 +2457,473 @@ else:
             "scale=64:32:force_original_aspect_ratio=decrease,"
             "pad=64:32:(ow-iw)/2:(oh-ih)/2:black",
         )
+
+    def test_video_playback_rate_scales_timeline_without_changing_default(self):
+        matrix = Matrix.__new__(Matrix)
+        matrix.matrix = Mock(width=64, height=32)
+        matrix.canvas = Mock()
+        matrix._frame_capture = Mock()
+        matrix.clear = Mock()
+        matrix.swap = Mock(return_value=matrix.canvas)
+        matrix._media_file = Mock(
+            return_value=framework.pathlib.Path("/tmp/clip.mp4")
+        )
+
+        for playback_rate, expected_delay in (
+            (0.1, 0.5), (1.0, 0.05), (4.0, 0.0125),
+        ):
+            with self.subTest(playback_rate=playback_rate), patch.object(
+                matrix, "_video_frame_timeline", return_value=iter((Mock(),)),
+            ), patch.object(framework.time, "sleep") as sleep:
+                self.assertTrue(matrix.show_video(
+                    "clip.mp4", loops=1, playback_rate=playback_rate,
+                ))
+                sleep.assert_called_once()
+                self.assertAlmostEqual(sleep.call_args.args[0], expected_delay)
+
+        with patch.object(
+            matrix, "_video_frame_timeline", return_value=iter((Mock(),)),
+        ), patch.object(framework.time, "sleep") as sleep:
+            self.assertTrue(matrix.show_video("clip.mp4", loops=1))
+            self.assertAlmostEqual(sleep.call_args.args[0], 0.05)
+
+        stop = threading.Event()
+        finished = threading.Event()
+        with patch.object(
+            matrix, "_video_frame_timeline", return_value=iter((Mock(),)),
+        ):
+            worker = threading.Thread(target=lambda: (
+                matrix.show_video(
+                    "clip.mp4", loops=1, playback_rate=0.1, stop_event=stop,
+                ),
+                finished.set(),
+            ))
+            worker.start()
+            time.sleep(0.02)
+            stop.set()
+            stopped_promptly = finished.wait(0.3)
+            worker.join(1)
+
+        self.assertTrue(stopped_promptly, "slow-rate wait ignored cancellation")
+        self.assertFalse(worker.is_alive())
+
+        matrix._media_file.reset_mock()
+        matrix._media_file.side_effect = AssertionError("media lookup must not run")
+        for rate in (False, 0, 0.09, 4.01, float("nan"), float("inf"), "1"):
+            with self.subTest(invalid_rate=rate), self.assertRaises(ValueError):
+                matrix.show_video("clip.mp4", playback_rate=rate)
+        matrix._media_file.assert_not_called()
+
+    def test_foundation_physical_verifier_rejects_a_weak_fixture_corpus(self):
+        from deploy import priority_1_5_transaction as transaction
+        from scripts import verify_priority_1_5_foundation_physical as verifier
+
+        source_sha = "a" * 40
+        tree_sha = "b" * 40
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            fixtures = root / "fixtures"
+            fixtures.mkdir()
+            gif_path = fixtures / "single.gif"
+            PillowImage.new("RGB", (1, 1), "red").save(
+                gif_path, format="GIF", duration=100,
+            )
+            mp4_path = fixtures / "single.mp4"
+            canonical_mp4 = next(
+                raw for _relative, kind, _digest, raw in transaction._FIXTURE_SPECS
+                if kind == "mp4"
+            )
+            mp4_path.write_bytes(canonical_mp4)
+            mp4_width, mp4_height, mp4_frames, mp4_durations = (
+                transaction._decoded_fixture_metadata(mp4_path, "mp4")
+            )
+            records = []
+            for path, kind, width, height, frames, durations in (
+                (gif_path, "gif", 1, 1, 1, [100]),
+                (mp4_path, "mp4", mp4_width, mp4_height, mp4_frames, mp4_durations),
+            ):
+                records.append({
+                    "path": f"fixtures/{path.name}",
+                    "sha256": hashlib.sha256(path.read_bytes()).hexdigest(),
+                    "size": path.stat().st_size, "kind": kind,
+                    "width": width, "height": height, "frames": frames,
+                    "durations_ms": durations,
+                })
+            manifest_path = root / "physical-fixtures.json"
+            manifest_path.write_bytes(verifier.canonical_json({
+                "version": 1, "boundary": "b1", "source_sha": source_sha,
+                "tree_sha": tree_sha, "fixtures": records,
+            }))
+
+            with self.assertRaisesRegex(ValueError, "fixture corpus"):
+                verifier.load_fixture_manifest(manifest_path, source_sha, tree_sha)
+
+    def test_foundation_physical_verifier_isolates_absolute_systemctl(self):
+        from scripts import verify_priority_1_5_foundation_physical as verifier
+
+        response = types.SimpleNamespace(returncode=0, stdout="active\n", stderr="")
+        with patch.object(verifier.subprocess, "run", return_value=response) as run:
+            self.assertIs(
+                verifier._run_command([
+                    "/usr/bin/systemctl", "is-active", "matrix-web.service",
+                ]),
+                response,
+            )
+        self.assertEqual(run.call_args.args[0], [
+            "/usr/bin/systemctl", "is-active", "matrix-web.service",
+        ])
+        self.assertEqual(run.call_args.kwargs, {
+            "text": True, "capture_output": True, "check": False,
+            "shell": False,
+            "env": {"PATH": "/usr/bin:/bin", "LANG": "C", "LC_ALL": "C"},
+            "timeout": 10,
+        })
+        with patch.object(
+            verifier.subprocess, "run",
+            side_effect=subprocess.TimeoutExpired(["/usr/bin/systemctl"], 10),
+        ), self.assertRaisesRegex(RuntimeError, "timed out"):
+            verifier._run_command(["/usr/bin/systemctl", "is-active", "matrix-web.service"])
+
+    def test_foundation_physical_restored_readiness_retries_transient_startup(self):
+        from deploy import priority_1_5_transaction as transaction
+        from scripts import verify_priority_1_5_foundation_physical as verifier
+
+        lock_path = Path("/run/matrix-display/matrix-display.lock")
+        healthy = {
+            "service": "matrix-web.service", "active": True, "substate": "running",
+            "http_status": 302,
+            "display_lock": {"path": str(lock_path), "locked": True},
+        }
+        attempts = [
+            subprocess.TimeoutExpired(["/usr/bin/systemctl", "show"], 15),
+            ConnectionRefusedError("starting"),
+            healthy,
+        ]
+
+        class DelayedService:
+            def status(self, *, deadline=None):
+                self.deadline = deadline
+                outcome = attempts.pop(0)
+                if isinstance(outcome, BaseException):
+                    raise outcome
+                return outcome
+
+        with patch.object(transaction, "SystemdService", return_value=DelayedService()):
+            verifier._restored_service_readiness("matrix-web.service", lock_path)
+        self.assertEqual(attempts, [])
+
+    def test_foundation_physical_restored_readiness_has_one_finite_deadline(self):
+        from deploy import priority_1_5_transaction as transaction
+        from scripts import verify_priority_1_5_foundation_physical as verifier
+
+        class UnreadyService:
+            calls = 0
+
+            def status(self, *, deadline=None):
+                self.deadline = deadline
+                self.calls += 1
+                raise ConnectionRefusedError("still starting")
+
+        service = UnreadyService()
+        with (
+            patch.object(transaction, "SystemdService", return_value=service),
+            patch.object(verifier.time, "monotonic", side_effect=[0.0, 0.0, 30.0]),
+            patch.object(verifier.time, "sleep") as sleep,
+            self.assertRaisesRegex(RuntimeError, "readiness timed out") as raised,
+        ):
+            verifier._restored_service_readiness(
+                "matrix-web.service", Path("/run/matrix-display/matrix-display.lock"),
+            )
+        self.assertEqual(service.calls, 2)
+        sleep.assert_called_once_with(0.1)
+        self.assertIsInstance(raised.exception.__cause__, ConnectionRefusedError)
+
+    def test_foundation_physical_restored_readiness_rejects_late_healthy_status(self):
+        from deploy import priority_1_5_transaction as transaction
+        from scripts import verify_priority_1_5_foundation_physical as verifier
+
+        lock_path = Path("/run/matrix-display/matrix-display.lock")
+        healthy = {
+            "service": "matrix-web.service", "active": True, "substate": "running",
+            "http_status": 302,
+            "display_lock": {"path": str(lock_path), "locked": True},
+        }
+
+        class LateHealthyService:
+            calls = 0
+
+            def status(self, **_kwargs):
+                self.calls += 1
+                return healthy
+
+        service = LateHealthyService()
+        with (
+            patch.object(transaction, "SystemdService", return_value=service),
+            patch.object(verifier.time, "monotonic", side_effect=[0.0, 31.0, 31.0]),
+            self.assertRaisesRegex(RuntimeError, "readiness timed out"),
+        ):
+            verifier._restored_service_readiness("matrix-web.service", lock_path)
+        self.assertEqual(service.calls, 1)
+
+    def test_foundation_physical_verifier_binds_identity_and_restores_service(self):
+        from deploy import priority_1_5_transaction as transaction
+        from scripts import verify_priority_1_5_foundation_physical as verifier
+
+        source_sha = "a" * 40
+        tree_sha = "b" * 40
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            fixtures = root / "fixtures"
+            fixtures.mkdir()
+            fixture_specs = []
+            for name, size, durations, colours in (
+                ("portrait.gif", (31, 65), [60, 180], ("red", "blue")),
+                ("small.gif", (5, 3), [40, 120], ("green", "yellow")),
+            ):
+                path = fixtures / name
+                frames = [PillowImage.new("RGB", size, colour) for colour in colours]
+                frames[0].save(
+                    path, format="GIF", save_all=True, append_images=frames[1:],
+                    duration=durations, loop=0,
+                )
+                fixture_specs.append((path, "gif", size, durations))
+            mp4_path = fixtures / "landscape.mp4"
+            encoded = subprocess.run([
+                "/usr/bin/ffmpeg", "-nostdin", "-v", "error", "-f", "lavfi",
+                "-i", "testsrc2=size=66x34:rate=10:duration=0.3",
+                "-frames:v", "3", "-c:v", "libx264", "-pix_fmt", "yuv420p",
+                "-y", str(mp4_path),
+            ], capture_output=True, text=True, check=False,
+               env={"PATH": "/usr/bin:/bin", "LANG": "C", "LC_ALL": "C"})
+            self.assertEqual(encoded.returncode, 0, encoded.stderr)
+            fixture_specs.append((mp4_path, "mp4", (66, 34), [100, 100, 100]))
+            fixture_records = []
+            for path, kind, size, durations in sorted(
+                fixture_specs, key=lambda value: value[0].name,
+            ):
+                fixture_records.append({
+                    "path": f"fixtures/{path.name}",
+                    "sha256": hashlib.sha256(path.read_bytes()).hexdigest(),
+                    "size": path.stat().st_size, "kind": kind,
+                    "width": size[0], "height": size[1],
+                    "frames": len(durations), "durations_ms": durations,
+                })
+            manifest = {
+                "version": 1, "boundary": "b1", "source_sha": source_sha,
+                "tree_sha": tree_sha, "fixtures": fixture_records,
+            }
+            manifest_path = root / "physical-fixtures.json"
+            manifest_path.write_bytes(verifier.canonical_json(manifest))
+
+            real_framework = importlib.import_module("matrix_framework")
+            real_capture = importlib.reload(importlib.import_module("frame_capture"))
+
+            class Canvas:
+                width = 64
+                height = 32
+
+                def Clear(self):
+                    return None
+
+                def SetImage(self, *_args):
+                    return None
+
+            class Hardware:
+                width = 64
+                height = 32
+
+                def __init__(self):
+                    self.submissions = 0
+
+                def SwapOnVSync(self, _canvas):
+                    self.submissions += 1
+                    return Canvas()
+
+            physical = real_framework.Matrix.__new__(real_framework.Matrix)
+            physical.matrix = Hardware()
+            physical.canvas = Canvas()
+            physical._frame_capture = real_capture.FrameCapture(64, 32)
+            physical._frame_capture.register(physical.canvas)
+            physical._capture_fonts = {}
+            physical._publication_guard = None
+            physical._physical_swap_observer = None
+            physical._media_file = lambda _filename: None
+
+            loaded_manifest = verifier.load_fixture_manifest(
+                manifest_path, source_sha, tree_sha,
+            )
+            evidence = verifier.exercise_foundation(physical, loaded_manifest)
+            self.assertEqual(
+                set(evidence["fixture_cases"]),
+                {item["path"] for item in fixture_records},
+            )
+            observed_categories = set()
+            for item in fixture_records:
+                case = evidence["fixture_cases"][item["path"]]
+                observed_categories.update(case["categories"])
+                self.assertEqual(case["durations_ms"], item["durations_ms"])
+                self.assertEqual(set(case["timing_ms"]), {"10.0", "100.0", "400.0"})
+                for rate in (10.0, 100.0, 400.0):
+                    self.assertEqual(
+                        case["timing_ms"][str(rate)],
+                        [delay / (rate / 100.0) for delay in item["durations_ms"]],
+                    )
+                frame_count = item["frames"]
+                self.assertEqual(
+                    case["loop_frame_sha256"][:frame_count],
+                    case["loop_frame_sha256"][frame_count:],
+                )
+                self.assertGreater(len(set(case["frame_sha256"])), 1)
+                self.assertEqual(
+                    set(case["geometry_sha256"]),
+                    {"contain", "cover", "stretch", "manual-negative"},
+                )
+            self.assertTrue(
+                {"small", "odd", "portrait", "landscape", "oversized"}
+                <= observed_categories
+            )
+            self.assertEqual(
+                set(evidence["cancellation"]),
+                {item["path"] for item in fixture_records},
+            )
+            for cancellation in evidence["cancellation"].values():
+                self.assertEqual(cancellation["draws"], 1)
+                self.assertEqual(cancellation["submissions"], 0)
+                self.assertTrue(cancellation["history_unchanged"])
+                self.assertGreater(cancellation["prior_submission_count"], 0)
+
+            lock_path = root / "matrix-display.lock"
+            lock_path.write_bytes(b"")
+            report_path = root / "physical-report.json"
+            readiness_calls = []
+
+            def restored_service_readiness(service, restored_lock):
+                self.assertFalse(report_path.exists(), "report published before service readiness")
+                readiness_calls.append((service, restored_lock))
+
+            readiness_patch = patch.object(
+                verifier, "_restored_service_readiness",
+                side_effect=restored_service_readiness, create=True,
+            )
+            readiness_mock = readiness_patch.start()
+            self.addCleanup(readiness_patch.stop)
+
+            arguments = verifier.build_parser().parse_args([
+                "--source-sha", source_sha, "--tree-sha", tree_sha,
+                "--fixture-manifest", str(manifest_path),
+                "--service", "matrix-web.service",
+                "--lock-file", str(lock_path),
+                "--expected-version", "0.3.58-preview",
+                "--report", str(report_path),
+            ])
+            commands = []
+            require_report_absent = [True]
+
+            def command_runner(command):
+                commands.append(tuple(command))
+                if require_report_absent[0]:
+                    self.assertFalse(report_path.exists(), "report published before service restoration")
+                return types.SimpleNamespace(returncode=0, stdout="active\n", stderr="")
+
+            class TestLock:
+                def __enter__(self):
+                    return self
+
+                def __exit__(self, *_args):
+                    return None
+
+            report = verifier.execute(
+                arguments, matrix_factory=lambda: object(),
+                exercise=lambda _matrix, _manifest: evidence,
+                command_runner=command_runner,
+                version_reader=lambda: "0.3.58-preview",
+                lock_factory=lambda _path: TestLock(),
+            )
+            require_report_absent[0] = False
+
+            self.assertTrue(all(item[0] == "/usr/bin/systemctl" for item in commands))
+            self.assertEqual([item[1] for item in commands], [
+                "is-active", "stop", "start", "is-active",
+            ])
+            self.assertEqual(readiness_calls, [("matrix-web.service", lock_path)])
+            self.assertEqual(report["source_sha"], source_sha)
+            self.assertEqual(report["tree_sha"], tree_sha)
+            self.assertEqual(report["fixture_manifest_sha256"],
+                             hashlib.sha256(manifest_path.read_bytes()).hexdigest())
+            self.assertEqual(report_path.read_bytes(), verifier.canonical_json(report))
+            self.assertNotIn(str(root).encode(), report_path.read_bytes())
+            verifier.verify_report(
+                report_path.read_bytes(), source_sha, tree_sha, loaded_manifest,
+            )
+
+            omitted = json.loads(verifier.canonical_json(report))
+            omitted["fixture_cases"].pop(fixture_records[0]["path"])
+            omitted.pop("evidence_sha256")
+            omitted["evidence_sha256"] = hashlib.sha256(
+                verifier.canonical_json(omitted)
+            ).hexdigest()
+            with self.assertRaisesRegex(ValueError, "omits"):
+                verifier.verify_report(omitted, source_sha, tree_sha, loaded_manifest)
+
+            tampered_manifest = json.loads(manifest_path.read_bytes())
+            tampered_manifest["fixtures"][0]["width"] = 3
+            manifest_path.write_bytes(verifier.canonical_json(tampered_manifest))
+            with self.assertRaisesRegex(ValueError, "MP4 fixture metadata mismatch"):
+                verifier.load_fixture_manifest(manifest_path, source_sha, tree_sha)
+            manifest_path.write_bytes(verifier.canonical_json(manifest))
+
+            commands.clear()
+            with self.assertRaisesRegex(RuntimeError, "exercise failed"):
+                verifier.execute(
+                    arguments, matrix_factory=lambda: object(),
+                    exercise=lambda *_args: (_ for _ in ()).throw(
+                        RuntimeError("exercise failed")
+                    ),
+                    command_runner=command_runner,
+                    version_reader=lambda: "0.3.58-preview",
+                    lock_factory=lambda _path: TestLock(),
+                )
+            self.assertIn(("/usr/bin/systemctl", "start", "matrix-web.service"), commands)
+
+            prior_report = b"preexisting report must survive\n"
+            report_path.write_bytes(prior_report)
+            def restore_failure(command):
+                if command[1] == "start":
+                    return types.SimpleNamespace(returncode=1, stdout="", stderr="failed")
+                return types.SimpleNamespace(returncode=0, stdout="active\n", stderr="")
+            with self.assertRaisesRegex(RuntimeError, "restore"):
+                verifier.execute(
+                    arguments, matrix_factory=lambda: object(),
+                    exercise=lambda *_args: evidence,
+                    command_runner=restore_failure,
+                    version_reader=lambda: "0.3.58-preview",
+                    lock_factory=lambda _path: TestLock(),
+                )
+            self.assertEqual(report_path.read_bytes(), prior_report)
+
+            readiness_mock.side_effect = RuntimeError("readiness failed")
+            with self.assertRaisesRegex(RuntimeError, "readiness failed"):
+                verifier.execute(
+                    arguments, matrix_factory=lambda: object(),
+                    exercise=lambda *_args: evidence,
+                    command_runner=command_runner,
+                    version_reader=lambda: "0.3.58-preview",
+                    lock_factory=lambda _path: TestLock(),
+                )
+            self.assertEqual(report_path.read_bytes(), prior_report)
+            readiness_mock.side_effect = restored_service_readiness
+
+            unsafe_lock = root / "unsafe-lock"
+            unsafe_lock.symlink_to(lock_path)
+            arguments.lock_file = str(unsafe_lock)
+            with self.assertRaisesRegex(ValueError, "lock file"):
+                verifier.execute(
+                    arguments, matrix_factory=lambda: object(),
+                    exercise=lambda *_args: evidence,
+                    command_runner=command_runner,
+                    version_reader=lambda: "0.3.58-preview",
+                    lock_factory=lambda _path: TestLock(),
+                )
 
     def test_show_video_cancellation_interrupts_blocked_decoder_read(self):
         matrix = Matrix.__new__(Matrix)
