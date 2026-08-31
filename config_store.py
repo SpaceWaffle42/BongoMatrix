@@ -49,6 +49,7 @@ PLAYLIST_LIMIT = 256
 CONFIG_SNAPSHOT_LIMIT = 1_048_576
 CURRENT_CONFIG_SCHEMA_VERSION = 3
 AVAILABLE_FONTS = frozenset(available_font_names())
+BASIC_BORDER_STYLES = ("none", "solid", "inset", "dotted", "dashed", "double")
 
 
 def _serialize_config(config):
@@ -970,8 +971,8 @@ def validate_config(
         item["colour"] = item["colour"].lower()
         item["background"] = item["background"].lower()
         item["border_colour"] = item["border_colour"].lower()
-        if item["border"] not in {"none", "solid", "inset"}:
-            raise ValueError("custom module border must be none, solid, or inset")
+        if item["border"] not in BASIC_BORDER_STYLES:
+            raise ValueError("custom module border is not supported")
         if isinstance(item["x"], bool) or not isinstance(item["x"], int) or not -128 <= item["x"] <= 63:
             raise ValueError("custom module x must be between -128 and 63")
         if isinstance(item["y"], bool) or not isinstance(item["y"], int) or not 5 <= item["y"] <= 31:

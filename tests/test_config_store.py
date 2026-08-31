@@ -122,12 +122,25 @@ class ConfigStoreTests(unittest.TestCase):
                 with self.assertRaisesRegex(ValueError, "announcement style has invalid fields"):
                     validate_config(malformed, allow_legacy_announcements=False)
 
+    def test_basic_custom_modules_accept_new_border_styles_and_preserve_existing_choices(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "config.json"
+            store = ConfigStore(path)
+            for border in ("none", "solid", "inset", "dotted", "dashed", "double"):
+                module = self._simple()
+                module.update(border=border, border_colour="#A1B2C3")
+                saved = store.update(
+                    {"custom_modules": [module]}, base_revision=store.get()["revision"],
+                )
+                self.assertEqual(saved["custom_modules"][0]["border"], border)
+                self.assertEqual(saved["custom_modules"][0]["border_colour"], "#a1b2c3")
+
     def test_current_save_rejects_invalid_custom_border_style_and_colour_without_changing_bytes(self):
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / "config.json"
             store = ConfigStore(path)
             before = path.read_bytes()
-            for border, colour in (("double", "#ffffff"), ("solid", "red"), (True, "#ffffff")):
+            for border, colour in (("groove", "#ffffff"), ("solid", "red"), (True, "#ffffff")):
                 simple = self._simple()
                 simple.update(border=border, border_colour=colour)
                 with self.assertRaises(ValueError):
