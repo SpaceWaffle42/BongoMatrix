@@ -234,17 +234,19 @@ Verified remediation approvals:
 
 **Completed 2026-08-29:** protected merge `c4f40d5e3ec1ccb02be3940a8684a3acf4c460f4` passed protected-main pipeline 281, including source-bound physical-device acceptance and recovery. Production then passed a preservation-safe deploy/candidate/physical/rollback/rollback-verification/redeploy transaction: exact schema-v0 revision-53 bytes and metadata were restored during rollback, the accepted release migrated deterministically to schema v2 revision 54, and the final real 64×32 acceptance produced one static frame plus 85 frames for each left- and right-scrolling fixture. A live Chrome 151 journey at 390×844 and 1440×900 verified the pair-page version, Basic text/static-and-scroll controls, left/right direction, background and None/Solid/Inset border behavior, 64×32 preview, touch target, responsive layout, and zero save/preview mutations; temporary pairing and test residue were removed with the paired-device registry and final configuration independently re-attested.
 
-### 1.5 Add GIF and video support to basic custom modules
+### ~~1.5 Add GIF and video support to basic custom modules~~ — Completed
 
-Basic custom modules should allow the user to select a GIF or video as the module content.
+~~Basic custom modules should allow the user to select a GIF or video as the module content.~~
 
-- A selected GIF or video creates a media-only custom module.
-- Keep controls appropriate to the selected media type.
-- Do not add text overlays, layered elements, or compositing to the basic editor.
-- Do not imply that the basic module can combine text and media.
-- Offer **Contain**, **Cover**, **Stretch**, and manual crop positioning.
-- Reuse the Advanced Canvas media drag/resize positioning interaction and its executed physical-rendering semantics rather than creating a visually similar browser-only crop tool.
-- Reset basic media modules to **Contain** at **100%** playback speed.
+- ~~A selected GIF or video creates a media-only custom module.~~
+- ~~Keep controls appropriate to the selected media type.~~
+- ~~Do not add text overlays, layered elements, or compositing to the basic editor.~~
+- ~~Do not imply that the basic module can combine text and media.~~
+- ~~Offer **Contain**, **Cover**, **Stretch**, and manual crop positioning.~~
+- ~~Reuse the Advanced Canvas media drag/resize positioning interaction and its executed physical-rendering semantics rather than creating a visually similar browser-only crop tool.~~
+- ~~Reset basic media modules to **Contain** at **100%** playback speed.~~
+
+**Completed 2026-08-31:** reviewed source `5594f106fdbb91f46c20da65b397456f6d447b01` merged as protected-main commit `41355e00217c3f8df45ca83063828c939aa99c7e` after exact-SHA pipelines 307 and 308 passed. Production passed exact deploy, rollback, and redeploy with a healthy locked display service and byte-identical mutable state, and the accepted transaction was finalized. The independent exact-artifact review passed with zero findings. The separately discovered sub-10 ms GIF-cadence/verifier decision is deferred to v1 in GitLab issue 2 and does not alter Priority 1.5's completed media-only product behavior.
 
 ### 1.6 Standardize GIF and MP4 playback speed across modules
 
