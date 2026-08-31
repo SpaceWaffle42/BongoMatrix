@@ -138,7 +138,7 @@
     if (type === 'rectangle') return {present: true, x: 24, y: 8, width: 16, height: 16, rotation: 0, colour: '#00ffff', filled: false};
     if (type === 'polygon') return {present: true, points: [[32, 6], [44, 25], [20, 25]], rotation: 0, colour: '#ffffff', filled: false};
     if (type === 'circle') return {present: true, x: 32, y: 16, radius: 8, colour: '#ffffff', filled: false};
-    if (type === 'media') return {present: true, x: 0, y: 0, width: 64, height: 32, rotation: 0, source: source || mediaItems[0]?.name || '', keep_aspect: true};
+    if (type === 'media') return {present: true, x: 0, y: 0, width: 64, height: 32, rotation: 0, source: source || mediaItems[0]?.name || '', keep_aspect: true, playback_speed_percent: 100.0};
     return {present: true, x: 32, y: 16, radius_x: 12, radius_y: 6, rotation: 0, colour: '#ffffff', filled: false};
   }
 
@@ -298,7 +298,22 @@
   }
 
   function simpleModuleFromCard(card) {
-    return {id: card.dataset.id, name: card.querySelector('[data-field=name]').value.trim(), type: card.querySelector('[data-field=type]').value, text: card.querySelector('[data-field=text]').value, font: card.querySelector('[data-field=font]').value, colour: card.querySelector('[data-field=colour]').value, background: card.querySelector('[data-field=background]').value, border: card.querySelector('[data-field=border]').value, border_colour: card.querySelector('[data-field=border_colour]').value, x: Number(card.querySelector('[data-field=x]').value), y: Number(card.querySelector('[data-field=y]').value), direction: card.querySelector('[data-field=direction]').value, speed: Number(card.querySelector('[data-field=speed]').value), loops: Number(card.querySelector('[data-field=loops]').value)};
+    const type = card.querySelector('[data-field=type]').value;
+    const name = card.querySelector('[data-field=name]').value.trim();
+    if (type === 'media') {
+      return {
+        id: card.dataset.id, name, type,
+        source: card.querySelector('[data-field=source]').value,
+        fit: card.querySelector('[data-field=fit]').value,
+        x: Number(card.querySelector('[data-field=x]').value),
+        y: Number(card.querySelector('[data-field=y]').value),
+        width: Number(card.querySelector('[data-field=width]').value),
+        height: Number(card.querySelector('[data-field=height]').value),
+        loops: Number(card.querySelector('[data-field=loops]').value),
+        playback_speed_percent: Number(card.querySelector('[data-field=playback_speed_percent]').value),
+      };
+    }
+    return {id: card.dataset.id, name, type, text: card.querySelector('[data-field=text]').value, font: card.querySelector('[data-field=font]').value, colour: card.querySelector('[data-field=colour]').value, background: card.querySelector('[data-field=background]').value, border: card.querySelector('[data-field=border]').value, border_colour: card.querySelector('[data-field=border_colour]').value, x: Number(card.querySelector('[data-field=x]').value), y: Number(card.querySelector('[data-field=y]').value), direction: card.querySelector('[data-field=direction]').value, speed: Number(card.querySelector('[data-field=speed]').value), loops: Number(card.querySelector('[data-field=loops]').value)};
   }
 
   const provisionalSimpleDrafts = new Map([...document.querySelectorAll('.custom-module-card')]
@@ -324,31 +339,52 @@
     return title;
   }
 
+  function basicModuleForType(module, type) {
+    const identity = {id: module.id, name: module.name};
+    if (type === 'media') return {...identity, type, source: mediaItems.find(item => ['gif', 'mp4'].includes(item.kind))?.name || '', fit: 'contain', x: 0, y: 0, width: 64, height: 32, loops: 1, playback_speed_percent: 100.0};
+    return {...identity, type, text: 'HELLO MATRIX', font: '5x7', colour: '#ffffff', background: '#000000', border: 'none', border_colour: '#ffffff', x: 2, y: 20, direction: 'left', speed: .05, loops: 1};
+  }
+
+  function replaceBasicSubtype(module, type) {
+    const index = customModules.findIndex(item => item.id === module.id);
+    if (index < 0) return null;
+    const replacement = basicModuleForType(module, type);
+    customModules.splice(index, 1, replacement);
+    return replacement;
+  }
+
   function renderSimple(module, list) {
     const card = document.createElement('div'); card.className = 'custom-module-card'; card.dataset.id = module.id; card.dataset.editorType = 'simple';
     const title = headerFor(module, card, false);
     const fields = document.createElement('div'); fields.className = 'custom-module-fields';
     const name = customControl('Name', 'name', 'text', module.name); name.classList.add('wide');
     name.querySelector('input').addEventListener('input', event => { module.name = event.target.value; title.textContent = event.target.value; syncCustomModuleUI(); });
-    const text = customControl('Text', 'text', 'text', module.text); text.classList.add('wide');
-    fields.append(name, text, customControl('Mode', 'type', 'select', module.type, ['text', 'text_scroll']), customControl('Font', 'font', 'select', module.font, fonts), customControl('Text colour', 'colour', 'color', module.colour), customControl('X position', 'x', 'number', module.x), customControl('Baseline Y', 'y', 'number', module.y), customControl('Scroll direction', 'direction', 'select', module.direction, ['left', 'right']), customControl('Frame delay (seconds)', 'speed', 'number', module.speed), customControl('Scroll loops', 'loops', 'number', module.loops ?? 1));
+    const mode = customControl('Mode', 'type', 'select', module.type, ['text', 'text_scroll', 'media']);
+    mode.querySelector('select').addEventListener('change', event => {
+      replaceBasicSubtype(module, event.target.value);
+      renderCustomModules();
+      document.querySelector(`.custom-module-card[data-id="${CSS.escape(module.id)}"] [data-field="type"]`)?.focus();
+    });
+    if (module.type === 'media') {
+      fields.append(name, mode,
+        customControl('Media file', 'source', 'select', module.source, mediaItems.filter(item => ['gif', 'mp4'].includes(item.kind)).map(item => item.name)),
+        customControl('Fit', 'fit', 'select', module.fit, ['contain', 'cover', 'stretch', 'manual']),
+        customControl('X position', 'x', 'number', module.x), customControl('Y position', 'y', 'number', module.y),
+        customControl('Width', 'width', 'number', module.width), customControl('Height', 'height', 'number', module.height),
+        customControl('Loops', 'loops', 'number', module.loops ?? 1),
+        customControl('Playback speed (%)', 'playback_speed_percent', 'playback_speed', module.playback_speed_percent ?? 100.0));
+    } else {
+      const text = customControl('Text', 'text', 'text', module.text); text.classList.add('wide');
+      fields.append(name, text, mode, customControl('Font', 'font', 'select', module.font, fonts), customControl('Text colour', 'colour', 'color', module.colour), customControl('X position', 'x', 'number', module.x), customControl('Baseline Y', 'y', 'number', module.y), customControl('Scroll direction', 'direction', 'select', module.direction, ['left', 'right']), customControl('Frame delay (seconds)', 'speed', 'number', module.speed), customControl('Scroll loops', 'loops', 'number', module.loops ?? 1));
+    }
     for (const control of fields.querySelectorAll('[data-field]')) control.addEventListener('input', syncPlaylistDurations);
-    const appearance = document.createElement('details'); appearance.className = 'editor-group'; appearance.open = true; appearance.setAttribute('data-simple-appearance', '');
-    const appearanceSummary = document.createElement('summary'); appearanceSummary.textContent = 'Appearance';
-    const appearanceFields = document.createElement('div'); appearanceFields.className = 'editor-fields';
-    const background = customControl('Background colour', 'background', 'color', module.background ?? '#000000');
-    const borderLabel = customControl('Border style', 'border', 'select', module.border ?? 'none', ['none', 'solid', 'inset']);
-    const colourLabel = customControl('Border colour', 'border_colour', 'color', module.border_colour ?? '#ffffff');
-    const border = borderLabel.querySelector('select'), control = colourLabel.querySelector('input');
-    const syncAppearance = () => { control.disabled = border.value === 'none'; colourLabel.hidden = border.value === 'none'; control.setAttribute('aria-disabled', String(control.disabled)); };
-    border.addEventListener('input', syncAppearance);
-    const resetAppearance = makeButton('Reset appearance', () => { background.querySelector('input').value = '#000000'; border.value = 'none'; control.value = '#ffffff'; for (const item of [background.querySelector('input'), border, control]) item.dispatchEvent(new Event('input', {bubbles: true})); syncAppearance(); }, 'btn danger');
-    resetAppearance.style.minHeight = '44px'; resetAppearance.style.minWidth = '44px';
-    appearanceFields.append(background, borderLabel, colourLabel, resetAppearance); appearance.append(appearanceSummary, appearanceFields); syncAppearance();
-    const convert = makeButton('Convert to advanced canvas', () => convertToAdvanced(module.id), 'btn primary'); convert.style.marginTop = '12px';
-    const runtime = scrollPhysicalTimeReadout(module.type === 'text_scroll' ? calculatedScrollDuration(module) : Number.NaN);
-    runtime.hidden = module.type !== 'text_scroll';
-    card.append(fields, appearance, runtime, convert); list.append(card);
+    const runtimeValue = module.type === 'text_scroll' ? calculatedScrollDuration(module) : (module.type === 'media' ? calculatedMediaDuration(module) : Number.NaN);
+    const runtime = scrollPhysicalTimeReadout(runtimeValue); runtime.hidden = !['text_scroll', 'media'].includes(module.type);
+    card.append(fields);
+    if (module.type !== 'media') card.append(simpleAppearanceGroup(module));
+    card.append(runtime);
+    if (module.type !== 'media') { const convert = makeButton('Convert to advanced canvas', () => convertToAdvanced(module.id), 'btn primary'); convert.style.marginTop = '12px'; card.append(convert); }
+    list.append(card);
   }
 
   function moduleControl(labelText, value, type, handler, options) {
@@ -407,7 +443,7 @@
 
   function mediaTimelineRevision(source) { return mediaItems.find(item => item.name === source)?.revision || 'unversioned'; }
 
-  function mediaTimelineUrl(source, frameCount, fps, revision = mediaTimelineRevision(source)) { return '/api/media-timeline/' + source.split('/').map(encodeURIComponent).join('/') + '?frame_count=' + frameCount + '&fps=' + fps + '&revision=' + encodeURIComponent(revision); }
+  function mediaTimelineUrl(source, frameCount, fps, playbackSpeedPercent = 100.0, revision = mediaTimelineRevision(source)) { return '/api/media-timeline/' + source.split('/').map(encodeURIComponent).join('/') + '?frame_count=' + frameCount + '&fps=' + fps + '&playback_speed_percent=' + Number(playbackSpeedPercent).toFixed(1) + '&revision=' + encodeURIComponent(revision); }
 
   function currentCanvasMediaSources() {
     const sources = new Set();
@@ -456,9 +492,9 @@
     }
   }
 
-  function mediaTimelineElement(source, frameCount, fps) {
+  function mediaTimelineElement(source, frameCount, fps, playbackSpeedPercent = 100.0) {
     const revision = mediaTimelineRevision(source);
-    const key = source + '|' + revision + '|' + frameCount + '|' + fps;
+    const key = source + '|' + revision + '|' + frameCount + '|' + fps + '|' + Number(playbackSpeedPercent).toFixed(1);
     if (mediaPreviews.has(key)) return mediaPreviews.get(key);
     const previousFailure = mediaFailureStates.get(source);
     if (previousFailure && previousFailure.revision !== revision) mediaFailureStates.delete(source);
@@ -472,7 +508,7 @@
       mediaPreviews.delete(oldestKey);
     }
     const element = document.createElement('img');
-    const url = mediaTimelineUrl(source, frameCount, fps, revision);
+    const url = mediaTimelineUrl(source, frameCount, fps, playbackSpeedPercent, revision);
     mediaLoadQueue.push({element, url, key, source, revision});
     pumpMediaLoadQueue();
     mediaPreviews.set(key, element);
@@ -572,7 +608,7 @@
     else if (layer.type === 'circle') { context.beginPath(); context.arc(properties.x, properties.y, properties.radius, 0, Math.PI * 2); properties.filled ? context.fill() : context.stroke(); }
     else if (layer.type === 'ellipse') { context.beginPath(); context.ellipse(properties.x, properties.y, properties.radius_x, properties.radius_y, properties.rotation * Math.PI / 180, 0, Math.PI * 2); properties.filled ? context.fill() : context.stroke(); }
     else if (layer.type === 'media' && properties.source) {
-      const media = mediaTimelineElement(properties.source, frameCount, fps);
+      const media = mediaTimelineElement(properties.source, frameCount, fps, properties.playback_speed_percent);
       if (!media) { context.restore(); return; }
       drawMediaFrame(context, media, properties, mediaFrameIndex(layer, frame) % frameCount, frameCount);
     }
@@ -660,7 +696,7 @@
     polygon: [['points', 'Points (x,y per line)', 'points'], ['rotation', 'Rotation', 'number'], ['colour', 'Colour', 'color'], ['filled', 'Filled', 'checkbox']],
     circle: [['x', 'Centre X', 'number'], ['y', 'Centre Y', 'number'], ['radius', 'Radius', 'number'], ['colour', 'Colour', 'color'], ['filled', 'Filled', 'checkbox']],
     ellipse: [['x', 'Centre X', 'number'], ['y', 'Centre Y', 'number'], ['radius_x', 'Radius X', 'number'], ['radius_y', 'Radius Y', 'number'], ['rotation', 'Rotation', 'number'], ['colour', 'Colour', 'color'], ['filled', 'Filled', 'checkbox']],
-    media: [['source', 'Media file', 'media-select'], ['x', 'X', 'number'], ['y', 'Y', 'number'], ['width', 'Width', 'number'], ['height', 'Height', 'number'], ['rotation', 'Rotation', 'number'], ['keep_aspect', 'Keep aspect ratio', 'checkbox']],
+    media: [['source', 'Media file', 'media-select'], ['playback_speed_percent', 'Playback speed (%)', 'playback-speed'], ['x', 'X', 'number'], ['y', 'Y', 'number'], ['width', 'Width', 'number'], ['height', 'Height', 'number'], ['rotation', 'Rotation', 'number'], ['keep_aspect', 'Keep aspect ratio', 'checkbox']],
   };
 
   function parsePoints(value) { return value.split(/\n|;/).map(line => line.trim()).filter(Boolean).map(line => line.split(',').map(Number)).filter(point => point.length === 2 && point.every(Number.isFinite)); }
@@ -677,10 +713,11 @@
     if (supportsRotation(layer.type) && !Object.hasOwn(values, 'rotation')) values.rotation = 0;
     for (const [field, labelText, type] of editableFields) {
       let label;
-      if (type === 'select' || type === 'media-select' || type === 'time-format') label = moduleControl(labelText, values[field], 'select', value => { saveFrameProperties(module, layer, {[field]: value}); if (type === 'media-select') pruneMediaFailureStates(); drawEditor(module, container.closest('.advanced-card').querySelector('canvas')); }, type === 'media-select' ? mediaItems.map(item => item.name) : (type === 'time-format' ? ['24h', '24h_seconds', '12h', '12h_seconds'] : (field === 'font' ? fonts : [])));
+      if (type === 'playback-speed') label = globalThis.playbackSpeedControl(labelText, values[field], value => { saveFrameProperties(module, layer, {[field]: value}); drawEditor(module, container.closest('.advanced-card').querySelector('canvas')); }, control => control.dataset.property = field);
+      else if (type === 'select' || type === 'media-select' || type === 'time-format') label = moduleControl(labelText, values[field], 'select', value => { saveFrameProperties(module, layer, {[field]: value}); if (type === 'media-select') pruneMediaFailureStates(); drawEditor(module, container.closest('.advanced-card').querySelector('canvas')); }, type === 'media-select' ? mediaItems.map(item => item.name) : (type === 'time-format' ? ['24h', '24h_seconds', '12h', '12h_seconds'] : (field === 'font' ? fonts : [])));
       else if (type === 'points') { label = document.createElement('label'); label.textContent = labelText; label.className = 'wide'; const textarea = document.createElement('textarea'); textarea.rows = 4; textarea.dataset.property = field; textarea.value = formatPoints(values[field]); textarea.addEventListener('change', () => { const points = parsePoints(textarea.value); if (points.length) { saveFrameProperties(module, layer, {points}); refreshAdvanced(module.id, true); } }); label.append(textarea); }
       else label = moduleControl(labelText, values[field], type, value => { const nextValue = field === 'z_index' ? Math.max(-64, Math.min(64, Math.round(value))) : value; saveFrameProperties(module, layer, {[field]: nextValue}); drawEditor(module, container.closest('.advanced-card').querySelector('canvas')); }, null);
-      label.querySelector('input,select,textarea').dataset.property = field; grid.append(label);
+      for (const control of label.querySelectorAll('input,select,textarea')) control.dataset.property = field; grid.append(label);
     }
     container.append(grid);
     const tools = document.createElement('div'); tools.className = 'advanced-section'; const toolsTitle = document.createElement('h4'); toolsTitle.textContent = 'Keyframes and frame override';

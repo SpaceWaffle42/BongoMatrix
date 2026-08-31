@@ -78,10 +78,31 @@ class CaptureMatrix:
 
     def draw_image(
         self, image, x=0, y=0, width=None, height=None, keep_aspect=True,
-        rotation=0, canvas=None,
+        rotation=0, canvas=None, fit=None,
     ):
+        canvas = canvas or self.canvas
         prepared = image.convert("RGB")
-        if width is not None and height is not None:
+        if fit is not None:
+            source_width, source_height = prepared.size
+            if fit == "contain":
+                scale = min(1, canvas.width / source_width, canvas.height / source_height)
+            elif fit == "cover":
+                scale = max(canvas.width / source_width, canvas.height / source_height)
+            elif fit == "stretch":
+                scale = None
+                width, height, x, y = canvas.width, canvas.height, 0, 0
+            elif fit == "manual":
+                scale = None
+            else:
+                raise ValueError(f"unknown media fit: {fit}")
+            if scale is not None:
+                width = max(1, round(source_width * scale))
+                height = max(1, round(source_height * scale))
+                x, y = (canvas.width - width) // 2, (canvas.height - height) // 2
+            width = canvas.width if width is None else width
+            height = canvas.height if height is None else height
+            prepared = prepared.resize((int(width), int(height)))
+        elif width is not None and height is not None:
             if keep_aspect:
                 prepared = prepared.copy()
                 prepared.thumbnail((width, height))
@@ -89,7 +110,7 @@ class CaptureMatrix:
                 prepared = prepared.resize((width, height))
         if rotation:
             prepared = prepared.rotate(-rotation, expand=False)
-        self._capture.set_image(canvas or self.canvas, prepared, x, y)
+        self._capture.set_image(canvas, prepared, x, y)
         return prepared
 
     def draw_text(self, font, x, y, colour, text, canvas=None, rotation=0):
@@ -418,8 +439,8 @@ def media_preview_frames(
             )
 
         timeline = gif_media_frames(
-            source, loops=0,
-            playback_rate=settings.get("gif_speed_percent", 100) / 100.0,
+            source, loops=settings.get("loops", 0),
+            playback_rate=settings.get("playback_speed_percent", 100.0) / 100.0,
             stop_event=stop_event, max_duration=duration,
             monotonic=playback_monotonic, image_open=image_open,
             image_iterator=lambda decoded: iter(decoded.frames),
@@ -438,9 +459,10 @@ def media_preview_frames(
         )
         timeline = video_media_frames(
             lambda: video_decoder(path, settings, **decoder_options),
-            fps=settings.get("video_fps", 20), loops=0,
+            fps=settings.get("video_fps", 20), loops=settings.get("loops", 0),
             stop_event=stop_event, max_duration=duration,
             monotonic=playback_monotonic,
+            playback_rate=settings.get("playback_speed_percent", 100.0) / 100.0,
         )
     else:
         source = path
@@ -466,6 +488,7 @@ def media_preview_frames(
                 x=settings.get("x", 0), y=settings.get("y", 0),
                 width=settings.get("width"), height=settings.get("height"),
                 keep_aspect=settings.get("keep_aspect", True),
+                fit=settings.get("fit"),
             )
             if stop_event is not None and stop_event.is_set():
                 return
@@ -486,6 +509,7 @@ def media_preview_frames(
                 x=settings.get("x", 0), y=settings.get("y", 0),
                 width=settings.get("width"), height=settings.get("height"),
                 keep_aspect=settings.get("keep_aspect", True),
+                fit=settings.get("fit"),
             )
             if stop_event is not None and stop_event.is_set():
                 return

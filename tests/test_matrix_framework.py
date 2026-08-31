@@ -2447,8 +2447,11 @@ else:
         ), patch.object(framework.time, "sleep"):
             self.assertTrue(matrix.show_video("clip.mp4", loops=1))
 
-        matrix.canvas.SetImage.assert_called_once_with(image, 0, 0)
-        matrix._frame_capture.set_image.assert_called_once_with(matrix.canvas, image, 0, 0)
+        prepared = image.convert.return_value.copy.return_value
+        matrix.canvas.SetImage.assert_called_once_with(prepared, 0, 0)
+        matrix._frame_capture.set_image.assert_called_once_with(
+            matrix.canvas, prepared, 0, 0,
+        )
         matrix.swap.assert_called_once()
         command = popen.call_args.args[0]
         video_filter = command[command.index("-vf") + 1]

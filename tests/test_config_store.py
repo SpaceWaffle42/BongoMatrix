@@ -1,9 +1,15 @@
 import json
+import os
+import shutil
+import subprocess
 import tempfile
 import threading
+import time
 import unittest
 from pathlib import Path
 from unittest.mock import patch
+
+from PIL import Image
 
 from config_store import (
     ConfigConflictError, ConfigDurabilityError, ConfigStore, DEFAULT_CONFIG,
@@ -12,6 +18,13 @@ from config_store import (
 
 
 class ConfigStoreTests(unittest.TestCase):
+    @staticmethod
+    def _wait_for_metadata_workers(store, timeout=1.0):
+        deadline = time.monotonic() + timeout
+        while store._metadata_workers and time.monotonic() < deadline:
+            time.sleep(0.005)
+        return set(store._metadata_workers)
+
     @staticmethod
     def _simple(module_id="custom_static", module_type="text"):
         return {
@@ -39,7 +52,7 @@ class ConfigStoreTests(unittest.TestCase):
 
             migrated = ConfigStore(path).get()
 
-            self.assertEqual(migrated["schema_version"], 2)
+            self.assertEqual(migrated["schema_version"], 3)
             self.assertEqual(migrated["revision"], 8)
             self.assertEqual(migrated["device"]["name"], "untouched")
             self.assertEqual(migrated["custom_modules"][0]["border"], "none")
@@ -49,7 +62,7 @@ class ConfigStoreTests(unittest.TestCase):
             self.assertEqual(ConfigStore(path).get(), migrated)
             self.assertEqual(path.read_bytes(), migrated_bytes)
 
-    def test_current_v2_custom_appearance_requires_exact_valid_fields_without_rewrite(self):
+    def test_schema_v2_custom_appearance_migrates_without_canonicalizing_unrelated_values(self):
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / "config.json"
             current = json.loads(json.dumps(DEFAULT_CONFIG))
@@ -94,7 +107,7 @@ class ConfigStoreTests(unittest.TestCase):
 
             config = ConfigStore(path).get()
 
-            self.assertEqual(config["schema_version"], 2)
+            self.assertEqual(config["schema_version"], 3)
             self.assertEqual(config["revision"], 1)
             without_server_fields = dict(config)
             without_server_fields.pop("schema_version")
@@ -154,7 +167,7 @@ class ConfigStoreTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / "config.json"
             store = ConfigStore(path)
-            for schema_version in (True, -1, 1.5, "1", 3):
+            for schema_version in (True, -1, 1.5, "1", 4):
                 with self.subTest(schema_version=schema_version):
                     invalid = store.get()
                     invalid["schema_version"] = schema_version
@@ -205,7 +218,7 @@ class ConfigStoreTests(unittest.TestCase):
 
             migrated = ConfigStore(path).get()
 
-            self.assertEqual(migrated["schema_version"], 2)
+            self.assertEqual(migrated["schema_version"], 3)
             self.assertEqual(migrated["revision"], 8)
             self.assertEqual(migrated["device"]["name"], "Version zero sentinel")
             migrated_bytes = path.read_bytes()
@@ -226,7 +239,7 @@ class ConfigStoreTests(unittest.TestCase):
 
             reloaded = ConfigStore(path).get()
 
-            self.assertEqual(reloaded["schema_version"], 2)
+            self.assertEqual(reloaded["schema_version"], 3)
             self.assertEqual(reloaded["revision"], 1)
             self.assertEqual(path.read_bytes(), original)
 
@@ -531,15 +544,17 @@ class ConfigStoreTests(unittest.TestCase):
             path = Path(directory) / "config.json"
             legacy = json.loads(json.dumps(DEFAULT_CONFIG))
             legacy.pop("schema_version")
+            legacy["media_layout"]["sleep"].pop("playback_speed_percent", None)
             legacy["media_layout"]["sleep"].pop("gif_speed_percent", None)
             expected_layout = json.loads(json.dumps(legacy["media_layout"]["sleep"]))
             path.write_text(json.dumps(legacy))
 
             config = ConfigStore(path).get()
 
-            self.assertEqual(config["media_layout"]["sleep"]["gif_speed_percent"], 100)
+            self.assertEqual(config["media_layout"]["sleep"]["playback_speed_percent"], 100.0)
+            self.assertNotIn("gif_speed_percent", config["media_layout"]["sleep"])
             actual_layout = dict(config["media_layout"]["sleep"])
-            actual_layout.pop("gif_speed_percent")
+            actual_layout.pop("playback_speed_percent")
             self.assertEqual(actual_layout, expected_layout)
             self.assertNotIn("gif_speed_percent", config["media_layout"]["splash"])
 
@@ -744,6 +759,7 @@ class ConfigStoreTests(unittest.TestCase):
             "id": "announcement_welcome",
             "enabled": True,
             "name": "Welcome",
+            "playback_speed_percent": 100.0,
             "layout": "text_notice",
             "headline": "Welcome",
             "message": "Front desk closes at 5 PM",
@@ -1776,6 +1792,996 @@ class ConfigStoreTests(unittest.TestCase):
 
             duration = updated["playlist"][-1]["duration"]
             self.assertGreater(duration, 0)
+
+
+    def test_priority_1_6_basic_media_schema_is_media_only_and_canonical(self):
+        candidate = json.loads(json.dumps(DEFAULT_CONFIG))
+        media = {
+            "id": "custom_media", "name": "Media", "type": "media",
+            "source": "party.gif", "fit": "manual", "x": -7, "y": 3,
+            "width": 80, "height": 40, "loops": 3,
+            "playback_speed_percent": 125,
+        }
+        candidate["custom_modules"] = [media]
+        candidate["playlist"].append({
+            "module": "custom_media", "duration": 1, "enabled": True,
+        })
+
+        validated = validate_config(candidate)
+
+        self.assertEqual(validated["custom_modules"][0]["playback_speed_percent"], 125.0)
+        self.assertNotIn("text", validated["custom_modules"][0])
+        self.assertEqual(validated["custom_modules"][0]["loops"], 3)
+
+    def test_basic_gif_playlist_duration_matches_physical_delay_floor_speed_and_loops(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            media_root = root / "media"
+            media_root.mkdir()
+            first = Image.new("RGB", (2, 2), "red")
+            second = Image.new("RGB", (2, 2), "blue")
+            first.save(
+                media_root / "timed.gif", save_all=True, append_images=[second],
+                duration=[10, 40], loop=0,
+            )
+            store = ConfigStore(root / "config.json", media_dir=media_root)
+            module = {
+                "id": "custom_media", "name": "Media", "type": "media",
+                "source": "timed.gif", "fit": "contain", "x": 0, "y": 0,
+                "width": 64, "height": 32, "loops": 3,
+                "playback_speed_percent": 400.0,
+            }
+
+            saved = store.update({
+                "custom_modules": [module],
+                "playlist": [{"module": module["id"], "duration": 99, "enabled": True}],
+            })
+
+            self.assertAlmostEqual(saved["playlist"][0]["duration"], 0.06)
+            self.assertEqual(json.loads((root / "config.json").read_text())["playlist"][0]["duration"], 0.06)
+
+    def test_same_basic_media_source_with_different_settings_is_probed_once(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            media_root = root / "media"
+            media_root.mkdir()
+            Image.new("RGB", (2, 2), "red").save(media_root / "same.gif")
+            store = ConfigStore(root / "config.json", media_dir=media_root)
+            modules = [
+                {
+                    "id": f"custom_same_{index}", "name": f"Same {index}",
+                    "type": "media", "source": "same.gif", "fit": "contain",
+                    "x": 0, "y": 0, "width": 64, "height": 32,
+                    "loops": loops, "playback_speed_percent": speed,
+                }
+                for index, (loops, speed) in enumerate(((1, 100.0), (3, 200.0)))
+            ]
+            playlist = [
+                {"module": module["id"], "duration": 99, "enabled": True}
+                for module in modules
+            ]
+
+            with patch.object(
+                store, "_probe_raw_metadata", return_value=("gif", (0.1,)), create=True,
+            ) as probe:
+                saved = store.update({"custom_modules": modules, "playlist": playlist})
+
+            probe.assert_called_once()
+            self.assertAlmostEqual(saved["playlist"][0]["duration"], 0.1)
+            self.assertAlmostEqual(saved["playlist"][1]["duration"], 0.15)
+
+    def test_hard_linked_media_with_different_decoder_kinds_are_probed_separately(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            media_root = root / "media"
+            media_root.mkdir()
+            gif_source = media_root / "alias.gif"
+            mp4_source = media_root / "alias.mp4"
+            Image.new("RGB", (2, 2), "red").save(gif_source)
+            os.link(gif_source, mp4_source)
+            store = ConfigStore(root / "config.json", media_dir=media_root)
+            modules = [
+                {
+                    "id": "custom_gif_alias", "name": "GIF alias", "type": "media",
+                    "source": gif_source.name, "fit": "contain", "x": 0, "y": 0,
+                    "width": 64, "height": 32, "loops": 1,
+                    "playback_speed_percent": 100.0,
+                },
+                {
+                    "id": "custom_mp4_alias", "name": "MP4 alias", "type": "media",
+                    "source": mp4_source.name, "fit": "contain", "x": 0, "y": 0,
+                    "width": 64, "height": 32, "loops": 1,
+                    "playback_speed_percent": 100.0,
+                },
+            ]
+
+            def probe(_descriptor, suffix, _deadline):
+                return ("gif", (0.1,)) if suffix == ".gif" else ("mp4", 20)
+
+            with patch.object(store, "_probe_raw_metadata", side_effect=probe) as metadata_probe:
+                saved = store.update({
+                    "custom_modules": modules,
+                    "playlist": [
+                        {"module": module["id"], "duration": 99, "enabled": True}
+                        for module in modules
+                    ],
+                })
+
+            self.assertEqual(
+                [call.args[1] for call in metadata_probe.call_args_list],
+                [".gif", ".mp4"],
+            )
+            self.assertEqual(
+                [item["duration"] for item in saved["playlist"]],
+                [0.1, 1.0],
+            )
+
+    def test_default_media_canonicalization_exception_closes_descriptor_once(self):
+        store = object.__new__(ConfigStore)
+        store._metadata_workers = set()
+        module = {
+            "id": "custom_close_once", "name": "Close once", "type": "media",
+            "source": "close.gif", "fit": "contain", "x": 0, "y": 0,
+            "width": 64, "height": 32, "loops": 1,
+            "playback_speed_percent": 100.0,
+        }
+        candidate = {
+            "custom_modules": [module],
+            "playlist": [{"module": module["id"], "duration": 99, "enabled": True}],
+        }
+        identity = (1, 2, 3, 4, 5)
+
+        with patch.object(
+            store, "_open_media_source", return_value=(123, identity),
+        ), patch.object(
+            store, "_probe_raw_metadata", side_effect=TimeoutError("probe timeout"),
+        ), patch("config_store.os.close") as close, self.assertRaisesRegex(
+            TimeoutError, "probe timeout",
+        ):
+            store._canonicalize_basic_media_durations(candidate)
+
+        close.assert_called_once_with(123)
+
+    def test_media_open_cleanup_failure_closes_all_directories_and_untransferred_source(self):
+        store = object.__new__(ConfigStore)
+        store.media_root = Path("/media")
+        identity = (1, 2, 3, 4, 5)
+
+        for failing_fd in (11, 10):
+            with self.subTest(failing_fd=failing_fd):
+                closed = []
+
+                def close(descriptor):
+                    closed.append(descriptor)
+                    if descriptor == failing_fd:
+                        raise OSError(f"close {descriptor} failed")
+
+                with patch(
+                    "config_store.os.open", side_effect=(10, 11, 12),
+                ), patch(
+                    "config_store.os.fstat",
+                ) as fstat, patch.object(
+                    store, "_stat_identity", return_value=identity,
+                ), patch("config_store.os.close", side_effect=close), self.assertRaisesRegex(
+                    OSError, f"close {failing_fd} failed",
+                ):
+                    fstat.return_value.st_mode = 0o100644
+                    store._open_media_source("built_in/clip.gif", time.monotonic() + 1)
+
+                self.assertEqual(closed, [11, 10, 12])
+
+    def test_media_record_cleanup_attempts_all_and_preserves_hostile_primary_error(self):
+        class HostilePrimary(Exception):
+            def __str__(self):
+                raise RuntimeError("primary stringification failed")
+
+            def add_note(self, note):
+                raise RuntimeError("primary note failed")
+
+        class HostileCleanup(Exception):
+            def __str__(self):
+                raise RuntimeError("cleanup stringification failed")
+
+        store = object.__new__(ConfigStore)
+        records = [("one.gif", 21, ()), ("two.gif", 22, ())]
+        primary = HostilePrimary()
+        attempted = []
+
+        def close(descriptor):
+            attempted.append(descriptor)
+            if descriptor == 21:
+                raise HostileCleanup()
+            raise KeyboardInterrupt("second cleanup failed")
+
+        with patch("config_store.os.close", side_effect=close):
+            try:
+                try:
+                    raise primary
+                finally:
+                    store._close_media_records(records, primary_error=primary)
+            except BaseException as error:
+                self.assertIs(error, primary)
+
+        self.assertEqual(attempted, [21, 22])
+
+    def test_media_record_cleanup_raises_earliest_cleanup_only_error_after_attempt_all(self):
+        store = object.__new__(ConfigStore)
+        records = [("one.gif", 31, ()), ("two.gif", 32, ())]
+        first = ValueError("first close")
+        attempted = []
+
+        def close(descriptor):
+            attempted.append(descriptor)
+            raise first if descriptor == 31 else RuntimeError("second close")
+
+        with patch("config_store.os.close", side_effect=close), self.assertRaises(
+            ValueError,
+        ) as raised:
+            store._close_media_records(records)
+
+        self.assertIs(raised.exception, first)
+        self.assertEqual(attempted, [31, 32])
+
+    def test_media_directory_entry_aba_is_rejected_by_ctime(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            media_root = root / "media"
+            media_root.mkdir()
+            source = media_root / "aba.gif"
+            Image.new("RGB", (2, 2), "red").save(source)
+            store = ConfigStore(root / "config.json", media_dir=media_root)
+            original_config = store.path.read_bytes()
+            module = {
+                "id": "custom_aba", "name": "ABA", "type": "media",
+                "source": source.name, "fit": "contain", "x": 0, "y": 0,
+                "width": 64, "height": 32, "loops": 1,
+                "playback_speed_percent": 100.0,
+            }
+
+            def aba_entry():
+                held = media_root / "held.gif"
+                source.replace(held)
+                Image.new("RGB", (3, 3), "blue").save(source)
+                source.unlink()
+                held.replace(source)
+
+            with patch.object(
+                store, "_probe_raw_metadata", return_value=("gif", (0.1,)),
+            ), patch.object(
+                store, "_test_before_media_commit_check", aba_entry,
+            ), self.assertRaisesRegex(ValueError, "source changed"):
+                store.update({
+                    "custom_modules": [module],
+                    "playlist": [{
+                        "module": module["id"], "duration": 99, "enabled": True,
+                    }],
+                })
+
+            self.assertEqual(store.path.read_bytes(), original_config)
+
+    def test_media_replacement_at_last_prewrite_seam_is_rejected(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            media_root = root / "media"
+            media_root.mkdir()
+            source = media_root / "replace.gif"
+            Image.new("RGB", (2, 2), "red").save(source)
+            store = ConfigStore(root / "config.json", media_dir=media_root)
+            original_config = store.path.read_bytes()
+            module = {
+                "id": "custom_replace", "name": "Replace", "type": "media",
+                "source": source.name, "fit": "contain", "x": 0, "y": 0,
+                "width": 64, "height": 32, "loops": 1,
+                "playback_speed_percent": 100.0,
+            }
+
+            def replace_entry():
+                replacement = media_root / "new.gif"
+                Image.new("RGB", (3, 3), "blue").save(replacement)
+                replacement.replace(source)
+
+            with patch.object(
+                store, "_probe_raw_metadata", return_value=("gif", (0.1,)),
+            ), patch.object(
+                store, "_test_before_media_commit_check", replace_entry,
+            ), self.assertRaisesRegex(ValueError, "source changed"):
+                store.update({
+                    "custom_modules": [module],
+                    "playlist": [{
+                        "module": module["id"], "duration": 99, "enabled": True,
+                    }],
+                })
+
+            self.assertEqual(store.path.read_bytes(), original_config)
+
+    def test_same_size_media_mutation_with_restored_mtime_is_rejected_at_commit(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            media_root = root / "media"
+            media_root.mkdir()
+            source = media_root / "mutable.gif"
+            Image.new("RGB", (2, 2), "red").save(source)
+            original_stat = source.stat()
+            store = ConfigStore(root / "config.json", media_dir=media_root)
+            original_config = store.path.read_bytes()
+            module = {
+                "id": "custom_mutable", "name": "Mutable", "type": "media",
+                "source": source.name, "fit": "contain", "x": 0, "y": 0,
+                "width": 64, "height": 32, "loops": 1,
+                "playback_speed_percent": 100.0,
+            }
+
+            def mutate_in_place():
+                data = source.read_bytes()
+                source.write_bytes(data[:-1] + bytes([data[-1] ^ 1]))
+                os.utime(source, ns=(original_stat.st_atime_ns, original_stat.st_mtime_ns))
+
+            with patch.object(
+                store, "_probe_raw_metadata", return_value=("gif", (0.1,)),
+            ), patch.object(
+                store, "_test_before_media_commit_check", mutate_in_place, create=True,
+            ), self.assertRaisesRegex(ValueError, "source changed"):
+                store.update({
+                    "custom_modules": [module],
+                    "playlist": [{
+                        "module": module["id"], "duration": 99, "enabled": True,
+                    }],
+                })
+
+            self.assertEqual(store.path.read_bytes(), original_config)
+
+    def test_basic_media_source_symlink_is_never_followed(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            media_root = root / "media"
+            media_root.mkdir()
+            Image.new("RGB", (2, 2), "red").save(media_root / "target.gif")
+            (media_root / "linked.gif").symlink_to("target.gif")
+            store = ConfigStore(root / "config.json", media_dir=media_root)
+            module = {
+                "id": "custom_linked", "name": "Linked", "type": "media",
+                "source": "linked.gif", "fit": "contain", "x": 0, "y": 0,
+                "width": 64, "height": 32, "loops": 1,
+                "playback_speed_percent": 100.0,
+            }
+
+            with patch.object(store, "_probe_raw_metadata") as probe:
+                saved = store.update({
+                    "custom_modules": [module],
+                    "playlist": [{
+                        "module": module["id"], "duration": 99, "enabled": True,
+                    }],
+                })
+
+            probe.assert_not_called()
+            self.assertEqual(saved["playlist"][0]["duration"], 99)
+
+    def test_metadata_worker_launch_overhead_consumes_aggregate_deadline_and_reaps(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            media_root = root / "media"
+            media_root.mkdir()
+            Image.new("RGB", (2, 2), "red").save(media_root / "launch.gif")
+            store = ConfigStore(root / "config.json", media_dir=media_root)
+            module = {
+                "id": "custom_launch", "name": "Launch", "type": "media",
+                "source": "launch.gif", "fit": "contain", "x": 0, "y": 0,
+                "width": 64, "height": 32, "loops": 1,
+                "playback_speed_percent": 100.0,
+            }
+            real_popen = subprocess.Popen
+            pids = []
+
+            def slow_launch(*args, **kwargs):
+                process = real_popen(*args, **kwargs)
+                pids.append(process.pid)
+                time.sleep(0.08)
+                return process
+
+            with patch.object(
+                ConfigStore, "METADATA_PROBE_BUDGET_SECONDS", 0.05,
+            ), patch.object(
+                ConfigStore, "_METADATA_WORKER_SCRIPT", "import time; time.sleep(60)",
+            ), patch("config_store.subprocess.Popen", side_effect=slow_launch), \
+                    self.assertRaisesRegex(TimeoutError, "aggregate budget"):
+                store.update({
+                    "custom_modules": [module],
+                    "playlist": [{
+                        "module": module["id"], "duration": 99, "enabled": True,
+                    }],
+                })
+
+            self.assertEqual(self._wait_for_metadata_workers(store), set())
+            self.assertEqual(len(pids), 1)
+            with self.assertRaises(ProcessLookupError):
+                os.kill(pids[0], 0)
+
+    def test_wait_timeout_transfers_killed_worker_to_durable_reaper_within_budget(self):
+        class Stream:
+            def __init__(self):
+                self.closed = False
+
+            def close(self):
+                self.closed = True
+
+        class Process:
+            pid = 424242
+
+            def __init__(self):
+                self.stdout = Stream()
+                self.stderr = Stream()
+                self.returncode = None
+                self.reaped = threading.Event()
+                self.timed_waits = 0
+
+            def communicate(self, timeout):
+                raise subprocess.TimeoutExpired(["metadata-worker"], timeout)
+
+            def poll(self):
+                return -9 if self.reaped.is_set() else None
+
+            def wait(self, timeout=None):
+                if timeout is not None:
+                    self.timed_waits += 1
+                    raise subprocess.TimeoutExpired(["metadata-worker"], timeout)
+                self.returncode = -9
+                self.reaped.set()
+                return self.returncode
+
+        process = Process()
+        store = object.__new__(ConfigStore)
+        store._metadata_workers = set()
+        started = time.monotonic()
+
+        with patch.object(
+            ConfigStore, "METADATA_PROBE_BUDGET_SECONDS", 0.05,
+        ), patch("config_store.subprocess.Popen", return_value=process), \
+                patch("config_store.os.killpg") as killpg, \
+                self.assertRaisesRegex(TimeoutError, "aggregate budget"):
+            store._probe_raw_metadata(7, ".gif", started + 0.05)
+        elapsed = time.monotonic() - started
+
+        self.assertLess(elapsed, 0.2)
+        killpg.assert_called_once_with(process.pid, 9)
+        self.assertTrue(process.reaped.wait(1))
+        self.assertGreaterEqual(process.timed_waits, 1)
+        self.assertTrue(process.stdout.closed)
+        self.assertTrue(process.stderr.closed)
+        self.assertEqual(store._metadata_workers, set())
+
+    def test_metadata_worker_never_launches_without_preestablished_reaper_owner(self):
+        class FreshReaperStore(ConfigStore):
+            _metadata_reaper_threads = ()
+            _metadata_reaper_queues = ()
+            _metadata_reaper_index = 0
+            _metadata_reaper_emergency = {}
+            _metadata_reaper_lock = threading.Lock()
+
+        store = object.__new__(FreshReaperStore)
+        store._metadata_workers = set()
+
+        with patch(
+            "config_store.threading.Thread.start", side_effect=RuntimeError("thread unavailable"),
+        ), patch(
+            "config_store.subprocess.Popen",
+            side_effect=AssertionError("child launched without durable owner"),
+        ) as popen, self.assertRaisesRegex(RuntimeError, "thread unavailable"):
+            store._probe_raw_metadata(123, ".gif", time.monotonic() + 1)
+
+        popen.assert_not_called()
+        self.assertEqual(store._metadata_workers, set())
+
+    def test_metadata_timeout_falls_back_to_exact_child_kill_if_group_kill_fails(self):
+        class Stream:
+            def __init__(self):
+                self.closed = False
+
+            def close(self):
+                self.closed = True
+
+        class Process:
+            pid = 454545
+
+            def __init__(self):
+                self.stdout = Stream()
+                self.stderr = Stream()
+                self.returncode = None
+                self.killed = False
+                self.reaped = False
+
+            def communicate(self, timeout):
+                raise subprocess.TimeoutExpired(["worker"], timeout)
+
+            def poll(self):
+                return -9 if self.reaped else None
+
+            def kill(self):
+                self.killed = True
+
+            def wait(self, timeout=None):
+                if not self.killed:
+                    raise AssertionError("exact child was not killed")
+                self.reaped = True
+                self.returncode = -9
+                return -9
+
+        store = object.__new__(ConfigStore)
+        store._metadata_workers = set()
+        process = Process()
+
+        with patch("config_store.subprocess.Popen", return_value=process), patch(
+            "config_store.os.killpg", side_effect=PermissionError("group unavailable"),
+        ), self.assertRaisesRegex(TimeoutError, "aggregate budget"):
+            store._probe_raw_metadata(123, ".gif", time.monotonic() + 1)
+
+        self.assertTrue(process.killed)
+        self.assertTrue(process.reaped)
+        self.assertTrue(process.stdout.closed)
+        self.assertTrue(process.stderr.closed)
+        self.assertEqual(store._metadata_workers, set())
+
+    def test_metadata_reaper_retries_interrupted_wait_before_releasing_ownership(self):
+        class Stream:
+            def __init__(self):
+                self.closed = False
+
+            def close(self):
+                self.closed = True
+
+        class Process:
+            pid = 434343
+
+            def __init__(self):
+                self.stdout = Stream()
+                self.stderr = Stream()
+                self.waits = 0
+
+            def wait(self):
+                self.waits += 1
+                if self.waits == 1:
+                    raise InterruptedError("signal")
+                if self.waits == 2:
+                    raise OSError("transient wait failure")
+                return -9
+
+        process = Process()
+        workers = {process}
+
+        ConfigStore._finish_metadata_worker(process, workers)
+
+        self.assertEqual(process.waits, 3)
+        self.assertTrue(process.stdout.closed)
+        self.assertTrue(process.stderr.closed)
+        self.assertEqual(workers, set())
+
+    def test_metadata_reaper_closes_each_pipe_and_releases_accounting_on_close_fault(self):
+        class Stream:
+            def __init__(self, error=None):
+                self.error = error
+                self.close_attempted = False
+
+            def close(self):
+                self.close_attempted = True
+                if self.error is not None:
+                    raise self.error
+
+        class Process:
+            def __init__(self):
+                self.stdout = Stream(ValueError("stdout close failed"))
+                self.stderr = Stream()
+
+            def wait(self):
+                return -9
+
+        process = Process()
+        workers = {process}
+
+        with self.assertRaisesRegex(ValueError, "stdout close failed"):
+            ConfigStore._finish_metadata_worker(process, workers)
+
+        self.assertTrue(process.stdout.close_attempted)
+        self.assertTrue(process.stderr.close_attempted)
+        self.assertEqual(workers, set())
+
+    def test_timed_out_metadata_worker_is_killed_reaped_and_unregistered(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            media_root = root / "media"
+            media_root.mkdir()
+            Image.new("RGB", (2, 2), "red").save(media_root / "slow.gif")
+            store = ConfigStore(root / "config.json", media_dir=media_root)
+            module = {
+                "id": "custom_slow_worker", "name": "Slow worker", "type": "media",
+                "source": "slow.gif", "fit": "contain", "x": 0, "y": 0,
+                "width": 64, "height": 32, "loops": 1,
+                "playback_speed_percent": 100.0,
+            }
+            started_pids = []
+
+            with patch.object(
+                ConfigStore, "METADATA_PROBE_BUDGET_SECONDS", 0.2,
+            ), patch.object(
+                ConfigStore, "_METADATA_WORKER_SCRIPT",
+                "import time; time.sleep(60)", create=True,
+            ), patch.object(
+                ConfigStore, "_test_worker_started", started_pids.append, create=True,
+            ), self.assertRaisesRegex(TimeoutError, "aggregate budget"):
+                store.update({
+                    "custom_modules": [module],
+                    "playlist": [{
+                        "module": module["id"], "duration": 99, "enabled": True,
+                    }],
+                })
+
+            self.assertEqual(len(started_pids), 1)
+            self.assertEqual(self._wait_for_metadata_workers(store), set())
+            with self.assertRaises(ProcessLookupError):
+                os.kill(started_pids[0], 0)
+
+    def test_duplicate_failed_basic_media_source_is_attempted_once(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            media_root = root / "media"
+            media_root.mkdir()
+            (media_root / "bad.gif").write_bytes(b"not a gif")
+            store = ConfigStore(root / "config.json", media_dir=media_root)
+            modules = [
+                {
+                    "id": f"custom_bad_{index}", "name": f"Bad {index}",
+                    "type": "media", "source": "bad.gif", "fit": "contain",
+                    "x": 0, "y": 0, "width": 64, "height": 32,
+                    "loops": index + 1, "playback_speed_percent": 100.0,
+                }
+                for index in range(2)
+            ]
+            playlist = [
+                {"module": module["id"], "duration": 99, "enabled": True}
+                for module in modules
+            ]
+
+            with patch.object(
+                store, "_probe_raw_metadata", side_effect=ValueError("bad metadata"),
+            ) as probe:
+                saved = store.update({"custom_modules": modules, "playlist": playlist})
+
+            probe.assert_called_once()
+            self.assertEqual([item["duration"] for item in saved["playlist"]], [99, 99])
+
+    def test_duplicate_basic_media_rows_probe_each_immutable_source_once_per_update(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            media_root = root / "media"
+            media_root.mkdir()
+            source = media_root / "same.gif"
+            Image.new("RGB", (2, 2), "red").save(source)
+            store = ConfigStore(root / "config.json", media_dir=media_root)
+            module = {
+                "id": "custom_same", "name": "Same", "type": "media",
+                "source": source.name, "fit": "contain", "x": 0, "y": 0,
+                "width": 64, "height": 32, "loops": 1,
+                "playback_speed_percent": 100.0,
+            }
+            row = {"module": module["id"], "duration": 99, "enabled": True}
+
+            with patch.object(
+                store, "_probe_raw_metadata", return_value=("gif", (2.5,)),
+            ) as probe:
+                saved = store.update({
+                    "custom_modules": [module],
+                    "playlist": [dict(row), dict(row)],
+                })
+
+            probe.assert_called_once()
+            self.assertEqual(
+                [item["duration"] for item in saved["playlist"]], [2.5, 2.5],
+            )
+
+    def test_slow_media_probe_releases_config_lock_and_detects_intervening_revision(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            media_root = root / "media"
+            media_root.mkdir()
+            source = media_root / "slow.gif"
+            Image.new("RGB", (2, 2), "red").save(source)
+            store = ConfigStore(root / "config.json", media_dir=media_root)
+            module = {
+                "id": "custom_slow", "name": "Slow", "type": "media",
+                "source": source.name, "fit": "contain", "x": 0, "y": 0,
+                "width": 64, "height": 32, "loops": 1,
+                "playback_speed_percent": 100.0,
+            }
+            probe_entered = threading.Event()
+            release_probe = threading.Event()
+            get_done = threading.Event()
+            update_done = threading.Event()
+            media_results = []
+            update_results = []
+
+            def slow_probe(*_args):
+                probe_entered.set()
+                if not release_probe.wait(2):
+                    raise TimeoutError("test did not release probe")
+                return "gif", (2.5,)
+
+            def media_update():
+                try:
+                    media_results.append(store.update({
+                        "custom_modules": [module],
+                        "playlist": [{
+                            "module": module["id"], "duration": 99, "enabled": True,
+                        }],
+                    }, base_revision=0))
+                except Exception as error:
+                    media_results.append(error)
+
+            def read_config():
+                store.get()
+                get_done.set()
+
+            def unrelated_update():
+                try:
+                    update_results.append(store.update(
+                        {"device": {"name": "Concurrent winner"}}, base_revision=0,
+                    ))
+                except Exception as error:
+                    update_results.append(error)
+                finally:
+                    update_done.set()
+
+            with patch.object(store, "_probe_raw_metadata", side_effect=slow_probe):
+                media_thread = threading.Thread(target=media_update)
+                media_thread.start()
+                self.assertTrue(probe_entered.wait(1))
+                get_thread = threading.Thread(target=read_config)
+                update_thread = threading.Thread(target=unrelated_update)
+                get_thread.start()
+                update_thread.start()
+                get_completed_while_probe_blocked = get_done.wait(1)
+                update_completed_while_probe_blocked = update_done.wait(1)
+                release_probe.set()
+                for thread in (media_thread, get_thread, update_thread):
+                    thread.join(2)
+                    self.assertFalse(thread.is_alive())
+
+            self.assertTrue(get_completed_while_probe_blocked)
+            self.assertTrue(update_completed_while_probe_blocked)
+            self.assertIsInstance(media_results[0], ConfigConflictError)
+            self.assertIsInstance(update_results[0], dict)
+            self.assertEqual(store.get()["device"]["name"], "Concurrent winner")
+
+    def test_basic_media_probes_share_one_bounded_aggregate_metadata_budget(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            media_root = root / "media"
+            media_root.mkdir()
+            for filename in ("first.gif", "second.gif"):
+                Image.new("RGB", (2, 2), "red").save(media_root / filename)
+            store = ConfigStore(root / "config.json", media_dir=media_root)
+            original_config = store.path.read_bytes()
+            modules = [
+                {
+                    "id": f"custom_{index}", "name": f"Media {index}", "type": "media",
+                    "source": filename, "fit": "contain", "x": 0, "y": 0,
+                    "width": 64, "height": 32, "loops": 1,
+                    "playback_speed_percent": 100.0,
+                }
+                for index, filename in enumerate(("first.gif", "second.gif"))
+            ]
+            playlist = [
+                {"module": module["id"], "duration": 99, "enabled": True}
+                for module in modules
+            ]
+
+            def slow_probe(*_args):
+                time.sleep(0.02)
+                return "gif", (2.5,)
+
+            started = time.monotonic()
+            with patch.object(
+                ConfigStore, "METADATA_PROBE_BUDGET_SECONDS", 0.01, create=True,
+            ), patch.object(
+                store, "_probe_raw_metadata", side_effect=slow_probe,
+            ) as probe, self.assertRaisesRegex(TimeoutError, "aggregate budget"):
+                store.update({
+                    "custom_modules": modules, "playlist": playlist,
+                })
+            elapsed = time.monotonic() - started
+
+            probe.assert_called_once()
+            self.assertLess(elapsed, 0.1)
+            self.assertEqual(store.path.read_bytes(), original_config)
+
+    def test_media_source_replaced_during_probe_cannot_authorize_stale_duration(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            media_root = root / "media"
+            media_root.mkdir()
+            source = media_root / "changing.gif"
+            Image.new("RGB", (2, 2), "red").save(source)
+            path = root / "config.json"
+            store = ConfigStore(path, media_dir=media_root)
+            original = path.read_bytes()
+            module = {
+                "id": "custom_changing", "name": "Changing", "type": "media",
+                "source": source.name, "fit": "contain", "x": 0, "y": 0,
+                "width": 64, "height": 32, "loops": 1,
+                "playback_speed_percent": 100.0,
+            }
+
+            def replacing_probe(*_args):
+                replacement = media_root / "replacement.gif"
+                Image.new("RGB", (3, 3), "blue").save(replacement)
+                replacement.replace(source)
+                return "gif", (2.5,)
+
+            with patch.object(
+                store, "_probe_raw_metadata", side_effect=replacing_probe,
+            ), self.assertRaisesRegex(ValueError, "source changed"):
+                store.update({
+                    "custom_modules": [module],
+                    "playlist": [{
+                        "module": module["id"], "duration": 99, "enabled": True,
+                    }],
+                })
+
+            self.assertEqual(path.read_bytes(), original)
+
+    def test_basic_media_computed_duration_over_save_bound_is_rejected_before_persistence(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            media_root = root / "media"
+            media_root.mkdir()
+            Image.new("RGB", (2, 2), "red").save(
+                media_root / "too-long.gif", duration=40_000,
+            )
+            path = root / "config.json"
+            store = ConfigStore(path, media_dir=media_root)
+            original = path.read_bytes()
+            module = {
+                "id": "custom_too_long", "name": "Too long", "type": "media",
+                "source": "too-long.gif", "fit": "contain", "x": 0, "y": 0,
+                "width": 64, "height": 32, "loops": 10,
+                "playback_speed_percent": 10.0,
+            }
+
+            changes = {
+                "custom_modules": [module],
+                "playlist": [{
+                    "module": module["id"], "duration": 1, "enabled": True,
+                }],
+            }
+            with self.assertRaisesRegex(ValueError, "duration.*3600"):
+                store.update(changes)
+            with self.assertRaisesRegex(ValueError, "duration.*3600"):
+                store.validate_candidate(changes)
+
+            self.assertEqual(path.read_bytes(), original)
+            self.assertEqual(ConfigStore(path, media_dir=media_root).get(), store.get())
+
+    @unittest.skipUnless(shutil.which("ffmpeg") and shutil.which("ffprobe"), "FFmpeg is required")
+    def test_basic_mp4_playlist_duration_uses_decoded_frames_physical_fps_speed_and_loops(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            media_root = root / "media"
+            media_root.mkdir()
+            source = media_root / "five-frames.mp4"
+            subprocess.run([
+                "ffmpeg", "-nostdin", "-v", "error", "-f", "lavfi",
+                "-i", "color=c=red:s=16x16:r=5:d=1", "-frames:v", "5",
+                "-c:v", "mpeg4", str(source),
+            ], check=True, timeout=15)
+            store = ConfigStore(root / "config.json", media_dir=media_root)
+            module = {
+                "id": "custom_video", "name": "Video", "type": "media",
+                "source": source.name, "fit": "contain", "x": 0, "y": 0,
+                "width": 64, "height": 32, "loops": 3,
+                "playback_speed_percent": 200.0,
+            }
+
+            saved = store.update({
+                "custom_modules": [module],
+                "playlist": [{"module": module["id"], "duration": 99, "enabled": True}],
+            })
+
+            # Physical Basic playback decodes all five source frames without
+            # transcoding, then clocks them at 20 FPS / 2x for three loops.
+            self.assertEqual(store._metadata_workers, set())
+            self.assertAlmostEqual(saved["playlist"][0]["duration"], 5 / 20 / 2 * 3)
+
+    def test_priority_1_6_builtin_media_speed_defaults_and_normalizes_exact_percentages(self):
+        candidate = json.loads(json.dumps(DEFAULT_CONFIG))
+        self.assertEqual(candidate["media_layout"]["splash"]["playback_speed_percent"], 100.0)
+        self.assertEqual(candidate["media_layout"]["sleep"]["playback_speed_percent"], 100.0)
+
+        candidate["media_layout"]["splash"]["playback_speed_percent"] = 100
+        candidate["media_layout"]["sleep"]["playback_speed_percent"] = 10.0
+        validated = validate_config(candidate)
+
+        self.assertEqual(validated["media_layout"]["splash"]["playback_speed_percent"], 100.0)
+        self.assertIs(type(validated["media_layout"]["splash"]["playback_speed_percent"]), float)
+        self.assertEqual(validated["media_layout"]["sleep"]["playback_speed_percent"], 10.0)
+
+    def test_priority_1_6_builtin_media_speed_rejects_unsupported_values(self):
+        invalid = [
+            True, False, 0, -10, 9.9, 400.1, 100.01,
+            100.00000004, 399.99999996,
+            "100", None, float("inf"), float("nan"),
+        ]
+        for value in invalid:
+            with self.subTest(value=value):
+                candidate = json.loads(json.dumps(DEFAULT_CONFIG))
+                candidate["media_layout"]["splash"]["playback_speed_percent"] = value
+                with self.assertRaisesRegex(ValueError, "playback speed"):
+                    validate_config(candidate)
+
+    def test_priority_1_6_schema_two_migrates_all_builtin_media_to_normal_speed_once(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "config.json"
+            legacy = json.loads(json.dumps(DEFAULT_CONFIG))
+            legacy["schema_version"] = 2
+            legacy["revision"] = 41
+            legacy["device"]["name"] = "speed migration sentinel"
+            for settings in legacy["media_layout"].values():
+                settings.pop("playback_speed_percent", None)
+            legacy["media_layout"]["sleep"]["gif_speed_percent"] = 275
+            path.write_text(json.dumps(legacy))
+
+            migrated = ConfigStore(path).get()
+
+            self.assertEqual(migrated["schema_version"], 3)
+            self.assertEqual(migrated["revision"], 42)
+            self.assertEqual(migrated["device"]["name"], "speed migration sentinel")
+            self.assertNotIn("gif_speed_percent", migrated["media_layout"]["sleep"])
+            self.assertEqual(migrated["media_layout"]["splash"]["playback_speed_percent"], 100.0)
+            self.assertEqual(migrated["media_layout"]["sleep"]["playback_speed_percent"], 100.0)
+            migrated_bytes = path.read_bytes()
+            self.assertEqual(ConfigStore(path).get(), migrated)
+            self.assertEqual(path.read_bytes(), migrated_bytes)
+
+    def test_priority_1_6_schema_two_adds_nested_media_speed_defaults_without_touching_colours(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "config.json"
+            legacy = json.loads(json.dumps(DEFAULT_CONFIG))
+            legacy["schema_version"] = 2
+            announcement = self.announcement()
+            announcement.pop("playback_speed_percent")
+            legacy["announcement_board"]["announcements"] = [announcement]
+            canvas = self.advanced_module()
+            canvas["background"] = "#ABCDEF"
+            canvas["layers"].append({
+                "id": "layer_media", "name": "Media", "type": "media", "visible": True,
+                "properties": {"x": 0, "y": 0, "width": 64, "height": 32,
+                               "rotation": 0, "source": "same.gif", "keep_aspect": True},
+                "keyframes": [{"frame": 1, "easing": "step", "properties": {"source": "same.gif"}}],
+            })
+            canvas["overrides"].append({"frame": 2, "layer_id": "layer_media",
+                                        "properties": {"source": "same.gif"}})
+            legacy["custom_modules"] = [canvas]
+            path.write_text(json.dumps(legacy))
+
+            migrated = ConfigStore(path).get()
+
+            self.assertEqual(migrated["announcement_board"]["announcements"][0]["playback_speed_percent"], 100.0)
+            layer = migrated["custom_modules"][0]["layers"][1]
+            self.assertEqual(layer["properties"]["playback_speed_percent"], 100.0)
+            self.assertEqual(layer["keyframes"][0]["properties"]["playback_speed_percent"], 100.0)
+            override = next(item for item in migrated["custom_modules"][0]["overrides"]
+                            if item["layer_id"] == "layer_media")
+            self.assertEqual(override["properties"]["playback_speed_percent"], 100.0)
+            self.assertEqual(migrated["custom_modules"][0]["background"], "#ABCDEF")
+
+    def test_priority_1_6_announcement_media_speed_is_canonical(self):
+        candidate = json.loads(json.dumps(DEFAULT_CONFIG))
+        announcement = self.announcement()
+        announcement["playback_speed_percent"] = 175
+        candidate["announcement_board"]["announcements"] = [announcement]
+
+        validated = validate_config(candidate)
+
+        self.assertEqual(
+            validated["announcement_board"]["announcements"][0]["playback_speed_percent"],
+            175.0,
+        )
 
 
 if __name__ == "__main__":

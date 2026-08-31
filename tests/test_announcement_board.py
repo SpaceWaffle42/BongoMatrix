@@ -997,6 +997,181 @@ class AnnouncementBoardTests(unittest.TestCase):
         self.assertEqual([call.args[1] for call in matrix.draw_image.call_args_list], [49, 33, 17, 1])
         self.assertEqual([call.args[1] for call in matrix.draw_text.call_args_list], [66, 50, 34, 18])
 
+    def test_priority_1_6_cancellation_immediately_before_first_swap_admits_no_frame(self):
+        matrix = Mock()
+        matrix.matrix.width = 64
+        matrix.matrix.height = 32
+        matrix.matrix.CreateFrameCanvas.return_value = "canvas"
+        matrix.font.return_value = "font"
+        matrix.colour_rgb.return_value = Mock(red=0, green=0, blue=0)
+        stop = Mock()
+        stop.is_set.side_effect = [False, False, False, True]
+        announcement = self.item("announcement_pre_submit_cancel", "09:00", "17:00")
+        announcement["message"] = ""
+
+        result = announcement_board._run_announcements(
+            matrix, [announcement], stop_event=stop,
+        )
+
+        self.assertFalse(result)
+        matrix.swap.assert_not_called()
+
+    def test_priority_1_6_cancellation_immediately_before_later_swap_returns_true_for_earlier_frame(self):
+        matrix = Mock()
+        matrix.matrix.width = 64
+        matrix.matrix.height = 32
+        matrix.matrix.CreateFrameCanvas.return_value = "canvas"
+        matrix.font.return_value = "font"
+        matrix.colour_rgb.return_value = Mock(red=0, green=0, blue=0)
+        matrix.media_frames.return_value = [
+            Image.new("RGB", (2, 2), "red"), Image.new("RGB", (2, 2), "blue"),
+        ]
+        matrix.swap.return_value = "canvas"
+        stop = Mock()
+        stop.is_set.side_effect = [False] * 7 + [True]
+        stop.wait.return_value = False
+        announcement = self.item("announcement_later_pre_submit_cancel", "09:00", "17:00")
+        announcement.update({"layout": "full_image_notice", "media": "clip.mp4"})
+        announcement["message"] = ""
+        announcement["timing"]["duration_seconds"] = 0.2
+
+        result = announcement_board._run_announcements(
+            matrix, [announcement], stop_event=stop,
+        )
+
+        self.assertTrue(result)
+        matrix.swap.assert_called_once_with("canvas")
+
+    def test_priority_1_6_long_animation_is_truncated_without_cadence_redistribution(self):
+        for speed_percent in (10.0, 100.0, 400.0):
+            with self.subTest(speed_percent=speed_percent):
+                matrix = Mock()
+                matrix.matrix.width = 64
+                matrix.matrix.height = 32
+                matrix.matrix.CreateFrameCanvas.side_effect = [
+                    "canvas-1", "canvas-2", "canvas-3",
+                ]
+                matrix.colour_rgb.return_value = Mock(red=0, green=0, blue=0)
+                matrix.font.return_value = "font"
+                source_frames = [
+                    Image.new("RGB", (2, 2), colour)
+                    for colour in ("red", "blue", "green", "white")
+                ]
+                matrix.media_frames.return_value = source_frames
+                announcement = self.item("announcement_long_media", "09:00", "17:00")
+                announcement.update({
+                    "layout": "full_image_notice", "media": "clip.gif",
+                    "playback_speed_percent": speed_percent,
+                })
+                announcement["timing"]["duration_seconds"] = 0.12
+
+                frames = list(announcement_board.announcement_frames(matrix, [announcement]))
+
+                self.assertEqual([delay for _canvas, delay in frames], [50.0, 50.0, 20.0])
+                self.assertEqual(
+                    [call.args[0] for call in matrix.draw_image.call_args_list],
+                    source_frames[:3],
+                )
+
+    def test_priority_1_6_animated_hold_does_not_change_transition_or_total_timing(self):
+        matrix = Mock()
+        matrix.matrix.width = 64
+        matrix.matrix.height = 32
+        matrix.matrix.CreateFrameCanvas.return_value = "canvas"
+        matrix.colour_rgb.side_effect = lambda value: Mock(
+            red=int(value[1:3], 16), green=int(value[3:5], 16), blue=int(value[5:7], 16),
+        )
+        matrix.font.return_value = "font"
+        matrix.media_frames.return_value = [
+            Image.new("RGB", (2, 2), "red"), Image.new("RGB", (2, 2), "blue"),
+        ]
+        matrix.swap.return_value = "canvas"
+        stop = Mock()
+        stop.is_set.return_value = False
+        stop.wait.return_value = False
+        announcement = self.item("announcement_animated_fade", "09:00", "17:00")
+        announcement.update({
+            "layout": "full_image_notice", "media": "clip.mp4",
+            "playback_speed_percent": 100.0,
+            "transition": {"type": "fade", "duration_seconds": 0.4},
+        })
+        announcement["timing"]["duration_seconds"] = 0.12
+
+        self.assertTrue(announcement_board._run_announcements(
+            matrix, [announcement], stop_event=stop,
+        ))
+
+        self.assertEqual(
+            [call.args[0] for call in stop.wait.call_args_list],
+            [0.1, 0.1, 0.1, 0.1, 0.05, 0.05, 0.02],
+        )
+        self.assertEqual(matrix.swap.call_count, 7)
+
+    def test_priority_1_6_cancellation_during_later_animation_draw_preserves_earlier_admission(self):
+        matrix = Mock()
+        matrix.matrix.width = 64
+        matrix.matrix.height = 32
+        matrix.matrix.CreateFrameCanvas.return_value = "canvas"
+        matrix.colour_rgb.return_value = Mock(red=0, green=0, blue=0)
+        matrix.font.return_value = "font"
+        matrix.media_frames.return_value = [
+            Image.new("RGB", (2, 2), "red"), Image.new("RGB", (2, 2), "blue"),
+        ]
+        matrix.swap.return_value = "canvas"
+        stop = threading.Event()
+        draw_count = 0
+
+        def cancel_second_draw(*args, **kwargs):
+            nonlocal draw_count
+            draw_count += 1
+            if draw_count == 2:
+                stop.set()
+
+        matrix.draw_image.side_effect = cancel_second_draw
+        announcement = self.item("announcement_cancel_later_draw", "09:00", "17:00")
+        announcement.update({"layout": "full_image_notice", "media": "clip.mp4"})
+        announcement["timing"]["duration_seconds"] = 0.2
+
+        result = announcement_board._run_announcements(
+            matrix, [announcement], stop_event=stop,
+        )
+
+        self.assertTrue(result)
+        matrix.swap.assert_called_once_with("canvas")
+
+    def test_priority_1_6_finite_animation_loops_at_canonical_cadence_until_hold_expires(self):
+        for speed_percent in (10.0, 100.0, 400.0):
+            with self.subTest(speed_percent=speed_percent):
+                matrix = Mock()
+                matrix.matrix.width = 64
+                matrix.matrix.height = 32
+                matrix.matrix.CreateFrameCanvas.side_effect = [
+                    "canvas-1", "canvas-2", "canvas-3",
+                ]
+                matrix.colour_rgb.return_value = Mock(red=0, green=0, blue=0)
+                matrix.font.return_value = "font"
+                red = Image.new("RGB", (2, 2), "red")
+                blue = Image.new("RGB", (2, 2), "blue")
+                matrix.media_frames.return_value = [red, blue]
+                announcement = self.item("announcement_media_speed", "09:00", "17:00")
+                announcement.update({
+                    "layout": "full_image_notice", "media": "clip.mp4",
+                    "playback_speed_percent": speed_percent,
+                })
+                announcement["timing"]["duration_seconds"] = 0.12
+
+                frames = list(announcement_board.announcement_frames(matrix, [announcement]))
+
+                self.assertEqual([delay for _canvas, delay in frames], [50.0, 50.0, 20.0])
+                self.assertEqual(
+                    matrix.media_frames.call_args.kwargs["playback_rate"],
+                    speed_percent / 100.0,
+                )
+                self.assertEqual(
+                    [call.args[0] for call in matrix.draw_image.call_args_list],
+                    [red, blue, red],
+                )
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -87,7 +87,7 @@ def resolve_layer_properties(layer, frame, overrides):
         elif previous is not None and following is not None:
             if previous["frame"] == following["frame"]:
                 resolved[name] = copy.deepcopy(previous["properties"][name])
-            elif name == "z_index":
+            elif name in {"source", "z_index"}:
                 resolved[name] = copy.deepcopy(previous["properties"][name])
             else:
                 amount = (frame - previous["frame"]) / (following["frame"] - previous["frame"])
@@ -182,7 +182,11 @@ def media_frame_index(layer, frame):
 def _draw_layer(matrix, canvas, layer, properties, *, media_cache=None, frame=0):
     layer_type = layer["type"]
     if layer_type == "media":
-        images = (media_cache or {}).get(properties["source"], [])
+        cache_key = (
+            properties["source"],
+            properties.get("playback_speed_percent", 100.0) / 100.0,
+        )
+        images = (media_cache or {}).get(cache_key, [])
         if images:
             matrix.draw_image(
                 images[media_frame_index(layer, frame) % len(images)], round(properties["x"]), round(properties["y"]),
@@ -234,35 +238,36 @@ def _draw_layer(matrix, canvas, layer, properties, *, media_cache=None, frame=0)
 
 
 def _canvas_media_cache(matrix, stop_event, module_config, pinned_handles=None):
-    media_sources = set()
+    media_identities = set()
     for layer in module_config["layers"]:
         if layer["type"] != "media":
             continue
-        if "source" in layer["properties"]:
-            media_sources.add(layer["properties"]["source"])
-        for keyframe in layer.get("keyframes", []):
-            if "source" in keyframe["properties"]:
-                media_sources.add(keyframe["properties"]["source"])
-        for override in module_config["overrides"]:
-            if override["layer_id"] == layer["id"] and "source" in override["properties"]:
-                media_sources.add(override["properties"]["source"])
+        for frame in range(module_config["frame_count"]):
+            properties = resolve_layer_properties(
+                layer, frame, module_config["overrides"],
+            )
+            if "source" in properties:
+                media_identities.add((
+                    properties["source"],
+                    properties.get("playback_speed_percent", 100.0) / 100.0,
+                ))
 
     media_cache = {}
     media_cache_bytes = 0
     prepare_deadline = (
-        time.monotonic() + CANVAS_MEDIA_PREPARE_TIMEOUT if media_sources else None
+        time.monotonic() + CANVAS_MEDIA_PREPARE_TIMEOUT if media_identities else None
     )
-    sorted_media_sources = sorted(media_sources)
-    for index, source in enumerate(sorted_media_sources):
+    sorted_media_identities = sorted(media_identities)
+    for index, (source, playback_rate) in enumerate(sorted_media_identities):
         if prepare_deadline is None:
             raise RuntimeError("canvas media preparation deadline is unavailable")
         if stop_event is not None and stop_event.is_set() is True:
             return None
         remaining = prepare_deadline - time.monotonic()
         if remaining <= 0:
-            media_cache[source] = []
+            media_cache[(source, playback_rate)] = []
             continue
-        remaining_source_count = len(sorted_media_sources) - index
+        remaining_source_count = len(sorted_media_identities) - index
         try:
             media_options = {
                 "stop_event": stop_event,
@@ -271,6 +276,7 @@ def _canvas_media_cache(matrix, stop_event, module_config, pinned_handles=None):
                     CANVAS_MEDIA_PREPARE_TIMEOUT,
                     remaining / remaining_source_count,
                 ),
+                "playback_rate": playback_rate,
             }
             pinned_handle = (pinned_handles or {}).get(source)
             if pinned_handle is not None:
@@ -290,7 +296,7 @@ def _canvas_media_cache(matrix, stop_event, module_config, pinned_handles=None):
         )
         if media_cache_bytes > CANVAS_MEDIA_CACHE_BYTES:
             raise ValueError("canvas media cache exceeds its aggregate memory budget")
-        media_cache[source] = frames
+        media_cache[(source, playback_rate)] = frames
     return media_cache
 
 
@@ -456,6 +462,20 @@ def run(
             matrix, duration, stop_event, module_config,
             pinned_handles=pinned_handles,
         )
+    if module_config["type"] == "media":
+        source = module_config["source"]
+        method = matrix.show_gif if source.lower().endswith(".gif") else matrix.show_video
+        pinned_handle = (pinned_handles or {}).get(source)
+        options = {
+            "x": module_config["x"], "y": module_config["y"],
+            "width": module_config["width"], "height": module_config["height"],
+            "fit": module_config["fit"], "loops": module_config["loops"],
+            "playback_rate": module_config["playback_speed_percent"] / 100.0,
+            "stop_event": stop_event,
+        }
+        if pinned_handle is not None:
+            options["pinned_handle"] = pinned_handle
+        return method(source, **options)
 
     rendered = False
     for canvas, delay in basic_text_frames(matrix, module_config, duration, stop_event):

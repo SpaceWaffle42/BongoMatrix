@@ -4,8 +4,10 @@ from __future__ import annotations
 
 import datetime as dt
 import hashlib
+import math
 import time
 from decimal import Decimal, ROUND_HALF_UP
+from pathlib import Path
 
 from PIL import Image
 
@@ -576,23 +578,36 @@ def announcement_frames(
         if eligibility is not None and not eligibility(announcement):
             continue
         media_frame = None
+        media_frames = []
+        animated = False
+        media_fps = 20
         if announcement["layout"] != "text_notice":
             try:
+                hold_seconds = announcement["timing"].get("duration_seconds", 1)
+                animated = Path(announcement["media"] or "").suffix.lower() in {".gif", ".mp4"}
                 media_options = {
                     "stop_event": stop_event,
                     "preserve_size": True,
                     "decode_timeout": ANNOUNCEMENT_MEDIA_DECODE_TIMEOUT,
                 }
+                if animated:
+                    media_options["playback_rate"] = (
+                        announcement.get("playback_speed_percent", 100.0) / 100.0
+                    )
                 pinned_handle = (pinned_handles or {}).get(announcement["media"])
                 if pinned_handle is not None:
                     media_options["pinned_handle"] = pinned_handle
                 frames = matrix.media_frames(
-                    announcement["media"], 1, 1, **media_options,
+                    announcement["media"],
+                    min(120, max(1, math.ceil(hold_seconds * media_fps))) if animated else 1,
+                    media_fps if animated else 1,
+                    **media_options,
                 )
             except (OSError, ValueError):
                 frames = []
             if stop_event is not None and stop_event.is_set():
                 return
+            media_frames = frames
             media_frame = frames[0] if frames else None
 
         if announcement["timing"]["mode"] == "scroll":
@@ -657,7 +672,25 @@ def announcement_frames(
         hold_ms = clipped(announcement["timing"]["duration_seconds"] * 1000)
         if hold_ms <= 0:
             return
-        yield canvas, hold_ms
+        if not animated or not media_frames:
+            yield canvas, hold_ms
+            continue
+        remaining_ms = hold_ms
+        index = 0
+        while remaining_ms > 0:
+            media_frame = media_frames[index % len(media_frames)]
+            if index:
+                canvas = matrix.matrix.CreateFrameCanvas()
+                _render_static_layout(
+                    matrix, canvas, announcement, stop_event=stop_event,
+                    media_frame=media_frame,
+                )
+            if stop_event is not None and stop_event.is_set():
+                return
+            frame_delay_ms = min(1000 / media_fps, remaining_ms)
+            yield canvas, frame_delay_ms
+            remaining_ms -= frame_delay_ms
+            index += 1
 
 
 def _render_slide(matrix, canvas, announcement, stop_event, media_frame=None):
@@ -764,6 +797,8 @@ def _run_announcements(
         matrix, announcements, duration, stop_event, eligibility,
         pinned_handles=pinned_handles,
     ):
+        if stop_event is not None and stop_event.is_set():
+            break
         matrix.swap(canvas)
         rendered = True
         seconds = delay_ms / 1000

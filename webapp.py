@@ -71,7 +71,7 @@ MEDIA_METADATA_ERRORS = (
 CONFIG_REQUEST_LIMIT = 1_048_576
 CONDITIONAL_HEADER_LIMIT = 4096
 MINIMUM_CLIENT_CONTRACT = 3
-APPLICATION_VERSION = "0.3.59-preview"
+APPLICATION_VERSION = "0.3.60-preview"
 DEVICE_RESTART_PENDING_TTL_SECONDS = 60
 PAIRED_ACTION_HEADER = "X-Matrix-Action"
 PAIRED_ACTION_VALUE = "paired-request"
@@ -354,6 +354,12 @@ def _edit_preview_iterator(
         return advanced_canvas_preview_frames(
             matrix, custom, preview_duration(candidate, module_name), stop_event,
             pinned_handles=pinned_media,
+        )
+    if custom["type"] == "media":
+        source = custom["source"]
+        return media_preview_frames(
+            matrix, source, preview_duration(candidate, module_name), custom,
+            stop_event=stop_event, pinned_handle=pinned_media.get(source),
         )
     return custom_text_preview_frames(
         matrix, custom, preview_duration(candidate, module_name), stop_event,
@@ -944,6 +950,7 @@ def create_app(
             "frame_count": max(1, min(120, round(duration_ms * fps / 1000))),
             "fps": fps,
             "duration_ms": duration_ms,
+            "frame_delays_ms": None,
         }
 
     def media_item(path):
@@ -955,6 +962,7 @@ def create_app(
             animation = {
                 "animated": False, "source_frames": 1,
                 "frame_count": 1, "fps": 1, "duration_ms": None,
+                "frame_delays_ms": None,
             }
             if path.suffix.lower() == ".mp4":
                 width, height, animation = video_metadata(fd)
@@ -965,9 +973,13 @@ def create_app(
                         source_frames = int(getattr(image, "n_frames", 1))
                         if source_frames > 1:
                             durations = []
+                            frame_delays_ms = []
                             for frame_index in range(source_frames):
                                 image.seek(frame_index)
-                                durations.append(max(20, int(image.info.get("duration", 100) or 100)))
+                                raw_delay = image.info.get("duration", 100)
+                                raw_delay = 100 if raw_delay is None else int(raw_delay)
+                                frame_delays_ms.append(max(0, raw_delay))
+                                durations.append(max(20, raw_delay or 100))
                             duration_ms = sum(durations)
                             preferred_fps = max(1, min(60, round(1000 / min(durations))))
                             fps = preferred_fps
@@ -979,6 +991,7 @@ def create_app(
                                 "frame_count": max(1, min(120, round(duration_ms * fps / 1000))),
                                 "fps": fps,
                                 "duration_ms": duration_ms,
+                                "frame_delays_ms": frame_delays_ms,
                             }
             relative_name = path.relative_to(media_root).as_posix()
             return {
@@ -1676,9 +1689,16 @@ def create_app(
     def media_timeline(filename):
         frame_count = request.args.get("frame_count", type=int)
         fps = request.args.get("fps", type=float)
+        speed_text = request.args.get("playback_speed_percent", "100.0")
+        speed = (
+            float(speed_text)
+            if re.fullmatch(r"[0-9]+(?:\.[0-9])?", speed_text or "")
+            else math.nan
+        )
         if (
             frame_count is None or fps is None or not 1 <= frame_count <= 120
             or not math.isfinite(fps) or not 1 <= fps <= 60
+            or not math.isfinite(speed) or not 10 <= speed <= 400
         ):
             return jsonify({"error": "Media timeline bounds are out of range."}), 400
         reference = safe_media_reference(filename)
@@ -1699,7 +1719,7 @@ def create_app(
             frames = controller.matrix.media_frames(
                 reference, frame_count, fps,
                 preserve_size=True, decode_timeout=5,
-                resolved_path=resolved,
+                resolved_path=resolved, playback_rate=speed / 100,
             )
         except (OSError, ValueError, subprocess.SubprocessError):
             LOGGER.exception("Canvas media timeline decode failed")
@@ -2032,7 +2052,9 @@ def create_app(
                         for filename in media_changes.values():
                             if safe_media_reference(filename) is None:
                                 raise ValueError("media filename is invalid")
-                    candidate = config_store.validate_candidate(changes)
+                    candidate = config_store.validate_candidate(
+                        changes, canonicalize_media=False,
+                    )
                     try:
                         with pin_candidate_media(
                             candidate, media_root, allow_missing=default_built_in_media,
