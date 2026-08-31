@@ -7,10 +7,19 @@ import datetime as dt
 import json
 import math
 import os
+import queue
 import re
+import signal
+import stat
+import subprocess
+import sys
 import tempfile
 import threading
+from decimal import Decimal
 from pathlib import Path
+from time import monotonic, sleep
+
+from PIL import Image, ImageSequence
 
 from module_options import LAVA_PALETTES
 from font_catalog import available_font_names, text_width
@@ -38,7 +47,7 @@ ALLOWED_MODULES = {
 }
 PLAYLIST_LIMIT = 256
 CONFIG_SNAPSHOT_LIMIT = 1_048_576
-CURRENT_CONFIG_SCHEMA_VERSION = 2
+CURRENT_CONFIG_SCHEMA_VERSION = 3
 AVAILABLE_FONTS = frozenset(available_font_names())
 
 
@@ -51,6 +60,40 @@ def scrolling_text_duration(module, matrix_width=64):
     rendered_width = text_width(module["font"], module["text"])
     frames_per_loop = scroll_frames(rendered_width, matrix_width=matrix_width, direction=module["direction"])
     return duration_milliseconds(frames_per_loop, module["loops"], module["speed"]) / 1000
+
+
+def _gif_physical_duration(path, loops, playback_rate):
+    """Match gif_media_frames' embedded-delay scaling and 10 ms floor."""
+    with Image.open(path) as image:
+        one_loop = sum(
+            max(0.01, frame.info.get("duration", 100) / 1000.0 / playback_rate)
+            for frame in ImageSequence.Iterator(image)
+        )
+    return one_loop * loops
+
+
+def _mp4_physical_duration(path, loops, playback_rate, physical_fps=20.0, *, timeout=15.0):
+    """Clock the effective decoded source-frame count like show_video."""
+    result = subprocess.run(
+        [
+            "/usr/bin/ffprobe", "-v", "error", "-count_frames",
+            "-select_streams", "v:0", "-show_entries",
+            "stream=nb_read_frames,nb_frames", "-of", "json", str(path),
+        ],
+        check=True, capture_output=True, text=True, timeout=timeout,
+        env={"PATH": "/usr/bin:/bin", "LANG": "C", "LC_ALL": "C"},
+    )
+    if len(result.stdout) > 64 * 1024:
+        raise ValueError("MP4 metadata is too large")
+    metadata = json.loads(result.stdout)
+    streams = metadata.get("streams")
+    if not isinstance(streams, list) or len(streams) != 1:
+        raise ValueError("MP4 frame count is unavailable")
+    stream = streams[0]
+    frame_count = int(stream.get("nb_read_frames") or stream.get("nb_frames"))
+    if frame_count < 1:
+        raise ValueError("MP4 frame count is unavailable")
+    return frame_count / physical_fps / playback_rate * loops
 
 DEFAULT_CONFIG = {
     "schema_version": CURRENT_CONFIG_SCHEMA_VERSION,
@@ -136,8 +179,8 @@ DEFAULT_CONFIG = {
     },
     "media": {"splash": "built-in/squares_tb.gif", "sleep": "built-in/sleep.gif"},
     "media_layout": {
-        "splash": {"x": 0, "y": 0, "width": 64, "height": 32, "keep_aspect": True, "video_fps": 20},
-        "sleep": {"x": 0, "y": 0, "width": 64, "height": 32, "keep_aspect": True, "video_fps": 20, "gif_speed_percent": 100},
+        "splash": {"x": 0, "y": 0, "width": 64, "height": 32, "keep_aspect": True, "video_fps": 20, "playback_speed_percent": 100.0},
+        "sleep": {"x": 0, "y": 0, "width": 64, "height": 32, "keep_aspect": True, "video_fps": 20, "playback_speed_percent": 100.0},
     },
     "announcement_board": {"announcements": []},
     "custom_modules": [],
@@ -199,6 +242,26 @@ def _is_hex_colour(value):
 def _validate_frame_delay(value, name):
     if isinstance(value, bool) or not isinstance(value, (int, float)) or not 0.01 <= value <= 1:
         raise ValueError(f"{name} frame delay must be between 0.01 and 1 second")
+
+
+def _normalize_playback_speed(value, name="media"):
+    """Validate and canonicalize one exact percentage-point speed."""
+    message = (
+        f"{name} playback speed must be 10.0-400.0 percent with at most one decimal place"
+    )
+    if (
+        isinstance(value, bool)
+        or not isinstance(value, (int, float))
+        or not math.isfinite(value)
+    ):
+        raise ValueError(message)
+    decimal_value = Decimal(str(value))
+    if (
+        not Decimal("10.0") <= decimal_value <= Decimal("400.0")
+        or decimal_value * 10 != (decimal_value * 10).to_integral_value()
+    ):
+        raise ValueError(message)
+    return float(decimal_value)
 
 
 def _validate_openweather_settings(settings, name, *, forecast=False):
@@ -280,6 +343,8 @@ def _validate_canvas_properties(properties, layer_type, *, partial=False):
     if fields is None:
         raise ValueError("custom canvas layer type is not supported")
     optional_fields = {"rotation"} if layer_type in {"text", "time", "pixels", "line"} else set()
+    if layer_type == "media":
+        optional_fields.add("playback_speed_percent")
     allowed_fields = fields | optional_fields | {"present", "z_index"}
     if (
         not isinstance(properties, dict)
@@ -323,6 +388,12 @@ def _validate_canvas_properties(properties, layer_type, *, partial=False):
             raise ValueError("custom canvas z_index must be an integer between -64 and 64")
     if "source" in properties and not _is_safe_media_reference(properties["source"]):
         raise ValueError("custom canvas media source is invalid")
+    if "playback_speed_percent" in properties:
+        properties["playback_speed_percent"] = _normalize_playback_speed(
+            properties["playback_speed_percent"], "custom canvas media",
+        )
+    elif layer_type == "media" and not partial:
+        properties["playback_speed_percent"] = 100.0
     if "text" in properties and (
         not isinstance(properties["text"], str)
         or not 1 <= len(properties["text"]) <= 200
@@ -447,7 +518,7 @@ def _validate_announcement_board(board, *, allow_legacy=True):
         "id", "layout", "headline", "message", "media", "schedule",
         "style", "timing", "transition",
     }
-    required = legacy_required | {"enabled", "name"}
+    required = legacy_required | {"enabled", "name", "playback_speed_percent"}
     for item in announcements:
         if (
             not isinstance(item, dict)
@@ -461,6 +532,7 @@ def _validate_announcement_board(board, *, allow_legacy=True):
         if allow_legacy:
             item.setdefault("enabled", True)
             item.setdefault("name", item["headline"])
+            item.setdefault("playback_speed_percent", 100.0)
         if not isinstance(item["enabled"], bool):
             raise ValueError("announcement enabled must be a boolean")
         if (
@@ -491,6 +563,9 @@ def _validate_announcement_board(board, *, allow_legacy=True):
                 raise ValueError(f"announcement {field} must be {minimum}-{maximum} printable characters")
         if item["media"] is not None and not _is_safe_media_reference(item["media"]):
             raise ValueError("announcement media must be empty or a safe media reference")
+        item["playback_speed_percent"] = _normalize_playback_speed(
+            item["playback_speed_percent"], "announcement media",
+        )
 
         schedule = item["schedule"]
         legacy_schedule_fields = {"start_date", "end_date", "start_time", "end_time"}
@@ -527,15 +602,17 @@ def _validate_announcement_board(board, *, allow_legacy=True):
 
         style = item["style"]
         if not isinstance(style, dict) or set(style) != {
-            "foreground", "background", "font", "alignment", "border", "border_colour",
+            "foreground", "background", "headline_font", "message_font",
+            "alignment", "border", "border_colour",
         }:
             raise ValueError("announcement style has invalid fields")
         for field in ("foreground", "background", "border_colour"):
             if not _is_hex_colour(style[field]):
                 raise ValueError(f"announcement {field} must use #RRGGBB format")
             style[field] = style[field].lower()
-        if style["font"] not in AVAILABLE_FONTS:
-            raise ValueError("announcement font is not supported")
+        for field in ("headline_font", "message_font"):
+            if style[field] not in AVAILABLE_FONTS:
+                raise ValueError(f"announcement {field} is not supported")
         if style["alignment"] not in {"left", "center", "right"}:
             raise ValueError("announcement alignment is not supported")
         if style["border"] not in {"none", "solid", "inset"}:
@@ -796,9 +873,10 @@ def validate_config(
             )
 
     for module_name, settings in config["media_layout"].items():
-        expected_fields = {"x", "y", "width", "height", "keep_aspect", "video_fps"}
-        if module_name == "sleep":
-            expected_fields.add("gif_speed_percent")
+        expected_fields = {
+            "x", "y", "width", "height", "keep_aspect", "video_fps",
+            "playback_speed_percent",
+        }
         if set(settings) != expected_fields:
             raise ValueError(f"media layout {module_name} has invalid fields")
         for key, low, high in (
@@ -810,10 +888,9 @@ def validate_config(
                 raise ValueError(f"media layout {module_name} {key} must be between {low} and {high}")
         if not isinstance(settings["keep_aspect"], bool):
             raise ValueError(f"media layout {module_name} keep_aspect must be a boolean")
-        if module_name == "sleep":
-            speed = settings["gif_speed_percent"]
-            if isinstance(speed, bool) or not isinstance(speed, int) or not 25 <= speed <= 400:
-                raise ValueError("sleep GIF playback speed must be between 25 and 400 percent")
+        settings["playback_speed_percent"] = _normalize_playback_speed(
+            settings["playback_speed_percent"], module_name,
+        )
 
     _validate_announcement_board(
         config["announcement_board"],
@@ -841,6 +918,34 @@ def validate_config(
             raise ValueError("custom module name must be 1-40 characters")
         if item.get("type") == "canvas":
             _validate_canvas_module(item)
+            continue
+        if item.get("type") == "media":
+            required_media_keys = {
+                "id", "name", "type", "source", "fit", "x", "y",
+                "width", "height", "loops", "playback_speed_percent",
+            }
+            if set(item) != required_media_keys:
+                raise ValueError("custom media modules have invalid fields")
+            if (
+                not _is_safe_media_reference(item["source"])
+                or Path(item["source"]).suffix.lower() not in {".gif", ".mp4"}
+            ):
+                raise ValueError("custom media source must be a GIF or MP4")
+            if item["fit"] not in {"contain", "cover", "stretch", "manual"}:
+                raise ValueError("custom media fit must be contain, cover, stretch, or manual")
+            for key, low, high in (
+                ("x", -128, 63), ("y", -64, 31),
+                ("width", 1, 192), ("height", 1, 96),
+            ):
+                value = item[key]
+                if isinstance(value, bool) or not isinstance(value, int) or not low <= value <= high:
+                    raise ValueError(f"custom media {key} must be between {low} and {high}")
+            loops = item["loops"]
+            if isinstance(loops, bool) or not isinstance(loops, int) or not 1 <= loops <= 10:
+                raise ValueError("custom media loops must be between 1 and 10")
+            item["playback_speed_percent"] = _normalize_playback_speed(
+                item["playback_speed_percent"], "custom media",
+            )
             continue
         if allow_missing_custom_loops:
             item.setdefault("loops", 1)
@@ -902,6 +1007,15 @@ def validate_config(
                 item["duration"] = 15
         elif custom_module is not None and custom_module["type"] == "text_scroll":
             item["duration"] = scrolling_text_duration(custom_module)
+        elif custom_module is not None and custom_module["type"] == "media":
+            duration = item.get("duration")
+            if (
+                isinstance(duration, bool)
+                or not isinstance(duration, (int, float))
+                or not math.isfinite(duration)
+                or not 0 < duration <= 3600
+            ):
+                raise ValueError("module duration must be greater than zero and at most 3600 seconds")
         else:
             duration = item.get("duration")
             if isinstance(duration, bool) or not isinstance(duration, (int, float)) or not 1 <= duration <= 3600:
@@ -943,10 +1057,57 @@ def _replace_canvas_media_references(modules, replacements):
 
 
 class ConfigStore:
+    METADATA_PROBE_BUDGET_SECONDS = 15.0
+    _test_worker_started = None
+    _test_before_media_commit_check = None
+    _metadata_reaper_threads = ()
+    _metadata_reaper_queues = ()
+    _metadata_reaper_index = 0
+    _metadata_reaper_emergency = {}
+    _metadata_reaper_lock = threading.Lock()
+    _METADATA_WORKER_SCRIPT = r'''
+import json
+import subprocess
+import sys
+from PIL import Image, ImageSequence
+
+path, suffix = sys.argv[1], sys.argv[2]
+descriptor = int(path.rsplit("/", 1)[-1])
+if suffix == ".gif":
+    with Image.open(path) as image:
+        value = [frame.info.get("duration", 100) / 1000.0
+                 for frame in ImageSequence.Iterator(image)]
+    result = ["gif", value]
+elif suffix == ".mp4":
+    completed = subprocess.run(
+        ["/usr/bin/ffprobe", "-v", "error", "-count_frames",
+         "-select_streams", "v:0", "-show_entries",
+         "stream=nb_read_frames,nb_frames", "-of", "json", path],
+        check=True, capture_output=True, text=True,
+        # Keep ffprobe in this worker's process group so the parent can kill
+        # the complete probe tree, and preserve the already-open source fd.
+        pass_fds=(descriptor,), close_fds=True,
+        env={"PATH": "/usr/bin:/bin", "LANG": "C", "LC_ALL": "C"},
+    )
+    if len(completed.stdout) > 65536:
+        raise ValueError("MP4 metadata is too large")
+    streams = json.loads(completed.stdout).get("streams")
+    if not isinstance(streams, list) or len(streams) != 1:
+        raise ValueError("MP4 frame count is unavailable")
+    count = int(streams[0].get("nb_read_frames") or streams[0].get("nb_frames"))
+    if count < 1:
+        raise ValueError("MP4 frame count is unavailable")
+    result = ["mp4", count]
+else:
+    raise ValueError("unsupported metadata source")
+sys.stdout.write(json.dumps(result, separators=(",", ":")))
+'''
+
     def __init__(self, path, media_dir=None):
         self.path = Path(path)
         self.media_root = Path(media_dir or Path(__file__).resolve().parent / "resources" / "media")
         self._lock = threading.RLock()
+        self._metadata_workers = set()
         if not self.path.exists():
             self._write(DEFAULT_CONFIG)
         else:
@@ -999,10 +1160,52 @@ class ConfigStore:
                 or current["revision"] < 0
             ):
                 raise ValueError("revision must be a nonnegative integer")
-            for custom_module in current.get("custom_modules", []):
-                if isinstance(custom_module, dict) and custom_module.get("type") != "canvas":
-                    custom_module.setdefault("border", "none")
-                    custom_module.setdefault("border_colour", "#ffffff")
+            if schema_version <= 1:
+                for custom_module in current.get("custom_modules", []):
+                    if isinstance(custom_module, dict) and custom_module.get("type") != "canvas":
+                        custom_module.setdefault("border", "none")
+                        custom_module.setdefault("border_colour", "#ffffff")
+            if schema_version <= 2:
+                media_layout = current.get("media_layout")
+                if isinstance(media_layout, dict):
+                    for settings in media_layout.values():
+                        if isinstance(settings, dict):
+                            settings.pop("gif_speed_percent", None)
+                            settings["playback_speed_percent"] = 100.0
+                board = current.get("announcement_board")
+                if isinstance(board, dict):
+                    for announcement in board.get("announcements", []):
+                        if isinstance(announcement, dict):
+                            announcement.setdefault("playback_speed_percent", 100.0)
+                            style = announcement.get("style")
+                            if isinstance(style, dict) and "font" in style:
+                                legacy_font = style.pop("font")
+                                style["headline_font"] = legacy_font
+                                style["message_font"] = legacy_font
+                for module in current.get("custom_modules", []):
+                    if not isinstance(module, dict) or module.get("type") != "canvas":
+                        continue
+                    media_layer_ids = set()
+                    for layer in module.get("layers", []):
+                        if not isinstance(layer, dict) or layer.get("type") != "media":
+                            continue
+                        media_layer_ids.add(layer.get("id"))
+                        property_sets = [layer.get("properties")]
+                        property_sets.extend(
+                            keyframe.get("properties")
+                            for keyframe in layer.get("keyframes", [])
+                            if isinstance(keyframe, dict)
+                        )
+                        for properties in property_sets:
+                            if isinstance(properties, dict):
+                                properties.setdefault("playback_speed_percent", 100.0)
+                    for override in module.get("overrides", []):
+                        if (
+                            isinstance(override, dict)
+                            and override.get("layer_id") in media_layer_ids
+                            and isinstance(override.get("properties"), dict)
+                        ):
+                            override["properties"].setdefault("playback_speed_percent", 100.0)
             _validate_update_keys(current, DEFAULT_CONFIG)
             lava = current.get("lava")
             if (
@@ -1059,7 +1262,8 @@ class ConfigStore:
             migrated = _merge(DEFAULT_CONFIG, current)
             migrated["schema_version"] = CURRENT_CONFIG_SCHEMA_VERSION
             migrated["revision"] = current["revision"] + 1
-            self._write(validate_config(migrated))
+            validated = validate_config(copy.deepcopy(migrated))
+            self._write(migrated if schema_version == 2 else validated)
 
     def _write(self, config):
         self.path.parent.mkdir(parents=True, exist_ok=True)
@@ -1089,7 +1293,365 @@ class ConfigStore:
         with self._lock:
             return json.loads(self.path.read_text())
 
-    def validate_candidate(self, changes):
+    @staticmethod
+    def _stat_identity(value):
+        stat_result = os.fstat(value) if isinstance(value, int) else os.stat(value)
+        return (
+            stat_result.st_dev, stat_result.st_ino, stat_result.st_size,
+            stat_result.st_mtime_ns, stat_result.st_ctime_ns,
+        )
+
+    @staticmethod
+    def _annotate_cleanup_error(primary_error, cleanup_error):
+        try:
+            try:
+                detail = str(cleanup_error)
+            except BaseException:
+                detail = f"<{type(cleanup_error).__name__}>"
+            primary_error.add_note(f"additional descriptor cleanup failure: {detail}")
+        except BaseException:
+            pass
+
+    @staticmethod
+    def _attempt_descriptor_closes(descriptors):
+        errors = []
+        for descriptor in descriptors:
+            if descriptor is None:
+                continue
+            try:
+                os.close(descriptor)
+            except BaseException as error:
+                errors.append(error)
+        return errors
+
+    @classmethod
+    def _resolve_descriptor_cleanup(cls, errors, primary_error=None):
+        if primary_error is not None:
+            for error in errors:
+                cls._annotate_cleanup_error(primary_error, error)
+            return
+        if errors:
+            primary_error, *secondary_errors = errors
+            for error in secondary_errors:
+                cls._annotate_cleanup_error(primary_error, error)
+            raise primary_error
+
+    def _open_media_source(self, reference, deadline):
+        self._remaining(deadline)
+        flags = os.O_RDONLY | os.O_DIRECTORY | getattr(os, "O_NOFOLLOW", 0)
+        root_fd = os.open(self.media_root, flags)
+        directory_fd = root_fd
+        child_fd = None
+        descriptor = None
+        identity = None
+        primary_error = None
+        try:
+            parts = Path(reference).parts
+            if len(parts) == 2:
+                child_fd = os.open(parts[0], flags, dir_fd=root_fd)
+                directory_fd = child_fd
+            descriptor = os.open(
+                parts[-1], os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0),
+                dir_fd=directory_fd,
+            )
+            if not stat.S_ISREG(os.fstat(descriptor).st_mode):
+                raise ValueError("media source is not a regular file")
+            identity = self._stat_identity(descriptor)
+            self._remaining(deadline)
+        except BaseException as error:
+            primary_error = error
+
+        cleanup_errors = self._attempt_descriptor_closes((child_fd, root_fd))
+
+        if primary_error is not None or cleanup_errors:
+            cleanup_errors.extend(self._attempt_descriptor_closes((descriptor,)))
+            self._resolve_descriptor_cleanup(cleanup_errors, primary_error)
+            if primary_error is not None:
+                raise primary_error
+        if descriptor is None or identity is None:
+            raise RuntimeError("media descriptor ownership was not established")
+        return descriptor, identity
+
+    def _media_sources_unchanged(self, identities, deadline=None):
+        deadline = deadline if deadline is not None else monotonic() + self.METADATA_PROBE_BUDGET_SECONDS
+        try:
+            for reference, descriptor, identity in identities:
+                if self._stat_identity(descriptor) != identity:
+                    return False
+                current_fd, current_identity = self._open_media_source(reference, deadline)
+                try:
+                    if current_identity != identity:
+                        return False
+                finally:
+                    os.close(current_fd)
+            return True
+        except (OSError, ValueError):
+            return False
+
+    @staticmethod
+    def _remaining(deadline):
+        remaining = deadline - monotonic()
+        if remaining <= 0:
+            raise TimeoutError("media metadata probe exceeded aggregate budget")
+        return remaining
+
+    @classmethod
+    def _release_metadata_worker(cls, process, workers, primary_error=None):
+        errors = []
+        try:
+            for stream in (process.stdout, process.stderr):
+                if stream is not None:
+                    try:
+                        stream.close()
+                    except BaseException as error:
+                        errors.append(error)
+        finally:
+            workers.discard(process)
+        cls._resolve_descriptor_cleanup(errors, primary_error)
+
+    @classmethod
+    def _finish_metadata_worker(cls, process, workers):
+        try:
+            while True:
+                try:
+                    process.wait()
+                    break
+                except InterruptedError:
+                    continue
+                except ChildProcessError:
+                    break
+                except OSError:
+                    sleep(0.01)
+                    continue
+        finally:
+            cls._release_metadata_worker(process, workers)
+
+    @classmethod
+    def _metadata_reaper_main(cls, work_queue):
+        while True:
+            try:
+                process, workers = work_queue.get(timeout=0.05)
+            except queue.Empty:
+                with cls._metadata_reaper_lock:
+                    if not cls._metadata_reaper_emergency:
+                        continue
+                    _process, job = cls._metadata_reaper_emergency.popitem()
+                    process, workers = job
+            try:
+                cls._finish_metadata_worker(process, workers)
+            except BaseException:
+                continue
+
+    @classmethod
+    def _ensure_metadata_reaper(cls):
+        with cls._metadata_reaper_lock:
+            if len(cls._metadata_reaper_threads) == 3 and all(
+                thread.is_alive() for thread in cls._metadata_reaper_threads
+            ):
+                return
+            queues = tuple(queue.Queue() for _index in range(3))
+            threads = []
+            for index, work_queue in enumerate(queues):
+                reaper = threading.Thread(
+                    target=cls._metadata_reaper_main,
+                    args=(work_queue,),
+                    name=f"metadata-reaper-{index}",
+                    daemon=True,
+                )
+                reaper.start()
+                threads.append(reaper)
+            cls._metadata_reaper_queues = queues
+            cls._metadata_reaper_threads = tuple(threads)
+            cls._metadata_reaper_index = 0
+
+    @classmethod
+    def _handoff_metadata_worker(cls, process, workers):
+        with cls._metadata_reaper_lock:
+            queues = cls._metadata_reaper_queues
+            start = cls._metadata_reaper_index
+            if queues:
+                cls._metadata_reaper_index = (start + 1) % len(queues)
+        for offset in range(len(queues)):
+            work_queue = queues[(start + offset) % len(queues)]
+            try:
+                work_queue.put_nowait((process, workers))
+                return
+            except BaseException:
+                continue
+        with cls._metadata_reaper_lock:
+            cls._metadata_reaper_emergency[process] = (process, workers)
+
+    def _probe_raw_metadata(self, descriptor, suffix, deadline):
+        self._ensure_metadata_reaper()
+        descriptor_path = f"/proc/self/fd/{descriptor}"
+        process = subprocess.Popen(
+            [sys.executable, "-c", self._METADATA_WORKER_SCRIPT, descriptor_path, suffix],
+            pass_fds=(descriptor,), stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+            text=True, start_new_session=True, close_fds=True,
+            env={"PATH": "/usr/bin:/bin", "LANG": "C", "LC_ALL": "C"},
+        )
+        self._metadata_workers.add(process)
+        output = error = ""
+        primary_error = None
+        try:
+            if self._test_worker_started is not None:
+                self._test_worker_started(process.pid)
+            output, error = process.communicate(timeout=self._remaining(deadline))
+        except subprocess.TimeoutExpired as timeout_error:
+            primary_error = TimeoutError("media metadata probe exceeded aggregate budget")
+            primary_error.__cause__ = timeout_error
+        except BaseException as probe_error:
+            primary_error = probe_error
+
+        cleanup_errors = []
+        cleanup_transferred = False
+        running = True
+        try:
+            running = process.poll() is None
+        except BaseException as poll_error:
+            cleanup_errors.append(poll_error)
+        if running:
+            group_signalled = False
+            try:
+                os.killpg(process.pid, signal.SIGKILL)
+                group_signalled = True
+            except ProcessLookupError:
+                group_signalled = True
+            except BaseException as signal_error:
+                cleanup_errors.append(signal_error)
+            if not group_signalled:
+                try:
+                    process.kill()
+                except ProcessLookupError:
+                    pass
+                except BaseException as kill_error:
+                    cleanup_errors.append(kill_error)
+            try:
+                process.wait(timeout=self._remaining(deadline))
+            except BaseException as wait_error:
+                if not isinstance(wait_error, (subprocess.TimeoutExpired, TimeoutError)):
+                    cleanup_errors.append(wait_error)
+                self._handoff_metadata_worker(process, self._metadata_workers)
+                cleanup_transferred = True
+
+        active_error = primary_error
+        if active_error is None and cleanup_errors:
+            active_error, *cleanup_errors = cleanup_errors
+        if active_error is not None:
+            for cleanup_error in cleanup_errors:
+                self._annotate_cleanup_error(active_error, cleanup_error)
+        if not cleanup_transferred:
+            self._release_metadata_worker(
+                process, self._metadata_workers, primary_error=active_error,
+            )
+        if active_error is not None:
+            raise active_error
+
+        self._remaining(deadline)
+        if process.returncode:
+            raise ValueError(f"media metadata probe failed: {error[:200]}")
+        if len(output) > 64 * 1024:
+            raise ValueError("media metadata is too large")
+        raw = json.loads(output)
+        if not isinstance(raw, list) or len(raw) != 2:
+            raise ValueError("media metadata is invalid")
+        kind, value = raw
+        if kind == "gif" and isinstance(value, list):
+            return kind, tuple(float(delay) for delay in value)
+        if kind == "mp4" and isinstance(value, int) and value > 0:
+            return kind, value
+        raise ValueError("media metadata is invalid")
+
+    @staticmethod
+    def _duration_from_raw_metadata(raw, loops, playback_rate):
+        kind, value = raw
+        if kind == "gif":
+            return sum(max(0.01, delay / playback_rate) for delay in value) * loops
+        if kind == "mp4":
+            return value / 20.0 / playback_rate * loops
+        raise ValueError("unsupported metadata result")
+
+    def _canonicalize_basic_media_durations(
+        self, config, *, return_identities=False, deadline=None,
+    ):
+        modules = {
+            module["id"]: module
+            for module in config.get("custom_modules", [])
+            if isinstance(module, dict) and module.get("type") == "media"
+        }
+        deadline = deadline if deadline is not None else monotonic() + self.METADATA_PROBE_BUDGET_SECONDS
+        metadata = {}
+        opened = {}
+        records = []
+        failure = object()
+        transfer_records = False
+        try:
+            for item in config.get("playlist", []):
+                module = modules.get(item.get("module")) if isinstance(item, dict) else None
+                if module is None:
+                    continue
+                reference = module["source"]
+                opened_source = opened.get(reference)
+                if opened_source is failure:
+                    continue
+                if opened_source is None:
+                    try:
+                        descriptor, source_identity = self._open_media_source(reference, deadline)
+                    except TimeoutError:
+                        raise
+                    except (OSError, ValueError):
+                        opened[reference] = failure
+                        continue
+                    opened_source = descriptor, source_identity
+                    opened[reference] = opened_source
+                    records.append((reference, descriptor, source_identity))
+                descriptor, source_identity = opened_source
+                suffix = Path(reference).suffix.lower()
+                metadata_key = source_identity, suffix
+                raw = metadata.get(metadata_key)
+                if raw is failure:
+                    continue
+                if raw is None:
+                    try:
+                        raw = self._probe_raw_metadata(descriptor, suffix, deadline)
+                        expected_kind = suffix.removeprefix(".")
+                        if raw[0] != expected_kind:
+                            raise ValueError("media metadata decoder kind is invalid")
+                    except TimeoutError:
+                        raise
+                    except (
+                        OSError, SyntaxError, ValueError, subprocess.SubprocessError,
+                        json.JSONDecodeError,
+                    ):
+                        metadata[metadata_key] = failure
+                        continue
+                    metadata[metadata_key] = raw
+                duration = self._duration_from_raw_metadata(
+                    raw,
+                    module["loops"],
+                    module["playback_speed_percent"] / 100.0,
+                )
+                if math.isfinite(duration) and duration > 0:
+                    if self._stat_identity(descriptor) != source_identity:
+                        raise ValueError("media source changed during duration validation")
+                    item["duration"] = duration
+            self._remaining(deadline)
+            if return_identities:
+                transfer_records = True
+                return config, records
+            return config
+        finally:
+            if not transfer_records:
+                self._close_media_records(records, primary_error=sys.exception())
+
+    @classmethod
+    def _close_media_records(cls, records, primary_error=None):
+        errors = cls._attempt_descriptor_closes(
+            descriptor for _reference, descriptor, _identity in records
+        )
+        cls._resolve_descriptor_cleanup(errors, primary_error)
+
+    def validate_candidate(self, changes, *, canonicalize_media=True):
         """Validate and canonicalize an unsaved draft without persisting it."""
         if not isinstance(changes, dict):
             raise ValueError("configuration candidate must be a JSON object")
@@ -1105,7 +1667,28 @@ class ConfigStore:
                 allow_legacy_announcements=False,
                 enforce_save_bounds=True,
             )
+        if not canonicalize_media:
             return copy.deepcopy(candidate)
+        deadline = monotonic() + self.METADATA_PROBE_BUDGET_SECONDS
+        identities = []
+        try:
+            candidate, identities = self._canonicalize_basic_media_durations(
+                candidate, return_identities=True, deadline=deadline,
+            )
+            self._remaining(deadline)
+            candidate = validate_config(
+                candidate,
+                allow_legacy_announcements=False,
+                allow_missing_custom_loops=False,
+                enforce_save_bounds=True,
+            )
+            self._remaining(deadline)
+            if not self._media_sources_unchanged(identities, deadline):
+                raise ValueError("media source changed during duration validation")
+            self._remaining(deadline)
+            return copy.deepcopy(candidate)
+        finally:
+            self._close_media_records(identities, primary_error=sys.exception())
 
     def update(self, changes, *, base_revision=None):
         if not isinstance(changes, dict):
@@ -1131,5 +1714,37 @@ class ConfigStore:
                 allow_legacy_announcements=False,
                 enforce_save_bounds=True,
             )
+        deadline = monotonic() + self.METADATA_PROBE_BUDGET_SECONDS
+        identities = []
+        acquired = False
+        try:
+            updated, identities = self._canonicalize_basic_media_durations(
+                updated, return_identities=True, deadline=deadline,
+            )
+            self._remaining(deadline)
+            updated = validate_config(
+                updated,
+                allow_legacy_announcements=False,
+                allow_missing_custom_loops=False,
+                enforce_save_bounds=True,
+            )
+            self._remaining(deadline)
+            acquired = self._lock.acquire(timeout=self._remaining(deadline))
+            if not acquired:
+                raise TimeoutError("media metadata probe exceeded aggregate budget")
+            latest = self.get()
+            if latest["revision"] != current["revision"]:
+                raise ConfigConflictError(latest["revision"])
+            if self._test_before_media_commit_check is not None:
+                self._test_before_media_commit_check()
+            if not self._media_sources_unchanged(identities, deadline):
+                raise ValueError("media source changed during duration validation")
+            # Exact admission boundary: no hook, await, or unchecked work follows this
+            # final deadline/descriptor/directory-entry check before atomic persistence.
+            self._remaining(deadline)
             self._write(updated)
             return copy.deepcopy(updated)
+        finally:
+            if acquired:
+                self._lock.release()
+            self._close_media_records(identities, primary_error=sys.exception())

@@ -397,7 +397,7 @@ class MediaModuleTests(unittest.TestCase):
         matrix.show_gif.return_value = True
         settings = {
             "x": 0, "y": 0, "width": 64, "height": 32,
-            "keep_aspect": True, "video_fps": 20, "gif_speed_percent": 250,
+            "keep_aspect": True, "video_fps": 20, "playback_speed_percent": 250.0,
         }
 
         result = sleep_screen.run(
@@ -472,7 +472,7 @@ class MediaModuleTests(unittest.TestCase):
         stop.set()
         settings = {
             "x": 0, "y": 0, "width": 64, "height": 32,
-            "keep_aspect": True, "video_fps": 20, "gif_speed_percent": 400,
+            "keep_aspect": True, "video_fps": 20, "playback_speed_percent": 400.0,
         }
 
         result = sleep_screen.run(
@@ -485,6 +485,167 @@ class MediaModuleTests(unittest.TestCase):
         self.assertFalse(result)
         matrix.show_image.assert_not_called()
         matrix.show_gif.assert_not_called()
+
+
+    def test_advanced_canvas_samples_media_at_speed_without_changing_canvas_timeline(self):
+        from modules.custom_text import canvas_timeline_frames
+
+        matrix = Mock()
+        matrix.matrix.CreateFrameCanvas.return_value = "canvas"
+        matrix.colour_rgb.return_value = Mock(red=0, green=0, blue=0)
+        matrix.media_frames.return_value = ["f0", "f1"]
+        module = {
+            "id": "custom_canvas", "name": "Canvas", "type": "canvas",
+            "background": "#000000", "frame_count": 2, "fps": 10,
+            "playback": "hold", "overrides": [],
+            "layers": [{
+                "id": "layer_media", "name": "Media", "type": "media",
+                "visible": True, "keyframes": [],
+                "properties": {
+                    "x": 0, "y": 0, "width": 64, "height": 32,
+                    "rotation": 0, "source": "clip.mp4", "keep_aspect": True,
+                    "playback_speed_percent": 250.0,
+                },
+            }],
+        }
+
+        frames = list(canvas_timeline_frames(matrix, 0.2, None, module))
+
+        self.assertEqual([delay for _canvas, delay in frames], [0.1, 0.1])
+        self.assertEqual(matrix.media_frames.call_args.kwargs["playback_rate"], 2.5)
+        self.assertEqual(matrix.draw_image.call_args_list[0].args[0], "f0")
+        self.assertEqual(matrix.draw_image.call_args_list[1].args[0], "f1")
+
+    def test_advanced_canvas_caches_every_resolved_inherited_media_identity(self):
+        from modules.custom_text import canvas_timeline_frames
+
+        matrix = Mock()
+        matrix.matrix.CreateFrameCanvas.return_value = "canvas"
+        matrix.colour_rgb.return_value = Mock(red=0, green=0, blue=0)
+        matrix.media_frames.side_effect = lambda source, _count, _fps, **options: [
+            (source, options["playback_rate"]),
+        ]
+        module = {
+            "id": "custom_canvas", "name": "Canvas", "type": "canvas",
+            "background": "#000000", "frame_count": 5, "fps": 10,
+            "playback": "hold",
+            "layers": [{
+                "id": "layer_media", "name": "Media", "type": "media",
+                "visible": True,
+                "properties": {
+                    "x": 0, "y": 0, "width": 64, "height": 32,
+                    "rotation": 0, "source": "base.gif", "keep_aspect": True,
+                    "playback_speed_percent": 100.0,
+                },
+                "keyframes": [
+                    {"frame": 0, "easing": "linear", "properties": {"source": "first.gif"}},
+                    {"frame": 1, "easing": "linear", "properties": {"playback_speed_percent": 100.0}},
+                    {"frame": 3, "easing": "linear", "properties": {"playback_speed_percent": 200.0}},
+                    {"frame": 4, "easing": "linear", "properties": {"source": "last.gif"}},
+                ],
+            }],
+            "overrides": [{
+                "frame": 3, "layer_id": "layer_media",
+                "properties": {"source": "override.gif", "playback_speed_percent": 125.0},
+            }],
+        }
+
+        list(canvas_timeline_frames(matrix, 0.5, None, module))
+
+        decoded = {
+            (call.args[0], call.kwargs["playback_rate"])
+            for call in matrix.media_frames.call_args_list
+        }
+        self.assertEqual(decoded, {
+            ("first.gif", 1.0),
+            ("first.gif", 1.5),
+            ("override.gif", 1.25),
+            ("last.gif", 2.0),
+        })
+        self.assertEqual(
+            [call.args[0] for call in matrix.draw_image.call_args_list],
+            [
+                ("first.gif", 1.0),
+                ("first.gif", 1.0),
+                ("first.gif", 1.5),
+                ("override.gif", 1.25),
+                ("last.gif", 2.0),
+            ],
+        )
+
+    def test_advanced_canvas_same_source_at_two_speeds_has_distinct_cache_entries(self):
+        from modules.custom_text import canvas_timeline_frames
+
+        matrix = Mock()
+        matrix.matrix.CreateFrameCanvas.return_value = "canvas"
+        matrix.colour_rgb.return_value = Mock(red=0, green=0, blue=0)
+        matrix.media_frames.side_effect = lambda _source, _count, _fps, **options: [options["playback_rate"]]
+        base = {"x": 0, "y": 0, "width": 64, "height": 32, "rotation": 0,
+                "source": "same.gif", "keep_aspect": True}
+        module = {
+            "id": "custom_canvas", "name": "Canvas", "type": "canvas",
+            "background": "#000000", "frame_count": 1, "fps": 10,
+            "playback": "hold", "overrides": [],
+            "layers": [
+                {"id": "layer_slow", "name": "Slow", "type": "media", "visible": True,
+                 "keyframes": [], "properties": {**base, "playback_speed_percent": 50.0}},
+                {"id": "layer_fast", "name": "Fast", "type": "media", "visible": True,
+                 "keyframes": [], "properties": {**base, "playback_speed_percent": 200.0}},
+            ],
+        }
+
+        list(canvas_timeline_frames(matrix, 0.1, None, module))
+
+        self.assertEqual([call.kwargs["playback_rate"] for call in matrix.media_frames.call_args_list], [0.5, 2.0])
+        self.assertEqual([call.args[0] for call in matrix.draw_image.call_args_list], [0.5, 2.0])
+
+    def test_basic_media_preserves_fit_loops_speed_and_cancellation(self):
+        from modules import custom_text
+
+        matrix = Mock()
+        matrix.show_gif.return_value = True
+        stop = threading.Event()
+        module = {
+            "id": "custom_party", "name": "Party", "type": "media",
+            "source": "party.gif", "fit": "manual", "x": -4, "y": 2,
+            "width": 72, "height": 36, "loops": 3,
+            "playback_speed_percent": 10.0,
+        }
+
+        self.assertTrue(custom_text.run(
+            matrix, {}, duration=99, stop_event=stop, module_config=module,
+        ))
+
+        matrix.show_gif.assert_called_once_with(
+            "party.gif", x=-4, y=2, width=72, height=36, fit="manual",
+            loops=3, playback_rate=0.1, stop_event=stop,
+        )
+
+    def test_builtin_gif_and_mp4_use_canonical_playback_speed(self):
+        settings = {
+            "x": 0, "y": 0, "width": 64, "height": 32,
+            "keep_aspect": True, "video_fps": 20,
+            "playback_speed_percent": 250.0,
+        }
+        stop = threading.Event()
+        for module, filename, method in (
+            (splash_screen, "splash.gif", "show_gif"),
+            (sleep_screen, "sleep.mp4", "show_video"),
+        ):
+            with self.subTest(filename=filename):
+                matrix = Mock()
+                getattr(matrix, method).return_value = True
+                config = {
+                    "media": {"splash": filename, "sleep": filename},
+                    "media_layout": {"splash": settings, "sleep": settings},
+                }
+                self.assertTrue(module.run(
+                    matrix, config, duration=2, stop_event=stop,
+                ))
+                call = getattr(matrix, method).call_args
+                self.assertEqual(call.kwargs["playback_rate"], 2.5)
+                self.assertEqual(call.kwargs["loops"], 0)
+                self.assertIs(call.kwargs["stop_event"], stop)
 
 
 if __name__ == "__main__":

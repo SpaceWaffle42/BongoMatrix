@@ -752,7 +752,8 @@ class Matrix:
 
     def media_frames(
         self, filename, frame_count, fps, stop_event=None, decode_timeout=45,
-        preserve_size=False, resolved_path=None, *, pinned_handle=None,
+        preserve_size=False, resolved_path=None, playback_rate=1.0, *,
+        pinned_handle=None,
     ):
         """Decode a bounded media timeline while observing cancellation/deadlines."""
         if (
@@ -765,6 +766,10 @@ class Matrix:
             or not 0 < decode_timeout <= 120
             or not isinstance(preserve_size, bool)
             or resolved_path is not None and not isinstance(resolved_path, (str, os.PathLike))
+            or isinstance(playback_rate, bool)
+            or not isinstance(playback_rate, (int, float))
+            or not math.isfinite(playback_rate)
+            or not 0.1 <= playback_rate <= 4.0
         ):
             raise ValueError("media timeline bounds are invalid")
         if stop_event is not None and stop_event.is_set():
@@ -798,13 +803,14 @@ class Matrix:
             reaper_queue = _ensure_decoder_reaper(deadline=deadline)
             if stop_event is not None and stop_event.is_set():
                 return []
+            timing_filter = f"setpts=PTS/{float(playback_rate):.10g},"
             command = [
                     "/usr/bin/ffmpeg", "-nostdin", "-v", "error", "-threads", "1",
                     "-i", "pipe:0",
                     "-map", "0:v:0", "-an", "-sn", "-dn",
                     "-vf", (
-                        f"scale=w='min({self.matrix.width},iw)':h='min({self.matrix.height},ih)':force_original_aspect_ratio=decrease,fps={fps}:eof_action=pass" if preserve_size else
-                        f"scale=64:32:force_original_aspect_ratio=decrease,pad=64:32:(ow-iw)/2:(oh-ih)/2,fps={fps}:eof_action=pass"
+                        timing_filter + f"scale=w='min({self.matrix.width},iw)':h='min({self.matrix.height},ih)':force_original_aspect_ratio=decrease,fps={fps}:eof_action=pass" if preserve_size else
+                        timing_filter + f"scale=64:32:force_original_aspect_ratio=decrease,pad=64:32:(ow-iw)/2:(oh-ih)/2,fps={fps}:eof_action=pass"
                     ),
                     "-frames:v", str(frame_count),
                 ]
@@ -975,6 +981,7 @@ class Matrix:
         width=None,
         height=None,
         keep_aspect=True,
+        fit=None,
         playback_rate=1.0,
         stop_event=None,
         max_duration=None,
@@ -1039,7 +1046,7 @@ class Matrix:
                     self.clear()
                     self.draw_image(
                         image, x=x, y=y, width=width, height=height,
-                        keep_aspect=keep_aspect,
+                        keep_aspect=keep_aspect, fit=fit,
                     )
                     if stop_event is not None and stop_event.is_set():
                         return shown
@@ -1233,6 +1240,7 @@ class Matrix:
         width=None,
         height=None,
         keep_aspect=True,
+        fit=None,
         playback_rate=1.0,
         stop_event=None,
         max_duration=None,
@@ -1280,8 +1288,10 @@ class Matrix:
             playback_rate=playback_rate,
         ):
             self.clear()
-            self.canvas.SetImage(image, x, y)
-            self._frame_capture.set_image(self.canvas, image, x, y)
+            self.draw_image(
+                image, x=x, y=y, width=width, height=height,
+                keep_aspect=keep_aspect, fit=fit,
+            )
             if stop_event is not None and stop_event.is_set():
                 return shown
             self.swap()

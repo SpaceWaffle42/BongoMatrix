@@ -20,7 +20,7 @@ import unittest
 from datetime import datetime, timedelta
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
-from unittest.mock import Mock, patch
+from unittest.mock import ANY, Mock, patch
 from werkzeug.serving import make_server
 
 from PIL import Image, UnidentifiedImageError
@@ -298,6 +298,34 @@ class WebAppTests(unittest.TestCase):
         self.assertIs(actual, expected)
         self.assertIs(frames.call_args.args[3], stop_event)
 
+    def test_basic_custom_media_edit_preview_uses_shared_media_lifecycle(self):
+        candidate = self.store.get()
+        custom = {
+            "id": "custom_media_preview", "name": "Media preview", "type": "media",
+            "source": "party.gif", "fit": "manual", "x": -4, "y": 2,
+            "width": 72, "height": 36, "loops": 3,
+            "playback_speed_percent": 125.0,
+        }
+        candidate["custom_modules"] = [custom]
+        candidate["playlist"] = [{
+            "module": custom["id"], "duration": 12, "enabled": True,
+        }]
+        stop_event = object()
+        pinned = object()
+        expected = iter(())
+
+        with patch("edit_preview.media_preview_frames", return_value=expected) as frames:
+            actual = webapp._edit_preview_iterator(
+                custom["id"], candidate, None, {custom["source"]: pinned}, None,
+                stop_event,
+            )
+
+        self.assertIs(actual, expected)
+        frames.assert_called_once_with(
+            ANY, custom["source"], 12, custom,
+            stop_event=stop_event, pinned_handle=pinned,
+        )
+
     def test_basic_custom_appearance_controls_serialize_defaults_reset_and_preserve_hidden_colour(self):
         self.pair_browser()
         body = self.client.get("/").get_data(as_text=True)
@@ -305,14 +333,12 @@ class WebAppTests(unittest.TestCase):
 
         for source in (body, canvas):
             self.assertIn("border_colour", source)
-            self.assertIn("Border style", source)
-            self.assertIn("Border colour", source)
-            self.assertIn("Reset appearance", source)
-            self.assertIn("data-simple-appearance", source)
+        for label in ("Border style", "Border colour", "Reset appearance", "data-simple-appearance"):
+            self.assertIn(label, body)
+        self.assertIn("simpleAppearanceGroup(module)", canvas)
         self.assertIn("border:'none',border_colour:'#ffffff'", body)
         self.assertIn("border:card.querySelector('[data-field=border]').value", body)
         self.assertIn("border: card.querySelector('[data-field=border]').value", canvas)
-        self.assertIn("control.disabled = border.value === 'none'", canvas)
         self.assertIn("MINIMUM_CLIENT_CONTRACT = 3", Path(webapp.__file__).read_text())
         self.assertIn("const MATRIX_CLIENT_CONTRACT=3", body)
 
@@ -377,6 +403,95 @@ console.log(JSON.stringify({layouts,reset}));}finally{socket.close()}
         self.assertEqual(report["reset"]["background"], "#000000", report)
         self.assertEqual(report["reset"]["border"], "none", report)
         self.assertEqual(report["reset"]["border_colour"], "#ffffff", report)
+
+    @unittest.skipUnless(shutil.which("node"), "Node.js is required")
+    @unittest.skipUnless(
+        os.environ.get("MATRIX_CHROMIUM")
+        and Path(os.environ.get("MATRIX_CHROMIUM", "")).is_file()
+        and os.access(os.environ.get("MATRIX_CHROMIUM", ""), os.X_OK),
+        "MATRIX_CHROMIUM browser is required",
+    )
+    def test_basic_subtype_switch_atomically_replaces_defaults_and_restores_mode_focus(self):
+        Image.new("RGB", (2, 2), "red").save(self.media_dir / "party.gif", format="GIF")
+        module = {
+            "id": "custom_switch", "name": "Keep identity", "type": "media",
+            "source": "party.gif", "fit": "manual", "x": -4, "y": 2,
+            "width": 72, "height": 36, "loops": 3,
+            "playback_speed_percent": 125.0,
+        }
+        self.store.update({"custom_modules": [module]})
+        self.pair_browser()
+        body = self.client.get("/").get_data(as_text=True)
+        probe = r"""
+const port=process.argv[1],pagePath=process.argv[2];let endpoint;
+for(let attempt=0;attempt<50;attempt++){try{endpoint=await fetch(`http://127.0.0.1:${port}/json/new`,{method:'PUT'}).then(r=>r.json());break}catch(_){await new Promise(r=>setTimeout(r,50))}}
+if(!endpoint)throw new Error('Chromium DevTools endpoint unavailable');
+const socket=new WebSocket(endpoint.webSocketDebuggerUrl),pending=new Map();let nextId=1,loadResolve,loaded=new Promise(resolve=>loadResolve=resolve);
+socket.onmessage=event=>{const message=JSON.parse(event.data);if(message.id&&pending.has(message.id)){const request=pending.get(message.id);pending.delete(message.id);message.error?request.reject(new Error(JSON.stringify(message.error))):request.resolve(message.result)}else if(message.method==='Page.loadEventFired')loadResolve()};
+await new Promise((resolve,reject)=>{socket.onopen=resolve;socket.onerror=reject});
+const send=(method,params={})=>{const id=nextId++;socket.send(JSON.stringify({id,method,params}));return new Promise((resolve,reject)=>pending.set(id,{resolve,reject}))};
+const evaluate=async expression=>{const result=await send('Runtime.evaluate',{expression,returnByValue:true,awaitPromise:true});if(result.exceptionDetails)throw new Error(JSON.stringify(result.exceptionDetails));return result.result.value};
+try{await send('Runtime.enable');await send('Page.enable');loaded=new Promise(resolve=>loadResolve=resolve);await send('Page.navigate',{url:'file://'+pagePath});await loaded;
+for(let attempt=0;attempt<100;attempt++){if(await evaluate(`globalThis.matrixCustomCanvasReady===true&&!!document.querySelector('[data-editor-type="simple"]')`))break;await new Promise(r=>setTimeout(r,20))}
+const report=await evaluate(`(()=>{const switchTo=type=>{const mode=document.querySelector('.custom-module-card[data-id="custom_switch"] [data-field="type"]');if(!mode)return{missing:true,ready:globalThis.matrixCustomCanvasReady,modules:globalThis.customModules?.map(item=>item.id),html:document.querySelector('#custom-modules')?.innerHTML};mode.value=type;mode.dispatchEvent(new Event('change',{bubbles:true}));return{draft:customModulesFromEditor()[0],focus:document.activeElement?.dataset?.field||null}};return{text:switchTo('text'),scroll:switchTo('text_scroll'),media:switchTo('media')}})()`);
+console.log(JSON.stringify(report));}finally{socket.close()}
+"""
+        report = self._run_dashboard_chromium_probe(body, probe)
+        text_defaults = {
+            "id": "custom_switch", "name": "Keep identity", "type": "text",
+            "text": "HELLO MATRIX", "font": "5x7", "colour": "#ffffff",
+            "background": "#000000", "border": "none", "border_colour": "#ffffff",
+            "x": 2, "y": 20, "direction": "left", "speed": .05, "loops": 1,
+        }
+        self.assertEqual(report["text"], {"draft": text_defaults, "focus": "type"})
+        self.assertEqual(
+            report["scroll"],
+            {"draft": {**text_defaults, "type": "text_scroll"}, "focus": "type"},
+        )
+        self.assertEqual(report["media"], {"draft": {
+            "id": "custom_switch", "name": "Keep identity", "type": "media",
+            "source": "party.gif", "fit": "contain", "x": 0, "y": 0,
+            "width": 64, "height": 32, "loops": 1,
+            "playback_speed_percent": 100.0,
+        }, "focus": "type"})
+
+    @unittest.skipUnless(shutil.which("node"), "Node.js is required")
+    @unittest.skipUnless(
+        os.environ.get("MATRIX_CHROMIUM")
+        and Path(os.environ.get("MATRIX_CHROMIUM", "")).is_file()
+        and os.access(os.environ.get("MATRIX_CHROMIUM", ""), os.X_OK),
+        "MATRIX_CHROMIUM browser is required",
+    )
+    def test_shared_playback_speed_control_keeps_one_canonical_numeric_state(self):
+        self.pair_browser()
+        body = self.client.get("/").get_data(as_text=True)
+        probe = r"""
+const port=process.argv[1],pagePath=process.argv[2];let endpoint;
+for(let attempt=0;attempt<50;attempt++){try{endpoint=await fetch(`http://127.0.0.1:${port}/json/new`,{method:'PUT'}).then(r=>r.json());break}catch(_){await new Promise(r=>setTimeout(r,50))}}
+if(!endpoint)throw new Error('Chromium DevTools endpoint unavailable');
+const socket=new WebSocket(endpoint.webSocketDebuggerUrl),pending=new Map();let nextId=1,loadResolve,loaded=new Promise(resolve=>loadResolve=resolve);
+socket.onmessage=event=>{const message=JSON.parse(event.data);if(message.id&&pending.has(message.id)){const request=pending.get(message.id);pending.delete(message.id);message.error?request.reject(new Error(JSON.stringify(message.error))):request.resolve(message.result)}else if(message.method==='Page.loadEventFired')loadResolve()};
+await new Promise((resolve,reject)=>{socket.onopen=resolve;socket.onerror=reject});
+const send=(method,params={})=>{const id=nextId++;socket.send(JSON.stringify({id,method,params}));return new Promise((resolve,reject)=>pending.set(id,{resolve,reject}))};
+const evaluate=async expression=>{const result=await send('Runtime.evaluate',{expression,returnByValue:true,awaitPromise:true});if(result.exceptionDetails)throw new Error(JSON.stringify(result.exceptionDetails));return result.result.value};
+try{await send('Runtime.enable');await send('Page.enable');loaded=new Promise(resolve=>loadResolve=resolve);await send('Page.navigate',{url:'file://'+pagePath});await loaded;
+const report=await evaluate(`(()=>{const callbacks=[],control=playbackSpeedControl('Test speed',Number.NaN,value=>callbacks.push(value)),inputs=control.querySelectorAll('input'),slider=inputs[0],exact=inputs[1],snapshot=()=>({slider:slider.value,exact:exact.value});document.body.append(control);const states={initial:snapshot()};const input=value=>{exact.value=value;exact.dispatchEvent(new Event('input',{bubbles:true}));return snapshot()};states.overprecision=input('125.55');states.empty=input('');states.high=input('999');states.low=input('9.9');slider.value='222.26';slider.dispatchEvent(new Event('input',{bubbles:true}));states.slider=snapshot();control.setPlaybackSpeed(333.34);states.model=snapshot();exact.value='';exact.dispatchEvent(new Event('blur',{bubbles:true}));states.blur=snapshot();control.resetPlaybackSpeed();states.reset=snapshot();return{states,callbacks,callbackTypes:callbacks.map(value=>typeof value)}})()`);
+console.log(JSON.stringify(report));}finally{socket.close()}
+"""
+        report = self._run_dashboard_chromium_probe(body, probe)
+        self.assertEqual(report["states"], {
+            "initial": {"slider": "100", "exact": "100.0"},
+            "overprecision": {"slider": "125.6", "exact": "125.6"},
+            "empty": {"slider": "125.6", "exact": "125.6"},
+            "high": {"slider": "400", "exact": "400.0"},
+            "low": {"slider": "10", "exact": "10.0"},
+            "slider": {"slider": "222.3", "exact": "222.3"},
+            "model": {"slider": "333.3", "exact": "333.3"},
+            "blur": {"slider": "333.3", "exact": "333.3"},
+            "reset": {"slider": "100", "exact": "100.0"},
+        })
+        self.assertEqual(report["callbacks"], [125.6, 400.0, 10.0, 222.3, 100.0])
+        self.assertEqual(report["callbackTypes"], ["number"] * 5)
 
     def run_live_chromium_probe(self, probe, timeout=30):
         server = make_server("127.0.0.1", 0, self.app, threaded=True)
@@ -1145,8 +1260,45 @@ try{
 
         self.assertEqual(fonts, list(available_font_names()))
         self.assertIn("options:installedFonts", body)
-        self.assertIn("const announcementAppearanceFields=[{label:'Font',path:'style.font',type:'select',options:installedFonts}", body)
+        self.assertIn("{label:'Headline font',path:'style.headline_font',type:'select',options:installedFonts}", body)
+        self.assertIn("{label:'Message font',path:'style.message_font',type:'select',options:installedFonts}", body)
         self.assertIn("const fonts = globalThis.matrixInstalledFonts || [];", canvas_source)
+
+    def test_priority_1_6_dashboard_uses_shared_speed_control_for_every_media_editor(self):
+        self.pair_browser()
+        body = self.client.get("/").get_data(as_text=True)
+
+        self.assertIn("function playbackSpeedControl", body)
+        self.assertIn("field:'playback_speed_percent',label:'Playback speed (%)',type:'playback_speed'", body)
+        self.assertIn("path:'playback_speed_percent',type:'playback_speed'", body)
+        self.assertIn("customControl('Playback speed (%)','playback_speed_percent','playback_speed'", body)
+        self.assertIn(".playback-speed-control input{min-height:44px}", body)
+        canvas_source = (Path(__file__).parents[1] / "app/static/custom_canvas.js").read_text()
+        self.assertIn("playback_speed_percent: 100.0", canvas_source)
+        self.assertIn("playbackSpeedControl", canvas_source)
+        self.assertIn("['text', 'text_scroll', 'media']", canvas_source)
+        self.assertIn("if (type === 'media')", canvas_source)
+        self.assertIn("calculatedMediaDuration(module)", canvas_source)
+
+    def test_priority_1_6_media_runtime_uses_metadata_loops_and_speed_for_readout_and_playlist(self):
+        self.pair_browser()
+        body = self.client.get("/").get_data(as_text=True)
+
+        self.assertIn("function calculatedMediaDuration(module)", body)
+        self.assertIn("frame_delays_ms", body)
+        self.assertIn("Math.max(10,delay/rate)", body)
+        self.assertIn("source_frames/20/rate", body)
+        self.assertIn("else if(isMediaAutomatic)", body)
+        self.assertIn("duration.value=seconds.toFixed(2)", body)
+        self.assertIn("module?.type==='media')runtime.textContent", body)
+
+    def test_priority_1_6_static_announcement_media_hides_speed_control(self):
+        self.pair_browser()
+        body = self.client.get("/").get_data(as_text=True)
+
+        self.assertIn("animated=/\\.(gif|mp4)$/i.test(announcement.media||'')", body)
+        self.assertIn("speedControl.hidden=hidden||!animated", body)
+        self.assertIn("sync=()=>label.hidden=!/\\.(gif|mp4)$/i.test(select?.value||'')", body)
 
     def test_dashboard_renders_the_canonical_preview_version_beneath_lan_control(self):
         self.pair_browser()
@@ -1154,7 +1306,7 @@ try{
         body = self.client.get("/").get_data(as_text=True)
 
         application_version = getattr(webapp, "APPLICATION_VERSION", None)
-        self.assertEqual(application_version, "0.3.59-preview")
+        self.assertEqual(application_version, "0.3.60-preview")
         self.assertEqual(body.count(f"Version {application_version}"), 1)
         self.assertRegex(
             body,
@@ -8807,7 +8959,7 @@ async function api(){return {status:'fresh',frames_per_loop:127,settings_digest:
         load_end = body.index("\nlet announcementTimingDebounce", load_start)
         harness = body[function_start:function_end] + "\n" + body[load_start:load_end] + r"""
 const announcement={
-  enabled:true,headline:'FIRST ANNOUNCEMENT',message:'',style:{font:'5x7'},
+  enabled:true,headline:'FIRST ANNOUNCEMENT',message:'',style:{headline_font:'5x7',message_font:'4x6'},
   timing:{mode:'static',duration_seconds:8},transition:{type:'cut'},
 };
 const announcements=[announcement];
@@ -8852,8 +9004,8 @@ api=async()=>({status:'unavailable',milliseconds:null,refresh_at:new Date(Date.n
         load_end = body.index("\nlet announcementTimingDebounce", load_start)
         harness = body[function_start:function_end] + "\n" + body[load_start:load_end] + r"""
 const announcements=[
-  {enabled:true,headline:'FIRST',message:'',style:{font:'5x7'},timing:{mode:'static',duration_seconds:8},transition:{type:'cut'}},
-  {enabled:true,headline:'SECOND',message:'',style:{font:'5x7'},timing:{mode:'static',duration_seconds:12},transition:{type:'cut'}},
+  {enabled:true,headline:'FIRST',message:'',style:{headline_font:'5x7',message_font:'4x6'},timing:{mode:'static',duration_seconds:8},transition:{type:'cut'}},
+  {enabled:true,headline:'SECOND',message:'',style:{headline_font:'5x7',message_font:'4x6'},timing:{mode:'static',duration_seconds:12},transition:{type:'cut'}},
 ];
 const builtInSettings={};
 const matrixLoadedRevision=0;let announcementTimingRequest=null,announcementTimingGeneration=0;
@@ -8906,7 +9058,7 @@ function markMatrixDirty(){}
 function customModulesFromEditor(){return [custom]}
 syncPlaylistDurations();
 if(rows[3].duration.value!==''||/\d/.test(rows[3].physical.textContent))throw new Error('empty announcement board should not show a duration');
-announcements.push({id:'announcement_draft',enabled:false,headline:'NEW ANNOUNCEMENT',message:'',style:{font:'5x7'},timing:{mode:'static',duration_seconds:8},transition:{type:'cut'}});
+announcements.push({id:'announcement_draft',enabled:false,headline:'NEW ANNOUNCEMENT',message:'',style:{headline_font:'5x7',message_font:'4x6'},timing:{mode:'static',duration_seconds:8},transition:{type:'cut'}});
 syncPlaylistDurations();
 if(rows[3].duration.value!==''||/\d/.test(rows[3].physical.textContent))throw new Error('disabled announcement should not show a board duration');
 announcements[0].enabled=true;
@@ -9254,9 +9406,10 @@ console.log('WEATHER_FRAME_DELAY_SERIALIZATION_PASS');
         sync_start = body.index("function syncAnnouncementRuntime(announcement)")
         sync_end = body.index("\nfunction ", sync_start + 1)
         harness = body[function_start:function_end] + "\n" + body[sync_start:sync_end] + r"""
-const announcement={headline:'A',message:'',style:{font:'5x7'},timing:{mode:'scroll',loops:2,frame_delay:.05},transition:{type:'cut'}};
+const announcement={headline:'A',message:'B',style:{headline_font:'5x7',message_font:'4x6'},timing:{mode:'scroll',loops:2,frame_delay:.05},transition:{type:'cut'}};
 if(calculatedTextWidth('helvR12','é😀')!==16)throw new Error('Unicode font width does not match the BDF renderer');
-if(calculatedAnnouncementDuration(announcement)!==7)throw new Error('scroll announcement runtime mismatch');
+const expectedScroll=Math.round((64+calculatedTextWidth('5x7','A - ')+calculatedTextWidth('4x6','B')+1)*2*.05*1000)/1000;
+if(calculatedAnnouncementDuration(announcement)!==expectedScroll)throw new Error('distinct-font scroll announcement runtime mismatch');
 announcement.timing={mode:'static',duration_seconds:8};
 if(calculatedAnnouncementDuration(announcement)!==8)throw new Error('static announcement runtime mismatch');
 announcement.transition={type:'fade',duration_seconds:1.5};
@@ -10719,7 +10872,7 @@ const first=mediaTimelineElement('built-in/clip.mp4',24,12.5);
 const second=mediaTimelineElement('built-in/clip.mp4',24,12.5);
 if(first!==second)throw new Error('cache miss');
 if(first.tag!=='img')throw new Error('preview must use sampled sprite');
-if(first.src!=='/api/media-timeline/built-in/clip.mp4?frame_count=24&fps=12.5&revision=r1')throw new Error(first.src);
+if(first.src!=='/api/media-timeline/built-in/clip.mp4?frame_count=24&fps=12.5&playback_speed_percent=100.0&revision=r1')throw new Error(first.src);
 first.naturalWidth=10;first.naturalHeight=240;
 let drawArgs=null;
 const context={save(){},restore(){},beginPath(){},rect(){},clip(){},translate(){},rotate(){},drawImage(...args){drawArgs=args}};
@@ -11065,7 +11218,8 @@ console.log('TERMINAL_MEDIA_PREVIEW_PASS');
         body = self.client.get("/").get_data(as_text=True)
 
         self.assertIn("function renderAnnouncementContent(announcement,fieldset)", body)
-        self.assertIn("mediaControl.hidden=announcement.layout==='text_notice'", body)
+        self.assertIn("mediaControl.hidden=hidden", body)
+        self.assertIn("speedControl.hidden=hidden||!animated", body)
         self.assertIn("layoutControl.addEventListener('input',syncMediaVisibility)", body)
         self.assertIn("missing.textContent=current+' (missing)'", body)
 
@@ -11127,8 +11281,9 @@ console.log('ANNOUNCEMENT_MEDIA_SELECT_REFRESH_PASS');
         self.pair_browser()
         body = self.client.get("/").get_data(as_text=True)
 
-        for path in ("style.font", "style.foreground", "style.background", "style.alignment", "style.border", "style.border_colour"):
+        for path in ("style.headline_font", "style.message_font", "style.foreground", "style.background", "style.alignment", "style.border", "style.border_colour"):
             self.assertIn(f"path:'{path}'", body)
+        self.assertNotIn("path:'style.font'", body)
         self.assertIn("options:['left','center','right']", body)
         self.assertIn("options:['none','solid','inset']", body)
         self.assertIn("if(group.name==='Appearance')renderAnnouncementFields(announcement,fieldset,announcementAppearanceFields)", body)
@@ -11366,34 +11521,57 @@ console.log('ANNOUNCEMENT_HEADING_SYNC_PASS');
         self.assertNotIn("Edit lava palettes", body)
         self.assertNotIn("#lava-palette-groups').scrollIntoView", body)
 
-    def test_sleep_editor_exposes_bounded_gif_playback_speed_percentage(self):
-        self.store.update({"media_layout": {"sleep": {"gif_speed_percent": 175}}})
+    def test_builtin_media_editors_expose_shared_bounded_playback_speed_percentage(self):
+        self.store.update({"media_layout": {"sleep": {"playback_speed_percent": 175.0}}})
         self.pair_browser()
 
         body = self.client.get("/").get_data(as_text=True)
 
-        self.assertIn(
-            "field:'gif_speed_percent',label:'GIF playback speed (%)',type:'number',min:25,max:400,step:5",
-            body,
+        self.assertEqual(
+            body.count("field:'playback_speed_percent',label:'Playback speed (%)',type:'playback_speed'"),
+            2,
         )
-        self.assertIn('"gif_speed_percent": 175', body)
-        self.assertIn('"gif_speed_percent": 100', body)
+        self.assertIn('"playback_speed_percent": 175.0', body)
+        self.assertIn('"playback_speed_percent": 100.0', body)
         self.assertIn("builtInSettings[module][definition.field]=", body)
         self.assertIn("builtInSettings[module]=structuredClone(builtInDefaults[module])", body)
         self.assertIn("media_layout:{splash:builtInSettings.splash,sleep:builtInSettings.sleep}", body)
 
-    def test_sleep_gif_speed_round_trips_through_paired_config_api(self):
+    def test_config_save_probes_basic_media_once_across_prepare_and_commit(self):
+        self.pair_browser()
+        module = {
+            "id": "custom_route_media", "name": "Route media", "type": "media",
+            "source": "built-in/sleep.gif", "fit": "contain", "x": 0, "y": 0,
+            "width": 64, "height": 32, "loops": 2,
+            "playback_speed_percent": 200.0,
+        }
+
+        with patch.object(
+            self.store, "_probe_raw_metadata", return_value=("gif", (0.1,)),
+        ) as probe:
+            response = self.post_config(json={
+                "custom_modules": [module],
+                "playlist": [{
+                    "module": module["id"], "duration": 99, "enabled": True,
+                }],
+            })
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(probe.call_count, 1)
+        self.assertAlmostEqual(response.get_json()["playlist"][0]["duration"], 0.1)
+
+    def test_builtin_media_speed_round_trips_through_paired_config_api(self):
         self.pair_browser()
 
         saved = self.post_config(
-            json={"media_layout": {"sleep": {"gif_speed_percent": 225}}},
+            json={"media_layout": {"sleep": {"playback_speed_percent": 225.0}}},
         )
 
         self.assertEqual(saved.status_code, 200)
-        self.assertEqual(saved.get_json()["media_layout"]["sleep"]["gif_speed_percent"], 225)
+        self.assertEqual(saved.get_json()["media_layout"]["sleep"]["playback_speed_percent"], 225.0)
         loaded = self.client.get("/api/config")
         self.assertEqual(loaded.status_code, 200)
-        self.assertEqual(loaded.get_json()["media_layout"]["sleep"]["gif_speed_percent"], 225)
+        self.assertEqual(loaded.get_json()["media_layout"]["sleep"]["playback_speed_percent"], 225.0)
         self.controller.reload.assert_called_once_with()
 
     def test_weather_editor_has_full_positioning_and_separate_separator_and_ticker_controls(self):
@@ -12172,7 +12350,7 @@ try{
             self.assertEqual((image.size, image.getpixel((0, 70))), ((10, 80), (0, 0, 255)))
         self.controller.matrix.media_frames.assert_called_once_with(
             "square.png", 8, 12.5, preserve_size=True, decode_timeout=5,
-            resolved_path=media,
+            resolved_path=media, playback_rate=1.0,
         )
         for query in ("frame_count=0&fps=12", "frame_count=121&fps=12", "frame_count=1&fps=0", "frame_count=1&fps=61", "frame_count=1&fps=nan"):
             self.assertEqual(
@@ -12202,6 +12380,25 @@ try{
         self.assertEqual((busy.status_code, busy.headers.get("Retry-After")), (429, "1"))
         self.assertEqual(busy.get_json(), {"error": "Media timeline service is busy."})
 
+    def test_priority_1_6_media_timeline_forwards_validated_playback_speed(self):
+        media = self.media_dir / "square.png"
+        Image.new("RGB", (10, 10), "red").save(media)
+        self.controller.matrix.media_frames.return_value = [Image.new("RGB", (10, 10), "blue")]
+        self.pair_browser()
+
+        response = self.client.get(
+            "/api/media-timeline/square.png?frame_count=1&fps=12&playback_speed_percent=250.0"
+        )
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(self.controller.matrix.media_frames.call_args.kwargs["playback_rate"], 2.5)
+        for speed in ("true", "nan", "9.9", "400.1", "100.01"):
+            with self.subTest(speed=speed):
+                invalid = self.client.get(
+                    "/api/media-timeline/square.png?frame_count=1&fps=12&playback_speed_percent=" + speed
+                )
+                self.assertEqual(invalid.status_code, 400)
+
     def test_media_listing_reports_automatic_timeline_for_animated_gif(self):
         self.pair_browser()
         (self.media_dir / "animated.gif").write_bytes(self.animated_gif_bytes().getvalue())
@@ -12213,6 +12410,7 @@ try{
         self.assertEqual(item["frame_count"], 3)
         self.assertEqual(item["fps"], 10)
         self.assertEqual(item["duration_ms"], 300)
+        self.assertEqual(item["frame_delays_ms"], [100, 100, 100])
 
     @unittest.skipUnless(shutil.which("ffmpeg") and shutil.which("ffprobe"), "FFmpeg is required")
     def test_media_listing_reports_automatic_timeline_for_video(self):
@@ -12226,6 +12424,7 @@ try{
         self.assertEqual(item["frame_count"], 6)
         self.assertEqual(item["fps"], 12)
         self.assertEqual(item["duration_ms"], 500)
+        self.assertIsNone(item["frame_delays_ms"])
 
     def test_media_upload_list_and_download(self):
         self.pair_browser()
@@ -15111,9 +15310,9 @@ try{
         announcement = {
             "id": "announcement_preview", "enabled": False, "name": "Draft preview",
             "layout": "text_notice", "headline": "PREVIEW", "message": "Unsaved draft",
-            "media": None,
+            "media": None, "playback_speed_percent": 100.0,
             "schedule": {"start_date": "2030-01-15", "end_date": "2030-01-15", "days": [0, 1, 2, 3, 4, 5, 6], "start_time": "09:00", "end_time": "17:00"},
-            "style": {"foreground": "#FFFFFF", "background": "#000000", "font": "5x7", "alignment": "center", "border": "none", "border_colour": "#FFFFFF"},
+            "style": {"foreground": "#FFFFFF", "background": "#000000", "headline_font": "5x7", "message_font": "4x6", "alignment": "center", "border": "none", "border_colour": "#FFFFFF"},
             "timing": {"mode": "static", "duration_seconds": 8},
             "transition": {"type": "cut"},
         }
@@ -15132,14 +15331,14 @@ try{
         base = {
             "id": "announcement_preview", "enabled": False, "name": "Draft preview",
             "layout": "text_notice", "headline": "PREVIEW", "message": "Unsaved draft",
-            "media": None,
+            "media": None, "playback_speed_percent": 100.0,
             "schedule": {"start_date": "2030-01-15", "end_date": "2030-01-15", "days": [0, 1, 2, 3, 4, 5, 6], "start_time": "09:00", "end_time": "17:00"},
-            "style": {"foreground": "#FFFFFF", "background": "#000000", "font": "5x7", "alignment": "center", "border": "none", "border_colour": "#FFFFFF"},
+            "style": {"foreground": "#FFFFFF", "background": "#000000", "headline_font": "5x7", "message_font": "4x6", "alignment": "center", "border": "none", "border_colour": "#FFFFFF"},
             "timing": {"mode": "static", "duration_seconds": 8},
             "transition": {"type": "cut"},
         }
         invalid_payloads = []
-        for field in ("enabled", "name"):
+        for field in ("enabled", "name", "playback_speed_percent"):
             payload = json.loads(json.dumps(base))
             payload.pop(field)
             invalid_payloads.append(payload)

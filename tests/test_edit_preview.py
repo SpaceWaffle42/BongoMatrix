@@ -2526,7 +2526,8 @@ class EditPreviewTests(unittest.TestCase):
             "style": {
                 "foreground": "#ffffff",
                 "background": "#001122",
-                "font": "5x7",
+                "headline_font": "5x7",
+                "message_font": "4x6",
                 "alignment": "left",
                 "border": "none",
                 "border_colour": "#ffffff",
@@ -2558,7 +2559,7 @@ class EditPreviewTests(unittest.TestCase):
                     CaptureMatrix(), media_path, 0.32,
                     settings={
                         "x": 0, "y": 0, "width": 64, "height": 32,
-                        "keep_aspect": True, "gif_speed_percent": 200,
+                        "keep_aspect": True, "playback_speed_percent": 200.0,
                     },
                     monotonic=lambda: 0.0,
                 ),
@@ -2708,7 +2709,7 @@ class EditPreviewTests(unittest.TestCase):
                         physical, str(path), 0.32, stop_event=stop,
                         settings={
                             "x": 0, "y": 0, "width": 64, "height": 32,
-                            "keep_aspect": True, "gif_speed_percent": 200,
+                            "keep_aspect": True, "playback_speed_percent": 200.0,
                             "video_fps": 20,
                         },
                     )
@@ -2719,7 +2720,7 @@ class EditPreviewTests(unittest.TestCase):
                     CaptureMatrix(), str(path), 0.32,
                     settings={
                         "x": 0, "y": 0, "width": 64, "height": 32,
-                        "keep_aspect": True, "gif_speed_percent": 200,
+                        "keep_aspect": True, "playback_speed_percent": 200.0,
                         "video_fps": 20,
                     },
                     monotonic=lambda: 0.0,
@@ -2825,7 +2826,7 @@ class EditPreviewTests(unittest.TestCase):
 
         settings = {
             "x": 0, "y": 0, "width": 64, "height": 32,
-            "keep_aspect": False, "gif_speed_percent": 200,
+            "keep_aspect": False, "playback_speed_percent": 200.0,
             "video_fps": 20,
         }
         red = Image.new("RGB", (64, 32), "red")
@@ -2841,7 +2842,7 @@ class EditPreviewTests(unittest.TestCase):
 
             for filename, duration, expected_delays, decoded in (
                 ("timeline.gif", 0.32, [50, 100, 50, 100, 20], []),
-                ("timeline.mp4", 0.23, [50, 50, 50, 50, 30], [red, blue]),
+                ("timeline.mp4", 0.23, [25, 25, 25, 25, 25, 25, 25, 25, 25, 5], [red, blue]),
             ):
                 with self.subTest(media=filename):
                     physical = PhysicalMatrix(
@@ -2921,8 +2922,8 @@ class EditPreviewTests(unittest.TestCase):
                     )
                     self.assertAlmostEqual(sum(stop.waits), duration)
                     if filename.endswith(".mp4"):
-                        self.assertEqual(physical.video_decode_calls, 3)
-                        self.assertEqual(preview_decode_calls[0], 3)
+                        self.assertEqual(physical.video_decode_calls, 6)
+                        self.assertEqual(preview_decode_calls[0], 6)
                     self.assertEqual(
                         [image.tobytes() for image in preview_images],
                         [image.tobytes() for image in physical.submissions],
@@ -3699,7 +3700,8 @@ class EditPreviewTests(unittest.TestCase):
                 "style": {
                     "foreground": "#ffffff",
                     "background": "#001122",
-                    "font": "5x7",
+                    "headline_font": "5x7",
+                    "message_font": "4x6",
                     "alignment": "left",
                     "border": "none",
                     "border_colour": "#ffffff",
@@ -3834,7 +3836,8 @@ class EditPreviewTests(unittest.TestCase):
             "style": {
                 "foreground": "#ffffff",
                 "background": "#001122",
-                "font": "5x7",
+                "headline_font": "5x7",
+                "message_font": "4x6",
                 "alignment": "left",
                 "border": "none",
                 "border_colour": "#ffffff",
@@ -4277,6 +4280,56 @@ class EditPreviewTests(unittest.TestCase):
         self.assertEqual(len(tokens), page_number)
         with self.assertRaises(StopIteration):
             session.page()
+
+
+    def test_basic_media_preview_honours_finite_loops_and_canonical_speed(self):
+        image = Image.new("RGB", (2, 2), "red")
+        with patch("modules.media_player.gif_media_frames", return_value=[(image, 0.05)]) as timeline:
+            frames = list(edit_preview.media_preview_frames(
+                CaptureMatrix(), "party.gif", 1,
+                settings={
+                    "fit": "manual", "x": 0, "y": 0, "width": 2, "height": 2,
+                    "loops": 3, "playback_speed_percent": 125.0,
+                },
+                monotonic=lambda: 0.0,
+            ))
+
+        self.assertEqual(len(frames), 1)
+        self.assertEqual(timeline.call_args.kwargs["loops"], 3)
+        self.assertEqual(timeline.call_args.kwargs["playback_rate"], 1.25)
+
+    def test_basic_media_preview_applies_shared_contain_fit(self):
+        image = Image.new("RGB", (2, 2), "red")
+        with patch("modules.media_player.gif_media_frames", return_value=[(image, 0.05)]):
+            [frame] = list(edit_preview.media_preview_frames(
+                CaptureMatrix(), "square.gif", 1,
+                settings={"fit": "contain", "loops": 1},
+                monotonic=lambda: 0.0,
+            ))
+
+        decoded = Image.open(io.BytesIO(base64.b64decode(frame["png"]))).convert("RGB")
+        self.assertEqual(decoded.getpixel((30, 16)), (0, 0, 0))
+        self.assertEqual(decoded.getpixel((31, 16)), (255, 0, 0))
+        self.assertEqual(decoded.getpixel((32, 16)), (255, 0, 0))
+        self.assertEqual(decoded.getpixel((33, 16)), (0, 0, 0))
+
+    def test_priority_1_6_mp4_preview_uses_same_playback_speed_as_physical_timeline(self):
+        images = [Image.new("RGB", (2, 2), colour) for colour in ("red", "blue")]
+
+        def decoder(_path, _settings, **_options):
+            return iter(images)
+
+        frames = list(edit_preview.media_preview_frames(
+            CaptureMatrix(), "clip.mp4", 0.05,
+            settings={
+                "x": 0, "y": 0, "width": 64, "height": 32,
+                "keep_aspect": True, "video_fps": 20,
+                "playback_speed_percent": 200.0,
+            },
+            video_decoder=decoder, monotonic=lambda: 0.0,
+        ))
+
+        self.assertEqual([frame["delay_ms"] for frame in frames], [25.0, 25.0])
 
 
 if __name__ == "__main__":
