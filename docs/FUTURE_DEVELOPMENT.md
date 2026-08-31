@@ -248,22 +248,26 @@ Verified remediation approvals:
 
 **Completed 2026-08-31:** reviewed source `5594f106fdbb91f46c20da65b397456f6d447b01` merged as protected-main commit `41355e00217c3f8df45ca83063828c939aa99c7e` after exact-SHA pipelines 307 and 308 passed. Production passed exact deploy, rollback, and redeploy with a healthy locked display service and byte-identical mutable state, and the accepted transaction was finalized. The independent exact-artifact review passed with zero findings. The separately discovered sub-10 ms GIF-cadence/verifier decision is deferred to v1 in GitLab issue 2 and does not alter Priority 1.5's completed media-only product behavior.
 
-### 1.6 Standardize GIF and MP4 playback speed across modules
+**Completion-record correction 2026-08-31:** the original Priority 1.5 closeout overstated the final requirement above. Priority 1.5 delivered media-only Basic custom modules, but it did not yet provide or reset a Basic-media playback-speed control to **100%**. That requirement is struck above only because Priority 1.6 subsequently implemented, merged, rolled back, redeployed, and accepted the shared **100%** default; it is not retroactive Priority 1.5 evidence.
 
-Every module that displays a GIF or MP4 should offer a playback-speed control. Use the same control model and terminology across built-in modules, basic custom modules, announcements, and Advanced Canvas wherever that media type is supported.
+### ~~1.6 Standardize GIF and MP4 playback speed across modules~~ — Completed
 
-- The default `100%` or `1×` setting should preserve the media's original playback timing.
-- Lower values should slow playback and higher values should speed it up.
-- GIF speed should scale the embedded frame delays without rewriting the source file.
-- MP4 speed should scale effective video playback timing without rewriting or transcoding the source file.
-- Use safe, bounded values and reject zero, negative, Boolean, malformed, or unsupported speeds.
-- Browser previews and physical Matrix output must use the same effective playback rate.
-- Playlist timing and displayed runtime should reflect the adjusted physical playback time rather than the source duration alone.
-- Slow playback must remain interruptible by module changes, preview changes, schedule changes, service stop, and shutdown.
-- Existing saved configurations should migrate to normal speed without altering unrelated settings.
-- Present speed as a shared slider plus an exact percentage input in every supporting module.
-- Allow `10.0%` through `400.0%` inclusive, with 0.1-percentage-point precision; normalize equivalent numeric representations before saving.
-- Changing media speed must not change loop count. Recalculate playlist runtime from the unchanged loop count and adjusted playback timing.
+~~Every module that displays a GIF or MP4 should offer a playback-speed control. Use the same control model and terminology across built-in modules, basic custom modules, announcements, and Advanced Canvas wherever that media type is supported.~~
+
+- ~~The default `100%` or `1×` setting should preserve the media's original playback timing.~~
+- ~~Lower values should slow playback and higher values should speed it up.~~
+- ~~GIF speed should scale the embedded frame delays without rewriting the source file.~~
+- ~~MP4 speed should scale effective video playback timing without rewriting or transcoding the source file.~~
+- ~~Use safe, bounded values and reject zero, negative, Boolean, malformed, or unsupported speeds.~~
+- ~~Browser previews and physical Matrix output must use the same effective playback rate.~~
+- ~~Playlist timing and displayed runtime should reflect the adjusted physical playback time rather than the source duration alone.~~
+- ~~Slow playback must remain interruptible by module changes, preview changes, schedule changes, service stop, and shutdown.~~
+- ~~Existing saved configurations should migrate to normal speed without altering unrelated settings.~~
+- ~~Present speed as a shared slider plus an exact percentage input in every supporting module.~~
+- ~~Allow `10.0%` through `400.0%` inclusive, with 0.1-percentage-point precision; normalize equivalent numeric representations before saving.~~
+- ~~Changing media speed must not change loop count. Recalculate playlist runtime from the unchanged loop count and adjusted playback timing.~~
+
+**Completed 2026-08-31:** reviewed source `2d4b35852b632260d5dc5fb6c4be6d36cb3f8341` merged through MR !101 as protected-main commit `6c312d40cc8d050d58a691d6266f91f6545d9194`. Exact-SHA push/MR pipelines 312 and 313 passed after one unchanged pre-existing heartbeat-test retry and a fresh aggregate retry; protected-main pipeline 314 passed 1,351 tests with zero failures, errors, or skips, zero quality/security findings, and source-bound physical acceptance plus recovery. Production's historical product port was narrowed to independently approved nine-runtime-path artifact `a67aeb4731708ee06d65e72a274d7ceea91604ea` (tree `e9b822596ac9171c003c496b2d29a5ca18aa71b5`) so unrelated production test files remained untouched. The guarded transaction passed deploy, deterministic schema-v2 revision-55 to schema-v3 revision-56 migration, deliberate byte-exact rollback, and final redeploy; unrelated mutable data and paired-device registry bytes remained exact. Live Chrome at 390×844 verified version `0.3.60-preview`, bounded shared speed controls, independent announcement headline/message fonts, horizontal containment, and zero configuration saves. Fresh physical 64×32 acceptance observed three distinct 200% sleep-animation frames and a later announcement-board publication, then removed the temporary pairing exactly. Hostile-runtime reaper hardening remains explicitly deferred to v1 in GitLab issue #12 and is not claimed complete here.
 
 ### 1.7 Advanced Canvas Pixel drawing tool
 
