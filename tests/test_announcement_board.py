@@ -28,7 +28,8 @@ class AnnouncementBoardTests(unittest.TestCase):
             "style": {
                 "foreground": "#ffffff",
                 "background": "#000000",
-                "font": "5x7",
+                "headline_font": "5x7",
+                "message_font": "4x6",
                 "alignment": "left",
                 "border": "none",
                 "border_colour": "#ffffff",
@@ -264,6 +265,67 @@ class AnnouncementBoardTests(unittest.TestCase):
         )
         matrix.swap.assert_called_once_with("canvas")
         stop.wait.assert_called_once_with(8)
+
+    def test_every_static_layout_uses_independent_headline_and_message_fonts(self):
+        for layout in ("text_notice", "icon_notice", "image_banner", "full_image_notice"):
+            with self.subTest(layout=layout):
+                matrix = Mock()
+                matrix.matrix.width = 64
+                matrix.matrix.height = 32
+                matrix.font.side_effect = lambda name: f"font:{name}"
+                matrix.colour_rgb.side_effect = lambda value: Mock(red=0, green=0, blue=0)
+                matrix.draw_text.return_value = 8
+                announcement = self.item("announcement_fonts", "09:00", "17:00")
+                announcement["layout"] = layout
+                announcement["style"]["headline_font"] = "7x13"
+                announcement["style"]["message_font"] = "tom_thumb"
+
+                announcement_board._render_static_layout(
+                    matrix, "canvas", announcement, media_frame=Image.new("RGB", (2, 2)),
+                )
+
+                text_calls = [(call.args[0], call.args[4]) for call in matrix.draw_text.call_args_list]
+                self.assertIn(("font:7x13", "Welcome"), text_calls)
+                self.assertIn(("font:tom_thumb", "Front desk closes at 5 PM"), text_calls)
+
+    def test_scrolling_timing_sums_distinct_font_runs_and_separator(self):
+        announcement = self.item("announcement_scroll_fonts", "09:00", "17:00")
+        announcement["timing"] = {"mode": "scroll", "loops": 2, "frame_delay": 0.05}
+        announcement["style"]["headline_font"] = "7x13"
+        announcement["style"]["message_font"] = "tom_thumb"
+        widths = {("7x13", "Welcome - "): 11, ("tom_thumb", "Front desk closes at 5 PM"): 17}
+        calls = []
+
+        plan = announcement_timing_plan(
+            [announcement], now=dt.datetime(2030, 1, 15, 12, 0), matrix_width=3,
+            text_width_provider=lambda font, text: calls.append((font, text)) or widths[(font, text)],
+        )
+
+        self.assertEqual(calls, [("7x13", "Welcome - "), ("tom_thumb", "Front desk closes at 5 PM")])
+        self.assertEqual(plan["item_milliseconds"], [3200])
+
+    def test_scrolling_frames_draw_distinct_font_runs_at_adjacent_positions(self):
+        matrix = Mock()
+        matrix.matrix.width = 3
+        matrix.matrix.CreateFrameCanvas.return_value = "canvas"
+        matrix.font.side_effect = lambda name: f"font:{name}"
+        matrix.colour_rgb.return_value = Mock(red=0, green=0, blue=0)
+        widths = {"Welcome - ": 2, "Front desk closes at 5 PM": 4}
+        matrix.draw_text.side_effect = lambda _font, _x, _y, _colour, text, **_kwargs: widths[text]
+        announcement = self.item("announcement_scroll_runs", "09:00", "17:00")
+        announcement["timing"] = {"mode": "scroll", "loops": 1, "frame_delay": 0.05}
+        announcement["style"]["headline_font"] = "7x13"
+        announcement["style"]["message_font"] = "tom_thumb"
+
+        frames = list(announcement_board.announcement_frames(matrix, [announcement]))
+
+        first_calls = matrix.draw_text.call_args_list[:2]
+        self.assertEqual(
+            [(call.args[0], call.args[1], call.args[4]) for call in first_calls],
+            [("font:7x13", 3, "Welcome - "), ("font:tom_thumb", 5, "Front desk closes at 5 PM")],
+        )
+        self.assertEqual(len(frames), 10)
+
     def test_scrolling_text_notice_completes_saved_loops_using_only_frame_delay(self):
         matrix = Mock()
         matrix.matrix.width = 3

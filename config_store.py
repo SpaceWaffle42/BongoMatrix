@@ -602,15 +602,17 @@ def _validate_announcement_board(board, *, allow_legacy=True):
 
         style = item["style"]
         if not isinstance(style, dict) or set(style) != {
-            "foreground", "background", "font", "alignment", "border", "border_colour",
+            "foreground", "background", "headline_font", "message_font",
+            "alignment", "border", "border_colour",
         }:
             raise ValueError("announcement style has invalid fields")
         for field in ("foreground", "background", "border_colour"):
             if not _is_hex_colour(style[field]):
                 raise ValueError(f"announcement {field} must use #RRGGBB format")
             style[field] = style[field].lower()
-        if style["font"] not in AVAILABLE_FONTS:
-            raise ValueError("announcement font is not supported")
+        for field in ("headline_font", "message_font"):
+            if style[field] not in AVAILABLE_FONTS:
+                raise ValueError(f"announcement {field} is not supported")
         if style["alignment"] not in {"left", "center", "right"}:
             raise ValueError("announcement alignment is not supported")
         if style["border"] not in {"none", "solid", "inset"}:
@@ -1175,6 +1177,11 @@ sys.stdout.write(json.dumps(result, separators=(",", ":")))
                     for announcement in board.get("announcements", []):
                         if isinstance(announcement, dict):
                             announcement.setdefault("playback_speed_percent", 100.0)
+                            style = announcement.get("style")
+                            if isinstance(style, dict) and "font" in style:
+                                legacy_font = style.pop("font")
+                                style["headline_font"] = legacy_font
+                                style["message_font"] = legacy_font
                 for module in current.get("custom_modules", []):
                     if not isinstance(module, dict) or module.get("type") != "canvas":
                         continue

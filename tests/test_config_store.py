@@ -82,6 +82,46 @@ class ConfigStoreTests(unittest.TestCase):
                     ConfigStore(path)
                 self.assertEqual(path.read_bytes(), original)
 
+    def test_schema_v2_announcement_font_migrates_to_both_canonical_fonts_exactly(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "config.json"
+            legacy = json.loads(json.dumps(DEFAULT_CONFIG))
+            legacy["schema_version"] = 2
+            announcement = self.announcement()
+            announcement["style"] = {
+                "foreground": "#AABBCC", "background": "#010203",
+                "font": "tom_thumb", "alignment": "right",
+                "border": "inset", "border_colour": "#DDEEFF",
+            }
+            legacy["announcement_board"]["announcements"] = [announcement]
+            unrelated_before = json.loads(json.dumps(legacy["device"]))
+            path.write_text(json.dumps(legacy))
+
+            migrated = ConfigStore(path).get()
+
+            style = migrated["announcement_board"]["announcements"][0]["style"]
+            self.assertEqual(style, {
+                "foreground": "#AABBCC", "background": "#010203",
+                "headline_font": "tom_thumb", "message_font": "tom_thumb",
+                "alignment": "right", "border": "inset", "border_colour": "#DDEEFF",
+            })
+            self.assertEqual(migrated["device"], unrelated_before)
+
+    def test_current_announcement_style_requires_both_canonical_fonts_and_rejects_legacy_font(self):
+        candidate = json.loads(json.dumps(DEFAULT_CONFIG))
+        candidate["announcement_board"]["announcements"] = [self.announcement()]
+        validate_config(candidate, allow_legacy_announcements=False)
+        for mutation in (
+            lambda style: style.pop("headline_font"),
+            lambda style: style.pop("message_font"),
+            lambda style: style.update(font="5x7"),
+        ):
+            malformed = json.loads(json.dumps(candidate))
+            mutation(malformed["announcement_board"]["announcements"][0]["style"])
+            with self.subTest(style=malformed["announcement_board"]["announcements"][0]["style"]):
+                with self.assertRaisesRegex(ValueError, "announcement style has invalid fields"):
+                    validate_config(malformed, allow_legacy_announcements=False)
+
     def test_current_save_rejects_invalid_custom_border_style_and_colour_without_changing_bytes(self):
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / "config.json"
@@ -774,7 +814,8 @@ class ConfigStoreTests(unittest.TestCase):
             "style": {
                 "foreground": "#FFFFFF",
                 "background": "#000000",
-                "font": "5x7",
+                "headline_font": "5x7",
+                "message_font": "4x6",
                 "alignment": "center",
                 "border": "none",
                 "border_colour": "#FFFFFF",
@@ -1760,7 +1801,8 @@ class ConfigStoreTests(unittest.TestCase):
                 "keyframes": [],
             }], overrides=[])
             announcement = self.announcement(style={
-                "foreground": "#FFFFFF", "background": "#000000", "font": font,
+                "foreground": "#FFFFFF", "background": "#000000",
+                "headline_font": font, "message_font": font,
                 "alignment": "center", "border": "none", "border_colour": "#FFFFFF",
             })
 
@@ -1773,7 +1815,8 @@ class ConfigStoreTests(unittest.TestCase):
             self.assertEqual(updated["lava"]["time_font"], font)
             self.assertEqual(updated["custom_modules"][0]["font"], font)
             self.assertEqual(updated["custom_modules"][1]["layers"][0]["properties"]["font"], font)
-            self.assertEqual(updated["announcement_board"]["announcements"][0]["style"]["font"], font)
+            self.assertEqual(updated["announcement_board"]["announcements"][0]["style"]["headline_font"], font)
+            self.assertEqual(updated["announcement_board"]["announcements"][0]["style"]["message_font"], font)
 
     def test_scrolling_duration_supports_an_installed_font_outside_the_old_allowlist(self):
         with tempfile.TemporaryDirectory() as directory:

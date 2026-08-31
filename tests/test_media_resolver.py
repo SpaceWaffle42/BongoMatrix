@@ -724,7 +724,8 @@ class MediaResolverTests(unittest.TestCase):
                     "days": [0, 1, 2, 3, 4, 5, 6],
                 },
                 "style": {
-                    "foreground": "#ffffff", "background": "#000000", "font": "5x7",
+                    "foreground": "#ffffff", "background": "#000000",
+                    "headline_font": "5x7", "message_font": "4x6",
                     "alignment": "left", "border": "none", "border_colour": "#ffffff",
                 },
                 "timing": {"mode": "static", "duration_seconds": 1},

@@ -1260,7 +1260,8 @@ try{
 
         self.assertEqual(fonts, list(available_font_names()))
         self.assertIn("options:installedFonts", body)
-        self.assertIn("const announcementAppearanceFields=[{label:'Font',path:'style.font',type:'select',options:installedFonts}", body)
+        self.assertIn("{label:'Headline font',path:'style.headline_font',type:'select',options:installedFonts}", body)
+        self.assertIn("{label:'Message font',path:'style.message_font',type:'select',options:installedFonts}", body)
         self.assertIn("const fonts = globalThis.matrixInstalledFonts || [];", canvas_source)
 
     def test_priority_1_6_dashboard_uses_shared_speed_control_for_every_media_editor(self):
@@ -8958,7 +8959,7 @@ async function api(){return {status:'fresh',frames_per_loop:127,settings_digest:
         load_end = body.index("\nlet announcementTimingDebounce", load_start)
         harness = body[function_start:function_end] + "\n" + body[load_start:load_end] + r"""
 const announcement={
-  enabled:true,headline:'FIRST ANNOUNCEMENT',message:'',style:{font:'5x7'},
+  enabled:true,headline:'FIRST ANNOUNCEMENT',message:'',style:{headline_font:'5x7',message_font:'4x6'},
   timing:{mode:'static',duration_seconds:8},transition:{type:'cut'},
 };
 const announcements=[announcement];
@@ -9003,8 +9004,8 @@ api=async()=>({status:'unavailable',milliseconds:null,refresh_at:new Date(Date.n
         load_end = body.index("\nlet announcementTimingDebounce", load_start)
         harness = body[function_start:function_end] + "\n" + body[load_start:load_end] + r"""
 const announcements=[
-  {enabled:true,headline:'FIRST',message:'',style:{font:'5x7'},timing:{mode:'static',duration_seconds:8},transition:{type:'cut'}},
-  {enabled:true,headline:'SECOND',message:'',style:{font:'5x7'},timing:{mode:'static',duration_seconds:12},transition:{type:'cut'}},
+  {enabled:true,headline:'FIRST',message:'',style:{headline_font:'5x7',message_font:'4x6'},timing:{mode:'static',duration_seconds:8},transition:{type:'cut'}},
+  {enabled:true,headline:'SECOND',message:'',style:{headline_font:'5x7',message_font:'4x6'},timing:{mode:'static',duration_seconds:12},transition:{type:'cut'}},
 ];
 const builtInSettings={};
 const matrixLoadedRevision=0;let announcementTimingRequest=null,announcementTimingGeneration=0;
@@ -9057,7 +9058,7 @@ function markMatrixDirty(){}
 function customModulesFromEditor(){return [custom]}
 syncPlaylistDurations();
 if(rows[3].duration.value!==''||/\d/.test(rows[3].physical.textContent))throw new Error('empty announcement board should not show a duration');
-announcements.push({id:'announcement_draft',enabled:false,headline:'NEW ANNOUNCEMENT',message:'',style:{font:'5x7'},timing:{mode:'static',duration_seconds:8},transition:{type:'cut'}});
+announcements.push({id:'announcement_draft',enabled:false,headline:'NEW ANNOUNCEMENT',message:'',style:{headline_font:'5x7',message_font:'4x6'},timing:{mode:'static',duration_seconds:8},transition:{type:'cut'}});
 syncPlaylistDurations();
 if(rows[3].duration.value!==''||/\d/.test(rows[3].physical.textContent))throw new Error('disabled announcement should not show a board duration');
 announcements[0].enabled=true;
@@ -9405,9 +9406,10 @@ console.log('WEATHER_FRAME_DELAY_SERIALIZATION_PASS');
         sync_start = body.index("function syncAnnouncementRuntime(announcement)")
         sync_end = body.index("\nfunction ", sync_start + 1)
         harness = body[function_start:function_end] + "\n" + body[sync_start:sync_end] + r"""
-const announcement={headline:'A',message:'',style:{font:'5x7'},timing:{mode:'scroll',loops:2,frame_delay:.05},transition:{type:'cut'}};
+const announcement={headline:'A',message:'B',style:{headline_font:'5x7',message_font:'4x6'},timing:{mode:'scroll',loops:2,frame_delay:.05},transition:{type:'cut'}};
 if(calculatedTextWidth('helvR12','é😀')!==16)throw new Error('Unicode font width does not match the BDF renderer');
-if(calculatedAnnouncementDuration(announcement)!==7)throw new Error('scroll announcement runtime mismatch');
+const expectedScroll=Math.round((64+calculatedTextWidth('5x7','A - ')+calculatedTextWidth('4x6','B')+1)*2*.05*1000)/1000;
+if(calculatedAnnouncementDuration(announcement)!==expectedScroll)throw new Error('distinct-font scroll announcement runtime mismatch');
 announcement.timing={mode:'static',duration_seconds:8};
 if(calculatedAnnouncementDuration(announcement)!==8)throw new Error('static announcement runtime mismatch');
 announcement.transition={type:'fade',duration_seconds:1.5};
@@ -11279,8 +11281,9 @@ console.log('ANNOUNCEMENT_MEDIA_SELECT_REFRESH_PASS');
         self.pair_browser()
         body = self.client.get("/").get_data(as_text=True)
 
-        for path in ("style.font", "style.foreground", "style.background", "style.alignment", "style.border", "style.border_colour"):
+        for path in ("style.headline_font", "style.message_font", "style.foreground", "style.background", "style.alignment", "style.border", "style.border_colour"):
             self.assertIn(f"path:'{path}'", body)
+        self.assertNotIn("path:'style.font'", body)
         self.assertIn("options:['left','center','right']", body)
         self.assertIn("options:['none','solid','inset']", body)
         self.assertIn("if(group.name==='Appearance')renderAnnouncementFields(announcement,fieldset,announcementAppearanceFields)", body)
@@ -15309,7 +15312,7 @@ try{
             "layout": "text_notice", "headline": "PREVIEW", "message": "Unsaved draft",
             "media": None, "playback_speed_percent": 100.0,
             "schedule": {"start_date": "2030-01-15", "end_date": "2030-01-15", "days": [0, 1, 2, 3, 4, 5, 6], "start_time": "09:00", "end_time": "17:00"},
-            "style": {"foreground": "#FFFFFF", "background": "#000000", "font": "5x7", "alignment": "center", "border": "none", "border_colour": "#FFFFFF"},
+            "style": {"foreground": "#FFFFFF", "background": "#000000", "headline_font": "5x7", "message_font": "4x6", "alignment": "center", "border": "none", "border_colour": "#FFFFFF"},
             "timing": {"mode": "static", "duration_seconds": 8},
             "transition": {"type": "cut"},
         }
@@ -15330,7 +15333,7 @@ try{
             "layout": "text_notice", "headline": "PREVIEW", "message": "Unsaved draft",
             "media": None, "playback_speed_percent": 100.0,
             "schedule": {"start_date": "2030-01-15", "end_date": "2030-01-15", "days": [0, 1, 2, 3, 4, 5, 6], "start_time": "09:00", "end_time": "17:00"},
-            "style": {"foreground": "#FFFFFF", "background": "#000000", "font": "5x7", "alignment": "center", "border": "none", "border_colour": "#FFFFFF"},
+            "style": {"foreground": "#FFFFFF", "background": "#000000", "headline_font": "5x7", "message_font": "4x6", "alignment": "center", "border": "none", "border_colour": "#FFFFFF"},
             "timing": {"mode": "static", "duration_seconds": 8},
             "transition": {"type": "cut"},
         }

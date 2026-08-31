@@ -99,11 +99,9 @@ def announcement_timing_plan(announcements, *, now, text_width_provider=text_wid
                 milliseconds.quantize(Decimal("1"), rounding=ROUND_HALF_UP)
             ))
             continue
-        text = announcement["headline"]
-        if announcement.get("message"):
-            text += " - " + announcement["message"]
+        runs = _scroll_text_runs(announcement)
         frames = scroll_frames(
-            text_width_provider(announcement["style"]["font"], text),
+            sum(text_width_provider(font_name, text) for font_name, text in runs),
             matrix_width=matrix_width,
         )
         item_milliseconds.append(duration_milliseconds(frames, timing["loops"], timing["frame_delay"]))
@@ -158,12 +156,24 @@ def _draw_border(matrix, canvas, style, x_offset=0):
     )
 
 
+def _scroll_text_runs(announcement):
+    """Return adjacent font/text runs for one scrolling announcement."""
+    style = announcement["style"]
+    headline = announcement["headline"]
+    if not announcement.get("message"):
+        return [(style["headline_font"], headline)]
+    return [
+        (style["headline_font"], headline + " - "),
+        (style["message_font"], announcement["message"]),
+    ]
+
+
 def _render_text_notice(matrix, canvas, announcement, x_offset=0):
     style = announcement["style"]
     background = matrix.colour_rgb(style["background"])
     foreground = matrix.colour_rgb(style["foreground"])
     matrix.fill(background.red, background.green, background.blue, canvas=canvas)
-    headline_font = matrix.font(style["font"])
+    headline_font = matrix.font(style["headline_font"])
     headline_x = _aligned_text_x(
         matrix, canvas, headline_font, foreground,
         announcement["headline"], style["alignment"], 11,
@@ -173,7 +183,7 @@ def _render_text_notice(matrix, canvas, announcement, x_offset=0):
         announcement["headline"], canvas=canvas,
     )
     if announcement["message"]:
-        message_font = matrix.font("4x6")
+        message_font = matrix.font(style["message_font"])
         message_x = _aligned_text_x(
             matrix, canvas, message_font, foreground,
             announcement["message"], style["alignment"], 23,
@@ -191,10 +201,7 @@ def _scroll_text_notice(matrix, canvas, announcement, stop_event):
         raise NotImplementedError("scrolling announcement border is not implemented")
     background = matrix.colour_rgb(style["background"])
     foreground = matrix.colour_rgb(style["foreground"])
-    font = matrix.font(style["font"])
-    text = announcement["headline"]
-    if announcement["message"]:
-        text += " - " + announcement["message"]
+    runs = [(matrix.font(font_name), text) for font_name, text in _scroll_text_runs(announcement)]
     timing = announcement["timing"]
     submitted = False
     for _ in range(timing["loops"]):
@@ -203,7 +210,11 @@ def _scroll_text_notice(matrix, canvas, announcement, stop_event):
             if stop_event is not None and stop_event.is_set():
                 return canvas, True, submitted
             matrix.fill(background.red, background.green, background.blue, canvas=canvas)
-            text_width = matrix.draw_text(font, x, 20, foreground, text, canvas=canvas)
+            text_width = 0
+            for font, text in runs:
+                text_width += matrix.draw_text(
+                    font, x + text_width, 20, foreground, text, canvas=canvas,
+                )
             if stop_event is not None and stop_event.is_set():
                 return canvas, True, submitted
             canvas = matrix.swap(canvas)
@@ -243,7 +254,7 @@ def _render_icon_notice(
     if media_brightness != 1:
         image = _scaled_image(image, media_brightness)
     matrix.draw_image(image, 1 + x_offset, 1, width=14, height=14, canvas=canvas)
-    headline_font = matrix.font(style["font"])
+    headline_font = matrix.font(style["headline_font"])
     headline_x = _aligned_text_x(
         matrix, canvas, headline_font, foreground, announcement["headline"],
         style["alignment"], 11, left=18,
@@ -253,7 +264,7 @@ def _render_icon_notice(
         announcement["headline"], canvas=canvas,
     )
     if announcement["message"]:
-        message_font = matrix.font("4x6")
+        message_font = matrix.font(style["message_font"])
         message_x = _aligned_text_x(
             matrix, canvas, message_font, foreground, announcement["message"],
             style["alignment"], 23, left=18,
@@ -288,7 +299,7 @@ def _render_image_banner(
         width=matrix.matrix.width, height=matrix.matrix.height // 2,
         keep_aspect=False, canvas=canvas,
     )
-    headline_font = matrix.font(style["font"])
+    headline_font = matrix.font(style["headline_font"])
     headline_x = _aligned_text_x(
         matrix, canvas, headline_font, foreground, announcement["headline"],
         style["alignment"], 24,
@@ -298,7 +309,7 @@ def _render_image_banner(
         announcement["headline"], canvas=canvas,
     )
     if announcement["message"]:
-        message_font = matrix.font("4x6")
+        message_font = matrix.font(style["message_font"])
         message_x = _aligned_text_x(
             matrix, canvas, message_font, foreground, announcement["message"],
             style["alignment"], 31,
@@ -334,7 +345,7 @@ def _render_full_image(
         keep_aspect=False, canvas=canvas,
     )
     if announcement["message"]:
-        message_font = matrix.font("4x6")
+        message_font = matrix.font(style["message_font"])
         message_x = _aligned_text_x(
             matrix, canvas, message_font, foreground, announcement["message"],
             style["alignment"], 21,
@@ -343,7 +354,7 @@ def _render_full_image(
             message_font, message_x, 21, foreground,
             announcement["message"], canvas=canvas,
         )
-    headline_font = matrix.font(style["font"])
+    headline_font = matrix.font(style["headline_font"])
     headline_x = _aligned_text_x(
         matrix, canvas, headline_font, foreground, announcement["headline"],
         style["alignment"], 30,
@@ -612,12 +623,12 @@ def announcement_frames(
 
         if announcement["timing"]["mode"] == "scroll":
             style = announcement["style"]
-            font = matrix.font(style["font"])
             foreground = matrix.colour_rgb(style["foreground"])
             background = matrix.colour_rgb(style["background"])
-            text = announcement["headline"]
-            if announcement["message"]:
-                text += " - " + announcement["message"]
+            runs = [
+                (font_name, matrix.font(font_name), text)
+                for font_name, text in _scroll_text_runs(announcement)
+            ]
             width = None
             for _ in range(announcement["timing"]["loops"]):
                 x = matrix.matrix.width
@@ -629,15 +640,20 @@ def announcement_frames(
                         background.red, background.green, background.blue,
                         canvas=canvas,
                     )
-                    drawn_width = matrix.draw_text(
-                        font, x, 20, foreground, text, canvas=canvas,
-                    )
-                    if width is None:
-                        width = (
-                            text_width(style["font"], text)
-                            if hasattr(font, "text_pixels")
-                            else drawn_width
+                    drawn_width = 0
+                    measured_width = 0
+                    for font_name, font, text in runs:
+                        run_width = matrix.draw_text(
+                            font, x + drawn_width, 20, foreground, text, canvas=canvas,
                         )
+                        drawn_width += run_width
+                        measured_width += (
+                            text_width(font_name, text)
+                            if hasattr(font, "text_pixels")
+                            else run_width
+                        )
+                    if width is None:
+                        width = measured_width
                     if stop_event is not None and stop_event.is_set():
                         return
                     delay_ms = clipped(announcement["timing"]["frame_delay"] * 1000)

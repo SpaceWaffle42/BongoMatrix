@@ -2526,7 +2526,8 @@ class EditPreviewTests(unittest.TestCase):
             "style": {
                 "foreground": "#ffffff",
                 "background": "#001122",
-                "font": "5x7",
+                "headline_font": "5x7",
+                "message_font": "4x6",
                 "alignment": "left",
                 "border": "none",
                 "border_colour": "#ffffff",
@@ -3699,7 +3700,8 @@ class EditPreviewTests(unittest.TestCase):
                 "style": {
                     "foreground": "#ffffff",
                     "background": "#001122",
-                    "font": "5x7",
+                    "headline_font": "5x7",
+                    "message_font": "4x6",
                     "alignment": "left",
                     "border": "none",
                     "border_colour": "#ffffff",
@@ -3834,7 +3836,8 @@ class EditPreviewTests(unittest.TestCase):
             "style": {
                 "foreground": "#ffffff",
                 "background": "#001122",
-                "font": "5x7",
+                "headline_font": "5x7",
+                "message_font": "4x6",
                 "alignment": "left",
                 "border": "none",
                 "border_colour": "#ffffff",

@@ -86,7 +86,7 @@ class ScrollTimingTests(unittest.TestCase):
         timing = {"mode": "static", "duration_seconds": 8} if mode == "static" else {"mode": "scroll", "loops": 2, "frame_delay": 0.05}
         return {
             "enabled": enabled, "headline": "HELLO", "message": "WORLD",
-            "style": {"font": "5x7"}, "timing": timing,
+            "style": {"headline_font": "5x7", "message_font": "4x6"}, "timing": timing,
             "schedule": {"start_date": "2030-01-15", "end_date": "2030-01-15", "days": [1], "start_time": start, "end_time": end},
         }
 
@@ -97,9 +97,9 @@ class ScrollTimingTests(unittest.TestCase):
         disabled = self.announcement("static", enabled=False)
         plan = announcement_timing_plan([static, scrolling, disabled], now=now, text_width_provider=lambda _font, _text: 10)
         self.assertEqual(plan["status"], "fresh")
-        self.assertEqual(plan["item_milliseconds"], [8000, 7500])
-        self.assertEqual(plan["milliseconds"], 15500)
-        self.assertEqual(plan["display"], "15.5 s")
+        self.assertEqual(plan["item_milliseconds"], [8000, 8500])
+        self.assertEqual(plan["milliseconds"], 16500)
+        self.assertEqual(plan["display"], "16.5 s")
         self.assertEqual(plan["refresh_at"], dt.datetime(2030, 1, 15, 9, 31))
 
     def test_announcement_plan_is_explicitly_unavailable_when_none_eligible(self):
