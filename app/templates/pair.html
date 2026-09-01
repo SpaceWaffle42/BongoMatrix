@@ -37,13 +37,6 @@
     </form>
     {% endfor %}
   </div>
-  {% elif recovery_start %}
-  <h2>Recover access</h2>
-  <p class="hint">No longer have access to a paired device? Start recovery pairing to show a short-lived PIN on the physical Matrix.</p>
-  <form method="post" action="/pair/recover">
-    <input type="hidden" name="recovery_start_nonce" value="{{ recovery_start_nonce }}">
-    <button type="submit">SHOW RECOVERY PIN</button>
-  </form>
   {% elif paired %}
   {% if pairing_ready %}<p>Pairing is ready. Enter the PIN shown on the Matrix on the new device.</p>{% endif %}
   {% if replacement_required %}<p class="hint">At the current limit, the new device will choose an existing pairing to replace after its PIN is accepted.</p>{% endif %}
@@ -58,6 +51,13 @@
   <p class="hint">Enter the six-digit PIN currently shown on the LED display.</p>
   {% endif %}
   <form method="post" action="/pair"><input name="device_name" maxlength="40" autocomplete="name" placeholder="Name this device, e.g. Alex's phone" required><input name="pin" inputmode="numeric" pattern="[0-9]{6}" maxlength="6" autocomplete="one-time-code" autofocus required><button>PAIR DISPLAY</button></form>
+  {% if recovery_start_nonce %}
+  <p class="hint">Need a PIN? Request one here, then read it from the physical Matrix.</p>
+  <form method="post" action="/pair/recover">
+    <input type="hidden" name="recovery_start_nonce" value="{{ recovery_start_nonce }}">
+    <button type="submit">REQUEST PIN ON MATRIX</button>
+  </form>
+  {% endif %}
   {% endif %}
 </main><script>
 function showPairActionFailure(button){let notice=document.querySelector('[data-pair-action-feedback]');if(!notice){notice=document.createElement('p');notice.className='error';notice.dataset.pairActionFeedback='';notice.setAttribute('role','alert');notice.tabIndex=-1;button.before(notice)}notice.textContent='Unable to reach the Matrix. Check the connection and try again.';notice.focus()}

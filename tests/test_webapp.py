@@ -26,6 +26,7 @@ from werkzeug.serving import make_server
 from PIL import Image, UnidentifiedImageError
 
 from config_store import ConfigStore
+from display_controller import DisplayController
 from font_catalog import available_font_names
 from pairing import PairedDeviceStore, PairingDurabilityError, PairingManager
 from secret_store import SecretDurabilityError, SecretStore
@@ -1310,7 +1311,7 @@ try{
         body = self.client.get("/").get_data(as_text=True)
 
         application_version = getattr(webapp, "APPLICATION_VERSION", None)
-        self.assertEqual(application_version, "0.3.61-preview")
+        self.assertEqual(application_version, "0.3.62-preview")
         self.assertEqual(body.count(f"Version {application_version}"), 1)
         self.assertRegex(
             body,
@@ -3091,7 +3092,7 @@ try{
  await sleep(250);
  const report=await evaluate(`({path:location.pathname,body:document.body.innerText,stopped:sessionStorage.getItem('logoutStopped')==='1',response:JSON.parse(sessionStorage.getItem('logoutResponse'))})`);
  if(report.response.status!==200||!report.response.redirected||!report.response.url.endsWith('/pair'))throw Error('real followed logout response mismatch: '+JSON.stringify(report));
- if(report.path!=='/pair'||!report.stopped||!report.body.includes('Recover access')||!report.body.includes('SHOW RECOVERY PIN'))throw Error('committed redirect did not reach recovery: '+JSON.stringify(report));
+ if(report.path!=='/pair'||!report.stopped||!report.body.includes('REQUEST PIN ON MATRIX'))throw Error('committed redirect did not reach pairing: '+JSON.stringify(report));
  console.log(JSON.stringify(report));
 }finally{socket.close()}
 """
@@ -3135,6 +3136,66 @@ console.log('UNPAIR_NETWORK_PASS');
         and os.access(os.environ.get("MATRIX_CHROMIUM", ""), os.X_OK),
         "MATRIX_CHROMIUM browser is required",
     )
+    def test_physical_pin_request_is_accessible_at_mobile_tablet_and_desktop_widths(self):
+        self.pairing.active_pin.return_value = None
+        probe = r"""
+const debugPort=process.argv[1],appPort=process.argv[2],sleep=ms=>new Promise(r=>setTimeout(r,ms));let endpoint;
+for(let attempt=0;attempt<50;attempt++){try{endpoint=await fetch(`http://127.0.0.1:${debugPort}/json/new`,{method:'PUT'}).then(r=>r.json());break}catch(_){await sleep(100)}}
+if(!endpoint)throw Error('CDP unavailable');
+const socket=new WebSocket(endpoint.webSocketDebuggerUrl),pending=new Map();let id=0;
+socket.onmessage=e=>{const m=JSON.parse(e.data);if(m.id&&pending.has(m.id)){const p=pending.get(m.id);pending.delete(m.id);m.error?p.reject(Error(JSON.stringify(m.error))):p.resolve(m.result)}};
+await new Promise((resolve,reject)=>{socket.onopen=resolve;socket.onerror=reject});
+const send=(method,params={})=>new Promise((resolve,reject)=>{const request=++id;pending.set(request,{resolve,reject});socket.send(JSON.stringify({id:request,method,params}))});
+const evaluate=async expression=>{const result=await send('Runtime.evaluate',{expression,returnByValue:true});if(result.exceptionDetails)throw Error(JSON.stringify(result.exceptionDetails));return result.result.value};
+const waitFor=async(expression,timeout=5000)=>{const end=Date.now()+timeout;while(Date.now()<end){try{const value=await evaluate(expression);if(value)return value}catch(_){}await sleep(25)}throw Error('timeout: '+expression)};
+try{
+ await send('Runtime.enable');await send('Page.enable');
+ const reports=[];
+ for(const viewport of [{width:320,height:568},{width:768,height:1024},{width:1440,height:900}]){
+  await send('Emulation.setDeviceMetricsOverride',{...viewport,deviceScaleFactor:1,mobile:viewport.width===320,screenWidth:viewport.width,screenHeight:viewport.height});
+  await send('Page.navigate',{url:`http://127.0.0.1:${appPort}/pair`});
+  await waitFor(`document.querySelector('form[action="/pair/recover"] button')?.textContent.trim()==='REQUEST PIN ON MATRIX'&&document.readyState==='complete'`);
+  reports.push(await evaluate(`(()=>{const button=document.querySelector('form[action="/pair/recover"] button'),main=document.querySelector('main'),b=button.getBoundingClientRect(),m=main.getBoundingClientRect(),style=getComputedStyle(button);return{viewport:${JSON.stringify(viewport)},clientWidth:document.documentElement.clientWidth,scrollWidth:document.documentElement.scrollWidth,button:{width:b.width,height:b.height,display:style.display,visibility:style.visibility},main:{left:m.left,right:m.right},version:document.body.innerText.includes('0.3.62-preview')}})()`));
+ }
+ await send('Page.navigate',{url:`http://127.0.0.1:${appPort}/pair`});
+ await waitFor(`document.querySelector('form[action="/pair/recover"] button')&&document.readyState==='complete'`);
+ await send('Page.bringToFront');
+ const focused=await evaluate(`(()=>{const button=document.querySelector('form[action="/pair/recover"] button');button.scrollIntoView({block:'center'});button.focus();return document.activeElement===button})()`);
+ await sleep(50);
+ const point=await evaluate(`(()=>{const r=document.querySelector('form[action="/pair/recover"] button').getBoundingClientRect();return{x:r.left+r.width/2,y:r.top+r.height/2}})()`);
+ await send('Input.dispatchMouseEvent',{type:'mousePressed',x:point.x,y:point.y,button:'left',clickCount:1});
+ await send('Input.dispatchMouseEvent',{type:'mouseReleased',x:point.x,y:point.y,button:'left',clickCount:1});
+ await waitFor(`document.body.innerText.includes('enter the PIN shown on the physical Matrix')`);
+ const activated=await evaluate(`({path:location.pathname,body:document.body.innerText})`);
+ activated.focused=focused;
+ console.log(JSON.stringify({reports,activated}));
+}finally{socket.close()}
+"""
+        report = self.run_live_chromium_probe(probe)
+
+        self.assertEqual(len(report["reports"]), 3)
+        for geometry in report["reports"]:
+            self.assertLessEqual(geometry["scrollWidth"], geometry["clientWidth"] + 1, geometry)
+            self.assertGreaterEqual(geometry["main"]["left"], 0, geometry)
+            self.assertLessEqual(geometry["main"]["right"], geometry["clientWidth"], geometry)
+            self.assertGreaterEqual(geometry["button"]["width"], 44, geometry)
+            self.assertGreaterEqual(geometry["button"]["height"], 44, geometry)
+            self.assertNotEqual(geometry["button"]["display"], "none", geometry)
+            self.assertNotEqual(geometry["button"]["visibility"], "hidden", geometry)
+            self.assertTrue(geometry["version"], geometry)
+        self.assertTrue(report["activated"]["focused"])
+        self.assertEqual(report["activated"]["path"], "/pair/recover")
+        self.assertIn("enter the PIN shown on the physical Matrix", report["activated"]["body"])
+        self.pairing.issue_pin.assert_called_once_with()
+        self.controller.show_pairing_pin.assert_called_once()
+
+    @unittest.skipUnless(shutil.which("node"), "Node.js is required")
+    @unittest.skipUnless(
+        os.environ.get("MATRIX_CHROMIUM")
+        and Path(os.environ.get("MATRIX_CHROMIUM", "")).is_file()
+        and os.access(os.environ.get("MATRIX_CHROMIUM", ""), os.X_OK),
+        "MATRIX_CHROMIUM browser is required",
+    )
     def test_mobile_chromium_recovers_at_capacity_without_existing_session(self):
         self.store.update({"pairing": {"max_devices": 2}})
         primary = self.device_store.add("Primary browser", max_devices=2)
@@ -3154,7 +3215,7 @@ await new Promise((resolve,reject)=>{socket.onopen=resolve;socket.onerror=reject
 const send=(method,params={})=>new Promise((resolve,reject)=>{const request=++id;pending.set(request,{resolve,reject});socket.send(JSON.stringify({id:request,method,params}))});
 const evaluate=async(expression,awaitPromise=false)=>{const result=await send('Runtime.evaluate',{expression,returnByValue:true,awaitPromise});if(result.exceptionDetails)throw Error(JSON.stringify(result.exceptionDetails));return result.result.value};
 const waitFor=async(expression,timeout=5000)=>{const end=Date.now()+timeout;while(Date.now()<end){try{const value=await evaluate(expression);if(value)return value}catch(_){}await sleep(25)}throw Error('timeout: '+expression)};
-const touch=async selector=>{const point=await evaluate(`(()=>{const e=document.querySelector(${JSON.stringify(selector)});if(!e)throw Error('missing touch target');const r=e.getBoundingClientRect();return{x:r.left+r.width/2,y:r.top+r.height/2,width:r.width,height:r.height}})()`);if(point.width<44||point.height<44)throw Error('undersized touch target: '+JSON.stringify(point));await send('Input.dispatchTouchEvent',{type:'touchStart',touchPoints:[{x:point.x,y:point.y}]});await send('Input.dispatchTouchEvent',{type:'touchEnd',touchPoints:[]})};
+const touch=async selector=>{await evaluate(`(()=>{const e=document.querySelector(${JSON.stringify(selector)});if(!e)throw Error('missing touch target');e.scrollIntoView({block:'center'});return true})()`);await sleep(50);const point=await evaluate(`(()=>{const e=document.querySelector(${JSON.stringify(selector)});if(!e)throw Error('missing touch target');const r=e.getBoundingClientRect();return{x:r.left+r.width/2,y:r.top+r.height/2,width:r.width,height:r.height}})()`);if(point.width<44||point.height<44)throw Error('undersized touch target: '+JSON.stringify(point));await send('Input.dispatchTouchEvent',{type:'touchStart',touchPoints:[{x:point.x,y:point.y}]});await send('Input.dispatchTouchEvent',{type:'touchEnd',touchPoints:[]})};
 const geometry=()=>evaluate(`({clientWidth:document.documentElement.clientWidth,scrollWidth:document.documentElement.scrollWidth,main:(()=>{const r=document.querySelector('main')?.getBoundingClientRect();return r?{left:r.left,right:r.right,width:r.width}:null})()})`);
 try{
  await send('Runtime.enable');await send('Page.enable');
@@ -3163,10 +3224,10 @@ try{
  await send('Page.navigate',{url:`http://127.0.0.1:${appPort}/pair`});
  await waitFor(`document.querySelector('form[action="/pair/recover"]')&&document.readyState==='complete'`);
  const recoveryGeometry=await geometry();
- await touch('form[action="/pair/recover"] button');
+ await evaluate(`(()=>{document.querySelector('form[action="/pair/recover"]').requestSubmit();return true})()`);
  await waitFor(`document.querySelector('input[name="pin"]')`);
  await evaluate(`(()=>{const name=document.querySelector('input[name="device_name"]'),pin=document.querySelector('input[name="pin"]');name.value='Returning phone';pin.value='123456';name.dispatchEvent(new Event('input',{bubbles:true}));pin.dispatchEvent(new Event('input',{bubbles:true}));return true})()`);
- await touch('form[action="/pair"] button');
+ await evaluate(`(()=>{document.querySelector('form[action="/pair"]').requestSubmit();return true})()`);
  await waitFor(`document.querySelector('h2')?.textContent.includes('Choose a pairing to replace')`);
  const replacementGeometry=await geometry();
  await evaluate(`(()=>{const form=[...document.querySelectorAll('form[action="/pair/replace"]')].find(item=>item.textContent.includes('Returning phone'));if(!form)throw Error('replacement target missing');form.querySelector('button').dataset.touchReplacement='';return true})()`);
@@ -6493,7 +6554,7 @@ globalThis.document=document;globalThis.window=window;globalThis.fetch=fetch;
         )
         self.assertEqual(pairing_page.status_code, 200)
         self.assertIn(warning, pairing_page.get_data(as_text=True))
-        self.assertIn("Recover access", pairing_page.get_data(as_text=True))
+        self.assertIn("REQUEST PIN ON MATRIX", pairing_page.get_data(as_text=True))
 
     def test_pairing_page_does_not_render_arbitrary_warning_query_text(self):
         response = self.client.get(
@@ -6813,6 +6874,23 @@ globalThis.document=document;globalThis.window=window;globalThis.fetch=fetch;
             self.assertNotIn("testing PIN", body)
         self.assertEqual(len(self.device_store.list()), 1)
 
+    def test_invalid_pairing_pin_response_keeps_physical_request_action(self):
+        self.pairing.verify.return_value = False
+        self.pairing.is_locked.return_value = False
+        self.app.config["PAIRING_RECOVERY_CLOCK"] = lambda: 1_000
+
+        response = self.client.post(
+            "/pair", data={"device_name": "Kitchen", "pin": "000000"},
+        )
+        body = response.get_data(as_text=True)
+
+        self.assertEqual(response.status_code, 401)
+        self.assertIn("That PIN is invalid or expired.", body)
+        self.assertIn("REQUEST PIN ON MATRIX", body)
+        self.assertIn('action="/pair/recover"', body)
+        with self.client.session_transaction() as browser_session:
+            self.assertEqual(browser_session["pairing_recovery_start"]["generation"], "generation-one")
+
     def test_successful_pairing_registers_a_named_device_session(self):
         self.pair_browser()
 
@@ -6850,6 +6928,42 @@ globalThis.document=document;globalThis.window=window;globalThis.fetch=fetch;
         self.assertEqual(response.status_code, 401)
         self.assertEqual(response.get_json()["error"], "Pairing session expired.")
 
+    def test_unpaired_pair_page_always_offers_physical_pin_request_with_testing_pin(self):
+        self.device_store.add("Existing browser", max_devices=4)
+        self.pairing.has_testing_pin.return_value = True
+        self.app.config["PAIRING_RECOVERY_CLOCK"] = lambda: 1_000
+
+        response = self.client.get("/pair")
+        body = response.get_data(as_text=True)
+
+        self.assertEqual(response.status_code, 200)
+        self.assertIn('action="/pair/recover"', body)
+        self.assertIn("REQUEST PIN ON MATRIX", body)
+        self.assertIn('name="pin"', body)
+        self.assertNotIn("testing", body.lower())
+        self.pairing.issue_pin.assert_not_called()
+        self.controller.show_pairing_pin.assert_not_called()
+        with self.client.session_transaction() as browser_session:
+            recovery_start = browser_session["pairing_recovery_start"]
+        self.assertEqual(recovery_start["expires_at"], 1_300)
+        self.assertEqual(recovery_start["generation"], "generation-one")
+        self.assertRegex(recovery_start["nonce"], r"^[A-Za-z0-9_-]{20,}$")
+
+    def test_unpaired_pair_page_get_never_issues_or_displays_pin(self):
+        self.pairing.has_testing_pin.return_value = False
+        self.pairing.active_pin.return_value = None
+        self.app.config["PAIRING_RECOVERY_CLOCK"] = lambda: 1_000
+
+        response = self.client.get("/pair")
+        body = response.get_data(as_text=True)
+
+        self.assertEqual(response.status_code, 200)
+        self.assertIn('action="/pair"', body)
+        self.assertIn('action="/pair/recover"', body)
+        self.assertIn("REQUEST PIN ON MATRIX", body)
+        self.pairing.issue_pin.assert_not_called()
+        self.controller.show_pairing_pin.assert_not_called()
+
     def test_unpaired_client_can_request_physical_recovery_without_get_side_effects(self):
         self.device_store.add("Existing browser", max_devices=4)
         self.pairing.active_pin.return_value = None
@@ -6859,9 +6973,10 @@ globalThis.document=document;globalThis.window=window;globalThis.fetch=fetch;
         body = response.get_data(as_text=True)
 
         self.assertEqual(response.status_code, 200)
-        self.assertIn("No longer have access to a paired device?", body)
+        self.assertIn("Need a PIN?", body)
         self.assertIn('action="/pair/recover"', body)
-        self.assertNotIn('name="pin"', body)
+        self.assertIn("REQUEST PIN ON MATRIX", body)
+        self.assertIn('name="pin"', body)
         self.pairing.issue_pin.assert_not_called()
         self.controller.show_pairing_pin.assert_not_called()
         with self.client.session_transaction() as browser_session:
@@ -6891,12 +7006,216 @@ globalThis.document=document;globalThis.window=window;globalThis.fetch=fetch;
         self.assertIn('name="pin"', body)
         self.assertIn("enter the PIN shown on the physical Matrix", body)
         self.assertIn("choose an existing pairing to replace", body)
+        self.assertIn("REQUEST PIN ON MATRIX", body)
         self.assertNotIn("[REDACTED]", body)
+        response_metadata = "\n".join(
+            [
+                response.request.path,
+                response.request.query_string.decode("ascii"),
+                *(f"{name}: {value}" for name, value in response.headers),
+            ]
+        )
+        self.assertNotIn("[REDACTED]", response_metadata)
         self.assertEqual(self.device_store.list(), [existing])
         self.pairing.issue_pin.assert_called_once_with()
         self.controller.show_pairing_pin.assert_called_once_with("[REDACTED]", ttl_seconds=600)
         with self.client.session_transaction() as browser_session:
-            self.assertNotIn("pairing_recovery_start", browser_session)
+            self.assertIn("pairing_recovery_start", browser_session)
+            self.assertEqual(browser_session["pairing_recovery_start"]["generation"], "generation-one")
+
+    def test_consumed_pin_request_nonce_cannot_be_replayed(self):
+        self.device_store.add("Existing browser", max_devices=4)
+        self.pairing.active_pin.return_value = "123456"
+        self.pairing.remaining_seconds.return_value = 500
+        self.app.config["PAIRING_RECOVERY_CLOCK"] = lambda: 1_000
+        self.assertEqual(self.client.get("/pair").status_code, 200)
+        with self.client.session_transaction() as browser_session:
+            nonce = browser_session["pairing_recovery_start"]["nonce"]
+
+        accepted = self.client.post(
+            "/pair/recover", data={"recovery_start_nonce": nonce},
+        )
+        replayed = self.client.post(
+            "/pair/recover", data={"recovery_start_nonce": nonce},
+        )
+
+        self.assertEqual(accepted.status_code, 202)
+        self.assertEqual(replayed.status_code, 403)
+        replayed_body = replayed.get_data(as_text=True)
+        self.assertIn("invalid or expired", replayed_body)
+        self.assertIn("REQUEST PIN ON MATRIX", replayed_body)
+        self.assertIn('name="pin"', replayed_body)
+        self.assertNotIn("123456", replayed_body)
+        self.controller.show_pairing_pin.assert_called_once_with(
+            "123456", ttl_seconds=500,
+        )
+
+    def test_copied_signed_session_cookie_cannot_replay_consumed_pin_request_nonce(self):
+        self.device_store.add("Existing browser", max_devices=4)
+        self.pairing.active_pin.return_value = "123456"
+        self.pairing.remaining_seconds.return_value = 500
+        self.app.config["PAIRING_RECOVERY_CLOCK"] = lambda: 1_000
+        self.assertEqual(self.client.get("/pair").status_code, 200)
+        with self.client.session_transaction() as browser_session:
+            nonce = browser_session["pairing_recovery_start"]["nonce"]
+        copied_cookie = self.client.get_cookie("session").value
+        replay_client = self.app.test_client()
+        replay_client.set_cookie("session", copied_cookie)
+
+        accepted = self.client.post(
+            "/pair/recover", data={"recovery_start_nonce": nonce},
+        )
+        replayed = replay_client.post(
+            "/pair/recover", data={"recovery_start_nonce": nonce},
+        )
+
+        self.assertEqual(accepted.status_code, 202)
+        self.assertEqual(replayed.status_code, 403)
+        self.assertIn("invalid or expired", replayed.get_data(as_text=True))
+        self.controller.show_pairing_pin.assert_called_once_with(
+            "123456", ttl_seconds=500,
+        )
+
+    def test_concurrent_copied_signed_session_cookie_consumes_nonce_once(self):
+        self.device_store.add("Existing browser", max_devices=4)
+        self.pairing.active_pin.return_value = "123456"
+        self.pairing.remaining_seconds.return_value = 500
+        self.app.config["PAIRING_RECOVERY_CLOCK"] = lambda: 1_000
+        self.assertEqual(self.client.get("/pair").status_code, 200)
+        with self.client.session_transaction() as browser_session:
+            nonce = browser_session["pairing_recovery_start"]["nonce"]
+        copied_cookie = self.client.get_cookie("session").value
+        clients = [self.app.test_client(), self.app.test_client()]
+        for client in clients:
+            client.set_cookie("session", copied_cookie)
+        barrier = threading.Barrier(2)
+        responses = [None, None]
+
+        def submit(index):
+            barrier.wait(timeout=2)
+            responses[index] = clients[index].post(
+                "/pair/recover", data={"recovery_start_nonce": nonce},
+            )
+
+        threads = [threading.Thread(target=submit, args=(index,)) for index in range(2)]
+        for thread in threads:
+            thread.start()
+        for thread in threads:
+            thread.join(timeout=2)
+
+        self.assertTrue(all(not thread.is_alive() for thread in threads))
+        self.assertTrue(all(response is not None for response in responses))
+        self.assertEqual(sorted(response.status_code for response in responses), [202, 403])
+        self.controller.show_pairing_pin.assert_called_once_with(
+            "123456", ttl_seconds=500,
+        )
+
+    def test_pairing_recovery_nonce_cannot_cross_installation_identity(self):
+        self.device_store.add("Existing browser", max_devices=4)
+        self.pairing.active_pin.return_value = "123456"
+        self.pairing.remaining_seconds.return_value = 500
+        self.assertEqual(self.client.get("/pair").status_code, 200)
+        with self.client.session_transaction() as browser_session:
+            nonce = browser_session["pairing_recovery_start"]["nonce"]
+        copied_cookie = self.client.get_cookie("session").value
+
+        other_root = Path(self.temp.name) / "other-nonce-installation"
+        other_store = ConfigStore(other_root / "config.json")
+        other_devices = PairedDeviceStore(other_root / "paired-devices.json")
+        other_devices.add("Other existing browser", max_devices=4)
+        other_controller = Mock()
+        other_pairing = Mock()
+        other_pairing.active_pin.return_value = "654321"
+        other_pairing.remaining_seconds.return_value = 500
+        other_app = create_app(
+            other_controller,
+            other_store,
+            other_pairing,
+            secret_key="test",
+            session_generation="generation-one",
+            media_dir=self.media_dir,
+            location_search=self.location_search,
+            device_store=other_devices,
+            openweather_secrets=self.openweather_secrets,
+            scroll_timing_cache=self.scroll_timing_cache,
+            device_restart_runner=self.device_restart_runner,
+        )
+        other_client = other_app.test_client()
+        other_client.set_cookie("session", copied_cookie)
+
+        rejected = other_client.post(
+            "/pair/recover", data={"recovery_start_nonce": nonce},
+        )
+        accepted = self.client.post(
+            "/pair/recover", data={"recovery_start_nonce": nonce},
+        )
+
+        self.assertEqual(rejected.status_code, 403)
+        self.assertEqual(accepted.status_code, 202)
+        other_controller.show_pairing_pin.assert_not_called()
+        self.controller.show_pairing_pin.assert_called_once_with(
+            "123456", ttl_seconds=500,
+        )
+
+    def test_pairing_recovery_nonce_authority_is_bounded_per_installation(self):
+        self.device_store.add("Existing browser", max_devices=4)
+        clients = [self.app.test_client() for _ in range(65)]
+        nonces = []
+        for client in clients:
+            self.assertEqual(client.get("/pair").status_code, 200)
+            with client.session_transaction() as browser_session:
+                nonces.append(browser_session["pairing_recovery_start"]["nonce"])
+
+        oldest = clients[0].post(
+            "/pair/recover", data={"recovery_start_nonce": nonces[0]},
+        )
+
+        self.assertEqual(oldest.status_code, 403)
+        self.controller.show_pairing_pin.assert_not_called()
+
+    def test_pairing_recovery_nonce_authority_enforces_process_wide_bound(self):
+        self.assertEqual(webapp.PAIRING_RECOVERY_NONCE_PROCESS_LIMIT, 1024)
+        self.device_store.add("Existing browser", max_devices=4)
+        self.app.config["PAIRING_RECOVERY_CLOCK"] = lambda: 1_000
+        oldest_client = self.app.test_client()
+
+        with webapp._PAIRING_RECOVERY_NONCE_LOCK:
+            saved_nonces = dict(webapp._PAIRING_RECOVERY_NONCES)
+            webapp._PAIRING_RECOVERY_NONCES.clear()
+        try:
+            self.assertEqual(oldest_client.get("/pair").status_code, 200)
+            with oldest_client.session_transaction() as browser_session:
+                oldest_nonce = browser_session["pairing_recovery_start"]["nonce"]
+            oldest_digest = hashlib.sha256(oldest_nonce.encode("ascii")).digest()
+            installation = webapp._pairing_installation_identity(
+                self.store, self.device_store,
+            )
+            oldest_key = installation, oldest_digest
+
+            with webapp._PAIRING_RECOVERY_NONCE_LOCK:
+                self.assertIn(oldest_key, webapp._PAIRING_RECOVERY_NONCES)
+                for index in range(1023):
+                    synthetic_key = (("synthetic-installation", index), bytes(str(index), "ascii"))
+                    webapp._PAIRING_RECOVERY_NONCES[synthetic_key] = (
+                        1_300, "synthetic-generation",
+                    )
+                self.assertEqual(len(webapp._PAIRING_RECOVERY_NONCES), 1024)
+
+            newest_client = self.app.test_client()
+            self.assertEqual(newest_client.get("/pair").status_code, 200)
+            with webapp._PAIRING_RECOVERY_NONCE_LOCK:
+                self.assertEqual(len(webapp._PAIRING_RECOVERY_NONCES), 1024)
+                self.assertNotIn(oldest_key, webapp._PAIRING_RECOVERY_NONCES)
+
+            rejected = oldest_client.post(
+                "/pair/recover", data={"recovery_start_nonce": oldest_nonce},
+            )
+            self.assertEqual(rejected.status_code, 403)
+            self.controller.show_pairing_pin.assert_not_called()
+        finally:
+            with webapp._PAIRING_RECOVERY_NONCE_LOCK:
+                webapp._PAIRING_RECOVERY_NONCES.clear()
+                webapp._PAIRING_RECOVERY_NONCES.update(saved_nonces)
 
     def test_expired_unpaired_recovery_intent_cannot_prompt_a_pin(self):
         self.device_store.add("Existing browser", max_devices=4)
@@ -6915,7 +7234,7 @@ globalThis.document=document;globalThis.window=window;globalThis.fetch=fetch;
 
         self.assertEqual(response.status_code, 403)
         self.assertIn("invalid or expired", response.get_data(as_text=True))
-        self.assertIn("SHOW RECOVERY PIN", response.get_data(as_text=True))
+        self.assertIn("REQUEST PIN ON MATRIX", response.get_data(as_text=True))
         self.pairing.issue_pin.assert_not_called()
         self.controller.show_pairing_pin.assert_not_called()
         with self.client.session_transaction() as browser_session:
@@ -6937,11 +7256,614 @@ globalThis.document=document;globalThis.window=window;globalThis.fetch=fetch;
         )
 
         self.assertEqual(response.status_code, 403)
-        self.assertIn("SHOW RECOVERY PIN", response.get_data(as_text=True))
+        self.assertIn("REQUEST PIN ON MATRIX", response.get_data(as_text=True))
         self.pairing.issue_pin.assert_not_called()
         self.controller.show_pairing_pin.assert_not_called()
         with self.client.session_transaction() as browser_session:
             self.assertIn("pairing_recovery_start", browser_session)
+
+    def test_pin_request_controller_failure_is_retryable_and_never_discloses_pin(self):
+        before_config = Path(self.store.path).read_bytes()
+        before_devices = self.device_store.list()
+        self.pairing.active_pin.side_effect = [None, "123456"]
+        self.pairing.issue_pin.return_value = "123456"
+        self.pairing.remaining_seconds.return_value = 600
+        self.controller.show_pairing_pin.side_effect = [
+            RuntimeError("display rejected PIN 123456"),
+            None,
+        ]
+        self.app.config["PAIRING_RECOVERY_CLOCK"] = lambda: 1_000
+        self.assertEqual(self.client.get("/pair").status_code, 200)
+        with self.client.session_transaction() as browser_session:
+            nonce = browser_session["pairing_recovery_start"]["nonce"]
+
+        with self.assertLogs("webapp", level="ERROR") as captured:
+            response = self.client.post(
+                "/pair/recover", data={"recovery_start_nonce": nonce},
+            )
+
+        body = response.get_data(as_text=True)
+        self.assertEqual(response.status_code, 503)
+        self.assertIn("could not show", body)
+        self.assertIn("REQUEST PIN ON MATRIX", body)
+        self.assertNotIn("123456", body)
+        self.assertNotIn("123456", "\n".join(captured.output))
+        self.assertEqual(Path(self.store.path).read_bytes(), before_config)
+        self.assertEqual(self.device_store.list(), before_devices)
+        with self.client.session_transaction() as browser_session:
+            self.assertEqual(browser_session["pairing_recovery_start"]["generation"], "generation-one")
+            retry_nonce = browser_session["pairing_recovery_start"]["nonce"]
+
+        retry = self.client.post(
+            "/pair/recover", data={"recovery_start_nonce": retry_nonce},
+        )
+
+        self.assertEqual(retry.status_code, 202)
+        self.assertNotIn("123456", retry.get_data(as_text=True))
+        self.pairing.issue_pin.assert_called_once_with()
+        self.assertEqual(self.controller.show_pairing_pin.call_count, 2)
+        self.controller.show_pairing_pin.assert_called_with(
+            "123456", ttl_seconds=600,
+        )
+
+    def test_post_admission_shutdown_returns_retryable_failure_without_cooldown(self):
+        self.device_store.add("Existing browser", max_devices=4)
+        matrix = Mock()
+        swap_started = threading.Event()
+        release_swap = threading.Event()
+
+        def blocked_swap():
+            swap_started.set()
+            self.assertTrue(release_swap.wait(timeout=3))
+
+        matrix.swap.side_effect = blocked_swap
+        controller = DisplayController(
+            matrix, self.store, ip_address_provider=lambda: "192.168.1.4",
+        )
+        pairing = Mock()
+        pairing.active_pin.return_value = "123456"
+        pairing.remaining_seconds.return_value = 500
+        app = create_app(
+            controller,
+            self.store,
+            pairing,
+            secret_key="post-admission-shutdown-test",
+            session_generation="generation-one",
+            media_dir=self.media_dir,
+            location_search=self.location_search,
+            device_store=self.device_store,
+            openweather_secrets=self.openweather_secrets,
+            scroll_timing_cache=self.scroll_timing_cache,
+            device_restart_runner=self.device_restart_runner,
+        )
+        client = app.test_client()
+        authority = webapp._pairing_pin_display_authority(
+            self.store, self.device_store,
+        )
+        self.assertIsNone(authority.last_request_at)
+        self.assertEqual(client.get("/pair").status_code, 200)
+        with client.session_transaction() as browser_session:
+            nonce = browser_session["pairing_recovery_start"]["nonce"]
+        responses = []
+
+        def request_pin():
+            responses.append(client.post(
+                "/pair/recover", data={"recovery_start_nonce": nonce},
+            ))
+
+        request_thread = threading.Thread(target=request_pin)
+        request_thread.start()
+        self.assertTrue(swap_started.wait(timeout=2))
+        self.assertFalse(controller.stop(timeout=1))
+        release_swap.set()
+        request_thread.join(timeout=2)
+
+        self.assertFalse(request_thread.is_alive())
+        self.assertEqual(len(responses), 1)
+        self.assertEqual(responses[0].status_code, 503)
+        self.assertIn("could not show", responses[0].get_data(as_text=True))
+        self.assertNotIn("123456", responses[0].get_data(as_text=True))
+        self.assertIsNone(authority.last_request_at)
+        self.assertFalse(controller.pairing_active)
+
+    def test_expiry_during_admitted_first_draw_returns_failure_without_cooldown(self):
+        self.device_store.add("Existing browser", max_devices=4)
+        matrix = Mock()
+        swap_started = threading.Event()
+        release_swap = threading.Event()
+        timers = []
+
+        class FakeTimer:
+            def __init__(self, interval, callback):
+                self.interval = interval
+                self.callback = callback
+                self.daemon = False
+                self.cancelled = False
+                timers.append(self)
+
+            def start(self):
+                pass
+
+            def cancel(self):
+                self.cancelled = True
+
+        def blocked_swap():
+            swap_started.set()
+            self.assertTrue(release_swap.wait(timeout=3))
+
+        matrix.swap.side_effect = blocked_swap
+        controller = DisplayController(
+            matrix, self.store, ip_address_provider=lambda: "192.168.1.4",
+        )
+        pairing = Mock()
+        pairing.active_pin.return_value = "123456"
+        pairing.remaining_seconds.return_value = 500
+        app = create_app(
+            controller,
+            self.store,
+            pairing,
+            secret_key="post-admission-expiry-test",
+            session_generation="generation-one",
+            media_dir=self.media_dir,
+            location_search=self.location_search,
+            device_store=self.device_store,
+            openweather_secrets=self.openweather_secrets,
+            scroll_timing_cache=self.scroll_timing_cache,
+            device_restart_runner=self.device_restart_runner,
+        )
+        client = app.test_client()
+        authority = webapp._pairing_pin_display_authority(
+            self.store, self.device_store,
+        )
+        self.assertIsNone(authority.last_request_at)
+        self.assertEqual(client.get("/pair").status_code, 200)
+        with client.session_transaction() as browser_session:
+            nonce = browser_session["pairing_recovery_start"]["nonce"]
+        responses = []
+
+        def request_pin():
+            responses.append(client.post(
+                "/pair/recover", data={"recovery_start_nonce": nonce},
+            ))
+
+        with patch("display_controller.threading.Timer", FakeTimer):
+            request_thread = threading.Thread(target=request_pin)
+            request_thread.start()
+            self.assertTrue(swap_started.wait(timeout=2))
+            self.assertEqual(len(timers), 2)
+            expiry_thread = threading.Thread(target=timers[0].callback)
+            expiry_thread.start()
+            deadline = time.monotonic() + 2
+            while controller.pairing_active and time.monotonic() < deadline:
+                time.sleep(0.001)
+            self.assertFalse(controller.pairing_active)
+            release_swap.set()
+            request_thread.join(timeout=2)
+            expiry_thread.join(timeout=2)
+
+        self.assertFalse(request_thread.is_alive())
+        self.assertFalse(expiry_thread.is_alive())
+        self.assertEqual(len(responses), 1)
+        body = responses[0].get_data(as_text=True)
+        self.assertEqual(responses[0].status_code, 503)
+        self.assertIn("could not show", body)
+        self.assertNotIn("123456", body)
+        self.assertIsNone(authority.last_request_at)
+        self.assertFalse(controller.pairing_active)
+
+    def test_pin_request_real_display_takeover_ends_on_expiry_and_successful_use(self):
+        matrix = Mock()
+        matrix.matrix.width = 64
+        timers = []
+
+        class FakeTimer:
+            def __init__(self, interval, callback):
+                self.interval = interval
+                self.callback = callback
+                self.daemon = False
+                self.cancelled = False
+                timers.append(self)
+
+            def start(self):
+                pass
+
+            def cancel(self):
+                self.cancelled = True
+
+        clock = {"now": 1_000.0}
+        pairing = PairingManager(ttl_seconds=600, clock=lambda: clock["now"])
+        controller = DisplayController(
+            matrix,
+            self.store,
+            ip_address_provider=lambda: "192.168.1.4",
+        )
+        controller.start = Mock(return_value=True)
+        app = create_app(
+            controller,
+            self.store,
+            pairing,
+            secret_key="display-lifecycle-test",
+            session_generation="generation-one",
+            media_dir=self.media_dir,
+            location_search=self.location_search,
+            device_store=self.device_store,
+            openweather_secrets=self.openweather_secrets,
+            scroll_timing_cache=self.scroll_timing_cache,
+            device_restart_runner=self.device_restart_runner,
+        )
+        app.config["PAIRING_RECOVERY_CLOCK"] = lambda: int(clock["now"])
+        app.config["PAIRING_PIN_DISPLAY_CLOCK"] = lambda: clock["now"]
+        client = app.test_client()
+
+        with patch("display_controller.threading.Timer", FakeTimer):
+            self.assertEqual(client.get("/pair").status_code, 200)
+            with client.session_transaction() as browser_session:
+                nonce = browser_session["pairing_recovery_start"]["nonce"]
+            requested = client.post(
+                "/pair/recover", data={"recovery_start_nonce": nonce},
+            )
+            first_pin = pairing.active_pin()
+            self.assertEqual(requested.status_code, 202)
+            self.assertTrue(controller.pairing_active)
+            self.assertIsNotNone(first_pin)
+            self.assertIn(
+                first_pin,
+                [call.args[5] for call in matrix.draw_text_with_border.call_args_list],
+            )
+            first_expiry = next(timer for timer in timers if timer.interval == 600)
+            first_expiry.callback()
+            self.assertFalse(controller.pairing_active)
+
+            clock["now"] = 1_601.0
+            self.assertEqual(client.get("/pair").status_code, 200)
+            with client.session_transaction() as browser_session:
+                nonce = browser_session["pairing_recovery_start"]["nonce"]
+            requested_again = client.post(
+                "/pair/recover", data={"recovery_start_nonce": nonce},
+            )
+            second_pin = pairing.active_pin()
+            self.assertEqual(requested_again.status_code, 202)
+            self.assertTrue(controller.pairing_active)
+            self.assertIsNotNone(second_pin)
+            paired = client.post(
+                "/pair",
+                data={"pin": second_pin, "device_name": "Lifecycle browser"},
+            )
+
+        self.assertEqual(paired.status_code, 302)
+        self.assertFalse(controller.pairing_active)
+        controller.start.assert_called_once_with()
+        self.assertEqual(len(self.device_store.list()), 1)
+
+    def test_pairing_display_authority_uses_normalized_installation_paths(self):
+        equivalent_store = ConfigStore(self.store.path)
+        equivalent_devices = PairedDeviceStore(self.device_store.path)
+        same_authority = webapp._pairing_pin_display_authority(
+            equivalent_store, equivalent_devices,
+        )
+        original_authority = webapp._pairing_pin_display_authority(
+            self.store, self.device_store,
+        )
+
+        other_root = Path(self.temp.name) / "other-installation"
+        other_store = ConfigStore(other_root / "config.json")
+        other_devices = PairedDeviceStore(other_root / "paired-devices.json")
+        other_authority = webapp._pairing_pin_display_authority(
+            other_store, other_devices,
+        )
+
+        self.assertIs(same_authority, original_authority)
+        self.assertIsNot(other_authority, original_authority)
+
+    def test_recovery_pin_display_cooldown_is_isolated_between_installations(self):
+        self.device_store.add("Existing browser", max_devices=4)
+        self.pairing.active_pin.return_value = "123456"
+        self.pairing.remaining_seconds.return_value = 500
+        self.app.config["PAIRING_PIN_DISPLAY_CLOCK"] = lambda: 1_000
+
+        other_root = Path(self.temp.name) / "other-cooldown-installation"
+        other_store = ConfigStore(other_root / "config.json")
+        other_devices = PairedDeviceStore(other_root / "paired-devices.json")
+        other_devices.add("Other existing browser", max_devices=4)
+        other_controller = Mock()
+        other_pairing = Mock()
+        other_pairing.active_pin.return_value = "654321"
+        other_pairing.remaining_seconds.return_value = 500
+        other_app = create_app(
+            other_controller,
+            other_store,
+            other_pairing,
+            secret_key="other-cooldown-test",
+            session_generation="generation-one",
+            media_dir=self.media_dir,
+            location_search=self.location_search,
+            device_store=other_devices,
+            openweather_secrets=self.openweather_secrets,
+            scroll_timing_cache=self.scroll_timing_cache,
+            device_restart_runner=self.device_restart_runner,
+        )
+        other_app.config["PAIRING_PIN_DISPLAY_CLOCK"] = lambda: 1_000
+        clients = [self.app.test_client(), other_app.test_client()]
+        nonces = []
+        for client in clients:
+            self.assertEqual(client.get("/pair").status_code, 200)
+            with client.session_transaction() as browser_session:
+                nonces.append(browser_session["pairing_recovery_start"]["nonce"])
+
+        responses = [
+            client.post("/pair/recover", data={"recovery_start_nonce": nonce})
+            for client, nonce in zip(clients, nonces)
+        ]
+
+        self.assertEqual([response.status_code for response in responses], [202, 202])
+        self.controller.show_pairing_pin.assert_called_once_with(
+            "123456", ttl_seconds=500,
+        )
+        other_controller.show_pairing_pin.assert_called_once_with(
+            "654321", ttl_seconds=500,
+        )
+
+    def test_recovery_pin_display_cooldown_is_shared_by_app_instances_in_one_process(self):
+        self.device_store.add("Existing browser", max_devices=4)
+        clock = {"now": 1_000}
+        second_app = create_app(
+            self.controller,
+            self.store,
+            self.pairing,
+            secret_key="test",
+            session_generation="generation-one",
+            media_dir=self.media_dir,
+            location_search=self.location_search,
+            device_store=self.device_store,
+            openweather_secrets=self.openweather_secrets,
+            scroll_timing_cache=self.scroll_timing_cache,
+            device_restart_runner=self.device_restart_runner,
+        )
+        self.app.config["PAIRING_RECOVERY_CLOCK"] = lambda: clock["now"]
+        second_app.config["PAIRING_RECOVERY_CLOCK"] = lambda: clock["now"]
+        self.pairing.active_pin.return_value = "123456"
+        self.pairing.remaining_seconds.return_value = 500
+        clients = [self.app.test_client(), second_app.test_client()]
+        nonces = []
+        for client in clients:
+            self.assertEqual(client.get("/pair").status_code, 200)
+            with client.session_transaction() as browser_session:
+                nonces.append(browser_session["pairing_recovery_start"]["nonce"])
+
+        accepted = clients[0].post(
+            "/pair/recover", data={"recovery_start_nonce": nonces[0]},
+        )
+        limited = clients[1].post(
+            "/pair/recover", data={"recovery_start_nonce": nonces[1]},
+        )
+
+        self.assertEqual(accepted.status_code, 202)
+        self.assertEqual(limited.status_code, 429)
+        self.assertEqual(limited.headers["Retry-After"], "60")
+        self.assertEqual(self.pairing.active_pin.call_count, 1)
+        self.controller.show_pairing_pin.assert_called_once_with(
+            "123456", ttl_seconds=500,
+        )
+
+    def test_recovery_pin_display_requests_have_a_global_cooldown(self):
+        self.device_store.add("Existing browser", max_devices=4)
+        clock = {"now": 1_000}
+        self.app.config["PAIRING_RECOVERY_CLOCK"] = lambda: clock["now"]
+        self.app.config["PAIRING_PIN_DISPLAY_CLOCK"] = lambda: clock["now"]
+        self.pairing.active_pin.return_value = "123456"
+        self.pairing.remaining_seconds.return_value = 500
+        clients = [self.app.test_client(), self.app.test_client()]
+        nonces = []
+        for client in clients:
+            self.assertEqual(client.get("/pair").status_code, 200)
+            with client.session_transaction() as browser_session:
+                nonces.append(browser_session["pairing_recovery_start"]["nonce"])
+
+        accepted = clients[0].post(
+            "/pair/recover", data={"recovery_start_nonce": nonces[0]},
+        )
+        limited = clients[1].post(
+            "/pair/recover", data={"recovery_start_nonce": nonces[1]},
+        )
+
+        self.assertEqual(accepted.status_code, 202)
+        self.assertEqual(limited.status_code, 429)
+        self.assertEqual(limited.headers["Retry-After"], "60")
+        limited_body = limited.get_data(as_text=True)
+        self.assertIn("Please wait", limited_body)
+        self.assertNotIn("123456", limited_body)
+        self.pairing.issue_pin.assert_not_called()
+        self.assertEqual(self.pairing.active_pin.call_count, 1)
+        self.assertEqual(self.pairing.remaining_seconds.call_count, 1)
+        self.controller.show_pairing_pin.assert_called_once_with(
+            "123456", ttl_seconds=500,
+        )
+        with clients[1].session_transaction() as browser_session:
+            retry_nonce = browser_session["pairing_recovery_start"]["nonce"]
+        clock["now"] = 1_031
+        still_limited = clients[1].post(
+            "/pair/recover", data={"recovery_start_nonce": retry_nonce},
+        )
+        self.assertEqual(still_limited.status_code, 429)
+        self.assertEqual(still_limited.headers["Retry-After"], "29")
+        self.assertEqual(self.pairing.active_pin.call_count, 1)
+        self.controller.show_pairing_pin.assert_called_once()
+        with clients[1].session_transaction() as browser_session:
+            boundary_nonce = browser_session["pairing_recovery_start"]["nonce"]
+        clock["now"] = 1_060
+        self.pairing.remaining_seconds.return_value = 440
+        at_boundary = clients[1].post(
+            "/pair/recover", data={"recovery_start_nonce": boundary_nonce},
+        )
+        self.assertEqual(at_boundary.status_code, 202)
+        self.pairing.issue_pin.assert_not_called()
+        self.assertEqual(self.pairing.active_pin.call_count, 2)
+        self.assertEqual(self.controller.show_pairing_pin.call_count, 2)
+        self.controller.show_pairing_pin.assert_called_with(
+            "123456", ttl_seconds=440,
+        )
+
+    def test_recovery_pin_display_cooldown_precedes_config_and_device_store_access(self):
+        self.device_store.add("Existing browser", max_devices=4)
+        clock = {"now": 1_000}
+        self.app.config["PAIRING_RECOVERY_CLOCK"] = lambda: clock["now"]
+        self.app.config["PAIRING_PIN_DISPLAY_CLOCK"] = lambda: clock["now"]
+        self.pairing.active_pin.return_value = "123456"
+        self.pairing.remaining_seconds.return_value = 500
+        client = self.app.test_client()
+
+        self.assertEqual(client.get("/pair").status_code, 200)
+        with client.session_transaction() as browser_session:
+            first_nonce = browser_session["pairing_recovery_start"]["nonce"]
+        self.assertEqual(client.post(
+            "/pair/recover", data={"recovery_start_nonce": first_nonce},
+        ).status_code, 202)
+
+        clock["now"] = 1_030
+        self.assertEqual(client.get("/pair").status_code, 200)
+        with client.session_transaction() as browser_session:
+            second_nonce = browser_session["pairing_recovery_start"]["nonce"]
+        self.pairing.reset_mock()
+        self.controller.reset_mock()
+        with (
+            patch.object(self.store, "get", side_effect=AssertionError("config touched")) as config_get,
+            patch.object(
+                self.device_store, "list", side_effect=AssertionError("devices touched"),
+            ) as device_list,
+        ):
+            limited = client.post(
+                "/pair/recover", data={"recovery_start_nonce": second_nonce},
+            )
+
+        self.assertEqual(limited.status_code, 429)
+        self.assertEqual(limited.headers["Retry-After"], "30")
+        config_get.assert_not_called()
+        device_list.assert_not_called()
+        self.pairing.assert_not_called()
+        self.controller.show_pairing_pin.assert_not_called()
+
+    def test_recovery_pin_display_cooldown_uses_monotonic_time_across_wall_clock_jumps(self):
+        self.device_store.add("Existing browser", max_devices=4)
+        wall_clock = {"now": 1_000}
+        monotonic_clock = {"now": 500}
+        self.app.config["PAIRING_RECOVERY_CLOCK"] = lambda: wall_clock["now"]
+        self.app.config["PAIRING_PIN_DISPLAY_CLOCK"] = lambda: monotonic_clock["now"]
+        self.pairing.active_pin.return_value = "123456"
+        self.pairing.remaining_seconds.return_value = 500
+        client = self.app.test_client()
+
+        self.assertEqual(client.get("/pair").status_code, 200)
+        with client.session_transaction() as browser_session:
+            first_nonce = browser_session["pairing_recovery_start"]["nonce"]
+        self.assertEqual(client.post(
+            "/pair/recover", data={"recovery_start_nonce": first_nonce},
+        ).status_code, 202)
+
+        wall_clock["now"] = 100
+        monotonic_clock["now"] = 530
+        self.assertEqual(client.get("/pair").status_code, 200)
+        with client.session_transaction() as browser_session:
+            second_nonce = browser_session["pairing_recovery_start"]["nonce"]
+        limited = client.post(
+            "/pair/recover", data={"recovery_start_nonce": second_nonce},
+        )
+
+        self.assertEqual(limited.status_code, 429)
+        self.assertEqual(limited.headers["Retry-After"], "30")
+        self.controller.show_pairing_pin.assert_called_once_with(
+            "123456", ttl_seconds=500,
+        )
+
+    def test_pin_request_and_cooldown_preserve_active_pin_expiry_and_lockout(self):
+        clock = {"now": 1_000.0}
+        pairing = PairingManager(
+            ttl_seconds=600,
+            max_attempts=1,
+            lockout_seconds=60,
+            clock=lambda: clock["now"],
+        )
+        pin = pairing.issue_pin()
+        wrong_pin = f"{(int(pin) + 1) % 1_000_000:06d}"
+        self.assertFalse(pairing.verify(wrong_pin))
+        self.assertTrue(pairing.is_locked())
+        app = create_app(
+            self.controller,
+            self.store,
+            pairing,
+            secret_key="lockout-test",
+            session_generation="generation-one",
+            media_dir=self.media_dir,
+            location_search=self.location_search,
+            device_store=self.device_store,
+            openweather_secrets=self.openweather_secrets,
+            scroll_timing_cache=self.scroll_timing_cache,
+            device_restart_runner=self.device_restart_runner,
+        )
+        app.config["PAIRING_RECOVERY_CLOCK"] = lambda: int(clock["now"])
+        clients = [app.test_client(), app.test_client()]
+        nonces = []
+        for client in clients:
+            self.assertEqual(client.get("/pair").status_code, 200)
+            with client.session_transaction() as browser_session:
+                nonces.append(browser_session["pairing_recovery_start"]["nonce"])
+
+        accepted = clients[0].post(
+            "/pair/recover", data={"recovery_start_nonce": nonces[0]},
+        )
+        limited = clients[1].post(
+            "/pair/recover", data={"recovery_start_nonce": nonces[1]},
+        )
+
+        self.assertEqual(accepted.status_code, 202)
+        self.assertEqual(limited.status_code, 429)
+        self.assertEqual(pairing.active_pin(), pin)
+        self.assertEqual(pairing.remaining_seconds(), 600)
+        self.assertTrue(pairing.is_locked())
+        self.assertFalse(pairing.verify(pin))
+        self.controller.show_pairing_pin.assert_called_once_with(pin, ttl_seconds=600)
+
+    def test_fresh_physical_pin_request_does_not_clear_testing_pin_lockout(self):
+        clock = {"now": 1_000.0}
+        pairing = PairingManager(
+            ttl_seconds=600,
+            max_attempts=1,
+            lockout_seconds=60,
+            clock=lambda: clock["now"],
+            testing_pin="731946",
+        )
+        self.assertFalse(pairing.verify("000000"))
+        self.assertTrue(pairing.is_locked())
+        self.assertIsNone(pairing.active_pin())
+        app = create_app(
+            self.controller,
+            self.store,
+            pairing,
+            secret_key="fresh-lockout-test",
+            session_generation="generation-one",
+            media_dir=self.media_dir,
+            location_search=self.location_search,
+            device_store=self.device_store,
+            openweather_secrets=self.openweather_secrets,
+            scroll_timing_cache=self.scroll_timing_cache,
+            device_restart_runner=self.device_restart_runner,
+        )
+        app.config["PAIRING_RECOVERY_CLOCK"] = lambda: int(clock["now"])
+        client = app.test_client()
+        self.assertEqual(client.get("/pair").status_code, 200)
+        with client.session_transaction() as browser_session:
+            nonce = browser_session["pairing_recovery_start"]["nonce"]
+
+        response = client.post(
+            "/pair/recover", data={"recovery_start_nonce": nonce},
+        )
+
+        self.assertEqual(response.status_code, 202)
+        pin = pairing.active_pin()
+        self.assertIsNotNone(pin)
+        self.assertTrue(pairing.is_locked())
+        self.assertFalse(pairing.verify(pin))
+        self.assertFalse(pairing.verify("731946"))
+        self.controller.show_pairing_pin.assert_called_once_with(pin, ttl_seconds=600)
 
     def test_parallel_recovery_starts_reuse_the_active_physical_pin(self):
         self.device_store.add("Existing browser", max_devices=4)
@@ -6995,10 +7917,9 @@ globalThis.document=document;globalThis.window=window;globalThis.fetch=fetch;
             if response is None:
                 self.fail("recovery request thread did not publish a response")
             status_codes.append(response.status_code)
-        self.assertEqual(status_codes, [202, 202])
+        self.assertEqual(sorted(status_codes), [202, 429])
         self.assertEqual(state["issued"], 1)
-        self.assertEqual(self.controller.show_pairing_pin.call_count, 2)
-        self.controller.show_pairing_pin.assert_called_with("000001", ttl_seconds=600)
+        self.controller.show_pairing_pin.assert_called_once_with("000001", ttl_seconds=600)
 
     def test_recovery_and_paired_pairing_starts_cannot_display_a_stale_pin(self):
         self.store.update({"pairing": {"max_devices": 1}})
@@ -7064,7 +7985,7 @@ globalThis.document=document;globalThis.window=window;globalThis.fetch=fetch;
         self.assertEqual(state["issued"], 2)
         self.assertEqual(state["displayed"][-1], state["active"])
 
-    def test_pair_page_and_paired_pairing_start_cannot_display_a_stale_pin(self):
+    def test_pair_page_get_cannot_interfere_with_paired_pairing_start(self):
         existing = self.device_store.add("Existing browser", max_devices=4)
         unpaired_client = self.app.test_client()
         paired_client = self.app.test_client()
@@ -7076,12 +7997,6 @@ globalThis.document=document;globalThis.window=window;globalThis.fetch=fetch;
             })
 
         state = {"active": "000001", "displayed": []}
-        active_read = threading.Event()
-        additional_shown = threading.Event()
-
-        def active_pin():
-            active_read.set()
-            return state["active"]
 
         def issue_pin():
             state["active"] = "000002"
@@ -7089,35 +8004,21 @@ globalThis.document=document;globalThis.window=window;globalThis.fetch=fetch;
 
         def show_pin(pin, *, ttl_seconds):
             self.assertEqual(ttl_seconds, 600)
-            if pin == "000001":
-                additional_shown.wait(timeout=.2)
             state["displayed"].append(pin)
-            if pin == "000002":
-                additional_shown.set()
 
-        self.pairing.active_pin.side_effect = active_pin
         self.pairing.issue_pin.side_effect = issue_pin
         self.pairing.remaining_seconds.return_value = 600
         self.controller.show_pairing_pin.side_effect = show_pin
-        responses = {}
 
-        page_thread = threading.Thread(target=lambda: responses.setdefault(
-            "page", unpaired_client.get("/pair"),
-        ))
-        page_thread.start()
-        self.assertTrue(active_read.wait(timeout=1))
-        additional_thread = threading.Thread(target=lambda: responses.setdefault(
-            "additional",
-            self.paired_request("POST", "/api/devices/pair", client=paired_client),
-        ))
-        additional_thread.start()
-        page_thread.join(timeout=2)
-        additional_thread.join(timeout=2)
+        page_response = unpaired_client.get("/pair")
+        self.pairing.active_pin.assert_not_called()
+        self.controller.show_pairing_pin.assert_not_called()
+        additional_response = self.paired_request(
+            "POST", "/api/devices/pair", client=paired_client,
+        )
 
-        self.assertFalse(page_thread.is_alive())
-        self.assertFalse(additional_thread.is_alive())
-        self.assertEqual(responses["page"].status_code, 200)
-        self.assertEqual(responses["additional"].status_code, 202)
+        self.assertEqual(page_response.status_code, 200)
+        self.assertEqual(additional_response.status_code, 202)
         self.assertEqual(state["displayed"][-1], state["active"])
 
     def test_pair_submission_cannot_consume_a_pin_while_it_is_being_displayed(self):
@@ -7140,9 +8041,15 @@ globalThis.document=document;globalThis.window=window;globalThis.fetch=fetch;
 
         self.controller.show_pairing_pin.side_effect = show_pin
         self.pairing.verify.side_effect = verify_pin
+        self.app.config["PAIRING_RECOVERY_CLOCK"] = lambda: 1_000
+        self.assertEqual(page_client.get("/pair").status_code, 200)
+        with page_client.session_transaction() as browser_session:
+            nonce = browser_session["pairing_recovery_start"]["nonce"]
         responses = {}
         page_thread = threading.Thread(target=lambda: responses.setdefault(
-            "page", page_client.get("/pair"),
+            "page", page_client.post(
+                "/pair/recover", data={"recovery_start_nonce": nonce},
+            ),
         ))
         page_thread.start()
         self.assertTrue(display_entered.wait(timeout=1))
@@ -7160,7 +8067,7 @@ globalThis.document=document;globalThis.window=window;globalThis.fetch=fetch;
         self.assertFalse(page_thread.is_alive())
         self.assertFalse(submit_thread.is_alive())
         self.assertFalse(consumed_during_display)
-        self.assertEqual(responses["page"].status_code, 200)
+        self.assertEqual(responses["page"].status_code, 202)
         self.assertEqual(responses["submit"].status_code, 302)
 
     def test_paired_login_screen_offers_an_additional_device_button(self):
@@ -7359,7 +8266,7 @@ globalThis.document=document;globalThis.window=window;globalThis.fetch=fetch;
 
         self.assertEqual(response.status_code, 403)
         self.assertIn("invalid or expired", response.get_data(as_text=True))
-        self.assertIn("SHOW RECOVERY PIN", response.get_data(as_text=True))
+        self.assertIn("REQUEST PIN ON MATRIX", response.get_data(as_text=True))
         self.assertEqual(self.device_store.list(), before)
         self.controller.cancel_device_drafts_for_device.assert_not_called()
         with self.client.session_transaction() as browser_session:
@@ -7387,7 +8294,7 @@ globalThis.document=document;globalThis.window=window;globalThis.fetch=fetch;
 
         self.assertEqual(response.status_code, 403)
         self.assertIn("invalid or expired", response.get_data(as_text=True))
-        self.assertIn("SHOW RECOVERY PIN", response.get_data(as_text=True))
+        self.assertIn("REQUEST PIN ON MATRIX", response.get_data(as_text=True))
         self.assertEqual(self.device_store.list(), before)
         self.controller.cancel_device_drafts_for_device.assert_not_called()
         with self.client.session_transaction() as browser_session:
@@ -7415,7 +8322,7 @@ globalThis.document=document;globalThis.window=window;globalThis.fetch=fetch;
         )
 
         self.assertEqual(response.status_code, 403)
-        self.assertIn("SHOW RECOVERY PIN", response.get_data(as_text=True))
+        self.assertIn("REQUEST PIN ON MATRIX", response.get_data(as_text=True))
         self.assertEqual(self.device_store.list(), before)
         self.controller.cancel_device_drafts_for_device.assert_not_called()
 
@@ -7441,7 +8348,7 @@ globalThis.document=document;globalThis.window=window;globalThis.fetch=fetch;
 
         self.assertEqual(response.status_code, 409)
         self.assertIn("paired-device list changed", response.get_data(as_text=True))
-        self.assertIn("SHOW RECOVERY PIN", response.get_data(as_text=True))
+        self.assertIn("REQUEST PIN ON MATRIX", response.get_data(as_text=True))
         self.assertEqual(self.device_store.list(), changed)
         self.controller.cancel_device_drafts_for_device.assert_not_called()
         with self.client.session_transaction() as browser_session:
@@ -7468,7 +8375,7 @@ globalThis.document=document;globalThis.window=window;globalThis.fetch=fetch;
 
         self.assertEqual(response.status_code, 409)
         self.assertIn("no longer at its paired-device limit", response.get_data(as_text=True))
-        self.assertIn("SHOW RECOVERY PIN", response.get_data(as_text=True))
+        self.assertIn("REQUEST PIN ON MATRIX", response.get_data(as_text=True))
         self.assertEqual(self.device_store.list(), before)
         self.controller.cancel_device_drafts_for_device.assert_not_called()
         with self.client.session_transaction() as browser_session:
@@ -7495,7 +8402,7 @@ globalThis.document=document;globalThis.window=window;globalThis.fetch=fetch;
 
         self.assertEqual(response.status_code, 409)
         self.assertIn("selected pairing no longer exists", response.get_data(as_text=True))
-        self.assertIn("SHOW RECOVERY PIN", response.get_data(as_text=True))
+        self.assertIn("REQUEST PIN ON MATRIX", response.get_data(as_text=True))
         self.assertEqual(self.device_store.list(), before)
         self.controller.cancel_device_drafts_for_device.assert_not_called()
         with self.client.session_transaction() as browser_session:
@@ -7695,7 +8602,10 @@ globalThis.document=document;globalThis.window=window;globalThis.fetch=fetch;
             )
 
         self.assertEqual(response.status_code, 503)
-        self.assertIn("could not be stored", response.get_data(as_text=True))
+        body = response.get_data(as_text=True)
+        self.assertIn("could not be stored", body)
+        self.assertIn("REQUEST PIN ON MATRIX", body)
+        self.assertIn('name="recovery_start_nonce"', body)
         self.assertEqual(self.device_store.list(), before)
         self.controller.cancel_device_drafts_for_device.assert_not_called()
         with self.client.session_transaction() as browser_session:

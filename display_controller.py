@@ -677,7 +677,7 @@ class DisplayController:
         self._terminate_device_draft()
         with self._lifecycle_lock:
             if self._shutdown.is_set():
-                return
+                raise RuntimeError("pairing display unavailable")
             lifecycle_generation = self._lifecycle_generation
             self._pairing_setup.set()
         with self._state_lock:
@@ -692,14 +692,14 @@ class DisplayController:
                 )
             if not lifecycle_current:
                 self.end_pairing(generation)
-                return
+                raise RuntimeError("pairing display unavailable")
             self._interrupt_module()
             abort = False
             with self._state_lock:
                 if self._shutdown.is_set():
                     abort = True
                 elif generation != self._pairing_generation:
-                    return
+                    abort = True
                 else:
                     self._pairing_pause.set()
                     if self._pairing_timer is not None:
@@ -721,7 +721,7 @@ class DisplayController:
                     self._pairing_page_timer.start()
             if abort:
                 self.end_pairing(generation)
-                return
+                raise RuntimeError("pairing display unavailable")
             with self._lifecycle_lock:
                 lifecycle_current = (
                     lifecycle_generation == self._lifecycle_generation
@@ -729,8 +729,23 @@ class DisplayController:
                 )
             if not lifecycle_current:
                 self.end_pairing(generation)
-                return
-            self._draw_pairing_page(show_ip=False, generation=generation)
+                raise RuntimeError("pairing display unavailable")
+            displayed = self._draw_pairing_page(
+                show_ip=False, generation=generation,
+            )
+            with self._lifecycle_lock:
+                lifecycle_current = (
+                    lifecycle_generation == self._lifecycle_generation
+                    and not self._shutdown.is_set()
+                )
+            with self._state_lock:
+                pairing_current = (
+                    generation == self._pairing_generation
+                    and self._pairing_pause.is_set()
+                )
+            if not displayed or not lifecycle_current or not pairing_current:
+                self.end_pairing(generation)
+                raise RuntimeError("pairing display unavailable")
         except Exception:
             self.end_pairing(generation)
             raise
@@ -744,7 +759,7 @@ class DisplayController:
                 or generation is not None
                 and generation != self._pairing_generation
             ):
-                return
+                return False
             self.matrix.clear()
             white = self.matrix.colour("white")
             cyan = self.matrix.colour("vapor_cyan")
@@ -767,6 +782,7 @@ class DisplayController:
                     self.matrix.font("6x10"), 12, 25, white, black, self._pairing_pin
                 )
             self.matrix.swap()
+            return True
 
     def _rotate_pairing_page(self, generation):
         with self._state_lock:

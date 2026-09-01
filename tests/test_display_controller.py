@@ -89,6 +89,142 @@ class DisplayControllerTests(unittest.TestCase):
         matrix.swap.assert_called()
         controller.end_pairing()
 
+    def test_show_pairing_pin_rejects_shutdown_controller(self):
+        matrix = Mock()
+        controller = DisplayController(matrix, Mock())
+        controller._shutdown.set()
+
+        with self.assertRaisesRegex(RuntimeError, "pairing display unavailable"):
+            controller.show_pairing_pin("123456", ttl_seconds=60)
+
+        self.assertFalse(controller.pairing_active)
+        matrix.swap.assert_not_called()
+
+    def test_show_pairing_pin_rejects_shutdown_after_initial_admission(self):
+        matrix = Mock()
+        provider_started = threading.Event()
+        release_provider = threading.Event()
+        failures = []
+
+        def stalled_ip_provider():
+            provider_started.set()
+            self.assertTrue(release_provider.wait(timeout=2))
+            return "192.168.1.4"
+
+        controller = DisplayController(
+            matrix, Mock(), ip_address_provider=stalled_ip_provider,
+        )
+
+        def show_pin():
+            try:
+                controller.show_pairing_pin("123456", ttl_seconds=600)
+            except Exception as error:
+                failures.append(error)
+
+        display_thread = threading.Thread(target=show_pin)
+        display_thread.start()
+        self.assertTrue(provider_started.wait(timeout=2))
+        self.assertFalse(controller.stop(timeout=1))
+        release_provider.set()
+        display_thread.join(timeout=2)
+
+        self.assertFalse(display_thread.is_alive())
+        self.assertEqual(len(failures), 1)
+        self.assertIsInstance(failures[0], RuntimeError)
+        self.assertEqual(str(failures[0]), "pairing display unavailable")
+        matrix.draw_text.assert_not_called()
+
+    def test_show_pairing_pin_rejects_shutdown_during_admitted_first_draw(self):
+        matrix = Mock()
+        swap_started = threading.Event()
+        release_swap = threading.Event()
+        failures = []
+
+        def blocked_swap():
+            swap_started.set()
+            self.assertTrue(release_swap.wait(timeout=3))
+
+        matrix.swap.side_effect = blocked_swap
+        controller = DisplayController(
+            matrix, Mock(), ip_address_provider=lambda: "192.168.1.4",
+        )
+
+        def show_pin():
+            try:
+                controller.show_pairing_pin("123456", ttl_seconds=600)
+            except Exception as error:
+                failures.append(error)
+
+        display_thread = threading.Thread(target=show_pin)
+        display_thread.start()
+        self.assertTrue(swap_started.wait(timeout=2))
+        self.assertFalse(controller.stop(timeout=1))
+        release_swap.set()
+        display_thread.join(timeout=2)
+
+        self.assertFalse(display_thread.is_alive())
+        self.assertEqual(len(failures), 1)
+        self.assertIsInstance(failures[0], RuntimeError)
+        self.assertEqual(str(failures[0]), "pairing display unavailable")
+        self.assertFalse(controller.pairing_active)
+
+    def test_show_pairing_pin_rejects_expiry_during_admitted_first_draw(self):
+        matrix = Mock()
+        swap_started = threading.Event()
+        release_swap = threading.Event()
+        timers = []
+        failures = []
+
+        class FakeTimer:
+            def __init__(self, interval, callback):
+                self.interval = interval
+                self.callback = callback
+                self.daemon = False
+                self.cancelled = False
+                timers.append(self)
+
+            def start(self):
+                pass
+
+            def cancel(self):
+                self.cancelled = True
+
+        def blocked_swap():
+            swap_started.set()
+            self.assertTrue(release_swap.wait(timeout=3))
+
+        matrix.swap.side_effect = blocked_swap
+        controller = DisplayController(
+            matrix, Mock(), ip_address_provider=lambda: "192.168.1.4",
+        )
+
+        def show_pin():
+            try:
+                controller.show_pairing_pin("123456", ttl_seconds=600)
+            except Exception as error:
+                failures.append(error)
+
+        with patch("display_controller.threading.Timer", FakeTimer):
+            display_thread = threading.Thread(target=show_pin)
+            display_thread.start()
+            self.assertTrue(swap_started.wait(timeout=2))
+            self.assertEqual(len(timers), 2)
+            expiry_thread = threading.Thread(target=timers[0].callback)
+            expiry_thread.start()
+            deadline = time.monotonic() + 2
+            while controller.pairing_active and time.monotonic() < deadline:
+                time.sleep(0.001)
+            self.assertFalse(controller.pairing_active)
+            release_swap.set()
+            display_thread.join(timeout=2)
+            expiry_thread.join(timeout=2)
+
+        self.assertFalse(display_thread.is_alive())
+        self.assertFalse(expiry_thread.is_alive())
+        self.assertEqual(len(failures), 1)
+        self.assertIsInstance(failures[0], RuntimeError)
+        self.assertEqual(str(failures[0]), "pairing display unavailable")
+
     def test_stale_pairing_timer_cannot_draw_after_pairing_ends(self):
         matrix = Mock()
         controller = DisplayController(matrix, Mock())
@@ -935,9 +1071,15 @@ class DisplayControllerTests(unittest.TestCase):
         controller = DisplayController(
             matrix, Mock(), ip_address_provider=blocked_ip_provider,
         )
-        pairing_thread = threading.Thread(
-            target=lambda: controller.show_pairing_pin("123456", ttl_seconds=60),
-        )
+        failures = []
+
+        def show_pin():
+            try:
+                controller.show_pairing_pin("123456", ttl_seconds=60)
+            except RuntimeError as error:
+                failures.append(error)
+
+        pairing_thread = threading.Thread(target=show_pin)
         pairing_thread.start()
         self.assertTrue(provider_started.wait(0.2))
 
@@ -954,6 +1096,9 @@ class DisplayControllerTests(unittest.TestCase):
         self.assertFalse(stop_thread.is_alive(), "stop exceeded its deadline on pairing state")
         self.assertEqual(result, [False])
         self.assertLess(elapsed, 0.2)
+        self.assertEqual(
+            [str(error) for error in failures], ["pairing display unavailable"],
+        )
         self.assertFalse(controller.pairing_active)
 
     def test_timed_out_stop_invalidates_stalled_pairing_before_restart(self):
@@ -969,9 +1114,15 @@ class DisplayControllerTests(unittest.TestCase):
         controller = DisplayController(
             matrix, Mock(), ip_address_provider=blocked_ip_provider,
         )
-        pairing_thread = threading.Thread(
-            target=lambda: controller.show_pairing_pin("123456", ttl_seconds=60),
-        )
+        failures = []
+
+        def show_pin():
+            try:
+                controller.show_pairing_pin("123456", ttl_seconds=60)
+            except RuntimeError as error:
+                failures.append(error)
+
+        pairing_thread = threading.Thread(target=show_pin)
         pairing_thread.start()
         self.assertTrue(provider_started.wait(0.2))
 
@@ -984,6 +1135,9 @@ class DisplayControllerTests(unittest.TestCase):
         pairing_thread.join(1)
 
         self.assertFalse(pairing_thread.is_alive())
+        self.assertEqual(
+            [str(error) for error in failures], ["pairing display unavailable"],
+        )
         self.assertFalse(controller.pairing_active)
         matrix.clear.assert_not_called()
         matrix.swap.assert_not_called()
@@ -1003,9 +1157,15 @@ class DisplayControllerTests(unittest.TestCase):
             return original_draw(*args, **kwargs)
 
         controller._draw_pairing_page = blocked_draw
-        pairing_thread = threading.Thread(
-            target=lambda: controller.show_pairing_pin("123456", ttl_seconds=60),
-        )
+        failures = []
+
+        def show_pin():
+            try:
+                controller.show_pairing_pin("123456", ttl_seconds=60)
+            except RuntimeError as error:
+                failures.append(error)
+
+        pairing_thread = threading.Thread(target=show_pin)
         pairing_thread.start()
         self.assertTrue(draw_admission_started.wait(0.2))
 
@@ -1018,6 +1178,9 @@ class DisplayControllerTests(unittest.TestCase):
         pairing_thread.join(1)
 
         self.assertFalse(pairing_thread.is_alive())
+        self.assertEqual(
+            [str(error) for error in failures], ["pairing display unavailable"],
+        )
         self.assertFalse(controller.pairing_active)
         matrix.clear.assert_not_called()
         matrix.swap.assert_not_called()
