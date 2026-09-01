@@ -231,7 +231,7 @@ class WebAppTests(unittest.TestCase):
             "id": "custom_api_appearance", "name": "API appearance",
             "type": "text_scroll", "text": "EDGE", "font": "5x7",
             "colour": "#fedcba", "background": "#123456",
-            "border": "inset", "border_colour": "#abcdef",
+            "border": "double", "border_colour": "#abcdef",
             "x": -2, "y": 7, "direction": "right", "speed": 0.05,
             "loops": 1,
         }
@@ -339,6 +339,7 @@ class WebAppTests(unittest.TestCase):
         self.assertIn("border:'none',border_colour:'#ffffff'", body)
         self.assertIn("border:card.querySelector('[data-field=border]').value", body)
         self.assertIn("border: card.querySelector('[data-field=border]').value", canvas)
+        self.assertIn("['none','solid','inset','dotted','dashed','double']", body)
         self.assertIn("MINIMUM_CLIENT_CONTRACT = 3", Path(webapp.__file__).read_text())
         self.assertIn("const MATRIX_CLIENT_CONTRACT=3", body)
 
@@ -387,7 +388,7 @@ const evaluate=async expression=>{const result=await send('Runtime.evaluate',{ex
 try{await send('Runtime.enable');await send('Page.enable');loaded=new Promise(resolve=>loadResolve=resolve);await send('Page.navigate',{url:'file://'+pagePath});await loaded;
 for(let attempt=0;attempt<100;attempt++){if(await evaluate(`globalThis.matrixCustomCanvasReady===true&&!!document.querySelector('[data-simple-appearance]')`))break;await new Promise(r=>setTimeout(r,20))}
 await evaluate(`(()=>{const card=document.querySelector('[data-editor-type="simple"]'),border=card.querySelector('[data-field="border"]'),colour=card.querySelector('[data-field="border_colour"]');border.value='solid';border.dispatchEvent(new Event('input',{bubbles:true}));colour.value='#123456';colour.dispatchEvent(new Event('input',{bubbles:true}));border.value='none';border.dispatchEvent(new Event('input',{bubbles:true}));border.focus()})()`);
-const layouts=[];for(const [width,height]of[[320,568],[360,800],[390,844],[412,915],[599,800],[600,800],[601,800],[768,1024],[820,1180],[844,390],[899,800],[900,800],[901,800],[1024,768],[1280,720],[1440,900]]){await send('Emulation.setDeviceMetricsOverride',{width,height,deviceScaleFactor:1,mobile:width<1100});layouts.push(await evaluate(`(()=>{const card=document.querySelector('[data-editor-type="simple"]'),reset=[...card.querySelectorAll('button')].find(button=>button.textContent==='Reset appearance'),draft=customModulesFromEditor()[0],box=reset.getBoundingClientRect();return{viewport:[innerWidth,innerHeight],draft,disabled:card.querySelector('[data-field="border_colour"]').disabled,focused:document.activeElement?.dataset?.field||null,reset:[box.width,box.height],overflow:document.documentElement.scrollWidth-document.documentElement.clientWidth}})()`))}
+const layouts=[];for(const [width,height]of[[320,568],[360,800],[390,844],[412,915],[599,800],[600,800],[601,800],[768,1024],[820,1180],[844,390],[899,800],[900,800],[901,800],[1024,768],[1280,720],[1440,900]]){await send('Emulation.setDeviceMetricsOverride',{width,height,deviceScaleFactor:1,mobile:width<1100});layouts.push(await evaluate(`(()=>{const card=document.querySelector('[data-editor-type="simple"]'),reset=[...card.querySelectorAll('button')].find(button=>button.textContent==='Reset appearance'),border=card.querySelector('[data-field="border"]'),draft=customModulesFromEditor()[0],box=reset.getBoundingClientRect();return{viewport:[innerWidth,innerHeight],draft,options:[...border.options].map(option=>option.value),disabled:card.querySelector('[data-field="border_colour"]').disabled,focused:document.activeElement?.dataset?.field||null,reset:[box.width,box.height],overflow:document.documentElement.scrollWidth-document.documentElement.clientWidth}})()`))}
 const reset=await evaluate(`(()=>{const card=document.querySelector('[data-editor-type="simple"]');[...card.querySelectorAll('button')].find(button=>button.textContent==='Reset appearance').click();return customModulesFromEditor()[0]})()`);
 console.log(JSON.stringify({layouts,reset}));}finally{socket.close()}
 """
@@ -395,6 +396,9 @@ console.log(JSON.stringify({layouts,reset}));}finally{socket.close()}
         for layout in report["layouts"]:
             self.assertEqual(layout["draft"]["border"], "none", report)
             self.assertEqual(layout["draft"]["border_colour"], "#123456", report)
+            self.assertEqual(layout["options"], [
+                "none", "solid", "inset", "dotted", "dashed", "double",
+            ], report)
             self.assertTrue(layout["disabled"], report)
             self.assertEqual(layout["focused"], "border", report)
             self.assertGreaterEqual(layout["reset"][0], 44, report)
@@ -1306,7 +1310,7 @@ try{
         body = self.client.get("/").get_data(as_text=True)
 
         application_version = getattr(webapp, "APPLICATION_VERSION", None)
-        self.assertEqual(application_version, "0.3.60-preview")
+        self.assertEqual(application_version, "0.3.61-preview")
         self.assertEqual(body.count(f"Version {application_version}"), 1)
         self.assertRegex(
             body,
