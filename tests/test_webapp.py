@@ -874,7 +874,11 @@ try{
         self.assertRegex(body, r'id="logs-status"[^>]+role="status"[^>]+aria-live="polite"')
         self.assertIn('id="logs-refresh"', body)
         self.assertIn('id="logs-close"', body)
-        self.assertIn("logsOutput.textContent=payload.logs", body)
+        self.assertIn('id="logs-filter-errors"', body)
+        self.assertIn('id="logs-filter-warnings"', body)
+        self.assertEqual(body.count('aria-pressed="false"'), 2)
+        self.assertIn("logsRawText=payload.logs||''", body)
+        self.assertIn("logsOutput.textContent=logsRawText", body)
         self.assertNotIn("logsOutput.innerHTML", body)
         self.assertIn("await api('/api/logs',{signal:controller.signal})", body)
 
@@ -900,15 +904,19 @@ const evaluate=async expression=>{const result=await send('Runtime.evaluate',{ex
 try{
  await send('Runtime.enable');await send('Page.enable');await send('Emulation.setDeviceMetricsOverride',{width:320,height:568,deviceScaleFactor:1,mobile:false});loaded=new Promise(resolve=>loadResolve=resolve);await send('Page.navigate',{url:'file://'+pagePath});await loaded;
  const mobile=await evaluate(`(()=>{const button=document.querySelector('#logs-nav-button'),rect=button.getBoundingClientRect();return{count:document.querySelectorAll('#logs-nav-button').length,insideNav:!!button.closest('nav.nav'),display:getComputedStyle(button).display,rect:[rect.left,rect.top,rect.right,rect.bottom],overflow:document.documentElement.scrollWidth-document.documentElement.clientWidth}})()`);
- await evaluate(`(()=>{globalThis.__logCalls=0;globalThis.__logAborted=false;globalThis.fetch=async(path,options={})=>{if(path!=='/api/logs')return{status:200,redirected:false,ok:true,json:async()=>({})};globalThis.__logCalls++;if(__logCalls===3){globalThis.__logSignal=options.signal;return new Promise((resolve,reject)=>options.signal.addEventListener('abort',()=>{globalThis.__logAborted=true;reject(new DOMException('Aborted','AbortError'))},{once:true}))};return{status:200,redirected:false,ok:true,json:async()=>({logs:__logCalls===1?'<img id="log-injection" src=x> first':'second refresh',source:'matrix-web.service'})}};return true})()`);
+ await evaluate(`(()=>{globalThis.__logCalls=0;globalThis.__logAborted=false;globalThis.fetch=async(path,options={})=>{if(path!=='/api/logs')return{status:200,redirected:false,ok:true,json:async()=>({})};globalThis.__logCalls++;if(__logCalls===3){globalThis.__logSignal=options.signal;return new Promise((resolve,reject)=>options.signal.addEventListener('abort',()=>{globalThis.__logAborted=true;reject(new DOMException('Aborted','AbortError'))},{once:true}))};return{status:200,redirected:false,ok:true,json:async()=>({logs:__logCalls===1?'<img id="log-injection" src=x> first':'INFO ready\\nWARNING cache is slow\\nERROR render failed\\nrequest \\"GET /health HTTP/1.1\\" 500 12\\nTraceback (most recent call last):\\n  File \\"/app/webapp.py\\", line 7, in route\\n    render()\\n  ValueError: bad config\\nDeprecationWarning: old setting',source:'matrix-web.service'})}};return true})()`);
  await evaluate(`document.querySelector('#logs-nav-button').click()`);await evaluate(`(async()=>{for(let attempt=0;attempt<100&&document.querySelector('#logs-dialog').hasAttribute('aria-busy');attempt++)await new Promise(resolve=>setTimeout(resolve,10))})()`);
  const first=await evaluate(`(()=>{const dialog=document.querySelector('#logs-dialog'),rect=dialog.getBoundingClientRect(),sizes=[...dialog.querySelectorAll('button')].map(button=>{const r=button.getBoundingClientRect();return[r.width,r.height]});return{open:dialog.open,text:document.querySelector('#logs-output').textContent,injected:!!document.querySelector('#log-injection'),calls:__logCalls,focus:document.activeElement.id,rect:[rect.left,rect.top,rect.right,rect.bottom],sizes}})()`);
  await evaluate(`document.querySelector('#logs-refresh').click()`);await evaluate(`(async()=>{for(let attempt=0;attempt<100&&document.querySelector('#logs-dialog').hasAttribute('aria-busy');attempt++)await new Promise(resolve=>setTimeout(resolve,10))})()`);const refreshed=await evaluate(`({text:document.querySelector('#logs-output').textContent,calls:__logCalls})`);
+ await evaluate(`document.querySelector('#logs-filter-errors').click()`);const errorsOnly=await evaluate(`({text:document.querySelector('#logs-output').textContent,calls:__logCalls,errors:document.querySelector('#logs-filter-errors').getAttribute('aria-pressed'),warnings:document.querySelector('#logs-filter-warnings').getAttribute('aria-pressed')})`);
+ await evaluate(`document.querySelector('#logs-filter-warnings').click()`);const errorsAndWarnings=await evaluate(`({text:document.querySelector('#logs-output').textContent,calls:__logCalls,errors:document.querySelector('#logs-filter-errors').getAttribute('aria-pressed'),warnings:document.querySelector('#logs-filter-warnings').getAttribute('aria-pressed')})`);
+ await evaluate(`document.querySelector('#logs-filter-errors').click()`);const warningsOnly=await evaluate(`({text:document.querySelector('#logs-output').textContent,calls:__logCalls,errors:document.querySelector('#logs-filter-errors').getAttribute('aria-pressed'),warnings:document.querySelector('#logs-filter-warnings').getAttribute('aria-pressed')})`);
+ await evaluate(`document.querySelector('#logs-filter-warnings').click()`);const allLogs=await evaluate(`({text:document.querySelector('#logs-output').textContent,calls:__logCalls,errors:document.querySelector('#logs-filter-errors').getAttribute('aria-pressed'),warnings:document.querySelector('#logs-filter-warnings').getAttribute('aria-pressed')})`);
  await send('Input.dispatchKeyEvent',{type:'keyDown',key:'Escape',code:'Escape',windowsVirtualKeyCode:27,nativeVirtualKeyCode:27});await send('Input.dispatchKeyEvent',{type:'keyUp',key:'Escape',code:'Escape',windowsVirtualKeyCode:27,nativeVirtualKeyCode:27});await new Promise(resolve=>setTimeout(resolve,20));const escaped=await evaluate(`({closed:!document.querySelector('#logs-dialog').open,focus:document.activeElement.id})`);
  await evaluate(`document.querySelector('#logs-nav-button').click()`);await evaluate(`(async()=>{await new Promise(resolve=>setTimeout(resolve,20));globalThis.__hadLogController=!!logsRequestController;document.querySelector('#logs-close').click();await new Promise(resolve=>setTimeout(resolve,20))})()`);const buttonClosed=await evaluate(`({closed:!document.querySelector('#logs-dialog').open,focus:document.activeElement.id,calls:__logCalls,hadController:__hadLogController,aborted:__logAborted,signalAborted:__logSignal?.aborted===true,text:document.querySelector('#logs-output').textContent})`);
  await send('Emulation.setDeviceMetricsOverride',{width:1280,height:720,deviceScaleFactor:1,mobile:false});
  const desktop=await evaluate(`(()=>{const button=document.querySelector('#logs-nav-button'),rect=button.getBoundingClientRect();return{display:getComputedStyle(button).display,rect:[rect.left,rect.top,rect.right,rect.bottom],overflow:document.documentElement.scrollWidth-document.documentElement.clientWidth}})()`);
- console.log(JSON.stringify({mobile,first,refreshed,escaped,buttonClosed,desktop}));
+ console.log(JSON.stringify({mobile,first,refreshed,errorsOnly,errorsAndWarnings,warningsOnly,allLogs,escaped,buttonClosed,desktop}));
 }finally{socket.close()}
 """
         report = self._run_dashboard_chromium_probe(body, probe, timeout=30)
@@ -928,11 +936,33 @@ try{
         self.assertGreaterEqual(dialog_top, 0, report)
         self.assertLessEqual(dialog_right, 320, report)
         self.assertLessEqual(dialog_bottom, 568, report)
-        self.assertEqual(report["refreshed"], {"text": "second refresh", "calls": 2}, report)
+        traceback_logs = 'Traceback (most recent call last):\n  File "/app/webapp.py", line 7, in route\n    render()\n  ValueError: bad config'
+        sample_logs = 'INFO ready\nWARNING cache is slow\nERROR render failed\nrequest "GET /health HTTP/1.1" 500 12\n' + traceback_logs + '\nDeprecationWarning: old setting'
+        self.assertEqual(report["refreshed"], {"text": sample_logs, "calls": 2}, report)
+        self.assertEqual(
+            report["errorsOnly"],
+            {"text": 'ERROR render failed\nrequest "GET /health HTTP/1.1" 500 12\n' + traceback_logs, "calls": 2, "errors": "true", "warnings": "false"},
+            report,
+        )
+        self.assertEqual(
+            report["errorsAndWarnings"],
+            {"text": 'WARNING cache is slow\nERROR render failed\nrequest "GET /health HTTP/1.1" 500 12\n' + traceback_logs + '\nDeprecationWarning: old setting', "calls": 2, "errors": "true", "warnings": "true"},
+            report,
+        )
+        self.assertEqual(
+            report["warningsOnly"],
+            {"text": "WARNING cache is slow\nDeprecationWarning: old setting", "calls": 2, "errors": "false", "warnings": "true"},
+            report,
+        )
+        self.assertEqual(
+            report["allLogs"],
+            {"text": sample_logs, "calls": 2, "errors": "false", "warnings": "false"},
+            report,
+        )
         self.assertEqual(report["escaped"], {"closed": True, "focus": "logs-nav-button"}, report)
         self.assertEqual(
             report["buttonClosed"],
-            {"closed": True, "focus": "logs-nav-button", "calls": 3, "hadController": True, "aborted": True, "signalAborted": True, "text": "second refresh"},
+            {"closed": True, "focus": "logs-nav-button", "calls": 3, "hadController": True, "aborted": True, "signalAborted": True, "text": sample_logs},
             report,
         )
         self.assertNotEqual(report["desktop"]["display"], "none", report)
