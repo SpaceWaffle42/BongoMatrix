@@ -608,6 +608,8 @@ class DisplayController:
             if pinned_handle is None:
                 raise ValueError("built-in device draft media is not pinned")
             options["pinned_handle"] = pinned_handle
+        elif module_name == "announcement_board":
+            options["pinned_handles"] = request.pinned_media
         elif custom is not None:
             options["module_config"] = custom
             options["pinned_handles"] = request.pinned_media
@@ -622,7 +624,12 @@ class DisplayController:
             return False
         rendered = False
         while not stop_event.is_set():
-            rendered = module.run(matrix, candidate, **options)
+            runner = (
+                module.run_draft
+                if module_name == "announcement_board"
+                else module.run
+            )
+            rendered = runner(matrix, candidate, **options)
             if request.timeout_seconds is not None or rendered is False:
                 return rendered
             if stop_event.is_set() or stop_event.wait(0.01):
