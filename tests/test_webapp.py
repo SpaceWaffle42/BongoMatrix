@@ -874,11 +874,19 @@ try{
         self.assertRegex(body, r'id="logs-status"[^>]+role="status"[^>]+aria-live="polite"')
         self.assertIn('id="logs-refresh"', body)
         self.assertIn('id="logs-close"', body)
+        self.assertRegex(body, r'id="logs-colour-toggle"[^>]+aria-label="Change log colours"[^>]+aria-expanded="false"[^>]+aria-controls="logs-colour-settings"')
+        self.assertIn('id="logs-colour-settings"', body)
+        self.assertIn('id="logs-colour-error"', body)
+        self.assertIn('id="logs-colour-warning"', body)
+        self.assertIn('id="logs-colour-generic"', body)
+        self.assertIn('id="logs-colour-reset"', body)
+        self.assertIn('matrix.log-colours.v1', body)
         self.assertIn('id="logs-filter-errors"', body)
         self.assertIn('id="logs-filter-warnings"', body)
         self.assertEqual(body.count('aria-pressed="false"'), 2)
         self.assertIn("logsRawText=payload.logs||''", body)
-        self.assertIn("logsOutput.textContent=logsRawText", body)
+        self.assertIn("logsOutput.replaceChildren()", body)
+        self.assertIn("line.textContent=record.join('\\n')", body)
         self.assertNotIn("logsOutput.innerHTML", body)
         self.assertIn("await api('/api/logs',{signal:controller.signal})", body)
 
@@ -906,17 +914,19 @@ try{
  const mobile=await evaluate(`(()=>{const button=document.querySelector('#logs-nav-button'),rect=button.getBoundingClientRect();return{count:document.querySelectorAll('#logs-nav-button').length,insideNav:!!button.closest('nav.nav'),display:getComputedStyle(button).display,rect:[rect.left,rect.top,rect.right,rect.bottom],overflow:document.documentElement.scrollWidth-document.documentElement.clientWidth}})()`);
  await evaluate(`(()=>{globalThis.__logCalls=0;globalThis.__logAborted=false;globalThis.fetch=async(path,options={})=>{if(path!=='/api/logs')return{status:200,redirected:false,ok:true,json:async()=>({})};globalThis.__logCalls++;if(__logCalls===3){globalThis.__logSignal=options.signal;return new Promise((resolve,reject)=>options.signal.addEventListener('abort',()=>{globalThis.__logAborted=true;reject(new DOMException('Aborted','AbortError'))},{once:true}))};return{status:200,redirected:false,ok:true,json:async()=>({logs:__logCalls===1?'<img id="log-injection" src=x> first':'INFO ready\\nWARNING cache is slow\\nERROR render failed\\nrequest \\"GET /health HTTP/1.1\\" 500 12\\nTraceback (most recent call last):\\n  File \\"/app/webapp.py\\", line 7, in route\\n    render()\\n  ValueError: bad config\\nDeprecationWarning: old setting',source:'matrix-web.service'})}};return true})()`);
  await evaluate(`document.querySelector('#logs-nav-button').click()`);await evaluate(`(async()=>{for(let attempt=0;attempt<100&&document.querySelector('#logs-dialog').hasAttribute('aria-busy');attempt++)await new Promise(resolve=>setTimeout(resolve,10))})()`);
- const first=await evaluate(`(()=>{const dialog=document.querySelector('#logs-dialog'),rect=dialog.getBoundingClientRect(),sizes=[...dialog.querySelectorAll('button')].map(button=>{const r=button.getBoundingClientRect();return[r.width,r.height]});return{open:dialog.open,text:document.querySelector('#logs-output').textContent,injected:!!document.querySelector('#log-injection'),calls:__logCalls,focus:document.activeElement.id,rect:[rect.left,rect.top,rect.right,rect.bottom],sizes}})()`);
- await evaluate(`document.querySelector('#logs-refresh').click()`);await evaluate(`(async()=>{for(let attempt=0;attempt<100&&document.querySelector('#logs-dialog').hasAttribute('aria-busy');attempt++)await new Promise(resolve=>setTimeout(resolve,10))})()`);const refreshed=await evaluate(`({text:document.querySelector('#logs-output').textContent,calls:__logCalls})`);
+ const first=await evaluate(`(()=>{const dialog=document.querySelector('#logs-dialog'),rect=dialog.getBoundingClientRect(),sizes=[...dialog.querySelectorAll('button')].filter(button=>!button.closest('[hidden]')).map(button=>{const r=button.getBoundingClientRect();return[r.width,r.height]});return{open:dialog.open,text:document.querySelector('#logs-output').textContent,injected:!!document.querySelector('#log-injection'),calls:__logCalls,focus:document.activeElement.id,rect:[rect.left,rect.top,rect.right,rect.bottom],sizes}})()`);
+ await evaluate(`document.querySelector('#logs-refresh').click()`);await evaluate(`(async()=>{for(let attempt=0;attempt<100&&document.querySelector('#logs-dialog').hasAttribute('aria-busy');attempt++)await new Promise(resolve=>setTimeout(resolve,10))})()`);const refreshed=await evaluate(`({text:document.querySelector('#logs-output').textContent,calls:__logCalls,records:[...document.querySelectorAll('#logs-output .logs-line')].map(line=>({severity:line.dataset.severity,colour:getComputedStyle(line).color,text:line.textContent}))})`);
+ const colourSettings=await evaluate(`(()=>{const dialog=document.querySelector('#logs-dialog'),toggle=document.querySelector('#logs-colour-toggle'),panel=document.querySelector('#logs-colour-settings'),rect=value=>{const box=value.getBoundingClientRect();return[box.left,box.top,box.right,box.bottom]},colours=()=>[...document.querySelectorAll('#logs-output .logs-line')].map(line=>({severity:line.dataset.severity,colour:getComputedStyle(line).color}));toggle.click();matrixDirty=false;let bubbledInput=0,bubbledChange=0;const onInput=()=>bubbledInput++,onChange=()=>bubbledChange++;document.addEventListener('input',onInput);document.addEventListener('change',onChange);const opened={hidden:panel.hidden,expanded:toggle.getAttribute('aria-expanded'),focus:document.activeElement.id,toggle:rect(toggle),panel:rect(panel),dialog:rect(dialog)};for(const [id,value]of[['logs-colour-error','#654321'],['logs-colour-warning','#123456'],['logs-colour-generic','#abcdef']]){const input=document.getElementById(id);input.value=value;input.dispatchEvent(new Event('input',{bubbles:true}));input.dispatchEvent(new Event('change',{bubbles:true}))}const isolation={matrixDirty,bubbledInput,bubbledChange};document.removeEventListener('input',onInput);document.removeEventListener('change',onChange);const customised={colours:colours(),stored:JSON.parse(localStorage.getItem('matrix.log-colours.v1')),inputs:Object.fromEntries([...panel.querySelectorAll('input[type=color]')].map(input=>[input.dataset.logColour,input.value]))};for(const input of logsColourInputs)input.value=LOG_COLOUR_DEFAULTS[input.dataset.logColour];for(const [severity,colour]of Object.entries(LOG_COLOUR_DEFAULTS))logsDialog.style.setProperty('--log-'+severity+'-colour',colour);loadLogColours();const restored={colours:colours(),inputs:Object.fromEntries(logsColourInputs.map(input=>[input.dataset.logColour,input.value]))};document.querySelector('#logs-colour-reset').click();const reset={colours:colours(),stored:JSON.parse(localStorage.getItem('matrix.log-colours.v1'))};const toggleBox=toggle.getBoundingClientRect();return{opened,isolation,customised,restored,reset,hitTarget:document.elementFromPoint(toggleBox.left+toggleBox.width/2,toggleBox.top+toggleBox.height/2)?.id||'',closed:null}})()`);const togglePoint={x:(colourSettings.opened.toggle[0]+colourSettings.opened.toggle[2])/2,y:(colourSettings.opened.toggle[1]+colourSettings.opened.toggle[3])/2};await send('Input.dispatchMouseEvent',{type:'mousePressed',x:togglePoint.x,y:togglePoint.y,button:'left',clickCount:1});await send('Input.dispatchMouseEvent',{type:'mouseReleased',x:togglePoint.x,y:togglePoint.y,button:'left',clickCount:1});colourSettings.closed=await evaluate(`({hidden:document.querySelector('#logs-colour-settings').hidden,expanded:document.querySelector('#logs-colour-toggle').getAttribute('aria-expanded')})`);
  await evaluate(`document.querySelector('#logs-filter-errors').click()`);const errorsOnly=await evaluate(`({text:document.querySelector('#logs-output').textContent,calls:__logCalls,errors:document.querySelector('#logs-filter-errors').getAttribute('aria-pressed'),warnings:document.querySelector('#logs-filter-warnings').getAttribute('aria-pressed')})`);
  await evaluate(`document.querySelector('#logs-filter-warnings').click()`);const errorsAndWarnings=await evaluate(`({text:document.querySelector('#logs-output').textContent,calls:__logCalls,errors:document.querySelector('#logs-filter-errors').getAttribute('aria-pressed'),warnings:document.querySelector('#logs-filter-warnings').getAttribute('aria-pressed')})`);
  await evaluate(`document.querySelector('#logs-filter-errors').click()`);const warningsOnly=await evaluate(`({text:document.querySelector('#logs-output').textContent,calls:__logCalls,errors:document.querySelector('#logs-filter-errors').getAttribute('aria-pressed'),warnings:document.querySelector('#logs-filter-warnings').getAttribute('aria-pressed')})`);
  await evaluate(`document.querySelector('#logs-filter-warnings').click()`);const allLogs=await evaluate(`({text:document.querySelector('#logs-output').textContent,calls:__logCalls,errors:document.querySelector('#logs-filter-errors').getAttribute('aria-pressed'),warnings:document.querySelector('#logs-filter-warnings').getAttribute('aria-pressed')})`);
+ const mixedSeverity=await evaluate(`(()=>{const original=logsRawText,errorFilter=document.querySelector('#logs-filter-errors'),warningFilter=document.querySelector('#logs-filter-warnings'),snapshot=()=>({text:document.querySelector('#logs-output').textContent,records:[...document.querySelectorAll('#logs-output .logs-line')].map(line=>({severity:line.dataset.severity,colour:getComputedStyle(line).color}))});logsRawText='WARNING task degraded\\n  ValueError: task failed';errorFilter.setAttribute('aria-pressed','false');warningFilter.setAttribute('aria-pressed','true');renderLogs();const warningOnly=snapshot();errorFilter.setAttribute('aria-pressed','true');warningFilter.setAttribute('aria-pressed','false');renderLogs();const errorOnly=snapshot();logsRawText=original;errorFilter.setAttribute('aria-pressed','false');warningFilter.setAttribute('aria-pressed','false');renderLogs();return{warningOnly,errorOnly}})()`);
  await send('Input.dispatchKeyEvent',{type:'keyDown',key:'Escape',code:'Escape',windowsVirtualKeyCode:27,nativeVirtualKeyCode:27});await send('Input.dispatchKeyEvent',{type:'keyUp',key:'Escape',code:'Escape',windowsVirtualKeyCode:27,nativeVirtualKeyCode:27});await new Promise(resolve=>setTimeout(resolve,20));const escaped=await evaluate(`({closed:!document.querySelector('#logs-dialog').open,focus:document.activeElement.id})`);
  await evaluate(`document.querySelector('#logs-nav-button').click()`);await evaluate(`(async()=>{await new Promise(resolve=>setTimeout(resolve,20));globalThis.__hadLogController=!!logsRequestController;document.querySelector('#logs-close').click();await new Promise(resolve=>setTimeout(resolve,20))})()`);const buttonClosed=await evaluate(`({closed:!document.querySelector('#logs-dialog').open,focus:document.activeElement.id,calls:__logCalls,hadController:__hadLogController,aborted:__logAborted,signalAborted:__logSignal?.aborted===true,text:document.querySelector('#logs-output').textContent})`);
  await send('Emulation.setDeviceMetricsOverride',{width:1280,height:720,deviceScaleFactor:1,mobile:false});
  const desktop=await evaluate(`(()=>{const button=document.querySelector('#logs-nav-button'),rect=button.getBoundingClientRect();return{display:getComputedStyle(button).display,rect:[rect.left,rect.top,rect.right,rect.bottom],overflow:document.documentElement.scrollWidth-document.documentElement.clientWidth}})()`);
- console.log(JSON.stringify({mobile,first,refreshed,errorsOnly,errorsAndWarnings,warningsOnly,allLogs,escaped,buttonClosed,desktop}));
+ console.log(JSON.stringify({mobile,first,refreshed,colourSettings,errorsOnly,errorsAndWarnings,warningsOnly,allLogs,mixedSeverity,escaped,buttonClosed,desktop}));
 }finally{socket.close()}
 """
         report = self._run_dashboard_chromium_probe(body, probe, timeout=30)
@@ -938,7 +948,64 @@ try{
         self.assertLessEqual(dialog_bottom, 568, report)
         traceback_logs = 'Traceback (most recent call last):\n  File "/app/webapp.py", line 7, in route\n    render()\n  ValueError: bad config'
         sample_logs = 'INFO ready\nWARNING cache is slow\nERROR render failed\nrequest "GET /health HTTP/1.1" 500 12\n' + traceback_logs + '\nDeprecationWarning: old setting'
-        self.assertEqual(report["refreshed"], {"text": sample_logs, "calls": 2}, report)
+        self.assertEqual(report["refreshed"], {
+            "text": sample_logs,
+            "calls": 2,
+            "records": [
+                {"severity": "generic", "colour": "rgb(255, 255, 255)", "text": "INFO ready"},
+                {"severity": "warning", "colour": "rgb(250, 204, 21)", "text": "WARNING cache is slow"},
+                {"severity": "error", "colour": "rgb(255, 107, 107)", "text": "ERROR render failed"},
+                {"severity": "error", "colour": "rgb(255, 107, 107)", "text": 'request "GET /health HTTP/1.1" 500 12'},
+                {"severity": "error", "colour": "rgb(255, 107, 107)", "text": traceback_logs},
+                {"severity": "warning", "colour": "rgb(250, 204, 21)", "text": "DeprecationWarning: old setting"},
+            ],
+        }, report)
+        colour_settings = report["colourSettings"]
+        self.assertEqual(colour_settings["opened"]["hidden"], False, report)
+        self.assertEqual(colour_settings["opened"]["expanded"], "true", report)
+        self.assertEqual(colour_settings["opened"]["focus"], "logs-colour-error", report)
+        self.assertEqual(
+            colour_settings["isolation"],
+            {"matrixDirty": False, "bubbledInput": 0, "bubbledChange": 0},
+            report,
+        )
+        toggle_left, toggle_top, toggle_right, toggle_bottom = colour_settings["opened"]["toggle"]
+        panel_left, panel_top, panel_right, panel_bottom = colour_settings["opened"]["panel"]
+        settings_dialog_left, settings_dialog_top, settings_dialog_right, settings_dialog_bottom = colour_settings["opened"]["dialog"]
+        self.assertGreaterEqual(toggle_left, settings_dialog_left, report)
+        self.assertGreaterEqual(toggle_top, settings_dialog_top, report)
+        self.assertLessEqual(settings_dialog_right - toggle_right, 20, report)
+        self.assertLessEqual(toggle_top - settings_dialog_top, 100, report)
+        self.assertGreaterEqual(toggle_bottom - toggle_top, 44, report)
+        self.assertGreaterEqual(panel_left, settings_dialog_left, report)
+        self.assertGreaterEqual(panel_top, settings_dialog_top, report)
+        self.assertLessEqual(panel_right, settings_dialog_right, report)
+        self.assertLessEqual(panel_bottom, settings_dialog_bottom, report)
+        self.assertGreaterEqual(panel_top, toggle_bottom, report)
+        self.assertEqual(colour_settings["hitTarget"], "logs-colour-toggle", report)
+        customised_colours = [
+            {"severity": "generic", "colour": "rgb(171, 205, 239)"},
+            {"severity": "warning", "colour": "rgb(18, 52, 86)"},
+            {"severity": "error", "colour": "rgb(101, 67, 33)"},
+            {"severity": "error", "colour": "rgb(101, 67, 33)"},
+            {"severity": "error", "colour": "rgb(101, 67, 33)"},
+            {"severity": "warning", "colour": "rgb(18, 52, 86)"},
+        ]
+        custom_values = {"error": "#654321", "warning": "#123456", "generic": "#abcdef"}
+        self.assertEqual(colour_settings["customised"], {
+            "colours": customised_colours,
+            "stored": custom_values,
+            "inputs": custom_values,
+        }, report)
+        self.assertEqual(colour_settings["restored"], {
+            "colours": customised_colours,
+            "inputs": custom_values,
+        }, report)
+        self.assertEqual(colour_settings["reset"], {
+            "colours": [{"severity": record["severity"], "colour": record["colour"]} for record in report["refreshed"]["records"]],
+            "stored": {"error": "#ff6b6b", "warning": "#facc15", "generic": "#ffffff"},
+        }, report)
+        self.assertEqual(colour_settings["closed"], {"hidden": True, "expanded": "false"}, report)
         self.assertEqual(
             report["errorsOnly"],
             {"text": 'ERROR render failed\nrequest "GET /health HTTP/1.1" 500 12\n' + traceback_logs, "calls": 2, "errors": "true", "warnings": "false"},
@@ -957,6 +1024,17 @@ try{
         self.assertEqual(
             report["allLogs"],
             {"text": sample_logs, "calls": 2, "errors": "false", "warnings": "false"},
+            report,
+        )
+        self.assertEqual(
+            report["mixedSeverity"],
+            {
+                "warningOnly": {"text": "No warning log entries are available.", "records": []},
+                "errorOnly": {
+                    "text": "WARNING task degraded\n  ValueError: task failed",
+                    "records": [{"severity": "error", "colour": "rgb(255, 107, 107)"}],
+                },
+            },
             report,
         )
         self.assertEqual(report["escaped"], {"closed": True, "focus": "logs-nav-button"}, report)
