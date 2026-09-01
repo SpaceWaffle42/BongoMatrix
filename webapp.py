@@ -32,6 +32,7 @@ from werkzeug.exceptions import HTTPException, RequestEntityTooLarge
 from werkzeug.utils import secure_filename
 
 from acceptance_artifacts import AcceptanceArtifactTransaction
+from api_timeouts import DEFAULT_API_TIMEOUT_SECONDS
 from config_store import (
     ALLOWED_MODULES, DEFAULT_CONFIG, ConfigConflictError, ConfigDurabilityError,
     validate_config,
@@ -88,7 +89,7 @@ JOURNAL_LOG_BYTES = 65_536
 ETAG_ITEM = re.compile(r'(?P<weak>W/)?"(?P<opaque>[\x21\x23-\x7e\x80-\xff]*)"')
 EDIT_PREVIEW_INSTANCE = re.compile(r"[0-9a-f]{32}")
 EDIT_PREVIEW_SESSION = re.compile(r"[0-9a-f]{32}")
-EDIT_PREVIEW_PROVIDER_DEADLINE_SECONDS = 8.0
+EDIT_PREVIEW_PROVIDER_DEADLINE_SECONDS = DEFAULT_API_TIMEOUT_SECONDS
 EDIT_PREVIEW_TOKEN = re.compile(r"[0-9a-f]{64}")
 
 
@@ -644,7 +645,7 @@ def create_app(
     media_timeline_slots = threading.BoundedSemaphore(2)
     sanitizer = Path(sanitizer_path or Path(__file__).resolve().parent / "media_sanitizer.py")
     sanitizer_python = sanitizer_python or sys.executable
-    location_search = location_search or OpenMeteoClient(timeout=5).search_locations
+    location_search = location_search or OpenMeteoClient().search_locations
     device_store = device_store or PairedDeviceStore()
     if openweather_secrets is None:
         config_path = getattr(config_store, "path", None)
@@ -1673,7 +1674,7 @@ def create_app(
     @app.post("/api/scroll-timing/<module_name>")
     @requires_pairing
     def provider_scroll_timing(module_name):
-        deadline = time.monotonic() + 5
+        deadline = time.monotonic() + DEFAULT_API_TIMEOUT_SECONDS
         if module_name not in {"announcement_board", "weather", "openweather_overview", "openweather_forecast"}:
             abort(404)
         # One extra byte lets an unknown-length WSGI stream prove overflow;

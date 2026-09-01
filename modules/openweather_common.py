@@ -14,6 +14,7 @@ from urllib.request import Request, urlopen
 
 from PIL import Image, UnidentifiedImageError
 
+from api_timeouts import DEFAULT_API_TIMEOUT_SECONDS
 
 MAX_RESPONSE_BYTES = 256 * 1024
 _ICON_CODE = re.compile(r"\d{2}[dn]")
@@ -51,7 +52,7 @@ class OpenWeatherClient:
     forecast_url = "https://api.openweathermap.org/data/2.5/forecast"
     icon_url = "https://openweathermap.org/img/wn/{icon_code}@2x.png"
 
-    def __init__(self, timeout=8, deadline=None):
+    def __init__(self, timeout=DEFAULT_API_TIMEOUT_SECONDS, deadline=None):
         self.timeout = timeout
         self.deadline = deadline
 

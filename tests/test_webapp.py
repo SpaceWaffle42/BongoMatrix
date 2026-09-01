@@ -1012,7 +1012,9 @@ try{
             deadline=fetch.call_args.kwargs["deadline"],
         )
         self.assertGreater(fetch.call_args.kwargs["deadline"], time.monotonic())
-        self.assertLessEqual(fetch.call_args.kwargs["deadline"] - time.monotonic(), 5)
+        remaining = fetch.call_args.kwargs["deadline"] - time.monotonic()
+        self.assertGreater(remaining, 29)
+        self.assertLessEqual(remaining, 30)
 
         oversized = b'{"settings":"' + b'x' * (16 * 1024) + b'"}'
         response = self.paired_request("POST",
@@ -1112,8 +1114,8 @@ try{
             response = self.paired_request("POST", "/api/scroll-timing/weather", json=payload)
         self.assertEqual(response.status_code, 200, response.get_data(as_text=True))
         self.assertEqual(len(observed), 1)
-        self.assertGreater(observed[0], 0)
-        self.assertLess(observed[0], 4.98)
+        self.assertGreater(observed[0], 29)
+        self.assertLess(observed[0], 30)
 
     def test_timing_cache_production_bounds_and_request_deadline_cover_followers_and_slots(self):
         cache = ScrollTimingCache()
@@ -14156,7 +14158,7 @@ try{
         ))).size, (64, 32))
         self.assertEqual(self.controller.method_calls, [])
 
-    def test_edit_preview_provider_requests_bounded_cold_start_budget(self):
+    def test_edit_preview_provider_requests_default_thirty_second_budget(self):
         class CapturingProvider:
             request_deadline = None
 
@@ -14174,7 +14176,7 @@ try{
                 threading.Event(),
             )
 
-        self.assertEqual(provider.request_deadline, 8.0)
+        self.assertEqual(provider.request_deadline, 30.0)
 
     def test_edit_preview_routes_render_splash_sleep_and_media_consumers(self):
         self.pair_browser()

@@ -98,7 +98,7 @@ class OpenWeatherClientTests(unittest.TestCase):
         self.assertEqual(query["lon"], ["-0.14"])
         self.assertEqual(query["units"], ["metric"])
         self.assertEqual(query["appid"], ["test_key_1234567890"])
-        self.assertEqual(urlopen.call_args.kwargs["timeout"], 8)
+        self.assertEqual(urlopen.call_args.kwargs["timeout"], 30)
 
     @patch("modules.openweather_common.urlopen")
     def test_three_hour_forecast_is_normalized_in_the_location_timezone(self, urlopen):
@@ -189,7 +189,7 @@ class OpenWeatherClientTests(unittest.TestCase):
             urlopen.call_args.args[0].full_url,
             "https://openweathermap.org/img/wn/04d@2x.png",
         )
-        self.assertEqual(urlopen.call_args.kwargs["timeout"], 8)
+        self.assertEqual(urlopen.call_args.kwargs["timeout"], 30)
 
 
 class OpenWeatherOverviewTests(unittest.TestCase):
@@ -441,9 +441,10 @@ class OpenWeatherOverviewTests(unittest.TestCase):
         config = {"weather": {"location": "London", "latitude": 1, "longitude": 2},
                   "openweather_overview": {"units": "celsius", "scroll_direction": "right",
                       "scroll_speed": .05, "scroll_loops": 2}}
-        client = Mock();client.timeout=5;client.fetch_current.return_value = weather
+        client = Mock();client.timeout=100;client.fetch_current.return_value = weather
         with patch("modules.openweather_overview.text_width", return_value=1):
             plan = prepare_overview_ticker_plan(config, client=client, api_key="x")
+        self.assertEqual(client.timeout, 30)
         canvas = SimpleNamespace(width=64);matrix = Mock();matrix.matrix.CreateFrameCanvas.return_value = canvas
         matrix.colour_rgb.side_effect=lambda value:value;matrix.font.side_effect=lambda value:value
         matrix.draw_text.return_value=1;matrix.widget_scroll.side_effect=lambda text,font,x,y,colour,canvas=None,step=1,wrap=True:(x-step,1);matrix.swap.return_value=canvas
@@ -723,9 +724,10 @@ class OpenWeatherForecastTests(unittest.TestCase):
         config = {"weather": {"location": "London", "latitude": 1, "longitude": 2},
                   "openweather_forecast": {"units": "celsius", "forecast_items": 3,
                       "scroll_direction": "left", "scroll_speed": .05, "scroll_loops": 2}}
-        client=Mock();client.timeout=5;client.fetch_forecast.return_value=periods
+        client=Mock();client.timeout=100;client.fetch_forecast.return_value=periods
         with patch("modules.openweather_forecast.text_width", return_value=1):
             plan=prepare_forecast_ticker_plan(config, client=client, api_key="x")
+        self.assertEqual(client.timeout, 30)
         canvas=SimpleNamespace(width=64);matrix=Mock();matrix.matrix.CreateFrameCanvas.return_value=canvas
         matrix.colour_rgb.side_effect=lambda value:value;matrix.font.side_effect=lambda value:value
         matrix.draw_text.return_value=1;matrix.widget_scroll.side_effect=lambda text,font,x,y,colour,canvas=None,step=1,wrap=True:(x-step,1);matrix.swap.return_value=canvas

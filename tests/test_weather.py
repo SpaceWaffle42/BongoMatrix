@@ -71,6 +71,10 @@ class WeatherTests(unittest.TestCase):
         self.assertEqual(snapshot.high, 21)
         self.assertEqual(snapshot.low, 12)
         self.assertEqual(snapshot.status, "Partly cloudy")
+        self.assertEqual(
+            [item.kwargs["timeout"] for item in urlopen.call_args_list],
+            [30, 30],
+        )
 
     def test_weather_code_has_safe_fallback(self):
         self.assertEqual(OpenMeteoClient.status_for_code(999), "Unknown")
