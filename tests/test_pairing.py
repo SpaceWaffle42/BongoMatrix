@@ -84,6 +84,25 @@ class PairingManagerTests(unittest.TestCase):
         self.assertFalse(manager.verify("000000"))
         self.assertFalse(manager.is_locked())
 
+    def test_issuing_physical_recovery_pin_can_preserve_existing_lockout(self):
+        clock = FakeClock()
+        manager = PairingManager(
+            max_attempts=2,
+            lockout_seconds=30,
+            clock=clock,
+            testing_pin=self.TESTING_PIN,
+        )
+        self.assertFalse(manager.verify("000000"))
+        self.assertFalse(manager.verify("111111"))
+        self.assertTrue(manager.is_locked())
+
+        issued_pin = manager.issue_pin()
+
+        self.assertEqual(manager.active_pin(), issued_pin)
+        self.assertTrue(manager.is_locked())
+        self.assertFalse(manager.verify(issued_pin))
+        self.assertFalse(manager.verify(self.TESTING_PIN))
+
     def test_initial_display_runs_normally_when_a_paired_device_exists(self):
         devices = Mock()
         devices.list.return_value = [{"id": "device"}]

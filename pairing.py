@@ -205,8 +205,6 @@ class PairingManager:
         with self._lock:
             self._pin = f"{secrets.randbelow(1_000_000):06d}"
             self._expires_at = self.clock() + self.ttl_seconds
-            self._failed_attempts = 0
-            self._locked_until = 0
             return self._pin
 
     def verify(self, candidate):

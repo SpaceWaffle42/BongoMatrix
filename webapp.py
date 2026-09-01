@@ -71,11 +71,18 @@ MEDIA_METADATA_ERRORS = (
 CONFIG_REQUEST_LIMIT = 1_048_576
 CONDITIONAL_HEADER_LIMIT = 4096
 MINIMUM_CLIENT_CONTRACT = 3
-APPLICATION_VERSION = "0.3.61-preview"
+APPLICATION_VERSION = "0.3.62-preview"
 DEVICE_RESTART_PENDING_TTL_SECONDS = 60
 PAIRED_ACTION_HEADER = "X-Matrix-Action"
 PAIRED_ACTION_VALUE = "paired-request"
 PAIRING_RECOVERY_TTL_SECONDS = 300
+PAIRING_PIN_REQUEST_COOLDOWN_SECONDS = 60
+PAIRING_RECOVERY_NONCE_INSTALLATION_LIMIT = 64
+PAIRING_RECOVERY_NONCE_PROCESS_LIMIT = 1024
+_PAIRING_RECOVERY_NONCE_LOCK = threading.Lock()
+_PAIRING_RECOVERY_NONCES = {}
+_PAIRING_PIN_DISPLAY_AUTHORITIES_LOCK = threading.Lock()
+_PAIRING_PIN_DISPLAY_AUTHORITIES = {}
 MATRIX_SERVICE = "matrix-web.service"
 JOURNAL_LOG_BYTES = 65_536
 ETAG_ITEM = re.compile(r'(?P<weak>W/)?"(?P<opaque>[\x21\x23-\x7e\x80-\xff]*)"')
@@ -83,6 +90,33 @@ EDIT_PREVIEW_INSTANCE = re.compile(r"[0-9a-f]{32}")
 EDIT_PREVIEW_SESSION = re.compile(r"[0-9a-f]{32}")
 EDIT_PREVIEW_PROVIDER_DEADLINE_SECONDS = 8.0
 EDIT_PREVIEW_TOKEN = re.compile(r"[0-9a-f]{64}")
+
+
+class _PairingPinDisplayAuthority:
+    def __init__(self):
+        self.lock = threading.Lock()
+        self.last_request_at = None
+
+
+def _pairing_installation_identity(config_store, device_store):
+    def store_identity(store):
+        path = getattr(store, "path", None)
+        if path is None:
+            return "object", store
+        return "path", str(Path(path).resolve())
+
+    return (
+        store_identity(config_store),
+        store_identity(device_store),
+    )
+
+
+def _pairing_pin_display_authority(config_store, device_store):
+    installation = _pairing_installation_identity(config_store, device_store)
+    with _PAIRING_PIN_DISPLAY_AUTHORITIES_LOCK:
+        return _PAIRING_PIN_DISPLAY_AUTHORITIES.setdefault(
+            installation, _PairingPinDisplayAuthority(),
+        )
 
 
 class RestartRequestOutcome(Enum):
@@ -626,7 +660,8 @@ def create_app(
     edit_preview_services_initializing = False
     device_restart_lock = threading.Lock()
     device_restart_pending_until = 0.0
-    pairing_pin_display_lock = threading.Lock()
+    pairing_installation = _pairing_installation_identity(config_store, device_store)
+    pairing_pin_display = _pairing_pin_display_authority(config_store, device_store)
 
     def get_edit_preview_services():
         """Lazily publish one healthy registry/provider pair per app process."""
@@ -701,6 +736,7 @@ def create_app(
         SESSION_COOKIE_SAMESITE="Strict",
         PERMANENT_SESSION_LIFETIME=timedelta(days=365),
         PAIRING_RECOVERY_CLOCK=time.time,
+        PAIRING_PIN_DISPLAY_CLOCK=time.monotonic,
         MAX_CONTENT_LENGTH=128 * 1024 * 1024,
     )
 
@@ -800,18 +836,51 @@ def create_app(
             "generation": session_generation,
             "nonce": secrets.token_urlsafe(24),
         }
+        nonce_digest = hashlib.sha256(recovery_start["nonce"].encode("ascii")).digest()
+        with _PAIRING_RECOVERY_NONCE_LOCK:
+            now = int(app.config["PAIRING_RECOVERY_CLOCK"]())
+            expired = [
+                key for key, (expires_at, _) in _PAIRING_RECOVERY_NONCES.items()
+                if expires_at <= now
+            ]
+            for key in expired:
+                _PAIRING_RECOVERY_NONCES.pop(key, None)
+            installation_keys = [
+                key for key in _PAIRING_RECOVERY_NONCES
+                if key[0] == pairing_installation
+            ]
+            while len(installation_keys) >= PAIRING_RECOVERY_NONCE_INSTALLATION_LIMIT:
+                _PAIRING_RECOVERY_NONCES.pop(installation_keys.pop(0), None)
+            while len(_PAIRING_RECOVERY_NONCES) >= PAIRING_RECOVERY_NONCE_PROCESS_LIMIT:
+                _PAIRING_RECOVERY_NONCES.pop(next(iter(_PAIRING_RECOVERY_NONCES)))
+            _PAIRING_RECOVERY_NONCES[(pairing_installation, nonce_digest)] = (
+                recovery_start["expires_at"], recovery_start["generation"],
+            )
         session["pairing_recovery_start"] = recovery_start
         return recovery_start
 
-    def pairing_recovery_restart_response(error, status):
-        session.pop("pairing_recovery", None)
+    def consume_pairing_recovery_start(recovery_start, submitted_nonce):
+        nonce_digest = hashlib.sha256(submitted_nonce.encode("ascii")).digest()
+        expected = (recovery_start["expires_at"], recovery_start["generation"])
+        key = pairing_installation, nonce_digest
+        with _PAIRING_RECOVERY_NONCE_LOCK:
+            if _PAIRING_RECOVERY_NONCES.get(key) != expected:
+                return False
+            _PAIRING_RECOVERY_NONCES.pop(key)
+        return True
+
+    def render_unpaired_pair(*, error=None, **context):
         recovery_start = begin_pairing_recovery_start()
         return render_template(
             "pair.html",
             error=error,
-            recovery_start=True,
             recovery_start_nonce=recovery_start["nonce"],
-        ), status
+            **context,
+        )
+
+    def pairing_recovery_restart_response(error, status):
+        session.pop("pairing_recovery", None)
+        return render_unpaired_pair(error=error), status
 
     def replacement_device_view(device, choice_number):
         try:
@@ -1187,22 +1256,38 @@ def create_app(
     def begin_additional_pairing():
         max_devices = config_store.get()["pairing"]["max_devices"]
         replacement_required = len(device_store.list()) >= max_devices
-        with pairing_pin_display_lock:
+        with pairing_pin_display.lock:
             pin = pairing.issue_pin()
             remaining_seconds = pairing.remaining_seconds()
             controller.show_pairing_pin(pin, ttl_seconds=remaining_seconds)
         return replacement_required
 
     def begin_recovery_pairing():
-        max_devices = config_store.get()["pairing"]["max_devices"]
-        replacement_required = len(device_store.list()) >= max_devices
-        with pairing_pin_display_lock:
+        now = app.config["PAIRING_PIN_DISPLAY_CLOCK"]()
+        with pairing_pin_display.lock:
+            if pairing_pin_display.last_request_at is not None:
+                cooldown_remaining = (
+                    pairing_pin_display.last_request_at
+                    + PAIRING_PIN_REQUEST_COOLDOWN_SECONDS
+                    - now
+                )
+                if cooldown_remaining > 0:
+                    return None, max(
+                        1,
+                        min(
+                            PAIRING_PIN_REQUEST_COOLDOWN_SECONDS,
+                            math.ceil(cooldown_remaining),
+                        ),
+                    )
+            max_devices = config_store.get()["pairing"]["max_devices"]
+            replacement_required = len(device_store.list()) >= max_devices
             pin = pairing.active_pin()
             if pin is None:
                 pin = pairing.issue_pin()
             remaining_seconds = pairing.remaining_seconds()
             controller.show_pairing_pin(pin, ttl_seconds=remaining_seconds)
-        return replacement_required
+            pairing_pin_display.last_request_at = now
+        return replacement_required, None
 
     @app.get("/pair")
     def pair():
@@ -1214,39 +1299,18 @@ def create_app(
         )
         if session.get("paired") and device_store.contains(session.get("device_id")):
             return render_template("pair.html", paired=True, error=warning)
-        with pairing_pin_display_lock:
-            pin = pairing.active_pin()
-            testing_pin_available = pairing.has_testing_pin()
-            recovery_start_required = (
-                pin is None and bool(device_store.list()) and not testing_pin_available
-            )
-            if not recovery_start_required:
-                if pin is None and not testing_pin_available:
-                    pin = pairing.issue_pin()
-                if pin is not None:
-                    controller.show_pairing_pin(
-                        pin, ttl_seconds=pairing.remaining_seconds()
-                    )
-        if recovery_start_required:
-            recovery_start = begin_pairing_recovery_start()
-            return render_template(
-                "pair.html",
-                recovery_start=True,
-                recovery_start_nonce=recovery_start["nonce"],
-                error=warning,
-            )
-        return render_template("pair.html", error=warning)
+        return render_unpaired_pair(error=warning)
 
     @app.post("/pair")
     def pair_submit():
         device_name = request.form.get("device_name", "").strip()
         if not 1 <= len(device_name) <= 40 or any(not character.isprintable() for character in device_name):
-            return render_template("pair.html", error="Device name must be 1-40 characters."), 400
+            return render_unpaired_pair(error="Device name must be 1-40 characters."), 400
         durability_uncertain = False
         display_cleanup_failures = []
         replacement_devices = None
         recovery = None
-        with pairing_pin_display_lock, device_store.transaction():
+        with pairing_pin_display.lock, device_store.transaction():
             max_devices = config_store.get()["pairing"]["max_devices"]
             if pairing.verify(request.form.get("pin", "").strip()):
                 devices = device_store.list()
@@ -1269,8 +1333,7 @@ def create_app(
                         device = error.device
                         durability_uncertain = True
                     except ValueError:
-                        return render_template(
-                            "pair.html",
+                        return render_unpaired_pair(
                             error="The Matrix has reached its paired-device limit. Try pairing again to replace an existing device.",
                         ), 409
                 for action_name, action in (
@@ -1334,7 +1397,7 @@ def create_app(
             if pairing.is_locked()
             else "That PIN is invalid or expired."
         )
-        return render_template("pair.html", error=error), 401
+        return render_unpaired_pair(error=error), 401
 
     @app.post("/pair/recover")
     def pair_recover():
@@ -1350,15 +1413,26 @@ def create_app(
             or recovery_start["generation"] != session_generation
             or int(app.config["PAIRING_RECOVERY_CLOCK"]()) >= recovery_start["expires_at"]
             or not secrets.compare_digest(submitted_nonce, recovery_start["nonce"])
+            or not consume_pairing_recovery_start(recovery_start, submitted_nonce)
         ):
             return pairing_recovery_restart_response(
-                "Recovery request is invalid or expired. Show a new recovery PIN.",
+                "PIN request is invalid or expired. Request a new PIN on the Matrix.",
                 403,
             )
         session.pop("pairing_recovery_start", None)
-        replacement_required = begin_recovery_pairing()
-        return render_template(
-            "pair.html",
+        try:
+            replacement_required, retry_after = begin_recovery_pairing()
+        except Exception:
+            LOGGER.error("Physical pairing PIN display request failed")
+            return pairing_recovery_restart_response(
+                "The Matrix could not show a pairing PIN. Please try again.",
+                503,
+            )
+        if retry_after is not None:
+            return render_unpaired_pair(
+                error="Please wait before requesting the PIN on the Matrix again.",
+            ), 429, {"Retry-After": str(retry_after)}
+        return render_unpaired_pair(
             recovery_started=True,
             replacement_required=replacement_required,
         ), 202
@@ -1410,13 +1484,12 @@ def create_app(
                 durability_uncertain = True
             except OSError:
                 LOGGER.exception("Paired-device replacement failed before commit")
-                return render_template(
-                    "pair.html",
+                return render_unpaired_pair(
                     error="The replacement could not be stored. Check storage and try again.",
                 ), 503
 
         lifecycle_failures = []
-        with pairing_pin_display_lock:
+        with pairing_pin_display.lock:
             actions = [
                 ("preview cleanup", lambda: controller.cancel_device_drafts_for_device(replaced_id)),
             ]
