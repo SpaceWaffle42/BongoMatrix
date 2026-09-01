@@ -477,6 +477,128 @@ class DisplayControllerTests(unittest.TestCase):
                 finally:
                     handle.close()
 
+    def test_announcement_device_draft_renders_disabled_out_of_schedule_content(self):
+        candidate = copy.deepcopy(DEFAULT_CONFIG)
+        candidate["announcement_board"]["announcements"] = [{
+            "id": "announcement_device_draft",
+            "enabled": False,
+            "layout": "text_notice",
+            "headline": "UNSAVED DRAFT",
+            "message": "Physical preview",
+            "media": None,
+            "schedule": {
+                "start_date": "2099-01-01",
+                "end_date": "2099-01-01",
+                "days": [0],
+                "start_time": "09:00",
+                "end_time": "17:00",
+            },
+            "style": {
+                "foreground": "#ffffff",
+                "background": "#000000",
+                "headline_font": "5x7",
+                "message_font": "4x6",
+                "alignment": "left",
+                "border": "none",
+                "border_colour": "#ffffff",
+            },
+            "timing": {"mode": "static", "duration_seconds": 8},
+            "transition": {"type": "cut"},
+        }]
+        request = Mock(
+            config={"module": "announcement_board", "candidate": candidate},
+            timeout_seconds=1,
+            pinned_media={},
+        )
+        matrix = Mock()
+        matrix.matrix.CreateFrameCanvas.return_value = "canvas"
+        matrix.font.side_effect = lambda name: f"font:{name}"
+        matrix.colour_rgb.side_effect = lambda value: {
+            "#ffffff": Mock(red=255, green=255, blue=255),
+            "#000000": Mock(red=0, green=0, blue=0),
+        }[value]
+        matrix.swap.return_value = "canvas"
+        stop = Mock()
+        stop.is_set.return_value = False
+        stop.wait.return_value = False
+
+        rendered = DisplayController(Mock(), Mock()).render_device_draft(
+            matrix, request, stop_event=stop,
+        )
+
+        self.assertTrue(rendered)
+        matrix.swap.assert_called_once_with("canvas")
+
+    def test_announcement_device_draft_consumes_admitted_media_inode(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "announcement.png"
+            path.write_bytes(b"admitted-inode")
+            handle = PinnedMediaHandle(os.open(path, os.O_RDONLY), lambda _handle: None)
+            replacement = Path(directory) / "replacement.png"
+            replacement.write_bytes(b"replacement-path")
+            os.replace(replacement, path)
+            candidate = copy.deepcopy(DEFAULT_CONFIG)
+            candidate["announcement_board"]["announcements"] = [{
+                "id": "announcement_media_draft",
+                "enabled": False,
+                "layout": "icon_notice",
+                "headline": "MEDIA DRAFT",
+                "message": "Pinned preview",
+                "media": "announcement.png",
+                "schedule": {
+                    "start_date": "2099-01-01",
+                    "end_date": "2099-01-01",
+                    "days": [0],
+                    "start_time": "09:00",
+                    "end_time": "17:00",
+                },
+                "style": {
+                    "foreground": "#ffffff",
+                    "background": "#000000",
+                    "headline_font": "5x7",
+                    "message_font": "4x6",
+                    "alignment": "left",
+                    "border": "none",
+                    "border_colour": "#ffffff",
+                },
+                "timing": {"mode": "static", "duration_seconds": 8},
+                "transition": {"type": "cut"},
+            }]
+            request = Mock(
+                config={"module": "announcement_board", "candidate": candidate},
+                timeout_seconds=1,
+                pinned_media={"announcement.png": handle},
+            )
+            consumed = []
+            matrix = Mock()
+            matrix.matrix.CreateFrameCanvas.return_value = "canvas"
+            matrix.font.side_effect = lambda name: f"font:{name}"
+            matrix.colour_rgb.side_effect = lambda value: {
+                "#ffffff": Mock(red=255, green=255, blue=255),
+                "#000000": Mock(red=0, green=0, blue=0),
+            }[value]
+            matrix.swap.return_value = "canvas"
+
+            def media_frames(_reference, *_args, pinned_handle=None, **_kwargs):
+                if pinned_handle is None:
+                    consumed.append(path.read_bytes())
+                else:
+                    with pinned_handle.dup_file() as source:
+                        consumed.append(source.read())
+                return []
+
+            matrix.media_frames.side_effect = media_frames
+            stop = Mock()
+            stop.is_set.return_value = False
+            stop.wait.return_value = False
+            try:
+                self.assertTrue(DisplayController(Mock(), Mock()).render_device_draft(
+                    matrix, request, stop_event=stop,
+                ))
+                self.assertEqual(consumed, [b"admitted-inode"])
+            finally:
+                handle.close()
+
     def test_scheduler_idles_when_announcement_only_playlist_has_no_active_record(self):
         config = {
             **DEFAULT_CONFIG,

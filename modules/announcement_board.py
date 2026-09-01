@@ -834,6 +834,19 @@ def run_preview(matrix, announcement, stop_event=None, *, pinned_handles=None):
     )
 
 
+def run_draft(
+    matrix, config, duration, stop_event=None, *, pinned_handles=None,
+):
+    """Render the exact board draft without saved-playback eligibility filters."""
+    return _run_announcements(
+        matrix,
+        config["announcement_board"]["announcements"],
+        duration=duration,
+        stop_event=stop_event,
+        pinned_handles=pinned_handles,
+    )
+
+
 def run(
     matrix, config, duration, stop_event=None, now_provider=dt.datetime.now,
     *, pinned_handles=None,
