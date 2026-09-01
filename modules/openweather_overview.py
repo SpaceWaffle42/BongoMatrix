@@ -5,6 +5,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 import time
 
+from api_timeouts import DEFAULT_API_TIMEOUT_SECONDS
 from font_catalog import text_width
 from modules.openweather_common import OpenWeatherClient, OpenWeatherError, composite_icon
 from modules.scroll_timing import duration_milliseconds, frame_delay_seconds, scroll_frames
@@ -32,10 +33,16 @@ def prepare_ticker_plan(config, *, client=None, api_key=None, deadline=None):
         raise OpenWeatherError("OpenWeather key is not configured")
     settings = config["openweather_overview"]
     location = config["weather"]
-    remaining = 5 if deadline is None else deadline - time.monotonic()
+    remaining = (
+        DEFAULT_API_TIMEOUT_SECONDS
+        if deadline is None
+        else deadline - time.monotonic()
+    )
     if remaining <= 0:
         raise TimeoutError("provider timing deadline exceeded")
-    client = client or OpenWeatherClient(timeout=min(5, remaining))
+    client = client or OpenWeatherClient(
+        timeout=min(DEFAULT_API_TIMEOUT_SECONDS, remaining)
+    )
     if client is not None and hasattr(client, "timeout"):
         client.timeout = min(client.timeout, remaining)
     weather = client.fetch_current(

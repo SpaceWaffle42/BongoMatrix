@@ -9,6 +9,8 @@ import time
 from collections import deque
 from collections.abc import Mapping
 
+from api_timeouts import DEFAULT_API_TIMEOUT_SECONDS
+
 
 _CANCEL_POLL_SECONDS = 0.005
 _REAP_JOIN_SECONDS = 0.05
@@ -71,7 +73,7 @@ class PreviewProvider:
     """
 
     MAX_WORKERS = 2
-    MAX_REQUEST_SECONDS = 8.0
+    MAX_REQUEST_SECONDS = DEFAULT_API_TIMEOUT_SECONDS
     _worker_slots = threading.BoundedSemaphore(MAX_WORKERS)
     _accounting_lock = threading.Lock()
     _active_children = 0

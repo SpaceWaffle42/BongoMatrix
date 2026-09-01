@@ -9,6 +9,7 @@ from dataclasses import dataclass
 from urllib.parse import urlencode
 from urllib.request import Request, urlopen
 
+from api_timeouts import DEFAULT_API_TIMEOUT_SECONDS
 from font_catalog import text_width
 from modules.scroll_timing import duration_milliseconds, frame_delay_seconds, scroll_frames
 
@@ -60,7 +61,7 @@ class OpenMeteoClient:
     geocoding_url = "https://geocoding-api.open-meteo.com/v1/search"
     forecast_url = "https://api.open-meteo.com/v1/forecast"
 
-    def __init__(self, timeout=8, clock=time.monotonic):
+    def __init__(self, timeout=DEFAULT_API_TIMEOUT_SECONDS, clock=time.monotonic):
         self.timeout = timeout
         self.clock = clock
 
@@ -223,7 +224,7 @@ def measure_ticker(matrix, font, y, colour, text, canvas):
 def prepare_ticker_plan(config, client=None, *, deadline=None):
     """Fetch only normalized Open-Meteo text needed by the timing editor."""
     settings = config["weather"]
-    client = client or OpenMeteoClient(timeout=5)
+    client = client or OpenMeteoClient()
     weather = client.fetch(
         settings["location"], latitude=settings.get("latitude"),
         longitude=settings.get("longitude"), units=settings["units"], deadline=deadline,
