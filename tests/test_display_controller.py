@@ -635,7 +635,7 @@ class DisplayControllerTests(unittest.TestCase):
         self.assertEqual(result, [True])
         self.assertEqual(module.run.call_args.kwargs["prepared"].weather.location, "Brighton, GB")
 
-    def test_openweather_blocked_preparation_is_cancelled_within_reload_budget(self):
+    def test_openweather_full_bounded_preparation_is_cancelled_within_reload_budget(self):
         matrix = Mock()
         secrets = Mock()
         secrets.get.return_value = "test_key_1234567890"
@@ -701,7 +701,9 @@ class DisplayControllerTests(unittest.TestCase):
         self.assertIs(provider_calls[0]["cancel_event"], owned_stop_event)
         self.assertIsNotNone(owned_stop_event)
         self.assertTrue(owned_stop_event.is_set())
-        self.assertLessEqual(provider_calls[0]["request_deadline"], 5)
+        self.assertEqual(
+            provider_calls[0]["request_deadline"], PreviewProvider.MAX_REQUEST_SECONDS
+        )
         module.run.assert_not_called()
 
     def test_openweather_reload_cancels_and_reaps_real_blocked_child(self):
