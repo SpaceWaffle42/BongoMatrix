@@ -207,7 +207,13 @@ def _draw_layer(matrix, canvas, layer, properties, *, media_cache=None, frame=0)
             if alpha:
                 points.append((index % 64 + offset_x, index // 64 + offset_y))
                 colours.append((red, green, blue))
-        rotated = _rotated(points, properties.get("rotation", 0)) if points else []
+        centre = None
+        if points:
+            centre = (
+                (min(x for x, _ in points) + max(x for x, _ in points)) / 2,
+                (min(y for _, y in points) + max(y for _, y in points)) / 2,
+            )
+        rotated = _rotated(points, properties.get("rotation", 0), centre) if points else []
         for (x, y), (red, green, blue) in zip(rotated, colours):
             if 0 <= x < 64 and 0 <= y < 32:
                 matrix.pixel(x, y, red, green, blue, canvas=canvas)

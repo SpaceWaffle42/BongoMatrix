@@ -42,6 +42,7 @@ GIT = "/usr/bin/git"
 SYSTEMCTL = "/usr/bin/systemctl"
 JOURNALCTL = "/usr/bin/journalctl"
 DISPLAY_LOCK = Path("/run/matrix-display/matrix-display.lock")
+RELEASE_LOCK_ROOT = Path("/run/matrix-priority-1-7")
 PRODUCTION_DESTINATION = "/home/admin/matrix"
 PRODUCTION_INTERPRETER = "/home/admin/matrix/venv/bin/python"
 PRODUCTION_SERVICE = "matrix-web.service"
@@ -58,7 +59,8 @@ STATE_KEYS = {
     "version", "boundary", "baseline_sha", "baseline_tree_sha", "source_sha", "tree_sha",
     "release_root", "release_manifest", "fixture_manifest", "baseline_manifest",
     "destination", "destination_owner", "backup_root", "service", "service_baseline",
-    "interpreter", "state_path", "backup_archive", "mutable_state", "self",
+    "interpreter", "state_path", "backup_archive", "mutable_state", "lifecycle",
+    "final_report_path", "final_report", "self",
 }
 PUBLIC_FINAL_KEYS = {
     "version", "boundary", "accepted_source_sha", "accepted_tree_sha",
@@ -341,6 +343,84 @@ def _fsync_dir(path: Path):
         os.close(fd)
 
 
+def _release_lock_root(destination: Path):
+    if str(destination) == PRODUCTION_DESTINATION:
+        return RELEASE_LOCK_ROOT
+    return destination.parent / ".priority-1-7-release-locks"
+
+
+def _release_lock_path(destination: Path):
+    return _release_lock_root(destination) / "destination.lock"
+
+
+def _validate_release_lock_root(destination: Path, *, create: bool):
+    production = str(destination) == PRODUCTION_DESTINATION
+    if production and os.geteuid() != 0:
+        raise PermissionError("production requires root release authority")
+    root = _release_lock_root(destination)
+    expected_uid = 0 if production else os.geteuid()
+    expected_gid = 0 if production else os.getegid()
+    if create:
+        try:
+            root.mkdir(mode=0o700)
+            os.chmod(root, 0o700)
+            os.chown(root, expected_uid, expected_gid)
+            _fsync_dir(root.parent)
+        except FileExistsError:
+            pass
+    metadata = root.lstat()
+    if (
+        not stat.S_ISDIR(metadata.st_mode)
+        or stat.S_ISLNK(metadata.st_mode)
+        or (metadata.st_uid, metadata.st_gid) != (expected_uid, expected_gid)
+        or stat.S_IMODE(metadata.st_mode) != 0o700
+    ):
+        raise ValueError("release lock root authority is unsafe")
+    return root, expected_uid, expected_gid
+
+
+def _acquire_release_lock(destination: Path):
+    root, expected_uid, expected_gid = _validate_release_lock_root(destination, create=True)
+    lock_path = root / "destination.lock"
+    fd = -1
+    try:
+        try:
+            fd = os.open(
+                lock_path,
+                os.O_RDWR | os.O_CREAT | os.O_EXCL | os.O_CLOEXEC | os.O_NOFOLLOW | os.O_NONBLOCK,
+                0o600,
+            )
+            os.fchmod(fd, 0o600)
+            os.fchown(fd, expected_uid, expected_gid)
+            os.fsync(fd)
+            _fsync_dir(root)
+        except FileExistsError:
+            fd = os.open(lock_path, os.O_RDWR | os.O_CLOEXEC | os.O_NOFOLLOW | os.O_NONBLOCK)
+        metadata = os.fstat(fd)
+        current = lock_path.lstat()
+        if (
+            not stat.S_ISREG(metadata.st_mode)
+            or metadata.st_nlink != 1
+            or (metadata.st_dev, metadata.st_ino) != (current.st_dev, current.st_ino)
+            or (metadata.st_uid, metadata.st_gid) != (expected_uid, expected_gid)
+            or stat.S_IMODE(metadata.st_mode) != 0o600
+        ):
+            raise ValueError("release lock authority is unsafe")
+        try:
+            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError as error:
+            raise RuntimeError("destination release lock is held by another command") from error
+        _validate_release_lock_root(destination, create=False)
+        if not _same_namespace_inode(fd, lock_path):
+            raise ValueError("release lock namespace changed")
+        result = fd
+        fd = -1
+        return result
+    finally:
+        if fd >= 0:
+            os.close(fd)
+
+
 def _rename_noreplace(source: str, destination: str, *, parent_fd: int):
     """Atomically publish one sibling without ever replacing an existing name."""
     try:
@@ -412,6 +492,43 @@ def _durable_new_file(path: Path, data: bytes, mode: int):
         os.fsync(fd)
     finally:
         os.close(fd)
+
+
+def _publish_final_report(path: Path, report: dict):
+    raw = canonical_json(report)
+
+    def validate_existing():
+        observed, metadata = _read_regular(path)
+        if (
+            observed != raw
+            or (metadata.st_uid, metadata.st_gid) != (os.geteuid(), os.getegid())
+            or stat.S_IMODE(metadata.st_mode) != 0o600
+        ):
+            raise ValueError("existing final report does not match exact acceptance")
+        return _manifest_file(path)
+
+    if path.exists() or path.is_symlink():
+        return validate_existing()
+    parent_fd = _open_directory(path.parent)
+    temporary_name = _fresh_sibling_name(path)
+    temporary = path.parent / temporary_name
+    published = False
+    try:
+        _durable_new_file(temporary, raw, 0o600)
+        try:
+            _rename_noreplace(temporary_name, path.name, parent_fd=parent_fd)
+            published = True
+            os.fsync(parent_fd)
+        except FileExistsError:
+            temporary.unlink()
+        return validate_existing()
+    finally:
+        os.close(parent_fd)
+        if not published:
+            try:
+                temporary.unlink()
+            except FileNotFoundError:
+                pass
 
 
 def _contained_path(root: Path, relative: str) -> Path:
@@ -1093,13 +1210,17 @@ class SystemdService:
 
 
 class Priority17Transaction:
-    def __init__(self, state_path: Path, state: dict, *, service=None, state_fd: int = -1):
+    def __init__(self, state_path: Path, state: dict, *, service=None, state_fd: int = -1,
+                 release_lock_fd: int = -1):
         self.state_path = state_path
         self.state = state
         self._state_fd = state_fd
+        self._release_lock_fd = release_lock_fd
         self.service = service or SystemdService(state["service"])
         self.release_manifest = None
         self.baseline_manifest = None
+        self.final_report = None
+        self.finalization_pending = False
 
     @classmethod
     def load(cls, state_path, *, service=None):
@@ -1118,30 +1239,47 @@ class Priority17Transaction:
         except BaseException:
             os.close(fd)
             raise
-        if metadata.st_uid != os.geteuid() or metadata.st_gid != os.getegid() or stat.S_IMODE(metadata.st_mode) != 0o600:
-            raise ValueError("state must be owner-bound mode 0600")
-        state = _parse_json(raw, "transaction state")
-        if type(state) is not dict or set(state) != STATE_KEYS or state["version"] != 1 or state["boundary"] not in ("b1", "b2"):
-            raise ValueError("transaction state schema is invalid")
-        if state["state_path"] != str(path):
-            raise ValueError("transaction state canonical path mismatch")
-        identity = state["self"]
-        expected_keys = {"path", "dev", "ino", "uid", "gid", "mode", "sha256"}
-        if type(identity) is not dict or set(identity) != expected_keys:
-            raise ValueError("state self identity schema is invalid")
-        if any(type(identity[key]) is not int for key in ("dev", "ino", "uid", "gid")):
-            raise ValueError("state self identity metadata is invalid")
-        expected = (
-            str(path), metadata.st_dev, metadata.st_ino, metadata.st_uid, metadata.st_gid,
-            f"{stat.S_IMODE(metadata.st_mode):04o}", _state_digest(state),
-        )
-        actual = (
-            identity["path"], identity["dev"], identity["ino"], identity["uid"],
-            identity["gid"], identity["mode"], identity["sha256"],
-        )
-        if actual != expected:
-            raise ValueError("state identity mismatch")
-        tx = cls(path, state, service=service, state_fd=fd)
+        try:
+            if metadata.st_uid != os.geteuid() or metadata.st_gid != os.getegid() or stat.S_IMODE(metadata.st_mode) != 0o600:
+                raise ValueError("state must be owner-bound mode 0600")
+            state = _parse_json(raw, "transaction state")
+            if type(state) is not dict or set(state) != STATE_KEYS or state["version"] != 1 or state["boundary"] not in ("b1", "b2"):
+                raise ValueError("transaction state schema is invalid")
+            if state["state_path"] != str(path):
+                raise ValueError("transaction state canonical path mismatch")
+            identity = state["self"]
+            expected_keys = {"path", "dev", "ino", "uid", "gid", "mode", "sha256"}
+            if type(identity) is not dict or set(identity) != expected_keys:
+                raise ValueError("state self identity schema is invalid")
+            if any(type(identity[key]) is not int for key in ("dev", "ino", "uid", "gid")):
+                raise ValueError("state self identity metadata is invalid")
+            expected = (
+                str(path), metadata.st_dev, metadata.st_ino, metadata.st_uid, metadata.st_gid,
+                f"{stat.S_IMODE(metadata.st_mode):04o}", _state_digest(state),
+            )
+            actual = (
+                identity["path"], identity["dev"], identity["ino"], identity["uid"],
+                identity["gid"], identity["mode"], identity["sha256"],
+            )
+            if actual != expected:
+                raise ValueError("state identity mismatch")
+            destination_record = state.get("destination")
+            if type(destination_record) is not dict or type(destination_record.get("path")) is not str:
+                raise ValueError("transaction destination authority is invalid")
+            destination = _absolute(destination_record["path"], "destination", must_exist=True)
+            release_lock_fd = _acquire_release_lock(destination)
+        except BaseException:
+            os.close(fd)
+            raise
+        try:
+            tx = cls(
+                path, state, service=service, state_fd=fd,
+                release_lock_fd=release_lock_fd,
+            )
+        except BaseException:
+            os.close(release_lock_fd)
+            os.close(fd)
+            raise
         try:
             tx._revalidate()
             return tx
@@ -1153,6 +1291,9 @@ class Priority17Transaction:
         if self._state_fd >= 0:
             os.close(self._state_fd)
             self._state_fd = -1
+        if self._release_lock_fd >= 0:
+            os.close(self._release_lock_fd)
+            self._release_lock_fd = -1
 
     def __del__(self):
         self.close()
@@ -1165,8 +1306,155 @@ class Priority17Transaction:
         if (metadata.st_dev, metadata.st_ino) != (current.st_dev, current.st_ino):
             raise ValueError("state identity changed after lock")
 
+    def _validate_release_lock(self):
+        if self._release_lock_fd < 0:
+            raise RuntimeError("destination release lock is not held")
+        destination = Path(self.state["destination"]["path"])
+        lock_path = _release_lock_path(destination)
+        _, expected_uid, expected_gid = _validate_release_lock_root(
+            destination, create=False,
+        )
+        metadata = os.fstat(self._release_lock_fd)
+        current = lock_path.lstat()
+        if (
+            not stat.S_ISREG(metadata.st_mode)
+            or metadata.st_nlink != 1
+            or (metadata.st_dev, metadata.st_ino) != (current.st_dev, current.st_ino)
+            or (metadata.st_uid, metadata.st_gid) != (expected_uid, expected_gid)
+            or stat.S_IMODE(metadata.st_mode) != 0o600
+        ):
+            raise ValueError("destination release lock identity changed")
+
+    def _validate_final_report(self, report):
+        baseline = self.state["service_baseline"]
+        service = report.get("service") if type(report) is dict else None
+        required_service = {
+            "service", "active", "substate", "http_status", "main_pid", "n_restarts",
+            "control_group", "display_lock", "warning_count", "n_restarts_baseline",
+            "previous_main_pid", "main_pid_changed",
+        }
+        lock = service.get("display_lock") if type(service) is dict else None
+        if (
+            type(report) is not dict
+            or set(report) != PUBLIC_FINAL_KEYS
+            or type(report.get("version")) is not int
+            or report["version"] != 1
+            or report.get("status") != "FINALIZED"
+            or report.get("boundary") != self.state["boundary"]
+            or report.get("accepted_source_sha") != self.state["source_sha"]
+            or report.get("accepted_tree_sha") != self.state["tree_sha"]
+            or report.get("release_manifest_sha256") != self.state["release_manifest"]["sha256"]
+            or report.get("baseline_manifest_sha256") != self.state["baseline_manifest"]["sha256"]
+            or report.get("mutable_state") != self.state["mutable_state"]
+            or type(service) is not dict
+            or set(service) != required_service
+            or service.get("service") != self.state["service"]
+            or service.get("active") is not True
+            or service.get("substate") != "running"
+            or service.get("http_status") != 302
+            or type(service.get("main_pid")) is not int
+            or service["main_pid"] <= 0
+            or type(service.get("previous_main_pid")) is not int
+            or service["previous_main_pid"] <= 0
+            or service["previous_main_pid"] != baseline["main_pid"]
+            or service["main_pid"] == service["previous_main_pid"]
+            or service.get("main_pid_changed") is not True
+            or type(service.get("n_restarts")) is not int
+            or service["n_restarts"] < 0
+            or service["n_restarts"] != baseline["n_restarts"]
+            or type(service.get("n_restarts_baseline")) is not int
+            or service["n_restarts_baseline"] < 0
+            or service["n_restarts_baseline"] != baseline["n_restarts"]
+            or type(service.get("control_group")) is not str
+            or not service["control_group"].endswith("/" + self.state["service"])
+            or type(service.get("warning_count")) is not int
+            or service["warning_count"] != 0
+            or type(lock) is not dict
+            or set(lock) != {"path", "dev", "ino", "uid", "gid", "mode", "locked"}
+            or lock.get("path") != str(DISPLAY_LOCK)
+            or lock.get("locked") is not True
+            or any(type(lock.get(key)) is not int or lock[key] < 0 for key in ("dev", "ino", "uid", "gid"))
+            or type(lock.get("mode")) is not str
+            or not re.fullmatch(r"[0-7]{4}", lock["mode"])
+        ):
+            raise ValueError("final report schema or identity is invalid")
+        return report
+
+    def _persist_state(self, updated: dict):
+        parent_fd = _open_directory(self.state_path.parent)
+        temporary_name = _fresh_sibling_name(self.state_path)
+        fd = -1
+        published = False
+        try:
+            fd = os.open(
+                temporary_name,
+                os.O_RDWR | os.O_CREAT | os.O_EXCL | os.O_CLOEXEC | os.O_NOFOLLOW,
+                0o600, dir_fd=parent_fd,
+            )
+            os.fchmod(fd, 0o600)
+            os.fchown(fd, os.geteuid(), os.getegid())
+            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            _populate_state_fd(self.state_path, updated, fd)
+            os.replace(
+                temporary_name, self.state_path.name,
+                src_dir_fd=parent_fd, dst_dir_fd=parent_fd,
+            )
+            published = True
+            os.fsync(parent_fd)
+            if not _same_namespace_inode(fd, self.state_path):
+                raise ValueError("terminal state identity changed after publication")
+            old_fd = self._state_fd
+            self._state_fd = fd
+            fd = -1
+            self.state = updated
+            os.close(old_fd)
+        finally:
+            if fd >= 0:
+                os.close(fd)
+            if not published:
+                try:
+                    os.unlink(temporary_name, dir_fd=parent_fd)
+                except FileNotFoundError:
+                    pass
+            os.close(parent_fd)
+
     def _revalidate(self):
         self._validate_state_lock()
+        self._validate_release_lock()
+        lifecycle = self.state["lifecycle"]
+        final_report_path = self.state["final_report_path"]
+        if (
+            lifecycle not in ("PREPARED", "FINALIZED")
+            or type(final_report_path) is not str
+            or final_report_path != str(self.state_path.with_name(self.state_path.name + ".finalized.json"))
+        ):
+            raise ValueError("transaction lifecycle authority is invalid")
+        if lifecycle == "PREPARED":
+            if self.state["final_report"] is not None:
+                raise ValueError("prepared transaction has terminal report authority")
+            report_path = Path(final_report_path)
+            self.finalization_pending = report_path.exists() or report_path.is_symlink()
+            if self.finalization_pending:
+                report_raw, metadata = _read_regular(report_path)
+                if (
+                    (metadata.st_uid, metadata.st_gid) != (os.geteuid(), os.getegid())
+                    or stat.S_IMODE(metadata.st_mode) != 0o600
+                ):
+                    raise ValueError("pending final report authority is unsafe")
+                self.final_report = self._validate_final_report(
+                    _parse_json(report_raw, "pending final report"),
+                )
+            else:
+                self.final_report = None
+        else:
+            self.finalization_pending = False
+            authority = self.state["final_report"]
+            if type(authority) is not dict or authority.get("path") != final_report_path:
+                raise ValueError("final report authority is invalid")
+            report_raw, _ = _validate_file_authority(authority)
+            self.final_report = self._validate_final_report(
+                _parse_json(report_raw, "final report"),
+            )
         release_raw, _ = _validate_file_authority(self.state["release_manifest"])
         fixture_raw, _ = _validate_file_authority(self.state["fixture_manifest"])
         baseline_raw, _ = _validate_file_authority(self.state["baseline_manifest"])
@@ -1332,6 +1620,10 @@ class Priority17Transaction:
         if target not in ("candidate", "baseline") or operation not in ("deploy", "rollback", "redeploy", "recover"):
             raise ValueError("transaction target or operation is invalid")
         self._revalidate()
+        if self.state["lifecycle"] == "FINALIZED":
+            raise ValueError("transaction is finalized")
+        if self.finalization_pending:
+            raise ValueError("transaction finalization requires convergence")
         if operation != "recover":
             if not self.service.is_active():
                 raise ValueError("inactive transaction requires explicit recovery")
@@ -1440,6 +1732,8 @@ class Priority17Transaction:
 
     def status(self):
         self._revalidate()
+        if self.state["lifecycle"] == "FINALIZED":
+            return dict(self.final_report)
         phase = self._phase()
         baseline = self.state["service_baseline"]
         service = self.service.status(warning_since=baseline["warning_since"])
@@ -1481,6 +1775,22 @@ class Priority17Transaction:
                 "mutable_state": self.state["mutable_state"], "service": service}
 
     def finalize(self):
+        self._revalidate()
+        if self.state["lifecycle"] == "FINALIZED":
+            if type(self.final_report) is not dict:
+                raise RuntimeError("terminal report was not validated")
+            return dict(self.final_report)
+        if self.finalization_pending:
+            if type(self.final_report) is not dict:
+                raise RuntimeError("pending terminal report was not validated")
+            updated = dict(self.state)
+            updated["lifecycle"] = "FINALIZED"
+            updated["final_report"] = _manifest_file(Path(self.state["final_report_path"]))
+            self._persist_state(updated)
+            self._revalidate()
+            if type(self.final_report) is not dict:
+                raise RuntimeError("terminal report was not validated")
+            return dict(self.final_report)
         status = self.status()
         if status["source"] != "candidate":
             raise ValueError("finalize requires verified candidate source")
@@ -1494,7 +1804,15 @@ class Priority17Transaction:
         }
         if set(report) != PUBLIC_FINAL_KEYS:
             raise RuntimeError("internal final report schema error")
-        return report
+        final_report = _publish_final_report(Path(self.state["final_report_path"]), report)
+        updated = dict(self.state)
+        updated["lifecycle"] = "FINALIZED"
+        updated["final_report"] = final_report
+        self._persist_state(updated)
+        self._revalidate()
+        if type(self.final_report) is not dict:
+            raise RuntimeError("terminal report was not validated")
+        return dict(self.final_report)
 
 
 def _baseline_manifest(approved: list[dict], baseline_sha: str, baseline_tree_sha: str,
@@ -1913,6 +2231,15 @@ def _build_and_publish_backup(backup: Path, approved: list[dict], baseline_manif
 
 
 def prepare_release(arguments):
+    destination = _absolute(arguments.destination, "destination", must_exist=True)
+    release_lock_fd = _acquire_release_lock(destination)
+    try:
+        return _prepare_release_locked(arguments, release_lock_fd)
+    finally:
+        os.close(release_lock_fd)
+
+
+def _prepare_release_locked(arguments, release_lock_fd):
     boundary = getattr(arguments, "boundary", None)
     if boundary not in ("b1", "b2"):
         raise ValueError("release boundary is invalid")
@@ -2062,7 +2389,10 @@ def prepare_release(arguments):
             "backup_archive": backup_authority["root_authority"],
             "service": arguments.service,
             "service_baseline": service_baseline, "interpreter": interpreter_authority,
-            "state_path": str(state_path), "mutable_state": mutable_state, "self": None,
+            "state_path": str(state_path), "mutable_state": mutable_state,
+            "lifecycle": "PREPARED",
+            "final_report_path": str(state_path.with_name(state_path.name + ".finalized.json")),
+            "final_report": None, "self": None,
         }
         _populate_state_fd(state_path, state, state_fd)
         _revalidate_backup_namespace(
@@ -2080,7 +2410,10 @@ def prepare_release(arguments):
         if not _same_namespace_inode(state_fd, state_path):
             raise ValueError("state identity changed after publication")
         os.fsync(parent_fd)
-        tx = Priority17Transaction(state_path, state, service=service, state_fd=state_fd)
+        tx = Priority17Transaction(
+            state_path, state, service=service, state_fd=state_fd,
+            release_lock_fd=os.dup(release_lock_fd),
+        )
         state_fd = -1
         try:
             tx._revalidate()

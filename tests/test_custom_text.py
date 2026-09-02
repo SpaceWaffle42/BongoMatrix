@@ -291,6 +291,35 @@ class CustomTextTests(unittest.TestCase):
 
         self.assertEqual(bitmap_matrix.pixel.call_args_list, legacy_matrix.pixel.call_args_list)
 
+    def test_canvas_pixel_bitmap_rotates_asymmetric_art_around_occupied_bounds_centre(self):
+        layer = {"id": "layer_pixels", "name": "Pixels", "type": "pixels", "visible": True, "keyframes": []}
+        pixels = bytearray(64 * 32 * 4)
+        for (x, y), rgba in {
+            (0, 0): (255, 0, 0, 255),
+            (2, 0): (0, 255, 0, 255),
+            (0, 2): (0, 0, 255, 255),
+        }.items():
+            offset = (y * 64 + x) * 4
+            pixels[offset:offset + 4] = bytes(rgba)
+        matrix = self.matrix()
+
+        custom_text._draw_layer(
+            matrix, "canvas", layer,
+            {
+                "bitmap_rgba": base64.b64encode(pixels).decode("ascii"),
+                "offset_x": 10, "offset_y": 10, "rotation": 90,
+            },
+        )
+
+        self.assertEqual(
+            matrix.pixel.call_args_list,
+            [
+                call(12, 10, 255, 0, 0, canvas="canvas"),
+                call(12, 12, 0, 255, 0, canvas="canvas"),
+                call(10, 10, 0, 0, 255, canvas="canvas"),
+            ],
+        )
+
     def test_canvas_pixel_bitmap_clips_and_composites_exactly(self):
         layer = {"id": "layer_pixels", "name": "Pixels", "type": "pixels", "visible": True, "keyframes": []}
         pixels = bytearray(64 * 32 * 4)

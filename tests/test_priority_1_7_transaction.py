@@ -5,6 +5,7 @@ import io
 import json
 import os
 import shutil
+import stat
 import subprocess
 import sys
 import tempfile
@@ -158,6 +159,84 @@ class Priority17TransactionTests(unittest.TestCase):
             "destination": destination, "backup": backup, "state": state,
             "private": private, "service": service, "prepare_report": prepare_report,
         }
+
+    def test_destination_wide_release_lock_excludes_distinct_attempts(self):
+        transaction = importlib.import_module("deploy.priority_1_7_transaction")
+        with tempfile.TemporaryDirectory() as temporary:
+            destination = Path(temporary) / "destination"
+            destination.mkdir()
+            first = transaction._acquire_release_lock(destination)
+            try:
+                lock_path = transaction._release_lock_path(destination)
+                self.assertEqual(
+                    lock_path.parent, destination.parent / ".priority-1-7-release-locks",
+                )
+                self.assertEqual(stat.S_IMODE(lock_path.parent.stat().st_mode), 0o700)
+                self.assertEqual(stat.S_IMODE(lock_path.stat().st_mode), 0o600)
+                destination.rename(Path(temporary) / "moved-destination")
+                destination.mkdir()
+                with self.assertRaisesRegex(RuntimeError, "release lock"):
+                    transaction._acquire_release_lock(destination)
+            finally:
+                os.close(first)
+            second = transaction._acquire_release_lock(destination)
+            os.close(second)
+
+    def test_load_validation_failure_releases_locked_state_descriptor(self):
+        transaction = importlib.import_module("deploy.priority_1_7_transaction")
+        with tempfile.TemporaryDirectory() as temporary:
+            state = Path(temporary) / "transaction-state.json"
+            state.write_text("{}\n")
+            state.chmod(0o600)
+            before = len(os.listdir("/proc/self/fd"))
+            for _ in range(2):
+                with self.assertRaisesRegex(ValueError, "transaction state schema"):
+                    transaction.Priority17Transaction.load(state)
+                self.assertEqual(len(os.listdir("/proc/self/fd")), before)
+
+    def test_production_release_lock_rejects_unprivileged_claim(self):
+        transaction = importlib.import_module("deploy.priority_1_7_transaction")
+        production = Path("/home/admin/matrix")
+        with (
+            patch.object(transaction, "PRODUCTION_DESTINATION", str(production)),
+            patch.object(transaction.os, "geteuid", return_value=1000),
+            self.assertRaisesRegex(PermissionError, "root release authority"),
+        ):
+            transaction._acquire_release_lock(production)
+
+    def test_prepare_holds_destination_wide_release_lock(self):
+        transaction = importlib.import_module("deploy.priority_1_7_transaction")
+        with tempfile.TemporaryDirectory() as temporary:
+            destination = Path(temporary) / "destination"
+            destination.mkdir()
+            arguments = types.SimpleNamespace(destination=str(destination))
+
+            def assert_locked(observed, descriptor):
+                self.assertEqual(observed, arguments)
+                self.assertGreaterEqual(descriptor, 0)
+                with self.assertRaisesRegex(RuntimeError, "release lock"):
+                    transaction._acquire_release_lock(destination)
+                return "locked"
+
+            with patch.object(transaction, "_prepare_release_locked", side_effect=assert_locked):
+                self.assertEqual(transaction.prepare_release(arguments), "locked")
+            descriptor = transaction._acquire_release_lock(destination)
+            os.close(descriptor)
+
+    def test_loaded_transaction_holds_destination_wide_release_lock(self):
+        transaction = importlib.import_module("deploy.priority_1_7_transaction")
+        with tempfile.TemporaryDirectory() as temporary:
+            fixture = self._fixture(transaction, Path(temporary))
+            tx = transaction.Priority17Transaction.load(
+                fixture["state"], service=fixture["service"],
+            )
+            try:
+                with self.assertRaisesRegex(RuntimeError, "release lock"):
+                    transaction._acquire_release_lock(fixture["destination"])
+            finally:
+                tx.close()
+            descriptor = transaction._acquire_release_lock(fixture["destination"])
+            os.close(descriptor)
 
     def test_cli_and_exported_transaction_are_exact(self):
         transaction = importlib.import_module("deploy.priority_1_7_transaction")
@@ -360,6 +439,106 @@ class Priority17TransactionTests(unittest.TestCase):
                 self.assertEqual(final["status"], "FINALIZED")
             finally:
                 tx.close()
+    def test_finalize_is_durable_idempotent_and_terminal(self):
+        transaction = importlib.import_module("deploy.priority_1_7_transaction")
+        with tempfile.TemporaryDirectory() as temporary:
+            fixture = self._fixture(transaction, Path(temporary))
+            tx = transaction.Priority17Transaction.load(
+                fixture["state"], service=fixture["service"],
+            )
+            tx.transition("candidate", operation="deploy")
+            report = tx.finalize()
+            tx.close()
+
+            persisted = json.loads(fixture["state"].read_bytes())
+            self.assertEqual(persisted["lifecycle"], "FINALIZED")
+            self.assertIsInstance(persisted["final_report"], dict)
+            report_path = Path(persisted["final_report"]["path"])
+            self.assertEqual(json.loads(report_path.read_bytes()), report)
+            self.assertEqual(stat.S_IMODE(report_path.stat().st_mode), 0o600)
+
+            tx = transaction.Priority17Transaction.load(
+                fixture["state"], service=fixture["service"],
+            )
+            try:
+                self.assertEqual(tx.finalize(), report)
+                for operation, target in (
+                    ("deploy", "candidate"),
+                    ("rollback", "baseline"),
+                    ("redeploy", "candidate"),
+                    ("recover", "baseline"),
+                ):
+                    with self.subTest(operation=operation):
+                        with self.assertRaisesRegex(ValueError, "finalized"):
+                            tx.transition(target, operation=operation)
+            finally:
+                tx.close()
+
+    def test_finalize_adopts_exact_report_after_state_publication_crash(self):
+        transaction = importlib.import_module("deploy.priority_1_7_transaction")
+        with tempfile.TemporaryDirectory() as temporary:
+            fixture = self._fixture(transaction, Path(temporary))
+            tx = transaction.Priority17Transaction.load(
+                fixture["state"], service=fixture["service"],
+            )
+            tx.transition("candidate", operation="deploy")
+            with (
+                patch.object(tx, "_persist_state", side_effect=transaction.InjectedCrash("finalize:state")),
+                self.assertRaises(transaction.InjectedCrash),
+            ):
+                tx.finalize()
+            report_path = fixture["state"].with_name(fixture["state"].name + ".finalized.json")
+            self.assertTrue(report_path.is_file())
+            self.assertEqual(json.loads(fixture["state"].read_bytes())["lifecycle"], "PREPARED")
+            tx.close()
+            fixture["service"].main_pid += 100
+            fixture["service"].active = False
+
+            tx = transaction.Priority17Transaction.load(
+                fixture["state"], service=fixture["service"],
+            )
+            try:
+                with self.assertRaisesRegex(ValueError, "finalization"):
+                    tx.transition("baseline", operation="rollback")
+                report = tx.finalize()
+                self.assertEqual(report["status"], "FINALIZED")
+                self.assertEqual(tx.status(), report)
+            finally:
+                tx.close()
+
+    def test_pending_final_report_rejects_wrong_version_boolean_counts_and_pid_claim(self):
+        transaction = importlib.import_module("deploy.priority_1_7_transaction")
+        mutations = {
+            "wrong-version": lambda report: report.__setitem__("version", 2),
+            "boolean-warning-count": lambda report: report["service"].__setitem__("warning_count", False),
+            "unchanged-main-pid": lambda report: report["service"].__setitem__(
+                "main_pid", report["service"]["previous_main_pid"],
+            ),
+        }
+        for name, mutate in mutations.items():
+            with self.subTest(name=name), tempfile.TemporaryDirectory() as temporary:
+                fixture = self._fixture(transaction, Path(temporary), boundary="b1")
+                tx = transaction.Priority17Transaction.load(
+                    fixture["state"], service=fixture["service"],
+                )
+                tx.transition("candidate", operation="deploy")
+                with patch.object(
+                    tx, "_persist_state",
+                    side_effect=transaction.InjectedCrash("finalize:state"),
+                ):
+                    with self.assertRaises(transaction.InjectedCrash):
+                        tx.finalize()
+                report_path = Path(tx.state["final_report_path"])
+                tx.close()
+                report = json.loads(report_path.read_bytes())
+                mutate(report)
+                report_path.write_bytes(transaction.canonical_json(report))
+                report_path.chmod(0o600)
+                with self.assertRaisesRegex(ValueError, "final report"):
+                    transaction.Priority17Transaction.load(
+                        fixture["state"], service=fixture["service"],
+                    )
+
     def test_ambiguous_source_requires_explicit_recovery(self):
         transaction = importlib.import_module("deploy.priority_1_7_transaction")
         with tempfile.TemporaryDirectory() as temporary:

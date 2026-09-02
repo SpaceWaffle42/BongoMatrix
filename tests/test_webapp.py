@@ -11868,6 +11868,36 @@ process.stdout.write(JSON.stringify(drawn));
         physical = [list(invocation.args[:5]) for invocation in matrix.pixel.call_args_list]
         self.assertEqual(json.loads(result.stdout), physical)
 
+        asymmetric = bytearray(64 * 32 * 4)
+        for (x, y), rgba in {
+            (0, 0): (255, 0, 0, 255),
+            (2, 0): (0, 255, 0, 255),
+            (0, 2): (0, 0, 255, 255),
+        }.items():
+            start = (y * 64 + x) * 4
+            asymmetric[start:start + 4] = bytes(rgba)
+        asymmetric_properties = {
+            "bitmap_rgba": base64.b64encode(asymmetric).decode("ascii"),
+            "offset_x": 10, "offset_y": 10, "rotation": 90,
+        }
+        browser = subprocess.run(
+            [shutil.which("node"), "-e", harness, json.dumps(asymmetric_properties)],
+            cwd=Path(__file__).parents[1], text=True, capture_output=True, check=False,
+        )
+        self.assertEqual(browser.returncode, 0, browser.stderr)
+        asymmetric_matrix = Mock()
+        asymmetric_matrix.pixel(10, 10, 9, 8, 7, canvas="canvas")
+        custom_text._draw_layer(
+            asymmetric_matrix, "canvas",
+            {"id": "pixel", "name": "Pixel", "type": "pixels", "visible": True,
+             "keyframes": []},
+            asymmetric_properties,
+        )
+        asymmetric_physical = [
+            list(invocation.args[:5]) for invocation in asymmetric_matrix.pixel.call_args_list
+        ]
+        self.assertEqual(json.loads(browser.stdout), asymmetric_physical)
+
     @unittest.skipUnless(shutil.which("node"), "Node.js is required")
     def test_browser_playback_sequences_match_physical_renderer(self):
         asset = (Path(__file__).parents[1] / "app/static/custom_canvas.js").read_text()

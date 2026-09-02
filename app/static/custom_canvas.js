@@ -420,8 +420,9 @@
       ]);
     }
     if (properties.rotation && cells.length) {
-      const centreX = cells.reduce((total, cell) => total + cell[0], 0) / cells.length;
-      const centreY = cells.reduce((total, cell) => total + cell[1], 0) / cells.length;
+      const box = pointsBounds(cells);
+      const centreX = (box.minX + box.maxX) / 2;
+      const centreY = (box.minY + box.maxY) / 2;
       const radians = properties.rotation * Math.PI / 180;
       const sine = Math.sin(radians), cosine = Math.cos(radians);
       for (const cell of cells) {
