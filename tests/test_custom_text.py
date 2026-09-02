@@ -1,3 +1,4 @@
+import base64
 import threading
 import types
 import unittest
@@ -266,6 +267,77 @@ class CustomTextModuleTests(unittest.TestCase):
                 call(11, 11, 255, 255, 255, canvas="canvas"),
             ],
         )
+
+    def test_canvas_pixel_bitmap_and_legacy_points_share_exact_cells(self):
+        layer = {"id": "layer_pixels", "name": "Pixels", "type": "pixels", "visible": True, "keyframes": []}
+        legacy_matrix = self.matrix()
+        custom_text._draw_layer(
+            legacy_matrix, "canvas", layer,
+            {"points": [[10, 10], [12, 10]], "colour": "#ffffff", "rotation": 90},
+        )
+        pixels = bytearray(64 * 32 * 4)
+        for x, y in ((10, 10), (12, 10)):
+            offset = (y * 64 + x) * 4
+            pixels[offset:offset + 4] = bytes((255, 255, 255, 255))
+        bitmap_matrix = self.matrix()
+
+        custom_text._draw_layer(
+            bitmap_matrix, "canvas", layer,
+            {
+                "bitmap_rgba": base64.b64encode(pixels).decode("ascii"),
+                "offset_x": 0, "offset_y": 0, "rotation": 90,
+            },
+        )
+
+        self.assertEqual(bitmap_matrix.pixel.call_args_list, legacy_matrix.pixel.call_args_list)
+
+    def test_canvas_pixel_bitmap_preserves_colours_transparency_offset_and_crop(self):
+        layer = {"id": "layer_pixels", "name": "Pixels", "type": "pixels", "visible": True, "keyframes": []}
+        pixels = bytearray(64 * 32 * 4)
+        cells = {
+            (0, 0): (255, 0, 0, 255),
+            (2, 1): (1, 2, 3, 255),
+            (63, 30): (4, 5, 6, 255),
+        }
+        for (x, y), rgba in cells.items():
+            offset = (y * 64 + x) * 4
+            pixels[offset:offset + 4] = bytes(rgba)
+        matrix = self.matrix()
+
+        custom_text._draw_layer(
+            matrix, "canvas", layer,
+            {
+                "bitmap_rgba": base64.b64encode(pixels).decode("ascii"),
+                "offset_x": -2, "offset_y": 1, "rotation": 0,
+            },
+        )
+
+        self.assertEqual(
+            matrix.pixel.call_args_list,
+            [
+                call(0, 2, 1, 2, 3, canvas="canvas"),
+                call(61, 31, 4, 5, 6, canvas="canvas"),
+            ],
+        )
+
+    def test_canvas_pixel_bitmap_render_work_is_bounded_for_sixty_four_full_layers(self):
+        class CountingMatrix:
+            def __init__(self):
+                self.pixels = 0
+
+            def pixel(self, *_args, **_kwargs):
+                self.pixels += 1
+
+        layer = {"id": "layer_pixels", "name": "Pixels", "type": "pixels", "visible": True, "keyframes": []}
+        bitmap = base64.b64encode(bytes((255, 255, 255, 255)) * (64 * 32)).decode("ascii")
+        properties = {"bitmap_rgba": bitmap, "offset_x": 0, "offset_y": 0, "rotation": 0}
+        matrix = CountingMatrix()
+
+        for _repeat in range(2):
+            for _layer in range(64):
+                custom_text._draw_layer(matrix, "canvas", layer, properties)
+
+        self.assertEqual(matrix.pixels, 2 * 64 * 2048)
 
     def test_canvas_line_rotation_uses_its_midpoint_in_physical_renderer(self):
         matrix = self.matrix()
