@@ -1,3 +1,4 @@
+import base64
 import json
 import os
 import shutil
@@ -1614,6 +1615,67 @@ class ConfigStoreTests(unittest.TestCase):
             self.assertEqual([layer["type"] for layer in saved["layers"]], [
                 "text", "pixels", "line", "polygon", "circle", "ellipse", "rectangle",
             ])
+
+    def test_canvas_pixel_bitmap_is_exact_bounded_and_exclusive(self):
+        pixels = bytearray(64 * 32 * 4)
+        pixels[(10 * 64 + 12) * 4:(10 * 64 + 12) * 4 + 4] = bytes((255, 0, 128, 255))
+        bitmap = base64.b64encode(pixels).decode("ascii")
+        layer = {
+            "id": "layer_bitmap", "name": "Bitmap", "type": "pixels", "visible": True,
+            "properties": {
+                "bitmap_rgba": bitmap, "offset_x": 0, "offset_y": 0, "rotation": 0,
+            },
+            "keyframes": [{
+                "frame": 1, "easing": "linear",
+                "properties": {"offset_x": 4, "offset_y": -3, "rotation": 90},
+            }],
+        }
+        module = self.advanced_module(
+            frame_count=2, layers=[layer],
+            overrides=[{
+                "frame": 0, "layer_id": "layer_bitmap",
+                "properties": {"offset_x": -2},
+            }],
+        )
+
+        with tempfile.TemporaryDirectory() as directory:
+            store = ConfigStore(Path(directory) / "config.json")
+            saved = store.update({"custom_modules": [module]})["custom_modules"][0]
+            self.assertEqual(saved["layers"][0]["properties"], layer["properties"])
+            self.assertEqual(saved["layers"][0]["keyframes"], layer["keyframes"])
+
+            invalid_properties = [
+                {**layer["properties"], "points": [[1, 2]], "colour": "#ffffff"},
+                {"bitmap_rgba": bitmap, "offset_x": 0, "offset_y": 0, "colour": "#ffffff"},
+                {"bitmap_rgba": bitmap, "offset_x": 0},
+                {"bitmap_rgba": bitmap, "offset_x": True, "offset_y": 0},
+                {"bitmap_rgba": bitmap, "offset_x": 0.5, "offset_y": 0},
+                {"bitmap_rgba": bitmap, "offset_x": -129, "offset_y": 0},
+                {"bitmap_rgba": bitmap, "offset_x": 0, "offset_y": 192},
+                {"bitmap_rgba": base64.b64encode(bytes(8191)).decode("ascii"), "offset_x": 0, "offset_y": 0},
+                {"bitmap_rgba": bitmap.rstrip("="), "offset_x": 0, "offset_y": 0},
+            ]
+            invalid_modules = []
+            for properties in invalid_properties:
+                invalid = json.loads(json.dumps(module))
+                invalid["layers"][0]["properties"] = properties
+                invalid_modules.append(invalid)
+            partial_bitmap = json.loads(json.dumps(module))
+            partial_bitmap["layers"][0]["keyframes"][0]["properties"]["bitmap_rgba"] = bitmap
+            invalid_modules.append(partial_bitmap)
+
+            partial_alpha = bytearray(pixels)
+            partial_alpha[3] = 1
+            nonzero_transparent = bytearray(pixels)
+            nonzero_transparent[0] = 1
+            for invalid_bytes in (partial_alpha, nonzero_transparent):
+                invalid = json.loads(json.dumps(module))
+                invalid["layers"][0]["properties"]["bitmap_rgba"] = base64.b64encode(invalid_bytes).decode("ascii")
+                invalid_modules.append(invalid)
+
+            for invalid in invalid_modules:
+                with self.subTest(properties=invalid["layers"][0]["properties"]), self.assertRaises(ValueError):
+                    store.update({"custom_modules": [invalid]})
 
     def test_advanced_canvas_module_supports_keyframed_layer_presence(self):
         with tempfile.TemporaryDirectory() as directory:
