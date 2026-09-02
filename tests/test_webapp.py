@@ -891,6 +891,30 @@ try{
         self.assertIn("await api('/api/logs',{signal:controller.signal})", body)
 
     @unittest.skipUnless(shutil.which("node"), "Node.js is required")
+    def test_logs_dialog_close_tolerates_missing_optional_colour_controls(self):
+        self.pair_browser()
+        body = self.client.get("/").get_data(as_text=True)
+        start = body.index("const logsDialog=")
+        end = body.index("\nfor(const button of document.querySelectorAll?.('button[data-paired-action]')", start)
+        script = body[start:end]
+        harness = r'''
+const vm=require('node:vm');
+const control=extra=>Object.assign({listeners:{},addEventListener(type,handler){this.listeners[type]=handler},setAttribute(){},removeAttribute(){},getAttribute(){return'false'},focus(){}},extra);
+const dialog=control({style:{setProperty(){}},open:true}),output=control({replaceChildren(){},append(){},scrollTop:0,scrollHeight:0}),refresh=control({disabled:false}),close=control({}),status=control({textContent:''}),nav=control({}),errors=control({}),warnings=control({});
+const elements={'#logs-dialog':dialog,'#logs-output':output,'#logs-refresh':refresh,'#logs-close':close,'#logs-status':status,'#logs-nav-button':nav,'#logs-filter-errors':errors,'#logs-filter-warnings':warnings};
+const context={console,AbortController,document:{querySelector:selector=>elements[selector]??null,createElement:()=>control({dataset:{},className:'',textContent:''})},localStorage:{getItem(){return null},setItem(){}},api:async()=>({logs:'',source:''})};
+context.globalThis=context;vm.createContext(context);vm.runInContext(process.argv[1],context);
+dialog.listeners.close();
+console.log('MINIMAL_LOGS_CLOSE_PASS');
+'''
+        result = subprocess.run(
+            [shutil.which("node"), "-e", harness, script],
+            cwd=Path(__file__).parents[1], text=True, capture_output=True, check=False,
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("MINIMAL_LOGS_CLOSE_PASS", result.stdout)
+
+    @unittest.skipUnless(shutil.which("node"), "Node.js is required")
     @unittest.skipUnless(
         os.environ.get("MATRIX_CHROMIUM")
         and Path(os.environ.get("MATRIX_CHROMIUM", "")).is_file()
