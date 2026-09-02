@@ -9,7 +9,7 @@ from PIL import Image
 from modules import custom_text
 
 
-class CustomTextModuleTests(unittest.TestCase):
+class CustomTextTests(unittest.TestCase):
     @staticmethod
     def module_options(**changes):
         options = {
@@ -291,18 +291,20 @@ class CustomTextModuleTests(unittest.TestCase):
 
         self.assertEqual(bitmap_matrix.pixel.call_args_list, legacy_matrix.pixel.call_args_list)
 
-    def test_canvas_pixel_bitmap_preserves_colours_transparency_offset_and_crop(self):
+    def test_canvas_pixel_bitmap_clips_and_composites_exactly(self):
         layer = {"id": "layer_pixels", "name": "Pixels", "type": "pixels", "visible": True, "keyframes": []}
         pixels = bytearray(64 * 32 * 4)
         cells = {
             (0, 0): (255, 0, 0, 255),
-            (2, 1): (1, 2, 3, 255),
+            (2, 1): (0, 0, 0, 255),
+            (3, 1): (0, 0, 0, 0),
             (63, 30): (4, 5, 6, 255),
         }
         for (x, y), rgba in cells.items():
             offset = (y * 64 + x) * 4
             pixels[offset:offset + 4] = bytes(rgba)
         matrix = self.matrix()
+        matrix.pixel(1, 2, 9, 8, 7, canvas="canvas")
 
         custom_text._draw_layer(
             matrix, "canvas", layer,
@@ -315,7 +317,8 @@ class CustomTextModuleTests(unittest.TestCase):
         self.assertEqual(
             matrix.pixel.call_args_list,
             [
-                call(0, 2, 1, 2, 3, canvas="canvas"),
+                call(1, 2, 9, 8, 7, canvas="canvas"),
+                call(0, 2, 0, 0, 0, canvas="canvas"),
                 call(61, 31, 4, 5, 6, canvas="canvas"),
             ],
         )

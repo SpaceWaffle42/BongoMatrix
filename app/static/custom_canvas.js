@@ -402,6 +402,40 @@
     return {minX: Math.min(...points.map(point => point[0])), minY: Math.min(...points.map(point => point[1])), maxX: Math.max(...points.map(point => point[0])), maxY: Math.max(...points.map(point => point[1]))};
   }
 
+  function pythonRound(value) {
+    const lower = Math.floor(value), fraction = value - lower;
+    if (fraction < .5) return lower;
+    if (fraction > .5) return lower + 1;
+    return lower % 2 === 0 ? lower : lower + 1;
+  }
+
+  function pixelBitmapCells(properties) {
+    const packed = atob(properties.bitmap_rgba), cells = [];
+    const offsetX = properties.offset_x || 0, offsetY = properties.offset_y || 0;
+    for (let index = 0; index < 64 * 32; index++) {
+      const byte = index * 4, alpha = packed.charCodeAt(byte + 3);
+      if (alpha) cells.push([
+        index % 64 + offsetX, Math.floor(index / 64) + offsetY,
+        packed.charCodeAt(byte), packed.charCodeAt(byte + 1), packed.charCodeAt(byte + 2),
+      ]);
+    }
+    if (properties.rotation && cells.length) {
+      const centreX = cells.reduce((total, cell) => total + cell[0], 0) / cells.length;
+      const centreY = cells.reduce((total, cell) => total + cell[1], 0) / cells.length;
+      const radians = properties.rotation * Math.PI / 180;
+      const sine = Math.sin(radians), cosine = Math.cos(radians);
+      for (const cell of cells) {
+        const x = cell[0], y = cell[1];
+        cell[0] = pythonRound(centreX + (x - centreX) * cosine - (y - centreY) * sine);
+        cell[1] = pythonRound(centreY + (x - centreX) * sine + (y - centreY) * cosine);
+      }
+    } else {
+      for (const cell of cells) { cell[0] = pythonRound(cell[0]); cell[1] = pythonRound(cell[1]); }
+    }
+    return cells.filter(([x, y]) => x >= 0 && x < 64 && y >= 0 && y < 32);
+  }
+  window.pixelBitmapCells = pixelBitmapCells;
+
   function currentTimeText(format, now = new Date()) {
     let hours = now.getHours();
     const minutes = String(now.getMinutes()).padStart(2, '0');
@@ -421,6 +455,10 @@
 
   function bounds(properties, type) {
     if (type === 'text' || type === 'time') { const text = type === 'time' ? currentTimeText(properties.format) : properties.text; return {minX: properties.x, minY: properties.y - 7, maxX: properties.x + Math.max(4, text.length * 5), maxY: properties.y}; }
+    if (type === 'pixels' && properties.bitmap_rgba) {
+      const cells = pixelBitmapCells(properties);
+      return cells.length ? pointsBounds(cells) : {minX: properties.offset_x || 0, minY: properties.offset_y || 0, maxX: properties.offset_x || 0, maxY: properties.offset_y || 0};
+    }
     if (type === 'pixels' || type === 'polygon') return pointsBounds(properties.points);
     if (type === 'line') return pointsBounds([[properties.x1, properties.y1], [properties.x2, properties.y2]]);
     if (type === 'rectangle' || type === 'media') return {minX: properties.x, minY: properties.y, maxX: properties.x + properties.width, maxY: properties.y + properties.height};
@@ -599,8 +637,10 @@
 
   function drawShape(context, layer, properties, alpha = 1, frame = 0, fps = 1, frameCount = 1) {
     context.save(); context.globalAlpha = alpha; context.strokeStyle = properties.colour; context.fillStyle = properties.colour; context.lineWidth = Math.max(.12, properties.width || .12);
-    beginLayerRotation(context, properties, layer.type);
-    if (layer.type === 'text' || layer.type === 'time') { context.font = `${Math.max(4, Number(properties.font.split('x')[1]?.replace(/\D/g, '') || 7))}px monospace`; context.textBaseline = 'alphabetic'; context.fillText(layer.type === 'time' ? currentTimeText(properties.format) : properties.text, properties.x, properties.y); }
+    const packedPixels = layer.type === 'pixels' && properties.bitmap_rgba;
+    if (!packedPixels) beginLayerRotation(context, properties, layer.type);
+    if (layer.type === 'text' || layer.type === 'time') { const text = layer.type === 'time' ? currentTimeText(properties.format) : properties.text; context.font = `${Math.max(4, Number(properties.font.split('x')[1]?.replace(/\D/g, '') || 7))}px monospace`; context.textBaseline = 'alphabetic'; context.fillText(text, properties.x, properties.y); }
+    else if (layer.type === 'pixels' && packedPixels) for (const [x, y, red, green, blue] of pixelBitmapCells(properties)) { context.fillStyle = `rgb(${red},${green},${blue})`; context.fillRect(x, y, 1, 1); }
     else if (layer.type === 'pixels') for (const [x, y] of properties.points) context.fillRect(Math.round(x), Math.round(y), 1, 1);
     else if (layer.type === 'line') { context.beginPath(); context.moveTo(properties.x1, properties.y1); context.lineTo(properties.x2, properties.y2); context.stroke(); }
     else if (layer.type === 'rectangle') { context.translate(properties.x + properties.width / 2, properties.y + properties.height / 2); context.rotate(properties.rotation * Math.PI / 180); properties.filled ? context.fillRect(-properties.width / 2, -properties.height / 2, properties.width, properties.height) : context.strokeRect(-properties.width / 2, -properties.height / 2, properties.width, properties.height); }
@@ -614,6 +654,7 @@
     }
     context.restore();
   }
+  window.drawCanvasShape = drawShape;
 
   function drawEditor(module, canvas) {
     const state = stateFor(module), context = canvas.getContext('2d');
@@ -629,6 +670,7 @@
   function moveProperties(properties, type, dx, dy) {
     if (['text', 'time', 'rectangle', 'circle', 'ellipse', 'media'].includes(type)) { properties.x += dx; properties.y += dy; }
     else if (type === 'line') { properties.x1 += dx; properties.y1 += dy; properties.x2 += dx; properties.y2 += dy; }
+    else if (type === 'pixels' && properties.bitmap_rgba) { properties.offset_x = pythonRound((properties.offset_x || 0) + dx); properties.offset_y = pythonRound((properties.offset_y || 0) + dy); }
     else properties.points = properties.points.map(([x, y]) => [x + dx, y + dy]);
   }
 
@@ -662,7 +704,7 @@
       canvas.setPointerCapture(event.pointerId); const current = point(event), properties = resolvedProperties(module, layer, state.frame), box = bounds(properties, layer.type), centre = {x: (box.minX + box.maxX) / 2, y: (box.minY + box.maxY) / 2};
       let mode = 'move';
       if (supportsRotation(layer.type) && Math.hypot(current.x - centre.x, current.y - (box.minY - 2.5)) < 2) { properties.rotation ??= 0; mode = 'rotate'; }
-      else if (layer.type === 'pixels') { const points = clone(properties.points); points.push([Math.round(current.x), Math.round(current.y)]); saveFrameProperties(module, layer, {points}); mode = 'freehand'; }
+      else if (layer.type === 'pixels' && !properties.bitmap_rgba) { const points = clone(properties.points); points.push([Math.round(current.x), Math.round(current.y)]); saveFrameProperties(module, layer, {points}); mode = 'freehand'; }
       else if (Math.hypot(current.x - box.maxX, current.y - box.maxY) < 2) mode = 'resize';
       state.drag = {mode, start: current, original: clone(properties), centre}; drawEditor(module, canvas); syncPropertyInputs(module);
     });
@@ -673,7 +715,10 @@
       else if (drag.mode === 'freehand') { const live = resolvedProperties(module, layer, state.frame); const last = live.points.at(-1); if (!last || Math.round(current.x) !== last[0] || Math.round(current.y) !== last[1]) saveFrameProperties(module, layer, {points: [...live.points, [Math.round(current.x), Math.round(current.y)]]}); drawEditor(module, canvas); return; }
       else if (drag.mode === 'rotate' && Object.hasOwn(properties, 'rotation')) { const rawRotation = Math.atan2(current.y - drag.centre.y, current.x - drag.centre.x) * 180 / Math.PI + 90; properties.rotation = snapRotation(rawRotation, state.rotationSnap); }
       else if (drag.mode === 'resize') resizeProperties(properties, layer.type, current, dx, dy);
-      saveFrameProperties(module, layer, properties); drawEditor(module, canvas); syncPropertyInputs(module);
+      const saved = layer.type === 'pixels' && properties.bitmap_rgba
+        ? Object.fromEntries(['offset_x', 'offset_y', 'rotation', 'present', 'z_index'].filter(key => Object.hasOwn(properties, key)).map(key => [key, properties[key]]))
+        : properties;
+      saveFrameProperties(module, layer, saved); drawEditor(module, canvas); syncPropertyInputs(module);
     });
     const end = () => { if (state.drag) { state.drag = null; refreshAdvanced(module.id, true); } };
     canvas.addEventListener('pointerup', end); canvas.addEventListener('pointercancel', end);
