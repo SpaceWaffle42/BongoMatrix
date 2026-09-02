@@ -654,7 +654,7 @@
     }
     context.restore();
   }
-  window.drawCanvasShape = drawShape;
+  if (typeof window !== 'undefined') window.drawCanvasShape = drawShape;
 
   function drawEditor(module, canvas) {
     const state = stateFor(module), context = canvas.getContext('2d');
