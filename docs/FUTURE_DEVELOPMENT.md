@@ -1,6 +1,6 @@
 # Future development notes
 
-Last updated: 2026-08-29
+Last updated: 2026-09-03
 
 This file records requested Matrix features that are intentionally deferred. They are product requirements and design notes, not descriptions of current behavior. Do not treat an item as implemented until its code, tests, review, merge, deployment, and physical-device verification are complete.
 
@@ -272,6 +272,22 @@ Verified remediation approvals:
 ### 1.7 Advanced Canvas Pixel drawing tool
 
 Treat **Pixel** in Advanced Canvas as a transparent, editable pixel-art layer rather than a single manually positioned pixel element.
+
+#### ~~Boundary 1 — Backward-compatible bitmap schema and renderer foundation~~ — Completed
+
+**Completed 2026-09-03:** the UI-inert B1 foundation was implemented and corrected through RED→GREEN TDD, immutable review, protected MR !113 and exact-source pipelines 351/352. Fresh accepted-lineage product-port candidate `fc745163460a9316998a25be574af01ec25019d4` passed immutable staging, prepare, deploy, candidate checks, deliberate rollback and baseline verification, exact-candidate redeployment, cache-disabled Chrome acceptance, both named real 64×32 framebuffer fixtures, cancellation before framebuffer submission, mutable-state preservation, and finalization. The rejected physical candidate `953f640145fa576bb6019bd5665df572aefa9435` remains truthfully recorded in GitLab issue #22 and was not reused.
+
+- ~~Accept one optional canonical 64×32 packed RGBA bitmap representation with exactly 8192 decoded bytes, binary alpha, zero RGB in transparent cells, bounded integer offsets, optional rotation, and strict rejection of malformed, mixed, keyframe-embedded, or unsupported values.~~
+- ~~Keep existing and newly created Pixels layers on the legacy `points` representation by default; expose no bitmap editor control and perform no automatic configuration migration or save in B1.~~
+- ~~Preserve legacy point validation and rendering exactly while providing deterministic legacy/bitmap cell conversion semantics.~~
+- ~~Use equivalent browser and physical cell semantics for translation, occupied-bounds-centred rotation, clipping, transparency, opaque black, visibility, depth, and lower-layer composition.~~
+- ~~Verify the named `corners_hole_black_composite` and `translated_clipped_rotation` fixtures byte-for-byte in cache-disabled Chrome and on the real 64×32 panel.~~
+- ~~Keep cancellation effective after frame preparation and before framebuffer submission so a cancelled frame cannot change the panel, revision, or swap history.~~
+- ~~Keep bitmap decoding bounded to 2048 cells with no decompression, provider, secret, or file input, and retain measured configuration-size headroom.~~
+- ~~Provide the exact source-only Priority 1.7 transaction for build, prepare, deploy, status, rollback, redeploy, recover, and finalize while preserving excluded mutable configuration, drafts, paired devices, data, and media.~~
+- ~~Prove immutable local/remote stage identity, candidate health, deliberate byte-exact rollback, baseline health, exact-candidate redeployment, browser/physical parity, service/display-lock recovery, and zero mutable-state drift before finalization.~~
+
+**Boundary 2 remains pending:** the user-facing drawing surface, grouped/contextual controls, pointer/touch/keyboard interactions, undo/redo history, editable save/reset flow, and all remaining requirements below have not been implemented or activated.
 
 #### Drawing surface and pointer behaviour
 
