@@ -140,6 +140,26 @@ def _parse_json(raw: bytes, description: str):
     return value
 
 
+def _parse_production_configuration(raw: bytes):
+    """Parse the exact compact JSON bytes emitted by ConfigStore."""
+    try:
+        value = json.loads(raw, object_pairs_hook=_unique)
+    except (UnicodeError, json.JSONDecodeError, ValueError) as error:
+        raise ValueError(
+            "production configuration is not valid duplicate-safe JSON"
+        ) from error
+    try:
+        expected = json.dumps(
+            value, sort_keys=True, separators=(",", ":"), ensure_ascii=True,
+            allow_nan=False,
+        ).encode("utf-8")
+    except (TypeError, ValueError) as error:
+        raise ValueError("production configuration is invalid") from error
+    if raw != expected:
+        raise ValueError("production configuration is not canonical ConfigStore JSON")
+    return value
+
+
 def _safe_relative(value: object) -> str:
     if type(value) is not str or not value or value != unicodedata.normalize("NFC", value):
         raise ValueError("manifest path is empty or non-NFC")
@@ -2056,7 +2076,7 @@ def _validate_boundary_configuration(destination: Path, boundary: str) -> None:
     config_path = destination / "data/config.json"
     try:
         raw, _ = _read_regular(config_path, max_bytes=1024 * 1024)
-        config = _parse_json(raw, "production configuration")
+        config = _parse_production_configuration(raw)
     except FileNotFoundError:
         return
     if type(config) is not dict:

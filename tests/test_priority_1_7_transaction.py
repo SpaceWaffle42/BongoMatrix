@@ -116,16 +116,17 @@ class Priority17TransactionTests(unittest.TestCase):
             "/usr/bin/git", "-C", str(destination), "checkout", "-q", baseline,
         ], check=True)
         private = {}
-        config = b'{"modules":[],"revision":7,"schema_version":3}\n'
+        # Match ConfigStore._serialize_config(): sorted compact UTF-8 with no newline.
+        config = b'{"modules":[],"revision":7,"schema_version":3}'
         if boundary == "b2":
-            config = transaction.canonical_json({
+            config = json.dumps({
                 "schema_version": 3, "revision": 8,
                 "modules": [{"type": "custom_text", "settings": {
                     "layers": [{"type": "pixels", "properties": {
                         "bitmap_rgba": "persisted-b2-bitmap",
                     }}],
                 }}],
-            })
+            }, sort_keys=True, separators=(",", ":")).encode("utf-8")
         for relative, value in (
             ("data/config.json", config),
             ("data/paired-devices.json", b"[]\n"),
@@ -343,6 +344,22 @@ class Priority17TransactionTests(unittest.TestCase):
             self.assertTrue(all(entry["width"] == 64 and entry["height"] == 32 for entry in physical["fixtures"]))
             self.assertFalse(any("path" in entry for entry in physical["fixtures"]))
 
+    def test_production_configuration_parser_matches_config_store_serialization(self):
+        transaction = importlib.import_module("deploy.priority_1_7_transaction")
+        exact = b'{"modules":[],"revision":7,"schema_version":3}'
+        self.assertEqual(
+            transaction._parse_production_configuration(exact),
+            {"modules": [], "revision": 7, "schema_version": 3},
+        )
+        for invalid in (
+            exact + b"\n",
+            b'{"modules": [],"revision":7,"schema_version":3}',
+            b'{"modules":[],"revision":7,"revision":8,"schema_version":3}',
+        ):
+            with self.subTest(invalid=invalid):
+                with self.assertRaisesRegex(ValueError, "production configuration"):
+                    transaction._parse_production_configuration(invalid)
+
     def test_prepare_snapshots_mutable_state_and_b1_rejects_bitmap_config(self):
         transaction = importlib.import_module("deploy.priority_1_7_transaction")
         with tempfile.TemporaryDirectory() as temporary:
@@ -382,7 +399,7 @@ class Priority17TransactionTests(unittest.TestCase):
                 }}],
             }
             (fixture["destination"] / "data/config.json").write_bytes(
-                transaction.canonical_json(bitmap_config)
+                json.dumps(bitmap_config, sort_keys=True, separators=(",", ":")).encode("utf-8")
             )
             arguments = types.SimpleNamespace(
                 boundary="b1", release_root=str(fixture["stage"] / "release"),
