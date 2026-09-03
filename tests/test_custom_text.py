@@ -291,6 +291,21 @@ class CustomTextTests(unittest.TestCase):
 
         self.assertEqual(bitmap_matrix.pixel.call_args_list, legacy_matrix.pixel.call_args_list)
 
+    def test_canvas_filled_one_by_one_rectangle_emits_physical_pixel(self):
+        matrix = self.matrix()
+        layer = {
+            "id": "layer_rectangle", "name": "Rectangle", "type": "rectangle",
+            "visible": True, "keyframes": [],
+        }
+
+        custom_text._draw_layer(
+            matrix, "canvas", layer,
+            {"x": 32, "y": 16, "width": 1, "height": 1,
+             "rotation": 0, "colour": "#ffff00", "filled": True},
+        )
+
+        matrix.pixel.assert_called_once_with(32, 16, 255, 255, 0, canvas="canvas")
+
     def test_canvas_pixel_bitmap_rotates_asymmetric_art_around_occupied_bounds_centre(self):
         layer = {"id": "layer_pixels", "name": "Pixels", "type": "pixels", "visible": True, "keyframes": []}
         pixels = bytearray(64 * 32 * 4)
