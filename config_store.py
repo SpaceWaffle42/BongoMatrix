@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import base64
+import binascii
 import copy
 import datetime as dt
 import json
@@ -344,19 +346,30 @@ def _validate_canvas_properties(properties, layer_type, *, partial=False):
     if fields is None:
         raise ValueError("custom canvas layer type is not supported")
     optional_fields = {"rotation"} if layer_type in {"text", "time", "pixels", "line"} else set()
+    if layer_type == "pixels":
+        optional_fields.update({"bitmap_rgba", "offset_x", "offset_y"})
     if layer_type == "media":
         optional_fields.add("playback_speed_percent")
     allowed_fields = fields | optional_fields | {"present", "z_index"}
-    if (
-        not isinstance(properties, dict)
-        or (not partial and (not fields <= set(properties) or not set(properties) <= allowed_fields))
-        or (partial and not set(properties) <= allowed_fields)
-    ):
+    if not isinstance(properties, dict) or not set(properties) <= allowed_fields:
         raise ValueError("custom canvas layer properties are invalid")
-    for key in ("x", "y", "x1", "y1", "x2", "y2"):
+    if not partial:
+        if layer_type == "pixels":
+            legacy = {"points", "colour"} <= set(properties)
+            bitmap = {"bitmap_rgba", "offset_x", "offset_y"} <= set(properties)
+            if legacy == bitmap:
+                raise ValueError("custom canvas pixels must use exactly one representation")
+            if legacy and set(properties) & {"bitmap_rgba", "offset_x", "offset_y"}:
+                raise ValueError("custom canvas pixel representations are mutually exclusive")
+            if bitmap and set(properties) & {"points", "colour"}:
+                raise ValueError("custom canvas pixel representations are mutually exclusive")
+        elif not fields <= set(properties):
+            raise ValueError("custom canvas layer properties are invalid")
+    for key in ("x", "y", "x1", "y1", "x2", "y2", "offset_x", "offset_y"):
         if key in properties:
             value = properties[key]
-            if isinstance(value, bool) or not isinstance(value, (int, float)) or not -128 <= value <= 191:
+            numeric = isinstance(value, int) if key in {"offset_x", "offset_y"} else isinstance(value, (int, float))
+            if isinstance(value, bool) or not numeric or not -128 <= value <= 191:
                 raise ValueError(f"custom canvas {key} must be between -128 and 191")
     for key in ("width", "height"):
         if key in properties:
@@ -417,6 +430,19 @@ def _validate_canvas_properties(properties, layer_type, *, partial=False):
                 or any(isinstance(value, bool) or not isinstance(value, (int, float)) or not -128 <= value <= 191 for value in point)
             ):
                 raise ValueError("custom canvas points must be numeric x/y pairs")
+    if "bitmap_rgba" in properties:
+        value = properties["bitmap_rgba"]
+        if not isinstance(value, str):
+            raise ValueError("custom canvas bitmap_rgba must be canonical base64")
+        try:
+            decoded = base64.b64decode(value, validate=True)
+        except (binascii.Error, ValueError) as error:
+            raise ValueError("custom canvas bitmap_rgba must be canonical base64") from error
+        if len(decoded) != 64 * 32 * 4 or base64.b64encode(decoded).decode("ascii") != value:
+            raise ValueError("custom canvas bitmap_rgba must encode exactly 8192 bytes")
+        for red, green, blue, alpha in zip(decoded[0::4], decoded[1::4], decoded[2::4], decoded[3::4]):
+            if alpha not in {0, 255} or (alpha == 0 and (red or green or blue)):
+                raise ValueError("custom canvas bitmap_rgba must use canonical transparent or opaque cells")
     return len(properties.get("points", []))
 
 
@@ -458,6 +484,7 @@ def _validate_canvas_module(item):
         if not isinstance(layer["visible"], bool):
             raise ValueError("custom canvas layer visible must be a boolean")
         point_total += _validate_canvas_properties(layer["properties"], layer["type"])
+        bitmap_pixels = layer["type"] == "pixels" and "bitmap_rgba" in layer["properties"]
         keyframes = layer["keyframes"]
         if not isinstance(keyframes, list):
             raise ValueError("custom canvas keyframes must be a list")
@@ -473,6 +500,10 @@ def _validate_canvas_module(item):
             if keyframe["easing"] not in {"linear", "ease_in", "ease_out", "ease_in_out", "step"}:
                 raise ValueError("custom canvas keyframe easing is invalid")
             point_total += _validate_canvas_properties(keyframe["properties"], layer["type"], partial=True)
+            if bitmap_pixels and set(keyframe["properties"]) & {"points", "colour", "bitmap_rgba"}:
+                raise ValueError("custom canvas bitmap keyframes may only change placement and common properties")
+            if "bitmap_rgba" in keyframe["properties"]:
+                raise ValueError("custom canvas bitmap_rgba is only valid in base properties")
     if keyframe_total > 512:
         raise ValueError("custom canvas supports at most 512 keyframes")
     overrides = item["overrides"]
@@ -480,6 +511,10 @@ def _validate_canvas_module(item):
         raise ValueError("custom canvas overrides must be a list with at most 512 items")
     seen_overrides = set()
     layer_types = {layer["id"]: layer["type"] for layer in layers}
+    bitmap_layers = {
+        layer["id"] for layer in layers
+        if layer["type"] == "pixels" and "bitmap_rgba" in layer["properties"]
+    }
     for override in overrides:
         if not isinstance(override, dict) or set(override) != {"frame", "layer_id", "properties"}:
             raise ValueError("custom canvas overrides have invalid fields")
@@ -492,6 +527,10 @@ def _validate_canvas_module(item):
             raise ValueError("custom canvas override layer is invalid or duplicated")
         seen_overrides.add(key)
         point_total += _validate_canvas_properties(override["properties"], layer_types[layer_id], partial=True)
+        if layer_id in bitmap_layers and set(override["properties"]) & {"points", "colour", "bitmap_rgba"}:
+            raise ValueError("custom canvas bitmap overrides may only change placement and common properties")
+        if "bitmap_rgba" in override["properties"]:
+            raise ValueError("custom canvas bitmap_rgba is only valid in base properties")
     if point_total > 8192:
         raise ValueError("custom canvas supports at most 8192 aggregate points")
 

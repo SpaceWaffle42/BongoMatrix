@@ -11804,6 +11804,101 @@ process.stdout.write(JSON.stringify({
                 })
 
     @unittest.skipUnless(shutil.which("node"), "Node.js is required")
+    def test_browser_pixel_bitmap_matches_physical_renderer(self):
+        pixels = bytearray(64 * 32 * 4)
+        for (x, y), rgba in {
+            (0, 0): (0, 0, 0, 255),
+            (63, 0): (255, 0, 0, 255),
+            (0, 31): (0, 255, 0, 255),
+            (63, 31): (0, 0, 255, 255),
+            (4, 3): (7, 8, 9, 255),
+            (5, 3): (0, 0, 0, 0),
+        }.items():
+            start = (y * 64 + x) * 4
+            pixels[start:start + 4] = bytes(rgba)
+        properties = {
+            "bitmap_rgba": base64.b64encode(pixels).decode("ascii"),
+            "offset_x": -2, "offset_y": 1, "rotation": 90,
+        }
+
+        harness = r"""
+const fs = require('fs');
+global.window = global;
+global.document = {
+  querySelectorAll: () => [],
+  querySelector: () => ({replaceChildren() {}, append() {}}),
+  createElement: () => ({}),
+};
+global.CSS = {escape: value => value};
+global.customModules = [];
+global.mediaItems = [];
+global.confirm = () => true;
+global.setInterval = () => 0;
+global.syncCustomModuleUI = () => {};
+global.syncPlaylistDurations = () => {};
+global.setMessage = () => {};
+eval(fs.readFileSync('app/static/custom_canvas.js', 'utf8'));
+const drawn = [[10, 10, 9, 8, 7]];
+const context = {
+  globalAlpha: 1, strokeStyle: '', fillStyle: '', lineWidth: 1,
+  save() {}, restore() {}, setLineDash() {},
+  fillRect(x, y) {
+    const colour = this.fillStyle.match(/\d+/g).map(Number);
+    drawn.push([x, y, ...colour]);
+  },
+};
+drawCanvasShape(context, {type: 'pixels'}, JSON.parse(process.argv[1]));
+process.stdout.write(JSON.stringify(drawn));
+"""
+        result = subprocess.run(
+            [shutil.which("node"), "-e", harness, json.dumps(properties)],
+            cwd=Path(__file__).parents[1], text=True, capture_output=True, check=False,
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+
+        from modules import custom_text
+        matrix = Mock()
+        matrix.pixel(10, 10, 9, 8, 7, canvas="canvas")
+        custom_text._draw_layer(
+            matrix, "canvas",
+            {"id": "pixel", "name": "Pixel", "type": "pixels", "visible": True,
+             "keyframes": []},
+            properties,
+        )
+        physical = [list(invocation.args[:5]) for invocation in matrix.pixel.call_args_list]
+        self.assertEqual(json.loads(result.stdout), physical)
+
+        asymmetric = bytearray(64 * 32 * 4)
+        for (x, y), rgba in {
+            (0, 0): (255, 0, 0, 255),
+            (2, 0): (0, 255, 0, 255),
+            (0, 2): (0, 0, 255, 255),
+        }.items():
+            start = (y * 64 + x) * 4
+            asymmetric[start:start + 4] = bytes(rgba)
+        asymmetric_properties = {
+            "bitmap_rgba": base64.b64encode(asymmetric).decode("ascii"),
+            "offset_x": 10, "offset_y": 10, "rotation": 90,
+        }
+        browser = subprocess.run(
+            [shutil.which("node"), "-e", harness, json.dumps(asymmetric_properties)],
+            cwd=Path(__file__).parents[1], text=True, capture_output=True, check=False,
+        )
+        self.assertEqual(browser.returncode, 0, browser.stderr)
+        asymmetric_matrix = Mock()
+        asymmetric_matrix.pixel(10, 10, 9, 8, 7, canvas="canvas")
+        custom_text._draw_layer(
+            asymmetric_matrix, "canvas",
+            {"id": "pixel", "name": "Pixel", "type": "pixels", "visible": True,
+             "keyframes": []},
+            asymmetric_properties,
+        )
+        asymmetric_physical = [
+            list(invocation.args[:5]) for invocation in asymmetric_matrix.pixel.call_args_list
+        ]
+        self.assertEqual(json.loads(browser.stdout), asymmetric_physical)
+
+    @unittest.skipUnless(shutil.which("node"), "Node.js is required")
     def test_browser_playback_sequences_match_physical_renderer(self):
         asset = (Path(__file__).parents[1] / "app/static/custom_canvas.js").read_text()
         self.assertIn(

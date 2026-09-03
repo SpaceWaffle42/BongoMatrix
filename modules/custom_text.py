@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import base64
 import copy
 import math
 import time
@@ -194,6 +195,28 @@ def _draw_layer(matrix, canvas, layer, properties, *, media_cache=None, frame=0)
                 keep_aspect=properties["keep_aspect"], rotation=properties["rotation"],
                 canvas=canvas,
             )
+        return
+    if layer_type == "pixels" and "bitmap_rgba" in properties:
+        bitmap = base64.b64decode(properties["bitmap_rgba"], validate=True)
+        points = []
+        colours = []
+        offset_x = properties.get("offset_x", 0)
+        offset_y = properties.get("offset_y", 0)
+        for index in range(64 * 32):
+            red, green, blue, alpha = bitmap[index * 4:index * 4 + 4]
+            if alpha:
+                points.append((index % 64 + offset_x, index // 64 + offset_y))
+                colours.append((red, green, blue))
+        centre = None
+        if points:
+            centre = (
+                (min(x for x, _ in points) + max(x for x, _ in points)) / 2,
+                (min(y for _, y in points) + max(y for _, y in points)) / 2,
+            )
+        rotated = _rotated(points, properties.get("rotation", 0), centre) if points else []
+        for (x, y), (red, green, blue) in zip(rotated, colours):
+            if 0 <= x < 64 and 0 <= y < 32:
+                matrix.pixel(x, y, red, green, blue, canvas=canvas)
         return
     colour = matrix.colour_rgb(properties["colour"])
     if layer_type == "text":
