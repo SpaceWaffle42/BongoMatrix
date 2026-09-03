@@ -251,7 +251,10 @@ def _draw_layer(matrix, canvas, layer, properties, *, media_cache=None, frame=0)
         x, y = properties["x"], properties["y"]
         width, height = properties["width"], properties["height"]
         points = _rotated([(x, y), (x + width - 1, y), (x + width - 1, y + height - 1), (x, y + height - 1)], properties["rotation"])
-        _draw_polygon(matrix, canvas, points, colour, properties["filled"])
+        if properties["filled"] and width == 1 and height == 1:
+            matrix.pixel(points[0][0], points[0][1], colour.red, colour.green, colour.blue, canvas=canvas)
+        else:
+            _draw_polygon(matrix, canvas, points, colour, properties["filled"])
     elif layer_type == "polygon":
         _draw_polygon(matrix, canvas, _rotated(properties["points"], properties["rotation"]), colour, properties["filled"])
     elif layer_type == "circle":
