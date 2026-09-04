@@ -25,6 +25,7 @@ from werkzeug.serving import make_server
 
 from PIL import Image, UnidentifiedImageError
 
+import config_store
 from config_store import ConfigStore
 from display_controller import DisplayController
 from font_catalog import available_font_names
@@ -1774,7 +1775,7 @@ context.globalThis=context;vm.createContext(context);vm.runInContext(process.arg
         body = self.client.get("/").get_data(as_text=True)
 
         for fragment in (
-            "function scheduleDevicePreview(delay)",
+            "function scheduleDevicePreview(delay,retireInFlight=false)",
             "function startDevicePreview()",
             "function stopDevicePreview",
             "'/api/device-preview/'",
@@ -1783,7 +1784,7 @@ context.globalThis=context;vm.createContext(context);vm.runInContext(process.arg
             "selected_lava_palette",
             "keepalive:true",
             "devicePreviewDelay(event)",
-            "scheduleDevicePreview(delay??150)",
+            "scheduleDevicePreview(delay??150,true)",
             "cancelDevicePreviewForSave",
             "pagehide",
         ):
@@ -11803,6 +11804,1247 @@ process.stdout.write(JSON.stringify({
                     "custom_modules": [module],
                 })
 
+    @staticmethod
+    def _pixel_payload_config(bitmap_layers, target_bytes):
+        """Build an exact-size, field-bounded config without padding keys/whitespace."""
+        candidate = copy.deepcopy(config_store.DEFAULT_CONFIG)
+        candidate.pop("revision")
+        candidate.pop("schema_version")
+        bitmap = base64.b64encode(bytes(64 * 32 * 4)).decode("ascii")
+        pixels = [
+            {
+                "id": f"layer_bitmap_{index}", "name": f"Bitmap {index}",
+                "type": "pixels", "visible": True,
+                "properties": {
+                    "bitmap_rgba": bitmap, "offset_x": 0, "offset_y": 0,
+                    "rotation": 0,
+                },
+                "keyframes": [],
+            }
+            for index in range(bitmap_layers)
+        ]
+        modules = [test_config_store.ConfigStoreTests.advanced_module(
+            id="custom_bitmap_boundary", name="Bitmap boundary", frame_count=120,
+            layers=pixels, overrides=[],
+        )]
+        adjustable = []
+        module_index = 0
+        def javascript_value(value):
+            if isinstance(value, float) and value.is_integer():
+                return int(value)
+            if isinstance(value, list):
+                return [javascript_value(item) for item in value]
+            if isinstance(value, dict):
+                return {key: javascript_value(item) for key, item in value.items()}
+            return value
+        compact = lambda value: json.dumps(
+            javascript_value(value), separators=(",", ":"), ensure_ascii=False,
+        ).encode("utf-8")
+        while True:
+            candidate["custom_modules"] = modules
+            minimum = len(compact(candidate))
+            capacity = len(adjustable) * 199
+            if minimum <= target_bytes <= minimum + capacity:
+                break
+            if minimum > target_bytes or len(modules) >= 20:
+                raise AssertionError(
+                    f"target {target_bytes} is unreachable for {bitmap_layers} bitmap layers; "
+                    f"bounded interval is [{minimum}, {minimum + capacity}]"
+                )
+            layers = []
+            for layer_index in range(64):
+                properties = {
+                    "x": 0, "y": 7, "text": "X", "font": "5x7",
+                    "colour": "#ffffff",
+                }
+                adjustable.append(properties)
+                keyframes = []
+                for frame in range(8):
+                    partial = {"text": "X"}
+                    adjustable.append(partial)
+                    keyframes.append({
+                        "frame": frame, "easing": "linear", "properties": partial,
+                    })
+                layers.append({
+                    "id": f"layer_f{module_index}_{layer_index}",
+                    "name": f"Filler {layer_index}", "type": "text", "visible": True,
+                    "properties": properties, "keyframes": keyframes,
+                })
+            modules.append(test_config_store.ConfigStoreTests.advanced_module(
+                id=f"custom_filler_{module_index}", name=f"Filler {module_index}",
+                frame_count=120, layers=layers, overrides=[],
+            ))
+            module_index += 1
+        remaining = target_bytes - minimum
+        for properties in adjustable:
+            addition = min(199, remaining)
+            properties["text"] += "X" * addition
+            remaining -= addition
+            if not remaining:
+                break
+        body = compact(candidate)
+        if len(body) != target_bytes:
+            raise AssertionError((len(body), target_bytes))
+        return candidate
+
+    @staticmethod
+    def _pixel_wrapper_config(bitmap_layers, target_bytes, kind):
+        empty = {"config": {}, "generation": 1, "preview_instance": "a" * 32}
+        if kind == "device":
+            # This is the exact browser wrapper; timeout_seconds is server-defaulted.
+            wrapper = empty
+        elif kind == "edit":
+            wrapper = empty
+        else:
+            raise AssertionError(kind)
+        overhead = len(json.dumps(wrapper, separators=(",", ":")).encode()) - 2
+        return WebAppTests._pixel_payload_config(bitmap_layers, target_bytes - overhead)
+
+    @unittest.skipUnless(shutil.which("node"), "Node.js is required")
+    def _assert_pixel_json_request_exact_schema_boundaries(self):
+        """Exact request bytes use valid bounded fields, never unknown padding."""
+        self.pair_browser()
+        dashboard = self.client.get("/").get_data(as_text=True)
+        source = re.search(
+            r"const MATRIX_JSON_REQUEST_LIMIT=1048576;.*?globalThis\.matrixJsonRequestBody=matrixJsonRequestBody;",
+            dashboard, re.DOTALL,
+        )
+        self.assertIsNotNone(source)
+        cases = []
+        maxima = {}
+        for bitmap_layers in (1, 64):
+            # A full Save omits the two server-owned fields. Their canonical compact
+            # representation adds 32 bytes, while Python's canonical persistence
+            # retains six bounded integral floats that JSON.stringify emits as
+            # integers. Thus 1,048,538 is the largest valid browser Save body.
+            maximum = self._pixel_payload_config(bitmap_layers, 1_048_538)
+            full = copy.deepcopy(maximum)
+            full.update({"revision": 0, "schema_version": config_store.CURRENT_CONFIG_SCHEMA_VERSION})
+            validated = config_store.validate_config(
+                full, allow_legacy_announcements=False,
+                allow_missing_custom_loops=False, enforce_save_bounds=True,
+            )
+            canonical_size = len(config_store._serialize_config(validated))
+            self.assertEqual(canonical_size, 1_048_576)
+            maxima[str(bitmap_layers)] = {
+                "request": 1_048_538,
+                "canonical": canonical_size,
+            }
+            cases.append({"label": f"save-max-{bitmap_layers}", "payload": maximum, "ok": True})
+
+            # The endpoint boundary itself is still tested exactly with a config
+            # whose every field remains structurally valid. Save-bound validation
+            # alone rejects these because adding server-owned fields exceeds 1 MiB.
+            for target in (1_048_575, 1_048_576, 1_048_577):
+                generic = self._pixel_payload_config(bitmap_layers, target)
+                structural = copy.deepcopy(generic)
+                structural.update({"revision": 0, "schema_version": config_store.CURRENT_CONFIG_SCHEMA_VERSION})
+                config_store.validate_config(
+                    structural, allow_legacy_announcements=False,
+                    allow_missing_custom_loops=False, enforce_save_bounds=False,
+                )
+                with self.assertRaisesRegex(ValueError, "1 MiB"):
+                    config_store.validate_config(
+                        copy.deepcopy(structural), allow_legacy_announcements=False,
+                        allow_missing_custom_loops=False, enforce_save_bounds=True,
+                    )
+                cases.append({
+                    "label": f"generic-save-{bitmap_layers}-{target}",
+                    "payload": generic, "ok": target <= 1_048_576,
+                })
+                for kind in ("edit", "device"):
+                    config = self._pixel_wrapper_config(bitmap_layers, target, kind)
+                    full_wrapper_config = copy.deepcopy(config)
+                    full_wrapper_config.update({
+                        "revision": 0,
+                        "schema_version": config_store.CURRENT_CONFIG_SCHEMA_VERSION,
+                    })
+                    config_store.validate_config(
+                        full_wrapper_config, allow_legacy_announcements=False,
+                        allow_missing_custom_loops=False, enforce_save_bounds=True,
+                    )
+                    cases.append({
+                        "label": f"{kind}-{bitmap_layers}-{target}",
+                        "payload": {
+                            "config": config, "generation": 1,
+                            "preview_instance": "a" * 32,
+                        },
+                        "ok": target <= 1_048_576,
+                    })
+
+        harness = r"""
+const fs=require('fs'),input=JSON.parse(fs.readFileSync(0,'utf8'));
+globalThis.TextEncoder=require('util').TextEncoder;
+eval(input.source);
+const observations=[];
+for(const item of input.cases){
+  const bytes=new TextEncoder().encode(JSON.stringify(item.payload)).byteLength;
+  let admitted=true,code=null;
+  try{matrixJsonRequestBody(item.payload)}catch(error){admitted=false;code=error.code}
+  observations.push({label:item.label,bytes,admitted,code});
+}
+process.stdout.write(JSON.stringify(observations));
+"""
+        completed = subprocess.run(
+            [shutil.which("node"), "-e", harness],
+            input=json.dumps({"source": source.group(0), "cases": cases}),
+            cwd=Path(__file__).parents[1], text=True, capture_output=True,
+            timeout=30, check=False,
+        )
+        self.assertEqual(completed.returncode, 0, completed.stderr)
+        observations = json.loads(completed.stdout)
+        expected = {item["label"]: item for item in cases}
+        self.assertEqual(set(expected), {item["label"] for item in observations})
+        for observed in observations:
+            item = expected[observed["label"]]
+            suffix = observed["label"].rsplit("-", 1)[-1]
+            target = 1_048_538 if observed["label"].startswith("save-max-") else int(suffix)
+            self.assertEqual(observed["bytes"], target, observed["label"])
+            self.assertEqual(observed["admitted"], item["ok"], observed)
+            self.assertEqual(observed["code"], None if item["ok"] else "MATRIX_REQUEST_TOO_LARGE")
+        self.assertEqual(maxima, {
+            "1": {"request": 1_048_538, "canonical": 1_048_576},
+            "64": {"request": 1_048_538, "canonical": 1_048_576},
+        })
+
+    @unittest.skipUnless(shutil.which("node"), "Node.js is required")
+    @unittest.skipUnless(
+        os.environ.get("MATRIX_CHROMIUM")
+        and Path(os.environ.get("MATRIX_CHROMIUM", "")).is_file()
+        and os.access(os.environ.get("MATRIX_CHROMIUM", ""), os.X_OK),
+        "MATRIX_CHROMIUM browser is required",
+    )
+    def _assert_pixel_oversized_requests_reject_before_lifecycle_side_effects(self):
+        """The exact +1 Save/edit/device bodies do not cross public seams."""
+        module = test_config_store.ConfigStoreTests.advanced_module(
+            id="custom_pixels", name="Pixel boundary",
+            layers=[{
+                "id": "layer_pixel", "name": "Pixels", "type": "pixels",
+                "visible": True,
+                "properties": {
+                    "bitmap_rgba": base64.b64encode(bytes(8192)).decode("ascii"),
+                    "offset_x": 0, "offset_y": 0, "rotation": 0,
+                },
+                "keyframes": [],
+            }], overrides=[],
+        )
+        self.store.update({"custom_modules": [module]})
+        self.pair_browser()
+        fixtures = {}
+        for count in (1, 64):
+            fixtures[str(count)] = {
+                "save": self._pixel_payload_config(count, 1_048_577),
+                "edit": self._pixel_wrapper_config(count, 1_048_577, "edit"),
+                "device": self._pixel_wrapper_config(count, 1_048_577, "device"),
+            }
+        body = self.client.get("/").get_data(as_text=True).replace(
+            "</head>",
+            "<script>globalThis.__pixelBoundaryFixtures="
+            + json.dumps(fixtures, separators=(",", ":"))
+            + ";</script></head>",
+            1,
+        )
+        probe = r"""
+const port=process.argv[1],pagePath=process.argv[2];let endpoint;
+for(let attempt=0;attempt<50;attempt++){try{endpoint=await fetch(`http://127.0.0.1:${port}/json/new`,{method:'PUT'}).then(response=>response.json());break}catch(_){await new Promise(resolve=>setTimeout(resolve,100))}}
+if(!endpoint)throw new Error('Chromium DevTools endpoint unavailable');
+const socket=new WebSocket(endpoint.webSocketDebuggerUrl),pending=new Map(),exceptions=[];let id=0,resolveLoad=()=>{},loaded;
+socket.onmessage=event=>{const message=JSON.parse(event.data);if(message.id&&pending.has(message.id)){const request=pending.get(message.id);pending.delete(message.id);message.error?request.reject(new Error(JSON.stringify(message.error))):request.resolve(message.result)}else if(message.method==='Runtime.exceptionThrown')exceptions.push(message.params.exceptionDetails);else if(message.method==='Page.loadEventFired')resolveLoad()};
+await new Promise((resolve,reject)=>{socket.onopen=resolve;socket.onerror=reject});
+const send=(method,params={})=>new Promise((resolve,reject)=>{const request=++id;pending.set(request,{resolve,reject});socket.send(JSON.stringify({id:request,method,params}))});
+const evaluate=async expression=>{const result=await send('Runtime.evaluate',{expression,returnByValue:true,awaitPromise:true});if(result.exceptionDetails)throw new Error(JSON.stringify(result.exceptionDetails));return result.result.value};
+try{await send('Runtime.enable');await send('Page.enable');loaded=new Promise(resolve=>resolveLoad=resolve);await send('Page.navigate',{url:'file://'+pagePath});await Promise.race([loaded,new Promise((_,reject)=>setTimeout(()=>reject(new Error('load timeout')),10000))]);
+const report=await evaluate(`(async()=>{stopMatrixConfigSync();clearInterval(matrixStatusTimer);clearTimeout(matrixFrameTimer);matrixStatusTimer=null;matrixFrameTimer=null;matrixSyncStopped=false;const observations=[];for(const count of ['1','64']){const fixture=__pixelBoundaryFixtures[count],calls=[];api=async(path,options={})=>{calls.push({path,body:options.body||null});return {generation:999,heartbeat_after_seconds:60}};globalThis.__cancelCalls=0;globalThis.cancelDevicePreviewForSave=async()=>{__cancelCalls++;return true};const layer=customModules.find(item=>item.id==='custom_pixels').layers[0],uiButtons=()=>[...document.querySelectorAll('[data-pixel-action="undo"],[data-pixel-action="redo"]')].map(item=>item.disabled),before={bitmap:layer.properties.bitmap_rgba,modules:JSON.stringify(customModules),history:uiButtons(),canvas:document.querySelector('.pixel-grid').toDataURL(),device:[devicePreviewGeneration,devicePreviewRequestGeneration,devicePreviewActiveGeneration,devicePreviewStatus.textContent],edit:[editPreviewGeneration,editPreviewSession,editPreviewFrames.length]};configBody=()=>fixture.save;const save=await saveConfig();const afterSave={calls:calls.length,cancels:__cancelCalls};configBody=()=>fixture.device;previewMode='edit';devicePreviewEnabled=true;await runDevicePreviewRequest();const afterDevice={calls:calls.length,generation:devicePreviewGeneration,request:devicePreviewRequestGeneration,active:devicePreviewActiveGeneration};configBody=()=>fixture.edit;const editGeneration=editPreviewGeneration;await startEditPreview();const afterEdit={calls:calls.length,generation:editPreviewGeneration,session:editPreviewSession,frames:editPreviewFrames.length};const after={bitmap:layer.properties.bitmap_rgba,modules:JSON.stringify(customModules),history:uiButtons(),canvas:document.querySelector('.pixel-grid').toDataURL(),device:[devicePreviewGeneration,devicePreviewRequestGeneration,devicePreviewActiveGeneration],edit:[editPreviewGeneration,editPreviewSession,editPreviewFrames.length]};observations.push({count,sizes:{save:new TextEncoder().encode(JSON.stringify(fixture.save)).length,edit:new TextEncoder().encode(JSON.stringify({config:fixture.edit,generation:1,preview_instance:'a'.repeat(32)})).length,device:new TextEncoder().encode(JSON.stringify({config:fixture.device,generation:1,preview_instance:'a'.repeat(32)})).length},before,save,afterSave,afterDevice,afterEdit,editGeneration,after});}return observations})()`);
+console.log(JSON.stringify({report,exceptions}));
+}finally{socket.close()}
+"""
+        result = self._run_dashboard_chromium_probe(body, probe, timeout=60)
+        self.assertEqual(result["exceptions"], [])
+        self.assertEqual([item["count"] for item in result["report"]], ["1", "64"])
+        for item in result["report"]:
+            self.assertEqual(item["sizes"], {
+                "save": 1_048_577, "edit": 1_048_577, "device": 1_048_577,
+            })
+            self.assertFalse(item["save"]["saved"])
+            self.assertEqual(item["afterSave"], {"calls": 0, "cancels": 0})
+            self.assertEqual(item["afterDevice"], {
+                "calls": 0,
+                "generation": item["before"]["device"][0],
+                "request": item["before"]["device"][1],
+                "active": item["before"]["device"][2],
+            })
+            self.assertEqual(item["afterEdit"], {
+                "calls": 0, "generation": item["editGeneration"],
+                "session": item["before"]["edit"][1],
+                "frames": item["before"]["edit"][2],
+            })
+            self.assertEqual(item["after"]["bitmap"], item["before"]["bitmap"])
+            self.assertEqual(item["after"]["modules"], item["before"]["modules"])
+            self.assertEqual(item["after"]["history"], item["before"]["history"])
+            self.assertEqual(item["after"]["canvas"], item["before"]["canvas"])
+
+    @unittest.skipUnless(shutil.which("node"), "Node.js is required")
+    def test_pixel_bitmap_operations_are_gap_free_atomic_and_undoable(self):
+        harness = r"""
+const fs = require('fs');
+global.window = global;
+global.document = {
+  documentElement: null,
+  querySelectorAll: () => [],
+  querySelector: () => ({replaceChildren() {}, append() {}}),
+  createElement: () => ({}),
+};
+global.CSS = {escape: value => value};
+global.customModules = [];
+global.mediaItems = [];
+global.confirm = () => true;
+global.setInterval = () => 0;
+global.syncCustomModuleUI = () => {};
+global.syncPlaylistDurations = () => {};
+global.setMessage = () => {};
+eval(fs.readFileSync('app/static/custom_canvas.js', 'utf8'));
+
+const ops = global.matrixPixelBitmapOperations;
+if (!ops) throw new Error('missing production bitmap-operation/history seam');
+if (!Object.isFrozen(ops)) throw new Error('helper surface must be frozen');
+const point = (x, y) => `${x},${y}`;
+const expectedLines = [
+  [[0, 0], [63, 0]], [[5, 0], [5, 31]],
+  [[0, 0], [31, 31]], [[63, 0], [32, 31]],
+  [[2, 1], [9, 31]], [[61, 30], [4, 2]],
+];
+for (const [start, end] of expectedLines) {
+  const cells = ops.lineCells(start[0], start[1], end[0], end[1]);
+  if (point(...cells[0]) !== point(...start) || point(...cells.at(-1)) !== point(...end)) {
+    throw new Error(`line endpoints missing: ${JSON.stringify([start, end, cells])}`);
+  }
+  const unique = new Set(cells.map(cell => point(...cell)));
+  if (unique.size !== cells.length) throw new Error('line repeated a cell');
+  for (let index = 1; index < cells.length; index++) {
+    const dx = Math.abs(cells[index][0] - cells[index - 1][0]);
+    const dy = Math.abs(cells[index][1] - cells[index - 1][1]);
+    if (dx > 1 || dy > 1 || dx + dy === 0) throw new Error('line contains a gap');
+  }
+}
+
+const source = new Uint8Array(64 * 32 * 4);
+source.set([9, 8, 7, 6], 0);
+const exactSource = Buffer.from(source).toString('hex');
+const editor = ops.create();
+ops.selectLayer(editor, 'module-a', 'layer-a', source);
+const rgba = [10, 20, 30, 255];
+ops.beginStroke(editor, 'draw', rgba);
+ops.extendStroke(editor, 0, 0);
+ops.extendStroke(editor, 63, 0);
+ops.extendStroke(editor, 63, 0);
+ops.extendStroke(editor, 63, 31);
+ops.extendStroke(editor, 0, 31);
+ops.extendStroke(editor, 0, 0);
+if (!ops.endStroke(editor)) throw new Error('changed stroke was reported as a no-op');
+if (editor.undo.length !== 1 || editor.redo.length !== 0) throw new Error('one stroke must be one undo unit');
+for (const [x, y] of [[0, 0], [63, 0], [63, 31], [0, 31], [32, 0], [63, 16], [32, 31], [0, 16]]) {
+  const byte = (y * 64 + x) * 4;
+  if (editor.bitmap[byte] !== 10 || editor.bitmap[byte + 3] !== 255) throw new Error(`draw missed ${x},${y}`);
+}
+if (!ops.undo(editor) || editor.bitmap[0] !== 9 || editor.bitmap[3] !== 6) throw new Error('stroke undo failed');
+if (!ops.redo(editor) || editor.bitmap[0] !== 10 || editor.bitmap[3] !== 255) throw new Error('stroke redo failed');
+
+ops.beginStroke(editor, 'erase');
+ops.extendStroke(editor, 0, 0);
+ops.extendStroke(editor, 63, 31);
+if (!ops.endStroke(editor)) throw new Error('erase stroke was reported as a no-op');
+for (const [x, y] of [[0, 0], [31, 15], [63, 31]]) {
+  const byte = (y * 64 + x) * 4;
+  if (editor.bitmap[byte + 3] !== 0) throw new Error(`erase missed ${x},${y}`);
+}
+
+const beforeCancel = Buffer.from(editor.bitmap).toString('hex');
+ops.beginStroke(editor, 'draw', [1, 2, 3, 255]);
+ops.extendStroke(editor, 4, 4);
+ops.extendStroke(editor, 60, 29);
+if (!ops.cancelStroke(editor)) throw new Error('changed stroke cancel was reported as a no-op');
+if (Buffer.from(editor.bitmap).toString('hex') !== beforeCancel) throw new Error('pointer cancel changed source bytes');
+if (Buffer.from(source).toString('hex') !== exactSource) throw new Error('editor mutated caller source bytes');
+
+if (!ops.fill(editor, [4, 5, 6, 255])) throw new Error('fill was a no-op');
+if (editor.bitmap[0] !== 4 || editor.bitmap.at(-1) !== 255) throw new Error('fill failed');
+if (ops.fill(editor, [4, 5, 6, 255])) throw new Error('identical fill created history');
+if (!ops.clear(editor) || editor.bitmap.some(Boolean)) throw new Error('clear failed');
+if (ops.clear(editor)) throw new Error('empty clear created history');
+if (!ops.undo(editor) || editor.bitmap[0] !== 4) throw new Error('clear undo failed');
+if (!ops.redo(editor) || editor.bitmap.some(Boolean)) throw new Error('clear redo failed');
+if (!ops.undo(editor)) throw new Error('second clear undo failed');
+ops.beginStroke(editor, 'draw', [7, 8, 9, 255]);
+ops.extendStroke(editor, 1, 1);
+ops.endStroke(editor);
+if (editor.redo.length !== 0 || ops.redo(editor)) throw new Error('new edit did not invalidate redo');
+
+for (let index = 0; index < 40; index++) {
+  ops.fill(editor, [index, index + 1, index + 2, 255]);
+}
+if (editor.undo.length + editor.redo.length !== 32) throw new Error('combined history exceeds 32 snapshots');
+for (let index = 0; index < 11; index++) ops.undo(editor);
+if (editor.undo.length + editor.redo.length !== 32) throw new Error('undo changed combined history budget');
+for (let index = 0; index < 4; index++) ops.redo(editor);
+if (editor.undo.length + editor.redo.length !== 32) throw new Error('redo changed combined history budget');
+ops.selectLayer(editor, 'module-a', 'layer-a', editor.bitmap);
+ops.beginStroke(editor, 'draw', [200, 201, 202, 255]);
+if (ops.storageBytes(editor) !== 294912) throw new Error(`raw editor storage was ${ops.storageBytes(editor)}, expected 294912`);
+ops.cancelStroke(editor);
+
+const other = new Uint8Array(64 * 32 * 4); other[7] = 77;
+ops.selectLayer(editor, 'module-b', 'layer-b', other);
+if (editor.moduleId !== 'module-b' || editor.layerId !== 'layer-b' || editor.bitmap[7] !== 77) throw new Error('module switch did not select new layer');
+if (editor.undo.length || editor.redo.length || editor.inProgress !== null) throw new Error('module switch retained layer history');
+if (ops.storageBytes(editor) !== 24576) throw new Error('module switch did not tear down selected-layer storage');
+ops.teardown(editor);
+if (ops.storageBytes(editor) !== 0 || editor.bitmap !== null || editor.selectedCache !== null) throw new Error('teardown retained selected-layer cache');
+process.stdout.write(JSON.stringify({lineCases: expectedLines.length, historyLimit: 32, storageBytes: 294912}));
+"""
+        result = subprocess.run(
+            [shutil.which("node"), "-e", harness],
+            cwd=Path(__file__).parents[1], text=True, capture_output=True, check=False,
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(
+            json.loads(result.stdout),
+            {"lineCases": 6, "historyLimit": 32, "storageBytes": 294912},
+        )
+
+    @unittest.skipUnless(shutil.which("node"), "Node.js is required")
+    @unittest.skipUnless(
+        os.environ.get("MATRIX_CHROMIUM")
+        and Path(os.environ.get("MATRIX_CHROMIUM", "")).is_file()
+        and os.access(os.environ.get("MATRIX_CHROMIUM", ""), os.X_OK),
+        "MATRIX_CHROMIUM browser is required",
+    )
+    def _assert_pixel_editor_contextual_toolbar_and_grid_in_real_chromium(self):
+        pixels = bytearray(64 * 32 * 4)
+        pixels[(1 * 64 + 1) * 4:(1 * 64 + 1) * 4 + 4] = bytes((0, 0, 0, 255))
+        module = test_config_store.ConfigStoreTests.advanced_module(
+            id="custom_pixels", name="Pixel editor", background="#123456",
+            layers=[
+                {
+                    "id": "layer_pixel", "name": "Pixel art", "type": "pixels",
+                    "visible": True,
+                    "properties": {
+                        "bitmap_rgba": base64.b64encode(pixels).decode("ascii"),
+                        "offset_x": 0, "offset_y": 0, "rotation": 0,
+                    },
+                    "keyframes": [],
+                },
+                {
+                    "id": "layer_text", "name": "Other layer", "type": "text",
+                    "visible": True,
+                    "properties": {
+                        "x": 40, "y": 20, "text": "T", "font": "5x7",
+                        "rotation": 0, "colour": "#ffffff",
+                    },
+                    "keyframes": [],
+                },
+            ],
+            overrides=[],
+        )
+        second_module = copy.deepcopy(module)
+        second_module["id"] = "custom_pixels_second"
+        second_module["name"] = "Second pixel editor"
+        second_module["layers"][0]["id"] = "layer_pixel_second"
+        second_module["layers"][0]["name"] = "Second pixel art"
+        self.store.update({"custom_modules": [module, second_module]})
+        self.pair_browser()
+        body = self.client.get("/").get_data(as_text=True)
+        css = (Path(__file__).parents[1] / "app/static/custom_canvas.css").read_text()
+        javascript = (Path(__file__).parents[1] / "app/static/custom_canvas.js").read_text()
+        stylesheet = '<link rel="stylesheet" href="/static/custom_canvas.css">'
+        script = '<script src="/static/custom_canvas.js"></script>'
+        self.assertIn(stylesheet, body)
+        self.assertIn(script, body)
+        body = body.replace(stylesheet, f"<style>{css}</style>", 1)
+        body = body.replace(script, f"<script>{javascript}</script>", 1)
+
+        probe = r"""
+const port=process.argv[1],pagePath=process.argv[2];let endpoint;
+for(let attempt=0;attempt<50;attempt++){try{endpoint=await fetch(`http://127.0.0.1:${port}/json/new`,{method:'PUT'}).then(response=>response.json());break}catch(_){await new Promise(resolve=>setTimeout(resolve,100))}}
+if(!endpoint)throw new Error('Chromium DevTools endpoint unavailable');
+const socket=new WebSocket(endpoint.webSocketDebuggerUrl),pending=new Map(),exceptions=[];let nextId=1,loadResolve=()=>{},loaded;
+socket.onmessage=event=>{const message=JSON.parse(event.data);if(message.id&&pending.has(message.id)){const request=pending.get(message.id);pending.delete(message.id);message.error?request.reject(new Error(JSON.stringify(message.error))):request.resolve(message.result);return}if(message.method==='Runtime.exceptionThrown')exceptions.push(message.params.exceptionDetails);if(message.method==='Page.loadEventFired')loadResolve()};
+await new Promise((resolve,reject)=>{socket.onopen=resolve;socket.onerror=reject});
+const send=(method,params={})=>{const id=nextId++;socket.send(JSON.stringify({id,method,params}));return new Promise((resolve,reject)=>pending.set(id,{resolve,reject}))};
+const evaluate=async expression=>{const result=await send('Runtime.evaluate',{expression,returnByValue:true,awaitPromise:true});if(result.exceptionDetails)throw new Error(JSON.stringify(result.exceptionDetails));return result.result.value};
+const settle=()=>evaluate(`new Promise(resolve=>requestAnimationFrame(()=>requestAnimationFrame(()=>resolve(true))))`);
+const metrics=async(width,height,touch,dpr=1)=>{await send('Emulation.setTouchEmulationEnabled',{enabled:touch,maxTouchPoints:touch?2:1});await send('Emulation.setDeviceMetricsOverride',{width,height,deviceScaleFactor:dpr,mobile:false,screenOrientation:{type:width>height?'landscapePrimary':'portraitPrimary',angle:width>height?90:0}});await settle()};
+const click=selector=>evaluate(`(()=>{const item=document.querySelector(${JSON.stringify(selector)});if(!item)throw new Error('missing '+${JSON.stringify(selector)});item.click();return true})()`);
+const key=async(key,modifiers=0)=>{const code=key.length===1?'Key'+key.toUpperCase():key;await send('Input.dispatchKeyEvent',{type:'rawKeyDown',key,code,modifiers});await send('Input.dispatchKeyEvent',{type:'keyUp',key,code,modifiers});await settle()};
+try{
+ await send('Runtime.enable');await send('Page.enable');await send('Emulation.setEmulatedMedia',{features:[{name:'prefers-reduced-motion',value:'reduce'}]});
+ await metrics(1280,720,false,1);loaded=new Promise(resolve=>loadResolve=resolve);await send('Page.navigate',{url:'file://'+pagePath});await Promise.race([loaded,new Promise((_,reject)=>setTimeout(()=>reject(new Error('load timeout')),5000))]);
+ const exists=await evaluate(`!!document.querySelector('.pixel-editor')`);
+ if(!exists){console.log(JSON.stringify({productRed:'contextual Pixel toolbar is missing after the real dashboard and production asset rendered',exceptions}));socket.close();process.exit(0)}
+ const geometry=[];
+ const viewports=[[320,568,true,1],[360,800,true,1],[768,1024,true,1],[1280,720,false,1],[1920,1080,false,1],[899,720,false,1],[900,720,false,1],[901,720,false,1],[360,800,true,2],[360,800,true,3],[800,360,true,1]];
+ for(const [width,height,touch,dpr] of viewports){await metrics(width,height,touch,dpr);geometry.push(await evaluate(`(()=>{const editor=document.querySelector('.pixel-editor'),toolbar=editor.querySelector('.pixel-toolbar'),surface=editor.querySelector('.pixel-surface'),buttons=[...toolbar.querySelectorAll('[data-pixel-action]')],tops=[...new Set(buttons.map(item=>Math.round(item.getBoundingClientRect().top)))],er=editor.getBoundingClientRect(),tr=toolbar.getBoundingClientRect(),sr=surface.getBoundingClientRect();return {width:${width},height:${height},touch:${touch},dpr:${dpr},order:buttons.map(item=>item.dataset.pixelAction),tops,targets:buttons.map(item=>[item.getBoundingClientRect().width,item.getBoundingClientRect().height]),names:buttons.map(item=>[item.getAttribute('aria-label'),item.title]),inside:tr.left>=er.left-1&&tr.right<=er.right+1&&sr.left>=er.left-1&&sr.right<=er.right+1,rects:{editor:[er.left,er.right],toolbar:[tr.left,tr.right],surface:[sr.left,sr.right]},nonOverlap:tr.bottom<=sr.top+1,overflow:document.documentElement.scrollWidth-document.documentElement.clientWidth,reduced:matchMedia('(prefers-reduced-motion: reduce)').matches}})()`))}
+ await metrics(1280,720,false,1);
+ const contextual=await evaluate(`(()=>{const card=document.querySelector('.custom-module-card[data-id="custom_pixels"]');card.querySelector('[aria-label^="Select Other layer"]').click();const hidden=!card.querySelector('.pixel-editor');card.querySelector('[aria-label^="Select Pixel art"]').click();return {hidden,shown:!!card.querySelector('.pixel-editor')}})()`);await settle();
+ const initial=await evaluate(`(()=>{const editor=document.querySelector('.pixel-editor'),surface=editor.querySelector('.pixel-surface'),canvas=editor.querySelector('.pixel-grid'),colour=editor.querySelector('[data-pixel-action="colour"]'),swatches=[...editor.querySelectorAll('.pixel-swatch')].map(item=>getComputedStyle(item).backgroundColor),matrixSwatches=[...document.querySelectorAll('#lava-palettes .swatch')].map(item=>getComputedStyle(item).backgroundColor);const r=canvas.getBoundingClientRect();canvas.dispatchEvent(new PointerEvent('pointermove',{bubbles:true,clientX:r.left+(10.5/64)*r.width,clientY:r.top+(5.5/32)*r.height,pointerId:1,pointerType:'mouse'}));return {active:editor.querySelector('[data-pixel-action="draw"]').getAttribute('aria-pressed'),status:editor.querySelector('.pixel-status').textContent,highlight:editor.querySelector('.pixel-cell-highlight').getBoundingClientRect().width,checker:getComputedStyle(surface).backgroundImage,black:Array.from(canvas.getContext('2d').getImageData(15,15,1,1).data),transparent:Array.from(canvas.getContext('2d').getImageData(25,15,1,1).data),colour:colour.value,swatchReuse:swatches.some(value=>matrixSwatches.includes(value)),digest:canvas.toDataURL(),zoom:editor.querySelector('.pixel-zoom').textContent}})()`);
+ await evaluate(`(()=>{globalThis.__pixelDirty=0;globalThis.__pixelDrafts=[];globalThis.markMatrixDirty=()=>__pixelDirty++;globalThis.matrixCustomCanvasDraftChanged=(id,delay)=>__pixelDrafts.push([id,delay]);const colour=document.querySelector('[data-pixel-action="colour"]');colour.value='#ff0000';colour.dispatchEvent(new Event('input',{bubbles:true}));document.querySelector('.pixel-grid').scrollIntoView({block:'center',inline:'nearest'});return true})()`);await settle();
+ const trustedPoint=await evaluate(`(()=>{const canvas=document.querySelector('.pixel-grid'),r=canvas.getBoundingClientRect();return{x:r.left+4.5*r.width/64,y:r.top+4.5*r.height/32}})()`);await send('Input.dispatchMouseEvent',{type:'mousePressed',x:trustedPoint.x,y:trustedPoint.y,button:'left',buttons:1,clickCount:1});await send('Input.dispatchMouseEvent',{type:'mouseReleased',x:trustedPoint.x,y:trustedPoint.y,button:'left',buttons:0,clickCount:1});await settle();
+ const lifecycle=await evaluate(`(()=>{const root=document.querySelector('.custom-module-card[data-id="custom_pixels"] .pixel-editor'),module=customModules.find(item=>item.id==='custom_pixels'),layer=module.layers.find(item=>item.id==='layer_pixel'),canvas=document.querySelector('.pixel-grid'),committed=canvas.toDataURL(),serialized=customModulesFromEditor().find(item=>item.id==='custom_pixels').layers.find(item=>item.id==='layer_pixel').properties;const r=canvas.getBoundingClientRect(),x=r.left+8.5*r.width/64,y=r.top+8.5*r.height/32;canvas.dispatchEvent(new PointerEvent('pointerdown',{bubbles:true,cancelable:true,button:0,buttons:1,clientX:x,clientY:y,pointerId:41,pointerType:'mouse'}));canvas.dispatchEvent(new PointerEvent('pointercancel',{bubbles:true,clientX:x,clientY:y,pointerId:41,pointerType:'mouse'}));const cancelled=canvas.toDataURL();document.querySelector('[aria-label^="Select Other layer"]').click();document.querySelector('[aria-label^="Select Pixel art"]').click();const switched=document.querySelector('.pixel-grid').toDataURL();globalThis.confirm=()=>false;document.querySelector('[data-pixel-action="more"]').click();document.querySelector('[data-pixel-more="reset"]').click();const cancelledReset=document.querySelector('.pixel-grid').toDataURL();globalThis.confirm=()=>true;document.querySelector('[data-pixel-more="reset"]').click();const reset=document.querySelector('.pixel-grid').toDataURL();return {committed,cancelled,switched,cancelledReset,reset,dirty:__pixelDirty,drafts:__pixelDrafts,bitmap:serialized.bitmap_rgba,legacy:[Object.hasOwn(serialized,'points'),Object.hasOwn(serialized,'colour')],historyAfterReset:[...document.querySelector('.custom-module-card[data-id="custom_pixels"] .pixel-editor').querySelectorAll('[data-pixel-action="undo"],[data-pixel-action="redo"]')].map(item=>item.disabled)}})()`);await settle();
+ const mouseDraw=await evaluate(`(()=>{const canvas=document.querySelector('.pixel-grid'),colour=document.querySelector('[data-pixel-action="colour"]'),r=canvas.getBoundingClientRect(),x=r.left+4.5*r.width/64,y=r.top+4.5*r.height/32;colour.value='#ff0000';colour.dispatchEvent(new Event('input',{bubbles:true}));canvas.dispatchEvent(new PointerEvent('pointerdown',{bubbles:true,cancelable:true,button:0,buttons:1,clientX:x,clientY:y,pointerId:20,pointerType:'mouse'}));canvas.dispatchEvent(new PointerEvent('pointerup',{bubbles:true,button:0,clientX:x,clientY:y,pointerId:20,pointerType:'mouse'}));return {pixel:Array.from(canvas.getContext('2d').getImageData(45,45,1,1).data),digest:canvas.toDataURL()}})()`);mouseDraw.changed=mouseDraw.digest!==initial.digest;
+ await evaluate(`document.querySelector('.pixel-grid').focus()`);await key('z',2);const ctrlUndo=await evaluate(`document.querySelector('.pixel-grid').toDataURL()`);await key('z',10);const shiftRedo=await evaluate(`document.querySelector('.pixel-grid').toDataURL()`);await key('z',2);await key('y',2);const yRedo=await evaluate(`document.querySelector('.pixel-grid').toDataURL()`);
+ await metrics(360,800,true,1);await click('[data-pixel-action="erase"]');await evaluate(`(()=>{document.querySelector('.pixel-grid').scrollIntoView({block:'center',inline:'nearest'});return true})()`);await settle();const touchPoint=await evaluate(`(()=>{const r=document.querySelector('.pixel-grid').getBoundingClientRect(),point={x:r.left+4.5*r.width/64,y:r.top+4.5*r.height/32};if(point.x<0||point.x>innerWidth||point.y<0||point.y>innerHeight)throw new Error('touch target is outside the visual viewport');return point})()`);const stamp=Date.now()/1000;await send('Input.dispatchTouchEvent',{type:'touchStart',timestamp:stamp,touchPoints:[{...touchPoint,radiusX:2,radiusY:2,force:1,id:31}]});await send('Input.dispatchTouchEvent',{type:'touchEnd',timestamp:stamp+.05,touchPoints:[]});await settle();const touchErase=await evaluate(`(()=>{const canvas=document.querySelector('.pixel-grid'),context=canvas.getContext('2d'),opaque=[];for(let y=0;y<32;y++)for(let x=0;x<64;x++){const pixel=Array.from(context.getImageData(x*10+5,y*10+5,1,1).data);if(pixel[3])opaque.push([x,y,...pixel])}return {digest:canvas.toDataURL(),opaque}})()`);await metrics(1280,720,false,1);
+ await click('[data-pixel-action="draw"]');const rightErase=await evaluate(`(()=>{const canvas=document.querySelector('.pixel-grid'),r=canvas.getBoundingClientRect(),x=r.left+1.5*r.width/64,y=r.top+1.5*r.height/32,before=canvas.toDataURL();canvas.dispatchEvent(new PointerEvent('pointerdown',{bubbles:true,cancelable:true,button:2,buttons:2,clientX:x,clientY:y,pointerId:21,pointerType:'mouse'}));canvas.dispatchEvent(new PointerEvent('pointerup',{bubbles:true,button:2,clientX:x,clientY:y,pointerId:21,pointerType:'mouse'}));return {changed:before!==canvas.toDataURL(),pixel:Array.from(canvas.getContext('2d').getImageData(15,15,1,1).data)}})()`);
+ await click('[data-pixel-action="erase"]');await key('d');const keyboardDraw=await evaluate(`document.querySelector('[data-pixel-action="draw"]').getAttribute('aria-pressed')`);
+ await evaluate(`document.querySelector('[data-property="rotation"]').focus()`);await key('e');const guarded=await evaluate(`document.querySelector('[data-pixel-action="draw"]').getAttribute('aria-pressed')`);
+ await evaluate(`document.querySelector('.pixel-grid').focus()`);await key('e');const keyboardErase=await evaluate(`document.querySelector('[data-pixel-action="erase"]').getAttribute('aria-pressed')`);
+ await key('i');const keyboardPick=await evaluate(`document.querySelector('[data-pixel-action="pick"]').getAttribute('aria-pressed')`);
+ const keyboardScope=await evaluate(`(()=>{const editors=[...document.querySelectorAll('.pixel-editor')];editors[1].querySelector('.pixel-grid').focus();return editors.length})()`);await key('e');const focusedEditors=await evaluate(`([...document.querySelectorAll('.pixel-editor')].map(editor=>({draw:editor.querySelector('[data-pixel-action="draw"]').getAttribute('aria-pressed'),erase:editor.querySelector('[data-pixel-action="erase"]').getAttribute('aria-pressed'),pick:editor.querySelector('[data-pixel-action="pick"]').getAttribute('aria-pressed')})))`);await evaluate(`document.querySelector('#save-config').focus()`);await key('d');const outsideEditors=await evaluate(`([...document.querySelectorAll('.pixel-editor')].map(editor=>({draw:editor.querySelector('[data-pixel-action="draw"]').getAttribute('aria-pressed'),erase:editor.querySelector('[data-pixel-action="erase"]').getAttribute('aria-pressed'),pick:editor.querySelector('[data-pixel-action="pick"]').getAttribute('aria-pressed')})))`);
+ const picked=await evaluate(`(()=>{const canvas=document.querySelector('.pixel-grid'),r=canvas.getBoundingClientRect();canvas.dispatchEvent(new PointerEvent('pointerdown',{bubbles:true,cancelable:true,button:0,buttons:1,clientX:r.left+.5*r.width/64,clientY:r.top+.5*r.height/32,pointerId:3,pointerType:'mouse'}));return document.querySelector('[data-pixel-action="colour"]').value})()`);
+ const beforeZoom=await evaluate(`document.querySelector('.pixel-grid').toDataURL()`);await click('[data-pixel-action="zoom-in"]');await click('[data-pixel-action="zoom-out"]');await click('[data-pixel-action="fit"]');const zoom=await evaluate(`({digest:document.querySelector('.pixel-grid').toDataURL(),label:document.querySelector('.pixel-zoom').textContent})`);
+ const highlightGeometry=[];for(const [level,steps] of [[50,-2],[150,2],[200,4]]){await click('[data-pixel-action="fit"]');for(let n=0;n<Math.abs(steps);n++)await click(steps<0?'[data-pixel-action="zoom-out"]':'[data-pixel-action="zoom-in"]');await evaluate(`(()=>{const surface=document.querySelector('.pixel-surface');surface.scrollLeft=surface.scrollWidth;surface.scrollTop=surface.scrollHeight;return true})()`);await settle();highlightGeometry.push(await evaluate(`(()=>{const canvas=document.querySelector('.pixel-grid'),surface=document.querySelector('.pixel-surface'),r=canvas.getBoundingClientRect(),x=40,y=20,event=new PointerEvent('pointermove',{bubbles:true,clientX:r.left+(x+.5)*r.width/64,clientY:r.top+(y+.5)*r.height/32,pointerId:77,pointerType:'mouse'});canvas.dispatchEvent(event);const h=document.querySelector('.pixel-cell-highlight').getBoundingClientRect(),expected={left:r.left+x*r.width/64,top:r.top+y*r.height/32,width:r.width/64,height:r.height/32};return{level:${level},scroll:[surface.scrollLeft,surface.scrollTop],status:document.querySelector('.pixel-status').textContent,error:[Math.abs(h.left-expected.left),Math.abs(h.top-expected.top),Math.abs(h.width-expected.width),Math.abs(h.height-expected.height)]}})()`))}
+ const contextSuppressed=await evaluate(`(()=>{const event=new MouseEvent('contextmenu',{bubbles:true,cancelable:true});document.querySelector('.pixel-grid').dispatchEvent(event);return event.defaultPrevented})()`);
+ await click('[data-pixel-action="more"]');const more=await evaluate(`(()=>{const menu=document.querySelector('.pixel-more-menu');return {visible:!menu.hidden,actions:[...menu.querySelectorAll('[data-pixel-more]')].map(item=>item.dataset.pixelMore),help:menu.textContent.includes('Ctrl/Cmd + Z')}})()`);
+ const confirms=await evaluate(`(()=>{globalThis.__pixelConfirms=[];globalThis.confirm=message=>{__pixelConfirms.push(message);return false};const before=document.querySelector('.pixel-grid').toDataURL();document.querySelector('[data-pixel-more="fill"]').click();document.querySelector('[data-pixel-more="clear"]').click();return {messages:__pixelConfirms,before,after:document.querySelector('.pixel-grid').toDataURL()}})()`);
+ await metrics(640,360,false,1);const browserZoom=await evaluate(`({effective:2,overflow:document.documentElement.scrollWidth-document.documentElement.clientWidth,editorRight:document.querySelector('.pixel-editor').getBoundingClientRect().right,viewport:innerWidth})`);
+ console.log(JSON.stringify({geometry,contextual,initial,lifecycle,mouseDraw,ctrlUndo,shiftRedo,yRedo,touchErase,rightErase,keyboardDraw,guarded,keyboardErase,keyboardPick,keyboardScope,focusedEditors,outsideEditors,picked,beforeZoom,zoom,highlightGeometry,contextSuppressed,more,confirms,browserZoom,exceptions}));
+}finally{if(socket.readyState===WebSocket.OPEN)socket.close()}
+"""
+        chromium = os.environ["MATRIX_CHROMIUM"]
+        node = shutil.which("node")
+        assert node is not None
+        with tempfile.TemporaryDirectory(prefix="matrix-pixel-editor-") as directory:
+            page = Path(directory) / "dashboard.html"
+            page.write_text(body)
+            profile = Path(directory) / "profile"
+            browser = subprocess.Popen([
+                chromium, "--headless", "--no-sandbox", "--disable-gpu",
+                "--remote-debugging-port=0", f"--user-data-dir={profile}", "about:blank",
+            ], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            try:
+                active_port = profile / "DevToolsActivePort"
+                for _attempt in range(50):
+                    if active_port.is_file():
+                        break
+                    if browser.poll() is not None:
+                        self.fail("Chromium exited before publishing its DevTools port")
+                    time.sleep(0.1)
+                self.assertTrue(active_port.is_file(), "Chromium DevTools port unavailable")
+                completed = subprocess.run(
+                    [node, "-e", probe, active_port.read_text().splitlines()[0], str(page)],
+                    capture_output=True, text=True, timeout=45,
+                )
+            finally:
+                browser.terminate()
+                try:
+                    browser.wait(timeout=5)
+                except subprocess.TimeoutExpired:
+                    browser.kill(); browser.wait(timeout=5)
+                shutil.rmtree(profile, ignore_errors=True)
+        self.assertEqual(completed.returncode, 0, completed.stderr)
+        report = json.loads(completed.stdout.strip().splitlines()[-1])
+        self.assertNotIn("productRed", report, report.get("productRed"))
+        self.assertEqual(report["exceptions"], [])
+        expected_order = [
+            "draw", "erase", "pick", "colour", "undo", "redo",
+            "zoom-out", "zoom-in", "fit", "more",
+        ]
+        for item in report["geometry"]:
+            with self.subTest(viewport=(item["width"], item["height"], item["dpr"])):
+                self.assertEqual(item["order"], expected_order)
+                self.assertTrue(item["inside"] and item["nonOverlap"], item)
+                self.assertLessEqual(item["overflow"], 1, item)
+                self.assertTrue(item["reduced"])
+                self.assertTrue(all(name and name == title for name, title in item["names"]), item)
+                narrow = item["width"] <= 900 or item["touch"]
+                self.assertEqual(len(item["tops"]), 2 if narrow else 1, item)
+                if narrow:
+                    self.assertTrue(all(width >= 44 and height >= 44 for width, height in item["targets"]), item)
+        self.assertEqual(report["contextual"], {"hidden": True, "shown": True})
+        self.assertEqual(report["initial"]["active"], "true")
+        self.assertIn("Draw · X 10 · Y 5", report["initial"]["status"])
+        self.assertGreater(report["initial"]["highlight"], 0)
+        self.assertIn("linear-gradient", report["initial"]["checker"])
+        self.assertNotEqual(report["initial"]["black"], report["initial"]["transparent"])
+        self.assertTrue(report["initial"]["swatchReuse"])
+        self.assertNotEqual(report["lifecycle"]["committed"], report["initial"]["digest"])
+        self.assertEqual(report["lifecycle"]["cancelled"], report["lifecycle"]["committed"])
+        self.assertEqual(report["lifecycle"]["switched"], report["lifecycle"]["committed"])
+        self.assertEqual(report["lifecycle"]["cancelledReset"], report["lifecycle"]["committed"])
+        self.assertEqual(report["lifecycle"]["reset"], report["initial"]["digest"])
+        self.assertEqual(report["lifecycle"]["dirty"], 2)
+        self.assertEqual(report["lifecycle"]["drafts"], [["custom_pixels", 150], ["custom_pixels", 150]])
+        self.assertEqual(len(base64.b64decode(report["lifecycle"]["bitmap"], validate=True)), 64 * 32 * 4)
+        self.assertEqual(report["lifecycle"]["legacy"], [False, False])
+        self.assertEqual(report["lifecycle"]["historyAfterReset"], [True, True])
+        self.assertTrue(report["mouseDraw"]["changed"])
+        self.assertEqual(report["mouseDraw"]["pixel"], [255, 0, 0, 255])
+        self.assertEqual(report["ctrlUndo"], report["initial"]["digest"])
+        self.assertEqual(report["shiftRedo"], report["mouseDraw"]["digest"])
+        self.assertEqual(report["yRedo"], report["mouseDraw"]["digest"])
+        self.assertEqual(report["touchErase"]["opaque"], [[1, 1, 0, 0, 0, 255]])
+        self.assertEqual(report["touchErase"]["digest"], report["initial"]["digest"])
+        self.assertTrue(report["rightErase"]["changed"])
+        self.assertEqual(report["rightErase"]["pixel"], [0, 0, 0, 0])
+        self.assertEqual(report["keyboardDraw"], "true")
+        self.assertEqual(report["guarded"], "true")
+        self.assertEqual(report["keyboardErase"], "true")
+        self.assertEqual(report["keyboardPick"], "true")
+        self.assertEqual(report["keyboardScope"], 2)
+        self.assertEqual(report["focusedEditors"], [
+            {"draw": "false", "erase": "false", "pick": "true"},
+            {"draw": "false", "erase": "true", "pick": "false"},
+        ], report)
+        self.assertEqual(report["outsideEditors"], report["focusedEditors"], report)
+        self.assertEqual(report["picked"].lower(), "#123456")
+        self.assertEqual(report["beforeZoom"], report["zoom"]["digest"])
+        self.assertIn("%", report["zoom"]["label"])
+        self.assertEqual([item["level"] for item in report["highlightGeometry"]], [50, 150, 200])
+        for item in report["highlightGeometry"]:
+            self.assertIn("X 40 · Y 20", item["status"], item)
+            self.assertTrue(all(error <= 1 for error in item["error"]), item)
+            if item["level"] > 100:
+                self.assertTrue(all(offset > 0 for offset in item["scroll"]), item)
+        self.assertTrue(report["contextSuppressed"])
+        self.assertEqual(report["more"]["actions"], ["grid", "fill", "clear", "reset"])
+        self.assertTrue(report["more"]["visible"] and report["more"]["help"])
+        self.assertEqual(report["confirms"]["before"], report["confirms"]["after"])
+        self.assertEqual(len(report["confirms"]["messages"]), 2)
+        self.assertTrue(all("?" in message for message in report["confirms"]["messages"]))
+        self.assertEqual(report["browserZoom"]["effective"], 2)
+        self.assertLessEqual(report["browserZoom"]["overflow"], 1)
+        self.assertLessEqual(report["browserZoom"]["editorRight"], report["browserZoom"]["viewport"] + 1)
+
+    @unittest.skipUnless(shutil.which("node"), "Node.js is required")
+    @unittest.skipUnless(
+        os.environ.get("MATRIX_CHROMIUM")
+        and Path(os.environ.get("MATRIX_CHROMIUM", "")).is_file()
+        and os.access(os.environ.get("MATRIX_CHROMIUM", ""), os.X_OK),
+        "MATRIX_CHROMIUM browser is required",
+    )
+    def _assert_pixel_pointer_state_is_cancelled_before_layer_switch(self):
+        pixels = bytearray(64 * 32 * 4)
+        pixels[(1 * 64 + 1) * 4:(1 * 64 + 1) * 4 + 4] = bytes((255, 255, 255, 255))
+        initial_bitmap = base64.b64encode(pixels).decode("ascii")
+        module = test_config_store.ConfigStoreTests.advanced_module(
+            id="custom_pixels", name="Pointer lifecycle", background="#000000",
+            layers=[
+                {"id": "layer_pixel", "name": "Pixels", "type": "pixels", "visible": True,
+                 "properties": {"bitmap_rgba": initial_bitmap, "offset_x": 0, "offset_y": 0, "rotation": 0}, "keyframes": []},
+                {"id": "layer_text", "name": "Text", "type": "text", "visible": True,
+                 "properties": {"x": 40, "y": 20, "text": "T", "font": "5x7", "rotation": 0, "colour": "#ffffff"}, "keyframes": []},
+            ], overrides=[],
+        )
+        self.store.update({"custom_modules": [module]})
+        self.pair_browser()
+        body = self.client.get("/").get_data(as_text=True)
+        css = (Path(__file__).parents[1] / "app/static/custom_canvas.css").read_text()
+        javascript = (Path(__file__).parents[1] / "app/static/custom_canvas.js").read_text()
+        body = body.replace('<link rel="stylesheet" href="/static/custom_canvas.css">', f"<style>{css}</style>", 1)
+        body = body.replace('<script src="/static/custom_canvas.js"></script>', f"<script>{javascript}</script>", 1)
+        probe = r"""
+const port=process.argv[1],pagePath=process.argv[2],sleep=ms=>new Promise(resolve=>setTimeout(resolve,ms));let endpoint;
+for(let attempt=0;attempt<50;attempt++){try{endpoint=await fetch(`http://127.0.0.1:${port}/json/new`,{method:'PUT'}).then(response=>response.json());break}catch(_){await sleep(100)}}
+if(!endpoint)throw new Error('CDP unavailable');const socket=new WebSocket(endpoint.webSocketDebuggerUrl),pending=new Map(),exceptions=[];let id=0,loadResolve=()=>{};socket.onmessage=event=>{const message=JSON.parse(event.data);if(message.id&&pending.has(message.id)){const request=pending.get(message.id);pending.delete(message.id);message.error?request.reject(new Error(JSON.stringify(message.error))):request.resolve(message.result);return}if(message.method==='Runtime.exceptionThrown')exceptions.push(message.params.exceptionDetails);if(message.method==='Page.loadEventFired')loadResolve()};
+await new Promise((resolve,reject)=>{socket.onopen=resolve;socket.onerror=reject});const send=(method,params={})=>new Promise((resolve,reject)=>{const request=++id;pending.set(request,{resolve,reject});socket.send(JSON.stringify({id:request,method,params}))});const evaluate=async expression=>{const result=await send('Runtime.evaluate',{expression,returnByValue:true,awaitPromise:true});if(result.exceptionDetails)throw new Error(JSON.stringify(result.exceptionDetails));return result.result.value};
+const point=async(x,y)=>{await evaluate(`(()=>{document.querySelector('.pixel-grid').scrollIntoView({block:'center'});return true})()`);await sleep(30);return evaluate(`(()=>{const r=document.querySelector('.pixel-grid').getBoundingClientRect();return{x:r.left+(${x}+.5)*r.width/64,y:r.top+(${y}+.5)*r.height/32}})()`)};
+try{
+ await send('Runtime.enable');await send('Page.enable');
+ const loaded=new Promise(resolve=>loadResolve=resolve);await send('Page.navigate',{url:'file://'+pagePath});await loaded;await sleep(50);
+ await evaluate(`(()=>{globalThis.__configSaves=0;globalThis.__trustedPixelPointers=[];const originalApi=api;api=(path,options)=>{if(path==='/api/config')__configSaves++;return originalApi(path,options)};document.addEventListener('pointerdown',event=>{globalThis.__trustedPixelPointer??=event.pointerId;if(!__trustedPixelPointers.includes(event.pointerId))__trustedPixelPointers.push(event.pointerId)},true);return true})()`);
+ const first=await point(4,4),secondTouch=await point(20,20),movedSecond={...secondTouch,x:secondTouch.x+10};await send('Emulation.setTouchEmulationEnabled',{enabled:true,maxTouchPoints:2});const touchStamp=Date.now()/1000;await send('Input.dispatchTouchEvent',{type:'touchStart',timestamp:touchStamp,touchPoints:[{...first,radiusX:2,radiusY:2,force:1,id:1}]});
+ const captured=await evaluate(`document.querySelector('.pixel-grid').hasPointerCapture(__trustedPixelPointer)`);
+ const trustedBefore=await evaluate(`document.querySelector('.pixel-grid').toDataURL()`);await send('Input.dispatchTouchEvent',{type:'touchStart',timestamp:touchStamp+.01,touchPoints:[{...first,radiusX:2,radiusY:2,force:1,id:1},{...secondTouch,radiusX:2,radiusY:2,force:1,id:2}]});await send('Input.dispatchTouchEvent',{type:'touchMove',timestamp:touchStamp+.02,touchPoints:[{...first,radiusX:2,radiusY:2,force:1,id:1},{...movedSecond,radiusX:2,radiusY:2,force:1,id:2}]});const trustedSecondary=await evaluate(`(()=>{const canvas=document.querySelector('.pixel-grid');return{before:null,after:canvas.toDataURL(),pointers:__trustedPixelPointers.slice(),ownerCaptured:canvas.hasPointerCapture(__trustedPixelPointer),foreignPixel:Array.from(canvas.getContext('2d').getImageData(205,205,1,1).data)}})()`);trustedSecondary.before=trustedBefore;
+ const secondary=await evaluate(`(()=>{const canvas=document.querySelector('.pixel-grid'),r=canvas.getBoundingClientRect(),before=canvas.toDataURL(),owner=__trustedPixelPointer,other=owner+100;for(const type of ['pointerdown','pointermove','pointerup','pointercancel'])canvas.dispatchEvent(new PointerEvent(type,{bubbles:true,cancelable:true,button:0,buttons:type==='pointerup'||type==='pointercancel'?0:1,clientX:r.left+20.5*r.width/64,clientY:r.top+20.5*r.height/32,pointerId:other,pointerType:'touch'}));return{before,after:canvas.toDataURL(),ownerCaptured:canvas.hasPointerCapture(owner)}})()`);
+ await evaluate(`document.querySelector('[aria-label^="Select Text"]').click();true`);await send('Input.dispatchTouchEvent',{type:'touchEnd',timestamp:touchStamp+.05,touchPoints:[]});await send('Emulation.setTouchEmulationEnabled',{enabled:false,maxTouchPoints:1});await evaluate(`document.querySelector('[aria-label^="Select Pixels"]').click();true`);
+ const afterSwitch=await evaluate(`customModules.find(item=>item.id==='custom_pixels').layers.find(item=>item.id==='layer_pixel').properties.bitmap_rgba`);await evaluate(`globalThis.__trustedPixelPointer=null`);
+ const second=await point(5,5);await send('Input.dispatchMouseEvent',{type:'mousePressed',x:second.x,y:second.y,button:'left',buttons:1,clickCount:1});const upCaptured=await evaluate(`document.querySelector('.pixel-grid').hasPointerCapture(__trustedPixelPointer)`);await send('Input.dispatchMouseEvent',{type:'mouseReleased',x:second.x,y:second.y,button:'left',buttons:0,clickCount:1});await sleep(30);
+ const up=await evaluate(`({bitmap:customModules.find(item=>item.id==='custom_pixels').layers.find(item=>item.id==='layer_pixel').properties.bitmap_rgba,captured:document.querySelector('.pixel-grid').hasPointerCapture(__trustedPixelPointer)})`);
+ const leavePoint=await point(6,6);await send('Input.dispatchMouseEvent',{type:'mousePressed',x:leavePoint.x,y:leavePoint.y,button:'left',buttons:1,clickCount:1});const leaveBefore=up.bitmap;await evaluate(`document.querySelector('.pixel-grid').dispatchEvent(new PointerEvent('pointerleave',{pointerId:__trustedPixelPointer,bubbles:true}));true`);const leave=await evaluate(`({bitmap:customModules.find(item=>item.id==='custom_pixels').layers.find(item=>item.id==='layer_pixel').properties.bitmap_rgba,captured:document.querySelector('.pixel-grid').hasPointerCapture(__trustedPixelPointer)})`);await send('Input.dispatchMouseEvent',{type:'mouseReleased',x:leavePoint.x,y:leavePoint.y,button:'left',buttons:0,clickCount:1});
+ const cancelBefore=leave.bitmap,cancelPoint=await point(7,7);await send('Input.dispatchMouseEvent',{type:'mousePressed',x:cancelPoint.x,y:cancelPoint.y,button:'left',buttons:1,clickCount:1});await evaluate(`document.querySelector('.pixel-grid').dispatchEvent(new PointerEvent('pointercancel',{pointerId:__trustedPixelPointer,bubbles:true}));true`);const cancelled=await evaluate(`({bitmap:customModules.find(item=>item.id==='custom_pixels').layers.find(item=>item.id==='layer_pixel').properties.bitmap_rgba,captured:document.querySelector('.pixel-grid').hasPointerCapture(__trustedPixelPointer)})`);await send('Input.dispatchMouseEvent',{type:'mouseReleased',x:cancelPoint.x,y:cancelPoint.y,button:'left',buttons:0,clickCount:1});
+ const blurBefore=cancelled.bitmap,blurPoint=await point(8,8);await send('Input.dispatchMouseEvent',{type:'mousePressed',x:blurPoint.x,y:blurPoint.y,button:'left',buttons:1,clickCount:1});await evaluate(`window.dispatchEvent(new Event('blur'));true`);const blurred=await evaluate(`({bitmap:customModules.find(item=>item.id==='custom_pixels').layers.find(item=>item.id==='layer_pixel').properties.bitmap_rgba,captured:document.querySelector('.pixel-grid').hasPointerCapture(__trustedPixelPointer)})`);await send('Input.dispatchMouseEvent',{type:'mouseReleased',x:blurPoint.x,y:blurPoint.y,button:'left',buttons:0,clickCount:1});
+ await evaluate(`document.querySelector('.editor-canvas').scrollIntoView({block:'center'});true`);await sleep(30);const drag=await evaluate(`(()=>{const canvas=document.querySelector('.editor-canvas'),r=canvas.getBoundingClientRect();return{start:{x:r.left+32.5*r.width/64,y:r.top+16.5*r.height/32},end:{x:r.left+35.5*r.width/64,y:r.top+15.5*r.height/32}}})()`),bitmapBeforeMove=blurred.bitmap;await evaluate(`(()=>{const canvas=document.querySelector('.editor-canvas');globalThis.__dragEvents=[];for(const type of ['pointerdown','pointermove','pointerup'])canvas.addEventListener(type,event=>__dragEvents.push({type,x:event.clientX,y:event.clientY,buttons:event.buttons}),true);return true})()`);await send('Input.dispatchMouseEvent',{type:'mousePressed',x:drag.start.x,y:drag.start.y,button:'left',buttons:1,clickCount:1});await send('Input.dispatchMouseEvent',{type:'mouseMoved',x:drag.end.x,y:drag.end.y,button:'left',buttons:1});await send('Input.dispatchMouseEvent',{type:'mouseReleased',x:drag.end.x,y:drag.end.y,button:'left',buttons:0,clickCount:1});const dragEvents=await evaluate(`__dragEvents`);await sleep(30);const moved=await evaluate(`(()=>{const properties=customModules.find(item=>item.id==='custom_pixels').layers.find(item=>item.id==='layer_pixel').properties;return{bitmap:properties.bitmap_rgba,offsets:[properties.offset_x,properties.offset_y],integers:[Number.isInteger(properties.offset_x),Number.isInteger(properties.offset_y)]}})()`);
+ await evaluate(`document.querySelector('.layer-row.active .layer-duplicate').click();true`);const duplicateId=await evaluate(`customModules.find(item=>item.id==='custom_pixels').layers.find(item=>item.name==='Pixels copy').id`);
+ const deletePoint=await point(9,9);await send('Input.dispatchMouseEvent',{type:'mousePressed',x:deletePoint.x,y:deletePoint.y,button:'left',buttons:1,clickCount:1});await evaluate(`document.querySelector('.layer-row.active .layer-remove').click();true`);await send('Input.dispatchMouseEvent',{type:'mouseReleased',x:deletePoint.x,y:deletePoint.y,button:'left',buttons:0,clickCount:1});const deleted=await evaluate(`({layers:customModules.find(item=>item.id==='custom_pixels').layers.map(item=>item.id),editor:!!document.querySelector('.pixel-editor')})`);
+ await evaluate(`globalThis.confirm=()=>true;true`);const removeButton=await evaluate(`(()=>{const card=document.querySelector('.custom-module-card[data-id="custom_pixels"]'),button=[...card.querySelectorAll('button')].find(item=>item.textContent==='Remove'),r=button.getBoundingClientRect();button.scrollIntoView({block:'center'});return{x:r.left+r.width/2,y:r.top+r.height/2}})()`);await sleep(30);
+ const oldCanvas=await evaluate(`document.querySelector('.pixel-grid')?true:false`);if(oldCanvas){const teardownPoint=await point(10,10);await send('Input.dispatchMouseEvent',{type:'mousePressed',x:teardownPoint.x,y:teardownPoint.y,button:'left',buttons:1,clickCount:1})}
+ await evaluate(`window.removeCustomModule('custom_pixels');true`);await evaluate(`window.dispatchEvent(new Event('blur'));window.dispatchEvent(new PageTransitionEvent('pagehide'));true`);if(oldCanvas)await send('Input.dispatchMouseEvent',{type:'mouseReleased',x:0,y:0,button:'left',buttons:0,clickCount:1});
+ const teardown=await evaluate(`({module:customModules.some(item=>item.id==='custom_pixels'),card:!!document.querySelector('.custom-module-card[data-id="custom_pixels"]'),saves:__configSaves})`);
+ console.log(JSON.stringify({captured,trustedSecondary,secondary,afterSwitch,upCaptured,up,leaveBefore,leave,cancelBefore,cancelled,blurBefore,blurred,bitmapBeforeMove,drag,dragEvents,moved,deleted,teardown,exceptions}));
+}finally{socket.close()}
+"""
+        report = self._run_dashboard_chromium_probe(body, probe)
+        self.assertTrue(report["captured"], report)
+        self.assertGreaterEqual(len(report["trustedSecondary"]["pointers"]), 2, report)
+        self.assertEqual(report["trustedSecondary"]["after"], report["trustedSecondary"]["before"], report)
+        self.assertTrue(report["trustedSecondary"]["ownerCaptured"], report)
+        self.assertEqual(report["trustedSecondary"]["foreignPixel"], [0, 0, 0, 0], report)
+        self.assertEqual(report["secondary"]["after"], report["secondary"]["before"], report)
+        self.assertTrue(report["secondary"]["ownerCaptured"], report)
+        self.assertEqual(report["afterSwitch"], initial_bitmap, report)
+        self.assertTrue(report["upCaptured"], report)
+        self.assertFalse(report["up"]["captured"], report)
+        self.assertNotEqual(report["up"]["bitmap"], initial_bitmap, report)
+        self.assertNotEqual(report["leave"]["bitmap"], report["leaveBefore"], report)
+        self.assertFalse(report["leave"]["captured"], report)
+        self.assertEqual(report["cancelled"]["bitmap"], report["cancelBefore"], report)
+        self.assertFalse(report["cancelled"]["captured"], report)
+        self.assertEqual(report["blurred"]["bitmap"], report["blurBefore"], report)
+        self.assertFalse(report["blurred"]["captured"], report)
+        self.assertEqual(report["moved"]["bitmap"], report["bitmapBeforeMove"], report)
+        self.assertEqual(report["moved"]["offsets"], [3, -1], {key: report[key] for key in ("drag", "dragEvents", "moved")})
+        self.assertEqual(report["moved"]["integers"], [True, True], report)
+        self.assertEqual(report["deleted"]["layers"], ["layer_pixel", "layer_text"], report)
+        self.assertTrue(report["deleted"]["editor"], report)
+        self.assertEqual(report["teardown"], {"module": False, "card": False, "saves": 0}, report)
+        self.assertEqual(report["exceptions"], [], report)
+
+    @unittest.skipUnless(shutil.which("node"), "Node.js is required")
+    def test_pixel_duplicate_layer_respects_server_schema_boundaries(self):
+        harness = r"""
+const fs=require('fs');const root={replaceChildren(){},append(){}};global.window=global;global.document={documentElement:null,querySelectorAll:()=>[],querySelector:()=>root,createElement:()=>({})};
+global.CSS={escape:value=>value};global.customModules=[];global.mediaItems=[];global.setInterval=()=>0;global.syncCustomModuleUI=()=>{};global.syncPlaylistDurations=()=>{};global.setMessage=()=>{};global.__publications=0;global.matrixCustomCanvasDraftChanged=()=>__publications++;global.Date.now=()=>0;
+const source=fs.readFileSync('app/static/custom_canvas.js','utf8').replace('function duplicateLayer(module, layerId) {','globalThis.__duplicateLayer = function duplicateLayer(module, layerId) {');eval(source);
+const layer=(id,name='Layer')=>({id,name,type:'text',visible:true,properties:{x:0,y:0,text:'T',font:'5x7',rotation:0,colour:'#ffffff'},keyframes:[]});
+const module={id:'custom_canvas',name:'Canvas',type:'canvas',background:'#000000',frame_count:120,fps:1,playback:'hold',layers:[layer('layer_source','1234567890123456789012345678901234567890')],overrides:[]};
+if(!__duplicateLayer(module,'layer_source'))throw new Error('40-character source name was rejected');
+if(module.layers[1].name!=='12345678901234567890123456789012345 copy'||module.layers[1].name.length!==40)throw new Error(`duplicate name was ${JSON.stringify(module.layers[1].name)}`);
+const keyframes=count=>Array.from({length:count},(_,frame)=>({frame,easing:'linear',properties:{text:'K'}}));
+const keyframeModule=total=>{const layers=[{...layer('layer_source'),keyframes:keyframes(2)}];let remaining=total-2,index=0;while(remaining){const count=Math.min(120,remaining);layers.push({...layer(`layer_key_${index++}`),keyframes:keyframes(count)});remaining-=count}return{id:`custom_keyframes_${total}`,name:'Canvas',type:'canvas',background:'#000000',frame_count:120,fps:1,playback:'hold',layers,overrides:[]}};
+const allowedKeyframes=keyframeModule(510);if(!__duplicateLayer(allowedKeyframes,'layer_source')||allowedKeyframes.layers.flatMap(item=>item.keyframes).length!==512)throw new Error('exact 512-keyframe duplicate was rejected');
+const rejectedKeyframes=keyframeModule(511),rejectedKeyframesBefore=JSON.stringify(rejectedKeyframes);if(__duplicateLayer(rejectedKeyframes,'layer_source'))throw new Error('513-keyframe duplicate was accepted');if(JSON.stringify(rejectedKeyframes)!==rejectedKeyframesBefore)throw new Error('rejected keyframe duplicate mutated draft');
+const overrideModule=total=>{const layers=[layer('layer_source')],overrides=[];let remaining=total,index=0;while(remaining){const id=index?'layer_override_'+index:'layer_source',count=Math.min(index?120:2,remaining);if(index)layers.push(layer(id));for(let frame=0;frame<count;frame++)overrides.push({frame,layer_id:id,properties:{text:'O'}});remaining-=count;index++}return{id:`custom_overrides_${total}`,name:'Canvas',type:'canvas',background:'#000000',frame_count:120,fps:1,playback:'hold',layers,overrides}};
+const allowedOverrides=overrideModule(510);if(!__duplicateLayer(allowedOverrides,'layer_source')||allowedOverrides.overrides.length!==512)throw new Error('exact 512-override duplicate was rejected');
+const rejectedOverrides=overrideModule(511),rejectedOverridesBefore=JSON.stringify(rejectedOverrides);if(__duplicateLayer(rejectedOverrides,'layer_source'))throw new Error('513-override duplicate was accepted');if(JSON.stringify(rejectedOverrides)!==rejectedOverridesBefore)throw new Error('rejected override duplicate mutated draft');
+const points=count=>Array.from({length:count},()=>[0,0]),pixelLayer=(id,count)=>({id,name:'Pixels',type:'pixels',visible:true,properties:{points:points(count),colour:'#ffffff'},keyframes:[]});
+const pointModule=total=>{const layers=[pixelLayer('layer_source',2048)];let remaining=total-2048,index=0;while(remaining){const count=Math.min(2048,remaining);layers.push(pixelLayer(`layer_points_${index++}`,count));remaining-=count}return{id:`custom_points_${total}`,name:'Canvas',type:'canvas',background:'#000000',frame_count:120,fps:1,playback:'hold',layers,overrides:[]}};
+const allowedPoints=pointModule(6144);if(!__duplicateLayer(allowedPoints,'layer_source')||allowedPoints.layers.reduce((total,item)=>total+item.properties.points.length,0)!==8192)throw new Error('exact 8192-point duplicate was rejected');
+const rejectedPoints=pointModule(6145),rejectedPointsBefore=JSON.stringify(rejectedPoints);if(__duplicateLayer(rejectedPoints,'layer_source'))throw new Error('8193-point duplicate was accepted');if(JSON.stringify(rejectedPoints)!==rejectedPointsBefore)throw new Error('rejected point duplicate mutated draft');
+const layerModule=count=>({id:`custom_layers_${count}`,name:'Canvas',type:'canvas',background:'#000000',frame_count:120,fps:1,playback:'hold',layers:Array.from({length:count},(_,index)=>layer(index?'layer_'+index:'layer_source')),overrides:[]});
+const allowedLayers=layerModule(63);if(!__duplicateLayer(allowedLayers,'layer_source')||allowedLayers.layers.length!==64)throw new Error('exact 64-layer duplicate was rejected');
+const rejectedLayers=layerModule(64),rejectedLayersBefore=JSON.stringify(rejectedLayers),publicationsBefore=__publications;if(__duplicateLayer(rejectedLayers,'layer_source'))throw new Error('65-layer duplicate was accepted');if(JSON.stringify(rejectedLayers)!==rejectedLayersBefore||__publications!==publicationsBefore)throw new Error('rejected layer duplicate mutated or published draft');
+const bitmap=Buffer.alloc(8192).toString('base64'),bitmapModule={id:'custom_bitmap',name:'Canvas',type:'canvas',background:'#000000',frame_count:120,fps:1,playback:'hold',layers:[{id:'layer_source',name:'Pixels',type:'pixels',visible:true,properties:{bitmap_rgba:bitmap,offset_x:0,offset_y:0,rotation:0},keyframes:[]}],overrides:[]};
+if(!__duplicateLayer(bitmapModule,'layer_source')||bitmapModule.layers[1].properties.bitmap_rgba!==bitmap||Buffer.from(bitmapModule.layers[1].properties.bitmap_rgba,'base64').length!==8192)throw new Error('canonical bitmap was not copied exactly');
+const sizedModule=savedBytes=>{const text='X'.repeat(200),properties={x:0,y:0,text,font:'5x7',rotation:0,colour:'#ffffff'},source={id:'layer_source',name:'Source',type:'text',visible:true,properties,keyframes:Array.from({length:120},(_,frame)=>({frame,easing:'linear',properties:{text}}))},verbosePoints=Array.from({length:2048},()=>[-127.12345678901234,190.12345678901234]),fullNames=Math.floor(savedBytes/5),remainder=savedBytes%5,layers=[source,...Array.from({length:4},(_,index)=>({id:`layer_p${index}`,name:'Points',type:'pixels',visible:true,properties:{points:verbosePoints,colour:'#ffffff'},keyframes:[]})),...Array.from({length:53},(_,index)=>({id:`layer_b${index}`,name:index<fullNames?'B':index===fullNames&&remainder?'Bitmap'.slice(0,6-remainder):'Bitmap',type:'pixels',visible:true,properties:{bitmap_rgba:bitmap,offset_x:0,offset_y:0,rotation:0},keyframes:[]}))],overrides=Array.from({length:120},(_,frame)=>({frame,layer_id:'layer_source',properties:{text}}));return{id:'custom_size',name:'Canvas',type:'canvas',background:'#000000',frame_count:120,fps:1,playback:'hold',layers,overrides}};
+const allowedSize=sizedModule(45);if(!__duplicateLayer(allowedSize,'layer_source')||Buffer.byteLength(JSON.stringify(allowedSize))!==1048576)throw new Error(`exact 1 MiB module duplicate failed at ${Buffer.byteLength(JSON.stringify(allowedSize))}`);
+const rejectedSize=sizedModule(44),rejectedSizeBefore=JSON.stringify(rejectedSize),sizePublicationsBefore=__publications;if(__duplicateLayer(rejectedSize,'layer_source'))throw new Error('1 MiB plus one-byte module duplicate was accepted');if(JSON.stringify(rejectedSize)!==rejectedSizeBefore||__publications!==sizePublicationsBefore)throw new Error('rejected module-size duplicate mutated or published draft');
+process.stdout.write(JSON.stringify({name:module.layers[1].name,length:module.layers[1].name.length,keyframes:allowedKeyframes.layers.flatMap(item=>item.keyframes).length,overrides:allowedOverrides.overrides.length,points:allowedPoints.layers.reduce((total,item)=>total+item.properties.points.length,0),layers:allowedLayers.layers.length,bitmapBytes:Buffer.from(bitmapModule.layers[1].properties.bitmap_rgba,'base64').length,moduleBytes:Buffer.byteLength(JSON.stringify(allowedSize)),publications:__publications,candidates:[module,allowedKeyframes,allowedOverrides,allowedPoints,allowedLayers,bitmapModule,allowedSize]}));
+"""
+        completed = subprocess.run(
+            [shutil.which("node"), "-e", harness], cwd=Path(__file__).parents[1],
+            text=True, capture_output=True, check=False,
+        )
+        self.assertEqual(completed.returncode, 0, completed.stderr)
+        report = json.loads(completed.stdout)
+        candidates = report.pop("candidates")
+        self.assertEqual(report, {
+            "name": "12345678901234567890123456789012345 copy", "length": 40,
+            "keyframes": 512, "overrides": 512, "points": 8192,
+            "layers": 64, "bitmapBytes": 8192, "moduleBytes": 1048576,
+            "publications": 0,
+        })
+        for module in candidates:
+            candidate = copy.deepcopy(self.store.get())
+            candidate["custom_modules"] = [module]
+            validated = config_store.validate_config(candidate)
+            self.assertEqual(validated["custom_modules"][0], module)
+
+    @unittest.skipUnless(shutil.which("node"), "Node.js is required")
+    def test_pixel_duplicate_layer_avoids_loaded_ids_and_size_rejection_consumes_no_id(self):
+        harness = r"""
+const fs=require('fs');const root={replaceChildren(){},append(){}};global.window=global;global.document={documentElement:null,querySelectorAll:()=>[],querySelector:()=>root,createElement:()=>({})};
+global.CSS={escape:value=>value};global.customModules=[];global.mediaItems=[];global.setInterval=()=>0;global.syncCustomModuleUI=()=>{};global.syncPlaylistDurations=()=>{};global.setMessage=()=>{};global.Date.now=()=>0;
+const source=fs.readFileSync('app/static/custom_canvas.js','utf8').replace('function duplicateLayer(module, layerId) {','globalThis.__duplicateLayer = function duplicateLayer(module, layerId) {');eval(source);
+const layer=(id,text='T')=>({id,name:'Layer',type:'text',visible:true,properties:{x:0,y:0,text,font:'5x7',rotation:0,colour:'#ffffff'},keyframes:[]});
+const mode=process.argv[1];
+if(mode==='collision'){
+  const collision={id:'custom_collision',name:'Canvas',type:'canvas',background:'#000000',frame_count:1,fps:1,playback:'hold',layers:[layer('layer_source'),layer('layer_00')],overrides:[{frame:0,layer_id:'layer_source',properties:{text:'O'}}]};
+  if(!__duplicateLayer(collision,'layer_source'))throw new Error('collision-safe duplicate rejected');
+  const copied=collision.layers[1];if(copied.id==='layer_00'||new Set(collision.layers.map(item=>item.id)).size!==collision.layers.length)throw new Error('generated duplicate id collided');
+  if(collision.overrides.length!==2||collision.overrides[1].layer_id!==copied.id)throw new Error('copied override did not unambiguously target duplicate');
+  process.stdout.write(JSON.stringify({id:copied.id,override:collision.overrides[1].layer_id,module:collision}));
+}else{
+  const module={id:'custom_serial',name:'Canvas',type:'canvas',background:'#000000',frame_count:1,fps:1,playback:'hold',layers:[layer('layer_source')],overrides:[]};
+  if(mode==='rejected'){module.layers[0].properties.text='X'.repeat(1048576);if(__duplicateLayer(module,'layer_source'))throw new Error('oversize duplicate accepted');module.layers[0].properties.text='T'}
+  if(!__duplicateLayer(module,'layer_source'))throw new Error('follow-up duplicate rejected');process.stdout.write(module.layers[1].id);
+}
+"""
+        reports = []
+        for mode in ("collision", "rejected", "control"):
+            completed = subprocess.run(
+                [shutil.which("node"), "-e", harness, mode], cwd=Path(__file__).parents[1],
+                text=True, capture_output=True, check=False,
+            )
+            self.assertEqual(completed.returncode, 0, completed.stderr)
+            reports.append(completed.stdout)
+        collision = json.loads(reports[0])
+        self.assertEqual(collision["override"], collision["id"])
+        self.assertEqual(reports[1], reports[2])
+        candidate = copy.deepcopy(self.store.get())
+        candidate["custom_modules"] = [collision["module"]]
+        validated = config_store.validate_config(candidate)
+        self.assertEqual(validated["custom_modules"][0], collision["module"])
+
+    @unittest.skipUnless(shutil.which("node"), "Node.js is required")
+    def test_pixel_duplicate_layer_uses_post_request_python_json_size(self):
+        harness = r"""
+const fs=require('fs');const root={replaceChildren(){},append(){}};global.window=global;global.document={documentElement:null,querySelectorAll:()=>[],querySelector:()=>root,createElement:()=>({})};
+global.CSS={escape:value=>value};global.customModules=[];global.mediaItems=[];global.setInterval=()=>0;global.syncCustomModuleUI=()=>{};global.syncPlaylistDurations=()=>{};global.setMessage=()=>{};global.Date.now=()=>0;
+const sourceCode=fs.readFileSync('app/static/custom_canvas.js','utf8').replace('  function pixelLineCells(startX, startY, endX, endY) {','  globalThis.__pythonJsonByteLength = pythonJsonByteLength;\n  function pixelLineCells(startX, startY, endX, endY) {').replace('function duplicateLayer(module, layerId) {','globalThis.__duplicateLayer = function duplicateLayer(module, layerId) {');eval(sourceCode);
+const bitmap=Buffer.alloc(8192).toString('base64');
+const sizedModule=savedBytes=>{const text='X'.repeat(200),properties={x:0,y:0,text,font:'5x7',rotation:0,colour:'#ffffff'},source={id:'layer_source',name:'Source',type:'text',visible:true,properties,keyframes:Array.from({length:120},(_,frame)=>({frame,easing:'linear',properties:{text}}))},verbosePoints=Array.from({length:2048},()=>[-127.12345678901234,190.12345678901234]),fullNames=Math.floor(savedBytes/5),remainder=savedBytes%5,layers=[source,...Array.from({length:4},(_,index)=>({id:`layer_p${index}`,name:'Points',type:'pixels',visible:true,properties:{points:verbosePoints,colour:'#ffffff'},keyframes:[]})),...Array.from({length:53},(_,index)=>({id:`layer_b${index}`,name:index<fullNames?'B':index===fullNames&&remainder?'Bitmap'.slice(0,6-remainder):'Bitmap',type:'pixels',visible:true,properties:{bitmap_rgba:bitmap,offset_x:0,offset_y:0,rotation:0},keyframes:[]}))],overrides=Array.from({length:120},(_,frame)=>({frame,layer_id:'layer_source',properties:{text}}));return{id:'custom_size',name:'Canvas',type:'canvas',background:'#000000',frame_count:120,fps:1,playback:'hold',layers,overrides}};
+const mode=process.argv[1],saved={allowed:45,rejected:44,unicode:49,exponent:51}[mode],module=sizedModule(saved);
+if(mode==='unicode')module.name='Cänvas';if(mode==='exponent')module.layers[0].properties.x=1e-7;
+const expected=structuredClone(module),copy=structuredClone(expected.layers[0]);copy.id='layer_00';copy.name='Source copy';expected.layers.splice(1,0,copy);expected.overrides.push(...expected.overrides.filter(item=>item.layer_id==='layer_source').slice(0,120).map(item=>({...structuredClone(item),layer_id:copy.id})));
+const before=JSON.stringify(module),admitted=__duplicateLayer(module,'layer_source');if(!admitted&&JSON.stringify(module)!==before)throw new Error('size rejection mutated module');
+const special={text:'"/\\\b\t\n\f\r\u0001é😀\ud800',slash:'a/b'};
+process.stdout.write(JSON.stringify({admitted,module:admitted?module:expected,special,specialSize:__pythonJsonByteLength(special)}));
+"""
+        reports = {}
+        for mode in ("allowed", "rejected", "unicode", "exponent"):
+            completed = subprocess.run(
+                [shutil.which("node"), "-e", harness, mode], cwd=Path(__file__).parents[1],
+                text=True, capture_output=True, timeout=30, check=False,
+            )
+            self.assertEqual(completed.returncode, 0, completed.stderr)
+            reports[mode] = json.loads(completed.stdout)
+        self.assertTrue(reports["allowed"]["admitted"])
+        for mode in ("rejected", "unicode", "exponent"):
+            self.assertFalse(reports[mode]["admitted"], mode)
+        expected_sizes = {"allowed": 1_048_576, "rejected": 1_048_577,
+                          "unicode": 1_048_577, "exponent": 1_048_578}
+        for mode, report in reports.items():
+            self.assertEqual(
+                report["specialSize"],
+                len(json.dumps(report["special"], separators=(",", ":"), ensure_ascii=True).encode()),
+                f"Python JSON escaping parity for {mode}",
+            )
+            module = report["module"]
+            size = len(json.dumps(module, separators=(",", ":"), ensure_ascii=True).encode())
+            self.assertEqual(size, expected_sizes[mode], mode)
+            candidate = copy.deepcopy(self.store.get())
+            candidate["custom_modules"] = [module]
+            if mode == "allowed":
+                validated = config_store.validate_config(candidate)
+                self.assertEqual(validated["custom_modules"][0], module)
+            else:
+                with self.assertRaisesRegex(ValueError, "1 MiB"):
+                    config_store.validate_config(candidate)
+
+    @unittest.skipUnless(shutil.which("node"), "Node.js is required")
+    def test_pixel_duplicate_button_explains_every_rejection_without_mutation(self):
+        harness = r"""
+const fs=require('fs');class Element{constructor(tag='div'){this.tag=tag;this.children=[];this.attributes={};this.className='';this.textContent='';}append(...items){this.children.push(...items)}replaceChildren(...items){this.children=[...items]}setAttribute(name,value){this.attributes[name]=value}addEventListener(name,handler){this['on'+name]=handler}querySelectorAll(){return[]}}
+const root=new Element();global.window=global;global.document={documentElement:null,querySelectorAll:()=>[],querySelector:()=>root,createElement:tag=>new Element(tag)};global.CSS={escape:value=>value};global.customModules=[];global.mediaItems=[];global.setInterval=()=>0;global.syncCustomModuleUI=()=>{};global.syncPlaylistDurations=()=>{};global.__messages=[];global.setMessage=(text,error)=>__messages.push({text,error});global.__publications=0;global.matrixCustomCanvasDraftChanged=()=>__publications++;global.Date.now=()=>0;global.makeButton=(text,onclick,className='btn')=>{const button=new Element('button');button.textContent=text;button.onclick=onclick;button.className=className;return button};
+const code=fs.readFileSync('app/static/custom_canvas.js','utf8').replace('const stateFor = module => {','const stateFor = globalThis.__stateFor = module => {').replace('function renderLayers(module, container) {','globalThis.__renderLayers = function renderLayers(module, container) {');eval(code);
+const layer=(id='layer_source')=>({id,name:id==='layer_source'?'Source':'Other',type:'text',visible:true,properties:{x:0,y:0,text:'T',font:'5x7',rotation:0,colour:'#ffffff'},keyframes:[]});
+const base=()=>({id:'custom_canvas',name:'Canvas',type:'canvas',background:'#000000',frame_count:120,fps:1,playback:'hold',layers:[layer()],overrides:[]});
+const keyframes=count=>Array.from({length:count},(_,frame)=>({frame,easing:'linear',properties:{text:'K'}}));
+const cases={};cases.layers=base();cases.layers.layers.push(...Array.from({length:63},(_,i)=>layer(`layer_${i}`)));
+cases.keyframes=base();cases.keyframes.layers[0].keyframes=keyframes(2);let remaining=509,index=0;while(remaining){const item=layer(`layer_k${index++}`),count=Math.min(120,remaining);item.keyframes=keyframes(count);cases.keyframes.layers.push(item);remaining-=count}
+cases.overrides=base();for(let i=0;i<511;i++)cases.overrides.overrides.push({frame:i%120,layer_id:'layer_source',properties:{text:'O'}});
+const points=count=>Array.from({length:count},()=>[0,0]),pixel=(id,count)=>({id,name:id==='layer_source'?'Source':'Other',type:'pixels',visible:true,properties:{points:points(count),colour:'#ffffff'},keyframes:[]});cases.points=base();cases.points.layers=[pixel('layer_source',2048),pixel('layer_p1',2048),pixel('layer_p2',2048),pixel('layer_p3',1)];
+cases.size=base();cases.size.layers[0].properties.text='X'.repeat(1048576);
+const report={};for(const [name,module] of Object.entries(cases)){__messages.length=0;const container=new Element(),before=JSON.stringify(module),state=__stateFor(module),selected=state.selected,published=__publications;__renderLayers(module,container);const buttons=[];const walk=item=>{if(item?.tag==='button')buttons.push(item);for(const child of item?.children||[])walk(child)};walk(container);const button=buttons.find(item=>item.className.includes('layer-duplicate')&&item.attributes['aria-label']==='Duplicate Source');if(!button)throw new Error(`shipped Duplicate button missing for ${name}`);button.onclick();report[name]={unchanged:JSON.stringify(module)===before,selected:state.selected===selected,published:__publications===published,messages:[...__messages]}}
+process.stdout.write(JSON.stringify(report));
+"""
+        completed = subprocess.run(
+            [shutil.which("node"), "-e", harness], cwd=Path(__file__).parents[1],
+            text=True, capture_output=True, timeout=30, check=False,
+        )
+        self.assertEqual(completed.returncode, 0, completed.stderr)
+        report = json.loads(completed.stdout)
+        self.assertEqual(set(report), {"layers", "keyframes", "overrides", "points", "size"})
+        for name, result in report.items():
+            self.assertTrue(result["unchanged"], name)
+            self.assertTrue(result["selected"], name)
+            self.assertTrue(result["published"], name)
+            self.assertEqual(len(result["messages"]), 1, name)
+            self.assertTrue(result["messages"][0]["error"], name)
+            self.assertIn("duplicate", result["messages"][0]["text"].lower(), name)
+
+    def _assert_pixel_duplicate_layer_boundaries(self):
+        """Exercise the shipped Duplicate action and authoritative schema boundaries."""
+        self.test_pixel_duplicate_layer_respects_server_schema_boundaries()
+        self.test_pixel_duplicate_layer_avoids_loaded_ids_and_size_rejection_consumes_no_id()
+        self.test_pixel_duplicate_layer_uses_post_request_python_json_size()
+        self.test_pixel_duplicate_button_explains_every_rejection_without_mutation()
+
+    @unittest.skipUnless(shutil.which("node"), "Node.js is required")
+    def test_pixel_json_request_exact_schema_boundaries(self):
+        self._assert_pixel_json_request_exact_schema_boundaries()
+
+    @unittest.skipUnless(shutil.which("node"), "Node.js is required")
+    @unittest.skipUnless(
+        os.environ.get("MATRIX_CHROMIUM")
+        and Path(os.environ.get("MATRIX_CHROMIUM", "")).is_file()
+        and os.access(os.environ.get("MATRIX_CHROMIUM", ""), os.X_OK),
+        "MATRIX_CHROMIUM browser is required",
+    )
+    def test_pixel_oversized_requests_reject_before_lifecycle_side_effects(self):
+        self._assert_pixel_oversized_requests_reject_before_lifecycle_side_effects()
+
+    @unittest.skipUnless(shutil.which("node"), "Node.js is required")
+    @unittest.skipUnless(
+        os.environ.get("MATRIX_CHROMIUM")
+        and Path(os.environ.get("MATRIX_CHROMIUM", "")).is_file()
+        and os.access(os.environ.get("MATRIX_CHROMIUM", ""), os.X_OK),
+        "MATRIX_CHROMIUM browser is required",
+    )
+    def test_pixel_editor_contextual_toolbar_and_grid_in_real_chromium(self):
+        self._assert_pixel_editor_contextual_toolbar_and_grid_in_real_chromium()
+
+    @unittest.skipUnless(shutil.which("node"), "Node.js is required")
+    @unittest.skipUnless(
+        os.environ.get("MATRIX_CHROMIUM")
+        and Path(os.environ.get("MATRIX_CHROMIUM", "")).is_file()
+        and os.access(os.environ.get("MATRIX_CHROMIUM", ""), os.X_OK),
+        "MATRIX_CHROMIUM browser is required",
+    )
+    def test_pixel_pointer_state_is_cancelled_before_layer_switch(self):
+        self._assert_pixel_pointer_state_is_cancelled_before_layer_switch()
+
+    @unittest.skipUnless(shutil.which("node"), "Node.js is required")
+    @unittest.skipUnless(
+        os.environ.get("MATRIX_CHROMIUM")
+        and Path(os.environ.get("MATRIX_CHROMIUM", "")).is_file()
+        and os.access(os.environ.get("MATRIX_CHROMIUM", ""), os.X_OK),
+        "MATRIX_CHROMIUM browser is required",
+    )
+    def test_pixel_active_stroke_is_committed_before_keyboard_save_and_reload(self):
+        self._assert_pixel_active_stroke_is_committed_before_keyboard_save_and_reload()
+
+    @unittest.skipUnless(shutil.which("node"), "Node.js is required")
+    @unittest.skipUnless(
+        os.environ.get("MATRIX_CHROMIUM")
+        and Path(os.environ.get("MATRIX_CHROMIUM", "")).is_file()
+        and os.access(os.environ.get("MATRIX_CHROMIUM", ""), os.X_OK),
+        "MATRIX_CHROMIUM browser is required",
+    )
+    def test_pixel_bitmap_save_reload_remains_canonical_and_editable_over_live_http(self):
+        self._assert_pixel_bitmap_save_reload_remains_canonical_and_editable_over_live_http()
+
+    @unittest.skipUnless(shutil.which("node"), "Node.js is required")
+    @unittest.skipUnless(
+        os.environ.get("MATRIX_CHROMIUM")
+        and Path(os.environ.get("MATRIX_CHROMIUM", "")).is_file()
+        and os.access(os.environ.get("MATRIX_CHROMIUM", ""), os.X_OK),
+        "MATRIX_CHROMIUM browser is required",
+    )
+    def test_pixel_bitmap_stale_save_remain_and_reload_newer_peer_state(self):
+        self._assert_pixel_bitmap_stale_save_remain_and_reload_newer_peer_state()
+
+    @unittest.skipUnless(shutil.which("node"), "Node.js is required")
+    @unittest.skipUnless(
+        os.environ.get("MATRIX_CHROMIUM")
+        and Path(os.environ.get("MATRIX_CHROMIUM", "")).is_file()
+        and os.access(os.environ.get("MATRIX_CHROMIUM", ""), os.X_OK),
+        "MATRIX_CHROMIUM browser is required",
+    )
+    def test_pixel_editor_browser_and_device_draft_parity(self):
+        self._assert_pixel_editor_browser_and_device_draft_parity()
+
+    @unittest.skipUnless(shutil.which("node"), "Node.js is required")
+    @unittest.skipUnless(
+        os.environ.get("MATRIX_CHROMIUM")
+        and Path(os.environ.get("MATRIX_CHROMIUM", "")).is_file()
+        and os.access(os.environ.get("MATRIX_CHROMIUM", ""), os.X_OK),
+        "MATRIX_CHROMIUM browser is required",
+    )
+    def test_pixel_editor_mouse_touch_keyboard_save_and_layer_lifecycle(self):
+        """Task 3 directly owns the complete real-browser pixel-editor journey."""
+        self._assert_pixel_json_request_exact_schema_boundaries()
+        self._assert_pixel_oversized_requests_reject_before_lifecycle_side_effects()
+        self._assert_pixel_duplicate_layer_boundaries()
+        self._assert_pixel_editor_contextual_toolbar_and_grid_in_real_chromium()
+        self._assert_pixel_pointer_state_is_cancelled_before_layer_switch()
+        self._assert_pixel_legacy_destructive_migration_and_saved_reset()
+        self._assert_pixel_active_stroke_is_committed_before_keyboard_save_and_reload()
+        self._assert_pixel_bitmap_save_reload_remains_canonical_and_editable_over_live_http()
+        self._assert_pixel_bitmap_stale_save_remain_and_reload_newer_peer_state()
+        self._assert_pixel_editor_browser_and_device_draft_parity()
+
+    def _assert_pixel_legacy_destructive_migration_and_saved_reset(self):
+        """Keep the narrow legacy lifecycle contract within the Task 3 journey."""
+        harness = r"""
+const fs=require('fs');global.window=global;global.document={documentElement:null,querySelectorAll:()=>[],querySelector:()=>({replaceChildren(){},append(){}}),createElement:()=>({})};
+global.CSS={escape:value=>value};global.customModules=[];global.mediaItems=[];global.setInterval=()=>0;global.syncCustomModuleUI=()=>{};global.syncPlaylistDurations=()=>{};global.setMessage=()=>{};
+eval(fs.readFileSync('app/static/custom_canvas.js','utf8'));
+const layer={id:'pixels',name:'Legacy',type:'pixels',visible:true,properties:{points:[[0,0],[2,0],[0,2]],colour:'#ff0000',rotation:90,present:true,kept:'base'},keyframes:[{frame:1,easing:'step',properties:{points:[[1,1],[1,1],[-20,-20]],colour:'#00ff00',rotation:45,present:false,keptKey:'yes'}}]};
+const module={id:'canvas',name:'Canvas',type:'canvas',background:'#000000',frame_count:3,fps:1,playback:'hold',layers:[layer],overrides:[{frame:1,layer_id:'pixels',properties:{points:[[2,2],[2,2],[100,100]],colour:'#0000ff',rotation:0,z_index:7,keptOverride:'yes'}},{frame:2,layer_id:'other',properties:{present:false}}]};
+const before=JSON.stringify(module),saved=matrixPixelLayerLifecycle.savedSnapshot(module,layer);let prompts=[];global.confirm=message=>{prompts.push(message);return false};
+if(matrixPixelLayerLifecycle.bakeLegacy(module,layer,1)!==false||JSON.stringify(module)!==before)throw new Error('rejected bake mutated draft');
+global.confirm=message=>{prompts.push(message);return true};if(!matrixPixelLayerLifecycle.bakeLegacy(module,layer,1))throw new Error('confirmed bake failed');
+if(layer.properties.points!==undefined||layer.properties.colour!==undefined||layer.properties.rotation!==0||layer.properties.offset_x!==0||layer.properties.offset_y!==0)throw new Error('base was not canonicalized');
+if(layer.properties.kept!=='base'||layer.keyframes[0].properties.present!==false||layer.keyframes[0].properties.keptKey!=='yes'||layer.keyframes[0].easing!=='step')throw new Error('unrelated keyframe data changed');
+const own=module.overrides.find(item=>item.layer_id==='pixels');if(own.properties.z_index!==7||own.properties.keptOverride!=='yes'||'points' in own.properties||'colour' in own.properties||'rotation' in own.properties)throw new Error('override cleanup was not surgical');
+if(!module.overrides.some(item=>item.layer_id==='other'))throw new Error('unrelated override removed');
+const bytes=Buffer.from(layer.properties.bitmap_rgba,'base64');if(bytes.length!==8192||bytes[(2*64+2)*4+2]!==255||bytes[(2*64+2)*4+3]!==255)throw new Error('resolved duplicate colour was not baked');
+if(prompts.length!==2||!prompts.every(message=>message.includes('other frames')))throw new Error('flatten confirmation did not name consequence');
+layer.properties.bitmap_rgba=matrixPixelLayerLifecycle.bitmapBase64(new Uint8Array(8192).fill(17));
+if(!matrixPixelLayerLifecycle.restoreSaved(module,layer,saved)||JSON.stringify(module)!==before)throw new Error('reset did not restore exact saved legacy layer and overrides');
+process.stdout.write(JSON.stringify({bytes:bytes.length,prompts:prompts.length,overrides:module.overrides.length,resetExact:JSON.stringify(module)===before}));
+"""
+        completed = subprocess.run(
+            [shutil.which("node"), "-e", harness], cwd=Path(__file__).parents[1],
+            text=True, capture_output=True, check=False,
+        )
+        self.assertEqual(completed.returncode, 0, completed.stderr)
+        self.assertEqual(json.loads(completed.stdout), {"bytes": 8192, "prompts": 2, "overrides": 2, "resetExact": True})
+
+    @unittest.skipUnless(shutil.which("node"), "Node.js is required")
+    @unittest.skipUnless(
+        os.environ.get("MATRIX_CHROMIUM")
+        and Path(os.environ.get("MATRIX_CHROMIUM", "")).is_file()
+        and os.access(os.environ.get("MATRIX_CHROMIUM", ""), os.X_OK),
+        "MATRIX_CHROMIUM browser is required",
+    )
+    def _assert_pixel_active_stroke_is_committed_before_keyboard_save_and_reload(self):
+        pixels = bytes(64 * 32 * 4)
+        module = test_config_store.ConfigStoreTests.advanced_module(
+            id="custom_pixels", name="Active save", background="#000000",
+            layers=[{
+                "id": "layer_pixel", "name": "Pixels", "type": "pixels", "visible": True,
+                "properties": {"bitmap_rgba": base64.b64encode(pixels).decode("ascii"),
+                               "offset_x": 0, "offset_y": 0, "rotation": 0},
+                "keyframes": [],
+            }], overrides=[],
+        )
+        Image.new("RGB", (2, 2), "black").save(self.media_dir / "splash.png")
+        Image.new("RGB", (2, 2), "black").save(self.media_dir / "sleep.png")
+        self.store.update({"custom_modules": [module],
+                           "media": {"splash": "splash.png", "sleep": "sleep.png"}})
+        self.controller.frame_png.side_effect = lambda: (
+            io.BytesIO(b"\x89PNG\r\n\x1a\n"), "active-save"
+        )
+        self.pairing.verify.return_value = True
+        probe = r"""
+const debugPort=process.argv[1],appPort=process.argv[2],sleep=ms=>new Promise(resolve=>setTimeout(resolve,ms));let endpoint;
+for(let n=0;n<50;n++){try{endpoint=await fetch(`http://127.0.0.1:${debugPort}/json/new`,{method:'PUT'}).then(r=>r.json());break}catch(_){await sleep(100)}}
+if(!endpoint)throw new Error('CDP unavailable');const socket=new WebSocket(endpoint.webSocketDebuggerUrl),pending=new Map(),errors=[];let id=0,loadResolve=()=>{};
+socket.onmessage=event=>{const message=JSON.parse(event.data);if(message.id&&pending.has(message.id)){const p=pending.get(message.id);pending.delete(message.id);message.error?p.reject(new Error(JSON.stringify(message.error))):p.resolve(message.result);return}if(message.method==='Runtime.exceptionThrown')errors.push(message.params.exceptionDetails);if(message.method==='Page.loadEventFired')loadResolve()};
+await new Promise((resolve,reject)=>{socket.onopen=resolve;socket.onerror=reject});const send=(method,params={})=>new Promise((resolve,reject)=>{const request=++id;pending.set(request,{resolve,reject});socket.send(JSON.stringify({id:request,method,params}))});const evaluate=async expression=>{const result=await send('Runtime.evaluate',{expression,returnByValue:true,awaitPromise:true});if(result.exceptionDetails)throw new Error(JSON.stringify(result.exceptionDetails));return result.result.value};
+const waitFor=async(expression,label)=>{for(let n=0;n<300;n++){if(await evaluate(expression))return;await sleep(20)}throw new Error('timeout '+label)};const navigate=async url=>{const loaded=new Promise(resolve=>loadResolve=resolve);await send('Page.navigate',{url});await Promise.race([loaded,sleep(7000).then(()=>{throw new Error('load timeout')})])};
+try{await send('Runtime.enable');await send('Page.enable');await navigate(`http://127.0.0.1:${appPort}/pair`);await evaluate(`fetch('/pair',{method:'POST',headers:{'Content-Type':'application/x-www-form-urlencoded'},body:new URLSearchParams({device_name:'Active save browser',pin:'123456'})}).then(r=>r.ok)`);await navigate(`http://127.0.0.1:${appPort}/`);await waitFor(`matrixEditorsReady&&document.querySelector('.pixel-grid')`,'editor');
+await evaluate(`(()=>{stopMatrixConfigSync();globalThis.__savedBody=null;const realFetch=fetch;globalThis.fetch=(url,options={})=>{if(String(url).endsWith('/api/config')&&options.method==='POST')__savedBody=options.body;return realFetch(url,options)};const input=document.querySelector('[data-pixel-action="colour"]');input.value='#ff0000';input.dispatchEvent(new Event('input',{bubbles:true}));document.querySelector('.pixel-grid').scrollIntoView({block:'center'});document.addEventListener('pointerdown',event=>globalThis.__owner=event.pointerId,true);return true})()`);await sleep(50);
+const point=await evaluate(`(()=>{const r=document.querySelector('.pixel-grid').getBoundingClientRect();return{x:r.left+4.5*r.width/64,y:r.top+4.5*r.height/32}})()`);await send('Input.dispatchMouseEvent',{type:'mousePressed',x:point.x,y:point.y,button:'left',buttons:1,clickCount:1});const captured=await evaluate(`document.querySelector('.pixel-grid').hasPointerCapture(__owner)`);const oldRevision=await evaluate(`matrixLoadedRevision`);await evaluate(`document.querySelector('#save-config').focus()`);await send('Input.dispatchKeyEvent',{type:'rawKeyDown',key:'Enter',code:'Enter',windowsVirtualKeyCode:13,nativeVirtualKeyCode:13});await send('Input.dispatchKeyEvent',{type:'char',text:'\r',key:'Enter',code:'Enter',windowsVirtualKeyCode:13,nativeVirtualKeyCode:13});await send('Input.dispatchKeyEvent',{type:'keyUp',key:'Enter',code:'Enter',windowsVirtualKeyCode:13,nativeVirtualKeyCode:13});await waitFor(`matrixLoadedRevision>${oldRevision}`,'save');await send('Input.dispatchMouseEvent',{type:'mouseReleased',x:point.x,y:point.y,button:'left',buttons:0,clickCount:1});await sleep(50);
+const after=await evaluate(`(()=>{const layer=customModules.find(m=>m.id==='custom_pixels').layers[0],submitted=JSON.parse(__savedBody),canvas=document.querySelector('.pixel-grid'),at=Array.from(canvas.getContext('2d').getImageData(45,45,1,1).data);return{visible:at,layer:layer.properties.bitmap_rgba,submitted:submitted.custom_modules[0].layers[0].properties.bitmap_rgba,baseline:JSON.parse(matrixSavedSnapshot).custom_modules[0].layers[0].properties.bitmap_rgba,dirty:matrixHasUnsavedDraft(),history:[...document.querySelectorAll('[data-pixel-action="undo"],[data-pixel-action="redo"]')].map(button=>button.disabled),captured:canvas.hasPointerCapture(__owner)}})()`);
+await navigate(`http://127.0.0.1:${appPort}/`);await waitFor(`matrixEditorsReady&&document.querySelector('.pixel-grid')`,'reloaded editor');const reloaded=await evaluate(`(()=>{const layer=customModules.find(m=>m.id==='custom_pixels').layers[0],canvas=document.querySelector('.pixel-grid');return{bitmap:layer.properties.bitmap_rgba,pixel:Array.from(canvas.getContext('2d').getImageData(45,45,1,1).data),dirty:matrixHasUnsavedDraft()}})()`);console.log(JSON.stringify({captured,after,reloaded,errors}));}finally{socket.close()}
+"""
+        report = self.run_live_chromium_probe(probe, timeout=35)
+        expected = bytearray(64 * 32 * 4)
+        expected[(4 * 64 + 4) * 4:(4 * 64 + 4) * 4 + 4] = bytes((255, 0, 0, 255))
+        expected_bitmap = base64.b64encode(expected).decode("ascii")
+        self.assertTrue(report["captured"], report)
+        self.assertEqual(report["after"], {
+            "visible": [255, 0, 0, 255], "layer": expected_bitmap,
+            "submitted": expected_bitmap, "baseline": expected_bitmap,
+            "dirty": False, "history": [True, True], "captured": False,
+        }, report)
+        self.assertEqual(report["reloaded"], {
+            "bitmap": expected_bitmap, "pixel": [255, 0, 0, 255], "dirty": False,
+        }, report)
+        self.assertEqual(report["errors"], [], report)
+
+    @unittest.skipUnless(shutil.which("node"), "Node.js is required")
+    @unittest.skipUnless(
+        os.environ.get("MATRIX_CHROMIUM")
+        and Path(os.environ.get("MATRIX_CHROMIUM", "")).is_file()
+        and os.access(os.environ.get("MATRIX_CHROMIUM", ""), os.X_OK),
+        "MATRIX_CHROMIUM browser is required",
+    )
+    def _assert_pixel_bitmap_save_reload_remains_canonical_and_editable_over_live_http(self):
+        pixels = bytearray(64 * 32 * 4)
+        module = test_config_store.ConfigStoreTests.advanced_module(
+            id="custom_pixels", name="Reload bitmap", background="#000000",
+            layers=[{
+                "id": "layer_pixel", "name": "Pixels", "type": "pixels", "visible": True,
+                "properties": {
+                    "bitmap_rgba": base64.b64encode(pixels).decode("ascii"),
+                    "offset_x": 0, "offset_y": 0, "rotation": 0,
+                },
+                "keyframes": [],
+            }], overrides=[],
+        )
+        Image.new("RGB", (2, 2), "black").save(self.media_dir / "splash.png")
+        Image.new("RGB", (2, 2), "black").save(self.media_dir / "sleep.png")
+        self.store.update({
+            "custom_modules": [module],
+            "media": {"splash": "splash.png", "sleep": "sleep.png"},
+        })
+        self.controller.frame_png.side_effect = lambda: (
+            io.BytesIO(b"\x89PNG\r\n\x1a\n"), "reload-frame"
+        )
+        self.pairing.verify.return_value = True
+        probe = r"""
+const debugPort=process.argv[1],appPort=process.argv[2],sleep=ms=>new Promise(resolve=>setTimeout(resolve,ms));let endpoint;
+for(let attempt=0;attempt<50;attempt++){try{endpoint=await fetch(`http://127.0.0.1:${debugPort}/json/new`,{method:'PUT'}).then(response=>response.json());break}catch(_){await sleep(100)}}
+if(!endpoint)throw new Error('CDP unavailable');const socket=new WebSocket(endpoint.webSocketDebuggerUrl),pending=new Map(),errors=[];let id=0,loadResolve=()=>{};
+socket.onmessage=event=>{const message=JSON.parse(event.data);if(message.id&&pending.has(message.id)){const request=pending.get(message.id);pending.delete(message.id);message.error?request.reject(new Error(JSON.stringify(message.error))):request.resolve(message.result);return}if(message.method==='Runtime.exceptionThrown')errors.push(message.params.exceptionDetails);if(message.method==='Page.loadEventFired')loadResolve()};
+await new Promise((resolve,reject)=>{socket.onopen=resolve;socket.onerror=reject});const send=(method,params={})=>new Promise((resolve,reject)=>{const request=++id;pending.set(request,{resolve,reject});socket.send(JSON.stringify({id:request,method,params}))});
+const evaluate=async expression=>{const result=await send('Runtime.evaluate',{expression,returnByValue:true,awaitPromise:true});if(result.exceptionDetails)throw new Error(JSON.stringify(result.exceptionDetails));return result.result.value};
+const waitFor=async(expression,label)=>{for(let attempt=0;attempt<250;attempt++){if(await evaluate(expression))return;await sleep(20)}throw new Error('timeout '+label)};
+const navigate=async url=>{const loaded=new Promise(resolve=>loadResolve=resolve);await send('Page.navigate',{url});await Promise.race([loaded,sleep(7000).then(()=>{throw new Error('load timeout')})])};
+const draw=async(cell,colour)=>{await evaluate(`(()=>{const colour=document.querySelector('[data-pixel-action="colour"]');colour.value='${colour}';colour.dispatchEvent(new Event('input',{bubbles:true}));document.querySelector('.pixel-grid').scrollIntoView({block:'center'});return true})()`);await sleep(50);const point=await evaluate(`(()=>{const r=document.querySelector('.pixel-grid').getBoundingClientRect();return{x:r.left+(${cell[0]}+.5)*r.width/64,y:r.top+(${cell[1]}+.5)*r.height/32}})()`);await send('Input.dispatchMouseEvent',{type:'mousePressed',x:point.x,y:point.y,button:'left',buttons:1,clickCount:1});await send('Input.dispatchMouseEvent',{type:'mouseReleased',x:point.x,y:point.y,button:'left',buttons:0,clickCount:1});await sleep(50)};
+try{await send('Runtime.enable');await send('Page.enable');await navigate(`http://127.0.0.1:${appPort}/pair`);await evaluate(`fetch('/pair',{method:'POST',headers:{'Content-Type':'application/x-www-form-urlencoded'},body:new URLSearchParams({device_name:'Bitmap reload browser',pin:'123456'})}).then(response=>response.ok)`,true);await navigate(`http://127.0.0.1:${appPort}/`);await waitFor(`matrixEditorsReady&&document.querySelector('.pixel-grid')`,'first editor');await evaluate(`stopMatrixConfigSync();true`);await draw([4,4],'#ff0000');const saved=await evaluate(`saveConfig()`,true);const savedBitmap=await evaluate(`customModules.find(item=>item.id==='custom_pixels').layers[0].properties.bitmap_rgba`);await navigate(`http://127.0.0.1:${appPort}/`);await waitFor(`matrixEditorsReady&&document.querySelector('.pixel-grid')`,'reloaded editor');await evaluate(`stopMatrixConfigSync();true`);const reloadedBitmap=await evaluate(`customModules.find(item=>item.id==='custom_pixels').layers[0].properties.bitmap_rgba`);await draw([5,4],'#00ff00');const edited=await evaluate(`(()=>{const layer=customModules.find(item=>item.id==='custom_pixels').layers[0],bytes=Uint8Array.from(atob(layer.properties.bitmap_rgba),value=>value.charCodeAt(0)),at=(x,y)=>Array.from(bytes.slice((y*64+x)*4,(y*64+x)*4+4));return{bitmap:layer.properties.bitmap_rgba,red:at(4,4),green:at(5,4),legacy:['points','colour'].filter(key=>key in layer.properties),offsets:[layer.properties.offset_x,layer.properties.offset_y],dirty:matrixHasUnsavedDraft()}})()`);console.log(JSON.stringify({saved,savedBitmap,reloadedBitmap,edited,errors}));}finally{socket.close()}
+"""
+        report = self.run_live_chromium_probe(probe, timeout=30)
+        expected = bytearray(64 * 32 * 4)
+        expected[(4 * 64 + 4) * 4:(4 * 64 + 4) * 4 + 4] = bytes((255, 0, 0, 255))
+        expected_bitmap = base64.b64encode(expected).decode("ascii")
+        self.assertEqual(report["saved"], {"saved": True, "warning": None}, report)
+        self.assertEqual(report["savedBitmap"], expected_bitmap, report)
+        self.assertEqual(report["reloadedBitmap"], expected_bitmap, report)
+        self.assertEqual(report["edited"]["red"], [255, 0, 0, 255], report)
+        self.assertEqual(report["edited"]["green"], [0, 255, 0, 255], report)
+        self.assertEqual(report["edited"]["legacy"], [], report)
+        self.assertEqual(report["edited"]["offsets"], [0, 0], report)
+        self.assertTrue(report["edited"]["dirty"], report)
+        self.assertEqual(report["errors"], [], report)
+        persisted = self.store.get()["custom_modules"][0]["layers"][0]["properties"]
+        self.assertEqual(persisted["bitmap_rgba"], expected_bitmap)
+
+    @unittest.skipUnless(shutil.which("node"), "Node.js is required")
+    @unittest.skipUnless(
+        os.environ.get("MATRIX_CHROMIUM")
+        and Path(os.environ.get("MATRIX_CHROMIUM", "")).is_file()
+        and os.access(os.environ.get("MATRIX_CHROMIUM", ""), os.X_OK),
+        "MATRIX_CHROMIUM browser is required",
+    )
+    def _assert_pixel_bitmap_stale_save_remain_and_reload_newer_peer_state(self):
+        pixels = bytes(64 * 32 * 4)
+        module = test_config_store.ConfigStoreTests.advanced_module(
+            id="custom_pixels", name="Bitmap conflict", background="#000000",
+            layers=[{
+                "id": "layer_pixel", "name": "Pixels", "type": "pixels", "visible": True,
+                "properties": {
+                    "bitmap_rgba": base64.b64encode(pixels).decode("ascii"),
+                    "offset_x": 0, "offset_y": 0, "rotation": 0,
+                },
+                "keyframes": [],
+            }], overrides=[],
+        )
+        Image.new("RGB", (2, 2), "black").save(self.media_dir / "splash.png")
+        Image.new("RGB", (2, 2), "black").save(self.media_dir / "sleep.png")
+        self.store.update({
+            "custom_modules": [module],
+            "media": {"splash": "splash.png", "sleep": "sleep.png"},
+        })
+        self.controller.frame_png.side_effect = lambda: (
+            io.BytesIO(b"\x89PNG\r\n\x1a\n"), "conflict-frame"
+        )
+        self.pairing.verify.return_value = True
+        probe = r"""
+const debugPort=process.argv[1],appPort=process.argv[2],sleep=ms=>new Promise(resolve=>setTimeout(resolve,ms));let endpoint;
+for(let attempt=0;attempt<50;attempt++){try{endpoint=await fetch(`http://127.0.0.1:${debugPort}/json/new`,{method:'PUT'}).then(response=>response.json());break}catch(_){await sleep(100)}}
+if(!endpoint)throw new Error('CDP unavailable');const socket=new WebSocket(endpoint.webSocketDebuggerUrl),pending=new Map(),errors=[];let id=0,loadResolve=()=>{};
+socket.onmessage=event=>{const message=JSON.parse(event.data);if(message.id&&pending.has(message.id)){const request=pending.get(message.id);pending.delete(message.id);message.error?request.reject(new Error(JSON.stringify(message.error))):request.resolve(message.result);return}if(message.method==='Runtime.exceptionThrown')errors.push(message.params.exceptionDetails);if(message.method==='Page.loadEventFired')loadResolve()};
+await new Promise((resolve,reject)=>{socket.onopen=resolve;socket.onerror=reject});const send=(method,params={})=>new Promise((resolve,reject)=>{const request=++id;pending.set(request,{resolve,reject});socket.send(JSON.stringify({id:request,method,params}))});const evaluate=async expression=>{const result=await send('Runtime.evaluate',{expression,returnByValue:true,awaitPromise:true});if(result.exceptionDetails)throw new Error(JSON.stringify(result.exceptionDetails));return result.result.value};
+const waitFor=async(expression,label)=>{for(let attempt=0;attempt<250;attempt++){if(await evaluate(expression))return;await sleep(20)}throw new Error('timeout '+label)};const navigate=async url=>{const loaded=new Promise(resolve=>loadResolve=resolve);await send('Page.navigate',{url});await Promise.race([loaded,sleep(7000).then(()=>{throw new Error('load timeout')})])};
+const trustedDraw=async(x,y,colour)=>{await evaluate(`(()=>{const input=document.querySelector('[data-pixel-action="colour"]');input.value='${colour}';input.dispatchEvent(new Event('input',{bubbles:true}));document.querySelector('.pixel-grid').scrollIntoView({block:'center'});return true})()`);await sleep(40);const point=await evaluate(`(()=>{const r=document.querySelector('.pixel-grid').getBoundingClientRect();return{x:r.left+(${x}+.5)*r.width/64,y:r.top+(${y}+.5)*r.height/32}})()`);await send('Input.dispatchMouseEvent',{type:'mousePressed',x:point.x,y:point.y,button:'left',buttons:1,clickCount:1});await send('Input.dispatchMouseEvent',{type:'mouseReleased',x:point.x,y:point.y,button:'left',buttons:0,clickCount:1});await sleep(40)};
+try{await send('Runtime.enable');await send('Page.enable');await navigate(`http://127.0.0.1:${appPort}/pair`);await evaluate(`fetch('/pair',{method:'POST',headers:{'Content-Type':'application/x-www-form-urlencoded'},body:new URLSearchParams({device_name:'Bitmap conflict browser',pin:'123456'})}).then(response=>response.ok)`,true);await navigate(`http://127.0.0.1:${appPort}/`);await waitFor(`matrixEditorsReady&&document.querySelector('.pixel-grid')`,'editor');await evaluate(`(()=>{clearInterval(matrixSyncTimer);matrixSyncTimer=null;globalThis.__configPosts=0;const realFetch=fetch;globalThis.fetch=(...args)=>{if(String(args[0]).endsWith('/api/config')&&args[1]?.method==='POST')__configPosts++;return realFetch(...args)};return true})()`);await trustedDraw(4,4,'#ff0000');const peer1=await evaluate(`(async()=>{const payload=configBody(),bytes=new Uint8Array(8192);bytes[(1*64+1)*4+2]=255;bytes[(1*64+1)*4+3]=255;payload.custom_modules[0].layers[0].properties.bitmap_rgba=btoa(String.fromCharCode(...bytes));const response=await fetch('/api/config',{method:'POST',headers:{'Content-Type':'application/json','X-Matrix-Action':'paired-request','X-Matrix-Client-Contract':String(MATRIX_CLIENT_CONTRACT),'If-Match':matrixRevisionETag()},body:JSON.stringify(payload)});return{status:response.status,data:await response.json()}})()`);const stale=await evaluate(`saveConfig()`,true);await evaluate(`matrixCheckForNewerConfig()`,true);await waitFor(`document.querySelector('.config-revision-dialog')`,'first conflict');const conflict=await evaluate(`(()=>{const layer=customModules.find(item=>item.id==='custom_pixels').layers[0],dialog=document.querySelector('.config-revision-dialog');return{posts:__configPosts,bitmap:layer.properties.bitmap_rgba,revision:dialog.matrixRemoteRevision,disabled:document.querySelector('#save-config').disabled,buttons:[...dialog.querySelectorAll('button')].map(item=>item.textContent)}})()`);const gated=await evaluate(`saveConfig()`,true);const gatedPosts=await evaluate(`__configPosts`);await evaluate(`document.querySelectorAll('.config-revision-dialog button')[1].click();true`);const remained=await evaluate(`(()=>{const layer=customModules.find(item=>item.id==='custom_pixels').layers[0];return{bitmap:layer.properties.bitmap_rgba,posts:__configPosts,dialog:!!document.querySelector('.config-revision-dialog'),disabled:document.querySelector('#save-config').disabled}})()`);await evaluate(`__peerRevision=${peer1.data.revision}`);const peer2=await evaluate(`(async()=>{const payload=configBody(),bytes=new Uint8Array(8192);bytes[(2*64+2)*4+1]=255;bytes[(2*64+2)*4+3]=255;payload.custom_modules[0].layers[0].properties.bitmap_rgba=btoa(String.fromCharCode(...bytes));const response=await fetch('/api/config',{method:'POST',headers:{'Content-Type':'application/json','X-Matrix-Action':'paired-request','X-Matrix-Client-Contract':String(MATRIX_CLIENT_CONTRACT),'If-Match':'"'+__peerRevision+'"'},body:JSON.stringify(payload)});return{status:response.status,data:await response.json(),bitmap:payload.custom_modules[0].layers[0].properties.bitmap_rgba}})()`);await evaluate(`matrixCheckForNewerConfig()`,true);await waitFor(`document.querySelector('.config-revision-dialog')`,'second conflict');const loaded=new Promise(resolve=>loadResolve=resolve);await evaluate(`document.querySelectorAll('.config-revision-dialog button')[0].click();true`);await Promise.race([loaded,sleep(7000).then(()=>{throw new Error('reload timeout')})]);await waitFor(`matrixEditorsReady&&document.querySelector('.pixel-grid')`,'reloaded peer editor');const accepted=await evaluate(`(()=>{const layer=customModules.find(item=>item.id==='custom_pixels').layers[0];return{bitmap:layer.properties.bitmap_rgba,revision:matrixLoadedRevision,legacy:['points','colour'].filter(key=>key in layer.properties)}})()`);console.log(JSON.stringify({peer1,stale,conflict,gated,gatedPosts,remained,peer2,accepted,errors}));}finally{socket.close()}
+"""
+        report = self.run_live_chromium_probe(probe, timeout=35)
+        local = bytearray(64 * 32 * 4)
+        local[(4 * 64 + 4) * 4:(4 * 64 + 4) * 4 + 4] = bytes((255, 0, 0, 255))
+        local_bitmap = base64.b64encode(local).decode("ascii")
+        self.assertEqual(report["peer1"]["status"], 200, report)
+        self.assertEqual(report["stale"]["saved"], False, report)
+        self.assertEqual(report["conflict"]["bitmap"], local_bitmap, report)
+        self.assertEqual(report["conflict"]["posts"], 2, report)
+        self.assertTrue(report["conflict"]["disabled"], report)
+        self.assertEqual(report["conflict"]["buttons"], [
+            "Reload latest saved state", "Remain with unsaved draft",
+        ], report)
+        self.assertEqual(report["gated"]["saved"], False, report)
+        self.assertEqual(report["gatedPosts"], 2, report)
+        self.assertEqual(report["remained"], {
+            "bitmap": local_bitmap, "posts": 2, "dialog": False, "disabled": False,
+        }, report)
+        self.assertEqual(report["peer2"]["status"], 200, report)
+        self.assertEqual(report["accepted"]["bitmap"], report["peer2"]["bitmap"], report)
+        self.assertEqual(report["accepted"]["revision"], report["peer2"]["data"]["revision"], report)
+        self.assertEqual(report["accepted"]["legacy"], [], report)
+        self.assertEqual(report["errors"], [], report)
+
+    @unittest.skipUnless(shutil.which("node"), "Node.js is required")
+    @unittest.skipUnless(
+        os.environ.get("MATRIX_CHROMIUM")
+        and Path(os.environ.get("MATRIX_CHROMIUM", "")).is_file()
+        and os.access(os.environ.get("MATRIX_CHROMIUM", ""), os.X_OK),
+        "MATRIX_CHROMIUM browser is required",
+    )
+    def _assert_pixel_editor_browser_and_device_draft_parity(self):
+        """The real dashboard owns the bitmap draft/save transport and byte preflight journey."""
+        module = test_config_store.ConfigStoreTests.advanced_module(
+            id="custom_pixels", name="Pixel integration", background="#000000",
+            layers=[
+                {
+                    "id": "layer_pixel", "name": "Legacy pixels", "type": "pixels", "visible": True,
+                    "properties": {"points": [[1, 1]], "colour": "#ff0000", "rotation": 0},
+                    "keyframes": [],
+                },
+                {
+                    "id": "layer_text", "name": "Backdrop", "type": "text", "visible": True,
+                    "properties": {"x": 0, "y": 7, "text": "B", "font": "5x7", "colour": "#0000ff"},
+                    "keyframes": [],
+                },
+            ], overrides=[],
+        )
+        self.store.update({"custom_modules": [module]})
+        self.pair_browser()
+        body = self.client.get("/").get_data(as_text=True)
+        probe = r"""
+const port=process.argv[1],pagePath=process.argv[2];let endpoint;
+for(let attempt=0;attempt<50;attempt++){try{endpoint=await fetch(`http://127.0.0.1:${port}/json/new`,{method:'PUT'}).then(response=>response.json());break}catch(_){await new Promise(resolve=>setTimeout(resolve,100))}}
+if(!endpoint)throw new Error('Chromium DevTools endpoint unavailable');
+const socket=new WebSocket(endpoint.webSocketDebuggerUrl),pending=new Map(),exceptions=[];let id=0,loadedResolve=()=>{},loaded;
+socket.onmessage=event=>{const message=JSON.parse(event.data);if(message.id&&pending.has(message.id)){const request=pending.get(message.id);pending.delete(message.id);message.error?request.reject(new Error(JSON.stringify(message.error))):request.resolve(message.result);return}if(message.method==='Runtime.exceptionThrown')exceptions.push(message.params.exceptionDetails);if(message.method==='Page.loadEventFired')loadedResolve()};
+await new Promise((resolve,reject)=>{socket.onopen=resolve;socket.onerror=reject});
+const send=(method,params={})=>new Promise((resolve,reject)=>{const request=++id;pending.set(request,{resolve,reject});socket.send(JSON.stringify({id:request,method,params}))});
+const evaluate=async expression=>{const result=await send('Runtime.evaluate',{expression,returnByValue:true,awaitPromise:true});if(result.exceptionDetails)throw new Error(JSON.stringify(result.exceptionDetails));return result.result.value};
+try{await send('Runtime.enable');await send('Page.enable');loaded=new Promise(resolve=>loadedResolve=resolve);await send('Page.navigate',{url:'file://'+pagePath});await Promise.race([loaded,new Promise((_,reject)=>setTimeout(()=>reject(new Error('load timeout')),5000))]);
+await evaluate(`(()=>{clearInterval(matrixSyncTimer);clearTimeout(matrixFrameTimer);matrixSyncTimer=null;matrixFrameTimer=null;matrixSyncStopped=false;globalThis.__calls=[];globalThis.__deferred=new Map();globalThis.__deviceStatuses=[];globalThis.__editDraws=[];globalThis.confirm=()=>true;const originalStatus=setDevicePreviewStatus;setDevicePreviewStatus=(text,state='off')=>{__deviceStatuses.push({text,state,generation:devicePreviewRequestGeneration,active:devicePreviewActiveGeneration});return originalStatus(text,state)};const originalDraw=ctx.drawImage.bind(ctx);ctx.drawImage=(...args)=>{if(previewMode==='edit')__editDraws.push(editPreviewGeneration);return originalDraw(...args)};api=async(path,options={})=>{const body=options.body||null;__calls.push({path,body});const payload=body?JSON.parse(body):null,deferred=__deferred.get(path);if(deferred?.armed){deferred.armed=false;deferred.entered=true;return new Promise(resolve=>deferred.resolve=resolve)}if(path.startsWith('/api/device-preview/')&&path!=='/api/device-preview/cancel')return {generation:payload.generation,heartbeat_after_seconds:60,connectivity_expires_in:15};if(path==='/api/device-preview/cancel')return {cancelled:true};if(path.startsWith('/api/edit-preview/'))return {session:String(payload.generation).padStart(32,'0'),generation:payload.generation,page:0,frames:[],next_token:null,complete:true};if(path==='/api/config')return {revision:matrixLoadedRevision+1};throw new Error('unexpected '+path)};return true})()`);
+await evaluate(`new Promise(resolve=>{document.querySelector('.pixel-grid').scrollIntoView({block:'center'});requestAnimationFrame(()=>requestAnimationFrame(resolve))})`);
+const point=await evaluate(`(()=>{const r=document.querySelector('.pixel-grid').getBoundingClientRect();return {x:r.left+4.5*r.width/64,y:r.top+4.5*r.height/32}})()`);
+await send('Input.dispatchMouseEvent',{type:'mousePressed',x:point.x,y:point.y,button:'left',buttons:1,clickCount:1});await send('Input.dispatchMouseEvent',{type:'mouseReleased',x:point.x,y:point.y,button:'left',buttons:0,clickCount:1});
+const stale=await evaluate(`(async()=>{const waitEntered=async deferred=>{for(let attempt=0;attempt<100&&!deferred.entered;attempt++)await new Promise(resolve=>setTimeout(resolve,5));if(!deferred.entered)throw new Error('deferred request barrier not reached')};previewMode='edit';devicePreviewEnabled=true;const devicePath='/api/device-preview/custom_pixels',deviceDeferred={armed:true,entered:false,resolve:null};__deferred.set(devicePath,deviceDeferred);const devicePromise=startDevicePreview();await waitEntered(deviceDeferred);const retiredDeviceGeneration=devicePreviewRequestGeneration,statusMarker=__deviceStatuses.length;globalThis.matrixCustomCanvasDraftChanged('custom_pixels',0);await new Promise(resolve=>setTimeout(resolve,5));deviceDeferred.resolve({generation:retiredDeviceGeneration,heartbeat_after_seconds:60,connectivity_expires_in:15});await devicePromise;await new Promise(resolve=>setTimeout(resolve,20));const staleDevicePublications=__deviceStatuses.slice(statusMarker).filter(item=>item.generation===retiredDeviceGeneration&&item.text==='Device is showing unsaved draft.');await stopDevicePreview('stale device phase stopped');cancelEditPreview(false);const editPath='/api/edit-preview/custom_pixels',editDeferred={armed:true,entered:false,resolve:null};__deferred.set(editPath,editDeferred);const editPromise=startEditPreview();await waitEntered(editDeferred);const retiredEditGeneration=editPreviewGeneration;globalThis.matrixCustomCanvasDraftChanged('custom_pixels',150);editDeferred.resolve({session:String(retiredEditGeneration).padStart(32,'0'),generation:retiredEditGeneration,page:0,frames:[],next_token:null,complete:true});await editPromise;await new Promise(resolve=>setTimeout(resolve,20));const staleEditSession=editPreviewSession;cancelEditPreview(false);clearTimeout(editPreviewDebounceTimer);editPreviewDebounceTimer=null;__calls=[];return{retiredDeviceGeneration,staleDevicePublications,retiredEditGeneration,staleEditSession,editGeneration:editPreviewGeneration}})()`);
+const report=await evaluate(`(async()=>{await new Promise(resolve=>requestAnimationFrame(()=>requestAnimationFrame(resolve)));const module=customModules.find(item=>item.id==='custom_pixels'),layer=module.layers.find(item=>item.id==='layer_pixel'),firstBitmap=layer.properties.bitmap_rgba,editorPixel=Array.from(document.querySelector('.pixel-grid').getContext('2d').getImageData(45,45,1,1).data),compositePixel=Array.from(document.querySelector('.editor-canvas').getContext('2d').getImageData(45,45,1,1).data);previewMode='edit';devicePreviewToggle.checked=true;devicePreviewToggle.dispatchEvent(new Event('change',{bubbles:true}));await new Promise(resolve=>setTimeout(resolve,200));document.querySelector('[data-pixel-action="colour"]').value='#00ff00';document.querySelector('[data-pixel-action="colour"]').dispatchEvent(new Event('input',{bubbles:true}));const canvas=document.querySelector('.pixel-grid'),r=canvas.getBoundingClientRect(),x=r.left+5.5*r.width/64,y=r.top+4.5*r.height/32;canvas.dispatchEvent(new PointerEvent('pointerdown',{bubbles:true,cancelable:true,button:0,buttons:1,clientX:x,clientY:y,pointerId:91,pointerType:'mouse'}));canvas.dispatchEvent(new PointerEvent('pointerup',{bubbles:true,button:0,clientX:x,clientY:y,pointerId:91,pointerType:'mouse'}));await new Promise(resolve=>setTimeout(resolve,200));devicePreviewToggle.checked=false;devicePreviewToggle.dispatchEvent(new Event('change',{bubbles:true}));await new Promise(resolve=>setTimeout(resolve,50));const saveResult=await saveConfig();const savedBitmap=layer.properties.bitmap_rgba,saveCalls=__calls.filter(call=>call.path==='/api/config');document.querySelector('[data-pixel-action="colour"]').value='#0000ff';canvas.dispatchEvent(new PointerEvent('pointerdown',{bubbles:true,cancelable:true,button:0,buttons:1,clientX:x,clientY:y,pointerId:92,pointerType:'mouse'}));canvas.dispatchEvent(new PointerEvent('pointerup',{bubbles:true,button:0,clientX:x,clientY:y,pointerId:92,pointerType:'mouse'}));document.querySelector('[data-pixel-action="more"]').click();document.querySelector('[data-pixel-more="reset"]').click();const resetBitmap=layer.properties.bitmap_rgba;const pixelRow=[...document.querySelectorAll('.layer-row')].find(row=>row.querySelector('[aria-label^="Select Legacy pixels"]'));pixelRow.querySelector('.layer-forward').click();const reordered=module.layers.map(item=>item.id);const selectedRow=[...document.querySelectorAll('.layer-row')].find(row=>row.classList.contains('active'));selectedRow.querySelector('.layer-duplicate').click();const duplicate=module.layers.find(item=>item.id!=='layer_pixel'&&item.type==='pixels');const duplicateBytes=duplicate?.properties.bitmap_rgba;const duplicateRow=[...document.querySelectorAll('.layer-row')].find(row=>row.querySelector('[aria-label^="Select Legacy pixels copy"]'));duplicateRow.querySelector('input[type="checkbox"]').click();const hidden=duplicate.visible===false;duplicateRow.querySelector('.layer-remove').click();return {preflight:typeof globalThis.matrixJsonRequestBody,savedHook:typeof globalThis.matrixCustomCanvasSaved,editor:true,legacyBaked:!('points'in layer.properties)&&!!firstBitmap,editorPixel,compositePixel,deviceBodies:__calls.filter(call=>call.path.startsWith('/api/device-preview/custom_pixels')).map(call=>call.body),cancelled:__calls.some(call=>call.path==='/api/device-preview/cancel'),saveResult,saveCount:saveCalls.length,saveBody:saveCalls[0]?.body,savedBitmap,resetBitmap,reordered,duplicateBytes,hidden,remaining:module.layers.map(item=>item.id)}})()`);
+report.exceptions=exceptions;report.stale=stale;console.log(JSON.stringify(report));
+}finally{if(socket.readyState===WebSocket.OPEN)socket.close()}
+"""
+        report = self._run_dashboard_chromium_probe(body, probe)
+        self.assertEqual(report["preflight"], "function")
+        self.assertEqual(report["savedHook"], "function")
+        self.assertEqual(report["stale"]["staleDevicePublications"], [], report["stale"])
+        self.assertIsNone(report["stale"]["staleEditSession"], report["stale"])
+        self.assertGreater(
+            report["stale"]["editGeneration"],
+            report["stale"]["retiredEditGeneration"],
+            report["stale"],
+        )
+        self.assertTrue(report["editor"] and report["legacyBaked"], report)
+        self.assertEqual(report["editorPixel"], [255, 0, 0, 255])
+        self.assertEqual(report["compositePixel"], [0, 255, 255, 255])  # selected-layer outline proves immediate redraw
+        self.assertGreaterEqual(len(report["deviceBodies"]), 2)
+        device_payloads = [json.loads(body) for body in report["deviceBodies"]]
+        self.assertNotEqual(
+            device_payloads[0]["config"]["custom_modules"][0]["layers"][0]["properties"]["bitmap_rgba"],
+            device_payloads[-1]["config"]["custom_modules"][0]["layers"][0]["properties"]["bitmap_rgba"],
+        )
+        self.assertTrue(report["cancelled"])
+        self.assertEqual(report["saveResult"], {"saved": True, "warning": None})
+        self.assertEqual(report["saveCount"], 1)
+        saved_payload = json.loads(report["saveBody"])
+        self.assertEqual(
+            saved_payload["custom_modules"][0]["layers"][0]["properties"]["bitmap_rgba"],
+            report["savedBitmap"],
+        )
+        self.assertEqual(report["resetBitmap"], report["savedBitmap"])
+        self.assertEqual(report["reordered"], ["layer_text", "layer_pixel"])
+        self.assertEqual(report["duplicateBytes"], report["savedBitmap"])
+        self.assertTrue(report["hidden"])
+        self.assertEqual(report["remaining"], ["layer_text", "layer_pixel"])
+        self.assertEqual(report["exceptions"], [])
+
     @unittest.skipUnless(shutil.which("node"), "Node.js is required")
     def test_browser_pixel_bitmap_matches_physical_renderer(self):
         pixels = bytearray(64 * 32 * 4)
@@ -14043,7 +15285,7 @@ try{
         page = self.client.get("/").get_data(as_text=True)
 
         self.assertIn(
-            "if(error.data?.committed){matrixLoadedRevision=error.data.config.revision;highestNotifiedRemoteRevision=Math.max(highestNotifiedRemoteRevision,matrixLoadedRevision);dismissMatrixRevisionDialogThrough(matrixLoadedRevision);matrixSavedSnapshot=submittedSnapshot;matrixDirty=false;if(!silent)setMessage(error.message,true);return {saved:true,warning:error.message,data:error.data}}",
+            "if(error.data?.committed){matrixLoadedRevision=error.data.config.revision;highestNotifiedRemoteRevision=Math.max(highestNotifiedRemoteRevision,matrixLoadedRevision);dismissMatrixRevisionDialogThrough(matrixLoadedRevision);matrixSavedSnapshot=submittedSnapshot;matrixDirty=false;globalThis.matrixCustomCanvasSaved?.();if(!silent)setMessage(error.message,true);return {saved:true,warning:error.message,data:error.data}}",
             page,
         )
         self.assertIn("if(error.data?.committed){input.value='';try{await refreshMedia()}", page)
