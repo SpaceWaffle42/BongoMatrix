@@ -287,83 +287,83 @@ Treat **Pixel** in Advanced Canvas as a transparent, editable pixel-art layer ra
 - ~~Provide the exact source-only Priority 1.7 transaction for build, prepare, deploy, status, rollback, redeploy, recover, and finalize while preserving excluded mutable configuration, drafts, paired devices, data, and media.~~
 - ~~Prove immutable local/remote stage identity, candidate health, deliberate byte-exact rollback, baseline health, exact-candidate redeployment, browser/physical parity, service/display-lock recovery, and zero mutable-state drift before finalization.~~
 
-**Boundary 2 remains pending:** the user-facing drawing surface, grouped/contextual controls, pointer/touch/keyboard interactions, undo/redo history, editable save/reset flow, and all remaining requirements below have not been implemented or activated.
+**Boundary 2 is complete:** the user-facing drawing surface, grouped/contextual controls, pointer/touch/keyboard interactions, undo/redo history, and editable save/reset flow are implemented and released.
 
 #### Drawing surface and pointer behaviour
 
-- Draw directly on a 64×32 grid in which every editor cell maps to exactly one physical Matrix pixel.
-- Provide **Zoom in**, **Zoom out**, and **Fit canvas** controls, display the current zoom percentage, and never let zoom alter the 64×32 artwork. Keep unrestricted panning out of the first version so the complete small canvas remains manageable.
-- Highlight the grid cell beneath the pointer and show its exact `X` and `Y` coordinate together with whether the current action will draw, erase, or pick a colour.
-- Use an editor-only transparency pattern so transparent pixels are visibly distinct from black pixels.
-- Use left-click and drag to draw continuously with the selected colour.
-- Use right-click and drag to erase continuously, and suppress the browser context menu inside the drawing surface.
-- Fill every grid cell crossed by a stroke so quick pointer movement does not leave gaps.
-- End a stroke cleanly when the pointer is released or leaves the drawing surface.
-- Provide explicit **Draw** and **Erase** modes for touch and keyboard users.
-- Start with an exact one-physical-pixel brush.
+- ~~Draw directly on a 64×32 grid in which every editor cell maps to exactly one physical Matrix pixel.~~
+- ~~Provide **Zoom in**, **Zoom out**, and **Fit canvas** controls, display the current zoom percentage, and never let zoom alter the 64×32 artwork. Keep unrestricted panning out of the first version so the complete small canvas remains manageable.~~
+- ~~Highlight the grid cell beneath the pointer and show its exact `X` and `Y` coordinate together with whether the current action will draw, erase, or pick a colour.~~
+- ~~Use an editor-only transparency pattern so transparent pixels are visibly distinct from black pixels.~~
+- ~~Use left-click and drag to draw continuously with the selected colour.~~
+- ~~Use right-click and drag to erase continuously, and suppress the browser context menu inside the drawing surface.~~
+- ~~Fill every grid cell crossed by a stroke so quick pointer movement does not leave gaps.~~
+- ~~End a stroke cleanly when the pointer is released or leaves the drawing surface.~~
+- ~~Provide explicit **Draw** and **Erase** modes for touch and keyboard users.~~
+- ~~Start with an exact one-physical-pixel brush.~~
 
 #### Grouped drawing controls
 
-Provide:
+~~Provide:~~
 
-- **Draw**, **Erase**, and **Pick colour** tools;
-- a colour picker and the existing Matrix colour swatches;
-- **Undo** and **Redo**;
-- **Clear layer** and **Fill layer**; and
-- **Reset to last saved state**.
+- ~~**Draw**, **Erase**, and **Pick colour** tools;~~
+- ~~a colour picker and the existing Matrix colour swatches;~~
+- ~~**Undo** and **Redo**;~~
+- ~~**Clear layer** and **Fill layer**; and~~
+- ~~**Reset to last saved state**.~~
 
-Treat each continuous stroke as one undo action rather than one action per pixel. Undo and redo must cover drawing, erasing, clearing, and filling. Clear and fill must be deliberate actions that cannot destroy the drawing accidentally.
+~~Treat each continuous stroke as one undo action rather than one action per pixel. Undo and redo must cover drawing, erasing, clearing, and filling. Clear and fill must be deliberate actions that cannot destroy the drawing accidentally.~~
 
-The **Pick colour** tool must sample the visible pixel under the pointer from the currently displayed composite and set it as the selected drawing colour. It must work through an explicit control for mouse, touch, and keyboard users rather than depending on a pointer-only gesture.
+~~The **Pick colour** tool must sample the visible pixel under the pointer from the currently displayed composite and set it as the selected drawing colour. It must work through an explicit control for mouse, touch, and keyboard users rather than depending on a pointer-only gesture.~~
 
 #### Contextual drawing toolbar
 
-Show a compact drawing toolbar only while a pixel-art layer is selected. Keep it inside the Pixel layer editor directly above the 64×32 drawing surface, hide it for every other layer type, and never float it over or obscure the artwork.
+~~Show a compact drawing toolbar only while a pixel-art layer is selected. Keep it inside the Pixel layer editor directly above the 64×32 drawing surface, hide it for every other layer type, and never float it over or obscure the artwork.~~
 
-On desktop, keep the primary actions in one horizontal toolbar in this order:
+~~On desktop, keep the primary actions in one horizontal toolbar in this order:~~
 
-**Draw | Erase | Pick | Colour | Undo | Redo | Zoom − | Zoom + | Fit | More**
+~~**Draw | Erase | Pick | Colour | Undo | Redo | Zoom − | Zoom + | Fit | More**~~
 
-- Clearly highlight the active drawing tool.
-- Give every icon an accessible name and a visible tooltip; do not rely on unexplained icons.
-- Put **Grid on/off**, **Fill layer**, **Clear layer**, **Reset to last saved state**, and keyboard-shortcut help in **More**.
-- Keep destructive actions out of the primary row and require the deliberate safeguards already specified for them.
-- Keep the toolbar attached to the drawing editor while that editor scrolls, without making it a page-wide Advanced Canvas toolbar.
+- ~~Clearly highlight the active drawing tool.~~
+- ~~Give every icon an accessible name and a visible tooltip; do not rely on unexplained icons.~~
+- ~~Put **Grid on/off**, **Fill layer**, **Clear layer**, **Reset to last saved state**, and keyboard-shortcut help in **More**.~~
+- ~~Keep destructive actions out of the primary row and require the deliberate safeguards already specified for them.~~
+- ~~Keep the toolbar attached to the drawing editor while that editor scrolls, without making it a page-wide Advanced Canvas toolbar.~~
 
-On narrow and touch layouts, keep the toolbar inside the Pixel editor, allow it to wrap into two compact rows, use sufficiently large touch targets, and show icons with short labels for **Draw**, **Erase**, and **Pick**. Do not use a hover-only toolbar or a draggable floating palette.
+~~On narrow and touch layouts, keep the toolbar inside the Pixel editor, allow it to wrap into two compact rows, use sufficiently large touch targets, and show icons with short labels for **Draw**, **Erase**, and **Pick**. Do not use a hover-only toolbar or a draggable floating palette.~~
 
 #### Keyboard shortcuts
 
-Provide:
+~~Provide:~~
 
-- `Ctrl/Cmd + Z` for undo;
-- `Ctrl/Cmd + Shift + Z` and `Ctrl/Cmd + Y` for redo;
-- `D` for Draw;
-- `E` for Erase; and
-- `I` for Pick colour.
+- ~~`Ctrl/Cmd + Z` for undo;~~
+- ~~`Ctrl/Cmd + Shift + Z` and `Ctrl/Cmd + Y` for redo;~~
+- ~~`D` for Draw;~~
+- ~~`E` for Erase; and~~
+- ~~`I` for Pick colour.~~
 
-Do not activate drawing shortcuts while the user is typing in a text, number, or other editable form field. Keep every shortcut paired with a visible control so pointer, touch, and keyboard users receive the same functionality.
+~~Do not activate drawing shortcuts while the user is typing in a text, number, or other editable form field. Keep every shortcut paired with a visible control so pointer, touch, and keyboard users receive the same functionality.~~
 
 #### Layer and editing behaviour
 
-- Keep the artwork as a normal Advanced Canvas layer that can be renamed, shown or hidden, reordered, duplicated, deleted, repositioned, and reset to its default position.
-- Moving the layer moves the complete drawing while preserving its internal pixel grid.
-- Transparent pixels reveal lower layers so pixel artwork can be composed with text, images, GIFs, videos, and other pixel-art layers.
-- Selecting an existing pixel-art layer reopens it for drawing, with every saved pixel still individually editable.
-- Switching tools or layers must not discard the current draft.
-- Provide an optional editor-only grid overlay that never appears on the physical Matrix.
+- ~~Keep the artwork as a normal Advanced Canvas layer that can be renamed, shown or hidden, reordered, duplicated, deleted, repositioned, and reset to its default position.~~
+- ~~Moving the layer moves the complete drawing while preserving its internal pixel grid.~~
+- ~~Transparent pixels reveal lower layers so pixel artwork can be composed with text, images, GIFs, videos, and other pixel-art layers.~~
+- ~~Selecting an existing pixel-art layer reopens it for drawing, with every saved pixel still individually editable.~~
+- ~~Switching tools or layers must not discard the current draft.~~
+- ~~Provide an optional editor-only grid overlay that never appears on the physical Matrix.~~
 
 #### Preview, persistence, and cancellation
 
-- Update the browser draft preview immediately while drawing.
-- Change the physical Matrix during editing only when the user enables the existing opt-in on-device draft preview.
-- Use the same coordinates, clipping, transparency, and compositing rules in the editor preview and physical renderer.
-- Save through the normal Advanced Canvas save flow, preserving the bounded bitmap in an editable form.
-- Cancelling or resetting restores the last saved version.
+- ~~Update the browser draft preview immediately while drawing.~~
+- ~~Change the physical Matrix during editing only when the user enables the existing opt-in on-device draft preview.~~
+- ~~Use the same coordinates, clipping, transparency, and compositing rules in the editor preview and physical renderer.~~
+- ~~Save through the normal Advanced Canvas save flow, preserving the bounded bitmap in an editable form.~~
+- ~~Cancelling or resetting restores the last saved version.~~
 
 #### Confirmed first-version boundaries
 
-The first version is static pixel artwork with a one-pixel brush. Do not include gradients, anti-aliasing, smoothing, spray brushes, shape tools, symmetry tools, imported-image conversion, or a separate animation-frame editor. Existing Advanced Canvas layer positioning and compositing still apply.
+~~The first version is static pixel artwork with a one-pixel brush. Do not include gradients, anti-aliasing, smoothing, spray brushes, shape tools, symmetry tools, imported-image conversion, or a separate animation-frame editor. Existing Advanced Canvas layer positioning and compositing still apply.~~
 
 ## Priority 2 — New playlist modules
 
