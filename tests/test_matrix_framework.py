@@ -1767,6 +1767,27 @@ else:
         matrix.canvas.SetImage.assert_not_called()
         matrix._media_file.assert_not_called()
 
+    def test_show_gif_uses_shared_corrected_compositor(self):
+        matrix = Matrix.__new__(Matrix)
+        matrix._media_file = Mock(return_value=Path("animated.gif"))
+        captured = {}
+        corrected = Mock(return_value=iter(()))
+
+        def timeline(*_args, **kwargs):
+            captured.update(kwargs)
+            return iter(())
+
+        with (
+            patch("modules.media_player.gif_media_frames", side_effect=timeline),
+            patch("modules.media_player.gif_composited_frames", corrected),
+        ):
+            self.assertFalse(matrix.show_gif("animated.gif"))
+
+        list(captured["image_iterator"]("gif"))
+        corrected.assert_called_once_with(
+            "gif", image_iterator=framework.ImageSequence.Iterator,
+        )
+
     def test_gif_playback_cancel_during_blocked_copy_returns_without_publication(self):
         from modules.media_player import play_media
 

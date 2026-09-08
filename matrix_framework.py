@@ -989,7 +989,7 @@ class Matrix:
         pinned_handle=None,
     ):
         """Display an animated GIF, optionally bounded or interruptible."""
-        from modules.media_player import gif_media_frames
+        from modules.media_player import gif_composited_frames, gif_media_frames
 
         # Validate before media lookup to preserve the public fail-fast contract.
         if (
@@ -1038,7 +1038,9 @@ class Matrix:
             path, loops=loops, playback_rate=playback_rate,
             stop_event=stop_event, max_duration=max_duration,
             monotonic=time.monotonic, image_open=image_open,
-            image_iterator=ImageSequence.Iterator,
+            image_iterator=lambda gif: gif_composited_frames(
+                gif, image_iterator=ImageSequence.Iterator,
+            ),
         )
         try:
             for image, frame_delay in timeline:
