@@ -32,6 +32,7 @@ for name, previous in previous_modules.items():
     else:
         sys.modules[name] = previous
 from PIL import Image as PillowImage, ImageSequence as PillowImageSequence
+from media_resolver import module_media_references
 Matrix = framework.Matrix
 
 
@@ -174,6 +175,7 @@ else:
 
         self.assertFalse(play_media(
             matrix, "custom.png", 8, stop_event=stop_event,
+            pinned_handle=Mock(),
         ))
         matrix.matrix.SwapOnVSync.assert_not_called()
         matrix._frame_capture.publish.assert_not_called()
@@ -1499,8 +1501,21 @@ else:
         stop.is_set.return_value = False
         stop.wait.return_value = True
         owned_queue = Mock()
+
+        def pinned_capability(source):
+            pinned = MagicMock()
+
+            def duplicate():
+                current_source[0] = source
+                return 9
+
+            pinned.dup_fd.side_effect = duplicate
+            return pinned
+
         with patch.object(framework.time, "monotonic", side_effect=lambda: clock[0]), patch.object(
             framework.os, "open", return_value=9,
+        ), patch.object(
+            framework.os, "fstat", return_value=types.SimpleNamespace(st_mode=0o100644),
         ), patch.object(framework.os, "close"), patch.object(
             framework.subprocess, "Popen", side_effect=launch_decoder,
         ), patch.object(
@@ -1515,6 +1530,12 @@ else:
         ):
             result = custom_text.run(
                 matrix, {}, duration=1, stop_event=stop, module_config=options,
+                pinned_handles={
+                    source: pinned_capability(source)
+                    for source in module_media_references(
+                        {"custom_modules": [options]}, options["id"],
+                    )
+                },
             )
 
         self.assertTrue(result)
@@ -1820,6 +1841,7 @@ else:
             try:
                 result["shown"] = play_media(
                     matrix, "clip.gif", 8, stop_event=stop,
+                    pinned_handle=Mock(),
                 )
             finally:
                 returned.set()
@@ -2155,6 +2177,7 @@ else:
         ):
             result = play_media(
                 matrix, "clip.gif", 8, stop_event=stop,
+                pinned_handle=Mock(),
             )
 
         self.assertFalse(result)
@@ -2184,6 +2207,7 @@ else:
         ):
             result = play_media(
                 matrix, "clip.gif", 8, stop_event=stop,
+                pinned_handle=Mock(),
             )
 
         self.assertTrue(result)
@@ -2410,6 +2434,7 @@ else:
         ):
             result = play_media(
                 matrix, "clip.mp4", 8, stop_event=stop,
+                pinned_handle=Mock(),
             )
 
         self.assertFalse(result)
@@ -2438,6 +2463,7 @@ else:
         ):
             result = play_media(
                 matrix, "clip.mp4", 8, stop_event=stop,
+                pinned_handle=Mock(),
             )
 
         self.assertTrue(result)

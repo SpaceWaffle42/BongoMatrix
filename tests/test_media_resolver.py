@@ -10,18 +10,38 @@ import time
 import types
 import unittest
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 from PIL import Image
 
 import media_resolver
+import edit_preview
 from config_store import DEFAULT_CONFIG, validate_config
 from edit_preview import CaptureMatrix
 from media_resolver import MediaResolutionError, MediaResolver
 from modules import announcement_board, custom_text, sleep_screen, splash_screen
+from modules.media_player import play_media
 
 
 class MediaResolverTests(unittest.TestCase):
+    def test_media_player_rejects_missing_capability_before_render(self):
+        matrix = Mock()
+
+        with self.assertRaisesRegex(ValueError, "capability"):
+            play_media(matrix, "untrusted.gif", 1, pinned_handle=None)
+
+        matrix.show_gif.assert_not_called()
+
+    def test_edit_media_preview_rejects_missing_capability_before_decode(self):
+        matrix = Mock()
+
+        with self.assertRaisesRegex(ValueError, "capability"):
+            next(edit_preview.media_preview_frames(
+                matrix, "untrusted.gif", 1, pinned_handle=None,
+            ))
+
+        matrix.media_frames.assert_not_called()
+
     def test_missing_traversal_directory_and_symlink_media_fail_closed(self):
         with tempfile.TemporaryDirectory() as directory:
             temporary_root = Path(directory)
@@ -613,6 +633,106 @@ class MediaResolverTests(unittest.TestCase):
                 os.fstat(original_descriptor)
             self.assertEqual(set(os.listdir("/proc/self/fd")), descriptors_before)
 
+
+    def test_basic_custom_media_uses_original_candidate_pin_after_path_replacement(self):
+        with tempfile.TemporaryDirectory() as directory:
+            media_root = Path(directory) / "media"
+            media_root.mkdir()
+            source = media_root / "basic.gif"
+            Image.new("RGB", (2, 2), (213, 17, 31)).save(source, format="GIF")
+            original = source.read_bytes()
+            module = {
+                "id": "custom_basic_media", "name": "Basic media", "type": "media",
+                "source": source.name, "fit": "contain", "x": 0, "y": 0,
+                "width": 64, "height": 32, "loops": 1,
+                "playback_speed_percent": 100.0,
+            }
+
+            with media_resolver.pin_candidate_media(
+                {"custom_modules": [module]}, media_root,
+            ) as handles:
+                pinned = handles[source.name]
+                replacement = media_root / "replacement.gif"
+                Image.new("RGB", (2, 2), (3, 5, 7)).save(replacement, format="GIF")
+                os.replace(replacement, source)
+
+                with pinned.dup_file() as handle:
+                    self.assertEqual(handle.read(), original)
+                matrix = Mock()
+                matrix.show_gif.return_value = True
+                self.assertTrue(custom_text.run(
+                    matrix, {}, duration=1, stop_event=None,
+                    module_config=module, pinned_handles=handles,
+                ))
+
+                matrix.show_gif.assert_called_once_with(
+                    source.name,
+                    x=0, y=0, width=64, height=32, fit="contain", loops=1,
+                    playback_rate=1.0, stop_event=None, pinned_handle=pinned,
+                )
+
+    def test_basic_custom_media_rejects_missing_capability_before_render(self):
+        module = {
+            "id": "custom_basic_media", "name": "Basic media", "type": "media",
+            "source": "basic.gif", "fit": "contain", "x": 0, "y": 0,
+            "width": 64, "height": 32, "loops": 1,
+            "playback_speed_percent": 100.0,
+        }
+        matrix = Mock()
+
+        with self.assertRaisesRegex(ValueError, "capability"):
+            custom_text.run(
+                matrix, {}, duration=1, stop_event=None,
+                module_config=module, pinned_handles={},
+            )
+
+        matrix.show_gif.assert_not_called()
+
+    def test_canvas_media_rejects_missing_capability_before_decode(self):
+        module = {
+            "id": "custom_canvas", "name": "Canvas", "type": "canvas",
+            "background": "#000000", "frame_count": 1, "fps": 5,
+            "playback": "hold", "overrides": [],
+            "layers": [{
+                "id": "media", "name": "Media", "type": "media", "visible": True,
+                "properties": {
+                    "source": "canvas.png", "x": 0, "y": 0, "width": 64,
+                    "height": 32, "rotation": 0, "keep_aspect": False,
+                },
+                "keyframes": [],
+            }],
+        }
+        matrix = Mock()
+        matrix.media_frames.return_value = []
+
+        with self.assertRaisesRegex(ValueError, "capability"):
+            custom_text._canvas_media_cache(matrix, None, module, pinned_handles={})
+
+        matrix.media_frames.assert_not_called()
+
+    def test_announcement_media_rejects_missing_capability_before_decode(self):
+        announcement = {
+            "layout": "full_image_notice", "media": "announcement.png",
+            "headline": "Pinned", "message": "",
+            "style": {
+                "foreground": "#ffffff", "background": "#000000",
+                "headline_font": "5x7", "message_font": "4x6",
+                "alignment": "left", "border": "none",
+                "border_colour": "#ffffff",
+            },
+            "timing": {"mode": "static", "duration_seconds": 1},
+            "transition": {"type": "cut"},
+            "playback_speed_percent": 100.0,
+        }
+        matrix = Mock()
+        matrix.media_frames.return_value = []
+
+        with self.assertRaisesRegex(ValueError, "capability"):
+            next(announcement_board.announcement_frames(
+                matrix, [announcement], pinned_handles={},
+            ))
+
+        matrix.media_frames.assert_not_called()
 
     def test_splash_sleep_announcement_and_canvas_use_pinned_handles_after_unlink(self):
         with tempfile.TemporaryDirectory() as directory:

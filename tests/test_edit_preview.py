@@ -26,9 +26,19 @@ from edit_preview import (
     static_announcement_preview_frames, static_media_frames,
 )
 from frame_capture import BdfFont, FrameCapture
+from media_resolver import MediaResolver, module_media_references
 from modules.media_player import play_media
 from modules import clock_lava, custom_text
 import edit_preview
+import matrix_framework as framework
+
+
+class _PinnedBytes:
+    def __init__(self, data=b""):
+        self._data = data
+
+    def dup_file(self):
+        return io.BytesIO(self._data)
 
 
 class Colour:
@@ -536,6 +546,7 @@ class EditPreviewTests(unittest.TestCase):
                     "keep_aspect": True, "video_fps": 20,
                 },
                 video_decoder=decoder, stop_event=media_stop,
+                pinned_handle=_PinnedBytes(),
             ),
             stop_event=media_stop,
         )
@@ -1802,6 +1813,7 @@ class EditPreviewTests(unittest.TestCase):
             session = capacity.admit(
                 lambda: edit_preview.media_preview_frames(
                     CaptureMatrix(), "blocked.gif", 10, stop_event=stop,
+                    pinned_handle=_PinnedBytes(),
                 ),
                 stop_event=stop,
             )
@@ -2033,6 +2045,7 @@ class EditPreviewTests(unittest.TestCase):
         list(edit_preview.media_preview_frames(
             CaptureMatrix(), "clip.mp4", 3,
             video_decoder=decoder, stop_event=threading.Event(), monotonic=clock,
+            pinned_handle=_PinnedBytes(),
         ))
 
         self.assertEqual(len(decoder_options), 1)
@@ -2197,6 +2210,7 @@ class EditPreviewTests(unittest.TestCase):
         with patch.object(Image, "open", return_value=opened):
             frames = list(edit_preview.media_preview_frames(
                 matrix, "cancelled.png", 1, stop_event=stop,
+                pinned_handle=_PinnedBytes(),
             ))
 
         self.assertEqual(frames, [])
@@ -2258,6 +2272,7 @@ class EditPreviewTests(unittest.TestCase):
                 },
                 video_decoder=decoder,
                 stop_event=cancelled,
+                pinned_handle=_PinnedBytes(),
             ),
             stop_event=cancelled,
         )
@@ -2548,6 +2563,9 @@ class EditPreviewTests(unittest.TestCase):
                 media_path, format="GIF", save_all=True, append_images=[second],
                 duration=[100, 200], loop=0,
             )
+            resolver = MediaResolver(media_path.parent)
+            self.addCleanup(resolver.close)
+            pinned = resolver.resolve(media_path.name)
             cases = {
                 "custom_text": lambda: custom_text_preview_frames(
                     CaptureMatrix(), custom_options,
@@ -2562,6 +2580,7 @@ class EditPreviewTests(unittest.TestCase):
                         "keep_aspect": True, "playback_speed_percent": 200.0,
                     },
                     monotonic=lambda: 0.0,
+                    pinned_handle=pinned,
                 ),
             }
 
@@ -2697,6 +2716,9 @@ class EditPreviewTests(unittest.TestCase):
 
             physical = PhysicalMatrix()
             stop = AdvancingStop()
+            resolver = MediaResolver(path.parent)
+            self.addCleanup(resolver.close)
+            pinned = resolver.resolve(path.name)
             with patch.object(
                 framework.time, "monotonic", side_effect=lambda: stop.elapsed,
             ), patch.object(
@@ -2712,6 +2734,7 @@ class EditPreviewTests(unittest.TestCase):
                             "keep_aspect": True, "playback_speed_percent": 200.0,
                             "video_fps": 20,
                         },
+                        pinned_handle=pinned,
                     )
                 )
 
@@ -2723,6 +2746,7 @@ class EditPreviewTests(unittest.TestCase):
                         "keep_aspect": True, "playback_speed_percent": 200.0,
                         "video_fps": 20,
                     },
+                    pinned_handle=pinned,
                     monotonic=lambda: 0.0,
                 )
             )
@@ -2849,6 +2873,10 @@ class EditPreviewTests(unittest.TestCase):
                         {filename: gif_path if filename.endswith(".gif") else mp4_path},
                         decoded,
                     )
+                    media_path = gif_path if filename.endswith(".gif") else mp4_path
+                    resolver = MediaResolver(media_path.parent)
+                    self.addCleanup(resolver.close)
+                    pinned = resolver.resolve(media_path.name)
                     stop = AdvancingStop()
                     playback_patches = [
                         patch.object(
@@ -2875,6 +2903,7 @@ class EditPreviewTests(unittest.TestCase):
                             self.assertTrue(play_media(
                                 physical, filename, duration, stop_event=stop,
                                 settings=settings,
+                                pinned_handle=pinned,
                             ))
                         finally:
                             if len(playback_patches) == 4:
@@ -2896,6 +2925,7 @@ class EditPreviewTests(unittest.TestCase):
                             None if filename.endswith(".gif") else
                             preview_video_decoder
                         ),
+                        pinned_handle=pinned,
                         monotonic=lambda: 0.0,
                     ))
                     session.MAX_FRAMES = 2
@@ -3013,6 +3043,10 @@ class EditPreviewTests(unittest.TestCase):
                 }]
                 validate_config(candidate, enforce_save_bounds=True)
                 module = candidate["custom_modules"][0]
+                pinned_handles = {
+                    source: Mock()
+                    for source in module_media_references(candidate, module["id"])
+                }
 
                 physical = RecordingMatrix()
                 stop = AdvancingStop()
@@ -3021,12 +3055,13 @@ class EditPreviewTests(unittest.TestCase):
                 ):
                     self.assertTrue(custom_text.run(
                         physical, candidate, duration=duration, stop_event=stop,
-                        module_config=module,
+                        module_config=module, pinned_handles=pinned_handles,
                     ))
 
                 preview = RecordingMatrix()
                 session = PreviewSession(edit_preview.advanced_canvas_preview_frames(
                     preview, module, duration,
+                    pinned_handles=pinned_handles,
                 ))
                 session.MAX_FRAMES = 2
                 pages = []
@@ -3124,7 +3159,11 @@ class EditPreviewTests(unittest.TestCase):
             def __init__(self):
                 self.shown = []
 
-            def show_image(self, filename, delay=None, *, stop_event=None, **geometry):
+            def show_image(
+                self, filename, delay=None, *, stop_event=None,
+                pinned_handle=None, **geometry,
+            ):
+                self.pinned_handle = pinned_handle
                 self.shown.append((filename, delay, geometry))
                 return True
 
@@ -3144,14 +3183,17 @@ class EditPreviewTests(unittest.TestCase):
         expected = list(preview_frames(static_media_frames(filename, 1.25, settings)))
         matrix = FakeMatrix()
         stop_event = FakeStopEvent()
+        pinned = object()
 
         with patch("modules.media_player.time.monotonic", return_value=0.0):
             rendered = play_media(
                 matrix, filename, 1.25, stop_event=stop_event, settings=settings,
+                pinned_handle=pinned,
             )
 
         self.assertEqual(expected, [(filename, 1250.0, settings)])
         self.assertTrue(rendered)
+        self.assertIs(matrix.pinned_handle, pinned)
         self.assertEqual(matrix.shown, [(filename, None, settings)])
         self.assertEqual(stop_event.waits, [expected[0][1] / 1000])
 
@@ -3441,6 +3483,7 @@ class EditPreviewTests(unittest.TestCase):
 
                 iterator = edit_preview.media_preview_frames(
                     CaptureMatrix(), "partial.gif", 1,
+                    pinned_handle=_PinnedBytes(),
                 )
                 with (
                     patch.object(Image, "open", return_value=opened),
@@ -3474,6 +3517,7 @@ class EditPreviewTests(unittest.TestCase):
         ], exit_error=source_error)
         iterator = edit_preview.media_preview_frames(
             CaptureMatrix(), "partial-source.gif", 1,
+            pinned_handle=_PinnedBytes(),
         )
         with (
             patch.object(Image, "open", return_value=opened),
@@ -3503,6 +3547,7 @@ class EditPreviewTests(unittest.TestCase):
         ], exit_error=source_error)
         iterator = edit_preview.media_preview_frames(
             CaptureMatrix(), "source-cleanup.gif", 1,
+            pinned_handle=_PinnedBytes(),
         )
         with (
             patch.object(Image, "open", return_value=opened),
@@ -3557,6 +3602,7 @@ class EditPreviewTests(unittest.TestCase):
 
                 iterator = edit_preview.media_preview_frames(
                     matrix, "owned.png", 1, stop_event=stop,
+                    pinned_handle=_PinnedBytes(),
                 )
                 with patch.object(edit_preview, "_preview_decode", side_effect=transfer):
                     if scenario == "draw_error":
@@ -3582,7 +3628,10 @@ class EditPreviewTests(unittest.TestCase):
                 self.clock = clock
                 self.submissions = []
 
-            def show_image(self, filename, delay=None, *, stop_event=None, **geometry):
+            def show_image(
+                self, filename, delay=None, *, stop_event=None,
+                pinned_handle=None, **geometry,
+            ):
                 self.clock.elapsed += 0.03
                 with Image.open(self.path) as image:
                     self.clear()
@@ -3614,11 +3663,15 @@ class EditPreviewTests(unittest.TestCase):
             physical_clock = Clock()
             physical = PhysicalCaptureMatrix(path, physical_clock)
             stop = AdvancingStop(physical_clock)
+            resolver = MediaResolver(path.parent)
+            self.addCleanup(resolver.close)
+            pinned = resolver.resolve(path.name)
             with patch(
                 "modules.media_player.time.monotonic", side_effect=physical_clock.monotonic,
             ):
                 self.assertTrue(play_media(
                     physical, str(path), 0.05, stop_event=stop, settings=settings,
+                    pinned_handle=pinned,
                 ))
 
             preview_clock = Clock()
@@ -4292,6 +4345,7 @@ class EditPreviewTests(unittest.TestCase):
                     "loops": 3, "playback_speed_percent": 125.0,
                 },
                 monotonic=lambda: 0.0,
+                pinned_handle=_PinnedBytes(),
             ))
 
         self.assertEqual(len(frames), 1)
@@ -4305,6 +4359,7 @@ class EditPreviewTests(unittest.TestCase):
                 CaptureMatrix(), "square.gif", 1,
                 settings={"fit": "contain", "loops": 1},
                 monotonic=lambda: 0.0,
+                pinned_handle=_PinnedBytes(),
             ))
 
         decoded = Image.open(io.BytesIO(base64.b64decode(frame["png"]))).convert("RGB")
@@ -4327,6 +4382,7 @@ class EditPreviewTests(unittest.TestCase):
                 "playback_speed_percent": 200.0,
             },
             video_decoder=decoder, monotonic=lambda: 0.0,
+            pinned_handle=_PinnedBytes(),
         ))
 
         self.assertEqual([frame["delay_ms"] for frame in frames], [25.0, 25.0])

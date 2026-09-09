@@ -2,7 +2,7 @@ import datetime as dt
 import threading
 import types
 import unittest
-from unittest.mock import Mock
+from unittest.mock import Mock, patch
 
 from PIL import Image
 
@@ -11,6 +11,42 @@ from modules.announcement_board import active_announcements, announcement_timing
 
 
 class AnnouncementBoardTests(unittest.TestCase):
+    def setUp(self):
+        self.pinned_handle = Mock()
+        original_frames = announcement_board.announcement_frames
+
+        def pinned_for(announcements):
+            return {
+                announcement["media"]: self.pinned_handle
+                for announcement in announcements
+                if announcement.get("media")
+            }
+
+        def frames_with_pins(matrix, announcements, *args, **kwargs):
+            if kwargs.get("pinned_handles") is None:
+                kwargs["pinned_handles"] = pinned_for(announcements)
+            return original_frames(matrix, announcements, *args, **kwargs)
+
+        original_run_announcements = announcement_board._run_announcements
+
+        def run_with_pins(matrix, announcements, *args, **kwargs):
+            if kwargs.get("pinned_handles") is None:
+                kwargs["pinned_handles"] = pinned_for(announcements)
+            return original_run_announcements(
+                matrix, announcements, *args, **kwargs,
+            )
+
+        patchers = [patch.object(
+            announcement_board, "announcement_frames",
+            side_effect=frames_with_pins,
+        ), patch.object(
+            announcement_board, "_run_announcements",
+            side_effect=run_with_pins,
+        )]
+        for patcher in patchers:
+            patcher.start()
+            self.addCleanup(patcher.stop)
+
     @staticmethod
     def item(item_id, start_time, end_time):
         return {
@@ -506,6 +542,7 @@ class AnnouncementBoardTests(unittest.TestCase):
         matrix.media_frames.assert_called_once_with(
             "events/open-day.png", 1, 1, stop_event=stop,
             preserve_size=True, decode_timeout=5,
+            pinned_handle=self.pinned_handle,
         )
         matrix.draw_image.assert_called_once_with(
             "icon-frame", 1, 1, width=14, height=14, canvas="canvas",
@@ -789,6 +826,7 @@ class AnnouncementBoardTests(unittest.TestCase):
         matrix.media_frames.assert_called_once_with(
             "events/open-day.png", 1, 1, stop_event=stop,
             preserve_size=True, decode_timeout=5,
+            pinned_handle=self.pinned_handle,
         )
         self.assertEqual(matrix.draw_image.call_count, 4)
 

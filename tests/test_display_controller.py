@@ -451,6 +451,12 @@ class DisplayControllerTests(unittest.TestCase):
                 os.replace(replacement, path)
                 candidate = copy.deepcopy(DEFAULT_CONFIG)
                 candidate["media"][module_name] = filename
+                playlist_item = next(
+                    item for item in candidate["playlist"]
+                    if item["module"] == module_name
+                )
+                playlist_item["source"] = filename
+                playlist_item["sources"] = [filename]
                 request = Mock(
                     config={"module": module_name, "candidate": candidate},
                     timeout_seconds=3,
@@ -647,7 +653,11 @@ class DisplayControllerTests(unittest.TestCase):
         config["playlist"] = [
             {"module": "splash", "duration": 1, "enabled": True},
         ]
+        temporary = tempfile.TemporaryDirectory()
+        self.addCleanup(temporary.cleanup)
         store = Mock()
+        store.media_root = Path(temporary.name)
+        (store.media_root / "custom.gif").write_bytes(b"fixture")
         store.get.return_value = config
         controller = DisplayController(matrix, store)
         original_wait = controller._shutdown.wait
@@ -901,36 +911,53 @@ class DisplayControllerTests(unittest.TestCase):
 
         controller.preview("custom_welcome")
 
-        self.assertEqual(controller._take_preview(), "custom_welcome")
+        pending = controller._take_preview()
+        self.assertIsInstance(pending, display_controller._PinnedModulePreview)
+        self.assertEqual(pending.module_name, "custom_welcome")
+        self.assertEqual(pending.config["custom_modules"], [{"id": "custom_welcome"}])
+        pending.close()
         controller.start.assert_called_once_with()
 
     def test_announcement_preview_queue_is_last_request_wins_and_isolated(self):
-        controller = DisplayController(Mock(), Mock())
+        controller = DisplayController(Mock(), Mock(media_root=Path("/unused")))
         controller.start = Mock()
         controller._module_stop = Mock()
         first = {"id": "announcement_first", "headline": "FIRST"}
         second = {"id": "announcement_second", "headline": "SECOND"}
+        first_resolver = Mock()
+        second_resolver = Mock()
 
-        controller.preview_announcement(first)
-        first["headline"] = "MUTATED"
-        controller.preview_announcement(second)
+        with patch(
+            "display_controller.MediaResolver",
+            side_effect=[first_resolver, second_resolver],
+        ):
+            controller.preview_announcement(first)
+            first["headline"] = "MUTATED"
+            controller.preview_announcement(second)
 
-        self.assertEqual(controller._take_announcement_preview(), second)
+        pending = controller._take_announcement_preview()
+        self.assertEqual(pending.announcement, second)
+        pending.close()
         self.assertIsNone(controller._take_announcement_preview())
         self.assertIsNone(controller._take_preview())
         self.assertIsNone(controller._take_media_preview())
         controller._module_stop.set.assert_called()
         self.assertEqual(controller.start.call_count, 2)
+        first_resolver.close.assert_called_once_with()
+        second_resolver.close.assert_called_once_with()
 
     def test_execute_announcement_preview_uses_exact_draft_and_stop_lifecycle(self):
         matrix = Mock()
         controller = DisplayController(matrix, Mock())
         announcement = {"id": "announcement_preview", "enabled": False, "headline": "EXACT"}
+        pending = display_controller._PinnedAnnouncementPreview(
+            announcement, Mock(), {},
+        )
         module = Mock()
         module.run_preview.return_value = True
 
         with patch("display_controller.importlib.import_module", return_value=module) as importer:
-            result = controller._execute_announcement_preview(announcement)
+            result = controller._execute_announcement_preview(pending)
 
         self.assertTrue(result)
         importer.assert_called_once_with("modules.announcement_board")
@@ -946,34 +973,271 @@ class DisplayControllerTests(unittest.TestCase):
         store.get.side_effect = [DEFAULT_CONFIG, RuntimeError("stop test loop")]
         controller = DisplayController(Mock(), store)
         draft = {"id": "announcement_preview"}
-        controller._announcement_preview = draft
+        pending = display_controller._PinnedAnnouncementPreview(draft, Mock(), {})
+        controller._announcement_preview = pending
         controller._execute = Mock()
         controller._execute_media = Mock()
         controller._execute_announcement_preview = Mock(side_effect=lambda item: controller._shutdown.set() or True)
 
         controller._run_loop_unchecked()
 
-        controller._execute_announcement_preview.assert_called_once_with(draft)
+        controller._execute_announcement_preview.assert_called_once_with(pending)
+        pending.resolver.close.assert_called_once_with()
         controller._execute.assert_not_called()
         controller._execute_media.assert_not_called()
 
+    def test_active_playlist_interleaved_pinned_preview_closes_owner_on_every_outcome(self):
+        for preview_type in ("direct-media", "announcement"):
+            for outcome in ("success", "rejected", "exception"):
+                with self.subTest(preview=preview_type, outcome=outcome):
+                    resolver = Mock()
+                    if preview_type == "direct-media":
+                        owner = display_controller._PinnedMediaPreview(
+                            "selected.gif", resolver, Mock(),
+                        )
+                    else:
+                        owner = display_controller._PinnedAnnouncementPreview(
+                            {"id": "announcement_interleaved"}, resolver, {},
+                        )
+                    store = Mock()
+                    store.get.return_value = DEFAULT_CONFIG
+                    controller = DisplayController(Mock(), store)
+                    controller._is_active = Mock(return_value=True)
+                    controller._execute = Mock()
+
+                    def execute(_owner, *args, **kwargs):
+                        controller._shutdown.set()
+                        if outcome == "exception":
+                            raise RuntimeError("interleaved execution failed")
+                        return outcome == "success"
+
+                    controller._execute_media = Mock(side_effect=execute)
+                    controller._execute_announcement_preview = Mock(side_effect=execute)
+                    if preview_type == "direct-media":
+                        controller._take_announcement_preview = Mock(return_value=None)
+                        controller._take_media_preview = Mock(
+                            side_effect=[None, owner],
+                        )
+                    else:
+                        controller._take_announcement_preview = Mock(
+                            side_effect=[None, owner],
+                        )
+                        controller._take_media_preview = Mock(return_value=None)
+
+                    with (
+                        patch(
+                            "display_controller.scheduled_playlist_items",
+                            return_value=[{
+                                "module": "clock", "duration": 5, "enabled": True,
+                            }],
+                        ),
+                        patch(
+                            "display_controller.invocation_default_duration",
+                            return_value=17,
+                        ) as default_duration,
+                    ):
+                        if outcome == "exception":
+                            with self.assertRaisesRegex(
+                                RuntimeError, "interleaved execution failed",
+                            ):
+                                controller._run_loop_unchecked()
+                        else:
+                            controller._run_loop_unchecked()
+
+                    resolver.close.assert_called_once_with()
+                    if preview_type == "direct-media":
+                        default_duration.assert_called_once_with("media:selected.gif")
+
     def test_media_file_can_be_queued_and_executed_as_a_one_off_preview(self):
         matrix = Mock()
-        controller = DisplayController(matrix, Mock())
+        controller = DisplayController(matrix, Mock(media_root=Path("/unused")))
         controller.start = Mock()
+        resolver = Mock()
+        pinned_handle = Mock()
+        resolver.resolve.return_value = pinned_handle
 
-        controller.preview_media("custom.gif")
+        with patch("display_controller.MediaResolver", return_value=resolver):
+            controller.preview_media("custom.gif")
 
-        self.assertEqual(controller._take_media_preview(), "custom.gif")
+        pending = controller._take_media_preview()
+        self.assertEqual(pending.filename, "custom.gif")
         controller.start.assert_called_once_with()
 
         with patch("display_controller.play_media", return_value=True) as player:
-            self.assertTrue(controller._execute_media("custom.gif", duration=15))
+            self.assertTrue(controller._execute_media(pending, duration=15))
 
         player.assert_called_once()
         self.assertIs(player.call_args.args[0], matrix)
         self.assertEqual(player.call_args.args[1:3], ("custom.gif", 15))
         self.assertIsNotNone(player.call_args.kwargs["stop_event"])
+        self.assertIs(player.call_args.kwargs["pinned_handle"], pinned_handle)
+        pending.close()
+        resolver.close.assert_called_once_with()
+
+    def test_direct_media_and_announcement_preview_execute_admitted_inode(self):
+        for preview_type in ("direct-media", "announcement"):
+            with self.subTest(preview=preview_type), tempfile.TemporaryDirectory() as directory:
+                media_root = Path(directory)
+                source = media_root / "selected.gif"
+                source.write_bytes(b"original-inode")
+                store = Mock(media_root=media_root)
+                controller = DisplayController(Mock(), store)
+                controller.start = Mock()
+
+                if preview_type == "direct-media":
+                    controller.preview_media(source.name)
+                    pending = controller._take_media_preview()
+                    pinned_handle = pending.pinned_handle
+                else:
+                    announcement = {
+                        "id": "announcement_pinned", "media": source.name,
+                    }
+                    controller.preview_announcement(announcement)
+                    pending = controller._take_announcement_preview()
+                    pinned_handle = pending.pinned_handles[source.name]
+
+                replacement = media_root / "replacement.gif"
+                replacement.write_bytes(b"replacement-path")
+                os.replace(replacement, source)
+                with pinned_handle.dup_file() as handle:
+                    self.assertEqual(handle.read(), b"original-inode")
+
+                try:
+                    if preview_type == "direct-media":
+                        with patch("display_controller.play_media", return_value=True) as player:
+                            self.assertTrue(controller._execute_media(pending, duration=15))
+                        self.assertIs(player.call_args.kwargs["pinned_handle"], pinned_handle)
+                    else:
+                        module = Mock(run_preview=Mock(return_value=True))
+                        with patch(
+                            "display_controller.importlib.import_module", return_value=module,
+                        ):
+                            self.assertTrue(controller._execute_announcement_preview(pending))
+                        self.assertIs(
+                            module.run_preview.call_args.kwargs["pinned_handles"][source.name],
+                            pinned_handle,
+                        )
+                finally:
+                    pending.close()
+                self.assertTrue(pinned_handle.closed)
+
+    def test_direct_media_and_announcement_start_failure_close_new_owner(self):
+        for preview_type in ("direct-media", "announcement"):
+            with self.subTest(preview=preview_type):
+                resolver = Mock()
+                if preview_type == "direct-media":
+                    owner = display_controller._PinnedMediaPreview(
+                        "selected.gif", resolver, Mock(),
+                    )
+                    queue = lambda controller: controller._queue_preview(
+                        media_preview=owner,
+                    )
+                else:
+                    owner = display_controller._PinnedAnnouncementPreview(
+                        {"id": "announcement_start_failure"}, resolver, {},
+                    )
+                    queue = lambda controller: controller._queue_preview(
+                        announcement_preview=owner,
+                    )
+                controller = DisplayController(Mock(), Mock())
+
+                with (
+                    patch.object(
+                        controller, "start", side_effect=RuntimeError("start failed"),
+                    ),
+                    self.assertRaisesRegex(RuntimeError, "start failed"),
+                ):
+                    queue(controller)
+
+                resolver.close.assert_called_once_with()
+                self.assertIsNone(controller._take_preview())
+                self.assertIsNone(controller._take_media_preview())
+                self.assertIsNone(controller._take_announcement_preview())
+
+    def test_successful_stop_drains_each_pending_pinned_preview_type(self):
+        cases = (
+            ("media", lambda controller: controller.preview_media("custom.gif")),
+            (
+                "announcement",
+                lambda controller: controller.preview_announcement({
+                    "id": "announcement_pending", "headline": "PENDING",
+                }),
+            ),
+        )
+        for label, queue in cases:
+            with self.subTest(preview=label):
+                resolver = Mock()
+                resolver.resolve.return_value = Mock()
+                controller = DisplayController(
+                    Mock(), Mock(media_root=Path("/unused")),
+                )
+                with (
+                    patch("display_controller.MediaResolver", return_value=resolver),
+                    patch.object(controller, "start"),
+                ):
+                    queue(controller)
+
+                self.assertTrue(controller.stop())
+
+                self.assertIsNone(controller._take_preview())
+                self.assertIsNone(controller._take_media_preview())
+                self.assertIsNone(controller._take_announcement_preview())
+                resolver.close.assert_called_once_with()
+
+    def test_stop_completion_invalidates_each_preview_resolving_before_admission(self):
+        cases = (
+            ("saved", lambda controller: controller.preview("splash")),
+            ("direct-media", lambda controller: controller.preview_media("selected.gif")),
+            (
+                "announcement",
+                lambda controller: controller.preview_announcement({
+                    "id": "announcement_resolving", "media": "selected.gif",
+                }),
+            ),
+        )
+        for label, request_preview in cases:
+            with self.subTest(preview=label):
+                entered = threading.Event()
+                release = threading.Event()
+                errors = []
+                resolver = Mock()
+
+                def resolve(_reference):
+                    entered.set()
+                    self.assertTrue(release.wait(1))
+                    return Mock()
+
+                resolver.resolve.side_effect = resolve
+                store = Mock(
+                    media_root=Path("/unused"),
+                    get=Mock(return_value=copy.deepcopy(DEFAULT_CONFIG)),
+                )
+                controller = DisplayController(Mock(), store)
+                controller.start = Mock()
+
+                def request():
+                    try:
+                        request_preview(controller)
+                    except BaseException as error:
+                        errors.append(error)
+
+                with patch("display_controller.MediaResolver", return_value=resolver):
+                    requester = threading.Thread(target=request)
+                    requester.start()
+                    self.assertTrue(entered.wait(0.2))
+                    self.assertTrue(controller.stop())
+                    release.set()
+                    requester.join(1)
+
+                self.assertFalse(requester.is_alive())
+                self.assertEqual(len(errors), 1)
+                self.assertIsInstance(errors[0], RuntimeError)
+                self.assertIn("lifecycle", str(errors[0]))
+                self.assertIsNone(controller._take_preview())
+                self.assertIsNone(controller._take_media_preview())
+                self.assertIsNone(controller._take_announcement_preview())
+                controller.start.assert_not_called()
+                resolver.close.assert_called_once_with()
 
     def test_queued_media_preview_prevents_a_scheduled_module_from_starting(self):
         controller = DisplayController(Mock(), Mock())
@@ -1100,7 +1364,8 @@ class DisplayControllerTests(unittest.TestCase):
         controller = DisplayController(matrix, store)
 
         with patch.object(display_controller.importlib, "import_module", return_value=module), \
-             patch.object(display_controller.LOGGER, "exception") as log_exception:
+             patch.object(display_controller.LOGGER, "exception") as log_exception, \
+             patch.object(controller, "_is_active", return_value=True):
             controller.start()
             time.sleep(0.82)
             controller.stop(timeout=1)

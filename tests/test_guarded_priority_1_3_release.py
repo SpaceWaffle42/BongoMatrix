@@ -243,7 +243,11 @@ print('EXPORTED_FULL_RUN_OK')
             shutil.copytree(source / "resources" / "fonts", exported / "resources" / "fonts")
             built_in_media = exported / "resources" / "media" / "built-in"
             built_in_media.mkdir(parents=True)
-            for media_name in ("sleep.gif", "squares_tb.gif"):
+            for media_name in (
+                "sleep.gif", "squares_tb.gif",
+                "rubik_squares.gif", "waterfall_squares.gif",
+                "loading_squares.gif", "zigzag_squares.gif",
+            ):
                 shutil.copy2(source / "resources" / "media" / "built-in" / media_name,
                              built_in_media / media_name)
             (exported / "scripts").mkdir()
@@ -256,6 +260,10 @@ print('EXPORTED_FULL_RUN_OK')
             (stage / "deploy").symlink_to(exported / "deploy", target_is_directory=True)
             for directory in (root / "bin", root / "bundle", root / "destination", root / "evidence", root / "transactions"):
                 directory.mkdir()
+            shutil.copytree(
+                built_in_media,
+                root / "destination" / "resources" / "media" / "built-in",
+            )
             (root / "transactions").chmod(0o700)
             for name in ("identity", "known-hosts", "cookie", "token"):
                 path = root / name

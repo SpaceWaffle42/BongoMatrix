@@ -85,6 +85,10 @@ class WebAppTests(unittest.TestCase):
         self.media_dir = Path(self.temp.name) / "media"
         self.media_dir.mkdir()
         self.media_dir.chmod(0o755)
+        shutil.copytree(
+            Path(__file__).parents[1] / "resources" / "media" / "built-in",
+            self.media_dir / "built-in",
+        )
         self.controller = Mock()
         self.pairing = Mock()
         self.pairing.active_pin.return_value = None
@@ -328,6 +332,51 @@ class WebAppTests(unittest.TestCase):
             stop_event=stop_event, pinned_handle=pinned,
         )
 
+    def test_builtin_edit_preview_randomly_selects_and_uses_a_pinned_pool_member(self):
+        candidate = self.store.get()
+        splash = next(item for item in candidate["playlist"] if item["module"] == "splash")
+        selected_source = splash["sources"][1]
+        selected_handle = object()
+        pinned = {source: object() for source in splash["sources"]}
+        pinned[selected_source] = selected_handle
+        stop_event = object()
+        expected = iter(())
+
+        with (
+            patch("display_controller.random.choice", return_value=selected_source),
+            patch("edit_preview.media_preview_frames", return_value=expected) as frames,
+        ):
+            actual = webapp._edit_preview_iterator(
+                "splash", candidate, None, pinned, None, stop_event,
+            )
+
+        self.assertIs(actual, expected)
+        frames.assert_called_once_with(
+            ANY, selected_source, splash["duration"], splash["layout"],
+            stop_event=stop_event, pinned_handle=selected_handle,
+        )
+
+    def test_edit_preview_media_branches_reject_missing_capability(self):
+        candidate = self.store.get()
+        custom = {
+            "id": "custom_media_preview", "name": "Media preview", "type": "media",
+            "source": "party.gif", "fit": "contain", "x": 0, "y": 0,
+            "width": 64, "height": 32, "loops": 1,
+            "playback_speed_percent": 100.0,
+        }
+        candidate["custom_modules"] = [custom]
+
+        with patch("edit_preview.media_preview_frames") as frames:
+            for module_name in ("splash", custom["id"]):
+                with self.subTest(module=module_name), self.assertRaisesRegex(
+                    ValueError, "capability",
+                ):
+                    webapp._edit_preview_iterator(
+                        module_name, candidate, None, {}, None, object(),
+                    )
+
+        frames.assert_not_called()
+
     def test_basic_custom_appearance_controls_serialize_defaults_reset_and_preserve_hidden_colour(self):
         self.pair_browser()
         body = self.client.get("/").get_data(as_text=True)
@@ -343,7 +392,7 @@ class WebAppTests(unittest.TestCase):
         self.assertIn("border: card.querySelector('[data-field=border]').value", canvas)
         self.assertIn("['none','solid','inset','dotted','dashed','double']", body)
         self.assertIn("MINIMUM_CLIENT_CONTRACT = 3", Path(webapp.__file__).read_text())
-        self.assertIn("const MATRIX_CLIENT_CONTRACT=3", body)
+        self.assertIn("const MATRIX_CLIENT_CONTRACT=4", body)
 
     def test_basic_border_conversion_to_canvas_is_explicit_and_drops_no_undisclosed_state(self):
         source = (Path(__file__).parents[1] / "app/static/custom_canvas.js").read_text()
@@ -567,10 +616,11 @@ try{
     def post_config(self, json=None, client=None, require_revision=True, **kwargs):
         if client is None:
             client = self.client
+        headers = dict(kwargs.pop("headers", {}))
+        headers.setdefault("X-Matrix-Client-Contract", "4")
         if require_revision:
-            headers = dict(kwargs.pop("headers", {}))
             headers.setdefault("If-Match", f'"{self.store.get()["revision"]}"')
-            kwargs["headers"] = headers
+        kwargs["headers"] = headers
         return self.paired_request("POST", "/api/config", client=client, json=json, **kwargs)
 
     def post_restart(self, client=None, **kwargs):
@@ -1446,7 +1496,7 @@ try{
         body = self.client.get("/").get_data(as_text=True)
 
         application_version = getattr(webapp, "APPLICATION_VERSION", None)
-        self.assertEqual(application_version, "0.3.62-preview")
+        self.assertEqual(application_version, "0.3.63-preview")
         self.assertEqual(body.count(f"Version {application_version}"), 1)
         self.assertRegex(
             body,
@@ -1635,7 +1685,7 @@ context.globalThis=context;vm.createContext(context);vm.runInContext(process.arg
         self.assertNotIn("document.querySelector('#stop-device-preview')", lifecycle)
         self.assertNotIn("devicePreviewStop.addEventListener", lifecycle)
         self.assertNotRegex(
-            re.search(r"function configBody\(\).*?\n", body).group(0),
+            re.search(r"function configBody\([^)]*\).*?\n", body).group(0),
             r"device-preview|device_preview",
         )
 
@@ -2119,6 +2169,7 @@ vm.createContext(context);vm.runInContext(process.argv[1],context);(async()=>{to
         shutil.copytree(
             Path(__file__).parents[1] / "resources" / "media" / "built-in",
             self.media_dir / "built-in",
+            dirs_exist_ok=True,
         )
         before_config = Path(self.store.path).read_bytes()
         saved_name = self.store.get()["device"]["name"]
@@ -3290,7 +3341,7 @@ try{
   await send('Emulation.setDeviceMetricsOverride',{...viewport,deviceScaleFactor:1,mobile:viewport.width===320,screenWidth:viewport.width,screenHeight:viewport.height});
   await send('Page.navigate',{url:`http://127.0.0.1:${appPort}/pair`});
   await waitFor(`document.querySelector('form[action="/pair/recover"] button')?.textContent.trim()==='REQUEST PIN ON MATRIX'&&document.readyState==='complete'`);
-  reports.push(await evaluate(`(()=>{const button=document.querySelector('form[action="/pair/recover"] button'),main=document.querySelector('main'),b=button.getBoundingClientRect(),m=main.getBoundingClientRect(),style=getComputedStyle(button);return{viewport:${JSON.stringify(viewport)},clientWidth:document.documentElement.clientWidth,scrollWidth:document.documentElement.scrollWidth,button:{width:b.width,height:b.height,display:style.display,visibility:style.visibility},main:{left:m.left,right:m.right},version:document.body.innerText.includes('0.3.62-preview')}})()`));
+  reports.push(await evaluate(`(()=>{const button=document.querySelector('form[action="/pair/recover"] button'),main=document.querySelector('main'),b=button.getBoundingClientRect(),m=main.getBoundingClientRect(),style=getComputedStyle(button);return{viewport:${JSON.stringify(viewport)},clientWidth:document.documentElement.clientWidth,scrollWidth:document.documentElement.scrollWidth,button:{width:b.width,height:b.height,display:style.display,visibility:style.visibility},main:{left:m.left,right:m.right},version:document.body.innerText.includes('0.3.63-preview')}})()`));
  }
  await send('Page.navigate',{url:`http://127.0.0.1:${appPort}/pair`});
  await waitFor(`document.querySelector('form[action="/pair/recover"] button')&&document.readyState==='complete'`);
@@ -4009,12 +4060,149 @@ console.log('PAIR_NETWORK_PASS');
         self.assertEqual(response.status_code, 202)
         self.assertEqual(self.store.get()["revision"], before)
 
+    def test_contract_three_config_write_preserves_rich_media_pool(self):
+        self.pair_browser()
+        selected = "built-in/loading_squares.gif"
+
+        response = self.post_config(
+            json={"media": {"splash": selected}},
+            headers={"X-Matrix-Client-Contract": "3"},
+        )
+
+        self.assertEqual(response.status_code, 200, response.get_data(as_text=True))
+        saved = self.store.get()
+        splash = next(item for item in saved["playlist"] if item["module"] == "splash")
+        self.assertEqual(saved["media"]["splash"], "built-in/rubik_squares.gif")
+        self.assertEqual(splash["source"], "built-in/rubik_squares.gif")
+        self.assertEqual(splash["sources"], [
+            "built-in/rubik_squares.gif",
+            "built-in/waterfall_squares.gif",
+            selected,
+            "built-in/zigzag_squares.gif",
+        ])
+
+    def test_missing_client_contract_is_treated_as_legacy(self):
+        self.pair_browser()
+        selected = "built-in/loading_squares.gif"
+        response = self.client.post(
+            "/api/config",
+            json={"media": {"splash": selected}},
+            headers={
+                "If-Match": f'"{self.store.get()["revision"]}"',
+                "X-Matrix-Action": "paired-request",
+            },
+        )
+
+        self.assertEqual(response.status_code, 200, response.get_data(as_text=True))
+        splash = next(
+            item for item in self.store.get()["playlist"] if item["module"] == "splash"
+        )
+        self.assertEqual(splash["source"], "built-in/rubik_squares.gif")
+        self.assertEqual(splash["sources"][0], "built-in/rubik_squares.gif")
+        self.assertEqual(len(splash["sources"]), 4)
+
+    def test_malformed_client_contract_rejects_config_without_mutation(self):
+        self.pair_browser()
+        before = self.store.get()
+
+        response = self.post_config(
+            json={"device": {"name": "Rejected"}},
+            headers={"X-Matrix-Client-Contract": "3.0"},
+        )
+
+        self.assertEqual(response.status_code, 400)
+        self.assertEqual(response.get_json(), {"error": "client contract is invalid"})
+        self.assertEqual(self.store.get(), before)
+
+    def test_malformed_client_contract_rejects_preview_admission(self):
+        self.pair_browser()
+        payload = {
+            "config": self.store.get(),
+            "generation": 1,
+            "preview_instance": "a" * 32,
+        }
+
+        with patch.object(
+            self.store, "validate_candidate", wraps=self.store.validate_candidate,
+        ) as validate_candidate:
+            for endpoint in ("edit-preview", "device-preview"):
+                with self.subTest(endpoint=endpoint):
+                    response = self.paired_request(
+                        "POST",
+                        f"/api/{endpoint}/splash",
+                        json=payload,
+                        headers={"X-Matrix-Client-Contract": "four"},
+                    )
+
+                    self.assertEqual(response.status_code, 400)
+                    self.assertEqual(
+                        response.get_json()["error"],
+                        (
+                            "Device preview request is invalid."
+                            if endpoint == "device-preview"
+                            else "Preview request is invalid."
+                        ),
+                    )
+            validate_candidate.assert_not_called()
+            self.controller.submit_device_draft.assert_not_called()
+
+    def test_malformed_or_unsupported_contract_rejects_every_preview_admission(self):
+        self.pair_browser()
+        announcement = test_config_store.ConfigStoreTests.announcement()
+        for contract in ("invalid", "5"):
+            with self.subTest(contract=contract, endpoint="config"):
+                response = self.paired_request(
+                    "get", "/api/config",
+                    headers={"X-Matrix-Client-Contract": contract},
+                )
+                self.assertEqual(response.status_code, 400)
+                self.assertEqual(response.get_json()["error"], "client contract is invalid")
+            with self.subTest(contract=contract, endpoint="preview"):
+                response = self.paired_request(
+                    "post", "/api/preview/splash",
+                    headers={"X-Matrix-Client-Contract": contract},
+                )
+                self.assertEqual(response.status_code, 400)
+                self.assertEqual(response.get_json()["error"], "client contract is invalid")
+            with self.subTest(contract=contract, endpoint="direct-media-preview"):
+                response = self.paired_request(
+                    "post", "/api/media/missing.gif/preview",
+                    headers={"X-Matrix-Client-Contract": contract},
+                )
+                self.assertEqual(response.status_code, 400)
+                self.assertEqual(response.get_json()["error"], "client contract is invalid")
+            with self.subTest(contract=contract, endpoint="announcement-preview"):
+                response = self.paired_request(
+                    "post", "/api/preview/announcement",
+                    headers={"X-Matrix-Client-Contract": contract},
+                    json=announcement,
+                )
+                self.assertEqual(response.status_code, 400)
+                self.assertEqual(response.get_json()["error"], "client contract is invalid")
+        self.controller.preview.assert_not_called()
+        self.controller.preview_media.assert_not_called()
+        self.controller.preview_announcement.assert_not_called()
+
+    def test_contract_five_rejects_config_save_without_mutation(self):
+        self.pair_browser()
+        before = self.store.get()
+
+        response = self.post_config(
+            json={"device": {"name": "must-not-save"}},
+            headers={"X-Matrix-Client-Contract": "5"},
+        )
+
+        self.assertEqual(response.status_code, 400)
+        self.assertEqual(response.get_json()["error"], "client contract is invalid")
+        self.assertEqual(self.store.get(), before)
+        self.controller.reload.assert_not_called()
+
     @unittest.skipUnless(shutil.which("node"), "Node.js is required")
     def test_dashboard_conditionally_saves_loaded_revision(self):
         self.pair_browser()
         body = self.client.get("/").get_data(as_text=True)
 
-        self.assertIn("const MATRIX_CLIENT_CONTRACT=3", body)
+        self.assertIn("const MATRIX_CLIENT_CONTRACT=4", body)
         self.assertIn("let matrixLoadedRevision=0", body)
         self.assertIn("'If-Match':matrixRevisionETag()", body)
         self.assertIn("matrixLoadedRevision=saved.revision", body)
@@ -4024,7 +4212,7 @@ console.log('PAIR_NETWORK_PASS');
     def test_dashboard_preload_edit_remains_dirty_when_sync_starts(self):
         self.pair_browser()
         body = self.client.get("/").get_data(as_text=True)
-        sync_start = body.index("const MATRIX_CLIENT_CONTRACT=3")
+        sync_start = body.index("const MATRIX_CLIENT_CONTRACT=4")
         sync_end = body.index("const customFontAdvances", sync_start)
         save_start = body.index("async function saveConfig(")
         save_end = body.index("\nfunction updateOpenWeatherSecretStatus", save_start)
@@ -4935,7 +5123,7 @@ async function api(path,options){request={path,options};const error=new Error('C
             with self.subTest(source=source):
                 self.assertIn(source, body)
 
-        start = body.index("const MATRIX_CLIENT_CONTRACT=3")
+        start = body.index("const MATRIX_CLIENT_CONTRACT=4")
         end = body.index("const customFontAdvances", start)
         synchronization = body[start:end]
         save_start = body.index("async function saveConfig(")
@@ -5070,6 +5258,10 @@ globalThis.document=document;globalThis.window=window;globalThis.fetch=fetch;
 
         base_a = client_a.get("/api/config").get_json()
         base_b = client_b.get("/api/config").get_json()
+        media_rows = [
+            item for item in base_a["playlist"]
+            if item["module"] in {"splash", "sleep"}
+        ]
         module = {
             "id": "custom_sync", "name": "Created", "type": "text",
             "text": "PAIR", "font": "5x7", "colour": "#ffffff",
@@ -5081,11 +5273,14 @@ globalThis.document=document;globalThis.window=window;globalThis.fetch=fetch;
             json={
                 "pairing": {"max_devices": 10},
                 "custom_modules": [module],
-                "playlist": [{
+                "playlist": [*media_rows, {
                     "module": "custom_sync", "duration": 15, "enabled": True,
                 }],
             },
-            headers={"If-Match": f'"{base_a["revision"]}"'},
+            headers={
+                "If-Match": f'"{base_a["revision"]}"',
+                "X-Matrix-Client-Contract": "4",
+            },
         )
         self.assertEqual(created.status_code, 200, created.get_data(as_text=True))
         self.assertEqual(created.get_json()["revision"], 1)
@@ -5095,7 +5290,7 @@ globalThis.document=document;globalThis.window=window;globalThis.fetch=fetch;
         )
         self.assertEqual(recovered.status_code, 200)
         self.assertEqual(recovered.get_json()["custom_modules"], [module])
-        self.assertEqual(recovered.get_json()["playlist"], [{
+        self.assertEqual(recovered.get_json()["playlist"], [*media_rows, {
             "module": "custom_sync", "duration": 15, "enabled": True,
         }])
 
@@ -5106,7 +5301,10 @@ globalThis.document=document;globalThis.window=window;globalThis.fetch=fetch;
             race_barrier.wait()
             race_results[label] = self.paired_client_request("POST", client,
                 "/api/config", json={"device": {"name": label}},
-                headers={"If-Match": '"1"'},
+                headers={
+                    "If-Match": '"1"',
+                    "X-Matrix-Client-Contract": "4",
+                },
             )
 
         race_threads = [
@@ -5125,7 +5323,10 @@ globalThis.document=document;globalThis.window=window;globalThis.fetch=fetch;
 
         deleted = self.paired_client_request("POST", client_a,
             "/api/config", json={"custom_modules": [], "playlist": base_a["playlist"]},
-            headers={"If-Match": '"2"'},
+            headers={
+                "If-Match": '"2"',
+                "X-Matrix-Client-Contract": "4",
+            },
         )
         self.assertEqual(deleted.status_code, 200)
         missed = client_b.get("/api/config", headers={"If-None-Match": '"1"'})
@@ -5133,13 +5334,16 @@ globalThis.document=document;globalThis.window=window;globalThis.fetch=fetch;
         self.assertEqual(missed.get_json()["custom_modules"], [])
         self.assertEqual(missed.get_json()["playlist"], base_a["playlist"])
 
-        maximum_playlist = [
+        maximum_playlist = [*media_rows, *[
             {"module": "clock_lava", "duration": 1, "enabled": True}
-            for _index in range(256)
-        ]
+            for _index in range(254)
+        ]]
         maximum = self.paired_client_request("POST", client_a,
             "/api/config", json={"playlist": maximum_playlist},
-            headers={"If-Match": '"3"'},
+            headers={
+                "If-Match": '"3"',
+                "X-Matrix-Client-Contract": "4",
+            },
         )
         self.assertEqual(maximum.status_code, 200, maximum.get_data(as_text=True))
         self.assertEqual(maximum.get_json()["revision"], 4)
@@ -6424,7 +6628,7 @@ try{
         self.pair_browser()
         body = self.client.get("/").get_data(as_text=True)
 
-        self.assertIn("const MATRIX_CLIENT_CONTRACT=3", body)
+        self.assertIn("const MATRIX_CLIENT_CONTRACT=4", body)
         self.assertIn("let matrixLoadedRevision=0", body)
         self.assertIn("'X-Matrix-Client-Contract':String(MATRIX_CLIENT_CONTRACT)", body)
         self.assertIn("'If-Match':matrixRevisionETag()", body)
@@ -6438,7 +6642,7 @@ try{
         self.assertIn("width:min(32rem,calc(100vw - 2rem))", body)
         self.assertIn("min-height:44px", body)
 
-        frozen_b1 = body.replace("const MATRIX_CLIENT_CONTRACT=3", "const MATRIX_CLIENT_CONTRACT=1", 1)
+        frozen_b1 = body.replace("const MATRIX_CLIENT_CONTRACT=4", "const MATRIX_CLIENT_CONTRACT=1", 1)
         start = frozen_b1.index("const MATRIX_CLIENT_CONTRACT=1")
         end = frozen_b1.index("const customFontAdvances", start)
         bridge = frozen_b1[start:end]
@@ -11915,9 +12119,10 @@ process.stdout.write(JSON.stringify({
         for bitmap_layers in (1, 64):
             # A full Save omits the two server-owned fields. Their canonical compact
             # representation adds 32 bytes, while Python's canonical persistence
-            # retains six bounded integral floats that JSON.stringify emits as
-            # integers. Thus 1,048,538 is the largest valid browser Save body.
-            maximum = self._pixel_payload_config(bitmap_layers, 1_048_538)
+            # retains bounded integral floats that JSON.stringify emits as
+            # integers. The two v4 media playlist layouts add two more such
+            # values, so 1,048,534 is the largest valid browser Save body.
+            maximum = self._pixel_payload_config(bitmap_layers, 1_048_534)
             full = copy.deepcopy(maximum)
             full.update({"revision": 0, "schema_version": config_store.CURRENT_CONFIG_SCHEMA_VERSION})
             validated = config_store.validate_config(
@@ -11927,7 +12132,7 @@ process.stdout.write(JSON.stringify({
             canonical_size = len(config_store._serialize_config(validated))
             self.assertEqual(canonical_size, 1_048_576)
             maxima[str(bitmap_layers)] = {
-                "request": 1_048_538,
+                "request": 1_048_534,
                 "canonical": canonical_size,
             }
             cases.append({"label": f"save-max-{bitmap_layers}", "payload": maximum, "ok": True})
@@ -11998,13 +12203,13 @@ process.stdout.write(JSON.stringify(observations));
         for observed in observations:
             item = expected[observed["label"]]
             suffix = observed["label"].rsplit("-", 1)[-1]
-            target = 1_048_538 if observed["label"].startswith("save-max-") else int(suffix)
+            target = 1_048_534 if observed["label"].startswith("save-max-") else int(suffix)
             self.assertEqual(observed["bytes"], target, observed["label"])
             self.assertEqual(observed["admitted"], item["ok"], observed)
             self.assertEqual(observed["code"], None if item["ok"] else "MATRIX_REQUEST_TOO_LARGE")
         self.assertEqual(maxima, {
-            "1": {"request": 1_048_538, "canonical": 1_048_576},
-            "64": {"request": 1_048_538, "canonical": 1_048_576},
+            "1": {"request": 1_048_534, "canonical": 1_048_576},
+            "64": {"request": 1_048_534, "canonical": 1_048_576},
         })
 
     @unittest.skipUnless(shutil.which("node"), "Node.js is required")
@@ -13347,10 +13552,16 @@ console.log('TERMINAL_MEDIA_PREVIEW_PASS');
         self.pair_browser()
         media = self.media_dir / "same.png"
         Image.new("RGB", (2, 2), "red").save(media)
-        first = self.client.get("/api/media").get_json()[0]["revision"]
+        first = next(
+            item for item in self.client.get("/api/media").get_json()
+            if item["name"] == "same.png"
+        )["revision"]
         media.unlink()
         Image.new("RGB", (2, 2), "blue").save(media)
-        second = self.client.get("/api/media").get_json()[0]["revision"]
+        second = next(
+            item for item in self.client.get("/api/media").get_json()
+            if item["name"] == "same.png"
+        )["revision"]
 
         self.assertNotEqual(first, second)
 
@@ -13862,8 +14073,8 @@ console.log('ANNOUNCEMENT_HEADING_SYNC_PASS');
         self.assertIn('class="module-item"', body)
         self.assertIn('data-module-editor="weather"', body)
         self.assertIn('data-module-editor="clock_lava"', body)
-        self.assertIn('data-module-editor="splash"', body)
-        self.assertIn('data-module-editor="sleep"', body)
+        self.assertIn('data-media-item-editor="splash_default"', body)
+        self.assertIn('data-media-item-editor="sleep_default"', body)
         self.assertIn("Edit", body)
         self.assertIn("Reset to default", body)
         self.assertIn("initialBuiltInSettings", body)
@@ -13876,11 +14087,11 @@ console.log('ANNOUNCEMENT_HEADING_SYNC_PASS');
             "keep_aspect", "video_fps",
         ):
             self.assertIn(f"field:'{field}'", body)
-        self.assertIn("onclick=\"toggleSlotEditor('splash')\"", body)
-        self.assertIn("onclick=\"toggleSlotEditor('sleep')\"", body)
-        self.assertIn('id="splash-slot-editor"', body)
-        self.assertIn('id="sleep-slot-editor"', body)
-        self.assertIn("media_layout:{splash:builtInSettings.splash,sleep:builtInSettings.sleep}", body)
+        self.assertIn("toggleMediaPlaylistEditor", body)
+        self.assertIn("resetMediaPlaylistItem", body)
+        self.assertIn('data-media-item-id="splash_default"', body)
+        self.assertIn('data-media-item-id="sleep_default"', body)
+        self.assertIn("item.layout=mediaPlaylistLayout(row)", body)
         self.assertIn("...builtInSettings.clock_lava", body)
 
     def test_lava_palettes_are_the_dropdown_body_inside_the_lava_clock_editor(self):
@@ -13920,10 +14131,18 @@ console.log('ANNOUNCEMENT_HEADING_SYNC_PASS');
         self.assertIn('"playback_speed_percent": 100.0', body)
         self.assertIn("builtInSettings[module][definition.field]=", body)
         self.assertIn("builtInSettings[module]=structuredClone(builtInDefaults[module])", body)
-        self.assertIn("media_layout:{splash:builtInSettings.splash,sleep:builtInSettings.sleep}", body)
+        self.assertIn("item.layout=mediaPlaylistLayout(row)", body)
+        self.assertIn("media_layout:{splash:splash?.layout||builtInSettings.splash", body)
 
     def test_config_save_probes_basic_media_once_across_prepare_and_commit(self):
         self.pair_browser()
+        media_rows = [
+            copy.deepcopy(item) for item in self.store.get()["playlist"]
+            if item["module"] in {"splash", "sleep"}
+        ]
+        for item in media_rows:
+            item["source"] = "built-in/sleep.gif"
+            item["sources"] = ["built-in/sleep.gif"]
         module = {
             "id": "custom_route_media", "name": "Route media", "type": "media",
             "source": "built-in/sleep.gif", "fit": "contain", "x": 0, "y": 0,
@@ -13936,14 +14155,18 @@ console.log('ANNOUNCEMENT_HEADING_SYNC_PASS');
         ) as probe:
             response = self.post_config(json={
                 "custom_modules": [module],
-                "playlist": [{
+                "playlist": [*media_rows, {
                     "module": module["id"], "duration": 99, "enabled": True,
                 }],
             })
 
         self.assertEqual(response.status_code, 200)
         self.assertEqual(probe.call_count, 1)
-        self.assertAlmostEqual(response.get_json()["playlist"][0]["duration"], 0.1)
+        saved = next(
+            item for item in response.get_json()["playlist"]
+            if item["module"] == module["id"]
+        )
+        self.assertAlmostEqual(saved["duration"], 0.1)
 
     def test_builtin_media_speed_round_trips_through_paired_config_api(self):
         self.pair_browser()
@@ -14381,7 +14604,7 @@ try{
     )
     def test_lava_palette_bulk_controls_are_mobile_safe_in_real_chromium(self):
         built_in = self.media_dir / "built-in"
-        built_in.mkdir()
+        built_in.mkdir(exist_ok=True)
         for filename in ("squares_tb.gif", "sleep.gif"):
             (built_in / filename).write_bytes(self.gif_bytes().getvalue())
         self.store.update({"lava": {"custom_palettes": [{
@@ -14679,14 +14902,17 @@ try{
     def test_media_inside_built_in_folder_is_classified_and_protected(self):
         self.pair_browser()
         built_in = self.media_dir / "built-in"
-        built_in.mkdir()
+        built_in.mkdir(exist_ok=True)
         (built_in / "system.gif").write_bytes(self.gif_bytes().getvalue())
         (self.media_dir / "custom.gif").write_bytes(self.gif_bytes().getvalue())
 
         listing = self.client.get("/api/media").get_json()
 
         self.assertEqual(
-            [(item["name"], item["built_in"]) for item in listing],
+            [
+                (item["name"], item["built_in"]) for item in listing
+                if item["name"] in {"built-in/system.gif", "custom.gif"}
+            ],
             [("built-in/system.gif", True), ("custom.gif", False)],
         )
         served = self.client.get("/media/built-in/system.gif")
@@ -14698,7 +14924,7 @@ try{
     def test_media_classification_cannot_be_changed_through_the_api(self):
         self.pair_browser()
         built_in = self.media_dir / "built-in"
-        built_in.mkdir()
+        built_in.mkdir(exist_ok=True)
         payload = self.gif_bytes().getvalue()
         (self.media_dir / "custom.gif").write_bytes(payload)
         (built_in / "system.gif").write_bytes(payload)
@@ -14788,7 +15014,10 @@ try{
         self.pair_browser()
         (self.media_dir / "animated.gif").write_bytes(self.animated_gif_bytes().getvalue())
 
-        item = self.client.get("/api/media").get_json()[0]
+        item = next(
+            item for item in self.client.get("/api/media").get_json()
+            if item["name"] == "animated.gif"
+        )
 
         self.assertTrue(item["animated"])
         self.assertEqual(item["source_frames"], 3)
@@ -14802,7 +15031,10 @@ try{
         self.pair_browser()
         (self.media_dir / "animated.mp4").write_bytes(self.mp4_bytes().getvalue())
 
-        item = self.client.get("/api/media").get_json()[0]
+        item = next(
+            item for item in self.client.get("/api/media").get_json()
+            if item["name"] == "animated.mp4"
+        )
 
         self.assertTrue(item["animated"])
         self.assertEqual(item["source_frames"], 6)
@@ -14821,7 +15053,10 @@ try{
         self.assertEqual(response.status_code, 201)
         self.assertTrue((self.media_dir / "custom.gif").is_file())
         listing = self.client.get("/api/media").get_json()
-        self.assertEqual([item["name"] for item in listing], ["custom.gif"])
+        self.assertEqual(
+            [item["name"] for item in listing if not item["built_in"]],
+            ["custom.gif"],
+        )
         served = self.client.get("/media/custom.gif")
         self.assertEqual(served.status_code, 200)
         self.assertEqual(served.mimetype, "image/gif")
@@ -14838,7 +15073,7 @@ try{
         self.controller.preview_media.assert_called_once_with("custom.gif")
 
         built_in = self.media_dir / "built-in"
-        built_in.mkdir()
+        built_in.mkdir(exist_ok=True)
         (built_in / "system.gif").write_bytes(self.gif_bytes().getvalue())
         built_in_response = self.paired_request("POST", "/api/media/built-in/system.gif/preview")
         self.assertEqual(built_in_response.status_code, 202)
@@ -14863,7 +15098,10 @@ try{
         self.assertEqual(item["kind"], "mp4")
         self.assertEqual((item["width"], item["height"]), (56, 32))
         listing = self.client.get("/api/media").get_json()
-        self.assertEqual([entry["name"] for entry in listing], ["clip.mp4"])
+        self.assertEqual(
+            [entry["name"] for entry in listing if not entry["built_in"]],
+            ["clip.mp4"],
+        )
         served = self.client.get("/media/clip.mp4")
         self.assertEqual(served.status_code, 200)
         self.assertEqual(served.mimetype, "video/mp4")
@@ -14977,6 +15215,152 @@ try{
         self.assertEqual(self.client.get("/media/leak.gif").status_code, 404)
         response = self.post_config( json={"media": {"splash": "missing.gif"}})
         self.assertEqual(response.status_code, 400)
+
+    def test_missing_default_media_is_rejected_before_save_or_preview_admission(self):
+        self.pair_browser()
+        candidate = self.store.get()
+        candidate.pop("revision")
+        candidate.pop("schema_version")
+
+        for module_name, reference in (
+            ("splash", "built-in/rubik_squares.gif"),
+            ("sleep", "built-in/sleep.gif"),
+        ):
+            with self.subTest(module=module_name):
+                path = self.media_dir / reference
+                original = path.read_bytes()
+                path.unlink()
+                before_config = Path(self.store.path).read_bytes()
+                try:
+                    saved = self.post_config(json={})
+
+                    with patch(
+                        "webapp._edit_preview_iterator", return_value=iter(()),
+                    ) as edit_iterator:
+                        edited = self.paired_request(
+                            "POST", f"/api/edit-preview/{module_name}",
+                            headers={"X-Matrix-Client-Contract": "4"},
+                            json={
+                                "config": candidate,
+                                "generation": 1,
+                                "preview_instance": "a" * 32,
+                            },
+                        )
+
+                    self.controller.submit_device_draft.reset_mock()
+                    device = self.paired_request(
+                        "POST", f"/api/device-preview/{module_name}",
+                        headers={"X-Matrix-Client-Contract": "4"},
+                        json={
+                            "config": candidate,
+                            "generation": 1,
+                            "preview_instance": "b" * 32,
+                        },
+                    )
+
+                    self.assertEqual(saved.status_code, 400, saved.get_data(as_text=True))
+                    self.assertEqual(edited.status_code, 503, edited.get_data(as_text=True))
+                    self.assertEqual(device.status_code, 503, device.get_data(as_text=True))
+                    edit_iterator.assert_not_called()
+                    self.controller.submit_device_draft.assert_not_called()
+                    self.assertEqual(Path(self.store.path).read_bytes(), before_config)
+                finally:
+                    path.write_bytes(original)
+                    Path(self.store.path).write_bytes(before_config)
+
+    def test_missing_basic_custom_media_is_rejected_before_save_or_preview_admission(self):
+        from device_preview import DevicePreviewManager
+
+        self.pair_browser()
+        module = {
+            "id": "custom_missing_media", "name": "Missing media", "type": "media",
+            "source": "missing-custom.gif", "fit": "contain", "x": 0, "y": 0,
+            "width": 64, "height": 32, "loops": 1,
+            "playback_speed_percent": 100.0,
+        }
+        candidate = {"custom_modules": [module]}
+        identity = "c" * 32
+        before_config = Path(self.store.path).read_bytes()
+
+        saved = self.post_config(json=candidate)
+        with patch(
+            "webapp._edit_preview_iterator", return_value=iter(()),
+        ) as edit_iterator:
+            edited = self.paired_request(
+                "POST", f"/api/edit-preview/{module['id']}",
+                headers={"X-Matrix-Client-Contract": "4"},
+                json={
+                    "config": candidate, "generation": 1,
+                    "preview_instance": identity,
+                },
+            )
+        device = self.paired_request(
+            "POST", f"/api/device-preview/{module['id']}",
+            headers={"X-Matrix-Client-Contract": "4"},
+            json={
+                "config": candidate, "generation": 1,
+                "preview_instance": identity,
+            },
+        )
+
+        self.assertEqual(saved.status_code, 400, saved.get_data(as_text=True))
+        self.assertEqual(edited.status_code, 503, edited.get_data(as_text=True))
+        self.assertEqual(device.status_code, 503, device.get_data(as_text=True))
+        edit_iterator.assert_not_called()
+        self.controller.submit_device_draft.assert_not_called()
+        self.assertEqual(Path(self.store.path).read_bytes(), before_config)
+
+        (self.media_dir / module["source"]).write_bytes(self.gif_bytes().read())
+        retry_edit = self.paired_request(
+            "POST", f"/api/edit-preview/{module['id']}",
+            headers={"X-Matrix-Client-Contract": "4"},
+            json={
+                "config": candidate, "generation": 1,
+                "preview_instance": identity,
+            },
+        )
+        self.assertEqual(retry_edit.status_code, 200, retry_edit.get_data(as_text=True))
+
+        manager = DevicePreviewManager()
+        self.controller.submit_device_draft.side_effect = (
+            lambda request, **_kwargs: manager.submit(request)
+        )
+        retry_device = self.paired_request(
+            "POST", f"/api/device-preview/{module['id']}",
+            headers={"X-Matrix-Client-Contract": "4"},
+            json={
+                "config": candidate, "generation": 1,
+                "preview_instance": identity,
+            },
+        )
+        self.assertEqual(retry_device.status_code, 202, retry_device.get_data(as_text=True))
+        manager.close()
+
+    def test_save_rejects_media_identity_change_between_pin_and_update(self):
+        self.pair_browser()
+        source = self.media_dir / "save-race.gif"
+        source.write_bytes(self.gif_bytes().read())
+        module = {
+            "id": "custom_save_race", "name": "Save race", "type": "media",
+            "source": source.name, "fit": "contain", "x": 0, "y": 0,
+            "width": 64, "height": 32, "loops": 1,
+            "playback_speed_percent": 100.0,
+        }
+        before_config = Path(self.store.path).read_bytes()
+        original_update = self.store.update
+
+        def replace_before_update(*args, **kwargs):
+            replacement = self.media_dir / "save-race-replacement.gif"
+            replacement.write_bytes(self.gif_bytes().read())
+            os.replace(replacement, source)
+            return original_update(*args, **kwargs)
+
+        with patch.object(self.store, "update", side_effect=replace_before_update):
+            response = self.post_config(json={"custom_modules": [module]})
+
+        self.assertEqual(response.status_code, 400, response.get_data(as_text=True))
+        self.assertIn("changed", response.get_json()["error"])
+        self.assertEqual(Path(self.store.path).read_bytes(), before_config)
 
     def test_rejected_upload_does_not_leave_a_retry_blocking_destination(self):
         self.pair_browser()
@@ -15502,10 +15886,10 @@ try{
 
         self.assertEqual(Path(self.store.path).read_bytes(), before_config)
         self.assertEqual(Path(self.device_store.path).read_bytes(), before_devices)
-        self.assertEqual([
+        self.assertEqual(sorted(
             (path.relative_to(self.media_dir).as_posix(), path.read_bytes())
             for path in self.media_dir.rglob("*") if path.is_file()
-        ], before_media)
+        ), before_media)
         self.assertEqual(self.controller.method_calls, [])
         registry.close()
         self.assertFalse(registry.reaper_alive)
@@ -17710,6 +18094,34 @@ try{
         self.assertEqual(previewed["style"]["foreground"], "#ffffff")
         self.assertEqual(self.store.get(), before)
         self.controller.reload.assert_not_called()
+
+    def test_announcement_preview_rejects_missing_media_before_admission(self):
+        self.pair_browser()
+        announcement = test_config_store.ConfigStoreTests.announcement(
+            media="missing-announcement.png",
+        )
+
+        self.controller.preview_announcement.side_effect = media_resolver.MediaResolutionError(
+            "not_found", reference=announcement["media"],
+        )
+        rejected = self.paired_request(
+            "POST", "/api/preview/announcement", json=announcement,
+        )
+
+        self.assertEqual(rejected.status_code, 400, rejected.get_data(as_text=True))
+        self.assertEqual(rejected.get_json()["error"], "media resource was not found")
+        rejected_record = self.controller.preview_announcement.call_args.args[0]
+        self.assertEqual(rejected_record["id"], announcement["id"])
+        self.assertEqual(rejected_record["media"], announcement["media"])
+
+        self.controller.preview_announcement.reset_mock(side_effect=True)
+        accepted = self.paired_request(
+            "POST", "/api/preview/announcement", json=announcement,
+        )
+        self.assertEqual(accepted.status_code, 202, accepted.get_data(as_text=True))
+        accepted_record = self.controller.preview_announcement.call_args.args[0]
+        self.assertEqual(accepted_record["id"], announcement["id"])
+        self.assertEqual(accepted_record["media"], announcement["media"])
 
     def test_unsaved_announcement_preview_rejects_legacy_missing_fields(self):
         self.pair_browser()
@@ -20176,10 +20588,13 @@ try{
         media.write_bytes(b"accepted-inode")
         candidate = {k: copy.deepcopy(v) for k, v in self.store.get().items() if k not in {"revision", "schema_version"}}
         candidate["media"]["splash"] = "draft.png"
+        splash = next(item for item in candidate["playlist"] if item["module"] == "splash")
+        splash["source"] = "draft.png"
+        splash["sources"] = ["draft.png"]
         instance = "2" * 32
         started = self.paired_client_request("POST", client, "/api/device-preview/splash", json={
             "config": candidate, "generation": 1, "preview_instance": instance, "timeout_seconds": 60,
-        })
+        }, headers={"X-Matrix-Client-Contract": "4"})
         self.assertEqual(started.status_code, 202, started.get_json())
         request_record = manager.active_lease().request
         handle = request_record.pinned_media["draft.png"]
@@ -20340,6 +20755,9 @@ try{
         media = self.media_dir / "closure-draft.png"
         media.write_bytes(b"accepted-closure-inode")
         candidate["media"]["splash"] = media.name
+        splash = next(item for item in candidate["playlist"] if item["module"] == "splash")
+        splash["source"] = media.name
+        splash["sources"] = [media.name]
         owner_instance = "5" * 32
         peer_instance = "6" * 32
         base_payload = {
@@ -20389,6 +20807,7 @@ try{
 
             started = self.paired_client_request(
                 "POST", owner, "/api/device-preview/splash", json=base_payload,
+                headers={"X-Matrix-Client-Contract": "4"},
             )
             self.assertEqual(started.status_code, 202, started.get_json())
             self.assertEqual(started.headers.get("Cache-Control"), "no-store")
@@ -20464,6 +20883,7 @@ try{
             with patch("webapp._prepare_edit_preview_provider", side_effect=prepare):
                 provider_start = self.paired_client_request(
                     "POST", owner, "/api/device-preview/weather", json=provider_payload,
+                    headers={"X-Matrix-Client-Contract": "4"},
                 )
                 self.assertEqual(provider_start.status_code, 202, provider_start.get_json())
                 provider_handle = manager.active_lease().request.pinned_media[media.name]
@@ -20505,6 +20925,7 @@ try{
                 capacity_worker = threading.Thread(target=lambda: first.append(
                     self.paired_client_request(
                         "POST", owner, "/api/device-preview/weather", json=capacity_payload,
+                        headers={"X-Matrix-Client-Contract": "4"},
                     )
                 ))
                 capacity_worker.start()
@@ -20515,6 +20936,7 @@ try{
                         "generation": 4,
                         "preview_instance": peer_instance,
                     },
+                    headers={"X-Matrix-Client-Contract": "4"},
                 )
                 self.assertEqual(excess.status_code, 429, excess.get_json())
                 self.assertEqual(excess.headers.get("Retry-After"), "2")

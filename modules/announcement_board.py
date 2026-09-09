@@ -593,6 +593,9 @@ def announcement_frames(
         animated = False
         media_fps = 20
         if announcement["layout"] != "text_notice":
+            pinned_handle = (pinned_handles or {}).get(announcement["media"])
+            if pinned_handle is None:
+                raise ValueError("announcement media capability is missing")
             try:
                 hold_seconds = announcement["timing"].get("duration_seconds", 1)
                 animated = Path(announcement["media"] or "").suffix.lower() in {".gif", ".mp4"}
@@ -605,9 +608,7 @@ def announcement_frames(
                     media_options["playback_rate"] = (
                         announcement.get("playback_speed_percent", 100.0) / 100.0
                     )
-                pinned_handle = (pinned_handles or {}).get(announcement["media"])
-                if pinned_handle is not None:
-                    media_options["pinned_handle"] = pinned_handle
+                media_options["pinned_handle"] = pinned_handle
                 frames = matrix.media_frames(
                     announcement["media"],
                     min(120, max(1, math.ceil(hold_seconds * media_fps))) if animated else 1,

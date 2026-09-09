@@ -6,10 +6,29 @@ from unittest.mock import Mock, call, patch
 
 from PIL import Image
 
+from media_resolver import module_media_references
 from modules import custom_text
 
 
 class CustomTextTests(unittest.TestCase):
+    def setUp(self):
+        original_run = custom_text.run
+
+        def run_with_pins(*args, **kwargs):
+            module = kwargs.get("module_config")
+            if module is not None and "pinned_handles" not in kwargs:
+                references = module_media_references(
+                    {"custom_modules": [module]}, module["id"],
+                )
+                kwargs["pinned_handles"] = {
+                    reference: Mock() for reference in references
+                }
+            return original_run(*args, **kwargs)
+
+        patcher = patch.object(custom_text, "run", side_effect=run_with_pins)
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
     @staticmethod
     def module_options(**changes):
         options = {

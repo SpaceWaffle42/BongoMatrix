@@ -336,7 +336,11 @@ def video_media_frames(
         completed += 1
 
 
-def play_media(matrix, filename, duration, stop_event=None, settings=None):
+def play_media(
+    matrix, filename, duration, stop_event=None, settings=None, *, pinned_handle=None,
+):
+    if pinned_handle is None:
+        raise ValueError("media playback capability is missing")
     if stop_event is not None and stop_event.is_set():
         return False
     geometry = {}
@@ -351,6 +355,7 @@ def play_media(matrix, filename, duration, stop_event=None, settings=None):
     playback = {}
     if settings and "playback_speed_percent" in settings:
         playback["playback_rate"] = settings["playback_speed_percent"] / 100.0
+    pinning = {"pinned_handle": pinned_handle}
     suffix = Path(filename).suffix.lower()
     if suffix == ".gif":
         return matrix.show_gif(
@@ -360,6 +365,7 @@ def play_media(matrix, filename, duration, stop_event=None, settings=None):
             loops=0,
             stop_event=stop_event,
             max_duration=duration,
+            **pinning,
         )
     if suffix == ".mp4":
         return matrix.show_video(
@@ -370,6 +376,7 @@ def play_media(matrix, filename, duration, stop_event=None, settings=None):
             loops=0,
             stop_event=stop_event,
             max_duration=duration,
+            **pinning,
         )
 
     from edit_preview import static_media_frames
@@ -377,7 +384,8 @@ def play_media(matrix, filename, duration, stop_event=None, settings=None):
     frame_iterator = static_media_frames(
         filename, duration, settings,
         render=lambda frame_filename, frame_geometry: matrix.show_image(
-            frame_filename, delay=None, stop_event=stop_event, **frame_geometry,
+            frame_filename, delay=None, stop_event=stop_event,
+            **pinning, **frame_geometry,
         ),
         monotonic=time.monotonic,
     )

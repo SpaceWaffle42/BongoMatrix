@@ -226,6 +226,66 @@ class MediaResolver:
                 os.close(descriptor)
 
 
+def _custom_module_media_references(module) -> tuple[str, ...]:
+    references = []
+
+    def add(reference):
+        if reference and reference not in references:
+            references.append(reference)
+
+    if not isinstance(module, dict):
+        return ()
+    if module.get("type") == "media":
+        add(module.get("source"))
+        return tuple(references)
+    if module.get("type") != "canvas":
+        return ()
+    media_layer_ids = set()
+    for layer in module.get("layers", []):
+        if not isinstance(layer, dict) or layer.get("type") != "media":
+            continue
+        media_layer_ids.add(layer.get("id"))
+        property_sets = [layer.get("properties", {})]
+        property_sets.extend(
+            keyframe.get("properties", {})
+            for keyframe in layer.get("keyframes", [])
+            if isinstance(keyframe, dict)
+        )
+        for properties in property_sets:
+            if isinstance(properties, dict):
+                add(properties.get("source"))
+    for override in module.get("overrides", []):
+        if not isinstance(override, dict) or override.get("layer_id") not in media_layer_ids:
+            continue
+        properties = override.get("properties", {})
+        if isinstance(properties, dict):
+            add(properties.get("source"))
+    return tuple(references)
+
+
+def module_media_references(candidate, module_name) -> tuple[str, ...]:
+    """Return only the references one module invocation can consume."""
+    if module_name in {"splash", "sleep"}:
+        reference = candidate.get("media", {}).get(module_name)
+        return (reference,) if reference else ()
+    if module_name == "announcement_board":
+        references = []
+        for announcement in candidate.get("announcement_board", {}).get("announcements", []):
+            if isinstance(announcement, dict):
+                reference = announcement.get("media")
+                if reference and reference not in references:
+                    references.append(reference)
+        return tuple(references)
+    module = next(
+        (
+            item for item in candidate.get("custom_modules", [])
+            if isinstance(item, dict) and item.get("id") == module_name
+        ),
+        None,
+    )
+    return _custom_module_media_references(module)
+
+
 def candidate_media_references(candidate) -> tuple[str, ...]:
     """Return every selected media reference from a validated candidate."""
     references = []
@@ -234,39 +294,25 @@ def candidate_media_references(candidate) -> tuple[str, ...]:
         if reference and reference not in references:
             references.append(reference)
 
-    for reference in candidate.get("media", {}).values():
-        add(reference)
+    media = candidate.get("media", {})
+    for module_name in ("splash", "sleep"):
+        add(media.get(module_name))
+    for item in candidate.get("playlist", []):
+        if isinstance(item, dict) and item.get("module") in {"splash", "sleep"}:
+            add(item.get("source"))
+            for reference in item.get("sources", []):
+                add(reference)
     for announcement in candidate.get("announcement_board", {}).get("announcements", []):
         if isinstance(announcement, dict):
             add(announcement.get("media"))
     for module in candidate.get("custom_modules", []):
-        if not isinstance(module, dict) or module.get("type") != "canvas":
-            continue
-        media_layer_ids = set()
-        for layer in module.get("layers", []):
-            if not isinstance(layer, dict) or layer.get("type") != "media":
-                continue
-            media_layer_ids.add(layer.get("id"))
-            property_sets = [layer.get("properties", {})]
-            property_sets.extend(
-                keyframe.get("properties", {})
-                for keyframe in layer.get("keyframes", [])
-                if isinstance(keyframe, dict)
-            )
-            for properties in property_sets:
-                if isinstance(properties, dict):
-                    add(properties.get("source"))
-        for override in module.get("overrides", []):
-            if not isinstance(override, dict) or override.get("layer_id") not in media_layer_ids:
-                continue
-            properties = override.get("properties", {})
-            if isinstance(properties, dict):
-                add(properties.get("source"))
+        for reference in _custom_module_media_references(module):
+            add(reference)
     return tuple(references)
 
 
 @contextmanager
-def pin_candidate_media(candidate, media_root, *, allow_missing=()):
+def pin_candidate_media(candidate, media_root):
     """Own pinned handles for all selected candidate media until context exit."""
     resolver = MediaResolver(media_root)
     handles = {}
@@ -275,8 +321,6 @@ def pin_candidate_media(candidate, media_root, *, allow_missing=()):
             try:
                 handles[reference] = resolver.resolve(reference)
             except MediaResolutionError as error:
-                if error.code == "not_found" and reference in allow_missing:
-                    continue
                 raise MediaResolutionError(error.code, reference=reference) from None
         yield handles
     finally:
