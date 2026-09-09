@@ -1998,7 +1998,10 @@ class DisplayControllerTests(unittest.TestCase):
                 "active_end": "17:00",
             },
         }
-        store = Mock(get=Mock(return_value=sleep_config))
+        store = Mock(
+            get=Mock(return_value=sleep_config),
+            media_root=Path(__file__).parents[1] / "resources" / "media",
+        )
         controller = DisplayController(Mock(), store)
         controller.start = Mock()
         events = []
