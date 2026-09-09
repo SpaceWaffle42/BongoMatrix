@@ -184,7 +184,10 @@ DEFAULT_CONFIG = {
         "text_colour": "#ffffff",
         "border_colour": "#000000",
     },
-    "media": {"splash": "built-in/rubik_squares.gif", "sleep": "built-in/sleep.gif"},
+    "media": {
+        "splash": "built-in/splash_loading_squares.gif",
+        "sleep": "built-in/sleep.gif",
+    },
     "media_layout": {
         "splash": {"x": 0, "y": 0, "width": 64, "height": 32, "keep_aspect": True, "video_fps": 20, "playback_speed_percent": 100.0},
         "sleep": {"x": 0, "y": 0, "width": 64, "height": 32, "keep_aspect": True, "video_fps": 20, "playback_speed_percent": 100.0},
@@ -194,13 +197,8 @@ DEFAULT_CONFIG = {
     "playlist": [
         {
             "id": "splash_default", "module": "splash",
-            "source": "built-in/rubik_squares.gif", "duration": 8,
-            "sources": [
-                "built-in/rubik_squares.gif",
-                "built-in/waterfall_squares.gif",
-                "built-in/loading_squares.gif",
-                "built-in/zigzag_squares.gif",
-            ],
+            "source": "built-in/splash_loading_squares.gif", "duration": 8,
+            "sources": ["built-in/splash_loading_squares.gif"],
             "enabled": True,
             "layout": {
                 "x": 0, "y": 0, "width": 64, "height": 32,
@@ -1066,12 +1064,14 @@ def validate_config(
         raise ValueError("playlist must contain at most 256 modules")
     custom_by_id = {item["id"]: item for item in custom_modules}
     media_item_ids = set()
+    media_item_counts = {"splash": 0, "sleep": 0}
     first_media_items = {}
     for item in playlist:
         if not isinstance(item, dict):
             raise ValueError("playlist items must be objects")
         module_name = item.get("module")
         if module_name in {"splash", "sleep"}:
+            media_item_counts[module_name] += 1
             if "duration" not in item:
                 raise ValueError("module duration is required")
             expected = {
@@ -1088,19 +1088,20 @@ def validate_config(
             if item_id in media_item_ids:
                 raise ValueError("splash and sleep playlist item ids must be unique")
             media_item_ids.add(item_id)
-            if not _is_safe_media_reference(item.get("source")):
-                raise ValueError(f"{module_name} playlist source must be a safe media reference")
             sources = item.get("sources")
-            if (
-                not isinstance(sources, list) or not sources
-                or len(sources) != len(set(sources))
-                or any(not _is_safe_media_reference(source) for source in sources)
-            ):
+            if not isinstance(sources, list) or len(sources) != len(set(sources)):
                 raise ValueError(
-                    f"{module_name} playlist sources must be a non-empty list "
-                    "of unique safe media references"
+                    f"{module_name} playlist sources must be a list of unique media references"
                 )
-            item["source"] = sources[0]
+            if not sources:
+                if item.get("enabled") is not False or item.get("source") != "":
+                    raise ValueError(f"enabled {module_name} screen requires selected media")
+            elif any(not _is_safe_media_reference(source) for source in sources):
+                raise ValueError(
+                    f"{module_name} playlist sources must contain only safe media references"
+                )
+            else:
+                item["source"] = sources[0]
             _validate_media_layout(item.get("layout"), f"playlist item {item_id}")
             first_media_items.setdefault(module_name, item)
         elif set(item) != {"module", "duration", "enabled"}:
@@ -1133,15 +1134,19 @@ def validate_config(
                 raise ValueError("module duration must be between 1 and 3600 seconds")
         if not isinstance(item.get("enabled"), bool):
             raise ValueError("module enabled must be a boolean")
+    for module_name, count in media_item_counts.items():
+        if count > 1:
+            raise ValueError(f"playlist must contain exactly one {module_name} screen")
     # Scalar slots remain backwards-compatible aliases for the first row.
     # ConfigStore synchronizes playlist-aware writes into these aliases before
     # validation; direct legacy callers can still update only the scalar slot.
     for module_name, item in first_media_items.items():
-        item["source"] = config["media"][module_name]
-        item["sources"] = [
-            config["media"][module_name],
-            *(source for source in item["sources"] if source != config["media"][module_name]),
-        ]
+        if item["sources"]:
+            item["source"] = config["media"][module_name]
+            item["sources"] = [
+                config["media"][module_name],
+                *(source for source in item["sources"] if source != config["media"][module_name]),
+            ]
         item["layout"] = copy.deepcopy(config["media_layout"][module_name])
     if (
         enforce_save_bounds

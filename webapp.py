@@ -45,6 +45,7 @@ from modules.scroll_timing_cache import ScrollTimingCache, TimingCacheBusy
 from modules.scroll_timing import timing_javascript
 from modules import announcement_board, weather_app, openweather_overview, openweather_forecast
 from media_resolver import MediaResolutionError, pin_candidate_media
+from screen_media import discover_screen_media, validate_screen_media_config
 from pairing import PairedDeviceStore, PairingDurabilityError
 from secret_store import SecretDurabilityError, SecretStore
 from edit_preview import (
@@ -73,7 +74,7 @@ MEDIA_METADATA_ERRORS = (
 CONFIG_REQUEST_LIMIT = 1_048_576
 CONDITIONAL_HEADER_LIMIT = 4096
 MINIMUM_CLIENT_CONTRACT = 3
-APPLICATION_VERSION = "0.3.63-preview"
+APPLICATION_VERSION = "0.3.64-preview"
 DEVICE_RESTART_PENDING_TTL_SECONDS = 60
 PAIRED_ACTION_HEADER = "X-Matrix-Action"
 PAIRED_ACTION_VALUE = "paired-request"
@@ -1629,6 +1630,13 @@ def create_app(
     @requires_pairing
     def dashboard():
         config = config_store.get()
+        available_media = media_items()
+        screen_media_files = {}
+        for screen in ("splash", "sleep"):
+            names = set(discover_screen_media(media_root, screen))
+            screen_media_files[screen] = [
+                item for item in available_media if item["name"] in names
+            ]
         current_device_id = session["device_id"]
         paired_devices = [
             {**device, "current": device["id"] == current_device_id}
@@ -1667,7 +1675,8 @@ def create_app(
             lava_palettes=lava_palettes,
             status=controller.status(),
             paired_devices=paired_devices,
-            media_files=media_items(),
+            media_files=available_media,
+            screen_media_files=screen_media_files,
             openweather_secret_configured=openweather_secret_configured,
             openweather_secret_unavailable=openweather_secret_unavailable,
             built_in_defaults={
@@ -2168,6 +2177,7 @@ def create_app(
                         canonicalize_media=False,
                         client_contract=client_contract,
                     )
+                    validate_screen_media_config(candidate, media_root)
                     try:
                         with media_lock:
                             with pin_candidate_media(candidate, media_root) as pinned_media:

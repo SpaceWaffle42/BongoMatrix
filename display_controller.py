@@ -16,6 +16,11 @@ import time
 from PIL import Image
 
 from media_resolver import MediaResolver, module_media_references
+from screen_media import (
+    ScreenMediaCatalog,
+    ScreenMediaRuntime,
+    repair_saved_screen,
+)
 from modules.media_player import play_media
 from device_preview import (
     DevicePreviewManager, PreviewAdmissionStatus, PreviewExpiryCause,
@@ -304,6 +309,12 @@ class DisplayController:
         self.last_error = None
         self._scheduler_fault_backoff = 0.25
         self._scheduler_next_fault_log = 0.0
+        try:
+            screen_catalog = ScreenMediaCatalog(config_store.media_root)
+        except (AttributeError, TypeError):
+            screen_catalog = lambda _screen: {}
+        self._screen_runtime = ScreenMediaRuntime(catalog=screen_catalog)
+        self._sleep_session_active = False
 
     @property
     def running(self):
@@ -1158,6 +1169,62 @@ class DisplayController:
                 if self._module_stop is stop_event:
                     self._module_stop = None
 
+    def _execute_scheduled_screen(
+        self, config, item, *, maximum_duration=None, entering_sleep=False,
+    ):
+        """Select and execute one screen identity, retrying failures once each."""
+        screen = item["module"]
+        if screen not in {"splash", "sleep"}:
+            raise ValueError("scheduled screen execution requires a splash or sleep row")
+        try:
+            media_root = self.config_store.media_root
+            if not media_root.exists():
+                raise AttributeError("screen media root is unavailable")
+            repair = repair_saved_screen(
+                self.config_store, config, screen, media_root,
+            )
+            config = repair.config
+            item = next(
+                row for row in config["playlist"] if row.get("module") == screen
+            )
+            if repair.default_unavailable:
+                LOGGER.error(
+                    "Matrix %s default media is unavailable; nothing will be shown",
+                    screen,
+                )
+        except (AttributeError, TypeError):
+            pass
+        attempts = len(item.get("sources", ()))
+        for _attempt in range(attempts):
+            if screen == "splash":
+                media = self._screen_runtime.choose_splash(config)
+            elif entering_sleep:
+                media = self._screen_runtime.begin_sleep(config)
+                entering_sleep = False
+            else:
+                media = self._screen_runtime.current_sleep(config)
+            if media is None:
+                return False
+            reference = media.reference
+            selected = playlist_item_config(
+                config, item, chooser=lambda _sources: reference,
+            )
+            duration = self._screen_runtime.duration(config, screen, media)
+            if maximum_duration is not None:
+                duration = min(duration, maximum_duration)
+            try:
+                return bool(self._execute(screen, selected, duration))
+            except Exception:
+                LOGGER.exception(
+                    "Matrix %s media %s failed; trying the next usable selection",
+                    screen, media.reference,
+                )
+                if screen == "splash":
+                    self._screen_runtime.retire_splash(media)
+                else:
+                    self._screen_runtime.retire_sleep(media)
+        return False
+
     def _execute(
         self, name, config, duration, *, pinned_handle=None, pinned_handles=None,
     ):
@@ -1342,6 +1409,9 @@ class DisplayController:
 
             acceptance_inactive = self._acceptance_inactive_probe()
             active = False if acceptance_inactive is not None else self._is_active(config)
+            if active and self._sleep_session_active:
+                self._screen_runtime.end_sleep()
+                self._sleep_session_active = False
             brightness = (
                 config["display"]["day_brightness"]
                 if active
@@ -1370,6 +1440,9 @@ class DisplayController:
                         "duration": invocation_default_duration("sleep"),
                         "enabled": True,
                     }]
+                entering_sleep = bool(sleep_items) and not self._sleep_session_active
+                if sleep_items and acceptance_inactive is None:
+                    self._sleep_session_active = True
                 try:
                     for item in sleep_items:
                         if (
@@ -1389,9 +1462,16 @@ class DisplayController:
                             )
                             if duration <= 0:
                                 break
-                        self._execute(
-                            "sleep", playlist_item_config(config, item), duration
-                        )
+                        if acceptance_inactive is None:
+                            self._execute_scheduled_screen(
+                                config, item, maximum_duration=duration,
+                                entering_sleep=entering_sleep,
+                            )
+                            entering_sleep = False
+                        else:
+                            self._execute(
+                                "sleep", playlist_item_config(config, item), duration
+                            )
                 finally:
                     if acceptance_inactive is not None:
                         self._finish_acceptance_inactive_probe(acceptance_inactive)
@@ -1461,16 +1541,21 @@ class DisplayController:
                         )
                     cycle_rendered = bool(rendered) or cycle_rendered
                     break
-                cycle_rendered = bool(
-                    self._execute(
+                maximum_duration = min(
+                    item["duration"],
+                    self._seconds_until_schedule_change(config, schedule_now),
+                )
+                if item["module"] == "splash":
+                    rendered = self._execute_scheduled_screen(
+                        config, item, maximum_duration=maximum_duration,
+                    )
+                else:
+                    rendered = self._execute(
                         item["module"],
                         playlist_item_config(config, item),
-                        min(
-                            item["duration"],
-                            self._seconds_until_schedule_change(config, schedule_now),
-                        ),
+                        maximum_duration,
                     )
-                ) or cycle_rendered
+                cycle_rendered = bool(rendered) or cycle_rendered
             if (
                 not cycle_rendered
                 and not self._shutdown.is_set()

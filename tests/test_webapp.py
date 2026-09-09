@@ -1496,7 +1496,7 @@ try{
         body = self.client.get("/").get_data(as_text=True)
 
         application_version = getattr(webapp, "APPLICATION_VERSION", None)
-        self.assertEqual(application_version, "0.3.63-preview")
+        self.assertEqual(application_version, "0.3.64-preview")
         self.assertEqual(body.count(f"Version {application_version}"), 1)
         self.assertRegex(
             body,
@@ -5386,6 +5386,75 @@ globalThis.document=document;globalThis.window=window;globalThis.fetch=fetch;
         elapsed = time.monotonic() - started
         self.assertEqual(response_sizes, [0] * 10)
         self.assertLess(elapsed, 5.0)
+
+    @unittest.skipUnless(shutil.which("node"), "Node.js is required")
+    @unittest.skipUnless(
+        os.environ.get("MATRIX_CHROMIUM")
+        and Path(os.environ.get("MATRIX_CHROMIUM", "")).is_file()
+        and os.access(os.environ.get("MATRIX_CHROMIUM", ""), os.X_OK),
+        "MATRIX_CHROMIUM browser is required",
+    )
+    def test_screen_media_configuration_is_independent_and_blocks_enabled_empty_save(self):
+        Image.new("RGB", (2, 1), "red").save(
+            self.media_dir / "upload.png", format="PNG",
+        )
+        Image.new("RGB", (2, 1), "red").save(
+            self.media_dir / "upload.webp", format="WEBP",
+        )
+        sleep_frames = [
+            Image.new("RGB", (2, 1), colour)
+            for colour in ("red", "green", "blue")
+        ]
+        sleep_frames[0].save(
+            self.media_dir / "built-in" / "sleep_extra.gif", format="GIF",
+            save_all=True, append_images=sleep_frames[1:],
+            duration=[2000, 3000, 4000], loop=0,
+        )
+        Image.new("RGB", (2, 1), "red").save(
+            self.media_dir / "built-in" / "weather_other.gif", format="GIF",
+        )
+        Image.new("RGB", (2, 1), "red").save(
+            self.media_dir / "built-in" / "splash_still.png", format="PNG",
+        )
+        self.pair_browser()
+        body = self.client.get("/").get_data(as_text=True)
+        probe = r"""
+const port=process.argv[1],pagePath=process.argv[2],sleep=ms=>new Promise(resolve=>setTimeout(resolve,ms));let endpoint;
+for(let attempt=0;attempt<50;attempt++){try{endpoint=await fetch(`http://127.0.0.1:${port}/json/new`,{method:'PUT'}).then(response=>response.json());break}catch(_){await sleep(100)}}
+if(!endpoint)throw new Error('Chromium DevTools endpoint unavailable');
+const socket=new WebSocket(endpoint.webSocketDebuggerUrl),pending=new Map();let nextId=0,resolveLoad,loaded=new Promise(resolve=>resolveLoad=resolve);
+socket.onmessage=event=>{const message=JSON.parse(event.data);if(message.id&&pending.has(message.id)){const request=pending.get(message.id);pending.delete(message.id);message.error?request.reject(new Error(JSON.stringify(message.error))):request.resolve(message.result)}else if(message.method==='Page.loadEventFired')resolveLoad()};
+await new Promise((resolve,reject)=>{socket.onopen=resolve;socket.onerror=reject});
+const send=(method,params={})=>new Promise((resolve,reject)=>{const id=++nextId;pending.set(id,{resolve,reject});socket.send(JSON.stringify({id,method,params}))});
+const evaluate=async expression=>{const result=await send('Runtime.evaluate',{expression,returnByValue:true,awaitPromise:true});if(result.exceptionDetails)throw new Error(JSON.stringify(result.exceptionDetails));return result.result.value};
+try{
+ await send('Runtime.enable');await send('Page.enable');
+ await send('Page.addScriptToEvaluateOnNewDocument',{source:`globalThis.__requests=[];globalThis.__errors=[];addEventListener('error',event=>__errors.push(String(event.error||event.message)));addEventListener('unhandledrejection',event=>__errors.push(String(event.reason)));globalThis.fetch=async(input,options={})=>{__requests.push({url:String(input),method:options.method||'GET'});if(String(input)==='/api/config'&&(options.method||'GET')==='GET')return new Response(null,{status:304,headers:{'X-Matrix-Minimum-Client-Contract':'4'}});if(String(input).startsWith('/api/status'))return new Response(JSON.stringify({running:true,current_module:null,minimum_client_contract:4}),{headers:{'Content-Type':'application/json'}});return new Response(JSON.stringify({error:'fixture endpoint unavailable'}),{status:400,headers:{'Content-Type':'application/json'}})};`});
+ await send('Page.navigate',{url:'file://'+pagePath});await loaded;
+ for(let attempt=0;attempt<160;attempt++){if(await evaluate('globalThis.matrixEditorsReady===true'))break;await sleep(25)}
+ const report=await evaluate(`(async()=>{const row=module=>document.querySelector('.module-row[data-module="'+module+'"]'),names=module=>[...row(module).closest('.module-item').querySelectorAll('[data-media-source]')].map(input=>input.dataset.mediaSource),splash=row('splash'),sleepRow=row('sleep'),sleepInputs=[...sleepRow.closest('.module-item').querySelectorAll('[data-media-source]')];for(const input of sleepInputs)input.checked=['built-in/sleep_extra.gif','upload.png'].includes(input.dataset.mediaSource);syncPlaylistDurations();const stillDuration=Number(sleepRow.querySelector('.duration').value),beforeSleep=[sleepRow.querySelector('.enabled').checked,...names('sleep').filter((_,index)=>sleepInputs[index].checked)];splash.querySelector('.enabled').checked=true;for(const input of splash.closest('.module-item').querySelectorAll('[data-media-source]'))input.checked=false;const postsBefore=__requests.filter(item=>item.url==='/api/config'&&item.method==='POST').length;const result=await saveConfig();return{counts:{splash:document.querySelectorAll('.module-row[data-module="splash"]').length,sleep:document.querySelectorAll('.module-row[data-module="sleep"]').length},names:{splash:names('splash'),sleep:names('sleep'),filteredSplash:screenMediaItems('splash').map(item=>[item.name,item.built_in,item.kind])},durations:{splash:splash.querySelector('.duration').readOnly,sleep:sleepRow.querySelector('.duration').readOnly,stillValue:stillDuration},removeButtons:[...document.querySelectorAll('.module-row[data-module="splash"] button,.module-row[data-module="sleep"] button')].filter(button=>button.textContent==='Remove').length,beforeSleep,afterSleep:[sleepRow.querySelector('.enabled').checked,...names('sleep').filter((_,index)=>sleepInputs[index].checked)],posted:__requests.filter(item=>item.url==='/api/config'&&item.method==='POST').length-postsBefore,result,message:document.querySelector('#message').textContent,errors:__errors}})()`);
+ console.log(JSON.stringify(report));
+}finally{socket.close()}
+"""
+        report = self._run_dashboard_chromium_probe(body, probe)
+        self.assertEqual(report["counts"], {"splash": 1, "sleep": 1}, report)
+        self.assertIn("built-in/splash_loading_squares.gif", report["names"]["splash"])
+        self.assertIn("built-in/sleep_extra.gif", report["names"]["sleep"])
+        self.assertIn("upload.png", report["names"]["splash"])
+        self.assertIn("upload.png", report["names"]["sleep"])
+        self.assertIn("upload.webp", report["names"]["splash"])
+        self.assertIn("upload.webp", report["names"]["sleep"])
+        self.assertNotIn("built-in/weather_other.gif", report["names"]["splash"], report)
+        self.assertNotIn("built-in/splash_still.png", report["names"]["splash"])
+        self.assertTrue(report["durations"]["splash"])
+        self.assertTrue(report["durations"]["sleep"])
+        self.assertEqual(report["durations"]["stillValue"], 9.0, report)
+        self.assertEqual(report["removeButtons"], 0, report)
+        self.assertEqual(report["beforeSleep"], report["afterSleep"])
+        self.assertEqual(report["posted"], 0, report)
+        self.assertFalse(report["result"]["saved"], report)
+        self.assertIn("select at least one Splash", report["message"])
+        self.assertEqual(report["errors"], [], report)
 
     def _run_dashboard_chromium_probe(self, body, probe, timeout=30):
         chromium = os.environ["MATRIX_CHROMIUM"]
@@ -16027,19 +16096,45 @@ try{
         ]
         preview_index = 0
 
-        def start(module_name, candidate):
+        def start(module_name, candidate, *, client_contract=None, complete_pages=False):
             nonlocal preview_index
             preview_index += 1
             instance = f"{preview_index:032x}"
-            response = self.paired_request("POST", f"/api/edit-preview/{module_name}", json={
-                "config": candidate,
-                "generation": preview_index,
-                "preview_instance": instance,
-            })
+            headers = (
+                {"X-Matrix-Client-Contract": str(client_contract)}
+                if client_contract is not None else {}
+            )
+            response = self.paired_request(
+                "POST", f"/api/edit-preview/{module_name}", headers=headers, json={
+                    "config": candidate,
+                    "generation": preview_index,
+                    "preview_instance": instance,
+                },
+            )
             self.assertEqual(response.status_code, 200, response.get_data(as_text=True))
             self.assertEqual(response.headers.get("Cache-Control"), "no-store")
             body = response.get_json()
             self.assertGreater(len(body["frames"]), 0)
+            if complete_pages:
+                frames = list(body["frames"])
+                for _page in range(16):
+                    if body["complete"]:
+                        break
+                    response = self.paired_request(
+                        "POST", "/api/edit-preview/page", json={
+                            "session": body["session"],
+                            "preview_instance": instance,
+                            "token": body["next_token"],
+                        },
+                    )
+                    self.assertEqual(
+                        response.status_code, 200, response.get_data(as_text=True),
+                    )
+                    body = response.get_json()
+                    frames.extend(body["frames"])
+                else:
+                    self.fail("screen animation preview did not complete within 16 pages")
+                body["frames"] = frames
             if not body["complete"]:
                 cancelled = self.paired_request("POST", "/api/edit-preview/cancel", json={
                     "session": body["session"], "preview_instance": instance,
@@ -16047,9 +16142,36 @@ try{
                 self.assertEqual(cancelled.status_code, 200)
             return body
 
+        screen_base = copy.deepcopy(self.store.get())
+        screen_base.pop("revision")
+        screen_base.pop("schema_version")
         for module_name in ("splash", "sleep"):
             with self.subTest(module=module_name):
-                start(module_name, copy.deepcopy(base))
+                candidate = copy.deepcopy(screen_base)
+                row = next(
+                    item for item in candidate["playlist"]
+                    if item["module"] == module_name
+                )
+                row.update(
+                    source=f"{module_name}.gif",
+                    sources=[f"{module_name}.gif"],
+                    duration=1,
+                )
+                candidate["media"][module_name] = f"{module_name}.gif"
+                animation = start(
+                    module_name, candidate, client_contract=4, complete_pages=True,
+                )
+                self.assertTrue(animation["complete"], animation)
+                self.assertIsNone(animation["next_token"], animation)
+                self.assertGreaterEqual(len(animation["frames"]), 2)
+                self.assertAlmostEqual(
+                    sum(frame["delay_ms"] for frame in animation["frames"]),
+                    1000,
+                    delta=1,
+                )
+                self.assertGreater(len({
+                    frame["png"] for frame in animation["frames"]
+                }), 1)
         video_splash = copy.deepcopy(base)
         video_splash["media"]["splash"] = "layer.mp4"
         with self.subTest(module="splash_mp4"):

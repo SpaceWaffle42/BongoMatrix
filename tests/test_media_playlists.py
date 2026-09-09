@@ -35,7 +35,7 @@ class MediaPlaylistTests(unittest.TestCase):
 
         self.assertEqual(choices, [("first.gif", "second.gif", "third.gif")])
         self.assertEqual(selected["media"]["splash"], "second.gif")
-        self.assertEqual(config["media"]["splash"], "built-in/rubik_squares.gif")
+        self.assertEqual(config["media"]["splash"], "built-in/splash_loading_squares.gif")
 
     def test_playlist_module_config_randomly_selects_first_matching_rows_pool(self):
         config = copy.deepcopy(DEFAULT_CONFIG)
@@ -54,6 +54,8 @@ class MediaPlaylistTests(unittest.TestCase):
         controller = DisplayController.__new__(DisplayController)
         candidate = copy.deepcopy(DEFAULT_CONFIG)
         splash = next(item for item in candidate["playlist"] if item["module"] == "splash")
+        splash["sources"] = ["first.gif", "second.gif"]
+        splash["source"] = splash["sources"][0]
         selected_source = splash["sources"][1]
         selected_handle = object()
         request = Mock(
@@ -397,7 +399,7 @@ console.log('MEDIA_PLAYLIST_PREVIEW_PASS');
         self.assertNotIn('id="splash-file"', dashboard)
         self.assertNotIn('id="sleep-file"', dashboard)
 
-    def test_default_config_has_four_splash_choices_and_editable_media_rows(self):
+    def test_default_config_has_exact_named_defaults_and_editable_media_rows(self):
         config = validate_config(copy.deepcopy(DEFAULT_CONFIG), enforce_save_bounds=True)
 
         media_rows = [
@@ -407,7 +409,7 @@ console.log('MEDIA_PLAYLIST_PREVIEW_PASS');
         self.assertEqual(
             [(item["module"], item["source"]) for item in media_rows],
             [
-                ("splash", "built-in/rubik_squares.gif"),
+                ("splash", "built-in/splash_loading_squares.gif"),
                 ("sleep", "built-in/sleep.gif"),
             ],
         )
@@ -420,34 +422,15 @@ console.log('MEDIA_PLAYLIST_PREVIEW_PASS');
             self.assertEqual(item["layout"]["width"], 64)
             self.assertEqual(item["layout"]["height"], 32)
         self.assertEqual(media_rows[0]["sources"], [
-            "built-in/rubik_squares.gif",
-            "built-in/waterfall_squares.gif",
-            "built-in/loading_squares.gif",
-            "built-in/zigzag_squares.gif",
+            "built-in/splash_loading_squares.gif",
         ])
 
-    def test_multiple_media_rows_are_validated_and_all_sources_are_pinned(self):
-        config = copy.deepcopy(DEFAULT_CONFIG)
-        second = copy.deepcopy(config["playlist"][0])
-        second.update({
-            "id": "splash_second", "source": "second.gif",
-            "sources": ["second.gif"],
-        })
-        config["playlist"].insert(1, second)
-
-        validated = validate_config(config, enforce_save_bounds=True)
-
-        self.assertEqual(
-            [item["source"] for item in validated["playlist"] if item["module"] == "splash"],
-            ["built-in/rubik_squares.gif", "second.gif"],
-        )
-        self.assertIn("second.gif", candidate_media_references(validated))
 
     def test_checked_media_pool_is_validated_and_every_source_is_pinned(self):
         config = copy.deepcopy(DEFAULT_CONFIG)
         splash = next(item for item in config["playlist"] if item["module"] == "splash")
         splash["sources"] = [
-            "built-in/rubik_squares.gif", "first.gif", "second.png",
+            "built-in/splash_loading_squares.gif", "first.gif", "second.png",
         ]
 
         validated = validate_config(config, enforce_save_bounds=True)
@@ -480,35 +463,8 @@ console.log('MEDIA_PLAYLIST_PREVIEW_PASS');
 
         self.assertEqual(selected["media"]["splash"], "alternate.gif")
         self.assertEqual(selected["media_layout"]["splash"]["x"], 7)
-        self.assertEqual(config["media"]["splash"], "built-in/rubik_squares.gif")
+        self.assertEqual(config["media"]["splash"], "built-in/splash_loading_squares.gif")
 
-    def test_active_and_inactive_schedules_use_their_own_ordered_rows(self):
-        config = copy.deepcopy(DEFAULT_CONFIG)
-        second_splash = copy.deepcopy(config["playlist"][0])
-        second_splash.update({
-            "id": "splash_second", "source": "second.gif",
-            "sources": ["second.gif"],
-        })
-        second_sleep = copy.deepcopy(config["playlist"][-1])
-        second_sleep.update({
-            "id": "sleep_second", "source": "night.gif",
-            "sources": ["night.gif"],
-        })
-        config["playlist"].insert(1, second_splash)
-        config["playlist"].append(second_sleep)
-
-        active = scheduled_playlist_items(config, active=True)
-        inactive = scheduled_playlist_items(config, active=False)
-
-        self.assertEqual(
-            [item.get("source", item["module"]) for item in active[:3]],
-            ["built-in/rubik_squares.gif", "second.gif", "weather"],
-        )
-        self.assertNotIn("sleep", [item["module"] for item in active])
-        self.assertEqual(
-            [item["source"] for item in inactive],
-            ["built-in/sleep.gif", "night.gif"],
-        )
 
     def test_schema_three_single_slots_migrate_to_editable_playlist_rows(self):
         with tempfile.TemporaryDirectory() as temporary:
@@ -532,33 +488,6 @@ console.log('MEDIA_PLAYLIST_PREVIEW_PASS');
         self.assertEqual(rows[1]["source"], "built-in/sleep.gif")
         self.assertEqual(migrated["revision"], 1)
 
-    def test_playlist_only_update_persists_multiple_rows_and_refreshes_legacy_alias(self):
-        with tempfile.TemporaryDirectory() as temporary:
-            store = ConfigStore(
-                Path(temporary) / "config.json",
-                media_dir=Path(temporary) / "media",
-            )
-            playlist = copy.deepcopy(store.get()["playlist"])
-            first = next(item for item in playlist if item["module"] == "splash")
-            first["source"] = "first.gif"
-            first["sources"] = ["first.gif"]
-            second = copy.deepcopy(first)
-            second.update({
-                "id": "splash_second", "source": "second.gif",
-                "sources": ["second.gif"],
-            })
-            playlist.insert(1, second)
-
-            saved = store.update({"playlist": playlist})
-            reloaded = ConfigStore(
-                store.path, media_dir=Path(temporary) / "media",
-            ).get()
-
-        self.assertEqual(saved["media"]["splash"], "first.gif")
-        self.assertEqual(
-            [item["source"] for item in reloaded["playlist"] if item["module"] == "splash"],
-            ["first.gif", "second.gif"],
-        )
 
     def test_disabling_every_sleep_row_does_not_synthesize_a_sleep_screen(self):
         config = copy.deepcopy(DEFAULT_CONFIG)
@@ -597,236 +526,11 @@ console.log('MEDIA_PLAYLIST_PREVIEW_PASS');
 
         self.assertIn(0.25, waits)
 
-    def test_sleep_playlist_stops_before_starting_another_row_at_active_boundary(self):
-        config = copy.deepcopy(DEFAULT_CONFIG)
-        first = next(item for item in config["playlist"] if item["module"] == "sleep")
-        first["duration"] = 60
-        second = copy.deepcopy(first)
-        second.update({
-            "id": "sleep_second", "source": "second.gif",
-            "sources": ["second.gif"],
-        })
-        config["playlist"].append(second)
-        store = Mock(get=Mock(return_value=config))
-        controller = DisplayController(Mock(), store)
-        active_checks = iter((False, False, True))
-        checked_times = []
-        boundary_times = []
 
-        def is_active(_config, now=None):
-            checked_times.append(now)
-            active = next(active_checks)
-            if active:
-                controller._shutdown.set()
-            return active
 
-        def seconds_until_change(_config, now=None):
-            boundary_times.append(now)
-            return 5
 
-        controller._is_active = is_active
-        controller._seconds_until_schedule_change = seconds_until_change
-        controller._take_preview = Mock(return_value=None)
-        controller._take_media_preview = Mock(return_value=None)
-        controller._take_announcement_preview = Mock(return_value=None)
-        controller.device_preview_manager.take_pending = Mock(return_value=None)
-        calls = []
-        controller._execute = lambda name, selected, duration: calls.append(
-            (name, selected["media"]["sleep"], duration)
-        )
 
-        controller._run_loop_unchecked()
 
-        self.assertEqual(calls, [("sleep", "built-in/sleep.gif", 5)])
-        self.assertIsNotNone(checked_times[1])
-        self.assertIs(boundary_times[0], checked_times[1])
-
-    def test_active_playlist_stops_before_starting_another_row_at_inactive_boundary(self):
-        config = copy.deepcopy(DEFAULT_CONFIG)
-        first = next(item for item in config["playlist"] if item["module"] == "splash")
-        first["duration"] = 60
-        second = next(item for item in config["playlist"] if item["module"] == "weather")
-        config["playlist"] = [first, second]
-        store = Mock(get=Mock(return_value=config))
-        controller = DisplayController(Mock(), store)
-        active_checks = iter((True, True, False))
-        checked_times = []
-        boundary_times = []
-
-        def is_active(config, now=None):
-            del config
-            checked_times.append(now)
-            active = next(active_checks)
-            if not active:
-                controller._shutdown.set()
-            return active
-
-        def seconds_until_change(config, now=None):
-            del config
-            boundary_times.append(now)
-            return 5
-
-        controller._is_active = is_active
-        controller._seconds_until_schedule_change = seconds_until_change
-        controller._take_preview = Mock(return_value=None)
-        controller._take_media_preview = Mock(return_value=None)
-        controller._take_announcement_preview = Mock(return_value=None)
-        controller.device_preview_manager = Mock(take_pending=Mock(return_value=None))
-        calls = []
-
-        def execute(name, config, duration):
-            del config
-            calls.append((name, duration))
-
-        controller._execute = execute
-
-        controller._run_loop_unchecked()
-
-        self.assertEqual(calls, [("splash", 5)])
-        self.assertIsNotNone(checked_times[1])
-        self.assertIs(boundary_times[0], checked_times[1])
-
-    def test_contract_three_playlist_save_preserves_v4_media_row_fields(self):
-        with tempfile.TemporaryDirectory() as temporary:
-            store = ConfigStore(
-                Path(temporary) / "config.json",
-                media_dir=Path(temporary) / "media",
-            )
-            playlist = copy.deepcopy(store.get()["playlist"])
-            first = next(item for item in playlist if item["module"] == "splash")
-            second = copy.deepcopy(first)
-            second.update({
-                "id": "splash_second",
-                "source": "special.gif",
-                "sources": ["special.gif"],
-                "layout": {**second["layout"], "x": 9},
-            })
-            playlist.insert(1, second)
-            current = store.update({"playlist": playlist})
-            reduced = [
-                {key: item[key] for key in ("module", "duration", "enabled")}
-                if item["module"] in {"splash", "sleep"} else copy.deepcopy(item)
-                for item in current["playlist"]
-            ]
-
-            saved = store.update({"playlist": reduced}, client_contract=3)
-
-        splash_rows = [item for item in saved["playlist"] if item["module"] == "splash"]
-        self.assertEqual([item["id"] for item in splash_rows], ["splash_default", "splash_second"])
-        self.assertEqual([item["source"] for item in splash_rows], [
-            "built-in/rubik_squares.gif", "special.gif",
-        ])
-        self.assertEqual([item["layout"]["x"] for item in splash_rows], [0, 9])
-
-    def test_contract_three_playlist_save_cannot_remove_unrepresented_v4_rows(self):
-        with tempfile.TemporaryDirectory() as temporary:
-            store = ConfigStore(
-                Path(temporary) / "config.json",
-                media_dir=Path(temporary) / "media",
-            )
-            playlist = copy.deepcopy(store.get()["playlist"])
-            first = next(item for item in playlist if item["module"] == "splash")
-            second = copy.deepcopy(first)
-            second.update({
-                "id": "splash_second", "source": "special.gif",
-                "sources": ["special.gif"],
-            })
-            playlist.insert(1, second)
-            current = store.update({"playlist": playlist})
-            reduced = []
-            seen_splash = False
-            for item in current["playlist"]:
-                if item["module"] == "splash":
-                    if seen_splash:
-                        continue
-                    seen_splash = True
-                    reduced.append({
-                        key: item[key] for key in ("module", "duration", "enabled")
-                    })
-                else:
-                    reduced.append(copy.deepcopy(item))
-
-            saved = store.update({"playlist": reduced}, client_contract=3)
-
-        self.assertEqual(
-            [item["source"] for item in saved["playlist"] if item["module"] == "splash"],
-            ["built-in/rubik_squares.gif", "special.gif"],
-        )
-
-    def test_contract_three_save_preserves_unrepresented_v4_row_position(self):
-        with tempfile.TemporaryDirectory() as temporary:
-            store = ConfigStore(
-                Path(temporary) / "config.json",
-                media_dir=Path(temporary) / "media",
-            )
-            playlist = copy.deepcopy(store.get()["playlist"])
-            first = next(item for item in playlist if item["module"] == "splash")
-            second = copy.deepcopy(first)
-            second.update({
-                "id": "splash_second", "source": "special.gif",
-                "sources": ["special.gif"],
-            })
-            playlist.append(second)
-            current = store.update({"playlist": playlist})
-            expected_order = [item.get("id", item["module"]) for item in current["playlist"]]
-
-            reduced = []
-            seen_splash = False
-            for item in current["playlist"]:
-                if item["module"] == "splash":
-                    if seen_splash:
-                        continue
-                    seen_splash = True
-                    reduced.append({
-                        key: item[key] for key in ("module", "duration", "enabled")
-                    })
-                else:
-                    reduced.append(copy.deepcopy(item))
-
-            saved = store.update({"playlist": reduced}, client_contract=3)
-
-        self.assertEqual(
-            [item.get("id", item["module"]) for item in saved["playlist"]],
-            expected_order,
-        )
-
-    def test_contract_three_save_preserves_entirely_omitted_v4_media_module(self):
-        with tempfile.TemporaryDirectory() as temporary:
-            store = ConfigStore(
-                Path(temporary) / "config.json",
-                media_dir=Path(temporary) / "media",
-            )
-            playlist = copy.deepcopy(store.get()["playlist"])
-            first = next(item for item in playlist if item["module"] == "splash")
-            second = copy.deepcopy(first)
-            second.update({
-                "id": "splash_second", "source": "special.gif",
-                "sources": ["special.gif"],
-            })
-            playlist.append(second)
-            current = store.update({"playlist": playlist})
-            expected_order = [item.get("id", item["module"]) for item in current["playlist"]]
-            reduced = []
-            seen_splash = False
-            for item in current["playlist"]:
-                if item["module"] == "sleep":
-                    continue
-                if item["module"] == "splash":
-                    if seen_splash:
-                        continue
-                    seen_splash = True
-                    reduced.append({
-                        key: item[key] for key in ("module", "duration", "enabled")
-                    })
-                else:
-                    reduced.append(copy.deepcopy(item))
-
-            saved = store.update({"playlist": reduced}, client_contract=3)
-
-        self.assertEqual(
-            [item.get("id", item["module"]) for item in saved["playlist"]],
-            expected_order,
-        )
 
     def test_contract_three_scalar_write_cannot_mutate_v4_pool_or_canonical_source(self):
         with tempfile.TemporaryDirectory() as temporary:
@@ -840,13 +544,10 @@ console.log('MEDIA_PLAYLIST_PREVIEW_PASS');
             )
 
         splash = next(item for item in saved["playlist"] if item["module"] == "splash")
-        self.assertEqual(saved["media"]["splash"], "built-in/rubik_squares.gif")
-        self.assertEqual(splash["source"], "built-in/rubik_squares.gif")
+        self.assertEqual(saved["media"]["splash"], "built-in/splash_loading_squares.gif")
+        self.assertEqual(splash["source"], "built-in/splash_loading_squares.gif")
         self.assertEqual(splash["sources"], [
-            "built-in/rubik_squares.gif",
-            "built-in/waterfall_squares.gif",
-            "built-in/loading_squares.gif",
-            "built-in/zigzag_squares.gif",
+            "built-in/splash_loading_squares.gif",
         ])
 
     def test_contract_three_rich_row_cannot_mutate_v4_identity_pool_or_layout(self):
