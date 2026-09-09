@@ -382,6 +382,8 @@ def media_preview_frames(
     stop_event=None, pinned_handle=None, monotonic=time.monotonic,
 ):
     """Render the shared production animated-media timeline into PNG frames."""
+    if pinned_handle is None:
+        raise ValueError("edit preview media capability is missing")
     from PIL import Image
 
     from modules.media_player import (

@@ -33,9 +33,10 @@ from werkzeug.utils import secure_filename
 
 from acceptance_artifacts import AcceptanceArtifactTransaction
 from api_timeouts import DEFAULT_API_TIMEOUT_SECONDS
+from display_controller import playlist_module_config
 from config_store import (
     ALLOWED_MODULES, DEFAULT_CONFIG, ConfigConflictError, ConfigDurabilityError,
-    validate_config,
+    MEDIA_PLAYLIST_CLIENT_CONTRACT, validate_config,
 )
 from font_catalog import available_font_names, font_advance_catalog
 from module_options import COLOUR_HEX, LAVA_PALETTES
@@ -72,7 +73,7 @@ MEDIA_METADATA_ERRORS = (
 CONFIG_REQUEST_LIMIT = 1_048_576
 CONDITIONAL_HEADER_LIMIT = 4096
 MINIMUM_CLIENT_CONTRACT = 3
-APPLICATION_VERSION = "0.3.62-preview"
+APPLICATION_VERSION = "0.3.63-preview"
 DEVICE_RESTART_PENDING_TTL_SECONDS = 60
 PAIRED_ACTION_HEADER = "X-Matrix-Action"
 PAIRED_ACTION_VALUE = "paired-request"
@@ -348,13 +349,18 @@ def _edit_preview_iterator(
         weather_preview_frames,
     )
 
+    if module_name in {"splash", "sleep"}:
+        candidate = playlist_module_config(candidate, module_name)
     matrix = CaptureMatrix()
     if module_name in {"splash", "sleep"}:
         filename = candidate["media"][module_name]
+        pinned_handle = pinned_media.get(filename)
+        if pinned_handle is None:
+            raise ValueError("edit preview media capability is missing")
         return media_preview_frames(
             matrix, filename, preview_duration(candidate, module_name),
             candidate.get("media_layout", {}).get(module_name),
-            stop_event=stop_event, pinned_handle=pinned_media.get(filename),
+            stop_event=stop_event, pinned_handle=pinned_handle,
         )
     if module_name == "clock_lava":
         if selected_palette is not None:
@@ -392,9 +398,12 @@ def _edit_preview_iterator(
         )
     if custom["type"] == "media":
         source = custom["source"]
+        pinned_handle = pinned_media.get(source)
+        if pinned_handle is None:
+            raise ValueError("edit preview media capability is missing")
         return media_preview_frames(
             matrix, source, preview_duration(candidate, module_name), custom,
-            stop_event=stop_event, pinned_handle=pinned_media.get(source),
+            stop_event=stop_event, pinned_handle=pinned_handle,
         )
     return custom_text_preview_frames(
         matrix, custom, preview_duration(candidate, module_name), stop_event,
@@ -403,6 +412,17 @@ def _edit_preview_iterator(
 
 def _revision_etag(revision):
     return f'"{revision}"'
+
+
+def _parse_client_contract(value):
+    if value is None:
+        return MINIMUM_CLIENT_CONTRACT
+    if not re.fullmatch(r"[0-9]{1,9}", value):
+        raise ValueError("client contract is invalid")
+    contract = int(value)
+    if contract not in {MINIMUM_CLIENT_CONTRACT, MEDIA_PLAYLIST_CLIENT_CONTRACT}:
+        raise ValueError("client contract is invalid")
+    return contract
 
 
 def _parse_revision_validators(value):
@@ -610,6 +630,7 @@ def create_app(
     session_generation = session_generation or secrets.token_hex(16)
     media_root = Path(media_dir or Path(__file__).resolve().parent / "resources" / "media")
     media_root.mkdir(parents=True, exist_ok=True)
+    config_store.media_root = media_root
     acceptance_authorization = None
     if (acceptance_authorization_file is None) != (acceptance_runtime is None):
         raise ValueError(
@@ -652,7 +673,6 @@ def create_app(
         secret_root = Path(config_path).parent if config_path is not None else media_root.parent
         openweather_secrets = SecretStore(secret_root / "secrets" / "openweather-api-key")
     scroll_timing_cache = scroll_timing_cache or ScrollTimingCache()
-    default_built_in_media = frozenset(DEFAULT_CONFIG["media"].values())
     openweather_credential_generation = 0
     openweather_credential_lock = threading.Lock()
     edit_preview_registry = None
@@ -1991,15 +2011,19 @@ def create_app(
     @app.post("/api/media/<path:filename>/preview")
     @requires_pairing
     def preview_media(filename):
+        try:
+            _parse_client_contract(request.headers.get("X-Matrix-Client-Contract"))
+        except ValueError as error:
+            return jsonify({"error": str(error)}), 400
         filename = safe_media_reference(filename)
         if filename is None:
             abort(404)
         with media_lock:
             try:
                 ensure_media_file(filename)
-            except ValueError:
+                controller.preview_media(filename)
+            except (ValueError, MediaResolutionError):
                 abort(404)
-        controller.preview_media(filename)
         return jsonify({"previewing": filename}), 202
 
     @app.delete("/api/media/<path:filename>")
@@ -2013,8 +2037,17 @@ def create_app(
         with media_lock:
             config = config_store.get()
             active_slots = [key for key, value in config["media"].items() if value == filename]
+            playlist_items = [
+                item["id"] for item in config["playlist"]
+                if item.get("module") in {"splash", "sleep"}
+                and filename in item.get("sources", [item.get("source")])
+            ]
             if active_slots:
                 return jsonify({"error": "Assign another file to " + " and ".join(active_slots) + " before removing this one."}), 409
+            if playlist_items:
+                return jsonify({
+                    "error": "Remove this file from splash and sleep playlist items before deleting it."
+                }), 409
             if filename in canvas_media_references(config["custom_modules"]):
                 return jsonify({"error": "Remove this file from custom canvas modules before deleting it."}), 409
             path = media_path(filename)
@@ -2042,8 +2075,9 @@ def create_app(
     @app.get("/api/config")
     @requires_pairing
     def get_config():
-        config = config_store.get()
         try:
+            _parse_client_contract(request.headers.get("X-Matrix-Client-Contract"))
+            config = config_store.get()
             validators = _parse_revision_validators(request.headers.get("If-None-Match"))
         except OverflowError as exc:
             return jsonify({"error": str(exc)}), 431
@@ -2069,6 +2103,9 @@ def create_app(
                 return jsonify({"error": "Configuration request must not exceed 1 MiB."}), 413
             if len(request.get_data(cache=True)) > CONFIG_REQUEST_LIMIT:
                 return jsonify({"error": "Configuration request must not exceed 1 MiB."}), 413
+            client_contract = _parse_client_contract(
+                request.headers.get("X-Matrix-Client-Contract")
+            )
             validators = _parse_revision_validators(request.headers.get("If-Match"))
             current_revision = config_store.get()["revision"]
             if validators is None:
@@ -2127,13 +2164,18 @@ def create_app(
                             if safe_media_reference(filename) is None:
                                 raise ValueError("media filename is invalid")
                     candidate = config_store.validate_candidate(
-                        changes, canonicalize_media=False,
+                        changes,
+                        canonicalize_media=False,
+                        client_contract=client_contract,
                     )
                     try:
-                        with pin_candidate_media(
-                            candidate, media_root, allow_missing=default_built_in_media,
-                        ):
-                            config = config_store.update(changes, base_revision=base_revision)
+                        with media_lock:
+                            with pin_candidate_media(candidate, media_root) as pinned_media:
+                                config = config_store.update(
+                                    changes, base_revision=base_revision,
+                                    client_contract=client_contract,
+                                    admitted_media=pinned_media,
+                                )
                     except MediaResolutionError as error:
                         reference = error.reference
                         if error.code == "not_regular":
@@ -2328,6 +2370,9 @@ def create_app(
         stack = ExitStack()
         instance = None
         try:
+            client_contract = _parse_client_contract(
+                request.headers.get("X-Matrix-Client-Contract")
+            )
             required = {"config", "generation", "preview_instance"}
             payload = edit_preview_json(required, {"selected_lava_palette"})
             generation = payload["generation"]
@@ -2340,7 +2385,9 @@ def create_app(
             selected_palette = payload.get("selected_lava_palette")
             if selected_palette is not None and not isinstance(selected_palette, dict):
                 raise ValueError("selected_lava_palette is invalid")
-            candidate = config_store.validate_candidate(payload["config"])
+            candidate = config_store.validate_candidate(
+                payload["config"], client_contract=client_contract,
+            )
             custom_ids = {item["id"] for item in candidate["custom_modules"]}
             if module_name not in ALLOWED_MODULES and module_name not in custom_ids:
                 stack.close()
@@ -2350,7 +2397,7 @@ def create_app(
             def iterator_factory():
                 with media_lock:
                     pinned_media = stack.enter_context(pin_candidate_media(
-                        candidate, media_root, allow_missing=default_built_in_media,
+                        candidate, media_root,
                     ))
                 provider_candidate = candidate
                 if module_name in {"openweather_overview", "openweather_forecast"}:
@@ -2579,6 +2626,9 @@ def create_app(
         stack = ExitStack()
         transferred = False
         try:
+            client_contract = _parse_client_contract(
+                request.headers.get("X-Matrix-Client-Contract")
+            )
             payload = edit_preview_json(
                 {"config", "generation", "preview_instance"},
                 {"timeout_seconds", "selected_lava_palette"},
@@ -2597,7 +2647,9 @@ def create_app(
             ):
                 raise ValueError("invalid transient preview values")
             identity = edit_preview_identity(payload)
-            candidate = config_store.validate_candidate(payload["config"])
+            candidate = config_store.validate_candidate(
+                payload["config"], client_contract=client_contract,
+            )
             selected_palette = _validate_current_lava_selection(
                 module_name, candidate, payload.get("selected_lava_palette"),
             )
@@ -2608,7 +2660,7 @@ def create_app(
             owner = DevicePreviewOwner(*identity)
             with media_lock:
                 pinned_media = stack.enter_context(pin_candidate_media(
-                    candidate, media_root, allow_missing=default_built_in_media,
+                    candidate, media_root,
                 ))
             request_record = DevicePreviewRequest(
                 owner=owner,
@@ -2728,6 +2780,10 @@ def create_app(
     @app.post("/api/preview/announcement")
     @requires_pairing
     def preview_announcement():
+        try:
+            _parse_client_contract(request.headers.get("X-Matrix-Client-Contract"))
+        except ValueError as error:
+            return jsonify({"error": str(error)}), 400
         candidate = json.loads(json.dumps(config_store.get()))
         candidate["announcement_board"] = {"announcements": [request.get_json()]}
         try:
@@ -2738,12 +2794,20 @@ def create_app(
         except ValueError as error:
             return jsonify({"error": str(error)}), 400
         announcement = validated["announcement_board"]["announcements"][0]
-        controller.preview_announcement(announcement)
+        try:
+            with media_lock:
+                controller.preview_announcement(announcement)
+        except MediaResolutionError as error:
+            return jsonify({"error": str(error)}), 400
         return jsonify({"previewing": announcement["id"]}), 202
 
     @app.post("/api/preview/<module_name>")
     @requires_pairing
     def preview(module_name):
+        try:
+            _parse_client_contract(request.headers.get("X-Matrix-Client-Contract"))
+        except ValueError as error:
+            return jsonify({"error": str(error)}), 400
         custom_ids = {item["id"] for item in config_store.get()["custom_modules"]}
         if module_name not in ALLOWED_MODULES and module_name not in custom_ids:
             abort(404)

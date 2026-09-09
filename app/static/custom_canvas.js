@@ -544,6 +544,9 @@
     .filter(card => customModules.find(module => module.id === card.dataset.id)?.type !== 'canvas')
     .map(card => [card.dataset.id, simpleModuleFromCard(card)]));
   customModules = customModules.map(module => module.type === 'canvas' ? module : (provisionalSimpleDrafts.get(module.id) || module));
+  const basicMediaSources = new Map(customModules
+    .filter(module => module.type === 'media')
+    .map(module => [module.id, module.source]));
 
   window.customModulesFromEditor = function customModulesFromEditor() {
     const simple = new Map([...document.querySelectorAll('.custom-module-card[data-editor-type="simple"]')].map(card => [card.dataset.id, simpleModuleFromCard(card)]));
@@ -565,7 +568,14 @@
 
   function basicModuleForType(module, type) {
     const identity = {id: module.id, name: module.name};
-    if (type === 'media') return {...identity, type, source: mediaItems.find(item => ['gif', 'mp4'].includes(item.kind))?.name || '', fit: 'contain', x: 0, y: 0, width: 64, height: 32, loops: 1, playback_speed_percent: 100.0};
+    const previousMediaSource = basicMediaSources.get(module.id) || (module.type === 'media' ? module.source : null);
+    if (previousMediaSource) basicMediaSources.set(module.id, previousMediaSource);
+    if (type === 'media') {
+      const playable = item => ['gif', 'mp4'].includes(item.kind);
+      const source = previousMediaSource || mediaItems.find(item => playable(item) && !item.built_in)?.name || mediaItems.find(playable)?.name || '';
+      if (source) basicMediaSources.set(module.id, source);
+      return {...identity, type, source, fit: 'contain', x: 0, y: 0, width: 64, height: 32, loops: 1, playback_speed_percent: 100.0};
+    }
     return {...identity, type, text: 'HELLO MATRIX', font: '5x7', colour: '#ffffff', background: '#000000', border: 'none', border_colour: '#ffffff', x: 2, y: 20, direction: 'left', speed: .05, loops: 1};
   }
 
@@ -585,6 +595,8 @@
     name.querySelector('input').addEventListener('input', event => { module.name = event.target.value; title.textContent = event.target.value; syncCustomModuleUI(); });
     const mode = customControl('Mode', 'type', 'select', module.type, ['text', 'text_scroll', 'media']);
     mode.querySelector('select').addEventListener('change', event => {
+      const mediaSource = card.querySelector('[data-field="source"]')?.value;
+      if (mediaSource) basicMediaSources.set(module.id, mediaSource);
       replaceBasicSubtype(module, event.target.value);
       renderCustomModules();
       document.querySelector(`.custom-module-card[data-id="${CSS.escape(module.id)}"] [data-field="type"]`)?.focus();

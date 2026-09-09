@@ -5,11 +5,63 @@ from unittest.mock import Mock, patch
 
 from PIL import Image, ImagePalette
 
-from modules import media_player, sleep_screen, splash_screen
+from media_resolver import module_media_references
+from modules import custom_text, media_player, sleep_screen, splash_screen
 from modules.media_player import gif_media_frames, video_media_frames
 
 
 class MediaModuleTests(unittest.TestCase):
+    def setUp(self):
+        self.pinned_handle = Mock()
+        patchers = []
+        for module in (splash_screen, sleep_screen):
+            original = module.run
+
+            def run_with_pin(*args, _original=original, **kwargs):
+                kwargs.setdefault("pinned_handle", self.pinned_handle)
+                return _original(*args, **kwargs)
+
+            patchers.append(patch.object(module, "run", side_effect=run_with_pin))
+
+        original_custom_run = custom_text.run
+
+        def custom_run_with_pins(*args, **kwargs):
+            module = kwargs.get("module_config")
+            if module is not None and "pinned_handles" not in kwargs:
+                references = module_media_references(
+                    {"custom_modules": [module]}, module["id"],
+                )
+                kwargs["pinned_handles"] = {
+                    reference: self.pinned_handle for reference in references
+                }
+            return original_custom_run(*args, **kwargs)
+
+        patchers.append(patch.object(
+            custom_text, "run", side_effect=custom_run_with_pins,
+        ))
+
+        original_canvas_frames = custom_text.canvas_timeline_frames
+
+        def canvas_frames_with_pins(matrix, duration, stop_event, module, *args, **kwargs):
+            if "pinned_handles" not in kwargs:
+                references = module_media_references(
+                    {"custom_modules": [module]}, module["id"],
+                )
+                kwargs["pinned_handles"] = {
+                    reference: self.pinned_handle for reference in references
+                }
+            return original_canvas_frames(
+                matrix, duration, stop_event, module, *args, **kwargs,
+            )
+
+        patchers.append(patch.object(
+            custom_text, "canvas_timeline_frames",
+            side_effect=canvas_frames_with_pins,
+        ))
+        for patcher in patchers:
+            patcher.start()
+            self.addCleanup(patcher.stop)
+
     def test_gif_compositing_uses_global_palette_for_background_disposal(self):
         palette = [0, 0, 0, 217, 160, 102] + ([0, 0, 0] * 254)
         source = Mock()
@@ -409,7 +461,10 @@ class MediaModuleTests(unittest.TestCase):
         matrix.show_gif.return_value = True
         result = splash_screen.run(matrix, {"media": {"splash": "squares_tb.gif"}}, duration=1)
         self.assertTrue(result)
-        matrix.show_gif.assert_called_once_with("squares_tb.gif", loops=0, stop_event=None, max_duration=1)
+        matrix.show_gif.assert_called_once_with(
+            "squares_tb.gif", loops=0, stop_event=None, max_duration=1,
+            pinned_handle=self.pinned_handle,
+        )
 
     def test_sleep_uses_configured_gif(self):
         matrix = Mock()
@@ -417,7 +472,10 @@ class MediaModuleTests(unittest.TestCase):
         stop = threading.Event()
         result = sleep_screen.run(matrix, {"media": {"sleep": "sleep.gif"}}, duration=2, stop_event=stop)
         self.assertTrue(result)
-        matrix.show_gif.assert_called_once_with("sleep.gif", loops=0, stop_event=stop, max_duration=2)
+        matrix.show_gif.assert_called_once_with(
+            "sleep.gif", loops=0, stop_event=stop, max_duration=2,
+            pinned_handle=self.pinned_handle,
+        )
 
     def test_sleep_gif_speed_percentage_is_forwarded_as_playback_rate(self):
         matrix = Mock()
@@ -437,6 +495,7 @@ class MediaModuleTests(unittest.TestCase):
         matrix.show_gif.assert_called_once_with(
             "sleep.gif", x=0, y=0, width=64, height=32, keep_aspect=True,
             playback_rate=2.5, loops=0, stop_event=None, max_duration=2,
+            pinned_handle=self.pinned_handle,
         )
 
     def test_mp4_uses_interruptible_video_playback(self):
@@ -453,7 +512,8 @@ class MediaModuleTests(unittest.TestCase):
 
         self.assertTrue(result)
         matrix.show_video.assert_called_once_with(
-            "custom.mp4", loops=0, stop_event=stop, max_duration=8
+            "custom.mp4", loops=0, stop_event=stop, max_duration=8,
+            pinned_handle=self.pinned_handle,
         )
 
     def test_media_layout_controls_position_size_aspect_and_video_rate(self):
@@ -475,6 +535,7 @@ class MediaModuleTests(unittest.TestCase):
             "custom.mp4", x=2, y=1, width=60, height=30,
             keep_aspect=False, fps_override=24, loops=0,
             stop_event=stop, max_duration=8,
+            pinned_handle=self.pinned_handle,
         )
 
     def test_pre_cancelled_static_uploaded_image_is_not_published(self):
@@ -646,6 +707,7 @@ class MediaModuleTests(unittest.TestCase):
         matrix.show_gif.assert_called_once_with(
             "party.gif", x=-4, y=2, width=72, height=36, fit="manual",
             loops=3, playback_rate=0.1, stop_event=stop,
+            pinned_handle=self.pinned_handle,
         )
 
     def test_builtin_gif_and_mp4_use_canonical_playback_speed(self):

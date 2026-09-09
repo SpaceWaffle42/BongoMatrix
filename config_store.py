@@ -26,6 +26,7 @@ from PIL import Image, ImageSequence
 from module_options import LAVA_PALETTES
 from font_catalog import available_font_names, text_width
 from modules.scroll_timing import duration_milliseconds, scroll_frames
+from media_resolver import candidate_media_references
 
 
 class ConfigDurabilityError(OSError):
@@ -47,9 +48,12 @@ ALLOWED_MODULES = {
     "clock_lava", "weather", "openweather_overview", "openweather_forecast",
     "announcement_board", "splash", "sleep",
 }
+MEDIA_PLAYLIST_MODULES = {"splash", "sleep"}
 PLAYLIST_LIMIT = 256
 CONFIG_SNAPSHOT_LIMIT = 1_048_576
-CURRENT_CONFIG_SCHEMA_VERSION = 3
+CURRENT_CONFIG_SCHEMA_VERSION = 4
+MINIMUM_CLIENT_CONTRACT = 3
+MEDIA_PLAYLIST_CLIENT_CONTRACT = 4
 AVAILABLE_FONTS = frozenset(available_font_names())
 BASIC_BORDER_STYLES = ("none", "solid", "inset", "dotted", "dashed", "double")
 
@@ -180,7 +184,7 @@ DEFAULT_CONFIG = {
         "text_colour": "#ffffff",
         "border_colour": "#000000",
     },
-    "media": {"splash": "built-in/squares_tb.gif", "sleep": "built-in/sleep.gif"},
+    "media": {"splash": "built-in/rubik_squares.gif", "sleep": "built-in/sleep.gif"},
     "media_layout": {
         "splash": {"x": 0, "y": 0, "width": 64, "height": 32, "keep_aspect": True, "video_fps": 20, "playback_speed_percent": 100.0},
         "sleep": {"x": 0, "y": 0, "width": 64, "height": 32, "keep_aspect": True, "video_fps": 20, "playback_speed_percent": 100.0},
@@ -188,12 +192,38 @@ DEFAULT_CONFIG = {
     "announcement_board": {"announcements": []},
     "custom_modules": [],
     "playlist": [
-        {"module": "splash", "duration": 8, "enabled": True},
+        {
+            "id": "splash_default", "module": "splash",
+            "source": "built-in/rubik_squares.gif", "duration": 8,
+            "sources": [
+                "built-in/rubik_squares.gif",
+                "built-in/waterfall_squares.gif",
+                "built-in/loading_squares.gif",
+                "built-in/zigzag_squares.gif",
+            ],
+            "enabled": True,
+            "layout": {
+                "x": 0, "y": 0, "width": 64, "height": 32,
+                "keep_aspect": True, "video_fps": 20,
+                "playback_speed_percent": 100.0,
+            },
+        },
         {"module": "weather", "duration": 15, "enabled": True},
         {"module": "clock_lava", "duration": 300, "enabled": True},
         {"module": "openweather_overview", "duration": 15, "enabled": False},
         {"module": "openweather_forecast", "duration": 15, "enabled": False},
         {"module": "announcement_board", "duration": 15, "enabled": False},
+        {
+            "id": "sleep_default", "module": "sleep",
+            "source": "built-in/sleep.gif", "duration": 60,
+            "sources": ["built-in/sleep.gif"],
+            "enabled": True,
+            "layout": {
+                "x": 0, "y": 0, "width": 64, "height": 32,
+                "keep_aspect": True, "video_fps": 20,
+                "playback_speed_percent": 100.0,
+            },
+        },
     ],
 }
 
@@ -265,6 +295,27 @@ def _normalize_playback_speed(value, name="media"):
     ):
         raise ValueError(message)
     return float(decimal_value)
+
+
+def _validate_media_layout(settings, name):
+    expected_fields = {
+        "x", "y", "width", "height", "keep_aspect", "video_fps",
+        "playback_speed_percent",
+    }
+    if not isinstance(settings, dict) or set(settings) != expected_fields:
+        raise ValueError(f"media layout {name} has invalid fields")
+    for key, low, high in (
+        ("x", 0, 63), ("y", 0, 31), ("width", 1, 64),
+        ("height", 1, 32), ("video_fps", 1, 60),
+    ):
+        value = settings[key]
+        if isinstance(value, bool) or not isinstance(value, int) or not low <= value <= high:
+            raise ValueError(f"media layout {name} {key} must be between {low} and {high}")
+    if not isinstance(settings["keep_aspect"], bool):
+        raise ValueError(f"media layout {name} keep_aspect must be a boolean")
+    settings["playback_speed_percent"] = _normalize_playback_speed(
+        settings["playback_speed_percent"], name,
+    )
 
 
 def _validate_openweather_settings(settings, name, *, forecast=False):
@@ -913,24 +964,7 @@ def validate_config(
             )
 
     for module_name, settings in config["media_layout"].items():
-        expected_fields = {
-            "x", "y", "width", "height", "keep_aspect", "video_fps",
-            "playback_speed_percent",
-        }
-        if set(settings) != expected_fields:
-            raise ValueError(f"media layout {module_name} has invalid fields")
-        for key, low, high in (
-            ("x", 0, 63), ("y", 0, 31), ("width", 1, 64),
-            ("height", 1, 32), ("video_fps", 1, 60),
-        ):
-            value = settings[key]
-            if isinstance(value, bool) or not isinstance(value, int) or not low <= value <= high:
-                raise ValueError(f"media layout {module_name} {key} must be between {low} and {high}")
-        if not isinstance(settings["keep_aspect"], bool):
-            raise ValueError(f"media layout {module_name} keep_aspect must be a boolean")
-        settings["playback_speed_percent"] = _normalize_playback_speed(
-            settings["playback_speed_percent"], module_name,
-        )
+        _validate_media_layout(settings, module_name)
 
     _validate_announcement_board(
         config["announcement_board"],
@@ -1031,8 +1065,45 @@ def validate_config(
     if enforce_save_bounds and len(playlist) > PLAYLIST_LIMIT:
         raise ValueError("playlist must contain at most 256 modules")
     custom_by_id = {item["id"]: item for item in custom_modules}
+    media_item_ids = set()
+    first_media_items = {}
     for item in playlist:
-        if not isinstance(item, dict) or set(item) != {"module", "duration", "enabled"}:
+        if not isinstance(item, dict):
+            raise ValueError("playlist items must be objects")
+        module_name = item.get("module")
+        if module_name in {"splash", "sleep"}:
+            if "duration" not in item:
+                raise ValueError("module duration is required")
+            expected = {
+                "id", "module", "source", "sources", "duration", "enabled", "layout",
+            }
+            if set(item) != expected:
+                raise ValueError("splash and sleep playlist items have invalid fields")
+            item_id = item.get("id")
+            if (
+                not isinstance(item_id, str)
+                or not re.fullmatch(rf"{module_name}_[a-z0-9_-]{{1,40}}", item_id)
+            ):
+                raise ValueError(f"{module_name} playlist item id is invalid")
+            if item_id in media_item_ids:
+                raise ValueError("splash and sleep playlist item ids must be unique")
+            media_item_ids.add(item_id)
+            if not _is_safe_media_reference(item.get("source")):
+                raise ValueError(f"{module_name} playlist source must be a safe media reference")
+            sources = item.get("sources")
+            if (
+                not isinstance(sources, list) or not sources
+                or len(sources) != len(set(sources))
+                or any(not _is_safe_media_reference(source) for source in sources)
+            ):
+                raise ValueError(
+                    f"{module_name} playlist sources must be a non-empty list "
+                    "of unique safe media references"
+                )
+            item["source"] = sources[0]
+            _validate_media_layout(item.get("layout"), f"playlist item {item_id}")
+            first_media_items.setdefault(module_name, item)
+        elif set(item) != {"module", "duration", "enabled"}:
             raise ValueError("playlist items require only module, duration, and enabled")
         if item.get("module") not in ALLOWED_MODULES and item.get("module") not in custom_ids:
             raise ValueError(f"Unknown module: {item.get('module')!r}")
@@ -1062,6 +1133,16 @@ def validate_config(
                 raise ValueError("module duration must be between 1 and 3600 seconds")
         if not isinstance(item.get("enabled"), bool):
             raise ValueError("module enabled must be a boolean")
+    # Scalar slots remain backwards-compatible aliases for the first row.
+    # ConfigStore synchronizes playlist-aware writes into these aliases before
+    # validation; direct legacy callers can still update only the scalar slot.
+    for module_name, item in first_media_items.items():
+        item["source"] = config["media"][module_name]
+        item["sources"] = [
+            config["media"][module_name],
+            *(source for source in item["sources"] if source != config["media"][module_name]),
+        ]
+        item["layout"] = copy.deepcopy(config["media_layout"][module_name])
     if (
         enforce_save_bounds
         and len(_serialize_config(config)) > CONFIG_SNAPSHOT_LIMIT
@@ -1094,6 +1175,161 @@ def _replace_canvas_media_references(modules, replacements):
             properties = override.get("properties", {})
             if isinstance(properties, dict) and properties.get("source") in replacements:
                 properties["source"] = replacements[properties["source"]]
+
+
+def _synchronize_media_playlist_changes(
+    candidate, changes, current, *, client_contract,
+):
+    """Reconcile v3 scalar writes and v4 playlist-aware writes."""
+    legacy_contract = (
+        client_contract is not None
+        and client_contract < MEDIA_PLAYLIST_CLIENT_CONTRACT
+    )
+    modern_contract = (
+        client_contract is not None
+        and client_contract >= MEDIA_PLAYLIST_CLIENT_CONTRACT
+    )
+    current_media_rows = {
+        module_name: [
+            copy.deepcopy(item) for item in current["playlist"]
+            if isinstance(item, dict) and item.get("module") == module_name
+        ]
+        for module_name in MEDIA_PLAYLIST_MODULES
+    }
+    if legacy_contract:
+        for module_name in MEDIA_PLAYLIST_MODULES:
+            candidate["media"][module_name] = current["media"][module_name]
+            candidate["media_layout"][module_name] = copy.deepcopy(
+                current["media_layout"][module_name]
+            )
+    media_counts = {module_name: 0 for module_name in MEDIA_PLAYLIST_MODULES}
+    legacy_modules = set()
+    rich_candidate_modules = set()
+    for index, item in enumerate(candidate["playlist"]):
+        module_name = item.get("module") if isinstance(item, dict) else None
+        if module_name not in MEDIA_PLAYLIST_MODULES:
+            continue
+        media_counts[module_name] += 1
+        if legacy_contract:
+            legacy_item = {
+                key: copy.deepcopy(item[key])
+                for key in ("module", "duration", "enabled")
+                if key in item
+            }
+            current_rows = current_media_rows[module_name]
+            occurrence = media_counts[module_name] - 1
+            if occurrence < len(current_rows):
+                upgraded = copy.deepcopy(current_rows[occurrence])
+                upgraded.update(legacy_item)
+            else:
+                upgraded = legacy_item
+                upgraded.update({
+                    "id": f"{module_name}_{media_counts[module_name]}",
+                    "source": current["media"][module_name],
+                    "sources": [current["media"][module_name]],
+                    "layout": copy.deepcopy(current["media_layout"][module_name]),
+                })
+            candidate["playlist"][index] = upgraded
+            legacy_modules.add(module_name)
+            continue
+        if (
+            modern_contract
+            and isinstance(item.get("sources"), list)
+            and item["sources"]
+            and item.get("source") != item["sources"][0]
+        ):
+            raise ValueError(
+                "playlist media source must be the first checked source"
+            )
+        if not legacy_contract and set(item) != {"module", "duration", "enabled"}:
+            rich_candidate_modules.add(module_name)
+            continue
+        legacy_modules.add(module_name)
+        current_rows = current_media_rows[module_name]
+        occurrence = media_counts[module_name] - 1
+        if occurrence < len(current_rows):
+            upgraded = copy.deepcopy(current_rows[occurrence])
+            upgraded.update(item)
+        else:
+            upgraded = copy.deepcopy(item)
+            upgraded.update({
+                "id": f"{module_name}_{media_counts[module_name]}",
+                "source": candidate["media"][module_name],
+                "sources": [candidate["media"][module_name]],
+                "layout": copy.deepcopy(candidate["media_layout"][module_name]),
+            })
+        candidate["playlist"][index] = upgraded
+    if modern_contract:
+        for module_name, count in media_counts.items():
+            if count == 0:
+                raise ValueError(
+                    f"playlist must contain at least one {module_name} row"
+                )
+    hidden_rows = []
+    preserved_modules = (
+        MEDIA_PLAYLIST_MODULES - rich_candidate_modules
+        if (
+            (legacy_contract and "playlist" in changes)
+            or (client_contract is None and legacy_modules)
+        )
+        else set()
+    )
+    for module_name in preserved_modules:
+        represented = media_counts[module_name]
+        occurrence = 0
+        for current_index, item in enumerate(current["playlist"]):
+            if not isinstance(item, dict) or item.get("module") != module_name:
+                continue
+            if occurrence >= represented:
+                hidden_rows.append((current_index, copy.deepcopy(item)))
+            occurrence += 1
+    for current_index, item in sorted(hidden_rows, key=lambda entry: entry[0]):
+        candidate["playlist"].insert(min(current_index, len(candidate["playlist"])), item)
+    playlist_changed = (
+        "playlist" in changes and changes["playlist"] != current["playlist"]
+    )
+    for module_name in MEDIA_PLAYLIST_MODULES:
+        item = next(
+            (
+                entry for entry in candidate["playlist"]
+                if isinstance(entry, dict) and entry.get("module") == module_name
+            ),
+            None,
+        )
+        if item is None:
+            continue
+        if (
+            not legacy_contract
+            and playlist_changed
+            and "source" in item
+            and "layout" in item
+        ):
+            candidate["media"][module_name] = item["source"]
+            candidate["media_layout"][module_name] = copy.deepcopy(item["layout"])
+            continue
+        if module_name in changes.get("media", {}):
+            source = candidate["media"][module_name]
+            item["source"] = source
+            item["sources"] = (
+                [source, *[value for value in item["sources"] if value != source]]
+                if legacy_contract else [source]
+            )
+        if module_name in changes.get("media_layout", {}):
+            item["layout"] = copy.deepcopy(candidate["media_layout"][module_name])
+    return candidate
+
+
+def _validate_client_contract(client_contract):
+    if client_contract is None:
+        return
+    if (
+        isinstance(client_contract, bool)
+        or not isinstance(client_contract, int)
+        or client_contract not in {
+            MINIMUM_CLIENT_CONTRACT, MEDIA_PLAYLIST_CLIENT_CONTRACT,
+        }
+    ):
+        raise ValueError("client contract is invalid")
 
 
 class ConfigStore:
@@ -1296,6 +1532,34 @@ sys.stdout.write(json.dumps(result, separators=(",", ":")))
                 for slot, filename in list(media.items()):
                     if filename in available_migrations:
                         media[slot] = available_migrations[filename]
+            if schema_version <= 3 and isinstance(playlist, list):
+                media = current.get("media", {})
+                media_layout = current.get("media_layout", {})
+                media_counts = {"splash": 0, "sleep": 0}
+                for item in playlist:
+                    if not isinstance(item, dict) or item.get("module") not in media_counts:
+                        continue
+                    module_name = item["module"]
+                    media_counts[module_name] += 1
+                    if set(item) == {"module", "duration", "enabled"}:
+                        item.update({
+                            "id": f"{module_name}_{media_counts[module_name]}",
+                            "source": media.get(
+                                module_name, DEFAULT_CONFIG["media"][module_name]
+                            ),
+                            "sources": [media.get(
+                                module_name, DEFAULT_CONFIG["media"][module_name]
+                            )],
+                            "layout": copy.deepcopy(media_layout.get(
+                                module_name, DEFAULT_CONFIG["media_layout"][module_name]
+                            )),
+                        })
+                for module_name, count in media_counts.items():
+                    if count == 0:
+                        playlist.append(copy.deepcopy(next(
+                            item for item in DEFAULT_CONFIG["playlist"]
+                            if item["module"] == module_name
+                        )))
             _replace_canvas_media_references(
                 current.get("custom_modules", []), available_migrations
             )
@@ -1691,16 +1955,22 @@ sys.stdout.write(json.dumps(result, separators=(",", ":")))
         )
         cls._resolve_descriptor_cleanup(errors, primary_error)
 
-    def validate_candidate(self, changes, *, canonicalize_media=True):
+    def validate_candidate(
+        self, changes, *, canonicalize_media=True, client_contract=None,
+    ):
         """Validate and canonicalize an unsaved draft without persisting it."""
         if not isinstance(changes, dict):
             raise ValueError("configuration candidate must be a JSON object")
         if "revision" in changes or "schema_version" in changes:
             raise ValueError("revision and schema_version are server-owned")
+        _validate_client_contract(client_contract)
         _validate_update_keys(changes, DEFAULT_CONFIG)
         with self._lock:
             current = self.get()
             candidate = _merge(current, changes)
+            candidate = _synchronize_media_playlist_changes(
+                candidate, changes, current, client_contract=client_contract,
+            )
             candidate["revision"] = current["revision"]
             candidate = validate_config(
                 candidate,
@@ -1730,12 +2000,40 @@ sys.stdout.write(json.dumps(result, separators=(",", ":")))
         finally:
             self._close_media_records(identities, primary_error=sys.exception())
 
-    def update(self, changes, *, base_revision=None):
+    def _bind_admitted_media(self, candidate, admitted_media, records, deadline):
+        references = candidate_media_references(candidate)
+        if set(admitted_media) != set(references):
+            raise ValueError("admitted media capabilities do not match candidate")
+        commit_identities = {
+            reference: identity for reference, _descriptor, identity in records
+        }
+        for reference in references:
+            self._remaining(deadline)
+            admitted_handle = admitted_media.get(reference)
+            if admitted_handle is None:
+                raise ValueError("admitted media capability is missing")
+            try:
+                admitted_identity = self._stat_identity(admitted_handle.fileno())
+            except (AttributeError, OSError, ValueError):
+                raise ValueError("admitted media capability is invalid") from None
+            commit_identity = commit_identities.get(reference)
+            if commit_identity is None:
+                descriptor, commit_identity = self._open_media_source(reference, deadline)
+                records.append((reference, descriptor, commit_identity))
+                commit_identities[reference] = commit_identity
+            if commit_identity != admitted_identity:
+                raise ValueError("media source changed after admission")
+
+    def update(
+        self, changes, *, base_revision=None, client_contract=None,
+        admitted_media=None,
+    ):
         if not isinstance(changes, dict):
             raise ValueError("configuration update must be a JSON object")
 
         if "revision" in changes or "schema_version" in changes:
             raise ValueError("revision and schema_version are server-owned")
+        _validate_client_contract(client_contract)
         if (
             base_revision is not None
             and (isinstance(base_revision, bool) or not isinstance(base_revision, int) or base_revision < 0)
@@ -1748,6 +2046,9 @@ sys.stdout.write(json.dumps(result, separators=(",", ":")))
             if base_revision is not None and base_revision != current["revision"]:
                 raise ConfigConflictError(current["revision"])
             updated = _merge(current, changes)
+            updated = _synchronize_media_playlist_changes(
+                updated, changes, current, client_contract=client_contract,
+            )
             updated["revision"] = current["revision"] + 1
             updated = validate_config(
                 updated,
@@ -1777,6 +2078,8 @@ sys.stdout.write(json.dumps(result, separators=(",", ":")))
                 raise ConfigConflictError(latest["revision"])
             if self._test_before_media_commit_check is not None:
                 self._test_before_media_commit_check()
+            if admitted_media is not None:
+                self._bind_admitted_media(updated, admitted_media, identities, deadline)
             if not self._media_sources_unchanged(identities, deadline):
                 raise ValueError("media source changed during duration validation")
             # Exact admission boundary: no hook, await, or unchecked work follows this

@@ -294,6 +294,9 @@ def _canvas_media_cache(matrix, stop_event, module_config, pinned_handles=None):
             media_cache[(source, playback_rate)] = []
             continue
         remaining_source_count = len(sorted_media_identities) - index
+        pinned_handle = (pinned_handles or {}).get(source)
+        if pinned_handle is None:
+            raise ValueError("canvas media capability is missing")
         try:
             media_options = {
                 "stop_event": stop_event,
@@ -304,9 +307,7 @@ def _canvas_media_cache(matrix, stop_event, module_config, pinned_handles=None):
                 ),
                 "playback_rate": playback_rate,
             }
-            pinned_handle = (pinned_handles or {}).get(source)
-            if pinned_handle is not None:
-                media_options["pinned_handle"] = pinned_handle
+            media_options["pinned_handle"] = pinned_handle
             frames = matrix.media_frames(
                 source, module_config["frame_count"], module_config["fps"],
                 **media_options,
@@ -492,15 +493,16 @@ def run(
         source = module_config["source"]
         method = matrix.show_gif if source.lower().endswith(".gif") else matrix.show_video
         pinned_handle = (pinned_handles or {}).get(source)
+        if pinned_handle is None:
+            raise ValueError("custom media capability is missing")
         options = {
             "x": module_config["x"], "y": module_config["y"],
             "width": module_config["width"], "height": module_config["height"],
             "fit": module_config["fit"], "loops": module_config["loops"],
             "playback_rate": module_config["playback_speed_percent"] / 100.0,
             "stop_event": stop_event,
+            "pinned_handle": pinned_handle,
         }
-        if pinned_handle is not None:
-            options["pinned_handle"] = pinned_handle
         return method(source, **options)
 
     rendered = False

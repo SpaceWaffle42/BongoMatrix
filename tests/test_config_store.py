@@ -13,8 +13,8 @@ from unittest.mock import patch
 from PIL import Image
 
 from config_store import (
-    ConfigConflictError, ConfigDurabilityError, ConfigStore, DEFAULT_CONFIG,
-    validate_config,
+    CURRENT_CONFIG_SCHEMA_VERSION, ConfigConflictError, ConfigDurabilityError,
+    ConfigStore, DEFAULT_CONFIG, validate_config,
 )
 
 
@@ -53,7 +53,7 @@ class ConfigStoreTests(unittest.TestCase):
 
             migrated = ConfigStore(path).get()
 
-            self.assertEqual(migrated["schema_version"], 3)
+            self.assertEqual(migrated["schema_version"], CURRENT_CONFIG_SCHEMA_VERSION)
             self.assertEqual(migrated["revision"], 8)
             self.assertEqual(migrated["device"]["name"], "untouched")
             self.assertEqual(migrated["custom_modules"][0]["border"], "none")
@@ -161,7 +161,7 @@ class ConfigStoreTests(unittest.TestCase):
 
             config = ConfigStore(path).get()
 
-            self.assertEqual(config["schema_version"], 3)
+            self.assertEqual(config["schema_version"], CURRENT_CONFIG_SCHEMA_VERSION)
             self.assertEqual(config["revision"], 1)
             without_server_fields = dict(config)
             without_server_fields.pop("schema_version")
@@ -221,7 +221,7 @@ class ConfigStoreTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / "config.json"
             store = ConfigStore(path)
-            for schema_version in (True, -1, 1.5, "1", 4):
+            for schema_version in (True, -1, 1.5, "1", CURRENT_CONFIG_SCHEMA_VERSION + 1):
                 with self.subTest(schema_version=schema_version):
                     invalid = store.get()
                     invalid["schema_version"] = schema_version
@@ -272,7 +272,7 @@ class ConfigStoreTests(unittest.TestCase):
 
             migrated = ConfigStore(path).get()
 
-            self.assertEqual(migrated["schema_version"], 3)
+            self.assertEqual(migrated["schema_version"], CURRENT_CONFIG_SCHEMA_VERSION)
             self.assertEqual(migrated["revision"], 8)
             self.assertEqual(migrated["device"]["name"], "Version zero sentinel")
             migrated_bytes = path.read_bytes()
@@ -293,7 +293,7 @@ class ConfigStoreTests(unittest.TestCase):
 
             reloaded = ConfigStore(path).get()
 
-            self.assertEqual(reloaded["schema_version"], 3)
+            self.assertEqual(reloaded["schema_version"], CURRENT_CONFIG_SCHEMA_VERSION)
             self.assertEqual(reloaded["revision"], 1)
             self.assertEqual(path.read_bytes(), original)
 
@@ -2846,7 +2846,7 @@ class ConfigStoreTests(unittest.TestCase):
 
             migrated = ConfigStore(path).get()
 
-            self.assertEqual(migrated["schema_version"], 3)
+            self.assertEqual(migrated["schema_version"], CURRENT_CONFIG_SCHEMA_VERSION)
             self.assertEqual(migrated["revision"], 42)
             self.assertEqual(migrated["device"]["name"], "speed migration sentinel")
             self.assertNotIn("gif_speed_percent", migrated["media_layout"]["sleep"])

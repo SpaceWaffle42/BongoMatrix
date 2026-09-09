@@ -8,12 +8,14 @@ import datetime as dt
 import importlib
 import io
 import logging
+import random
 import socket
 import threading
 import time
 
 from PIL import Image
 
+from media_resolver import MediaResolver, module_media_references
 from modules.media_player import play_media
 from device_preview import (
     DevicePreviewManager, PreviewAdmissionStatus, PreviewExpiryCause,
@@ -51,6 +53,47 @@ MODULE_DEFAULT_DURATIONS = {
 ONE_OFF_PREVIEW_DURATION = 15
 UNBOUNDED_DEVICE_PREVIEW_SLICE_SECONDS = 3600
 OPENWEATHER_PREPARATION_DEADLINE_SECONDS = PreviewProvider.MAX_REQUEST_SECONDS
+
+
+def playlist_item_config(config, item, *, chooser=None):
+    """Overlay one editable splash/sleep row without mutating saved config."""
+    if (
+        item.get("module") not in {"splash", "sleep"}
+        or "source" not in item
+        or "layout" not in item
+    ):
+        return config
+    module_name = item["module"]
+    selected = dict(config)
+    selected["media"] = dict(config["media"])
+    selected["media_layout"] = dict(config["media_layout"])
+    sources = item.get("sources") or [item["source"]]
+    if chooser is None:
+        chooser = random.choice
+    # Non-cryptographic randomness rotates user-selected visual media only.
+    selected["media"][module_name] = chooser(sources)  # nosemgrep: bandit.B311
+    selected["media_layout"][module_name] = copy.deepcopy(item["layout"])
+    return selected
+
+
+def playlist_module_config(config, module_name, *, chooser=None):
+    """Select from the first matching editable media row's source pool."""
+    item = next((
+        row for row in config.get("playlist", [])
+        if isinstance(row, dict) and row.get("module") == module_name
+    ), None)
+    if item is None:
+        return config
+    return playlist_item_config(config, item, chooser=chooser)
+
+
+def scheduled_playlist_items(config, *, active):
+    """Select ordered active rows or the separate off-hours sleep rows."""
+    enabled = [item for item in config["playlist"] if item["enabled"]]
+    if active:
+        return [item for item in enabled if item["module"] != "sleep"]
+    sleep_items = [item for item in enabled if item["module"] == "sleep"]
+    return sleep_items
 
 
 def _provider_image(image):
@@ -151,6 +194,63 @@ def custom_module(config, module_name):
     )
 
 
+class _PinnedModulePreview:
+    """Own one saved media Preview snapshot and its pinned capability."""
+
+    def __init__(self, module_name, config, resolver, pinned_handles):
+        self.module_name = module_name
+        self.config = config
+        self.resolver = resolver
+        if isinstance(pinned_handles, dict):
+            self.pinned_handles = pinned_handles
+        else:
+            self.pinned_handles = {"_legacy": pinned_handles}
+        self.pinned_handle = next(iter(self.pinned_handles.values()), None)
+
+    def close(self):
+        if self.resolver is not None:
+            self.resolver.close()
+
+
+class _PinnedMediaPreview:
+    """Own one direct-media preview filename and its pinned descriptor."""
+
+    def __init__(self, filename, resolver, pinned_handle):
+        self.filename = filename
+        self.resolver = resolver
+        self.pinned_handle = pinned_handle
+
+    def close(self):
+        self.resolver.close()
+
+
+class _PinnedAnnouncementPreview:
+    """Own one announcement preview snapshot and all of its pinned media."""
+
+    def __init__(self, announcement, resolver, pinned_handles):
+        self.announcement = announcement
+        self.resolver = resolver
+        self.pinned_handles = pinned_handles
+
+    def close(self):
+        self.resolver.close()
+
+
+_PINNED_PREVIEW_TYPES = (
+    _PinnedModulePreview,
+    _PinnedMediaPreview,
+    _PinnedAnnouncementPreview,
+)
+
+
+def _close_preview_owners(*values):
+    closed = set()
+    for value in values:
+        if isinstance(value, _PINNED_PREVIEW_TYPES) and id(value) not in closed:
+            closed.add(id(value))
+            value.close()
+
+
 def local_ip_address():
     """Return the LAN address used to reach the outside network."""
     sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
@@ -174,7 +274,7 @@ class DisplayController:
         self._pairing_pause = threading.Event()
         self._pairing_setup = threading.Event()
         self._display_lock = threading.RLock()
-        self._lifecycle_lock = threading.Lock()
+        self._lifecycle_lock = threading.RLock()
         self._state_lock = threading.Lock()
         self._thread = None
         self._stopping = False
@@ -265,6 +365,16 @@ class DisplayController:
                 if thread.is_alive():
                     LOGGER.error("Matrix display thread did not stop within %s seconds", timeout)
                     return False
+            with self._state_lock:
+                pending = (
+                    self._preview_name,
+                    self._media_preview_name,
+                    self._announcement_preview,
+                )
+                self._preview_name = None
+                self._media_preview_name = None
+                self._announcement_preview = None
+            _close_preview_owners(*pending)
             self.device_preview_manager.close()
             if not self._display_lock.acquire(timeout=max(0, deadline - time.monotonic())):
                 LOGGER.error("Matrix display lock was not released within %s seconds", timeout)
@@ -583,6 +693,8 @@ class DisplayController:
         """Render one validated transient request without consulting saved config."""
         module_name = request.config["module"]
         candidate = request.config["candidate"]
+        if module_name in {"splash", "sleep"}:
+            candidate = playlist_module_config(candidate, module_name)
         if stop_event.is_set():
             return False
         custom = custom_module(candidate, module_name)
@@ -636,37 +748,120 @@ class DisplayController:
                 break
         return rendered
 
+    def _preview_admission_generation(self):
+        with self._lifecycle_lock:
+            if self._stopping:
+                raise RuntimeError("display controller is stopping or lifecycle changed")
+            return self._lifecycle_generation
+
+    def _queue_preview(
+        self, *, pending=None, media_preview=None, announcement_preview=None,
+        expected_generation=None,
+    ):
+        queued = (pending, media_preview, announcement_preview)
+        with self._lifecycle_lock:
+            if (
+                self._stopping
+                or expected_generation is not None
+                and expected_generation != self._lifecycle_generation
+            ):
+                _close_preview_owners(*queued)
+                raise RuntimeError("display controller is stopping or lifecycle changed")
+            with self._state_lock:
+                displaced = (
+                    self._preview_name,
+                    self._media_preview_name,
+                    self._announcement_preview,
+                )
+                (
+                    self._preview_name,
+                    self._media_preview_name,
+                    self._announcement_preview,
+                ) = queued
+                if self._module_stop is not None:
+                    self._module_stop.set()
+            try:
+                self.start()
+            except BaseException:
+                with self._state_lock:
+                    if (
+                        self._preview_name is pending
+                        and self._media_preview_name is media_preview
+                        and self._announcement_preview is announcement_preview
+                    ):
+                        (
+                            self._preview_name,
+                            self._media_preview_name,
+                            self._announcement_preview,
+                        ) = displaced
+                        close_values = queued
+                    else:
+                        close_values = displaced
+                _close_preview_owners(*close_values)
+                raise
+            _close_preview_owners(*displaced)
+
     def preview(self, module_name):
-        if module_name not in MODULES and custom_module(self.config_store.get(), module_name) is None:
+        generation = self._preview_admission_generation()
+        config = self.config_store.get()
+        if module_name not in MODULES and custom_module(config, module_name) is None:
             raise KeyError(module_name)
-        with self._state_lock:
-            self._preview_name = module_name
-            self._media_preview_name = None
-            self._announcement_preview = None
-            if self._module_stop is not None:
-                self._module_stop.set()
-        self.start()
+        if module_name in {"splash", "sleep"}:
+            snapshot = playlist_module_config(config, module_name)
+        else:
+            snapshot = copy.deepcopy(config)
+        references = module_media_references(snapshot, module_name)
+        resolver = None
+        try:
+            pinned_handles = {}
+            if references:
+                resolver = MediaResolver(self.config_store.media_root)
+                for reference in references:
+                    pinned_handles[reference] = resolver.resolve(reference)
+            pending = _PinnedModulePreview(
+                module_name, snapshot, resolver, pinned_handles,
+            )
+        except BaseException:
+            if resolver is not None:
+                resolver.close()
+            raise
+        self._queue_preview(pending=pending, expected_generation=generation)
 
     def preview_media(self, filename):
+        generation = self._preview_admission_generation()
         if not isinstance(filename, str) or not filename:
             raise ValueError("media filename is required")
-        with self._state_lock:
-            self._media_preview_name = filename
-            self._preview_name = None
-            self._announcement_preview = None
-            if self._module_stop is not None:
-                self._module_stop.set()
-        self.start()
+        resolver = MediaResolver(self.config_store.media_root)
+        try:
+            pending = _PinnedMediaPreview(
+                filename, resolver, resolver.resolve(filename),
+            )
+        except BaseException:
+            resolver.close()
+            raise
+        self._queue_preview(
+            media_preview=pending, expected_generation=generation,
+        )
 
     def preview_announcement(self, announcement):
         """Queue a validated unsaved announcement as a one-off preview."""
-        with self._state_lock:
-            self._announcement_preview = copy.deepcopy(announcement)
-            self._preview_name = None
-            self._media_preview_name = None
-            if self._module_stop is not None:
-                self._module_stop.set()
-        self.start()
+        generation = self._preview_admission_generation()
+        announcement = copy.deepcopy(announcement)
+        resolver = MediaResolver(self.config_store.media_root)
+        try:
+            pinned_handles = {}
+            reference = announcement.get("media")
+            if reference is not None:
+                pinned_handles[reference] = resolver.resolve(reference)
+            pending = _PinnedAnnouncementPreview(
+                announcement, resolver, pinned_handles,
+            )
+        except BaseException:
+            resolver.close()
+            raise
+        self._queue_preview(
+            announcement_preview=pending, expected_generation=generation,
+        )
 
     def status(self):
         return {
@@ -857,6 +1052,20 @@ class DisplayController:
             return start <= current < end
         return current >= start or current < end
 
+    @staticmethod
+    def _seconds_until_schedule_change(config, now=None):
+        now = now or dt.datetime.now()
+        display = config["display"]
+        start = dt.time.fromisoformat(display["active_start"])
+        end = dt.time.fromisoformat(display["active_end"])
+        if start == end:
+            return float("inf")
+        boundary_time = end if DisplayController._is_active(config, now) else start
+        boundary = dt.datetime.combine(now.date(), boundary_time)
+        if boundary <= now:
+            boundary += dt.timedelta(days=1)
+        return max(0.0, (boundary - now).total_seconds())
+
     def _take_preview(self):
         with self._state_lock:
             name = self._preview_name
@@ -875,7 +1084,9 @@ class DisplayController:
             self._announcement_preview = None
             return announcement
 
-    def _execute_announcement_preview(self, announcement):
+    def _execute_announcement_preview(self, preview):
+        if not isinstance(preview, _PinnedAnnouncementPreview):
+            raise TypeError("pinned announcement preview is required")
         if self._shutdown.is_set() or self._pairing_pause.is_set():
             return False
         stop_event = threading.Event()
@@ -896,8 +1107,9 @@ class DisplayController:
             with self._display_lock:
                 return module.run_preview(
                     self.matrix,
-                    announcement,
+                    preview.announcement,
                     stop_event=stop_event,
+                    pinned_handles=preview.pinned_handles,
                 )
         except Exception as exc:
             LOGGER.exception("Matrix announcement preview failed")
@@ -909,7 +1121,9 @@ class DisplayController:
                 if self._module_stop is stop_event:
                     self._module_stop = None
 
-    def _execute_media(self, filename, duration):
+    def _execute_media(self, preview, duration):
+        if not isinstance(preview, _PinnedMediaPreview):
+            raise TypeError("pinned media preview is required")
         if self._shutdown.is_set() or self._pairing_pause.is_set():
             return False
         stop_event = threading.Event()
@@ -923,18 +1137,19 @@ class DisplayController:
             ):
                 return False
             self._module_stop = stop_event
-        self.current_module = f"media:{filename}"
+        self.current_module = f"media:{preview.filename}"
         self.last_error = None
         try:
             with self._display_lock:
                 return play_media(
                     self.matrix,
-                    filename,
+                    preview.filename,
                     duration,
                     stop_event=stop_event,
+                    pinned_handle=preview.pinned_handle,
                 )
         except Exception as exc:
-            LOGGER.exception("Matrix media preview %s failed", filename)
+            LOGGER.exception("Matrix media preview %s failed", preview.filename)
             self.last_error = f"{type(exc).__name__}: {exc}"
             return False
         finally:
@@ -943,7 +1158,9 @@ class DisplayController:
                 if self._module_stop is stop_event:
                     self._module_stop = None
 
-    def _execute(self, name, config, duration):
+    def _execute(
+        self, name, config, duration, *, pinned_handle=None, pinned_handles=None,
+    ):
         if self._shutdown.is_set() or self._pairing_pause.is_set():
             return False
         custom = custom_module(config, name)
@@ -975,13 +1192,34 @@ class DisplayController:
             self._module_stop = stop_event
         self.current_module = name
         self.last_error = None
+        resolver = None
         try:
+            references = module_media_references(config, name)
+            if pinned_handles is None and pinned_handle is not None and len(references) == 1:
+                pinned_handles = {references[0]: pinned_handle}
+            if pinned_handles is None and references:
+                resolver = MediaResolver(self.config_store.media_root)
+                pinned_handles = {
+                    reference: resolver.resolve(reference) for reference in references
+                }
+            if pinned_handles is not None and any(
+                pinned_handles.get(reference) is None for reference in references
+            ):
+                raise ValueError("module media capability is missing")
             options = {
                 "duration": duration,
                 "stop_event": stop_event,
             }
+            if name in {"splash", "sleep"}:
+                reference = config.get("media", {}).get(name)
+                if reference is not None and pinned_handles is not None:
+                    options["pinned_handle"] = pinned_handles[reference]
+            if name == "announcement_board" and pinned_handles is not None:
+                options["pinned_handles"] = pinned_handles
             if custom is not None:
                 options["module_config"] = custom
+                if pinned_handles is not None:
+                    options["pinned_handles"] = pinned_handles
             if name in {"openweather_overview", "openweather_forecast"}:
                 api_key = self._openweather_secrets.get() if self._openweather_secrets else None
                 options["api_key"] = api_key
@@ -1023,6 +1261,8 @@ class DisplayController:
             self.last_error = f"{type(exc).__name__}: {exc}"
             raise
         finally:
+            if resolver is not None:
+                resolver.close()
             self.current_module = None
             with self._state_lock:
                 if self._module_stop is stop_event:
@@ -1066,19 +1306,37 @@ class DisplayController:
 
             announcement_preview = self._take_announcement_preview()
             if announcement_preview:
-                self._execute_announcement_preview(announcement_preview)
+                try:
+                    self._execute_announcement_preview(announcement_preview)
+                finally:
+                    announcement_preview.close()
                 self._mark_scheduler_healthy()
                 continue
             media_preview = self._take_media_preview()
             if media_preview:
-                self._execute_media(
-                    media_preview, invocation_default_duration(f"media:{media_preview}")
-                )
+                try:
+                    self._execute_media(
+                        media_preview,
+                        invocation_default_duration(f"media:{media_preview.filename}"),
+                    )
+                finally:
+                    media_preview.close()
                 self._mark_scheduler_healthy()
                 continue
             preview = self._take_preview()
             if preview:
-                self._execute(preview, config, invocation_default_duration(preview))
+                if isinstance(preview, _PinnedModulePreview):
+                    try:
+                        self._execute(
+                            preview.module_name,
+                            preview.config,
+                            invocation_default_duration(preview.module_name),
+                            pinned_handles=preview.pinned_handles,
+                        )
+                    finally:
+                        preview.close()
+                else:
+                    self._execute(preview, config, invocation_default_duration(preview))
                 self._mark_scheduler_healthy()
                 continue
 
@@ -1103,15 +1361,46 @@ class DisplayController:
                     and not self._claim_acceptance_inactive_probe(acceptance_inactive)
                 ):
                     continue
+                sleep_items = scheduled_playlist_items(config, active=False)
+                if acceptance_inactive is not None and not sleep_items:
+                    # Acceptance rollback evidence must exercise the saved sleep
+                    # path even when the user's off-hours playlist is empty.
+                    sleep_items = [{
+                        "module": "sleep",
+                        "duration": invocation_default_duration("sleep"),
+                        "enabled": True,
+                    }]
                 try:
-                    self._execute("sleep", config, invocation_default_duration("sleep"))
+                    for item in sleep_items:
+                        if (
+                            self._shutdown.is_set()
+                            or self._reload_requested.is_set()
+                            or self._pairing_pause.is_set()
+                        ):
+                            break
+                        duration = item["duration"]
+                        if acceptance_inactive is None:
+                            schedule_now = dt.datetime.now()
+                            if self._is_active(config, schedule_now):
+                                break
+                            duration = min(
+                                duration,
+                                self._seconds_until_schedule_change(config, schedule_now),
+                            )
+                            if duration <= 0:
+                                break
+                        self._execute(
+                            "sleep", playlist_item_config(config, item), duration
+                        )
                 finally:
                     if acceptance_inactive is not None:
                         self._finish_acceptance_inactive_probe(acceptance_inactive)
+                if not sleep_items and acceptance_inactive is None:
+                    self._shutdown.wait(0.25)
                 self._mark_scheduler_healthy()
                 continue
 
-            playlist = [item for item in config["playlist"] if item["enabled"]]
+            playlist = scheduled_playlist_items(config, active=True)
             if not playlist:
                 self._shutdown.wait(1)
                 self._mark_scheduler_healthy()
@@ -1128,31 +1417,59 @@ class DisplayController:
                 with self._state_lock:
                     if self._device_draft_pending is not None:
                         break
+                schedule_now = dt.datetime.now()
+                if not self._is_active(config, schedule_now):
+                    break
                 announcement_preview = self._take_announcement_preview()
                 if announcement_preview:
-                    cycle_rendered = bool(
-                        self._execute_announcement_preview(announcement_preview)
-                    ) or cycle_rendered
+                    try:
+                        cycle_rendered = bool(
+                            self._execute_announcement_preview(announcement_preview)
+                        ) or cycle_rendered
+                    finally:
+                        announcement_preview.close()
                     break
                 media_preview = self._take_media_preview()
                 if media_preview:
-                    cycle_rendered = bool(
-                        self._execute_media(
-                            media_preview,
-                            invocation_default_duration(f"media:{media_preview}"),
-                        )
-                    ) or cycle_rendered
+                    try:
+                        cycle_rendered = bool(
+                            self._execute_media(
+                                media_preview,
+                                invocation_default_duration(
+                                    f"media:{media_preview.filename}"
+                                ),
+                            )
+                        ) or cycle_rendered
+                    finally:
+                        media_preview.close()
                     break
                 preview = self._take_preview()
                 if preview:
-                    cycle_rendered = bool(
-                        self._execute(
+                    if isinstance(preview, _PinnedModulePreview):
+                        try:
+                            rendered = self._execute(
+                                preview.module_name,
+                                preview.config,
+                                invocation_default_duration(preview.module_name),
+                                pinned_handles=preview.pinned_handles,
+                            )
+                        finally:
+                            preview.close()
+                    else:
+                        rendered = self._execute(
                             preview, config, invocation_default_duration(preview)
                         )
-                    ) or cycle_rendered
+                    cycle_rendered = bool(rendered) or cycle_rendered
                     break
                 cycle_rendered = bool(
-                    self._execute(item["module"], config, item["duration"])
+                    self._execute(
+                        item["module"],
+                        playlist_item_config(config, item),
+                        min(
+                            item["duration"],
+                            self._seconds_until_schedule_change(config, schedule_now),
+                        ),
+                    )
                 ) or cycle_rendered
             if (
                 not cycle_rendered
