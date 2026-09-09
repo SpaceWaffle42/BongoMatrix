@@ -246,7 +246,8 @@ print('EXPORTED_FULL_RUN_OK')
             for media_name in (
                 "sleep.gif", "squares_tb.gif",
                 "rubik_squares.gif", "waterfall_squares.gif",
-                "loading_squares.gif", "zigzag_squares.gif",
+                "loading_squares.gif", "splash_loading_squares.gif",
+                "zigzag_squares.gif",
             ):
                 shutil.copy2(source / "resources" / "media" / "built-in" / media_name,
                              built_in_media / media_name)
