@@ -3,11 +3,38 @@ import time
 import unittest
 from unittest.mock import Mock, patch
 
-from modules import sleep_screen, splash_screen
+from PIL import Image, ImagePalette
+
+from modules import media_player, sleep_screen, splash_screen
 from modules.media_player import gif_media_frames, video_media_frames
 
 
 class MediaModuleTests(unittest.TestCase):
+    def test_gif_compositing_uses_global_palette_for_background_disposal(self):
+        palette = [0, 0, 0, 217, 160, 102] + ([0, 0, 0] * 254)
+        source = Mock()
+        source.global_palette = ImagePalette.ImagePalette("RGB", palette)
+        source.info = {"background": 0}
+        source.mode = "RGB"
+        source._frame_transparency = None
+        source.disposal_method = 2
+        source.dispose_extent = (0, 0, 2, 1)
+        source.dispose = Image.new("RGB", (2, 1), (217, 160, 102)).im
+        observed = []
+
+        def frames(gif):
+            yield Image.new("RGB", (2, 1), "white")
+            disposal = Image.Image()._new(gif.dispose)
+            observed.append(disposal.getpixel((0, 0)))
+            yield Image.new("RGB", (2, 1), "white")
+
+        decoded = list(media_player.gif_composited_frames(
+            source, image_iterator=frames,
+        ))
+
+        self.assertEqual(len(decoded), 2)
+        self.assertEqual(observed, [(0, 0, 0)])
+
     @staticmethod
     def _timed_gif_case(open_seconds, iteration_seconds, copy_seconds):
         class Clock:

@@ -133,6 +133,38 @@ class _GifSource:
             self.gif.close()
 
 
+def _repair_gif_background_disposal(gif):
+    """Resolve opaque disposal-2 background colours through the global palette."""
+    if (
+        getattr(gif, "disposal_method", 0) != 2
+        or getattr(gif, "dispose", None) is None
+        or getattr(gif, "dispose_extent", None) is None
+        or gif.info.get("transparency") is not None
+        or getattr(gif, "_frame_transparency", None) is not None
+        or gif.mode not in {"RGB", "RGBA"}
+    ):
+        return
+    palette = getattr(gif, "global_palette", None)
+    palette_bytes = getattr(palette, "palette", None)
+    background = gif.info.get("background", 0)
+    offset = background * 3
+    if palette_bytes is None or offset + 3 > len(palette_bytes):
+        return
+    colour = tuple(palette_bytes[offset:offset + 3])
+    if gif.mode == "RGBA":
+        colour += (255,)
+    x0, y0, x1, y1 = gif.dispose_extent
+    gif.dispose = Image.new(gif.mode, (x1 - x0, y1 - y0), colour).im
+
+
+def gif_composited_frames(gif, image_iterator=None):
+    """Iterate GIF frames with logical-background disposal composited correctly."""
+    iterator = iter((image_iterator or ImageSequence.Iterator)(gif))
+    for frame in iterator:
+        _repair_gif_background_disposal(gif)
+        yield frame
+
+
 def gif_media_frames(
     path, loops=1, playback_rate=1.0, stop_event=None, max_duration=None,
     monotonic=None, image_open=None, image_iterator=None, frame_copy=None,
@@ -140,7 +172,7 @@ def gif_media_frames(
 ):
     """Yield the finite GIF timeline shared by physical and preview playback."""
     image_open = image_open or Image.open
-    image_iterator = image_iterator or ImageSequence.Iterator
+    image_iterator = image_iterator or gif_composited_frames
     frame_copy = frame_copy or (lambda frame: frame.copy())
     if (
         isinstance(playback_rate, bool)

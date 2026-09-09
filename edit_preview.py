@@ -382,9 +382,11 @@ def media_preview_frames(
     stop_event=None, pinned_handle=None, monotonic=time.monotonic,
 ):
     """Render the shared production animated-media timeline into PNG frames."""
-    from PIL import Image, ImageSequence
+    from PIL import Image
 
-    from modules.media_player import gif_media_frames, video_media_frames
+    from modules.media_player import (
+        gif_composited_frames, gif_media_frames, video_media_frames,
+    )
 
     settings = settings or {}
     duration = max(0.0, float(duration))
@@ -410,7 +412,7 @@ def media_preview_frames(
                 manager = Image.open(source)
                 opened = manager.__enter__()
                 try:
-                    for frame in ImageSequence.Iterator(opened):
+                    for frame in gif_composited_frames(opened):
                         frames.append(frame.copy())
                 except BaseException as primary_error:
                     try:
