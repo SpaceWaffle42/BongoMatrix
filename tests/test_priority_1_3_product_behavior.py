@@ -1,4 +1,5 @@
 import copy
+from pathlib import Path
 import threading
 import time
 import unittest
@@ -102,9 +103,14 @@ class Priority13ProductBehaviorTests(unittest.TestCase):
 
     def test_process_loss_expires_active_lava_and_restores_saved_playback_for_later_owner(self):
         now = [200.0]
+        splash = copy.deepcopy(next(
+            item for item in DEFAULT_CONFIG["playlist"]
+            if item["module"] == "splash"
+        ))
+        splash["duration"] = 1
         saved_config = {
             **copy.deepcopy(DEFAULT_CONFIG),
-            "playlist": [{"module": "splash", "duration": 1, "enabled": True}],
+            "playlist": [splash],
         }
         matrix = CaptureMatrix()
         first_frame = threading.Event()
@@ -117,7 +123,13 @@ class Priority13ProductBehaviorTests(unittest.TestCase):
 
         matrix.swap = observe_swap
         setattr(matrix, "set_brightness", Mock())
-        controller = DisplayController(matrix, Mock(get=Mock(return_value=saved_config)))
+        controller = DisplayController(
+            matrix,
+            Mock(
+                get=Mock(return_value=saved_config),
+                media_root=Path(__file__).parents[1] / "resources" / "media",
+            ),
+        )
         controller.device_preview_manager._clock = lambda: now[0]
         controller.start = Mock()
         first_owner = DevicePreviewOwner("paired-device", "lost-browser")
