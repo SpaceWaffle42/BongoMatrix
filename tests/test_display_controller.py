@@ -405,14 +405,23 @@ class DisplayControllerTests(unittest.TestCase):
         self.assertEqual(calls, ["announcement_board", "clock_lava"])
 
     def test_pending_physical_draft_preempts_next_saved_playlist_row(self):
+        splash = copy.deepcopy(next(
+            item for item in DEFAULT_CONFIG["playlist"]
+            if item["module"] == "splash"
+        ))
+        sleep = copy.deepcopy(next(
+            item for item in DEFAULT_CONFIG["playlist"]
+            if item["module"] == "sleep"
+        ))
+        splash["duration"] = sleep["duration"] = 1
         config = {
             **DEFAULT_CONFIG,
-            "playlist": [
-                {"module": "splash", "duration": 1, "enabled": True},
-                {"module": "sleep", "duration": 1, "enabled": True},
-            ],
+            "playlist": [splash, sleep],
         }
-        store = Mock(get=Mock(return_value=config))
+        store = Mock(
+            get=Mock(return_value=config),
+            media_root=Path(__file__).parents[1] / "resources" / "media",
+        )
         controller = DisplayController(Mock(), store)
         observed = []
 
@@ -1575,9 +1584,22 @@ class DisplayControllerTests(unittest.TestCase):
         matrix.swap.assert_not_called()
 
     def test_reload_breaks_playlist_and_loads_new_config(self):
-        old = {"display": {"active_start": "00:00", "active_end": "00:00", "day_brightness": 100, "night_brightness": 10}, "playlist": [{"module": "splash", "duration": 2, "enabled": True}, {"module": "weather", "duration": 2, "enabled": True}]}
-        new = {"display": old["display"], "playlist": [{"module": "clock_lava", "duration": 2, "enabled": True}]}
-        store = Mock()
+        splash = copy.deepcopy(next(
+            item for item in DEFAULT_CONFIG["playlist"]
+            if item["module"] == "splash"
+        ))
+        splash["duration"] = 2
+        old = {
+            **copy.deepcopy(DEFAULT_CONFIG),
+            "display": {"active_start": "00:00", "active_end": "00:00", "day_brightness": 100, "night_brightness": 10},
+            "playlist": [splash, {"module": "weather", "duration": 2, "enabled": True}],
+        }
+        new = {
+            **copy.deepcopy(DEFAULT_CONFIG),
+            "display": old["display"],
+            "playlist": [{"module": "clock_lava", "duration": 2, "enabled": True}],
+        }
+        store = Mock(media_root=Path(__file__).parents[1] / "resources" / "media")
         store.get.side_effect = [old, new]
         controller = DisplayController(Mock(), store)
         calls = []
@@ -1813,12 +1835,17 @@ class DisplayControllerTests(unittest.TestCase):
     def test_pending_device_draft_autonomously_expires_once_before_saved_scheduler_resumes(self):
         from device_preview import DevicePreviewOwner, DevicePreviewRequest
 
-        saved_config = {
-            **DEFAULT_CONFIG,
-            "playlist": [{"module": "splash", "duration": 1, "enabled": True}],
-        }
+        splash = copy.deepcopy(next(
+            item for item in DEFAULT_CONFIG["playlist"]
+            if item["module"] == "splash"
+        ))
+        splash["duration"] = 1
+        saved_config = {**DEFAULT_CONFIG, "playlist": [splash]}
         now = [300.0]
-        store = Mock(get=Mock(return_value=saved_config))
+        store = Mock(
+            get=Mock(return_value=saved_config),
+            media_root=Path(__file__).parents[1] / "resources" / "media",
+        )
         controller = DisplayController(Mock(), store)
         controller.device_preview_manager._clock = lambda: now[0]
         controller.start = Mock()
@@ -2085,15 +2112,20 @@ class DisplayControllerTests(unittest.TestCase):
             def set_brightness(self, _brightness):
                 pass
 
-        saved_config = {
-            **DEFAULT_CONFIG,
-            "playlist": [{"module": "splash", "duration": 1, "enabled": True}],
-        }
+        splash = copy.deepcopy(next(
+            item for item in DEFAULT_CONFIG["playlist"]
+            if item["module"] == "splash"
+        ))
+        splash["duration"] = 1
+        saved_config = {**DEFAULT_CONFIG, "playlist": [splash]}
         unsaved_candidate = {"module": "weather", "candidate": {"draft": "unsaved"}}
         clock = FakeClock()
         display_lock = OwnedLock()
         matrix = GuardedMatrix(display_lock)
-        store = Mock(get=Mock(return_value=saved_config))
+        store = Mock(
+            get=Mock(return_value=saved_config),
+            media_root=Path(__file__).parents[1] / "resources" / "media",
+        )
         controller = DisplayController(matrix, store)
         controller._display_lock = display_lock
         controller.device_preview_manager._clock = clock.monotonic
@@ -2291,13 +2323,21 @@ class DisplayControllerTests(unittest.TestCase):
             def set_brightness(self, _brightness):
                 pass
 
-        config = {
-            **DEFAULT_CONFIG,
-            "playlist": [{"module": "splash", "duration": 1, "enabled": True}],
-        }
+        splash = copy.deepcopy(next(
+            item for item in DEFAULT_CONFIG["playlist"]
+            if item["module"] == "splash"
+        ))
+        splash["duration"] = 1
+        config = {**DEFAULT_CONFIG, "playlist": [splash]}
         display_lock = OwnedLock()
         matrix = GuardedMatrix(display_lock)
-        controller = DisplayController(matrix, Mock(get=Mock(return_value=config)))
+        controller = DisplayController(
+            matrix,
+            Mock(
+                get=Mock(return_value=config),
+                media_root=Path(__file__).parents[1] / "resources" / "media",
+            ),
+        )
         controller._display_lock = display_lock
         controller.start = Mock()
         owner = DevicePreviewOwner("device-a", "tab-a")
