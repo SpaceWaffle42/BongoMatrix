@@ -371,7 +371,7 @@ This checklist tracks the successor to the superseded 0.3.63-preview Splash/Slee
 
 - [x] Implement the revised one-flow-per-screen configuration, screen-specific media admission, conditional saved-state repair, Splash shuffled-bag lifecycle, retained Sleep sessions, and selected-GIF still-duration calculation (`screen_media.py`, `config_store.py`, `display_controller.py`, `webapp.py`, and `app/templates/dashboard.html`).
 - [x] Add focused backend and real-browser tests for the revised configuration and runtime contract (`tests/test_screen_media.py`, `tests/test_media_playlists.py`, and `tests/test_webapp.py`; RED/GREEN transcripts in the builder evidence directory).
-- [ ] Pass the frozen candidate's complete Python suites and configured static/syntax checks with an immutable command/result manifest.
+- [x] ~~Pass the frozen candidate's complete Python suites and configured static/syntax checks with an immutable command/result manifest.~~ (Locally verified with the builder's canonical inventory, structured shard manifest/results, zero skips, and configured Ruff/syntax gates.)
   - Recovery verification must preserve the prior 1,504-test canonical set and include any new remediation regression IDs. Structured `unittest` start/stop identities are authoritative; multiline descriptions and repeated parent status lines in human-readable logs must not hide or duplicate executions.
 - [ ] Obtain independent frontend, quality, and recovery reviews against the exact candidate commit and tree.
 - [ ] Open a protected merge request and pass exact-head plus exact-protected-main CI.
