@@ -290,9 +290,14 @@ def _decodes(resolver: MediaResolver, reference: str) -> bool:
         with resolver.resolve(reference) as pinned:
             with pinned.dup_file() as source:
                 with Image.open(source) as image:
-                    if image.format != _EXPECTED_FORMAT[Path(reference).suffix.lower()]:
+                    suffix = Path(reference).suffix.lower()
+                    if image.format != _EXPECTED_FORMAT[suffix]:
                         return False
-                    image.verify()
+                    if suffix == ".gif":
+                        for frame in ImageSequence.Iterator(image):
+                            frame.load()
+                    else:
+                        image.load()
         return True
     except (
         KeyError,

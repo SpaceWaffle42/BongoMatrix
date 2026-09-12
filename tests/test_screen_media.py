@@ -91,6 +91,29 @@ class ScreenMediaRevisionTests(unittest.TestCase):
                 "upload.gif",
             ))
 
+    def test_discovery_rejects_gif_that_verify_accepts_but_runtime_decode_rejects(self):
+        from PIL import ImageSequence
+        from screen_media import discover_screen_media
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            (root / "built-in").mkdir()
+            complete = root / "complete.gif"
+            self._animation(complete, [100, 100, 100])
+            truncated = root / "truncated.gif"
+            truncated.write_bytes(complete.read_bytes()[:-3])
+
+            with Image.open(truncated) as image:
+                image.verify()
+            with self.assertRaises(OSError), Image.open(truncated) as image:
+                for frame in ImageSequence.Iterator(image):
+                    frame.load()
+
+            self.assertNotIn(
+                "truncated.gif",
+                discover_screen_media(root, "splash"),
+            )
+
     def test_each_screen_has_one_independent_toggle_and_selection_list(self):
         config = copy.deepcopy(DEFAULT_CONFIG)
         splash = next(item for item in config["playlist"] if item["module"] == "splash")

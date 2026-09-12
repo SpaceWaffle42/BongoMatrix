@@ -335,6 +335,13 @@ class WebAppTests(unittest.TestCase):
     def test_builtin_edit_preview_randomly_selects_and_uses_a_pinned_pool_member(self):
         candidate = self.store.get()
         splash = next(item for item in candidate["playlist"] if item["module"] == "splash")
+        alternate_source = "splash-random.gif"
+        Image.new("RGB", (2, 1), "red").save(
+            self.media_dir / alternate_source, format="GIF",
+        )
+        splash["sources"] = [
+            splash["source"], alternate_source,
+        ]
         selected_source = splash["sources"][1]
         selected_handle = object()
         pinned = {source: object() for source in splash["sources"]}
@@ -2006,6 +2013,7 @@ console.log('PROGRAMMATIC_DEVICE_PREVIEW_PUBLICATION_PASS');
 let matrixEditorsReady=true,matrixRecoveryPending=false,matrixLoadedRevision=7,highestNotifiedRemoteRevision=7,matrixSavedSnapshot='saved-baseline',matrixDirty=true;
 const messages=[],requests=[];
 globalThis.cancelDevicePreviewForSave=async()=>false;
+globalThis.validateScreenMediaSelections=()=>null;
 globalThis.validateAnnouncementBoard=()=>true;
 globalThis.configBody=()=>({device:{name:'unsaved draft'}});
 globalThis.matrixRevisionETag=()=> '"revision-7"';
@@ -2095,7 +2103,7 @@ async function drain(){for(let i=0;i<8;i++)await Promise.resolve()}
 async function advance(target){while(true){const due=[...timers].filter(([,timer])=>timer.at<=target).sort((a,b)=>a[1].at-b[1].at||a[0]-b[0]);if(!due.length)break;const [id,timer]=due[0];timers.delete(id);now=timer.at;timer.fn();await drain()}now=target;await drain()}
 const control=extra=>Object.assign({addEventListener(type,handler){this.listeners??={};this.listeners[type]=handler}},extra),toggle=control({checked:false}),timeout=control({value:'60',focus(){}}),stop=control({disabled:true}),status={textContent:'',dataset:{}};
 const elements={'#device-preview-enabled':toggle,'#device-preview-timeout':timeout,'#stop-device-preview':stop,'#device-preview-status':status};
-const context={console,AbortController,Date:{now:()=>now},Number,Promise,Set,Map,Math,encodeURIComponent,setTimeout,clearTimeout,setInterval:()=>++nextTimer,clearInterval(){},matrixSyncStopped:false,matrixEditorsReady:true,previewMode:'edit',matrixRecoveryPending:false,matrixLoadedRevision:7,highestNotifiedRemoteRevision:7,matrixSavedSnapshot:'saved',matrixDirty:true,previewModule:'clock',previewInstance:'1'.repeat(32),PAIRED_ACTION_SIGNAL:'1',configBody:()=>({name:'draft'}),selectedLavaPaletteDescriptor:()=>null,selectEditPreviewModule(){},selectEditedPreviewModule(){},validateAnnouncementBoard:()=>true,matrixRevisionETag:()=> '"revision-7"',dismissMatrixRevisionDialogThrough(){},setMessage(){},document:{querySelector:s=>elements[s],addEventListener(){}},window:{addEventListener(){}},fetch:async()=>({ok:true}),api:async(path,options={})=>{const body=options.body?JSON.parse(options.body):null;if(path==='/api/device-preview/clock'){startCalls++;if(startImmediate)return {generation:body.generation,expires_in:60,heartbeat_after_seconds:5};return new Promise(resolve=>{startResolve=()=>resolve({generation:body.generation,expires_in:60,heartbeat_after_seconds:5})})}if(path==='/api/device-preview/cancel'){cancelCalls++;cancelSignal=options.signal;return new Promise(resolve=>{cancelResolve=()=>resolve({cancelled:true})})}if(path==='/api/config'){persistence++;return {revision:8}}throw new Error(path)}};
+const context={console,AbortController,Date:{now:()=>now},Number,Promise,Set,Map,Math,encodeURIComponent,setTimeout,clearTimeout,setInterval:()=>++nextTimer,clearInterval(){},matrixSyncStopped:false,matrixEditorsReady:true,previewMode:'edit',matrixRecoveryPending:false,matrixLoadedRevision:7,highestNotifiedRemoteRevision:7,matrixSavedSnapshot:'saved',matrixDirty:true,previewModule:'clock',previewInstance:'1'.repeat(32),PAIRED_ACTION_SIGNAL:'1',configBody:()=>({name:'draft'}),selectedLavaPaletteDescriptor:()=>null,selectEditPreviewModule(){},selectEditedPreviewModule(){},validateScreenMediaSelections:()=>null,validateAnnouncementBoard:()=>true,matrixRevisionETag:()=> '"revision-7"',dismissMatrixRevisionDialogThrough(){},setMessage(){},document:{querySelector:s=>elements[s],addEventListener(){}},window:{addEventListener(){}},fetch:async()=>({ok:true}),api:async(path,options={})=>{const body=options.body?JSON.parse(options.body):null;if(path==='/api/device-preview/clock'){startCalls++;if(startImmediate)return {generation:body.generation,expires_in:60,heartbeat_after_seconds:5};return new Promise(resolve=>{startResolve=()=>resolve({generation:body.generation,expires_in:60,heartbeat_after_seconds:5})})}if(path==='/api/device-preview/cancel'){cancelCalls++;cancelSignal=options.signal;return new Promise(resolve=>{cancelResolve=()=>resolve({cancelled:true})})}if(path==='/api/config'){persistence++;return {revision:8}}throw new Error(path)}};
 vm.createContext(context);vm.runInContext(process.argv[1]+'\n'+process.argv[2],context);(async()=>{const mode=process.argv[3];toggle.checked=true;toggle.listeners.change();await advance(0);let settled=false,value;const operation=mode==='replacement'?context.replaceDevicePreviewAfterSourceRemoval('clock'):mode==='save'?context.saveConfig():context.stopDevicePreview();operation.then(result=>{settled=true;value=result});await advance(2900);startResolve();await drain();await advance(3000);if(!settled)throw new Error(mode+' exceeded original deadline');if(mode==='save'){if(value.saved!==false||persistence!==0)throw new Error('save crossed deadline barrier')}else if(value!==false)throw new Error(mode+' did not resolve false');if(cancelCalls!==1||!cancelSignal?.aborted)throw new Error(mode+' cancellation was not aborted once');const expectedChecked=mode==='replacement';if(toggle.checked!==expectedChecked||status.dataset.state!=='error'||!status.textContent.includes('connection is lost'))throw new Error(mode+' uncertainty state missing');startImmediate=true;toggle.checked=true;toggle.listeners.change();await advance(3000);if(startCalls!==2||status.dataset.state!=='active')throw new Error(mode+' later preview suppressed');cancelResolve();await drain();if(status.dataset.state!=='active')throw new Error(mode+' late completion overwrote newer state');console.log('DEVICE_PREVIEW_LATE_ADMISSION_DEADLINE_PASS '+mode)})().catch(error=>{console.error(error);process.exit(1)});
 '''
         node = shutil.which("node")
@@ -3341,7 +3349,7 @@ try{
   await send('Emulation.setDeviceMetricsOverride',{...viewport,deviceScaleFactor:1,mobile:viewport.width===320,screenWidth:viewport.width,screenHeight:viewport.height});
   await send('Page.navigate',{url:`http://127.0.0.1:${appPort}/pair`});
   await waitFor(`document.querySelector('form[action="/pair/recover"] button')?.textContent.trim()==='REQUEST PIN ON MATRIX'&&document.readyState==='complete'`);
-  reports.push(await evaluate(`(()=>{const button=document.querySelector('form[action="/pair/recover"] button'),main=document.querySelector('main'),b=button.getBoundingClientRect(),m=main.getBoundingClientRect(),style=getComputedStyle(button);return{viewport:${JSON.stringify(viewport)},clientWidth:document.documentElement.clientWidth,scrollWidth:document.documentElement.scrollWidth,button:{width:b.width,height:b.height,display:style.display,visibility:style.visibility},main:{left:m.left,right:m.right},version:document.body.innerText.includes('0.3.63-preview')}})()`));
+  reports.push(await evaluate(`(()=>{const button=document.querySelector('form[action="/pair/recover"] button'),main=document.querySelector('main'),b=button.getBoundingClientRect(),m=main.getBoundingClientRect(),style=getComputedStyle(button);return{viewport:${JSON.stringify(viewport)},clientWidth:document.documentElement.clientWidth,scrollWidth:document.documentElement.scrollWidth,button:{width:b.width,height:b.height,display:style.display,visibility:style.visibility},main:{left:m.left,right:m.right},version:document.body.innerText.includes('0.3.64-preview')}})()`));
  }
  await send('Page.navigate',{url:`http://127.0.0.1:${appPort}/pair`});
  await waitFor(`document.querySelector('form[action="/pair/recover"] button')&&document.readyState==='complete'`);
@@ -4061,8 +4069,20 @@ console.log('PAIR_NETWORK_PASS');
         self.assertEqual(self.store.get()["revision"], before)
 
     def test_contract_three_config_write_preserves_rich_media_pool(self):
+        extra_sources = ["splash-a.gif", "splash-b.gif", "splash-c.gif"]
+        for source in extra_sources:
+            Image.new("RGB", (2, 1), "red").save(
+                self.media_dir / source, format="GIF",
+            )
+        current = self.store.get()
+        splash = next(
+            item for item in current["playlist"] if item["module"] == "splash"
+        )
+        expected_sources = [splash["source"], *extra_sources]
+        splash["sources"] = expected_sources
+        self.store.update({"playlist": current["playlist"]})
         self.pair_browser()
-        selected = "built-in/loading_squares.gif"
+        selected = extra_sources[0]
 
         response = self.post_config(
             json={"media": {"splash": selected}},
@@ -4072,18 +4092,24 @@ console.log('PAIR_NETWORK_PASS');
         self.assertEqual(response.status_code, 200, response.get_data(as_text=True))
         saved = self.store.get()
         splash = next(item for item in saved["playlist"] if item["module"] == "splash")
-        self.assertEqual(saved["media"]["splash"], "built-in/rubik_squares.gif")
-        self.assertEqual(splash["source"], "built-in/rubik_squares.gif")
-        self.assertEqual(splash["sources"], [
-            "built-in/rubik_squares.gif",
-            "built-in/waterfall_squares.gif",
-            selected,
-            "built-in/zigzag_squares.gif",
-        ])
+        self.assertEqual(saved["media"]["splash"], expected_sources[0])
+        self.assertEqual(splash["source"], expected_sources[0])
+        self.assertEqual(splash["sources"], expected_sources)
 
     def test_missing_client_contract_is_treated_as_legacy(self):
+        extra_source = "legacy-splash.gif"
+        Image.new("RGB", (2, 1), "red").save(
+            self.media_dir / extra_source, format="GIF",
+        )
+        current = self.store.get()
+        splash = next(
+            item for item in current["playlist"] if item["module"] == "splash"
+        )
+        expected_sources = [splash["source"], extra_source]
+        splash["sources"] = expected_sources
+        self.store.update({"playlist": current["playlist"]})
         self.pair_browser()
-        selected = "built-in/loading_squares.gif"
+        selected = extra_source
         response = self.client.post(
             "/api/config",
             json={"media": {"splash": selected}},
@@ -4097,9 +4123,8 @@ console.log('PAIR_NETWORK_PASS');
         splash = next(
             item for item in self.store.get()["playlist"] if item["module"] == "splash"
         )
-        self.assertEqual(splash["source"], "built-in/rubik_squares.gif")
-        self.assertEqual(splash["sources"][0], "built-in/rubik_squares.gif")
-        self.assertEqual(len(splash["sources"]), 4)
+        self.assertEqual(splash["source"], expected_sources[0])
+        self.assertEqual(splash["sources"], expected_sources)
 
     def test_malformed_client_contract_rejects_config_without_mutation(self):
         self.pair_browser()
@@ -4265,6 +4290,7 @@ const window={
 Object.defineProperty(window,'location',{get(){return locationObject},set(value){redirect=value}});
 function configBody(){return {device:{name:field.value}}}
 function setMessage(){}
+function validateScreenMediaSelections(){return null}
 function setInterval(){return nextTimer++} function clearInterval(){}
 function setTimeout(){return nextTimer++} function clearTimeout(){}
 function renderMedia(){} function renderCustomLavaPalettes(){} function renderCustomModules(){} function renderBuiltInEditors(){} function refreshDisplayFrame(){}
@@ -5080,6 +5106,7 @@ const configState={device:{name:'unsaved draft'}};
 function matrixRevisionETag(){return '"'+matrixLoadedRevision+'"'}
 function configBody(){return structuredClone(configState)}
 function setMessage(text){messageText=text}
+function validateScreenMediaSelections(){return null}
 async function api(path,options){request={path,options};const error=new Error('Configuration changed elsewhere.');error.data={revision:1};throw error}
 """ + save_function + r"""
 (async()=>{
@@ -5159,6 +5186,7 @@ const window={
 Object.defineProperty(window,'location',{get(){return locationObject},set(value){redirect=value}});
 function configBody(){return structuredClone(configState)}
 function setMessage(text){message.textContent=text}
+function validateScreenMediaSelections(){return null}
 function setInterval(){return nextTimer++} function clearInterval(id){clearedIntervals.push(id)}
 function setTimeout(){return nextTimer++} function clearTimeout(id){clearedTimeouts.push(id)}
 function cancelEditPreview(){}
@@ -10368,11 +10396,15 @@ const builtInSettings={weather:{scroll_loops:1,scroll_speed:.05}};
 function makeRow(module,value){
   const label={childNodes:[{textContent:''}]};
   const physical={textContent:''};let row;
+  const layout=[{dataset:{mediaLayout:'playback_speed_percent'},type:'number',value:'100'}];
+  const sources=[{dataset:{mediaSource:'selected.gif'},checked:true}];
+  const moduleItem={querySelectorAll(selector){if(selector==='[data-media-layout]')return layout;if(selector==='[data-media-source]:checked')return sources.filter(input=>input.checked);return []}};
   const duration={value:String(value),hidden:false,readOnly:false,title:'',min:'',max:'',step:'',dataset:{},closest(selector){return selector==='.module-row'?row:label},removeAttribute(name){delete this[name]}};
-  row={dataset:{module},duration,physical,querySelector(selector){return selector==='.duration'?duration:selector==='.physical-time'?physical:null}};return row;
+  row={dataset:{module},duration,physical,closest(selector){return selector==='.module-item'?moduleItem:null},querySelector(selector){return selector==='.duration'?duration:selector==='.physical-time'?physical:null}};return row;
 }
 const rows=[makeRow('splash',90),makeRow('custom_scroll',1),makeRow('weather',9),makeRow('announcement_board','')];
 const announcements=[];
+const mediaItems=[];
 const runtime={hidden:true,textContent:''};
 const card={dataset:{id:'custom_scroll'},querySelector(selector){return selector==='.scroll-runtime'?runtime:null}};
 global.document={querySelector(){return null},querySelectorAll(selector){if(selector==='.module-row')return rows;if(selector==='.custom-module-card')return [card];return []},createElement(){return {setAttribute(){}}}};
@@ -10398,7 +10430,7 @@ if(builtInSettings.weather.scroll_loops!==weatherLoopsBefore||builtInSettings.we
 providerTimingPlans.set('weather',{frames_per_loop:100,status:'fresh'});
 const pending=setTickerDelay('weather',null,playlistDurationTargets.get('weather'));syncPlaylistDurations();
 if(!pending||builtInSettings.weather.scroll_loops!==weatherLoopsBefore||builtInSettings.weather.scroll_speed!==0.12||Number(rows[2].duration.value)!==12)throw new Error('resolved weather target did not adjust frame delay only');
-if(rows[0].physical.textContent!=='Physical time · 00:01:30')throw new Error('fixed runtime did not synchronize');
+if(Number(rows[0].duration.value)!==7||rows[0].physical.textContent!=='Physical time · 7.0 s')throw new Error('screen fallback runtime did not synchronize');
 if(Number(rows[1].duration.value)!==7 || rows[1].physical.textContent!=='Physical time · 7.0 s')throw new Error('scroll runtime did not synchronize: '+JSON.stringify({value:rows[1].duration.value,physical:rows[1].physical.textContent}));
 if(rows[1].duration.hidden || rows[1].duration.readOnly || rows[1].duration.closest().childNodes[0].textContent!=='Display duration (seconds) ')throw new Error('calculated scroll row did not match editable Lava layout');
 if(rows[2].duration.hidden || rows[2].duration.readOnly || rows[2].duration.closest().childNodes[0].textContent!=='Display duration (seconds) ')throw new Error('provider row did not match editable Lava layout');
@@ -14209,9 +14241,6 @@ console.log('ANNOUNCEMENT_HEADING_SYNC_PASS');
             copy.deepcopy(item) for item in self.store.get()["playlist"]
             if item["module"] in {"splash", "sleep"}
         ]
-        for item in media_rows:
-            item["source"] = "built-in/sleep.gif"
-            item["sources"] = ["built-in/sleep.gif"]
         module = {
             "id": "custom_route_media", "name": "Route media", "type": "media",
             "source": "built-in/sleep.gif", "fit": "contain", "x": 0, "y": 0,
@@ -14785,13 +14814,21 @@ try{
         outside = Path(self.temp.name) / "outside.png"
         outside.write_bytes(b"outside sentinel")
         selected = {
-            "splash.gif": b"splash sentinel",
-            "sleep.png": b"sleep sentinel",
             "announcement.jpg": b"announcement sentinel",
             "canvas.webp": b"canvas sentinel",
         }
         for reference, content in selected.items():
             (self.media_dir / reference).write_bytes(content)
+        Image.new("RGB", (2, 1), "red").save(
+            self.media_dir / "splash.gif", format="GIF",
+        )
+        Image.new("RGB", (2, 1), "blue").save(
+            self.media_dir / "sleep.png", format="PNG",
+        )
+        selected.update({
+            reference: (self.media_dir / reference).read_bytes()
+            for reference in ("splash.gif", "sleep.png")
+        })
         (self.media_dir / "directory.png").mkdir()
         (self.media_dir / "linked.png").symlink_to(outside)
 
@@ -14806,11 +14843,16 @@ try{
             error_handles.append((handle, handle.fileno()))
             return handle
 
+        def announcement_change(reference):
+            return {"announcement_board": {"announcements": [
+                test_config_store.ConfigStoreTests.announcement(media=reference)
+            ]}}
+
         rejected = (
-            ({"media": {"splash": "missing.gif"}}, "media file does not exist: missing.gif", 0),
-            ({"media": {"splash": "../outside.png"}}, "media filename is invalid", 0),
-            ({"media": {"splash": "directory.png"}}, "media file is not regular: directory.png", 0),
-            ({"media": {"splash": "linked.png"}}, "media filename is invalid", 0),
+            (announcement_change("missing.gif"), "media file does not exist: missing.gif", "missing.gif"),
+            (announcement_change("../outside.png"), "announcement media must be empty or a safe media reference", None),
+            (announcement_change("directory.png"), "media file is not regular: directory.png", "directory.png"),
+            (announcement_change("linked.png"), "media filename is invalid", "linked.png"),
             (
                 {
                     "media": {"splash": "splash.gif", "sleep": "sleep.png"},
@@ -14819,10 +14861,10 @@ try{
                     ]},
                 },
                 "media file does not exist: missing.gif",
-                2,
+                "missing.gif",
             ),
         )
-        for changes, expected_error, expected_opened in rejected:
+        for changes, expected_error, terminal_attempt in rejected:
             with self.subTest(rejected=changes):
                 before_config = self.store.get()
                 before_bytes = config_path.read_bytes()
@@ -14833,6 +14875,7 @@ try{
                     for path in self.media_dir.iterdir()
                 }
                 opened_before = len(error_handles)
+                attempts_before = len(error_attempts)
                 with patch.object(
                     media_resolver.MediaResolver, "resolve", autospec=True,
                     side_effect=observe_error_resolve,
@@ -14854,10 +14897,11 @@ try{
                 self.assertEqual(outside.read_bytes(), b"outside sentinel")
                 self.controller.reload.assert_not_called()
                 opened = error_handles[opened_before:]
-                self.assertEqual(
-                    len(opened), expected_opened,
-                    f"resolver attempts were {error_attempts}",
-                )
+                attempts = error_attempts[attempts_before:]
+                if terminal_attempt is None:
+                    self.assertEqual(attempts, [])
+                else:
+                    self.assertEqual(attempts[-1], terminal_attempt)
                 for handle, descriptor in opened:
                     self.assertTrue(handle.closed)
                     with self.assertRaises(OSError):
@@ -14907,11 +14951,11 @@ try{
         self.assertEqual(response.get_json(), expected)
         self.assertEqual(expected["revision"], 1)
         self.assertEqual(expected["device"]["name"], "Pinned Save")
+        pinned = resolved[-len(selected):]
         self.assertEqual(
-            {reference: content for reference, _handle, _descriptor, content in resolved},
+            {reference: content for reference, _handle, _descriptor, content in pinned},
             selected,
         )
-        self.assertEqual(len(resolved), len(selected))
         for _reference, handle, descriptor, _content in resolved:
             self.assertTrue(handle.closed)
             with self.assertRaises(OSError):
@@ -15291,11 +15335,9 @@ try{
         candidate.pop("revision")
         candidate.pop("schema_version")
 
-        for module_name, reference in (
-            ("splash", "built-in/rubik_squares.gif"),
-            ("sleep", "built-in/sleep.gif"),
-        ):
+        for module_name in ("splash", "sleep"):
             with self.subTest(module=module_name):
+                reference = candidate["media"][module_name]
                 path = self.media_dir / reference
                 original = path.read_bytes()
                 path.unlink()
