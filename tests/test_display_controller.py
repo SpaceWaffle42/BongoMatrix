@@ -5,6 +5,8 @@ import io
 import os
 from pathlib import Path
 import random
+import subprocess
+import sys
 import threading
 import tempfile
 import time
@@ -1140,6 +1142,62 @@ class DisplayControllerTests(unittest.TestCase):
                     if controller._preview_name is not None:
                         controller._preview_name.close()
                         controller._preview_name = None
+                    controller.device_preview_manager.close()
+                    controller._openweather_provider.shutdown()
+
+    def test_saved_screen_preview_rejects_missing_preparation_authority_under_optimization(self):
+        if __debug__:
+            result = subprocess.run(
+                [
+                    sys.executable, "-O", "-m", "unittest",
+                    f"{__name__}.DisplayControllerTests."
+                    "test_saved_screen_preview_rejects_missing_preparation_authority_under_optimization",
+                    "-v",
+                ],
+                cwd=Path(__file__).resolve().parents[1],
+                text=True,
+                capture_output=True,
+                timeout=10,
+            )
+            self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+            return
+
+        for screen in ("splash", "sleep"):
+            with self.subTest(screen=screen):
+                resolver = Mock()
+                resolver.resolve.return_value = Mock()
+                store = Mock(
+                    media_root=Path("/unused"),
+                    get=Mock(return_value=copy.deepcopy(DEFAULT_CONFIG)),
+                )
+                controller = DisplayController(Mock(), store)
+                controller._preview_preparation_authority = Mock(return_value=None)
+                controller._begin_preview_preparation = Mock()
+                controller._queue_preview = Mock()
+                controller.start = Mock()
+                duration = Mock(return_value=1)
+                try:
+                    with (
+                        patch("display_controller.MediaResolver", return_value=resolver),
+                        patch.object(
+                            edit_preview,
+                            "bounded_screen_preview_duration_seconds",
+                            duration,
+                        ),
+                        self.assertRaisesRegex(
+                            RuntimeError,
+                            "display controller is stopping or lifecycle changed",
+                        ),
+                    ):
+                        controller.preview(screen)
+                    controller._begin_preview_preparation.assert_not_called()
+                    controller._queue_preview.assert_not_called()
+                    controller.start.assert_not_called()
+                    duration.assert_not_called()
+                    resolver.close.assert_called_once_with()
+                    self.assertEqual(controller._preview_preparations, set())
+                    self.assertIsNone(controller._take_preview())
+                finally:
                     controller.device_preview_manager.close()
                     controller._openweather_provider.shutdown()
 

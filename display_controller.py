@@ -1083,7 +1083,10 @@ class DisplayController:
                 if module_name in {"splash", "sleep"}:
                     from edit_preview import bounded_screen_preview_duration_seconds
 
-                    assert authority is not None
+                    if authority is None:
+                        raise RuntimeError(
+                            "display controller is stopping or lifecycle changed"
+                        )
                     preparation = self._begin_preview_preparation(authority)
                     duration = bounded_screen_preview_duration_seconds(
                         snapshot, module_name,
