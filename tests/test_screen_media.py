@@ -434,9 +434,11 @@ class ScreenMediaRevisionTests(unittest.TestCase):
         class HardwareBoundary:
             show_gif = Matrix.show_gif
 
-            def __init__(self):
+            def __init__(self, preview_started):
                 self.frames = []
                 self.pixel = None
+                self.preview_invocation = 0
+                self.preview_started = preview_started
 
             def clear(self):
                 self.pixel = None
@@ -446,6 +448,8 @@ class ScreenMediaRevisionTests(unittest.TestCase):
 
             def draw_image(self, image, **_kwargs):
                 self.pixel = image.convert("RGB").getpixel((0, 0))
+                if 0 < self.preview_invocation <= len(self.preview_started):
+                    self.preview_started[self.preview_invocation - 1].set()
 
             def swap(self):
                 self.frames.append(self.pixel)
@@ -499,8 +503,24 @@ class ScreenMediaRevisionTests(unittest.TestCase):
                     pairing.active_pin.return_value = None
                     pairing.has_testing_pin.return_value = False
                     pairing.verify.return_value = True
-                    matrix = HardwareBoundary()
+                    preview_started = (threading.Event(), threading.Event())
+                    matrix = HardwareBoundary(preview_started)
                     controller = DisplayController(matrix, store)
+                    preview_invocations = []
+                    original_execute = controller._execute
+
+                    def tracked_execute(
+                        name, config, duration, *, pinned_handle=None, pinned_handles=None,
+                    ):
+                        if name == screen:
+                            preview_invocations.append(name)
+                            matrix.preview_invocation = len(preview_invocations)
+                        return original_execute(
+                            name, config, duration,
+                            pinned_handle=pinned_handle, pinned_handles=pinned_handles,
+                        )
+
+                    controller._execute = tracked_execute
                     app = create_app(
                         controller, store, pairing,
                         secret_key="dormant-reload-preview-test",
@@ -523,6 +543,7 @@ class ScreenMediaRevisionTests(unittest.TestCase):
                             f"/api/preview/{screen}", headers=headers,
                         )
                         self.assertEqual(initial.status_code, 202)
+                        self.assertTrue(preview_started[0].wait(2))
                         self.assertTrue(wait_for_frames(matrix, 2))
                         self.assertEqual(matrix.frames[:2], [(255, 0, 0), (0, 0, 255)])
 
@@ -536,10 +557,11 @@ class ScreenMediaRevisionTests(unittest.TestCase):
                                 if reload_pending:
                                     scheduler_waiting.set()
                                     self.assertTrue(release_scheduler.wait(3))
+                                if controller._shutdown.is_set():
+                                    return False
                                 return original_acknowledge()
 
                             controller._acknowledge_reload_boundary = gated_acknowledge
-                            client.post(f"/api/preview/{screen}", headers=headers)
                             reloaded = client.post(
                                 "/api/control/reload", headers=headers,
                             )
@@ -557,6 +579,11 @@ class ScreenMediaRevisionTests(unittest.TestCase):
                             stop_thread.join(2)
                             self.assertFalse(stop_thread.is_alive())
                             self.assertEqual(stop_responses[0].status_code, 200)
+                            with controller._state_lock:
+                                self.assertEqual(
+                                    set(controller._reload_obligations.values()),
+                                    {"settled-success"},
+                                )
                         else:
                             stopped = client.post(
                                 "/api/control/stop", headers=headers,
@@ -589,6 +616,14 @@ class ScreenMediaRevisionTests(unittest.TestCase):
                         self.assertEqual(
                             fresh.status_code, 202, fresh.get_data(as_text=True),
                         )
+                        if sequence == "reload-stop-before-ack-preview":
+                            with controller._state_lock:
+                                self.assertFalse(controller._reload_obligations)
+                        self.assertTrue(
+                            preview_started[1].wait(2),
+                            "the second saved Preview invocation did not become active",
+                        )
+                        self.assertEqual(preview_invocations, [screen, screen])
                         self.assertTrue(wait_for_frames(matrix, 2))
                         self.assertEqual(matrix.frames[:2], [(255, 0, 0), (0, 0, 255)])
                     finally:
