@@ -296,7 +296,12 @@ def candidate_media_references(candidate) -> tuple[str, ...]:
 
     media = candidate.get("media", {})
     for module_name in ("splash", "sleep"):
-        add(media.get(module_name))
+        rows = [
+            item for item in candidate.get("playlist", [])
+            if isinstance(item, dict) and item.get("module") == module_name
+        ]
+        if not rows:
+            add(media.get(module_name))
     for item in candidate.get("playlist", []):
         if isinstance(item, dict) and item.get("module") in {"splash", "sleep"}:
             add(item.get("source"))

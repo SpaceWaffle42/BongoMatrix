@@ -15,7 +15,12 @@ import time
 
 from PIL import Image
 
-from media_resolver import MediaResolver, module_media_references
+from media_resolver import MediaResolutionError, MediaResolver, module_media_references
+from screen_media import (
+    ScreenMediaCatalog,
+    ScreenMediaRuntime,
+    repair_saved_screen,
+)
 from modules.media_player import play_media
 from device_preview import (
     DevicePreviewManager, PreviewAdmissionStatus, PreviewExpiryCause,
@@ -53,6 +58,10 @@ MODULE_DEFAULT_DURATIONS = {
 ONE_OFF_PREVIEW_DURATION = 15
 UNBOUNDED_DEVICE_PREVIEW_SLICE_SECONDS = 3600
 OPENWEATHER_PREPARATION_DEADLINE_SECONDS = PreviewProvider.MAX_REQUEST_SECONDS
+SAVED_PREVIEW_METADATA_DEADLINE_SECONDS = PreviewProvider.MAX_REQUEST_SECONDS
+_RELOAD_FENCE_ACTIVE = "active"
+_RELOAD_FENCE_SETTLED_SUCCESS = "settled-success"
+_RELOAD_FENCE_SETTLED_TIMEOUT = "settled-timeout"
 
 
 def playlist_item_config(config, item, *, chooser=None):
@@ -197,10 +206,11 @@ def custom_module(config, module_name):
 class _PinnedModulePreview:
     """Own one saved media Preview snapshot and its pinned capability."""
 
-    def __init__(self, module_name, config, resolver, pinned_handles):
+    def __init__(self, module_name, config, resolver, pinned_handles, duration=None):
         self.module_name = module_name
         self.config = config
         self.resolver = resolver
+        self.duration = duration
         if isinstance(pinned_handles, dict):
             self.pinned_handles = pinned_handles
         else:
@@ -210,6 +220,24 @@ class _PinnedModulePreview:
     def close(self):
         if self.resolver is not None:
             self.resolver.close()
+
+
+class _PreviewPreparation:
+    """Expose cancellation and completion for one saved Preview preparation."""
+
+    def __init__(
+        self, lifecycle_generation, admission_generation, *, pairing_generation,
+        allow_stopped=False,
+    ):
+        self.lifecycle_generation = lifecycle_generation
+        self.admission_generation = admission_generation
+        self.pairing_generation = pairing_generation
+        self.allow_stopped = allow_stopped
+        self.stop_event = threading.Event()
+        self.done = threading.Event()
+
+    def cancel(self):
+        self.stop_event.set()
 
 
 class _PinnedMediaPreview:
@@ -279,6 +307,10 @@ class DisplayController:
         self._thread = None
         self._stopping = False
         self._lifecycle_generation = 0
+        self._module_admission_generation = 0
+        self._reload_obligations = {}
+        self._reload_admission_fence = None
+        self._reload_fence_state = None
         self._module_stop = None
         self.device_preview_manager = DevicePreviewManager(
             on_expire=self._expire_device_draft,
@@ -291,6 +323,7 @@ class DisplayController:
         self._preview_name = None
         self._media_preview_name = None
         self._announcement_preview = None
+        self._preview_preparations = set()
         self._pairing_timer = None
         self._pairing_page_timer = None
         self._pairing_pin = None
@@ -304,6 +337,70 @@ class DisplayController:
         self.last_error = None
         self._scheduler_fault_backoff = 0.25
         self._scheduler_next_fault_log = 0.0
+        try:
+            screen_catalog = ScreenMediaCatalog(config_store.media_root)
+        except (AttributeError, TypeError):
+            screen_catalog = lambda _screen: {}
+        self._screen_runtime = ScreenMediaRuntime(catalog=screen_catalog)
+        self._sleep_session_active = False
+
+    def _sync_reload_fence_aliases_locked(self):
+        """Expose the newest obligation through the legacy diagnostic fields."""
+        if not self._reload_obligations:
+            self._reload_admission_fence = None
+            self._reload_fence_state = None
+            return
+        generation = max(self._reload_obligations)
+        self._reload_admission_fence = generation
+        self._reload_fence_state = self._reload_obligations[generation]
+
+    def _reload_admission_blocked_locked(self):
+        return bool(self._reload_obligations) or self._reload_admission_fence is not None
+
+    def _retire_dormant_successful_reloads_locked(self):
+        """Retire reloads that already synchronized before the scheduler stopped."""
+        if not self._reload_obligations or any(
+            state != _RELOAD_FENCE_SETTLED_SUCCESS
+            for state in self._reload_obligations.values()
+        ):
+            return False
+        self._reload_obligations.clear()
+        self._sync_reload_fence_aliases_locked()
+        self._reload_requested.clear()
+        return True
+
+    def _module_admission_snapshot_locked(self):
+        if (
+            self._shutdown.is_set()
+            or self._pairing_pause.is_set()
+            or self._reload_admission_blocked_locked()
+        ):
+            return None
+        return self._module_admission_generation
+
+    def _module_admission_current_locked(self, generation, stop_event):
+        return (
+            generation is not None
+            and generation == self._module_admission_snapshot_locked()
+            and not stop_event.is_set()
+        )
+
+    def _preview_preparation_current_locked(self, preparation):
+        if preparation.pairing_generation != self._pairing_generation:
+            return False
+        if self._module_admission_current_locked(
+            preparation.admission_generation, preparation.stop_event,
+        ):
+            return True
+        return (
+            preparation.allow_stopped
+            and preparation.admission_generation == self._module_admission_generation
+            and not preparation.stop_event.is_set()
+            and self._shutdown.is_set()
+            and self._thread is None
+            and not self._pairing_pause.is_set()
+            and not self._reload_admission_blocked_locked()
+        )
 
     @property
     def running(self):
@@ -329,18 +426,82 @@ class DisplayController:
             return True
 
     def _interrupt_module(self, timeout=None):
-        if timeout is None:
-            acquired = self._state_lock.acquire()
+        return self._cancel_and_quiesce(
+            stop_module=True, stop_preview_preparation=True,
+            wait=False, timeout=timeout,
+        )
+
+    def _cancel_and_quiesce(
+        self, *, stop_module=False, stop_device_draft=False,
+        stop_preview_preparation=False,
+        wait=True, timeout=None, close_device_drafts=False, on_quiesced=None,
+        fence_reload_admission=False,
+    ):
+        """Install cancellation authority before waiting for display ownership."""
+        deadline = None if timeout is None else time.monotonic() + max(0, timeout)
+        reload_generation = None
+        synchronized = False
+        if deadline is None:
+            state_acquired = self._state_lock.acquire()
         else:
-            acquired = self._state_lock.acquire(timeout=max(0, timeout))
-        if not acquired:
+            state_acquired = self._state_lock.acquire(
+                timeout=max(0, deadline - time.monotonic())
+            )
+        if not state_acquired:
             return False
         try:
-            if self._module_stop is not None:
+            if fence_reload_admission:
+                self._module_admission_generation += 1
+                reload_generation = self._module_admission_generation
+                self._reload_obligations[reload_generation] = _RELOAD_FENCE_ACTIVE
+                self._sync_reload_fence_aliases_locked()
+                self._reload_requested.set()
+            if stop_device_draft:
+                self._device_draft_pending = None
+                if self._device_draft_stop is not None:
+                    self._device_draft_stop.set()
+            if stop_module and self._module_stop is not None:
                 self._module_stop.set()
-            return True
+            preparations = tuple(self._preview_preparations)
+            if stop_preview_preparation:
+                for preparation in preparations:
+                    preparation.cancel()
         finally:
             self._state_lock.release()
+        try:
+            if not wait:
+                return True
+            if stop_preview_preparation:
+                for preparation in preparations:
+                    remaining = None if deadline is None else max(
+                        0, deadline - time.monotonic(),
+                    )
+                    if not preparation.done.wait(remaining):
+                        return False
+            if deadline is None:
+                synchronized = self._display_lock.acquire()
+            else:
+                synchronized = self._display_lock.acquire(
+                    timeout=max(0, deadline - time.monotonic())
+                )
+            if not synchronized:
+                return False
+            try:
+                result = True if on_quiesced is None else bool(on_quiesced())
+            finally:
+                self._display_lock.release()
+            if close_device_drafts:
+                self.device_preview_manager.close()
+            return result
+        finally:
+            if reload_generation is not None:
+                with self._state_lock:
+                    self._reload_obligations[reload_generation] = (
+                        _RELOAD_FENCE_SETTLED_SUCCESS
+                        if synchronized
+                        else _RELOAD_FENCE_SETTLED_TIMEOUT
+                    )
+                    self._sync_reload_fence_aliases_locked()
 
     def stop(self, timeout=5):
         deadline = time.monotonic() + max(0, float(timeout))
@@ -355,6 +516,12 @@ class DisplayController:
             self._terminate_device_draft(wait=False)
             if not self._interrupt_module(timeout=max(0, deadline - time.monotonic())):
                 return False
+            with self._state_lock:
+                preparations = tuple(self._preview_preparations)
+            for preparation in preparations:
+                preparation.cancel()
+                if not preparation.done.wait(max(0, deadline - time.monotonic())):
+                    return False
             pairing_setup_active = self._pairing_setup.is_set()
             if not self.end_pairing(timeout=max(0, deadline - time.monotonic())):
                 return False
@@ -392,21 +559,19 @@ class DisplayController:
             with self._lifecycle_lock:
                 self._stopping = False
 
-    def reload(self):
-        self._terminate_device_draft()
-        self._reload_requested.set()
-        self._interrupt_module()
+    def reload(self, timeout=None):
+        return self._cancel_and_quiesce(
+            stop_module=True, stop_device_draft=True,
+            stop_preview_preparation=True,
+            timeout=timeout, close_device_drafts=True,
+            fence_reload_admission=True,
+        )
 
-    def _terminate_device_draft(self, *, wait=True):
-        with self._state_lock:
-            stop_event = self._device_draft_stop
-            self._device_draft_pending = None
-            if stop_event is not None:
-                stop_event.set()
-        if wait:
-            with self._display_lock:
-                pass
-            self.device_preview_manager.close()
+    def _terminate_device_draft(self, *, wait=True, timeout=None):
+        return self._cancel_and_quiesce(
+            stop_device_draft=True, wait=wait, timeout=timeout,
+            close_device_drafts=wait,
+        )
 
     def shutdown_device_drafts(self):
         self._terminate_device_draft()
@@ -630,14 +795,21 @@ class DisplayController:
                 return False
             lease, renderer = pending
             stop_event = threading.Event()
+            admission_generation = self._module_admission_snapshot_locked()
             self._device_draft_active_lease = lease
             self._device_draft_stop = stop_event
             self._module_stop = stop_event
         request = lease.request
-        guard = lambda: (
-            not stop_event.is_set()
-            and self.device_preview_manager.is_current(request.owner, request.generation)
-        )
+
+        def guard():
+            with self._state_lock:
+                admitted = self._module_admission_current_locked(
+                    admission_generation, stop_event,
+                )
+            return admitted and self.device_preview_manager.is_current(
+                request.owner, request.generation,
+            )
+
         self.current_module = f"device-draft:{request.config.get('module', 'unknown')}"
         try:
             with self._display_lock:
@@ -754,9 +926,59 @@ class DisplayController:
                 raise RuntimeError("display controller is stopping or lifecycle changed")
             return self._lifecycle_generation
 
+    def _preview_preparation_authority(self, expected_generation):
+        with self._lifecycle_lock:
+            if (
+                self._stopping
+                or expected_generation != self._lifecycle_generation
+            ):
+                raise RuntimeError("display controller is stopping or lifecycle changed")
+            with self._state_lock:
+                dormant = (
+                    self._shutdown.is_set()
+                    and self._thread is None
+                    and not self._pairing_pause.is_set()
+                )
+                if dormant:
+                    self._retire_dormant_successful_reloads_locked()
+                admission_generation = self._module_admission_snapshot_locked()
+                allow_stopped = (
+                    admission_generation is None
+                    and dormant
+                    and not self._reload_admission_blocked_locked()
+                )
+                if allow_stopped:
+                    admission_generation = self._module_admission_generation
+                if admission_generation is None:
+                    raise RuntimeError("display controller is stopping or lifecycle changed")
+                return _PreviewPreparation(
+                    expected_generation,
+                    admission_generation,
+                    pairing_generation=self._pairing_generation,
+                    allow_stopped=allow_stopped,
+                )
+
+    def _begin_preview_preparation(self, preparation):
+        with self._lifecycle_lock:
+            if (
+                self._stopping
+                or preparation.lifecycle_generation != self._lifecycle_generation
+            ):
+                raise RuntimeError("display controller is stopping or lifecycle changed")
+            with self._state_lock:
+                if not self._preview_preparation_current_locked(preparation):
+                    raise RuntimeError("display controller is stopping or lifecycle changed")
+                self._preview_preparations.add(preparation)
+        return preparation
+
+    def _finish_preview_preparation(self, preparation):
+        preparation.done.set()
+        with self._state_lock:
+            self._preview_preparations.discard(preparation)
+
     def _queue_preview(
         self, *, pending=None, media_preview=None, announcement_preview=None,
-        expected_generation=None,
+        expected_generation=None, preparation=None,
     ):
         queued = (pending, media_preview, announcement_preview)
         with self._lifecycle_lock:
@@ -768,18 +990,29 @@ class DisplayController:
                 _close_preview_owners(*queued)
                 raise RuntimeError("display controller is stopping or lifecycle changed")
             with self._state_lock:
-                displaced = (
-                    self._preview_name,
-                    self._media_preview_name,
-                    self._announcement_preview,
-                )
-                (
-                    self._preview_name,
-                    self._media_preview_name,
-                    self._announcement_preview,
-                ) = queued
-                if self._module_stop is not None:
-                    self._module_stop.set()
+                if preparation is not None and (
+                    preparation not in self._preview_preparations
+                    or not self._preview_preparation_current_locked(preparation)
+                ):
+                    rejected = True
+                    displaced = (None, None, None)
+                else:
+                    rejected = False
+                    displaced = (
+                        self._preview_name,
+                        self._media_preview_name,
+                        self._announcement_preview,
+                    )
+                    (
+                        self._preview_name,
+                        self._media_preview_name,
+                        self._announcement_preview,
+                    ) = queued
+                    if self._module_stop is not None:
+                        self._module_stop.set()
+            if rejected:
+                _close_preview_owners(*queued)
+                raise RuntimeError("display controller is stopping or lifecycle changed")
             try:
                 self.start()
             except BaseException:
@@ -803,29 +1036,84 @@ class DisplayController:
 
     def preview(self, module_name):
         generation = self._preview_admission_generation()
-        config = self.config_store.get()
-        if module_name not in MODULES and custom_module(config, module_name) is None:
-            raise KeyError(module_name)
-        if module_name in {"splash", "sleep"}:
-            snapshot = playlist_module_config(config, module_name)
-        else:
-            snapshot = copy.deepcopy(config)
-        references = module_media_references(snapshot, module_name)
-        resolver = None
+        authority = (
+            self._preview_preparation_authority(generation)
+            if module_name in {"splash", "sleep"}
+            else None
+        )
+        preparation = None
         try:
-            pinned_handles = {}
-            if references:
-                resolver = MediaResolver(self.config_store.media_root)
-                for reference in references:
-                    pinned_handles[reference] = resolver.resolve(reference)
-            pending = _PinnedModulePreview(
-                module_name, snapshot, resolver, pinned_handles,
+            config = self.config_store.get()
+            if module_name not in MODULES and custom_module(config, module_name) is None:
+                raise KeyError(module_name)
+            selected_screen_row = None
+            if module_name in {"splash", "sleep"}:
+                snapshot = playlist_module_config(config, module_name)
+            else:
+                snapshot = copy.deepcopy(config)
+            required_references = list(module_media_references(snapshot, module_name))
+            optional_references = []
+            if module_name in {"splash", "sleep"}:
+                row = next((
+                    item for item in snapshot.get("playlist", [])
+                    if isinstance(item, dict) and item.get("module") == module_name
+                ), None)
+                selected_screen_row = row
+                if row is not None:
+                    for reference in row.get("sources", ()):
+                        if (
+                            reference
+                            and reference not in required_references
+                            and reference not in optional_references
+                        ):
+                            optional_references.append(reference)
+            resolver = None
+            try:
+                pinned_handles = {}
+                if required_references or optional_references:
+                    resolver = MediaResolver(self.config_store.media_root)
+                    for reference in required_references:
+                        pinned_handles[reference] = resolver.resolve(reference)
+                    for reference in optional_references:
+                        try:
+                            pinned_handles[reference] = resolver.resolve(reference)
+                        except MediaResolutionError:
+                            pass
+                duration = None
+                if module_name in {"splash", "sleep"}:
+                    from edit_preview import bounded_screen_preview_duration_seconds
+
+                    if authority is None:
+                        raise RuntimeError(
+                            "display controller is stopping or lifecycle changed"
+                        )
+                    preparation = self._begin_preview_preparation(authority)
+                    duration = bounded_screen_preview_duration_seconds(
+                        snapshot, module_name,
+                        snapshot.get("media", {}).get(module_name), pinned_handles,
+                        selected_row=selected_screen_row,
+                        stop_event=preparation.stop_event,
+                        decode_timeout=SAVED_PREVIEW_METADATA_DEADLINE_SECONDS,
+                    )
+                    if duration is None:
+                        raise RuntimeError(
+                            "display controller is stopping or lifecycle changed"
+                        )
+                pending = _PinnedModulePreview(
+                    module_name, snapshot, resolver, pinned_handles, duration,
+                )
+            except BaseException:
+                if resolver is not None:
+                    resolver.close()
+                raise
+            self._queue_preview(
+                pending=pending,
+                expected_generation=generation,
+                preparation=preparation,
             )
-        except BaseException:
-            if resolver is not None:
-                resolver.close()
-            raise
-        self._queue_preview(pending=pending, expected_generation=generation)
+        finally:
+            if preparation is not None:
+                self._finish_preview_preparation(preparation)
 
     def preview_media(self, filename):
         generation = self._preview_admission_generation()
@@ -876,7 +1164,6 @@ class DisplayController:
         return self.matrix.latest_frame_png()
 
     def show_pairing_pin(self, pin, ttl_seconds=600):
-        self._terminate_device_draft()
         with self._lifecycle_lock:
             if self._shutdown.is_set():
                 raise RuntimeError("pairing display unavailable")
@@ -885,7 +1172,14 @@ class DisplayController:
         with self._state_lock:
             self._pairing_generation += 1
             generation = self._pairing_generation
+            self._pairing_pause.set()
         try:
+            if not self._cancel_and_quiesce(
+                stop_module=True, stop_device_draft=True,
+                stop_preview_preparation=True,
+                wait=False,
+            ):
+                raise RuntimeError("pairing display unavailable")
             pairing_ip = self._ip_address_provider()
             with self._lifecycle_lock:
                 lifecycle_current = (
@@ -895,7 +1189,6 @@ class DisplayController:
             if not lifecycle_current:
                 self.end_pairing(generation)
                 raise RuntimeError("pairing display unavailable")
-            self._interrupt_module()
             abort = False
             with self._state_lock:
                 if self._shutdown.is_set():
@@ -903,7 +1196,6 @@ class DisplayController:
                 elif generation != self._pairing_generation:
                     abort = True
                 else:
-                    self._pairing_pause.set()
                     if self._pairing_timer is not None:
                         self._pairing_timer.cancel()
                     if self._pairing_page_timer is not None:
@@ -932,8 +1224,12 @@ class DisplayController:
             if not lifecycle_current:
                 self.end_pairing(generation)
                 raise RuntimeError("pairing display unavailable")
-            displayed = self._draw_pairing_page(
-                show_ip=False, generation=generation,
+            displayed = self._cancel_and_quiesce(
+                stop_preview_preparation=True,
+                close_device_drafts=True,
+                on_quiesced=lambda: self._draw_pairing_page(
+                    show_ip=False, generation=generation, display_owned=True,
+                ),
             )
             with self._lifecycle_lock:
                 lifecycle_current = (
@@ -954,37 +1250,42 @@ class DisplayController:
         finally:
             self._pairing_setup.clear()
 
-    def _draw_pairing_page(self, show_ip, generation=None):
+    def _draw_pairing_page(self, show_ip, generation=None, *, display_owned=False):
+        if display_owned:
+            return self._draw_pairing_page_owned(show_ip, generation)
         with self._display_lock:
-            if (
-                not self._pairing_pause.is_set()
-                or generation is not None
-                and generation != self._pairing_generation
-            ):
-                return False
-            self.matrix.clear()
-            white = self.matrix.colour("white")
-            cyan = self.matrix.colour("vapor_cyan")
-            black = self.matrix.colour("black")
-            if show_ip:
-                self.matrix.draw_text_with_border(
-                    self.matrix.font("4x6"), 18, 7, cyan, black, "PAIR IP"
-                )
-                self.matrix.draw_text_with_border(
-                    self.matrix.font("4x6"), 8, 17, white, black, self._pairing_ip
-                )
-                self.matrix.draw_text_with_border(
-                    self.matrix.font("4x6"), 14, 27, white, black, "PORT 5000"
-                )
-            else:
-                self.matrix.draw_text_with_border(
-                    self.matrix.font("5x7"), 20, 10, cyan, black, "PAIR"
-                )
-                self.matrix.draw_text_with_border(
-                    self.matrix.font("6x10"), 12, 25, white, black, self._pairing_pin
-                )
-            self.matrix.swap()
-            return True
+            return self._draw_pairing_page_owned(show_ip, generation)
+
+    def _draw_pairing_page_owned(self, show_ip, generation=None):
+        if (
+            not self._pairing_pause.is_set()
+            or generation is not None
+            and generation != self._pairing_generation
+        ):
+            return False
+        self.matrix.clear()
+        white = self.matrix.colour("white")
+        cyan = self.matrix.colour("vapor_cyan")
+        black = self.matrix.colour("black")
+        if show_ip:
+            self.matrix.draw_text_with_border(
+                self.matrix.font("4x6"), 18, 7, cyan, black, "PAIR IP"
+            )
+            self.matrix.draw_text_with_border(
+                self.matrix.font("4x6"), 8, 17, white, black, self._pairing_ip
+            )
+            self.matrix.draw_text_with_border(
+                self.matrix.font("4x6"), 14, 27, white, black, "PORT 5000"
+            )
+        else:
+            self.matrix.draw_text_with_border(
+                self.matrix.font("5x7"), 20, 10, cyan, black, "PAIR"
+            )
+            self.matrix.draw_text_with_border(
+                self.matrix.font("6x10"), 12, 25, white, black, self._pairing_pin
+            )
+        self.matrix.swap()
+        return True
 
     def _rotate_pairing_page(self, generation):
         with self._state_lock:
@@ -1087,14 +1388,12 @@ class DisplayController:
     def _execute_announcement_preview(self, preview):
         if not isinstance(preview, _PinnedAnnouncementPreview):
             raise TypeError("pinned announcement preview is required")
-        if self._shutdown.is_set() or self._pairing_pause.is_set():
-            return False
         stop_event = threading.Event()
         module = importlib.import_module("modules.announcement_board")
         with self._state_lock:
+            admission_generation = self._module_admission_snapshot_locked()
             if (
-                self._shutdown.is_set()
-                or self._pairing_pause.is_set()
+                admission_generation is None
                 or self._announcement_preview is not None
                 or self._media_preview_name is not None
                 or self._preview_name is not None
@@ -1105,6 +1404,11 @@ class DisplayController:
         self.last_error = None
         try:
             with self._display_lock:
+                with self._state_lock:
+                    if not self._module_admission_current_locked(
+                        admission_generation, stop_event,
+                    ):
+                        return False
                 return module.run_preview(
                     self.matrix,
                     preview.announcement,
@@ -1124,13 +1428,11 @@ class DisplayController:
     def _execute_media(self, preview, duration):
         if not isinstance(preview, _PinnedMediaPreview):
             raise TypeError("pinned media preview is required")
-        if self._shutdown.is_set() or self._pairing_pause.is_set():
-            return False
         stop_event = threading.Event()
         with self._state_lock:
+            admission_generation = self._module_admission_snapshot_locked()
             if (
-                self._shutdown.is_set()
-                or self._pairing_pause.is_set()
+                admission_generation is None
                 or self._announcement_preview is not None
                 or self._media_preview_name is not None
                 or self._preview_name is not None
@@ -1141,6 +1443,11 @@ class DisplayController:
         self.last_error = None
         try:
             with self._display_lock:
+                with self._state_lock:
+                    if not self._module_admission_current_locked(
+                        admission_generation, stop_event,
+                    ):
+                        return False
                 return play_media(
                     self.matrix,
                     preview.filename,
@@ -1158,16 +1465,90 @@ class DisplayController:
                 if self._module_stop is stop_event:
                     self._module_stop = None
 
+    def _execute_scheduled_screen(
+        self, config, item, *, maximum_duration=None, entering_sleep=False,
+    ):
+        """Select and execute one screen identity, retrying failures once each."""
+        screen = item["module"]
+        if screen not in {"splash", "sleep"}:
+            raise ValueError("scheduled screen execution requires a splash or sleep row")
+        item_id = item.get("id")
+        try:
+            media_root = self.config_store.media_root
+            if not media_root.exists():
+                raise AttributeError("screen media root is unavailable")
+            repair = repair_saved_screen(
+                self.config_store, config, screen, media_root, row_id=item_id,
+            )
+            config = repair.config
+            item = next(
+                (
+                    row for row in config["playlist"]
+                    if row.get("module") == screen
+                    and (item_id is None or row.get("id") == item_id)
+                ),
+                None,
+            )
+            if item is None:
+                return False
+            if repair.default_unavailable:
+                LOGGER.error(
+                    "Matrix %s default media is unavailable; nothing will be shown",
+                    screen,
+                )
+        except (AttributeError, TypeError):
+            pass
+        if item is None:
+            return False
+        attempts = len(item.get("sources", ()))
+        for _attempt in range(attempts):
+            if screen == "splash":
+                media = self._screen_runtime.choose_splash(config, item)
+            elif entering_sleep:
+                media = self._screen_runtime.begin_sleep(config, item)
+                self._sleep_session_active = True
+                entering_sleep = False
+            else:
+                media = self._screen_runtime.current_sleep(config, item)
+            if media is None:
+                return False
+            reference = media.reference
+            selected = playlist_item_config(
+                config, item, chooser=lambda _sources: reference,
+            )
+            duration = self._screen_runtime.duration(config, screen, media, item)
+            if maximum_duration is not None:
+                duration = min(duration, maximum_duration)
+            try:
+                selected["_screen_maximum_duration"] = maximum_duration
+                try:
+                    rendered = bool(self._execute(screen, selected, duration))
+                finally:
+                    selected.pop("_screen_maximum_duration", None)
+                if screen == "splash" and not rendered:
+                    self._screen_runtime.restore_splash(media, item)
+                return rendered
+            except Exception:
+                LOGGER.exception(
+                    "Matrix %s media %s failed; trying the next usable selection",
+                    screen, media.reference,
+                )
+                if screen == "splash":
+                    self._screen_runtime.retire_splash(media, item)
+                else:
+                    self._screen_runtime.retire_sleep(media, item)
+        return False
+
     def _execute(
         self, name, config, duration, *, pinned_handle=None, pinned_handles=None,
     ):
-        if self._shutdown.is_set() or self._pairing_pause.is_set():
-            return False
         custom = custom_module(config, name)
         stop_event = threading.Event()
         with self._state_lock:
+            admission_generation = self._module_admission_snapshot_locked()
             if (
-                self._device_draft_pending is not None
+                admission_generation is None
+                or self._device_draft_pending is not None
                 or self._announcement_preview is not None
                 or self._media_preview_name is not None
                 or self._preview_name is not None
@@ -1181,8 +1562,9 @@ class DisplayController:
             raise KeyError(name)
         with self._state_lock:
             if (
-                self._shutdown.is_set()
-                or self._pairing_pause.is_set()
+                not self._module_admission_current_locked(
+                    admission_generation, stop_event,
+                )
                 or self._device_draft_pending is not None
                 or self._announcement_preview is not None
                 or self._media_preview_name is not None
@@ -1214,6 +1596,7 @@ class DisplayController:
                 reference = config.get("media", {}).get(name)
                 if reference is not None and pinned_handles is not None:
                     options["pinned_handle"] = pinned_handles[reference]
+                options["maximum_duration"] = config.get("_screen_maximum_duration")
             if name == "announcement_board" and pinned_handles is not None:
                 options["pinned_handles"] = pinned_handles
             if custom is not None:
@@ -1252,6 +1635,11 @@ class DisplayController:
                     return False
                 options["prepared"] = _prepared_openweather(name, transported)
             with self._display_lock:
+                with self._state_lock:
+                    if not self._module_admission_current_locked(
+                        admission_generation, stop_event,
+                    ):
+                        return False
                 return module.run(
                     self.matrix,
                     config,
@@ -1290,12 +1678,31 @@ class DisplayController:
         self._scheduler_fault_backoff = 0.25
         self._scheduler_next_fault_log = 0.0
 
+    def _acknowledge_reload_boundary(self):
+        """Retire one stable snapshot of settled reload obligations."""
+        with self._state_lock:
+            snapshot = dict(self._reload_obligations)
+        if any(state == _RELOAD_FENCE_ACTIVE for state in snapshot.values()):
+            return False
+        if any(state == _RELOAD_FENCE_SETTLED_TIMEOUT for state in snapshot.values()):
+            with self._display_lock:
+                pass
+        with self._state_lock:
+            if self._reload_obligations != snapshot:
+                return False
+            self._reload_obligations.clear()
+            self._sync_reload_fence_aliases_locked()
+            self._reload_requested.clear()
+            return True
+
     def _run_loop_unchecked(self):
         while not self._shutdown.is_set():
             self._wait_while_pairing()
             if self._shutdown.is_set():
                 break
-            self._reload_requested.clear()
+            if not self._acknowledge_reload_boundary():
+                self._shutdown.wait(0.01)
+                continue
             with self._state_lock:
                 device_draft_pending = self._device_draft_pending is not None
             if device_draft_pending:
@@ -1330,7 +1737,11 @@ class DisplayController:
                         self._execute(
                             preview.module_name,
                             preview.config,
-                            invocation_default_duration(preview.module_name),
+                            (
+                                preview.duration
+                                if preview.duration is not None
+                                else invocation_default_duration(preview.module_name)
+                            ),
                             pinned_handles=preview.pinned_handles,
                         )
                     finally:
@@ -1342,6 +1753,9 @@ class DisplayController:
 
             acceptance_inactive = self._acceptance_inactive_probe()
             active = False if acceptance_inactive is not None else self._is_active(config)
+            if active and self._sleep_session_active:
+                self._screen_runtime.end_sleep()
+                self._sleep_session_active = False
             brightness = (
                 config["display"]["day_brightness"]
                 if active
@@ -1370,6 +1784,8 @@ class DisplayController:
                         "duration": invocation_default_duration("sleep"),
                         "enabled": True,
                     }]
+                entering_sleep = bool(sleep_items) and not self._sleep_session_active
+                sleep_cycle_rendered = False
                 try:
                     for item in sleep_items:
                         if (
@@ -1383,19 +1799,34 @@ class DisplayController:
                             schedule_now = dt.datetime.now()
                             if self._is_active(config, schedule_now):
                                 break
-                            duration = min(
-                                duration,
-                                self._seconds_until_schedule_change(config, schedule_now),
+                            maximum_duration = self._seconds_until_schedule_change(
+                                config, schedule_now,
                             )
-                            if duration <= 0:
+                            if maximum_duration <= 0:
                                 break
-                        self._execute(
-                            "sleep", playlist_item_config(config, item), duration
-                        )
+                        if acceptance_inactive is None:
+                            sleep_cycle_rendered = bool(
+                                self._execute_scheduled_screen(
+                                    config, item, maximum_duration=maximum_duration,
+                                    entering_sleep=entering_sleep,
+                                )
+                            ) or sleep_cycle_rendered
+                            entering_sleep = False
+                        else:
+                            self._execute(
+                                "sleep", playlist_item_config(config, item), duration
+                            )
                 finally:
                     if acceptance_inactive is not None:
                         self._finish_acceptance_inactive_probe(acceptance_inactive)
-                if not sleep_items and acceptance_inactive is None:
+                if (
+                    acceptance_inactive is None
+                    and not sleep_cycle_rendered
+                    and not self._shutdown.is_set()
+                    and not self._reload_requested.is_set()
+                    and not self._pairing_pause.is_set()
+                    and not self._is_active(config)
+                ):
                     self._shutdown.wait(0.25)
                 self._mark_scheduler_healthy()
                 continue
@@ -1450,7 +1881,11 @@ class DisplayController:
                             rendered = self._execute(
                                 preview.module_name,
                                 preview.config,
-                                invocation_default_duration(preview.module_name),
+                                (
+                                    preview.duration
+                                    if preview.duration is not None
+                                    else invocation_default_duration(preview.module_name)
+                                ),
                                 pinned_handles=preview.pinned_handles,
                             )
                         finally:
@@ -1461,16 +1896,21 @@ class DisplayController:
                         )
                     cycle_rendered = bool(rendered) or cycle_rendered
                     break
-                cycle_rendered = bool(
-                    self._execute(
+                maximum_duration = self._seconds_until_schedule_change(
+                    config, schedule_now,
+                )
+                if item["module"] == "splash":
+                    rendered = self._execute_scheduled_screen(
+                        config, item, maximum_duration=maximum_duration,
+                    )
+                else:
+                    rendered = self._execute(
                         item["module"],
                         playlist_item_config(config, item),
-                        min(
-                            item["duration"],
-                            self._seconds_until_schedule_change(config, schedule_now),
-                        ),
+                        min(item["duration"], maximum_duration),
                     )
-                ) or cycle_rendered
+                cycle_rendered = bool(rendered) or cycle_rendered
+
             if (
                 not cycle_rendered
                 and not self._shutdown.is_set()

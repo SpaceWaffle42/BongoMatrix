@@ -184,7 +184,10 @@ DEFAULT_CONFIG = {
         "text_colour": "#ffffff",
         "border_colour": "#000000",
     },
-    "media": {"splash": "built-in/rubik_squares.gif", "sleep": "built-in/sleep.gif"},
+    "media": {
+        "splash": "built-in/splash_loading_squares.gif",
+        "sleep": "built-in/sleep.gif",
+    },
     "media_layout": {
         "splash": {"x": 0, "y": 0, "width": 64, "height": 32, "keep_aspect": True, "video_fps": 20, "playback_speed_percent": 100.0},
         "sleep": {"x": 0, "y": 0, "width": 64, "height": 32, "keep_aspect": True, "video_fps": 20, "playback_speed_percent": 100.0},
@@ -194,13 +197,8 @@ DEFAULT_CONFIG = {
     "playlist": [
         {
             "id": "splash_default", "module": "splash",
-            "source": "built-in/rubik_squares.gif", "duration": 8,
-            "sources": [
-                "built-in/rubik_squares.gif",
-                "built-in/waterfall_squares.gif",
-                "built-in/loading_squares.gif",
-                "built-in/zigzag_squares.gif",
-            ],
+            "source": "built-in/splash_loading_squares.gif", "duration": 8,
+            "sources": ["built-in/splash_loading_squares.gif"],
             "enabled": True,
             "layout": {
                 "x": 0, "y": 0, "width": 64, "height": 32,
@@ -1088,19 +1086,20 @@ def validate_config(
             if item_id in media_item_ids:
                 raise ValueError("splash and sleep playlist item ids must be unique")
             media_item_ids.add(item_id)
-            if not _is_safe_media_reference(item.get("source")):
-                raise ValueError(f"{module_name} playlist source must be a safe media reference")
             sources = item.get("sources")
-            if (
-                not isinstance(sources, list) or not sources
-                or len(sources) != len(set(sources))
-                or any(not _is_safe_media_reference(source) for source in sources)
-            ):
+            if not isinstance(sources, list) or len(sources) != len(set(sources)):
                 raise ValueError(
-                    f"{module_name} playlist sources must be a non-empty list "
-                    "of unique safe media references"
+                    f"{module_name} playlist sources must be a list of unique media references"
                 )
-            item["source"] = sources[0]
+            if not sources:
+                if item.get("enabled") is not False or item.get("source") != "":
+                    raise ValueError(f"enabled {module_name} screen requires selected media")
+            elif any(not _is_safe_media_reference(source) for source in sources):
+                raise ValueError(
+                    f"{module_name} playlist sources must contain only safe media references"
+                )
+            else:
+                item["source"] = sources[0]
             _validate_media_layout(item.get("layout"), f"playlist item {item_id}")
             first_media_items.setdefault(module_name, item)
         elif set(item) != {"module", "duration", "enabled"}:
@@ -1137,11 +1136,12 @@ def validate_config(
     # ConfigStore synchronizes playlist-aware writes into these aliases before
     # validation; direct legacy callers can still update only the scalar slot.
     for module_name, item in first_media_items.items():
-        item["source"] = config["media"][module_name]
-        item["sources"] = [
-            config["media"][module_name],
-            *(source for source in item["sources"] if source != config["media"][module_name]),
-        ]
+        if item["sources"]:
+            item["source"] = config["media"][module_name]
+            item["sources"] = [
+                config["media"][module_name],
+                *(source for source in item["sources"] if source != config["media"][module_name]),
+            ]
         item["layout"] = copy.deepcopy(config["media_layout"][module_name])
     if (
         enforce_save_bounds
@@ -1285,10 +1285,11 @@ def _synchronize_media_playlist_changes(
             occurrence += 1
     for current_index, item in sorted(hidden_rows, key=lambda entry: entry[0]):
         candidate["playlist"].insert(min(current_index, len(candidate["playlist"])), item)
-    playlist_changed = (
-        "playlist" in changes and changes["playlist"] != current["playlist"]
-    )
     for module_name in MEDIA_PLAYLIST_MODULES:
+        if legacy_contract and current_media_rows[module_name]:
+            first_current = current_media_rows[module_name][0]
+            if first_current.get("sources"):
+                candidate["media"][module_name] = first_current["source"]
         item = next(
             (
                 entry for entry in candidate["playlist"]
@@ -1300,14 +1301,21 @@ def _synchronize_media_playlist_changes(
             continue
         if (
             not legacy_contract
-            and playlist_changed
+            and "playlist" in changes
+            and module_name in rich_candidate_modules
             and "source" in item
             and "layout" in item
         ):
-            candidate["media"][module_name] = item["source"]
+            # Disabled rows may intentionally have no selected media. Preserve
+            # the valid legacy alias instead of copying an invalid empty scalar.
+            if item.get("sources"):
+                candidate["media"][module_name] = item["source"]
             candidate["media_layout"][module_name] = copy.deepcopy(item["layout"])
             continue
-        if module_name in changes.get("media", {}):
+        if (
+            module_name in changes.get("media", {})
+            and (not legacy_contract or not current_media_rows[module_name])
+        ):
             source = candidate["media"][module_name]
             item["source"] = source
             item["sources"] = (
@@ -1316,6 +1324,31 @@ def _synchronize_media_playlist_changes(
             )
         if module_name in changes.get("media_layout", {}):
             item["layout"] = copy.deepcopy(candidate["media_layout"][module_name])
+    if client_contract in {MINIMUM_CLIENT_CONTRACT, MEDIA_PLAYLIST_CLIENT_CONTRACT}:
+        for screen in MEDIA_PLAYLIST_MODULES:
+            current_ids = [
+                item.get("id") for item in current["playlist"]
+                if isinstance(item, dict) and item.get("module") == screen
+            ]
+            candidate_ids = [
+                item.get("id") for item in candidate["playlist"]
+                if isinstance(item, dict) and item.get("module") == screen
+            ]
+            if len(current_ids) <= 1 and len(candidate_ids) > 1:
+                raise ValueError(
+                    f"new {screen} screen state must contain exactly one row"
+                )
+            if (
+                len(current_ids) > 1
+                and all(isinstance(item_id, str) for item_id in candidate_ids)
+                and (
+                    len(candidate_ids) != len(current_ids)
+                    or set(candidate_ids) != set(current_ids)
+                )
+            ):
+                raise ValueError(
+                    f"legacy {screen} screen row identities must be preserved"
+                )
     return candidate
 
 

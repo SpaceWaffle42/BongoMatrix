@@ -1,6 +1,6 @@
 # Future development notes
 
-Last updated: 2026-09-03
+Last updated: 2026-09-09
 
 This file records requested Matrix features that are intentionally deferred. They are product requirements and design notes, not descriptions of current behavior. Do not treat an item as implemented until its code, tests, review, merge, deployment, and physical-device verification are complete.
 
@@ -364,6 +364,25 @@ Treat **Pixel** in Advanced Canvas as a transparent, editable pixel-art layer ra
 #### Confirmed first-version boundaries
 
 ~~The first version is static pixel artwork with a one-pixel brush. Do not include gradients, anti-aliasing, smoothing, spray brushes, shape tools, symmetry tools, imported-image conversion, or a separate animation-frame editor. Existing Advanced Canvas layer positioning and compositing still apply.~~
+
+### Splash/Sleep revised-release checklist — 0.3.64-preview candidate
+
+This checklist tracks the successor to the superseded 0.3.63-preview Splash/Sleep media-pool candidate. Checked builder items are supported by `/root/matrix_review_evidence/splash-sleep-revision-v4/builder/`; all release and independent-review gates remain pending until their exact artifacts exist.
+
+- [x] Implement the revised one-flow-per-screen configuration, screen-specific media admission, conditional saved-state repair, Splash shuffled-bag lifecycle, retained Sleep sessions, and selected-GIF still-duration calculation (`screen_media.py`, `config_store.py`, `display_controller.py`, `webapp.py`, and `app/templates/dashboard.html`).
+- [x] Add focused backend and real-browser tests for the revised configuration and runtime contract (`tests/test_screen_media.py`, `tests/test_media_playlists.py`, and `tests/test_webapp.py`; RED/GREEN transcripts in the builder evidence directory).
+- [x] ~~Pass the frozen candidate's complete Python suites and configured static/syntax checks with an immutable command/result manifest.~~ (Locally verified with the builder's canonical inventory, structured shard manifest/results, zero skips, and configured Ruff/syntax gates.)
+  - Recovery verification must preserve the prior 1,504-test canonical set and include any new remediation regression IDs. Structured `unittest` start/stop identities are authoritative; multiline descriptions and repeated parent status lines in human-readable logs must not hide or duplicate executions.
+- [ ] Obtain independent frontend, quality, and recovery reviews against the exact candidate commit and tree.
+- [ ] Open a protected merge request and pass exact-head plus exact-protected-main CI.
+- [ ] Publish an immutable code, built-in-asset, and release-tooling manifest, including `resources/media/built-in/splash_loading_squares.gif` and `resources/media/built-in/sleep.gif`.
+- [ ] Reconcile production pre-state, including existing prefixed assets and saved references, without deleting or overwriting unowned state.
+- [ ] Perform the guarded deployment and verify live service, lock ownership, source identity, and mutable-state preservation.
+- [ ] Complete live desktop/mobile UI acceptance and physical Splash/Sleep lifecycle, animation, timing, interruption, disposal, transparency, and aspect-ratio acceptance.
+- [ ] Complete a deliberate rollback with exact baseline and mutable-state acceptance.
+- [ ] Redeploy the exact same reviewed artifact and repeat final live and physical acceptance.
+- [ ] Publish exact GitLab evidence and reconcile every retained finding or deferral.
+- [ ] Complete Kanban handoffs and strike through the roadmap requirements only after review, merge, deployment, rollback, redeployment, and final acceptance are all verified.
 
 ## Priority 2 — New playlist modules
 
