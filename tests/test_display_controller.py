@@ -1150,7 +1150,7 @@ class DisplayControllerTests(unittest.TestCase):
             result = subprocess.run(
                 [
                     sys.executable, "-O", "-m", "unittest",
-                    f"{__name__}.DisplayControllerTests."
+                    "tests.test_display_controller.DisplayControllerTests."
                     "test_saved_screen_preview_rejects_missing_preparation_authority_under_optimization",
                     "-v",
                 ],
