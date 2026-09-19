@@ -331,13 +331,16 @@ class DisplayControllerTests(unittest.TestCase):
             controller = DisplayController(matrix, Mock())
             controller.show_pairing_pin("111111", ttl_seconds=60)
             old_expiry = timers[0]
+            original_cancel_and_quiesce = controller._cancel_and_quiesce
 
-            def block_replacement_interrupt(timeout=None):
+            def block_replacement_interrupt(**_kwargs):
+                if _kwargs.get("wait", True):
+                    return original_cancel_and_quiesce(**_kwargs)
                 replacement_interrupt_started.set()
                 release_replacement.wait(1)
                 return True
 
-            controller._interrupt_module = block_replacement_interrupt
+            controller._cancel_and_quiesce = block_replacement_interrupt
             replacement = threading.Thread(
                 target=lambda: controller.show_pairing_pin("222222", ttl_seconds=60)
             )
@@ -691,6 +694,153 @@ class DisplayControllerTests(unittest.TestCase):
         matrix._frame_capture.publish.assert_not_called()
         self.assertEqual(waits, [0.25])
 
+    def test_sleep_scheduler_waits_interruptibly_when_every_identity_is_unavailable(self):
+        from screen_media import ScreenMediaRuntime
+
+        config = copy.deepcopy(DEFAULT_CONFIG)
+        sleep = next(item for item in config["playlist"] if item["module"] == "sleep")
+        sleep.update(source="missing.gif", sources=["missing.gif"])
+        config["playlist"] = [sleep]
+        store = Mock(media_root=Path("/nonexistent"))
+        controller = DisplayController(Mock(), store)
+        reads = 0
+
+        def get_config():
+            nonlocal reads
+            reads += 1
+            if reads == 2:
+                controller._shutdown.set()
+            return config
+
+        store.get = get_config
+        controller._screen_runtime = ScreenMediaRuntime(catalog=lambda _screen: {})
+        controller._is_active = Mock(return_value=False)
+        controller._seconds_until_schedule_change = Mock(return_value=100)
+        original_wait = controller._shutdown.wait
+        waits = []
+
+        def stop_after_idle(seconds):
+            waits.append(seconds)
+            controller._shutdown.set()
+            return original_wait(0)
+
+        with patch.object(controller._shutdown, "wait", side_effect=stop_after_idle):
+            controller._run_loop_unchecked()
+
+        self.assertEqual(waits, [0.25])
+
+    def test_sleep_scheduler_waits_interruptibly_after_every_play_attempt_fails(self):
+        from screen_media import MediaInfo, ScreenMediaRuntime
+
+        config = copy.deepcopy(DEFAULT_CONFIG)
+        sleep = next(item for item in config["playlist"] if item["module"] == "sleep")
+        sleep.update(source="one.png", sources=["one.png", "two.png"])
+        config["playlist"] = [sleep]
+        catalog = {
+            reference: MediaInfo(reference, identity, "still", None)
+            for reference, identity in {
+                "one.png": (1, 1, 1, 1, 1),
+                "two.png": (1, 2, 1, 1, 1),
+            }.items()
+        }
+        store = Mock(media_root=Path("/nonexistent"))
+        controller = DisplayController(Mock(), store)
+        reads = 0
+
+        def get_config():
+            nonlocal reads
+            reads += 1
+            if reads == 2:
+                controller._shutdown.set()
+            return config
+
+        store.get = get_config
+        controller._screen_runtime = ScreenMediaRuntime(
+            catalog=lambda _screen: catalog, choice=lambda values: values[0],
+        )
+        controller._execute = Mock(side_effect=RuntimeError("decode failed"))
+        controller._is_active = Mock(return_value=False)
+        controller._seconds_until_schedule_change = Mock(return_value=100)
+        original_wait = controller._shutdown.wait
+        waits = []
+
+        def stop_after_idle(seconds):
+            waits.append(seconds)
+            controller._shutdown.set()
+            return original_wait(0)
+
+        with patch.object(controller._shutdown, "wait", side_effect=stop_after_idle):
+            controller._run_loop_unchecked()
+
+        self.assertEqual(controller._execute.call_count, 2)
+        self.assertEqual(waits, [0.25])
+
+    def test_successful_ordinary_scheduler_cycle_skips_all_failed_backoff(self):
+        config = copy.deepcopy(DEFAULT_CONFIG)
+        config["playlist"] = [
+            next(item for item in config["playlist"] if item["module"] == "clock_lava")
+        ]
+        controller = DisplayController(Mock(), Mock(get=Mock(return_value=config)))
+        finished = threading.Event()
+        waits = []
+        executions = []
+        controller._shutdown = Mock(
+            is_set=finished.is_set,
+            set=finished.set,
+            wait=lambda seconds: waits.append(seconds),
+        )
+        controller._take_preview = Mock(return_value=None)
+        controller._take_media_preview = Mock(return_value=None)
+        controller._take_announcement_preview = Mock(return_value=None)
+        controller._is_active = Mock(return_value=True)
+        controller._seconds_until_schedule_change = Mock(return_value=100)
+
+        def execute(*args, **kwargs):
+            executions.append((args, kwargs))
+            if len(executions) == 2:
+                finished.set()
+            return True
+
+        controller._execute = Mock(side_effect=execute)
+
+        controller._run_loop_unchecked()
+
+        self.assertEqual(controller._execute.call_count, 2)
+        self.assertEqual(waits, [])
+
+    def test_successful_splash_scheduler_cycle_skips_all_failed_backoff(self):
+        config = copy.deepcopy(DEFAULT_CONFIG)
+        config["playlist"] = [
+            next(item for item in config["playlist"] if item["module"] == "splash")
+        ]
+        controller = DisplayController(Mock(), Mock(get=Mock(return_value=config)))
+        finished = threading.Event()
+        waits = []
+        executions = []
+        controller._shutdown = Mock(
+            is_set=finished.is_set,
+            set=finished.set,
+            wait=lambda seconds: waits.append(seconds),
+        )
+        controller._take_preview = Mock(return_value=None)
+        controller._take_media_preview = Mock(return_value=None)
+        controller._take_announcement_preview = Mock(return_value=None)
+        controller._is_active = Mock(return_value=True)
+        controller._seconds_until_schedule_change = Mock(return_value=100)
+
+        def execute(*args, **kwargs):
+            executions.append((args, kwargs))
+            if len(executions) == 2:
+                finished.set()
+            return True
+
+        controller._execute_scheduled_screen = Mock(side_effect=execute)
+
+        controller._run_loop_unchecked()
+
+        self.assertEqual(controller._execute_scheduled_screen.call_count, 2)
+        self.assertEqual(waits, [])
+
     def test_openweather_module_receives_secret_without_adding_it_to_config(self):
         matrix = Mock()
         store = Mock()
@@ -927,6 +1077,72 @@ class DisplayControllerTests(unittest.TestCase):
         pending.close()
         controller.start.assert_called_once_with()
 
+    def test_required_saved_preview_media_failure_preserves_existing_owners(self):
+        cases = (
+            (
+                "custom_media",
+                {
+                    "custom_modules": [{
+                        "id": "custom_media", "type": "media",
+                        "source": "missing.png",
+                    }],
+                },
+            ),
+            (
+                "custom_canvas",
+                {
+                    "custom_modules": [{
+                        "id": "custom_canvas", "type": "canvas",
+                        "layers": [{
+                            "id": "media_layer", "type": "media",
+                            "properties": {"source": "missing.png"},
+                            "keyframes": [],
+                        }],
+                        "overrides": [],
+                    }],
+                },
+            ),
+            (
+                "announcement_board",
+                {
+                    "custom_modules": [],
+                    "announcement_board": {
+                        "announcements": [{
+                            "id": "announcement", "media": "missing.png",
+                        }],
+                    },
+                },
+            ),
+        )
+        for module_name, config in cases:
+            with self.subTest(module=module_name), tempfile.TemporaryDirectory() as directory:
+                media_root = Path(directory) / "media"
+                media_root.mkdir()
+                store = Mock(media_root=media_root, get=Mock(return_value=config))
+                controller = DisplayController(Mock(), store)
+                controller.start = Mock()
+                prior_resolver = Mock()
+                prior = display_controller._PinnedModulePreview(
+                    "weather", {}, prior_resolver, {},
+                )
+                controller._preview_name = prior
+                active_stop = threading.Event()
+                controller._module_stop = active_stop
+                try:
+                    with self.assertRaises(display_controller.MediaResolutionError):
+                        controller.preview(module_name)
+
+                    self.assertIs(controller._preview_name, prior)
+                    self.assertFalse(active_stop.is_set())
+                    prior_resolver.close.assert_not_called()
+                    controller.start.assert_not_called()
+                finally:
+                    if controller._preview_name is not None:
+                        controller._preview_name.close()
+                        controller._preview_name = None
+                    controller.device_preview_manager.close()
+                    controller._openweather_provider.shutdown()
+
     def test_announcement_preview_queue_is_last_request_wins_and_isolated(self):
         controller = DisplayController(Mock(), Mock(media_root=Path("/unused")))
         controller.start = Mock()
@@ -975,6 +1191,41 @@ class DisplayControllerTests(unittest.TestCase):
         self.assertEqual(module.run_preview.call_args.args[1], announcement)
         self.assertIsNotNone(module.run_preview.call_args.kwargs["stop_event"])
         self.assertIsNone(controller.current_module)
+        self.assertIsNone(controller._module_stop)
+
+    def test_announcement_preview_revalidates_reload_admission_after_display_wait(self):
+        controller = DisplayController(Mock(), Mock())
+        real_lock = controller._display_lock
+        pending = display_controller._PinnedAnnouncementPreview(
+            {"id": "announcement_preview"}, Mock(), {},
+        )
+        module = Mock()
+        module.run_preview.return_value = True
+
+        class ReloadBeforeDisplayOwnership:
+            def __enter__(self):
+                real_lock.acquire()
+                with controller._state_lock:
+                    controller._module_admission_generation += 1
+                    generation = controller._module_admission_generation
+                    controller._reload_obligations[generation] = "active"
+                    controller._sync_reload_fence_aliases_locked()
+                return self
+
+            def __exit__(self, *_args):
+                real_lock.release()
+
+        object.__setattr__(controller, "_display_lock", ReloadBeforeDisplayOwnership())
+        try:
+            with patch("display_controller.importlib.import_module", return_value=module):
+                result = controller._execute_announcement_preview(pending)
+        finally:
+            pending.close()
+            controller.device_preview_manager.close()
+            controller._openweather_provider.shutdown()
+
+        self.assertFalse(result)
+        module.run_preview.assert_not_called()
         self.assertIsNone(controller._module_stop)
 
     def test_scheduler_executes_queued_announcement_before_normal_playlist(self):
@@ -1880,7 +2131,9 @@ class DisplayControllerTests(unittest.TestCase):
         controller._is_active = Mock(return_value=True)
         controller._execute = render_saved
         controller._run_loop_unchecked()
-        self.assertEqual(saved_renders, [("splash", saved_config, 1)])
+        self.assertEqual(len(saved_renders), 1)
+        self.assertEqual(saved_renders[0][:2], ("splash", saved_config))
+        self.assertEqual(saved_renders[0][2], 7.23)
         store.set.assert_not_called()
 
         controller.shutdown_device_drafts()
@@ -1930,6 +2183,46 @@ class DisplayControllerTests(unittest.TestCase):
         self.assertTrue(returned.is_set())
         self.assertIsNone(controller.device_preview_manager.active_lease())
         self.assertTrue(controller._reload_requested.is_set())
+
+    def test_device_draft_revalidates_reload_admission_after_display_wait(self):
+        from device_preview import (
+            DevicePreviewOwner, DevicePreviewRequest, PreviewAdmissionStatus,
+        )
+
+        controller = DisplayController(Mock(), Mock())
+        controller.start = Mock()
+        owner = DevicePreviewOwner("device-a", "reload-admission")
+        renderer = Mock(return_value=True)
+        admission = controller.submit_device_draft(
+            DevicePreviewRequest(owner, 1, {"module": "clock_lava"}, 60),
+            renderer=renderer,
+        )
+        self.assertIs(admission.status, PreviewAdmissionStatus.ACCEPTED)
+        real_lock = controller._display_lock
+
+        class ReloadBeforeDisplayOwnership:
+            def __enter__(self):
+                real_lock.acquire()
+                with controller._state_lock:
+                    controller._module_admission_generation += 1
+                    generation = controller._module_admission_generation
+                    controller._reload_obligations[generation] = "active"
+                    controller._sync_reload_fence_aliases_locked()
+                return self
+
+            def __exit__(self, *_args):
+                real_lock.release()
+
+        object.__setattr__(controller, "_display_lock", ReloadBeforeDisplayOwnership())
+        try:
+            result = controller._execute_pending_device_draft()
+        finally:
+            controller.device_preview_manager.close()
+            controller._openweather_provider.shutdown()
+
+        self.assertFalse(result)
+        renderer.assert_not_called()
+        self.assertIsNone(controller._module_stop)
 
 
     def test_device_draft_pairing_reload_stop_and_shutdown_cleanup(self):
@@ -2887,6 +3180,1365 @@ class DisplayControllerTests(unittest.TestCase):
             self.assertEqual((publisher.path / "saved.rgb").read_bytes(), saved)
             self.assertEqual((publisher.path / "current.rgb").read_bytes(), saved)
             controller.device_preview_manager.close()
+
+    def test_reload_rejects_execution_prepared_before_reload_completed(self):
+        controller = DisplayController(Mock(), Mock())
+        import_started = threading.Event()
+        release_import = threading.Event()
+        module = Mock()
+        module.run.return_value = True
+        results = []
+
+        def delayed_import(_name):
+            import_started.set()
+            self.assertTrue(release_import.wait(1))
+            return module
+
+        worker = threading.Thread(
+            target=lambda: results.append(controller._execute("weather", {}, 1))
+        )
+        try:
+            with patch("display_controller.importlib.import_module", side_effect=delayed_import):
+                worker.start()
+                self.assertTrue(import_started.wait(0.5))
+                self.assertTrue(controller.reload(timeout=0.5))
+                release_import.set()
+                worker.join(1)
+        finally:
+            release_import.set()
+            worker.join(1)
+            controller.device_preview_manager.close()
+            controller._openweather_provider.shutdown()
+
+        self.assertFalse(worker.is_alive())
+        self.assertEqual(results, [False])
+        module.run.assert_not_called()
+
+    def test_scheduled_module_revalidates_reload_admission_after_display_wait(self):
+        controller = DisplayController(Mock(), Mock())
+        real_lock = controller._display_lock
+        module = Mock()
+        module.run.return_value = True
+
+        class ReloadBeforeDisplayOwnership:
+            def __enter__(self):
+                real_lock.acquire()
+                with controller._state_lock:
+                    controller._module_admission_generation += 1
+                    generation = controller._module_admission_generation
+                    controller._reload_obligations[generation] = "active"
+                    controller._sync_reload_fence_aliases_locked()
+                return self
+
+            def __exit__(self, *_args):
+                real_lock.release()
+
+        object.__setattr__(controller, "_display_lock", ReloadBeforeDisplayOwnership())
+        try:
+            with patch("display_controller.importlib.import_module", return_value=module):
+                result = controller._execute("weather", {}, 1)
+        finally:
+            controller.device_preview_manager.close()
+            controller._openweather_provider.shutdown()
+
+        self.assertFalse(result)
+        module.run.assert_not_called()
+        self.assertIsNone(controller._module_stop)
+
+    def test_reload_fences_scheduler_admission_before_waiting_for_display(self):
+        controller = DisplayController(Mock(), Mock())
+        old_stop = threading.Event()
+        controller._module_stop = old_stop
+        old_owner_ready = threading.Event()
+        allow_scheduler = threading.Event()
+        scheduler_lock_acquired = threading.Event()
+        scheduler_done = threading.Event()
+        release_new_owner = threading.Event()
+        module = Mock()
+
+        def run_new_owner(*_args, **_kwargs):
+            release_new_owner.wait(1)
+            return True
+
+        module.run.side_effect = run_new_owner
+
+        class AdmissionOrderedLock:
+            def __init__(self):
+                self.lock = threading.RLock()
+
+            def acquire(self, blocking=True, timeout=-1):
+                if threading.current_thread().name == "reload-race-reloader":
+                    allow_scheduler.set()
+                    deadline = time.monotonic() + 0.5
+                    while not (
+                        scheduler_lock_acquired.is_set() or scheduler_done.is_set()
+                    ) and time.monotonic() < deadline:
+                        time.sleep(0.001)
+                if timeout == -1:
+                    acquired = self.lock.acquire(blocking)
+                else:
+                    acquired = self.lock.acquire(blocking, timeout)
+                if (
+                    acquired
+                    and threading.current_thread().name == "reload-race-scheduler"
+                ):
+                    scheduler_lock_acquired.set()
+                return acquired
+
+            def release(self):
+                self.lock.release()
+
+            def __enter__(self):
+                self.acquire()
+                return self
+
+            def __exit__(self, *_args):
+                self.release()
+
+        object.__setattr__(controller, "_display_lock", AdmissionOrderedLock())
+
+        def old_owner():
+            with controller._display_lock:
+                old_owner_ready.set()
+                old_stop.wait(1)
+
+        def scheduler():
+            try:
+                self.assertTrue(allow_scheduler.wait(0.5))
+                controller._execute("weather", {}, 1)
+            finally:
+                scheduler_done.set()
+
+        reload_results = []
+        owner = threading.Thread(target=old_owner, name="reload-race-old-owner")
+        queued = threading.Thread(target=scheduler, name="reload-race-scheduler")
+        reloader = threading.Thread(
+            target=lambda: reload_results.append(controller.reload(timeout=0.1)),
+            name="reload-race-reloader",
+        )
+        try:
+            with patch("display_controller.importlib.import_module", return_value=module):
+                owner.start()
+                self.assertTrue(old_owner_ready.wait(0.5))
+                queued.start()
+                reloader.start()
+                reloader.join(0.5)
+        finally:
+            release_new_owner.set()
+            old_stop.set()
+            owner.join(1)
+            queued.join(1)
+            reloader.join(1)
+            controller.device_preview_manager.close()
+            controller._openweather_provider.shutdown()
+
+        self.assertFalse(reloader.is_alive())
+        self.assertEqual(reload_results, [True])
+        self.assertFalse(scheduler_lock_acquired.is_set())
+        module.run.assert_not_called()
+
+    def test_active_reload_fence_survives_real_scheduler_acknowledgement(self):
+        config = copy.deepcopy(DEFAULT_CONFIG)
+        config["playlist"] = [
+            item for item in config["playlist"] if item["module"] == "weather"
+        ]
+        store = Mock(get=Mock(return_value=config))
+        controller = DisplayController(Mock(), store)
+        controller._is_active = lambda *_args: True
+        controller._seconds_until_schedule_change = lambda *_args: 30
+        old_stop = threading.Event()
+        controller._module_stop = old_stop
+        old_owner_ready = threading.Event()
+        reloader_at_lock = threading.Event()
+        allow_reloader = threading.Event()
+        reload_done = threading.Event()
+        replacement_started = threading.Event()
+        release_replacement = threading.Event()
+        reload_results = []
+        reload_errors = []
+        real_lock = controller._display_lock
+
+        class ReloadOrderedLock:
+            def acquire(self, *args, **kwargs):
+                if threading.current_thread().name == "full-loop-reloader":
+                    reloader_at_lock.set()
+                    if not allow_reloader.wait(2):
+                        raise TimeoutError("reload interleaving gate")
+                return real_lock.acquire(*args, **kwargs)
+
+            def release(self):
+                real_lock.release()
+
+            def __enter__(self):
+                self.acquire()
+                return self
+
+            def __exit__(self, *_args):
+                self.release()
+
+        controller._display_lock = ReloadOrderedLock()
+
+        def old_owner():
+            with controller._display_lock:
+                old_owner_ready.set()
+                old_stop.wait(2)
+
+        module = Mock()
+
+        def run_replacement(*_args, **_kwargs):
+            replacement_started.set()
+            release_replacement.wait(2)
+            controller._shutdown.set()
+            return True
+
+        module.run.side_effect = run_replacement
+
+        def reload():
+            try:
+                reload_results.append(controller.reload(timeout=1))
+            except BaseException as error:
+                reload_errors.append(error)
+            finally:
+                reload_done.set()
+
+        owner = threading.Thread(target=old_owner, name="full-loop-old-owner")
+        scheduler = threading.Thread(
+            target=controller._run_loop_unchecked, name="full-loop-scheduler",
+        )
+        reloader = threading.Thread(target=reload, name="full-loop-reloader")
+        replacement_before_settlement = None
+        reload_settled_after_release = None
+        try:
+            with patch("display_controller.importlib.import_module", return_value=module):
+                owner.start()
+                self.assertTrue(old_owner_ready.wait(0.5))
+                reloader.start()
+                self.assertTrue(reloader_at_lock.wait(0.5))
+                self.assertTrue(old_stop.is_set())
+                scheduler.start()
+                replacement_before_settlement = replacement_started.wait(0.2)
+                allow_reloader.set()
+                reload_settled_after_release = reload_done.wait(0.3)
+                self.assertTrue(replacement_started.wait(0.5))
+        finally:
+            allow_reloader.set()
+            release_replacement.set()
+            old_stop.set()
+            controller._shutdown.set()
+            owner.join(1)
+            scheduler.join(1)
+            reloader.join(1)
+            controller.device_preview_manager.close()
+            controller._openweather_provider.shutdown()
+
+        self.assertFalse(owner.is_alive())
+        self.assertFalse(scheduler.is_alive())
+        self.assertFalse(reloader.is_alive())
+        self.assertEqual(reload_errors, [])
+        self.assertFalse(
+            replacement_before_settlement,
+            "the scheduler retired a fence still owned by the active reload caller",
+        )
+        self.assertTrue(reload_settled_after_release)
+        self.assertEqual(reload_results, [True])
+        module.run.assert_called_once()
+
+    def test_newer_reload_cannot_retire_an_older_active_reload_obligation(self):
+        for newer_timeout, expected_newer in ((1, True), (0, False)):
+            with self.subTest(newer_timeout=newer_timeout):
+                controller = DisplayController(Mock(), Mock())
+                real_lock = controller._display_lock
+                older_waiting = threading.Event()
+                release_older = threading.Event()
+
+                class OrderedDisplayLock:
+                    def acquire(self, *args, **kwargs):
+                        if threading.current_thread().name == "reload-A":
+                            older_waiting.set()
+                            if not release_older.wait(2):
+                                raise TimeoutError("older reload interleaving gate")
+                        return real_lock.acquire(*args, **kwargs)
+
+                    def release(self):
+                        real_lock.release()
+
+                    def __enter__(self):
+                        self.acquire()
+                        return self
+
+                    def __exit__(self, *_args):
+                        self.release()
+
+                object.__setattr__(controller, "_display_lock", OrderedDisplayLock())
+                results = {"older": [], "newer": []}
+                older = threading.Thread(
+                    target=lambda: results["older"].append(controller.reload(timeout=1)),
+                    name="reload-A",
+                )
+                newer = threading.Thread(
+                    target=lambda: results["newer"].append(
+                        controller.reload(timeout=newer_timeout)
+                    ),
+                    name="reload-B",
+                )
+                try:
+                    if newer_timeout == 0:
+                        real_lock.acquire()
+                    older.start()
+                    self.assertTrue(older_waiting.wait(0.5))
+                    newer.start()
+                    newer.join(0.5)
+                    self.assertFalse(newer.is_alive())
+                    self.assertEqual(results["newer"], [expected_newer])
+                    if newer_timeout == 0:
+                        real_lock.release()
+                    self.assertFalse(
+                        controller._acknowledge_reload_boundary(),
+                        "newer reload retired admission protection owed to reload A",
+                    )
+                    self.assertTrue(controller._reload_requested.is_set())
+                    release_older.set()
+                    older.join(1)
+                    self.assertEqual(results["older"], [True])
+                    self.assertTrue(controller._acknowledge_reload_boundary())
+                    self.assertFalse(controller._reload_requested.is_set())
+                finally:
+                    if newer_timeout == 0:
+                        try:
+                            real_lock.release()
+                        except RuntimeError:
+                            pass
+                    release_older.set()
+                    older.join(1)
+                    newer.join(1)
+                    controller.device_preview_manager.close()
+                    controller._openweather_provider.shutdown()
+
+    def test_dequeued_direct_media_preview_is_rejected_during_reload_admission(self):
+        controller = DisplayController(Mock(), Mock())
+        preview = display_controller._PinnedMediaPreview(
+            "selected.gif", Mock(), Mock(),
+        )
+        with controller._state_lock:
+            controller._module_admission_generation += 1
+            controller._reload_admission_fence = controller._module_admission_generation
+            controller._reload_fence_state = "active"
+            controller._reload_requested.set()
+
+        try:
+            with patch("display_controller.play_media", return_value=True) as player:
+                self.assertFalse(controller._execute_media(preview, 15))
+            player.assert_not_called()
+            self.assertIsNone(controller._module_stop)
+        finally:
+            preview.close()
+            controller.device_preview_manager.close()
+            controller._openweather_provider.shutdown()
+
+    def test_direct_media_preview_revalidates_reload_admission_after_display_wait(self):
+        controller = DisplayController(Mock(), Mock())
+        real_lock = controller._display_lock
+        preview = display_controller._PinnedMediaPreview(
+            "selected.gif", Mock(), Mock(),
+        )
+
+        class ReloadBeforeDisplayOwnership:
+            def __enter__(self):
+                real_lock.acquire()
+                with controller._state_lock:
+                    controller._module_admission_generation += 1
+                    generation = controller._module_admission_generation
+                    controller._reload_obligations[generation] = "active"
+                    controller._sync_reload_fence_aliases_locked()
+                return self
+
+            def __exit__(self, *_args):
+                real_lock.release()
+
+        object.__setattr__(controller, "_display_lock", ReloadBeforeDisplayOwnership())
+        try:
+            with patch("display_controller.play_media", return_value=True) as player:
+                result = controller._execute_media(preview, 15)
+        finally:
+            preview.close()
+            controller.device_preview_manager.close()
+            controller._openweather_provider.shutdown()
+
+        self.assertFalse(result)
+        player.assert_not_called()
+        self.assertIsNone(controller._module_stop)
+
+    def _assert_saved_screen_preview_metadata_cancelled(
+        self, screen, callers, lifecycle="stop",
+    ):
+        baseline_fds = set(os.listdir("/proc/self/fd"))
+        baseline_threads = {thread.ident for thread in threading.enumerate()}
+        with tempfile.TemporaryDirectory() as directory:
+            media_root = Path(directory) / "media"
+            media_root.mkdir()
+            Image.new("RGB", (2, 2), "red").save(media_root / "still.png")
+            frames = (
+                Image.new("RGB", (2, 2), "green"),
+                Image.new("RGB", (2, 2), "blue"),
+            )
+            try:
+                frames[0].save(
+                    media_root / "pool.gif", save_all=True,
+                    append_images=[frames[1]], duration=[3000, 3000], loop=0,
+                )
+            finally:
+                for frame in frames:
+                    frame.close()
+
+            config = copy.deepcopy(DEFAULT_CONFIG)
+            row = next(
+                item for item in config["playlist"] if item["module"] == screen
+            )
+            row.update(source="still.png", sources=["still.png", "pool.gif"])
+            config["media"][screen] = "still.png"
+            original_config = copy.deepcopy(config)
+            store = Mock(
+                media_root=media_root,
+                get=Mock(side_effect=lambda: copy.deepcopy(config)),
+            )
+            controller = DisplayController(Mock(), store)
+            controller.start = Mock()
+            entered = threading.Condition()
+            release = threading.Event()
+            local = threading.local()
+            streams = []
+            done = [threading.Event() for _ in range(callers)]
+            errors = []
+            owned_workers = ()
+            owned_timers = ()
+            original_read = display_controller.ScreenMediaCatalog._read_info
+            original_open = Image.open
+
+            def read_info(reference, pinned, identity):
+                local.reading_timing_pool = reference == "pool.gif"
+                try:
+                    return original_read(reference, pinned, identity)
+                finally:
+                    local.reading_timing_pool = False
+
+            def open_image(source, *args, **kwargs):
+                if getattr(local, "reading_timing_pool", False):
+                    with entered:
+                        streams.append(source)
+                        entered.notify_all()
+                    if not release.wait(3):
+                        raise TimeoutError("saved Preview metadata test gate was not released")
+                return original_open(source, *args, **kwargs)
+
+            def request_preview(index):
+                try:
+                    controller.preview(screen)
+                except BaseException as error:
+                    errors.append(error)
+                finally:
+                    done[index].set()
+
+            requests = [
+                threading.Thread(
+                    target=request_preview, args=(index,),
+                    name=f"saved-{screen}-metadata-{index}",
+                )
+                for index in range(callers)
+            ]
+            try:
+                with (
+                    patch.object(
+                        display_controller.ScreenMediaCatalog, "_read_info",
+                        side_effect=read_info,
+                    ),
+                    patch.object(Image, "open", side_effect=open_image),
+                    patch("display_controller.random.choice", return_value="still.png"),
+                ):
+                    for request in requests:
+                        request.start()
+                    with entered:
+                        self.assertTrue(entered.wait_for(
+                            lambda: len(streams) >= min(callers, 4), timeout=1,
+                        ))
+                    owned_workers = tuple(
+                        thread for thread in threading.enumerate()
+                        if thread.ident not in baseline_threads
+                        and thread.name == "matrix-preview-pillow"
+                    )
+                    if lifecycle == "stop":
+                        lifecycle_result = controller.stop(timeout=1)
+                    elif lifecycle == "reload":
+                        lifecycle_result = controller.reload(timeout=1)
+                    else:
+                        controller.show_pairing_pin("123456", ttl_seconds=60)
+                        lifecycle_result = True
+                    with controller._state_lock:
+                        owned_timers = tuple(
+                            timer for timer in (
+                                controller._pairing_timer,
+                                controller._pairing_page_timer,
+                            )
+                            if timer is not None
+                        )
+                    callers_finished = all(event.wait(0.5) for event in done)
+                    streams_closed = all(stream.closed for stream in streams)
+                    admitted = len(streams)
+            finally:
+                release.set()
+                for request in requests:
+                    request.join(2)
+                controller.end_pairing(timeout=1)
+                controller.stop(timeout=1)
+                controller.device_preview_manager.close()
+                controller._openweather_provider.shutdown()
+                for owner in (*owned_workers, *owned_timers):
+                    owner.join(2)
+                    self.assertFalse(
+                        owner.is_alive(),
+                        f"fixture-owned thread did not stop: {owner.name}",
+                    )
+
+            self.assertTrue(lifecycle_result)
+            self.assertTrue(
+                callers_finished,
+                "stop reported completion while saved Preview metadata callers remained",
+            )
+            self.assertTrue(
+                streams_closed,
+                "stop reported completion while saved Preview metadata streams remained open",
+            )
+            self.assertLessEqual(admitted, 4)
+            self.assertEqual(len(errors), callers)
+            self.assertTrue(all(isinstance(error, RuntimeError) for error in errors))
+            self.assertTrue(all("lifecycle" in str(error) for error in errors))
+            self.assertEqual(config, original_config)
+
+        self.assertEqual(set(os.listdir("/proc/self/fd")), baseline_fds)
+        self.assertEqual(
+            [
+                thread.name for thread in threading.enumerate()
+                if thread.ident not in baseline_threads
+            ],
+            [],
+        )
+
+    def test_saved_splash_preview_metadata_callers_cancel_on_stop(self):
+        for callers in (1, 5):
+            with self.subTest(callers=callers):
+                self._assert_saved_screen_preview_metadata_cancelled(
+                    "splash", callers,
+                )
+
+    def test_saved_sleep_preview_metadata_callers_cancel_on_stop(self):
+        for callers in (1, 5):
+            with self.subTest(callers=callers):
+                self._assert_saved_screen_preview_metadata_cancelled(
+                    "sleep", callers,
+                )
+
+    def test_saved_screen_preview_metadata_cancels_on_reload_and_pairing(self):
+        for screen in ("splash", "sleep"):
+            for lifecycle in ("reload", "pairing"):
+                with self.subTest(screen=screen, lifecycle=lifecycle):
+                    self._assert_saved_screen_preview_metadata_cancelled(
+                        screen, 1, lifecycle,
+                    )
+
+    def _assert_saved_screen_preview_reload_timeout_settles(
+        self, screen, callers, concurrent_reloads,
+    ):
+        baseline_fds = set(os.listdir("/proc/self/fd"))
+        baseline_threads = {thread.ident for thread in threading.enumerate()}
+        with tempfile.TemporaryDirectory() as directory:
+            media_root = Path(directory) / "media"
+            media_root.mkdir()
+            Image.new("RGB", (2, 2), "red").save(media_root / "still.png")
+            config = copy.deepcopy(DEFAULT_CONFIG)
+            row = next(
+                item for item in config["playlist"] if item["module"] == screen
+            )
+            row.update(source="still.png", sources=["still.png"])
+            config["media"][screen] = "still.png"
+            original_config = copy.deepcopy(config)
+            store = Mock(
+                media_root=media_root,
+                get=Mock(side_effect=lambda: copy.deepcopy(config)),
+            )
+            controller = DisplayController(Mock(), store)
+            controller.start = Mock(return_value=True)
+            gate = threading.Condition()
+            release = threading.Event()
+            preparations = []
+            errors = []
+            reload_results = []
+            original_duration = edit_preview.bounded_screen_preview_duration_seconds
+
+            def blocked_duration(*args, **kwargs):
+                duration = original_duration(*args, **kwargs)
+                with gate:
+                    preparations.append(kwargs["stop_event"])
+                    gate.notify_all()
+                if not release.wait(2):
+                    raise TimeoutError("saved Preview transfer gate was not released")
+                return duration
+
+            def request_preview():
+                try:
+                    controller.preview(screen)
+                except BaseException as error:
+                    errors.append(error)
+
+            reload_barrier = threading.Barrier(concurrent_reloads)
+
+            def reload_display():
+                reload_barrier.wait(timeout=1)
+                reload_results.append(controller.reload(timeout=0.1))
+
+            requests = [
+                threading.Thread(
+                    target=request_preview,
+                    name=f"saved-{screen}-timeout-preview-{index}",
+                )
+                for index in range(callers)
+            ]
+            reloaders = [
+                threading.Thread(
+                    target=reload_display,
+                    name=f"saved-{screen}-timeout-reload-{index}",
+                )
+                for index in range(concurrent_reloads)
+            ]
+            try:
+                with patch.object(
+                    edit_preview,
+                    "bounded_screen_preview_duration_seconds",
+                    side_effect=blocked_duration,
+                ):
+                    for request in requests:
+                        request.start()
+                    with gate:
+                        self.assertTrue(gate.wait_for(
+                            lambda: len(preparations) == callers, timeout=1,
+                        ))
+                    for reloader in reloaders:
+                        reloader.start()
+                    self.assertTrue(all(
+                        preparation.wait(1) for preparation in preparations
+                    ))
+                    deadline = time.monotonic() + 0.5
+                    installed = 0
+                    while time.monotonic() < deadline:
+                        with controller._state_lock:
+                            installed = len(controller._reload_obligations)
+                        if installed == concurrent_reloads:
+                            break
+                        time.sleep(0.001)
+                    self.assertEqual(installed, concurrent_reloads)
+                    for reloader in reloaders:
+                        reloader.join(1)
+                    self.assertTrue(all(not reloader.is_alive() for reloader in reloaders))
+                    self.assertEqual(reload_results, [False] * concurrent_reloads)
+                    release.set()
+                    for request in requests:
+                        request.join(1)
+                self.assertTrue(all(not request.is_alive() for request in requests))
+                self.assertTrue(controller._acknowledge_reload_boundary())
+                self.assertEqual(controller._reload_obligations, {})
+                self.assertFalse(controller._reload_requested.is_set())
+                self.assertEqual(config, original_config)
+            finally:
+                release.set()
+                for thread in requests + reloaders:
+                    thread.join(2)
+                pending = controller._take_preview()
+                if pending is not None and hasattr(pending, "close"):
+                    pending.close()
+                controller.stop(timeout=1)
+                controller.device_preview_manager.close()
+                controller._openweather_provider.shutdown()
+
+        self.assertEqual(set(os.listdir("/proc/self/fd")), baseline_fds)
+        self.assertEqual(
+            [
+                thread.name for thread in threading.enumerate()
+                if thread.ident not in baseline_threads
+            ],
+            [],
+        )
+
+    def test_saved_screen_preview_reload_timeout_settles_exact_obligations(self):
+        for screen in ("splash", "sleep"):
+            for callers in (1, 5):
+                for concurrent_reloads in (1, 3):
+                    with self.subTest(
+                        screen=screen,
+                        callers=callers,
+                        concurrent_reloads=concurrent_reloads,
+                    ):
+                        self._assert_saved_screen_preview_reload_timeout_settles(
+                            screen, callers, concurrent_reloads,
+                        )
+
+    def _assert_saved_screen_preview_revalidates_preparation_before_transfer(
+        self, screen, callers, lifecycle,
+    ):
+        baseline_fds = set(os.listdir("/proc/self/fd"))
+        baseline_threads = {thread.ident for thread in threading.enumerate()}
+        with tempfile.TemporaryDirectory() as directory:
+            media_root = Path(directory) / "media"
+            media_root.mkdir()
+            Image.new("RGB", (2, 2), "red").save(media_root / "still.png")
+            config = copy.deepcopy(DEFAULT_CONFIG)
+            row = next(
+                item for item in config["playlist"] if item["module"] == screen
+            )
+            row.update(source="still.png", sources=["still.png"])
+            config["media"][screen] = "still.png"
+            original_config = copy.deepcopy(config)
+            store = Mock(
+                media_root=media_root,
+                get=Mock(side_effect=lambda: copy.deepcopy(config)),
+            )
+            controller = DisplayController(
+                Mock(), store, ip_address_provider=lambda: "192.0.2.1",
+            )
+            controller.start = Mock(return_value=True)
+            gate = threading.Condition()
+            release = threading.Event()
+            preparations = []
+            errors = []
+            lifecycle_results = []
+            owned_timers = ()
+            original_duration = edit_preview.bounded_screen_preview_duration_seconds
+
+            def blocked_duration(*args, **kwargs):
+                duration = original_duration(*args, **kwargs)
+                with gate:
+                    preparations.append(kwargs["stop_event"])
+                    gate.notify_all()
+                if not release.wait(2):
+                    raise TimeoutError("saved Preview transfer gate was not released")
+                return duration
+
+            def request_preview():
+                try:
+                    controller.preview(screen)
+                except BaseException as error:
+                    errors.append(error)
+
+            def revoke_preview():
+                try:
+                    if lifecycle == "reload":
+                        lifecycle_results.append(controller.reload(timeout=1))
+                    else:
+                        controller.show_pairing_pin("123456", ttl_seconds=60)
+                        lifecycle_results.append(True)
+                except BaseException as error:
+                    lifecycle_results.append(error)
+
+            requests = [
+                threading.Thread(
+                    target=request_preview,
+                    name=f"saved-{screen}-{lifecycle}-transfer-{index}",
+                )
+                for index in range(callers)
+            ]
+            revoker = threading.Thread(
+                target=revoke_preview,
+                name=f"saved-{screen}-{lifecycle}-revoker",
+            )
+            pending = None
+            try:
+                with patch.object(
+                    edit_preview,
+                    "bounded_screen_preview_duration_seconds",
+                    side_effect=blocked_duration,
+                ):
+                    for request in requests:
+                        request.start()
+                    with gate:
+                        self.assertTrue(gate.wait_for(
+                            lambda: len(preparations) == callers, timeout=1,
+                        ))
+                    revoker.start()
+                    self.assertTrue(all(
+                        preparation.wait(1) for preparation in preparations
+                    ))
+                    release.set()
+                    for request in requests:
+                        request.join(1)
+                    revoker.join(1)
+                self.assertTrue(all(not request.is_alive() for request in requests))
+                self.assertFalse(revoker.is_alive())
+                self.assertEqual(lifecycle_results, [True])
+                self.assertEqual(len(errors), callers)
+                self.assertTrue(all(isinstance(error, RuntimeError) for error in errors))
+                pending = controller._take_preview()
+                self.assertIsNone(pending)
+                controller.start.assert_not_called()
+                self.assertEqual(controller._preview_preparations, set())
+                self.assertEqual(config, original_config)
+            finally:
+                release.set()
+                for thread in requests + [revoker]:
+                    thread.join(2)
+                if pending is None:
+                    pending = controller._take_preview()
+                if pending is not None and hasattr(pending, "close"):
+                    pending.close()
+                with controller._state_lock:
+                    owned_timers = tuple(
+                        timer for timer in (
+                            controller._pairing_timer,
+                            controller._pairing_page_timer,
+                        )
+                        if timer is not None
+                    )
+                controller.end_pairing(timeout=1)
+                for timer in owned_timers:
+                    timer.join(2)
+                    self.assertFalse(
+                        timer.is_alive(),
+                        f"fixture-owned pairing timer did not stop: {timer.name}",
+                    )
+                if lifecycle == "reload":
+                    controller._acknowledge_reload_boundary()
+                controller.stop(timeout=1)
+                controller.device_preview_manager.close()
+                controller._openweather_provider.shutdown()
+
+        self.assertEqual(set(os.listdir("/proc/self/fd")), baseline_fds)
+        self.assertEqual(
+            [
+                thread.name for thread in threading.enumerate()
+                if thread.ident not in baseline_threads
+            ],
+            [],
+        )
+
+    def test_saved_screen_preview_revalidates_cancelled_preparation_at_transfer(self):
+        for screen in ("splash", "sleep"):
+            for callers in (1, 5):
+                for lifecycle in ("reload", "pairing"):
+                    with self.subTest(
+                        screen=screen, callers=callers, lifecycle=lifecycle,
+                    ):
+                        self._assert_saved_screen_preview_revalidates_preparation_before_transfer(
+                            screen, callers, lifecycle,
+                        )
+
+    def _assert_saved_screen_preview_captures_revocation_before_resolution(
+        self, screen, callers, lifecycle,
+    ):
+        with tempfile.TemporaryDirectory() as directory:
+            media_root = Path(directory) / "media"
+            media_root.mkdir()
+            Image.new("RGB", (2, 2), "red").save(media_root / "old.png")
+            Image.new("RGB", (2, 2), "green").save(media_root / "new.png")
+            config = copy.deepcopy(DEFAULT_CONFIG)
+            row = next(
+                item for item in config["playlist"] if item["module"] == screen
+            )
+            row.update(source="old.png", sources=["old.png"])
+            config["media"][screen] = "old.png"
+            store = Mock(
+                media_root=media_root,
+                get=Mock(side_effect=lambda: copy.deepcopy(config)),
+            )
+            controller = DisplayController(
+                Mock(), store, ip_address_provider=lambda: "192.0.2.1",
+            )
+            controller.start = Mock(return_value=True)
+            arrived = threading.Condition()
+            blocked = []
+            release = threading.Event()
+            errors = []
+            original_resolve = display_controller.MediaResolver.resolve
+
+            class FakeTimer:
+                def __init__(self, _interval, _callback):
+                    self.daemon = False
+
+                def start(self):
+                    pass
+
+                def cancel(self):
+                    pass
+
+            def blocked_resolve(resolver, reference):
+                pinned = original_resolve(resolver, reference)
+                if reference == "old.png":
+                    with arrived:
+                        blocked.append(pinned)
+                        arrived.notify_all()
+                    if not release.wait(3):
+                        raise TimeoutError("pre-registration resolution gate was not released")
+                return pinned
+
+            def request_preview():
+                try:
+                    controller.preview(screen)
+                except BaseException as error:
+                    errors.append(error)
+
+            dormant = lifecycle.startswith("dormant-")
+            requests = [
+                threading.Thread(
+                    target=request_preview,
+                    name=f"saved-{screen}-{lifecycle}-pre-registration-{index}",
+                )
+                for index in range(callers)
+            ]
+            pending = None
+            try:
+                if dormant:
+                    self.assertTrue(controller.stop(timeout=1))
+                with (
+                    patch.object(
+                        display_controller.MediaResolver, "resolve",
+                        new=blocked_resolve,
+                    ),
+                    patch("display_controller.threading.Timer", FakeTimer),
+                ):
+                    for request in requests:
+                        request.start()
+                    with arrived:
+                        self.assertTrue(arrived.wait_for(
+                            lambda: len(blocked) == callers, timeout=1,
+                        ))
+                    self.assertEqual(controller._preview_preparations, set())
+                    if lifecycle == "stop":
+                        self.assertTrue(controller.stop(timeout=1))
+                    elif lifecycle == "pairing":
+                        controller.show_pairing_pin("123456", ttl_seconds=60)
+                        self.assertTrue(controller.end_pairing(timeout=1))
+                    else:
+                        if "save" in lifecycle:
+                            next_config = copy.deepcopy(config)
+                            next_row = next(
+                                item for item in next_config["playlist"]
+                                if item["module"] == screen
+                            )
+                            next_row.update(source="new.png", sources=["new.png"])
+                            next_config["media"][screen] = "new.png"
+                            config.clear()
+                            config.update(next_config)
+                        self.assertTrue(controller.reload(timeout=1))
+                        if not dormant:
+                            self.assertTrue(controller._acknowledge_reload_boundary())
+                    release.set()
+                    for request in requests:
+                        request.join(2)
+                self.assertTrue(all(not request.is_alive() for request in requests))
+                self.assertEqual(len(errors), callers)
+                self.assertTrue(all(isinstance(error, RuntimeError) for error in errors))
+                self.assertTrue(all("lifecycle" in str(error) for error in errors))
+                pending = controller._take_preview()
+                self.assertIsNone(pending)
+                self.assertTrue(all(pinned.closed for pinned in blocked))
+            finally:
+                release.set()
+                for request in requests:
+                    request.join(2)
+                if pending is None:
+                    pending = controller._take_preview()
+                if pending is not None and hasattr(pending, "close"):
+                    pending.close()
+                controller.end_pairing(timeout=1)
+                if controller._reload_obligations:
+                    controller._acknowledge_reload_boundary()
+                controller.stop(timeout=1)
+                controller.device_preview_manager.close()
+                controller._openweather_provider.shutdown()
+
+    def test_saved_screen_preview_captures_revocation_before_media_resolution(self):
+        for screen in ("splash", "sleep"):
+            for callers in (1, 5):
+                for lifecycle in (
+                    "stop", "reload", "save-reload", "pairing",
+                    "dormant-reload", "dormant-save-reload",
+                ):
+                    with self.subTest(
+                        screen=screen, callers=callers, lifecycle=lifecycle,
+                    ):
+                        self._assert_saved_screen_preview_captures_revocation_before_resolution(
+                            screen, callers, lifecycle,
+                        )
+
+    def test_saved_screen_still_preview_uses_pool_hold_through_static_frames(self):
+        original_static_media_frames = edit_preview.static_media_frames
+        for screen, legacy_duration in (("splash", 1), ("sleep", 3600)):
+            with self.subTest(screen=screen), tempfile.TemporaryDirectory() as directory:
+                media_root = Path(directory) / "media"
+                media_root.mkdir()
+                Image.new("RGB", (2, 2), "red").save(media_root / "still.png")
+                config = copy.deepcopy(DEFAULT_CONFIG)
+                row = next(
+                    item for item in config["playlist"] if item["module"] == screen
+                )
+                row.update(
+                    source="still.png", sources=["still.png"],
+                    duration=legacy_duration,
+                )
+                config["media"][screen] = "still.png"
+                store = Mock(media_root=media_root, get=Mock(return_value=config))
+                matrix = Mock()
+                matrix.show_image.return_value = True
+                controller = DisplayController(matrix, store)
+                controller._mark_scheduler_healthy = lambda: controller._shutdown.set()
+                observed = []
+
+                def record_static_frames(filename, duration, settings=None, **kwargs):
+                    times = iter((100.0, 100.125))
+                    iterator = original_static_media_frames(
+                        filename, duration, settings,
+                        **{**kwargs, "monotonic": lambda: next(times)},
+                    )
+                    for frame, delay_ms, geometry in iterator:
+                        observed.append((duration, delay_ms))
+                        yield frame, 0, geometry
+
+                try:
+                    with (
+                        patch.object(controller, "start"),
+                        patch(
+                            "edit_preview.static_media_frames",
+                            side_effect=record_static_frames,
+                        ),
+                    ):
+                        controller.preview(screen)
+                        controller._run_loop_unchecked()
+                finally:
+                    controller.device_preview_manager.close()
+                    controller._openweather_provider.shutdown()
+
+                self.assertEqual(observed, [(7.0, 6875.0)])
+
+    def test_saved_screen_still_preview_uses_pinned_usable_gif_pool_mean(self):
+        original_static_media_frames = edit_preview.static_media_frames
+        cases = (
+            (10.0, 1, (250, 250), 5.0),
+            (10.0, 99, (250, 250), 5.0),
+            (400.0, 3600, (20000, 20000), 10.0),
+        )
+        for screen in ("splash", "sleep"):
+            for speed, legacy_duration, gif_delays, expected in cases:
+                with (
+                    self.subTest(screen=screen, speed=speed),
+                    tempfile.TemporaryDirectory() as directory,
+                ):
+                    media_root = Path(directory) / "media"
+                    media_root.mkdir()
+                    Image.new("RGB", (2, 2), "red").save(media_root / "still.png")
+                    frames = (
+                        Image.new("RGB", (2, 2), "green"),
+                        Image.new("RGB", (2, 2), "blue"),
+                    )
+                    try:
+                        frames[0].save(
+                            media_root / "timed.gif", save_all=True,
+                            append_images=[frames[1]], duration=gif_delays, loop=0,
+                        )
+                    finally:
+                        for frame in frames:
+                            frame.close()
+                    (media_root / "invalid.gif").write_bytes(b"not-an-image")
+                    config = copy.deepcopy(DEFAULT_CONFIG)
+                    row = next(
+                        item for item in config["playlist"]
+                        if item["module"] == screen
+                    )
+                    row.update(
+                        source="still.png",
+                        sources=[
+                            "still.png", "timed.gif", "missing.gif", "invalid.gif",
+                        ],
+                        duration=legacy_duration,
+                        enabled=False,
+                        layout={
+                            **row["layout"], "playback_speed_percent": speed,
+                        },
+                    )
+                    decoy = copy.deepcopy(row)
+                    decoy.update(
+                        id=f"{screen}_enabled_decoy",
+                        source="decoy.png", sources=["decoy.png"], enabled=True,
+                    )
+                    config["playlist"].insert(
+                        config["playlist"].index(row) + 1, decoy,
+                    )
+                    config["media"][screen] = "still.png"
+                    store = Mock(media_root=media_root, get=Mock(return_value=config))
+                    matrix = Mock()
+                    matrix.show_image.return_value = True
+                    controller = DisplayController(matrix, store)
+                    controller._screen_runtime = Mock()
+                    controller._mark_scheduler_healthy = lambda: controller._shutdown.set()
+                    observed = []
+
+                    def record_static_frames(filename, duration, settings=None, **kwargs):
+                        times = iter((100.0, 100.125))
+                        iterator = original_static_media_frames(
+                            filename, duration, settings,
+                            **{**kwargs, "monotonic": lambda: next(times)},
+                        )
+                        for frame, delay_ms, geometry in iterator:
+                            observed.append((duration, delay_ms))
+                            yield frame, 0, geometry
+
+                    try:
+                        with (
+                            patch.object(controller, "start"),
+                            patch("display_controller.random.choice", return_value="still.png"),
+                        ):
+                            controller.preview(screen)
+                        pending = controller._preview_name
+                        self.assertIsNotNone(pending)
+                        assert pending is not None
+                        self.assertEqual(pending.duration, expected)
+                        self.assertEqual(set(pending.pinned_handles), {
+                            "still.png", "timed.gif", "invalid.gif",
+                        })
+                        controller._screen_runtime.assert_not_called()
+                        controller._screen_runtime.choose_splash.assert_not_called()
+                        controller._screen_runtime.begin_sleep.assert_not_called()
+                        controller._screen_runtime.current_sleep.assert_not_called()
+                        with patch(
+                            "edit_preview.static_media_frames",
+                            side_effect=record_static_frames,
+                        ):
+                            controller._run_loop_unchecked()
+                        self.assertEqual(observed, [(expected, expected * 1000 - 125)])
+                        self.assertTrue(
+                            all(handle.closed for handle in pending.pinned_handles.values())
+                        )
+                    finally:
+                        controller.device_preview_manager.close()
+                        controller._openweather_provider.shutdown()
+
+    def test_reload_signals_scheduled_module_before_waiting_for_display_quiescence(self):
+        matrix = Mock()
+        controller = DisplayController(matrix, Mock())
+        module_stop = threading.Event()
+        controller._module_stop = module_stop
+        owns_display = threading.Event()
+
+        def scheduled_render():
+            with controller._display_lock:
+                owns_display.set()
+                module_stop.wait(2)
+
+        renderer = threading.Thread(target=scheduled_render)
+        reload_done = threading.Event()
+        reloader = threading.Thread(
+            target=lambda: (controller.reload(), reload_done.set())
+        )
+        renderer.start()
+        self.assertTrue(owns_display.wait(0.5))
+        reloader.start()
+        try:
+            self.assertTrue(
+                module_stop.wait(0.3),
+                "reload waited for display ownership before signalling cancellation",
+            )
+            self.assertTrue(reload_done.wait(0.5))
+            self.assertTrue(controller._reload_requested.is_set())
+            self.assertEqual(controller._reload_fence_state, "settled-success")
+        finally:
+            module_stop.set()
+            renderer.join(1)
+            reloader.join(1)
+            controller.device_preview_manager.close()
+            controller._openweather_provider.shutdown()
+        self.assertFalse(renderer.is_alive())
+        self.assertFalse(reloader.is_alive())
+
+    def test_pairing_signals_scheduled_module_before_waiting_for_display_quiescence(self):
+        matrix = Mock()
+        controller = DisplayController(
+            matrix, Mock(), ip_address_provider=lambda: "192.0.2.1",
+        )
+        module_stop = threading.Event()
+        controller._module_stop = module_stop
+        owns_display = threading.Event()
+
+        def scheduled_render():
+            with controller._display_lock:
+                owns_display.set()
+                module_stop.wait(2)
+
+        renderer = threading.Thread(target=scheduled_render)
+        pairing_result = []
+        pairing_done = threading.Event()
+
+        def pair():
+            try:
+                pairing_result.append(controller.show_pairing_pin("123456", ttl_seconds=60))
+            finally:
+                pairing_done.set()
+
+        pairing = threading.Thread(target=pair)
+        renderer.start()
+        self.assertTrue(owns_display.wait(0.5))
+        pairing.start()
+        try:
+            self.assertTrue(
+                module_stop.wait(0.3),
+                "pairing waited for display ownership before signalling cancellation",
+            )
+            self.assertTrue(pairing_done.wait(0.5))
+            self.assertTrue(controller._pairing_pause.is_set())
+            self.assertTrue(pairing_result)
+        finally:
+            module_stop.set()
+            renderer.join(1)
+            pairing.join(1)
+            controller.end_pairing(timeout=0.5)
+            controller.device_preview_manager.close()
+            controller._openweather_provider.shutdown()
+        self.assertFalse(renderer.is_alive())
+        self.assertFalse(pairing.is_alive())
+
+    def test_pairing_draw_uses_the_single_post_cancellation_display_acquisition(self):
+        class CountingLock:
+            def __init__(self):
+                self._lock = threading.RLock()
+                self.acquisitions = 0
+
+            def acquire(self, *args, **kwargs):
+                acquired = self._lock.acquire(*args, **kwargs)
+                if acquired:
+                    self.acquisitions += 1
+                return acquired
+
+            def release(self):
+                self._lock.release()
+
+            def __enter__(self):
+                self.acquire()
+                return self
+
+            def __exit__(self, *_args):
+                self.release()
+
+        matrix = Mock()
+        controller = DisplayController(
+            matrix, Mock(), ip_address_provider=lambda: "192.0.2.1",
+        )
+        display_lock = CountingLock()
+        controller._display_lock = display_lock
+        module_stop = threading.Event()
+        controller._module_stop = module_stop
+        owns_display = threading.Event()
+
+        def scheduled_render():
+            with display_lock:
+                owns_display.set()
+                module_stop.wait(2)
+
+        renderer = threading.Thread(target=scheduled_render)
+        renderer.start()
+        self.assertTrue(owns_display.wait(0.5))
+        try:
+            controller.show_pairing_pin("123456", ttl_seconds=60)
+            self.assertEqual(display_lock.acquisitions, 2)
+            matrix.clear.assert_called_once_with()
+            matrix.swap.assert_called_once_with()
+        finally:
+            module_stop.set()
+            renderer.join(1)
+            controller.end_pairing(timeout=0.5)
+            controller.device_preview_manager.close()
+            controller._openweather_provider.shutdown()
+        self.assertFalse(renderer.is_alive())
+
+    def test_reload_quiescence_timeout_returns_failure_without_hardware_draw(self):
+        matrix = Mock()
+        controller = DisplayController(matrix, Mock())
+        module_stop = threading.Event()
+        controller._module_stop = module_stop
+        owns_display = threading.Event()
+        release_display = threading.Event()
+
+        def blocked_render():
+            with controller._display_lock:
+                owns_display.set()
+                release_display.wait(2)
+
+        renderer = threading.Thread(target=blocked_render)
+        renderer.start()
+        self.assertTrue(owns_display.wait(0.5))
+        try:
+            self.assertFalse(controller.reload(timeout=0))
+            self.assertTrue(module_stop.is_set())
+            self.assertTrue(controller._reload_requested.is_set())
+            self.assertIsNotNone(controller._reload_admission_fence)
+            self.assertEqual(controller._reload_fence_state, "settled-timeout")
+            matrix.clear.assert_not_called()
+            matrix.swap.assert_not_called()
+        finally:
+            release_display.set()
+            renderer.join(1)
+            controller.device_preview_manager.close()
+            controller._openweather_provider.shutdown()
+        self.assertFalse(renderer.is_alive())
+        self.assertTrue(controller._acknowledge_reload_boundary())
+        self.assertFalse(controller._reload_requested.is_set())
+        self.assertIsNone(controller._reload_admission_fence)
+
+    def test_stale_timeout_acknowledgement_cannot_retire_newer_reload_generation(self):
+        controller = DisplayController(Mock(), Mock())
+        owns_display = threading.Event()
+        release_display = threading.Event()
+        acknowledgement_started = threading.Event()
+        acknowledgement_results = []
+
+        def blocked_owner():
+            with controller._display_lock:
+                owns_display.set()
+                release_display.wait(2)
+
+        owner = threading.Thread(target=blocked_owner, name="overlap-owner")
+        owner.start()
+        self.assertTrue(owns_display.wait(0.5))
+        try:
+            self.assertFalse(controller.reload(timeout=0))
+            first_generation = controller._reload_admission_fence
+
+            def acknowledge_first():
+                acknowledgement_started.set()
+                acknowledgement_results.append(
+                    controller._acknowledge_reload_boundary()
+                )
+
+            acknowledger = threading.Thread(
+                target=acknowledge_first, name="overlap-acknowledger",
+            )
+            acknowledger.start()
+            self.assertTrue(acknowledgement_started.wait(0.5))
+            self.assertFalse(controller.reload(timeout=0))
+            second_generation = controller._reload_admission_fence
+            self.assertGreater(second_generation, first_generation)
+            self.assertEqual(controller._reload_fence_state, "settled-timeout")
+            release_display.set()
+            acknowledger.join(1)
+        finally:
+            release_display.set()
+            owner.join(1)
+            if "acknowledger" in locals():
+                acknowledger.join(1)
+            controller.device_preview_manager.close()
+            controller._openweather_provider.shutdown()
+
+        self.assertFalse(owner.is_alive())
+        self.assertFalse(acknowledger.is_alive())
+        self.assertEqual(acknowledgement_results, [False])
+        self.assertEqual(controller._reload_admission_fence, second_generation)
+        self.assertTrue(controller._reload_requested.is_set())
+        self.assertTrue(controller._acknowledge_reload_boundary())
+        self.assertIsNone(controller._reload_admission_fence)
+        self.assertIsNone(controller._reload_fence_state)
+        self.assertFalse(controller._reload_requested.is_set())
 
 
 if __name__ == "__main__":

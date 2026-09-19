@@ -168,7 +168,7 @@ def gif_composited_frames(gif, image_iterator=None):
 def gif_media_frames(
     path, loops=1, playback_rate=1.0, stop_event=None, max_duration=None,
     monotonic=None, image_open=None, image_iterator=None, frame_copy=None,
-    *, bounded_pillow=True,
+    *, bounded_pillow=True, completion=None,
 ):
     """Yield the finite GIF timeline shared by physical and preview playback."""
     image_open = image_open or Image.open
@@ -190,6 +190,8 @@ def gif_media_frames(
     playback_started = None
     preparation_elapsed = 0.0
     elapsed_delays = 0.0
+    if completion is not None:
+        completion["complete"] = False
 
     def cancelled():
         return ((stop_event is not None and stop_event.is_set()) or
@@ -281,6 +283,8 @@ def gif_media_frames(
             if not rendered_frame:
                 return
             completed += 1
+        if completion is not None:
+            completion["complete"] = True
     except PillowWorkCancelled:
         source = None
         return
@@ -338,6 +342,7 @@ def video_media_frames(
 
 def play_media(
     matrix, filename, duration, stop_event=None, settings=None, *, pinned_handle=None,
+    gif_loops=0, maximum_duration=None, require_complete=False,
 ):
     if pinned_handle is None:
         raise ValueError("media playback capability is missing")
@@ -362,9 +367,10 @@ def play_media(
             filename,
             **geometry,
             **playback,
-            loops=0,
+            loops=gif_loops,
             stop_event=stop_event,
-            max_duration=duration,
+            max_duration=duration if gif_loops == 0 else maximum_duration,
+            require_complete=require_complete,
             **pinning,
         )
     if suffix == ".mp4":
@@ -394,5 +400,5 @@ def play_media(
     except StopIteration:
         return False
     waiter = stop_event or threading.Event()
-    waiter.wait(delay_ms / 1000)
-    return True
+    interrupted = waiter.wait(delay_ms / 1000)
+    return not (require_complete and interrupted)

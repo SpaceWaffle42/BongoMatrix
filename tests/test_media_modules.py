@@ -62,6 +62,31 @@ class MediaModuleTests(unittest.TestCase):
             patcher.start()
             self.addCleanup(patcher.stop)
 
+    def test_interrupted_still_requires_completion_only_when_requested(self):
+        matrix = Mock()
+        pinned_handle = Mock()
+        for duration in (5, 7, 10):
+            for require_complete, expected in ((True, False), (False, True)):
+                with self.subTest(
+                    duration=duration, require_complete=require_complete,
+                ):
+                    stop_event = Mock()
+                    stop_event.is_set.return_value = False
+                    stop_event.wait.return_value = True
+                    with patch(
+                        "edit_preview.static_media_frames",
+                        return_value=iter(((Mock(), duration * 1000, Mock()),)),
+                    ):
+                        rendered = media_player.play_media(
+                            matrix, "still.png", duration,
+                            stop_event=stop_event,
+                            pinned_handle=pinned_handle,
+                            require_complete=require_complete,
+                        )
+
+                    self.assertIs(rendered, expected)
+                    stop_event.wait.assert_called_once_with(duration)
+
     def test_gif_compositing_uses_global_palette_for_background_disposal(self):
         palette = [0, 0, 0, 217, 160, 102] + ([0, 0, 0] * 254)
         source = Mock()
@@ -462,7 +487,8 @@ class MediaModuleTests(unittest.TestCase):
         result = splash_screen.run(matrix, {"media": {"splash": "squares_tb.gif"}}, duration=1)
         self.assertTrue(result)
         matrix.show_gif.assert_called_once_with(
-            "squares_tb.gif", loops=0, stop_event=None, max_duration=1,
+            "squares_tb.gif", loops=1, stop_event=None, max_duration=None,
+            require_complete=True,
             pinned_handle=self.pinned_handle,
         )
 
@@ -473,7 +499,8 @@ class MediaModuleTests(unittest.TestCase):
         result = sleep_screen.run(matrix, {"media": {"sleep": "sleep.gif"}}, duration=2, stop_event=stop)
         self.assertTrue(result)
         matrix.show_gif.assert_called_once_with(
-            "sleep.gif", loops=0, stop_event=stop, max_duration=2,
+            "sleep.gif", loops=1, stop_event=stop, max_duration=None,
+            require_complete=False,
             pinned_handle=self.pinned_handle,
         )
 
@@ -494,7 +521,8 @@ class MediaModuleTests(unittest.TestCase):
         self.assertTrue(result)
         matrix.show_gif.assert_called_once_with(
             "sleep.gif", x=0, y=0, width=64, height=32, keep_aspect=True,
-            playback_rate=2.5, loops=0, stop_event=None, max_duration=2,
+            playback_rate=2.5, loops=1, stop_event=None, max_duration=None,
+            require_complete=False,
             pinned_handle=self.pinned_handle,
         )
 
@@ -733,7 +761,9 @@ class MediaModuleTests(unittest.TestCase):
                 ))
                 call = getattr(matrix, method).call_args
                 self.assertEqual(call.kwargs["playback_rate"], 2.5)
-                self.assertEqual(call.kwargs["loops"], 0)
+                self.assertEqual(
+                    call.kwargs["loops"], 1 if method == "show_gif" else 0,
+                )
                 self.assertIs(call.kwargs["stop_event"], stop)
 
 

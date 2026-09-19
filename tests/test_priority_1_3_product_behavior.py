@@ -175,7 +175,7 @@ class Priority13ProductBehaviorTests(unittest.TestCase):
         controller._is_active = Mock(return_value=True)
         controller._execute = execute_saved
         controller._run_loop_unchecked()
-        self.assertEqual(saved, [("splash", 1)])
+        self.assertEqual(saved, [("splash", 7.23)])
 
         later = controller.submit_device_draft(
             DevicePreviewRequest(

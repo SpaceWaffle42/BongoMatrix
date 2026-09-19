@@ -9,7 +9,7 @@ import unittest
 from pathlib import Path
 from unittest.mock import Mock, patch
 
-from config_store import ConfigStore, DEFAULT_CONFIG, validate_config
+from config_store import ConfigConflictError, ConfigStore, DEFAULT_CONFIG, validate_config
 import display_controller
 from display_controller import (
     DisplayController,
@@ -574,6 +574,112 @@ console.log('MEDIA_PLAYLIST_PREVIEW_PASS');
         self.assertEqual(saved_splash["duration"], splash["duration"] + 1)
         self.assertEqual(saved_splash["enabled"], (not splash["enabled"]))
 
+    def test_legacy_full_snapshot_preserves_authoritative_screen_rows(self):
+        payloads = (
+            (3, "full"),
+            (3, "playlist-only"),
+            (4, "full"),
+        )
+        for screen in ("splash", "sleep"):
+            for row_count in (1, 3):
+                for cleared_index in range(row_count):
+                    for alias_exists in (False, True):
+                        for contract, payload_kind in payloads:
+                            with (
+                                self.subTest(
+                                    screen=screen,
+                                    row_count=row_count,
+                                    cleared_index=cleared_index,
+                                    alias_exists=alias_exists,
+                                    contract=contract,
+                                    payload_kind=payload_kind,
+                                ),
+                                tempfile.TemporaryDirectory() as directory,
+                            ):
+                                store = ConfigStore(Path(directory) / "config.json")
+                                predecessor = store.get()
+                                template = next(
+                                    item for item in predecessor["playlist"]
+                                    if item["module"] == screen
+                                )
+                                selected = (
+                                    "built-in/splash_loading_squares.gif"
+                                    if screen == "splash" else "built-in/sleep.gif"
+                                )
+                                rows = []
+                                for index in range(row_count):
+                                    row = copy.deepcopy(template)
+                                    row.update(
+                                        id=f"{screen}_authoritative_{index}",
+                                        source=selected,
+                                        sources=[selected],
+                                        enabled=True,
+                                        layout={**row["layout"], "x": index},
+                                    )
+                                    rows.append(row)
+                                rows[cleared_index].update(
+                                    source="", sources=[], enabled=False,
+                                )
+                                predecessor["playlist"] = [
+                                    item for item in predecessor["playlist"]
+                                    if item["module"] != screen
+                                ]
+                                predecessor["playlist"][0:0] = copy.deepcopy(rows)
+                                predecessor["media"][screen] = (
+                                    selected if alias_exists else "missing-alias.png"
+                                )
+                                store._write(predecessor)
+                                current = store.get()
+                                changes = {
+                                    "playlist": copy.deepcopy(current["playlist"]),
+                                    "device": {"name": "Legacy unrelated update"},
+                                }
+                                if payload_kind == "full":
+                                    changes["media"] = copy.deepcopy(current["media"])
+
+                                saved = store.update(
+                                    changes,
+                                    base_revision=current["revision"],
+                                    client_contract=contract,
+                                )
+
+                                saved_rows = [
+                                    item for item in saved["playlist"]
+                                    if item["module"] == screen
+                                ]
+                                self.assertEqual(saved_rows, rows)
+                                self.assertEqual(
+                                    saved["device"]["name"], "Legacy unrelated update",
+                                )
+                                self.assertEqual(
+                                    saved["revision"], current["revision"] + 1,
+                                )
+
+    def test_contract_three_cannot_create_a_new_screen_row(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "config.json"
+            store = ConfigStore(path)
+            current = store.get()
+            legacy_playlist = [
+                {key: item[key] for key in ("module", "duration", "enabled")}
+                for item in current["playlist"]
+            ]
+            legacy_playlist.append({
+                "module": "splash", "duration": 4, "enabled": True,
+            })
+            before = path.read_bytes()
+
+            with self.assertRaisesRegex(
+                ValueError, "new splash screen state must contain exactly one row",
+            ):
+                store.update(
+                    {"playlist": legacy_playlist},
+                    base_revision=current["revision"], client_contract=3,
+                )
+
+            self.assertEqual(path.read_bytes(), before)
+            self.assertEqual(store.get(), current)
+
     def test_only_contracts_three_and_four_are_supported(self):
         with tempfile.TemporaryDirectory() as directory:
             store = ConfigStore(Path(directory) / "config.json")
@@ -637,6 +743,188 @@ console.log('MEDIA_PLAYLIST_PREVIEW_PASS');
                 store.validate_candidate(
                     {"playlist": [None]}, canonicalize_media=False,
                 )
+
+    def test_schema_four_multirow_predecessor_is_admitted_without_rewrite_or_loss(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "config.json"
+            predecessor = copy.deepcopy(DEFAULT_CONFIG)
+            predecessor["device"]["name"] = "Predecessor with two splash rows"
+            second = copy.deepcopy(next(
+                item for item in predecessor["playlist"]
+                if item["module"] == "splash"
+            ))
+            second.update({
+                "id": "splash_second", "source": "second.gif",
+                "sources": ["second.gif"], "duration": 19, "enabled": False,
+                "layout": {**second["layout"], "x": 9},
+            })
+            predecessor["playlist"].insert(2, second)
+            original = json.dumps(predecessor, indent=2).encode()
+            path.write_bytes(original)
+
+            store = ConfigStore(path, media_dir=Path(directory) / "media")
+
+            self.assertEqual(path.read_bytes(), original)
+            self.assertEqual(store.get(), predecessor)
+            saved = store.update(
+                {"display": {"night_brightness": 23}},
+                base_revision=predecessor["revision"], client_contract=4,
+            )
+            saved_rows = [
+                item for item in saved["playlist"] if item["module"] == "splash"
+            ]
+            self.assertEqual(saved_rows, [predecessor["playlist"][0], second])
+            self.assertEqual(saved["device"], predecessor["device"])
+            self.assertEqual(saved["display"]["night_brightness"], 23)
+            self.assertEqual(saved["revision"], predecessor["revision"] + 1)
+
+            collapsed = copy.deepcopy(saved["playlist"])
+            collapsed.remove(next(
+                item for item in collapsed if item.get("id") == "splash_second"
+            ))
+            with self.assertRaisesRegex(
+                ValueError, "legacy splash screen row identities must be preserved",
+            ):
+                store.update(
+                    {"playlist": collapsed},
+                    base_revision=saved["revision"], client_contract=4,
+                )
+
+    def test_contract_three_preserves_grandfathered_multirow_screen_state(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "config.json"
+            predecessor = copy.deepcopy(DEFAULT_CONFIG)
+            first = next(
+                item for item in predecessor["playlist"] if item["module"] == "splash"
+            )
+            second = copy.deepcopy(first)
+            second.update(
+                id="splash_second", source="second.gif", sources=["second.gif"],
+                duration=19, enabled=False, layout={**second["layout"], "x": 9},
+            )
+            predecessor["playlist"].insert(predecessor["playlist"].index(first) + 1, second)
+            path.write_text(json.dumps(predecessor), encoding="utf-8")
+            store = ConfigStore(path)
+            legacy_playlist = [
+                {key: item[key] for key in ("module", "duration", "enabled")}
+                for item in predecessor["playlist"]
+                if item.get("id") != "splash_second"
+            ]
+
+            saved = store.update(
+                {"playlist": legacy_playlist, "device": {"name": "Contract 3"}},
+                base_revision=predecessor["revision"], client_contract=3,
+            )
+
+            saved_rows = [
+                item for item in saved["playlist"] if item["module"] == "splash"
+            ]
+            self.assertEqual(saved_rows, [first, second])
+            self.assertEqual(saved["device"]["name"], "Contract 3")
+            self.assertEqual(saved["revision"], predecessor["revision"] + 1)
+
+    def test_new_schema_four_writes_cannot_create_multirow_screen_state(self):
+        with tempfile.TemporaryDirectory() as temp:
+            store = ConfigStore(Path(temp) / "config.json")
+            current = store.get()
+            playlist = copy.deepcopy(current["playlist"])
+            splash = next(item for item in playlist if item["module"] == "splash")
+            duplicate = copy.deepcopy(splash)
+            duplicate["id"] = "splash_extra"
+            playlist.append(duplicate)
+
+            with self.assertRaisesRegex(
+                ValueError, "new splash screen state must contain exactly one row",
+            ):
+                store.update(
+                    {"playlist": playlist},
+                    base_revision=current["revision"], client_contract=4,
+                )
+
+    def test_disabled_empty_screen_update_round_trips_without_emptying_legacy_alias(self):
+        for screen in ("splash", "sleep"):
+            with self.subTest(screen=screen), tempfile.TemporaryDirectory() as directory:
+                path = Path(directory) / "config.json"
+                store = ConfigStore(path, media_dir=Path(directory) / "media")
+                before = store.get()
+                playlist = copy.deepcopy(before["playlist"])
+                row = next(item for item in playlist if item["module"] == screen)
+                other = next(
+                    item for item in playlist
+                    if item["module"] in {"splash", "sleep"} and item["module"] != screen
+                )
+                other_before = copy.deepcopy(other)
+                row.update(enabled=False, source="", sources=[])
+
+                saved = store.update(
+                    {"playlist": playlist},
+                    base_revision=before["revision"], client_contract=4,
+                )
+
+                saved_row = next(
+                    item for item in saved["playlist"] if item["module"] == screen
+                )
+                self.assertEqual(
+                    {key: saved_row[key] for key in ("enabled", "source", "sources")},
+                    {"enabled": False, "source": "", "sources": []},
+                )
+                self.assertEqual(saved["media"][screen], before["media"][screen])
+                self.assertEqual(next(
+                    item for item in saved["playlist"]
+                    if item["module"] == other_before["module"]
+                ), other_before)
+                self.assertEqual(saved["revision"], before["revision"] + 1)
+                self.assertEqual(ConfigStore(path).get(), saved)
+                with self.assertRaisesRegex(
+                    ConfigConflictError, "configuration revision conflict",
+                ):
+                    store.update(
+                        {"device": {"name": "stale"}},
+                        base_revision=before["revision"], client_contract=4,
+                    )
+
+                full_snapshot = copy.deepcopy(saved)
+                full_snapshot.pop("revision")
+                full_snapshot.pop("schema_version")
+                full_snapshot["device"]["name"] = f"Unrelated {screen} follow-up"
+                followed_up = store.update(
+                    full_snapshot,
+                    base_revision=saved["revision"], client_contract=4,
+                )
+                followed_up_row = next(
+                    item for item in followed_up["playlist"]
+                    if item["module"] == screen
+                )
+                self.assertEqual(
+                    {
+                        key: followed_up_row[key]
+                        for key in ("enabled", "source", "sources")
+                    },
+                    {"enabled": False, "source": "", "sources": []},
+                )
+                self.assertEqual(
+                    followed_up["device"]["name"], f"Unrelated {screen} follow-up",
+                )
+                self.assertEqual(followed_up["media"][screen], before["media"][screen])
+                self.assertEqual(next(
+                    item for item in followed_up["playlist"]
+                    if item["module"] == other_before["module"]
+                ), other_before)
+                self.assertEqual(followed_up["revision"], saved["revision"] + 1)
+                self.assertEqual(ConfigStore(path).get(), followed_up)
+
+                invalid = copy.deepcopy(followed_up["playlist"])
+                invalid_row = next(
+                    item for item in invalid if item["module"] == screen
+                )
+                invalid_row.update(enabled=True, source="", sources=[])
+                with self.assertRaisesRegex(
+                    ValueError, f"enabled {screen} screen requires selected media",
+                ):
+                    store.update(
+                        {"playlist": invalid},
+                        base_revision=followed_up["revision"], client_contract=4,
+                    )
 
 
 if __name__ == "__main__":

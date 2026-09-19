@@ -985,6 +985,7 @@ class Matrix:
         playback_rate=1.0,
         stop_event=None,
         max_duration=None,
+        require_complete=False,
         *,
         pinned_handle=None,
     ):
@@ -1034,6 +1035,7 @@ class Matrix:
                     pass
 
         shown = False
+        completion = {}
         timeline = gif_media_frames(
             path, loops=loops, playback_rate=playback_rate,
             stop_event=stop_event, max_duration=max_duration,
@@ -1041,6 +1043,7 @@ class Matrix:
             image_iterator=lambda gif: gif_composited_frames(
                 gif, image_iterator=ImageSequence.Iterator,
             ),
+            completion=completion,
         )
         try:
             for image, frame_delay in timeline:
@@ -1051,19 +1054,21 @@ class Matrix:
                         keep_aspect=keep_aspect, fit=fit,
                     )
                     if stop_event is not None and stop_event.is_set():
-                        return shown
+                        return False if require_complete else shown
                     self.swap()
                     if not _swap_admitted(self):
-                        return shown
+                        return False if require_complete else shown
                     shown = True
                     if stop_event is not None:
                         if stop_event.wait(frame_delay):
-                            return True
+                            return not require_complete
                     else:
                         time.sleep(frame_delay)
                 finally:
                     close_owned(image, "GIF candidate")
-            return shown
+            return shown and (
+                not require_complete or completion.get("complete", False)
+            )
         finally:
             close_owned(timeline, "GIF timeline")
 

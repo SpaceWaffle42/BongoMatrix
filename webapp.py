@@ -33,7 +33,7 @@ from werkzeug.utils import secure_filename
 
 from acceptance_artifacts import AcceptanceArtifactTransaction
 from api_timeouts import DEFAULT_API_TIMEOUT_SECONDS
-from display_controller import playlist_module_config
+from display_controller import playlist_item_config, playlist_module_config
 from config_store import (
     ALLOWED_MODULES, DEFAULT_CONFIG, ConfigConflictError, ConfigDurabilityError,
     MEDIA_PLAYLIST_CLIENT_CONTRACT, validate_config,
@@ -45,7 +45,9 @@ from modules.scroll_timing_cache import ScrollTimingCache, TimingCacheBusy
 from modules.scroll_timing import timing_javascript
 from modules import announcement_board, weather_app, openweather_overview, openweather_forecast
 from media_resolver import MediaResolutionError, pin_candidate_media
-from screen_media import discover_screen_media, validate_screen_media_config
+from screen_media import (
+    discover_screen_media, validate_screen_media_config,
+)
 from pairing import PairedDeviceStore, PairingDurabilityError
 from secret_store import SecretDurabilityError, SecretStore
 from edit_preview import (
@@ -340,18 +342,42 @@ def _validate_current_lava_selection(module_name, candidate, selected_palette):
 
 def _edit_preview_iterator(
     module_name, candidate, selected_palette, pinned_media, prepared, stop_event,
+    selected_screen_row=None,
 ):
     """Construct a capture-only iterator without touching display-controller state."""
     from edit_preview import (
         advanced_canvas_preview_frames, announcement_preview_frames,
+        bounded_screen_preview_duration_seconds,
         continuous_lava_preview_frames, custom_text_preview_frames,
         lava_preview_frames, media_preview_frames, openweather_forecast_preview_frames,
         openweather_overview_preview_frames, preview_duration,
         weather_preview_frames,
     )
 
+    screen_duration = None
     if module_name in {"splash", "sleep"}:
-        candidate = playlist_module_config(candidate, module_name)
+        if selected_screen_row is None:
+            selected_screen_row = next(
+                (
+                    row for row in candidate.get("playlist", [])
+                    if isinstance(row, dict) and row.get("module") == module_name
+                ),
+                None,
+            )
+        candidate = (
+            playlist_item_config(candidate, selected_screen_row)
+            if selected_screen_row is not None
+            else playlist_module_config(candidate, module_name)
+        )
+        reference = candidate.get("media", {}).get(module_name)
+        screen_duration = bounded_screen_preview_duration_seconds(
+            candidate, module_name, reference, pinned_media,
+            selected_row=selected_screen_row,
+            stop_event=stop_event,
+            decode_timeout=EDIT_PREVIEW_PROVIDER_DEADLINE_SECONDS,
+        )
+        if screen_duration is None:
+            return iter(())
     matrix = CaptureMatrix()
     if module_name in {"splash", "sleep"}:
         filename = candidate["media"][module_name]
@@ -359,9 +385,11 @@ def _edit_preview_iterator(
         if pinned_handle is None:
             raise ValueError("edit preview media capability is missing")
         return media_preview_frames(
-            matrix, filename, preview_duration(candidate, module_name),
+            matrix, filename, screen_duration,
             candidate.get("media_layout", {}).get(module_name),
             stop_event=stop_event, pinned_handle=pinned_handle,
+            gif_loops=1, gif_max_duration=None,
+            decode_timeout=EDIT_PREVIEW_PROVIDER_DEADLINE_SECONDS,
         )
     if module_name == "clock_lava":
         if selected_palette is not None:
@@ -2384,7 +2412,9 @@ def create_app(
                 request.headers.get("X-Matrix-Client-Contract")
             )
             required = {"config", "generation", "preview_instance"}
-            payload = edit_preview_json(required, {"selected_lava_palette"})
+            payload = edit_preview_json(
+                required, {"selected_lava_palette", "selected_media_item_id"},
+            )
             generation = payload["generation"]
             if (
                 isinstance(generation, bool) or not isinstance(generation, int)
@@ -2398,6 +2428,21 @@ def create_app(
             candidate = config_store.validate_candidate(
                 payload["config"], client_contract=client_contract,
             )
+            selected_media_item_id = payload.get("selected_media_item_id")
+            selected_screen_row = None
+            if selected_media_item_id is not None:
+                if not isinstance(selected_media_item_id, str):
+                    raise ValueError("selected_media_item_id is invalid")
+                selected_screen_row = next((
+                    row for row in candidate.get("playlist", [])
+                    if (
+                        isinstance(row, dict)
+                        and row.get("module") == module_name
+                        and row.get("id") == selected_media_item_id
+                    )
+                ), None)
+                if selected_screen_row is None:
+                    raise ValueError("selected_media_item_id is invalid")
             custom_ids = {item["id"] for item in candidate["custom_modules"]}
             if module_name not in ALLOWED_MODULES and module_name not in custom_ids:
                 stack.close()
@@ -2420,10 +2465,17 @@ def create_app(
                 def owned_iterator():
                     try:
                         try:
-                            yield from _edit_preview_iterator(
+                            iterator_arguments = (
                                 module_name, candidate, selected_palette, pinned_media,
                                 prepared, stop_event,
                             )
+                            if selected_screen_row is None:
+                                yield from _edit_preview_iterator(*iterator_arguments)
+                            else:
+                                yield from _edit_preview_iterator(
+                                    *iterator_arguments,
+                                    selected_screen_row=selected_screen_row,
+                                )
                         except Exception:
                             raise EditPreviewRenderError(
                                 "preview rendering is unavailable"

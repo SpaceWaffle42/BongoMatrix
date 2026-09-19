@@ -1064,14 +1064,12 @@ def validate_config(
         raise ValueError("playlist must contain at most 256 modules")
     custom_by_id = {item["id"]: item for item in custom_modules}
     media_item_ids = set()
-    media_item_counts = {"splash": 0, "sleep": 0}
     first_media_items = {}
     for item in playlist:
         if not isinstance(item, dict):
             raise ValueError("playlist items must be objects")
         module_name = item.get("module")
         if module_name in {"splash", "sleep"}:
-            media_item_counts[module_name] += 1
             if "duration" not in item:
                 raise ValueError("module duration is required")
             expected = {
@@ -1134,9 +1132,6 @@ def validate_config(
                 raise ValueError("module duration must be between 1 and 3600 seconds")
         if not isinstance(item.get("enabled"), bool):
             raise ValueError("module enabled must be a boolean")
-    for module_name, count in media_item_counts.items():
-        if count > 1:
-            raise ValueError(f"playlist must contain exactly one {module_name} screen")
     # Scalar slots remain backwards-compatible aliases for the first row.
     # ConfigStore synchronizes playlist-aware writes into these aliases before
     # validation; direct legacy callers can still update only the scalar slot.
@@ -1290,10 +1285,11 @@ def _synchronize_media_playlist_changes(
             occurrence += 1
     for current_index, item in sorted(hidden_rows, key=lambda entry: entry[0]):
         candidate["playlist"].insert(min(current_index, len(candidate["playlist"])), item)
-    playlist_changed = (
-        "playlist" in changes and changes["playlist"] != current["playlist"]
-    )
     for module_name in MEDIA_PLAYLIST_MODULES:
+        if legacy_contract and current_media_rows[module_name]:
+            first_current = current_media_rows[module_name][0]
+            if first_current.get("sources"):
+                candidate["media"][module_name] = first_current["source"]
         item = next(
             (
                 entry for entry in candidate["playlist"]
@@ -1305,14 +1301,21 @@ def _synchronize_media_playlist_changes(
             continue
         if (
             not legacy_contract
-            and playlist_changed
+            and "playlist" in changes
+            and module_name in rich_candidate_modules
             and "source" in item
             and "layout" in item
         ):
-            candidate["media"][module_name] = item["source"]
+            # Disabled rows may intentionally have no selected media. Preserve
+            # the valid legacy alias instead of copying an invalid empty scalar.
+            if item.get("sources"):
+                candidate["media"][module_name] = item["source"]
             candidate["media_layout"][module_name] = copy.deepcopy(item["layout"])
             continue
-        if module_name in changes.get("media", {}):
+        if (
+            module_name in changes.get("media", {})
+            and (not legacy_contract or not current_media_rows[module_name])
+        ):
             source = candidate["media"][module_name]
             item["source"] = source
             item["sources"] = (
@@ -1321,6 +1324,31 @@ def _synchronize_media_playlist_changes(
             )
         if module_name in changes.get("media_layout", {}):
             item["layout"] = copy.deepcopy(candidate["media_layout"][module_name])
+    if client_contract in {MINIMUM_CLIENT_CONTRACT, MEDIA_PLAYLIST_CLIENT_CONTRACT}:
+        for screen in MEDIA_PLAYLIST_MODULES:
+            current_ids = [
+                item.get("id") for item in current["playlist"]
+                if isinstance(item, dict) and item.get("module") == screen
+            ]
+            candidate_ids = [
+                item.get("id") for item in candidate["playlist"]
+                if isinstance(item, dict) and item.get("module") == screen
+            ]
+            if len(current_ids) <= 1 and len(candidate_ids) > 1:
+                raise ValueError(
+                    f"new {screen} screen state must contain exactly one row"
+                )
+            if (
+                len(current_ids) > 1
+                and all(isinstance(item_id, str) for item_id in candidate_ids)
+                and (
+                    len(candidate_ids) != len(current_ids)
+                    or set(candidate_ids) != set(current_ids)
+                )
+            ):
+                raise ValueError(
+                    f"legacy {screen} screen row identities must be preserved"
+                )
     return candidate
 
 

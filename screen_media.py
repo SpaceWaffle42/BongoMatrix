@@ -110,35 +110,100 @@ class ScreenMediaCatalog:
             return current
 
 
-def screen_still_duration_seconds(row, selected_media) -> float:
-    """Derive a still hold from exact one-pass timings of selected usable GIFs."""
+def _screen_playback_rate(row):
     try:
         speed = row.get("layout", {}).get("playback_speed_percent", 100.0)
-        if isinstance(speed, bool) or not math.isfinite(speed) or speed <= 0:
-            return 7.0
+        if (
+            isinstance(speed, bool)
+            or not math.isfinite(speed)
+            or not 10 <= speed <= 400
+        ):
+            return None
         rate = Fraction(str(speed)) / 100
     except (TypeError, ValueError, ZeroDivisionError):
+        return None
+    return rate
+
+
+def _scaled_gif_duration_seconds(media, rate):
+    if media.kind != "gif" or not media.frame_delays_ms or rate is None:
+        return None
+    try:
+        delays = [Fraction(str(delay)) for delay in media.frame_delays_ms]
+    except (TypeError, ValueError, ZeroDivisionError):
+        return None
+    if any(not math.isfinite(float(delay)) for delay in delays):
+        return None
+    duration = sum((max(Fraction(10), delay / rate) for delay in delays), Fraction())
+    return duration if duration > 0 else None
+
+
+def screen_gif_duration_seconds(row, media) -> float:
+    """Return one scaled GIF pass, matching the physical renderer's delay floor."""
+    duration = _scaled_gif_duration_seconds(media, _screen_playback_rate(row))
+    if duration is None:
+        return 7.0
+    return float(duration / 1000)
+
+
+def screen_still_duration_seconds(row, selected_media) -> float:
+    """Derive a still hold from exact one-pass timings of selected usable GIFs."""
+    rate = _screen_playback_rate(row)
+    if rate is None:
         return 7.0
 
     durations = []
     seen = set()
     for media in selected_media:
-        if media.reference in seen or media.kind != "gif" or not media.frame_delays_ms:
+        if media.reference in seen:
             continue
         seen.add(media.reference)
-        try:
-            delays = [Fraction(str(delay)) for delay in media.frame_delays_ms]
-        except (TypeError, ValueError, ZeroDivisionError):
-            continue
-        if any(not math.isfinite(float(delay)) for delay in delays):
-            continue
-        duration = sum((max(Fraction(10), delay / rate) for delay in delays), Fraction())
-        if duration > 0:
+        duration = _scaled_gif_duration_seconds(media, rate)
+        if duration is not None:
             durations.append(duration)
     if not durations:
         return 7.0
     mean = sum(durations, Fraction()) / len(durations)
     return float(mean / 1000) if Fraction(5000) <= mean <= Fraction(10000) else 7.0
+
+
+def screen_preview_duration_seconds(
+    config, screen, reference, pinned_media, *, selected_row=None, read_info=None,
+) -> float:
+    """Derive screen preview timing from pinned media without selection state."""
+    read_info = read_info or ScreenMediaCatalog._read_info
+    row = selected_row if (
+        isinstance(selected_row, dict) and selected_row.get("module") == screen
+    ) else next(
+        (
+            item for item in config.get("playlist", [])
+            if isinstance(item, dict)
+            and item.get("enabled") is True
+            and item.get("module") == screen
+        ),
+        None,
+    )
+    if row is None:
+        return 7.0
+    media = []
+    for source in row.get("sources", ()):
+        pinned = pinned_media.get(source)
+        if pinned is None:
+            continue
+        try:
+            identity = ScreenMediaCatalog._identity(os.fstat(pinned.fileno()))
+            media.append(read_info(source, pinned, identity))
+        except (
+            KeyError, OSError, SyntaxError, TypeError, ValueError,
+            UnidentifiedImageError, Image.DecompressionBombError,
+        ):
+            continue
+    selected = next((item for item in media if item.reference == reference), None)
+    if selected is None:
+        return 7.0
+    if selected.kind == "gif":
+        return screen_gif_duration_seconds(row, selected)
+    return screen_still_duration_seconds(row, media)
 
 
 class ScreenMediaRuntime:
@@ -149,15 +214,18 @@ class ScreenMediaRuntime:
         self._shuffle = shuffle
         self._choice = choice
         self._lock = threading.RLock()
-        self._splash_key = ()
-        self._splash_bag = []
-        self._retired_splash = set()
-        self._retired_sleep = set()
+        self._splash_states = {}
+        self._retired_splash = {}
+        self._last_splash_row_key = None
+        self._retired_sleep = {}
+        self._last_sleep_row_key = None
         self._sleep_active = False
-        self._sleep_current = None
+        self._sleep_current = {}
 
     @staticmethod
-    def _row(config, screen):
+    def _row(config, screen, row=None):
+        if isinstance(row, dict) and row.get("module") == screen:
+            return row
         return next(
             (
                 item for item in config.get("playlist", [])
@@ -166,101 +234,184 @@ class ScreenMediaRuntime:
             None,
         )
 
-    def _effective(self, config, screen):
-        row = self._row(config, screen)
+    @staticmethod
+    def _row_keys(config, screen):
+        return {
+            item.get("id") if isinstance(item.get("id"), str) else screen
+            for item in config.get("playlist", [])
+            if isinstance(item, dict) and item.get("module") == screen
+        }
+
+    def _prune_removed_rows(self, config, screen):
+        current = self._row_keys(config, screen)
+        if screen == "splash":
+            self._splash_states = {
+                row_key: state for row_key, state in self._splash_states.items()
+                if row_key in current
+            }
+            self._retired_splash = {
+                row_key: retired for row_key, retired in self._retired_splash.items()
+                if row_key in current
+            }
+            if self._last_splash_row_key not in current:
+                self._last_splash_row_key = None
+        else:
+            self._sleep_current = {
+                row_key: media for row_key, media in self._sleep_current.items()
+                if row_key in current
+            }
+            self._retired_sleep = {
+                row_key: retired for row_key, retired in self._retired_sleep.items()
+                if row_key in current
+            }
+            if self._last_sleep_row_key not in current:
+                self._last_sleep_row_key = None
+
+    def _effective(self, config, screen, row=None):
+        row = self._row(config, screen, row)
         if not row or row.get("enabled") is not True:
             return []
         catalog = self._catalog(screen)
+        row_key = row.get("id") if isinstance(row.get("id"), str) else screen
         if screen == "splash":
             current_identities = {
                 (item.reference, item.identity) for item in catalog.values()
             }
-            self._retired_splash.intersection_update(current_identities)
+            retired = self._retired_splash.setdefault(row_key, set())
+            retired.intersection_update(current_identities)
         elif screen == "sleep":
             current_identities = {
                 (item.reference, item.identity) for item in catalog.values()
             }
-            self._retired_sleep.intersection_update(current_identities)
+            retired = self._retired_sleep.setdefault(row_key, set())
+            retired.intersection_update(current_identities)
         return [
             catalog[reference] for reference in row.get("sources", ())
             if reference in catalog and (
                 (
                     screen != "splash"
-                    or (reference, catalog[reference].identity) not in self._retired_splash
+                    or (reference, catalog[reference].identity) not in retired
                 ) and (
                     screen != "sleep"
-                    or (reference, catalog[reference].identity) not in self._retired_sleep
+                    or (reference, catalog[reference].identity) not in retired
                 )
             )
         ]
 
-    def choose_splash(self, config) -> MediaInfo | None:
+    def choose_splash(self, config, row=None) -> MediaInfo | None:
         with self._lock:
-            effective = self._effective(config, "splash")
+            self._prune_removed_rows(config, "splash")
+            row = self._row(config, "splash", row)
+            row_key = (
+                row.get("id") if isinstance(row, dict) and isinstance(row.get("id"), str)
+                else "splash"
+            )
+            self._last_splash_row_key = row_key
+            effective = self._effective(config, "splash", row)
             key = tuple((item.reference, item.identity) for item in effective)
-            if key != self._splash_key:
-                self._splash_key = key
-                self._splash_bag.clear()
+            state = self._splash_states.get(row_key)
+            bag = state[1] if state is not None and state[0] == key else []
             if not effective:
+                self._splash_states[row_key] = (key, bag)
                 return None
-            if not self._splash_bag:
-                self._splash_bag = [item.reference for item in effective]
-                self._shuffle(self._splash_bag)
-            reference = self._splash_bag.pop()
+            if not bag:
+                bag = [item.reference for item in effective]
+                self._shuffle(bag)
+            reference = bag.pop()
+            self._splash_states[row_key] = (key, bag)
             return next(item for item in effective if item.reference == reference)
 
-    def retire_splash(self, media: MediaInfo | None) -> None:
+    def retire_splash(self, media: MediaInfo | None, row=None) -> None:
         if media is None:
             return
         with self._lock:
-            self._retired_splash.add((media.reference, media.identity))
+            row_key = (
+                row.get("id") if isinstance(row, dict) and isinstance(row.get("id"), str)
+                else self._last_splash_row_key or "splash"
+            )
+            self._retired_splash.setdefault(row_key, set()).add(
+                (media.reference, media.identity)
+            )
 
-    def _select_sleep(self, config) -> MediaInfo | None:
-        effective = self._effective(config, "sleep")
-        if self._sleep_current is not None:
+    def restore_splash(self, media: MediaInfo | None, row=None) -> None:
+        """Return an interrupted selection to its unchanged row-local bag."""
+        if media is None:
+            return
+        with self._lock:
+            row_key = (
+                row.get("id") if isinstance(row, dict) and isinstance(row.get("id"), str)
+                else self._last_splash_row_key or "splash"
+            )
+            state = self._splash_states.get(row_key)
+            if state is not None and media.reference not in state[1]:
+                state[1].append(media.reference)
+
+    def _select_sleep(self, config, row=None) -> MediaInfo | None:
+        self._prune_removed_rows(config, "sleep")
+        row = self._row(config, "sleep", row)
+        row_key = (
+            row.get("id") if isinstance(row, dict) and isinstance(row.get("id"), str)
+            else "sleep"
+        )
+        self._last_sleep_row_key = row_key
+        effective = self._effective(config, "sleep", row)
+        current = self._sleep_current.get(row_key)
+        if current is not None:
             for item in effective:
                 if (
-                    item.reference == self._sleep_current.reference
-                    and item.identity == self._sleep_current.identity
+                    item.reference == current.reference
+                    and item.identity == current.identity
                 ):
-                    return self._sleep_current
-        self._sleep_current = self._choice(effective) if effective else None
-        return self._sleep_current
+                    return current
+        current = self._choice(effective) if effective else None
+        if current is None:
+            self._sleep_current.pop(row_key, None)
+        else:
+            self._sleep_current[row_key] = current
+        return current
 
-    def begin_sleep(self, config) -> MediaInfo | None:
+    def begin_sleep(self, config, row=None) -> MediaInfo | None:
         with self._lock:
             self._sleep_active = True
-            self._sleep_current = None
-            return self._select_sleep(config)
+            self._sleep_current.clear()
+            return self._select_sleep(config, row)
 
-    def current_sleep(self, config) -> MediaInfo | None:
+    def current_sleep(self, config, row=None) -> MediaInfo | None:
         with self._lock:
             if not self._sleep_active:
                 return None
-            return self._select_sleep(config)
+            return self._select_sleep(config, row)
 
     def end_sleep(self) -> None:
         with self._lock:
             self._sleep_active = False
-            self._sleep_current = None
+            self._sleep_current.clear()
 
-    def retire_sleep(self, media: MediaInfo | None) -> None:
+    def retire_sleep(self, media: MediaInfo | None, row=None) -> None:
         if media is None:
             return
         with self._lock:
-            self._retired_sleep.add((media.reference, media.identity))
-            if self._sleep_current == media:
-                self._sleep_current = None
+            row_key = (
+                row.get("id") if isinstance(row, dict) and isinstance(row.get("id"), str)
+                else self._last_sleep_row_key or "sleep"
+            )
+            self._retired_sleep.setdefault(row_key, set()).add(
+                (media.reference, media.identity)
+            )
+            if self._sleep_current.get(row_key) == media:
+                self._sleep_current.pop(row_key, None)
 
-    def duration(self, config, screen: str, media: MediaInfo) -> float:
-        """Return the configured GIF hold or this screen's selected-GIF still hold."""
+    def duration(self, config, screen: str, media: MediaInfo, row=None) -> float:
+        """Return one natural GIF pass or this screen's selected-GIF still hold."""
         with self._lock:
-            row = self._row(config, screen)
+            row = self._row(config, screen, row)
             if row is None:
                 return 7.0
             if media.kind == "gif":
-                return row["duration"]
-            return screen_still_duration_seconds(row, self._effective(config, screen))
+                return screen_gif_duration_seconds(row, media)
+            return screen_still_duration_seconds(
+                row, self._effective(config, screen, row),
+            )
 
 
 def _screen_name(screen: str) -> str:
@@ -342,22 +493,26 @@ def validate_screen_media_config(config, media_root) -> dict[str, tuple[str, ...
             item for item in playlist
             if isinstance(item, dict) and item.get("module") == screen
         ]
-        if len(rows) != 1:
-            raise ValueError(f"playlist must contain exactly one {screen} screen")
-        row = rows[0]
-        sources = row.get("sources")
-        if not isinstance(sources, list):
-            raise ValueError(f"{screen} screen requires usable selected media")
+        if not rows:
+            raise ValueError(f"playlist must contain at least one {screen} screen")
         available = set(discover_screen_media(media_root, screen))
-        if any(reference not in available for reference in sources):
-            raise ValueError(f"{screen} screen requires usable selected media")
-        if row.get("enabled") is True and not sources:
-            raise ValueError(f"enabled {screen} screen requires usable selected media")
-        validated[screen] = tuple(sources)
+        selected = []
+        for row in rows:
+            sources = row.get("sources")
+            if not isinstance(sources, list):
+                raise ValueError(f"{screen} screen requires usable selected media")
+            if any(reference not in available for reference in sources):
+                raise ValueError(f"{screen} screen requires usable selected media")
+            if row.get("enabled") is True and not sources:
+                raise ValueError(f"enabled {screen} screen requires usable selected media")
+            selected.extend(sources)
+        validated[screen] = tuple(dict.fromkeys(selected))
     return validated
 
 
-def repair_saved_screen(config_store, config, screen: str, media_root) -> ScreenRepair:
+def repair_saved_screen(
+    config_store, config, screen: str, media_root, *, row_id=None,
+) -> ScreenRepair:
     """Filter one stale saved selection and persist a revision-bound repair once."""
     from config_store import ConfigConflictError
 
@@ -368,6 +523,7 @@ def repair_saved_screen(config_store, config, screen: str, media_root) -> Screen
         (
             item for item in playlist
             if isinstance(item, dict) and item.get("module") == screen
+            and (row_id is None or item.get("id") == row_id)
         ),
         None,
     )
@@ -401,6 +557,7 @@ def repair_saved_screen(config_store, config, screen: str, media_root) -> Screen
             (
                 item for item in latest.get("playlist", [])
                 if isinstance(item, dict) and item.get("module") == screen
+                and (row_id is None or item.get("id") == row_id)
             ),
             {},
         )

@@ -283,7 +283,9 @@ class _DecodedGif:
             raise first_error
 
 
-def _preview_decode(decode, stop_event, deadline, monotonic):
+def _preview_decode(
+    decode, stop_event, deadline, monotonic, *, cancel_cleanup=None,
+):
     """Transfer one Pillow result atomically or abandon it for worker cleanup."""
     while not _PREVIEW_DECODE_SLOTS.acquire(timeout=0.01):
         if ((stop_event is not None and stop_event.is_set()) or
@@ -334,8 +336,12 @@ def _preview_decode(decode, stop_event, deadline, monotonic):
             state["outcome"] = None
             if outcome is not None and outcome[0]:
                 value_to_close = outcome[1]
-        if value_to_close is not None:
-            _close_preview_value(value_to_close)
+        try:
+            if value_to_close is not None:
+                _close_preview_value(value_to_close)
+        finally:
+            if cancel_cleanup is not None:
+                cancel_cleanup()
         raise _PreviewDecodeCancelled()
 
     while not done.wait(0.01):
@@ -352,6 +358,74 @@ def _preview_decode(decode, stop_event, deadline, monotonic):
     if not succeeded:
         raise value
     return value
+
+
+class _PreviewMetadataPin:
+    """Expose exact pin identity while owning cancellable in-memory duplicates."""
+
+    def __init__(self, pinned_handle):
+        self._pinned_handle = pinned_handle
+        self._lock = threading.Lock()
+        self._sources = []
+        self._closed = False
+
+    def fileno(self):
+        return self._pinned_handle.fileno()
+
+    def dup_file(self):
+        source = io.BytesIO(_pinned_preview_bytes(self._pinned_handle))
+        with self._lock:
+            self._sources.append(source)
+            closed = self._closed
+        if closed:
+            source.close()
+        return source
+
+    def close(self):
+        with self._lock:
+            self._closed = True
+            sources = list(self._sources)
+        for source in sources:
+            source.close()
+
+
+def bounded_screen_preview_duration_seconds(
+    config, screen, reference, pinned_media, *, selected_row=None,
+    stop_event=None, decode_timeout=None, monotonic=time.monotonic,
+):
+    """Read exact pinned screen timing under preview cancellation ownership."""
+    from screen_media import ScreenMediaCatalog, screen_preview_duration_seconds
+
+    started = monotonic()
+    deadline = None if decode_timeout is None else started + max(
+        0.0, float(decode_timeout),
+    )
+    cancellable_stop_event = (
+        stop_event if callable(getattr(stop_event, "is_set", None)) else None
+    )
+    metadata_pins = {
+        source: _PreviewMetadataPin(pinned)
+        for source, pinned in pinned_media.items()
+    }
+
+    def read_info(source, _pinned, identity):
+        metadata_pin = metadata_pins[source]
+        return _preview_decode(
+            lambda: ScreenMediaCatalog._read_info(source, metadata_pin, identity),
+            cancellable_stop_event, deadline, monotonic,
+            cancel_cleanup=metadata_pin.close,
+        )
+
+    try:
+        return screen_preview_duration_seconds(
+            config, screen, reference, metadata_pins,
+            selected_row=selected_row, read_info=read_info,
+        )
+    except _PreviewDecodeCancelled:
+        return None
+    finally:
+        for metadata_pin in metadata_pins.values():
+            metadata_pin.close()
 
 
 def _pinned_preview_bytes(pinned_handle):
@@ -377,9 +451,14 @@ def _preview_elapsed(monotonic, started):
     return max(0.0, monotonic() - started)
 
 
+_USE_PREVIEW_DURATION = object()
+
+
 def media_preview_frames(
     matrix, filename, duration, settings=None, *, video_decoder=None,
     stop_event=None, pinned_handle=None, monotonic=time.monotonic,
+    gif_loops=None, gif_max_duration=_USE_PREVIEW_DURATION,
+    decode_timeout=None,
 ):
     """Render the shared production animated-media timeline into PNG frames."""
     if pinned_handle is None:
@@ -393,7 +472,8 @@ def media_preview_frames(
     settings = settings or {}
     duration = max(0.0, float(duration))
     started = monotonic()
-    deadline = started + duration
+    decode_timeout = duration if decode_timeout is None else max(0.0, float(decode_timeout))
+    deadline = started + decode_timeout
 
     def playback_monotonic():
         return started + _preview_elapsed(monotonic, started)
@@ -443,9 +523,14 @@ def media_preview_frames(
             )
 
         timeline = gif_media_frames(
-            source, loops=settings.get("loops", 0),
+            source, loops=settings.get("loops", 0) if gif_loops is None else gif_loops,
             playback_rate=settings.get("playback_speed_percent", 100.0) / 100.0,
-            stop_event=stop_event, max_duration=duration,
+            stop_event=stop_event,
+            max_duration=(
+                duration
+                if gif_max_duration is _USE_PREVIEW_DURATION
+                else gif_max_duration
+            ),
             monotonic=playback_monotonic, image_open=image_open,
             image_iterator=lambda decoded: iter(decoded.frames),
             frame_copy=lambda frame: frame, bounded_pillow=False,
