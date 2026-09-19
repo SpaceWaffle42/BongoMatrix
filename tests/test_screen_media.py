@@ -528,21 +528,23 @@ class ScreenMediaRevisionTests(unittest.TestCase):
 
                         if sequence == "reload-stop-before-ack-preview":
                             scheduler_waiting = threading.Event()
-                            original_wait = controller._shutdown.wait
+                            original_acknowledge = controller._acknowledge_reload_boundary
 
-                            def gated_wait(timeout=None):
-                                if timeout == 1:
+                            def gated_acknowledge():
+                                with controller._state_lock:
+                                    reload_pending = bool(controller._reload_obligations)
+                                if reload_pending:
                                     scheduler_waiting.set()
                                     self.assertTrue(release_scheduler.wait(3))
-                                return original_wait(timeout)
+                                return original_acknowledge()
 
-                            controller._shutdown.wait = gated_wait
+                            controller._acknowledge_reload_boundary = gated_acknowledge
                             client.post(f"/api/preview/{screen}", headers=headers)
-                            self.assertTrue(scheduler_waiting.wait(2))
                             reloaded = client.post(
                                 "/api/control/reload", headers=headers,
                             )
                             self.assertEqual(reloaded.status_code, 200)
+                            self.assertTrue(scheduler_waiting.wait(2))
                             stop_responses = []
                             stop_thread = threading.Thread(
                                 target=lambda: stop_responses.append(client.post(
@@ -550,7 +552,7 @@ class ScreenMediaRevisionTests(unittest.TestCase):
                                 )),
                             )
                             stop_thread.start()
-                            self.assertTrue(original_wait(0.5))
+                            self.assertTrue(controller._shutdown.wait(0.5))
                             release_scheduler.set()
                             stop_thread.join(2)
                             self.assertFalse(stop_thread.is_alive())
