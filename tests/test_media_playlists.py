@@ -680,11 +680,11 @@ console.log('MEDIA_PLAYLIST_PREVIEW_PASS');
             self.assertEqual(path.read_bytes(), before)
             self.assertEqual(store.get(), current)
 
-    def test_only_contracts_three_and_four_are_supported(self):
+    def test_unknown_contract_is_not_supported(self):
         with tempfile.TemporaryDirectory() as directory:
             store = ConfigStore(Path(directory) / "config.json")
             with self.assertRaisesRegex(ValueError, "client contract is invalid"):
-                store.validate_candidate({}, client_contract=5)
+                store.validate_candidate({}, client_contract=6)
 
     def test_schema_three_migration_synthesizes_each_missing_required_media_row(self):
         for missing in ({"splash"}, {"sleep"}, {"splash", "sleep"}):

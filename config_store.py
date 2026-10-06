@@ -54,6 +54,7 @@ CONFIG_SNAPSHOT_LIMIT = 1_048_576
 CURRENT_CONFIG_SCHEMA_VERSION = 4
 MINIMUM_CLIENT_CONTRACT = 3
 MEDIA_PLAYLIST_CLIENT_CONTRACT = 4
+GROUPED_SCREEN_CLIENT_CONTRACT = 5
 AVAILABLE_FONTS = frozenset(available_font_names())
 BASIC_BORDER_STYLES = ("none", "solid", "inset", "dotted", "dashed", "double")
 
@@ -184,6 +185,7 @@ DEFAULT_CONFIG = {
         "text_colour": "#ffffff",
         "border_colour": "#000000",
     },
+    "screen_enabled": {"splash": True, "sleep": True},
     "media": {
         "splash": "built-in/splash_loading_squares.gif",
         "sleep": "built-in/sleep.gif",
@@ -258,10 +260,15 @@ def _validate_required_config_keys(config, schema, prefix=""):
     if not isinstance(config, dict):
         raise ValueError(f"current configuration field {prefix or '<root>'} must be an object")
     missing = set(schema) - set(config)
+    # Additive switches are optional in existing v4 snapshots; preserve bytes.
+    if not prefix:
+        missing.discard("screen_enabled")
     if missing:
         names = ", ".join(f"{prefix}{key}" for key in sorted(missing))
         raise ValueError(f"current configuration has missing fields: {names}")
     for key, expected in schema.items():
+        if not prefix and key == "screen_enabled" and key not in config:
+            continue
         if isinstance(expected, dict):
             _validate_required_config_keys(config[key], expected, f"{prefix}{key}.")
 
@@ -815,6 +822,14 @@ def validate_config(
     _validate_time(display["active_start"])
     _validate_time(display["active_end"])
 
+    screen_enabled = config.get("screen_enabled", {"splash": True, "sleep": True})
+    if (
+        not isinstance(screen_enabled, dict)
+        or set(screen_enabled) != {"splash", "sleep"}
+        or any(not isinstance(value, bool) for value in screen_enabled.values())
+    ):
+        raise ValueError("screen_enabled requires independent splash and sleep booleans")
+
     location = config["weather"]["location"]
     if not isinstance(location, str) or not location.strip() or len(location) > 100:
         raise ValueError("weather location must be 1-100 characters")
@@ -1349,6 +1364,20 @@ def _synchronize_media_playlist_changes(
                 raise ValueError(
                     f"legacy {screen} screen row identities must be preserved"
                 )
+    if client_contract == GROUPED_SCREEN_CLIENT_CONTRACT:
+        for screen in MEDIA_PLAYLIST_MODULES:
+            current_ids = {
+                item.get("id") for item in current["playlist"]
+                if isinstance(item, dict) and item.get("module") == screen
+            }
+            candidate_ids = {
+                item.get("id") for item in candidate["playlist"]
+                if isinstance(item, dict) and item.get("module") == screen
+            }
+            if not current_ids.issubset(candidate_ids):
+                raise ValueError(
+                    f"legacy {screen} screen row identities must be preserved"
+                )
     return candidate
 
 
@@ -1360,6 +1389,7 @@ def _validate_client_contract(client_contract):
         or not isinstance(client_contract, int)
         or client_contract not in {
             MINIMUM_CLIENT_CONTRACT, MEDIA_PLAYLIST_CLIENT_CONTRACT,
+            GROUPED_SCREEN_CLIENT_CONTRACT,
         }
     ):
         raise ValueError("client contract is invalid")

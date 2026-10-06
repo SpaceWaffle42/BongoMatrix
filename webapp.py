@@ -36,7 +36,7 @@ from api_timeouts import DEFAULT_API_TIMEOUT_SECONDS
 from display_controller import playlist_item_config, playlist_module_config
 from config_store import (
     ALLOWED_MODULES, DEFAULT_CONFIG, ConfigConflictError, ConfigDurabilityError,
-    MEDIA_PLAYLIST_CLIENT_CONTRACT, validate_config,
+    MEDIA_PLAYLIST_CLIENT_CONTRACT, GROUPED_SCREEN_CLIENT_CONTRACT, validate_config,
 )
 from font_catalog import available_font_names, font_advance_catalog
 from module_options import COLOUR_HEX, LAVA_PALETTES
@@ -76,7 +76,7 @@ MEDIA_METADATA_ERRORS = (
 CONFIG_REQUEST_LIMIT = 1_048_576
 CONDITIONAL_HEADER_LIMIT = 4096
 MINIMUM_CLIENT_CONTRACT = 3
-APPLICATION_VERSION = "0.3.64-preview"
+APPLICATION_VERSION = "0.3.65-preview"
 DEVICE_RESTART_PENDING_TTL_SECONDS = 60
 PAIRED_ACTION_HEADER = "X-Matrix-Action"
 PAIRED_ACTION_VALUE = "paired-request"
@@ -449,7 +449,7 @@ def _parse_client_contract(value):
     if not re.fullmatch(r"[0-9]{1,9}", value):
         raise ValueError("client contract is invalid")
     contract = int(value)
-    if contract not in {MINIMUM_CLIENT_CONTRACT, MEDIA_PLAYLIST_CLIENT_CONTRACT}:
+    if contract not in {MINIMUM_CLIENT_CONTRACT, MEDIA_PLAYLIST_CLIENT_CONTRACT, GROUPED_SCREEN_CLIENT_CONTRACT}:
         raise ValueError("client contract is invalid")
     return contract
 
@@ -1018,6 +1018,7 @@ def create_app(
     def advertise_client_contract(response):
         if request.path == "/api/config":
             response.headers["X-Matrix-Minimum-Client-Contract"] = str(MINIMUM_CLIENT_CONTRACT)
+            response.headers["X-Matrix-Current-Client-Contract"] = str(GROUPED_SCREEN_CLIENT_CONTRACT)
         if request.path.startswith(("/api/edit-preview", "/api/device-preview")):
             response.headers["Cache-Control"] = "no-store"
             response.headers.pop("ETag", None)
@@ -1727,6 +1728,24 @@ def create_app(
     @requires_pairing
     def list_media():
         return jsonify(media_items())
+
+    @app.get("/api/screen-media")
+    @requires_pairing
+    def list_screen_media():
+        from screen_media import SCREEN_DEFAULTS
+
+        with media_lock:
+            items = media_items()
+            catalog = {}
+            for screen in ("splash", "sleep"):
+                names = set(discover_screen_media(media_root, screen))
+                choices = [item for item in items if item["name"] in names]
+                default = SCREEN_DEFAULTS[screen]
+                if default not in names:
+                    default = next((item["name"] for item in choices if item["built_in"]), None)
+                    default = default or next((item["name"] for item in choices), None)
+                catalog[screen] = {"choices": choices, "default": default}
+            return jsonify(catalog)
 
     @app.post("/api/scroll-timing/<module_name>")
     @requires_pairing
