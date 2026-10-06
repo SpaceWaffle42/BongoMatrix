@@ -4883,6 +4883,8 @@ try{
         self.pair_browser()
         body = self.client.get("/").get_data(as_text=True)
         asset = (Path(__file__).parents[1] / "app/static/custom_canvas.js").read_bytes()
+        screen_asset = self.client.get("/static/screen_media.js").data
+        screen_catalogue = self.client.get("/api/screen-media").data
         posted = []
         previewed = []
         preview_lock = threading.Lock()
@@ -4912,6 +4914,10 @@ try{
                         self.send(200, asset, "text/javascript; charset=utf-8")
                     else:
                         self.send(503, b"/* timed out waiting to release Canvas editor */", "text/javascript")
+                elif self.path == "/static/screen_media.js":
+                    self.send(200, screen_asset, "text/javascript; charset=utf-8")
+                elif self.path == "/api/screen-media":
+                    self.send(200, screen_catalogue)
                 elif self.path == "/preview-boundary-before-readiness":
                     with preview_lock:
                         preview_boundaries["before_readiness"] = copy.deepcopy(previewed)
@@ -10101,6 +10107,33 @@ console.log('UNIFIED_PHYSICAL_TIME_FORMAT_PASS');
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertIn("UNIFIED_PHYSICAL_TIME_FORMAT_PASS", result.stdout)
 
+    def timing_dashboard_with_shipped_assets(self):
+        """File-based timing probes still execute both shipped editor assets/catalogue."""
+        body = self.client.get("/").get_data(as_text=True)
+        response = self.client.get("/api/screen-media")
+        self.assertEqual(response.status_code, 200)
+        catalogue = response.get_json()
+        for role in ("splash", "sleep"):
+            self.assertTrue(catalogue[role]["choices"])
+        for name in ("custom_canvas.js", "screen_media.js"):
+            asset = self.client.get("/static/" + name)
+            self.assertEqual(asset.status_code, 200)
+            source = asset.get_data(as_text=True)
+            if name == "screen_media.js":
+                # Only this real API fixture is intercepted; provider mocks are
+                # installed later, after catalogue/editor readiness is proven.
+                source = (
+                    "const timingFixtureApi=api;api=(path,options)=>"
+                    "path==='/api/screen-media'?Promise.resolve("
+                    + json.dumps(catalogue) + "):timingFixtureApi(path,options);\n"
+                    + source
+                )
+            body = body.replace(
+                '<script src="/static/' + name + '"></script>',
+                "<script>" + source + "</script>",
+            )
+        return body
+
     def test_physical_time_wraps_on_narrow_mobile_layouts(self):
         self.pair_browser()
         body = self.client.get("/").get_data(as_text=True)
@@ -10122,7 +10155,7 @@ console.log('UNIFIED_PHYSICAL_TIME_FORMAT_PASS');
     )
     def test_playlist_timing_and_reorder_controls_in_real_chromium_at_320px(self):
         self.pair_browser()
-        body = self.client.get("/").get_data(as_text=True)
+        body = self.timing_dashboard_with_shipped_assets()
         chromium = os.environ["MATRIX_CHROMIUM"]
         node = shutil.which("node")
         assert node is not None
@@ -10145,10 +10178,11 @@ await send('Emulation.setDeviceMetricsOverride',{width:320,height:900,deviceScal
 loaded=new Promise(resolve=>{loadResolve=resolve});
 await send('Page.navigate',{url:'file://'+pagePath});
 await Promise.race([loaded,new Promise((_,reject)=>setTimeout(()=>reject(new Error('page load timeout')),5000))]);
+const readiness=await send('Runtime.evaluate',{expression: "matrixEditorsReady&&Boolean(screenMediaCatalog?.splash?.choices.length)&&Boolean(screenMediaCatalog?.sleep?.choices.length)",returnByValue:true});if(readiness.result.value!==true)throw Error('shipped editors/catalogue not ready');
 const expression=`JSON.stringify((()=>{const wrapper=createPlaylistRow({module:'custom_probe',duration:15,enabled:true});document.querySelector('#playlist').append(wrapper);providerTimingPlans.set('weather',{frames_per_loop:1000000,status:'stale'});syncPlaylistDurations();const buttons=[...wrapper.querySelectorAll('.module-actions button')],duration=wrapper.querySelector('.duration');duration.value='90';duration.dispatchEvent(new Event('input',{bubbles:true}));const physical=wrapper.querySelector('.physical-time'),automatic=document.querySelector('.module-row[data-module="weather"] .physical-time'),style=getComputedStyle(automatic),rect=automatic.getBoundingClientRect(),itemRect=automatic.closest('.module-item').getBoundingClientRect(),range=document.createRange();range.selectNodeContents(automatic);return {viewport:innerWidth,labels:buttons.slice(0,2).map(button=>button.getAttribute('aria-label')),physical:physical.textContent,automatic:automatic.textContent,whiteSpace:style.whiteSpace,overflowWrap:style.overflowWrap,lineCount:range.getClientRects().length,clipped:rect.right>itemRect.right+.5}})())`;
 const evaluated=await send('Runtime.evaluate',{expression,returnByValue:true,awaitPromise:true});
 if(evaluated.exceptionDetails)throw new Error(JSON.stringify(evaluated.exceptionDetails));
-console.log(JSON.stringify({result:JSON.parse(evaluated.result.value),exceptions:exceptions.map(item=>item.text)}));
+console.log(JSON.stringify({result:JSON.parse(evaluated.result.value),exceptions}));
 }finally{socket.close()}
 """
         with tempfile.TemporaryDirectory(prefix="matrix-chromium-") as directory:
@@ -10327,7 +10361,7 @@ const result=await send('Runtime.evaluate',{expression,returnByValue:true,awaitP
         self.controller.status.return_value = {
             "running": False, "current_module": None, "last_error": None,
         }
-        body = self.client.get("/").get_data(as_text=True)
+        body = self.timing_dashboard_with_shipped_assets()
         chromium = os.environ["MATRIX_CHROMIUM"]
         node = shutil.which("node")
         assert node is not None
@@ -10342,11 +10376,12 @@ const port=process.argv[1],pagePath=process.argv[2],expected=JSON.parse(process.
 for(let attempt=0;attempt<50;attempt++){try{endpoint=await fetch(`http://127.0.0.1:${port}/json/new`,{method:'PUT'}).then(r=>r.json());break}catch(_){await new Promise(r=>setTimeout(r,100))}}
 if(!endpoint)throw Error('CDP unavailable');
 const socket=new WebSocket(endpoint.webSocketDebuggerUrl),pending=new Map(),exceptions=[];let id=0,resolveLoad,loaded=new Promise(r=>resolveLoad=r);
-socket.onmessage=e=>{const m=JSON.parse(e.data);if(m.id&&pending.has(m.id)){const p=pending.get(m.id);pending.delete(m.id);m.error?p.reject(Error(JSON.stringify(m.error))):p.resolve(m.result)}else if(m.method==='Page.loadEventFired')resolveLoad();else if(m.method==='Runtime.exceptionThrown')exceptions.push(m.params.exceptionDetails.text)};
+socket.onmessage=e=>{const m=JSON.parse(e.data);if(m.id&&pending.has(m.id)){const p=pending.get(m.id);pending.delete(m.id);m.error?p.reject(Error(JSON.stringify(m.error))):p.resolve(m.result)}else if(m.method==='Page.loadEventFired')resolveLoad();else if(m.method==='Runtime.exceptionThrown')exceptions.push(m.params.exceptionDetails)};
 await new Promise((r,j)=>{socket.onopen=r;socket.onerror=j});
 const send=(method,params={})=>new Promise((resolve,reject)=>{const request=++id;pending.set(request,{resolve,reject});socket.send(JSON.stringify({id:request,method,params}))});
 const evaluate=async expression=>{const result=await send('Runtime.evaluate',{expression,returnByValue:true,awaitPromise:true});if(result.exceptionDetails)throw Error(JSON.stringify(result.exceptionDetails));return result.result.value};
 await send('Runtime.enable');await send('Page.enable');await send('Emulation.setDeviceMetricsOverride',{width:390,height:844,deviceScaleFactor:1,mobile:true});await send('Emulation.setTouchEmulationEnabled',{enabled:true,maxTouchPoints:5});await send('Emulation.setEmulatedMedia',{features:[{name:'prefers-reduced-motion',value:'reduce'}]});await send('Page.navigate',{url:'file://'+pagePath});await Promise.race([loaded,new Promise((_,j)=>setTimeout(()=>j(Error('load timeout')),5000))]);
+if(!await evaluate(`matrixEditorsReady&&Boolean(screenMediaCatalog?.splash?.choices.length)&&Boolean(screenMediaCatalog?.sleep?.choices.length)`))throw Error('shipped editors/catalogue not ready');
 const vectors=await evaluate(`JSON.stringify([[1.25,100,1],[.1,100,2],[999,100,2],[9.84,82,3]].map(v=>frameDelayForSeconds(...v)))`);
 if(JSON.stringify(JSON.parse(vectors))!==JSON.stringify(expected))throw Error('Python/JavaScript timing vector mismatch');
 const provider=await evaluate(`(async()=>{let aborted=0,calls=0;api=async(_path,options)=>{calls++;const payload=JSON.parse(options.body),digest=await timingSettingsDigest('weather',payload);await new Promise((resolve,reject)=>{const timer=setTimeout(resolve,30);options.signal.addEventListener('abort',()=>{aborted++;clearTimeout(timer);reject(new DOMException('Aborted','AbortError'))},{once:true})});return {status:'fresh',milliseconds:5000,frames_per_loop:100,loops:1,settings_digest:digest,settings_correlation:payload.settings_correlation}};const row=document.querySelector('.module-row[data-module="weather"]'),edit=row.querySelector('.module-actions button:last-child');edit.click();setTimeout(()=>{document.querySelector('#weather-location').value='NEW DRAFT'},5);await new Promise(r=>setTimeout(r,420));return JSON.stringify({calls,aborted,state:row.closest('.module-item').querySelector('[data-provider-timing-state]').textContent,hidden:row.closest('.module-item').querySelector('.module-editor').hidden})})()`);
