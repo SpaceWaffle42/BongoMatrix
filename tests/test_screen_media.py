@@ -94,6 +94,63 @@ class ScreenMediaRevisionTests(unittest.TestCase):
                 "upload.gif",
             ))
 
+    def test_legacy_splash_is_finite_saved_selection_only_and_fully_decoded(self):
+        from screen_media import ScreenMediaCatalog, discover_screen_media, validate_screen_media_config
+        from tests.test_config_store import ConfigStoreTests
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            built_in = root / "built-in"
+            built_in.mkdir()
+            for name in ("loading_squares.gif", "splash_loading_squares.gif", "sleep.gif", "unrelated.gif"):
+                self._animation(built_in / name, [100, 200, 300])
+            saved = ConfigStoreTests.startup_predecessor()
+            for row in saved["playlist"]:
+                if row["module"] in {"splash", "sleep"}:
+                    row["sources"] = [row["source"]]
+            legacy = "built-in/loading_squares.gif"
+            self.assertNotIn(legacy, discover_screen_media(root, "splash"))
+            self.assertIn(legacy, discover_screen_media(root, "splash", saved_config=saved))
+            self.assertNotIn(legacy, discover_screen_media(root, "sleep", saved_config=saved))
+            catalog = ScreenMediaCatalog(root, saved_config=lambda: saved)
+            self.assertEqual(catalog("splash")[legacy].gif_duration_ms, 600)
+            self.assertIn(legacy, validate_screen_media_config(saved, root, saved_config=saved)["splash"])
+            with self.assertRaises(ValueError):
+                validate_screen_media_config(saved, root)
+            for reference in ("built-in/unrelated.gif", "built-in/../loading_squares.gif", "../loading_squares.gif"):
+                candidate = copy.deepcopy(saved)
+                row = candidate["playlist"][0]
+                row.update(source=reference, sources=[reference])
+                with self.subTest(reference=reference), self.assertRaises(ValueError):
+                    validate_screen_media_config(candidate, root, saved_config=saved)
+            new_selection = copy.deepcopy(DEFAULT_CONFIG)
+            new_selection["playlist"][0].update(source=legacy, sources=[legacy])
+            with self.assertRaises(ValueError):
+                validate_screen_media_config(new_selection, root, saved_config=DEFAULT_CONFIG)
+            candidate = copy.deepcopy(saved)
+            row = copy.deepcopy(candidate["playlist"][0])
+            row["id"] = "new_splash"
+            candidate["playlist"].append(row)
+            with self.assertRaises(ValueError):
+                validate_screen_media_config(candidate, root, saved_config=saved)
+            path = built_in / "loading_squares.gif"
+            valid = path.read_bytes()
+            for defect in ("corrupt", "truncated", "format", "symlink", "missing", "directory"):
+                path.unlink()
+                if defect == "corrupt": path.write_bytes(b"not a gif")
+                elif defect == "truncated": path.write_bytes(valid[:-3])
+                elif defect == "format": self._image(path, "PNG")
+                elif defect == "symlink": path.symlink_to(built_in / "splash_loading_squares.gif")
+                elif defect == "directory": path.mkdir()
+                with self.subTest(defect=defect):
+                    self.assertNotIn(legacy, discover_screen_media(root, "splash", saved_config=saved))
+                    self.assertNotIn(legacy, catalog("splash"))
+                    with self.assertRaises(ValueError):
+                        validate_screen_media_config(saved, root, saved_config=saved)
+                if path.is_dir(): path.rmdir()
+                elif path.exists() or path.is_symlink(): path.unlink()
+                path.write_bytes(valid)
+
     def test_discovery_rejects_gif_that_verify_accepts_but_runtime_decode_rejects(self):
         from PIL import ImageSequence
         from screen_media import discover_screen_media

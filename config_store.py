@@ -791,7 +791,7 @@ def _validate_announcement_board(board, *, allow_legacy=True):
 
 def validate_config(
     config, *, allow_legacy_announcements=True, allow_missing_custom_loops=True,
-    enforce_save_bounds=False,
+    enforce_save_bounds=False, synchronize_screen_aliases=True,
 ):
 
     schema_version = config["schema_version"]
@@ -1150,7 +1150,7 @@ def validate_config(
     # Scalar slots remain backwards-compatible aliases for the first row.
     # ConfigStore synchronizes playlist-aware writes into these aliases before
     # validation; direct legacy callers can still update only the scalar slot.
-    for module_name, item in first_media_items.items():
+    for module_name, item in (first_media_items.items() if synchronize_screen_aliases else ()):
         if item["sources"]:
             item["source"] = config["media"][module_name]
             item["sources"] = [
@@ -1321,6 +1321,18 @@ def _synchronize_media_playlist_changes(
             and "source" in item
             and "layout" in item
         ):
+            # A no-op rich-row save must not derive scalar aliases from a
+            # disabled duplicate that happened to precede the active row.
+            candidate_rows = [
+                entry for entry in candidate["playlist"]
+                if isinstance(entry, dict) and entry.get("module") == module_name
+            ]
+            if (
+                candidate_rows == current_media_rows[module_name]
+                and module_name not in changes.get("media", {})
+                and module_name not in changes.get("media_layout", {})
+            ):
+                continue
             # Disabled rows may intentionally have no selected media. Preserve
             # the valid legacy alias instead of copying an invalid empty scalar.
             if item.get("sources"):
@@ -1395,6 +1407,38 @@ def _validate_client_contract(client_contract):
         raise ValueError("client contract is invalid")
 
 
+def _project_persisted_screen_rows(config):
+    """Read schema-4 single-source rows without migrating the saved document.
+
+    The installed predecessor already used schema 4. Only its exact six-field
+    screen shape gains a singleton pool; partial/unknown shapes remain invalid.
+    Never return validate_config's canonicalization of unrelated saved values.
+    """
+    if config.get("schema_version") != CURRENT_CONFIG_SCHEMA_VERSION:
+        return config
+    projected = False
+    playlist = config.get("playlist")
+    for item in playlist if isinstance(playlist, list) else []:
+        if (
+            isinstance(item, dict)
+            and item.get("module") in MEDIA_PLAYLIST_MODULES
+            and set(item) == {"id", "module", "source", "duration", "enabled", "layout"}
+        ):
+            item["sources"] = [item["source"]]
+            projected = True
+    if projected:
+        config.setdefault("screen_enabled", {"splash": True, "sleep": True})
+        _validate_update_keys(config, DEFAULT_CONFIG)
+        _validate_required_config_keys(config, DEFAULT_CONFIG)
+        validate_config(
+            copy.deepcopy(config),
+            allow_legacy_announcements=False,
+            allow_missing_custom_loops=False,
+            enforce_save_bounds=True,
+        )
+    return config
+
+
 class ConfigStore:
     METADATA_PROBE_BUDGET_SECONDS = 15.0
     _test_worker_started = None
@@ -1463,6 +1507,7 @@ sys.stdout.write(json.dumps(result, separators=(",", ":")))
             if schema_version > CURRENT_CONFIG_SCHEMA_VERSION:
                 raise ValueError("configuration schema_version is not supported")
             if schema_version == CURRENT_CONFIG_SCHEMA_VERSION:
+                current = _project_persisted_screen_rows(current)
                 _validate_update_keys(current, DEFAULT_CONFIG)
                 _validate_required_config_keys(current, DEFAULT_CONFIG)
                 validate_config(
@@ -1658,7 +1703,9 @@ sys.stdout.write(json.dumps(result, separators=(",", ":")))
 
     def get(self):
         with self._lock:
-            return json.loads(self.path.read_text())
+            # Re-project each fresh disk snapshot, not a constructor cache, so
+            # other instances and explicit saves retain the revision protocol.
+            return _project_persisted_screen_rows(json.loads(self.path.read_text()))
 
     @staticmethod
     def _stat_identity(value):
@@ -2039,6 +2086,7 @@ sys.stdout.write(json.dumps(result, separators=(",", ":")))
                 candidate,
                 allow_legacy_announcements=False,
                 enforce_save_bounds=True,
+                synchronize_screen_aliases=False,
             )
         if not canonicalize_media:
             return copy.deepcopy(candidate)
@@ -2054,6 +2102,7 @@ sys.stdout.write(json.dumps(result, separators=(",", ":")))
                 allow_legacy_announcements=False,
                 allow_missing_custom_loops=False,
                 enforce_save_bounds=True,
+                synchronize_screen_aliases=False,
             )
             self._remaining(deadline)
             if not self._media_sources_unchanged(identities, deadline):
@@ -2117,6 +2166,7 @@ sys.stdout.write(json.dumps(result, separators=(",", ":")))
                 updated,
                 allow_legacy_announcements=False,
                 enforce_save_bounds=True,
+                synchronize_screen_aliases=False,
             )
         deadline = monotonic() + self.METADATA_PROBE_BUDGET_SECONDS
         identities = []
@@ -2131,6 +2181,7 @@ sys.stdout.write(json.dumps(result, separators=(",", ":")))
                 allow_legacy_announcements=False,
                 allow_missing_custom_loops=False,
                 enforce_save_bounds=True,
+                synchronize_screen_aliases=False,
             )
             self._remaining(deadline)
             acquired = self._lock.acquire(timeout=self._remaining(deadline))

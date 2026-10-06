@@ -1662,7 +1662,7 @@ def create_app(
         available_media = media_items()
         screen_media_files = {}
         for screen in ("splash", "sleep"):
-            names = set(discover_screen_media(media_root, screen))
+            names = set(discover_screen_media(media_root, screen, saved_config=config))
             screen_media_files[screen] = [
                 item for item in available_media if item["name"] in names
             ]
@@ -1737,8 +1737,9 @@ def create_app(
         with media_lock:
             items = media_items()
             catalog = {}
+            saved_config = config_store.get()
             for screen in ("splash", "sleep"):
-                names = set(discover_screen_media(media_root, screen))
+                names = set(discover_screen_media(media_root, screen, saved_config=saved_config))
                 choices = [item for item in items if item["name"] in names]
                 default = SCREEN_DEFAULTS[screen]
                 if default not in names:
@@ -2224,7 +2225,9 @@ def create_app(
                         canonicalize_media=False,
                         client_contract=client_contract,
                     )
-                    validate_screen_media_config(candidate, media_root)
+                    validate_screen_media_config(
+                        candidate, media_root, saved_config=config_store.get(),
+                    )
                     try:
                         with media_lock:
                             with pin_candidate_media(candidate, media_root) as pinned_media:
@@ -2448,6 +2451,11 @@ def create_app(
                 payload["config"], client_contract=client_contract,
             )
             selected_media_item_id = payload.get("selected_media_item_id")
+            if module_name in {"splash", "sleep"}:
+                with media_lock:
+                    validate_screen_media_config(
+                        candidate, media_root, saved_config=config_store.get(),
+                    )
             selected_screen_row = None
             if selected_media_item_id is not None:
                 if not isinstance(selected_media_item_id, str):
@@ -2734,6 +2742,11 @@ def create_app(
             selected_palette = _validate_current_lava_selection(
                 module_name, candidate, payload.get("selected_lava_palette"),
             )
+            if module_name in {"splash", "sleep"}:
+                with media_lock:
+                    validate_screen_media_config(
+                        candidate, media_root, saved_config=config_store.get(),
+                    )
             custom_ids = {item["id"] for item in candidate["custom_modules"]}
             if module_name not in ALLOWED_MODULES and module_name not in custom_ids:
                 stack.close()

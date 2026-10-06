@@ -341,7 +341,9 @@ class DisplayController:
         self._scheduler_fault_backoff = 0.25
         self._scheduler_next_fault_log = 0.0
         try:
-            screen_catalog = ScreenMediaCatalog(config_store.media_root)
+            screen_catalog = ScreenMediaCatalog(
+                config_store.media_root, saved_config=config_store.get,
+            )
         except (AttributeError, TypeError):
             screen_catalog = lambda _screen: {}
         self._screen_runtime = ScreenMediaRuntime(catalog=screen_catalog)

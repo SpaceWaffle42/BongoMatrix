@@ -33,9 +33,9 @@ try{
    assert.match(await evaluate("document.querySelector('#message').textContent"),/256/,'capacity refusal must explain the hold, not claim selected');
   }
  }else{
-  const retained=initial.playlist.find(r=>r.id===original.id),split=initial.playlist.find(r=>r.module==='splash'&&r.sources[0]==='built-in/loading_squares.gif');
-  assert.deepEqual(retained.sources,[original.sources[0]]);assert.deepEqual(retained.layout,original.layout);
-  assert.ok(split&&split.id!==retained.id);assert.deepEqual(split.layout,original.layout);assert.equal(split.enabled,original.enabled);
+  const legacy='built-in/loading_squares.gif',retained=initial.playlist.find(r=>r.id===original.id),split=initial.playlist.find(r=>r.module==='splash'&&r.sources[0]===original.sources[0]&&!originalIds.includes(r.id)),start=initial.playlist.indexOf(retained)-original.sources.indexOf(legacy),materialized=initial.playlist.slice(start,start+original.sources.length);
+  assert.deepEqual(retained.sources,[legacy]);assert.deepEqual(retained.layout,original.layout);assert.equal(retained.enabled,original.enabled);assert.ok(split&&split.id!==retained.id);assert.deepEqual(split.sources,[original.sources[0]]);assert.deepEqual(split.layout,original.layout);assert.equal(split.enabled,original.enabled);
+  assert.equal(materialized.length,original.sources.length);assert.deepEqual(materialized.map(r=>r.sources),original.sources.map(source=>[source]));assert.equal(new Set(materialized.map(r=>r.id)).size,original.sources.length);for(const row of materialized){assert.equal(row.module,original.module);assert.deepEqual(row.layout,original.layout);assert.equal(row.enabled,original.enabled);if(row!==retained)assert.ok(row.id&&!originalIds.includes(row.id));}assert.deepEqual(initial.playlist.flatMap(r=>r.sources||[]),persisted.playlist.flatMap(r=>r.sources||[]),'exact flattened source counts/order');
   const selector='#screen-media-splash .screen-media-choice[data-source="removable.gif"] .screen-media-selected';
   await evaluate(`globalThis.__first=document.querySelector(${JSON.stringify(selector)});__first.focus({preventScroll:true})`);
   await click(selector,"globalThis.__grid=__first.closest('.palette-grid');globalThis.__fresh=__first.closest('.screen-media-choice');globalThis.__freshCheck=__first;if(__fresh.dataset.rowId)throw Error('unmaterialized upload prerequisite');__grid.scrollTop=37;if(__grid.scrollTop!==37)throw Error('positive local scroll prerequisite')");

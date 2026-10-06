@@ -22,6 +22,73 @@ class GroupedScreenIntegrationTests(unittest.TestCase):
             return frame, 1
         fixture.controller.frame_png.side_effect = frame_png
 
+    def test_saved_nonfirst_legacy_pool_shipped_save_preview_and_reload(self):
+        # The first case is the auditor's exact revision-17 -> 18 counterexample.
+        for order, enabled, capacity in (("nonfirst", True, False), ("first", True, False),
+                                         ("nonfirst", False, False), ("ordinary", True, False),
+                                         ("nonfirst", True, True)):
+            with self.subTest(order=order, enabled=enabled, capacity=capacity):
+                fixture = test_webapp.WebAppTests()
+                fixture.setUp()
+                try:
+                    fixture.store.path.write_text(json.dumps(test_webapp.test_config_store.ConfigStoreTests.startup_predecessor()))
+                    fixture.pair_browser()
+                    fixture.pairing.verify.return_value = True
+                    self.configure_live_frame(fixture)
+                    with Image.new('RGB', (64, 32), 'red') as image:
+                        image.save(fixture.media_dir / 'grouped_upload.gif')
+                    rows = copy.deepcopy(fixture.store.get()['playlist'])
+                    original = rows[0]
+                    legacy, modern = 'built-in/loading_squares.gif', 'built-in/splash_loading_squares.gif'
+                    sources = [modern, legacy] if order == 'nonfirst' else [legacy, modern]
+                    if order == 'ordinary':
+                        sources = [modern, 'grouped_upload.gif']
+                    original.update(source=sources[0], sources=sources, enabled=enabled)
+                    original['layout']['x'] = 3
+                    if capacity:
+                        while len(rows) < 256:
+                            rows.append({'module': 'weather', 'duration': 15, 'enabled': False})
+                    initial = fixture.paired_request('post', '/api/config', json={'playlist': rows},
+                        headers={'If-Match': '"17"', 'X-Matrix-Client-Contract': '5'})
+                    self.assertEqual(initial.status_code, 200, initial.get_data(as_text=True))
+                    self.assertEqual(initial.headers['ETag'], '"18"')
+                    before = fixture.store.path.read_bytes()
+                    persisted = fixture.store.get()
+                    probe = Path(__file__).with_name('grouped_screen_legacy_browser.js').read_text()
+                    report = fixture.run_live_chromium_probe(probe, timeout=60)
+                    if report['saved']['revision'] == 18:
+                        self.assertEqual(fixture.store.path.read_bytes(), before)
+                    self.assertEqual(report['errors'], [])
+                    self.assertEqual(report['preview']['status'], 200, report['preview'])
+                    self.assertEqual(report['message'], 'Configuration saved and display reloaded.')
+                    self.assertEqual(report['requests'][0]['match'], '"18"')
+                    draft = report['draft']
+                    self.assertEqual(report['requests'][0]['body'], draft)
+                    self.assertEqual(report['repeated'], draft, 'catalog normalization must be idempotent')
+                    self.assertEqual(report['saved']['revision'], 19)
+                    self.assertEqual(report['saved']['playlist'], draft['playlist'])
+                    self.assertEqual(report['reloaded'], draft)
+                    self.assertEqual(fixture.store.get(), report['saved'])
+                    self.assertEqual(draft['screen_enabled'], persisted['screen_enabled'])
+                    self.assertEqual([r for r in draft['playlist'] if r['module'] != 'splash'],
+                                     [r for r in persisted['playlist'] if r['module'] != 'splash'])
+                    split = draft['playlist'][:len(sources) if not capacity else 1]
+                    self.assertEqual([s for r in split for s in r['sources']], sources)
+                    retained = next(r for r in draft['playlist'] if r.get('id') == original['id'])
+                    self.assertEqual(retained['sources'], sources if capacity else [sources[0] if order == 'ordinary' else legacy])
+                    for row in split:
+                        self.assertEqual(row['layout'], original['layout'])
+                        self.assertEqual(row['enabled'], enabled)
+                        self.assertEqual(row['duration'], original['duration'])
+                    if capacity:
+                        self.assertEqual(draft['playlist'], persisted['playlist'])
+                    else:
+                        self.assertEqual(len({r['id'] for r in split}), len(sources))
+                    self.assertEqual(draft['playlist'][1 if capacity else len(sources):],
+                                     persisted['playlist'][1:])
+                finally:
+                    fixture.tearDown()
+
     def test_contract_five_additions_share_save_and_preview_validation(self):
         fixture = test_webapp.WebAppTests()
         fixture.setUp()

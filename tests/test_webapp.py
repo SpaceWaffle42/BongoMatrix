@@ -75,6 +75,90 @@ def terminate_process_group(process, timeout=5.0):
 
 
 class WebAppTests(unittest.TestCase):
+    def test_predecessor_startup_api_snapshot_etag_and_explicit_save(self):
+        predecessor = test_config_store.ConfigStoreTests.startup_predecessor()
+        self.store.path.write_text(json.dumps(predecessor, indent=3))
+        original = self.store.path.read_bytes(), self.store.path.stat()
+        self.assertEqual(ConfigStore(self.store.path).get(), self.store.get())
+        self.pair_browser()
+        response = self.paired_request("get", "/api/config", headers={"X-Matrix-Client-Contract": "5"})
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.get_json(), self.store.get())
+        self.assertEqual(response.headers["ETag"], '"17"')
+        cached = self.paired_request("get", "/api/config", headers={"If-None-Match": '"17"'})
+        self.assertEqual(cached.status_code, 304)
+        self.assertEqual(self.store.path.read_bytes(), original[0])
+        after = self.store.path.stat()
+        for field in ("st_ino", "st_mode", "st_uid", "st_gid", "st_mtime_ns", "st_ctime_ns"):
+            self.assertEqual(getattr(after, field), getattr(original[1], field))
+        snapshot = self.store.get()
+        rejected = self.paired_request("post", "/api/config", json={"device": {"name": "Stale"}}, headers={"If-Match": '"16"'})
+        self.assertEqual(rejected.status_code, 412)
+        self.assertEqual(self.store.path.read_bytes(), original[0])
+        saved = self.paired_request("post", "/api/config", json={"device": {"name": "Legitimate save"}},
+                                    headers={"If-Match": '"17"', "X-Matrix-Client-Contract": "5"})
+        self.assertEqual(saved.status_code, 200, saved.get_data(as_text=True))
+        self.assertEqual(saved.headers["ETag"], '"18"')
+        self.assertEqual(json.loads(self.store.path.read_text()), self.store.get())
+        self.assertEqual([r.get("id") for r in self.store.get()["playlist"]], [r.get("id") for r in snapshot["playlist"]])
+
+    def test_predecessor_catalog_preview_and_save_preserve_exact_selections(self):
+        predecessor = test_config_store.ConfigStoreTests.startup_predecessor()
+        self.store.path.write_text(json.dumps(predecessor, indent=3))
+        self.store.path.chmod(0o640)
+        self.pair_browser()
+        original = self.store.path.read_bytes(), self.store.path.stat()
+        snapshot = self.store.get()
+        legacy = "built-in/loading_squares.gif"
+        catalog = self.paired_request("get", "/api/screen-media").get_json()
+        self.assertIn(legacy, [item["name"] for item in catalog["splash"]["choices"]])
+        self.assertNotIn(legacy, [item["name"] for item in catalog["sleep"]["choices"]])
+        self.assertEqual(catalog["splash"]["default"], "built-in/splash_loading_squares.gif")
+        for index, role in enumerate(("splash", "sleep"), 1):
+            row = next(r for r in snapshot["playlist"] if r["module"] == role and r["enabled"])
+            instance = f"{index:032x}"
+            response = self.paired_request("post", f"/api/edit-preview/{role}",
+                headers={"X-Matrix-Client-Contract": "5"}, json={
+                    "config": {}, "generation": index, "preview_instance": instance,
+                    "selected_media_item_id": row["id"],
+                })
+            self.assertEqual(response.status_code, 200, response.get_data(as_text=True))
+            body = response.get_json()
+            self.assertTrue(body["frames"])
+            with Image.open(io.BytesIO(base64.b64decode(body["frames"][0]["png"]))) as image:
+                self.assertEqual(image.size, (64, 32))
+            cancelled = self.paired_request("post", "/api/edit-preview/cancel", json={
+                "session": body["session"], "preview_instance": instance,
+            })
+            self.assertEqual(cancelled.status_code, 200)
+        self.assertEqual(self.store.path.read_bytes(), original[0])
+        for field in ("st_dev", "st_ino", "st_mode", "st_uid", "st_gid", "st_size", "st_mtime_ns", "st_ctime_ns"):
+            self.assertEqual(getattr(self.store.path.stat(), field), getattr(original[1], field), field)
+        saved = self.paired_request("post", "/api/config", json={"playlist": snapshot["playlist"]},
+            headers={"If-Match": '"17"', "X-Matrix-Client-Contract": "5"})
+        self.assertEqual(saved.status_code, 200, saved.get_data(as_text=True))
+        expected = copy.deepcopy(snapshot)
+        expected["revision"] = 18
+        self.assertEqual(self.store.get(), expected)
+
+    def test_predecessor_permission_does_not_admit_unrelated_builtin_in_save_or_preview(self):
+        self.store.path.write_text(json.dumps(test_config_store.ConfigStoreTests.startup_predecessor()))
+        self.pair_browser()
+        original = self.store.path.read_bytes()
+        Image.new("RGB", (2, 1), "red").save(self.media_dir / "built-in/unrelated.gif", format="GIF")
+        candidate = self.store.get()["playlist"]
+        candidate[0].update(source="built-in/unrelated.gif", sources=["built-in/unrelated.gif"])
+        saved = self.paired_request("post", "/api/config", json={"playlist": candidate},
+            headers={"If-Match": '"17"', "X-Matrix-Client-Contract": "5"})
+        self.assertEqual(saved.status_code, 400)
+        preview = self.paired_request("post", "/api/edit-preview/splash",
+            headers={"X-Matrix-Client-Contract": "5"}, json={
+                "config": {"playlist": candidate}, "generation": 1,
+                "preview_instance": "d" * 32, "selected_media_item_id": candidate[0]["id"],
+            })
+        self.assertEqual(preview.status_code, 400, preview.get_data(as_text=True))
+        self.assertEqual(self.store.path.read_bytes(), original)
+
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory()
         Path(self.temp.name).chmod(0o755)
