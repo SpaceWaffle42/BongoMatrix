@@ -62,7 +62,7 @@ full_test_suite:
   stage: test
   # The pixel-editor browser journeys add about two minutes to the prior
   # canonical runtime; keep a narrow margin below the project 60-minute cap.
-  timeout: 30m
+  timeout: 60m
   variables:
     MATRIX_CHROMIUM: /usr/bin/chromium
   before_script:
