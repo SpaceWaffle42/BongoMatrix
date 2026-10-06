@@ -42,7 +42,8 @@ try{
   assert.deepEqual(selected.playlist.filter(r=>r.id!==state.id),before.playlist,'library action must preserve old IDs/order/layout/opposite/Canvas rows');
   assert.deepEqual(selected.custom_modules,before.custom_modules);assert.deepEqual(selected.screen_enabled,before.screen_enabled);
   await click(selector+' [data-media-layout="x"]');
-  await send('Input.dispatchKeyEvent',{type:'keyDown',key:'a',code:'KeyA',modifiers:2});await send('Input.dispatchKeyEvent',{type:'keyUp',key:'a',code:'KeyA',modifiers:2});
+  assert.equal(await evaluate(`document.activeElement===document.querySelector(${JSON.stringify(selector+' [data-media-layout="x"]')})`),true,'native layout click must focus the owning input');
+  await send('Input.dispatchKeyEvent',{type:'keyDown',key:'a',code:'KeyA',windowsVirtualKeyCode:65,nativeVirtualKeyCode:65,modifiers:2});await send('Input.dispatchKeyEvent',{type:'keyUp',key:'a',code:'KeyA',windowsVirtualKeyCode:65,nativeVirtualKeyCode:65,modifiers:2});
   await send('Input.insertText',{text:'7'});
   const edited=await evaluate('configBody()');assert.equal(edited.playlist.find(r=>r.id===state.id).layout.x,7);
   assert.deepEqual(edited.playlist.filter(r=>r.id!==state.id),before.playlist);

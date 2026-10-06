@@ -2451,11 +2451,6 @@ def create_app(
                 payload["config"], client_contract=client_contract,
             )
             selected_media_item_id = payload.get("selected_media_item_id")
-            if module_name in {"splash", "sleep"}:
-                with media_lock:
-                    validate_screen_media_config(
-                        candidate, media_root, saved_config=config_store.get(),
-                    )
             selected_screen_row = None
             if selected_media_item_id is not None:
                 if not isinstance(selected_media_item_id, str):
@@ -2481,6 +2476,10 @@ def create_app(
                     pinned_media = stack.enter_context(pin_candidate_media(
                         candidate, media_root,
                     ))
+                    if module_name in {"splash", "sleep"}:
+                        validate_screen_media_config(
+                            candidate, media_root, saved_config=config_store.get(),
+                        )
                 provider_candidate = candidate
                 if module_name in {"openweather_overview", "openweather_forecast"}:
                     provider_candidate = copy.deepcopy(candidate)
@@ -2742,11 +2741,6 @@ def create_app(
             selected_palette = _validate_current_lava_selection(
                 module_name, candidate, payload.get("selected_lava_palette"),
             )
-            if module_name in {"splash", "sleep"}:
-                with media_lock:
-                    validate_screen_media_config(
-                        candidate, media_root, saved_config=config_store.get(),
-                    )
             custom_ids = {item["id"] for item in candidate["custom_modules"]}
             if module_name not in ALLOWED_MODULES and module_name not in custom_ids:
                 stack.close()
@@ -2756,6 +2750,10 @@ def create_app(
                 pinned_media = stack.enter_context(pin_candidate_media(
                     candidate, media_root,
                 ))
+                if module_name in {"splash", "sleep"}:
+                    validate_screen_media_config(
+                        candidate, media_root, saved_config=config_store.get(),
+                    )
             request_record = DevicePreviewRequest(
                 owner=owner,
                 generation=generation,
