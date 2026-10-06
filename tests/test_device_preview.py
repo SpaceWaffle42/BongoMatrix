@@ -205,9 +205,11 @@ class DevicePreviewTests(unittest.TestCase):
         self.assertEqual(stale.status, PreviewHeartbeatStatus.STALE_GENERATION)
         self.assertEqual(manager.active_lease().connectivity_deadline, 420.0)
 
-        now[0] = 420.0
-        expired = manager.heartbeat(owner, generation=7)
-        self.assertEqual(expired.status, PreviewHeartbeatStatus.EXPIRED)
+        # Exercise heartbeat-discovered expiry before the background reaper can win.
+        with manager._lock:
+            now[0] = 420.0
+            expired = manager.heartbeat(owner, generation=7)
+            self.assertEqual(expired.status, PreviewHeartbeatStatus.EXPIRED)
         self.assertIsNone(expired.lease)
         self.assertIsNone(manager.active_lease())
         manager.close()
