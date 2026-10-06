@@ -98,7 +98,10 @@ def playlist_module_config(config, module_name, *, chooser=None):
 
 def scheduled_playlist_items(config, *, active):
     """Select ordered active rows or the separate off-hours sleep rows."""
-    enabled = [item for item in config["playlist"] if item["enabled"]]
+    enabled = [
+        item for item in config["playlist"] if item["enabled"]
+        and config.get("screen_enabled", {}).get(item["module"], True)
+    ]
     if active:
         return [item for item in enabled if item["module"] != "sleep"]
     sleep_items = [item for item in enabled if item["module"] == "sleep"]
@@ -560,6 +563,9 @@ class DisplayController:
                 self._stopping = False
 
     def reload(self, timeout=None):
+        # Publish intent even when a renderer owns the state lock. The locked
+        # generation fence below still owns admission and settlement.
+        self._reload_requested.set()
         return self._cancel_and_quiesce(
             stop_module=True, stop_device_draft=True,
             stop_preview_preparation=True,
