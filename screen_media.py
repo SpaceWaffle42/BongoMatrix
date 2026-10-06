@@ -22,6 +22,8 @@ SCREEN_DEFAULTS = {
     "splash": "built-in/splash_loading_squares.gif",
     "sleep": "built-in/sleep.gif",
 }
+# Retained predecessor Splash default; never a choice for a new selection.
+_LEGACY_SCREEN_MEDIA = {"splash": frozenset({"built-in/loading_squares.gif"})}
 _STILL_EXTENSIONS = frozenset({".png", ".jpg", ".jpeg", ".webp"})
 _SCREEN_EXTENSIONS = _STILL_EXTENSIONS | {".gif"}
 _EXPECTED_FORMAT = {
@@ -53,8 +55,9 @@ class MediaInfo:
 class ScreenMediaCatalog:
     """Thread-safe identity-aware metadata for usable screen media."""
 
-    def __init__(self, media_root):
+    def __init__(self, media_root, *, saved_config=None):
         self._root = Path(media_root)
+        self._saved_config = saved_config
         self._lock = threading.RLock()
         self._cache = {}
 
@@ -90,7 +93,8 @@ class ScreenMediaCatalog:
 
     def __call__(self, screen: str) -> dict[str, MediaInfo]:
         with self._lock:
-            references = discover_screen_media(self._root, screen)
+            saved = self._saved_config() if self._saved_config is not None else None
+            references = discover_screen_media(self._root, screen, saved_config=saved)
             resolver = MediaResolver(self._root)
             current = {}
             next_cache = {}
@@ -462,11 +466,26 @@ def _decodes(resolver: MediaResolver, reference: str) -> bool:
         return False
 
 
-def discover_screen_media(media_root, screen: str) -> tuple[str, ...]:
+def _saved_legacy_media(config, screen, *, row_id=None):
+    """Only the finite predecessor default already selected by a saved row."""
+    allowed = _LEGACY_SCREEN_MEDIA.get(screen, ())
+    selected = set()
+    for row in (config or {}).get("playlist", []):
+        if not isinstance(row, dict) or row.get("module") != screen:
+            continue
+        if row_id is not None and row.get("id") != row_id:
+            continue
+        sources = row.get("sources", [row.get("source")])
+        if isinstance(sources, list):
+            selected.update(reference for reference in allowed if reference in sources)
+    return selected
+
+
+def discover_screen_media(media_root, screen: str, *, saved_config=None) -> tuple[str, ...]:
     """Return canonical decodable choices for one screen in stable order."""
     screen = _screen_name(screen)
     root = Path(media_root)
-    references = []
+    references = list(_saved_legacy_media(saved_config, screen))
     for name in _regular_names(root / "built-in"):
         if name.startswith(screen) and Path(name).suffix.lower() == ".gif":
             references.append(f"built-in/{name}")
@@ -484,7 +503,7 @@ def discover_screen_media(media_root, screen: str) -> tuple[str, ...]:
         resolver.close()
 
 
-def validate_screen_media_config(config, media_root) -> dict[str, tuple[str, ...]]:
+def validate_screen_media_config(config, media_root, *, saved_config=None) -> dict[str, tuple[str, ...]]:
     """Validate every persisted screen selection against current usable media."""
     validated = {}
     playlist = config.get("playlist", [])
@@ -495,13 +514,17 @@ def validate_screen_media_config(config, media_root) -> dict[str, tuple[str, ...
         ]
         if not rows:
             raise ValueError(f"playlist must contain at least one {screen} screen")
-        available = set(discover_screen_media(media_root, screen))
+        available = set(discover_screen_media(media_root, screen, saved_config=saved_config))
+        legacy = _LEGACY_SCREEN_MEDIA.get(screen, ())
         selected = []
         for row in rows:
             sources = row.get("sources")
             if not isinstance(sources, list):
                 raise ValueError(f"{screen} screen requires usable selected media")
             if any(reference not in available for reference in sources):
+                raise ValueError(f"{screen} screen requires usable selected media")
+            retained = _saved_legacy_media(saved_config, screen, row_id=row.get("id"))
+            if any(reference in legacy and reference not in retained for reference in sources):
                 raise ValueError(f"{screen} screen requires usable selected media")
             if row.get("enabled") is True and not sources:
                 raise ValueError(f"enabled {screen} screen requires usable selected media")
@@ -517,7 +540,7 @@ def repair_saved_screen(
     from config_store import ConfigConflictError
 
     screen = _screen_name(screen)
-    available = set(discover_screen_media(media_root, screen))
+    available = set(discover_screen_media(media_root, screen, saved_config=config))
     playlist = copy.deepcopy(config.get("playlist", []))
     row = next(
         (

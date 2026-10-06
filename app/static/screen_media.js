@@ -36,15 +36,22 @@ function normalizeScreenPools() {
   const changes=[];
   for(let index=0;index<rows.length;index++) {
     const item=items[index];if(item.sources.length<2)continue;
-    const additions=item.sources.slice(1).map(source=>{
+    // Non-prefix built-ins in this catalog are saved-only choices, not
+    // independently admissible selections. Keep their existing owning ID.
+    const retainedIndex=item.sources.findIndex(source=>screenMediaCatalog?.[item.module]?.choices.some(
+      media=>media.name===source&&media.built_in&&!source.startsWith('built-in/'+item.module)));
+    const anchor=retainedIndex<0?0:retainedIndex,before=[],after=[];
+    item.sources.forEach((source,sourceIndex)=>{
+      if(sourceIndex===anchor)return;
       const wrapper=createPlaylistRow({...item,id:screenNewId(item.module),sources:[source],source,layout:structuredClone(item.layout)});
-      wrapper.hidden=true;return wrapper;
-    });changes.push({row:rows[index],first:item.sources[0],additions});
+      wrapper.hidden=true;(sourceIndex<anchor?before:after).push(wrapper);
+    });changes.push({row:rows[index],source:item.sources[anchor],before,after});
   }
   // Preflight and detached construction finish before touching any pool.
-  for(const {row,first,additions} of changes) {
-    for(const input of row.closest('.module-item').querySelectorAll('[data-media-source]'))input.checked=input.dataset.mediaSource===first;
-    row.closest('.module-item').after(...additions);
+  for(const {row,source,before,after} of changes) {
+    for(const input of row.closest('.module-item').querySelectorAll('[data-media-source]'))input.checked=input.dataset.mediaSource===source;
+    row.closest('.module-item').before(...before);
+    row.closest('.module-item').after(...after);
   }
   if(changes.length)markMatrixDirty();return true;
 }

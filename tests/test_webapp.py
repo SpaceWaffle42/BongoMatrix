@@ -75,6 +75,90 @@ def terminate_process_group(process, timeout=5.0):
 
 
 class WebAppTests(unittest.TestCase):
+    def test_predecessor_startup_api_snapshot_etag_and_explicit_save(self):
+        predecessor = test_config_store.ConfigStoreTests.startup_predecessor()
+        self.store.path.write_text(json.dumps(predecessor, indent=3))
+        original = self.store.path.read_bytes(), self.store.path.stat()
+        self.assertEqual(ConfigStore(self.store.path).get(), self.store.get())
+        self.pair_browser()
+        response = self.paired_request("get", "/api/config", headers={"X-Matrix-Client-Contract": "5"})
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.get_json(), self.store.get())
+        self.assertEqual(response.headers["ETag"], '"17"')
+        cached = self.paired_request("get", "/api/config", headers={"If-None-Match": '"17"'})
+        self.assertEqual(cached.status_code, 304)
+        self.assertEqual(self.store.path.read_bytes(), original[0])
+        after = self.store.path.stat()
+        for field in ("st_ino", "st_mode", "st_uid", "st_gid", "st_mtime_ns", "st_ctime_ns"):
+            self.assertEqual(getattr(after, field), getattr(original[1], field))
+        snapshot = self.store.get()
+        rejected = self.paired_request("post", "/api/config", json={"device": {"name": "Stale"}}, headers={"If-Match": '"16"'})
+        self.assertEqual(rejected.status_code, 412)
+        self.assertEqual(self.store.path.read_bytes(), original[0])
+        saved = self.paired_request("post", "/api/config", json={"device": {"name": "Legitimate save"}},
+                                    headers={"If-Match": '"17"', "X-Matrix-Client-Contract": "5"})
+        self.assertEqual(saved.status_code, 200, saved.get_data(as_text=True))
+        self.assertEqual(saved.headers["ETag"], '"18"')
+        self.assertEqual(json.loads(self.store.path.read_text()), self.store.get())
+        self.assertEqual([r.get("id") for r in self.store.get()["playlist"]], [r.get("id") for r in snapshot["playlist"]])
+
+    def test_predecessor_catalog_preview_and_save_preserve_exact_selections(self):
+        predecessor = test_config_store.ConfigStoreTests.startup_predecessor()
+        self.store.path.write_text(json.dumps(predecessor, indent=3))
+        self.store.path.chmod(0o640)
+        self.pair_browser()
+        original = self.store.path.read_bytes(), self.store.path.stat()
+        snapshot = self.store.get()
+        legacy = "built-in/loading_squares.gif"
+        catalog = self.paired_request("get", "/api/screen-media").get_json()
+        self.assertIn(legacy, [item["name"] for item in catalog["splash"]["choices"]])
+        self.assertNotIn(legacy, [item["name"] for item in catalog["sleep"]["choices"]])
+        self.assertEqual(catalog["splash"]["default"], "built-in/splash_loading_squares.gif")
+        for index, role in enumerate(("splash", "sleep"), 1):
+            row = next(r for r in snapshot["playlist"] if r["module"] == role and r["enabled"])
+            instance = f"{index:032x}"
+            response = self.paired_request("post", f"/api/edit-preview/{role}",
+                headers={"X-Matrix-Client-Contract": "5"}, json={
+                    "config": {}, "generation": index, "preview_instance": instance,
+                    "selected_media_item_id": row["id"],
+                })
+            self.assertEqual(response.status_code, 200, response.get_data(as_text=True))
+            body = response.get_json()
+            self.assertTrue(body["frames"])
+            with Image.open(io.BytesIO(base64.b64decode(body["frames"][0]["png"]))) as image:
+                self.assertEqual(image.size, (64, 32))
+            cancelled = self.paired_request("post", "/api/edit-preview/cancel", json={
+                "session": body["session"], "preview_instance": instance,
+            })
+            self.assertEqual(cancelled.status_code, 200)
+        self.assertEqual(self.store.path.read_bytes(), original[0])
+        for field in ("st_dev", "st_ino", "st_mode", "st_uid", "st_gid", "st_size", "st_mtime_ns", "st_ctime_ns"):
+            self.assertEqual(getattr(self.store.path.stat(), field), getattr(original[1], field), field)
+        saved = self.paired_request("post", "/api/config", json={"playlist": snapshot["playlist"]},
+            headers={"If-Match": '"17"', "X-Matrix-Client-Contract": "5"})
+        self.assertEqual(saved.status_code, 200, saved.get_data(as_text=True))
+        expected = copy.deepcopy(snapshot)
+        expected["revision"] = 18
+        self.assertEqual(self.store.get(), expected)
+
+    def test_predecessor_permission_does_not_admit_unrelated_builtin_in_save_or_preview(self):
+        self.store.path.write_text(json.dumps(test_config_store.ConfigStoreTests.startup_predecessor()))
+        self.pair_browser()
+        original = self.store.path.read_bytes()
+        Image.new("RGB", (2, 1), "red").save(self.media_dir / "built-in/unrelated.gif", format="GIF")
+        candidate = self.store.get()["playlist"]
+        candidate[0].update(source="built-in/unrelated.gif", sources=["built-in/unrelated.gif"])
+        saved = self.paired_request("post", "/api/config", json={"playlist": candidate},
+            headers={"If-Match": '"17"', "X-Matrix-Client-Contract": "5"})
+        self.assertEqual(saved.status_code, 400)
+        preview = self.paired_request("post", "/api/edit-preview/splash",
+            headers={"X-Matrix-Client-Contract": "5"}, json={
+                "config": {"playlist": candidate}, "generation": 1,
+                "preview_instance": "d" * 32, "selected_media_item_id": candidate[0]["id"],
+            })
+        self.assertEqual(preview.status_code, 400, preview.get_data(as_text=True))
+        self.assertEqual(self.store.path.read_bytes(), original)
+
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory()
         Path(self.temp.name).chmod(0o755)
@@ -15791,6 +15875,67 @@ try{
                     path.write_bytes(original)
                     Path(self.store.path).write_bytes(before_config)
 
+    def test_screen_preview_rejection_releases_pins_registry_and_capacity(self):
+        self.pair_browser()
+        before_config = self.store.path.read_bytes()
+        Image.new("RGB", (2, 1), "red").save(
+            self.media_dir / "built-in/unrelated.gif", format="GIF",
+        )
+        original_resolve = media_resolver.MediaResolver.resolve
+        handles = []
+
+        def track_resolve(resolver, reference):
+            handle = original_resolve(resolver, reference)
+            handles.append(handle)
+            return handle
+
+        for module_name in ("splash", "sleep"):
+            for rejection, expected in (("missing", 503), ("permission", 400), ("malformed", 400)):
+                with self.subTest(module=module_name, rejection=rejection):
+                    candidate = self.store.get()
+                    candidate.pop("revision")
+                    candidate.pop("schema_version")
+                    row = next(row for row in candidate["playlist"] if row["module"] == module_name)
+                    if rejection == "missing":
+                        reference = "missing-screen.gif"
+                    else:
+                        reference = "built-in/unrelated.gif"
+                    row.update(source=reference, sources=[reference])
+                    for route in ("edit-preview", "device-preview"):
+                        # Repeating the same generation also proves failed registration
+                        # and the device operation semaphore do not retain ownership.
+                        for _attempt in range(2):
+                            handles.clear()
+                            self.controller.submit_device_draft.reset_mock()
+                            with patch.object(
+                                media_resolver.MediaResolver, "resolve", new=track_resolve,
+                            ), patch("webapp._prepare_edit_preview_provider") as provider, patch(
+                                "webapp._edit_preview_iterator", return_value=iter(()),
+                            ) as iterator:
+                                response = self.paired_request(
+                                    "POST", f"/api/{route}/{module_name}",
+                                    headers={"X-Matrix-Client-Contract": "4"},
+                                    json={
+                                        "config": candidate,
+                                        "generation": -1 if rejection == "malformed" else 1,
+                                        "preview_instance": "e" * 32,
+                                    },
+                                )
+                            self.assertEqual(response.status_code, expected, response.get_data(as_text=True))
+                            provider.assert_not_called()
+                            iterator.assert_not_called()
+                            self.controller.submit_device_draft.assert_not_called()
+                            if rejection == "permission":
+                                self.assertTrue(handles)
+                            self.assertTrue(all(handle.closed for handle in handles))
+                            registry = self.app.extensions.get("edit_preview_registry")
+                            if registry is not None:
+                                self.assertEqual(registry.total_count, 0)
+                                self.assertEqual(registry.counts_by_device, {})
+                                self.assertEqual(registry._capacity.active_count, 0)
+                                self.assertEqual(registry._capacity.waiting_count, 0)
+                            self.assertEqual(self.store.path.read_bytes(), before_config)
+
     def test_missing_basic_custom_media_is_rejected_before_save_or_preview_admission(self):
         from device_preview import DevicePreviewManager
 
@@ -21670,7 +21815,16 @@ try{
     def test_physical_draft_pins_accepted_media_inode_until_cleanup(self):
         client, _device_id, manager = self.physical_draft_fixture()
         media = self.media_dir / "draft.png"
-        media.write_bytes(b"accepted-inode")
+        accepted_payload = io.BytesIO()
+        replacement_payload = io.BytesIO()
+        with Image.new("RGB", (64, 32), "red") as image:
+            image.save(accepted_payload, format="PNG")
+        with Image.new("RGB", (64, 32), "blue") as image:
+            image.save(replacement_payload, format="PNG")
+        accepted_bytes = accepted_payload.getvalue()
+        replacement_bytes = replacement_payload.getvalue()
+        self.assertNotEqual(accepted_bytes, replacement_bytes)
+        media.write_bytes(accepted_bytes)
         candidate = {k: copy.deepcopy(v) for k, v in self.store.get().items() if k not in {"revision", "schema_version"}}
         candidate["media"]["splash"] = "draft.png"
         splash = next(item for item in candidate["playlist"] if item["module"] == "splash")
@@ -21684,17 +21838,17 @@ try{
         request_record = manager.active_lease().request
         handle = request_record.pinned_media["draft.png"]
         replacement = self.media_dir / "replacement.png"
-        replacement.write_bytes(b"replacement-inode")
+        replacement.write_bytes(replacement_bytes)
         os.replace(replacement, media)
         with handle.dup_file() as accepted:
-            self.assertEqual(accepted.read(), b"accepted-inode")
+            self.assertEqual(accepted.read(), accepted_bytes)
         self.assertFalse(handle.closed)
         cancelled = self.paired_client_request("POST", client, "/api/device-preview/cancel", json={
             "generation": 1, "preview_instance": instance,
         })
         self.assertEqual(cancelled.status_code, 202)
         self.assertTrue(handle.closed)
-        self.assertEqual(media.read_bytes(), b"replacement-inode")
+        self.assertEqual(media.read_bytes(), replacement_bytes)
 
 
     def test_physical_draft_cancelled_provider_cannot_publish(self):
@@ -21838,7 +21992,16 @@ try{
         }
         candidate["weather"]["location"] = "Unsaved integration closure"
         media = self.media_dir / "closure-draft.png"
-        media.write_bytes(b"accepted-closure-inode")
+        accepted_payload = io.BytesIO()
+        replacement_payload = io.BytesIO()
+        with Image.new("RGB", (64, 32), "red") as image:
+            image.save(accepted_payload, format="PNG")
+        with Image.new("RGB", (64, 32), "blue") as image:
+            image.save(replacement_payload, format="PNG")
+        accepted_bytes = accepted_payload.getvalue()
+        replacement_bytes = replacement_payload.getvalue()
+        self.assertNotEqual(accepted_bytes, replacement_bytes)
+        media.write_bytes(accepted_bytes)
         candidate["media"]["splash"] = media.name
         splash = next(item for item in candidate["playlist"] if item["module"] == "splash")
         splash["source"] = media.name
@@ -21925,10 +22088,10 @@ try{
                 assert_private(conflict, media.name)
 
             replacement = self.media_dir / "closure-replacement.png"
-            replacement.write_bytes(b"replacement-closure-inode")
+            replacement.write_bytes(replacement_bytes)
             os.replace(replacement, media)
             with accepted_handle.dup_file() as pinned:
-                self.assertEqual(pinned.read(), b"accepted-closure-inode")
+                self.assertEqual(pinned.read(), accepted_bytes)
             self.assertFalse(accepted_handle.closed)
             cancelled = self.paired_client_request(
                 "POST", owner, "/api/device-preview/cancel", json={
@@ -21939,7 +22102,7 @@ try{
             self.assertEqual(cancelled.get_json(), {"cancelled": True})
             self.assertTrue(accepted_handle.closed)
             self.assertIsNone(manager.active_lease())
-            self.assertEqual(media.read_bytes(), b"replacement-closure-inode")
+            self.assertEqual(media.read_bytes(), replacement_bytes)
 
             captured = {}
             provider_stop = threading.Event()

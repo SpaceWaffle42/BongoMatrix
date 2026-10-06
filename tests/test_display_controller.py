@@ -1909,13 +1909,16 @@ class DisplayControllerTests(unittest.TestCase):
             "playlist": [{"module": "clock_lava", "duration": 2, "enabled": True}],
         }
         store = Mock(media_root=Path(__file__).parents[1] / "resources" / "media")
-        store.get.side_effect = [old, new]
+        current = old
+        store.get.side_effect = lambda: current
         controller = DisplayController(Mock(), store)
         calls = []
 
         def execute(name, config, duration):
+            nonlocal current
             calls.append((name, config))
             if len(calls) == 1:
+                current = new
                 controller._reload_requested.set()
             else:
                 controller._shutdown.set()

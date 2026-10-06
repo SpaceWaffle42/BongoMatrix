@@ -20,11 +20,154 @@ from config_store import (
 
 class ConfigStoreTests(unittest.TestCase):
     @staticmethod
+    def startup_predecessor():
+        # Synthetic defaults/duplicates validated by the retained installed
+        # predecessor (config_store.py SHA-256 a4da2d31e5d1de44cbc439e1892d8401
+        # b9b7e34d73365161890cc546e4cc614e), not a private userdata capture.
+        return json.loads((Path(__file__).parent / "fixtures" / "startup_predecessor_v4.json").read_text())
+
+    def test_predecessor_v4_startup_projects_both_screens_without_rewriting_state(self):
+        for screen_flags in (None, {"splash": False, "sleep": True}):
+            with self.subTest(screen_flags=screen_flags), tempfile.TemporaryDirectory() as directory:
+                path = Path(directory) / "config.json"
+                predecessor = self.startup_predecessor()
+                if screen_flags is not None:
+                    predecessor["screen_enabled"] = screen_flags
+                path.write_text(json.dumps(predecessor, indent=3) + "\n")
+                path.chmod(0o640)
+                before = path.read_bytes(), path.stat()
+                store = ConfigStore(path)
+                projected = store.get()
+                expected = json.loads(json.dumps(predecessor))
+                expected.setdefault("screen_enabled", {"splash": True, "sleep": True})
+                for row in expected["playlist"]:
+                    if row["module"] in {"splash", "sleep"}:
+                        row["sources"] = [row["source"]]
+                self.assertEqual(projected, expected)
+                validate_config(json.loads(json.dumps(projected)), allow_legacy_announcements=False,
+                                allow_missing_custom_loops=False, enforce_save_bounds=True)
+                self.assertEqual(ConfigStore(path).get(), projected)
+                projected["playlist"][0]["sources"].append("mutated.gif")
+                self.assertEqual(store.get(), expected)
+                self.assertEqual(path.read_bytes(), before[0])
+                after = path.stat()
+                for field in ("st_dev", "st_ino", "st_mode", "st_uid", "st_gid", "st_size", "st_mtime_ns", "st_ctime_ns"):
+                    self.assertEqual(getattr(after, field), getattr(before[1], field), field)
+
+    @staticmethod
     def _wait_for_metadata_workers(store, timeout=1.0):
         deadline = time.monotonic() + timeout
         while store._metadata_workers and time.monotonic() < deadline:
             time.sleep(0.005)
         return set(store._metadata_workers)
+
+    def test_predecessor_projection_is_fresh_until_explicit_revision_bound_save(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "config.json"
+            path.write_text(json.dumps(self.startup_predecessor()))
+            original = path.read_bytes()
+            first, second = ConfigStore(path), ConfigStore(path)
+            snapshot = first.get()
+            candidate = first.validate_candidate({"device": {"name": "Explicit save"}}, canonicalize_media=False)
+            self.assertEqual(candidate["revision"], 17)
+            self.assertEqual(path.read_bytes(), original)
+            saved = second.update({"device": {"name": "Explicit save"}}, base_revision=17)
+            self.assertEqual(saved["revision"], 18)
+            self.assertEqual(saved["schema_version"], snapshot["schema_version"])
+            self.assertEqual(first.get(), saved)
+            self.assertEqual(json.loads(path.read_text()), saved)
+            self.assertEqual([r.get("id") for r in saved["playlist"]], [r.get("id") for r in snapshot["playlist"]])
+            self.assertEqual([(r["module"], r["duration"], r["enabled"]) for r in saved["playlist"]],
+                             [(r["module"], r["duration"], r["enabled"]) for r in snapshot["playlist"]])
+            with self.assertRaises(ConfigConflictError):
+                first.update({"device": {"name": "Stale"}}, base_revision=17)
+            self.assertEqual(first.get(), saved)
+            # Exercise the existing final revision check across instances.
+            canonicalize = first._canonicalize_basic_media_durations
+            def concurrent_save(config, **kwargs):
+                second.update({"device": {"name": "Interleaved"}}, base_revision=18)
+                return canonicalize(config, **kwargs)
+            with patch.object(first, "_canonicalize_basic_media_durations", side_effect=concurrent_save):
+                with self.assertRaises(ConfigConflictError):
+                    first.update({"device": {"name": "Lost update"}}, base_revision=18)
+            self.assertEqual(first.get()["device"]["name"], "Interleaved")
+
+    def test_predecessor_runtime_caller_preserves_saved_bytes_and_selection(self):
+        from screen_media import repair_saved_screen
+
+        media_root = Path(__file__).parents[1] / "resources" / "media"
+        for role in ("splash", "sleep"):
+            with self.subTest(role=role), tempfile.TemporaryDirectory() as directory:
+                path = Path(directory) / "config.json"
+                path.write_text(json.dumps(self.startup_predecessor(), indent=3))
+                store = ConfigStore(path, media_dir=media_root)
+                snapshot = store.get()
+                original = path.read_bytes()
+                row = next(r for r in snapshot["playlist"] if r["module"] == role)
+                repaired = repair_saved_screen(store, snapshot, role, media_root, row_id=row["id"])
+                self.assertEqual(path.read_bytes(), original, "runtime caller must not rewrite preserved predecessor")
+                self.assertFalse(repaired.persisted)
+                self.assertEqual(repaired.sources, tuple(row["sources"]))
+
+    def test_predecessor_actual_scheduled_render_preserves_state_and_media(self):
+        from display_controller import DisplayController
+        from edit_preview import CaptureMatrix
+        from matrix_framework import Matrix
+
+        class ScheduledMatrix(CaptureMatrix):
+            show_gif = Matrix.show_gif
+
+        media_root = Path(__file__).parents[1] / "resources" / "media"
+        legacy = media_root / "built-in/loading_squares.gif"
+        media_before = legacy.read_bytes(), legacy.stat()
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "config.json"
+            path.write_text(json.dumps(self.startup_predecessor(), indent=3))
+            path.chmod(0o640)
+            before = path.read_bytes(), path.stat()
+            store = ConfigStore(path, media_dir=media_root)
+            snapshot = store.get()
+            controller = DisplayController(ScheduledMatrix(), store)
+            for role in ("splash", "sleep"):
+                row = next(r for r in snapshot["playlist"] if r["module"] == role and r["enabled"])
+                with self.subTest(role=role):
+                    self.assertTrue(controller._execute_scheduled_screen(
+                        snapshot, row, entering_sleep=role == "sleep",
+                    ))
+                    self.assertEqual(path.read_bytes(), before[0])
+                    self.assertEqual(store.get(), snapshot)
+                    for field in ("st_dev", "st_ino", "st_mode", "st_uid", "st_gid", "st_size", "st_mtime_ns", "st_ctime_ns"):
+                        self.assertEqual(getattr(path.stat(), field), getattr(before[1], field), field)
+            self.assertEqual(legacy.read_bytes(), media_before[0])
+            self.assertEqual(legacy.stat().st_mtime_ns, media_before[1].st_mtime_ns)
+
+    def test_predecessor_projection_preserves_mixed_rich_rows_and_rejects_invalid_state(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "config.json"
+            mixed = self.startup_predecessor()
+            row = mixed["playlist"][0]
+            row["sources"] = [row["source"], "other.gif"]
+            path.write_text(json.dumps(mixed))
+            self.assertEqual(ConfigStore(path).get()["playlist"][0], row)
+            for role in ("splash", "sleep"):
+                for defect in ("extra", "missing-id", "source", "layout", "duration", "enabled", "duplicate-id", "schema", "unrelated", "capacity"):
+                    with self.subTest(role=role, defect=defect):
+                        invalid = self.startup_predecessor()
+                        target = next(r for r in invalid["playlist"] if r["module"] == role)
+                        if defect == "extra": target["extra"] = True
+                        elif defect == "missing-id": target.pop("id")
+                        elif defect == "source": target["source"] = "../unsafe.gif"
+                        elif defect == "layout": target["layout"]["width"] = 0
+                        elif defect == "duration": target["duration"] = True
+                        elif defect == "enabled": target["enabled"] = 1
+                        elif defect == "duplicate-id": invalid["playlist"].append(json.loads(json.dumps(target)))
+                        elif defect == "schema": invalid["schema_version"] = True
+                        elif defect == "unrelated": invalid["device"]["extra"] = True
+                        else: invalid["playlist"] *= 40
+                        original = json.dumps(invalid).encode()
+                        path.write_bytes(original)
+                        with self.assertRaises(ValueError): ConfigStore(path)
+                        self.assertEqual(path.read_bytes(), original)
 
     @staticmethod
     def _simple(module_id="custom_static", module_type="text"):

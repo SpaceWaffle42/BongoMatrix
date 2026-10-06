@@ -1662,7 +1662,7 @@ def create_app(
         available_media = media_items()
         screen_media_files = {}
         for screen in ("splash", "sleep"):
-            names = set(discover_screen_media(media_root, screen))
+            names = set(discover_screen_media(media_root, screen, saved_config=config))
             screen_media_files[screen] = [
                 item for item in available_media if item["name"] in names
             ]
@@ -1737,8 +1737,9 @@ def create_app(
         with media_lock:
             items = media_items()
             catalog = {}
+            saved_config = config_store.get()
             for screen in ("splash", "sleep"):
-                names = set(discover_screen_media(media_root, screen))
+                names = set(discover_screen_media(media_root, screen, saved_config=saved_config))
                 choices = [item for item in items if item["name"] in names]
                 default = SCREEN_DEFAULTS[screen]
                 if default not in names:
@@ -2224,7 +2225,9 @@ def create_app(
                         canonicalize_media=False,
                         client_contract=client_contract,
                     )
-                    validate_screen_media_config(candidate, media_root)
+                    validate_screen_media_config(
+                        candidate, media_root, saved_config=config_store.get(),
+                    )
                     try:
                         with media_lock:
                             with pin_candidate_media(candidate, media_root) as pinned_media:
@@ -2473,6 +2476,10 @@ def create_app(
                     pinned_media = stack.enter_context(pin_candidate_media(
                         candidate, media_root,
                     ))
+                    if module_name in {"splash", "sleep"}:
+                        validate_screen_media_config(
+                            candidate, media_root, saved_config=config_store.get(),
+                        )
                 provider_candidate = candidate
                 if module_name in {"openweather_overview", "openweather_forecast"}:
                     provider_candidate = copy.deepcopy(candidate)
@@ -2743,6 +2750,10 @@ def create_app(
                 pinned_media = stack.enter_context(pin_candidate_media(
                     candidate, media_root,
                 ))
+                if module_name in {"splash", "sleep"}:
+                    validate_screen_media_config(
+                        candidate, media_root, saved_config=config_store.get(),
+                    )
             request_record = DevicePreviewRequest(
                 owner=owner,
                 generation=generation,
