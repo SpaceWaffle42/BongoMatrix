@@ -16,6 +16,8 @@ from collections import OrderedDict, deque
 from pathlib import Path
 from types import SimpleNamespace
 
+from PIL import Image
+
 from frame_capture import BdfFont, FrameCapture
 
 
@@ -105,9 +107,9 @@ class CaptureMatrix:
         elif width is not None and height is not None:
             if keep_aspect:
                 prepared = prepared.copy()
-                prepared.thumbnail((width, height))
+                prepared.thumbnail((width, height), Image.Resampling.LANCZOS)
             else:
-                prepared = prepared.resize((width, height))
+                prepared = prepared.resize((width, height), Image.Resampling.LANCZOS)
         if rotation:
             prepared = prepared.rotate(-rotation, expand=False)
         self._capture.set_image(canvas, prepared, x, y)
