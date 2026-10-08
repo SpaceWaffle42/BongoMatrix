@@ -29,7 +29,7 @@ import tempfile
 import threading
 import time
 
-OPERATOR_SHA = '3456cba7611fba503657fdd807e09bde4463187333bac96f2677473b8211ad85'
+OPERATOR_SHA = '37680acf2751b74182c85e42ec0e077e1bb4bc0d84cd3317764480b46674615b'
 IDENTITIES = ('binding_sha256','source_identity','spec_sha256','stage','phase','app_pid','nonce')
 HEX = re.compile(r'[0-9a-f]{64}')
 LIMIT = 2 * 1024 * 1024

@@ -62,7 +62,7 @@ def failure_custody():
     path = Path(__file__).with_name("release_failure_custody.py")
     require(sha(path.read_bytes()) == DIAGNOSTIC_SHA, "diagnostic helper identity mismatch")
     spec = importlib.util.spec_from_file_location("release_failure_custody", path)
-    assert spec is not None and spec.loader is not None
+    require(spec is not None and spec.loader is not None, "diagnostic helper load unavailable")
     module = importlib.util.module_from_spec(spec); spec.loader.exec_module(module)
     return module
 
@@ -95,7 +95,7 @@ def primitives():
     require(sha(path.read_bytes()) == HELPER_HASHES["deploy/release_bundle.py"],
             "release primitive identity mismatch")
     spec = importlib.util.spec_from_file_location("scoped_release_bundle", path)
-    assert spec is not None and spec.loader is not None
+    require(spec is not None and spec.loader is not None, "release primitive load unavailable")
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
     return module
@@ -1683,10 +1683,18 @@ def main(argv=None):
                     load_json(origin / "binding.json")["spec_sha256"] == load_json(stage / "binding.json")["spec_sha256"],
                     "final redeploy must use same exact package/spec")
             services.prove_exclusion()
-        accept = caller_acceptance(stage, services, args.phase)
         if args.phase == "rollback":
-            rollback_proof(stage, services, accept)
+            try:
+                accept = caller_acceptance(stage, services, args.phase)
+                rollback_proof(stage, services, accept)
+            except BaseException as primary:
+                # Persist before PID1 ExecStopPost recovery or launcher readback.
+                # Diagnosis is best-effort; it cannot replace the initiating error
+                # or interfere with the existing independently guarded recovery.
+                retain_diagnostic(stage, args.phase, "primary", "OPERATOR_EXECUTE", primary)
+                raise
         else:
+            accept = caller_acceptance(stage, services, args.phase)
             execute(stage, services, accept, keep_containment=args.phase == "initial")
         print("PHASE recorded; inspect retained private metadata journal")
         return 0

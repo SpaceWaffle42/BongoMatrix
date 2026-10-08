@@ -18,6 +18,82 @@ op=module('custody_operator',Path(os.environ.get('MATRIX_CUSTODY_OPERATOR',str(R
 caller=module('custody_caller',Path(os.environ.get('MATRIX_CUSTODY_CALLER',str(ROOT/'deploy/feature_release_acceptance.py'))))
 SECRET='PRIVATE_PIN_COOKIE_MEDIA_SENTINEL'
 class CustodyTests(unittest.TestCase):
+    def rollback_dispatch_fixture(self, stage, failure):
+        from contextlib import ExitStack
+        binding={'source_identity':'b'*64,'spec_sha256':'c'*64,'destination':str(stage/'destination')}
+        (stage/'binding.json').write_text(json.dumps(binding))
+        digest=op.sha((stage/'binding.json').read_bytes())
+        initial={'outcome':'committed','keep_containment':True,'binding_sha256':digest,
+                 'checkpoint_sha256':'d'*64,'state_sha256':op.sha(op.encoded({r:{} for r in op.MUTABLE_ROOTS}))}
+        (stage/'run.json').write_text(json.dumps(initial))
+        request={'operator_sha256':op.sha(Path(op.__file__).read_bytes()),'binding_sha256':digest,'origin_stage':None,'acceptance_sha256':'e'*64}
+        (stage/'request-rollback.json').write_text(json.dumps(request))
+        services=SimpleNamespace(prove_exclusion=lambda:None,stop=lambda:None)
+        if failure=='stop':services.stop=lambda:(_ for _ in ()).throw(ValueError(SECRET))
+        original_open=op.os.open
+        def local_open(path,*a,**kw):
+            if str(path)=='/run/lock/matrix-scoped-release.lock':path=stage/'global.lock'
+            return original_open(path,*a,**kw)
+        stack=ExitStack()
+        for name,value in [('safe_stage',lambda p:Path(p)),('assert_pid1_guard',lambda *a,**k:None),
+                           ('directory_record',lambda p:{'uid':0,'mode':'0700'}),('SystemServices',lambda *a,**k:services),
+                           ('assert_service_target',lambda *a:None),('assert_binding',lambda *a,**k:None),
+                           ('tree_snapshot',lambda *a:{}),('caller_acceptance',lambda *a:lambda c:None)]:
+            stack.enter_context(patch.object(op,name,side_effect=value))
+        stack.enter_context(patch.object(op.os,'open',side_effect=local_open))
+        # Keep actual loader, publisher, dispatcher and rollback producer; only mock deployment verification.
+        primitive=op.primitives();stack.enter_context(patch.object(primitive,'verify_release'))
+        stack.enter_context(patch.object(op,'primitives',return_value=primitive))
+        return stack,services
+    def test_actual_rollback_dispatch_primary_survives_recovery_failure_and_replay(self):
+        for failure in ('stop','recovery'):
+            with self.subTest(failure=failure),tempfile.TemporaryDirectory() as tmp:
+                stage=Path(tmp);stack,services=self.rollback_dispatch_fixture(stage,failure)
+                with stack:
+                    with patch.object(op,'recover_locked',side_effect=ValueError(SECRET)):
+                        with self.assertRaises(ValueError):op.main(['execute','--stage',str(stage),'--phase','rollback'])
+                    primary_path=stage/'diagnostic-primary-rollback.json'
+                    self.assertTrue(primary_path.exists(),'actual rollback dispatcher lost initiating cause outside target caller')
+                    primary=primary_path.read_bytes();record=json.loads(primary)
+                    self.assertEqual(record['exception_class'],'ValueError');self.assertFalse(record['acceptance'])
+                    self.assertEqual(record['identity']['phase'],'rollback')
+                    self.assertEqual(record['site']['function'],'rollback_proof')
+                    with patch.object(op,'recover_locked',side_effect=RuntimeError(SECRET)):
+                        with self.assertRaises(RuntimeError):op.main(['recover','--stage',str(stage),'--phase','rollback'])
+                    recovery=(stage/'diagnostic-recovery-stoppost-rollback.json').read_bytes()
+                    def success(stage,services,run,binding):op.journal(stage,run,'recovered',outcome='recovered')
+                    with patch.object(op,'recover_locked',side_effect=success):
+                        op.main(['recover','--stage',str(stage),'--phase','rollback'])
+                        op.main(['recover','--stage',str(stage),'--phase','rollback'])
+                    self.assertEqual(primary_path.read_bytes(),primary)
+                    self.assertEqual((stage/'diagnostic-recovery-stoppost-rollback.json').read_bytes(),recovery)
+                    self.assertNotIn(SECRET.encode(),primary+recovery)
+                    run=json.loads((stage/'run-rollback.json').read_bytes())
+                    self.assertNotEqual(run['outcome'],'committed');self.assertNotIn('rollback_accepted',run)
+                    self.assertFalse((stage/'caller-proof-rollback.json').exists())
+    def test_actual_rollback_diagnosis_failure_does_not_skip_stoppost_recovery(self):
+        for broken in ('loader','malformed'):
+            with self.subTest(broken=broken),tempfile.TemporaryDirectory() as tmp:
+                stage=Path(tmp);stack,services=self.rollback_dispatch_fixture(stage,'stop')
+                path=stage/'diagnostic-primary-rollback.json'
+                if broken=='malformed':path.write_text(json.dumps({'message':SECRET}))
+                with stack:
+                    from contextlib import nullcontext
+                    diagnostic=patch.object(op,'failure_custody',side_effect=OSError(SECRET)) if broken=='loader' else nullcontext()
+                    with diagnostic:
+                        with self.assertRaises(ValueError):op.main(['execute','--stage',str(stage),'--phase','rollback'])
+                    def success(stage,services,run,binding):op.journal(stage,run,'recovered',outcome='recovered')
+                    with patch.object(op,'recover_locked',side_effect=success) as recovery:
+                        op.main(['recover','--stage',str(stage),'--phase','rollback'])
+                    recovery.assert_called_once()
+                    run=json.loads((stage/'run-rollback.json').read_bytes())
+                    self.assertEqual(run['outcome'],'recovered');self.assertNotIn('rollback_accepted',run)
+                    if broken=='malformed':self.assertEqual(json.loads(path.read_bytes()),{'message':SECRET})
+    def test_operator_loaders_explicitly_fail_closed(self):
+        for producer,label in ((op.failure_custody,'diagnostic helper load unavailable'),(op.primitives,'release primitive load unavailable')):
+            for spec in (None,SimpleNamespace(loader=None)):
+                with self.subTest(producer=producer.__name__,spec=spec),patch.object(op.importlib.util,'spec_from_file_location',return_value=spec):
+                    with self.assertRaisesRegex(op.OperatorError,label):producer()
     def test_execute_retains_primary_before_successful_recovery(self):
         with tempfile.TemporaryDirectory() as tmp:
             stage=Path(tmp); binding={'source_identity':'b'*64,'spec_sha256':'c'*64}
