@@ -12,7 +12,7 @@ const audit=`(()=>{const shown=e=>e.offsetParent!==null;
  const tiles=[...document.querySelectorAll('.media-card,.palette-group,.module-item,.palette-choice,.paired-device-row,.screen-media-choice,.custom-module-card,.custom-lava-card')].filter(shown);
  const kinds=new Set(tiles.map(e=>e.className.split(' ')[0]));
  const cards=[...document.querySelectorAll('.card')].filter(shown);
- const actionButtons=[...document.querySelectorAll('.section-head .btn,.palette-bulk-actions .btn,.media-actions .btn,.module-actions .btn,.screen-media-card-actions .btn,.sticky-save .btn,.paired-device-row .btn')].filter(shown);
+ const actionButtons=[...document.querySelectorAll('.media-actions .btn,.screen-media-card-actions .btn')].filter(shown);
  const notes=[...document.querySelectorAll('.card-note,.editor-note,.media-group-note,.screen-media-summary')].filter(shown);
  const checks=[...document.querySelectorAll('label:has(>input[id^=screen-enabled-])')].map(l=>{const a=l.querySelector('input').getBoundingClientRect(),b=l.getBoundingClientRect();return Math.abs((a.top+a.height/2)-(b.top+b.height/2))});
  const library={};for(const c of [...document.querySelectorAll('#media .media-card')].filter(shown)){const a=c.querySelector('.media-actions'),k=a.children.length;(library[k]||=new Set()).add(Math.round(a.getBoundingClientRect().height))}

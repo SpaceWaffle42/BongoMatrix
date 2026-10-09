@@ -43,12 +43,12 @@
     :is(.card,.config-upgrade-dialog,.logs-dialog,.screen-media-dialog){border-radius:var(--radius-lg)}
     :is(.config-upgrade-dialog,.logs-dialog,.screen-media-dialog){box-shadow:var(--dialog-shadow)}:is(.config-upgrade-dialog,.logs-dialog,.screen-media-dialog)::backdrop{background:#000b}
     :is(.card-note,.editor-note,.media-group-note,.location-hint,.screen-media-hint,.screen-media-summary),.section-head p.card-note{font-size:var(--fs-note)}:is(.palette-count,.media-detail,.physical-time,.custom-module-id){font-size:var(--fs-meta)}
-    .btn{display:inline-flex;align-items:center;justify-content:center;gap:6px;line-height:1.3;transition:background-color .12s,color .12s,border-color .12s}
-    :is(.section-head,.palette-bulk-actions,.media-actions,.module-actions,.announcement-actions,.paired-device-row,.sticky-save,.config-upgrade-actions,.upload-zone,.screen-media-card-actions,.device-actions) .btn{min-height:var(--control-h)}
+    .btn{transition:background-color .12s,color .12s,border-color .12s}
+    /* Only card action rows owned by this layer; existing 44px touch targets elsewhere are kept. */:is(.media-actions,.screen-media-card-actions) .btn{min-height:var(--control-h)}
     .btn:disabled,.btn[aria-disabled="true"]{opacity:.45;cursor:not-allowed}.btn:disabled:hover{background:rgba(255,255,255,.035);color:var(--secondary)}.btn.primary:disabled:hover{background:var(--primary)}
     .btn.danger:hover{background:#ef6a7214;border-color:#ef6a7240}
     :is(.btn,button,summary,a,[role=button]):focus-visible{outline:2px solid var(--accent);outline-offset:2px}
-    label:has(>input[id^="screen-enabled-"]),label:has(>input.lava-palette),label:has(>input[data-media-source]){display:flex;align-items:center;gap:8px}
+    label:has(>input[id^="screen-enabled-"]){display:flex;align-items:center;gap:8px}
     .media-actions{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:6px}.media-actions .btn{min-width:0;padding-inline:6px}.media-actions .btn:first-child{grid-column:1/-1}.media-actions .btn.danger{grid-column:1/-1}
     .media-name,.screen-media-choice>label{font-weight:510}
     @media(max-width:600px){:root{--control-h:44px}}

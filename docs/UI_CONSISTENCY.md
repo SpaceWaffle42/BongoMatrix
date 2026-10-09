@@ -24,12 +24,12 @@ radii, type sizes or control heights — use the tokens below.
 | `--radius` | 8px | tiles inside a card (media, palette, playlist, devices, groups) |
 | `--radius-lg` | 10px | top-level cards, dialogs |
 | `--tile` | rgba(255,255,255,.018) | every tile surface |
-| `--control-h` | 36px (44px under 600px) | buttons, inputs, selects |
+| `--control-h` | 36px (44px under 600px) | media tile action buttons (library and Splash/Sleep); other controls keep their existing 44px touch targets |
 | `--fs-note` | 12px | all muted notes/hints |
 | `--fs-meta` | 11px | counts, sizes, ids |
 | `--primary` | #5e6ad2 | primary buttons, pressed toggles |
 | `--danger-text` / `--success-text` | #ff9da3 / #86efac | destructive / ok text |
-| `--focus-ring` | 0 0 0 3px #7170ff40 | focus-visible on every interactive element |
+| focus-visible | 2px `--accent` outline, 2px offset | every button, summary, link |
 
 ## Component rules
 

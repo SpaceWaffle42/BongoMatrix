@@ -121,7 +121,7 @@ class ProjectionTests(unittest.TestCase):
                     if first==96: return '\n'.join(lines[107:110])+'\n'
                     return '\n'.join(lines[first-1+offset:last+offset])+'\n'
                 probe="const assert=require('node:assert/strict');const {createHash}=require('node:crypto');\n"+'\n'.join(lines[5:14])+'\n(async()=>{\n'
-                probe+='const input='+json.dumps({'cookie':cookie,'nonce':secrets.token_hex(32),'version':'0.3.66-preview','offline_fixture':True})+';input.debug_port=process.argv[1];input.base="http://127.0.0.1:"+process.argv[2];\nconst sleep=ms=>new Promise(r=>setTimeout(r,ms));\n'
+                probe+='const input='+json.dumps({'cookie':cookie,'nonce':secrets.token_hex(32),'version':webapp_fixture.webapp.APPLICATION_VERSION,'offline_fixture':True})+';input.debug_port=process.argv[1];input.base="http://127.0.0.1:"+process.argv[2];\nconst sleep=ms=>new Promise(r=>setTimeout(r,ms));\n'
                 # No ESM imports/stdin loop or original transport/rollback branch braces.
                 # No actual-frame function or actual-frame assertions in this focused mock-controller test.
                 probe+=exact(7,22)+exact(24,24)+'try {\n'+exact(27,27)

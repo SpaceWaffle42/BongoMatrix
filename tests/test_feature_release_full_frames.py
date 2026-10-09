@@ -43,7 +43,7 @@ class FullFrameTests(unittest.TestCase):
    raw=io.BytesIO();im.save(raw,format='PNG');raw.seek(0);return raw,rev
   f.controller.frame_png.side_effect=frame
   before=f.store.path.read_bytes();cookie=f.client.get_cookie('session').value
-  context=dict(phase='initial',app_pid=123,nonce='d'*64,binding_sha256='a'*64,source_identity='b'*64,spec_sha256='c'*64,driver_sha256=caller.sha(DRIVER.read_bytes()),caller_sha256=caller.sha((DRIVER.parent/'feature_release_acceptance.py').read_bytes()),version='0.3.66-preview',cookie=cookie,offline_fixture=True)
+  context=dict(phase='initial',app_pid=123,nonce='d'*64,binding_sha256='a'*64,source_identity='b'*64,spec_sha256='c'*64,driver_sha256=caller.sha(DRIVER.read_bytes()),caller_sha256=caller.sha((DRIVER.parent/'feature_release_acceptance.py').read_bytes()),version=projection.webapp_fixture.webapp.APPLICATION_VERSION,cookie=cookie,offline_fixture=True)
   server=make_server('127.0.0.1',0,f.app,threaded=True);thread=threading.Thread(target=server.serve_forever);thread.start()
   try:
    with tempfile.TemporaryDirectory() as tmp:
