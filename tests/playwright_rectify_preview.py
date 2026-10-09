@@ -23,7 +23,6 @@ except ModuleNotFoundError:
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
-os.umask(0o077)
 RESULT = Path(os.environ.get('MATRIX_PLAYWRIGHT_RESULT', '/root/.local/state/hermes-worker-dashboard/matrix-development-20261008-r11b-playwright-fix-result.json'))
 
 def record(name, status, **evidence):
@@ -329,6 +328,7 @@ def run(args):
     return 2 if failed else 0
 
 if __name__=='__main__':
+    os.umask(0o077)
     parser=argparse.ArgumentParser()
     parser.add_argument('--phase',default='green')
     parser.add_argument('--url')

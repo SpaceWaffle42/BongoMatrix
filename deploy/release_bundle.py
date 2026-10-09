@@ -2240,6 +2240,9 @@ _NON_PRODUCTION_EXPORT_ROOTS = frozenset({
     ".git", ".github", ".gitlab", ".hermes", "ci", "data", "docs", "skills", "tests",
 })
 _NON_PRODUCTION_EXPORT_FILES = frozenset({
+    "release-controls/r11b-prod-rectify/release_bundle.py",
+    "release-controls/r11b-prod-rectify/release_failure_custody.py",
+    "release-controls/r11b-prod-rectify/scoped_release_operator.py",
     ".gitignore", ".gitlab-ci.yml", "README.md", "code_review.md",
 })
 

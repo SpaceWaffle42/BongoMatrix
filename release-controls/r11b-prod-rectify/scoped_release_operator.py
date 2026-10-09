@@ -30,7 +30,7 @@ RUNTIME_PATHS = (
     "modules/splash_screen.py", "screen_media.py", "webapp.py",
 )
 HELPER_HASHES = {
-    "deploy/release_bundle.py": "118d435da056b880f40dbcb4a3f0e3c1978c6e422f6508102edfd00b63e5b0e0",
+    "deploy/release_bundle.py": "6d1a98df08809b5292e85bd968f7f3b2582a189a854520ce636dc1018efca755",
     "release_argparse.py": "090e98340173d99605f9701c290e78cafc21da49e072dfd5242786685ee5a5f1",
 }
 ABSENT_ADDITIONS = {"screen_media.py", "app/static/screen_media.js"}
