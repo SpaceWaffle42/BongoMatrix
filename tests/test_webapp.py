@@ -12166,6 +12166,105 @@ console.log(JSON.stringify(result.module));
         self.assertEqual(final_snapshot["custom_modules"], [moved])
         self.assertEqual(final_snapshot["revision"], saved_revision)
 
+    @unittest.skipUnless(os.environ.get("MATRIX_CHROMIUM"), "MATRIX_CHROMIUM browser is required")
+    def test_canvas_passive_reflow_retains_delivered_scroll_after_resize_lifecycle(self):
+        from playwright.sync_api import sync_playwright
+
+        module = test_config_store.ConfigStoreTests.advanced_module(
+            id="custom_motion", frame_count=120, overrides=[],
+            layers=[{"id": "layer_a", "name": "Primary motion", "type": "rectangle",
+                     "visible": True, "properties": {"x": 1, "y": 2, "width": 8,
+                     "height": 8, "rotation": 0, "colour": "#00ffff", "filled": False}, "keyframes": []}],
+        )
+        self.store.update({"custom_modules": [module]})
+        self.pair_browser()
+        body = self.client.get("/").get_data(as_text=True)
+        root = Path(__file__).parents[1]
+        body = body.replace('<link rel="stylesheet" href="/static/custom_canvas.css">',
+                            f"<style>{(root / 'app/static/custom_canvas.css').read_text()}</style>", 1)
+        body = body.replace('<script src="/static/custom_canvas.js"></script>',
+                            f"<script>{(root / 'app/static/custom_canvas.js').read_text()}</script>", 1)
+        with sync_playwright() as playwright:
+            browser = playwright.chromium.launch(executable_path=os.environ["MATRIX_CHROMIUM"],
+                                                 args=["--no-sandbox"])
+            try:
+                page = browser.new_page(viewport={"width": 899, "height": 700})
+                page.set_content(body)
+                page.locator('.layer-frame-cell[data-layer-id="layer_a"][data-frame="7"]').click()
+                # Observe the real producer, not an arbitrary two-frame/sleep barrier.
+                # Wrappers only record scheduled/completed work; native callbacks run unchanged.
+                page.evaluate("""() => {
+                    if (matrixSyncTimer !== null) clearInterval(matrixSyncTimer);
+                    if (matrixFrameTimer !== null) clearTimeout(matrixFrameTimer);
+                    const raf = window.requestAnimationFrame.bind(window);
+                    const cancel = window.cancelAnimationFrame.bind(window);
+                    const timer = window.setTimeout.bind(window);
+                    const clear = window.clearTimeout.bind(window);
+                    const work = window.__resizeWork = {frames: new Set(), timers: new Set(),
+                        events: 0, completedFrames: 0, completedTimers: 0};
+                    window.requestAnimationFrame = callback => {
+                        const id = raf(time => {work.frames.delete(id); work.completedFrames++; callback(time)});
+                        work.frames.add(id); return id;
+                    };
+                    window.cancelAnimationFrame = id => {work.frames.delete(id); cancel(id)};
+                    window.setTimeout = (callback, delay, ...args) => {
+                        if (delay !== 100) return timer(callback, delay, ...args);
+                        const id = timer(() => {work.timers.delete(id); work.completedTimers++; callback(...args)}, delay);
+                        work.timers.add(id); return id;
+                    };
+                    window.clearTimeout = id => {work.timers.delete(id); clear(id)};
+                    window.addEventListener('resize', () => work.events++);
+                    visualViewport.addEventListener('resize', () => work.events++);
+                    document.activeElement.blur();
+                }""")
+                baseline = page.evaluate("""async () => {
+                    const scroll = document.querySelector('.aseprite-timeline-scroll');
+                    await new Promise(resolve => {
+                        scroll.addEventListener('scroll', resolve, {once: true}); scroll.scrollLeft = 160;
+                    });
+                    const active = scroll.querySelector('.layer-frame-cell.active');
+                    return {local: scroll.scrollLeft, active: [active.dataset.layerId, active.dataset.frame],
+                            focus: document.activeElement.tagName};
+                }""")
+                self.assertEqual(baseline, {"local": 160, "active": ["layer_a", "7"], "focus": "BODY"})
+                page.set_viewport_size({"width": 901, "height": 700})
+                page.wait_for_function("""() => __resizeWork.events > 0 && __resizeWork.completedTimers > 0
+                    && __resizeWork.frames.size === 0 && __resizeWork.timers.size === 0""")
+                after = page.evaluate("""() => {
+                    const scroll = document.querySelector('.aseprite-timeline-scroll');
+                    const active = scroll.querySelector('.layer-frame-cell.active');
+                    return {local: scroll.scrollLeft, active: [active.dataset.layerId, active.dataset.frame],
+                        columns: getComputedStyle(document.querySelector('.advanced-layout')).gridTemplateColumns.split(' ').length};
+                }""")
+                self.assertEqual(after, {"local": 160, "active": ["layer_a", "7"], "columns": 2})
+                # Sibling visualViewport resize has the same passive-position contract.
+                page.evaluate("__resizeWork.completedTimers = 0; visualViewport.dispatchEvent(new Event('resize'))")
+                page.wait_for_function("""() => __resizeWork.completedTimers > 0
+                    && __resizeWork.frames.size === 0 && __resizeWork.timers.size === 0""")
+                self.assertEqual(page.locator('.aseprite-timeline-scroll').evaluate('(node) => node.scrollLeft'), 160)
+                # Native keyboard focus must still reveal a clipped cell locally, not scroll the page.
+                page.locator('.layer-frame-cell[data-layer-id="layer_a"][data-frame="7"]').evaluate(
+                    '(node) => node.focus({preventScroll: true})')
+                page.evaluate("document.querySelector('.layer-frame-cell.active').scrollIntoView({behavior: 'instant', block: 'center'}); document.querySelector('.aseprite-timeline-scroll').scrollLeft = 160")
+                outer = page.evaluate('({x: scrollX, y: scrollY})')
+                page.keyboard.press('Enter')
+                page.evaluate("__resizeWork.completedTimers = 0; visualViewport.dispatchEvent(new Event('resize'))")
+                page.wait_for_function("""() => __resizeWork.completedTimers > 0
+                    && __resizeWork.frames.size === 0 && __resizeWork.timers.size === 0""")
+                keyboard = page.evaluate("""() => {
+                    const scroll = document.querySelector('.aseprite-timeline-scroll');
+                    const focused = document.activeElement, rect = focused.getBoundingClientRect();
+                    return {frame: focused.dataset.frame, visible: rect.right <= scroll.getBoundingClientRect().right
+                        && rect.left >= scroll.querySelector('.layer-track-label').getBoundingClientRect().right,
+                        outer: {x: scrollX, y: scrollY}, local: scroll.scrollLeft};
+                }""")
+                self.assertEqual(keyboard['frame'], '7')
+                self.assertTrue(keyboard['visible'], keyboard)
+                self.assertGreater(keyboard['local'], 160)
+                self.assertEqual(keyboard['outer'], outer)
+            finally:
+                browser.close()
+
     @unittest.skipUnless(shutil.which("node"), "Node.js is required")
     @unittest.skipUnless(
         os.environ.get("MATRIX_CHROMIUM")
