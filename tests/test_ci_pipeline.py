@@ -241,23 +241,48 @@ class GitLabPipelineContractTests(unittest.TestCase):
         )
         self.assertLess(job.index("typeof WebSocket"), job.index("coverage run"))
         self.assertIn(
-            "coverage run --source=. --omit='tests/*' -m xmlrunner discover -s tests",
+            "coverage run --source=. --omit='tests/*' scripts/ci_shard.py run"
+            ' --index "$CI_NODE_INDEX" --total "$CI_NODE_TOTAL"',
             job,
         )
         self.assertIn('test_status=$?', job)
         self.assertIn('exit "$test_status"', job)
         self.assertRegex(job, r"reports:\n\s+junit:")
-        self.assertIn("coverage_report:", job)
         self.assertIn("when: always", job)
+        self.assertIn("coverage_report:", block(self.sections, "test_results"))
 
     def test_collection_preflight_precedes_full_canonical_suite(self):
         job = block(self.sections, "full_test_suite")
-        preflight = ".venv-ci/bin/python scripts/ci_collection.py --output collection.json"
+        preflight = '.venv-ci/bin/python scripts/ci_collection.py --output "shards/collection-$CI_NODE_INDEX.json"'
         self.assertIn(preflight, job)
         self.assertLess(job.index(preflight), job.index("set +e"))
         self.assertLess(job.index(preflight), job.index("coverage run"))
-        self.assertIn("- collection.json", job)
+        self.assertIn("- shards/", job)
         self.assertNotIn("allow_failure", job)
+
+    def test_sharded_suite_is_joined_by_an_exact_partition_proof(self):
+        job = block(self.sections, "full_test_suite")
+        self.assertRegex(job, r"\n  parallel: [2-9]\n")
+        self.assertIn("COVERAGE_RCFILE: ci/coveragerc", job)
+        rc = (ROOT / "ci/coveragerc").read_text(encoding="utf-8")
+        self.assertIn("parallel = True", rc)
+        self.assertIn("data_file = coverage-data/.coverage", rc)
+        self.assertIn("- coverage-data/", job)
+
+        join = block(self.sections, "test_results")
+        self.assertIn("when: always", join)
+        self.assertRegex(join, r"- job: full_test_suite\n\s+artifacts: true")
+        verify = "python scripts/ci_shard.py verify --collections shards --manifests shards --results test-results"
+        self.assertIn(verify, join)
+        self.assertLess(join.index(verify), join.index("coverage combine coverage-data"))
+        self.assertLess(join.index("coverage combine"), join.index("coverage xml -o coverage.xml"))
+        self.assertIn("- shard-verification.json", join)
+
+    def test_quality_and_security_evidence_does_not_wait_for_the_suite(self):
+        for name in ("python_static_analysis", "dependency_audit", "semgrep-sast", "secret_detection"):
+            self.assertIn("\n  needs: []\n", "\n" + block(self.sections, name), name)
+        summary = block(self.sections, "ci_summary")
+        self.assertRegex(summary, r"- job: test_results\n\s+artifacts: true")
 
     def test_full_test_job_provisions_the_repository_venv_contract(self):
         job = block(self.sections, "full_test_suite")
@@ -315,6 +340,8 @@ class GitLabPipelineContractTests(unittest.TestCase):
                     **os.environ,
                     "PATH": str(fake_bin) + os.pathsep + os.environ["PATH"],
                     "PYTHONDONTWRITEBYTECODE": "1",
+                    "CI_NODE_INDEX": "1",
+                    "CI_NODE_TOTAL": "2",
                 },
             )
 
@@ -417,7 +444,8 @@ class GitLabPipelineContractTests(unittest.TestCase):
             "workflow", "stages", "include", "variables", ".default_project_job",
             "python_syntax", "full_test_suite", "python_static_analysis",
             "dependency_audit", "semgrep-sast", "secret_detection",
-            "ci_summary", "physical_device_acceptance", "non_essential_browser_tests",
+            "test_results", "ci_summary", "physical_device_acceptance",
+            "non_essential_browser_tests",
         }
         self.assertEqual(set(self.sections), required)
 

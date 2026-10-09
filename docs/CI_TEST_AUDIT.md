@@ -33,7 +33,7 @@ Independent ci/required-tests.json preserves all1661 baseline discovered IDs
 (inherited included; AST-declared1649), plus9 explicit collection/CI regressions in the review-fix generation.
 It is not regenerated in CI. Valid additions pass; removal needs requirements
 review. Counts below are audit observations, not gate thresholds. Actual complete
-per-module inventory is collection.json; every module runs in full discovery.
+per-module inventory is shards/collection-<n>.json; every module is loaded by every shard and each collected test runs in exactly one shard (proved by test_results).
 
 ## Entire pipeline
 
@@ -42,6 +42,7 @@ per-module inventory is collection.json; every module runs in full discovery.
 | workflow/includes/default | MR/branch/schedule; runner/image/retry | Valid, unchanged |
 | validate/python_syntax | all Python AST + shipped helper presence | Valid, retained and locally executed |
 | test/full_test_suite | complete xmlrunner/coverage/Chromium/media | Preflight/artifact only; full command/exclusions/timeout retained |
+| summary/test_results | shard join | Exact-partition proof (shard-verification.json) and combined coverage; runs when a shard fails |
 | quality/python_static_analysis | Ruff E9,F63,F7,F82 + report | Valid, locally executed; no cuts |
 | quality/dependency_audit | requirements vulnerability report | Valid, unchanged; freshness not inferred locally |
 | security/semgrep-sast | scanner + reviewed baseline | Valid, unchanged; external execution pending |
