@@ -31,7 +31,7 @@ try{
  }
  for(const role of ['splash','sleep']){
   const before=await evaluate('configBody()');
-  await evaluate(`(()=>{const card=[...document.querySelectorAll('#media-library .media-card')].find(c=>c.querySelector('.media-name').textContent==='grouped_upload.gif');[...card.querySelectorAll('button')].find(b=>b.textContent==='Select for ${role}').id='native-library-${role}'})()`);
+  await evaluate(`(()=>{const card=[...document.querySelectorAll('#media-library .media-card')].find(c=>c.querySelector('.media-name').textContent==='grouped_upload.gif');card.querySelector('button[aria-label="Use grouped_upload.gif for ${role}"]').id='native-library-${role}'})()`);
   await click('#native-library-'+role);
   const selector=`#screen-media-${role} .screen-media-choice[data-source="grouped_upload.gif"]`;
   const state=await evaluate(`(()=>{const c=document.querySelector(${JSON.stringify(selector)});return {checked:c.querySelector('.screen-media-selected').checked,id:c.dataset.rowId,disabled:c.querySelector('.palette-inspect').disabled}})()`);

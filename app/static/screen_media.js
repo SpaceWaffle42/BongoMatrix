@@ -146,14 +146,22 @@ function screenMediaCard(role, media, row) {
   summary.textContent = 'Select to set up layout'; card.append(summary);
   const actions = document.createElement('div'); actions.className = 'screen-media-card-actions';
   const edit = makeButton('Edit', () => openDialog());
-  edit.classList.add('screen-media-edit'); edit.disabled = !row;
+  edit.classList.add('screen-media-edit');
+  // Layout editing is offered only for selected (enabled) cards; unselecting closes an open editor.
+  function syncSelection() {
+    edit.disabled = !row || !check.checked;
+    if (edit.disabled && dialog?.open) dialog.close();
+  }
+  card.syncScreenSelection = syncSelection;
   edit.setAttribute('aria-label', 'Edit layout for ' + media.name);
+  // Preview is always available: selected cards inspect their saved layout in Edit Preview;
+  // unselected cards show the raw media on the Matrix, like the media library.
   const inspect = makeButton('Preview', () => {
-    if (!row) return;
+    if (!row || !check.checked) { previewMedia(media.name); return; }
     previewMediaItemId = row.dataset.itemId; selectEditPreviewModule(role, false);
     requestPreviewMode('edit'); scheduleEditPreview(0);
   });
-  inspect.classList.add('palette-inspect'); inspect.disabled = !row;
+  inspect.classList.add('palette-inspect');
   inspect.setAttribute('aria-label', 'Inspect ' + media.name + ' in Edit Preview');
   actions.append(edit, inspect); card.append(actions);
   let dialog = null, stageImage = null, stageBox = null;
@@ -255,7 +263,7 @@ function screenMediaCard(role, media, row) {
   }
   function bindRow(owner) {
     if (card.dataset.rowId === owner.dataset.itemId && dialog) return;
-    row = owner; card.dataset.rowId = row.dataset.itemId; inspect.disabled = false; edit.disabled = false;
+    row = owner; card.dataset.rowId = row.dataset.itemId; syncSelection();
     const original = row.closest('.module-item').querySelector('.media-playlist-editor');
     if (dialog) { if (dialog.open) dialog.close(); dialog.remove(); }
     dialog = buildDialog(original);
@@ -273,6 +281,7 @@ function screenMediaCard(role, media, row) {
   }
   card.bindScreenRow = bindRow;
   if (row) bindRow(row);
+  syncSelection();
   check.addEventListener('change', () => {
     if (!matrixEditorsReady) { renderScreenMediaRole(role); return; }
     if (!row) row = materializeScreenChoice(role, media.name);
@@ -300,6 +309,7 @@ function updateScreenMediaChecks(role) {
       : screenRowForSource(role,card.dataset.source);
     if(row)card.bindScreenRow(row);
     card.querySelector('.screen-media-selected').checked=Boolean(row?.querySelector('.enabled').checked);
+    card.syncScreenSelection?.();
   }
   for(const group of section.querySelectorAll('[data-screen-group]')) {
     const checks=[...group.querySelectorAll('.screen-media-selected')];

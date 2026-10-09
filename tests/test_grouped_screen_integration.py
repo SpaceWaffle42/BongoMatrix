@@ -250,3 +250,23 @@ class GroupedScreenIntegrationTests(unittest.TestCase):
         self.assertEqual(sorted(report['roles']), ['sleep', 'splash'])
         self.assertTrue(report['phone_dialog_fits'])
         self.assertFalse(report['phone_overflow'])
+
+    def test_dashboard_modules_share_visual_contract(self):
+        fixture = test_webapp.WebAppTests()
+        fixture.setUp()
+        self.addCleanup(fixture.tearDown)
+        fixture.pairing.verify.return_value = True
+        for name, colour in (('consistency_a.gif', 'blue'), ('consistency_b.png', 'green')):
+            with Image.new('RGB', (64, 32), colour) as image:
+                image.save(fixture.media_dir / name)
+        def frame_png():
+            frame = io.BytesIO()
+            with Image.new('RGB', (64, 32), 'black') as image:
+                image.save(frame, format='PNG')
+            frame.seek(0)
+            return frame, 1
+        fixture.controller.frame_png.side_effect = frame_png
+        probe = Path(__file__).with_name('ui_consistency_browser.js').read_text()
+        report = fixture.run_live_chromium_probe(probe, timeout=90)
+        self.assertEqual(report['errors'], [])
+        self.assertEqual(sorted(report['viewports']), ['1440', '390'])

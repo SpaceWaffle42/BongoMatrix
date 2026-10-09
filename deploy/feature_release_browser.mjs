@@ -60,7 +60,7 @@ const decode=async png=>evaluate(`(async()=>{const r=await fetch('data:image/png
     roleTag=role;frames=freshFrames();at('SELECT'); const before=await evaluate('configBody()');
     const source=await evaluate(`(()=>{const choices=screenMediaCatalog[${JSON.stringify(role)}].choices.filter(c=>c.name.endsWith('.gif'));const eligible=choices.filter(c=>[...document.querySelectorAll('#media-library .media-name')].some(n=>n.textContent===c.name));return (eligible.find(c=>!screenRowForSource(${JSON.stringify(role)},c.name))||eligible[0])?.name})()`);
     assert.ok(source,'existing eligible GIF required; no upload fallback');
-    await evaluate(`(()=>{const c=[...document.querySelectorAll('#media-library .media-card')].find(c=>c.querySelector('.media-name').textContent===${JSON.stringify(source)});[...c.querySelectorAll('button')].find(b=>b.textContent===${JSON.stringify('Select for '+role)}).id='acceptance-library-${role}'})()`);
+    await evaluate(`(()=>{const c=[...document.querySelectorAll('#media-library .media-card')].find(c=>c.querySelector('.media-name').textContent===${JSON.stringify(source)});c.querySelector(${JSON.stringify('button[aria-label="Use '+source+' for '+role+'"]')}).id='acceptance-library-${role}'})()`);
     await click('#acceptance-library-'+role);
     const selector=`#screen-media-${role} .screen-media-choice[data-source=${JSON.stringify(source)}]`;
     const selected=await evaluate(`(()=>{const c=document.querySelector(${JSON.stringify(selector)});return {id:c.dataset.rowId,checked:c.querySelector('.screen-media-selected').checked,inspect:!c.querySelector('.palette-inspect').disabled}})()`);

@@ -27,7 +27,7 @@ try{
   await evaluate("setScreenMediaSelection('splash','all')");
   assert.deepEqual(await evaluate('configBody().playlist'),initial.playlist,'bulk capacity rejection must not partially mutate');
   for(const role of ['splash','sleep']){
-   await evaluate(`(()=>{const card=[...document.querySelectorAll('#media-library .media-card')].find(c=>c.querySelector('.media-name').textContent==='removable.gif');[...card.querySelectorAll('button')].find(b=>b.textContent==='Select for ${role}').id='capacity-library-${role}'})()`);
+   await evaluate(`(()=>{const card=[...document.querySelectorAll('#media-library .media-card')].find(c=>c.querySelector('.media-name').textContent==='removable.gif');card.querySelector('button[aria-label="Use removable.gif for ${role}"]').id='capacity-library-${role}'})()`);
    await click('#capacity-library-'+role);
    assert.deepEqual(await evaluate('configBody()'),initial,'library capacity refusal must be all-or-nothing');
    assert.match(await evaluate("document.querySelector('#message').textContent"),/256/,'capacity refusal must explain the hold, not claim selected');
