@@ -43,7 +43,13 @@ try{
   await until(`!document.querySelector(${JSON.stringify(card+' dialog[open]')})`);
   // The dialog close event is queued after the open attribute is removed; wait for the release.
   await until(`document.querySelector(${JSON.stringify(card+' .screen-media-stage-image')}).getAttribute('src').startsWith('data:')`);
-  report.roles[role]={row_id_ok:true,edited_x:edited.layout.x};
+  const editDisabled=`document.querySelector(${JSON.stringify(card+' .screen-media-edit')}).disabled`;
+  await click(card+' .screen-media-edit');await until(`document.querySelector(${JSON.stringify(card+' dialog[open]')})`);
+  await evaluate(`(()=>{const c=document.querySelector(${JSON.stringify(card+' .screen-media-selected')});c.checked=false;c.dispatchEvent(new Event('change',{bubbles:true}))})()`);
+  await until(editDisabled);
+  assert.equal(await evaluate(`Boolean(document.querySelector(${JSON.stringify(card+' dialog[open]')}))`),false,'unselecting closes the open editor');
+  await click(card+' .screen-media-selected');await until('!'+editDisabled);
+  report.roles[role]={row_id_ok:true,edited_x:edited.layout.x,edit_follows_selection:true};
  }
  await send('Emulation.setDeviceMetricsOverride',{width:390,height:844,deviceScaleFactor:1,mobile:true});await until('innerWidth===390');
  const phone='#screen-media-sleep .screen-media-choice[data-source="editor_upload.gif"]';

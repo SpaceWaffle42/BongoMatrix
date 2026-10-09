@@ -146,7 +146,13 @@ function screenMediaCard(role, media, row) {
   summary.textContent = 'Select to set up layout'; card.append(summary);
   const actions = document.createElement('div'); actions.className = 'screen-media-card-actions';
   const edit = makeButton('Edit', () => openDialog());
-  edit.classList.add('screen-media-edit'); edit.disabled = !row;
+  edit.classList.add('screen-media-edit');
+  // Layout editing is offered only for selected (enabled) cards; unselecting closes an open editor.
+  function syncSelection() {
+    edit.disabled = !row || !check.checked;
+    if (edit.disabled && dialog?.open) dialog.close();
+  }
+  card.syncScreenSelection = syncSelection;
   edit.setAttribute('aria-label', 'Edit layout for ' + media.name);
   const inspect = makeButton('Preview', () => {
     if (!row) return;
@@ -255,7 +261,7 @@ function screenMediaCard(role, media, row) {
   }
   function bindRow(owner) {
     if (card.dataset.rowId === owner.dataset.itemId && dialog) return;
-    row = owner; card.dataset.rowId = row.dataset.itemId; inspect.disabled = false; edit.disabled = false;
+    row = owner; card.dataset.rowId = row.dataset.itemId; inspect.disabled = false; syncSelection();
     const original = row.closest('.module-item').querySelector('.media-playlist-editor');
     if (dialog) { if (dialog.open) dialog.close(); dialog.remove(); }
     dialog = buildDialog(original);
@@ -273,6 +279,7 @@ function screenMediaCard(role, media, row) {
   }
   card.bindScreenRow = bindRow;
   if (row) bindRow(row);
+  syncSelection();
   check.addEventListener('change', () => {
     if (!matrixEditorsReady) { renderScreenMediaRole(role); return; }
     if (!row) row = materializeScreenChoice(role, media.name);
@@ -300,6 +307,7 @@ function updateScreenMediaChecks(role) {
       : screenRowForSource(role,card.dataset.source);
     if(row)card.bindScreenRow(row);
     card.querySelector('.screen-media-selected').checked=Boolean(row?.querySelector('.enabled').checked);
+    card.syncScreenSelection?.();
   }
   for(const group of section.querySelectorAll('[data-screen-group]')) {
     const checks=[...group.querySelectorAll('.screen-media-selected')];
