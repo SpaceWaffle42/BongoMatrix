@@ -29,7 +29,7 @@ import tempfile
 import threading
 import time
 
-OPERATOR_SHA = 'fd11f541a61b0e2b69805a1559aaac34c89872e876da0b5c9d7613e302def650'
+OPERATOR_SHA = '532553f71b97f2834fb57144ef606e59a00013b478895042b258e41397b40cc2'
 IDENTITIES = ('binding_sha256','source_identity','spec_sha256','stage','phase','app_pid','nonce')
 HEX = re.compile(r'[0-9a-f]{64}')
 LIMIT = 2 * 1024 * 1024
@@ -273,40 +273,80 @@ def validate_request(context):
     return binding,release
 
 
+DIAGNOSTIC_SHA = '709c66be37fe70a0e91c5f3072afc4511bab242c16bd1c7d9275bdb7363bd5f5'
+
+
+def failure_custody():
+    path=Path(__file__).with_name('release_failure_custody.py')
+    require(sha(read_private(path))==DIAGNOSTIC_SHA,'diagnostic helper identity mismatch')
+    spec=importlib.util.spec_from_file_location('release_failure_custody',path)
+    require(spec is not None and spec.loader is not None,'diagnostic helper unavailable')
+    module=importlib.util.module_from_spec(spec);spec.loader.exec_module(module)
+    return module
+
+
 def target(context, *, wait_seconds=46):
-    deadline=time.monotonic()+wait_seconds
-    binding,release=validate_request(context)
-    identity=namespace_identity(context['app_pid'],inside=True)
-    hashes=verify_sources(binding,release,context['phase'])
-    before=state_evidence(context['stage'],binding)
-    version_match=re.search(rb'^APPLICATION_VERSION = "([^"]+)"$',read_private(Path(binding['destination'])/'webapp.py'),re.M)
-    require(version_match is not None,'phase version missing')
-    driver=load(Path(context['stage'])/'caller-driver.json')
-    require(set(driver)=={'sha256'} and HEX.fullmatch(str(driver['sha256'])),'reviewed driver pin absent')
-    request={**context,'nonce':secrets.token_hex(32),'version':version_match[1].decode(),
-             'process_identity':identity,'issued_at':time.time(),'driver_sha256':driver['sha256']}
-    stage=Path(context['stage']); phase=context['phase']
-    publish_private(stage/f'caller-request-{phase}.json',request)
-    receipt=stage/f'caller-receipt-{phase}.json'
-    while time.monotonic()<deadline:
-        if receipt.exists(): break
-        time.sleep(min(.05,max(0,deadline-time.monotonic())))
-    require(receipt.exists(),'bounded real browser receipt unavailable')
-    proof=load(receipt)
-    validate_browser_proof(request,proof)
-    require(proof.get('driver_sha256')==driver['sha256'],'reviewed driver identity differs')
-    require(namespace_identity(context['app_pid'],inside=True)==identity,'app identity changed during journey')
-    require(verify_sources(binding,release,phase)==hashes,'runtime changed during journey')
-    after=state_evidence(stage,binding)
-    require(after==before,'private state changed during browser journey')
-    retained={**request,'browser_evidence':proof,'runtime_hashes':hashes,
-              'preservation_before':before,'preservation_after':after,
-              'native_driver':native_driver(context['app_pid']), 'accepted':True}
-    path=stage/f'caller-proof-{phase}.json'
-    publish_private(path,retained)
-    return {k:request[k] for k in IDENTITIES}|{
-        'accepted':True,'checks':{'browser':True,'framebuffer':True,'preservation':True},
-        'evidence_sha256':sha(read_private(path))}
+    stage_name='TARGET_REQUEST'; request={}
+    try:
+        deadline=time.monotonic()+wait_seconds
+        stage_name='TARGET_REQUEST'
+        binding,release=validate_request(context)
+        stage_name='TARGET_PROCESS'
+        identity=namespace_identity(context['app_pid'],inside=True)
+        stage_name='TARGET_SOURCE'
+        hashes=verify_sources(binding,release,context['phase'])
+        stage_name='TARGET_STATE'
+        before=state_evidence(context['stage'],binding)
+        stage_name='TARGET_VERSION'
+        version_match=re.search(rb'^APPLICATION_VERSION = "([^"]+)"$',read_private(Path(binding['destination'])/'webapp.py'),re.M)
+        require(version_match is not None,'phase version missing')
+        stage_name='TARGET_DRIVER_PIN'
+        driver=load(Path(context['stage'])/'caller-driver.json')
+        require(set(driver)=={'sha256'} and HEX.fullmatch(str(driver['sha256'])),'reviewed driver pin absent')
+        request={**context,'nonce':secrets.token_hex(32),'version':version_match[1].decode(),
+                 'process_identity':identity,'issued_at':time.time(),'driver_sha256':driver['sha256']}
+        stage=Path(context['stage']); phase=context['phase']
+        stage_name='TARGET_REQUEST_PUBLISH'
+        publish_private(stage/f'caller-request-{phase}.json',request)
+        stage_name='TARGET_RECEIPT_WAIT'
+        receipt=stage/f'caller-receipt-{phase}.json'
+        while time.monotonic()<deadline:
+            if receipt.exists(): break
+            time.sleep(min(.05,max(0,deadline-time.monotonic())))
+        require(receipt.exists(),'bounded real browser receipt unavailable')
+        stage_name='TARGET_RECEIPT_VALIDATE'
+        proof=load(receipt)
+        validate_browser_proof(request,proof)
+        require(proof.get('driver_sha256')==driver['sha256'],'reviewed driver identity differs')
+        stage_name='TARGET_PROCESS_RECHECK'
+        require(namespace_identity(context['app_pid'],inside=True)==identity,'app identity changed during journey')
+        stage_name='TARGET_SOURCE_RECHECK'
+        require(verify_sources(binding,release,phase)==hashes,'runtime changed during journey')
+        stage_name='TARGET_STATE_RECHECK'
+        after=state_evidence(stage,binding)
+        require(after==before,'private state changed during browser journey')
+        stage_name='TARGET_NATIVE_DRIVER'
+        retained={**request,'browser_evidence':proof,'runtime_hashes':hashes,
+                  'preservation_before':before,'preservation_after':after,
+                  'native_driver':native_driver(context['app_pid']), 'accepted':True}
+        stage_name='TARGET_PROOF_PUBLISH'
+        path=stage/f'caller-proof-{phase}.json'
+        publish_private(path,retained)
+        stage_name='TARGET_PROOF_READBACK'
+        return {k:request[k] for k in IDENTITIES}|{
+            'accepted':True,'checks':{'browser':True,'framebuffer':True,'preservation':True},
+            'evidence_sha256':sha(read_private(path))}
+    except BaseException as primary:
+        try:
+            pins={k:context[k] for k in IDENTITIES if k in context}
+            pins.update(operator_sha256=OPERATOR_SHA,caller_sha256=sha(read_private(Path(__file__))))
+            for key in ('nonce','driver_sha256'):
+                if key in request:pins[key]=request[key]
+            if request:pins['request_sha256']=sha(encoded(request)+b'\n')
+            failure_custody().retain(pins,'target',stage_name,primary,2)
+        except BaseException:
+            print('MATRIX_FAILURE_CUSTODY_UNAVAILABLE; no acceptance',file=sys.stderr)
+        raise
 
 
 def native_driver(pid):

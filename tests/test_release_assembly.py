@@ -22,18 +22,28 @@ def ids(suite):
 class AssemblyTests(unittest.TestCase):
     def test_missing_controls_discoverable(self):
         root = Path(__file__).resolve().parents[1]
-        names = list(ids(unittest.defaultTestLoader.discover(str(root / 'tests'), top_level_dir=str(root))))
-        self.assertFalse(unittest.defaultTestLoader.errors)
-        self.assertTrue(MISSING <= {name.rsplit('.', 1)[-1] for name in names}, sorted(MISSING - {name.rsplit('.', 1)[-1] for name in names}))
+        loader = unittest.TestLoader()
+        names = list(ids(loader.discover(str(root / 'tests'), top_level_dir=str(root))))
+        self.assertFalse(loader.errors)
+        required = json.loads((root / 'ci/required-tests.json').read_text())
+        qualified = {f'tests.{module}.{name}' for module, methods in required.items()
+                     for name in methods if name.rsplit('.', 1)[-1] in MISSING}
+        self.assertEqual({name.rsplit('.', 1)[-1] for name in qualified}, MISSING)
+        self.assertTrue(qualified <= set(names), sorted(qualified - set(names)))
         self.assertEqual(len(names), len(set(names)))
 
     def test_projection_has_only_three_owning_tests(self):
-        names = list(ids(unittest.defaultTestLoader.loadTestsFromModule(projection)))
-        self.assertEqual(len(names), 3)
-        self.assertTrue(all('.ProjectionTests.' in name for name in names))
+        # Historical method name retained as a required behavior ID, not a total.
+        names = list(ids(unittest.TestLoader().loadTestsFromModule(projection)))
+        required = json.loads((Path(__file__).resolve().parents[1] / 'ci/required-tests.json').read_text())
+        self.assertTrue({name.removeprefix(projection.__name__ + '.') for name in names} >= set(required['test_release_projection']))
+        self.assertEqual(len(names), len(set(names)))
+        self.assertTrue(all(name.startswith(projection.__name__ + '.ProjectionTests.') for name in names))
         from tests import test_webapp
-        original = list(ids(unittest.defaultTestLoader.loadTestsFromModule(test_webapp)))
-        self.assertEqual(sum('.WebAppTests.' in name for name in original), 442)
+        original = list(ids(unittest.TestLoader().loadTestsFromModule(test_webapp)))
+        self.assertTrue({name.removeprefix(test_webapp.__name__ + '.') for name in original} >= set(required['test_webapp']))
+        self.assertEqual(len(original), len(set(original)))
+        self.assertTrue(all(name.startswith(test_webapp.__name__ + '.') for name in original))
 
     def test_binding_keeps_real_popen_and_exact_executable_seam(self):
         from tests import release_browser_binding as binding

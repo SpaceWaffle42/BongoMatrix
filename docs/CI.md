@@ -6,21 +6,55 @@ The project-owned pipeline is the source of truth for broad automated verificati
 
 Use this sequence to avoid repeating deterministic work in an agent session:
 
-1. Inspect only the relevant source and tests.
+1. Inspect governing requirements, the relevant source/tests, and discovery ownership.
 2. Write and run one focused failing test.
 3. Implement the change and rerun the focused test.
-4. Review the exact diff, commit, and push it.
+4. Review the exact diff. Commit/push only when the current assignment authorizes publication; local-only assignments leave edits uncommitted.
 5. Let GitLab run repository-wide syntax, tests, browser/media coverage, Ruff, dependency auditing, SAST, and secret detection.
 6. Read `ci-summary.txt` or `ci-summary.json` first. Open an individual job log or report only when that summary is `FAIL` or `INCOMPLETE`.
 7. After merge, verify deployment identity, service health, rollback readiness, and the physical panel separately.
 
 Do not rerun the complete suite, repository-wide lint, coverage, dependency audit, SAST, secret detection, or Chromium regression locally after GitLab has passed them against the same commit. Repeat a broad check only when CI used a different commit, an artifact is missing, CI does not exercise the required environment, or independent reproduction was explicitly requested.
 
+## Collection and local verification
+
+`full_test_suite` first runs `scripts/ci_collection.py --output collection.json`
+with the same dependency-bearing interpreter as canonical discovery. It loads,
+but does not execute, every `tests/test_*.py` module. Import/load errors, empty
+collection, foreign imported TestCases, duplicate IDs, or missing required named
+behaviors fail before the long run. This is not a replacement test tier: complete
+`coverage run --source=. --omit='tests/*' -m xmlrunner discover -s tests` remains
+mandatory, including real Chromium/media journeys.
+
+`ci/required-tests.json` is an independent named-behavior preservation contract
+seeded from exact base `7ae96302ada12fecc6e36d5494bfb1862962da47`, plus the new
+collection/CI regression IDs. It is not regenerated in CI and contains no minimum
+or exact suite count. Additions are allowed; removal/rename of required behaviors
+requires explicit requirement review, not a changed total. Module ownership is
+checked independently against the actual loader; the projection fixture imports
+a module, never a foreign TestCase. Historical assembly method names are retained
+for contract continuity, not numeric expectations. See `CI_TEST_AUDIT.md` for the
+complete module/job accounting and dispositions.
+
+For CI-equivalent offline execution use `node:22-bookworm`, the exact packages
+and regular `/usr/bin/node` copy in `.gitlab-ci.yml`, the repository `.venv-ci`
+and `.venv` compatibility symlink, umask `0022`, and `MATRIX_CHROMIUM=/usr/bin/chromium`.
+Run disposable Docker verification with `--init` so orphaned browser children are
+reaped; a sleep-only PID1 can make strict process-group cleanup fail.
+Use a dedicated short sticky temporary root (e.g. `/tmp/mcm`, mode `1777`) for
+unprivileged/socket fixtures. Local Chrome is an explicitly configured fallback,
+not proof of the CI image. No device credentials or production target are needed
+for canonical simulated-hardware tests; do not execute the physical job locally.
+Keep raw logs private, record actual exits and hashes, and run one final frozen-byte
+canonical suite after focused gates. Infrastructure/setup errors are not assertion
+failures, skipped/partial runs are not GREEN, and local success is not remote CI
+or physical acceptance.
+
 ## Pipeline evidence
 
 The pipeline publishes the following reports for 14 days:
 
-- JUnit XML and Cobertura coverage from `full_test_suite`;
+- collection ownership inventory, JUnit XML and Cobertura coverage from `full_test_suite`;
 - GitLab code-quality JSON from Ruff;
 - `dependency-audit.json` from `pip-audit`;
 - GitLab SAST and secret-detection reports;

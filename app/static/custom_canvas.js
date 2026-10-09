@@ -1700,9 +1700,13 @@
         const activeRect = active.getBoundingClientRect();
         const scrollRect = scroll.getBoundingClientRect();
         const labelRect = label.getBoundingClientRect();
-        if (activeRect.right > scrollRect.right) scroll.scrollLeft += activeRect.right - scrollRect.right + 4;
-        else if (activeRect.left < labelRect.right) scroll.scrollLeft -= labelRect.right - activeRect.left + 4;
         const focused = document.activeElement;
+        // Passive reflow retains the user's timeline position. Only the focused
+        // active cell needs local visibility; unrelated editor focus is not a seek.
+        if (focused === active) {
+          if (activeRect.right > scrollRect.right) scroll.scrollLeft += activeRect.right - scrollRect.right + 4;
+          else if (activeRect.left < labelRect.right) scroll.scrollLeft -= labelRect.right - activeRect.left + 4;
+        }
         const card = container.closest('.advanced-card');
         if (focused instanceof HTMLElement && card?.contains(focused)) {
           const focusedRect = focused.getBoundingClientRect();
