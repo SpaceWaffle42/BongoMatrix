@@ -12168,8 +12168,6 @@ console.log(JSON.stringify(result.module));
 
     @unittest.skipUnless(os.environ.get("MATRIX_CHROMIUM"), "MATRIX_CHROMIUM browser is required")
     def test_canvas_passive_reflow_retains_delivered_scroll_after_resize_lifecycle(self):
-        from playwright.sync_api import sync_playwright
-
         module = test_config_store.ConfigStoreTests.advanced_module(
             id="custom_motion", frame_count=120, overrides=[],
             layers=[{"id": "layer_a", "name": "Primary motion", "type": "rectangle",
@@ -12184,86 +12182,82 @@ console.log(JSON.stringify(result.module));
                             f"<style>{(root / 'app/static/custom_canvas.css').read_text()}</style>", 1)
         body = body.replace('<script src="/static/custom_canvas.js"></script>',
                             f"<script>{(root / 'app/static/custom_canvas.js').read_text()}</script>", 1)
-        with sync_playwright() as playwright:
-            browser = playwright.chromium.launch(executable_path=os.environ["MATRIX_CHROMIUM"],
-                                                 args=["--no-sandbox"])
+        probe = r"""
+const port=process.argv[1],pagePath=process.argv[2];let endpoint;
+for(let attempt=0;attempt<50;attempt++){try{endpoint=await fetch(`http://127.0.0.1:${port}/json/new`,{method:'PUT'}).then(response=>response.json());break}catch(_){await new Promise(resolve=>setTimeout(resolve,100))}}
+if(!endpoint)throw new Error('Chromium DevTools endpoint unavailable');
+const socket=new WebSocket(endpoint.webSocketDebuggerUrl),pending=new Map(),exceptions=[];let nextId=1,loadResolve=()=>{},loaded;
+socket.onmessage=event=>{const message=JSON.parse(event.data);if(message.id&&pending.has(message.id)){const request=pending.get(message.id);pending.delete(message.id);message.error?request.reject(new Error(JSON.stringify(message.error))):request.resolve(message.result);return}if(message.method==='Runtime.exceptionThrown')exceptions.push(message.params.exceptionDetails);if(message.method==='Page.loadEventFired')loadResolve()};
+await new Promise((resolve,reject)=>{socket.onopen=resolve;socket.onerror=reject});
+const send=(method,params={})=>{const id=nextId++;socket.send(JSON.stringify({id,method,params}));return new Promise((resolve,reject)=>pending.set(id,{resolve,reject}))};
+const evaluate=async expression=>{const result=await send('Runtime.evaluate',{expression,returnByValue:true,awaitPromise:true});if(result.exceptionDetails)throw new Error(JSON.stringify(result.exceptionDetails));return result.result.value};
+const settle=async()=>{const deadline=Date.now()+5000;while(!await evaluate('__resizeWork.events > 0 && __resizeWork.completedTimers > 0 && __resizeWork.frames.size===0 && __resizeWork.timers.size===0')){if(Date.now()>deadline)throw new Error('resize producer incomplete');await evaluate('new Promise(resolve=>__observeFrame(resolve))')}};
+try{
+ await send('Runtime.enable');await send('Page.enable');
+ await send('Emulation.setDeviceMetricsOverride',{width:899,height:700,deviceScaleFactor:1,mobile:false});
+ loaded=new Promise(resolve=>loadResolve=resolve);await send('Page.navigate',{url:'file://'+pagePath});await loaded;
+ await evaluate(`document.querySelector('.layer-frame-cell[data-layer-id="layer_a"][data-frame="7"]').click()`);
+ await evaluate("(() => {\n                    if (matrixSyncTimer !== null) clearInterval(matrixSyncTimer);\n                    if (matrixFrameTimer !== null) clearTimeout(matrixFrameTimer);\n                    const raf = window.requestAnimationFrame.bind(window); window.__observeFrame=raf;\n                    const cancel = window.cancelAnimationFrame.bind(window);\n                    const timer = window.setTimeout.bind(window);\n                    const clear = window.clearTimeout.bind(window);\n                    const work = window.__resizeWork = {frames: new Set(), timers: new Set(),\n                        events: 0, completedFrames: 0, completedTimers: 0};\n                    window.requestAnimationFrame = callback => {\n                        const id = raf(time => {work.frames.delete(id); work.completedFrames++; callback(time)});\n                        work.frames.add(id); return id;\n                    };\n                    window.cancelAnimationFrame = id => {work.frames.delete(id); cancel(id)};\n                    window.setTimeout = (callback, delay, ...args) => {\n                        if (delay !== 100) return timer(callback, delay, ...args);\n                        const id = timer(() => {work.timers.delete(id); work.completedTimers++; callback(...args)}, delay);\n                        work.timers.add(id); return id;\n                    };\n                    window.clearTimeout = id => {work.timers.delete(id); clear(id)};\n                    window.addEventListener('resize', () => work.events++);\n                    visualViewport.addEventListener('resize', () => work.events++);\n                    document.activeElement.blur();\n                })()");
+ const baseline=await evaluate("(async () => {\n                    const scroll = document.querySelector('.aseprite-timeline-scroll');\n                    await new Promise(resolve => {\n                        scroll.addEventListener('scroll', resolve, {once: true}); scroll.scrollLeft = 160;\n                    });\n                    const active = scroll.querySelector('.layer-frame-cell.active');\n                    return {local: scroll.scrollLeft, active: [active.dataset.layerId, active.dataset.frame],\n                            focus: document.activeElement.tagName};\n                })()");
+ await send('Emulation.setDeviceMetricsOverride',{width:901,height:700,deviceScaleFactor:1,mobile:false}); await settle();
+ const after=await evaluate("(() => {\n                    const scroll = document.querySelector('.aseprite-timeline-scroll');\n                    const active = scroll.querySelector('.layer-frame-cell.active');\n                    return {local: scroll.scrollLeft, active: [active.dataset.layerId, active.dataset.frame],\n                        columns: getComputedStyle(document.querySelector('.advanced-layout')).gridTemplateColumns.split(' ').length};\n                })()");
+ await evaluate("__resizeWork.completedTimers = 0; visualViewport.dispatchEvent(new Event('resize'))");await settle();const viewportLocal=await evaluate("document.querySelector('.aseprite-timeline-scroll').scrollLeft");
+ await evaluate("document.querySelector('.layer-frame-cell.active').focus({preventScroll:true})");await evaluate("document.querySelector('.layer-frame-cell.active').scrollIntoView({behavior: 'instant', block: 'center'}); document.querySelector('.aseprite-timeline-scroll').scrollLeft = 160");const outer=await evaluate("({x: scrollX, y: scrollY})");
+ const key={key:'Enter',code:'Enter',windowsVirtualKeyCode:13,nativeVirtualKeyCode:13};await send('Input.dispatchKeyEvent',{type:'rawKeyDown',...key});await send('Input.dispatchKeyEvent',{type:'char',...key,text:'\r',unmodifiedText:'\r'});await send('Input.dispatchKeyEvent',{type:'keyUp',...key});await evaluate('new Promise(resolve=>__observeFrame(()=>__observeFrame(resolve)))');
+ await evaluate("__resizeWork.completedTimers = 0; visualViewport.dispatchEvent(new Event('resize'))");await settle();const keyboard=await evaluate("(() => {\n                    const scroll = document.querySelector('.aseprite-timeline-scroll');\n                    const focused = document.activeElement, rect = focused.getBoundingClientRect();\n                    return {frame: focused.dataset.frame, visible: rect.right <= scroll.getBoundingClientRect().right\n                        && rect.left >= scroll.querySelector('.layer-track-label').getBoundingClientRect().right,\n                        outer: {x: scrollX, y: scrollY}, local: scroll.scrollLeft};\n                })()");console.log(JSON.stringify({baseline,after,viewportLocal,outer,keyboard,exceptions}));
+}finally{socket.close()}
+"""
+        chromium = os.environ["MATRIX_CHROMIUM"]
+        node = shutil.which("node")
+        assert node is not None
+        with tempfile.TemporaryDirectory(prefix="matrix-timeline-interactions-") as directory:
+            page = Path(directory) / "dashboard.html"
+            page.write_text(body)
+            profile = Path(directory) / "profile"
+            browser = subprocess.Popen([
+                chromium, "--headless", "--no-sandbox", "--disable-gpu",
+                "--remote-debugging-port=0", f"--user-data-dir={profile}", "about:blank",
+            ], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
             try:
-                page = browser.new_page(viewport={"width": 899, "height": 700})
-                page.set_content(body)
-                page.locator('.layer-frame-cell[data-layer-id="layer_a"][data-frame="7"]').click()
-                # Observe the real producer, not an arbitrary two-frame/sleep barrier.
-                # Wrappers only record scheduled/completed work; native callbacks run unchanged.
-                page.evaluate("""() => {
-                    if (matrixSyncTimer !== null) clearInterval(matrixSyncTimer);
-                    if (matrixFrameTimer !== null) clearTimeout(matrixFrameTimer);
-                    const raf = window.requestAnimationFrame.bind(window);
-                    const cancel = window.cancelAnimationFrame.bind(window);
-                    const timer = window.setTimeout.bind(window);
-                    const clear = window.clearTimeout.bind(window);
-                    const work = window.__resizeWork = {frames: new Set(), timers: new Set(),
-                        events: 0, completedFrames: 0, completedTimers: 0};
-                    window.requestAnimationFrame = callback => {
-                        const id = raf(time => {work.frames.delete(id); work.completedFrames++; callback(time)});
-                        work.frames.add(id); return id;
-                    };
-                    window.cancelAnimationFrame = id => {work.frames.delete(id); cancel(id)};
-                    window.setTimeout = (callback, delay, ...args) => {
-                        if (delay !== 100) return timer(callback, delay, ...args);
-                        const id = timer(() => {work.timers.delete(id); work.completedTimers++; callback(...args)}, delay);
-                        work.timers.add(id); return id;
-                    };
-                    window.clearTimeout = id => {work.timers.delete(id); clear(id)};
-                    window.addEventListener('resize', () => work.events++);
-                    visualViewport.addEventListener('resize', () => work.events++);
-                    document.activeElement.blur();
-                }""")
-                baseline = page.evaluate("""async () => {
-                    const scroll = document.querySelector('.aseprite-timeline-scroll');
-                    await new Promise(resolve => {
-                        scroll.addEventListener('scroll', resolve, {once: true}); scroll.scrollLeft = 160;
-                    });
-                    const active = scroll.querySelector('.layer-frame-cell.active');
-                    return {local: scroll.scrollLeft, active: [active.dataset.layerId, active.dataset.frame],
-                            focus: document.activeElement.tagName};
-                }""")
-                self.assertEqual(baseline, {"local": 160, "active": ["layer_a", "7"], "focus": "BODY"})
-                page.set_viewport_size({"width": 901, "height": 700})
-                page.wait_for_function("""() => __resizeWork.events > 0 && __resizeWork.completedTimers > 0
-                    && __resizeWork.frames.size === 0 && __resizeWork.timers.size === 0""")
-                after = page.evaluate("""() => {
-                    const scroll = document.querySelector('.aseprite-timeline-scroll');
-                    const active = scroll.querySelector('.layer-frame-cell.active');
-                    return {local: scroll.scrollLeft, active: [active.dataset.layerId, active.dataset.frame],
-                        columns: getComputedStyle(document.querySelector('.advanced-layout')).gridTemplateColumns.split(' ').length};
-                }""")
-                self.assertEqual(after, {"local": 160, "active": ["layer_a", "7"], "columns": 2})
-                # Sibling visualViewport resize has the same passive-position contract.
-                page.evaluate("__resizeWork.completedTimers = 0; visualViewport.dispatchEvent(new Event('resize'))")
-                page.wait_for_function("""() => __resizeWork.completedTimers > 0
-                    && __resizeWork.frames.size === 0 && __resizeWork.timers.size === 0""")
-                self.assertEqual(page.locator('.aseprite-timeline-scroll').evaluate('(node) => node.scrollLeft'), 160)
-                # Native keyboard focus must still reveal a clipped cell locally, not scroll the page.
-                page.locator('.layer-frame-cell[data-layer-id="layer_a"][data-frame="7"]').evaluate(
-                    '(node) => node.focus({preventScroll: true})')
-                page.evaluate("document.querySelector('.layer-frame-cell.active').scrollIntoView({behavior: 'instant', block: 'center'}); document.querySelector('.aseprite-timeline-scroll').scrollLeft = 160")
-                outer = page.evaluate('({x: scrollX, y: scrollY})')
-                page.keyboard.press('Enter')
-                page.evaluate("__resizeWork.completedTimers = 0; visualViewport.dispatchEvent(new Event('resize'))")
-                page.wait_for_function("""() => __resizeWork.completedTimers > 0
-                    && __resizeWork.frames.size === 0 && __resizeWork.timers.size === 0""")
-                keyboard = page.evaluate("""() => {
-                    const scroll = document.querySelector('.aseprite-timeline-scroll');
-                    const focused = document.activeElement, rect = focused.getBoundingClientRect();
-                    return {frame: focused.dataset.frame, visible: rect.right <= scroll.getBoundingClientRect().right
-                        && rect.left >= scroll.querySelector('.layer-track-label').getBoundingClientRect().right,
-                        outer: {x: scrollX, y: scrollY}, local: scroll.scrollLeft};
-                }""")
-                self.assertEqual(keyboard['frame'], '7')
-                self.assertTrue(keyboard['visible'], keyboard)
-                self.assertGreater(keyboard['local'], 160)
-                self.assertEqual(keyboard['outer'], outer)
+                active_port = profile / "DevToolsActivePort"
+                for _attempt in range(50):
+                    if active_port.is_file():
+                        break
+                    if browser.poll() is not None:
+                        self.fail("Chromium exited before publishing its DevTools port")
+                    time.sleep(0.1)
+                self.assertTrue(active_port.is_file(), "Chromium DevTools port unavailable")
+                completed = subprocess.run(
+                    [node, "-e", probe, active_port.read_text().splitlines()[0], str(page)],
+                    capture_output=True, text=True, timeout=45,
+                )
             finally:
-                browser.close()
+                browser.terminate()
+                try:
+                    browser.wait(timeout=5)
+                except subprocess.TimeoutExpired:
+                    browser.kill(); browser.wait(timeout=5)
+                for cleanup_attempt in range(20):
+                    try:
+                        shutil.rmtree(profile)
+                        break
+                    except FileNotFoundError:
+                        break
+                    except OSError:
+                        if cleanup_attempt == 19:
+                            raise
+                        time.sleep(0.05)
+        self.assertEqual(completed.returncode, 0, completed.stderr)
+        report = json.loads(completed.stdout.strip().splitlines()[-1])
+        self.assertEqual(report['exceptions'], [])
+        self.assertEqual(report['baseline'], {'local': 160, 'active': ['layer_a', '7'], 'focus': 'BODY'})
+        self.assertEqual(report['after'], {'local': 160, 'active': ['layer_a', '7'], 'columns': 2})
+        self.assertEqual(report['viewportLocal'], 160)
+        keyboard = report['keyboard']
+        self.assertEqual(keyboard['frame'], '7')
+        self.assertTrue(keyboard['visible'], keyboard)
+        self.assertGreater(keyboard['local'], 160)
+        self.assertEqual(keyboard['outer'], report['outer'])
 
     @unittest.skipUnless(shutil.which("node"), "Node.js is required")
     @unittest.skipUnless(
