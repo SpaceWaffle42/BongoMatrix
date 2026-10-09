@@ -83,6 +83,9 @@ full_test_suite:
     - .venv-ci/bin/python -m pip install -r requirements.txt coverage unittest-xml-reporting
   script:
     - mkdir -p test-results
+    # Collect every owning module before the long suite; missing behavior/import
+    # errors/duplicate or foreign cases fail without weakening full discovery.
+    - .venv-ci/bin/python scripts/ci_collection.py --output collection.json
     - |
       set +e
       .venv-ci/bin/coverage run --source=. --omit='tests/*' -m xmlrunner discover -s tests -o test-results
@@ -109,6 +112,7 @@ full_test_suite:
     paths:
       - coverage.xml
       - test-results/
+      - collection.json
 
 python_static_analysis:
   extends: .default_project_job

@@ -250,6 +250,15 @@ class GitLabPipelineContractTests(unittest.TestCase):
         self.assertIn("coverage_report:", job)
         self.assertIn("when: always", job)
 
+    def test_collection_preflight_precedes_full_canonical_suite(self):
+        job = block(self.sections, "full_test_suite")
+        preflight = ".venv-ci/bin/python scripts/ci_collection.py --output collection.json"
+        self.assertIn(preflight, job)
+        self.assertLess(job.index(preflight), job.index("set +e"))
+        self.assertLess(job.index(preflight), job.index("coverage run"))
+        self.assertIn("- collection.json", job)
+        self.assertNotIn("allow_failure", job)
+
     def test_full_test_job_provisions_the_repository_venv_contract(self):
         job = block(self.sections, "full_test_suite")
         self.assertIn("rm -rf -- .venv .venv-ci", job)
