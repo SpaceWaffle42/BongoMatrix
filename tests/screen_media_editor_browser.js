@@ -47,6 +47,7 @@ try{
   await click(card+' .screen-media-edit');await until(`document.querySelector(${JSON.stringify(card+' dialog[open]')})`);
   await evaluate(`(()=>{const c=document.querySelector(${JSON.stringify(card+' .screen-media-selected')});c.checked=false;c.dispatchEvent(new Event('change',{bubbles:true}))})()`);
   await until(editDisabled);
+  assert.equal(await evaluate(`document.querySelector(${JSON.stringify(card+' .palette-inspect')}).disabled`),false,'Preview stays enabled when the card is unselected');
   assert.equal(await evaluate(`Boolean(document.querySelector(${JSON.stringify(card+' dialog[open]')}))`),false,'unselecting closes the open editor');
   await click(card+' .screen-media-selected');await until('!'+editDisabled);
   report.roles[role]={row_id_ok:true,edited_x:edited.layout.x,edit_follows_selection:true};

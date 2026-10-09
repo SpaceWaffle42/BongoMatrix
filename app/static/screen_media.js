@@ -154,12 +154,14 @@ function screenMediaCard(role, media, row) {
   }
   card.syncScreenSelection = syncSelection;
   edit.setAttribute('aria-label', 'Edit layout for ' + media.name);
+  // Preview is always available: selected cards inspect their saved layout in Edit Preview;
+  // unselected cards show the raw media on the Matrix, like the media library.
   const inspect = makeButton('Preview', () => {
-    if (!row) return;
+    if (!row || !check.checked) { previewMedia(media.name); return; }
     previewMediaItemId = row.dataset.itemId; selectEditPreviewModule(role, false);
     requestPreviewMode('edit'); scheduleEditPreview(0);
   });
-  inspect.classList.add('palette-inspect'); inspect.disabled = !row;
+  inspect.classList.add('palette-inspect');
   inspect.setAttribute('aria-label', 'Inspect ' + media.name + ' in Edit Preview');
   actions.append(edit, inspect); card.append(actions);
   let dialog = null, stageImage = null, stageBox = null;
@@ -261,7 +263,7 @@ function screenMediaCard(role, media, row) {
   }
   function bindRow(owner) {
     if (card.dataset.rowId === owner.dataset.itemId && dialog) return;
-    row = owner; card.dataset.rowId = row.dataset.itemId; inspect.disabled = false; syncSelection();
+    row = owner; card.dataset.rowId = row.dataset.itemId; syncSelection();
     const original = row.closest('.module-item').querySelector('.media-playlist-editor');
     if (dialog) { if (dialog.open) dialog.close(); dialog.remove(); }
     dialog = buildDialog(original);
