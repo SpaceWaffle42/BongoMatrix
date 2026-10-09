@@ -33,6 +33,22 @@ HELPER_HASHES = {
     "deploy/release_bundle.py": "6d1a98df08809b5292e85bd968f7f3b2582a189a854520ce636dc1018efca755",
     "release_argparse.py": "090e98340173d99605f9701c290e78cafc21da49e072dfd5242786685ee5a5f1",
 }
+HELPER_PREDECESSORS = {
+    "deploy/release_bundle.py": {
+        "sha256": "118d435da056b880f40dbcb4a3f0e3c1978c6e422f6508102edfd00b63e5b0e0",
+        "size": 108049, "uid": 1000, "gid": 985, "mode": "0664",
+    },
+    "release_argparse.py": {
+        "sha256": "090e98340173d99605f9701c290e78cafc21da49e072dfd5242786685ee5a5f1",
+        "size": 1043, "uid": 1000, "gid": 985, "mode": "0664",
+    },
+}
+HELPER_TRANSITION = {
+    "version": 1,
+    "retained_binding_sha256": "80d9c488f0d079b12a18b0859d7272ab095629fd019da6adb2b9ad6a33e06937",
+    "predecessor": HELPER_PREDECESSORS, "candidate": HELPER_HASHES,
+    "prepare_roles": ["initial", "final"], "rollback_role": "predecessor",
+}
 ABSENT_ADDITIONS = {"screen_media.py", "app/static/screen_media.js"}
 FROZEN_IDENTITY = "9c09708e426594a24ba88a0e86a980b439d35a03389bdc11677a755fe8a441b2"
 MUTABLE_ROOTS = ("data", "resources/media")
@@ -211,6 +227,8 @@ def prepare_package(source, manifest, route, destination, stage, *, expected_ide
     helpers = {e["path"]: e["sha256"] for e in plan["operational_package_entries"]}
     require(len(plan["runtime_delta"]) == 15 and set(delta) == set(RUNTIME_PATHS), "runtime scope mismatch")
     require(helpers == HELPER_HASHES, "helper scope/identity mismatch")
+    require(successor_source_matches(manifest, expected_identity), "helper transition requires exact successor source pin")
+    require(plan.get("helper_transition") == HELPER_TRANSITION, "helper transition pair/phase binding mismatch")
     selected = list(RUNTIME_PATHS) + list(HELPER_HASHES)
     predecessor, intended, parents = {}, [], {}
     for relative in selected:
@@ -232,7 +250,8 @@ def prepare_package(source, manifest, route, destination, stage, *, expected_ide
                             for k in r), "actual predecessor identity/metadata mismatch")
         require(current is not None or relative in ABSENT_ADDITIONS, "unexpected absent helper")
         if relative in HELPER_HASHES:
-            require(sha(current[0]) == HELPER_HASHES[relative], "production helper must remain unchanged")
+            require(record(*current) == HELPER_PREDECESSORS[relative],
+                    "helper predecessor identity/metadata mismatch")
         predecessor[relative] = record(*current) if current else {"absent": True}
         metadata = {k: predecessor[relative][k] for k in ("uid", "gid", "mode")} if current else {
             "uid": 1000, "gid": 985, "mode": "0644"}
@@ -263,6 +282,7 @@ def prepare_package(source, manifest, route, destination, stage, *, expected_ide
                "spec_sha256": sha((stage / "release-spec.json").read_bytes()),
                "predecessor": predecessor, "unaffected": unaffected, "parents": parents,
                "roots": roots, "destination": str(destination.absolute()), "stage": str(stage.absolute()), "target": target}
+    binding["helper_transition"] = transition_binding(binding)
     publish(stage / "binding.json", binding)
     return binding
 
@@ -272,12 +292,31 @@ def load_json(path):
     return json.loads(value[0])
 
 
+def transition_binding(binding):
+    """Closed reviewed pair, bound to this source plan and target filesystem.
+
+    Preparation only admits the retained predecessor, including after rollback.
+    Already-candidate targets are not a fresh initial/final preparation authority.
+    """
+    return {"plan": HELPER_TRANSITION, **{k: binding[k] for k in (
+        "source_identity", "source_head", "source_closure_sha256", "route_sha256",
+        "destination", "roots", "parents")}}
+
+
 def assert_binding(stage, binding, *, predecessor=False):
     rb = primitives()
     stage = Path(stage)
     require(str(stage.absolute()) == binding["stage"], "stage binding mismatch")
     require(sha(read_at(stage, "release-spec.json")[0]) == binding["spec_sha256"], "spec binding mismatch")
     rb.verify_staged_release(stage / "release/deploy/release_bundle.py", stage / "release", stage / "release-spec.json")
+    require(binding.get("helper_transition") == transition_binding(binding), "helper transition binding changed")
+    spec_helpers = {e["path"]: e for e in load_json(stage / "release-spec.json")["files"]
+                    if e["path"] in HELPER_HASHES}
+    require(spec_helpers == {p: {"path": p, "sha256": HELPER_HASHES[p],
+            **{k: prior[k] for k in ("uid", "gid", "mode")}}
+            for p, prior in HELPER_PREDECESSORS.items()} and
+            all(binding["predecessor"].get(p) == prior for p, prior in HELPER_PREDECESSORS.items()),
+            "helper transition predecessor/candidate cross-binding mismatch")
     live = Path(binding["destination"])
     for relative, expected in {**binding["roots"], **binding["parents"]}.items():
         require(directory_record(live / relative) == expected, "preserved directory identity/metadata mismatch")
@@ -494,6 +533,8 @@ def execute(stage, services, acceptance, *, keep_containment=False):
     fd = locked(stage)
     try:
         fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        require(getattr(services, "phase", "initial") in HELPER_TRANSITION["prepare_roles"],
+                "helper transition execution phase mismatch")
         require(not (stage / "run.json").exists(), "phase must have a fresh independently guarded stage")
         binding = load_json(stage / "binding.json")
         assert_binding(stage, binding, predecessor=True)
