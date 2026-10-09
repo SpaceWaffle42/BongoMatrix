@@ -68,13 +68,13 @@ const decode=async png=>evaluate(`(async()=>{const r=await fetch('data:image/png
     at('DRAFT_ASSERT'); const selectedDraft=await evaluate('configBody()');
     assert.deepEqual(selectedDraft.playlist.filter(r=>r.id!==selected.id),before.playlist.filter(r=>r.id!==selected.id));
     assert.deepEqual(selectedDraft.custom_modules,before.custom_modules);assert.deepEqual(selectedDraft.screen_enabled,before.screen_enabled);
-    await click(selector+' [data-media-layout="x"]');
+    await click(selector+' .screen-media-edit');await click(selector+' [data-media-layout="x"]');
     await send('Input.dispatchKeyEvent',{type:'keyDown',key:'a',code:'KeyA',modifiers:2});await send('Input.dispatchKeyEvent',{type:'keyUp',key:'a',code:'KeyA',modifiers:2});await send('Input.insertText',{text:'7'});
     const draft=await evaluate('configBody()'), row=draft.playlist.find(r=>r.id===selected.id);
     assert.equal(row.layout.x,7);assert.deepEqual(row.sources,[source]);
     assert.deepEqual(draft.playlist.filter(r=>r.id!==selected.id),before.playlist.filter(r=>r.id!==selected.id));
     assert.deepEqual(draft.custom_modules,before.custom_modules);assert.deepEqual(draft.screen_enabled,before.screen_enabled);
-    at('INSPECT_HTTP'); await click(selector+' .palette-inspect');
+    await click(selector+' dialog[open] .screen-media-done');at('INSPECT_HTTP'); await click(selector+' .palette-inspect');
     await until(`__acceptanceInspects.some(p=>p.path==='/api/edit-preview/${role}'&&p.selected===${JSON.stringify(selected.id)}&&p.status===200&&p.response?.frames?.length)&&document.querySelector('#preview-frame').textContent.includes('Unsaved draft frame')`);
     const inspector=await evaluate(`__acceptanceInspects.filter(p=>p.path==='/api/edit-preview/${role}'&&p.selected===${JSON.stringify(selected.id)}&&p.status===200).at(-1)`);assert.deepEqual(await evaluate('configBody()'),draft,'inspector must not mutate unsaved browser draft');
     at('INSPECT_DECODE');http={method:'POST',path:'/api/edit-preview/'+role,status:bounded(inspector.status,599)};frames.inspector_count=Math.min(1000000,inspector.response.frames.length); const pixels=[];for(const f of inspector.response.frames){const decoded=await decode(f.png);assert.deepEqual(decoded.dimensions,[64,32]);pixels.push(hash(decoded.pixels));remember('inspector_hashes',pixels.at(-1))}

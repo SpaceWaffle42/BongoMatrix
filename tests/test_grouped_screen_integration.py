@@ -228,3 +228,25 @@ class GroupedScreenIntegrationTests(unittest.TestCase):
         self.assertEqual(report['reloaded']['playlist'], report['draft']['playlist'])
         self.assertEqual(report['reloaded']['screen_enabled'], report['draft']['screen_enabled'])
         self.assertEqual(report['viewport'], 390)
+
+    def test_screen_media_edit_dialog_for_uploads_on_insecure_http(self):
+        fixture = test_webapp.WebAppTests()
+        fixture.setUp()
+        self.addCleanup(fixture.tearDown)
+        fixture.pairing.verify.return_value = True
+        with Image.new('RGB', (64, 32), 'blue') as image:
+            image.save(fixture.media_dir / 'editor_upload.gif')
+        def frame_png():
+            frame = io.BytesIO()
+            with Image.new('RGB', (64, 32), 'black') as image:
+                image.save(frame, format='PNG')
+            frame.seek(0)
+            return frame, 1
+        fixture.controller.frame_png.side_effect = frame_png
+        probe = Path(__file__).with_name('screen_media_editor_browser.js').read_text()
+        report = fixture.run_live_chromium_probe(probe, timeout=60)
+        self.assertEqual(report['errors'], [])
+        self.assertTrue(report['random_uuid_absent'])
+        self.assertEqual(sorted(report['roles']), ['sleep', 'splash'])
+        self.assertTrue(report['phone_dialog_fits'])
+        self.assertFalse(report['phone_overflow'])

@@ -41,12 +41,14 @@ try{
   assert.notEqual(state.id,role+'_default');assert.deepEqual(owner.sources,['grouped_upload.gif']);
   assert.deepEqual(selected.playlist.filter(r=>r.id!==state.id),before.playlist,'library action must preserve old IDs/order/layout/opposite/Canvas rows');
   assert.deepEqual(selected.custom_modules,before.custom_modules);assert.deepEqual(selected.screen_enabled,before.screen_enabled);
+  await click(selector+' .screen-media-edit');
   await click(selector+' [data-media-layout="x"]');
   assert.equal(await evaluate(`document.activeElement===document.querySelector(${JSON.stringify(selector+' [data-media-layout="x"]')})`),true,'native layout click must focus the owning input');
   await send('Input.dispatchKeyEvent',{type:'keyDown',key:'a',code:'KeyA',windowsVirtualKeyCode:65,nativeVirtualKeyCode:65,modifiers:2});await send('Input.dispatchKeyEvent',{type:'keyUp',key:'a',code:'KeyA',windowsVirtualKeyCode:65,nativeVirtualKeyCode:65,modifiers:2});
   await send('Input.insertText',{text:'7'});
   const edited=await evaluate('configBody()');assert.equal(edited.playlist.find(r=>r.id===state.id).layout.x,7);
   assert.deepEqual(edited.playlist.filter(r=>r.id!==state.id),before.playlist);
+  await click(selector+' dialog[open] .screen-media-done');
   await evaluate(`(()=>{globalThis.__libraryRequests=[];const priorFetch=fetch;globalThis.fetch=async(input,options={})=>{if(String(input)==='/api/edit-preview/${role}')__libraryRequests.push(JSON.parse(options.body));return priorFetch(input,options)}})()`);
   await click(selector+' .palette-inspect');
   await until(`__libraryRequests.length&&document.querySelector('#preview-frame').textContent.includes('Unsaved draft frame')&&previewModule==='${role}'`);
@@ -68,9 +70,9 @@ try{
  await evaluate('__check.click()');
  assert.equal(await evaluate('__check.isConnected&&document.activeElement===__check&&__choice.closest(".palette-grid").scrollTop===__scroll'),true,'checkbox must retain DOM/focus/local scroll');
  await evaluate('__check.click()');
- await evaluate(`(()=>{const b=[...__choice.querySelectorAll('button')].find(b=>b.textContent==='Reset layout');globalThis.__reset=b;b.focus({preventScroll:true});b.click()})()`);
+ await evaluate(`(()=>{__choice.querySelector('.screen-media-edit').click();const b=[...__choice.querySelectorAll('button')].find(b=>b.textContent==='Reset layout');globalThis.__reset=b;b.focus({preventScroll:true});b.click()})()`);
  assert.equal(await evaluate('__reset.isConnected&&document.activeElement===__reset&&__choice.closest(".palette-grid").scrollTop===__scroll'),true,'reset must retain focus/local scroll');
- const reset=await evaluate('configBody()');assert.equal(reset.playlist.find(r=>r.id===upload.id).layout.x,0);assert.equal(reset.playlist.find(r=>r.id===upload.id).layout.playback_speed_percent,100);
+ await evaluate("__choice.querySelector('dialog[open]').close()");const reset=await evaluate('configBody()');assert.equal(reset.playlist.find(r=>r.id===upload.id).layout.x,0);assert.equal(reset.playlist.find(r=>r.id===upload.id).layout.playback_speed_percent,100);
  assert.deepEqual(reset.playlist.filter(r=>r.id!==upload.id),beforeEdit.playlist.filter(r=>r.id!==upload.id));
  await evaluate("__choice.closest('.palette-grid').style.maxHeight='';__choice.closest('.palette-grid').style.overflow=''");
  await evaluate("globalThis.__inspectRequests=[];globalThis.__inspectResponses=[];const original=fetch;globalThis.fetch=async(input,options={})=>{const inspect=String(input)==='/api/edit-preview/splash';if(inspect)__inspectRequests.push(JSON.parse(options.body));const response=await original(input,options);if(inspect)__inspectResponses.push({status:response.status,body:response.ok?'frame':await response.clone().text()});return response}");
