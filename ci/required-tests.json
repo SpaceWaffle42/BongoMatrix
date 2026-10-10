@@ -779,6 +779,13 @@
     "MediaModuleTests.test_sleep_uses_configured_gif",
     "MediaModuleTests.test_splash_uses_configured_gif"
   ],
+  "test_media_pagination": [
+    "MediaPaginationTests.test_chosen_page_size_is_remembered_and_unknown_values_ignored",
+    "MediaPaginationTests.test_empty_groups_and_invalid_sizes_are_safe",
+    "MediaPaginationTests.test_library_renders_pager_controls",
+    "MediaPaginationTests.test_page_sizes_default_to_ten_with_larger_options",
+    "MediaPaginationTests.test_pages_slice_items_and_clamp_out_of_range_pages"
+  ],
   "test_media_playlists": [
     "MediaPlaylistTests.test_checked_media_pool_is_validated_and_every_source_is_pinned",
     "MediaPlaylistTests.test_contract_four_rejects_removing_all_splash_or_sleep_rows",
