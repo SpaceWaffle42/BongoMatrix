@@ -1077,7 +1077,7 @@
   }
 
   function drawShape(context, layer, properties, alpha = 1, frame = 0, fps = 1, frameCount = 1) {
-    context.save(); context.globalAlpha = alpha; context.strokeStyle = properties.colour; context.fillStyle = properties.colour; context.lineWidth = Math.max(.12, properties.width || .12);
+    context.save(); context.globalAlpha = alpha; context.strokeStyle = properties.colour; context.fillStyle = properties.colour; context.lineWidth = Math.max(.12, layer.type === 'line' && properties.width || .12);
     const packedPixels = layer.type === 'pixels' && properties.bitmap_rgba;
     if (!packedPixels) beginLayerRotation(context, properties, layer.type);
     if (layer.type === 'text' || layer.type === 'time') { const text = layer.type === 'time' ? currentTimeText(properties.format) : properties.text; context.font = `${Math.max(4, Number(properties.font.split('x')[1]?.replace(/\D/g, '') || 7))}px monospace`; context.textBaseline = 'alphabetic'; context.fillText(text, properties.x, properties.y); }

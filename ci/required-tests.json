@@ -56,6 +56,7 @@
     "ApiTimeoutContractTests.test_provider_call_sites_do_not_replace_the_shared_default_with_short_literals"
   ],
   "test_canvas_starters": [
+    "CanvasStarterExampleTests.test_editor_outlines_rectangles_instead_of_stroking_them_with_their_own_width",
     "CanvasStarterExampleTests.test_every_starter_draws_visible_motion_on_the_physical_renderer",
     "CanvasStarterExampleTests.test_every_starter_is_an_animated_loop_that_the_config_store_accepts",
     "CanvasStarterExampleTests.test_every_starter_is_deterministic_apart_from_fresh_layer_ids",

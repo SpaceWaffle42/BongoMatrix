@@ -135,5 +135,26 @@ class CanvasStarterExampleTests(unittest.TestCase):
                 self.assertGreater(len(set(frames)), len(frames) // 4)
 
 
+    def test_editor_outlines_rectangles_instead_of_stroking_them_with_their_own_width(self):
+        # Rectangle `width` is its size; only line layers carry a stroke width.
+        source = ASSET.read_text()
+        draw_shape = source[source.index("  function drawShape("):source.index("    const packedPixels", source.index("  function drawShape("))]
+        completed = subprocess.run(
+            [shutil.which("node") or "node", "-e", r"""
+const body = process.argv[1];
+const assignment = body.slice(body.indexOf('context.lineWidth'), body.indexOf(';', body.indexOf('context.lineWidth')) + 1);
+const widthFor = (layer, properties) => { const context = {}; eval(assignment); return context.lineWidth; };
+process.stdout.write(JSON.stringify({
+  rectangle: widthFor({type: 'rectangle'}, {width: 64}),
+  ellipse: widthFor({type: 'ellipse'}, {}),
+  line: widthFor({type: 'line'}, {width: 2}),
+}));
+""", draw_shape],
+            capture_output=True, text=True, timeout=30, check=False,
+        )
+        self.assertEqual(completed.returncode, 0, completed.stderr)
+        self.assertEqual(json.loads(completed.stdout), {"rectangle": .12, "ellipse": .12, "line": 2})
+
+
 if __name__ == "__main__":
     unittest.main()
