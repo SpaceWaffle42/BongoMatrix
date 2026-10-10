@@ -31,6 +31,27 @@ def record(name, status, **evidence):
     result['updated_utc'] = datetime.datetime.now(datetime.timezone.utc).isoformat()
     RESULT.write_text(json.dumps(result, indent=2) + '\n')
 
+class _DecodeOnlyMatrix:
+    """Real media decoding for the synthetic preview, with no panel behind it.
+
+    The Advanced Canvas editor draws media layers from /api/media-timeline,
+    which calls ``controller.matrix.media_frames``. A Mock there made every
+    media frame black in the preview tiers.
+    """
+
+    def __init__(self, width=64, height=32):
+        from types import SimpleNamespace
+        self.matrix = SimpleNamespace(width=width, height=height)
+
+    def media_frames(self, *args, **kwargs):
+        from matrix_framework import Matrix
+        return Matrix.media_frames(self, *args, **kwargs)
+
+    def _media_file(self, filename):
+        from matrix_framework import Matrix
+        return Matrix._media_file(self, filename)
+
+
 def build(state, public_demo=False):
     hardware = ModuleType('rgbmatrix')
     def forbidden(*args, **kwargs):
@@ -64,6 +85,7 @@ def build(state, public_demo=False):
         stream.seek(0)
         return stream, 1
     controller.frame_png.side_effect = frame
+    controller.matrix = _DecodeOnlyMatrix()
     pairing = Mock()
     pairing.active_pin.return_value = None
     pairing.has_testing_pin.return_value = False

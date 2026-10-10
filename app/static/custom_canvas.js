@@ -2089,6 +2089,11 @@
     frameAction('Delete frame', 'Delete', module.frame_count <= 1 ? FRAME_ACTION_REASONS.last_frame : '', deleteTimelineFrame, `Delete frame ${state.frame + 1}?`);
     frameAction('Move frame earlier', 'Shift+ArrowLeft', state.frame <= 0 ? 'already the first frame' : '', (item, frame) => moveTimelineFrame(item, frame, -1));
     frameAction('Move frame later', 'Shift+ArrowRight', state.frame >= module.frame_count - 1 ? 'already the last frame' : '', (item, frame) => moveTimelineFrame(item, frame, 1));
+    const selectedLayer = module.layers.find(item => item.id === state.selected), generatePlan = mediaGeneratePlan(module, selectedLayer);
+    const generate = document.createElement('button'); generate.type = 'button'; generate.className = 'btn primary'; generate.dataset.frameAction = 'Generate';
+    generate.textContent = 'Generate'; generate.disabled = !generatePlan.ok;
+    generate.title = generatePlan.ok ? `Generate frames from ${generatePlan.source}` : `Generate unavailable: ${GENERATE_REASONS[generatePlan.reason]}`;
+    wireTimelineAction(generate, () => openGenerateDialog(module.id)); frameActions.prepend(generate);
     const keys = document.createElement('p'); keys.className = 'timeline-keys';
     keys.textContent = 'Keys on the timeline: ← → step · Home/End first/last · Shift+← → move frame · D duplicate · Delete remove';
     context.append(
@@ -2420,10 +2425,100 @@
     return {changed, module: next, frame, message: mediaImportMessage(item, mediaFrames, requestedFrames, next.fps, startFrame)};
   }
 
+  // Generate: rebuild a media layer's frames on demand.
+  //   'replace'  — the timeline becomes the media: a GIF/MP4 sets the frame count and its own FPS
+  //                and loops; a still image is shown on every existing frame.
+  //   'in_place' — the media starts at the highlighted frame; earlier frames are untouched, the
+  //                timeline grows if needed, and an animation is hidden again once it has played.
+  function mediaGeneratePlan(module, layer) {
+    const source = layer?.type === 'media' ? layer.properties.source : '';
+    const item = source ? mediaItems.find(candidate => candidate.name === source) : null;
+    if (!item) return {ok: false, reason: source ? 'missing_media' : 'not_media'};
+    const speed = Math.max(0.1, Number(layer.properties.playback_speed_percent ?? 100) / 100);
+    const animated = Boolean(item.animated && item.duration_ms);
+    return {ok: true, item, source, animated, playedMs: animated ? item.duration_ms / speed : 0};
+  }
+
+  function generateMediaFrames(module, layerId, mode, frame) {
+    const layer = module.layers.find(candidate => candidate.id === layerId), plan = mediaGeneratePlan(module, layer);
+    if (!plan.ok) return {changed: false, reason: plan.reason, module, frame};
+    if (!['replace', 'in_place'].includes(mode)) return {changed: false, reason: 'invalid_mode', module, frame};
+    const start = mode === 'replace' ? 0 : frame;
+    if (!Number.isInteger(start) || start < 0 || start >= module.frame_count) return {changed: false, reason: 'out_of_bounds', module, frame};
+    const next = clone(module), target = next.layers.find(candidate => candidate.id === layerId);
+    if (mode === 'replace' && plan.animated) { next.fps = plan.item.fps; next.playback = 'loop'; }
+    const wanted = plan.animated ? Math.max(1, Math.round(plan.playedMs * next.fps / 1000)) : 0;
+    const mediaFrames = plan.animated ? Math.min(120 - start, wanted) : 0;
+    if (plan.animated) next.frame_count = mode === 'replace' ? mediaFrames : Math.min(120, Math.max(next.frame_count, start + mediaFrames));
+    // The generated run owns this layer's visibility and source; other layers keep their edits in range.
+    const strip = properties => { const rest = {...properties}; delete rest.present; delete rest.source; return rest; };
+    for (const item of next.layers) item.keyframes = item.keyframes.filter(key => key.frame < next.frame_count);
+    target.keyframes = target.keyframes.map(key => ({...key, properties: strip(key.properties)}))
+      .filter(key => Object.keys(key.properties).length);
+    next.overrides = next.overrides.filter(item => item.frame < next.frame_count)
+      .map(item => item.layer_id === layerId ? {...item, properties: strip(item.properties)} : item)
+      .filter(item => Object.keys(item.properties).length);
+    target.properties.source = plan.source;
+    target.properties.present = start === 0;
+    const setPresence = (at, present) => {
+      const existing = target.keyframes.find(key => key.frame === at);
+      if (existing) { existing.properties.present = present; existing.easing = 'step'; }
+      else target.keyframes.push({frame: at, easing: 'step', properties: {present}});
+    };
+    if (start > 0) setPresence(start, true);
+    const end = start + mediaFrames;
+    if (plan.animated && end < next.frame_count) setPresence(end, false);
+    target.keyframes.sort((a, b) => a.frame - b.frame);
+    const clipped = plan.animated && mediaFrames < wanted;
+    let message;
+    if (plan.animated) {
+      message = `Generated ${mediaFrames} frame${mediaFrames === 1 ? '' : 's'} of ${plan.source} at ${next.fps} FPS`
+        + (mode === 'replace' ? ', replacing the timeline.' : ` from frame ${start + 1} to ${end}.`);
+      if (clipped) message += ` The 120-frame limit was reached: only ${(mediaFrames / next.fps).toFixed(2)} s of ${(plan.playedMs / 1000).toFixed(2)} s plays.`;
+    } else {
+      message = mode === 'replace' ? `${plan.source} now shows on all ${next.frame_count} frames.` : `${plan.source} now shows from frame ${start + 1} to the end.`;
+    }
+    return {changed: true, module: next, frame: start, mediaFrames, clipped, message};
+  }
+
   globalThis.matrixTimelineFrames = Object.freeze({
     moveFrame: moveTimelineFrame, deleteFrame: deleteTimelineFrame, insertFrame: insertTimelineFrame,
-    playheadText: timelinePlayheadText, adoptMediaSource,
+    playheadText: timelinePlayheadText, adoptMediaSource, generateMedia: generateMediaFrames,
   });
+
+  const GENERATE_REASONS = {not_media: 'select an image, GIF or MP4 layer first', missing_media: 'the selected media file is not in the library', out_of_bounds: 'no frame is highlighted', invalid_mode: 'unknown option'};
+
+  function openGenerateDialog(id) {
+    const module = byId(id), state = module && stateFor(module); if (!module || !state) return false;
+    const layer = module.layers.find(item => item.id === state.selected), plan = mediaGeneratePlan(module, layer);
+    if (!plan.ok) { setMessage('Generate unavailable: ' + GENERATE_REASONS[plan.reason] + '.', true); return false; }
+    const dialog = document.createElement('dialog'); dialog.className = 'generate-dialog'; dialog.setAttribute('aria-labelledby', 'generate-dialog-title');
+    const title = document.createElement('h3'); title.id = 'generate-dialog-title'; title.textContent = 'Generate frames';
+    const text = document.createElement('p');
+    text.textContent = plan.animated
+      ? `${plan.source} plays for ${(plan.playedMs / 1000).toFixed(2)} s.`
+        + ` Replace all frames makes the timeline exactly this media at ${plan.item.fps} FPS (other layers keep their edits that fit).`
+        + ` Generate frames in place starts it at frame ${state.frame + 1} at ${module.fps} FPS and keeps earlier frames.`
+      : `${plan.source} is a still image. Replace all frames shows it on every frame; generate frames in place shows it from frame ${state.frame + 1} onwards.`;
+    const actions = document.createElement('div'); actions.className = 'generate-dialog-actions';
+    const close = () => { dialog.close(); dialog.remove(); };
+    const choose = mode => () => {
+      close();
+      const latest = byId(id), current = latest && stateFor(latest); if (!latest) return;
+      const result = generateMediaFrames(latest, layer.id, mode, current.frame);
+      if (!result.changed) { setMessage('Frames not generated: ' + (GENERATE_REASONS[result.reason] || result.reason) + '.', true); return; }
+      applyTimelineFrameOperation(id, () => result);
+      setMessage(result.message, result.clipped);
+    };
+    const replace = makeButton('Replace all frames', choose('replace'), 'btn primary'); replace.dataset.generate = 'replace';
+    const inPlace = makeButton('Generate frames in place', choose('in_place'), 'btn'); inPlace.dataset.generate = 'in_place';
+    const cancel = makeButton('Cancel', close, 'btn'); cancel.dataset.generate = 'cancel';
+    dialog.addEventListener('cancel', event => { event.preventDefault(); close(); });
+    actions.append(replace, inPlace, cancel); dialog.append(title, text, actions); document.body.append(dialog);
+    dialog.showModal(); replace.focus();
+    return true;
+  }
+  window.openGenerateDialog = openGenerateDialog;
 
   const FRAME_ACTION_REASONS = {out_of_bounds: 'no frame on that side', last_frame: 'an animation needs at least one frame', frame_limit: 'animations are limited to 120 frames', override_limit: 'too many per-frame edits to rebuild this order'};
 
