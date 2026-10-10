@@ -70,6 +70,18 @@
     "StaticImageSchemaTests.test_saved_static_image_module_keeps_user_display_duration",
     "StaticImageSchemaTests.test_unsupported_basic_media_source_is_rejected_with_clear_message"
   ],
+  "test_canvas_generate_frames": [
+    "GenerateFramesTests.test_generate_in_place_hides_the_media_after_it_has_played",
+    "GenerateFramesTests.test_generate_in_place_respects_the_120_frame_limit_and_says_so",
+    "GenerateFramesTests.test_generate_in_place_starts_at_the_highlighted_frame_and_keeps_earlier_frames",
+    "GenerateFramesTests.test_playback_speed_changes_the_generated_length",
+    "GenerateFramesTests.test_refuses_layers_that_are_not_media_or_missing_from_the_library",
+    "GenerateFramesTests.test_replace_all_frames_can_shrink_a_long_timeline",
+    "GenerateFramesTests.test_replace_all_frames_makes_the_timeline_the_gif",
+    "GenerateFramesTests.test_still_image_in_place_shows_from_the_highlighted_frame",
+    "GenerateFramesTests.test_still_image_replace_shows_it_on_every_frame",
+    "GenerateMarkupTests.test_button_and_popup_choices_are_wired"
+  ],
   "test_canvas_starters": [
     "CanvasStarterExampleTests.test_editor_outlines_rectangles_instead_of_stroking_them_with_their_own_width",
     "CanvasStarterExampleTests.test_every_starter_draws_visible_motion_on_the_physical_renderer",
