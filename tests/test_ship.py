@@ -369,3 +369,25 @@ class ShipRemoteRecoveryTests(unittest.TestCase):
 
 if __name__ == '__main__':
     unittest.main()
+
+
+class ShipRemoteCheckTests(unittest.TestCase):
+    """ship_remote.py runs as root on production; its safety checks must survive `python -O`."""
+
+    def test_remote_installer_has_no_optimizable_asserts(self):
+        import ast
+        tree = ast.parse((ROOT / 'deploy/ship_remote.py').read_text(encoding='utf-8'))
+        self.assertEqual([node.lineno for node in ast.walk(tree) if isinstance(node, ast.Assert)], [])
+
+    def test_require_raises_even_under_optimize(self):
+        import subprocess
+        import sys
+        probe = ('import importlib.util,sys;'
+                 's=importlib.util.spec_from_file_location("r",sys.argv[1]);m=importlib.util.module_from_spec(s);'
+                 's.loader.exec_module(m);m.require(True,"ok")\n'
+                 'try:\n m.require(False,"boom")\nexcept AssertionError as e:\n print("raised",e)')
+        done = subprocess.run([sys.executable, '-O', '-c', probe, str(ROOT / 'deploy/ship_remote.py')],
+                              capture_output=True, text=True, timeout=20)
+        self.assertEqual(done.returncode, 0, done.stderr)
+        self.assertEqual(done.stdout.strip(), 'raised boom')
+

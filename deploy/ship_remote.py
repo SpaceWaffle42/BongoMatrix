@@ -46,6 +46,13 @@ class IncoherentTree(RuntimeError):
     """A code restore failed after its first write; the checkout may be mixed."""
 
 
+def require(condition, message):
+    """Explicit check that survives `python -O` (unlike `assert`). Raises AssertionError so the
+    existing failure/recovery paths, which catch BaseException, behave exactly as before."""
+    if not condition:
+        raise AssertionError(message)
+
+
 def utc():
     return datetime.datetime.now(datetime.timezone.utc).isoformat(timespec='seconds')
 
@@ -73,7 +80,7 @@ def save(result):
 def command(argv, timeout=120):
     done = subprocess.run(argv, capture_output=True, timeout=timeout)
     log.append({'argv': argv, 'exit': done.returncode})
-    assert done.returncode == 0, 'administrative command failed: ' + argv[0]
+    require(done.returncode == 0, 'administrative command failed: ' + argv[0])
     return done.stdout.decode()
 
 
@@ -87,17 +94,17 @@ def stop():
     before = props()
     command(['systemctl', 'stop', 'matrix-web.service'])
     after = props()
-    assert after['MainPID'] == after['ControlPID'] == '0' and after['ActiveState'] in ('inactive', 'failed')
+    require(after['MainPID'] == after['ControlPID'] == '0' and after['ActiveState'] in ('inactive', 'failed'), "check failed: after['MainPID'] == after['ControlPID'] == '0' and after['ActiveState'")
     for group in {before['ControlGroup'], after['ControlGroup'], '/system.slice/matrix-web.service'}:
         cgroup = pathlib.Path('/sys/fs/cgroup') / group.lstrip('/') if group else None
         if cgroup and cgroup.exists():
-            assert all(not f.read_text().strip() for f in cgroup.rglob('cgroup.procs')), 'service processes remain'
+            require(all(not f.read_text().strip() for f in cgroup.rglob('cgroup.procs')), 'service processes remain')
 
 
 def take(path, create=False):
     fd = os.open(path, os.O_RDWR | os.O_NOFOLLOW | (os.O_CREAT if create else 0), 0o600)
     info = os.fstat(fd)
-    assert stat.S_ISREG(info.st_mode) and info.st_nlink == 1
+    require(stat.S_ISREG(info.st_mode) and info.st_nlink == 1, 'check failed: stat.S_ISREG(info.st_mode) and info.st_nlink == 1')
     fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
     locks.append(fd)
     return fd
@@ -110,10 +117,10 @@ def release(fd):
 
 
 def safe(path):
-    assert path.is_relative_to(ROOT)
+    require(path.is_relative_to(ROOT), 'check failed: path.is_relative_to(ROOT)')
     for parent in [path, *path.parents]:
         if parent.exists():
-            assert not parent.is_symlink(), str(parent)
+            require(not parent.is_symlink(), str(parent))
         if parent == ROOT:
             break
     return path
@@ -124,14 +131,14 @@ def record(path):
     if not path.exists():
         return {'absent': True}
     info = path.stat()
-    assert stat.S_ISREG(info.st_mode) and info.st_nlink == 1
+    require(stat.S_ISREG(info.st_mode) and info.st_nlink == 1, 'check failed: stat.S_ISREG(info.st_mode) and info.st_nlink == 1')
     return {'sha256': sha(path), 'size': info.st_size, 'uid': info.st_uid, 'gid': info.st_gid,
             'mode': stat.S_IMODE(info.st_mode)}
 
 
 def publish(path, data, meta):
     safe(path)
-    assert path.parent.is_dir(), f'missing directory for {path}'
+    require(path.parent.is_dir(), f'missing directory for {path}')
     tmp = path.parent / f'.matrix-ship-{time.time_ns()}'
     fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600)
     try:
@@ -152,8 +159,8 @@ def publish(path, data, meta):
 
 def root_ok():
     info = ROOT.lstat()
-    assert stat.S_ISDIR(info.st_mode)
-    assert (info.st_uid, info.st_gid, stat.S_IMODE(info.st_mode)) == ROOT_OWNER, 'checkout owner/mode drift'
+    require(stat.S_ISDIR(info.st_mode), 'check failed: stat.S_ISDIR(info.st_mode)')
+    require((info.st_uid, info.st_gid, stat.S_IMODE(info.st_mode)) == ROOT_OWNER, 'checkout owner/mode drift')
 
 
 def start_normal():
@@ -174,20 +181,19 @@ def start_normal():
 def restore_code(manifest, result):
     """Restore every manifest file or raise. Validates everything before the first write."""
     expected = {e['path']: e['sha256'] for e in SPEC['files']}
-    assert set(manifest) == set(expected), 'backup manifest does not match spec'
+    require(set(manifest) == set(expected), 'backup manifest does not match spec')
     plan = []
     for name, before in manifest.items():
         path = ROOT / name
         current = record(path)
-        assert current == before or current.get('sha256') == expected[name], \
-            f'{name} changed after this deploy; refuse rollback'
+        require(current == before or current.get('sha256') == expected[name], f'{name} changed after this deploy; refuse rollback')
         if before.get('absent'):
             plan.append((path, None, before))
         else:
             backup = STAGE / 'backup/code' / name
             data = backup.read_bytes()
-            assert hashlib.sha256(data).hexdigest() == before['sha256'], f'backup of {name} is corrupt'
-            assert path.parent.is_dir(), f'missing directory for {name}'
+            require(hashlib.sha256(data).hexdigest() == before['sha256'], f'backup of {name} is corrupt')
+            require(path.parent.is_dir(), f'missing directory for {name}')
             plan.append((path, data, before))
     try:
         for path, data, before in plan:
@@ -199,7 +205,7 @@ def restore_code(manifest, result):
             else:
                 publish(path, data, before)
         for name, before in manifest.items():
-            assert record(ROOT / name) == before, f'{name} not restored'
+            require(record(ROOT / name) == before, f'{name} not restored')
     except BaseException as error:
         raise IncoherentTree(f'code restore failed part-way: {type(error).__name__}: {error}') from error
 
@@ -212,15 +218,15 @@ def locked_and_quiet():
             take(optional)
     busy = command(['systemctl', 'list-units', '--state=active,activating,deactivating', '--no-legend',
                     '--plain', 'matrix-scoped-*.service', 'matrix-ci-physical.service'])
-    assert not busy.strip(), 'another release/CI unit is active'
+    require(not busy.strip(), 'another release/CI unit is active')
 
 
 def validate_spec():
     for entry in SPEC['files']:
         name = pathlib.PurePosixPath(entry['path'])
-        assert not name.is_absolute() and '..' not in name.parts
-        assert not str(name).startswith(STATE_PREFIXES)
-        assert ROLLBACK or sha(STAGE / 'payload' / entry['path']) == entry['sha256']
+        require(not name.is_absolute() and '..' not in name.parts, "check failed: not name.is_absolute() and '..' not in name.parts")
+        require(not str(name).startswith(STATE_PREFIXES), 'check failed: not str(name).startswith(STATE_PREFIXES)')
+        require(ROLLBACK or sha(STAGE / 'payload' / entry['path']) == entry['sha256'], "check failed: ROLLBACK or sha(STAGE / 'payload' / entry['path']) == entry['sha256']")
         safe(ROOT / entry['path'])
 
 
@@ -234,7 +240,7 @@ def back_up_and_publish(result):
         target = backup / 'code' / name
         target.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
         target.write_bytes((ROOT / name).read_bytes())
-        assert sha(target) == before['sha256']
+        require(sha(target) == before['sha256'], "check failed: sha(target) == before['sha256']")
     (backup / 'code-manifest.json').write_text(json.dumps(manifest, indent=2) + '\n')
     with tarfile.open(backup / 'opaque-current-state.tar', 'x') as tar:
         for name in ('data', 'resources/media'):
@@ -250,7 +256,7 @@ def back_up_and_publish(result):
         result['production_mutated'] = True
         publish(ROOT / entry['path'], (STAGE / 'payload' / entry['path']).read_bytes(), meta)
     for entry in SPEC['files']:
-        assert record(ROOT / entry['path'])['sha256'] == entry['sha256'], entry['path']
+        require(record(ROOT / entry['path'])['sha256'] == entry['sha256'], entry['path'])
     result['status'] = 'PAYLOAD_INSTALLED'
     save(result)
 
@@ -293,11 +299,11 @@ def run():
              'restore_incoherent': False}
     save(result)
     try:
-        assert os.geteuid() == 0
+        require(os.geteuid() == 0, 'check failed: os.geteuid() == 0')
         root_ok()
         locked_and_quiet()
         state = props()
-        assert state['PrivateNetwork'] == 'no'
+        require(state['PrivateNetwork'] == 'no', "check failed: state['PrivateNetwork'] == 'no'")
         result['before_service'] = state
         validate_spec()
         flags['stop_attempted'] = True        # recorded before stop(): a failed readback still recovers
