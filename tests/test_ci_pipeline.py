@@ -417,9 +417,28 @@ class GitLabPipelineContractTests(unittest.TestCase):
             "workflow", "stages", "include", "variables", ".default_project_job",
             "python_syntax", "full_test_suite", "python_static_analysis",
             "dependency_audit", "semgrep-sast", "secret_detection",
-            "ci_summary", "physical_device_acceptance",
+            "ci_summary", "physical_device_acceptance", "non_essential_browser_tests",
         }
         self.assertEqual(set(self.sections), required)
+
+    def test_non_essential_browser_tests_run_separately_with_two_passes_and_never_block(self):
+        blocking = block(self.sections, "full_test_suite")
+        self.assertIn('MATRIX_CI_SKIP_NON_ESSENTIAL: "1"', blocking)
+        self.assertNotIn("allow_failure", blocking)
+        job = block(self.sections, "non_essential_browser_tests")
+        self.assertIn("extends: full_test_suite", job)
+        self.assertIn('MATRIX_CI_SKIP_NON_ESSENTIAL: "0"', job)
+        self.assertIn("allow_failure: true", job)
+        self.assertIn("when: always", job)
+        # At most two passes per pipeline: the first run plus one retry, including on test failure.
+        self.assertRegex(job, r"retry:\n\s+max: 1\n\s+when:\n\s+- script_failure")
+        self.assertRegex(job, r"needs:\n\s+- job: full_test_suite\n\s+artifacts: false")
+        self.assertIn("scripts/ci_collection.py --print-non-essential", job)
+        self.assertIn('test -n "$non_essential"', job)
+        self.assertIn("-m xmlrunner -o test-results $non_essential", job)
+        self.assertIn('exit "$test_status"', job)
+        # The required summary gate never depends on the quarantined job.
+        self.assertNotIn("non_essential_browser_tests", block(self.sections, "ci_summary"))
 
 
 if __name__ == "__main__":

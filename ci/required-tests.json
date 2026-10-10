@@ -63,7 +63,12 @@
     "CollectionContractTests.test_dropped_required_module_is_rejected",
     "CollectionContractTests.test_duplicate_case_alias_is_rejected",
     "CollectionContractTests.test_empty_collection_is_rejected",
-    "CollectionContractTests.test_imported_foreign_case_is_rejected"
+    "CollectionContractTests.test_imported_foreign_case_is_rejected",
+    "CollectionContractTests.test_listed_non_essential_test_is_reported_and_printable",
+    "CollectionContractTests.test_unlisted_non_essential_marker_is_rejected",
+    "CollectionContractTests.test_listed_but_unmarked_non_essential_test_is_rejected",
+    "CollectionContractTests.test_non_essential_test_must_stay_required",
+    "CollectionContractTests.test_repository_quarantine_is_exactly_the_reviewed_issue_32_list"
   ],
   "test_ci_physical_matrix_smoke": [
     "PhysicalVerifierTests.test_abrupt_writer_death_never_authorizes_report_acceptance",
@@ -215,7 +220,8 @@
     "GitLabPipelineContractTests.test_pipeline_publishes_quality_and_security_evidence",
     "GitLabPipelineContractTests.test_pipeline_targets_merge_requests_and_all_branches_with_protected_physical_gate",
     "GitLabPipelineContractTests.test_project_jobs_inherit_cancelation_and_runner_without_cache_volumes",
-    "GitLabPipelineContractTests.test_summary_job_reduces_reports_to_bounded_gitlab_artifacts"
+    "GitLabPipelineContractTests.test_summary_job_reduces_reports_to_bounded_gitlab_artifacts",
+    "GitLabPipelineContractTests.test_non_essential_browser_tests_run_separately_with_two_passes_and_never_block"
   ],
   "test_ci_summary": [
     "CiSummaryTests.test_accepted_security_baseline_and_clean_reports_produce_pass_summary",

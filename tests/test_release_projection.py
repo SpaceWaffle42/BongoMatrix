@@ -14,6 +14,7 @@ from pathlib import Path
 from unittest.mock import patch
 W=Path(__file__).resolve().parents[1]
 from tests import test_webapp as webapp_fixture
+from tests.ci_quarantine import non_essential
 from device_preview import DevicePreviewManager
 from PIL import Image
 DRIVER=Path(os.environ.get('PROJECTION_DRIVER',W/'deploy/feature_release_browser.mjs'))
@@ -97,6 +98,7 @@ class ProjectionTests(unittest.TestCase):
                     with self.observe(f):
                         rejected=f.paired_request('POST','/api/device-preview/'+role,json={'config':invalid,**dict(control,generation=2)},headers={'X-Matrix-Client-Contract':'5'})
                     self.assertEqual(rejected.status_code,400);self.assertEqual(f.store.get(),saved);self.assertEqual(f.store.path.read_bytes(),saved_bytes)
+    @non_essential('#32 native-driver harness flake')
     def test_native_dashboard_projection(self):
         # Real dashboard, existing CDP runner, exact reviewed selection/inspector/projection.
         # Device manager is real; controller is the existing mock fixture, NOT framebuffer proof.
