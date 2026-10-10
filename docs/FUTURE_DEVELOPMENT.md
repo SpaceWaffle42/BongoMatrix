@@ -365,6 +365,19 @@ Treat **Pixel** in Advanced Canvas as a transparent, editable pixel-art layer ra
 
 ~~The first version is static pixel artwork with a one-pixel brush. Do not include gradients, anti-aliasing, smoothing, spray brushes, shape tools, symmetry tools, imported-image conversion, or a separate animation-frame editor. Existing Advanced Canvas layer positioning and compositing still apply.~~
 
+#### Boundary 3 — Remastered direct-canvas pixel editor
+
+The Boundary 2 side-panel editor (separate zoomable grid, editor-only checkerboard, single-layer history cache) is replaced by direct drawing on the main 64×32 Advanced Canvas stage, matching the owner's direction that the canvas stays a fixed 64×32 surface and is drawn on directly. The saved bitmap schema, physical renderer, legacy bake/flatten confirmation, and save/reload/stale-peer flows are unchanged.
+
+- Show the pixel toolbar above the stage only while a Pixels layer is selected: **Move | Draw | Erase | Blend | Pick | Colour | Size | Shape | Undo | Redo | More**, with Matrix swatches below. **More** holds Grid on/off, Fill layer, Clear layer, Reset to last saved state, and shortcut help.
+- Paint every display cell under the brush through the layer's current offset and occupied-bounds rotation, so strokes land exactly where the pixel is shown, including on moved and rotated layers.
+- Brush size 1–16 physical pixels (size 1 is exactly one pixel) with **Square**, **Round**, and **Flat** shapes; an on-stage brush outline previews the footprint, and the coordinate/tool/brush status sits under the stage.
+- **Blend** averages the colour into opaque pixels and paints transparent pixels with the colour, keeping canonical binary alpha.
+- **Pick** samples the composited 64×32 output (background and every visible layer), then returns to Draw.
+- **Move** drags the whole layer by integer offsets without touching bitmap bytes; keyframes and overrides never carry bitmap data.
+- History is per canvas, covers every Pixels layer in it, survives re-renders and layer switches, holds 32 steps, treats one stroke as one step, and is cleared by a successful save. Pointer capture keeps a stroke alive past the stage edge; release commits, cancel/blur or switching layers reverts.
+- Shortcuts: `M`, `D`, `E`, `B`, `I`, `[`/`]` brush size, `Ctrl/Cmd + Z`, `Ctrl/Cmd + Shift + Z`, `Ctrl/Cmd + Y`; right-click erases. New Pixels layers start as an empty bitmap rather than a legacy point.
+
 ### Splash/Sleep revised-release checklist — 0.3.64-preview candidate
 
 This checklist tracks the successor to the superseded 0.3.63-preview Splash/Sleep media-pool candidate. Checked builder items are supported by `/root/matrix_review_evidence/splash-sleep-revision-v4/builder/`; all release and independent-review gates remain pending until their exact artifacts exist.

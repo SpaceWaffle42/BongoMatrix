@@ -1644,7 +1644,7 @@
     "WebAppTests.test_pin_request_controller_failure_is_retryable_and_never_discloses_pin",
     "WebAppTests.test_pin_request_real_display_takeover_ends_on_expiry_and_successful_use",
     "WebAppTests.test_pixel_active_stroke_is_committed_before_keyboard_save_and_reload",
-    "WebAppTests.test_pixel_bitmap_operations_are_gap_free_atomic_and_undoable",
+    "WebAppTests.test_pixel_editing_core_brushes_blend_and_transform_are_exact",
     "WebAppTests.test_pixel_bitmap_save_reload_remains_canonical_and_editable_over_live_http",
     "WebAppTests.test_pixel_bitmap_stale_save_remain_and_reload_newer_peer_state",
     "WebAppTests.test_pixel_duplicate_button_explains_every_rejection_without_mutation",
