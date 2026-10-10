@@ -55,6 +55,19 @@
     "ApiTimeoutContractTests.test_outbound_api_defaults_are_thirty_seconds",
     "ApiTimeoutContractTests.test_provider_call_sites_do_not_replace_the_shared_default_with_short_literals"
   ],
+  "test_basic_static_images": [
+    "StaticImageDashboardTests.test_fit_note_makes_clipping_and_stretching_explicit",
+    "StaticImageDashboardTests.test_media_file_choices_include_static_images",
+    "StaticImageDashboardTests.test_static_image_hides_animation_controls_and_keeps_editable_duration",
+    "StaticImageRenderingTests.test_browser_preview_fit_matches_physical_matrix_for_every_fit",
+    "StaticImageRenderingTests.test_edit_preview_frame_matches_physical_output",
+    "StaticImageRenderingTests.test_physical_run_requires_the_pinned_capability",
+    "StaticImageRenderingTests.test_physical_run_shows_fitted_image_for_the_playlist_duration",
+    "StaticImageRenderingTests.test_physical_run_stops_before_drawing_when_cancelled",
+    "StaticImageSchemaTests.test_basic_media_module_accepts_png_jpeg_and_webp_sources",
+    "StaticImageSchemaTests.test_saved_static_image_module_keeps_user_display_duration",
+    "StaticImageSchemaTests.test_unsupported_basic_media_source_is_rejected_with_clear_message"
+  ],
   "test_canvas_starters": [
     "CanvasStarterExampleTests.test_editor_outlines_rectangles_instead_of_stroking_them_with_their_own_width",
     "CanvasStarterExampleTests.test_every_starter_draws_visible_motion_on_the_physical_renderer",
