@@ -403,6 +403,34 @@ This checklist tracks the successor to the superseded 0.3.63-preview Splash/Slee
 - Keep the pick through interruptions (previews, reloads, pairing). Move to another enabled screen only when the picked one has no usable media, and then keep that one.
 - A Sleep screen whose pool has several sources still keeps its one retained media choice for the night, as before. Splash keeps its shuffled bag.
 
+### ~~1.8 Rework the Advanced Canvas timeline and animated-media import~~ — Completed (2026-10-10, !139)
+
+~~The Advanced Canvas timeline is currently confusing to understand and operate. Rework it so creating, selecting, ordering, editing, and previewing frames is clear and predictable for new and existing users.~~
+
+- ~~Make the current frame, frame order, playback position, layer state, and available timeline actions visually unambiguous.~~
+- ~~Use clear labels, grouping, and interaction feedback rather than relying on unexplained icons or implicit timeline behavior.~~
+- ~~Keep frame creation, duplication, deletion, reordering, seeking, and playback practical with mouse, touch, and keyboard input.~~
+- ~~When a GIF is added, automatically create the complete corresponding timeline frame sequence from all frames in the GIF, preserving its frame order and timing.~~
+- ~~When an MP4 is added, automatically create the complete corresponding timeline frame sequence from the video, preserving playback order and timeline timing at the module's configured frame rate.~~
+- ~~Do not require users to create one Advanced Canvas frame manually for each decoded GIF or MP4 frame.~~
+- ~~Keep browser preview, saved timeline data, and physical Matrix playback consistent, including media timing, looping, clipping, and cancellation.~~
+- ~~Preserve existing Advanced Canvas configurations and add real-browser usability coverage at mobile, tablet, and desktop widths.~~
+
+Delivered: Playhead / Frames / Selected-layer groups; Duplicate, Delete, Move earlier/later whole frames (rebuilt so saved data and the panel match); keyboard Left/Right, Home/End, Shift+arrows, D, Delete. Choosing a GIF/MP4 on a layer builds its frames; a single-frame canvas adopts the media's own timing, otherwise the module FPS is kept. The 120-frame cap remains and the import message states how much plays and which FPS would fit all of it. Tests: `tests/test_canvas_timeline_rework.py`.
+
+### ~~1.9 Add static-image support to basic custom modules~~ — Completed (2026-10-10, !138)
+
+~~The basic **Add custom module** workflow should allow the user to select a single static image as the module content, alongside the existing GIF and MP4 media choices.~~
+
+- ~~Create an image-only Basic custom module without requiring text, animation, layers, or Advanced Canvas.~~
+- ~~Reuse the existing Basic media selection, upload, validation, positioning, preview, persistence, and physical-rendering workflow wherever the behavior is equivalent.~~
+- ~~Provide the same **Contain**, **Cover**, **Stretch**, and manual crop-positioning options available to Basic GIF and MP4 modules.~~
+- ~~Preserve the source image's aspect ratio for **Contain** and **Cover**, and make clipping or stretching explicit in the browser preview.~~
+- ~~Keep browser preview and physical 64x32 Matrix output consistent.~~
+- ~~Preserve existing custom modules and reject unsupported, malformed, or oversized image files with a clear validation message.~~
+
+Delivered: PNG/JPEG/WebP stills in Basic media modules, held for the playlist duration (Loops/Playback speed hidden), with a fit note explaining bars, cropping or stretching. Tests: `tests/test_basic_static_images.py`.
+
 ## Priority 2 — New playlist modules
 
 Implement these only after higher-priority fixes and workflow improvements are complete. Their order favors lower-friction local or free-data behavior before more provider-dependent integrations.
