@@ -1,6 +1,8 @@
 # Future development notes
 
-Last updated: 2026-09-09
+Last updated: 2026-10-10
+
+**Status:** Priority 0 and Priority 1 are complete. 1.8 and 1.9 are merged and wait for the next production release; everything else is live (0.3.68-preview). Next item: **2.1 Event Countdown**. Open findings and deferred v1 hardening live in GitLab issue #33.
 
 This file records requested Matrix features that are intentionally deferred. They are product requirements and design notes, not descriptions of current behavior. Do not treat an item as implemented until its code, tests, review, merge, deployment, and physical-device verification are complete.
 
@@ -183,41 +185,9 @@ Begin these after Priority 0 is clear. They improve existing editing, preview, m
 - ~~Use adaptive debounce timing: 150 ms for simple controls and 500 ms for media changes or other expensive renders.~~
 - ~~Cancel superseded draft work so an older slow render can never replace a newer edit on the device.~~
 
-#### Priority 1.3 post-completion whole-project remediation — Deferred to v1.0
+#### Priority 1.3 post-completion remediation — Deferred to v1.0
 
-A fresh whole-project review rejected the earlier post-1.3 release candidate and opened the ordered remediation ledger in GitLab issue 2. F1–F15 were subsequently reproduced, remediated under strict TDD, independently reviewed, and merged through protected CI. The complete remediated artifacts passed the applicable protected-CI and production-acceptance gates recorded in that issue, but later release-path validation found additional restricted release-preparation issues. MR !95 and the accepted production process-loss journey closed issue #4 and completed Priority 1.3's shipped product behavior. The remaining release-reliability findings in issue 2 are explicitly deferred to the v1.0 hardening milestone; they remain open and unremediated.
-
-Verified remediation approvals:
-
-- **F1 approved:** commit `603154b0d7bd3417df610f8df6a33b2f26a46146` prevents cancelled custom-text and OpenWeather frames from publishing after their final cancellation-admission point.
-- **F2 approved:** commit `c1905c15aee6fffc2a87ee2f790875f8201db815` pins privileged release/acceptance service control to an absolute `systemctl`, fixes its environment, and bounds it under one aggregate monotonic deadline.
-- **F3 approved:** commit `6395cb68786798c1f8e69f5ea4ae4b140225bb28` rejects wildcard, weak, malformed, or multiple configuration mutation validators and requires exactly one strong current revision.
-- **F4 approved:** commit `4faa8c2db8d2e86a5a0409ca00d407baaca03b5a` moves physical OpenWeather overview/forecast preparation through the existing bounded spawned-provider lifecycle, with cancellation, reaping, aggregate deadline, remaining-deadline transport timeouts, configuration isolation, and secret isolation. Immutable review `deleg_ff55377b` reported **APPROVED** with no actionable P0/P1/P2 findings; GitLab evidence is recorded in issue 2 notes 357–358.
-- **F5 approved:** commit `2595829680805a51be7c54f719640db7ddb0114b` keeps authoritative active physical-draft status and the native **Stop device preview** action reachable in the popped sticky strip across combined narrow/short states and active 200% zoom while preserving inactive and natural-flow layouts. Immutable review `deleg_dd49116e` reported **APPROVED** with no actionable P0/P1/P2 or P3 findings; GitLab evidence is recorded in issue 2 notes 359–360.
-- **F6 approved:** commit `dcf04c9517a2ae65f8403b6df779f26af6ec76c9` stops ordinary custom-module **Preview** from committing the dashboard draft. It previews only the already-saved custom module, performs no configuration mutation, preserves unsaved controls and dirty state on success or failure, and reports that unsaved changes were not applied. Immutable review `deleg_6f63dc23` reported **APPROVED** with no actionable findings; GitLab evidence is recorded in issue 2 notes 363–364.
-- **F7 approved:** commit `d3c1fa6ca048ef4ec02f531e90780df4ad019411` introduces server-owned persisted `schema_version` 1, strictly validates current-version snapshots before revision arithmetic, migrates only legacy version-zero snapshots exactly once, and rejects malformed, future, or client-supplied schema state without changing persisted bytes. Immutable review `deleg_178f92b7` reported **APPROVED** with no actionable findings; final approval and F8 authorization are recorded in GitLab issue 2 note 366.
-
-**F8 approved:** commit `e009b385e006eef753a4800015e40410b6bab459` keeps explicit cancellation separate from natural expiry. The canonical draft is a transient `clock_lava` preview; it cannot certify sleep, and its physical evidence is accepted only while the scheduler holds the exact admitted lease's renderer-execution token, so a late saved-module swap between lease admission and renderer claim cannot publish the draft. Timeout evidence is produced only by the exact owner/generation content-expiry callback when the typed expiry cause is unambiguously content-first; the controller follows the exact request identity preserved across immutable heartbeat lease renewals so that expiry stops the correct renderer without granting authority over a replacement request. Timeout is never inferred from cancellation, generic result injection, connectivity-first expiry, or equal content/connectivity deadlines. That observed expiry arms a one-shot transaction-bound inactive probe, after which the normal scheduler takes its inactive branch and executes the configured `sleep` module. Only a physical swap emitted while that exact inactive execution token is held records `sleep_observed` and publishes the saved inactive output. Artifact evidence is recorded only after the real `DisplayController` admits the exact concrete `AcceptanceArtifactTransaction` type and installs an active transaction-specific opaque token; subclasses and nominal controller type alone are insufficient, subclass rejection occurs before context installation, the concrete class-owned binder is invoked non-polymorphically, binding returns no observer or capability, and controller lifecycle methods alone use the context-held token to mutate events. Idle genuine controllers, caller-created controller instances, overridden binders, arbitrary objects, and constructor tricks are rejected, ordinary artifact callers have no minting API, and publication fails closed unless foreign-owner rejection, accepted heartbeat, natural content expiry, scheduler-inactive sleep, and rollback are all observed in order. Canonical transaction metadata and remote verification consume those observed states rather than synthesizing success. The longer event-bound journey also retains already authenticated immutable commit terminals across reconciliation callbacks so historical publication retry deadlines cannot invalidate later rollback/final phases; a resumed process still performs fresh remote discovery. Immutable reviews `deleg_09672e21` and `deleg_ae54ac48` reported no findings or limitations; final approval and F9 authorization are recorded in GitLab issue 2 note 367.
-
-**F9 approved:** commit `5316bf6ebe847b9b0f5d80561e0fd8cf4cdd8c7b` rotates OpenWeather credential generation and clears provider timing-cache entries whenever typed post-replace or post-unlink durability uncertainty reports disk-visible committed state, while preserving truthful HTTP 503 `configured` metadata and ordinary pre-commit storage-failure behavior. Immutable review `deleg_0c780c77` reported **APPROVED** with no findings, security concerns, suggestions, or limitations; final approval and F10 authorization are recorded in GitLab issue 2 note 369.
-
-**F10 approved:** commit `366050af401faa37e8f50d32aef529d7c1ac6ed8` cancels and resets owned Advanced Canvas browser-playback intervals before template replacement or module removal deletes editor state, gives the one-second time-layer redraw interval explicit lifecycle ownership, and clears global and per-state intervals on one-shot `pagehide` so no disposed callback can advance or redraw. Immutable review `deleg_9fdc6b84` reported **APPROVED** with no findings, security concerns, suggestions, or limitations; final approval and F11 authorization are recorded in GitLab issue 2 note 371.
-
-**F11-G1 approved:** commit `205b8b3c09aba0655f4f4d690f96cd50b94716e8` gives decoder-reaper acquisition a separate bounded 250ms lifecycle window while decoder reads and frame publication remain bound to the original content deadline, preserving exact ownership, cancellation cleanup, GIF/MP4 repeat timing, and the required final clipped frame. The first generation that skipped a sub-frame repeat remains rejected because it omitted that clipped frame. Immutable review `deleg_65b864b9` reported **APPROVED** with no findings, security concerns, suggestions, or limitations; final approval and F11 resumption authorization are recorded in GitLab issue 2 note 376.
-
-**F11 approved:** commit `1596137cccacfbdb93a661df4444d1ca0be277c6` enforces at least 44 CSS-pixel target height for the physical-preview timeout and **Stop device preview** action through 900px width and under coarse pointers while preserving desktop mouse layout, active popped-strip reachability, touch/mouse/keyboard activation, and 200% zoom. Immutable review `deleg_12964e22` reported **APPROVED** with no findings, security concerns, suggestions, or limitations; final approval and F12 authorization are recorded in GitLab issue 2 note 378.
-
-**F12 approved:** commit `f27026f738b2426031aeb4bf63d87ea3987e11d8` aligns the authoritative Priority 1.3 release procedure with the README-supported `./venv/bin/python` operator environment while retaining the CI-only `.venv` compatibility alias solely inside CI.
-
-**F13 approved:** commit `961e9ebdbc97feb5a82d53239569e60a62b5269d` binds the exported Python 3.11 acceptance fixture to one accelerated monotonic authority while retaining real sleeping.
-
-**F14 approved:** commit `5302d31462f9404f0fdf7d16b779506c696e40a8` scopes the two reviewed fixed-provider OpenWeather SAST suppressions without changing transport behavior.
-
-**F15 approved at commit `568f4fc8953d3e6fd96f2546c868370c4a76265a`:** the reviewed artifact contains the tracked, idempotent privileged bootstrap installer; protected merge `478a876e6cb9bc90ee2171296d545c9ef3c30871` admitted the exact reviewed tree.
-
-**Latest acceptance evidence 2026-08-29:** MR !95 exact head `3115ee09ed0af18e580dde4f10d3c0e04bb6fa4e` passed independent re-review `deleg_10856fa7` and pipeline 293 with 1,248 tests and zero failures, errors, or skips. Protected merge `f3443b9a891a282c1d706cc74f7541a31211b1f6` passed pipeline 294 with 1,248 tests and zero failures, errors, or skips; physical job 2001 bound its report to that merge SHA and pipeline and recorded both acceptance and recovery as PASS. The production process-loss journey then observed the final heartbeat at 11:23:36 BST and the physical transition back to saved non-draft playback at 11:23:52 BST before any later pairing request. Issue #4 closed with the merge.
-
-**v1.0 deferred findings register:** GitLab issue 2 note 496 consolidates the earlier restricted release-preparation and release-reliability findings, and owner decision note 497 defers them to v1.0 without closing or waiving them. Preservation note 580 adds the five rejected v6 review findings and exact artifact identities. Issue 2 remains open as their durable register. These findings remain readable, open, unstruck, and explicitly deferred; this roadmap reconciliation does not authorize or claim their remediation. Priority 1.5 is no longer blocked by stale Priority 1.3 status text.
+Whole-project review findings F1–F15 were reproduced, fixed under TDD, independently reviewed and merged (commits and review IDs are recorded in GitLab issue #2). The remaining release-reliability findings are deferred to v1.0 hardening and stay open in the consolidated issue #33.
 
 ### ~~1.4 Add borders and backgrounds to basic custom modules~~ — Completed
 
@@ -269,9 +239,11 @@ Verified remediation approvals:
 
 **Completed 2026-08-31:** reviewed source `2d4b35852b632260d5dc5fb6c4be6d36cb3f8341` merged through MR !101 as protected-main commit `6c312d40cc8d050d58a691d6266f91f6545d9194`. Exact-SHA push/MR pipelines 312 and 313 passed after one unchanged pre-existing heartbeat-test retry and a fresh aggregate retry; protected-main pipeline 314 passed 1,351 tests with zero failures, errors, or skips, zero quality/security findings, and source-bound physical acceptance plus recovery. Production's historical product port was narrowed to independently approved nine-runtime-path artifact `a67aeb4731708ee06d65e72a274d7ceea91604ea` (tree `e9b822596ac9171c003c496b2d29a5ca18aa71b5`) so unrelated production test files remained untouched. The guarded transaction passed deploy, deterministic schema-v2 revision-55 to schema-v3 revision-56 migration, deliberate byte-exact rollback, and final redeploy; unrelated mutable data and paired-device registry bytes remained exact. Live Chrome at 390×844 verified version `0.3.60-preview`, bounded shared speed controls, independent announcement headline/message fonts, horizontal containment, and zero configuration saves. Fresh physical 64×32 acceptance observed three distinct 200% sleep-animation frames and a later announcement-board publication, then removed the temporary pairing exactly. Hostile-runtime reaper hardening remains explicitly deferred to v1 in GitLab issue #12 and is not claimed complete here.
 
-### 1.7 Advanced Canvas Pixel drawing tool
+### ~~1.7 Advanced Canvas Pixel drawing tool~~ — Completed
 
-Treat **Pixel** in Advanced Canvas as a transparent, editable pixel-art layer rather than a single manually positioned pixel element.
+**Completed 2026-10-10:** Boundaries 1–3 released; the remastered direct-canvas editor shipped in 0.3.68-preview and was approved on 5002 UAT.
+
+~~Treat **Pixel** in Advanced Canvas as a transparent, editable pixel-art layer rather than a single manually positioned pixel element.~~
 
 #### ~~Boundary 1 — Backward-compatible bitmap schema and renderer foundation~~ — Completed
 
@@ -365,45 +337,31 @@ Treat **Pixel** in Advanced Canvas as a transparent, editable pixel-art layer ra
 
 ~~The first version is static pixel artwork with a one-pixel brush. Do not include gradients, anti-aliasing, smoothing, spray brushes, shape tools, symmetry tools, imported-image conversion, or a separate animation-frame editor. Existing Advanced Canvas layer positioning and compositing still apply.~~
 
-#### Boundary 3 — Remastered direct-canvas pixel editor
+#### ~~Boundary 3 — Remastered direct-canvas pixel editor~~ — Completed
 
-The Boundary 2 side-panel editor (separate zoomable grid, editor-only checkerboard, single-layer history cache) is replaced by direct drawing on the main 64×32 Advanced Canvas stage, matching the owner's direction that the canvas stays a fixed 64×32 surface and is drawn on directly. The saved bitmap schema, physical renderer, legacy bake/flatten confirmation, and save/reload/stale-peer flows are unchanged.
+~~The Boundary 2 side-panel editor (separate zoomable grid, editor-only checkerboard, single-layer history cache) is replaced by direct drawing on the main 64×32 Advanced Canvas stage, matching the owner's direction that the canvas stays a fixed 64×32 surface and is drawn on directly. The saved bitmap schema, physical renderer, legacy bake/flatten confirmation, and save/reload/stale-peer flows are unchanged.~~
 
-- Show the pixel toolbar above the stage only while a Pixels layer is selected: **Move | Draw | Erase | Blend | Pick | Colour | Size | Shape | Undo | Redo | More**, with Matrix swatches below. **More** holds Grid on/off, Fill layer, Clear layer, Reset to last saved state, and shortcut help.
-- Paint every display cell under the brush through the layer's current offset and occupied-bounds rotation, so strokes land exactly where the pixel is shown, including on moved and rotated layers.
-- Brush size 1–16 physical pixels (size 1 is exactly one pixel) with **Square**, **Round**, and **Flat** shapes; an on-stage brush outline previews the footprint, and the coordinate/tool/brush status sits under the stage.
-- **Blend** averages the colour into opaque pixels and paints transparent pixels with the colour, keeping canonical binary alpha.
-- **Pick** samples the composited 64×32 output (background and every visible layer), then returns to Draw.
-- **Move** drags the whole layer by integer offsets without touching bitmap bytes; keyframes and overrides never carry bitmap data.
-- History is per canvas, covers every Pixels layer in it, survives re-renders and layer switches, holds 32 steps, treats one stroke as one step, and is cleared by a successful save. Pointer capture keeps a stroke alive past the stage edge; release commits, cancel/blur or switching layers reverts.
-- Shortcuts: `M`, `D`, `E`, `B`, `I`, `[`/`]` brush size, `Ctrl/Cmd + Z`, `Ctrl/Cmd + Shift + Z`, `Ctrl/Cmd + Y`; right-click erases. New Pixels layers start as an empty bitmap rather than a legacy point.
+- ~~Show the pixel toolbar above the stage only while a Pixels layer is selected: **Move | Draw | Erase | Blend | Pick | Colour | Size | Shape | Undo | Redo | More**, with Matrix swatches below. **More** holds Grid on/off, Fill layer, Clear layer, Reset to last saved state, and shortcut help.~~
+- ~~Paint every display cell under the brush through the layer's current offset and occupied-bounds rotation, so strokes land exactly where the pixel is shown, including on moved and rotated layers.~~
+- ~~Brush size 1–16 physical pixels (size 1 is exactly one pixel) with **Square**, **Round**, and **Flat** shapes; an on-stage brush outline previews the footprint, and the coordinate/tool/brush status sits under the stage.~~
+- ~~**Blend** averages the colour into opaque pixels and paints transparent pixels with the colour, keeping canonical binary alpha.~~
+- ~~**Pick** samples the composited 64×32 output (background and every visible layer), then returns to Draw.~~
+- ~~**Move** drags the whole layer by integer offsets without touching bitmap bytes; keyframes and overrides never carry bitmap data.~~
+- ~~History is per canvas, covers every Pixels layer in it, survives re-renders and layer switches, holds 32 steps, treats one stroke as one step, and is cleared by a successful save. Pointer capture keeps a stroke alive past the stage edge; release commits, cancel/blur or switching layers reverts.~~
+- ~~Shortcuts: `M`, `D`, `E`, `B`, `I`, `[`/`]` brush size, `Ctrl/Cmd + Z`, `Ctrl/Cmd + Shift + Z`, `Ctrl/Cmd + Y`; right-click erases. New Pixels layers start as an empty bitmap rather than a legacy point.~~
 
-### Splash/Sleep revised-release checklist — 0.3.64-preview candidate
+### ~~Splash/Sleep media screens~~ — Completed
 
-This checklist tracks the successor to the superseded 0.3.63-preview Splash/Sleep media-pool candidate. Checked builder items are supported by `/root/matrix_review_evidence/splash-sleep-revision-v4/builder/`; all release and independent-review gates remain pending until their exact artifacts exist.
+**Completed 2026-10-10:** shipped in 0.3.68-preview and approved on 5002 UAT. The old 0.3.64 release checklist (independent reviews, rollback/redeploy rehearsal, Kanban handoffs) was superseded by the lean `deploy/ship.py` delivery path.
 
-- [x] Implement the revised one-flow-per-screen configuration, screen-specific media admission, conditional saved-state repair, Splash shuffled-bag lifecycle, retained Sleep sessions, and selected-GIF still-duration calculation (`screen_media.py`, `config_store.py`, `display_controller.py`, `webapp.py`, and `app/templates/dashboard.html`).
-- [x] Add focused backend and real-browser tests for the revised configuration and runtime contract (`tests/test_screen_media.py`, `tests/test_media_playlists.py`, and `tests/test_webapp.py`; RED/GREEN transcripts in the builder evidence directory).
-- [x] ~~Pass the frozen candidate's complete Python suites and configured static/syntax checks with an immutable command/result manifest.~~ (Locally verified with the builder's canonical inventory, structured shard manifest/results, zero skips, and configured Ruff/syntax gates.)
-  - Recovery verification must preserve the prior 1,504-test canonical set and include any new remediation regression IDs. Structured `unittest` start/stop identities are authoritative; multiline descriptions and repeated parent status lines in human-readable logs must not hide or duplicate executions.
-- [ ] Obtain independent frontend, quality, and recovery reviews against the exact candidate commit and tree.
-- [ ] Open a protected merge request and pass exact-head plus exact-protected-main CI.
-- [ ] Publish an immutable code, built-in-asset, and release-tooling manifest, including `resources/media/built-in/splash_loading_squares.gif` and `resources/media/built-in/sleep.gif`.
-- [ ] Reconcile production pre-state, including existing prefixed assets and saved references, without deleting or overwriting unowned state.
-- [ ] Perform the guarded deployment and verify live service, lock ownership, source identity, and mutable-state preservation.
-- [ ] Complete live desktop/mobile UI acceptance and physical Splash/Sleep lifecycle, animation, timing, interruption, disposal, transparency, and aspect-ratio acceptance.
-- [ ] Complete a deliberate rollback with exact baseline and mutable-state acceptance.
-- [ ] Redeploy the exact same reviewed artifact and repeat final live and physical acceptance.
-- [ ] Publish exact GitLab evidence and reconcile every retained finding or deferral.
-- [ ] Complete Kanban handoffs and strike through the roadmap requirements only after review, merge, deployment, rollback, redeployment, and final acceptance are all verified.
+- ~~One flow per screen with screen-specific media, saved-state repair, and a selected-GIF still-duration calculation.~~
+- ~~Splash plays a shuffled bag of its enabled screens.~~
+- ~~Sleep picks one enabled screen at random as the night begins and plays only that one until wake; the next night picks again.~~
+- ~~The pick survives previews, reloads and pairing; it moves to another enabled screen only when the picked one has no usable media.~~
+- ~~A Sleep screen with several sources keeps its one retained media choice for the night.~~
+- ~~Focused backend and real-browser tests (`tests/test_screen_media.py`, `tests/test_media_playlists.py`, `tests/test_webapp.py`).~~
 
-#### Sleep: one screen for the whole night (owner change, 2026-10-10)
-
-- When several Sleep screens are enabled, pick one at random as the night begins and play only that one until wake. The next night picks again.
-- Keep the pick through interruptions (previews, reloads, pairing). Move to another enabled screen only when the picked one has no usable media, and then keep that one.
-- A Sleep screen whose pool has several sources still keeps its one retained media choice for the night, as before. Splash keeps its shuffled bag.
-
-### ~~1.8 Rework the Advanced Canvas timeline and animated-media import~~ — Completed (2026-10-10, !139)
+### ~~1.8 Rework the Advanced Canvas timeline and animated-media import~~ — Completed (merged 2026-10-10, !139; ships with the next release)
 
 ~~The Advanced Canvas timeline is currently confusing to understand and operate. Rework it so creating, selecting, ordering, editing, and previewing frames is clear and predictable for new and existing users.~~
 
@@ -418,7 +376,7 @@ This checklist tracks the successor to the superseded 0.3.63-preview Splash/Slee
 
 Delivered: Playhead / Frames / Selected-layer groups; Duplicate, Delete, Move earlier/later whole frames (rebuilt so saved data and the panel match); keyboard Left/Right, Home/End, Shift+arrows, D, Delete. Choosing a GIF/MP4 on a layer builds its frames; a single-frame canvas adopts the media's own timing, otherwise the module FPS is kept. The 120-frame cap remains and the import message states how much plays and which FPS would fit all of it. Tests: `tests/test_canvas_timeline_rework.py`.
 
-### ~~1.9 Add static-image support to basic custom modules~~ — Completed (2026-10-10, !138)
+### ~~1.9 Add static-image support to basic custom modules~~ — Completed (merged 2026-10-10, !138; ships with the next release)
 
 ~~The basic **Add custom module** workflow should allow the user to select a single static image as the module content, alongside the existing GIF and MP4 media choices.~~
 
@@ -430,6 +388,8 @@ Delivered: Playhead / Frames / Selected-layer groups; Duplicate, Delete, Move ea
 - ~~Preserve existing custom modules and reject unsupported, malformed, or oversized image files with a clear validation message.~~
 
 Delivered: PNG/JPEG/WebP stills in Basic media modules, held for the playlist duration (Loops/Playback speed hidden), with a fit note explaining bars, cropping or stretching. Tests: `tests/test_basic_static_images.py`.
+
+**Also delivered alongside Priority 1 (!140):** the media library pages 10 items at a time, with 20/30/40/50 per page; the choice is remembered per browser.
 
 ## Priority 2 — New playlist modules
 
