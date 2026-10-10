@@ -77,6 +77,20 @@
     "CanvasStarterExampleTests.test_every_starter_is_deterministic_apart_from_fresh_layer_ids",
     "CanvasStarterExampleTests.test_starter_catalogue_is_remastered_and_extended"
   ],
+  "test_canvas_timeline_rework": [
+    "AnimatedMediaImportTests.test_choosing_a_gif_on_an_existing_layer_builds_every_frame_at_source_timing",
+    "AnimatedMediaImportTests.test_existing_animation_keeps_its_frame_rate_when_media_is_chosen",
+    "AnimatedMediaImportTests.test_media_longer_than_120_frames_explains_what_was_clipped",
+    "AnimatedMediaImportTests.test_single_frame_canvas_adopts_gif_timing_even_with_frame_edits",
+    "AnimatedMediaImportTests.test_still_media_leaves_the_timeline_alone",
+    "TimelineFrameOperationTests.test_delete_frame_removes_its_content_and_closes_the_gap",
+    "TimelineFrameOperationTests.test_delete_refuses_the_last_frame",
+    "TimelineFrameOperationTests.test_insert_frame_holds_the_current_picture_and_shifts_later_frames",
+    "TimelineFrameOperationTests.test_insert_refuses_beyond_the_120_frame_limit",
+    "TimelineFrameOperationTests.test_move_frame_swaps_whole_frames_and_physical_order_follows",
+    "TimelineFrameOperationTests.test_playhead_readout_states_frame_time_rate_and_mode",
+    "TimelineMarkupTests.test_timeline_groups_labels_and_keyboard_are_wired"
+  ],
   "test_ci_collection": [
     "CollectionContractTests.test_duplicate_required_module_keys_reject_missing_earlier_behavior",
     "CollectionContractTests.test_added_valid_test_is_allowed",

@@ -1788,7 +1788,7 @@
     for (const [field, labelText, type] of editableFields) {
       let label;
       if (type === 'playback-speed') label = globalThis.playbackSpeedControl(labelText, values[field], value => { saveFrameProperties(module, layer, {[field]: value}); drawEditor(module, container.closest('.advanced-card').querySelector('canvas')); }, control => control.dataset.property = field);
-      else if (type === 'select' || type === 'media-select' || type === 'time-format') label = moduleControl(labelText, values[field], 'select', value => { saveFrameProperties(module, layer, {[field]: value}); if (type === 'media-select') pruneMediaFailureStates(); drawEditor(module, container.closest('.advanced-card').querySelector('canvas')); }, type === 'media-select' ? mediaItems.map(item => item.name) : (type === 'time-format' ? ['24h', '24h_seconds', '12h', '12h_seconds'] : (field === 'font' ? fonts : [])));
+      else if (type === 'select' || type === 'media-select' || type === 'time-format') label = moduleControl(labelText, values[field], 'select', value => { saveFrameProperties(module, layer, {[field]: value}); if (type === 'media-select') { pruneMediaFailureStates(); const adopted = adoptMediaSource(module, layer.id, value, state.frame); if (adopted.changed) { Object.assign(module, {frame_count: adopted.module.frame_count, fps: adopted.module.fps, playback: adopted.module.playback}); setMessage(layer.name + ' now uses ' + value + '; ' + adopted.message); refreshAdvanced(module.id, true); return; } } drawEditor(module, container.closest('.advanced-card').querySelector('canvas')); }, type === 'media-select' ? mediaItems.map(item => item.name) : (type === 'time-format' ? ['24h', '24h_seconds', '12h', '12h_seconds'] : (field === 'font' ? fonts : [])));
       else if (type === 'points') { label = document.createElement('label'); label.textContent = labelText; label.className = 'wide'; const textarea = document.createElement('textarea'); textarea.rows = 4; textarea.dataset.property = field; textarea.value = formatPoints(values[field]); textarea.addEventListener('change', () => { const points = parsePoints(textarea.value); if (points.length) { saveFrameProperties(module, layer, {points}); refreshAdvanced(module.id, true); } }); label.append(textarea); }
       else label = moduleControl(labelText, values[field], type, value => { const nextValue = field === 'z_index' ? Math.max(-64, Math.min(64, Math.round(value))) : value; saveFrameProperties(module, layer, {[field]: nextValue}); drawEditor(module, container.closest('.advanced-card').querySelector('canvas')); }, null);
       for (const control of label.querySelectorAll('input,select,textarea')) control.dataset.property = field; grid.append(label);
@@ -2069,7 +2069,34 @@
     }
     const status = document.createElement('span'); status.className = 'timeline-context-status'; status.setAttribute('aria-live', 'polite');
     status.textContent = reasons.length ? reasons.join(' · ') : 'Adjacent moves available';
-    context.append(summary, actions, status); return context;
+    const group = (title, ...children) => {
+      const section = document.createElement('section'); section.className = 'timeline-group';
+      const heading = document.createElement('h5'); heading.className = 'timeline-group-title'; heading.textContent = title;
+      section.setAttribute('aria-label', title); section.append(heading, ...children); return section;
+    };
+    const playhead = document.createElement('output'); playhead.className = 'timeline-playhead'; playhead.setAttribute('aria-live', 'polite');
+    playhead.textContent = timelinePlayheadText(module, state.frame).message;
+    const seekActions = document.createElement('div'); seekActions.className = 'timeline-seek-actions'; seekActions.append(...actions.querySelectorAll('[data-action="seek"]'));
+    const frameActions = document.createElement('div'); frameActions.className = 'timeline-frame-actions';
+    const frameAction = (label, shortcut, disabledReason, operation, confirmText) => {
+      const button = document.createElement('button'); button.type = 'button'; button.className = 'btn'; button.dataset.frameAction = label;
+      button.textContent = label; button.setAttribute('aria-keyshortcuts', shortcut); button.disabled = Boolean(disabledReason);
+      button.title = disabledReason ? `${label} unavailable: ${disabledReason}` : `${label} (${shortcut.replace('Shift+', 'Shift + ')})`;
+      wireTimelineAction(button, () => { if (!confirmText || confirm(confirmText)) applyTimelineFrameOperation(module.id, operation); });
+      frameActions.append(button);
+    };
+    frameAction('Duplicate frame', 'D', module.frame_count >= 120 ? FRAME_ACTION_REASONS.frame_limit : '', insertTimelineFrame);
+    frameAction('Delete frame', 'Delete', module.frame_count <= 1 ? FRAME_ACTION_REASONS.last_frame : '', deleteTimelineFrame, `Delete frame ${state.frame + 1}?`);
+    frameAction('Move frame earlier', 'Shift+ArrowLeft', state.frame <= 0 ? 'already the first frame' : '', (item, frame) => moveTimelineFrame(item, frame, -1));
+    frameAction('Move frame later', 'Shift+ArrowRight', state.frame >= module.frame_count - 1 ? 'already the last frame' : '', (item, frame) => moveTimelineFrame(item, frame, 1));
+    const keys = document.createElement('p'); keys.className = 'timeline-keys';
+    keys.textContent = 'Keys on the timeline: ← → step · Home/End first/last · Shift+← → move frame · D duplicate · Delete remove';
+    context.append(
+      group('Playhead', playhead, seekActions),
+      group('Frames', frameActions, keys),
+      group('Selected layer on this frame', summary, actions, status),
+    );
+    return context;
   }
 
   function renderLayerTimeline(module, container) {
@@ -2079,6 +2106,7 @@
     const title = document.createElement('div'); title.className = 'layer-timeline-title'; title.textContent = 'Layer timeline · top rows are in front';
     const legend = document.createElement('span'); legend.className = 'layer-timeline-legend'; legend.textContent = '◆ keyframe  ● frame edit  · present  ○ hidden'; title.append(legend);
     const context = renderTimelineContext(module, state);
+    container.addEventListener('keydown', event => onTimelineKeydown(module, event));
     container.addEventListener('pointerdown', event => {
       const drag = state.timelineDrag;
       if (drag && event.pointerId !== drag.pointerId) cancelTimelineDrag(state);
@@ -2088,9 +2116,9 @@
     }, {capture: true, passive: true});
     const scroll = document.createElement('div'); scroll.className = 'aseprite-timeline-scroll';
     const grid = document.createElement('div'); grid.className = 'aseprite-timeline'; grid.style.gridTemplateColumns = `var(--timeline-label-size) repeat(${module.frame_count},var(--timeline-frame-size))`;
-    const corner = document.createElement('div'); corner.className = 'layer-track-corner'; corner.textContent = 'Layer / frame'; grid.append(corner);
+    const corner = document.createElement('div'); corner.className = 'layer-track-corner'; corner.textContent = 'Frames'; grid.append(corner);
     for (let frame = 0; frame < module.frame_count; frame++) {
-      const header = document.createElement('button'); header.type = 'button'; header.className = 'frame-chip' + (frame === state.frame ? ' active' : ''); header.dataset.frame = frame; header.textContent = frame + 1; header.title = 'Select frame ' + (frame + 1); wireTimelineAction(header, () => { state.frame = frame; refreshAdvanced(module.id); }); grid.append(header);
+      const header = document.createElement('button'); header.type = 'button'; header.className = 'frame-chip' + (frame === state.frame ? ' active' : ''); header.dataset.frame = frame; header.textContent = frame + 1; header.title = 'Select frame ' + (frame + 1) + ' (' + (frame / module.fps).toFixed(2) + ' s)'; header.setAttribute('aria-label', 'Frame ' + (frame + 1) + (frame === state.frame ? ', current' : '')); if (frame === state.frame) header.setAttribute('aria-current', 'true'); header.setAttribute('aria-keyshortcuts', 'ArrowLeft ArrowRight Home End'); wireTimelineAction(header, () => { state.frame = frame; refreshAdvanced(module.id); }); grid.append(header);
     }
     const currentStack = [...orderedLayersForFrame(module, state.frame)].reverse();
     for (const {layer, properties: current, index, depth} of currentStack) {
@@ -2188,7 +2216,13 @@
 
   function updateTimelineSelection(module, container) {
     const state = stateFor(module);
-    for (const header of container.querySelectorAll('.frame-chip')) header.classList.toggle('active', Number(header.dataset.frame) === state.frame);
+    for (const header of container.querySelectorAll('.frame-chip')) {
+      const current = Number(header.dataset.frame) === state.frame;
+      header.classList.toggle('active', current);
+      header.setAttribute('aria-label', 'Frame ' + (Number(header.dataset.frame) + 1) + (current ? ', current' : ''));
+      if (current) header.setAttribute('aria-current', 'true'); else header.removeAttribute('aria-current');
+    }
+    const playhead = container.querySelector('.timeline-playhead'); if (playhead) playhead.textContent = timelinePlayheadText(module, state.frame).message;
     for (const cell of container.querySelectorAll('.layer-frame-cell')) {
       const selectedFrame = Number(cell.dataset.frame) === state.frame;
       cell.classList.toggle('selected-frame', selectedFrame);
@@ -2228,7 +2262,7 @@
     const requestedFrames = Math.max(1, Math.round(item.duration_ms * module.fps / 1000));
     const mediaFrames = Math.max(1, Math.min(120 - state.frame, requestedFrames));
     module.frame_count = Math.min(120, Math.max(module.frame_count, state.frame + mediaFrames));
-    return {item, mediaFrames, clipped: mediaFrames < requestedFrames};
+    return {item, mediaFrames, requestedFrames, startFrame: state.frame, clipped: mediaFrames < requestedFrames};
   }
   window.expandTimelineForAnimatedMedia = expandTimelineForAnimatedMedia;
 
@@ -2252,8 +2286,7 @@
     initializeLayerAtCurrentFrame(module, layer);
     stateFor(module).selected = layer.id;
     if (expansion) {
-      const clipping = expansion.clipped ? ' The 120-frame limit was reached.' : '';
-      setMessage(layer.name + ' added; ' + expansion.mediaFrames + ' timeline frames created automatically at ' + module.fps + ' FPS.' + clipping);
+      setMessage(layer.name + ' added; ' + mediaImportMessage(expansion.item, expansion.mediaFrames, expansion.requestedFrames, module.fps, expansion.startFrame));
     } else {
       setMessage(layer.name + ' added with a complete keyframe at frame ' + (stateFor(module).frame + 1) + '.');
     }
@@ -2305,15 +2338,139 @@
   }
   window.uploadAdvancedMedia = uploadAdvancedMedia;
 
+  // Roadmap 1.8: whole-frame timeline operations. Each rebuilds the timeline from a new frame order
+  // (order[newFrame] = oldFrame): keyframes keep their first position, and per-frame overrides pin any
+  // frame whose interpolated picture would otherwise change, so saved data and the panel match exactly.
+  const PLAYBACK_LABELS = {loop: 'Loop', ping_pong: 'Ping-pong', hold: 'Hold last frame'};
+
+  function reorderTimelineFrames(module, order) {
+    const desired = order.map(oldFrame => new Map(module.layers.map(layer => [layer.id, animatablePixelProperties(layer, resolvedProperties(module, layer, oldFrame))])));
+    const firstPosition = new Map();
+    order.forEach((oldFrame, newFrame) => { if (!firstPosition.has(oldFrame)) firstPosition.set(oldFrame, newFrame); });
+    const next = clone(module);
+    next.frame_count = order.length;
+    next.overrides = [];
+    for (const layer of next.layers) {
+      layer.keyframes = layer.keyframes.filter(item => firstPosition.has(item.frame)).map(item => ({...item, frame: firstPosition.get(item.frame)})).sort((a, b) => a.frame - b.frame);
+    }
+    for (let frame = 0; frame < order.length; frame++) {
+      for (const layer of next.layers) {
+        const want = desired[frame].get(layer.id), have = animatablePixelProperties(layer, resolvedProperties(next, layer, frame)), properties = {};
+        for (const [name, value] of Object.entries(want)) if (JSON.stringify(have[name]) !== JSON.stringify(value)) properties[name] = clone(value);
+        if (Object.keys(properties).length) next.overrides.push({frame, layer_id: layer.id, properties});
+      }
+    }
+    if (next.overrides.length > 512) return {changed: false, reason: 'override_limit', module, frame: null};
+    return {changed: true, module: next};
+  }
+
+  function moveTimelineFrame(module, frame, direction) {
+    const target = frame + direction;
+    if (!Number.isInteger(frame) || !Number.isInteger(target) || frame < 0 || target < 0 || frame >= module.frame_count || target >= module.frame_count) return {changed: false, reason: 'out_of_bounds', module, frame};
+    const order = [...Array(module.frame_count).keys()]; [order[frame], order[target]] = [order[target], order[frame]];
+    const result = reorderTimelineFrames(module, order);
+    return result.changed ? {...result, frame: target} : {...result, frame};
+  }
+
+  function deleteTimelineFrame(module, frame) {
+    if (module.frame_count <= 1) return {changed: false, reason: 'last_frame', module, frame};
+    if (!Number.isInteger(frame) || frame < 0 || frame >= module.frame_count) return {changed: false, reason: 'out_of_bounds', module, frame};
+    const result = reorderTimelineFrames(module, [...Array(module.frame_count).keys()].filter(item => item !== frame));
+    return result.changed ? {...result, frame: Math.min(frame, module.frame_count - 2)} : {...result, frame};
+  }
+
+  function insertTimelineFrame(module, frame) {
+    if (module.frame_count >= 120) return {changed: false, reason: 'frame_limit', module, frame};
+    if (!Number.isInteger(frame) || frame < 0 || frame >= module.frame_count) return {changed: false, reason: 'out_of_bounds', module, frame};
+    const order = [...Array(module.frame_count).keys()]; order.splice(frame + 1, 0, frame);
+    const result = reorderTimelineFrames(module, order);
+    return result.changed ? {...result, frame: frame + 1} : {...result, frame};
+  }
+
+  function timelinePlayheadText(module, frame) {
+    const seconds = value => (value / module.fps).toFixed(2);
+    return {changed: false, module, frame, message: `Frame ${frame + 1} of ${module.frame_count} · ${seconds(frame)} s of ${seconds(module.frame_count)} s · ${module.fps} FPS · ${PLAYBACK_LABELS[module.playback] || module.playback}`};
+  }
+
+  function mediaLayerStartFrame(layer, frame) { return frame - mediaFrameIndex(layer, frame); }
+
+  function mediaImportMessage(item, mediaFrames, requestedFrames, fps, startFrame) {
+    let message = mediaFrames + ' timeline frames created automatically at ' + fps + ' FPS.';
+    if (mediaFrames < requestedFrames) {
+      const fitFps = Math.floor((120 - startFrame) * 1000 / item.duration_ms);
+      message += ` The 120-frame limit was reached: only the first ${(mediaFrames / fps).toFixed(2)} s of ${(item.duration_ms / 1000).toFixed(2)} s plays.`
+        + (fitFps >= 1 ? ` Set FPS to ${fitFps} FPS or lower to fit all of it.` : ' Shorten the clip to fit all of it.');
+    }
+    return message;
+  }
+
+  // Choosing a GIF/MP4 on an existing media layer builds its frames like adding a new one does.
+  function adoptMediaSource(module, layerId, source, frame) {
+    const item = mediaItems.find(candidate => candidate.name === source), layer = module.layers.find(candidate => candidate.id === layerId);
+    if (!item?.animated || !item.duration_ms || !layer) return {changed: false, reason: 'not_animated', module, frame};
+    const next = clone(module), startFrame = Math.max(0, Math.min(119, mediaLayerStartFrame(layer, frame)));
+    // A single-frame canvas has no timing to preserve, so it adopts the media's own rate and loops it.
+    const starterTimeline = next.frame_count === 1;
+    if (starterTimeline) { next.fps = item.fps; next.playback = 'loop'; }
+    const requestedFrames = Math.max(1, Math.round(item.duration_ms * next.fps / 1000));
+    const mediaFrames = Math.max(1, Math.min(120 - startFrame, requestedFrames));
+    const frameCount = Math.min(120, Math.max(next.frame_count, startFrame + mediaFrames));
+    const changed = frameCount !== module.frame_count || next.fps !== module.fps || next.playback !== module.playback;
+    next.frame_count = frameCount;
+    return {changed, module: next, frame, message: mediaImportMessage(item, mediaFrames, requestedFrames, next.fps, startFrame)};
+  }
+
+  globalThis.matrixTimelineFrames = Object.freeze({
+    moveFrame: moveTimelineFrame, deleteFrame: deleteTimelineFrame, insertFrame: insertTimelineFrame,
+    playheadText: timelinePlayheadText, adoptMediaSource,
+  });
+
+  const FRAME_ACTION_REASONS = {out_of_bounds: 'no frame on that side', last_frame: 'an animation needs at least one frame', frame_limit: 'animations are limited to 120 frames', override_limit: 'too many per-frame edits to rebuild this order'};
+
+  function applyTimelineFrameOperation(id, operation, focusFrame = true) {
+    const module = byId(id), state = module && stateFor(module); if (!module || !state) return false;
+    const result = operation(module, state.frame);
+    if (!result.changed) { setMessage('Frame not changed: ' + (FRAME_ACTION_REASONS[result.reason] || result.reason) + '.', true); return false; }
+    const index = customModules.findIndex(item => item.id === id); if (index < 0) return false;
+    if (state.playing) { clearInterval(state.timer); state.playing = false; }
+    customModules[index] = result.module; state.frame = result.frame;
+    syncCustomModuleUI(); refreshAdvanced(id, true);
+    if (focusFrame) focusTimelineFrame(id, result.frame);
+    return true;
+  }
+
+  function focusTimelineFrame(id, frame) {
+    requestAnimationFrame(() => requestAnimationFrame(() => document.querySelector(`.custom-module-card[data-id="${CSS.escape(id)}"] .frame-chip[data-frame="${frame}"]`)?.focus({preventScroll: true})));
+  }
+
+  function seekTimelineFrame(id, frame) {
+    const module = byId(id), state = module && stateFor(module); if (!module || !state) return false;
+    const target = Math.max(0, Math.min(module.frame_count - 1, frame)); if (target === state.frame) return false;
+    state.frame = target; refreshAdvanced(id); focusTimelineFrame(id, target); return true;
+  }
+
+  function onTimelineKeydown(module, event) {
+    if (event.defaultPrevented || event.altKey || event.ctrlKey || event.metaKey) return;
+    if (event.target.matches?.('input,textarea,select,[contenteditable="true"]')) return;
+    const state = stateFor(module), key = event.key;
+    let handled = true;
+    if (event.shiftKey && key === 'ArrowLeft') applyTimelineFrameOperation(module.id, (item, frame) => moveTimelineFrame(item, frame, -1));
+    else if (event.shiftKey && key === 'ArrowRight') applyTimelineFrameOperation(module.id, (item, frame) => moveTimelineFrame(item, frame, 1));
+    else if (event.shiftKey) handled = false;
+    else if (key === 'ArrowLeft') seekTimelineFrame(module.id, state.frame - 1);
+    else if (key === 'ArrowRight') seekTimelineFrame(module.id, state.frame + 1);
+    else if (key === 'Home') seekTimelineFrame(module.id, 0);
+    else if (key === 'End') seekTimelineFrame(module.id, module.frame_count - 1);
+    else if (key.toLowerCase() === 'd') applyTimelineFrameOperation(module.id, insertTimelineFrame);
+    else if (key === 'Delete') { if (confirm('Delete frame ' + (state.frame + 1) + '?')) applyTimelineFrameOperation(module.id, deleteTimelineFrame); }
+    else handled = false;
+    if (handled) { event.preventDefault(); event.stopPropagation(); }
+  }
+
   function copyFrame(module) { const state = stateFor(module); state.clipboard = module.layers.map(layer => ({layer_id: layer.id, properties: animatablePixelProperties(layer, resolvedProperties(module, layer, state.frame))})); setMessage('Frame ' + (state.frame + 1) + ' copied.'); }
   function pasteFrame(module) { const state = stateFor(module); if (!state.clipboard) return; for (const snapshot of state.clipboard) { const layer = module.layers.find(item => item.id === snapshot.layer_id); if (layer) { module.overrides = module.overrides.filter(item => item.frame !== state.frame || item.layer_id !== layer.id); module.overrides.push({frame: state.frame, layer_id: layer.id, properties: clone(snapshot.properties)}); } } refreshAdvanced(module.id, true); }
-  function duplicateFrame(module) {
-    if (module.frame_count >= 120) { setMessage('Animations are limited to 120 frames.', true); return; }
-    const state = stateFor(module), insert = state.frame + 1, snapshots = module.layers.map(layer => ({layer_id: layer.id, properties: animatablePixelProperties(layer, resolvedProperties(module, layer, state.frame))}));
-    for (const layer of module.layers) for (const keyframe of layer.keyframes) if (keyframe.frame >= insert) keyframe.frame++;
-    for (const override of module.overrides) if (override.frame >= insert) override.frame++;
-    module.frame_count++; state.frame = insert; for (const snapshot of snapshots) module.overrides.push({frame: insert, layer_id: snapshot.layer_id, properties: snapshot.properties}); refreshAdvanced(module.id, true);
-  }
+  function duplicateFrame(module) { return applyTimelineFrameOperation(module.id, insertTimelineFrame); }
+
 
   window.advanceCanvasPlaybackFrame = function advanceCanvasPlaybackFrame(frame, frameCount, playback, direction = 1) {
     frameCount = Math.max(1, Math.round(frameCount));
@@ -2404,7 +2561,7 @@
     const canvasWrap = document.createElement('div'); canvasWrap.className = 'editor-canvas-wrap'; const canvas = document.createElement('canvas'); canvas.className = 'editor-canvas'; canvas.width = 640; canvas.height = 320; canvas.setAttribute('aria-label', 'Direct 64 by 32 custom module canvas editor'); canvas.tabIndex = 0; const cursor = document.createElement('div'); cursor.className = 'pixel-cursor'; cursor.hidden = true; cursor.setAttribute('aria-hidden', 'true'); canvasWrap.append(canvas, cursor);
     const pixelLayer = selectedPixelLayer(module), pixelToolbar = pixelLayer ? renderPixelToolbar(module) : null;
     const help = document.createElement('p'); help.className = 'canvas-help'; help.textContent = 'Drag a layer to move it. Drag the square handle to resize, the round handle to rotate, or paint directly with the pixel toolbar when a Pixels layer is selected. Higher depth values draw in front; keyframe Depth to change the stack on a chosen frame.';
-    const timelineTools = document.createElement('div'); timelineTools.className = 'timeline-toolbar'; const onion = moduleControl('Onion skin', state.onion, 'checkbox', value => { state.onion = value; drawEditor(module, canvas); }); timelineTools.append(onion, makeButton(state.playing ? 'Stop browser preview' : 'Play browser preview', () => playBrowserPreview(module), 'btn primary'), makeButton('Copy frame', () => copyFrame(module)), makeButton('Paste frame', () => pasteFrame(module)), makeButton('Duplicate frame', () => duplicateFrame(module)));
+    const timelineTools = document.createElement('div'); timelineTools.className = 'timeline-toolbar'; const onion = moduleControl('Onion skin', state.onion, 'checkbox', value => { state.onion = value; drawEditor(module, canvas); }); timelineTools.append(onion, makeButton(state.playing ? 'Stop browser preview' : 'Play browser preview', () => playBrowserPreview(module), 'btn primary'), makeButton('Copy frame', () => copyFrame(module)), makeButton('Paste frame', () => pasteFrame(module)));
     const timeline = document.createElement('div'); timeline.className = 'timeline';
     stage.append(nameRow, templateRow, ...(pixelToolbar ? [pixelToolbar] : []), canvasWrap, ...(pixelToolbar ? [Object.assign(document.createElement('p'), {className: 'pixel-status', textContent: ''})] : []), help, timelineTools, timeline); const layers = document.createElement('div'); const properties = document.createElement('div'); properties.className = 'advanced-section'; sidebar.append(layers, properties); layout.append(stage, sidebar); card.append(layout);
     renderTimeline(module, timeline); renderLayers(module, layers); renderProperties(module, properties); bindCanvasPointerTransforms(module, canvas); drawEditor(module, canvas); if (pixelToolbar) syncPixelToolbar(module); restoreEditorViewState(card, state);
