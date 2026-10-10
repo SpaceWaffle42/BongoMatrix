@@ -6,15 +6,19 @@
     python3 deploy/ship.py --rollback STAGE   # restore the code backed up by an earlier --apply
 
 Gates (all must hold, otherwise nothing on the device changes):
-  * the commit is origin/main and its newest GitLab pipeline succeeded;
-  * the commit's APPLICATION_VERSION differs from what production serves;
-  * the only differing files are runtime files (no state, config, media, secrets).
+  * the commit is origin/main and its newest GitLab pipeline on ref main succeeded;
+  * production serves exactly one identifiable version and the commit's APPLICATION_VERSION
+    differs from it;
+  * the only differing files are runtime files (no state, config, media, secrets): a changed
+    requirements.txt or installed matrix-web.service unit, or a runtime file present on
+    production but deleted on main, refuses because this tool cannot apply those.
 
 The device-side installer (deploy/ship_remote.py) stops matrix-web, backs up the replaced
 code and an opaque copy of data/ + resources/media, publishes each file atomically with
 the production owner/mode, restarts, and restores the old code by itself if the service
 fails to come back. ship.py then requires the public pairing page to show the new version
-and automatically rolls back if it does not. User state, config, drafts, uploads and the
+(or the check itself fails) and automatically rolls back if it does not; a rollback only
+counts when the previous version is served again. User state, config, drafts, uploads and the
 pairing PIN are never written.
 """
 from __future__ import annotations
@@ -50,6 +54,10 @@ RUNTIME_TOP_LEVEL = re.compile(r'^[A-Za-z0-9_]+\.py$')
 RUNTIME_DIRS = ('app/', 'modules/', 'setup/')
 NEVER = ('data/', 'resources/', 'venv/', '.venv', 'backups/', '.git/')
 VERSION_RE = re.compile(r'APPLICATION_VERSION\s*=\s*"([^"]+)"')
+# Non-runtime files whose change needs work this tool does not do (pip install, unit reload).
+DEPENDENCY_FILES = ('requirements.txt',)
+UNIT_KEY = '@systemd/matrix-web.service'          # installed unit, compared with deploy/matrix-web.service
+UNIT_SOURCE = 'deploy/matrix-web.service'
 
 
 class ShipError(RuntimeError):
@@ -76,6 +84,25 @@ def version_of(webapp_source: bytes) -> str:
 def plan_files(main_files: dict[str, str], prod_files: dict[str, str]) -> list[str]:
     """Runtime paths whose bytes differ from production (or are new)."""
     return sorted(p for p, h in main_files.items() if is_runtime(p) and prod_files.get(p) != h)
+
+
+def unsupported_changes(main_files: dict[str, str], prod_files: dict[str, str]) -> list[str]:
+    """Differences this installer cannot apply; any entry refuses the deploy.
+
+    main_files is the complete tree of the commit (all paths), prod_files the production
+    inventory (state directories excluded) plus UNIT_KEY for the installed unit.
+    """
+    problems = []
+    for name in DEPENDENCY_FILES:
+        if main_files.get(name) != prod_files.get(name):
+            problems.append(f'{name} differs from production (dependency install not supported)')
+    if UNIT_SOURCE in main_files and main_files[UNIT_SOURCE] != prod_files.get(UNIT_KEY):
+        problems.append(f'{UNIT_SOURCE} differs from the installed unit (unit install not supported)')
+    stale = sorted(p for p in prod_files if is_runtime(p) and p not in main_files)
+    if stale:
+        problems.append('runtime file(s) on production are not in main (deletion not supported): '
+                        + ', '.join(stale))
+    return problems
 
 
 def public_versions(html: bytes) -> list[str]:
@@ -117,10 +144,13 @@ def gitlab(path: str):
 
 
 def ci_status(sha: str) -> tuple[str, int | None]:
-    pipelines = gitlab(f'/pipelines?sha={sha}&order_by=id&sort=desc&per_page=5')
+    """Status of the newest pipeline for this SHA on ref main (other refs never count)."""
+    pipelines = gitlab(f'/pipelines?sha={sha}&ref=main&order_by=id&sort=desc&per_page=20')
+    pipelines = [p for p in pipelines if p.get('ref') == 'main' and p.get('sha') == sha]
     if not pipelines:
         return 'missing', None
-    return pipelines[0]['status'], pipelines[0]['id']
+    newest = max(pipelines, key=lambda p: p['id'])
+    return newest['status'], newest['id']
 
 
 def fetch_public() -> bytes:
@@ -135,17 +165,23 @@ PROD_INVENTORY = (
     " rel=p.relative_to(r).as_posix()\n"
     " if rel.startswith(('data/','resources/','venv/','.venv','backups/','.git/')) or '__pycache__' in rel:continue\n"
     " if p.is_file() and not p.is_symlink():o[rel]=hashlib.sha256(p.read_bytes()).hexdigest()\n"
+    "u=pathlib.Path('/etc/systemd/system/matrix-web.service')\n"
+    "if u.is_file():o[%r]=hashlib.sha256(u.read_bytes()).hexdigest()\n"
     "print(json.dumps(o))"
-) % REMOTE_ROOT
+) % (REMOTE_ROOT, UNIT_KEY)
 
 
 def build_plan(sha: str):
+    """Returns (runtime files to publish, candidate version, unsupported differences)."""
     tree = git('ls-tree', '-r', '--name-only', sha).decode().split('\n')
-    main = {p: sha256(git('show', f'{sha}:{p}')) for p in tree if p and is_runtime(p)}
+    relevant = [p for p in tree if p and (is_runtime(p) or p in DEPENDENCY_FILES or p == UNIT_SOURCE)]
+    main = {p: sha256(git('show', f'{sha}:{p}')) for p in relevant}
+    tracked = {p: '' for p in tree if p}
+    tracked.update(main)
     prod = json.loads(remote_python(PROD_INVENTORY))
     files = plan_files(main, prod)
     version = version_of(git('show', f'{sha}:webapp.py'))
-    return files, version, prod
+    return files, version, unsupported_changes(tracked, prod)
 
 
 def write_result(result: dict[str, Any]) -> Path:
@@ -204,13 +240,32 @@ def run_installer(stage: str, rollback: bool) -> dict:
     return report
 
 
+def roll_back(stage: str, previous: str) -> dict[str, Any]:
+    """Automatic rollback; only ROLLED_BACK when the device and public page both confirm it."""
+    out: dict[str, Any] = {}
+    try:
+        back = stage_and_run([], '', rollback_stage=stage)
+        out['rollback'] = back
+        restored = public_versions(fetch_public())
+        out['public_versions_after_rollback'] = restored
+        if back.get('status') == 'ROLLED_BACK_NORMAL' and restored == [previous]:
+            out['status'] = 'ROLLED_BACK'
+        else:
+            out['status'] = 'ROLLBACK_FAILED'
+            out['error'] = f'rollback status {back.get("status")}, public page shows {restored}, expected {previous}'
+    except Exception as error:
+        out.update(status='ROLLBACK_FAILED', error=f'{type(error).__name__}: {error}')
+    print(f'{out["status"]}' + (f': {out["error"]}' if 'error' in out else f' to {previous}'))
+    if out['status'] != 'ROLLED_BACK':
+        print(f'operator action needed; retry: python3 deploy/ship.py --rollback {stage}', file=sys.stderr)
+    return out
+
+
 def main(argv=None) -> int:
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     group = parser.add_mutually_exclusive_group()
     group.add_argument('--apply', action='store_true', help='deploy origin/main to production')
     group.add_argument('--rollback', metavar='STAGE', help='restore code backed up by an earlier --apply')
-    parser.add_argument('--allow-same-version', action='store_true',
-                        help='deploy even if production already reports this version')
     args = parser.parse_args(argv)
     mode = 'rollback' if args.rollback else 'apply' if args.apply else 'dry-run'
     result: dict[str, Any] = {'mode': mode, 'started_utc': datetime.datetime.now(datetime.timezone.utc).isoformat(timespec='seconds')}
@@ -223,7 +278,7 @@ def main(argv=None) -> int:
         git('fetch', '-q', 'origin', 'main')
         sha = git('rev-parse', 'origin/main').decode().strip()
         status, pipeline = ci_status(sha)
-        files, version, _ = build_plan(sha)
+        files, version, unsupported = build_plan(sha)
         live = public_versions(fetch_public())
         result.update(source_sha=sha, ci_pipeline=pipeline, ci_status=status, version=version,
                       production_versions=live, files=files)
@@ -235,10 +290,13 @@ def main(argv=None) -> int:
             problems.append(f'CI for {sha[:10]} is {status}, not success')
         if not files:
             problems.append('production already matches origin/main')
-        if live == [version] and not args.allow_same_version:
+        if len(live) != 1:
+            problems.append(f'cannot identify the production version (public page shows {live or "none"})')
+        elif live == [version]:
             problems.append(f'production already reports {version}; bump APPLICATION_VERSION')
         if 'webapp.py' not in files and files:
             problems.append('webapp.py (APPLICATION_VERSION) unchanged; bump the visible version')
+        problems.extend(unsupported)
         result['problems'] = problems
         if problems:
             print('NOT DEPLOYABLE:\n  ' + '\n  '.join(problems))
@@ -248,18 +306,27 @@ def main(argv=None) -> int:
             print('dry run OK; rerun with --apply to deploy')
             result['status'] = 'DRY_RUN_OK'
             return 0
+        previous = live[0]
         execution = stage_and_run(files, sha)
         result['execution'] = execution
-        after = public_versions(fetch_public())
-        result['public_versions_after'] = after
         if execution.get('status') != 'INSTALLED':
             print(f'installer failed: {execution.get("status")} {execution.get("primary_error")}')
-            result.update(status='FAILED', public_versions_after_failure=after)
+            result['status'] = 'FAILED'
+            try:
+                result['public_versions_after_failure'] = public_versions(fetch_public())
+            except Exception as error:      # report only; the installer already did its recovery
+                result['public_check_error'] = f'{type(error).__name__}: {error}'
             return 2
-        if after != [version]:
-            print(f'public page shows {after}, expected {version}; rolling back')
-            back = stage_and_run([], '', rollback_stage=execution['stage'])
-            result.update(status='ROLLED_BACK', rollback=back, public_versions_after_rollback=public_versions(fetch_public()))
+        try:
+            after = public_versions(fetch_public())
+            result['public_versions_after'] = after
+            check_failure = None if after == [version] else f'public page shows {after}, expected {version}'
+        except Exception as error:
+            check_failure = f'public version check failed: {type(error).__name__}: {error}'
+        if check_failure:
+            print(check_failure + '; rolling back')
+            result['public_check_failure'] = check_failure
+            result.update(roll_back(execution['stage'], previous))
             return 2
         result['status'] = 'DEPLOYED'
         print(f'DEPLOYED {version}; rollback: python3 deploy/ship.py --rollback {execution["stage"]}')
