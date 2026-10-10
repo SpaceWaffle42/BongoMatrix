@@ -59,6 +59,10 @@ AVAILABLE_FONTS = frozenset(available_font_names())
 BASIC_BORDER_STYLES = ("none", "solid", "inset", "dotted", "dashed", "double")
 
 
+# Basic media modules: animated sources derive their runtime, static images keep the user duration.
+BASIC_ANIMATED_MEDIA_SUFFIXES = frozenset({".gif", ".mp4"})
+BASIC_MEDIA_SUFFIXES = BASIC_ANIMATED_MEDIA_SUFFIXES | {".png", ".jpg", ".jpeg", ".webp"}
+
 def _serialize_config(config):
     return json.dumps(config, sort_keys=True, separators=(",", ":")).encode("utf-8")
 
@@ -1015,9 +1019,9 @@ def validate_config(
                 raise ValueError("custom media modules have invalid fields")
             if (
                 not _is_safe_media_reference(item["source"])
-                or Path(item["source"]).suffix.lower() not in {".gif", ".mp4"}
+                or Path(item["source"]).suffix.lower() not in BASIC_MEDIA_SUFFIXES
             ):
-                raise ValueError("custom media source must be a GIF or MP4")
+                raise ValueError("custom media source must be a PNG, JPEG, WebP, GIF or MP4")
             if item["fit"] not in {"contain", "cover", "stretch", "manual"}:
                 raise ValueError("custom media fit must be contain, cover, stretch, or manual")
             for key, low, high in (
@@ -2005,6 +2009,8 @@ sys.stdout.write(json.dumps(result, separators=(",", ":")))
                 if module is None:
                     continue
                 reference = module["source"]
+                if Path(reference).suffix.lower() not in BASIC_ANIMATED_MEDIA_SUFFIXES:
+                    continue
                 opened_source = opened.get(reference)
                 if opened_source is failure:
                     continue

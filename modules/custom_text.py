@@ -475,6 +475,26 @@ def basic_text_frames(matrix, module_config, duration, stop_event=None):
             )
 
 
+def _run_static_image(matrix, duration, stop_event, module_config, pinned_handle):
+    """Show one fitted still (PNG/JPEG/WebP) for the playlist duration."""
+    with pinned_handle.dup_file() as media_file:
+        with Image.open(media_file) as opened:
+            image = opened.convert("RGB")
+    if stop_event is not None and stop_event.is_set() is True:
+        return False
+    matrix.clear()
+    matrix.draw_image(
+        image, module_config["x"], module_config["y"],
+        width=module_config["width"], height=module_config["height"],
+        fit=module_config["fit"],
+    )
+    if stop_event is not None and stop_event.is_set() is True:
+        return False
+    matrix.swap()
+    _wait(stop_event, max(0.0, float(duration)))
+    return True
+
+
 def run(
     matrix, config, duration=15, stop_event=None, module_config=None,
     *, pinned_handles=None,
@@ -491,10 +511,14 @@ def run(
         )
     if module_config["type"] == "media":
         source = module_config["source"]
-        method = matrix.show_gif if source.lower().endswith(".gif") else matrix.show_video
         pinned_handle = (pinned_handles or {}).get(source)
         if pinned_handle is None:
             raise ValueError("custom media capability is missing")
+        if not source.lower().endswith((".gif", ".mp4")):
+            return _run_static_image(
+                matrix, duration, stop_event, module_config, pinned_handle,
+            )
+        method = matrix.show_gif if source.lower().endswith(".gif") else matrix.show_video
         options = {
             "x": module_config["x"], "y": module_config["y"],
             "width": module_config["width"], "height": module_config["height"],

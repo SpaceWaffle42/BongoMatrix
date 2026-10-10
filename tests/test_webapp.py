@@ -1782,7 +1782,9 @@ try{
         self.assertIn("source_frames/20/rate", body)
         self.assertIn("else if(isMediaAutomatic)", body)
         self.assertIn("duration.value=seconds.toFixed(2)", body)
-        self.assertIn("module?.type==='media')runtime.textContent", body)
+        # Roadmap 1.9: only animated media (GIF/MP4) has a derived runtime; stills keep the user duration.
+        self.assertIn("animatedMedia=module?.type==='media'&&!isStaticMediaSource(module.source)", body)
+        self.assertIn("else if(animatedMedia)runtime.textContent", body)
 
     def test_priority_1_6_static_announcement_media_hides_speed_control(self):
         self.pair_browser()

@@ -103,7 +103,9 @@ class CaptureMatrix:
                 x, y = (canvas.width - width) // 2, (canvas.height - height) // 2
             width = canvas.width if width is None else width
             height = canvas.height if height is None else height
-            prepared = prepared.resize((int(width), int(height)))
+            if prepared.size != (int(width), int(height)):
+                # Same filter as Matrix._prepare_media_fit so preview pixels match the panel.
+                prepared = prepared.resize((int(width), int(height)), Image.Resampling.LANCZOS)
         elif width is not None and height is not None:
             if keep_aspect:
                 prepared = prepared.copy()
