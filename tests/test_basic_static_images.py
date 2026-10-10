@@ -244,6 +244,20 @@ class StaticImageDashboardTests(unittest.TestCase):
         self.assertIn("const still = isStaticMediaSource(current.source);", asset)
         self.assertIn("loopsControl.hidden = speedControl.hidden = still;", asset)
 
+    def test_switching_mode_reads_stored_module_until_new_fields_render(self):
+        asset = (ROOT / "app" / "static" / "custom_canvas.js").read_text()
+        start = asset.index("  function simpleModuleFromCard(card)")
+        end = asset.index("\n  }\n", start) + 4
+        probe = r"""
+let customModules = [{id: 'custom_a', name: 'A', type: 'text_scroll', text: 'HI'}];
+const fields = {type: {value: 'media'}, name: {value: 'A'}, text: {value: 'HI'}};
+const card = {dataset: {id: 'custom_a'}, querySelector: selector => fields[selector.match(/data-field=(\w+)/)[1]] || null};
+""" + asset[start:end] + r"""
+console.log(JSON.stringify(simpleModuleFromCard(card)));
+"""
+        result = subprocess.run(["node", "-e", probe], check=True, capture_output=True, text=True, timeout=30)
+        self.assertEqual(json.loads(result.stdout)["type"], "text_scroll")
+
 
 if __name__ == "__main__":
     unittest.main()

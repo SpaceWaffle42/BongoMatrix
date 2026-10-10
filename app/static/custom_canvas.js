@@ -728,6 +728,13 @@
   function simpleModuleFromCard(card) {
     const type = card.querySelector('[data-field=type]').value;
     const name = card.querySelector('[data-field=name]').value.trim();
+    // While the Mode select fires `input` (before its `change` re-render), the card still shows the
+    // previous subtype's fields; keep the stored module until the new fields exist.
+    const rendered = card.querySelector(type === 'media' ? '[data-field=source]' : '[data-field=text]');
+    if (!rendered) {
+      const stored = customModules.find(module => module.id === card.dataset.id);
+      if (stored) return structuredClone(stored);
+    }
     if (type === 'media') {
       return {
         id: card.dataset.id, name, type,

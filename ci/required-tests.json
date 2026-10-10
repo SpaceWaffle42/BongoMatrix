@@ -60,6 +60,7 @@
     "StaticImageDashboardTests.test_live_card_renderer_offers_static_images",
     "StaticImageDashboardTests.test_media_file_choices_include_static_images",
     "StaticImageDashboardTests.test_static_image_hides_animation_controls_and_keeps_editable_duration",
+    "StaticImageDashboardTests.test_switching_mode_reads_stored_module_until_new_fields_render",
     "StaticImageRenderingTests.test_browser_preview_fit_matches_physical_matrix_for_every_fit",
     "StaticImageRenderingTests.test_edit_preview_frame_matches_physical_output",
     "StaticImageRenderingTests.test_physical_run_requires_the_pinned_capability",
