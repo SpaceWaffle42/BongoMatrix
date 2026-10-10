@@ -55,6 +55,13 @@
     "ApiTimeoutContractTests.test_outbound_api_defaults_are_thirty_seconds",
     "ApiTimeoutContractTests.test_provider_call_sites_do_not_replace_the_shared_default_with_short_literals"
   ],
+  "test_canvas_starters": [
+    "CanvasStarterExampleTests.test_editor_outlines_rectangles_instead_of_stroking_them_with_their_own_width",
+    "CanvasStarterExampleTests.test_every_starter_draws_visible_motion_on_the_physical_renderer",
+    "CanvasStarterExampleTests.test_every_starter_is_an_animated_loop_that_the_config_store_accepts",
+    "CanvasStarterExampleTests.test_every_starter_is_deterministic_apart_from_fresh_layer_ids",
+    "CanvasStarterExampleTests.test_starter_catalogue_is_remastered_and_extended"
+  ],
   "test_ci_collection": [
     "CollectionContractTests.test_duplicate_required_module_keys_reject_missing_earlier_behavior",
     "CollectionContractTests.test_added_valid_test_is_allowed",
@@ -1398,7 +1405,7 @@
     "WebAppTests.test_advanced_editor_expands_timeline_when_animated_media_is_added",
     "WebAppTests.test_advanced_editor_exposes_rotation_for_text_time_pixels_and_line",
     "WebAppTests.test_advanced_editor_has_aseprite_style_layer_tracks_and_depth_controls",
-    "WebAppTests.test_advanced_editor_offers_five_valid_examples_including_matrix_rain_and_rainbow",
+    "WebAppTests.test_advanced_editor_offers_valid_examples_including_matrix_rain_and_rainbow",
     "WebAppTests.test_advanced_successful_upload_reports_later_refresh_failure_as_committed",
     "WebAppTests.test_advanced_successful_upload_reports_silent_layer_adoption_failure",
     "WebAppTests.test_advanced_upload_adopts_committed_item_without_losing_warning",

@@ -12607,10 +12607,10 @@ console.log(JSON.stringify({
         self.assertIn("'#ff0000'", asset)
         self.assertIn("'#00ff00'", asset)
         self.assertIn("'#0000ff'", asset)
-        self.assertIn("frame_count: 32", asset)
+        self.assertIn("frame_count: frames, fps: 24", asset)
 
     @unittest.skipUnless(shutil.which("node"), "Node.js is required")
-    def test_advanced_editor_offers_five_valid_examples_including_matrix_rain_and_rainbow(self):
+    def test_advanced_editor_offers_valid_examples_including_matrix_rain_and_rainbow(self):
         harness = r"""
 const fs = require('fs');
 global.window = global;
@@ -12671,7 +12671,9 @@ process.stdout.write(JSON.stringify({
             [example["id"] for example in payload["examples"]],
             [
                 "spinning_square", "spinning_rgb_cube", "three_lines_circle",
-                "matrix_rain", "rainbow_pulse",
+                "matrix_rain", "rainbow_pulse", "neon_clock", "starfield_warp",
+                "bouncing_ball", "equalizer_bars", "pixel_heart", "chomp_chase",
+                "fireworks", "sunset", "rainbow_marquee",
             ],
         )
         modules = dict(zip(

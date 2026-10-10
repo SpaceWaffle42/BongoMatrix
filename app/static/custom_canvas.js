@@ -267,13 +267,74 @@
     return {id: safeId('layer_'), name: name || layerLabels[type] || type[0].toUpperCase() + type.slice(1), type, visible: true, properties: propertyDefaults(type, source), keyframes: []};
   }
 
+  // ---- Starter examples -------------------------------------------------------------------
+  // Every example is deterministic, uses only saved-schema layer types and stays inside the
+  // config_store limits (<=64 layers, <=512 keyframes, <=120 frames, <=8192 points).
+  const r2 = value => Math.round(value * 100) / 100;
+  const keyframe = (frame, properties, easing = 'linear') => ({frame, easing, properties});
+
+  function starterLayer(type, name, properties = {}, keyframes = []) {
+    const layer = newLayer(type, name);
+    Object.assign(layer.properties, properties);
+    layer.keyframes = keyframes;
+    return layer;
+  }
+
+  function useStarter(module, settings, layers) {
+    Object.assign(module, {background: '#000000', fps: 20, playback: 'loop', ...settings, layers, overrides: []});
+  }
+
+  function seededRandom(seed) {
+    let state = seed >>> 0;
+    return () => {
+      state = (Math.imul(state, 1664525) + 1013904223) >>> 0;
+      return state / 4294967296;
+    };
+  }
+
+  // Colour at `frame` along [[frame, '#rrggbb'], ...] stops.
+  function colourAt(stops, frame) {
+    const next = stops.findIndex(([stop]) => stop >= frame);
+    if (next <= 0) return stops[Math.max(0, next)][1];
+    const [leftFrame, left] = stops[next - 1], [rightFrame, right] = stops[next];
+    return interpolate(left, right, (frame - leftFrame) / (rightFrame - leftFrame));
+  }
+
+  // Keyframes for a value that moves `cycles` times through u in [0, 1) per loop and wraps
+  // between two adjacent frames, so a starter loops seamlessly with only a few keyframes.
+  function wrappingKeyframes(frameCount, phase, cycles, valueAt) {
+    const position = frame => (phase + cycles * frame / frameCount) % 1;
+    const frames = new Set([0, frameCount - 1]);
+    for (let frame = 0; frame < frameCount - 1; frame += 1) {
+      if (position(frame + 1) < position(frame)) frames.add(frame).add(frame + 1);
+    }
+    return [...frames].sort((a, b) => a - b).map(frame => keyframe(frame, valueAt(position(frame))));
+  }
+
+  function pixelArtBitmap(rows, palette, left, top) {
+    const bytes = new Uint8Array(PIXEL_BITMAP_BYTES);
+    rows.forEach((row, y) => [...row].forEach((key, x) => {
+      const colour = palette[key], px = left + x, py = top + y;
+      if (!colour || px < 0 || px >= 64 || py < 0 || py >= 32) return;
+      bytes.set([1, 3, 5].map(offset => parseInt(colour.slice(offset, offset + 2), 16)).concat(255), (py * 64 + px) * 4);
+    }));
+    return pixelBitmapBase64(bytes);
+  }
+
   function spinningSquare(module) {
-    const square = newLayer('rectangle', 'Spinning square');
-    square.keyframes = [
-      {frame: 0, easing: 'linear', properties: {rotation: 0}},
-      {frame: 23, easing: 'ease_in_out', properties: {rotation: 360}},
+    const squares = [
+      {size: 22, filled: false, turn: 90, colours: ['#00e5ff', '#ff3df2']},
+      {size: 14, filled: false, turn: -90, colours: ['#ffe14d', '#00ff9c']},
+      {size: 6, filled: true, turn: 180, colours: ['#ffffff', '#ff6a00']},
     ];
-    Object.assign(module, {background: '#000000', frame_count: 24, fps: 12, playback: 'loop', layers: [square], overrides: []});
+    const layers = squares.map(({size, filled, turn, colours}, index) => starterLayer('rectangle', 'Square ' + (index + 1), {
+      x: 32 - size / 2, y: 16 - size / 2, width: size, height: size, rotation: 0, colour: colours[0], filled,
+    }, [
+      keyframe(0, {rotation: 0, colour: colours[0]}),
+      keyframe(24, {rotation: turn / 2, colour: colours[1]}),
+      keyframe(47, {rotation: r2(turn * 47 / 48), colour: interpolate(colours[1], colours[0], 23 / 24)}),
+    ]));
+    useStarter(module, {frame_count: 48, fps: 24}, layers);
   }
 
   const cubeVertices = [
@@ -287,87 +348,324 @@
   ];
 
   function projectedCubeVertices(angle) {
-    const yaw = angle * Math.PI / 180, tilt = 24 * Math.PI / 180;
+    const yaw = angle * Math.PI / 180, tilt = (22 + 8 * Math.sin(angle * Math.PI / 180)) * Math.PI / 180;
     return cubeVertices.map(([x, y, z]) => {
       const rotatedX = x * Math.cos(yaw) + z * Math.sin(yaw);
       const rotatedZ = -x * Math.sin(yaw) + z * Math.cos(yaw);
       const tiltedY = y * Math.cos(tilt) - rotatedZ * Math.sin(tilt);
       const depth = y * Math.sin(tilt) + rotatedZ * Math.cos(tilt);
       const perspective = 3.2 / (4 + depth);
-      return [Math.round((32 + rotatedX * 11 * perspective) * 100) / 100, Math.round((16 + tiltedY * 11 * perspective) * 100) / 100];
+      return [r2(32 + rotatedX * 12 * perspective), r2(16 + tiltedY * 12 * perspective)];
     });
   }
 
   function spinningRgbCube(module) {
-    const stops = [[0, 0], [8, 90], [16, 180], [24, 270], [31, 360]];
-    const layers = cubeEdges.map(([start, end, colour], index) => {
-      const initial = projectedCubeVertices(0), layer = newLayer('line', 'Cube edge ' + (index + 1));
-      Object.assign(layer.properties, {x1: initial[start][0], y1: initial[start][1], x2: initial[end][0], y2: initial[end][1], width: 1, colour});
-      layer.keyframes = stops.map(([frame, angle]) => {
-        const points = projectedCubeVertices(angle);
-        return {frame, easing: 'linear', properties: {x1: points[start][0], y1: points[start][1], x2: points[end][0], y2: points[end][1], present: true}};
-      });
-      return layer;
-    });
-    Object.assign(module, {background: '#000000', frame_count: 32, fps: 16, playback: 'loop', layers, overrides: []});
+    const frames = 48, stops = [];
+    for (let frame = 0; frame < frames; frame += 3) stops.push(frame);
+    stops.push(frames - 1);
+    const at = frame => projectedCubeVertices(frame * 360 / frames);
+    const initial = at(0);
+    const edges = cubeEdges.map(([start, end, colour], index) => starterLayer('line', 'Cube edge ' + (index + 1), {
+      x1: initial[start][0], y1: initial[start][1], x2: initial[end][0], y2: initial[end][1], width: 1, colour,
+    }, stops.map(frame => {
+      const points = at(frame);
+      return keyframe(frame, {x1: points[start][0], y1: points[start][1], x2: points[end][0], y2: points[end][1]});
+    })));
+    const corners = cubeVertices.map((_, vertex) => starterLayer('rectangle', 'Cube corner ' + (vertex + 1), {
+      x: initial[vertex][0], y: initial[vertex][1], width: 1, height: 1, rotation: 0, colour: '#ffffff', filled: true,
+    }, [0, 6, 12, 18, 24, 30, 36, 42, 47].map(frame => keyframe(frame, {x: at(frame)[vertex][0], y: at(frame)[vertex][1]}))));
+    useStarter(module, {background: '#000000', frame_count: frames, fps: 24}, [...edges, ...corners]);
   }
 
   function linesAndCircle(module) {
-    const labels = ['LINE ONE', 'LINE TWO', 'LINE THREE'].map((text, index) => ({
-      id: safeId('layer_'), name: 'Text ' + (index + 1), type: 'text', visible: true,
-      properties: {x: 1, y: 7 + index * 9, text, font: '4x6', colour: ['#ffffff', '#00ffff', '#ff71ce'][index]}, keyframes: [],
-    }));
-    const circle = newLayer('circle', 'Circle');
-    Object.assign(circle.properties, {x: 55, y: 16, radius: 7, colour: '#ffb300'});
-    Object.assign(module, {background: '#000000', frame_count: 1, fps: 10, playback: 'hold', layers: [...labels, circle], overrides: []});
+    const labels = [['LINE ONE', '#ffffff'], ['LINE TWO', '#00e5ff'], ['LINE THREE', '#ff71ce']].map(([text, colour], index) =>
+      starterLayer('text', 'Text ' + (index + 1), {x: 2, y: 8 + index * 10, text, font: '4x6', colour}));
+    const divider = starterLayer('line', 'Divider', {x1: 44, y1: 3, x2: 44, y2: 28, width: 1, colour: '#2a2a44'});
+    const ring = starterLayer('circle', 'Circle', {x: 54, y: 16, radius: 7, colour: '#ffb300', filled: false}, [
+      keyframe(0, {radius: 6, colour: '#ffb300'}),
+      keyframe(12, {radius: 8, colour: '#ff5e00'}, 'ease_in_out'),
+      keyframe(23, {radius: 6.17, colour: '#ffa804'}, 'ease_in_out'),
+    ]);
+    const core = starterLayer('circle', 'Circle core', {x: 54, y: 16, radius: 2, colour: '#ffe9a8', filled: true});
+    useStarter(module, {background: '#000000', frame_count: 24, fps: 12}, [...labels, divider, ring, core]);
   }
 
   function matrixRain(module) {
-    const offsets = [-28, -12, 4, 20, -20, -4, 12, -24, -8, 8, 21, -16];
-    const glyphs = ['0', '1', '+', '*'];
-    const colours = ['#aaffcc', '#00ff66', '#00bb44', '#005522'];
+    const frames = 48, random = seededRandom(7);
+    const glyphs = ['0', '1', '7', '+', '*', '$', '#', '=', '%', '&', '?', '<'];
+    const colours = ['#eafff0', '#3dff8a', '#00b84a', '#00632a'];
+    const low = -12, span = 64;
     const layers = [];
-    for (let column = 0; column < offsets.length; column += 1) {
+    for (let column = 0; column < 13; column += 1) {
+      const phase = random(), cycles = random() < .35 ? 2 : 1;
       for (let trail = 0; trail < 4; trail += 1) {
-        const layer = newLayer('text', `Rain ${column + 1}.${trail + 1}`);
-        const startY = offsets[column] - trail * 7;
-        Object.assign(layer.properties, {
-          x: 1 + column * 5, y: startY,
-          text: glyphs[(column * 3 + trail) % glyphs.length],
-          font: '4x6', colour: colours[trail],
-        });
-        layer.keyframes = [
-          {frame: 0, easing: 'linear', properties: {y: startY}},
-          {frame: 47, easing: 'linear', properties: {y: startY + 64}},
-        ];
-        layers.push(layer);
+        const glyphPhase = (phase - trail * 7 / span + 1) % 1;
+        layers.push(starterLayer('text', `Rain ${column + 1}.${trail + 1}`, {
+          x: column * 5, y: r2(low + glyphPhase * span),
+          text: glyphs[Math.floor(random() * glyphs.length)], font: '4x6', colour: colours[trail],
+        }, wrappingKeyframes(frames, glyphPhase, cycles, u => ({y: r2(low + u * span)}))));
       }
     }
-    Object.assign(module, {background: '#000300', frame_count: 48, fps: 20, playback: 'loop', layers, overrides: []});
+    useStarter(module, {background: '#000300', frame_count: frames, fps: 20}, layers);
   }
 
   function rainbowPulse(module) {
     const colours = ['#ff004c', '#ff7a00', '#ffe600', '#20e060', '#00d9ff', '#3973ff', '#a855f7'];
+    // One keyframe per frame: browser and device then share exact colours (no rounding drift).
+    const frames = 42, samples = Array.from({length: frames}, (_, frame) => frame);
+    const colourFor = (index, frame) => {
+      const position = (frame / frames + index / colours.length) * colours.length % colours.length;
+      const left = Math.floor(position);
+      return interpolate(colours[left], colours[(left + 1) % colours.length], position - left);
+    };
     const layers = colours.map((colour, index) => {
-      const layer = newLayer('circle', `Rainbow ring ${index + 1}`);
-      const radius = 3 + index * 3;
-      Object.assign(layer.properties, {x: 32, y: 16, radius, colour, filled: false});
-      layer.keyframes = [
-        {frame: 0, easing: 'ease_in_out', properties: {radius, colour}},
-        {frame: 17, easing: 'ease_in_out', properties: {radius: radius + 5, colour: colours[(index + 1) % colours.length]}},
-        {frame: 34, easing: 'ease_in_out', properties: {radius, colour}},
-      ];
-      return layer;
+      const base = 3 + index * 3, radiusAt = frame => r2(base + 1.2 * Math.sin(2 * Math.PI * frame / frames - index * .6));
+      return starterLayer('circle', `Rainbow ring ${index + 1}`, {
+        x: 32, y: 16, radius: radiusAt(0), colour: colourFor(index, 0), filled: index === 0,
+      }, samples.map(frame => keyframe(frame, {radius: radiusAt(frame), colour: colourFor(index, frame)})));
     });
-    Object.assign(module, {background: '#030008', frame_count: 35, fps: 18, playback: 'loop', layers, overrides: []});
+    useStarter(module, {background: '#030008', frame_count: frames, fps: 18}, layers);
+  }
+
+  function neonClock(module) {
+    const frame = starterLayer('rectangle', 'Frame', {x: 0, y: 0, width: 64, height: 32, rotation: 0, colour: '#0a2a4a', filled: false}, [
+      keyframe(0, {colour: '#0a2a4a'}), keyframe(60, {colour: '#2a1a5a'}, 'ease_in_out'), keyframe(119, {colour: '#0a2a4a'}, 'ease_in_out'),
+    ]);
+    const time = starterLayer('time', 'Time', {x: 12, y: 19, format: '24h', font: '8x13B', colour: '#00e5ff'}, [
+      keyframe(0, {colour: '#00e5ff'}), keyframe(60, {colour: '#c45cff'}, 'ease_in_out'), keyframe(119, {colour: '#00e5ff'}, 'ease_in_out'),
+    ]);
+    const track = starterLayer('line', 'Sweep track', {x1: 6, y1: 25, x2: 57, y2: 25, width: 1, colour: '#10283c'});
+    const sweep = starterLayer('line', 'Sweep', {x1: 6, y1: 25, x2: 12, y2: 25, width: 1, colour: '#7df9ff'}, [
+      keyframe(0, {x1: 6, x2: 12}), keyframe(59, {x1: 51, x2: 57}, 'ease_in_out'), keyframe(119, {x1: 6.01, x2: 12.01}, 'ease_in_out'),
+    ]);
+    useStarter(module, {background: '#000000', frame_count: 120, fps: 20}, [frame, track, sweep, time]);
+  }
+
+  function starfieldWarp(module) {
+    const frames = 48, random = seededRandom(11), layers = [];
+    for (let star = 0; star < 36; star += 1) {
+      const angle = random() * 2 * Math.PI, dx = Math.cos(angle), dy = Math.sin(angle);
+      const edge = Math.min(32 / Math.max(Math.abs(dx), 1e-3), 16 / Math.max(Math.abs(dy), 1e-3));
+      const maxRadius = Math.min(60, edge / .65 + 2), phase = random(), cycles = random() < .4 ? 2 : 1;
+      const valueAt = u => {
+        const depth = u * u, radius = 3 + depth * (maxRadius - 3), tail = .5 + radius * .22;
+        return {
+          x1: r2(32 + dx * (radius - tail)), y1: r2(16 + dy * (radius - tail)),
+          x2: r2(32 + dx * radius), y2: r2(16 + dy * radius),
+          colour: interpolate('#101830', star % 5 ? '#ffffff' : '#9fd8ff', Math.min(1, u * 1.6)),
+        };
+      };
+      layers.push(starterLayer('line', 'Star ' + (star + 1), {...valueAt(phase), width: 1}, wrappingKeyframes(frames, phase, cycles, valueAt)));
+    }
+    useStarter(module, {background: '#000006', frame_count: frames, fps: 24}, layers);
+  }
+
+  function bouncingBall(module) {
+    const frames = 60, poses = {impact: {rx: 6.5, ry: 3.5, y: 25.5}, low: {rx: 5, ry: 5, y: 24}, apex: {rx: 4.6, ry: 5.4, y: 8}};
+    const xAt = frame => r2(frame <= 30 ? 8 + 48 * frame / 30 : 56 - 48 * (frame - 30) / 30);
+    const plan = [];
+    for (let bounce = 0; bounce < 3; bounce += 1) {
+      const base = bounce * 20;
+      plan.push([base, 'impact', 'linear'], [base + 2, 'low', 'ease_out'], [base + 10, 'apex', 'ease_out'], [base + 18, 'low', 'ease_in']);
+    }
+    const colours = ['#ff3b3b', '#3bd1ff', '#ffd23b'];
+    const ballFrames = plan.map(([frame, pose, easing]) => {
+      const values = {x: xAt(frame), y: poses[pose].y, radius_x: poses[pose].rx, radius_y: poses[pose].ry};
+      if (frame % 20 === 0) values.colour = colours[frame / 20];
+      return keyframe(frame, values, easing);
+    });
+    ballFrames.push(keyframe(59, {x: xAt(59), y: 24.75, radius_x: 5.75, radius_y: 4.25, colour: interpolate(colours[2], colours[0], .9)}));
+    const shadowFrames = ballFrames.map(({frame, easing, properties}) => {
+      const height = (properties.y - 8) / (25.5 - 8);
+      return keyframe(frame, {x: properties.x, radius_x: r2(2 + 5 * height), colour: interpolate('#0c0c0c', '#3a3a3a', height)}, easing);
+    });
+    const highlightFrames = ballFrames.map(({frame, easing, properties}) => keyframe(frame, {
+      x: r2(properties.x - properties.radius_x * .4), y: r2(properties.y - properties.radius_y * .4),
+    }, easing));
+    const floor = starterLayer('line', 'Floor', {x1: 0, y1: 31, x2: 63, y2: 31, width: 1, colour: '#1d5c3a'});
+    const shadow = starterLayer('ellipse', 'Shadow', {x: 8, y: 30, radius_x: 7, radius_y: 1, rotation: 0, colour: '#3a3a3a', filled: true}, shadowFrames);
+    const ball = starterLayer('ellipse', 'Ball', {x: 8, y: 25.5, radius_x: 6.5, radius_y: 3.5, rotation: 0, colour: colours[0], filled: true}, ballFrames);
+    const highlight = starterLayer('ellipse', 'Highlight', {x: 5.4, y: 24.1, radius_x: 1, radius_y: 1, rotation: 0, colour: '#ffffff', filled: true}, highlightFrames);
+    useStarter(module, {background: '#000000', frame_count: frames, fps: 30}, [floor, shadow, ball, highlight]);
+  }
+
+  function equalizerBars(module) {
+    const frames = 48, bars = 12, random = seededRandom(5), samples = [];
+    for (let frame = 0; frame < frames; frame += 4) samples.push(frame);
+    const levels = Array.from({length: bars}, (_, bar) => samples.map((_, sample) => {
+      const beat = sample % 3 === 0 && bar < 4 ? 7 : 0;
+      return Math.round(Math.max(2, Math.min(29, 20 - bar * 1.1 + beat + (random() - .5) * 16)));
+    }));
+    const colourFor = height => height < 16 ? interpolate('#00ff6a', '#ffe600', (height - 2) / 14) : interpolate('#ffe600', '#ff2a2a', (height - 16) / 13);
+    const layers = [];
+    levels.forEach((heights, bar) => {
+      const x = 2 + bar * 5;
+      const barFrames = samples.map((frame, sample) => keyframe(frame, {y: 32 - heights[sample], height: heights[sample], colour: colourFor(heights[sample])}, 'ease_out'));
+      barFrames.push(keyframe(47, {...barFrames[0].properties}));
+      layers.push(starterLayer('rectangle', 'Bar ' + (bar + 1), {x, y: 32 - heights[0], width: 4, height: heights[0], rotation: 0, colour: colourFor(heights[0]), filled: true}, barFrames));
+      let peak = 0;
+      const peaks = [];
+      for (let pass = 0; pass < 2; pass += 1) heights.forEach((height, sample) => { peak = Math.max(height, peak - 4); if (pass) peaks[sample] = peak; });
+      const peakFrames = samples.map((frame, sample) => keyframe(frame, {y: 30 - peaks[sample]}));
+      peakFrames.push(keyframe(47, {y: 30 - peaks[0]}));
+      layers.push(starterLayer('rectangle', 'Peak ' + (bar + 1), {x, y: 30 - peaks[0], width: 4, height: 1, rotation: 0, colour: '#ffffff', filled: true}, peakFrames));
+    });
+    useStarter(module, {background: '#000000', frame_count: frames, fps: 16}, layers);
+  }
+
+  function pixelHeart(module) {
+    const palette = {X: '#ff2050', H: '#ffc2d4', D: '#a0102e'};
+    const big = [
+      '..XXX.....XXX..', '.XHHXX...XXXXX.', 'XHHXXXX.XXXXXXX', 'XHXXXXXXXXXXXXX', 'XXXXXXXXXXXXXXX',
+      'XXXXXXXXXXXXXXD', '.XXXXXXXXXXXXD.', '..XXXXXXXXXXD..', '...XXXXXXXXD...', '....XXXXXXD....',
+      '.....XXXXD.....', '......XXD......', '.......D.......',
+    ];
+    const small = [
+      '.XXX...XXX.', 'XHHXX.XXXXX', 'XHXXXXXXXXX', 'XXXXXXXXXXX', 'XXXXXXXXXXD',
+      '.XXXXXXXXD.', '..XXXXXXD..', '...XXXXD...', '....XXD....', '.....D.....',
+    ];
+    const heart = (name, rows, left, top, shown) => starterLayer('pixels', name, {
+      bitmap_rgba: pixelArtBitmap(rows, palette, left, top), offset_x: 0, offset_y: 0, rotation: 0,
+    }, [0, 2, 6, 8].map((frame, index) => keyframe(frame, {present: shown === (index % 2 === 0)}, 'step')));
+    const ring = (name, start) => starterLayer('circle', name, {present: false, x: 32, y: 16, radius: 9, colour: '#ff2050', filled: false}, [
+      keyframe(start, {present: true, radius: 9, colour: '#ff2050'}),
+      keyframe(start + 10, {radius: 26, colour: '#08000a'}, 'ease_out'),
+      keyframe(start + 11, {present: false}),
+    ]);
+    useStarter(module, {background: '#08000a', frame_count: 24, fps: 12}, [
+      ring('Pulse ring 1', 0), ring('Pulse ring 2', 6),
+      heart('Heart (beat)', big, 25, 10, true), heart('Heart (rest)', small, 27, 11, false),
+    ]);
+  }
+
+  function chompChase(module) {
+    const frames = 60, centreY = 15.5;
+    const chompX = frame => -8 + frame * 1.8;
+    const chomp = (frame, mouth) => {
+      const cx = chompX(frame), points = [[r2(cx - 1), centreY]];
+      for (let step = 0; step < 15; step += 1) {
+        const angle = (mouth + (360 - 2 * mouth) * step / 14) * Math.PI / 180;
+        points.push([r2(cx + 6.5 * Math.cos(angle)), r2(centreY - 6.5 * Math.sin(angle))]);
+      }
+      return points;
+    };
+    const chompFrames = [];
+    for (let frame = 0; frame < frames; frame += 3) chompFrames.push(frame);
+    chompFrames.push(frames - 1);
+    const mouthAt = frame => 4 + 38 * Math.abs(Math.cos(Math.PI * frame / 6));
+    const ghostShape = [[-6, 7], [-6, -1], [-5, -4], [-3, -6], [0, -7], [3, -6], [5, -4], [6, -1], [6, 7], [4, 5], [2, 7], [0, 5], [-2, 7], [-4, 5]];
+    const ghostX = frame => chompX(frame) - 21;
+    const ghost = (frame, wiggle) => ghostShape.map(([x, y], index) => [r2(ghostX(frame) + x), r2(centreY + y - (index > 7 && wiggle ? (index % 2 ? 2 : -2) * (y > 6 ? 1 : 0) : 0))]);
+    const ghostFrames = [0, 6, 12, 18, 24, 30, 36, 42, 48, 54, 59];
+    const moving = (name, x, y, width, height, colour, offset) => starterLayer('rectangle', name, {x: r2(x(0) + offset), y, width, height, rotation: 0, colour, filled: true}, [
+      keyframe(0, {x: r2(x(0) + offset)}), keyframe(59, {x: r2(x(59) + offset)}),
+    ]);
+    const walls = [[5, '#2848ff'], [7, '#14248c'], [24, '#14248c'], [26, '#2848ff']].map(([y, colour], index) =>
+      starterLayer('line', 'Wall ' + (index + 1), {x1: 0, y1: y, x2: 63, y2: y, width: 1, colour}));
+    const dots = Array.from({length: 8}, (_, index) => {
+      const x = 5 + index * 8, eaten = Array.from({length: frames}, (_, frame) => frame).find(frame => chompX(frame) >= x + 1);
+      return starterLayer('rectangle', 'Dot ' + (index + 1), {x, y: 15, width: 2, height: 2, rotation: 0, colour: '#ffd9b0', filled: true}, [
+        keyframe(0, {present: true}, 'step'), keyframe(eaten, {present: false}, 'step'),
+      ]);
+    });
+    const chomper = starterLayer('polygon', 'Chomper', {points: chomp(0, mouthAt(0)), rotation: 0, colour: '#ffe600', filled: true},
+      chompFrames.map(frame => keyframe(frame, {points: chomp(frame, mouthAt(frame))})));
+    const chaser = starterLayer('polygon', 'Ghost', {points: ghost(0, false), rotation: 0, colour: '#ff3030', filled: true},
+      ghostFrames.map((frame, index) => keyframe(frame, {points: ghost(frame, index % 2 === 1)})));
+    useStarter(module, {background: '#000000', frame_count: frames, fps: 20}, [
+      ...walls, ...dots, chomper,
+      moving('Chomper eye', chompX, 11, 1, 1, '#000000', 0), chaser,
+      moving('Ghost eye left', ghostX, 11, 2, 3, '#ffffff', -3), moving('Ghost eye right', ghostX, 11, 2, 3, '#ffffff', 1),
+      moving('Ghost pupil left', ghostX, 12, 1, 2, '#2040ff', -2), moving('Ghost pupil right', ghostX, 12, 1, 2, '#2040ff', 2),
+    ]);
+  }
+
+  function fireworks(module) {
+    const background = '#000005', layers = [];
+    const bursts = [
+      {start: 0, x: 18, y: 10, colour: '#ff4d6d'}, {start: 15, x: 46, y: 8, colour: '#4dd2ff'},
+      {start: 30, x: 31, y: 12, colour: '#ffd34d'}, {start: 46, x: 52, y: 13, colour: '#7dff6a'},
+    ];
+    bursts.forEach(({start, x, y, colour}, number) => {
+      const burst = start + 8, fade = start + 22, gone = start + 23;
+      layers.push(starterLayer('line', `Rocket ${number + 1}`, {present: false, x1: x, y1: 31, x2: x, y2: 34, width: 1, colour: '#ffeeaa'}, [
+        keyframe(start, {present: true, y1: 31, y2: 34}),
+        keyframe(burst - 1, {y1: y, y2: y + 3}, 'ease_out'),
+        keyframe(burst, {present: false}),
+      ]));
+      layers.push(starterLayer('circle', `Flash ${number + 1}`, {present: false, x, y, radius: 1, colour: '#ffffff', filled: false}, [
+        keyframe(burst, {present: true, radius: 1, colour: '#ffffff'}),
+        keyframe(burst + 4, {radius: 6, colour}, 'ease_out'),
+        keyframe(fade, {radius: 11, colour: background}, 'ease_out'),
+        keyframe(gone, {present: false}),
+      ]));
+      for (let spark = 0; spark < 10; spark += 1) {
+        const angle = (spark * 36 + number * 12) * Math.PI / 180, dx = Math.cos(angle), dy = Math.sin(angle);
+        const at = (radius, drop) => ({x1: r2(x + dx * radius), y1: r2(y + dy * radius + drop), x2: r2(x + dx * (radius + 2.5)), y2: r2(y + dy * (radius + 2.5) + drop)});
+        layers.push(starterLayer('line', `Spark ${number + 1}.${spark + 1}`, {present: false, ...at(1, 0), width: 1, colour: '#ffffff'}, [
+          keyframe(burst, {present: true, ...at(1, 0), colour: '#ffffff'}),
+          keyframe(burst + 5, {...at(7, .5), colour}, 'ease_out'),
+          keyframe(burst + 12, {...at(10, 2), colour: interpolate(colour, '#ffffff', .25)}, 'ease_out'),
+          keyframe(fade, {...at(12, 5), colour: background}, 'ease_in'),
+          keyframe(gone, {present: false}),
+        ]));
+      }
+    });
+    useStarter(module, {background, frame_count: 70, fps: 24}, layers);
+  }
+
+  function sunset(module) {
+    const sky = [
+      ['#1e64c8', '#2a1a5e', '#05051a'], ['#2e78d2', '#5a2a78', '#0a0a2a'], ['#4890dc', '#a03c78', '#16123c'],
+      ['#64a6e4', '#e0566a', '#2a1848'], ['#82bcec', '#ff8a50', '#4a1e4a'], ['#a6d2f2', '#ffc04a', '#7a2a40'],
+    ];
+    const timeline = colours => [keyframe(0, {colour: colours[0]}), keyframe(60, {colour: colours[1]}, 'ease_in_out'), keyframe(119, {colour: colours[2]}, 'ease_in_out')];
+    const bands = sky.map((colours, index) => starterLayer('rectangle', 'Sky ' + (index + 1), {x: 0, y: index * 4, width: 64, height: 4, rotation: 0, colour: colours[0], filled: true}, timeline(colours)));
+    const random = seededRandom(3);
+    const stars = Array.from({length: 8}, (_, index) => starterLayer('rectangle', 'Star ' + (index + 1), {
+      present: false, x: Math.floor(2 + random() * 60), y: Math.floor(1 + random() * 12), width: 1, height: 1, rotation: 0, colour: '#30304a', filled: true,
+    }, [keyframe(80 + index * 3, {present: true, colour: '#30304a'}), keyframe(119, {colour: '#ffffff'})]));
+    const sun = starterLayer('circle', 'Sun', {x: 32, y: 6, radius: 5, colour: '#fff6c0', filled: true}, [
+      keyframe(0, {y: 6, colour: '#fff6c0'}), keyframe(60, {y: 22, colour: '#ffb030'}, 'ease_in_out'), keyframe(119, {y: 31, colour: '#ff4020'}, 'ease_in'),
+    ]);
+    const sea = starterLayer('rectangle', 'Sea', {x: 0, y: 24, width: 64, height: 8, rotation: 0, colour: '#2a6ab0', filled: true}, timeline(['#2a6ab0', '#3a2a60', '#0a0a20']));
+    const glints = [[26, 6], [28, 4], [30, 2]].map(([y, half], index) => {
+      const colours = [[0, '#a8d0ff'], [60, '#ffb030'], [119, '#5a1a10']];
+      return starterLayer('line', 'Glint ' + (index + 1), {x1: 32 - half, y1: y, x2: 32 + half, y2: y, width: 1, colour: '#a8d0ff'},
+        Array.from({length: 13}, (_, step) => {
+          const frame = Math.min(119, step * 10), shift = (step + index) % 2 ? 1 : -1;
+          return keyframe(frame, {x1: 32 - half + shift, x2: 32 + half + shift, colour: colourAt(colours, frame)}, 'ease_in_out');
+        }));
+    });
+    useStarter(module, {background: '#000000', frame_count: 120, fps: 15, playback: 'ping_pong'}, [...bands, ...stars, sun, sea, ...glints]);
+  }
+
+  function rainbowMarquee(module) {
+    const colours = ['#ff004c', '#ff7a00', '#ffe600', '#20e060', '#00d9ff', '#3973ff', '#a855f7'];
+    const textFrames = colours.map((colour, index) => keyframe(index * 17, {colour}));
+    textFrames[0].properties.x = 54;
+    textFrames.push(keyframe(119, {x: -104, colour: colours[0]}));
+    const text = starterLayer('text', 'Marquee', {x: 54, y: 21, text: 'HELLO MATRIX', font: '9x15B', colour: colours[0]}, textFrames);
+    const stripe = (name, y, shift) => starterLayer('line', name, {x1: 0, y1: y, x2: 63, y2: y, width: 1, colour: colours[shift]},
+      colours.map((_, index) => keyframe(index * 17, {colour: interpolate(colours[(index + shift) % 7], '#000000', .55)})).concat(keyframe(119, {colour: interpolate(colours[shift], '#000000', .55)})));
+    useStarter(module, {background: '#000000', frame_count: 120, fps: 30}, [stripe('Top stripe', 2, 3), stripe('Bottom stripe', 29, 5), text]);
   }
 
   const canvasStarterExamples = Object.freeze([
-    Object.freeze({id: 'spinning_square', label: 'Spinning square'}),
+    Object.freeze({id: 'spinning_square', label: 'Spinning squares'}),
     Object.freeze({id: 'spinning_rgb_cube', label: 'Spinning RGB cube'}),
     Object.freeze({id: 'three_lines_circle', label: 'Three lines and circle'}),
     Object.freeze({id: 'matrix_rain', label: 'Matrix rain'}),
     Object.freeze({id: 'rainbow_pulse', label: 'Rainbow pulse'}),
+    Object.freeze({id: 'neon_clock', label: 'Neon clock'}),
+    Object.freeze({id: 'starfield_warp', label: 'Starfield warp'}),
+    Object.freeze({id: 'bouncing_ball', label: 'Bouncing ball'}),
+    Object.freeze({id: 'equalizer_bars', label: 'Equalizer bars'}),
+    Object.freeze({id: 'pixel_heart', label: 'Pixel heart'}),
+    Object.freeze({id: 'chomp_chase', label: 'Chomp chase'}),
+    Object.freeze({id: 'fireworks', label: 'Fireworks'}),
+    Object.freeze({id: 'sunset', label: 'Sunset'}),
+    Object.freeze({id: 'rainbow_marquee', label: 'Rainbow marquee'}),
   ]);
   const canvasTemplateBuilders = Object.freeze({
     spinning_square: spinningSquare,
@@ -375,6 +673,15 @@
     three_lines_circle: linesAndCircle,
     matrix_rain: matrixRain,
     rainbow_pulse: rainbowPulse,
+    neon_clock: neonClock,
+    starfield_warp: starfieldWarp,
+    bouncing_ball: bouncingBall,
+    equalizer_bars: equalizerBars,
+    pixel_heart: pixelHeart,
+    chomp_chase: chompChase,
+    fireworks,
+    sunset,
+    rainbow_marquee: rainbowMarquee,
   });
 
   function publishCanvasDraftMutation(id) {
@@ -770,7 +1077,7 @@
   }
 
   function drawShape(context, layer, properties, alpha = 1, frame = 0, fps = 1, frameCount = 1) {
-    context.save(); context.globalAlpha = alpha; context.strokeStyle = properties.colour; context.fillStyle = properties.colour; context.lineWidth = Math.max(.12, properties.width || .12);
+    context.save(); context.globalAlpha = alpha; context.strokeStyle = properties.colour; context.fillStyle = properties.colour; context.lineWidth = Math.max(.12, layer.type === 'line' && properties.width || .12);
     const packedPixels = layer.type === 'pixels' && properties.bitmap_rgba;
     if (!packedPixels) beginLayerRotation(context, properties, layer.type);
     if (layer.type === 'text' || layer.type === 'time') { const text = layer.type === 'time' ? currentTimeText(properties.format) : properties.text; context.font = `${Math.max(4, Number(properties.font.split('x')[1]?.replace(/\D/g, '') || 7))}px monospace`; context.textBaseline = 'alphabetic'; context.fillText(text, properties.x, properties.y); }
