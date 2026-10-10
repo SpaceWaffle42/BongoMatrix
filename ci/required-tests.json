@@ -939,6 +939,11 @@
     "PairingManagerTests.test_testing_pin_guesses_lock_out_without_a_one_time_pin",
     "PairingManagerTests.test_testing_pin_is_reusable_without_consuming_the_one_time_pin"
   ],
+  "test_preview_media_timeline": [
+    "PreviewMediaTimelineTests.test_controller_still_never_touches_hardware",
+    "PreviewMediaTimelineTests.test_gif_timeline_has_every_decoded_frame_in_order",
+    "PreviewMediaTimelineTests.test_still_image_timeline_shows_the_image"
+  ],
   "test_preview_provider": [
     "PreviewProviderTests.test_cancel_after_provider_return_before_renderer_publication_drops_result",
     "PreviewProviderTests.test_cancel_before_dns_starts_no_child",
