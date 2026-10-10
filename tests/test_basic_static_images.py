@@ -243,6 +243,8 @@ class StaticImageDashboardTests(unittest.TestCase):
         self.assertIn("customControl('Media file', 'source', 'select', module.source, basicMediaChoices())", asset)
         self.assertIn("const still = isStaticMediaSource(current.source);", asset)
         self.assertIn("loopsControl.hidden = speedControl.hidden = still;", asset)
+        stylesheet = (ROOT / "app" / "static" / "custom_canvas.css").read_text()
+        self.assertIn(".custom-module-fields [data-static-image-hidden][hidden]{display:none!important}", stylesheet)
 
     def test_switching_mode_reads_stored_module_until_new_fields_render(self):
         asset = (ROOT / "app" / "static" / "custom_canvas.js").read_text()
