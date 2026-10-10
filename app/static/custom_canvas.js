@@ -1788,7 +1788,7 @@
     for (const [field, labelText, type] of editableFields) {
       let label;
       if (type === 'playback-speed') label = globalThis.playbackSpeedControl(labelText, values[field], value => { saveFrameProperties(module, layer, {[field]: value}); drawEditor(module, container.closest('.advanced-card').querySelector('canvas')); }, control => control.dataset.property = field);
-      else if (type === 'select' || type === 'media-select' || type === 'time-format') label = moduleControl(labelText, values[field], 'select', value => { saveFrameProperties(module, layer, {[field]: value}); if (type === 'media-select') { pruneMediaFailureStates(); const adopted = adoptMediaSource(module, layer.id, value, state.frame); if (adopted.changed) { Object.assign(module, {frame_count: adopted.module.frame_count, fps: adopted.module.fps, playback: adopted.module.playback}); setMessage(layer.name + ' now uses ' + value + '; ' + adopted.message); refreshAdvanced(module.id, true); return; } } drawEditor(module, container.closest('.advanced-card').querySelector('canvas')); }, type === 'media-select' ? mediaItems.map(item => item.name) : (type === 'time-format' ? ['24h', '24h_seconds', '12h', '12h_seconds'] : (field === 'font' ? fonts : [])));
+      else if (type === 'select' || type === 'media-select' || type === 'time-format') label = moduleControl(labelText, values[field], 'select', value => { if (type === 'media-select') { const chosen = setLayerMediaSource(module, layer.id, value); if (chosen.changed) Object.assign(module, {layers: chosen.module.layers, overrides: chosen.module.overrides}); } else saveFrameProperties(module, layer, {[field]: value}); if (type === 'media-select') { pruneMediaFailureStates(); const adopted = adoptMediaSource(module, layer.id, value, state.frame); if (adopted.changed) { Object.assign(module, {frame_count: adopted.module.frame_count, fps: adopted.module.fps, playback: adopted.module.playback}); setMessage(layer.name + ' now uses ' + value + '; ' + adopted.message); refreshAdvanced(module.id, true); return; } } drawEditor(module, container.closest('.advanced-card').querySelector('canvas')); }, type === 'media-select' ? mediaItems.map(item => item.name) : (type === 'time-format' ? ['24h', '24h_seconds', '12h', '12h_seconds'] : (field === 'font' ? fonts : [])));
       else if (type === 'points') { label = document.createElement('label'); label.textContent = labelText; label.className = 'wide'; const textarea = document.createElement('textarea'); textarea.rows = 4; textarea.dataset.property = field; textarea.value = formatPoints(values[field]); textarea.addEventListener('change', () => { const points = parsePoints(textarea.value); if (points.length) { saveFrameProperties(module, layer, {points}); refreshAdvanced(module.id, true); } }); label.append(textarea); }
       else label = moduleControl(labelText, values[field], type, value => { const nextValue = field === 'z_index' ? Math.max(-64, Math.min(64, Math.round(value))) : value; saveFrameProperties(module, layer, {[field]: nextValue}); drawEditor(module, container.closest('.advanced-card').querySelector('canvas')); }, null);
       for (const control of label.querySelectorAll('input,select,textarea')) control.dataset.property = field; grid.append(label);
@@ -2089,7 +2089,7 @@
     frameAction('Delete frame', 'Delete', module.frame_count <= 1 ? FRAME_ACTION_REASONS.last_frame : '', deleteTimelineFrame, `Delete frame ${state.frame + 1}?`);
     frameAction('Move frame earlier', 'Shift+ArrowLeft', state.frame <= 0 ? 'already the first frame' : '', (item, frame) => moveTimelineFrame(item, frame, -1));
     frameAction('Move frame later', 'Shift+ArrowRight', state.frame >= module.frame_count - 1 ? 'already the last frame' : '', (item, frame) => moveTimelineFrame(item, frame, 1));
-    const selectedLayer = module.layers.find(item => item.id === state.selected), generatePlan = mediaGeneratePlan(module, selectedLayer);
+    const selectedLayer = module.layers.find(item => item.id === state.selected), generatePlan = mediaGeneratePlan(module, selectedLayer, state.frame);
     const generate = document.createElement('button'); generate.type = 'button'; generate.className = 'btn primary'; generate.dataset.frameAction = 'Generate';
     generate.textContent = 'Generate'; generate.disabled = !generatePlan.ok;
     generate.title = generatePlan.ok ? `Generate frames from ${generatePlan.source}` : `Generate unavailable: ${GENERATE_REASONS[generatePlan.reason]}`;
@@ -2425,13 +2425,31 @@
     return {changed, module: next, frame, message: mediaImportMessage(item, mediaFrames, requestedFrames, next.fps, startFrame)};
   }
 
+  // A media layer shows one file for its whole run. New layers carry their default source in a
+  // frame-0 keyframe, so choosing a file must replace it everywhere — otherwise the choice only
+  // lands as a single-frame edit and every later frame falls back to the default image.
+  function setLayerMediaSource(module, layerId, source) {
+    const layer = module.layers.find(candidate => candidate.id === layerId);
+    if (!layer || layer.type !== 'media' || !mediaItems.some(item => item.name === source)) return {changed: false, reason: 'missing_media', module};
+    const next = clone(module), target = next.layers.find(candidate => candidate.id === layerId);
+    target.properties.source = source;
+    target.keyframes = target.keyframes.map(key => { const properties = {...key.properties}; delete properties.source; return {...key, properties}; })
+      .filter(key => Object.keys(key.properties).length);
+    next.overrides = next.overrides.map(item => {
+      if (item.layer_id !== layerId) return item;
+      const properties = {...item.properties}; delete properties.source; return {...item, properties};
+    }).filter(item => Object.keys(item.properties).length);
+    return {changed: true, module: next};
+  }
+
   // Generate: rebuild a media layer's frames on demand.
   //   'replace'  — the timeline becomes the media: a GIF/MP4 sets the frame count and its own FPS
   //                and loops; a still image is shown on every existing frame.
   //   'in_place' — the media starts at the highlighted frame; earlier frames are untouched, the
   //                timeline grows if needed, and an animation is hidden again once it has played.
-  function mediaGeneratePlan(module, layer) {
-    const source = layer?.type === 'media' ? layer.properties.source : '';
+  function mediaGeneratePlan(module, layer, frame = 0) {
+    // Use the file the layer actually shows at the highlighted frame, not a stale base default.
+    const source = layer?.type === 'media' ? (resolvedProperties(module, layer, frame).source || layer.properties.source) : '';
     const item = source ? mediaItems.find(candidate => candidate.name === source) : null;
     if (!item) return {ok: false, reason: source ? 'missing_media' : 'not_media'};
     const speed = Math.max(0.1, Number(layer.properties.playback_speed_percent ?? 100) / 100);
@@ -2440,7 +2458,7 @@
   }
 
   function generateMediaFrames(module, layerId, mode, frame) {
-    const layer = module.layers.find(candidate => candidate.id === layerId), plan = mediaGeneratePlan(module, layer);
+    const layer = module.layers.find(candidate => candidate.id === layerId), plan = mediaGeneratePlan(module, layer, frame);
     if (!plan.ok) return {changed: false, reason: plan.reason, module, frame};
     if (!['replace', 'in_place'].includes(mode)) return {changed: false, reason: 'invalid_mode', module, frame};
     const start = mode === 'replace' ? 0 : frame;
@@ -2483,14 +2501,14 @@
 
   globalThis.matrixTimelineFrames = Object.freeze({
     moveFrame: moveTimelineFrame, deleteFrame: deleteTimelineFrame, insertFrame: insertTimelineFrame,
-    playheadText: timelinePlayheadText, adoptMediaSource, generateMedia: generateMediaFrames,
+    playheadText: timelinePlayheadText, adoptMediaSource, generateMedia: generateMediaFrames, setMediaSource: setLayerMediaSource,
   });
 
   const GENERATE_REASONS = {not_media: 'select an image, GIF or MP4 layer first', missing_media: 'the selected media file is not in the library', out_of_bounds: 'no frame is highlighted', invalid_mode: 'unknown option'};
 
   function openGenerateDialog(id) {
     const module = byId(id), state = module && stateFor(module); if (!module || !state) return false;
-    const layer = module.layers.find(item => item.id === state.selected), plan = mediaGeneratePlan(module, layer);
+    const layer = module.layers.find(item => item.id === state.selected), plan = mediaGeneratePlan(module, layer, state.frame);
     if (!plan.ok) { setMessage('Generate unavailable: ' + GENERATE_REASONS[plan.reason] + '.', true); return false; }
     const dialog = document.createElement('dialog'); dialog.className = 'generate-dialog'; dialog.setAttribute('aria-labelledby', 'generate-dialog-title');
     const title = document.createElement('h3'); title.id = 'generate-dialog-title'; title.textContent = 'Generate frames';

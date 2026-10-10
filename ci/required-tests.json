@@ -71,6 +71,9 @@
     "StaticImageSchemaTests.test_unsupported_basic_media_source_is_rejected_with_clear_message"
   ],
   "test_canvas_generate_frames": [
+    "ChosenMediaStaysTests.test_choosing_a_gif_replaces_the_default_source_on_every_frame",
+    "ChosenMediaStaysTests.test_generate_uses_the_gif_chosen_on_the_highlighted_frame_not_the_default_png",
+    "ChosenMediaStaysTests.test_media_picker_uses_the_whole_layer_source_setter",
     "GenerateFramesTests.test_generate_in_place_hides_the_media_after_it_has_played",
     "GenerateFramesTests.test_generate_in_place_respects_the_120_frame_limit_and_says_so",
     "GenerateFramesTests.test_generate_in_place_starts_at_the_highlighted_frame_and_keeps_earlier_frames",
