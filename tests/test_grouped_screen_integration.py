@@ -5,6 +5,7 @@ import json
 import os
 from pathlib import Path
 import unittest
+from unittest.mock import patch
 from PIL import Image
 from tests import test_webapp
 from config_store import DEFAULT_CONFIG, validate_config
@@ -219,7 +220,10 @@ class GroupedScreenIntegrationTests(unittest.TestCase):
             return frame, 1
         fixture.controller.frame_png.side_effect = frame_png
         probe = Path(__file__).with_name('grouped_screen_browser.js').read_text()
-        report = fixture.run_live_chromium_probe(probe, timeout=60)
+        # Keep the dashboard's weather timing request offline: a live Open-Meteo
+        # answer rewrites the weather row duration between draft and reload.
+        with patch('modules.weather_app.OpenMeteoClient.fetch', side_effect=OSError('offline test')):
+            report = fixture.run_live_chromium_probe(probe, timeout=60)
         self.assertEqual(report['errors'], [])
         self.assertEqual(report['saved']['playlist'], report['draft']['playlist'])
         self.assertEqual(report['saved']['screen_enabled'], {'splash': False, 'sleep': True})
