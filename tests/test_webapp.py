@@ -160,6 +160,14 @@ class WebAppTests(unittest.TestCase):
         self.assertEqual(self.store.path.read_bytes(), original)
 
     def setUp(self):
+        # Weather providers must never reach the network from tests: CI runners have
+        # internet access, and a live answer changes dashboard timing mid-test.
+        self._offline_providers = [
+            patch(f"modules.{module}.urlopen", side_effect=OSError("network disabled in tests"))
+            for module in ("weather_app", "openweather_common")
+        ]
+        for offline in self._offline_providers:
+            offline.start()
         self.temp = tempfile.TemporaryDirectory()
         Path(self.temp.name).chmod(0o755)
         self.store = ConfigStore(Path(self.temp.name) / "config.json")
@@ -16424,6 +16432,8 @@ try{
 
     def tearDown(self):
         self.temp.cleanup()
+        for offline in getattr(self, "_offline_providers", ()):
+            offline.stop()
 
     def test_dashboard_handles_committed_partial_success_without_blind_retry(self):
         self.pair_browser()
