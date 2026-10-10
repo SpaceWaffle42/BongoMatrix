@@ -202,6 +202,12 @@ class ShipApplyTests(unittest.TestCase):
         code, calls, out = self.run_apply('INSTALLED', ['0.3.67-preview', '0.3.67-preview', OSError('down')])
         self.assertEqual(self.result['status'], 'ROLLBACK_FAILED')
 
+    def test_installer_failure_with_candidate_still_served_rolls_back(self):
+        code, calls, out = self.run_apply('PAYLOAD_INSTALLED', ['0.3.67-preview', '0.3.68-preview', '0.3.67-preview'])
+        self.assertEqual(code, 2)
+        self.assertEqual(calls, [None, '/var/tmp/matrix-ship-1'])
+        self.assertEqual(self.result['status'], 'ROLLED_BACK')
+
     def test_installer_failure_is_reported_without_double_rollback(self):
         code, calls, out = self.run_apply('FAILED_PREVIOUS_VERSION_RESTORED', ['0.3.67-preview', '0.3.67-preview'])
         self.assertEqual((code, calls), (2, [None]))
@@ -334,6 +340,21 @@ class ShipRemoteRecoveryTests(unittest.TestCase):
             self.assertEqual(self.remote.main([]), 2)
         self.assertEqual(self.tree(), self.old)
         self.assertIn('start', self.events, 'stopped service must be restarted')
+
+    def test_final_report_write_failure_undoes_install(self):
+        real_save = self.remote.save
+
+        def fail_installed(result):
+            if result.get('status') == 'INSTALLED':
+                self.remote.save_errors.append('OSError: [Errno 28] No space left on device')
+                return False
+            return real_save(result)
+        with mock.patch.object(self.remote, 'save', side_effect=fail_installed):
+            self.assertEqual(self.remote.main([]), 2)
+        self.assertEqual(self.tree(), self.old)
+        self.assertEqual(self.report()['status'], 'FAILED_PREVIOUS_VERSION_RESTORED')
+        self.assertEqual(self.events.count('stop'), 2)
+        self.assertEqual(self.events[-1], 'start')
 
     def test_failure_after_stop_attempt_restarts_service(self):
         def stop_then_fail():

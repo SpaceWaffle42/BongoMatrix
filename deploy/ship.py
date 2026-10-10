@@ -313,9 +313,15 @@ def main(argv=None) -> int:
             print(f'installer failed: {execution.get("status")} {execution.get("primary_error")}')
             result['status'] = 'FAILED'
             try:
-                result['public_versions_after_failure'] = public_versions(fetch_public())
-            except Exception as error:      # report only; the installer already did its recovery
+                after = public_versions(fetch_public())
+                result['public_versions_after_failure'] = after
+            except Exception as error:      # service down: the installer report says why
                 result['public_check_error'] = f'{type(error).__name__}: {error}'
+                return 2
+            if version in after:
+                # The installer's own recovery did not happen (or was not recorded).
+                print(f'candidate {version} still served after installer failure; rolling back')
+                result.update(roll_back(execution['stage'], previous))
             return 2
         try:
             after = public_versions(fetch_public())

@@ -321,7 +321,9 @@ def run():
         flags['opened'] = True
         result.update(status='ROLLED_BACK_NORMAL' if ROLLBACK else 'INSTALLED',
                       installed={e['path']: record(ROOT / e['path']) for e in SPEC['files']})
-        save(result)
+        if not save(result) and not ROLLBACK:
+            # ship.py only trusts a persisted INSTALLED; without it, undo the install.
+            raise OSError('could not persist the INSTALLED report: ' + save_errors[-1])
         return 0
     except BaseException as primary:
         result.update(status='FAILED', primary_error={'class': type(primary).__name__, 'message': str(primary)})
