@@ -390,7 +390,7 @@ console.log('MEDIA_PLAYLIST_PREVIEW_PASS');
 
         self.assertIn("legend.textContent='Select '+module+' screens'", dashboard)
         self.assertIn("Splash screens play in the active playlist", dashboard)
-        self.assertIn("Sleep screens rotate outside active hours", dashboard)
+        self.assertIn("one checked sleep screen is chosen at random and plays the whole night", dashboard)
         self.assertIn("data-media-item-id", dashboard)
         self.assertIn('data-media-source="{{ file.name }}"', dashboard)
         self.assertIn("item.sources=mediaPlaylistSources(row)", dashboard)

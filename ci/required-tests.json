@@ -1189,7 +1189,9 @@
     "ScreenMediaRevisionTests.test_first_sleep_file_fsync_failure_retries_runtime_admission",
     "ScreenMediaRevisionTests.test_first_sleep_pre_replace_failure_retries_runtime_admission",
     "ScreenMediaRevisionTests.test_inactive_scheduler_owns_one_sleep_session_until_wake",
+    "ScreenMediaRevisionTests.test_interrupted_nightly_sleep_pick_is_kept_not_replaced",
     "ScreenMediaRevisionTests.test_legacy_splash_is_finite_saved_selection_only_and_fully_decoded",
+    "ScreenMediaRevisionTests.test_multiple_enabled_sleep_rows_play_one_pick_for_the_whole_night",
     "ScreenMediaRevisionTests.test_multiple_rows_for_one_screen_still_require_unique_ids",
     "ScreenMediaRevisionTests.test_nonfirst_screen_row_repairs_only_its_missing_media_before_execution",
     "ScreenMediaRevisionTests.test_packaged_screen_defaults_are_exact_decodable_assets",
@@ -1222,7 +1224,8 @@
     "ScreenMediaRevisionTests.test_splash_retirement_is_scoped_to_the_failing_row",
     "ScreenMediaRevisionTests.test_splash_uses_every_effective_identifier_once_before_refill",
     "ScreenMediaRevisionTests.test_still_interval_uses_exact_selected_gif_boundaries_and_fallback",
-    "ScreenMediaRevisionTests.test_unavailable_default_reports_empty_without_persisting_invalid_repair"
+    "ScreenMediaRevisionTests.test_unavailable_default_reports_empty_without_persisting_invalid_repair",
+    "ScreenMediaRevisionTests.test_unusable_nightly_sleep_pick_falls_back_once_and_then_holds"
   ],
   "test_scroll_timing": [
     "ScrollTimingTests.test_announcement_plan_is_explicitly_unavailable_when_none_eligible",
