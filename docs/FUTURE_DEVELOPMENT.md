@@ -384,6 +384,12 @@ This checklist tracks the successor to the superseded 0.3.63-preview Splash/Slee
 - [ ] Publish exact GitLab evidence and reconcile every retained finding or deferral.
 - [ ] Complete Kanban handoffs and strike through the roadmap requirements only after review, merge, deployment, rollback, redeployment, and final acceptance are all verified.
 
+#### Sleep: one screen for the whole night (owner change, 2026-10-10)
+
+- When several Sleep screens are enabled, pick one at random as the night begins and play only that one until wake. The next night picks again.
+- Keep the pick through interruptions (previews, reloads, pairing). Move to another enabled screen only when the picked one has no usable media, and then keep that one.
+- A Sleep screen whose pool has several sources still keeps its one retained media choice for the night, as before. Splash keeps its shuffled bag.
+
 ## Priority 2 — New playlist modules
 
 Implement these only after higher-priority fixes and workflow improvements are complete. Their order favors lower-friction local or free-data behavior before more provider-dependent integrations.

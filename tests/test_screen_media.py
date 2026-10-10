@@ -1926,6 +1926,111 @@ class ScreenMediaRevisionTests(unittest.TestCase):
             [1.5, 1.5],
         )
 
+    def _night_controller(self, rows, catalog, *, nights, plays_per_night, render=None):
+        from screen_media import ScreenMediaRuntime
+
+        config = copy.deepcopy(DEFAULT_CONFIG)
+        template = next(item for item in config["playlist"] if item["module"] == "sleep")
+        index = config["playlist"].index(template)
+        config["playlist"][index:index + 1] = [
+            dict(copy.deepcopy(template), id=row_id, enabled=True,
+                 source=sources[0], sources=list(sources))
+            for row_id, sources in rows
+        ]
+        store = Mock(get=Mock(return_value=config))
+        store.media_root = Mock(exists=Mock(return_value=False))
+        controller = DisplayController(Mock(), store)
+        row_picks = []
+
+        def row_choice(values):
+            row_picks.append(tuple(row["id"] for row in values))
+            return values[(len(row_picks) - 1) % len(values)]
+
+        controller._screen_runtime = ScreenMediaRuntime(
+            catalog=lambda screen: catalog if screen == "sleep" else {},
+            choice=lambda values: values[0], row_choice=row_choice,
+        )
+        for name in ("_take_preview", "_take_media_preview", "_take_announcement_preview"):
+            setattr(controller, name, Mock(return_value=None))
+        controller._seconds_until_schedule_change = Mock(return_value=100)
+        schedule = []
+        for _night in range(nights):
+            schedule += [False] * plays_per_night + [True]
+        state = {"position": 0, "night": 0}
+        played = []
+
+        def is_active(_config, now=None):
+            del now
+            if state["position"] >= len(schedule):
+                controller._shutdown.set()
+                return True
+            return schedule[state["position"]]
+
+        def execute(name, selected, _duration, **_kwargs):
+            if name != "sleep":
+                return True
+            played.append((state["night"], selected["media"]["sleep"]))
+            return True if render is None else render(selected["media"]["sleep"], len(played))
+
+        def healthy():
+            if schedule[min(state["position"], len(schedule) - 1)]:
+                state["night"] += 1
+            state["position"] += 1
+
+        controller._is_active = is_active
+        controller._execute = Mock(side_effect=execute)
+        controller._mark_scheduler_healthy = healthy
+        controller._run_loop_unchecked()
+        return played, row_picks
+
+    def test_multiple_enabled_sleep_rows_play_one_pick_for_the_whole_night(self):
+        from screen_media import MediaInfo
+
+        catalog = {
+            reference: MediaInfo(reference, (1, index, 1, 1, 1), "gif", 1000)
+            for index, reference in enumerate(("a.gif", "b.gif", "c.gif"), 1)
+        }
+        played, row_picks = self._night_controller(
+            [("sleep_a", ["a.gif"]), ("sleep_b", ["b.gif"]), ("sleep_c", ["c.gif"])],
+            catalog, nights=2, plays_per_night=4,
+        )
+
+        by_night = {}
+        for night, reference in played:
+            by_night.setdefault(night, []).append(reference)
+        # Night 1 picks sleep_a, night 2 re-picks (sleep_b); never rotates within a night.
+        self.assertEqual(by_night, {0: ["a.gif"] * 4, 1: ["b.gif"] * 4})
+        self.assertEqual(row_picks, [("sleep_a", "sleep_b", "sleep_c")] * 2)
+
+    def test_unusable_nightly_sleep_pick_falls_back_once_and_then_holds(self):
+        from screen_media import MediaInfo
+
+        catalog = {"b.gif": MediaInfo("b.gif", (1, 2, 1, 1, 1), "gif", 1000)}
+        played, row_picks = self._night_controller(
+            [("sleep_a", ["missing.gif"]), ("sleep_b", ["b.gif"])],
+            catalog, nights=1, plays_per_night=3,
+        )
+
+        self.assertEqual(played, [(0, "b.gif")] * 3)
+        self.assertEqual(row_picks, [("sleep_a", "sleep_b")])
+
+    def test_interrupted_nightly_sleep_pick_is_kept_not_replaced(self):
+        from screen_media import MediaInfo
+
+        catalog = {
+            reference: MediaInfo(reference, (1, index, 1, 1, 1), "gif", 1000)
+            for index, reference in enumerate(("a.gif", "b.gif"), 1)
+        }
+        # The second play is interrupted (e.g. a preview); the pick must survive it.
+        played, row_picks = self._night_controller(
+            [("sleep_a", ["a.gif"]), ("sleep_b", ["b.gif"])],
+            catalog, nights=1, plays_per_night=4,
+            render=lambda _reference, count: count != 2,
+        )
+
+        self.assertEqual(played, [(0, "a.gif")] * 4)
+        self.assertEqual(row_picks, [("sleep_a", "sleep_b")])
+
     def test_inactive_scheduler_owns_one_sleep_session_until_wake(self):
         config = copy.deepcopy(DEFAULT_CONFIG)
         sleep = next(item for item in config["playlist"] if item["module"] == "sleep")
@@ -1946,6 +2051,8 @@ class ScreenMediaRevisionTests(unittest.TestCase):
         controller._is_active = is_active
         controller._seconds_until_schedule_change = Mock(return_value=5)
         controller._screen_runtime = Mock()
+        controller._screen_runtime.night_sleep_rows.side_effect = lambda rows: rows
+        controller._screen_runtime.sleep_row_unrendered.return_value = True
 
         def execute_scheduled_screen(*_args, **kwargs):
             if kwargs.get("entering_sleep"):
@@ -2083,6 +2190,7 @@ class ScreenMediaRevisionTests(unittest.TestCase):
                 return values[0]
 
             controller._screen_runtime._choice = choose
+            controller._screen_runtime._row_choice = lambda rows: rows[-1]
             executions = []
 
             def execute(_screen, selected, _duration):
@@ -2097,7 +2205,14 @@ class ScreenMediaRevisionTests(unittest.TestCase):
                 set=shutdown_event.set,
                 wait=lambda timeout=None: waits.append(timeout) or False,
             )
-            controller._mark_scheduler_healthy = lambda: controller._shutdown.set()
+            healthy = []
+
+            def mark_healthy():
+                healthy.append(True)
+                if len(healthy) == 3:
+                    controller._shutdown.set()
+
+            controller._mark_scheduler_healthy = mark_healthy
             original_fsync = os.fsync
             injected = []
 
@@ -2110,14 +2225,13 @@ class ScreenMediaRevisionTests(unittest.TestCase):
             with patch("config_store.os.fsync", side_effect=fsync):
                 controller._run_loop()
 
+            # Tonight's pick is the second row. Its first repair write fails and
+            # the cycle backs off; the retry repairs it to the default and that one
+            # row then holds for the rest of the night (the first row never plays).
             self.assertEqual(injected, ["second-row-file-fsync"])
             self.assertEqual(waits, [0.25])
-            self.assertEqual(executions, [
-                "first.png", "first.png", "built-in/sleep.gif",
-            ])
-            self.assertEqual(choices, [
-                ("first.png",), ("built-in/sleep.gif",),
-            ])
+            self.assertEqual(executions, ["built-in/sleep.gif"] * 3)
+            self.assertEqual(choices, [("built-in/sleep.gif",)])
             self.assertTrue(controller._sleep_session_active)
             self.assertTrue(controller._screen_runtime._sleep_active)
 

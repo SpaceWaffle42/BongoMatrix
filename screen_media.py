@@ -213,10 +213,14 @@ def screen_preview_duration_seconds(
 class ScreenMediaRuntime:
     """Own thread-safe Splash/Sleep selection state for one controller."""
 
-    def __init__(self, *, catalog, shuffle=random.shuffle, choice=random.choice):
+    def __init__(
+        self, *, catalog, shuffle=random.shuffle, choice=random.choice,
+        row_choice=random.choice,
+    ):
         self._catalog = catalog
         self._shuffle = shuffle
         self._choice = choice
+        self._row_choice = row_choice
         self._lock = threading.RLock()
         self._splash_states = {}
         self._retired_splash = {}
@@ -225,6 +229,8 @@ class ScreenMediaRuntime:
         self._last_sleep_row_key = None
         self._sleep_active = False
         self._sleep_current = {}
+        self._night_sleep_row_key = None
+        self._unusable_sleep_rows = set()
 
     @staticmethod
     def _row(config, screen, row=None):
@@ -374,6 +380,57 @@ class ScreenMediaRuntime:
             self._sleep_current[row_key] = current
         return current
 
+    @staticmethod
+    def _sleep_row_key(row):
+        return row.get("id") if isinstance(row.get("id"), str) else "sleep"
+
+    def night_sleep_rows(self, rows):
+        """Order enabled Sleep rows so one random pick plays the whole night.
+
+        The pick is kept until wake (``end_sleep``), until its row is removed or
+        disabled, or until it proves to have no usable media. The remaining rows
+        follow only as fallbacks for that case.
+        """
+        rows = [row for row in rows if isinstance(row, dict)]
+        if not rows:
+            return []
+        with self._lock:
+            keys = [self._sleep_row_key(row) for row in rows]
+            self._unusable_sleep_rows.intersection_update(keys)
+            if self._night_sleep_row_key not in keys:
+                candidates = [
+                    row for row, key in zip(rows, keys)
+                    if key not in self._unusable_sleep_rows
+                ] or rows
+                self._night_sleep_row_key = self._sleep_row_key(
+                    self._row_choice(candidates)
+                )
+            chosen = keys.index(self._night_sleep_row_key)
+            return [rows[chosen], *rows[:chosen], *rows[chosen + 1:]]
+
+    def keep_night_sleep_row(self, row) -> None:
+        """Record the row that rendered as tonight's Sleep screen."""
+        with self._lock:
+            key = self._sleep_row_key(row)
+            self._night_sleep_row_key = key
+            self._unusable_sleep_rows.discard(key)
+
+    def sleep_row_unrendered(self, row) -> bool:
+        """Handle a row that did not render; return True when it is unusable.
+
+        A row that still holds a usable selection was interrupted (preview,
+        reload, pairing) and keeps tonight's pick. A row without usable media is
+        skipped for the rest of the night and a different row is chosen.
+        """
+        with self._lock:
+            key = self._sleep_row_key(row)
+            if key in self._sleep_current:
+                return False
+            self._unusable_sleep_rows.add(key)
+            if self._night_sleep_row_key == key:
+                self._night_sleep_row_key = None
+            return True
+
     def begin_sleep(self, config, row=None) -> MediaInfo | None:
         with self._lock:
             self._sleep_active = True
@@ -390,6 +447,8 @@ class ScreenMediaRuntime:
         with self._lock:
             self._sleep_active = False
             self._sleep_current.clear()
+            self._night_sleep_row_key = None
+            self._unusable_sleep_rows.clear()
 
     def retire_sleep(self, media: MediaInfo | None, row=None) -> None:
         if media is None:

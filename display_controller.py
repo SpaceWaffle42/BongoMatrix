@@ -1793,6 +1793,10 @@ class DisplayController:
                         "enabled": True,
                     }]
                 entering_sleep = bool(sleep_items) and not self._sleep_session_active
+                if acceptance_inactive is None:
+                    # One enabled Sleep row is picked per night (cleared by
+                    # end_sleep at wake); the others are only fallbacks.
+                    sleep_items = self._screen_runtime.night_sleep_rows(sleep_items)
                 sleep_cycle_rendered = False
                 try:
                     for item in sleep_items:
@@ -1813,13 +1817,23 @@ class DisplayController:
                             if maximum_duration <= 0:
                                 break
                         if acceptance_inactive is None:
-                            sleep_cycle_rendered = bool(
+                            rendered = bool(
                                 self._execute_scheduled_screen(
                                     config, item, maximum_duration=maximum_duration,
                                     entering_sleep=entering_sleep,
                                 )
-                            ) or sleep_cycle_rendered
-                            entering_sleep = False
+                            )
+                            # Only the attempt that actually opened the session
+                            # consumes entry; a failed first row leaves it pending.
+                            entering_sleep = (
+                                entering_sleep and not self._sleep_session_active
+                            )
+                            if rendered:
+                                sleep_cycle_rendered = True
+                                self._screen_runtime.keep_night_sleep_row(item)
+                                break
+                            if not self._screen_runtime.sleep_row_unrendered(item):
+                                break
                         else:
                             self._execute(
                                 "sleep", playlist_item_config(config, item), duration
