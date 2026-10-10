@@ -57,6 +57,7 @@
   ],
   "test_basic_static_images": [
     "StaticImageDashboardTests.test_fit_note_makes_clipping_and_stretching_explicit",
+    "StaticImageDashboardTests.test_live_card_renderer_offers_static_images",
     "StaticImageDashboardTests.test_media_file_choices_include_static_images",
     "StaticImageDashboardTests.test_static_image_hides_animation_controls_and_keeps_editable_duration",
     "StaticImageRenderingTests.test_browser_preview_fit_matches_physical_matrix_for_every_fit",

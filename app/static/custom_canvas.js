@@ -775,7 +775,7 @@
     const previousMediaSource = basicMediaSources.get(module.id) || (module.type === 'media' ? module.source : null);
     if (previousMediaSource) basicMediaSources.set(module.id, previousMediaSource);
     if (type === 'media') {
-      const playable = item => ['gif', 'mp4'].includes(item.kind);
+      const playable = item => basicMediaChoices().includes(item.name);
       const source = previousMediaSource || mediaItems.find(item => playable(item) && !item.built_in)?.name || mediaItems.find(playable)?.name || '';
       if (source) basicMediaSources.set(module.id, source);
       return {...identity, type, source, fit: 'contain', x: 0, y: 0, width: 64, height: 32, loops: 1, playback_speed_percent: 100.0};
@@ -806,20 +806,35 @@
       document.querySelector(`.custom-module-card[data-id="${CSS.escape(module.id)}"] [data-field="type"]`)?.focus();
     });
     if (module.type === 'media') {
+      // Stills (PNG/JPEG/WebP) share the GIF/MP4 fit workflow; loops and speed only apply to animation.
+      const loopsControl = customControl('Loops', 'loops', 'number', module.loops ?? 1);
+      const speedControl = customControl('Playback speed (%)', 'playback_speed_percent', 'playback_speed', module.playback_speed_percent ?? 100.0);
+      for (const control of [loopsControl, speedControl]) control.setAttribute('data-static-image-hidden', '');
+      const fitNote = document.createElement('p'); fitNote.className = 'editor-note wide media-fit-note'; fitNote.setAttribute('aria-live', 'polite');
       fields.append(name, mode,
-        customControl('Media file', 'source', 'select', module.source, mediaItems.filter(item => ['gif', 'mp4'].includes(item.kind)).map(item => item.name)),
+        customControl('Media file', 'source', 'select', module.source, basicMediaChoices()),
         customControl('Fit', 'fit', 'select', module.fit, ['contain', 'cover', 'stretch', 'manual']),
         customControl('X position', 'x', 'number', module.x), customControl('Y position', 'y', 'number', module.y),
         customControl('Width', 'width', 'number', module.width), customControl('Height', 'height', 'number', module.height),
-        customControl('Loops', 'loops', 'number', module.loops ?? 1),
-        customControl('Playback speed (%)', 'playback_speed_percent', 'playback_speed', module.playback_speed_percent ?? 100.0));
+        loopsControl, speedControl, fitNote);
+      const syncStatic = () => {
+        const value = field => fields.querySelector(`[data-field="${field}"]`)?.value;
+        const current = {source: value('source'), fit: value('fit'), x: value('x'), y: value('y'), width: value('width'), height: value('height')};
+        const still = isStaticMediaSource(current.source);
+        loopsControl.hidden = speedControl.hidden = still;
+        fitNote.textContent = mediaFitNote(current) + (still ? ' Still image: set how long it shows with the playlist duration.' : '');
+        runtime.hidden = still;
+      };
+      fields.addEventListener('input', syncStatic); fields.addEventListener('change', syncStatic);
+      queueMicrotask(syncStatic);
     } else {
       const text = customControl('Text', 'text', 'text', module.text); text.classList.add('wide');
       fields.append(name, text, mode, customControl('Font', 'font', 'select', module.font, fonts), customControl('Text colour', 'colour', 'color', module.colour), customControl('X position', 'x', 'number', module.x), customControl('Baseline Y', 'y', 'number', module.y), customControl('Scroll direction', 'direction', 'select', module.direction, ['left', 'right']), customControl('Frame delay (seconds)', 'speed', 'number', module.speed), customControl('Scroll loops', 'loops', 'number', module.loops ?? 1));
     }
     for (const control of fields.querySelectorAll('[data-field]')) control.addEventListener('input', syncPlaylistDurations);
-    const runtimeValue = module.type === 'text_scroll' ? calculatedScrollDuration(module) : (module.type === 'media' ? calculatedMediaDuration(module) : Number.NaN);
-    const runtime = scrollPhysicalTimeReadout(runtimeValue); runtime.hidden = !['text_scroll', 'media'].includes(module.type);
+    const animatedMedia = module.type === 'media' && !isStaticMediaSource(module.source);
+    const runtimeValue = module.type === 'text_scroll' ? calculatedScrollDuration(module) : (animatedMedia ? calculatedMediaDuration(module) : Number.NaN);
+    const runtime = scrollPhysicalTimeReadout(runtimeValue); runtime.hidden = !(module.type === 'text_scroll' || animatedMedia);
     card.append(fields);
     if (module.type !== 'media') card.append(simpleAppearanceGroup(module));
     card.append(runtime);

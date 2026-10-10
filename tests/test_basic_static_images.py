@@ -236,6 +236,14 @@ class StaticImageDashboardTests(unittest.TestCase):
         self.assertIn("data-static-image-hidden", template)
         self.assertIn("isMediaAutomatic=module?.type==='media'&&!isStaticMediaSource(module.source)", template)
 
+    def test_live_card_renderer_offers_static_images(self):
+        # custom_canvas.js replaces the dashboard renderer at runtime, so it must use the same choices.
+        asset = (ROOT / "app" / "static" / "custom_canvas.js").read_text()
+        self.assertNotIn("['gif', 'mp4'].includes(item.kind)", asset)
+        self.assertIn("customControl('Media file', 'source', 'select', module.source, basicMediaChoices())", asset)
+        self.assertIn("const still = isStaticMediaSource(current.source);", asset)
+        self.assertIn("loopsControl.hidden = speedControl.hidden = still;", asset)
+
 
 if __name__ == "__main__":
     unittest.main()
