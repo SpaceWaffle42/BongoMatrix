@@ -102,144 +102,40 @@
     }
   }
 
-  function createPixelBitmapEditor() {
-    return {moduleId: null, layerId: null, bitmap: null, baseline: null, selectedCache: null, inProgress: null, undo: [], redo: []};
+  const PIXEL_BRUSH_SHAPES = ['square', 'round', 'flat'];
+
+  function clampPixelBrushSize(size) {
+    return Math.max(1, Math.min(16, Math.round(Number(size) || 1)));
   }
 
-  function selectPixelBitmapLayer(editor, moduleId, layerId, source) {
-    if (!(source instanceof Uint8Array) || source.byteLength !== PIXEL_BITMAP_BYTES) throw new TypeError('pixel bitmap must be an 8192-byte Uint8Array');
-    if (editor.moduleId === moduleId && editor.layerId === layerId) {
-      editor.selectedCache = new Uint8Array(source);
-      return editor.bitmap;
+  // Brush footprint as display-cell offsets around the pointer cell; size 1 is exactly one physical pixel.
+  function pixelBrushOffsets(size, shape) {
+    const extent = clampPixelBrushSize(size), start = -Math.floor((extent - 1) / 2), offsets = [];
+    const rows = shape === 'flat' ? [0] : Array.from({length: extent}, (_, index) => start + index);
+    const centre = start + (extent - 1) / 2, radius = extent / 2;
+    for (const y of rows) for (let x = start; x < start + extent; x++) {
+      if (shape === 'round' && extent > 2 && (x - centre) ** 2 + (y - centre) ** 2 > radius * radius) continue;
+      offsets.push([x, y]);
     }
-    editor.moduleId = moduleId;
-    editor.layerId = layerId;
-    editor.bitmap = new Uint8Array(source);
-    editor.baseline = new Uint8Array(source);
-    editor.selectedCache = new Uint8Array(source);
-    editor.inProgress = null;
-    editor.undo = [];
-    editor.redo = [];
-    return editor.bitmap;
+    return offsets;
   }
 
-  function beginPixelStroke(editor, tool, rgba = [0, 0, 0, 255]) {
-    if (!editor.bitmap) throw new Error('select a pixel layer before drawing');
-    if (editor.inProgress) throw new Error('a pixel stroke is already active');
-    if (tool !== 'draw' && tool !== 'erase') throw new TypeError('pixel stroke tool must be draw or erase');
-    editor.inProgress = {before: new Uint8Array(editor.bitmap), tool, rgba: [...rgba], previous: null, visited: new Set()};
-  }
-
-  function extendPixelStroke(editor, x, y) {
-    const stroke = editor.inProgress;
-    if (!stroke) return false;
-    const current = [Math.round(x), Math.round(y)];
-    const cells = stroke.previous ? pixelLineCells(...stroke.previous, ...current) : [current];
+  // Paint bitmap-local cells. Output stays canonical binary alpha: opaque colour or transparent black.
+  function paintPixelCells(bitmap, cells, tool, rgba = [255, 255, 255, 255]) {
     let changed = false;
-    for (const [cellX, cellY] of cells) {
-      if (cellX < 0 || cellX >= 64 || cellY < 0 || cellY >= 32) continue;
-      const key = cellY * 64 + cellX;
-      if (stroke.visited.has(key)) continue;
-      stroke.visited.add(key);
-      const byte = key * 4;
-      const colour = stroke.tool === 'erase' ? [0, 0, 0, 0] : stroke.rgba;
+    for (const [x, y] of cells) {
+      if (x < 0 || x >= 64 || y < 0 || y >= 32) continue;
+      const byte = (y * 64 + x) * 4;
+      let colour;
+      if (tool === 'erase') colour = [0, 0, 0, 0];
+      else if (tool === 'blend' && bitmap[byte + 3]) colour = [0, 1, 2].map(channel => Math.round((bitmap[byte + channel] + rgba[channel]) / 2)).concat(255);
+      else colour = [rgba[0], rgba[1], rgba[2], 255];
       for (let channel = 0; channel < 4; channel++) {
-        if (editor.bitmap[byte + channel] !== colour[channel]) changed = true;
-        editor.bitmap[byte + channel] = colour[channel];
+        if (bitmap[byte + channel] !== colour[channel]) { bitmap[byte + channel] = colour[channel]; changed = true; }
       }
     }
-    stroke.previous = current;
-    if (changed) editor.selectedCache = null;
     return changed;
   }
-
-  function samePixelBitmap(left, right) {
-    return left.every((value, index) => value === right[index]);
-  }
-
-  function recordPixelSnapshot(editor, before) {
-    editor.undo.push(before);
-    editor.redo = [];
-    if (editor.undo.length > PIXEL_HISTORY_LIMIT) editor.undo.splice(0, editor.undo.length - PIXEL_HISTORY_LIMIT);
-  }
-
-  function endPixelStroke(editor) {
-    if (!editor.inProgress) return false;
-    const before = editor.inProgress.before;
-    editor.inProgress = null;
-    if (samePixelBitmap(before, editor.bitmap)) return false;
-    recordPixelSnapshot(editor, before);
-    return true;
-  }
-
-  function cancelPixelStroke(editor) {
-    if (!editor.inProgress) return false;
-    const before = editor.inProgress.before;
-    const changed = !samePixelBitmap(before, editor.bitmap);
-    editor.bitmap = before;
-    editor.inProgress = null;
-    return changed;
-  }
-
-  function replacePixelBitmap(editor, rgba) {
-    if (!editor.bitmap || editor.inProgress) return false;
-    const before = new Uint8Array(editor.bitmap);
-    if (rgba) {
-      for (let byte = 0; byte < editor.bitmap.length; byte += 4) editor.bitmap.set(rgba, byte);
-    } else editor.bitmap.fill(0);
-    if (samePixelBitmap(before, editor.bitmap)) return false;
-    editor.selectedCache = null;
-    recordPixelSnapshot(editor, before);
-    return true;
-  }
-
-  function undoPixelBitmap(editor) {
-    if (!editor.bitmap || editor.inProgress || !editor.undo.length) return false;
-    editor.redo.push(new Uint8Array(editor.bitmap));
-    editor.bitmap = editor.undo.pop();
-    editor.selectedCache = null;
-    return true;
-  }
-
-  function redoPixelBitmap(editor) {
-    if (!editor.bitmap || editor.inProgress || !editor.redo.length) return false;
-    editor.undo.push(new Uint8Array(editor.bitmap));
-    editor.bitmap = editor.redo.pop();
-    editor.selectedCache = null;
-    return true;
-  }
-
-  function pixelBitmapStorageBytes(editor) {
-    const snapshots = [editor.bitmap, editor.baseline, editor.selectedCache, editor.inProgress?.before, ...editor.undo, ...editor.redo];
-    return snapshots.reduce((total, snapshot) => total + (snapshot?.byteLength || 0), 0);
-  }
-
-  function teardownPixelBitmapEditor(editor) {
-    editor.moduleId = null;
-    editor.layerId = null;
-    editor.bitmap = null;
-    editor.baseline = null;
-    editor.selectedCache = null;
-    editor.inProgress = null;
-    editor.undo = [];
-    editor.redo = [];
-  }
-
-  globalThis.matrixPixelBitmapOperations = Object.freeze({
-    lineCells: pixelLineCells,
-    create: createPixelBitmapEditor,
-    selectLayer: selectPixelBitmapLayer,
-    beginStroke: beginPixelStroke,
-    extendStroke: extendPixelStroke,
-    endStroke: endPixelStroke,
-    cancelStroke: cancelPixelStroke,
-    fill: (editor, rgba) => replacePixelBitmap(editor, rgba),
-    clear: editor => replacePixelBitmap(editor, null),
-    undo: undoPixelBitmap,
-    redo: redoPixelBitmap,
-    storageBytes: pixelBitmapStorageBytes,
-    teardown: teardownPixelBitmapEditor,
-  });
 
   function disposeTimelineResize(state) {
     state.timelineResizeGeneration = (state.timelineResizeGeneration || 0) + 1;
@@ -258,12 +154,12 @@
   function disposeTimelineState(state) {
     cancelTimelineDrag(state);
     disposeTimelineResize(state);
-    if (state.pixelUi) {
-      disposePixelView(state.pixelUi, true);
-      state.pixelUi.saved.clear();
-      state.pixelUi.structuresUndo = [];
-      state.pixelUi.structuresRedo = [];
-      state.pixelUi = null;
+    if (state.pixel) {
+      state.pixel.stroke = null;
+      state.pixel.saved.clear();
+      state.pixel.undo = [];
+      state.pixel.redo = [];
+      state.pixel = null;
     }
     if (state.timer !== null) clearInterval(state.timer);
     state.timer = null;
@@ -342,6 +238,7 @@
 
   function saveFrameProperties(module, layer, values) {
     const state = stateFor(module);
+    if (state.frame !== 0 || layer.keyframes.some(keyframe => keyframe.frame === 0)) values = animatablePixelProperties(layer, values);
     if (state.frame === 0 && !layer.keyframes.some(keyframe => keyframe.frame === 0)) {
       Object.assign(layer.properties, clone(values));
       return;
@@ -357,7 +254,7 @@
   function propertyDefaults(type, source) {
     if (type === 'text') return {present: true, x: 2, y: 8, rotation: 0, text: 'TEXT', font: '5x7', colour: '#ffffff'};
     if (type === 'time') return {present: true, x: 2, y: 12, rotation: 0, format: '24h', font: '7x13', colour: '#ffffff'};
-    if (type === 'pixels') return {present: true, points: [[32, 16]], rotation: 0, colour: '#ffffff'};
+    if (type === 'pixels') return {present: true, bitmap_rgba: emptyPixelBitmap(), offset_x: 0, offset_y: 0, rotation: 0};
     if (type === 'line') return {present: true, x1: 20, y1: 16, x2: 44, y2: 16, rotation: 0, width: 1, colour: '#ffffff'};
     if (type === 'rectangle') return {present: true, x: 24, y: 8, width: 16, height: 16, rotation: 0, colour: '#00ffff', filled: false};
     if (type === 'polygon') return {present: true, points: [[32, 6], [44, 25], [20, 25]], rotation: 0, colour: '#ffffff', filled: false};
@@ -899,7 +796,13 @@
     if (state.onion) for (const onionFrame of [state.frame - 1, state.frame + 1]) if (onionFrame >= 0 && onionFrame < module.frame_count) for (const {layer, properties} of orderedLayersForFrame(module, onionFrame)) { if (layer.visible && properties.present !== false) drawShape(context, layer, properties, .18, onionFrame, module.fps, module.frame_count); }
     for (const {layer, properties} of orderedLayersForFrame(module, state.frame)) { if (layer.visible && properties.present !== false) drawShape(context, layer, properties, 1, state.frame, module.fps, module.frame_count); }
     const selected = module.layers.find(layer => layer.id === state.selected);
-    if (selected) {
+    if (selected?.type === 'pixels' && state.pixel?.grid) {
+      context.save(); context.strokeStyle = 'rgba(255,255,255,.14)'; context.lineWidth = .06; context.beginPath();
+      for (let x = 1; x < 64; x++) { context.moveTo(x, 0); context.lineTo(x, 32); }
+      for (let y = 1; y < 32; y++) { context.moveTo(0, y); context.lineTo(64, y); }
+      context.stroke(); context.restore();
+    }
+    if (selected && !(selected.type === 'pixels' && state.pixel && state.pixel.tool !== 'move')) {
       const box = bounds(resolvedProperties(module, selected, state.frame), selected.type); context.save(); context.strokeStyle = '#00ffff'; context.fillStyle = '#00ffff'; context.lineWidth = .12; context.setLineDash([.5, .35]); context.strokeRect(box.minX, box.minY, Math.max(1, box.maxX - box.minX), Math.max(1, box.maxY - box.minY)); context.setLineDash([]); context.fillRect(box.maxX - .7, box.maxY - .7, 1.4, 1.4); if (supportsRotation(selected.type)) { context.beginPath(); context.arc((box.minX + box.maxX) / 2, box.minY - 2.5, .75, 0, Math.PI * 2); context.fill(); } context.restore();
     }
   }
@@ -936,29 +839,32 @@
   function bindCanvasPointerTransforms(module, canvas) {
     const state = stateFor(module);
     const point = event => canvasPointerPoint(canvas, event);
+    canvas.addEventListener('contextmenu', event => { if (selectedPixelLayer(module)) event.preventDefault(); });
+    canvas.addEventListener('pointerleave', () => { if (state.pixel && !state.pixel.stroke) { state.pixel.hover = null; updatePixelCursor(module); } });
     canvas.addEventListener('pointerdown', event => {
+      if (handlePixelPointerDown(module, canvas, event)) return;
       const layer = module.layers.find(item => item.id === state.selected); if (!layer) return;
       canvas.setPointerCapture(event.pointerId); const current = point(event), properties = resolvedProperties(module, layer, state.frame), box = bounds(properties, layer.type), centre = {x: (box.minX + box.maxX) / 2, y: (box.minY + box.maxY) / 2};
       let mode = 'move';
       if (supportsRotation(layer.type) && Math.hypot(current.x - centre.x, current.y - (box.minY - 2.5)) < 2) { properties.rotation ??= 0; mode = 'rotate'; }
-      else if (layer.type === 'pixels' && !properties.bitmap_rgba) { const points = clone(properties.points); points.push([Math.round(current.x), Math.round(current.y)]); saveFrameProperties(module, layer, {points}); mode = 'freehand'; }
       else if (Math.hypot(current.x - box.maxX, current.y - box.maxY) < 2) mode = 'resize';
       state.drag = {mode, start: current, original: clone(properties), centre}; drawEditor(module, canvas); syncPropertyInputs(module);
     });
     canvas.addEventListener('pointermove', event => {
+      if (!state.drag && handlePixelPointerMove(module, canvas, event)) return;
       if (!state.drag) return; const layer = module.layers.find(item => item.id === state.selected); if (!layer) return;
       const current = point(event), drag = state.drag, properties = clone(drag.original), dx = current.x - drag.start.x, dy = current.y - drag.start.y;
       if (drag.mode === 'move') moveProperties(properties, layer.type, dx, dy);
-      else if (drag.mode === 'freehand') { const live = resolvedProperties(module, layer, state.frame); const last = live.points.at(-1); if (!last || Math.round(current.x) !== last[0] || Math.round(current.y) !== last[1]) saveFrameProperties(module, layer, {points: [...live.points, [Math.round(current.x), Math.round(current.y)]]}); drawEditor(module, canvas); return; }
       else if (drag.mode === 'rotate' && Object.hasOwn(properties, 'rotation')) { const rawRotation = Math.atan2(current.y - drag.centre.y, current.x - drag.centre.x) * 180 / Math.PI + 90; properties.rotation = snapRotation(rawRotation, state.rotationSnap); }
       else if (drag.mode === 'resize') resizeProperties(properties, layer.type, current, dx, dy);
-      const saved = layer.type === 'pixels' && properties.bitmap_rgba
-        ? Object.fromEntries(['offset_x', 'offset_y', 'rotation', 'present', 'z_index'].filter(key => Object.hasOwn(properties, key)).map(key => [key, properties[key]]))
-        : properties;
-      saveFrameProperties(module, layer, saved); drawEditor(module, canvas); syncPropertyInputs(module);
+      saveFrameProperties(module, layer, animatablePixelProperties(layer, properties)); drawEditor(module, canvas); syncPropertyInputs(module);
     });
-    const end = () => { if (state.drag) { state.drag = null; refreshAdvanced(module.id, true); } };
-    canvas.addEventListener('pointerup', end); canvas.addEventListener('pointercancel', end);
+    const end = commit => event => {
+      if (handlePixelPointerEnd(module, event, commit)) return;
+      if (state.drag) { state.drag = null; refreshAdvanced(module.id, true); }
+    };
+    canvas.addEventListener('pointerup', end(true)); canvas.addEventListener('pointercancel', end(false));
+    canvas.addEventListener('lostpointercapture', end(true));
   }
 
   globalThis.matrixMediaCanvasTransforms = Object.freeze({
@@ -972,7 +878,7 @@
   const fieldDefinitions = {
     text: [['text', 'Text', 'text'], ['font', 'Font', 'select'], ['x', 'X', 'number'], ['y', 'Baseline Y', 'number'], ['rotation', 'Rotation', 'number'], ['colour', 'Colour', 'color']],
     time: [['format', 'Time format', 'time-format'], ['font', 'Font', 'select'], ['x', 'X', 'number'], ['y', 'Baseline Y', 'number'], ['rotation', 'Rotation', 'number'], ['colour', 'Colour', 'color']],
-    pixels: [['rotation', 'Rotation', 'number'], ['colour', 'Colour', 'color']],
+    pixels: [['offset_x', 'Offset X', 'number'], ['offset_y', 'Offset Y', 'number'], ['rotation', 'Rotation', 'number']],
     line: [['x1', 'Start X', 'number'], ['y1', 'Start Y', 'number'], ['x2', 'End X', 'number'], ['y2', 'End Y', 'number'], ['rotation', 'Rotation', 'number'], ['width', 'Width', 'number'], ['colour', 'Colour', 'color']],
     rectangle: [['x', 'X', 'number'], ['y', 'Y', 'number'], ['width', 'Width', 'number'], ['height', 'Height', 'number'], ['rotation', 'Rotation', 'number'], ['colour', 'Colour', 'color'], ['filled', 'Filled', 'checkbox']],
     polygon: [['points', 'Points (x,y per line)', 'points'], ['rotation', 'Rotation', 'number'], ['colour', 'Colour', 'color'], ['filled', 'Filled', 'checkbox']],
@@ -1072,20 +978,6 @@
     restoreSaved: restoreSavedPixelLayer,
   });
 
-  function commitPixelEditor(module, layer, ui) {
-    const encoded = pixelBitmapBase64(ui.editor.bitmap);
-    if (layer.properties.bitmap_rgba === encoded && !Object.hasOwn(layer.properties, 'points')
-        && !Object.hasOwn(layer.properties, 'colour')) return false;
-    layer.properties.bitmap_rgba = encoded;
-    layer.properties.offset_x ??= 0; layer.properties.offset_y ??= 0; layer.properties.rotation ??= 0;
-    delete layer.properties.points; delete layer.properties.colour;
-    globalThis.markMatrixDirty?.();
-    publishCanvasDraftMutation(module.id);
-    const stage = document.querySelector(`.custom-module-card[data-id="${CSS.escape(module.id)}"] .editor-canvas`);
-    if (stage) drawEditor(module, stage);
-    return true;
-  }
-
   function hexToRgba(hex) {
     const value = /^#[0-9a-f]{6}$/i.test(hex) ? hex : '#ffffff';
     return [1, 3, 5].map(offset => parseInt(value.slice(offset, offset + 2), 16)).concat(255);
@@ -1097,253 +989,467 @@
     return channels?.length === 3 ? '#' + channels.map(channel => channel.toString(16).padStart(2, '0')).join('') : null;
   }
 
-  function pixelUiState(module, layer, properties) {
+  let emptyPixelBitmapCache = null;
+  function emptyPixelBitmap() {
+    emptyPixelBitmapCache ??= pixelBitmapBase64(new Uint8Array(PIXEL_BITMAP_BYTES));
+    return emptyPixelBitmapCache;
+  }
+
+  // Bitmap layers keep their pixels only in base properties; keyframes and overrides carry placement.
+  function animatablePixelProperties(layer, properties) {
+    if (layer.type !== 'pixels' || !layer.properties.bitmap_rgba) return properties;
+    const result = {...properties};
+    for (const name of ['bitmap_rgba', 'points', 'colour']) delete result[name];
+    return result;
+  }
+
+  const PIXEL_TOOLS = ['move', 'draw', 'erase', 'blend', 'pick'];
+  const PIXEL_TOOL_LABELS = {move: 'Move', draw: 'Draw', erase: 'Erase', blend: 'Blend', pick: 'Pick colour'};
+  const PIXEL_TOOL_ICONS = {move: '✥', draw: '✎', erase: '⌫', blend: '◐', pick: '⌾'};
+  const PIXEL_SHORTCUTS = {m: 'move', d: 'draw', e: 'erase', b: 'blend', i: 'pick'};
+
+  function capturePixelBaselines(module, pixel) {
+    pixel.saved.clear();
+    for (const layer of module.layers) if (layer.type === 'pixels') pixel.saved.set(layer.id, savedPixelLayerSnapshot(module, layer));
+  }
+
+  // Per-canvas pixel state lives with the editor state, so card re-renders never lose history or the saved baseline.
+  function pixelState(module) {
     const state = stateFor(module);
-    if (!state.pixelUi) state.pixelUi = {editor: createPixelBitmapEditor(), saved: new Map(), structuresUndo: [], structuresRedo: [], tool: 'draw', colour: properties.colour || '#ffffff', zoom: 100, grid: true, cell: null};
-    const ui = state.pixelUi;
-    if (ui.editor.moduleId !== module.id || ui.editor.layerId !== layer.id) {
-      disposePixelView(ui, true);
-      const source = properties.bitmap_rgba ? pixelBytes(properties) : legacyPixelBitmap(properties);
-      if (!ui.saved.has(layer.id)) ui.saved.set(layer.id, {bitmap: new Uint8Array(source), structure: savedPixelLayerSnapshot(module, layer)});
-      selectPixelBitmapLayer(ui.editor, module.id, layer.id, source);
-      ui.editor.baseline = new Uint8Array(ui.saved.get(layer.id).bitmap);
-      ui.structuresUndo = []; ui.structuresRedo = [];
+    if (!state.pixel) {
+      const legacyColour = module.layers.find(item => item.id === state.selected && item.type === 'pixels')?.properties.colour;
+      state.pixel = {tool: 'draw', colour: /^#[0-9a-f]{6}$/i.test(legacyColour || '') ? legacyColour.toLowerCase() : '#ffffff', size: 1, shape: 'square', grid: false, menu: false,
+        undo: [], redo: [], stroke: null, hover: null, saved: new Map()};
+      capturePixelBaselines(module, state.pixel);
     }
-    return ui;
+    return state.pixel;
   }
 
-  function disposePixelView(ui, teardown = false) {
-    ui?.disposeView?.();
-    if (ui) { ui.disposeView = null; ui.finishView = null; }
-    if (teardown && ui?.editor) teardownPixelBitmapEditor(ui.editor);
+  function selectedPixelLayer(module) {
+    const state = stateFor(module), layer = module.layers.find(item => item.id === state.selected);
+    return layer?.type === 'pixels' ? layer : null;
   }
 
-  globalThis.matrixSettlePixelEditors = () => {
-    for (const module of customModules.filter(item => item.type === 'canvas')) {
-      const ui = editorState.get(module.id)?.pixelUi;
-      if (ui?.editor?.inProgress) ui.finishView?.();
-    }
-  };
+  function pixelPainting(module) {
+    return Boolean(selectedPixelLayer(module)) && pixelState(module).tool !== 'move';
+  }
 
-  globalThis.matrixCustomCanvasSaved = () => {
-    for (const module of customModules.filter(item => item.type === 'canvas')) {
-      const ui = editorState.get(module.id)?.pixelUi;
-      if (!ui) continue;
-      const currentIds = new Set(module.layers.filter(layer => layer.type === 'pixels').map(layer => layer.id));
-      for (const layerId of [...ui.saved.keys()]) if (!currentIds.has(layerId)) ui.saved.delete(layerId);
-      for (const layer of module.layers.filter(item => item.type === 'pixels')) {
-        const bitmap = pixelBytes(layer.properties);
-        ui.saved.set(layer.id, {bitmap: new Uint8Array(bitmap), structure: savedPixelLayerSnapshot(module, layer)});
-        if (ui.editor.layerId === layer.id) {
-          ui.editor.baseline = new Uint8Array(bitmap);
-          ui.editor.undo = []; ui.editor.redo = []; ui.editor.inProgress = null;
-          ui.structuresUndo = []; ui.structuresRedo = [];
-          const root = document.querySelector(`.custom-module-card[data-id="${CSS.escape(module.id)}"] .pixel-editor`);
-          if (root) drawPixelGrid(root, ui);
-        }
+  function canvasCard(module) {
+    return document.querySelector(`.custom-module-card[data-id="${CSS.escape(module.id)}"]`);
+  }
+
+  function redrawCanvasStage(module) {
+    const stage = canvasCard(module)?.querySelector('.editor-canvas');
+    if (stage) drawEditor(module, stage);
+  }
+
+  // Freeze the layer's displayed placement at stroke start so a stroke stays stable while bounds change.
+  function pixelTransform(module, layer, anchor) {
+    const properties = resolvedProperties(module, layer, stateFor(module).frame);
+    const offsetX = Number(properties.offset_x || 0), offsetY = Number(properties.offset_y || 0);
+    const rotation = Number(properties.rotation || 0);
+    let centreX = anchor[0], centreY = anchor[1];
+    if (rotation && layer.properties.bitmap_rgba) {
+      const bytes = pixelBytes(layer.properties);
+      let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
+      for (let index = 0; index < 64 * 32; index++) {
+        if (!bytes[index * 4 + 3]) continue;
+        const x = index % 64 + offsetX, y = Math.floor(index / 64) + offsetY;
+        minX = Math.min(minX, x); minY = Math.min(minY, y); maxX = Math.max(maxX, x); maxY = Math.max(maxY, y);
       }
+      if (minX !== Infinity) { centreX = (minX + maxX) / 2; centreY = (minY + maxY) / 2; }
     }
-  };
-
-  function setPixelTool(root, ui, tool) {
-    ui.tool = tool;
-    for (const button of root.querySelectorAll('[data-pixel-action="draw"],[data-pixel-action="erase"],[data-pixel-action="pick"]')) {
-      button.setAttribute('aria-pressed', String(button.dataset.pixelAction === tool));
-    }
-    updatePixelStatus(root, ui);
+    return {offsetX, offsetY, rotation, centreX, centreY};
   }
 
-  function updatePixelStatus(root, ui) {
-    const name = {draw: 'Draw', erase: 'Erase', pick: 'Pick'}[ui.tool];
-    root.querySelector('.pixel-status').textContent = ui.cell ? `${name} · X ${ui.cell[0]} · Y ${ui.cell[1]}` : `${name} · move over the grid`;
-  }
-
-  function drawPixelGrid(root, ui) {
-    const canvas = root.querySelector('.pixel-grid'), context = canvas.getContext('2d');
-    context.clearRect(0, 0, canvas.width, canvas.height);
-    for (let index = 0; index < 64 * 32; index++) {
-      const byte = index * 4;
-      if (!ui.editor.bitmap[byte + 3]) continue;
-      context.fillStyle = `rgb(${ui.editor.bitmap[byte]},${ui.editor.bitmap[byte + 1]},${ui.editor.bitmap[byte + 2]})`;
-      context.fillRect((index % 64) * 10, Math.floor(index / 64) * 10, 10, 10);
+  // Inverse of pixelBitmapCells: a displayed 64x32 cell to the bitmap-local cell that renders there.
+  function pixelDisplayToLocal(transform, x, y) {
+    let displayX = x, displayY = y;
+    if (transform.rotation) {
+      const radians = -transform.rotation * Math.PI / 180, sine = Math.sin(radians), cosine = Math.cos(radians);
+      const dx = x - transform.centreX, dy = y - transform.centreY;
+      displayX = pythonRound(transform.centreX + dx * cosine - dy * sine);
+      displayY = pythonRound(transform.centreY + dx * sine + dy * cosine);
     }
-    root.classList.toggle('show-grid', ui.grid);
-    const undo = root.querySelector('[data-pixel-action="undo"]'), redo = root.querySelector('[data-pixel-action="redo"]');
-    undo.disabled = !ui.editor.undo.length; redo.disabled = !ui.editor.redo.length;
+    return [pythonRound(displayX - transform.offsetX), pythonRound(displayY - transform.offsetY)];
   }
 
-  function pixelCompositeColour(module, layer, ui, x, y) {
-    const byte = (y * 64 + x) * 4;
-    if (ui.editor.bitmap[byte + 3]) return Array.from(ui.editor.bitmap.slice(byte, byte + 4));
+  function pushPixelHistory(pixel, entry) {
+    pixel.undo.push(entry);
+    if (pixel.undo.length > PIXEL_HISTORY_LIMIT) pixel.undo.shift();
+    pixel.redo = [];
+  }
+
+  function pixelHistoryEntry(module, layer, kind) {
+    return {layerId: layer.id, kind, value: kind === 'layer' ? savedPixelLayerSnapshot(module, layer) : layer.properties.bitmap_rgba};
+  }
+
+  function publishPixelChange(module) {
+    globalThis.markMatrixDirty?.();
+    publishCanvasDraftMutation(module.id);
+    syncPixelToolbar(module);
+  }
+
+  // Legacy point layers are baked once, on the first edit; the pre-bake layer becomes the undo entry.
+  function preparePixelBitmap(module, layer) {
+    if (layer.properties.bitmap_rgba) return {ok: true, legacy: null};
+    const before = savedPixelLayerSnapshot(module, layer);
+    if (!bakeLegacyPixelLayer(module, layer, resolvedProperties(module, layer, stateFor(module).frame))) return {ok: false, legacy: null};
+    return {ok: true, legacy: before};
+  }
+
+  function beginPixelStroke(module, layer, tool, cell) {
+    const pixel = pixelState(module);
+    if (pixel.stroke) finishPixelStroke(module);
+    const prepared = preparePixelBitmap(module, layer);
+    if (!prepared.ok) return false;
+    pixel.stroke = {
+      layerId: layer.id, tool, rgba: hexToRgba(pixel.colour), offsets: pixelBrushOffsets(pixel.size, pixel.shape),
+      visited: new Set(), previous: null, legacy: prepared.legacy, before: layer.properties.bitmap_rgba,
+      bytes: pixelBytes(layer.properties), transform: pixelTransform(module, layer, cell), pointerId: null, canvas: null,
+    };
+    extendPixelStroke(module, cell);
+    return true;
+  }
+
+  function extendPixelStroke(module, cell) {
+    const stroke = editorState.get(module.id)?.pixel?.stroke;
+    if (!stroke) return false;
+    const layer = module.layers.find(item => item.id === stroke.layerId);
+    if (!layer) { editorState.get(module.id).pixel.stroke = null; return false; }
+    const centres = stroke.previous ? pixelLineCells(...stroke.previous, ...cell) : [cell];
+    stroke.previous = cell;
+    const cells = [];
+    for (const [centreX, centreY] of centres) for (const [offsetX, offsetY] of stroke.offsets) {
+      const x = centreX + offsetX, y = centreY + offsetY;
+      if (x < 0 || x >= 64 || y < 0 || y >= 32) continue;
+      const key = y * 64 + x;
+      if (stroke.visited.has(key)) continue;
+      stroke.visited.add(key);
+      cells.push(pixelDisplayToLocal(stroke.transform, x, y));
+    }
+    if (!paintPixelCells(stroke.bytes, cells, stroke.tool, stroke.rgba)) return false;
+    layer.properties.bitmap_rgba = pixelBitmapBase64(stroke.bytes);
+    redrawCanvasStage(module);
+    return true;
+  }
+
+  function releasePixelPointer(stroke) {
+    try { if (stroke.canvas?.hasPointerCapture?.(stroke.pointerId)) stroke.canvas.releasePointerCapture(stroke.pointerId); } catch (_) { /* Capture already ended. */ }
+  }
+
+  function finishPixelStroke(module) {
+    const pixel = editorState.get(module.id)?.pixel, stroke = pixel?.stroke;
+    if (!stroke) return false;
+    pixel.stroke = null;
+    releasePixelPointer(stroke);
+    const layer = module.layers.find(item => item.id === stroke.layerId);
+    if (!layer) return false;
+    if (layer.properties.bitmap_rgba === stroke.before) {
+      if (stroke.legacy) { restoreSavedPixelLayer(module, layer, stroke.legacy); redrawCanvasStage(module); }
+      return false;
+    }
+    pushPixelHistory(pixel, stroke.legacy
+      ? {layerId: layer.id, kind: 'layer', value: stroke.legacy}
+      : {layerId: layer.id, kind: 'bitmap', value: stroke.before});
+    publishPixelChange(module);
+    return true;
+  }
+
+  function cancelPixelStroke(module) {
+    const pixel = editorState.get(module.id)?.pixel, stroke = pixel?.stroke;
+    if (!stroke) return false;
+    pixel.stroke = null;
+    releasePixelPointer(stroke);
+    const layer = module.layers.find(item => item.id === stroke.layerId);
+    if (!layer) return false;
+    if (stroke.legacy) restoreSavedPixelLayer(module, layer, stroke.legacy);
+    else layer.properties.bitmap_rgba = stroke.before;
+    redrawCanvasStage(module);
+    return true;
+  }
+
+  function stepPixelHistory(module, direction) {
+    finishPixelStroke(module);
+    const pixel = pixelState(module), from = direction < 0 ? pixel.undo : pixel.redo, to = direction < 0 ? pixel.redo : pixel.undo;
+    while (from.length) {
+      const entry = from.pop(), layer = module.layers.find(item => item.id === entry.layerId && item.type === 'pixels');
+      if (!layer) continue;
+      to.push(pixelHistoryEntry(module, layer, entry.kind));
+      if (entry.kind === 'layer') restoreSavedPixelLayer(module, layer, entry.value);
+      else layer.properties.bitmap_rgba = entry.value;
+      stateFor(module).selected = layer.id;
+      globalThis.markMatrixDirty?.();
+      refreshAdvanced(module.id, true);
+      return true;
+    }
+    syncPixelToolbar(module);
+    return false;
+  }
+
+  // Fill paints every displayed cell through the layer transform; Clear empties the whole bitmap.
+  function fillPixelLayer(module, rgba) {
+    const layer = selectedPixelLayer(module);
+    if (!layer) return false;
+    finishPixelStroke(module);
+    const pixel = pixelState(module), prepared = preparePixelBitmap(module, layer);
+    if (!prepared.ok) return false;
+    const previous = layer.properties.bitmap_rgba;
+    let bytes = new Uint8Array(PIXEL_BITMAP_BYTES);
+    if (rgba) {
+      bytes = pixelBytes(layer.properties);
+      const transform = pixelTransform(module, layer, [32, 16]), cells = [];
+      for (let y = 0; y < 32; y++) for (let x = 0; x < 64; x++) cells.push(pixelDisplayToLocal(transform, x, y));
+      paintPixelCells(bytes, cells, 'draw', rgba);
+    }
+    const encoded = pixelBitmapBase64(bytes);
+    if (encoded === previous) {
+      if (prepared.legacy) restoreSavedPixelLayer(module, layer, prepared.legacy);
+      return false;
+    }
+    layer.properties.bitmap_rgba = encoded;
+    pushPixelHistory(pixel, prepared.legacy
+      ? {layerId: layer.id, kind: 'layer', value: prepared.legacy}
+      : {layerId: layer.id, kind: 'bitmap', value: previous});
+    redrawCanvasStage(module);
+    publishPixelChange(module);
+    return true;
+  }
+
+  function resetPixelLayer(module) {
+    const layer = selectedPixelLayer(module);
+    if (!layer) return false;
+    finishPixelStroke(module);
+    const pixel = pixelState(module), saved = pixel.saved.get(layer.id);
+    if (!saved) return false;
+    const current = savedPixelLayerSnapshot(module, layer);
+    if (JSON.stringify(current) === JSON.stringify(saved)) return false;
+    restoreSavedPixelLayer(module, layer, saved);
+    pushPixelHistory(pixel, {layerId: layer.id, kind: 'layer', value: current});
+    globalThis.markMatrixDirty?.();
+    refreshAdvanced(module.id, true);
+    return true;
+  }
+
+  // The eyedropper samples the composited 64x32 output (background and every visible layer).
+  function pickCompositeColour(module, x, y) {
     const canvas = document.createElement('canvas'); canvas.width = 64; canvas.height = 32;
-    const context = canvas.getContext('2d'); context.fillStyle = module.background; context.fillRect(0, 0, 64, 32);
-    const state = stateFor(module);
-    for (const item of orderedLayersForFrame(module, state.frame)) {
-      if (item.layer.id !== layer.id && item.layer.visible && item.properties.present !== false) drawShape(context, item.layer, item.properties, 1, state.frame, module.fps, module.frame_count);
+    const context = canvas.getContext('2d', {willReadFrequently: true}), state = stateFor(module);
+    context.fillStyle = module.background; context.fillRect(0, 0, 64, 32);
+    for (const {layer, properties} of orderedLayersForFrame(module, state.frame)) {
+      if (layer.visible && properties.present !== false) drawShape(context, layer, properties, 1, state.frame, module.fps, module.frame_count);
     }
-    return Array.from(context.getImageData(x, y, 1, 1).data);
+    const data = context.getImageData(x, y, 1, 1).data;
+    return '#' + [data[0], data[1], data[2]].map(value => value.toString(16).padStart(2, '0')).join('');
   }
 
-  function renderPixelEditor(module, layer, properties) {
-    const ui = pixelUiState(module, layer, properties), root = document.createElement('section');
-    disposePixelView(ui);
-    root.className = 'pixel-editor advanced-section'; root.setAttribute('aria-label', 'Pixel drawing editor');
+  function setPixelTool(module, tool) {
+    if (!PIXEL_TOOLS.includes(tool)) return;
+    finishPixelStroke(module);
+    pixelState(module).tool = tool;
+    syncPixelToolbar(module);
+    redrawCanvasStage(module);
+  }
+
+  function setPixelBrushSize(module, size) {
+    pixelState(module).size = clampPixelBrushSize(size);
+    syncPixelToolbar(module);
+  }
+
+  function pixelCellAt(canvas, event) {
+    const box = canvas.getBoundingClientRect();
+    return [
+      Math.max(0, Math.min(63, Math.floor((event.clientX - box.left) * 64 / box.width))),
+      Math.max(0, Math.min(31, Math.floor((event.clientY - box.top) * 32 / box.height))),
+    ];
+  }
+
+  function updatePixelCursor(module) {
+    const card = canvasCard(module), cursor = card?.querySelector('.pixel-cursor');
+    if (!cursor) return;
+    const pixel = pixelState(module), painting = pixelPainting(module) && pixel.hover;
+    cursor.hidden = !painting;
+    if (painting) {
+      const offsets = pixel.tool === 'pick' ? [[0, 0]] : pixelBrushOffsets(pixel.size, pixel.shape);
+      const xs = offsets.map(item => item[0] + pixel.hover[0]), ys = offsets.map(item => item[1] + pixel.hover[1]);
+      const left = Math.max(0, Math.min(...xs)), top = Math.max(0, Math.min(...ys));
+      const right = Math.min(63, Math.max(...xs)), bottom = Math.min(31, Math.max(...ys));
+      Object.assign(cursor.style, {left: left / 64 * 100 + '%', top: top / 32 * 100 + '%',
+        width: (right - left + 1) / 64 * 100 + '%', height: (bottom - top + 1) / 32 * 100 + '%'});
+    }
+    const status = card.querySelector('.pixel-status');
+    if (status) {
+      const brush = pixel.tool === 'pick' || pixel.tool === 'move' ? '' : ` · ${pixel.size}px ${pixel.shape}`;
+      status.textContent = PIXEL_TOOL_LABELS[pixel.tool] + (pixel.hover ? ` · X ${pixel.hover[0]} · Y ${pixel.hover[1]}` : ' · move over the canvas') + brush;
+    }
+  }
+
+  function syncPixelToolbar(module) {
+    const card = canvasCard(module), root = card?.querySelector('.pixel-editor');
+    if (!root) return;
+    const pixel = pixelState(module);
+    for (const button of root.querySelectorAll('[data-pixel-tool]')) button.setAttribute('aria-pressed', String(button.dataset.pixelTool === pixel.tool));
+    const colour = root.querySelector('[data-pixel-action="colour"]'); if (colour && colour.value !== pixel.colour) colour.value = pixel.colour;
+    const size = root.querySelector('[data-pixel-action="size"]'); if (size && document.activeElement !== size) size.value = String(pixel.size);
+    const shape = root.querySelector('[data-pixel-action="shape"]'); if (shape) shape.value = pixel.shape;
+    root.querySelector('[data-pixel-action="undo"]').disabled = !pixel.undo.length;
+    root.querySelector('[data-pixel-action="redo"]').disabled = !pixel.redo.length;
+    const layer = selectedPixelLayer(module), reset = root.querySelector('[data-pixel-more="reset"]');
+    if (reset) reset.disabled = !layer || !pixel.saved.has(layer.id);
+    const grid = root.querySelector('[data-pixel-more="grid"]'); if (grid) grid.setAttribute('aria-pressed', String(pixel.grid));
+    const menu = root.querySelector('.pixel-more-menu'), more = root.querySelector('[data-pixel-action="more"]');
+    if (menu) menu.hidden = !pixel.menu;
+    if (more) more.setAttribute('aria-expanded', String(pixel.menu));
+    const wrap = card.querySelector('.editor-canvas-wrap');
+    wrap?.classList.toggle('pixel-painting', pixelPainting(module));
+    wrap?.classList.toggle('pixel-grid-on', pixel.grid && Boolean(layer));
+    updatePixelCursor(module);
+  }
+
+  function renderPixelToolbar(module) {
+    const pixel = pixelState(module), root = document.createElement('section');
+    root.className = 'pixel-editor'; root.setAttribute('aria-label', 'Pixel drawing editor');
     const toolbar = document.createElement('div'); toolbar.className = 'pixel-toolbar'; toolbar.setAttribute('role', 'toolbar'); toolbar.setAttribute('aria-label', 'Pixel drawing tools');
-    const button = (action, label, text, handler) => {
-      const item = document.createElement('button'); item.type = 'button'; item.className = 'btn pixel-tool'; item.dataset.pixelAction = action; item.setAttribute('aria-label', label); item.title = label; item.textContent = text; item.addEventListener('click', handler); toolbar.append(item); return item;
+    const button = (action, label, text, handler, parent = toolbar) => {
+      const item = document.createElement('button'); item.type = 'button'; item.className = 'btn pixel-tool';
+      item.dataset.pixelAction = action; item.setAttribute('aria-label', label); item.title = label; item.textContent = text;
+      item.addEventListener('click', handler); parent.append(item); return item;
     };
-    const draw = button('draw', 'Draw', '✎ Draw', () => setPixelTool(root, ui, 'draw'));
-    const erase = button('erase', 'Erase', '⌫ Erase', () => setPixelTool(root, ui, 'erase'));
-    const pick = button('pick', 'Pick colour', '⌾ Pick', () => setPixelTool(root, ui, 'pick'));
-    for (const item of [draw, erase, pick]) item.setAttribute('aria-pressed', String(item.dataset.pixelAction === ui.tool));
-    const colour = document.createElement('input'); colour.type = 'color'; colour.className = 'pixel-colour'; colour.dataset.pixelAction = 'colour'; colour.value = ui.colour; colour.setAttribute('aria-label', 'Colour'); colour.title = 'Colour'; colour.addEventListener('input', () => { ui.colour = colour.value; }); toolbar.append(colour);
-    const layerSnapshot = () => ({layer: clone(layer), overrides: clone(module.overrides)});
-    const restoreLayerSnapshot = snapshot => {
-      for (const key of Object.keys(layer)) delete layer[key]; Object.assign(layer, clone(snapshot.layer));
-      module.overrides = clone(snapshot.overrides);
-    };
-    const publishOnly = () => { globalThis.markMatrixDirty?.(); publishCanvasDraftMutation(module.id); const stage = document.querySelector(`.custom-module-card[data-id="${CSS.escape(module.id)}"] .editor-canvas`); if (stage) drawEditor(module, stage); };
-    button('undo', 'Undo', '↶', () => {
-      const structure = ui.structuresUndo.at(-1) || null, redoStructure = structure ? layerSnapshot() : null;
-      if (undoPixelBitmap(ui.editor)) {
-        ui.structuresUndo.pop(); ui.structuresRedo.push(redoStructure);
-        if (structure) { restoreLayerSnapshot(structure); publishOnly(); } else commitPixelEditor(module, layer, ui);
-        drawPixelGrid(root, ui);
-      }
-    });
-    button('redo', 'Redo', '↷', () => {
-      const structure = ui.structuresRedo.at(-1) || null, undoStructure = structure ? layerSnapshot() : null;
-      if (redoPixelBitmap(ui.editor)) {
-        ui.structuresRedo.pop(); ui.structuresUndo.push(undoStructure);
-        if (structure) { restoreLayerSnapshot(structure); publishOnly(); } else commitPixelEditor(module, layer, ui);
-        drawPixelGrid(root, ui);
-      }
-    });
-    const zoomLabel = document.createElement('span'); zoomLabel.className = 'pixel-zoom';
-    const applyZoom = value => { ui.zoom = Math.max(50, Math.min(200, value)); root.style.setProperty('--pixel-zoom', ui.zoom + '%'); zoomLabel.textContent = ui.zoom + '%'; };
-    button('zoom-out', 'Zoom out', '−', () => applyZoom(ui.zoom - 25));
-    button('zoom-in', 'Zoom in', '+', () => applyZoom(ui.zoom + 25));
-    button('fit', 'Fit canvas', 'Fit', () => applyZoom(100));
-    const moreButton = button('more', 'More pixel actions', 'More', () => { menu.hidden = !menu.hidden; moreButton.setAttribute('aria-expanded', String(!menu.hidden)); });
-    moreButton.setAttribute('aria-expanded', 'false'); moreButton.setAttribute('aria-controls', 'pixel-more-' + layer.id);
-    toolbar.append(zoomLabel);
+    const shortcutFor = tool => Object.keys(PIXEL_SHORTCUTS).find(key => PIXEL_SHORTCUTS[key] === tool).toUpperCase();
+    for (const tool of PIXEL_TOOLS) {
+      const item = button(tool, PIXEL_TOOL_LABELS[tool], `${PIXEL_TOOL_ICONS[tool]} ${PIXEL_TOOL_LABELS[tool].split(' ')[0]}`, () => setPixelTool(module, tool));
+      item.dataset.pixelTool = tool; item.title = `${PIXEL_TOOL_LABELS[tool]} (${shortcutFor(tool)})`;
+    }
+    const colour = document.createElement('input'); colour.type = 'color'; colour.className = 'pixel-colour'; colour.dataset.pixelAction = 'colour';
+    colour.value = pixel.colour; colour.title = 'Colour'; colour.setAttribute('aria-label', 'Colour');
+    colour.addEventListener('input', () => { pixel.colour = colour.value; if (!['draw', 'blend'].includes(pixel.tool)) setPixelTool(module, 'draw'); });
+    const size = document.createElement('input'); size.type = 'number'; size.min = '1'; size.max = '16'; size.step = '1'; size.className = 'pixel-size';
+    size.dataset.pixelAction = 'size'; size.value = String(pixel.size); size.title = 'Brush size ([ and ])'; size.setAttribute('aria-label', 'Brush size');
+    size.addEventListener('input', () => { if (size.value !== '') pixel.size = clampPixelBrushSize(size.value); updatePixelCursor(module); });
+    size.addEventListener('change', () => setPixelBrushSize(module, size.value));
+    const shape = document.createElement('select'); shape.className = 'pixel-shape'; shape.dataset.pixelAction = 'shape'; shape.title = 'Brush shape'; shape.setAttribute('aria-label', 'Brush shape');
+    for (const value of PIXEL_BRUSH_SHAPES) { const option = document.createElement('option'); option.value = value; option.textContent = value[0].toUpperCase() + value.slice(1); shape.append(option); }
+    shape.value = pixel.shape; shape.addEventListener('change', () => { pixel.shape = shape.value; syncPixelToolbar(module); });
+    toolbar.append(colour, size, shape);
+    button('undo', 'Undo (Ctrl/Cmd + Z)', '↶', () => stepPixelHistory(module, -1));
+    button('redo', 'Redo (Ctrl/Cmd + Shift + Z)', '↷', () => stepPixelHistory(module, 1));
+    const more = button('more', 'More pixel actions', 'More', () => { pixel.menu = !pixel.menu; syncPixelToolbar(module); });
+    const menuId = 'pixel-more-' + module.id; more.setAttribute('aria-controls', menuId);
 
     const swatches = document.createElement('div'); swatches.className = 'pixel-swatches'; swatches.setAttribute('aria-label', 'Matrix colour swatches');
     const matrixColours = [...document.querySelectorAll('#lava-palettes .swatch')].map(item => rgbToHex(getComputedStyle(item).backgroundColor)).filter(Boolean);
     for (const value of [...new Set(matrixColours)].slice(0, 12)) {
-      const swatch = document.createElement('button'); swatch.type = 'button'; swatch.className = 'pixel-swatch'; swatch.style.backgroundColor = value; swatch.title = `Use ${value}`; swatch.setAttribute('aria-label', `Use ${value}`); swatch.addEventListener('click', () => { ui.colour = value; colour.value = value; setPixelTool(root, ui, 'draw'); }); swatches.append(swatch);
+      const swatch = document.createElement('button'); swatch.type = 'button'; swatch.className = 'pixel-swatch'; swatch.style.backgroundColor = value;
+      swatch.title = `Use ${value}`; swatch.setAttribute('aria-label', `Use ${value}`);
+      swatch.addEventListener('click', () => { pixel.colour = value; setPixelTool(module, pixel.tool === 'blend' ? 'blend' : 'draw'); });
+      swatches.append(swatch);
     }
 
-    const menu = document.createElement('div'); menu.className = 'pixel-more-menu'; menu.id = 'pixel-more-' + layer.id; menu.hidden = true;
-    const moreAction = (action, label, handler) => { const item = document.createElement('button'); item.type = 'button'; item.className = 'btn'; item.dataset.pixelMore = action; item.textContent = label; item.title = label; item.setAttribute('aria-label', label); item.addEventListener('click', handler); menu.append(item); };
-    moreAction('grid', 'Grid on/off', () => { ui.grid = !ui.grid; drawPixelGrid(root, ui); });
-    const wholeLayerMutation = rgba => {
-      const legacy = !layer.properties.bitmap_rgba, structure = legacy ? layerSnapshot() : null;
-      if (legacy && !bakeLegacyPixelLayer(module, layer, resolvedProperties(module, layer, stateFor(module).frame))) return;
-      if (legacy) ui.editor.bitmap = pixelBytes(layer.properties);
-      if (!replacePixelBitmap(ui.editor, rgba)) { if (structure) restoreLayerSnapshot(structure); return; }
-      ui.structuresUndo.push(structure); ui.structuresRedo = [];
-      while (ui.structuresUndo.length > ui.editor.undo.length) ui.structuresUndo.shift();
-      commitPixelEditor(module, layer, ui); drawPixelGrid(root, ui);
-    };
-    moreAction('fill', 'Fill layer', () => { if (confirm('Fill the entire pixel layer?')) wholeLayerMutation(hexToRgba(ui.colour)); });
-    moreAction('clear', 'Clear layer', () => { if (confirm('Clear the entire pixel layer?')) wholeLayerMutation(null); });
-    moreAction('reset', 'Reset to last saved state', () => {
-      if (!confirm('Reset this pixel layer to its last saved state?')) return;
-      const saved = ui.saved.get(layer.id), baseline = new Uint8Array(saved.bitmap);
-      const structureChanged = JSON.stringify(savedPixelLayerSnapshot(module, layer)) !== JSON.stringify(saved.structure);
-      if (samePixelBitmap(baseline, ui.editor.bitmap) && !structureChanged) return;
-      restoreSavedPixelLayer(module, layer, saved.structure);
-      ui.editor.bitmap = baseline; ui.editor.selectedCache = null; ui.editor.inProgress = null; ui.editor.undo = []; ui.editor.redo = [];
-      publishOnly(); drawPixelGrid(root, ui); menu.hidden = true; moreButton.setAttribute('aria-expanded', 'false');
-    });
-    const help = document.createElement('p'); help.className = 'pixel-shortcuts'; help.textContent = 'Shortcuts: D Draw · E Erase · I Pick · Ctrl/Cmd + Z Undo · Ctrl/Cmd + Shift + Z or Ctrl/Cmd + Y Redo'; menu.append(help);
-
-    const surface = document.createElement('div'); surface.className = 'pixel-surface';
-    const canvas = document.createElement('canvas'); canvas.className = 'pixel-grid'; canvas.width = 640; canvas.height = 320; canvas.tabIndex = 0; canvas.setAttribute('aria-label', '64 by 32 pixel drawing grid');
-    const highlight = document.createElement('span'); highlight.className = 'pixel-cell-highlight'; highlight.hidden = true; surface.append(canvas, highlight);
-    const status = document.createElement('p'); status.className = 'pixel-status'; status.setAttribute('aria-live', 'polite');
-    const cellFor = event => { const box = canvas.getBoundingClientRect(); return [Math.max(0, Math.min(63, Math.floor((event.clientX - box.left) * 64 / box.width))), Math.max(0, Math.min(31, Math.floor((event.clientY - box.top) * 32 / box.height)))]; };
-    const showCell = event => {
-      ui.cell = cellFor(event); highlight.hidden = false;
-      const box = canvas.getBoundingClientRect();
-      highlight.style.left = canvas.offsetLeft + ui.cell[0] * box.width / 64 + 'px';
-      highlight.style.top = canvas.offsetTop + ui.cell[1] * box.height / 32 + 'px';
-      highlight.style.width = box.width / 64 + 'px'; highlight.style.height = box.height / 32 + 'px';
-      updatePixelStatus(root, ui); return ui.cell;
-    };
-    let activePointer = null;
-    const release = () => {
-      if (activePointer === null) return;
-      try { if (canvas.hasPointerCapture?.(activePointer)) canvas.releasePointerCapture(activePointer); } catch (_) {}
-      activePointer = null;
-    };
-    let pendingLegacy = null;
-    const finish = event => {
-      if (event && activePointer !== null && event.pointerId !== activePointer) return;
-      const changed = endPixelStroke(ui.editor); release();
-      if (!changed && pendingLegacy) restoreLayerSnapshot(pendingLegacy);
-      if (changed) {
-        ui.structuresUndo.push(pendingLegacy); ui.structuresRedo = [];
-        while (ui.structuresUndo.length > ui.editor.undo.length) ui.structuresUndo.shift();
-        commitPixelEditor(module, layer, ui); drawPixelGrid(root, ui);
-      }
-      pendingLegacy = null;
-    };
-    const cancel = event => {
-      if (event && activePointer !== null && event.pointerId !== activePointer) return;
-      const changed = cancelPixelStroke(ui.editor); release();
-      if (pendingLegacy) restoreLayerSnapshot(pendingLegacy);
-      pendingLegacy = null; if (changed) drawPixelGrid(root, ui);
-    };
-    canvas.addEventListener('pointermove', event => {
-      if (activePointer !== null && event.pointerId !== activePointer) return;
-      const cell = showCell(event); if (ui.editor.inProgress && event.buttons) { extendPixelStroke(ui.editor, ...cell); drawPixelGrid(root, ui); }
-    });
-    canvas.addEventListener('pointerdown', event => {
-      if (activePointer !== null) return;
-      event.preventDefault(); const cell = showCell(event);
-      if (ui.tool === 'pick' && event.button !== 2) {
-        const rgba = pixelCompositeColour(module, layer, ui, ...cell); ui.colour = '#' + rgba.slice(0, 3).map(value => value.toString(16).padStart(2, '0')).join(''); colour.value = ui.colour; setPixelTool(root, ui, 'draw'); return;
-      }
-      const tool = event.button === 2 ? 'erase' : ui.tool;
-      if (tool !== 'draw' && tool !== 'erase') return;
-      if (!layer.properties.bitmap_rgba) pendingLegacy = layerSnapshot();
-      if (!bakeLegacyPixelLayer(module, layer, resolvedProperties(module, layer, stateFor(module).frame))) { pendingLegacy = null; return; }
-      if (!properties.bitmap_rgba) {
-        const baked = pixelBytes(layer.properties);
-        ui.editor.bitmap = new Uint8Array(baked); ui.editor.selectedCache = null;
-      }
-      beginPixelStroke(ui.editor, tool, hexToRgba(ui.colour)); extendPixelStroke(ui.editor, ...cell); drawPixelGrid(root, ui);
-      activePointer = event.pointerId;
-      try { canvas.setPointerCapture?.(event.pointerId); } catch (_) { /* Synthetic/ended pointers have no capture target. */ }
-    });
-    canvas.addEventListener('pointerup', finish); canvas.addEventListener('pointerleave', finish); canvas.addEventListener('pointercancel', cancel);
-    ui.finishView = finish;
-    const blur = () => cancel(), pagehide = () => { cancel(); disposePixelView(ui, true); };
-    window.addEventListener('blur', blur); window.addEventListener('pagehide', pagehide, {once: true});
-    ui.disposeView = () => { cancel(); window.removeEventListener('blur', blur); window.removeEventListener('pagehide', pagehide); };
-    canvas.addEventListener('contextmenu', event => event.preventDefault());
-    root.append(toolbar, swatches, menu, surface, status); applyZoom(ui.zoom); drawPixelGrid(root, ui); updatePixelStatus(root, ui);
+    const menu = document.createElement('div'); menu.className = 'pixel-more-menu'; menu.id = menuId; menu.hidden = !pixel.menu;
+    const moreAction = (action, label, handler) => { const item = button('more-' + action, label, label, handler, menu); item.dataset.pixelMore = action; delete item.dataset.pixelAction; return item; };
+    moreAction('grid', 'Grid on/off', () => { pixel.grid = !pixel.grid; syncPixelToolbar(module); });
+    moreAction('fill', 'Fill layer', () => { if (confirm('Fill the whole visible pixel layer with the current colour?')) fillPixelLayer(module, hexToRgba(pixel.colour)); });
+    moreAction('clear', 'Clear layer', () => { if (confirm('Clear every pixel in this layer?')) fillPixelLayer(module, null); });
+    moreAction('reset', 'Reset to last saved state', () => { if (confirm('Reset this pixel layer to its last saved state?')) resetPixelLayer(module); });
+    const help = document.createElement('p'); help.className = 'pixel-shortcuts';
+    help.textContent = 'Shortcuts: M Move · D Draw · E Erase · B Blend · I Pick · [ ] brush size · Ctrl/Cmd + Z Undo · Ctrl/Cmd + Shift + Z or Ctrl/Cmd + Y Redo · right-click erases';
+    menu.append(help);
+    root.append(toolbar, swatches, menu);
     return root;
   }
 
+  function handlePixelPointerDown(module, canvas, event) {
+    const layer = selectedPixelLayer(module);
+    if (!layer) return false;
+    const pixel = pixelState(module), erase = event.button === 2;
+    if (pixel.tool === 'move' && !erase) return false;
+    event.preventDefault();
+    canvas.focus?.({preventScroll: true});
+    if (event.button !== 0 && !erase) return true;
+    const cell = pixelCellAt(canvas, event);
+    pixel.hover = cell;
+    if (pixel.tool === 'pick' && !erase) {
+      pixel.colour = pickCompositeColour(module, ...cell);
+      setPixelTool(module, 'draw');
+      return true;
+    }
+    if (pixel.stroke) return true;
+    if (!beginPixelStroke(module, layer, erase ? 'erase' : pixel.tool, cell)) return true;
+    pixel.stroke.pointerId = event.pointerId; pixel.stroke.canvas = canvas;
+    try { canvas.setPointerCapture(event.pointerId); } catch (_) { /* Synthetic pointers may have no capture target. */ }
+    updatePixelCursor(module);
+    return true;
+  }
+
+  function handlePixelPointerMove(module, canvas, event) {
+    if (!selectedPixelLayer(module)) return false;
+    const pixel = pixelState(module);
+    if (!pixelPainting(module) && !pixel.stroke) return false;
+    const cell = pixelCellAt(canvas, event);
+    pixel.hover = cell;
+    if (pixel.stroke && pixel.stroke.pointerId === event.pointerId) extendPixelStroke(module, cell);
+    updatePixelCursor(module);
+    return true;
+  }
+
+  function handlePixelPointerEnd(module, event, commit) {
+    const stroke = editorState.get(module.id)?.pixel?.stroke;
+    if (!stroke) return Boolean(selectedPixelLayer(module)) && pixelPainting(module);
+    if (stroke.pointerId !== null && stroke.pointerId !== event.pointerId) return true;
+    if (commit) finishPixelStroke(module); else cancelPixelStroke(module);
+    return true;
+  }
+
+  globalThis.matrixSettlePixelEditors = () => {
+    for (const module of customModules.filter(item => item.type === 'canvas')) finishPixelStroke(module);
+  };
+
+  globalThis.matrixCustomCanvasSaved = () => {
+    for (const module of customModules.filter(item => item.type === 'canvas')) {
+      const pixel = editorState.get(module.id)?.pixel;
+      if (!pixel) continue;
+      pixel.stroke = null; pixel.undo = []; pixel.redo = [];
+      capturePixelBaselines(module, pixel);
+      syncPixelToolbar(module);
+    }
+  };
+
+  if (typeof window !== 'undefined' && typeof window.addEventListener === 'function') {
+    window.addEventListener('blur', () => { for (const module of customModules.filter(item => item.type === 'canvas')) cancelPixelStroke(module); });
+  }
+
   if (typeof document !== 'undefined' && typeof document.addEventListener === 'function') document.addEventListener('keydown', event => {
-    const root = event.target?.closest?.('.pixel-editor'); if (!root || event.defaultPrevented) return;
-    const editable = event.target?.matches?.('input,textarea,select,[contenteditable="true"]'); if (editable) return;
+    if (event.defaultPrevented || event.altKey) return;
+    const card = event.target?.closest?.('.advanced-card');
+    if (!card?.querySelector('.pixel-toolbar')) return;
+    if (event.target.matches?.('input,textarea,select,[contenteditable="true"]')) return;
+    const module = byId(card.dataset.id);
+    if (!module || !selectedPixelLayer(module)) return;
     const key = event.key.toLowerCase(), modifier = event.ctrlKey || event.metaKey;
-    let selector = null;
-    if (modifier && key === 'z') selector = `[data-pixel-action="${event.shiftKey ? 'redo' : 'undo'}"]`;
-    else if (modifier && key === 'y') selector = '[data-pixel-action="redo"]';
-    else if (!modifier) selector = {d: '[data-pixel-action="draw"]', e: '[data-pixel-action="erase"]', i: '[data-pixel-action="pick"]'}[key];
-    if (selector) { event.preventDefault(); root.querySelector(selector)?.click(); }
+    let handled = true;
+    if (modifier && key === 'z') stepPixelHistory(module, event.shiftKey ? 1 : -1);
+    else if (modifier && key === 'y') stepPixelHistory(module, 1);
+    else if (modifier || event.shiftKey && !['[', ']', '{', '}'].includes(key)) handled = false;
+    else if (PIXEL_SHORTCUTS[key]) setPixelTool(module, PIXEL_SHORTCUTS[key]);
+    else if (key === '[' || key === '{') setPixelBrushSize(module, pixelState(module).size - 1);
+    else if (key === ']' || key === '}') setPixelBrushSize(module, pixelState(module).size + 1);
+    else handled = false;
+    if (handled) event.preventDefault();
+  });
+
+  globalThis.matrixPixelEditing = Object.freeze({
+    lineCells: pixelLineCells,
+    brushOffsets: pixelBrushOffsets,
+    paintCells: paintPixelCells,
+    displayToLocal: pixelDisplayToLocal,
+    emptyBitmap: emptyPixelBitmap,
+    animatableProperties: animatablePixelProperties,
   });
 
   function renderProperties(module, container) {
     container.replaceChildren(); const state = stateFor(module), layer = module.layers.find(item => item.id === state.selected); if (!layer) return;
-    if (layer.type !== 'pixels') disposePixelView(state.pixelUi, true);
     const values = resolvedProperties(module, layer, state.frame); const title = document.createElement('h4'); title.textContent = layer.name + ' · frame ' + (state.frame + 1); container.append(title);
-    if (layer.type === 'pixels') container.append(renderPixelEditor(module, layer, values));
+    if (layer.type === 'pixels') { const note = document.createElement('p'); note.className = 'pixel-sidebar-note'; note.textContent = 'Draw directly on the canvas with the pixel toolbar. Choose Move to drag the whole layer.'; container.append(note); }
     const grid = document.createElement('div'); grid.className = 'property-grid';
     const name = moduleControl('Layer name', layer.name, 'text', value => { layer.name = value; refreshAdvanced(module.id, true); }); name.className = 'wide'; grid.append(name);
     const editableFields = [['present', 'Present at this frame', 'checkbox'], ['z_index', 'Depth at this frame', 'number'], ...fieldDefinitions[layer.type]];
@@ -1361,7 +1467,7 @@
     container.append(grid);
     const tools = document.createElement('div'); tools.className = 'advanced-section'; const toolsTitle = document.createElement('h4'); toolsTitle.textContent = 'Keyframes and frame override';
     const easing = moduleControl('Easing into this keyframe', state.easing, 'select', value => { state.easing = value; }, easings);
-    const row = document.createElement('div'); row.className = 'row'; row.append(makeButton('Add/update keyframe', () => addCanvasKeyframe(module.id), 'btn primary'), makeButton('Show from this frame', () => setLayerPresence(module.id, true)), makeButton('Hide from this frame', () => setLayerPresence(module.id, false), 'btn danger'), makeButton('Save frame override', () => { saveFrameProperties(module, layer, resolvedProperties(module, layer, state.frame)); refreshAdvanced(module.id, true); }), makeButton('Clear frame override', () => { module.overrides = module.overrides.filter(item => item.frame !== state.frame || item.layer_id !== layer.id); refreshAdvanced(module.id, true); }, 'btn danger'));
+    const row = document.createElement('div'); row.className = 'row'; row.append(makeButton('Add/update keyframe', () => addCanvasKeyframe(module.id), 'btn primary'), makeButton('Show from this frame', () => setLayerPresence(module.id, true)), makeButton('Hide from this frame', () => setLayerPresence(module.id, false), 'btn danger'), makeButton('Save frame override', () => { saveFrameProperties(module, layer, animatablePixelProperties(layer, resolvedProperties(module, layer, state.frame))); refreshAdvanced(module.id, true); }), makeButton('Clear frame override', () => { module.overrides = module.overrides.filter(item => item.frame !== state.frame || item.layer_id !== layer.id); refreshAdvanced(module.id, true); }, 'btn danger'));
     const list = document.createElement('div'); list.className = 'keyframe-list';
     for (const keyframe of layer.keyframes) { const item = document.createElement('div'); item.className = 'keyframe-row'; const text = document.createElement('span'); text.textContent = 'Frame ' + (keyframe.frame + 1) + ' · ' + keyframe.easing.replaceAll('_', ' '); item.append(text, makeButton('Remove', () => { layer.keyframes = layer.keyframes.filter(candidate => candidate !== keyframe); refreshAdvanced(module.id, true); }, 'btn danger')); list.append(item); }
     tools.append(toolsTitle, easing, row, list); container.append(tools);
@@ -1763,7 +1869,7 @@
 
   function addCanvasKeyframe(id) {
     const module = byId(id), state = module && stateFor(module), layer = module?.layers.find(item => item.id === state.selected); if (!layer) return;
-    const properties = resolvedProperties(module, layer, state.frame); let keyframe = layer.keyframes.find(item => item.frame === state.frame);
+    const properties = animatablePixelProperties(layer, resolvedProperties(module, layer, state.frame)); let keyframe = layer.keyframes.find(item => item.frame === state.frame);
     if (keyframe) Object.assign(keyframe, {easing: state.easing, properties}); else layer.keyframes.push({frame: state.frame, easing: state.easing, properties});
     layer.keyframes.sort((a, b) => a.frame - b.frame); module.overrides = module.overrides.filter(item => item.frame !== state.frame || item.layer_id !== layer.id); refreshAdvanced(id, true);
   }
@@ -1798,7 +1904,7 @@
   window.expandTimelineForAnimatedMedia = expandTimelineForAnimatedMedia;
 
   function initializeLayerAtCurrentFrame(module, layer) {
-    const state = stateFor(module), initialProperties = clone(layer.properties);
+    const state = stateFor(module), initialProperties = animatablePixelProperties(layer, clone(layer.properties));
     if (state.frame > 0) layer.properties.present = false;
     layer.keyframes = [{frame: state.frame, easing: 'step', properties: clone(initialProperties)}];
   }
@@ -1870,11 +1976,11 @@
   }
   window.uploadAdvancedMedia = uploadAdvancedMedia;
 
-  function copyFrame(module) { const state = stateFor(module); state.clipboard = module.layers.map(layer => ({layer_id: layer.id, properties: resolvedProperties(module, layer, state.frame)})); setMessage('Frame ' + (state.frame + 1) + ' copied.'); }
+  function copyFrame(module) { const state = stateFor(module); state.clipboard = module.layers.map(layer => ({layer_id: layer.id, properties: animatablePixelProperties(layer, resolvedProperties(module, layer, state.frame))})); setMessage('Frame ' + (state.frame + 1) + ' copied.'); }
   function pasteFrame(module) { const state = stateFor(module); if (!state.clipboard) return; for (const snapshot of state.clipboard) { const layer = module.layers.find(item => item.id === snapshot.layer_id); if (layer) { module.overrides = module.overrides.filter(item => item.frame !== state.frame || item.layer_id !== layer.id); module.overrides.push({frame: state.frame, layer_id: layer.id, properties: clone(snapshot.properties)}); } } refreshAdvanced(module.id, true); }
   function duplicateFrame(module) {
     if (module.frame_count >= 120) { setMessage('Animations are limited to 120 frames.', true); return; }
-    const state = stateFor(module), insert = state.frame + 1, snapshots = module.layers.map(layer => ({layer_id: layer.id, properties: resolvedProperties(module, layer, state.frame)}));
+    const state = stateFor(module), insert = state.frame + 1, snapshots = module.layers.map(layer => ({layer_id: layer.id, properties: animatablePixelProperties(layer, resolvedProperties(module, layer, state.frame))}));
     for (const layer of module.layers) for (const keyframe of layer.keyframes) if (keyframe.frame >= insert) keyframe.frame++;
     for (const override of module.overrides) if (override.frame >= insert) override.frame++;
     module.frame_count++; state.frame = insert; for (const snapshot of snapshots) module.overrides.push({frame: insert, layer_id: snapshot.layer_id, properties: snapshot.properties}); refreshAdvanced(module.id, true);
@@ -1961,16 +2067,18 @@
   }
 
   function renderAdvancedInto(module, card) {
-    const state = stateFor(module); card.replaceChildren(); card.className = 'custom-module-card advanced-card'; card.dataset.id = module.id; card.dataset.editorType = 'canvas'; headerFor(module, card, true);
+    const state = stateFor(module);
+    if (state.pixel?.stroke && state.pixel.stroke.layerId !== state.selected) cancelPixelStroke(module); card.replaceChildren(); card.className = 'custom-module-card advanced-card'; card.dataset.id = module.id; card.dataset.editorType = 'canvas'; headerFor(module, card, true);
     const layout = document.createElement('div'); layout.className = 'advanced-layout'; const stage = document.createElement('div'); stage.className = 'canvas-stage'; const sidebar = document.createElement('div'); sidebar.className = 'advanced-sidebar';
     const nameRow = document.createElement('div'); nameRow.className = 'canvas-toolbar'; nameRow.append(moduleControl('Name', module.name, 'text', value => { module.name = value; syncCustomModuleUI(); }), moduleControl('Background', module.background, 'color', value => { module.background = value; drawEditor(module, canvas); }), moduleControl('Frames', module.frame_count, 'number', value => { module.frame_count = Math.max(1, Math.min(120, Math.round(value))); module.overrides = module.overrides.filter(item => item.frame < module.frame_count); for (const layer of module.layers) layer.keyframes = layer.keyframes.filter(item => item.frame < module.frame_count); refreshAdvanced(module.id); }), moduleControl('FPS', module.fps, 'number', value => { module.fps = Math.max(1, Math.min(60, value)); }), moduleControl('Playback', module.playback, 'select', value => { module.playback = value; }, ['loop', 'ping_pong', 'hold']), moduleControl('Rotation snap', state.rotationSnap || 'off', 'select', value => { state.rotationSnap = value === 'off' ? 0 : Number(value); }, ['off', '15', '30', '45', '90']));
     const templateRow = document.createElement('div'); templateRow.className = 'template-row'; const template = document.createElement('select'); [...canvasStarterExamples, {id: 'blank', label: 'Blank canvas'}].forEach(({id, label}) => { const option = document.createElement('option'); option.value = id; option.textContent = label; template.append(option); }); const templateLabel = document.createElement('label'); templateLabel.textContent = 'Starter example'; templateLabel.append(template); templateRow.append(templateLabel, makeButton('Load example', () => applyTemplate(module.id, template.value)));
-    const canvasWrap = document.createElement('div'); canvasWrap.className = 'editor-canvas-wrap'; const canvas = document.createElement('canvas'); canvas.className = 'editor-canvas'; canvas.width = 640; canvas.height = 320; canvas.setAttribute('aria-label', 'Direct 64 by 32 custom module canvas editor'); canvasWrap.append(canvas);
-    const help = document.createElement('p'); help.className = 'canvas-help'; help.textContent = 'Drag a layer to move it. Drag the square handle to resize, the round handle to rotate, or draw directly when a Pixels layer is selected. Higher depth values draw in front; keyframe Depth to change the stack on a chosen frame.';
+    const canvasWrap = document.createElement('div'); canvasWrap.className = 'editor-canvas-wrap'; const canvas = document.createElement('canvas'); canvas.className = 'editor-canvas'; canvas.width = 640; canvas.height = 320; canvas.setAttribute('aria-label', 'Direct 64 by 32 custom module canvas editor'); canvas.tabIndex = 0; const cursor = document.createElement('div'); cursor.className = 'pixel-cursor'; cursor.hidden = true; cursor.setAttribute('aria-hidden', 'true'); canvasWrap.append(canvas, cursor);
+    const pixelLayer = selectedPixelLayer(module), pixelToolbar = pixelLayer ? renderPixelToolbar(module) : null;
+    const help = document.createElement('p'); help.className = 'canvas-help'; help.textContent = 'Drag a layer to move it. Drag the square handle to resize, the round handle to rotate, or paint directly with the pixel toolbar when a Pixels layer is selected. Higher depth values draw in front; keyframe Depth to change the stack on a chosen frame.';
     const timelineTools = document.createElement('div'); timelineTools.className = 'timeline-toolbar'; const onion = moduleControl('Onion skin', state.onion, 'checkbox', value => { state.onion = value; drawEditor(module, canvas); }); timelineTools.append(onion, makeButton(state.playing ? 'Stop browser preview' : 'Play browser preview', () => playBrowserPreview(module), 'btn primary'), makeButton('Copy frame', () => copyFrame(module)), makeButton('Paste frame', () => pasteFrame(module)), makeButton('Duplicate frame', () => duplicateFrame(module)));
     const timeline = document.createElement('div'); timeline.className = 'timeline';
-    stage.append(nameRow, templateRow, canvasWrap, help, timelineTools, timeline); const layers = document.createElement('div'); const properties = document.createElement('div'); properties.className = 'advanced-section'; sidebar.append(layers, properties); layout.append(stage, sidebar); card.append(layout);
-    renderTimeline(module, timeline); renderLayers(module, layers); renderProperties(module, properties); bindCanvasPointerTransforms(module, canvas); drawEditor(module, canvas); restoreEditorViewState(card, state);
+    stage.append(nameRow, templateRow, ...(pixelToolbar ? [pixelToolbar] : []), canvasWrap, ...(pixelToolbar ? [Object.assign(document.createElement('p'), {className: 'pixel-status', textContent: ''})] : []), help, timelineTools, timeline); const layers = document.createElement('div'); const properties = document.createElement('div'); properties.className = 'advanced-section'; sidebar.append(layers, properties); layout.append(stage, sidebar); card.append(layout);
+    renderTimeline(module, timeline); renderLayers(module, layers); renderProperties(module, properties); bindCanvasPointerTransforms(module, canvas); drawEditor(module, canvas); if (pixelToolbar) syncPixelToolbar(module); restoreEditorViewState(card, state);
   }
 
   function renderAdvanced(module, list) { const card = document.createElement('div'); list.append(card); renderAdvancedInto(module, card); }
