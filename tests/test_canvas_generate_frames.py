@@ -129,6 +129,56 @@ class GenerateFramesTests(unittest.TestCase):
         self.assertEqual(module, canvas())
 
 
+def owner_added_layer():
+    """Exactly what "Add layer > Image/GIF/MP4" creates: the library's first file in a frame-0 keyframe."""
+    module = canvas(frame_count=1, fps=20, source="still.png")
+    module["overrides"] = []
+    module["layers"][0]["keyframes"] = module["layers"][0]["keyframes"][:1]
+    media = module["layers"][1]
+    media["keyframes"] = [{"frame": 0, "easing": "step", "properties": dict(media["properties"])}]
+    return module
+
+
+def source_on_each_frame(module, layer_id="layer_media"):
+    layer = next(item for item in module["layers"] if item["id"] == layer_id)
+    keys = sorted((key for key in layer["keyframes"] if "source" in key["properties"]), key=lambda key: key["frame"])
+    result = []
+    for frame in range(module["frame_count"]):
+        value = layer["properties"]["source"]
+        for key in keys:
+            if key["frame"] <= frame:
+                value = key["properties"]["source"]
+        for override in module["overrides"]:
+            if override["frame"] == frame and override["layer_id"] == layer_id and "source" in override["properties"]:
+                value = override["properties"]["source"]
+        result.append(value)
+    return result
+
+
+@unittest.skipUnless(shutil.which("node"), "Node.js is required")
+class ChosenMediaStaysTests(unittest.TestCase):
+    """Owner UAT 2026-10-10 23:03Z: Generate "keeps switching back to the default png"."""
+
+    def test_choosing_a_gif_replaces_the_default_source_on_every_frame(self):
+        report = run_ops(owner_added_layer(), {"pick": {"op": "setMediaSource", "args": ["layer_media", "party.gif"]}}, [STILL, GIF])
+        module = dict(report["pick"]["module"], frame_count=30)
+        self.assertTrue(report["pick"]["result"]["changed"])
+        self.assertEqual(source_on_each_frame(saved(module)), ["party.gif"] * 30)
+
+    def test_generate_uses_the_gif_chosen_on_the_highlighted_frame_not_the_default_png(self):
+        # Data saved by the old picker: default PNG in the frame-0 keyframe, the GIF only as a frame edit.
+        module = owner_added_layer()
+        module["overrides"] = [{"frame": 0, "layer_id": "layer_media", "properties": {"source": "party.gif"}}]
+        result, generated = generate(module, "replace", 0, [STILL, GIF])
+        generated = saved(generated)
+        self.assertIn("party.gif", result["message"])
+        self.assertEqual((generated["frame_count"], generated["fps"]), (30, 10))
+        self.assertEqual(source_on_each_frame(generated), ["party.gif"] * 30)
+
+    def test_media_picker_uses_the_whole_layer_source_setter(self):
+        self.assertIn("setLayerMediaSource(module, layer.id, value)", ASSET.read_text())
+
+
 class GenerateMarkupTests(unittest.TestCase):
     def test_button_and_popup_choices_are_wired(self):
         asset = ASSET.read_text()
