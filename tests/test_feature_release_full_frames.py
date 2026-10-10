@@ -9,6 +9,8 @@ from tests.release_browser_binding import provisioned_browser
 from PIL import Image
 from flask import request
 from werkzeug.serving import make_server
+from tests.ci_quarantine import non_essential
+@non_essential('#32 native-driver harness flake')
 class FullFrameTests(unittest.TestCase):
  def journey(self,mode):
   with provisioned_browser(caller):

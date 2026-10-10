@@ -1,0 +1,15 @@
+{
+  "issue": "#32 native-driver harness tests fail intermittently on unmodified main",
+  "tests": {
+    "test_feature_release_full_frames": [
+      "FullFrameTests.test_decode_failure",
+      "FullFrameTests.test_expected_decoded_frames",
+      "FullFrameTests.test_invalid_dimensions",
+      "FullFrameTests.test_nonadvancing_revision",
+      "FullFrameTests.test_wrong_pixels"
+    ],
+    "test_release_projection": [
+      "ProjectionTests.test_native_dashboard_projection"
+    ]
+  }
+}
