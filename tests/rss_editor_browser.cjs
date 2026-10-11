@@ -1,0 +1,102 @@
+(async()=>{
+const debugPort=process.argv[1],appPort=process.argv[2],sleep=ms=>new Promise(r=>setTimeout(r,ms));
+const endpoint=await fetch(`http://127.0.0.1:${debugPort}/json/new`,{method:'PUT'}).then(r=>r.json());
+const socket=new WebSocket(endpoint.webSocketDebuggerUrl),pending=new Map(),errors=[];let id=0;
+socket.onmessage=e=>{const m=JSON.parse(e.data);if(m.id&&pending.has(m.id)){const p=pending.get(m.id);pending.delete(m.id);m.error?p.reject(Error(JSON.stringify(m.error))):p.resolve(m.result)}else if(m.method==='Runtime.exceptionThrown')errors.push(m.params.exceptionDetails.text)};
+await new Promise((resolve,reject)=>{socket.onopen=resolve;socket.onerror=reject});
+const send=(method,params={})=>new Promise((resolve,reject)=>{const request=++id;pending.set(request,{resolve,reject});socket.send(JSON.stringify({id:request,method,params}))});
+const evaluate=async expression=>{const result=await send('Runtime.evaluate',{expression,returnByValue:true,awaitPromise:true});if(result.exceptionDetails)throw Error(JSON.stringify(result.exceptionDetails));return result.result.value};
+const waitFor=async expression=>{for(let i=0;i<200;i++){try{if(await evaluate(expression))return}catch(_){}await sleep(50)}throw Error('timeout: '+expression)};
+const click=async selector=>{const point=await evaluate(`(()=>{const el=document.querySelector(${JSON.stringify(selector)});if(!el)throw Error('Missing control '+${JSON.stringify(selector)});el.scrollIntoView({block:'center',behavior:'instant'});const r=el.getBoundingClientRect();return {x:r.x+r.width/2,y:r.y+r.height/2}})()`);await send('Input.dispatchMouseEvent',{type:'mousePressed',button:'left',clickCount:1,...point});await send('Input.dispatchMouseEvent',{type:'mouseReleased',button:'left',clickCount:1,...point})};
+const change=async(selector,value)=>evaluate(`(()=>{const el=document.querySelector(${JSON.stringify(selector)});el.value=${JSON.stringify(value)};el.dispatchEvent(new Event('input',{bubbles:true}));el.dispatchEvent(new Event('change',{bubbles:true}));return true})()`);
+try{
+ await send('Runtime.enable');await send('Page.enable');
+ await send('Page.navigate',{url:`http://127.0.0.1:${appPort}/pair`});await waitFor(`document.querySelector('form')`);
+ await evaluate(`fetch('/pair',{method:'POST',headers:{'Content-Type':'application/x-www-form-urlencoded'},body:new URLSearchParams({device_name:'RSS browser',pin:'123456'})}).then(()=>true)`);
+ await send('Page.navigate',{url:`http://127.0.0.1:${appPort}/`});await waitFor(`typeof matrixEditorsReady!=='undefined'&&matrixEditorsReady`);
+ if(!await evaluate(`!!document.querySelector('[data-rss-add]')`))throw Error('RSS Add feed control missing from loaded dashboard');
+ await click('[data-module="rss"] button:last-child');
+ await change('[data-rss-url]','https://example.com/rss');await click('[data-rss-add]');
+ await click('[data-rss-row]:last-of-type [data-rss-test]');
+ await waitFor(`document.querySelector('[data-rss-row]:last-of-type [role="status"]').textContent.includes('Fixture news')`);
+ if(!await evaluate(`document.querySelectorAll('[data-rss-presets] option').length===7`))throw Error('Verified grouped BBC presets missing');
+ if(!await evaluate(`document.querySelector('[data-rss-row]:last-of-type [role="status"]').textContent.includes('Fixture news')&&!document.querySelector('[data-rss-row] img')`))throw Error('Publisher content escaped incorrectly');
+ await click('[data-rss-row]:last-of-type [data-rss-up]');
+ if(!await evaluate(`configBody().rss.feeds[0]==='https://example.com/rss'`))throw Error('Feed reorder failed');
+ await change('[data-rss-setting="include"]','Headline');await change('[data-rss-setting="exclude"]','sport');
+ await change('[data-rss-setting="frame_delay"]','0.025');
+ await change('[data-rss-setting="headline_mode"]','continuous');
+ await change('[data-rss-setting="count"]','3');
+ await click('label[for="preview-mode-edit"]');
+ await waitFor(`document.querySelector('#preview-frame').textContent.includes('Unsaved draft frame')`);
+ if(!await evaluate(`editPreviewLastBitmap?.width===64&&editPreviewLastBitmap?.height===32`))throw Error('RSS shared preview bitmap missing');
+ await waitFor(`document.querySelector('[data-rss-duration]').textContent.includes('stories')`);
+ await evaluate(`globalThis.rssStartedGeneration=editPreviewGeneration`);
+ await waitFor(`document.querySelector('#preview-frame').textContent.includes('Unsaved draft complete')`);
+ await sleep(350);
+ if(!await evaluate(`editPreviewGeneration===rssStartedGeneration&&editPreviewAnimationTimer===null`))throw Error('RSS preview automatically restarted completed pass');
+ const finalPixels=await evaluate(`(()=>{const canvas=document.createElement('canvas');canvas.width=64;canvas.height=32;const context=canvas.getContext('2d');context.drawImage(editPreviewLastBitmap,0,0);return Array.from(context.getImageData(0,0,64,32).data)})()`);
+ for(const width of [320,1280]){
+   await send('Emulation.setDeviceMetricsOverride',{width,height:900,deviceScaleFactor:1,mobile:false});
+   if(!await evaluate(`document.documentElement.scrollWidth<=window.innerWidth`))throw Error('Horizontal overflow at '+width);
+   await click('[data-rss-row]:first-of-type [data-rss-test]');
+   await waitFor(`document.querySelector('[data-rss-row]:first-of-type [role="status"]').textContent.includes('Image hints: available')`);
+   const shot=await send('Page.captureScreenshot',{format:'png'});require('node:fs').writeFileSync('/tmp/matrix-rss-editor-'+width+'.png',Buffer.from(shot.data,'base64'));
+ }
+ await click('#save-config');await waitFor(`!matrixHasUnsavedDraft()`);
+ await click('label[for="preview-mode-live"]');
+ await send('Page.navigate',{url:`http://127.0.0.1:${appPort}/`});await waitFor(`typeof matrixEditorsReady!=='undefined'&&matrixEditorsReady`);
+ if(!await evaluate(`configBody().rss.count===3&&configBody().rss.feeds.includes('https://example.com/rss')`))throw Error('RSS save/reload lost draft');
+ await click('[data-module="rss"] button:last-child');
+ if(!await evaluate(`!!document.querySelector('[data-rss-reset-draft]')&&document.querySelector('[data-rss-reset-all]').disabled`))throw Error('Safe draft reset and blocked cache reset missing');
+ await evaluate(`window.confirm=()=>false`);await click('[data-rss-reset-draft]');
+ if(!await evaluate(`configBody().rss.count===3`))throw Error('Cancelled reset changed draft');
+ await evaluate(`window.confirm=()=>true`);await click('[data-rss-reset-draft]');
+ if(!await evaluate(`configBody().rss.count===5&&configBody().rss.feeds.length===1&&configBody().rss.frame_delay===.05&&matrixHasUnsavedDraft()`))throw Error('Draft reset defaults incorrect');
+ if(!await evaluate(`fetch('/api/config').then(r=>r.json()).then(c=>c.rss.count===3)`))throw Error('Draft reset silently saved');
+ await send('Page.navigate',{url:`http://127.0.0.1:${appPort}/`});await waitFor(`matrixEditorsReady&&configBody().rss.count===3`);
+ const peerTarget=await fetch(`http://127.0.0.1:${debugPort}/json/new`,{method:'PUT'}).then(r=>r.json());
+ const peerSocket=new WebSocket(peerTarget.webSocketDebuggerUrl),peerPending=new Map();let peerId=0;
+ peerSocket.onmessage=e=>{const m=JSON.parse(e.data);if(m.id&&peerPending.has(m.id)){const p=peerPending.get(m.id);peerPending.delete(m.id);m.error?p.reject(Error(JSON.stringify(m.error))):p.resolve(m.result)}};
+ await new Promise((resolve,reject)=>{peerSocket.onopen=resolve;peerSocket.onerror=reject});
+ const peerSend=(method,params={})=>new Promise((resolve,reject)=>{const id=++peerId;peerPending.set(id,{resolve,reject});peerSocket.send(JSON.stringify({id,method,params}))});
+ const peerEval=async expression=>{const r=await peerSend('Runtime.evaluate',{expression,returnByValue:true,awaitPromise:true});if(r.exceptionDetails)throw Error(JSON.stringify(r.exceptionDetails));return r.result.value};
+ const peerWait=async expression=>{for(let i=0;i<200;i++){try{if(await peerEval(expression))return}catch(_){}await sleep(50)}throw Error('peer timeout: '+expression)};
+ const titleInput=`document.querySelector('[data-rss-setting="include"]')`;
+ const editTitle=value=>`(()=>{const el=${titleInput};el.value=${JSON.stringify(value)};el.dispatchEvent(new Event('input',{bubbles:true}));return true})()`;
+ try{
+   await peerSend('Page.navigate',{url:`http://127.0.0.1:${appPort}/`});await peerWait(`typeof matrixEditorsReady!=='undefined'&&matrixEditorsReady`);
+   const oldRevision=await evaluate('matrixLoadedRevision');
+   await peerEval(editTitle('RemoteAccepted'));if(!(await peerEval('saveConfig()')).saved)throw Error('Peer save failed');
+   await evaluate('matrixCheckForNewerConfig()');
+   await waitFor(`matrixEditorsReady&&matrixLoadedRevision>${oldRevision}&&${titleInput}.value==='RemoteAccepted'`);
+   if(!await evaluate(`configBody().rss.include[0]==='RemoteAccepted'&&!matrixHasUnsavedDraft()`))throw Error('Clean remote reload did not synchronize editor/serializer');
+   await click('[data-module="rss"] button:last-child');
+   await change('[data-rss-setting="include"]','LocalUnsaved');await evaluate(`${titleInput}.focus()`);
+   await peerEval(editTitle('RemoteConflicting'));await peerEval('saveConfig()');
+   await evaluate('matrixCheckForNewerConfig()');await waitFor(`document.querySelector('.config-revision-dialog')?.open`);
+   if(!await evaluate(`${titleInput}.value==='LocalUnsaved'&&document.querySelector('#save-config').disabled`))throw Error('Conflict erased draft or did not gate save');
+   await click('.config-revision-dialog button:last-child');
+   await evaluate('matrixCheckForNewerConfig()');
+   if(!await evaluate(`!document.querySelector('.config-revision-dialog')&&${titleInput}.value==='LocalUnsaved'&&document.activeElement===${titleInput}`))throw Error('Remain lost draft/focus or repeated warning');
+   const stale=await evaluate('saveConfig()');if(stale.saved)throw Error('Stale draft overwrote peer config');
+   await peerEval(editTitle('RemoteLatest'));await peerEval('saveConfig()');
+   await evaluate('matrixCheckForNewerConfig()');await waitFor(`document.querySelector('.config-revision-dialog')?.open`);
+   await click('.config-revision-dialog button:first-child');
+   await waitFor(`matrixEditorsReady&&${titleInput}.value==='RemoteLatest'&&!matrixHasUnsavedDraft()`);
+   // Deterministic barrier AFTER a real server commit, BEFORE Save consumes its
+   // response. A newer local edit must survive and still block clean reload.
+   await evaluate(`(()=>{const realFetch=fetch;globalThis.releaseSave=null;globalThis.saveArrived=false;globalThis.fetch=async(...args)=>{const response=await realFetch(...args);if(args[0]==='/api/config'&&args[1]?.method==='POST'){globalThis.saveArrived=response.status===200;await new Promise(resolve=>globalThis.releaseSave=resolve)}return response};return true})()`);
+   await evaluate(editTitle('BarrierSubmitted'));
+   await evaluate(`void(saveConfig().then(result=>globalThis.barrierResult=result))`);await waitFor('saveArrived&&releaseSave');
+   await evaluate(editTitle('NewerLocalEdit'));await evaluate('releaseSave()');await waitFor('globalThis.barrierResult');
+   if(!await evaluate(`barrierResult.saved&&${titleInput}.value==='NewerLocalEdit'&&configBody().rss.include[0]==='NewerLocalEdit'&&matrixHasUnsavedDraft()`))throw Error('Save response erased newer RSS edit');
+   const stored=await peerEval(`fetch('/api/config').then(r=>r.json())`);
+   if(stored.rss.include[0]!=='BarrierSubmitted')throw Error('Barrier did not use actual committed snapshot');
+   // Reload deliberately discards the test draft; restore original fixture title.
+   await send('Page.navigate',{url:`http://127.0.0.1:${appPort}/`});await waitFor(`matrixEditorsReady&&${titleInput}.value==='BarrierSubmitted'`);
+   await evaluate(editTitle('Headline'));if(!(await evaluate('saveConfig()')).saved)throw Error('Restore failed');
+ }finally{peerSocket.close()}
+ console.log(JSON.stringify({errors,finalPixels}));
+}finally{socket.close()}
+})().catch(error=>{console.error(error);process.exitCode=1});
