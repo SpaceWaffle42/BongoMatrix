@@ -1,0 +1,67 @@
+{
+  "apiversion": "4.0.1",
+  "geometry": {
+    "coordinates": [
+      0.0,
+      51.4779
+    ],
+    "type": "Point"
+  },
+  "properties": {
+    "data": {
+      "closestphase": {
+        "day": 8,
+        "month": 4,
+        "phase": "New Moon",
+        "time": "18:21",
+        "year": 2024
+      },
+      "curphase": "New Moon",
+      "day": 8,
+      "day_of_week": "Monday",
+      "fracillum": "0%",
+      "isdst": false,
+      "label": null,
+      "month": 4,
+      "moondata": [
+        {
+          "phen": "Rise",
+          "time": "05:15"
+        },
+        {
+          "phen": "Upper Transit",
+          "time": "11:47"
+        },
+        {
+          "phen": "Set",
+          "time": "18:41"
+        }
+      ],
+      "sundata": [
+        {
+          "phen": "Begin Civil Twilight",
+          "time": "04:44"
+        },
+        {
+          "phen": "Rise",
+          "time": "05:19"
+        },
+        {
+          "phen": "Upper Transit",
+          "time": "12:02"
+        },
+        {
+          "phen": "Set",
+          "time": "18:46"
+        },
+        {
+          "phen": "End Civil Twilight",
+          "time": "19:20"
+        }
+      ],
+      "tz": 0.0,
+      "year": 2024
+    }
+  },
+  "type": "Feature"
+}

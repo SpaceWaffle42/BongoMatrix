@@ -1,0 +1,6 @@
+# Offline astronomy foundation; included by the CI/runtime requirements.txt.
+# NumPy is resolved jointly with OpenCV by requirements.txt; no duplicate pin.
+skyfield==1.54
+jplephem==2.24
+sgp4==2.25
+certifi==2026.7.22
