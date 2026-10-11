@@ -38,6 +38,7 @@ LOGGER = logging.getLogger(__name__)
 MODULES = {
     "event_countdown": "modules.event_countdown",
     "rss": "modules.rss",
+    "astronomy": "modules.astronomy_display",
     "announcement_board": "modules.announcement_board",
     "clock_lava": "modules.clock_lava",
     "weather": "modules.weather_app",
@@ -379,6 +380,7 @@ class DisplayController:
         self.matrix = matrix
         self.config_store = config_store
         self.rss_host = None
+        self.astronomy_host = None
         self._shutdown = threading.Event()
         self._reload_requested = threading.Event()
         self._pairing_pause = threading.Event()
@@ -1118,7 +1120,7 @@ class DisplayController:
                 def fetch(self, *_args, **_kwargs):
                     return prepared
             options["client"] = PreparedWeatherClient()
-        elif module_name in {"openweather_overview", "openweather_forecast", "rss"}:
+        elif module_name in {"openweather_overview", "openweather_forecast", "rss", "astronomy"}:
             options["prepared"] = prepared
         if stop_event.is_set():
             return False
@@ -1130,10 +1132,22 @@ class DisplayController:
                 else module.run
             )
             rendered = runner(matrix, candidate, **options)
-            if request.timeout_seconds is not None or rendered is False:
+            astronomy_empty = (module_name == 'astronomy' and options.get('prepared') is not None
+                               and options['prepared'].status == 'empty')
+            if request.timeout_seconds is not None or (rendered is False and not astronomy_empty):
                 return rendered
-            if stop_event.is_set() or stop_event.wait(0.01):
+            if stop_event.is_set() or stop_event.wait(1 if astronomy_empty else 0.01):
                 break
+            if module_name == 'astronomy' and self.astronomy_host is not None:
+                from astronomy_host import PreparationBusy
+                while not stop_event.is_set():
+                    try:
+                        options['prepared'] = self.astronomy_host.wait_preview(
+                            candidate, stop_event,
+                            owner=('device', request.owner.device_id, request.owner.preview_instance))
+                        break
+                    except PreparationBusy:
+                        stop_event.wait(.1)
         return rendered
 
     def _preview_admission_generation(self):
@@ -1850,6 +1864,8 @@ class DisplayController:
                 if stop_event.is_set():
                     return False
                 options["prepared"] = _prepared_openweather(name, transported)
+            if name == 'astronomy':
+                options['prepared'] = self.astronomy_host.prepare_saved_pass(config, stop_event) if self.astronomy_host else None
             with self._display_lock:
                 with self._state_lock:
                     if not self._module_admission_current_locked(

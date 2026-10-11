@@ -12,6 +12,7 @@ from functools import lru_cache
 from PIL import Image
 from font_catalog import FONT_DIR, font_key, available_font_names
 from frame_capture import BdfFont
+from astronomy import AstronomyEvent, event_eligible, _utc
 
 UTC = dt.timezone.utc
 
@@ -50,6 +51,57 @@ class PreparedMoon:
     phase_degrees: float
     options: MoonOptions
     clipping: tuple
+    refresh_at: dt.datetime | None = None
+
+
+@dataclass(frozen=True)
+class EventOptions:
+    title_font: str = '5x7'
+    detail_font: str = '4x6'
+    countdown_font: str = 'auto'
+    hold_seconds: float = 8
+    frame_delay: float = .05
+    background: str = '#000000'
+    text_colour: str = '#FFFFFF'
+    accent: str = '#B388FF'
+
+    def __post_init__(self):
+        MoonOptions(self.title_font, self.detail_font, self.hold_seconds,
+                    self.frame_delay, self.background, self.text_colour, self.accent)
+        if self.countdown_font != 'auto' and self.countdown_font not in available_font_names():
+            raise ValueError('Installed countdown font required')
+
+
+@dataclass(frozen=True)
+class PreparedEvent:
+    event: AstronomyEvent
+    prepared_at: dt.datetime
+    labels: tuple
+    lines: tuple
+    window_lines: tuple
+    countdown_fonts: tuple
+    options: EventOptions
+    clipping: tuple
+
+
+def event_countdown(event, now):
+    """Count down to the next local observing window; NOW only inside one.
+
+    The exact global phase instant is a separate labelled date/time, not an
+    invented phase duration. Event Countdown's seconds-based helper differs.
+    """
+    now = _utc(now)
+    window = next((w for w in event.windows if w.end > now), None)
+    if window is None:
+        return None
+    seconds = max(0, math.ceil((window.start - now).total_seconds()))
+    if not seconds:
+        return 'NOW'
+    if seconds >= 86400:
+        return f'{seconds // 86400}d {seconds % 86400 // 3600}h'
+    if seconds >= 3600:
+        return f'{seconds // 3600}h {seconds % 3600 // 60}m'
+    return f'{max(1, seconds // 60)}m'
 
 
 @lru_cache(maxsize=32)
@@ -59,11 +111,53 @@ def _font(name):
 
 def _line(text, name, x, y, width, height):
     advance, pixels = _font(name).text_pixels(0, 0, text)
+    return _pixel_line(advance, pixels, x, y, width, height)
+
+
+def _pixel_line(advance, pixels, x, y, width, height):
     left = min((p[0] for p in pixels), default=0)
     top = min((p[1] for p in pixels), default=0)
     right = max((p[0] for p in pixels), default=-1) + 1
     return (tuple((px - min(0, left), py - top) for px, py in pixels),
             max(advance, right) - min(0, left), x, y, width, height)
+
+
+def _countdown_line(fonts, text):
+    candidates = []
+    for name, glyphs in fonts:
+        glyphs = dict(glyphs)
+        advance, pixels = 0, []
+        for character in text:
+            size, points = glyphs[character]
+            pixels.extend((px + advance, py) for px, py in points)
+            advance += size
+        line = _pixel_line(advance, pixels, 0, 25, 64, 7)
+        height = max((py for px, py in line[0]), default=-1) + 1
+        candidates.append((height, line[1], name, line))
+    fitting = [c for c in candidates if c[0] <= 7 and c[1] <= 64]
+    selected = max(fitting) if fitting else min(candidates)
+    return selected[3], selected[2], selected[0] > 7 or selected[1] > 64
+
+
+def prepare_event(event, now, options=None):
+    from zoneinfo import ZoneInfo
+    now = _utc(now)
+    options = options or EventOptions()
+    zone = ZoneInfo(event.location.timezone)
+    windows = tuple(f'Partly visible {minute_label(w.start.astimezone(zone), "%H:%M %Z")}'
+                    f'-{minute_label(w.end.astimezone(zone), "%H:%M %Z")}' for w in event.windows)
+    labels = (event.title, minute_label(event.time.astimezone(zone), '%d %b %H:%M %Z'), windows[0])
+    lines = (_line(labels[0], options.title_font, 10, 0, 54, 7),
+             _line(labels[1], options.detail_font, 0, 9, 64, 6),
+             _line(labels[2], options.detail_font, 0, 17, 64, 6))
+    window_lines = tuple(_line(text, options.detail_font, 0, 17, 64, 6) for text in windows)
+    names = available_font_names() if options.countdown_font == 'auto' else (options.countdown_font,)
+    fonts = tuple((name, tuple((c, (advance, tuple(points)))
+                    for c in '0123456789dhm NOW'
+                    for advance, points in (_font(name).text_pixels(0, 0, c),))) for name in names)
+    _, _, clipped = _countdown_line(fonts, event_countdown(event, now) or 'NOW')
+    clipping = tuple(any(py >= line[5] for px, py in line[0]) for line in lines) + (clipped,)
+    return PreparedEvent(event, now.astimezone(UTC), labels, lines, window_lines, fonts, options, clipping)
 
 
 def prepare_moon(moon, options=None):
@@ -82,44 +176,74 @@ def prepare_moon(moon, options=None):
         (options.title_font, 17, 0, 47, 7), (options.detail_font, 17, 9, 47, 6),
         (options.detail_font, 0, 18, 64, 6), (options.detail_font, 0, 26, 64, 6))))
     clipping = tuple(any(py >= line[5] for px, py in line[0]) for line in lines)
-    return PreparedMoon(labels, lines, moon.phase_degrees, options, clipping)
+    return PreparedMoon(labels, lines, moon.phase_degrees, options, clipping, moon.next_phase.time)
 
 
-def prepare_pass(engine, now, location, *, current_moon=True, options=None, stop_event=None):
+def prepare_pass(engine, now, location, *, current_moon=True, lunar_events=False,
+                 horizon_days=90, event_limit=5, options=None, event_options=None, stop_event=None):
     """Recalculate outside playback; host owns errors and empty-cycle idling."""
-    from astronomy import Cancelled, check_cancel
-    if not current_moon:
+    from astronomy import Cancelled, check_cancel, select_events
+    if not current_moon and not lunar_events:
         return ()
     try:
         check_cancel(stop_event)
-        moon = engine.moon(now, location, stop_event=stop_event)
+        if lunar_events:
+            select_events((), now, location, horizon_days=horizon_days, limit=event_limit)
+        cards = []
+        if current_moon:
+            moon = engine.moon(now, location, stop_event=stop_event)
+            check_cancel(stop_event)
+            cards.append(prepare_moon(moon, options))
+        if lunar_events:
+            events = engine.lunar_events(now, location, horizon_days=horizon_days, stop_event=stop_event)
+            for event in select_events(events, now, location, horizon_days=horizon_days, limit=event_limit):
+                check_cancel(stop_event)
+                cards.append(prepare_event(event, now, event_options))
         check_cancel(stop_event)
-        card = prepare_moon(moon, options)
-        check_cancel(stop_event)
-        return (card,)
+        return tuple(cards)
     except Cancelled:
         return ()
 
 
 def _scroll_ticks(card):
-    return max((line[1] + 1 for line in card.lines if line[1] > line[4]), default=0)
+    lines = card.lines + (card.window_lines if isinstance(card, PreparedEvent) else ())
+    return max((line[1] + 1 for line in lines if line[1] > line[4]), default=0)
 
 
-def render_frame(card, tick=0):
+def render_frame(card, tick=0, *, now=None):
     image = Image.new('RGB', (64, 32), card.options.background)
-    moon_colour = tuple(bytes.fromhex(card.options.moon_colour[1:]))
     text_colour = tuple(bytes.fromhex(card.options.text_colour[1:]))
-    # Orthographic sphere shading with a fixed schematic waxing-right view.
-    angle = math.radians(card.phase_degrees)
-    sx, sz = math.sin(angle), -math.cos(angle)
-    for y in range(16):
-        for x in range(16):
-            nx, ny = (x - 7.5) / 7.5, (y - 7.5) / 7.5
-            radius = nx * nx + ny * ny
-            if radius <= 1:
-                lit = nx * sx + math.sqrt(1 - radius) * sz > 0
-                image.putpixel((x, y), moon_colour if lit else (25, 25, 25))
-    for points, measured, x, y, width, height in card.lines:
+    if isinstance(card, PreparedEvent):
+        now = now or card.prepared_at
+        countdown = event_countdown(card.event, now)
+        if countdown is None:
+            return image
+        index = next(i for i, w in enumerate(card.event.windows) if w.end > now.astimezone(UTC))
+        counter, _, _ = _countdown_line(card.countdown_fonts, countdown)
+        lines = card.lines[:2] + (card.window_lines[index], counter)
+        # Bundled 8x7 schematic lunar icons; unknown types use a generic star.
+        icons = {'full_moon': (0x3c, 0x7e, 0xff, 0xff, 0xff, 0x7e, 0x3c),
+                 'new_moon': (0x3c, 0x42, 0x81, 0x81, 0x81, 0x42, 0x3c)}
+        icon = icons.get(card.event.kind, (0x10, 0x54, 0x38, 0xfe, 0x38, 0x54, 0x10))
+        colour = tuple(bytes.fromhex(card.options.accent[1:]))
+        for y, row in enumerate(icon):
+            for x in range(8):
+                if row & (0x80 >> x):
+                    image.putpixel((x, y), colour)
+    else:
+        lines = card.lines
+        moon_colour = tuple(bytes.fromhex(card.options.moon_colour[1:]))
+        # Orthographic sphere shading with a fixed schematic waxing-right view.
+        angle = math.radians(card.phase_degrees)
+        sx, sz = math.sin(angle), -math.cos(angle)
+        for y in range(16):
+            for x in range(16):
+                nx, ny = (x - 7.5) / 7.5, (y - 7.5) / 7.5
+                radius = nx * nx + ny * ny
+                if radius <= 1:
+                    lit = nx * sx + math.sqrt(1 - radius) * sz > 0
+                    image.putpixel((x, y), moon_colour if lit else (25, 25, 25))
+    for points, measured, x, y, width, height in lines:
         offset = -tick if measured > width and tick <= measured else 0
         for px, py in points:
             px += offset
@@ -129,34 +253,75 @@ def render_frame(card, tick=0):
 
 
 def _pass(cards):
-    if type(cards) is not tuple or len(cards) > 51 or any(not isinstance(c, PreparedMoon) for c in cards):
+    if type(cards) is not tuple or len(cards) > 51 or any(not isinstance(c, (PreparedMoon, PreparedEvent)) for c in cards):
         raise ValueError('Expected immutable bounded prepared cards')
     return cards
 
 
-def duration_seconds(cards):
-    return sum(_scroll_ticks(c) * c.options.frame_delay + c.options.hold_seconds for c in _pass(cards))
+def duration_seconds(cards, *, now=None):
+    """Exact shared virtual timeline; slow hardware/cancellation can differ."""
+    return sum(delay for _, _, delay, _ in _frame_specs(cards, now=now))
 
 
 def _stopped(stop_event):
     return stop_event is not None and stop_event.is_set()
 
 
-def image_frames(cards, stop_event=None):
-    for card in _pass(cards):
+def _frame_specs(cards, stop_event=None, *, now=None, utc_clock=None):
+    cards = _pass(cards)
+    origin = _utc(now or next((c.prepared_at for c in cards if isinstance(c, PreparedEvent)), dt.datetime.now(UTC)))
+    elapsed = 0
+    for card_index, card in enumerate(cards):
         ticks = _scroll_ticks(card)
         for tick in range(ticks + 1):
-            if _stopped(stop_event):
-                return
-            image = render_frame(card, tick)
-            if _stopped(stop_event):
-                return
-            yield image, card.options.frame_delay if tick < ticks else card.options.hold_seconds, {'tick': tick}
+            remaining = card.options.frame_delay if tick < ticks else card.options.hold_seconds
+            while remaining > 0.000001:
+                if _stopped(stop_event):
+                    return
+                moment = _utc(utc_clock() if utc_clock else origin + dt.timedelta(seconds=elapsed))
+                info = {'tick': tick, 'card_index': card_index}
+                delay = remaining
+                if isinstance(card, PreparedEvent):
+                    if not event_eligible(card.event, moment):
+                        break
+                    index = next(i for i, w in enumerate(card.event.windows) if w.end > moment)
+                    window = card.event.windows[index]
+                    until_start = (window.start - moment).total_seconds()
+                    if until_start > 0:
+                        # Match the seconds-free label's actual next change.
+                        quantum = 3600 if until_start >= 86400 else 60
+                        threshold = max(0, math.ceil(until_start) // quantum * quantum - 1)
+                        change = until_start - threshold
+                    else:
+                        change = (window.end - moment).total_seconds()
+                    delay = min(delay, max(0.000001, change))
+                    label = event_countdown(card.event, moment)
+                    info = dict(info, countdown=label, window_index=index)
+                if _stopped(stop_event):
+                    return
+                yield card, moment, delay, info
+                elapsed += delay
+                remaining -= delay
 
 
-def preview_frames(cards, stop_event=None):
+def image_frames(cards, stop_event=None, *, now=None, utc_clock=None):
+    for card, moment, delay, info in _frame_specs(cards, stop_event, now=now, utc_clock=utc_clock):
+        if _stopped(stop_event):
+            return
+        if isinstance(card, PreparedEvent):
+            image = render_frame(card, info['tick'], now=moment)
+            _, font, clipping = _countdown_line(card.countdown_fonts, info['countdown'])
+            info = dict(info, countdown_font=font, countdown_clipped=clipping)
+        else:
+            image = render_frame(card, info['tick'])
+        if _stopped(stop_event):
+            return
+        yield image, delay, info
+
+
+def preview_frames(cards, stop_event=None, *, now=None):
     from edit_preview import _png_frame
-    for image, delay, info in image_frames(cards, stop_event):
+    for image, delay, info in image_frames(cards, stop_event, now=now):
         if _stopped(stop_event):
             return
         frame = _png_frame(image, delay * 1000)
@@ -166,14 +331,26 @@ def preview_frames(cards, stop_event=None):
         yield frame
 
 
-def run(matrix, cards, stop_event=None, *, clock=time.monotonic, sleep=time.sleep):
+def run(matrix, cards, stop_event=None, *, clock=time.monotonic, sleep=time.sleep, utc_clock=None):
+    utc_clock = utc_clock or (lambda: dt.datetime.now(UTC))
     deadline, count = clock(), 0
-    for image, delay, _ in image_frames(cards, stop_event):
+    for image, delay, info in image_frames(cards, stop_event, utc_clock=utc_clock):
         if _stopped(stop_event):
             break
+        card = cards[info['card_index']]
+        def still_eligible():
+            if not isinstance(card, PreparedEvent):
+                return True
+            now = utc_clock().astimezone(UTC)
+            index = next((i for i, w in enumerate(card.event.windows) if w.end > now), None)
+            return index == info['window_index'] and event_countdown(card.event, now) == info['countdown']
+        if not still_eligible():
+            continue
         matrix.draw_image(image)
         if _stopped(stop_event):
             break
+        if not still_eligible():
+            continue
         matrix.swap()
         count += 1
         deadline += delay

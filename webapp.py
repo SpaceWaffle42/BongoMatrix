@@ -410,6 +410,10 @@ def _edit_preview_iterator(
     if module_name == 'rss':
         from modules.rss_renderer import preview_frames
         return preview_frames(prepared.stories, stop_event)
+    if module_name == 'astronomy':
+        from modules.astronomy_renderer import preview_frames
+        return preview_frames(prepared.cards if prepared else (), stop_event,
+                              now=prepared.prepared_at if prepared else None)
     if module_name == "event_countdown":
         from modules.event_countdown import preview_frames
         return preview_frames(candidate, preview_duration(candidate, module_name, 15), stop_event,
@@ -764,6 +768,7 @@ def create_app(
     def close_edit_preview_services():
         """Close the published pair without preventing a later lazy restart."""
         rss_host.close()
+        astronomy_host.close()
         with edit_preview_services_lock:
             registry = edit_preview_registry
             provider = edit_preview_provider
@@ -789,6 +794,11 @@ def create_app(
     rss_host.sync(config_store.get())
     controller.rss_host = rss_host
     app.extensions['rss_host'] = rss_host
+    from astronomy_host import AstronomyHost, PreparationBusy
+    astronomy_host = AstronomyHost()
+    astronomy_host.sync(config_store.get())
+    controller.astronomy_host = astronomy_host
+    app.extensions['astronomy_host'] = astronomy_host
     rss_operation = threading.BoundedSemaphore(1)
     app.jinja_env.globals["application_version"] = APPLICATION_VERSION
     app.extensions["get_edit_preview_services"] = get_edit_preview_services
@@ -1707,6 +1717,7 @@ def create_app(
             config=config,
             modules=sorted(ALLOWED_MODULES) + custom_names,
             module_labels={
+                "astronomy": "Astronomy (local Moon)",
                 "event_countdown": "Event Countdown",
                 "announcement_board": "Announcement Board",
                 "weather": "Weather (Free · Open-Meteo)",
@@ -1767,7 +1778,7 @@ def create_app(
     @requires_pairing
     def provider_scroll_timing(module_name):
         deadline = time.monotonic() + DEFAULT_API_TIMEOUT_SECONDS
-        if module_name not in {"announcement_board", "weather", "openweather_overview", "openweather_forecast", "rss"}:
+        if module_name not in {"announcement_board", "weather", "openweather_overview", "openweather_forecast", "rss", "astronomy"}:
             abort(404)
         # One extra byte lets an unknown-length WSGI stream prove overflow;
         # known lengths are rejected by the explicit check below.
@@ -1778,7 +1789,10 @@ def create_app(
         if len(body) > 16 * 1024:
             return jsonify({"error": "Timing draft exceeds the 16 KiB limit."}), 413
         payload = request.get_json(silent=True)
-        if not isinstance(payload, dict) or set(payload) - {"base_revision", "settings", "weather", "settings_correlation"}:
+        allowed_fields = {"base_revision", "settings", "weather", "settings_correlation"}
+        if module_name == 'astronomy':
+            allowed_fields.add('preview_instance')
+        if not isinstance(payload, dict) or set(payload) - allowed_fields:
             return jsonify({"error": "Timing draft is invalid."}), 400
         correlation = payload.get("settings_correlation")
         if correlation is not None and (
@@ -1795,6 +1809,27 @@ def create_app(
             return jsonify({"error": "Timing draft is invalid."}), 400
         draft = copy.deepcopy(current)
         draft[module_name] = copy.deepcopy(settings)
+        if module_name == 'astronomy':
+            try:
+                identity = edit_preview_identity(payload) if 'preview_instance' in payload else (session['device_id'], None)
+                if 'weather' in payload:
+                    if not isinstance(payload['weather'], dict):
+                        raise ValueError('Invalid weather draft')
+                    draft['weather'] = copy.deepcopy(payload['weather'])
+                validate_config(draft, allow_legacy_announcements=False, enforce_save_bounds=True)
+                snapshot = astronomy_host.preview(draft, owner=('timing', *identity))
+            except PreparationBusy:
+                response = jsonify({'error': 'Astronomy preparation is busy.', 'retryable': True})
+                response.status_code = 429
+                response.headers['Retry-After'] = '1'
+                return response
+            except (KeyError, TypeError, ValueError):
+                return jsonify({'error': 'Timing draft is invalid.'}), 400
+            return jsonify({'module': 'astronomy', 'duration_seconds': snapshot.duration,
+                            'ready_count': len(snapshot.cards), 'generation': snapshot.generation,
+                            'clipping': [card.clipping for card in snapshot.cards],
+                            'status': snapshot.status, 'error': snapshot.error,
+                            **({'settings_correlation': correlation} if correlation is not None else {})})
         if module_name == 'rss':
             try:
                 from rss_config import validate as validate_rss
@@ -2294,6 +2329,7 @@ def create_app(
             return jsonify({"error": str(exc)}), 400
         try:
             rss_host.sync(config)
+            astronomy_host.sync(config)
             controller.reload()
         except Exception:
             LOGGER.exception("Configuration committed but display reload failed")
@@ -2324,6 +2360,20 @@ def create_app(
         response = jsonify(config)
         response.headers["ETag"] = _revision_etag(config["revision"])
         return response
+
+    @app.get('/api/astronomy/status')
+    @requires_pairing
+    def astronomy_status():
+        snapshot = astronomy_host.saved.peek()
+        return jsonify({'status': snapshot.status, 'generation': snapshot.generation,
+            'ready_count': len(snapshot.cards), 'duration_seconds': snapshot.duration,
+            'location': snapshot.location, 'error': snapshot.error,
+            'prepared_at': snapshot.prepared_at.isoformat() if snapshot.prepared_at else None,
+            'source': 'NASA/JPL DE440s / Skyfield 1.54; offline bundled time tables',
+            'checksum': 'verified during preparation' if snapshot.prepared_at else 'not yet verified',
+            'supported_years': [2000, 2100],
+            'unsupported': ['eclipses', 'supermoon/blue-moon labels', 'meteor showers', 'planetary events', 'providers'],
+            'uncertainty': 'Level horizon; no terrain or weather model. Future time tables uncertain.'})
 
     @app.get('/api/rss/status')
     @requires_pairing
@@ -2550,6 +2600,10 @@ def create_app(
                 )
                 if module_name == 'rss':
                     prepared = rss_host.preview(candidate['rss'])
+                if module_name == 'astronomy':
+                    prepared = astronomy_host.wait_preview(candidate, stop_event, owner=('edit', *identity))
+                    if prepared is None and not stop_event.is_set():
+                        raise RuntimeError('Astronomy preparation superseded or timed out')
 
                 def owned_iterator():
                     try:
@@ -2595,7 +2649,7 @@ def create_app(
             stack.close()
             return edit_preview_error("Preview generation was superseded.", 409)
         except (
-            PreviewInstanceCapacityError, PreviewCapacityError,
+            PreparationBusy, PreviewInstanceCapacityError, PreviewCapacityError,
             PreviewProviderCapacityError,
         ):
             stack.close()
@@ -2831,6 +2885,15 @@ def create_app(
             )
             def render_device_draft(matrix, owned_request, *, stop_event):
                 prepared = rss_host.preview(candidate['rss']) if module_name == 'rss' else None
+                if module_name == 'astronomy':
+                    while not stop_event.is_set():
+                        try:
+                            prepared = astronomy_host.wait_preview(candidate, stop_event, owner=('device', *identity))
+                            break
+                        except PreparationBusy:
+                            stop_event.wait(.1)
+                    if prepared is None or stop_event.is_set():
+                        return False
                 if module_name in {
                     "weather", "openweather_overview", "openweather_forecast",
                 }:

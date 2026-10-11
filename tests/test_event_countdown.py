@@ -193,6 +193,8 @@ class CountdownTests(unittest.TestCase):
         predecessor = copy.deepcopy(DEFAULT_CONFIG)
         predecessor.pop('event_countdown')
         predecessor['playlist'] = [dict(module='clock_lava', duration=15, enabled=True)]
+        # Keep this predecessor boundary independent of later omittable defaults.
+        predecessor.pop('astronomy')
         # The established schema permits surrounding whitespace in device names.
         predecessor['device']['name'] += ' ' * (CONFIG_SNAPSHOT_LIMIT - len(encode(predecessor)))
         validate_config(copy.deepcopy(predecessor), enforce_save_bounds=True)
