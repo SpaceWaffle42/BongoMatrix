@@ -215,6 +215,35 @@ Run the endpoint again only after the diagnosed marker has been safely cleared.
 
 The reviewed tmpfiles policy creates a root-owned `0755` parent and canonical root-owned `0644` single-link lock before either service starts. The tmpfiles `f` line creates the file only when absent and does not replace an existing inode. Both services receive `/run/matrix-display` through a read-only systemd namespace and open the canonical inode read-only for `flock`; neither service truncates, rewrites, unlinks, or replaces it. Both implementations descriptor-walk the root-owned, non-writable `/run` ancestry and revalidate parent and inode identity after acquiring the lock. Their `UMask=0077` therefore cannot narrow the host-created lock's canonical `0644` mode.
 
+## Restart request drop-in for an existing install
+
+A device still running its original `matrix-web.service` (Group=root, no write
+access to the submit directory) refuses every dashboard restart with "Device
+restart could not be scheduled." The full repository unit is not a drop-in
+replacement there: its `ProcSubset=pid` hides `/proc/cpuinfo` and
+`/proc/device-tree`, which the RGB driver reads to detect the board. Install only
+the reviewed drop-in, which adds the submit group, the one writable path, and
+hides the broker state:
+
+```sh
+set -eu
+# Preflight before touching the running service: group, broker namespaces, broker.
+getent group matrix-web >/dev/null
+test "$(stat -c '%U:%G:%a:%F' /run/matrix-device-restart/submit)" = "root:matrix-web:1730:directory"
+test "$(stat -c '%U:%G:%a:%F' /run/matrix-device-restart/state)" = "root:root:700:directory"
+test -f /run/matrix-device-restart/state/transaction.lock
+systemctl is-active --quiet matrix-device-restart.path
+install -d -o root -g root -m 0755 /etc/systemd/system/matrix-web.service.d
+install -o root -g root -m 0644 deploy/matrix-web.service.d/restart-request.conf /etc/systemd/system/matrix-web.service.d/restart-request.conf
+systemd-analyze verify /etc/systemd/system/matrix-web.service
+systemctl daemon-reload
+systemctl restart matrix-web.service
+test "$(systemctl show -p Group --value matrix-web.service)" = matrix-web
+```
+
+Rollback: `rm /etc/systemd/system/matrix-web.service.d/restart-request.conf`,
+`systemctl daemon-reload`, `systemctl restart matrix-web.service`.
+
 ## Digest-pinned RGB binding provenance
 
 Do **not** generate trust from the live admin venv during appliance installation. From the separately reviewed RGB Matrix build artifact, review the exact three files and generate a release-side manifest:

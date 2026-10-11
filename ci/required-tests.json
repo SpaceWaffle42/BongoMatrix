@@ -1258,6 +1258,13 @@
     "ReloadContentionRegressionTests.test_reload_interrupts_module_before_waiting_for_display_lock",
     "ReloadContentionRegressionTests.test_reload_publishes_intent_before_waiting_for_state_lock"
   ],
+  "test_restart_request_dropin": [
+    "RestartRequestDropInTests.test_dropin_grants_exactly_the_restart_publisher_identity_and_paths",
+    "RestartRequestDropInTests.test_dropin_group_matches_the_tmpfiles_submit_directory_group",
+    "RestartRequestDropInTests.test_dropin_never_widens_privilege_or_hides_hardware_detection",
+    "RestartRequestDropInTests.test_install_documentation_installs_and_verifies_the_dropin",
+    "RestartRequestDropInTests.test_publisher_accepts_submit_directory_only_when_its_group_is_the_process_group"
+  ],
   "test_screen_media": [
     "ScreenMediaRevisionTests.test_active_scheduler_does_not_treat_screen_row_duration_as_a_deadline",
     "ScreenMediaRevisionTests.test_active_scheduler_routes_splash_through_the_stateful_runtime",
