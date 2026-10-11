@@ -227,13 +227,18 @@ hides the broker state:
 
 ```sh
 set -eu
+# Preflight before touching the running service: group, broker namespaces, broker.
+getent group matrix-web >/dev/null
+test "$(stat -c '%U:%G:%a:%F' /run/matrix-device-restart/submit)" = "root:matrix-web:1730:directory"
+test "$(stat -c '%U:%G:%a:%F' /run/matrix-device-restart/state)" = "root:root:700:directory"
+test -f /run/matrix-device-restart/state/transaction.lock
+systemctl is-active --quiet matrix-device-restart.path
 install -d -o root -g root -m 0755 /etc/systemd/system/matrix-web.service.d
 install -o root -g root -m 0644 deploy/matrix-web.service.d/restart-request.conf /etc/systemd/system/matrix-web.service.d/restart-request.conf
 systemd-analyze verify /etc/systemd/system/matrix-web.service
 systemctl daemon-reload
 systemctl restart matrix-web.service
 test "$(systemctl show -p Group --value matrix-web.service)" = matrix-web
-test "$(stat -c '%U:%G:%a' /run/matrix-device-restart/submit)" = root:matrix-web:1730
 ```
 
 Rollback: `rm /etc/systemd/system/matrix-web.service.d/restart-request.conf`,
