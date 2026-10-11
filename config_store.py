@@ -65,6 +65,8 @@ BASIC_BORDER_STYLES = ("none", "solid", "inset", "dotted", "dashed", "double")
 BASIC_ANIMATED_MEDIA_SUFFIXES = frozenset({".gif", ".mp4"})
 BASIC_MEDIA_SUFFIXES = BASIC_ANIMATED_MEDIA_SUFFIXES | {".png", ".jpg", ".jpeg", ".webp"}
 
+RSS_PROJECTED_FIELDS = ("disabled_feeds", "layout", "headline_colour", "summary_colour", "background_colour")
+
 def _serialize_config(config):
     data = json.dumps(config, sort_keys=True, separators=(",", ":")).encode("utf-8")
     compact = dict(config)
@@ -73,6 +75,15 @@ def _serialize_config(config):
             # Only unused defaults can be reconstructed losslessly on read.
             compact.pop(key, None)
             data = json.dumps(compact, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    if len(data) > CONFIG_SNAPSHOT_LIMIT and isinstance(compact.get("rss"), dict):
+        # These additive fields are reconstructed even when the RSS object is
+        # nondefault. Retain the object itself: absence also controls legacy row
+        # introduction, whereas field omission must never change the playlist.
+        compact["rss"] = dict(compact["rss"])
+        for key in RSS_PROJECTED_FIELDS:
+            if compact["rss"].get(key) == RSS_DEFAULTS[key]:
+                compact["rss"].pop(key, None)
+        data = json.dumps(compact, sort_keys=True, separators=(",", ":")).encode("utf-8")
     return data
 
 
@@ -1435,6 +1446,10 @@ def _project_persisted_screen_rows(config):
     """
     if config.get("schema_version") != CURRENT_CONFIG_SCHEMA_VERSION:
         return config
+    rss = config.get("rss")
+    if isinstance(rss, dict):
+        for key in RSS_PROJECTED_FIELDS:
+            rss.setdefault(key, copy.deepcopy(RSS_DEFAULTS[key]))
     missing_modules = [name for name in ("event_countdown", "rss") if name not in config]
     for name in missing_modules:
         config[name] = copy.deepcopy(DEFAULT_CONFIG[name])

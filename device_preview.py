@@ -47,6 +47,7 @@ class DevicePreviewRequest:
     timeout_seconds: int | None = 60
     cleanup: Callable[[], None] | None = None
     pinned_media: Mapping[str, object] | None = None
+    ready: Callable[[], bool] | None = None
 
     def __post_init__(self) -> None:
         object.__setattr__(

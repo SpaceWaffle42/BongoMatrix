@@ -16,6 +16,9 @@ try{
  await send('Page.navigate',{url:`http://127.0.0.1:${appPort}/`});await waitFor(`typeof matrixEditorsReady!=='undefined'&&matrixEditorsReady`);
  if(!await evaluate(`!!document.querySelector('[data-rss-add]')`))throw Error('RSS Add feed control missing from loaded dashboard');
  await click('[data-module="rss"] button:last-child');
+ if(!await evaluate(`!!document.querySelector('[data-rss-enabled]')`))throw Error('Per-feed enabled control missing');
+ await click('[data-rss-enabled]');
+ if(!await evaluate(`configBody().rss.feeds.length===1&&configBody().rss.disabled_feeds[0]===configBody().rss.feeds[0]`))throw Error('Disabling removed source instead of retaining it');
  await change('[data-rss-url]','https://example.com/rss');await click('[data-rss-add]');
  await click('[data-rss-row]:last-of-type [data-rss-test]');
  await waitFor(`document.querySelector('[data-rss-row]:last-of-type [role="status"]').textContent.includes('Fixture news')`);
@@ -27,6 +30,11 @@ try{
  await change('[data-rss-setting="frame_delay"]','0.025');
  await change('[data-rss-setting="headline_mode"]','continuous');
  await change('[data-rss-setting="count"]','3');
+ if(!await evaluate(`!!document.querySelector('[data-rss-setting="layout"]')&&!!document.querySelector('[data-rss-setting="headline_colour"]')&&!!document.querySelector('[data-rss-setting="summary_colour"]')&&!!document.querySelector('[data-rss-setting="background_colour"]')`))throw Error('Layout or colour controls missing');
+ await change('[data-rss-setting="layout"]','text');
+ await change('[data-rss-setting="headline_colour"]','#12ab34');
+ await change('[data-rss-setting="summary_colour"]','#abcdef');
+ await change('[data-rss-setting="background_colour"]','#010203');
  await click('label[for="preview-mode-edit"]');
  await waitFor(`document.querySelector('#preview-frame').textContent.includes('Unsaved draft frame')`);
  if(!await evaluate(`editPreviewLastBitmap?.width===64&&editPreviewLastBitmap?.height===32`))throw Error('RSS shared preview bitmap missing');
@@ -47,6 +55,8 @@ try{
  await click('label[for="preview-mode-live"]');
  await send('Page.navigate',{url:`http://127.0.0.1:${appPort}/`});await waitFor(`typeof matrixEditorsReady!=='undefined'&&matrixEditorsReady`);
  if(!await evaluate(`configBody().rss.count===3&&configBody().rss.feeds.includes('https://example.com/rss')`))throw Error('RSS save/reload lost draft');
+ if(!await evaluate(`configBody().rss.layout==='text'&&configBody().rss.headline_colour==='#12ab34'&&configBody().rss.summary_colour==='#abcdef'&&configBody().rss.background_colour==='#010203'`))throw Error('Save/reload lost presentation');
+ if(!await evaluate(`configBody().rss.feeds[0]==='https://example.com/rss'&&configBody().rss.disabled_feeds[0]==='https://feeds.bbci.co.uk/news/rss.xml'&&!document.querySelector('[data-rss-row]:last-of-type [data-rss-enabled]').checked`))throw Error('Save/reorder/reload lost disabled feed');
  await click('[data-module="rss"] button:last-child');
  if(!await evaluate(`!!document.querySelector('[data-rss-reset-draft]')&&!document.querySelector('[data-rss-reset-all]').disabled`))throw Error('Cache reset remains disabled despite safe backend lifecycle');
  await evaluate(`(()=>{const realFetch=fetch;globalThis.rssResetCalls=0;globalThis.fetch=(...args)=>{if(args[0]==='/api/rss/reset')rssResetCalls++;return realFetch(...args)};return true})()`);

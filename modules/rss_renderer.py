@@ -113,6 +113,8 @@ def prepare_story(story, options=None, *, thumbnail=None):
     options = options or RenderOptions()
     if thumbnail is not None and not isinstance(thumbnail, PreparedThumbnail):
         raise ValueError('Thumbnail must be prepared before rendering')
+    if options.layout == 'text':
+        thumbnail = None
     if not isinstance(story.title, str) or len(story.title) > 300 or not isinstance(story.summary, str) or len(story.summary) > 2000:
         raise ValueError('Prepared story exceeds normalized text bounds')
     headline = _measure(_font(options.headline_font), ' '.join(story.title.split()))
@@ -128,7 +130,7 @@ def prepare_story(story, options=None, *, thumbnail=None):
     return PreparedStory(headline, lines, pitch, options, warnings, thumbnail)
 
 
-def _draw(area, run, x, y):
+def _draw(area, run, x, y, colour):
     for cursor, glyph in run.glyphs:
         gx = x + cursor - run.left + glyph.x_offset
         gy = y - run.top - glyph.y_offset - glyph.height
@@ -140,25 +142,26 @@ def _draw(area, run, x, y):
                 for col in range(glyph.width):
                     px = gx + col
                     if 0 <= px < area.width and row & (1 << (glyph.bits_per_row - 1 - col)):
-                        area.putpixel((px, py), (255, 255, 255))
+                        area.putpixel((px, py), colour)
 
 
 def render_frame(prepared, tick, *, thumbnail_index=0):
-    image = Image.new('RGB', (64, 32))
+    background = prepared.options.background_colour
+    image = Image.new('RGB', (64, 32), background)
     tx, hh, sh = (17, 16, 15) if prepared.thumbnail else (0, 7, 24)
     if prepared.thumbnail:
         image.paste(Image.frombytes('RGB', (16, 16), prepared.thumbnail.frames[thumbnail_index]), (0, 0))
-    title = Image.new('RGB', (64 - tx, hh))
+    title = Image.new('RGB', (64 - tx, hh), background)
     title_end, summary_end, _ = _timing(prepared)
     x = 0
     if title_end and (tick < title_end or prepared.options.headline_mode == 'continuous'):
         x = -(tick % title_end)
-    _draw(title, prepared.headline, x, 0)
+    _draw(title, prepared.headline, x, 0, tuple(bytes.fromhex(prepared.options.headline_colour[1:])))
     image.paste(title, (tx, 0))
-    summary = Image.new('RGB', (64, sh))
+    summary = Image.new('RGB', (64, sh), background)
     sy = sh - tick
     for index, line in enumerate(prepared.lines):
-        _draw(summary, line, 0, sy + index * prepared.line_pitch)
+        _draw(summary, line, 0, sy + index * prepared.line_pitch, tuple(bytes.fromhex(prepared.options.summary_colour[1:])))
     image.paste(summary, (0, hh + 1))
     return image, {'summary_y': sy, 'headline_x': x, 'summary_done': tick >= summary_end}
 

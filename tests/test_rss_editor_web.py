@@ -27,7 +27,8 @@ class RSSEditorWebTests(unittest.TestCase):
         from rss_config import RenderOptions
         from modules.rss_renderer import prepare_story, image_frames
         story = parse_feed(feed, 'https://example.com/rss').stories[0]
-        prepared = prepare_story(story, RenderOptions(frame_delay=.025, headline_mode='continuous'))
+        prepared = prepare_story(story, RenderOptions(frame_delay=.025, headline_mode='continuous',
+            layout='text', headline_colour='#12ab34', summary_colour='#abcdef', background_colour='#010203'))
         image, _, _ = list(image_frames((prepared,)))[-1]
         self.assertEqual(result['finalPixels'], list(image.convert('RGBA').tobytes()))
         self.assertEqual(self.fixture.store.get()['rss']['count'], 3)

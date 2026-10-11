@@ -5,6 +5,39 @@ import unittest
 
 
 class RendererTests(unittest.TestCase):
+    def test_layout_and_colours_use_existing_regions_and_shared_output(self):
+        import base64
+        import io
+        from PIL import Image
+        from rss_config import DEFAULTS, render_options
+        from rss_data import Story
+        from modules import rss_renderer as r
+        self.assertEqual(DEFAULTS.get('layout'), 'auto')
+        thumbnail = r.PreparedThumbnail((bytes((250, 0, 0)) * 256,), (100,))
+        story = Story((), 'Headline', 'Summary', '', None)
+        for layout in ('auto', 'text'):
+            settings = dict(DEFAULTS, layout=layout, headline_colour='#12ab34',
+                            summary_colour='#abcdef', background_colour='#010203')
+            p = r.prepare_story(story, render_options(settings), thumbnail=thumbnail)
+            expected = list(r.image_frames((p,)))
+            image, _ = r.render_frame(p, 10)
+            hh = 16 if layout == 'auto' else 7
+            self.assertEqual(p.warnings['headline_available_height'], hh)
+            self.assertEqual(image.getpixel((63, hh)), (1, 2, 3))
+            self.assertIn((18, 171, 52), set(image.crop((17 if layout == 'auto' else 0, 0, 64, hh)).getdata()))
+            self.assertIn((171, 205, 239), set(image.crop((0, hh + 1, 64, 32)).getdata()))
+            self.assertEqual((250, 0, 0) in set(image.getdata()), layout == 'auto')
+            frames, now = [], [0.0]
+            class Matrix:
+                def draw_image(self, image):
+                    frames.append(image.tobytes())
+                def swap(self):
+                    pass
+            r.run(Matrix(), (p,), clock=lambda: now[0], sleep=lambda delay: now.__setitem__(0, now[0] + delay))
+            self.assertEqual(frames, [im.tobytes() for im, _, _ in expected])
+            self.assertEqual(frames, [Image.open(io.BytesIO(base64.b64decode(f['png']))).tobytes() for f in r.preview_frames((p,))])
+            self.assertAlmostEqual(now[0], r.duration_seconds((p,)))
+
     def test_executable_options_are_numeric_bounded_and_installed(self):
         self.assertIsNotNone(importlib.util.find_spec('rss_config'), 'RSS render options absent')
         from rss_config import RenderOptions, SPEED_DELAYS

@@ -89,12 +89,16 @@ function rssAddFeed(value){
 }
 function renderRSSEditor(container){
   container.replaceChildren();container.style.minWidth='0';
-  const note=document.createElement('p');note.textContent='RSS / Atom · 30-minute refresh · Auto layout: 16×16 image when usable; otherwise full-width text. City and county BBC presets are not available in the verified catalogue. Colours and manual layout overrides are not available in this saved contract.';container.append(note);
+  const note=document.createElement('p');note.textContent='RSS / Atom · 30-minute refresh · Auto layout: 16×16 image when usable; otherwise full-width text. Text-only layout always uses the full width. City and county BBC presets are not available in the verified catalogue.';container.append(note);
   const fields=document.createElement('div');fields.className='editor-fields';container.append(fields);
   const count=rssControl(fields,'count','Stories per pass (1–50; default 5)','number');count.min=1;count.max=50;
   rssControl(fields,'include','Include whole words (comma-separated)');rssControl(fields,'exclude','Exclude whole words (comma-separated)');
   rssControl(fields,'headline_font','Headline font','text',installedFonts.map(font=>[font,font]));
   rssControl(fields,'summary_font','Summary font','text',installedFonts.map(font=>[font,font]));
+  rssControl(fields,'layout','Story layout','text',[['auto','Automatic image / text'],['text','Text only']]);
+  rssControl(fields,'headline_colour','Headline colour','color');
+  rssControl(fields,'summary_colour','Summary colour','color');
+  rssControl(fields,'background_colour','Background colour','color');
   rssControl(fields,'frame_delay','Overview scroll speed','text',[[.1,'Slow'],[.05,'Normal'],[.025,'Fast']]);
   rssControl(fields,'headline_mode','Headline scrolling','text',[['once','One pass, then restore and freeze'],['continuous','Continuous until summary completes']]);
   const fontNote=document.createElement('p');fontNote.textContent='Fonts are installed BDF fonts. Exact clipping measurements are not yet available; inspect the shared 64×32 Edit Preview.';container.append(fontNote);
@@ -107,6 +111,9 @@ function renderRSSEditor(container){
   rssSettings.feeds.forEach((feed,index)=>{
     const row=document.createElement('fieldset');row.dataset.rssRow='';row.className='editor-fields';row.style.minWidth='0';
     const name=document.createElement('legend');name.textContent=`Feed ${index+1} of ${rssSettings.feeds.length}: ${feed}`;name.style.overflowWrap='anywhere';row.append(name);
+    const enabledLabel=document.createElement('label');enabledLabel.textContent='Use this feed';
+    const enabled=document.createElement('input');enabled.type='checkbox';enabled.dataset.rssEnabled='';enabled.checked=!rssSettings.disabled_feeds.includes(feed);enabled.setAttribute('aria-label','Enable feed '+feed);
+    enabled.addEventListener('change',()=>{rssSettings.disabled_feeds=rssSettings.disabled_feeds.filter(url=>url!==feed);if(!enabled.checked)rssSettings.disabled_feeds.push(feed);rssChanged()});enabledLabel.prepend(enabled);row.append(enabledLabel);
     const result=document.createElement('p');result.style.overflowWrap='anywhere';result.setAttribute('role','status');
     const runTest=async()=>{
       if(test.disabled||!test.isConnected)return;
@@ -119,14 +126,14 @@ function renderRSSEditor(container){
       const move=makeButton(label,()=>{const next=index+step;[rssSettings.feeds[index],rssSettings.feeds[next]]=[rssSettings.feeds[next],rssSettings.feeds[index]];rssChanged();renderRSSEditors()});
       move.dataset[key]='';move.disabled=index+step<0||index+step>=rssSettings.feeds.length;move.setAttribute('aria-label',label+' '+feed);row.append(move);
     }
-    const remove=makeButton('Delete feed',()=>{rssSettings.feeds.splice(index,1);rssChanged();renderRSSEditors()},'btn danger');remove.dataset.rssDelete='';remove.setAttribute('aria-label','Delete feed '+feed);row.append(remove);container.append(row);
+    const remove=makeButton('Delete feed',()=>{rssSettings.feeds.splice(index,1);rssSettings.disabled_feeds=rssSettings.disabled_feeds.filter(url=>url!==feed);rssChanged();renderRSSEditors()},'btn danger');remove.dataset.rssDelete='';remove.setAttribute('aria-label','Delete feed '+feed);row.append(remove);container.append(row);
   });
   const status=document.createElement('div');status.dataset.rssStatus='';status.setAttribute('role','status');status.style.overflowWrap='anywhere';container.append(status,makeButton('Refresh feed status',rssRefreshStatus));
   const testAll=makeButton('Test feeds',async()=>{testAll.disabled=true;try{for(const button of container.querySelectorAll('[data-rss-test]')){if(!container.isConnected)break;await button.rssRunTest()}}finally{testAll.disabled=false}});testAll.dataset.rssTestAll='';container.append(testAll);
   const duration=document.createElement('p');duration.dataset.rssDuration='';duration.setAttribute('role','status');container.append(duration,makeButton('Calculate prepared duration',rssCalculate));
   const reset=makeButton('Reset draft to defaults',()=>{
     if(!confirm('Replace this RSS draft with defaults? Nothing is saved and playback/cache are unchanged.'))return;
-    rssSettings={feeds:['https://feeds.bbci.co.uk/news/rss.xml'],refresh_seconds:1800,count:5,include:[],exclude:[],headline_font:'5x7',summary_font:'4x6',frame_delay:.05,headline_mode:'once',thumbnail_speed:100};
+    rssSettings={feeds:['https://feeds.bbci.co.uk/news/rss.xml'],disabled_feeds:[],refresh_seconds:1800,count:5,include:[],exclude:[],headline_font:'5x7',summary_font:'4x6',frame_delay:.05,headline_mode:'once',thumbnail_speed:100,layout:'auto',headline_colour:'#ffffff',summary_colour:'#ffffff',background_colour:'#000000'};
     rssChanged();renderRSSEditors();
   },'btn danger');reset.dataset.rssResetDraft='';
   const resetAll=makeButton('Reset to defaults and clear caches',async()=>{
@@ -142,7 +149,7 @@ function renderRSSEditor(container){
       await rssRefreshStatus();
     }catch(error){setMessage('RSS reset failed: '+error.message,true)}finally{resetAll.disabled=false}
   },'btn danger');resetAll.dataset.rssResetAll='';
-  const resetNote=document.createElement('p');resetNote.textContent='Draft reset does not clear cache or seen stories. Reset to defaults clears shared caches immediately but does not save configuration. Individual disabled feed rows cannot be retained by the current saved URL-list contract; delete a feed to stop using it.';
+  const resetNote=document.createElement('p');resetNote.textContent='Draft reset does not clear cache or seen stories. Reset to defaults clears shared caches immediately but does not save configuration. Disabled feeds keep their position and URL but are not fetched or selected for playback. Test feed remains available for diagnostics.';
   container.append(reset,resetAll,resetNote);
   rssRenderStatus();rssRenderDuration();if(!rssCatalogue)rssRefreshStatus();
 }

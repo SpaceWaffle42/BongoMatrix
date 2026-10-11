@@ -995,7 +995,8 @@ class DisplayController:
         with self._state_lock:
             if self._device_draft_stop is not None:
                 self._device_draft_stop.set()
-            if self._device_draft_pending is not None and self._device_draft_pending[0] is lease:
+            # Heartbeat renews the lease record, but not its owned request.
+            if self._device_draft_pending is not None and self._device_draft_pending[0].request is lease.request:
                 self._device_draft_pending = None
         with self._display_lock:
             pass
@@ -1006,10 +1007,15 @@ class DisplayController:
     def _execute_pending_device_draft(self):
         with self._state_lock:
             pending = self._device_draft_pending
-            self._device_draft_pending = None
             if pending is None:
                 return False
             lease, renderer = pending
+            # Admission polls only prepared memory. Keep the owned lease pending
+            # while the host worker prepares; never enter the render/display lock
+            # with a cold snapshot, nor fetch/decode/wait for I/O here.
+            if lease.request.ready is not None and not lease.request.ready():
+                return False
+            self._device_draft_pending = None
             stop_event = threading.Event()
             admission_generation = self._module_admission_snapshot_locked()
             self._device_draft_active_lease = lease
@@ -1924,7 +1930,8 @@ class DisplayController:
             with self._state_lock:
                 device_draft_pending = self._device_draft_pending is not None
             if device_draft_pending:
-                self._execute_pending_device_draft()
+                if not self._execute_pending_device_draft():
+                    self._shutdown.wait(0.01)
                 self._mark_scheduler_healthy()
                 continue
             config = self.config_store.get()
