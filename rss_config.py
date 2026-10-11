@@ -1,6 +1,8 @@
-"""Opt-in RSS rendering contract; not registered in saved config or the UI."""
+"""Validated RSS source and prepared-rendering settings."""
 from dataclasses import dataclass
+import json
 import math
+import re
 from types import MappingProxyType
 from font_catalog import available_font_names
 from modules.scroll_timing import LEGACY_FRAME_DELAYS, MINIMUM_FRAME_DELAY, MAXIMUM_FRAME_DELAY
@@ -9,16 +11,36 @@ SPEED_DELAYS = MappingProxyType(dict(LEGACY_FRAME_DELAYS))
 
 DEFAULTS = {
     'feeds': ['https://feeds.bbci.co.uk/news/rss.xml'],
+    'disabled_feeds': [],
     'refresh_seconds': 1800, 'count': 5, 'include': [], 'exclude': [],
     'headline_font': '5x7', 'summary_font': '4x6',
     'frame_delay': SPEED_DELAYS['normal'], 'headline_mode': 'once',
     'thumbnail_speed': 100.0,
+    'layout': 'auto', 'headline_colour': '#ffffff',
+    'summary_colour': '#ffffff', 'background_colour': '#000000',
 }
 
 
 def render_options(settings):
     return RenderOptions(**{key: settings[key] for key in (
-        'headline_font', 'summary_font', 'frame_delay', 'headline_mode', 'thumbnail_speed')})
+        'headline_font', 'summary_font', 'frame_delay', 'headline_mode', 'thumbnail_speed',
+        'layout', 'headline_colour', 'summary_colour', 'background_colour')})
+
+
+def timing_request_limit(revision):
+    """Bound the JSON envelope using the supported RSS schema, not provider defaults.
+
+    checked_url permits 2048 Unicode characters, twice for 20 sources plus their
+    disabled subset. filter_words permits two lists of 50 x 64 characters.
+    An escaped non-BMP character takes 12 bytes; quotes/comma/space take four.
+    Fonts come from the finite installed catalogue. Reserve 24 bytes per float,
+    two digits for count, and the longest headline mode. Revision is authoritative.
+    Default JSON spacing is covered; arbitrary whitespace is intentionally not.
+    """
+    envelope = len(json.dumps({'base_revision': revision, 'settings': DEFAULTS,
+                              'settings_correlation': 'f' * 64}).encode('utf-8'))
+    fonts = 2 * max(len(json.dumps(name)) for name in available_font_names())
+    return envelope + 2 * 20 * (2048 * 12 + 4) + 2 * 50 * (64 * 12 + 4) + fonts + 2 * 24 + 2 + len('continuous')
 
 
 def validate(settings):
@@ -33,6 +55,11 @@ def validate(settings):
         checked_url(url)
     if len(set(feeds)) != len(feeds):
         raise ValueError('RSS feed URLs must be unique')
+    disabled = settings['disabled_feeds']
+    if (type(disabled) is not list or len(disabled) > len(feeds)
+            or any(type(url) is not str or url not in feeds for url in disabled)
+            or len(set(disabled)) != len(disabled)):
+        raise ValueError('Disabled RSS feeds must be a unique subset of feed URLs')
     if type(settings['refresh_seconds']) is not int or settings['refresh_seconds'] != 1800:
         raise ValueError('RSS refresh must be 1800 seconds')
     if type(settings['count']) is not int or not 1 <= settings['count'] <= 50:
@@ -52,8 +79,17 @@ class RenderOptions:
     frame_delay: float = SPEED_DELAYS['normal']
     headline_mode: str = 'once'
     thumbnail_speed: float = 100.0
+    layout: str = 'auto'
+    headline_colour: str = '#ffffff'
+    summary_colour: str = '#ffffff'
+    background_colour: str = '#000000'
 
     def __post_init__(self):
+        if self.layout not in ('auto', 'text'):
+            raise ValueError('RSS layout must be auto or text')
+        for colour in (self.headline_colour, self.summary_colour, self.background_colour):
+            if not isinstance(colour, str) or not re.fullmatch(r'#[0-9a-fA-F]{6}', colour):
+                raise ValueError('RSS colours must be #RRGGBB')
         installed = available_font_names()
         if self.headline_font not in installed or self.summary_font not in installed:
             raise ValueError('Choose an installed BDF font')

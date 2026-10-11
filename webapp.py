@@ -1782,12 +1782,19 @@ def create_app(
             abort(404)
         # One extra byte lets an unknown-length WSGI stream prove overflow;
         # known lengths are rejected by the explicit check below.
-        request.max_content_length = 16 * 1024 + 1
-        if request.content_length is not None and request.content_length > 16 * 1024:
-            return jsonify({"error": "Timing draft exceeds the 16 KiB limit."}), 413
+        current = config_store.get()
+        timing_limit = 16 * 1024
+        limit_error = "Timing draft exceeds the 16 KiB limit."
+        if module_name == 'rss':
+            from rss_config import timing_request_limit
+            timing_limit = timing_request_limit(current['revision'])
+            limit_error = "RSS timing draft exceeds the supported settings envelope."
+        request.max_content_length = timing_limit + 1
+        if request.content_length is not None and request.content_length > timing_limit:
+            return jsonify({"error": limit_error}), 413
         body = request.get_data(cache=True)
-        if len(body) > 16 * 1024:
-            return jsonify({"error": "Timing draft exceeds the 16 KiB limit."}), 413
+        if len(body) > timing_limit:
+            return jsonify({"error": limit_error}), 413
         payload = request.get_json(silent=True)
         allowed_fields = {"base_revision", "settings", "weather", "settings_correlation"}
         if module_name == 'astronomy':
@@ -1800,7 +1807,6 @@ def create_app(
             or re.fullmatch(r"[0-9a-f]{64}", correlation) is None
         ):
             return jsonify({"error": "Timing draft is invalid."}), 400
-        current = config_store.get()
         base_revision = payload.get("base_revision")
         if isinstance(base_revision, bool) or not isinstance(base_revision, int) or base_revision != current["revision"]:
             return jsonify({"error": "Timing draft is based on an older configuration.", "revision": current["revision"]}), 412
@@ -2871,6 +2877,16 @@ def create_app(
                     validate_screen_media_config(
                         candidate, media_root, saved_config=config_store.get(),
                     )
+            rss_reader = None
+            rss_prepared = None
+
+            def rss_ready():
+                nonlocal rss_prepared
+                if rss_reader is None:
+                    return False
+                rss_prepared = rss_reader()
+                return rss_prepared is not None
+
             request_record = DevicePreviewRequest(
                 owner=owner,
                 generation=generation,
@@ -2882,9 +2898,10 @@ def create_app(
                 timeout_seconds=timeout_seconds,
                 cleanup=stack.close,
                 pinned_media=pinned_media,
+                ready=rss_ready if module_name == 'rss' else None,
             )
             def render_device_draft(matrix, owned_request, *, stop_event):
-                prepared = rss_host.preview(candidate['rss']) if module_name == 'rss' else None
+                prepared = rss_prepared if module_name == 'rss' else None
                 if module_name == 'astronomy':
                     while not stop_event.is_set():
                         try:
@@ -2894,6 +2911,7 @@ def create_app(
                             stop_event.wait(.1)
                     if prepared is None or stop_event.is_set():
                         return False
+
                 if module_name in {
                     "weather", "openweather_overview", "openweather_forecast",
                 }:
@@ -2923,6 +2941,10 @@ def create_app(
                 status = 409
                 return edit_preview_error("Device preview is not available.", status)
             transferred = True
+            if module_name == 'rss':
+                # Configure/start on the route, only after ownership admission.
+                # Scheduler admission subsequently uses a nonblocking reader.
+                rss_reader = rss_host.preview_reader(candidate['rss'])
             now = time.monotonic()
             lease = admission.lease
             response = {

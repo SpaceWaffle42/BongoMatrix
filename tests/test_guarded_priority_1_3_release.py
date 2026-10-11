@@ -238,6 +238,7 @@ print('EXPORTED_FULL_RUN_OK')
             shutil.copytree(source / "deploy", exported / "deploy")
             for production_source in source.glob("*.py"):
                 shutil.copy2(production_source, exported / production_source.name)
+            shutil.copy2(source / "rss_presets.json", exported / "rss_presets.json")
             for production_tree in ("app", "modules"):
                 shutil.copytree(source / production_tree, exported / production_tree)
             shutil.copytree(source / "resources" / "fonts", exported / "resources" / "fonts")

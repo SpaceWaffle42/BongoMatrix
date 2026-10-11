@@ -20,6 +20,7 @@ class RSSHost:
         self.draft_service = PreparedFeedService(cache=self.service.cache)
         self._draft_settings = None
         self._settings = None
+        self._revision = -1
         self._lock = threading.RLock()
         self.presets = json.loads(Path(__file__).with_name('rss_presets.json').read_text())
 
@@ -28,8 +29,15 @@ class RSSHost:
         validate(settings)
         enabled = any(row.get('module') == 'rss' and row.get('enabled') for row in config['playlist'])
         with self._lock:
+            revision = config.get('revision', -1)
+            if revision < self._revision:
+                return
+            # Establish the committed high-water mark before fallible runtime
+            # work. A failure must still reject older commits; the same revision
+            # may retry, and the caller retains its committed-but-failed report.
+            self._revision = revision
             if settings != self._settings:
-                self.service.configure(settings['feeds'], include=settings['include'],
+                self.service.configure([url for url in settings['feeds'] if url not in settings['disabled_feeds']], include=settings['include'],
                     exclude=settings['exclude'], count=settings['count'], options=render_options(settings))
                 self._settings = copy.deepcopy(settings)
             if enabled:
@@ -49,11 +57,33 @@ class RSSHost:
             if settings == self._settings and snapshot.items:
                 return snapshot
             if settings != self._draft_settings:
-                self.draft_service.configure(settings['feeds'], include=settings['include'],
+                self.draft_service.configure([url for url in settings['feeds'] if url not in settings['disabled_feeds']], include=settings['include'],
                     exclude=settings['exclude'], count=settings['count'], options=render_options(settings))
                 self._draft_settings = copy.deepcopy(settings)
             self.draft_service.start()
             return self.draft_service.peek()
+
+    def preview_reader(self, settings):
+        """Start preparation off-scheduler, then return a generation-bound peek.
+
+        None means still preparing. An empty snapshot is terminal (disabled or
+        superseded); neither outcome consumes the physical or draft rotation.
+        The returned reader never configures, starts, fetches or decodes.
+        """
+        from rss_service import PreparedSnapshot
+        with self._lock:
+            initial = self.preview(settings)
+            if initial.items:
+                return lambda: initial
+            generation = initial.generation
+            no_sources = not self.draft_service.feeds
+
+        def read():
+            snapshot = self.draft_service.peek()
+            if snapshot.generation != generation:
+                return PreparedSnapshot(generation)
+            return snapshot if snapshot.items or no_sources else None
+        return read
 
     def status(self):
         snapshot = self.service.peek()

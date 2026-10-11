@@ -7,6 +7,77 @@ from rss_service import PreparedFeedService, FeedService
 
 
 class ConfigIntegrationTests(unittest.TestCase):
+    def test_nondefault_predecessor_at_byte_limit_opens_updates_and_retains_removed_rows(self):
+        import json
+        from config_store import ConfigStore, DEFAULT_CONFIG, CONFIG_SNAPSHOT_LIMIT
+        from rss_config import DEFAULTS
+        added = ('disabled_feeds', 'layout', 'headline_colour', 'summary_colour', 'background_colour')
+        encode = lambda value: json.dumps(value, sort_keys=True, separators=(',', ':')).encode()
+        for removed in (False, True):
+            with self.subTest(removed=removed), tempfile.TemporaryDirectory() as directory:
+                old = copy.deepcopy(DEFAULT_CONFIG)
+                old['rss']['count'] = 3
+                old['event_countdown']['layout'] = 'icon'
+                for key in added:
+                    old['rss'].pop(key)
+                if removed:
+                    old['playlist'] = [r for r in old['playlist'] if r['module'] not in ('rss', 'event_countdown')]
+                old['device']['name'] += ' ' * (CONFIG_SNAPSHOT_LIMIT - len(encode(old)))
+                path = Path(directory) / 'config.json'
+                path.write_bytes(encode(old))
+                before = path.read_bytes()
+                self.assertEqual(len(before), CONFIG_SNAPSHOT_LIMIT)
+                store = ConfigStore(path)
+                current = store.get()
+                self.assertEqual(path.read_bytes(), before)
+                self.assertEqual(current['playlist'], old['playlist'])
+                self.assertEqual(current['device'], old['device'])
+                for key in added:
+                    self.assertEqual(current['rss'][key], DEFAULTS[key])
+                saved = store.update({'rss': {'count': 4}}, base_revision=current['revision'])
+                self.assertEqual(saved['rss']['count'], 4)
+                self.assertEqual(saved['event_countdown'], old['event_countdown'])
+                self.assertEqual(saved['device'], old['device'])
+                self.assertEqual(saved['playlist'], old['playlist'])
+                self.assertLessEqual(path.stat().st_size, CONFIG_SNAPSHOT_LIMIT)
+                self.assertEqual(ConfigStore(path).get(), saved)
+
+    def test_disabled_feeds_persist_order_and_old_sources_migrate(self):
+        import json
+        from config_store import ConfigStore
+        urls = ['https://example.com/a', 'https://example.com/b']
+        with tempfile.TemporaryDirectory() as directory:
+            store = ConfigStore(Path(directory) / 'config.json')
+            old = store.update({'rss': {'feeds': urls}})
+            old['rss'].pop('disabled_feeds', None)
+            for key in ('layout', 'headline_colour', 'summary_colour', 'background_colour'):
+                old['rss'].pop(key, None)
+            store.path.write_text(json.dumps(old))
+            before = store.path.read_bytes()
+            store = ConfigStore(store.path)
+            self.assertEqual(store.get()['rss'].get('disabled_feeds'), [])
+            self.assertEqual(store.path.read_bytes(), before)
+            saved = store.update({'rss': {'disabled_feeds': [urls[0]]}})
+            self.assertEqual(saved['rss']['feeds'], urls)
+            self.assertEqual(ConfigStore(store.path).get()['rss'], saved['rss'])
+            saved = store.update({'rss': {'feeds': urls[::-1]}})
+            self.assertEqual(saved['rss']['disabled_feeds'], [urls[0]])
+            self.assertEqual(saved['rss']['layout'], 'auto')
+            saved = store.update({'rss': {'layout': 'text', 'headline_colour': '#12ab34',
+                                         'summary_colour': '#abcdef', 'background_colour': '#010203'}})
+            self.assertEqual(ConfigStore(store.path).get()['rss'], saved['rss'])
+            before = store.path.read_bytes()
+            for changes in ({'layout': 'image'}, {'headline_colour': 'red'},
+                            {'summary_colour': '#fffffff'}, {'background_colour': False}):
+                with self.subTest(changes=changes), self.assertRaises(ValueError):
+                    store.update({'rss': changes})
+                self.assertEqual(store.path.read_bytes(), before)
+            before = store.path.read_bytes()
+            for disabled in ([urls[0], urls[0]], ['https://example.com/unknown'], [False], 'all'):
+                with self.subTest(disabled=disabled), self.assertRaises(ValueError):
+                    store.update({'rss': {'disabled_feeds': disabled}})
+                self.assertEqual(store.path.read_bytes(), before)
+
     def test_predecessor_capacity_and_byte_budget_are_nondestructive(self):
         import json
         from config_store import ConfigStore, DEFAULT_CONFIG, CONFIG_SNAPSHOT_LIMIT
@@ -58,6 +129,300 @@ class ConfigIntegrationTests(unittest.TestCase):
 
 
 class WebIntegrationTests(unittest.TestCase):
+    def test_cold_device_cancel_after_heartbeat_clears_pending_request(self):
+        from unittest.mock import Mock, patch
+        from display_controller import DisplayController
+        f = self.fixture
+        f.pair_browser()
+        host = f.app.extensions['rss_host']
+        self.addCleanup(host.close)
+        controller = DisplayController(Mock(), f.store)
+        self.addCleanup(controller.stop)
+        f.controller.submit_device_draft.side_effect = controller.submit_device_draft
+        f.controller.heartbeat_device_draft.side_effect = controller.heartbeat_device_draft
+        f.controller.cancel_device_draft.side_effect = controller.cancel_device_draft
+        with patch.object(controller, 'start'), patch.object(host.draft_service, 'start'):
+            response = f.paired_request('post', '/api/device-preview/rss', json={
+                'config': {'rss': {'count': 2}}, 'generation': 1, 'preview_instance': 'b' * 32})
+            self.assertEqual(response.status_code, 202)
+            self.assertFalse(controller._execute_pending_device_draft())
+            lease = controller.device_preview_manager.active_lease()
+            with patch.object(controller.device_preview_manager, '_clock', return_value=lease.last_heartbeat_at + 5):
+                heartbeat = f.paired_request('post', '/api/device-preview/heartbeat', json={
+                    'generation': 1, 'preview_instance': 'b' * 32})
+                self.assertEqual(heartbeat.status_code, 202)
+                self.assertIsNot(controller.device_preview_manager.active_lease(), lease)
+                cancelled = f.paired_request('post', '/api/device-preview/cancel', json={
+                    'generation': 1, 'preview_instance': 'b' * 32})
+                self.assertEqual(cancelled.status_code, 202)
+            self.assertIsNone(controller._device_draft_pending)
+            self.assertIsNone(controller.device_preview_manager.active_lease())
+            controller.matrix.draw_image.assert_not_called()
+
+    def test_failed_latest_sync_reports_committed_and_cannot_revert_to_old_revision(self):
+        from unittest.mock import patch
+        f = self.fixture
+        f.pair_browser()
+        host = f.app.extensions['rss_host']
+        self.addCleanup(host.close)
+        old = f.store.get()
+        rows = copy.deepcopy(old['playlist'])
+        for row in rows:
+            if row['module'] == 'rss':
+                row['enabled'] = True
+        with patch.object(host.service, 'start', side_effect=RuntimeError('worker failure')):
+            response = f.paired_request('post', '/api/config',
+                headers={'If-Match': f'"{old["revision"]}"'},
+                json={'rss': {'count': 3}, 'playlist': rows})
+        self.assertEqual(response.status_code, 503)
+        self.assertTrue(response.json['committed'])
+        self.assertEqual(response.json['config'], f.store.get())
+        host.sync(old)
+        self.assertEqual(host.service.count, 3)
+        with patch.object(host.service.client, 'fetch', return_value=b'<rss><channel/></rss>'):
+            host.sync(f.store.get())
+            self.assertTrue(host.service.running)
+            host.service.close()
+
+    def test_timing_rss_exact_envelope_boundary_known_and_unknown_lengths(self):
+        import io
+        import json
+        from unittest.mock import patch
+        from rss_config import timing_request_limit
+        f = self.fixture
+        f.pair_browser()
+        current = f.store.get()
+        host = f.app.extensions['rss_host']
+        self.addCleanup(host.close)
+        body = json.dumps({'base_revision': current['revision'], 'settings': current['rss']}).encode()
+        limit = timing_request_limit(current['revision'])
+        self.assertLessEqual(len(body), limit)
+        at_limit = body + b' ' * (limit - len(body))
+        before = f.store.path.read_bytes()
+        with patch.object(host.draft_service, 'start'), patch('rss_transport.SafeFeedClient.fetch') as fetch:
+            for unknown in (False, True):
+                for extra, expected in ((b'', 200), (b' ', 413)):
+                    with self.subTest(unknown=unknown, expected=expected):
+                        options = {'input_stream': io.BytesIO(at_limit + extra),
+                            'environ_overrides': {'CONTENT_LENGTH': '', 'wsgi.input_terminated': True}} if unknown else {'data': at_limit + extra}
+                        response = f.paired_request('post', '/api/scroll-timing/rss',
+                            content_type='application/json', **options)
+                        self.assertEqual(response.status_code, expected, response.get_data(as_text=True))
+            fetch.assert_not_called()
+        self.assertEqual(f.store.path.read_bytes(), before)
+
+    def test_cold_device_generation_replacement_uses_only_latest_enabled_source_and_options(self):
+        import threading
+        from unittest.mock import Mock, patch
+        from display_controller import DisplayController
+        f = self.fixture
+        f.pair_browser()
+        host = f.app.extensions['rss_host']
+        self.addCleanup(host.close)
+        controller = DisplayController(Mock(), f.store)
+        controller.rss_host = host
+        self.addCleanup(controller.stop)
+        f.controller.submit_device_draft.side_effect = controller.submit_device_draft
+        f.controller.render_device_draft.side_effect = controller.render_device_draft
+        entered, release, ready = (threading.Event() for _ in range(3))
+        urls = ['https://example.com/old', 'https://example.com/latest']
+        service = host.draft_service
+        original_refresh = service.refresh_due
+        def fetch(url):
+            if url == urls[0]:
+                entered.set()
+                release.wait(3)
+            return f'<rss><channel><item><title>{url.rsplit("/", 1)[1]}</title></item></channel></rss>'.encode()
+        def refresh():
+            original_refresh()
+            if service.peek().items:
+                ready.set()
+        def stop_after_swap():
+            stop = controller._device_draft_stop
+            self.assertIsNotNone(stop)
+            stop.set()
+        with patch.object(controller, 'start'), patch.object(service.client, 'fetch', side_effect=fetch), patch.object(service, 'refresh_due', side_effect=refresh):
+            first = f.paired_request('post', '/api/device-preview/rss', json={
+                'config': {'rss': {'feeds': urls}}, 'generation': 1, 'preview_instance': 'd' * 32})
+            self.assertEqual(first.status_code, 202)
+            try:
+                self.assertTrue(entered.wait(1))
+                old_request = controller.device_preview_manager.active_lease().request
+                self.assertFalse(controller._execute_pending_device_draft())
+                second = f.paired_request('post', '/api/device-preview/rss', json={
+                    'config': {'rss': {'feeds': urls, 'disabled_feeds': [urls[0]],
+                        'layout': 'text', 'headline_colour': '#abcdef'}},
+                    'generation': 2, 'preview_instance': 'd' * 32})
+                self.assertEqual(second.status_code, 202)
+                self.assertEqual(controller.device_preview_manager.active_lease().generation, 2)
+                self.assertFalse(controller._execute_pending_device_draft())
+                controller.matrix.draw_image.assert_not_called()
+            finally:
+                release.set()
+            self.assertTrue(ready.wait(2))
+            with patch.object(controller.matrix, 'swap', side_effect=stop_after_swap):
+                self.assertTrue(controller._execute_pending_device_draft())
+            call = f.controller.render_device_draft.call_args
+            self.assertIsNot(call.args[1], old_request)
+            self.assertEqual(call.args[1].generation, 2)
+            prepared = call.kwargs['prepared']
+            self.assertEqual([item.source for item in prepared.items], [urls[1]])
+            self.assertEqual(prepared.stories[0].options.layout, 'text')
+            self.assertEqual(prepared.stories[0].options.headline_colour, '#abcdef')
+            self.assertFalse(host.service._rotation.seen)
+            self.assertFalse(service._rotation.seen)
+
+    def test_timing_admits_maximum_saved_rss_sources_and_disabled_subset(self):
+        import json
+        from unittest.mock import patch
+        from rss_config import validate
+        f = self.fixture
+        f.pair_browser()
+        host = f.app.extensions['rss_host']
+        self.addCleanup(host.close)
+        settings = copy.deepcopy(f.store.get()['rss'])
+        settings['feeds'] = [f'https://example.com/{i:02d}?' + '界' * (2048 - 23) for i in range(20)]
+        self.assertEqual({len(url) for url in settings['feeds']}, {2048})
+        settings['include'] = ['𐐀' * 64] * 50
+        settings['exclude'] = ['𐐁' * 64] * 50
+        with patch.object(host.draft_service, 'start'), patch.object(host.service.client, 'fetch') as fetch:
+            for disabled_count in (19, 20):
+                with self.subTest(disabled_count=disabled_count):
+                    settings['disabled_feeds'] = settings['feeds'][:disabled_count]
+                    validate(settings)
+                    saved = f.paired_request('post', '/api/config',
+                        headers={'If-Match': f'"{f.store.get()["revision"]}"'}, json={'rss': settings})
+                    self.assertEqual(saved.status_code, 200)
+                    body = json.dumps({'base_revision': f.store.get()['revision'],
+                        'settings': settings, 'settings_correlation': 'f' * 64}, separators=(',', ':'))
+                    response = f.paired_request('post', '/api/scroll-timing/rss',
+                        data=body, content_type='application/json')
+                    self.assertEqual(response.status_code, 200, response.get_data(as_text=True))
+                    before = f.store.path.read_bytes()
+                    oversized = f.paired_request('post', '/api/scroll-timing/rss',
+                        data=body + ' ' * (2 * 1024 * 1024), content_type='application/json')
+                    self.assertEqual(oversized.status_code, 413)
+                    self.assertEqual(f.store.path.read_bytes(), before)
+            fetch.assert_not_called()
+
+    def test_cold_device_preview_defers_render_and_cancel_discards_late_preparation(self):
+        import threading
+        from unittest.mock import Mock, patch
+        from display_controller import DisplayController
+        f = self.fixture
+        f.pair_browser()
+        host = f.app.extensions['rss_host']
+        self.addCleanup(host.close)
+        matrix = Mock()
+        controller = DisplayController(matrix, f.store)
+        controller.rss_host = host
+        self.addCleanup(controller.stop)
+        f.controller.submit_device_draft.side_effect = controller.submit_device_draft
+        f.controller.render_device_draft.side_effect = controller.render_device_draft
+        f.controller.cancel_device_draft.side_effect = controller.cancel_device_draft
+        before = f.store.path.read_bytes()
+        for generation, cancel in ((1, False), (2, True)):
+            with self.subTest(cancel=cancel):
+                entered, release, ready = (threading.Event() for _ in range(3))
+                service = host.draft_service
+                original_refresh = service.refresh_due
+                def fetch(url):
+                    entered.set()
+                    release.wait(3)
+                    return b'<rss><channel><item><title>Draft</title></item></channel></rss>'
+                def refresh():
+                    original_refresh()
+                    if service.peek().items:
+                        ready.set()
+                matrix.reset_mock()
+                with patch.object(controller, 'start'), patch.object(service.client, 'fetch', side_effect=fetch), patch.object(service, 'refresh_due', side_effect=refresh):
+                    response = f.paired_request('post', '/api/device-preview/rss', json={
+                        'config': {'rss': {'feeds': [f'https://example.com/{generation}'],
+                            'layout': 'text', 'headline_colour': '#123456', 'disabled_feeds': []}},
+                        'generation': generation, 'preview_instance': 'c' * 32, 'timeout_seconds': 5})
+                    self.assertEqual(response.status_code, 202)
+                    try:
+                        self.assertFalse(controller._execute_pending_device_draft())
+                        self.assertTrue(entered.wait(1))
+                        self.assertIsNotNone(controller.device_preview_manager.active_lease())
+                        self.assertIsNotNone(controller._device_draft_pending)
+                        matrix.draw_image.assert_not_called()
+                        if cancel:
+                            result = f.paired_request('post', '/api/device-preview/cancel', json={
+                                'generation': generation, 'preview_instance': 'c' * 32})
+                            self.assertEqual(result.status_code, 202)
+                    finally:
+                        release.set()
+                    self.assertTrue(ready.wait(2))
+                    if cancel:
+                        self.assertFalse(controller._execute_pending_device_draft())
+                        matrix.draw_image.assert_not_called()
+                    else:
+                        # Stop after a real first-frame swap; no fake renderer.
+                        with patch.object(matrix, 'swap', side_effect=lambda: controller._device_draft_stop.set()):
+                            self.assertTrue(controller._execute_pending_device_draft())
+                        self.assertGreater(matrix.draw_image.call_count, 0)
+                        prepared = f.controller.render_device_draft.call_args.kwargs['prepared']
+                        self.assertEqual(prepared.stories[0].options.layout, 'text')
+                        self.assertEqual(prepared.stories[0].options.headline_colour, '#123456')
+                    self.assertIsNone(controller.device_preview_manager.active_lease())
+                    self.assertFalse(service._rotation.seen)
+                    self.assertFalse(host.service._rotation.seen)
+                    self.assertEqual(f.store.path.read_bytes(), before)
+
+    def test_overlapping_committed_saves_keep_latest_runtime_and_worker_lifecycle(self):
+        import threading
+        from unittest.mock import patch
+        f = self.fixture
+        f.pair_browser()
+        host = f.app.extensions['rss_host']
+        self.addCleanup(host.close)
+        original_sync = host.sync
+        for latest_enabled in (False, True):
+            with self.subTest(latest_enabled=latest_enabled):
+                entered, release = threading.Event(), threading.Event()
+                results = []
+                first_config = f.store.get()
+                rows = copy.deepcopy(first_config['playlist'])
+                for row in rows:
+                    if row['module'] == 'rss':
+                        row['enabled'] = True
+                def delayed_sync(config):
+                    if config['rss']['count'] == 2:
+                        entered.set()
+                        if not release.wait(3):
+                            raise TimeoutError('save barrier')
+                    return original_sync(config)
+                def save_first():
+                    results.append(f.paired_request('post', '/api/config',
+                        headers={'If-Match': f'"{first_config["revision"]}"'},
+                        json={'playlist': rows, 'rss': {'count': 2, 'feeds': ['https://example.com/old'], 'disabled_feeds': []}}))
+                with patch.object(host, 'sync', side_effect=delayed_sync), patch.object(host.service.client, 'fetch', return_value=b'<rss><channel/></rss>'):
+                    first = threading.Thread(target=save_first)
+                    first.start()
+                    try:
+                        self.assertTrue(entered.wait(2))
+                        current = f.store.get()
+                        for row in current['playlist']:
+                            if row['module'] == 'rss':
+                                row['enabled'] = latest_enabled
+                        second = f.paired_request('post', '/api/config',
+                            headers={'If-Match': f'"{current["revision"]}"'},
+                            json={'playlist': current['playlist'], 'rss': {'count': 3,
+                                'feeds': ['https://example.com/new', 'https://example.com/off'],
+                                'disabled_feeds': ['https://example.com/off']}})
+                        self.assertEqual(second.status_code, 200)
+                    finally:
+                        release.set()
+                        first.join(3)
+                    self.assertFalse(first.is_alive())
+                    self.assertEqual(results[0].status_code, 200)
+                    self.assertEqual(f.store.get()['rss']['count'], 3)
+                    self.assertEqual(host.service.count, 3)
+                    self.assertEqual(host.service.feeds, ('https://example.com/new',))
+                    self.assertEqual(host.service.running, latest_enabled)
+                    host.service.close()
+
     def test_reset_cancels_draft_decode_without_enabling_disabled_physical(self):
         import threading
         from unittest.mock import patch
@@ -301,6 +666,46 @@ class WebIntegrationTests(unittest.TestCase):
 
 
 class ServiceContractTests(unittest.TestCase):
+    def test_host_filters_disabled_sources_and_invalidates_ready_in_both_lanes(self):
+        from unittest.mock import patch
+        from rss_host import RSSHost
+        from rss_config import DEFAULTS
+        urls = ['https://example.com/a', 'https://example.com/b']
+        with tempfile.TemporaryDirectory() as directory:
+            host = RSSHost(directory)
+            self.addCleanup(host.close)
+            settings = copy.deepcopy(DEFAULTS)
+            settings['feeds'] = urls
+            config = {'rss': settings, 'playlist': []}
+            def fetch(url):
+                return f'<rss><channel><item><title>{url[-1]}</title></item></channel></rss>'.encode()
+            with patch.object(host.draft_service, 'start'):
+                for service, configure in ((host.service, lambda: host.sync(config)),
+                                           (host.draft_service, lambda: host.preview(settings))):
+                    settings['disabled_feeds'] = []
+                    configure()
+                    with patch.object(service.client, 'fetch', side_effect=fetch) as request:
+                        service.refresh_due()
+                        self.assertEqual([i.source for i in service.peek().items], urls)
+                        generation, cancel = service.peek().generation, service._cancel
+                        settings['disabled_feeds'] = [urls[0]]
+                        configure()
+                        self.assertGreater(service.peek().generation, generation)
+                        self.assertTrue(cancel.is_set())
+                        self.assertEqual(service.admit().items, ())
+                        service.reset()
+                        request.reset_mock()
+                        service.refresh_due()
+                        self.assertEqual([c.args[0] for c in request.call_args_list], [urls[1]])
+                        self.assertEqual([i.source for i in service.admit().items], [urls[1]])
+                        settings['disabled_feeds'] = urls[:]
+                        configure()
+                        request.reset_mock()
+                        service.refresh_due()
+                        self.assertEqual(service.admit().items, ())
+                        request.assert_not_called()
+                    self.assertEqual(settings['feeds'], urls)
+
     def test_disk_operations_do_not_hold_reader_lock(self):
         import threading
         class Cache:

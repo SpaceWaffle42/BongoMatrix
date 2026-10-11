@@ -2784,12 +2784,67 @@ class DisplayControllerTests(unittest.TestCase):
         )
         controller.device_preview_manager.close()
 
+    def test_acceptance_publisher_fixtures_close_owned_fds_without_collection(self):
+        import errno
+        import gc
+        from acceptance_artifacts import AcceptanceArtifactTransaction
+
+        descriptor_names = (
+            "_runtime_fd", "_transactions_fd", "_attempt_fd", "_operation_fd",
+        )
+        original_init = AcceptanceArtifactTransaction.__init__
+        publishers = []
+
+        def capture_publisher(publisher, *args, **kwargs):
+            original_init(publisher, *args, **kwargs)
+            publishers.append((publisher, {
+                name: getattr(publisher, name) for name in descriptor_names
+            }))
+
+        collection_enabled = gc.isenabled()
+        gc.disable()
+        try:
+            for predecessor in (
+                "test_acceptance_binding_failure_does_not_leave_active_controller_context",
+                "test_acceptance_transaction_binds_exact_owner_and_finishes_only_after_later_saved_swap",
+            ):
+                with self.subTest(predecessor=predecessor):
+                    publishers.clear()
+                    try:
+                        result = unittest.TestResult()
+                        with patch.object(
+                            AcceptanceArtifactTransaction, "__init__", capture_publisher,
+                        ):
+                            # run() includes setUp, tearDown and registered cleanups.
+                            type(self)(predecessor).run(result)
+                        self.assertEqual(result.testsRun, 1)
+                        self.assertEqual(result.errors, [])
+                        self.assertEqual(result.failures, [])
+                        self.assertEqual(len(publishers), 1)
+                        publisher, descriptors = publishers[0]
+                        # Retain the exact owner: neither refcounting nor GC may
+                        # substitute for its fixture's explicit cleanup.
+                        for name, descriptor in descriptors.items():
+                            with self.subTest(descriptor=name):
+                                with self.assertRaises(OSError) as closed:
+                                    os.fstat(descriptor)
+                                self.assertEqual(closed.exception.errno, errno.EBADF)
+                                self.assertIsNone(getattr(publisher, name))
+                    finally:
+                        # Keep this regression itself leak-free even on RED.
+                        for publisher, _descriptors in publishers:
+                            publisher.close()
+        finally:
+            if collection_enabled:
+                gc.enable()
+
     def test_acceptance_binding_failure_does_not_leave_active_controller_context(self):
         from acceptance_artifacts import AcceptanceArtifactTransaction
 
         matrix = Mock()
         matrix.latest_frame_rgb.return_value = (bytes(64 * 32 * 3), 10)
         controller = DisplayController(matrix, Mock())
+        self.addCleanup(controller.device_preview_manager.close)
 
         with tempfile.TemporaryDirectory() as directory:
             publisher = AcceptanceArtifactTransaction(Path(directory), {
@@ -2798,6 +2853,7 @@ class DisplayControllerTests(unittest.TestCase):
                 "expected_version": "v", "mode": "deploy", "nonce": "d" * 64,
                 "owner_revision": 1,
             }, owner_generation=4)
+            self.addCleanup(publisher.close)
             with patch.object(
                 AcceptanceArtifactTransaction, "_bind_display_controller",
                 side_effect=RuntimeError("binding unavailable"),
@@ -2808,7 +2864,6 @@ class DisplayControllerTests(unittest.TestCase):
                     )
 
         self.assertIsNone(controller._acceptance_transaction)
-        controller.device_preview_manager.close()
 
     def test_acceptance_transaction_transient_sleep_preview_does_not_certify_inactive_sleep(self):
         from device_preview import DevicePreviewOwner, DevicePreviewRequest
@@ -3146,6 +3201,7 @@ class DisplayControllerTests(unittest.TestCase):
                 "playlist": [], "custom_modules": [],
             }
             controller = DisplayController(matrix, store)
+            self.addCleanup(controller.device_preview_manager.close)
             controller.start = Mock()
             now = [100.0]
             controller.device_preview_manager._clock = lambda: now[0]
@@ -3161,6 +3217,7 @@ class DisplayControllerTests(unittest.TestCase):
                 "nonce": "4" * 64,
                 "owner_revision": 7,
             }, owner_generation=4)
+            self.addCleanup(publisher.close)
             controller.begin_acceptance_transaction(publisher, owner, generation=4)
             self.assertEqual(controller.acceptance_transaction_status(owner, generation=4), {
                 "state": "INIT", "nonce": "4" * 64,
@@ -3240,7 +3297,6 @@ class DisplayControllerTests(unittest.TestCase):
             self.assertEqual((publisher.path / "draft.rgb").read_bytes(), draft)
             self.assertEqual((publisher.path / "saved.rgb").read_bytes(), saved)
             self.assertEqual((publisher.path / "current.rgb").read_bytes(), saved)
-            controller.device_preview_manager.close()
 
     def test_reload_rejects_execution_prepared_before_reload_completed(self):
         controller = DisplayController(Mock(), Mock())
