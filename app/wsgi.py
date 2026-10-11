@@ -63,7 +63,9 @@ with _entrypoint_owner._wsgi_runtime_lock:
             ROOT / "data" / "secrets" / "openweather-api-key"
         )
         controller = DisplayController(
-            matrix, config_store, openweather_secrets=openweather_secrets
+            matrix, config_store, openweather_secrets=openweather_secrets,
+            announce_address=True,
+            address_port=int(os.environ.get("MATRIX_PORT", "5000")),
         )
         pairing = PairingManager(
             ttl_seconds=600,
