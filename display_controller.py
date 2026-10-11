@@ -410,6 +410,7 @@ class DisplayController:
         self._pairing_timer = None
         self._pairing_page_timer = None
         self._pairing_pin = None
+        self._pairing_label = "PAIR"
         self._pairing_ip = None
         self._pairing_show_ip = False
         self._pairing_generation = 0
@@ -560,6 +561,13 @@ class DisplayController:
             if event[0] != "offline":
                 self._announced_name = self._refresh_name() or self._announced_name
             self._queue_address_notice(event)
+
+    def refresh_device_name(self):
+        """Re-publish after a rename; return the actual name (1.10c)."""
+        name = self._refresh_name()
+        if self._address_watch is not None:
+            self._name_seen(name)
+        return name
 
     def _name_seen(self, name):
         """Announce a new published name (for example an avahi clash rename)."""
@@ -1413,7 +1421,27 @@ class DisplayController:
         """Return the exact last frame submitted to the owned physical Matrix."""
         return self.matrix.latest_frame_png()
 
-    def show_pairing_pin(self, pin, ttl_seconds=600):
+    def show_panel_code(self, label, code, ttl_seconds):
+        """Take over the panel with ``label`` over ``code`` (1.10c rename code).
+
+        Shares the pairing takeover, so a pairing PIN request replaces it.
+        Returns a token for ``panel_code_current`` / ``end_panel_code``.
+        """
+        return self.show_pairing_pin(code, ttl_seconds=ttl_seconds, label=label, rotate=False)
+
+    def panel_code_current(self, token):
+        with self._state_lock:
+            return (
+                token is not None
+                and token == self._pairing_generation
+                and self._pairing_pause.is_set()
+                and self._pairing_label != "PAIR"
+            )
+
+    def end_panel_code(self, token):
+        return self.end_pairing(token)
+
+    def show_pairing_pin(self, pin, ttl_seconds=600, *, label="PAIR", rotate=True):
         with self._lifecycle_lock:
             if self._shutdown.is_set():
                 raise RuntimeError("pairing display unavailable")
@@ -1451,6 +1479,7 @@ class DisplayController:
                     if self._pairing_page_timer is not None:
                         self._pairing_page_timer.cancel()
                     self._pairing_pin = str(pin)
+                    self._pairing_label = str(label)
                     self._pairing_ip = pairing_ip
                     self._pairing_show_ip = False
                     self._pairing_timer = threading.Timer(
@@ -1458,11 +1487,13 @@ class DisplayController:
                     )
                     self._pairing_timer.daemon = True
                     self._pairing_timer.start()
-                    self._pairing_page_timer = threading.Timer(
-                        3, lambda: self._rotate_pairing_page(generation)
-                    )
-                    self._pairing_page_timer.daemon = True
-                    self._pairing_page_timer.start()
+                    self._pairing_page_timer = None
+                    if rotate:
+                        self._pairing_page_timer = threading.Timer(
+                            3, lambda: self._rotate_pairing_page(generation)
+                        )
+                        self._pairing_page_timer.daemon = True
+                        self._pairing_page_timer.start()
             if abort:
                 self.end_pairing(generation)
                 raise RuntimeError("pairing display unavailable")
@@ -1499,6 +1530,7 @@ class DisplayController:
             raise
         finally:
             self._pairing_setup.clear()
+        return generation
 
     def _draw_pairing_page(self, show_ip, generation=None, *, display_owned=False):
         if display_owned:
@@ -1526,6 +1558,16 @@ class DisplayController:
             )
             self.matrix.draw_text_with_border(
                 self.matrix.font("4x6"), 14, 27, white, black, "PORT 5000"
+            )
+        elif self._pairing_label != "PAIR":
+            label = self._pairing_label
+            self.matrix.draw_text_with_border(
+                self.matrix.font("5x7"), max(1, (64 - 5 * len(label)) // 2), 10,
+                cyan, black, label,
+            )
+            self.matrix.draw_text_with_border(
+                self.matrix.font("6x10"), max(1, (64 - 6 * len(self._pairing_pin)) // 2), 25,
+                white, black, self._pairing_pin,
             )
         else:
             self.matrix.draw_text_with_border(
@@ -1571,6 +1613,7 @@ class DisplayController:
             self._pairing_timer = None
             self._pairing_page_timer = None
             self._pairing_pin = None
+            self._pairing_label = "PAIR"
             self._pairing_ip = None
         finally:
             self._state_lock.release()

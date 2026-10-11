@@ -33,6 +33,7 @@ from werkzeug.utils import secure_filename
 
 from acceptance_artifacts import AcceptanceArtifactTransaction
 from api_timeouts import DEFAULT_API_TIMEOUT_SECONDS
+from device_name import name_problem
 from display_controller import playlist_item_config, playlist_module_config
 from config_store import (
     ALLOWED_MODULES, DEFAULT_CONFIG, ConfigConflictError, ConfigDurabilityError,
@@ -82,6 +83,11 @@ PAIRED_ACTION_HEADER = "X-Matrix-Action"
 PAIRED_ACTION_VALUE = "paired-request"
 PAIRING_RECOVERY_TTL_SECONDS = 300
 PAIRING_PIN_REQUEST_COOLDOWN_SECONDS = 60
+RENAME_CODE_TTL_SECONDS = 120
+RENAME_CODE_ATTEMPTS = 3
+RENAME_PANEL_LABEL = "RENAME?"
+RENAME_START_COOLDOWN_SECONDS = 10
+RENAME_LOCKOUT_SECONDS = 300  # after 3 wrong codes, no new code for 5 minutes
 PAIRING_RECOVERY_NONCE_INSTALLATION_LIMIT = 64
 PAIRING_RECOVERY_NONCE_PROCESS_LIMIT = 1024
 _PAIRING_RECOVERY_NONCE_LOCK = threading.Lock()
@@ -655,6 +661,7 @@ def create_app(
     config_exclusion_sentinel="/var/lib/matrix-release/active-config-exclusion-v1.json",
     config_exclusion_marker="/run/matrix-release/config-write.lock",
     config_exclusion_authority="/run/matrix-release/config-write-authority-v1.json",
+    display_name=None,
 ):
     session_generation = session_generation or secrets.token_hex(16)
     media_root = Path(media_dir or Path(__file__).resolve().parent / "resources" / "media")
@@ -710,6 +717,9 @@ def create_app(
     edit_preview_services_initializing = False
     device_restart_lock = threading.Lock()
     device_restart_pending_until = 0.0
+    rename_lock = threading.Lock()
+    rename_pending = None
+    rename_next_start = 0.0
     pairing_installation = _pairing_installation_identity(config_store, device_store)
     pairing_pin_display = _pairing_pin_display_authority(config_store, device_store)
 
@@ -2965,5 +2975,172 @@ def create_app(
                 outcome is RestartRequestOutcome.ACTIVE_REQUEST or locally_pending
             ),
         }), 202
+
+    # Roadmap 1.10c: rename only at the display.  A paired browser asks, the
+    # panel shows a one-time code, and only someone who can read the panel can
+    # finish the rename.  Pairing PIN requests take the panel over and void it.
+    def display_name_payload():
+        custom = display_name.store.get() if display_name.store is not None else None
+        published = display_name.current()
+        return {
+            "name": custom or display_name.default,
+            "default": display_name.default,
+            "custom": custom is not None,
+            "address": published,
+            "port": port if (port := request.host.rpartition(":")[2]).isdigit() else "5000",
+        }
+
+    def rename_unavailable():
+        return jsonify({"error": "Renaming is not available on this installation."}), 503
+
+    def clear_rename_locked():
+        nonlocal rename_pending
+        pending, rename_pending = rename_pending, None
+        if pending is not None:
+            try:
+                controller.end_panel_code(pending["token"])
+            except Exception:
+                LOGGER.exception("Rename code display cleanup failed")
+
+    @app.get("/api/display-name")
+    @requires_pairing
+    def get_display_name():
+        if display_name is None or display_name.default is None:
+            return rename_unavailable()
+        payload = display_name_payload()
+        with rename_lock:
+            pending = rename_pending
+            payload["pending"] = bool(
+                pending is not None
+                and pending["device_id"] == session.get("device_id")
+                and pending["expires_at"] > time.monotonic()
+                and controller.panel_code_current(pending["token"])
+            )
+        return jsonify(payload)
+
+    @app.post("/api/display-name/start")
+    @requires_pairing
+    def start_display_rename():
+        nonlocal rename_pending, rename_next_start
+        if display_name is None or display_name.default is None:
+            return rename_unavailable()
+        body = request.get_json(silent=True)
+        if not isinstance(body, dict):
+            return jsonify({"error": "Send a JSON object."}), 400
+        reset = body.get("reset") is True
+        name = None if reset else body.get("name")
+        if not reset:
+            if isinstance(name, str):
+                name = name.strip()
+            problem = name_problem(name)
+            if problem is not None:
+                return jsonify({"error": problem}), 400
+            if name.lower() == display_name.default.lower():
+                reset = True
+                name = None
+        target = display_name.default if reset else name
+        if not reset and display_name.in_use_elsewhere(name):
+            return jsonify({
+                "error": f"{name}.local is already used by another device on this network.",
+            }), 409
+        with rename_lock:
+            now = time.monotonic()
+            pending = rename_pending
+            if (
+                pending is not None
+                and pending["expires_at"] > now
+                and pending["device_id"] != session.get("device_id")
+                and controller.panel_code_current(pending["token"])
+            ):
+                return jsonify({"error": "Another browser is renaming this display. Try again in two minutes."}), 409
+            if now < rename_next_start:
+                wait = max(1, int(rename_next_start - now + 0.999))
+                response = jsonify({"error": f"Wait {wait} seconds before asking for another code."})
+                response.headers["Retry-After"] = str(wait)
+                return response, 429
+            rename_next_start = now + RENAME_START_COOLDOWN_SECONDS
+            clear_rename_locked()
+            code = f"{secrets.randbelow(10_000):04d}"
+            with pairing_pin_display.lock:
+                if controller.pairing_active:
+                    return jsonify({"error": "The display is showing a pairing PIN. Try again after pairing."}), 409
+                try:
+                    token = controller.show_panel_code(
+                        RENAME_PANEL_LABEL, code, RENAME_CODE_TTL_SECONDS,
+                    )
+                except RuntimeError:
+                    return jsonify({"error": "The display could not show a code. Try again."}), 503
+            rename_pending = {
+                "device_id": session.get("device_id"),
+                "name": None if reset else name,
+                "code": code,
+                "tries": 0,
+                "expires_at": now + RENAME_CODE_TTL_SECONDS,
+                "token": token,
+            }
+        return jsonify({
+            "pending": True,
+            "name": target,
+            "expires_in": RENAME_CODE_TTL_SECONDS,
+            "attempts": RENAME_CODE_ATTEMPTS,
+        }), 202
+
+    @app.post("/api/display-name/confirm")
+    @requires_pairing
+    def confirm_display_rename():
+        nonlocal rename_pending, rename_next_start
+        if display_name is None or display_name.default is None:
+            return rename_unavailable()
+        body = request.get_json(silent=True)
+        submitted = body.get("code") if isinstance(body, dict) else None
+        if not isinstance(submitted, str) or not re.fullmatch(r"[0-9]{4}", submitted.strip()):
+            return jsonify({"error": "Enter the 4-digit code shown on the display."}), 400
+        submitted = submitted.strip()
+        with rename_lock:
+            pending = rename_pending
+            if (
+                pending is None
+                or pending["device_id"] != session.get("device_id")
+                or pending["expires_at"] <= time.monotonic()
+                or not controller.panel_code_current(pending["token"])
+            ):
+                if pending is not None and pending["device_id"] == session.get("device_id"):
+                    clear_rename_locked()
+                return jsonify({"error": "The code expired. Start the rename again."}), 410
+            if not secrets.compare_digest(submitted, pending["code"]):
+                pending["tries"] += 1
+                left = RENAME_CODE_ATTEMPTS - pending["tries"]
+                if left <= 0:
+                    clear_rename_locked()
+                    rename_next_start = time.monotonic() + RENAME_LOCKOUT_SECONDS
+                    return jsonify({"error": "Too many wrong codes. Rename cancelled."}), 410
+                return jsonify({
+                    "error": f"Wrong code. {left} {'try' if left == 1 else 'tries'} left.",
+                    "attempts_left": left,
+                }), 403
+            name = pending["name"]
+            try:
+                if name is None:
+                    display_name.store.clear()
+                else:
+                    display_name.store.set(name)
+            except (OSError, ValueError):
+                LOGGER.exception("Display name could not be saved")
+                clear_rename_locked()
+                return jsonify({"error": "The new name could not be saved."}), 500
+            clear_rename_locked()
+        try:
+            controller.refresh_device_name()
+        except Exception:
+            LOGGER.exception("Display name saved but publishing failed")
+        return jsonify({"saved": True, **display_name_payload()})
+
+    @app.post("/api/display-name/cancel")
+    @requires_pairing
+    def cancel_display_rename():
+        with rename_lock:
+            if rename_pending is not None and rename_pending["device_id"] == session.get("device_id"):
+                clear_rename_locked()
+        return jsonify({"pending": False})
 
     return app
