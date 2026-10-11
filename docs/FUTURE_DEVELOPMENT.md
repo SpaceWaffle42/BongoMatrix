@@ -1,8 +1,8 @@
 # Future development notes
 
-Last updated: 2026-10-10
+Last updated: 2026-10-11
 
-**Status:** Priority 0 and Priority 1 are complete. 1.8 and 1.9 are merged and wait for the next production release; everything else is live (0.3.68-preview). Next item: **2.1 Event Countdown**. Open findings and deferred v1 hardening live in GitLab issue #33.
+**Status:** Priority 0 and 1.1-1.9 are complete and live (0.3.69-preview, 2026-10-11). Owner-approved **1.10 Find the Matrix after an address change** is next, before Priority 2; then **2.1 Event Countdown**. Open findings and deferred v1 hardening live in GitLab issue #33.
 
 This file records requested Matrix features that are intentionally deferred. They are product requirements and design notes, not descriptions of current behavior. Do not treat an item as implemented until its code, tests, review, merge, deployment, and physical-device verification are complete.
 
@@ -390,6 +390,21 @@ Delivered: Playhead / Frames / Selected-layer groups; Duplicate, Delete, Move ea
 Delivered: PNG/JPEG/WebP stills in Basic media modules, held for the playlist duration (Loops/Playback speed hidden), with a fit note explaining bars, cropping or stretching. Tests: `tests/test_basic_static_images.py`.
 
 **Also delivered alongside Priority 1 (!140):** the media library pages 10 items at a time, with 20/30/40/50 per page; the choice is remembered per browser.
+
+### 1.10 Find the Matrix after an address change — Owner-approved 2026-10-11, in progress
+
+When the router restarts it can hand the Matrix a new IP address and the user no longer knows where the dashboard is. The device is used by anyone on any network, so the fix must live on the device: no router reservation, no router or DNS changes. Approved mockup: `http://192.168.1.123:5050/` (`/single`, `/multi`); GitLab issue #34.
+
+Split into independently mergeable sub-items, in this order:
+
+- **1.10a Panel shows the address when it changes.** The device watches its own address. On a change, and once at start-up, it pauses the playlist for about 10-15 seconds and scrolls the name and address (for example `matrix-3f9a.local 192.168.1.7:5000`), then resumes. With no address it shows "No network". The pairing PIN takeover keeps priority.
+- **1.10b A fixed per-device name.** Default `matrix-` plus the last 4 hex characters of the built-in (not randomised) MAC address, for example `matrix-3f9a.local`. Stable across reboots and power cuts.
+- **1.10c Rename only at the display.** One "Display name" setting on that display's own paired dashboard (never on matrix.local). Letters, digits and hyphens, at most 63 characters, not starting or ending with a hyphen; `matrix` is reserved; names already seen on the network are refused; Reset to default. Saving also needs a one-time 4-digit code shown on the panel (2-minute expiry, 3 wrong tries cancels), so a paired browser that is not in front of the display (for example children on the Wi-Fi) cannot rename it. Pairing/auth change: needs the second reviewer.
+- **1.10d Displays announce and find each other** on the local network (mDNS service), which feeds the directory list, flags duplicate names and older versions, and greys out displays that went quiet (dropped after 10 minutes).
+- **1.10e `matrix.local` is a directory page, not a display.** Any one display also answers to `matrix.local`; requests for that name get a read-only page listing every Matrix display (name, address, version, now playing, last seen) with links to each dashboard. No settings, no controls, no PIN. If the serving display goes away another takes over within seconds. With one display it shows a single card and a "bookmark this" note.
+- **1.10f Deploys find the device by identity.** `deploy/ship.py` and the physical-device CI job stop relying on a hardcoded IP: they locate the device by its pinned SSH host key and refuse anything else. Ship tooling change: needs the second reviewer.
+
+Open before 1.10d/e can ship: they need avahi (`avahi-daemon`, publishing via `avahi-publish`) on the device; whether it is installed is not yet checked, and installing a package is a system change that needs the owner's go-ahead. Limits to state in the UI: guest or business networks that isolate clients only list the serving display; the first visit needs `http://` and `:5000`.
 
 ## Priority 2 — New playlist modules
 
