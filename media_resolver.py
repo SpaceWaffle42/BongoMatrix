@@ -268,6 +268,11 @@ def module_media_references(candidate, module_name) -> tuple[str, ...]:
     if module_name in {"splash", "sleep"}:
         reference = candidate.get("media", {}).get(module_name)
         return (reference,) if reference else ()
+    if module_name == "event_countdown":
+        return tuple(dict.fromkeys(
+            item['artwork'] for item in candidate.get('event_countdown', {}).get('events', [])
+            if isinstance(item, dict) and item.get('artwork')
+        ))
     if module_name == "announcement_board":
         references = []
         for announcement in candidate.get("announcement_board", {}).get("announcements", []):
@@ -310,6 +315,8 @@ def candidate_media_references(candidate) -> tuple[str, ...]:
     for announcement in candidate.get("announcement_board", {}).get("announcements", []):
         if isinstance(announcement, dict):
             add(announcement.get("media"))
+    for reference in module_media_references(candidate, 'event_countdown'):
+        add(reference)
     for module in candidate.get("custom_modules", []):
         for reference in _custom_module_media_references(module):
             add(reference)

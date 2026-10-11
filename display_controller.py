@@ -36,6 +36,8 @@ from preview_provider import (
 
 LOGGER = logging.getLogger(__name__)
 MODULES = {
+    "event_countdown": "modules.event_countdown",
+    "rss": "modules.rss",
     "announcement_board": "modules.announcement_board",
     "clock_lava": "modules.clock_lava",
     "weather": "modules.weather_app",
@@ -376,6 +378,7 @@ class DisplayController:
     ):
         self.matrix = matrix
         self.config_store = config_store
+        self.rss_host = None
         self._shutdown = threading.Event()
         self._reload_requested = threading.Event()
         self._pairing_pause = threading.Event()
@@ -1105,7 +1108,7 @@ class DisplayController:
             if pinned_handle is None:
                 raise ValueError("built-in device draft media is not pinned")
             options["pinned_handle"] = pinned_handle
-        elif module_name == "announcement_board":
+        elif module_name in {"announcement_board", "event_countdown"}:
             options["pinned_handles"] = request.pinned_media
         elif custom is not None:
             options["module_config"] = custom
@@ -1115,7 +1118,7 @@ class DisplayController:
                 def fetch(self, *_args, **_kwargs):
                     return prepared
             options["client"] = PreparedWeatherClient()
-        elif module_name in {"openweather_overview", "openweather_forecast"}:
+        elif module_name in {"openweather_overview", "openweather_forecast", "rss"}:
             options["prepared"] = prepared
         if stop_event.is_set():
             return False
@@ -1810,7 +1813,7 @@ class DisplayController:
                 if reference is not None and pinned_handles is not None:
                     options["pinned_handle"] = pinned_handles[reference]
                 options["maximum_duration"] = config.get("_screen_maximum_duration")
-            if name == "announcement_board" and pinned_handles is not None:
+            if name in {"announcement_board", "event_countdown"} and pinned_handles is not None:
                 options["pinned_handles"] = pinned_handles
             if custom is not None:
                 options["module_config"] = custom
@@ -1853,6 +1856,8 @@ class DisplayController:
                         admission_generation, stop_event,
                     ):
                         return False
+                    if name == 'rss':
+                        options['prepared'] = self.rss_host.service.admit() if self.rss_host else None
                 return module.run(
                     self.matrix,
                     config,

@@ -2,7 +2,7 @@
 
 Last updated: 2026-10-11
 
-**Status:** Priority 0 and 1.1-1.9 are complete and live (0.3.69-preview, 2026-10-11). Owner-approved **1.10 Find the Matrix after an address change** is next, before Priority 2; then **2.1 Event Countdown**. Open findings and deferred v1 hardening live in GitLab issue #33.
+**Status:** Priority 0 and 1.1-1.9 are complete and live (0.3.69-preview, 2026-10-11). **Owner reprioritization, 2026-10-11: start 2.1 Event Countdown; leave 1.10 paused.** Priority 1.10 remains reserved for Opus; its existing work is preserved and is not part of 2.1. Event Countdown is in development, not complete or deployed. Open findings and deferred v1 hardening live in GitLab issue #33.
 
 This file records requested Matrix features that are intentionally deferred. They are product requirements and design notes, not descriptions of current behavior. Do not treat an item as implemented until its code, tests, review, merge, deployment, and physical-device verification are complete.
 
@@ -410,9 +410,15 @@ Open before 1.10d/e can ship: they need avahi (`avahi-daemon`, publishing via `a
 
 Implement these only after higher-priority fixes and workflow improvements are complete. Their order favors lower-friction local or free-data behavior before more provider-dependent integrations.
 
+**Owner continuation authorization, 2026-10-11:** after the local portion of 2.1 is implemented and verified, continue sequentially through the remaining eligible Priority 2 work without another routine start approval. Priority 1.10 remains paused and reserved for Opus. External API integrations, or entire modules that require them, may remain deferred; preserve their requirements and label them deferred rather than complete. The development sequence is **2.1 local Event Countdown → 2.2 RSS/Headline Ticker → 2.3 local Astronomy**. Public RSS/Atom feeds and versioned static astronomy datasets are treated as data sources, not account/API integrations; optional Google and astronomy API providers remain deferred, and **2.4 Spotify is deferred** because its functionality requires the Spotify API. This authorizes development and verification, not access to or deployment on production.
+
 ### 2.1 Event Countdown module
 
 Add an Event Countdown playlist module for birthdays, anniversaries, launches, holidays, openings, and other deliberately selected events.
+
+**Delivery decision, 2026-10-11:** the owner selected **deliver local events first; defer Google connection**. The active implementation is the local-event module, editor and shared physical/browser rendering. Google synchronization below remains a preserved future requirement, not part of the first local-event delivery or a claim of completion. See `docs/event-countdown-provider-notes.md` for the verified OAuth callback constraints.
+
+**Local development checkpoint, 2026-10-11:** local implementation and affected browser/configuration/runtime tests are verified; required config/state review closed all blocking findings at 17:18 UTC. Google remains deferred. A nonblocking first-frame GIF sampling discrepancy remains recorded in the independent review. This is not merged, CI-green, deployed, or physical-device acceptance; requirements below remain visible rather than declaring the entire priority shipped. Authorized sequential local development now proceeds to 2.2.
 
 #### Confirmed behavior
 

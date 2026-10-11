@@ -407,6 +407,13 @@ def _edit_preview_iterator(
         return openweather_forecast_preview_frames(
             matrix, candidate, prepared, stop_event,
         )
+    if module_name == 'rss':
+        from modules.rss_renderer import preview_frames
+        return preview_frames(prepared.stories, stop_event)
+    if module_name == "event_countdown":
+        from modules.event_countdown import preview_frames
+        return preview_frames(candidate, preview_duration(candidate, module_name, 15), stop_event,
+                              pinned_handles=pinned_media)
     if module_name == "announcement_board":
         settings = candidate["announcement_board"]
         return announcement_preview_frames(
@@ -756,6 +763,7 @@ def create_app(
 
     def close_edit_preview_services():
         """Close the published pair without preventing a later lazy restart."""
+        rss_host.close()
         with edit_preview_services_lock:
             registry = edit_preview_registry
             provider = edit_preview_provider
@@ -776,6 +784,12 @@ def create_app(
             scroll_timing_cache.clear(provider="openweather")
 
     app = Flask(__name__, template_folder="app/templates", static_folder="app/static")
+    from rss_host import RSSHost
+    rss_host = RSSHost(Path(config_store.path).parent / 'rss-cache')
+    rss_host.sync(config_store.get())
+    controller.rss_host = rss_host
+    app.extensions['rss_host'] = rss_host
+    rss_operation = threading.BoundedSemaphore(1)
     app.jinja_env.globals["application_version"] = APPLICATION_VERSION
     app.extensions["get_edit_preview_services"] = get_edit_preview_services
     app.extensions["close_edit_preview_services"] = close_edit_preview_services
@@ -1693,6 +1707,7 @@ def create_app(
             config=config,
             modules=sorted(ALLOWED_MODULES) + custom_names,
             module_labels={
+                "event_countdown": "Event Countdown",
                 "announcement_board": "Announcement Board",
                 "weather": "Weather (Free · Open-Meteo)",
                 "openweather_overview": "OpenWeather Overview",
@@ -1752,7 +1767,7 @@ def create_app(
     @requires_pairing
     def provider_scroll_timing(module_name):
         deadline = time.monotonic() + DEFAULT_API_TIMEOUT_SECONDS
-        if module_name not in {"announcement_board", "weather", "openweather_overview", "openweather_forecast"}:
+        if module_name not in {"announcement_board", "weather", "openweather_overview", "openweather_forecast", "rss"}:
             abort(404)
         # One extra byte lets an unknown-length WSGI stream prove overflow;
         # known lengths are rejected by the explicit check below.
@@ -1780,6 +1795,17 @@ def create_app(
             return jsonify({"error": "Timing draft is invalid."}), 400
         draft = copy.deepcopy(current)
         draft[module_name] = copy.deepcopy(settings)
+        if module_name == 'rss':
+            try:
+                from rss_config import validate as validate_rss
+                validate_rss(settings)
+                snapshot = rss_host.preview(settings)
+            except (KeyError, TypeError, ValueError):
+                return jsonify({'error': 'Timing draft is invalid.'}), 400
+            return jsonify({'module': 'rss', 'duration_seconds': snapshot.duration,
+                            'ready_count': len(snapshot.items), 'generation': snapshot.generation,
+                            'status': 'ready' if snapshot.items else 'preparing',
+                            **({'settings_correlation': correlation} if correlation is not None else {})})
         if module_name == "announcement_board":
             try:
                 validate_config(draft, allow_legacy_announcements=False, enforce_save_bounds=True)
@@ -2107,6 +2133,9 @@ def create_app(
                 }), 409
             if filename in canvas_media_references(config["custom_modules"]):
                 return jsonify({"error": "Remove this file from custom canvas modules before deleting it."}), 409
+            if any(item.get("artwork") == filename
+                   for item in config.get("event_countdown", {}).get("events", [])):
+                return jsonify({"error": "Remove this artwork from countdown events before deleting it."}), 409
             path = media_path(filename)
             if path is None:
                 abort(404)
@@ -2264,6 +2293,7 @@ def create_app(
         except (TypeError, ValueError, KeyError) as exc:
             return jsonify({"error": str(exc)}), 400
         try:
+            rss_host.sync(config)
             controller.reload()
         except Exception:
             LOGGER.exception("Configuration committed but display reload failed")
@@ -2294,6 +2324,37 @@ def create_app(
         response = jsonify(config)
         response.headers["ETag"] = _revision_etag(config["revision"])
         return response
+
+    @app.get('/api/rss/status')
+    @requires_pairing
+    def rss_status():
+        response = jsonify(rss_host.status())
+        response.headers['Cache-Control'] = 'no-store'
+        return response
+
+    @app.post('/api/rss/test')
+    @requires_pairing
+    def rss_test():
+        payload = edit_preview_json({'url'})
+        if not rss_operation.acquire(blocking=False):
+            return edit_preview_error('RSS operation is busy.', 429, retry_after=2)
+        try:
+            return jsonify(rss_host.test_feed(payload['url']))
+        except (ValueError, OSError, TimeoutError):
+            return jsonify({'error': 'Feed rejected or unavailable.'}), 400
+        finally:
+            rss_operation.release()
+
+    @app.post('/api/rss/reset')
+    @requires_pairing
+    def rss_reset():
+        edit_preview_json(set())
+        if not rss_operation.acquire(blocking=False):
+            return edit_preview_error('RSS operation is busy.', 429, retry_after=2)
+        try:
+            return jsonify(rss_host.reset())
+        finally:
+            rss_operation.release()
 
     @app.get("/api/display-frame")
     @requires_pairing
@@ -2487,6 +2548,8 @@ def create_app(
                 prepared = _prepare_edit_preview_provider(
                     provider, module_name, provider_candidate, stop_event,
                 )
+                if module_name == 'rss':
+                    prepared = rss_host.preview(candidate['rss'])
 
                 def owned_iterator():
                     try:
@@ -2767,7 +2830,7 @@ def create_app(
                 pinned_media=pinned_media,
             )
             def render_device_draft(matrix, owned_request, *, stop_event):
-                prepared = None
+                prepared = rss_host.preview(candidate['rss']) if module_name == 'rss' else None
                 if module_name in {
                     "weather", "openweather_overview", "openweather_forecast",
                 }:

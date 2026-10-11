@@ -24,6 +24,8 @@ from time import monotonic, sleep
 from PIL import Image, ImageSequence
 
 from module_options import LAVA_PALETTES
+from event_countdown_config import DEFAULTS as COUNTDOWN_DEFAULTS, validate as validate_countdown
+from rss_config import DEFAULTS as RSS_DEFAULTS, validate as validate_rss
 from font_catalog import available_font_names, text_width
 from modules.scroll_timing import duration_milliseconds, scroll_frames
 from media_resolver import candidate_media_references
@@ -46,7 +48,7 @@ class ConfigConflictError(ValueError):
 
 ALLOWED_MODULES = {
     "clock_lava", "weather", "openweather_overview", "openweather_forecast",
-    "announcement_board", "splash", "sleep",
+    "announcement_board", "event_countdown", "rss", "splash", "sleep",
 }
 MEDIA_PLAYLIST_MODULES = {"splash", "sleep"}
 PLAYLIST_LIMIT = 256
@@ -64,7 +66,14 @@ BASIC_ANIMATED_MEDIA_SUFFIXES = frozenset({".gif", ".mp4"})
 BASIC_MEDIA_SUFFIXES = BASIC_ANIMATED_MEDIA_SUFFIXES | {".png", ".jpg", ".jpeg", ".webp"}
 
 def _serialize_config(config):
-    return json.dumps(config, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    data = json.dumps(config, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    compact = dict(config)
+    for key, defaults in (("event_countdown", COUNTDOWN_DEFAULTS), ("rss", RSS_DEFAULTS)):
+        if len(data) > CONFIG_SNAPSHOT_LIMIT and config.get(key) == defaults:
+            # Only unused defaults can be reconstructed losslessly on read.
+            compact.pop(key, None)
+            data = json.dumps(compact, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    return data
 
 
 def scrolling_text_duration(module, matrix_width=64):
@@ -198,6 +207,8 @@ DEFAULT_CONFIG = {
         "splash": {"x": 0, "y": 0, "width": 64, "height": 32, "keep_aspect": True, "video_fps": 20, "playback_speed_percent": 100.0},
         "sleep": {"x": 0, "y": 0, "width": 64, "height": 32, "keep_aspect": True, "video_fps": 20, "playback_speed_percent": 100.0},
     },
+    "event_countdown": copy.deepcopy(COUNTDOWN_DEFAULTS),
+    "rss": copy.deepcopy(RSS_DEFAULTS),
     "announcement_board": {"announcements": []},
     "custom_modules": [],
     "playlist": [
@@ -228,6 +239,8 @@ DEFAULT_CONFIG = {
                 "playback_speed_percent": 100.0,
             },
         },
+        {"module": "event_countdown", "duration": 15, "enabled": False},
+        {"module": "rss", "duration": 15, "enabled": False},
     ],
 }
 
@@ -810,6 +823,8 @@ def validate_config(
     if isinstance(revision, bool) or not isinstance(revision, int) or revision < 0:
         raise ValueError("revision must be a nonnegative integer")
 
+    validate_countdown(config.get("event_countdown", COUNTDOWN_DEFAULTS))
+    validate_rss(config.get("rss", RSS_DEFAULTS))
     name = config["device"]["name"]
     if not isinstance(name, str) or not name.strip() or len(name.strip()) > 40:
         raise ValueError("device name must be 1-40 characters")
@@ -1420,6 +1435,21 @@ def _project_persisted_screen_rows(config):
     """
     if config.get("schema_version") != CURRENT_CONFIG_SCHEMA_VERSION:
         return config
+    missing_modules = [name for name in ("event_countdown", "rss") if name not in config]
+    for name in missing_modules:
+        config[name] = copy.deepcopy(DEFAULT_CONFIG[name])
+    for name in missing_modules:
+        playlist = config.get("playlist")
+        if isinstance(playlist, list) and len(playlist) < PLAYLIST_LIMIT and not any(
+            isinstance(row, dict) and row.get("module") == name for row in playlist
+        ):
+            row = {"module": name, "duration": 15, "enabled": False}
+            candidate = dict(config, playlist=[*playlist, row])
+            # Omitted defaults can also come from a current-format save. Only
+            # introduce a row when the FULL reconstruction fits; using the
+            # compact serializer here could resurrect an explicitly removed row.
+            if len(json.dumps(candidate, sort_keys=True, separators=(",", ":")).encode("utf-8")) <= CONFIG_SNAPSHOT_LIMIT:
+                playlist.append(row)
     projected = False
     playlist = config.get("playlist")
     for item in playlist if isinstance(playlist, list) else []:
@@ -1616,7 +1646,7 @@ sys.stdout.write(json.dumps(result, separators=(",", ":")))
                 for item in DEFAULT_CONFIG["playlist"]:
                     if (
                         item["module"] in {
-                            "openweather_overview", "openweather_forecast", "announcement_board",
+                            "openweather_overview", "openweather_forecast", "announcement_board", "event_countdown", "rss",
                         }
                         and item["module"] not in existing_modules
                     ):
