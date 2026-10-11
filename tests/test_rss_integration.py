@@ -58,6 +58,139 @@ class ConfigIntegrationTests(unittest.TestCase):
 
 
 class WebIntegrationTests(unittest.TestCase):
+    def test_reset_cancels_draft_decode_without_enabling_disabled_physical(self):
+        import threading
+        from unittest.mock import patch
+        from rss_thumbnails import ThumbnailResult
+        from modules.rss_renderer import PreparedThumbnail
+        f = self.fixture
+        f.pair_browser()
+        host = f.app.extensions['rss_host']
+        before = f.store.path.read_bytes()
+        settings = copy.deepcopy(f.store.get()['rss'])
+        settings['feeds'] = ['https://example.com/draft']
+        image = 'https://example.com/obsolete.png'
+        entered, release, finished, returned = (threading.Event() for _ in range(4))
+        stops, responses = [], []
+        draft = host.draft_service
+        refresh = draft.refresh_due
+        def observed_refresh():
+            refresh()
+            finished.set()
+        def decode(url, stop):
+            stops.append(stop)
+            entered.set()
+            release.wait(5)
+            return ThumbnailResult(PreparedThumbnail((bytes(768),), (100,)))
+        def reset():
+            try:
+                responses.append(f.paired_request('post', '/api/rss/reset', json={}))
+            finally:
+                returned.set()
+        wire = f'<rss><channel><item><title>obsolete</title><enclosure type="image/png" url="{image}"/></item></channel></rss>'.encode()
+        with patch.object(draft.client, 'fetch', return_value=wire) as fetch, patch.object(draft._preparer, 'prepare', side_effect=decode), patch.object(draft, 'refresh_due', side_effect=observed_refresh):
+            host.preview(settings)
+            request = threading.Thread(target=reset)
+            try:
+                self.assertTrue(entered.wait(1))
+                self.assertIsNotNone(draft.cache.get(settings['feeds'][0]))
+                host.service._rotation.seen.add('id:old')
+                request.start()
+                self.assertTrue(returned.wait(1), 'reset route waited for draft decoder')
+                self.assertEqual(responses[0].status_code, 200)
+                self.assertTrue(stops[0].is_set())
+                self.assertFalse(host.service.running)
+                self.assertFalse(host.service._rotation.seen)
+                self.assertEqual(draft.feeds, ())
+                self.assertEqual(host.service.peek().items, ())
+                release.set()
+                self.assertTrue(finished.wait(1))
+                self.assertEqual(draft.peek().items, ())
+                self.assertIsNone(draft.cache.get(settings['feeds'][0]))
+                self.assertIsNone(draft.cache.get_thumbnail(image))
+                self.assertEqual(fetch.call_count, 1)
+                self.assertEqual(f.store.path.read_bytes(), before)
+            finally:
+                release.set()
+                if request.ident is not None:
+                    request.join(2)
+                host.close()
+
+    def test_reset_during_fetch_returns_without_network_and_resumes_saved_physical(self):
+        import threading
+        from unittest.mock import patch
+        from rss_config import DEFAULTS
+        f = self.fixture
+        f.pair_browser()
+        host = f.app.extensions['rss_host']
+        url = 'https://example.com/saved'
+        config = f.store.get()
+        for row in config['playlist']:
+            if row['module'] == 'rss':
+                row['enabled'] = True
+        saved = f.store.update({'playlist': config['playlist'], 'rss': {'feeds': [url], 'count': 2}})
+        before = f.store.path.read_bytes()
+        entered, release = threading.Event(), threading.Event()
+        resumed, allow_fresh = threading.Event(), threading.Event()
+        ready, returned = threading.Event(), threading.Event()
+        calls, responses = [], []
+        service = host.service
+        refresh = service.refresh_due
+        def observed_refresh():
+            refresh()
+            if service.peek().items:
+                ready.set()
+        def fetch(source):
+            calls.append(source)
+            if len(calls) == 1:
+                entered.set()
+                release.wait(5)
+                title = 'obsolete'
+            else:
+                resumed.set()
+                allow_fresh.wait(5)
+                title = 'fresh'
+            return f'<rss><channel><item><title>{title}</title></item></channel></rss>'.encode()
+        def reset():
+            try:
+                responses.append(f.paired_request('post', '/api/rss/reset', json={}))
+            finally:
+                returned.set()
+        with patch.object(service.client, 'fetch', side_effect=fetch), patch.object(service, 'refresh_due', side_effect=observed_refresh):
+            host.sync(saved)
+            request = threading.Thread(target=reset)
+            try:
+                self.assertTrue(entered.wait(1))
+                cancel = service._cancel
+                generation = service.peek().generation
+                service._rotation.seen.add('id:old')
+                request.start()
+                self.assertTrue(returned.wait(1), 'reset route waited for in-flight network')
+                self.assertEqual(responses[0].status_code, 200)
+                self.assertEqual(responses[0].json, {'defaults': DEFAULTS, 'saved': False, 'cache_cleared': True})
+                self.assertTrue(cancel.is_set())
+                self.assertGreater(service.peek().generation, generation)
+                self.assertFalse(service._rotation.seen)
+                self.assertTrue(service.running)
+                self.assertEqual(f.store.path.read_bytes(), before)
+                self.assertEqual(service.feeds, (url,))
+                self.assertEqual(service.count, 2)
+                release.set()
+                self.assertTrue(resumed.wait(1), 'saved physical worker was not woken after reset')
+                self.assertEqual(service.peek().items, ())
+                self.assertIsNone(service.cache.get(url), 'obsolete fetch resurrected cache')
+                allow_fresh.set()
+                self.assertTrue(ready.wait(1))
+                self.assertEqual([i.story.title for i in service.admit().items], ['fresh'])
+                self.assertEqual(calls, [url, url])
+                self.assertEqual(f.store.path.read_bytes(), before)
+            finally:
+                release.set()
+                allow_fresh.set()
+                if request.ident is not None:
+                    request.join(2)
+                host.close()
+
     def test_draft_options_use_bounded_owned_worker_and_never_change_physical(self):
         import time
         from unittest.mock import patch

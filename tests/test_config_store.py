@@ -42,6 +42,8 @@ class ConfigStoreTests(unittest.TestCase):
                 expected.setdefault("screen_enabled", {"splash": True, "sleep": True})
                 expected["event_countdown"] = json.loads(json.dumps(DEFAULT_CONFIG["event_countdown"]))
                 expected["playlist"].append({"module": "event_countdown", "duration": 15, "enabled": False})
+                expected["rss"] = json.loads(json.dumps(DEFAULT_CONFIG["rss"]))
+                expected["playlist"].append({"module": "rss", "duration": 15, "enabled": False})
                 for row in expected["playlist"]:
                     if row["module"] in {"splash", "sleep"}:
                         row["sources"] = [row["source"]]
