@@ -3234,6 +3234,8 @@ try{
             ("POST", "/api/media/<path:filename>/preview"),
             ("DELETE", "/api/media/<path:filename>"),
             ("POST", "/api/config"),
+            ("POST", "/api/rss/test"),
+            ("POST", "/api/rss/reset"),
             ("PUT", "/api/secrets/openweather"),
             ("DELETE", "/api/secrets/openweather"),
             ("POST", "/api/edit-preview/<module_name>"),
@@ -3263,6 +3265,8 @@ try{
             ("POST", "/api/media/missing.gif/preview"),
             ("DELETE", "/api/media/missing.gif"),
             ("POST", "/api/config"),
+            ("POST", "/api/rss/test"),
+            ("POST", "/api/rss/reset"),
             ("PUT", "/api/secrets/openweather"),
             ("DELETE", "/api/secrets/openweather"),
             ("POST", "/api/edit-preview/clock_lava"),
@@ -3286,6 +3290,11 @@ try{
         self.pairing.reset_mock()
         self.device_restart_runner.reset_mock()
 
+        rss_actions = []
+        for action in ("test_feed", "reset"):
+            patcher = patch.object(self.app.extensions["rss_host"], action)
+            rss_actions.append(patcher.start())
+            self.addCleanup(patcher.stop)
         for signal in (None, "wrong-value"):
             for method, path in concrete_routes:
                 with self.subTest(signal=signal, method=method, path=path):
@@ -3310,6 +3319,8 @@ try{
             action.assert_not_called()
         self.pairing.issue_pin.assert_not_called()
         self.device_restart_runner.assert_not_called()
+        for action in rss_actions:
+            action.assert_not_called()
         self.assertIsNone(self.app.extensions.get("edit_preview_registry"))
         self.assertIsNone(self.app.extensions.get("edit_preview_provider"))
 
@@ -11210,7 +11221,8 @@ timingSettingsDigest('weather',payload).then(value=>console.log(value)).catch(er
         self.pair_browser()
         body = self.client.get("/").get_data(as_text=True)
         helper_start = body.index("function withSharedWeatherLocation(settings)")
-        helper_end = body.index("\nasync function saveConfig", helper_start)
+        # Extract the serializer functions, not unrelated editor DOM startup.
+        helper_end = body.index("\n", body.index("function configBody(", helper_start))
         harness = body[helper_start:helper_end] + r"""
 const values={
   '#max-paired-devices':'5','#day-brightness':'50','#night-brightness':'25',
@@ -12717,6 +12729,9 @@ process.stdout.write(JSON.stringify({
         candidate = copy.deepcopy(config_store.DEFAULT_CONFIG)
         candidate.pop("revision")
         candidate.pop("schema_version")
+        # Non-default settings must survive serialization, even at the limit.
+        candidate["event_countdown"]["layout"] = "icon"
+        candidate["rss"]["count"] = 4
         bitmap = base64.b64encode(bytes(64 * 32 * 4)).decode("ascii")
         pixels = [
             {
@@ -12823,9 +12838,9 @@ process.stdout.write(JSON.stringify({
             # A full Save omits the two server-owned fields. Their canonical compact
             # representation adds 32 bytes, while Python's canonical persistence
             # retains bounded integral floats that JSON.stringify emits as
-            # integers. The two v4 media playlist layouts add two more such
-            # values, so 1,048,534 is the largest valid browser Save body.
-            maximum = self._pixel_payload_config(bitmap_layers, 1_048_534)
+            # integers. RSS thumbnail_speed adds another integral float;
+            # 1,048,532 is the largest lossless browser Save for this fixture.
+            maximum = self._pixel_payload_config(bitmap_layers, 1_048_532)
             full = copy.deepcopy(maximum)
             full.update({"revision": 0, "schema_version": config_store.CURRENT_CONFIG_SCHEMA_VERSION})
             validated = config_store.validate_config(
@@ -12834,8 +12849,9 @@ process.stdout.write(JSON.stringify({
             )
             canonical_size = len(config_store._serialize_config(validated))
             self.assertEqual(canonical_size, 1_048_576)
+            self.assertEqual(json.loads(config_store._serialize_config(validated)), validated)
             maxima[str(bitmap_layers)] = {
-                "request": 1_048_534,
+                "request": 1_048_532,
                 "canonical": canonical_size,
             }
             cases.append({"label": f"save-max-{bitmap_layers}", "payload": maximum, "ok": True})
@@ -12906,13 +12922,13 @@ process.stdout.write(JSON.stringify(observations));
         for observed in observations:
             item = expected[observed["label"]]
             suffix = observed["label"].rsplit("-", 1)[-1]
-            target = 1_048_534 if observed["label"].startswith("save-max-") else int(suffix)
+            target = 1_048_532 if observed["label"].startswith("save-max-") else int(suffix)
             self.assertEqual(observed["bytes"], target, observed["label"])
             self.assertEqual(observed["admitted"], item["ok"], observed)
             self.assertEqual(observed["code"], None if item["ok"] else "MATRIX_REQUEST_TOO_LARGE")
         self.assertEqual(maxima, {
-            "1": {"request": 1_048_534, "canonical": 1_048_576},
-            "64": {"request": 1_048_534, "canonical": 1_048_576},
+            "1": {"request": 1_048_532, "canonical": 1_048_576},
+            "64": {"request": 1_048_532, "canonical": 1_048_576},
         })
 
     @unittest.skipUnless(shutil.which("node"), "Node.js is required")
@@ -22222,6 +22238,7 @@ atexit.register = lambda callback, *args, **kwargs: registered.append(callback) 
 
 # Importing the reusable factory is not a process-entrypoint side effect.
 import webapp
+from config_store import ConfigStore
 real_create_app = webapp.create_app
 
 class Passive:
@@ -22333,7 +22350,7 @@ with tempfile.TemporaryDirectory() as temp:
     def tracked_create_app(*args, **kwargs):
         create_calls.append((args, kwargs))
         return real_create_app(
-            FakeController(), Passive(), FakePairing(), secret_key="test",
+            FakeController(), ConfigStore(runtime_data / "config.json"), FakePairing(), secret_key="test",
             session_generation="wsgi-test", media_dir=temp / "media",
             location_search=lambda query: [], device_store=FakeDeviceStore(),
             openweather_secrets=Passive(),
