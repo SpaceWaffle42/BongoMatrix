@@ -300,6 +300,7 @@ ADDRESS_POLL_SECONDS = 5
 ADDRESS_NOTICE_SECONDS = (10, 15)  # keep scrolling at least / at most this long
 ADDRESS_NOTICE_FRAME_SECONDS = 0.04
 ADDRESS_STABLE_READINGS = 2
+NAME_REFRESH_POLLS = 6  # re-check the published mDNS name every ~30 s (1.10b)
 
 
 class AddressWatch:
@@ -341,13 +342,16 @@ class AddressWatch:
         return ("reconnected", address) if address == previous else ("changed", address)
 
 
-def address_notice_text(event, port):
+def address_notice_text(event, port, name=None):
     """Return the (label, detail) lines the panel shows for an address event."""
     kind, address = event
     if kind == "offline":
         return "NO NETWORK", "check Wi-Fi"
-    label = {"changed": "NEW ADDRESS", "reconnected": "CONNECTED"}.get(kind, "ADDRESS")
-    return label, f"{address}:{port}"
+    label = {
+        "changed": "NEW ADDRESS", "reconnected": "CONNECTED", "renamed": "NEW NAME",
+    }.get(kind, "ADDRESS")
+    detail = f"{address}:{port}"
+    return label, f"{name}  {detail}" if name else detail
 
 
 def _text_width(font_name, text):
@@ -372,7 +376,7 @@ def _lan_address(value):
 class DisplayController:
     def __init__(
         self, matrix, config_store, ip_address_provider=None, openweather_secrets=None,
-        *, announce_address=False, address_port=5000,
+        *, announce_address=False, address_port=5000, device_name=None,
     ):
         self.matrix = matrix
         self.config_store = config_store
@@ -414,6 +418,8 @@ class DisplayController:
         self._address_port = int(address_port)
         self._address_notice = None
         self._address_thread = None
+        self._device_name = device_name
+        self._announced_name = None
         self._openweather_secrets = openweather_secrets
         self._openweather_provider = PreviewProvider()
         self.current_module = None
@@ -523,12 +529,27 @@ class DisplayController:
         except Exception:
             return None
 
+    def _refresh_name(self):
+        """Publish this device's mDNS name; return the actual name or None."""
+        if self._device_name is None:
+            return None
+        try:
+            return self._device_name.refresh()
+        except Exception:
+            LOGGER.exception("Matrix mDNS name refresh failed")
+            return None
+
     def _watch_address(self):
         """Poll the LAN address until shutdown; queue a panel notice on changes."""
         try:
             if not self._address_watch.started:
+                self._announced_name = self._refresh_name()
                 self._queue_address_notice(self._address_watch.start(self._read_address()))
+            polls = 0
             while not self._shutdown.wait(ADDRESS_POLL_SECONDS):
+                polls += 1
+                if polls % NAME_REFRESH_POLLS == 0:
+                    self._name_seen(self._refresh_name())
                 self._address_seen(self._read_address())
         except Exception:
             LOGGER.exception("Matrix address watcher stopped")
@@ -536,7 +557,18 @@ class DisplayController:
     def _address_seen(self, address):
         event = self._address_watch.observe(address)
         if event is not None:
+            if event[0] != "offline":
+                self._announced_name = self._refresh_name() or self._announced_name
             self._queue_address_notice(event)
+
+    def _name_seen(self, name):
+        """Announce a new published name (for example an avahi clash rename)."""
+        if name is None or name == self._announced_name:
+            return
+        previous, self._announced_name = self._announced_name, name
+        address = self._address_watch.known
+        if address is not None:
+            self._queue_address_notice(("renamed" if previous else "start", address))
 
     def _address_notice_may_interrupt(self):
         """Only cut into the ordinary daytime playlist, never owner work."""
@@ -604,7 +636,9 @@ class DisplayController:
                     self._module_stop = None
 
     def _draw_address_notice(self, event, stop_event):
-        label, detail = address_notice_text(event, self._address_port)
+        label, detail = address_notice_text(
+            event, self._address_port, self._announced_name,
+        )
         matrix = self.matrix
         label_font, detail_font = matrix.font("5x7"), matrix.font("6x10")
         label_colour = matrix.colour_rgb("#ff7070" if event[0] == "offline" else "#01cdfe")
@@ -1370,6 +1404,9 @@ class DisplayController:
             "current_module": self.current_module,
             "last_error": self.last_error,
             "pairing_active": self.pairing_active,
+            "device_name": (
+                self._device_name.current() if self._device_name is not None else None
+            ),
         }
 
     def frame_png(self):

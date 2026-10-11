@@ -20,13 +20,18 @@
     "AddressWatchTests.test_start_up_without_network_says_so",
     "ControllerNoticeTests.test_change_interrupts_running_playlist_item",
     "ControllerNoticeTests.test_change_never_interrupts_pairing_or_device_draft",
+    "ControllerNoticeTests.test_clash_rename_queues_new_name_notice",
     "ControllerNoticeTests.test_disabled_by_default",
+    "ControllerNoticeTests.test_name_failure_never_breaks_address_notice",
+    "ControllerNoticeTests.test_notice_text_leads_with_device_name",
     "ControllerNoticeTests.test_playlist_breaks_out_when_notice_arrives_mid_cycle",
     "ControllerNoticeTests.test_provider_failure_counts_as_no_network",
     "ControllerNoticeTests.test_scheduler_shows_pending_notice_before_next_playlist_item",
     "ControllerNoticeTests.test_sleep_hours_keep_notice_until_wake",
     "ControllerNoticeTests.test_start_up_notice_renders_label_and_address_on_panel",
+    "ControllerNoticeTests.test_start_up_publishes_name_and_panel_shows_actual_name",
     "ControllerNoticeTests.test_watcher_thread_follows_controller_lifecycle",
+    "ControllerNoticeTests.test_without_device_name_status_reports_none",
     "NoticeTextTests.test_labels_fit_the_panel_and_carry_the_port"
   ],
   "test_announcement_board": [
@@ -468,6 +473,22 @@
     "CustomTextTests.test_scrolling_custom_text_stops_after_saved_number_of_loops",
     "CustomTextTests.test_static_custom_text_draws_saved_content_and_position",
     "CustomTextTests.test_static_custom_text_fills_then_draws_text_then_solid_border"
+  ],
+  "test_device_name": [
+    "AvahiHostNameTests.test_failure_reads_as_none",
+    "AvahiHostNameTests.test_get_and_set",
+    "AvahiHostNameTests.test_missing_busctl_reads_as_none",
+    "BuiltinMacTests.test_default_name_uses_last_four_hex",
+    "BuiltinMacTests.test_no_usable_interface",
+    "BuiltinMacTests.test_prefers_wired_built_in_interface",
+    "BuiltinMacTests.test_skips_random_virtual_and_locally_administered",
+    "DeviceNameTests.test_already_named_does_not_set_again",
+    "DeviceNameTests.test_avahi_restart_reapplies_name",
+    "DeviceNameTests.test_clash_rename_is_kept_and_reported",
+    "DeviceNameTests.test_for_device_uses_sysfs",
+    "DeviceNameTests.test_lookalike_name_is_not_treated_as_clash_rename",
+    "DeviceNameTests.test_no_avahi_or_no_mac_means_no_name",
+    "DeviceNameTests.test_refresh_applies_default_name"
   ],
   "test_device_preview": [
     "DevicePreviewTests.test_accepted_update_restarts_timeout_but_other_traffic_does_not",

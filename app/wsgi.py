@@ -17,6 +17,7 @@ if str(ROOT) not in sys.path:
 import app as _entrypoint_owner
 from app.testing_pin import load_testing_pin
 from config_store import ConfigStore
+from device_name import DeviceName
 from display_controller import DisplayController
 from hardware_lock import DisplayOwnershipLock
 from matrix_framework import Matrix
@@ -66,6 +67,7 @@ with _entrypoint_owner._wsgi_runtime_lock:
             matrix, config_store, openweather_secrets=openweather_secrets,
             announce_address=True,
             address_port=int(os.environ.get("MATRIX_PORT", "5000")),
+            device_name=DeviceName.for_device(),
         )
         pairing = PairingManager(
             ttl_seconds=600,
