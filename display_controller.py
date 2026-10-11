@@ -7,6 +7,7 @@ import copy
 import datetime as dt
 import importlib
 import io
+import ipaddress
 import logging
 import random
 import socket
@@ -294,9 +295,84 @@ def local_ip_address():
         sock.close()
 
 
+# Roadmap 1.10a: the panel tells people where the dashboard went.
+ADDRESS_POLL_SECONDS = 5
+ADDRESS_NOTICE_SECONDS = (10, 15)  # keep scrolling at least / at most this long
+ADDRESS_NOTICE_FRAME_SECONDS = 0.04
+ADDRESS_STABLE_READINGS = 2
+
+
+class AddressWatch:
+    """Debounced view of this device's LAN address.
+
+    A new value (another address, or no network) must be read on
+    ADDRESS_STABLE_READINGS consecutive polls before it is announced, so DHCP
+    renewals and brief Wi-Fi drops back to the same address stay silent.
+    """
+
+    def __init__(self):
+        self.started = False
+        self.known = None
+        self._last_online = None
+        self._candidate = None
+        self._count = 0
+
+    def start(self, address):
+        self.started = True
+        self.known = address
+        self._last_online = address
+        return ("start", address) if address else ("offline", None)
+
+    def observe(self, address):
+        if address == self.known:
+            self._candidate, self._count = None, 0
+            return None
+        if address == self._candidate:
+            self._count += 1
+        else:
+            self._candidate, self._count = address, 1
+        if self._count < ADDRESS_STABLE_READINGS:
+            return None
+        self._candidate, self._count = None, 0
+        self.known = address
+        if address is None:
+            return ("offline", None)
+        previous, self._last_online = self._last_online, address
+        return ("reconnected", address) if address == previous else ("changed", address)
+
+
+def address_notice_text(event, port):
+    """Return the (label, detail) lines the panel shows for an address event."""
+    kind, address = event
+    if kind == "offline":
+        return "NO NETWORK", "check Wi-Fi"
+    label = {"changed": "NEW ADDRESS", "reconnected": "CONNECTED"}.get(kind, "ADDRESS")
+    return label, f"{address}:{port}"
+
+
+def _text_width(font_name, text):
+    """Measure with the BDF files that both the panel and the capture mirror use."""
+    from pathlib import Path
+    from frame_capture import BdfFont
+
+    path = Path(__file__).resolve().parent / "resources" / "fonts" / f"{font_name}.bdf"
+    return BdfFont(path).text_pixels(0, 0, text)[0]
+
+
+def _lan_address(value):
+    try:
+        parsed = ipaddress.ip_address(str(value))
+    except ValueError:
+        return None
+    if parsed.is_loopback or parsed.is_unspecified or parsed.is_link_local:
+        return None
+    return str(parsed)
+
+
 class DisplayController:
     def __init__(
-        self, matrix, config_store, ip_address_provider=None, openweather_secrets=None
+        self, matrix, config_store, ip_address_provider=None, openweather_secrets=None,
+        *, announce_address=False, address_port=5000,
     ):
         self.matrix = matrix
         self.config_store = config_store
@@ -334,6 +410,10 @@ class DisplayController:
         self._pairing_show_ip = False
         self._pairing_generation = 0
         self._ip_address_provider = ip_address_provider or local_ip_address
+        self._address_watch = AddressWatch() if announce_address else None
+        self._address_port = int(address_port)
+        self._address_notice = None
+        self._address_thread = None
         self._openweather_secrets = openweather_secrets
         self._openweather_provider = PreviewProvider()
         self.current_module = None
@@ -428,7 +508,132 @@ class DisplayController:
                 daemon=True,
             )
             self._thread.start()
+            if self._address_watch is not None and not (
+                self._address_thread and self._address_thread.is_alive()
+            ):
+                self._address_thread = threading.Thread(
+                    target=self._watch_address, name="matrix-address", daemon=True,
+                )
+                self._address_thread.start()
             return True
+
+    def _read_address(self):
+        try:
+            return _lan_address(self._ip_address_provider())
+        except Exception:
+            return None
+
+    def _watch_address(self):
+        """Poll the LAN address until shutdown; queue a panel notice on changes."""
+        try:
+            if not self._address_watch.started:
+                self._queue_address_notice(self._address_watch.start(self._read_address()))
+            while not self._shutdown.wait(ADDRESS_POLL_SECONDS):
+                self._address_seen(self._read_address())
+        except Exception:
+            LOGGER.exception("Matrix address watcher stopped")
+
+    def _address_seen(self, address):
+        event = self._address_watch.observe(address)
+        if event is not None:
+            self._queue_address_notice(event)
+
+    def _address_notice_may_interrupt(self):
+        """Only cut into the ordinary daytime playlist, never owner work."""
+        with self._state_lock:
+            busy = (
+                self._pairing_pause.is_set()
+                or self._device_draft_pending is not None
+                or self._device_draft_active_lease is not None
+                or self._acceptance_transaction is not None
+                or self._preview_name is not None
+                or self._media_preview_name is not None
+                or self._announcement_preview is not None
+            )
+        if busy:
+            return False
+        try:
+            return bool(self._is_active(self.config_store.get()))
+        except Exception:
+            return False
+
+    def _address_notice_due(self, config):
+        return (
+            self._address_notice is not None
+            and self._acceptance_transaction is None
+            and bool(self._is_active(config))
+        )
+
+    def _queue_address_notice(self, event):
+        with self._state_lock:
+            self._address_notice = event
+        if self._address_notice_may_interrupt():
+            with self._state_lock:
+                if self._module_stop is not None:
+                    self._module_stop.set()
+
+    def _run_pending_address_notice(self):
+        stop_event = threading.Event()
+        with self._state_lock:
+            event = self._address_notice
+            admission_generation = self._module_admission_snapshot_locked()
+            if event is None or admission_generation is None or (
+                self._device_draft_pending is not None
+            ):
+                return False
+            self._address_notice = None
+            self._module_stop = stop_event
+        self.current_module = "address_notice"
+        try:
+            with self._display_lock:
+                with self._state_lock:
+                    if not self._module_admission_current_locked(
+                        admission_generation, stop_event,
+                    ):
+                        return False
+                self._draw_address_notice(event, stop_event)
+                return True
+        except Exception as exc:
+            LOGGER.exception("Matrix address notice failed")
+            self.last_error = f"{type(exc).__name__}: {exc}"
+            return False
+        finally:
+            self.current_module = None
+            with self._state_lock:
+                if self._module_stop is stop_event:
+                    self._module_stop = None
+
+    def _draw_address_notice(self, event, stop_event):
+        label, detail = address_notice_text(event, self._address_port)
+        matrix = self.matrix
+        label_font, detail_font = matrix.font("5x7"), matrix.font("6x10")
+        label_colour = matrix.colour_rgb("#ff7070" if event[0] == "offline" else "#01cdfe")
+        detail_colour = matrix.colour_rgb("#ffffff")
+        label_width = _text_width("5x7", label)
+        detail_width = _text_width("6x10", detail)
+        label_x = max(0, (64 - label_width) // 2)
+        minimum, maximum = ADDRESS_NOTICE_SECONDS
+        started = time.monotonic()
+        scrolls = detail_width > 62
+        position = 2 if scrolls else (64 - detail_width) // 2
+        while not stop_event.is_set() and not self._shutdown.is_set():
+            elapsed = time.monotonic() - started
+            if elapsed >= maximum:
+                break
+            matrix.clear()
+            matrix.draw_text(label_font, label_x, 9, label_colour, label)
+            matrix.draw_text(detail_font, position, 25, detail_colour, detail)
+            matrix.swap()
+            if stop_event.wait(ADDRESS_NOTICE_FRAME_SECONDS):
+                break
+            if scrolls:
+                position -= 1
+                if position + detail_width < 0:
+                    if time.monotonic() - started >= minimum:
+                        break
+                    position = 64
+            elif time.monotonic() - started >= minimum:
+                break
 
     def _interrupt_module(self, timeout=None):
         return self._cancel_and_quiesce(
@@ -1759,6 +1964,10 @@ class DisplayController:
                 self._mark_scheduler_healthy()
                 continue
 
+            if self._address_notice_due(config) and self._run_pending_address_notice():
+                self._mark_scheduler_healthy()
+                continue
+
             acceptance_inactive = self._acceptance_inactive_probe()
             active = False if acceptance_inactive is not None else self._is_active(config)
             if active and self._sleep_session_active:
@@ -1865,6 +2074,7 @@ class DisplayController:
                     self._shutdown.is_set()
                     or self._reload_requested.is_set()
                     or self._pairing_pause.is_set()
+                    or self._address_notice_due(config)
                 ):
                     break
                 with self._state_lock:

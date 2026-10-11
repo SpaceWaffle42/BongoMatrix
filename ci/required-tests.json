@@ -10,6 +10,25 @@
     "AcceptanceArtifactTests.test_saved_rollback_rejects_missing_sleep_event_without_partial_artifacts",
     "AcceptanceArtifactTests.test_saved_rollback_rejects_omitted_journey_evidence"
   ],
+  "test_address_notice": [
+    "AddressWatchTests.test_brief_drop_back_to_same_address_is_silent",
+    "AddressWatchTests.test_change_must_hold_for_two_readings",
+    "AddressWatchTests.test_flapping_readings_never_announce",
+    "AddressWatchTests.test_lasting_drop_then_new_address_reports_change",
+    "AddressWatchTests.test_lasting_drop_then_same_address_reports_offline_then_reconnected",
+    "AddressWatchTests.test_start_up_announces_current_address_once",
+    "AddressWatchTests.test_start_up_without_network_says_so",
+    "ControllerNoticeTests.test_change_interrupts_running_playlist_item",
+    "ControllerNoticeTests.test_change_never_interrupts_pairing_or_device_draft",
+    "ControllerNoticeTests.test_disabled_by_default",
+    "ControllerNoticeTests.test_playlist_breaks_out_when_notice_arrives_mid_cycle",
+    "ControllerNoticeTests.test_provider_failure_counts_as_no_network",
+    "ControllerNoticeTests.test_scheduler_shows_pending_notice_before_next_playlist_item",
+    "ControllerNoticeTests.test_sleep_hours_keep_notice_until_wake",
+    "ControllerNoticeTests.test_start_up_notice_renders_label_and_address_on_panel",
+    "ControllerNoticeTests.test_watcher_thread_follows_controller_lifecycle",
+    "NoticeTextTests.test_labels_fit_the_panel_and_carry_the_port"
+  ],
   "test_announcement_board": [
     "AnnouncementBoardTests.test_active_static_text_notice_renders_one_frame_and_waits_its_own_duration",
     "AnnouncementBoardTests.test_cancellation_during_final_draw_prevents_cut_scroll_and_transition_swaps",
