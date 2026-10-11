@@ -80,41 +80,52 @@ async function calculateAstronomy(container) {
   } catch(error) {if(generation===astronomyTimingGeneration&&error.name!=='AbortError')note.textContent=error.message;}
 }
 function renderAstronomyEditor(container) {
-  container.replaceChildren();
+  editorCloseHelp(container);container.replaceChildren();
   const note=document.createElement('p');note.dataset.astronomyNote='';
-  note.textContent='Offline current Moon and locally observable new/full moons only. Eclipses, supermoon/blue-moon labels, meteor showers and planetary events are not implemented. No provider is connected. Phase time is the global instant; countdown targets the next local observing window, not a phase duration. Moon icon is schematic, not sky-oriented. Weather coordinates have no timezone: enter it explicitly. Place search/map remains unavailable in this local slice. Blank timezone safely skips playback.';
+  note.textContent='Offline current Moon and local new/full Moon events only. Other astronomy events are not implemented. Choose content and an explicit timezone, then Calculate or Preview your draft. Save applies changes to playback.';
   container.append(note);
-  const fields=document.createElement('div');fields.className='editor-fields';container.append(fields);
+  const content=editorSection(container,'Content'),location=editorSection(container,'Location'),playback=editorSection(container,'Playback'),appearance=editorSection(container,'Appearance',true),actions=editorSection(container,'Status and actions');
+  let fields=document.createElement('div');fields.className='editor-fields';content.append(fields);
+  const switchFields=parent=>{fields=document.createElement('div');fields.className='editor-fields';parent.append(fields)};
   function control(key,label,type='text',options=null,min=null,max=null) {
     const wrapper=document.createElement('label');wrapper.textContent=label;
-    const input=document.createElement(options?'select':'input');input.dataset.astronomySetting=key;
+    const input=key==='timezone'?editorTimezoneSelect(astronomySettings[key]):document.createElement(options?'select':'input');input.dataset.astronomySetting=key;
     if(options)for(const value of options){const option=document.createElement('option');option.value=value;option.textContent=value;input.append(option)}
-    else input.type=type;
+    else if(key!=='timezone')input.type=type;
     if(type==='checkbox')input.checked=astronomySettings[key];else input.value=astronomySettings[key];
     if(min!==null)input.min=min;if(max!==null)input.max=max;if(type==='number')input.step=key.includes('days')||key==='event_limit'?'1':'any';
-    input.addEventListener(type==='checkbox'||options?'change':'input',()=>{
+    input.addEventListener(type==='checkbox'||options||key==='timezone'?'change':'input',()=>{
       astronomySettings[key]=type==='checkbox'?input.checked:type==='number'?Number(input.value):input.value;
       astronomyChanged();
+      if(key==='location_source')updateLocationFields();
     });
-    wrapper.append(input);fields.append(wrapper);
+    wrapper.append(input);fields.append(wrapper);return input;
   }
   control('current_moon','Current Moon','checkbox');control('lunar_events','Local new/full Moon events','checkbox');
+  control('horizon_days','Search ahead (local dates including today)','number',null,1,366);
+  control('event_limit','Maximum event cards per pass','number',null,1,50);
+  switchFields(location);
   control('location_source','Coordinate source','text',['weather','override']);
-  control('timezone','Explicit IANA timezone (for either source)');
+  const source=fields.querySelector('[data-astronomy-setting="location_source"]');source.options[0].textContent='Use Weather coordinates';source.options[1].textContent='Use separate coordinates';
+  control('timezone','Timezone (required for either source)');
+  const locationNote=editorParagraph(location,'');
+  switchFields(location);const overrides=fields;
   control('location_label','Override place label');
   control('latitude','Override latitude','number',null,-90,90);control('longitude','Override longitude','number',null,-180,180);
-  control('horizon_days','Horizon (local dates including today)','number',null,1,366);
-  control('event_limit','Event cards per pass','number',null,1,50);
+  function updateLocationFields(){overrides.hidden=astronomySettings.location_source!=='override';locationNote.textContent=overrides.hidden?'Uses the coordinates selected in Weather. Choose the timezone explicitly; none is inferred. Blank timezone skips playback.':'Enter decimal coordinates for this module only. Weather is unchanged. Choose a timezone explicitly; blank skips playback.'}
+  updateLocationFields();switchFields(playback);
   control('moon_hold_seconds','Moon hold seconds','number',null,1,300);control('event_hold_seconds','Event hold seconds','number',null,1,300);
   control('frame_delay','Scroll frame delay seconds','number',null,.01,1);
+  editorParagraph(playback,'Hold times are seconds per card. Frame delay is seconds between scroll steps: smaller values scroll faster. Total duration also includes measured text scrolling.');
+  switchFields(appearance);
   control('title_font','Title font','text',installedFonts);control('detail_font','Detail font','text',installedFonts);
   control('countdown_font','Countdown font','text',['auto',...installedFonts]);
   for(const key of ['background','text_colour','moon_colour','accent'])control(key,key.replaceAll('_',' '),'color');
-  const calculate=makeButton('Calculate prepared duration',()=>calculateAstronomy(container));calculate.dataset.astronomyCalculate='';container.append(calculate);
-  const timing=document.createElement('p');timing.dataset.astronomyTiming='';timing.setAttribute('role','status');timing.textContent='Not calculated. All content disabled safely yields to the next module.';container.append(timing);
+  const calculate=makeButton('Calculate prepared duration',()=>calculateAstronomy(container));calculate.dataset.astronomyCalculate='';actions.append(calculate,makeButton('Preview unsaved draft',()=>editorDraftPreview('astronomy')));
+  const timing=document.createElement('p');timing.dataset.astronomyTiming='';timing.setAttribute('role','status');timing.textContent='Draft not calculated. Select a timezone and content, then Calculate. All content disabled safely yields to the next module.';actions.append(timing);
   const details=document.createElement('details'),summary=document.createElement('summary'),text=document.createElement('p');
   summary.textContent='Offline source and limitations';
-  text.textContent='NASA/JPL DE440s, Skyfield 1.54, checksum verified in background before use; supported dates 2000–2100. Bundled time tables; future UTC/UT1 uncertainty. Moon >10° and Sun <−18° for at least 10 continuous minutes. No terrain or weather visibility model. No event catalogue or updater installed. Production static-data/dependency delivery remains blocked.';
-  details.append(summary,text);container.append(details);
+  text.textContent='Eclipses, supermoon/blue-moon labels, meteor showers and planetary events are not implemented. No provider is connected. Phase time is the global instant; countdown targets the next local observing window, not a phase duration. Moon icon is schematic, not sky-oriented. Place search/map remains unavailable in this local slice. NASA/JPL DE440s, Skyfield 1.54, checksum verified in background before use; supported dates 2000–2100. Bundled time tables; future UTC/UT1 uncertainty. Moon >10° and Sun <−18° for at least 10 continuous minutes. No terrain or weather visibility model. No event catalogue or updater installed. Production static-data/dependency delivery remains blocked.';
+  details.append(summary,text);actions.append(details);
 }
 window.addEventListener('beforeunload',()=>astronomyTimingRequest?.abort(),{once:true});

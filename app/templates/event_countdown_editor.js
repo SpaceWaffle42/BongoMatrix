@@ -72,12 +72,12 @@ function renderCountdownEditor(container) {
   const fields=document.createElement('div');fields.className='editor-fields';container.append(fields);
   function control(parent,obj,key,label,type='text',options=null,scope='field') {
     const wrapper=document.createElement('label');wrapper.textContent=label;
-    const input=document.createElement(options?'select':'input');
+    const input=key==='timezone'?editorTimezoneSelect(obj[key]):document.createElement(options?'select':'input');
     input.dataset[scope==='setting'?'countdownSetting':'countdownField']=key;
     if(options)for(const option of options){const el=document.createElement('option');el.value=option;el.textContent=option||'Shared accent';input.append(el)}
-    else input.type=type;
+    else if(key!=='timezone')input.type=type;
     if(type==='checkbox')input.checked=obj[key];else input.value=obj[key]??'';
-    input.addEventListener(type==='checkbox'||options?'change':'input',()=>{
+    input.addEventListener(type==='checkbox'||options||key==='timezone'?'change':'input',()=>{
       obj[key]=type==='checkbox'?input.checked:type==='number'?Number(input.value):input.value;
       if((key==='end'||key==='accent'||key==='artwork')&&input.value==='')obj[key]=null;
       if(key==='all_day'){

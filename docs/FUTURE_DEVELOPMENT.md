@@ -783,6 +783,10 @@ Configure module entry, item change, and module exit independently.
 - Show artwork-cache size and item count and provide a confirmation-protected **Clear artwork cache** action; normal LRU eviction remains automatic.
 - Use a polite accessible live region for connection, item, and playback-state changes, never announce interpolated progress continuously, and give every control an explicit accessible label.
 
+## LATER — project-wide contextual help audit
+
+- [ ] Audit every module and every confusing element for contextual **? help**: explain purpose, units, examples, actual matching/selection semantics, saved-versus-draft behavior and side effects (especially reset/cache actions). Support hover, keyboard focus and tap, accessible names/relationships, Escape/outside dismissal and unclipped narrow-screen content. RSS coverage is only the first slice, not completion of this project-wide audit. This deferred work does not block the current grouped RSS/Astronomy editor usability update. Track in consolidated GitLab issue #33.
+
 ## Planning appendix
 
 ### Implementation budget estimate

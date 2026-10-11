@@ -25,6 +25,7 @@ from datetime import timedelta
 from enum import Enum
 from functools import wraps
 from pathlib import Path
+from zoneinfo import available_timezones
 
 from flask import Flask, abort, jsonify, redirect, render_template, request, send_file, session, url_for
 from PIL import Image, UnidentifiedImageError
@@ -76,7 +77,7 @@ MEDIA_METADATA_ERRORS = (
 CONFIG_REQUEST_LIMIT = 1_048_576
 CONDITIONAL_HEADER_LIMIT = 4096
 MINIMUM_CLIENT_CONTRACT = 3
-APPLICATION_VERSION = "0.3.70-preview"
+APPLICATION_VERSION = "0.3.71-preview"
 DEVICE_RESTART_PENDING_TTL_SECONDS = 60
 PAIRED_ACTION_HEADER = "X-Matrix-Action"
 PAIRED_ACTION_VALUE = "paired-request"
@@ -1743,6 +1744,7 @@ def create_app(
                 "sleep": DEFAULT_CONFIG["media_layout"]["sleep"],
             },
             installed_fonts=available_font_names(),
+            editor_timezones=sorted(available_timezones() | {"UTC"}),
             font_advances=font_advance_catalog(),
             scroll_timing_javascript=timing_javascript(),
             application_version=APPLICATION_VERSION,
