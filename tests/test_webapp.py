@@ -12732,6 +12732,13 @@ process.stdout.write(JSON.stringify({
         # Non-default settings must survive serialization, even at the limit.
         candidate["event_countdown"]["layout"] = "icon"
         candidate["rss"]["count"] = 4
+        # RSS editor defaults are individually reconstructible at the budget.
+        # Exercise meaningful values so boundary cases cannot omit those fields.
+        candidate["rss"].update(
+            disabled_feeds=candidate["rss"]["feeds"][:1], layout="text",
+            headline_colour="#12ab34", summary_colour="#abcdef",
+            background_colour="#010203",
+        )
         bitmap = base64.b64encode(bytes(64 * 32 * 4)).decode("ascii")
         pixels = [
             {
