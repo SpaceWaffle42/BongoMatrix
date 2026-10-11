@@ -129,8 +129,20 @@ function renderRSSEditor(container){
     rssSettings={feeds:['https://feeds.bbci.co.uk/news/rss.xml'],refresh_seconds:1800,count:5,include:[],exclude:[],headline_font:'5x7',summary_font:'4x6',frame_delay:.05,headline_mode:'once',thumbnail_speed:100};
     rssChanged();renderRSSEditors();
   },'btn danger');reset.dataset.rssResetDraft='';
-  const resetAll=makeButton('Reset defaults and clear caches (unavailable)',()=>{});resetAll.disabled=true;resetAll.dataset.rssResetAll='';
-  const resetNote=document.createElement('p');resetNote.textContent='Full cache reset is unavailable pending safe playback lifecycle support. Draft reset does not clear cache or seen stories. Individual disabled feed rows cannot be retained by the current saved URL-list contract; delete a feed to stop using it.';
+  const resetAll=makeButton('Reset to defaults and clear caches',async()=>{
+    if(resetAll.disabled||!confirm('Reset this RSS draft to defaults and clear shared feed/thumbnail caches and seen stories now? Saved configuration is unchanged until Save; playback continues using saved feeds.'))return;
+    resetAll.disabled=true;const draft=JSON.stringify(rssSettings);
+    rssTimingGeneration++;rssTimingController?.abort();rssTimingController=null;
+    if(previewMode==='edit'&&previewModule==='rss')cancelEditPreview();
+    try{
+      const result=await api('/api/rss/reset',{method:'POST',headers:{'Content-Type':'application/json'},body:'{}'});
+      if(JSON.stringify(rssSettings)!==draft){setMessage('Caches and seen stories cleared. Newer draft edits were kept; defaults were not applied.');return}
+      rssSettings=structuredClone(result.defaults);rssChanged();renderRSSEditors();
+      setMessage('Caches and seen stories cleared. RSS draft restored to defaults; Save to apply settings. Saved playback remains enabled or disabled as configured.');
+      await rssRefreshStatus();
+    }catch(error){setMessage('RSS reset failed: '+error.message,true)}finally{resetAll.disabled=false}
+  },'btn danger');resetAll.dataset.rssResetAll='';
+  const resetNote=document.createElement('p');resetNote.textContent='Draft reset does not clear cache or seen stories. Reset to defaults clears shared caches immediately but does not save configuration. Individual disabled feed rows cannot be retained by the current saved URL-list contract; delete a feed to stop using it.';
   container.append(reset,resetAll,resetNote);
   rssRenderStatus();rssRenderDuration();if(!rssCatalogue)rssRefreshStatus();
 }
