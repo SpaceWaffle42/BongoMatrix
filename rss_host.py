@@ -75,10 +75,12 @@ class RSSHost:
 
     def reset(self):
         with self._lock:
-            # Stop both generations before clearing shared disk state.
-            self.service.close()
-            self.draft_service.close()
-            self.service.reset()
-            self.draft_service.reset()
-            self._draft_settings = None
+            # Invalidate both writers before clearing their shared cache. Never
+            # join a network worker on this route: reset wakes the physical lane
+            # with its saved sources, and an idle disabled lane stays stopped.
+            with self.service._cache_gate, self.draft_service._cache_gate:
+                self.draft_service.configure(())
+                self.service.reset()
+                self.draft_service.reset()
+                self._draft_settings = None
         return {'defaults': copy.deepcopy(DEFAULTS), 'saved': False, 'cache_cleared': True}
