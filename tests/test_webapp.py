@@ -11055,6 +11055,7 @@ const container={querySelector(selector){return selector==='[data-provider-timin
 const controls={
   '#weather-location':{value:builtInSettings.weather.location},
   '#weather-latitude':{value:'1e-7'},'#weather-longitude':{value:'-1e-7'},
+  '#weather-timezone':{value:builtInSettings.weather.timezone},
   '#weather-units':{value:builtInSettings.weather.units},
 };
 global.document={activeElement:null,querySelector(selector){return controls[selector]||null}};
