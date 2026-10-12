@@ -80,7 +80,6 @@ const rssHelpText={
   frame_delay:'Seconds between one-pixel scroll steps: 0.1 = slow, 0.05 = normal, 0.025 = fast. Smaller delay is faster. Story length and font affect the total runtime.',
   headline_mode:'One pass scrolls the headline once, then restores and freezes it. Continuous repeats it until the summary finishes. This is not a number of stories or module loops.',
   layout:'Automatic shows a small site banner (for example BBC: red with BBC on it) at the start of the headline; story photos are not used. Text only hides the banner.',
-  thumbnail_speed:'Animation playback rate as a percentage: 100% is original speed, 200% is twice as fast, 50% is half speed. Still images do not animate.',
   headline_font:'Installed BDF font for headlines. Inspect the 64×32 Edit Preview for clipping; exact clipping measurements are not available.',
   summary_font:'Installed BDF font for story summaries. A larger font can increase scroll duration. Inspect Edit Preview for clipping.',
   headline_colour:'Colour of headline text in the prepared story.',summary_colour:'Colour of summary text in the prepared story.',background_colour:'Background colour behind text and any thumbnail.'
@@ -119,7 +118,6 @@ function renderRSSEditor(container){
   const playbackFields=document.createElement('div');playbackFields.className='editor-fields';playback.append(playbackFields);
   for(const key of ['headline_font','summary_font','layout','headline_colour','summary_colour','background_colour'])appearanceFields.append(fields.querySelector(`[data-rss-setting="${key}"]`).closest('.ux-control'));
   for(const key of ['frame_delay','headline_mode'])playbackFields.append(fields.querySelector(`[data-rss-setting="${key}"]`).closest('.ux-control'));
-  const speed=rssControl(appearanceFields,'thumbnail_speed','Thumbnail animation speed (%)','number');speed.min=10;speed.max=400;speed.step=.1;
   editorParagraph(appearance,'Installed BDF fonts. Inspect the shared 64×32 Edit Preview for clipping.');
   const feedFields=document.createElement('div');feedFields.className='editor-fields';feeds.append(feedFields);
   const presetLabel=document.createElement('label');presetLabel.textContent='Verified BBC preset';const presets=document.createElement('select');presets.dataset.rssPresets='';rssFillPresets(presets);presetLabel.append(presets);feedFields.append(presetLabel,makeButton('Add BBC preset',()=>{if(presets.value)rssAddFeed(presets.value)}));
@@ -158,7 +156,7 @@ function renderRSSEditor(container){
   editorHelp(actions,'duration','Computed timing','Duration comes from prepared eligible stories, fonts, scrolling and thumbnail timing, not the playlist compatibility duration. Change settings, then Calculate again. No prepared stories means duration is unavailable; check feeds and filters.');
   const reset=makeButton('Reset draft to defaults',()=>{
     if(!confirm('Replace this RSS draft with defaults? Nothing is saved and playback/cache are unchanged.'))return;
-    rssSettings={feeds:['https://feeds.bbci.co.uk/news/rss.xml'],disabled_feeds:[],refresh_seconds:1800,count:5,include:[],exclude:[],headline_font:'5x7',summary_font:'4x6',frame_delay:.05,headline_mode:'once',thumbnail_speed:100,layout:'auto',headline_colour:'#ffffff',summary_colour:'#ffffff',background_colour:'#000000'};
+    rssSettings={feeds:['https://feeds.bbci.co.uk/news/rss.xml'],disabled_feeds:[],refresh_seconds:1800,count:5,include:[],exclude:[],headline_font:'5x7',summary_font:'4x6',frame_delay:.05,headline_mode:'once',thumbnail_speed:100,layout:'auto',headline_colour:'#eea62b',summary_colour:'#ffffff',background_colour:'#000000'};
     rssChanged();renderRSSEditors();
   },'btn danger');reset.dataset.rssResetDraft='';
   const resetAll=makeButton('Reset to defaults and clear caches',async()=>{

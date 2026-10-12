@@ -16,7 +16,7 @@ DEFAULTS = {
     'headline_font': '5x7', 'summary_font': '4x6',
     'frame_delay': SPEED_DELAYS['normal'], 'headline_mode': 'once',
     'thumbnail_speed': 100.0,
-    'layout': 'auto', 'headline_colour': '#ffffff',
+    'layout': 'auto', 'headline_colour': '#eea62b',
     'summary_colour': '#ffffff', 'background_colour': '#000000',
 }
 
@@ -80,7 +80,7 @@ class RenderOptions:
     headline_mode: str = 'once'
     thumbnail_speed: float = 100.0
     layout: str = 'auto'
-    headline_colour: str = '#ffffff'
+    headline_colour: str = '#eea62b'
     summary_colour: str = '#ffffff'
     background_colour: str = '#000000'
 

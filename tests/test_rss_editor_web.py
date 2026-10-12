@@ -33,6 +33,19 @@ class RSSEditorWebTests(unittest.TestCase):
         self.assertEqual(result['finalPixels'], list(image.convert('RGBA').tobytes()))
         self.assertEqual(self.fixture.store.get()['rss']['count'], 3)
 
+    def test_owner_defaults_and_no_redundant_animation_speed_control(self):
+        from rss_config import DEFAULTS, RenderOptions
+        self.assertEqual(DEFAULTS['headline_colour'], '#eea62b')
+        self.assertEqual(RenderOptions().headline_colour, '#eea62b')
+        js = (Path(__file__).parents[1] / 'app/templates/rss_editor.js').read_text()
+        # Site banners are still images: an animation speed control does nothing.
+        self.assertNotIn("rssControl(appearanceFields,'thumbnail_speed'", js)
+        self.assertNotIn('Thumbnail animation speed', js)
+        self.assertIn("headline_colour:'#eea62b'", js)
+        self.assertNotIn("headline_colour:'#ffffff'", js)
+        # Saved field stays accepted so existing configs load unchanged.
+        self.assertIn('thumbnail_speed', DEFAULTS)
+
     @unittest.skipUnless(os.environ.get('MATRIX_CHROMIUM'), 'Chromium required')
     def test_stale_error_and_bounded_empty_preview(self):
         import time
