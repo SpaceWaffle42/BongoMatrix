@@ -286,27 +286,13 @@ class PreparedFeedService(FeedService):
                         tuple(item.last_success for item in self._ready) == tuple(s.last_success for s in selected_sources)):
                     return
             items = []
+            from rss_banners import site_banner
             for story, source in zip(selected, selected_sources):
                 if self._stop.is_set() or cancel.is_set():
                     break
-                thumbnail, warning = None, ''
-                if story.media:
-                    url = story.media[0]
-                    try:
-                        cached = self.cache.get_thumbnail(url) if self.cache else None
-                        if cached and 0 <= self.clock() - cached[1] < EXPIRY_SECONDS:
-                            thumbnail = cached[0]
-                        else:
-                            result = self._preparer.prepare(url, cancel)
-                            thumbnail, warning = result.thumbnail, result.warning
-                            with self._cache_gate:
-                                with self._lock:
-                                    if generation != self._generation or cancel.is_set():
-                                        return
-                                if thumbnail and self.cache:
-                                    self.cache.put_thumbnail(url, thumbnail, self.clock())
-                    except Exception:
-                        warning = 'Thumbnail unavailable; using text only'
+                # Owner decision: stories show their site's banner (e.g. BBC red
+                # with "BBC"), never per-story publisher images; no media download.
+                thumbnail, warning = site_banner(source.url, source.feed.title if source.feed else ''), ''
                 try:
                     prepared = prepare_story(story, options, thumbnail=thumbnail)
                 except Exception:

@@ -79,7 +79,7 @@ const rssHelpText={
   exclude:'Any matching exclude word removes a story, even if it matches Include. Matching uses whole words without case sensitivity in headline, summary and categories. Example: sport, football. Blank excludes nothing.',
   frame_delay:'Seconds between one-pixel scroll steps: 0.1 = slow, 0.05 = normal, 0.025 = fast. Smaller delay is faster. Story length and font affect the total runtime.',
   headline_mode:'One pass scrolls the headline once, then restores and freezes it. Continuous repeats it until the summary finishes. This is not a number of stories or module loops.',
-  layout:'Automatic uses a 16×16 thumbnail only when a usable image is prepared; otherwise text uses the full width. Text only never reserves image space.',
+  layout:'Automatic shows the site banner (for example BBC: red with BBC on it) as a 16×16 tile beside each story; story photos are not used. Text only never reserves banner space.',
   thumbnail_speed:'Animation playback rate as a percentage: 100% is original speed, 200% is twice as fast, 50% is half speed. Still images do not animate.',
   headline_font:'Installed BDF font for headlines. Inspect the 64×32 Edit Preview for clipping; exact clipping measurements are not available.',
   summary_font:'Installed BDF font for story summaries. A larger font can increase scroll duration. Inspect Edit Preview for clipping.',
@@ -109,7 +109,7 @@ function renderRSSEditor(container){
   rssControl(fields,'include','Include whole words (comma-separated)');rssControl(fields,'exclude','Exclude whole words (comma-separated)');
   rssControl(fields,'headline_font','Headline font','text',installedFonts.map(font=>[font,font]));
   rssControl(fields,'summary_font','Summary font','text',installedFonts.map(font=>[font,font]));
-  rssControl(fields,'layout','Story layout','text',[['auto','Automatic image / text'],['text','Text only']]);
+  rssControl(fields,'layout','Story layout','text',[['auto','Site banner + text'],['text','Text only']]);
   rssControl(fields,'headline_colour','Headline colour','color');
   rssControl(fields,'summary_colour','Summary colour','color');
   rssControl(fields,'background_colour','Background colour','color');

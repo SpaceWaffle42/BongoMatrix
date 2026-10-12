@@ -137,29 +137,30 @@ class PreparedServiceTests(unittest.TestCase):
             service.configure(service.feeds, options='invalid')
         service.close()
 
-    def test_worker_close_cancels_decode_and_prepares_only_current_pass(self):
+    def test_worker_close_cancels_preparation_and_prepares_only_current_pass(self):
         from rss_service import PreparedFeedService
-        from rss_thumbnails import ThumbnailResult
-        entered, stopped = threading.Event(), threading.Event()
+        from modules.rss_renderer import prepare_story
+        entered, release = threading.Event(), threading.Event()
         calls = []
         class Client:
             def fetch(self, url):
                 return ('<rss><channel>' + ''.join(f'<item><guid>{i}</guid><title>{i}</title><enclosure type="image/png" url="https://example.com/{i}.png"/></item>' for i in range(200)) + '</channel></rss>').encode()
-        def blocked(url, stop):
-            calls.append(url)
+        def blocked(story, *args, **kwargs):
+            calls.append(story.title)
             entered.set()
-            stop.wait(2)
-            if stop.is_set():
-                stopped.set()
-            return ThumbnailResult()
+            release.wait(2)
+            return prepare_story(story, *args, **kwargs)
         service = PreparedFeedService(('https://example.com/feed',), client=Client(), count=1)
-        with patch('rss_thumbnails.ThumbnailPreparer.prepare', side_effect=blocked):
+        with patch('modules.rss_renderer.prepare_story', side_effect=blocked), \
+                patch('rss_thumbnails.ThumbnailPreparer.prepare', side_effect=AssertionError('story image download')):
             service.start()
             try:
                 self.assertTrue(entered.wait(1))
+                closer = threading.Thread(target=service.close, kwargs={'timeout': 2})
+                closer.start()
             finally:
-                service.close(timeout=1)
-        self.assertTrue(stopped.is_set())
+                release.set()
+            closer.join(3)
         self.assertFalse(service.running)
         self.assertEqual(len(calls), 1)
         self.assertEqual(service.peek().stories, ())
@@ -179,12 +180,13 @@ class PreparedServiceTests(unittest.TestCase):
             self.assertFalse(service.running)
             with patch('rss_thumbnails.ThumbnailPreparer.prepare', return_value=ThumbnailResult(warning='rejected')) as decode:
                 service.refresh_due()
-                self.assertEqual(decode.call_count, 1)
+                self.assertEqual(decode.call_count, 0, 'story images are never downloaded; site banner only')
             first = service.peek()
             self.assertEqual(first.items[0].story.keys, ('id:one',))
             self.assertEqual(first.items[0].source, 'https://example.com/feed')
-            self.assertIsNone(first.stories[0].thumbnail)
-            self.assertEqual(first.stories[0].warnings['headline_available_height'], 7)
+            from rss_banners import site_banner
+            self.assertEqual(first.stories[0].thumbnail, site_banner('https://example.com/feed', ''))
+            self.assertEqual(first.stories[0].warnings['headline_available_height'], 16)
             self.assertEqual(first.duration, duration_seconds(first.stories))
             with patch('builtins.open', side_effect=AssertionError('disk')), patch('modules.rss_renderer._font', side_effect=AssertionError('font')), patch.object(service.client, 'fetch', side_effect=AssertionError('network')):
                 for _ in range(3):
@@ -199,10 +201,9 @@ class PreparedServiceTests(unittest.TestCase):
             self.assertEqual(service.admit().stories, ())
             service.close()
 
-    def test_decode_barriers_reconfigure_reset_close_cannot_publish(self):
+    def test_preparation_barriers_reconfigure_reset_close_cannot_publish(self):
         from rss_service import PreparedFeedService
-        from rss_thumbnails import ThumbnailResult
-        tile = PreparedThumbnail((bytes(768),), (100,))
+        from modules.rss_renderer import prepare_story
         class Client:
             def fetch(self, url):
                 return b'<rss><channel><item><guid>one</guid><title>one</title><enclosure type="image/png" url="https://example.com/a.png"/></item></channel></rss>'
@@ -211,13 +212,11 @@ class PreparedServiceTests(unittest.TestCase):
                 cache = DiskFeedCache(directory)
                 service = PreparedFeedService(('https://example.com/feed',), client=Client(), cache=cache)
                 entered, release = threading.Event(), threading.Event()
-                stops = []
-                def blocked(url, stop):
-                    stops.append(stop)
+                def blocked(story, *args, **kwargs):
                     entered.set()
                     release.wait(2)
-                    return ThumbnailResult(tile)
-                with patch('rss_thumbnails.ThumbnailPreparer.prepare', side_effect=blocked):
+                    return prepare_story(story, *args, **kwargs)
+                with patch('modules.rss_renderer.prepare_story', side_effect=blocked):
                     worker = threading.Thread(target=service.refresh_due)
                     worker.start()
                     try:
@@ -230,7 +229,6 @@ class PreparedServiceTests(unittest.TestCase):
                             service.reset()
                         else:
                             service.close()
-                        self.assertTrue(stops[0].is_set(), 'old generation decoder not cancelled')
                         self.assertGreater(service.peek().generation, generation)
                     finally:
                         release.set()

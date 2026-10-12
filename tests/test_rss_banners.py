@@ -1,0 +1,74 @@
+import unittest
+from unittest.mock import patch
+
+from modules.rss_renderer import PreparedThumbnail
+
+
+def pixels(tile):
+    data = tile.frames[0]
+    return [tuple(data[i:i + 3]) for i in range(0, len(data), 3)]
+
+
+class SiteBannerTests(unittest.TestCase):
+    def test_bbc_is_red_tile_with_white_bbc_text(self):
+        from rss_banners import site_banner
+        for url in ('https://feeds.bbci.co.uk/news/rss.xml', 'https://www.bbc.co.uk/sport/rss.xml', 'https://bbc.com/x'):
+            tile = site_banner(url, 'BBC News')
+            self.assertIsInstance(tile, PreparedThumbnail)
+            self.assertEqual(len(tile.frames), 1)
+            colours = set(pixels(tile))
+            self.assertEqual(colours, {(0xBB, 0x19, 0x19), (0xFF, 0xFF, 0xFF)})
+        from rss_banners import banner_text
+        self.assertEqual(banner_text('https://feeds.bbci.co.uk/news/rss.xml', 'anything'), 'BBC')
+
+    def test_text_is_centred_and_inside_tile(self):
+        from rss_banners import site_banner
+        grid = pixels(site_banner('https://feeds.bbci.co.uk/news/rss.xml', ''))
+        white = [(i % 16, i // 16) for i, c in enumerate(grid) if c == (255, 255, 255)]
+        xs, ys = [x for x, _ in white], [y for _, y in white]
+        self.assertLessEqual(abs(min(xs) - (15 - max(xs))), 1)
+        self.assertLessEqual(abs(min(ys) - (15 - max(ys))), 1)
+
+    def test_lookalike_hosts_do_not_get_bbc_branding(self):
+        from rss_banners import banner_text
+        self.assertNotEqual(banner_text('https://notbbc.co.uk/rss', 'Not BBC'), 'BBC')
+        self.assertNotEqual(banner_text('https://bbc.co.uk.evil.example/rss', 'Fake'), 'BBC')
+
+    def test_unknown_site_uses_title_initials_and_stable_colour(self):
+        from rss_banners import banner_text, site_banner
+        self.assertEqual(banner_text('https://example.com/feed', 'Hacker News Daily'), 'HND')
+        self.assertEqual(banner_text('https://example.com/feed', ''), 'EXA')
+        self.assertEqual(banner_text('https://example.com/feed', '  '), 'EXA')
+        first = site_banner('https://example.com/feed', 'Hacker News')
+        self.assertEqual(first, site_banner('https://example.com/other', 'Hacker News'))
+        self.assertEqual(len(set(pixels(first))), 2)
+
+    def test_service_uses_site_banner_and_never_downloads_story_images(self):
+        from rss_service import PreparedFeedService
+        class Client:
+            def fetch(self, url):
+                return (b'<rss><channel><title>BBC News</title><item><guid>one</guid><title>one</title>'
+                        b'<enclosure type="image/png" url="https://example.com/a.png"/></item></channel></rss>')
+        service = PreparedFeedService(('https://feeds.bbci.co.uk/news/rss.xml',), client=Client(), count=1)
+        with patch('rss_thumbnails.ThumbnailPreparer.prepare', side_effect=AssertionError('story image download')):
+            service.refresh_due()
+        from rss_banners import site_banner
+        story = service.peek().stories[0]
+        self.assertEqual(story.thumbnail, site_banner('https://feeds.bbci.co.uk/news/rss.xml', 'BBC News'))
+        self.assertEqual(story.warnings['headline_available_height'], 16)
+        service.close()
+
+    def test_text_layout_still_has_no_banner(self):
+        from rss_config import RenderOptions
+        from rss_service import PreparedFeedService
+        class Client:
+            def fetch(self, url):
+                return b'<rss><channel><title>T</title><item><guid>one</guid><title>one</title></item></channel></rss>'
+        service = PreparedFeedService(('https://example.com/feed',), client=Client(), options=RenderOptions(layout='text'))
+        service.refresh_due()
+        self.assertIsNone(service.peek().stories[0].thumbnail)
+        service.close()
+
+
+if __name__ == '__main__':
+    unittest.main()

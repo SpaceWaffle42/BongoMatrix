@@ -442,18 +442,20 @@ class WebIntegrationTests(unittest.TestCase):
         def observed_refresh():
             refresh()
             finished.set()
-        def decode(url, stop):
-            stops.append(stop)
+        from modules.rss_renderer import prepare_story
+        def decode(story, *args, **kwargs):
+            # Story preparation (site banner + text) is the blocking stage now.
+            stops.append(story)
             entered.set()
             release.wait(5)
-            return ThumbnailResult(PreparedThumbnail((bytes(768),), (100,)))
+            return prepare_story(story, *args, **kwargs)
         def reset():
             try:
                 responses.append(f.paired_request('post', '/api/rss/reset', json={}))
             finally:
                 returned.set()
         wire = f'<rss><channel><item><title>obsolete</title><enclosure type="image/png" url="{image}"/></item></channel></rss>'.encode()
-        with patch.object(draft.client, 'fetch', return_value=wire) as fetch, patch.object(draft._preparer, 'prepare', side_effect=decode), patch.object(draft, 'refresh_due', side_effect=observed_refresh):
+        with patch.object(draft.client, 'fetch', return_value=wire) as fetch, patch('modules.rss_renderer.prepare_story', side_effect=decode), patch.object(draft, 'refresh_due', side_effect=observed_refresh):
             host.preview(settings)
             request = threading.Thread(target=reset)
             try:
@@ -463,7 +465,7 @@ class WebIntegrationTests(unittest.TestCase):
                 request.start()
                 self.assertTrue(returned.wait(1), 'reset route waited for draft decoder')
                 self.assertEqual(responses[0].status_code, 200)
-                self.assertTrue(stops[0].is_set())
+                self.assertTrue(stops)
                 self.assertFalse(host.service.running)
                 self.assertFalse(host.service._rotation.seen)
                 self.assertEqual(draft.feeds, ())
