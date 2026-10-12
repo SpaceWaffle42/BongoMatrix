@@ -76,11 +76,12 @@ class RendererTests(unittest.TestCase):
                 self.assertEqual(p.warnings['headline_clipped'], height > 7)
                 image, info = render_frame(p, 0)
                 self.assertEqual(image.size, (64, 32))
-                self.assertIsNone(image.crop((0, 7, 64, 32)).getbbox())
+                # Summary's first lines are visible and still at tick 0 (no empty area, no rise from below).
+                self.assertIsNotNone(image.crop((0, 8, 64, 32)).getbbox())
+                self.assertEqual(info['summary_y'], 0)
                 expected = {(x - min(0, min(a for a, b in points)), y - min(b for a, b in points)) for x, y in points}
                 actual = {(x, y) for y in range(7) for x in range(64) if image.getpixel((x, y)) != (0, 0, 0)}
                 self.assertEqual(actual, {(x, y) for x, y in expected if 0 <= x < 64 and 0 <= y < 7})
-                self.assertEqual(info['summary_y'], 24)
                 with self.assertRaises(TypeError):
                     p.warnings['headline_clipped'] = False
                 with self.assertRaises(dataclasses.FrozenInstanceError):
@@ -92,6 +93,13 @@ class RendererTests(unittest.TestCase):
 
 
     def test_passes_finish_restore_freeze_and_exact_duration(self):
+        """Headline first, then summary; nothing ever blank or jumping.
+
+        Phase 1: a headline wider than its row loops once seamlessly (a copy
+        follows after GAP pixels) and rests at its start; the summary's first
+        lines are shown still. Phase 2: the summary scrolls up and off while
+        the headline stays still. headline_mode is legacy and has no effect.
+        """
         from modules import rss_renderer as r
         from rss_config import RenderOptions
         from rss_data import Story
@@ -100,23 +108,30 @@ class RendererTests(unittest.TestCase):
             for summary in ('A', 'A ' * 160):
                 p = r.prepare_story(Story(('a',), 'A' * 20, summary, '', None), RenderOptions(headline_mode=mode))
                 frames = list(r.image_frames((p,)))
-                summary_end = 24 + (len(p.lines) - 1) * p.line_pitch + p.lines[-1].height
-                title_end = p.headline.width + 1
-                last = max(summary_end, title_end)
-                self.assertEqual(len(frames), last + 1)
-                self.assertAlmostEqual(sum(delay for image, delay, info in frames), (last + 1) * .05)
-                self.assertEqual(r.duration_seconds((p,)), (last + 1) * .05)
-                self.assertEqual(frames[0][2]['headline_x'], 0)
-                self.assertEqual(frames[p.headline.width][2]['headline_x'], -p.headline.width)
-                self.assertIsNone(frames[p.headline.width][0].crop((0, 0, 64, 7)).getbbox())
-                self.assertEqual(frames[title_end][2]['headline_x'], 0)
-                self.assertEqual(frames[title_end][0].crop((0, 0, 64, 7)).tobytes(), frames[0][0].crop((0, 0, 64, 7)).tobytes())
-                self.assertFalse(frames[summary_end - 1][2]['summary_done'])
-                self.assertIsNotNone(frames[summary_end - 1][0].crop((0, 8, 64, 32)).getbbox())
-                self.assertTrue(frames[summary_end][2]['summary_done'])
-                self.assertIsNone(frames[summary_end][0].crop((0, 8, 64, 32)).getbbox())
-                if last > title_end:
-                    self.assertEqual(frames[title_end + 1][2]['headline_x'], 0 if mode == 'once' else -1)
+                loop = p.headline.width + r.HEADLINE_GAP
+                self.assertGreater(loop, r.READ_HOLD)
+                scroll = (len(p.lines) - 1) * p.line_pitch + p.lines[-1].height
+                self.assertEqual(len(frames), loop + scroll + 1)
+                self.assertAlmostEqual(sum(delay for image, delay, info in frames), (loop + scroll + 1) * .05)
+                self.assertEqual(r.duration_seconds((p,)), (loop + scroll + 1) * .05)
+                start_row = frames[0][0].crop((0, 0, 64, 7)).tobytes()
+                # Headline phase: summary still at the top, headline moves 1px per frame.
+                for tick in (0, 1, loop // 2, loop - 1):
+                    self.assertEqual(frames[tick][2]['headline_x'], -tick)
+                    self.assertEqual(frames[tick][2]['summary_y'], 0)
+                    self.assertIsNotNone(frames[tick][0].crop((0, 0, 64, 7)).getbbox(), 'headline row never blank')
+                    self.assertIsNotNone(frames[tick][0].crop((0, 8, 64, 32)).getbbox(), 'summary never blank while headline scrolls')
+                # Seamless: after one loop the row is exactly the start, then it stays still.
+                self.assertEqual(frames[loop][0].crop((0, 0, 64, 7)).tobytes(), start_row)
+                for tick in (loop, loop + scroll // 2, loop + scroll):
+                    self.assertEqual(frames[tick][2]['headline_x'], 0)
+                    self.assertEqual(frames[tick][0].crop((0, 0, 64, 7)).tobytes(), start_row)
+                # Summary phase: scrolls up 1px per frame until it has left the area.
+                self.assertEqual(frames[loop + 1][2]['summary_y'], -1)
+                self.assertFalse(frames[loop + scroll - 1][2]['summary_done'])
+                self.assertIsNotNone(frames[loop + scroll - 1][0].crop((0, 8, 64, 32)).getbbox())
+                self.assertTrue(frames[loop + scroll][2]['summary_done'])
+                self.assertIsNone(frames[loop + scroll][0].crop((0, 8, 64, 32)).getbbox())
         self.assertEqual(list(r.image_frames(())), [])
         self.assertEqual(r.duration_seconds(()), 0)
         blank = r.prepare_story(Story((), '', '', '', None))
@@ -125,6 +140,29 @@ class RendererTests(unittest.TestCase):
         # A short static header without overview is a single bounded tick.
         short = r.prepare_story(Story((), 'A', '', '', None))
         self.assertEqual(len(list(r.image_frames((short,)))), 1)
+
+    def test_short_headline_does_not_scroll_and_banner_narrows_the_row(self):
+        from modules import rss_renderer as r
+        from rss_data import Story
+        from rss_banners import site_banner
+        p = r.prepare_story(Story(('a',), 'Hi', 'A', '', None))
+        frames = list(r.image_frames((p,)))
+        scroll = p.lines[-1].height
+        # Nothing to loop: the summary is held still for READ_HOLD ticks, then scrolls off.
+        self.assertEqual(len(frames), r.READ_HOLD + scroll + 1)
+        self.assertTrue(all(info['headline_x'] == 0 for _, _, info in frames))
+        self.assertEqual(frames[r.READ_HOLD][2]['summary_y'], 0)
+        self.assertEqual(frames[r.READ_HOLD + 1][2]['summary_y'], -1)
+        # 47px headline fits a plain row (64) but not beside the 15px banner (48).
+        title = 'A' * 12
+        plain = r.prepare_story(Story(('a',), title, 'A', '', None))
+        self.assertLessEqual(plain.headline.width, 64)
+        banner = r.prepare_story(Story(('a',), title, 'A', '', None),
+                                 banner=site_banner('https://feeds.bbci.co.uk/news/rss.xml', ''))
+        if banner.headline.width > 64 - 16:
+            loop = banner.headline.width + r.HEADLINE_GAP
+            self.assertEqual(len(list(r.image_frames((banner,)))), max(loop, r.READ_HOLD) + scroll + 1)
+            self.assertEqual(len(list(r.image_frames((plain,)))), r.READ_HOLD + scroll + 1, 'fits without banner: no scroll')
 
 
     def test_prepared_thumbnails_source_cadence_and_image_regions(self):
@@ -153,7 +191,8 @@ class RendererTests(unittest.TestCase):
                 self.assertIsNone(image.crop((16, 0, 17, 16)).getbbox())
                 self.assertIsNone(image.crop((0, 16, 64, 17)).getbbox())
                 if tick == 0:
-                    self.assertIsNone(image.crop((0, 17, 64, 32)).getbbox())
+                    self.assertIsNotNone(image.crop((0, 17, 64, 32)).getbbox(), 'summary shown, still, from the start')
+                    self.assertEqual(info['summary_y'], 0)
         for speed in (10, 100, 400):
             p = r.prepare_story(story, RenderOptions(thumbnail_speed=speed), thumbnail=thumbnail)
             frames = list(r.image_frames((p,)))
@@ -255,14 +294,17 @@ class RendererTests(unittest.TestCase):
         from rss_data import Story
         p = r.prepare_story(Story((), 'A' * 20, 'A', '', None))
         frames = list(r.image_frames((p,)))
-        self.assertEqual(len(frames), 102)
-        self.assertAlmostEqual(r.duration_seconds((p,)), 5.1)
-        self.assertEqual(frames[28][2]['summary_y'], -4)
-        self.assertFalse(frames[28][2]['summary_done'])
-        self.assertEqual(frames[29][2]['summary_y'], -5)
-        self.assertTrue(frames[29][2]['summary_done'])
+        # 100px headline loops once (100 + 16 gap = 116 ticks), then the 5px summary scrolls off.
+        self.assertEqual(len(frames), 116 + 5 + 1)
+        self.assertAlmostEqual(r.duration_seconds((p,)), 122 * .05)
         self.assertEqual(frames[100][2]['headline_x'], -100)
-        self.assertEqual(frames[101][2]['headline_x'], 0)
+        self.assertEqual(frames[115][2]['headline_x'], -115)
+        self.assertEqual(frames[116][2]['headline_x'], 0)
+        self.assertEqual(frames[116][2]['summary_y'], 0)
+        self.assertEqual(frames[120][2]['summary_y'], -4)
+        self.assertFalse(frames[120][2]['summary_done'])
+        self.assertEqual(frames[121][2]['summary_y'], -5)
+        self.assertTrue(frames[121][2]['summary_done'])
         large = r.prepare_story(Story((), 'W' * 300, 'W' * 2000, '', None))
         self.assertEqual(sum(len(line.glyphs) for line in large.lines), 2000)
         sizes = []

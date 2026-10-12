@@ -164,6 +164,10 @@ def _draw(area, run, x, y, colour):
                         area.putpixel((px, py), colour)
 
 
+HEADLINE_GAP = 16  # Pixels between the end of a looping headline and its repeat.
+READ_HOLD = 40  # Minimum ticks (2 s at normal speed) before the summary starts to move.
+
+
 def _headline_x(p):
     """Headline column: after a 16px thumbnail, or after the banner plus a 1px gap."""
     if p.thumbnail:
@@ -182,26 +186,41 @@ def render_frame(prepared, tick, *, thumbnail_index=0):
         b = prepared.banner
         image.paste(Image.frombytes('RGB', (b.width, b.height), b.pixels), (0, 0))
     title = Image.new('RGB', (64 - tx, hh), background)
-    title_end, summary_end, _ = _timing(prepared)
-    x = 0
-    if title_end and (tick < title_end or prepared.options.headline_mode == 'continuous'):
-        x = -(tick % title_end)
-    _draw(title, prepared.headline, x, 0, tuple(bytes.fromhex(prepared.options.headline_colour[1:])))
+    loop, hold, scroll, _ = _phases(prepared)
+    # Phase 1 (tick < hold): a too-wide headline loops once, seamlessly, with a
+    # repeat following HEADLINE_GAP pixels behind; the summary's first lines wait
+    # (at least READ_HOLD ticks so short stories stay readable).
+    # Phase 2: the headline rests at its start while the summary scrolls up/off.
+    x = -tick if tick < loop else 0
+    colour = tuple(bytes.fromhex(prepared.options.headline_colour[1:]))
+    _draw(title, prepared.headline, x, 0, colour)
+    if x:
+        _draw(title, prepared.headline, x + loop, 0, colour)
     image.paste(title, (tx, 0))
     summary = Image.new('RGB', (64, sh), background)
-    sy = sh - tick
+    sy = -max(0, tick - hold)
     for index, line in enumerate(prepared.lines):
         _draw(summary, line, 0, sy + index * prepared.line_pitch, tuple(bytes.fromhex(prepared.options.summary_colour[1:])))
     image.paste(summary, (0, hh + 1))
-    return image, {'summary_y': sy, 'headline_x': x, 'summary_done': tick >= summary_end}
+    return image, {'summary_y': sy, 'headline_x': x, 'summary_done': tick >= hold + scroll}
+
+
+def _phases(p):
+    """(headline loop ticks, summary start tick, summary scroll ticks, total frames).
+
+    headline_mode is a legacy saved field and has no effect.
+    """
+    width = 64 - _headline_x(p)
+    loop = p.headline.width + HEADLINE_GAP if p.headline.width > width else 0
+    scroll = (len(p.lines) - 1) * p.line_pitch + p.lines[-1].height if p.lines else 0
+    hold = max(loop, READ_HOLD) if p.lines else loop
+    count = hold + scroll + 1 if p.headline.height or p.lines or p.thumbnail or p.banner else 0
+    return loop, hold, scroll, count
 
 
 def _timing(p):
-    width, height = (64 - _headline_x(p), 15) if p.thumbnail else (64 - _headline_x(p), 24)
-    title_end = p.headline.width + 1 if p.headline.width > width else 0
-    summary_end = height + (len(p.lines) - 1) * p.line_pitch + p.lines[-1].height if p.lines else 0
-    count = max(title_end, summary_end) + 1 if p.headline.height or p.lines or p.thumbnail or p.banner else 0
-    return title_end, summary_end, count
+    loop, hold, scroll, count = _phases(p)
+    return loop, hold + scroll, count
 
 
 def _validated_pass(stories):

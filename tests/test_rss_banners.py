@@ -43,8 +43,8 @@ class SiteBannerTests(unittest.TestCase):
         image, _ = render_frame(p, 0)
         self.assertEqual(image.getpixel((0, 0)), (0xBB, 0x19, 0x19))
         self.assertEqual(image.getpixel((W - 1, H - 1)), (0xBB, 0x19, 0x19))
-        # Nothing of the banner below the headline row.
-        self.assertTrue(all(image.getpixel((x, y)) == (0, 0, 0) for x in range(W) for y in range(H, 32)))
+        # Nothing of the banner below the headline row: rows 7+ match the text-only layout.
+        self.assertEqual(image.crop((0, H, 64, 32)).tobytes(), render_frame(prepare_story(story), 0)[0].crop((0, H, 64, 32)).tobytes())
         # Summary starts at column 0 (full width), as in the text-only layout.
         text_only = render_frame(prepare_story(story), 24)[0]
         banner_frame = render_frame(p, 24)[0]

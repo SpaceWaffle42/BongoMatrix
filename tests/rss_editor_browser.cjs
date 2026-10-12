@@ -28,8 +28,8 @@ try{
  if(!await evaluate(`configBody().rss.feeds[0]==='https://example.com/rss'`))throw Error('Feed reorder failed');
  await change('[data-rss-setting="include"]','Headline');await change('[data-rss-setting="exclude"]','sport');
  await change('[data-rss-setting="frame_delay"]','0.025');
- await change('[data-rss-setting="headline_mode"]','continuous');
  await change('[data-rss-setting="count"]','3');
+ if(await evaluate(`!!document.querySelector('[data-rss-setting="headline_mode"]')||!!document.querySelector('[data-rss-setting="thumbnail_speed"]')`))throw Error('Redundant headline/animation controls still shown');
  if(!await evaluate(`!!document.querySelector('[data-rss-setting="layout"]')&&!!document.querySelector('[data-rss-setting="headline_colour"]')&&!!document.querySelector('[data-rss-setting="summary_colour"]')&&!!document.querySelector('[data-rss-setting="background_colour"]')`))throw Error('Layout or colour controls missing');
  await change('[data-rss-setting="layout"]','text');
  await change('[data-rss-setting="headline_colour"]','#12ab34');

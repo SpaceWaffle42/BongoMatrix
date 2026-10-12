@@ -27,7 +27,7 @@ class RSSEditorWebTests(unittest.TestCase):
         from rss_config import RenderOptions
         from modules.rss_renderer import prepare_story, image_frames
         story = parse_feed(feed, 'https://example.com/rss').stories[0]
-        prepared = prepare_story(story, RenderOptions(frame_delay=.025, headline_mode='continuous',
+        prepared = prepare_story(story, RenderOptions(frame_delay=.025,
             layout='text', headline_colour='#12ab34', summary_colour='#abcdef', background_colour='#010203'))
         image, _, _ = list(image_frames((prepared,)))[-1]
         self.assertEqual(result['finalPixels'], list(image.convert('RGBA').tobytes()))
@@ -41,6 +41,9 @@ class RSSEditorWebTests(unittest.TestCase):
         # Site banners are still images: an animation speed control does nothing.
         self.assertNotIn("rssControl(appearanceFields,'thumbnail_speed'", js)
         self.assertNotIn('Thumbnail animation speed', js)
+        # Headline timing is fixed (loop once, then summary), so no mode control.
+        self.assertNotIn("rssControl(fields,'headline_mode'", js)
+        self.assertIn('headline_mode', DEFAULTS)
         self.assertIn("headline_colour:'#eea62b'", js)
         self.assertNotIn("headline_colour:'#ffffff'", js)
         # Saved field stays accepted so existing configs load unchanged.
