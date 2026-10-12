@@ -13,7 +13,11 @@ DEFAULTS = {
     'title_font': '5x7', 'detail_font': '4x6', 'countdown_font': 'auto',
     'background': '#000000', 'text_colour': '#FFFFFF',
     'moon_colour': '#D9D9D9', 'accent': '#B388FF',
+    'view': 'simple',
 }
+VIEWS = ('simple', 'advanced')
+# Additive fields reconstructed on read for saves made before they existed.
+PROJECTED_FIELDS = ('view',)
 
 
 def validate(settings):
@@ -45,6 +49,7 @@ def validate(settings):
         require(settings[key] in (('auto', *fonts) if key == 'countdown_font' else fonts), 'installed font required')
     for key in ('background', 'text_colour', 'moon_colour', 'accent'):
         require(isinstance(settings[key], str) and re.fullmatch(r'#[0-9a-fA-F]{6}', settings[key]), 'invalid colour')
+    require(settings['view'] in VIEWS, 'invalid view')
 
 
 def location_values(config):

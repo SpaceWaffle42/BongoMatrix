@@ -15,6 +15,36 @@ from frame_capture import BdfFont
 from astronomy import AstronomyEvent, event_eligible, _utc
 
 UTC = dt.timezone.utc
+SPRITES = FONT_DIR.parent / 'astronomy' / 'sprites'
+MOON_FRAMES = 32  # Aseprite sheet frames: index i covers phase angle i*360/32.
+VIEWS = ('simple', 'advanced')
+
+
+@lru_cache(maxsize=4)
+def _sheet(name):
+    with Image.open(SPRITES / name) as image:
+        return image.convert('RGBA')
+
+
+def moon_sprite(size, phase_degrees):
+    """One immutable RGBA frame from the Aseprite-exported phase sheet."""
+    index = round((phase_degrees % 360) / 360 * MOON_FRAMES) % MOON_FRAMES
+    return _sheet(f'moon_{size}.png').crop((index * size, 0, (index + 1) * size, size))
+
+
+def event_icon(kind):
+    index = {'full_moon': 0, 'new_moon': 1}.get(kind, 2)
+    return _sheet('event_icons.png').crop((index * 8, 0, index * 8 + 8, 8))
+
+
+def _tint(sprite, colour):
+    """Scale the neutral sprite toward the configured moon colour, keep alpha."""
+    if colour == '#D9D9D9':
+        return sprite
+    r, g, b = bytes.fromhex(colour[1:])
+    channels = sprite.split()
+    scaled = [c.point(lambda v, k=k: min(255, v * k // 217)) for c, k in zip(channels[:3], (r, g, b))]
+    return Image.merge('RGBA', (*scaled, channels[3]))
 
 
 def minute_label(value, pattern='%H:%M'):
@@ -32,8 +62,11 @@ class MoonOptions:
     background: str = '#000000'
     text_colour: str = '#FFFFFF'
     moon_colour: str = '#D9D9D9'
+    view: str = 'simple'
 
     def __post_init__(self):
+        if self.view not in VIEWS:
+            raise ValueError('Moon view must be simple or advanced')
         for value, low, high in ((self.hold_seconds, 1, 300), (self.frame_delay, .01, 1)):
             if type(value) not in (int, float) or not math.isfinite(value) or not low <= value <= high:
                 raise ValueError('Invalid bounded card timing')
@@ -52,6 +85,7 @@ class PreparedMoon:
     options: MoonOptions
     clipping: tuple
     refresh_at: dt.datetime | None = None
+    sprite: Image.Image | None = None
 
 
 @dataclass(frozen=True)
@@ -160,8 +194,30 @@ def prepare_event(event, now, options=None):
     return PreparedEvent(event, now.astimezone(UTC), labels, lines, window_lines, fonts, options, clipping)
 
 
+def _simple_lines(phase_name, options):
+    """Two centred words beside the large moon; largest configured font that fits."""
+    words = tuple(phase_name.split(' ', 1)) if ' ' in phase_name else (phase_name, '')
+    for name in (options.title_font, options.detail_font, 'tom_thumb'):
+        measured = [_line(word, name, 0, 0, 33, 16) for word in words]
+        if all(line[1] <= 33 for line in measured):
+            break
+    heights = [max((py for _, py in line[0]), default=-1) + 1 for line in measured]
+    gap = 2
+    top = (32 - sum(heights) - gap) // 2
+    lines, y = [], top
+    for (points, width, _, _, _, _), height in zip(measured, heights):
+        lines.append((points, width, 31 + max(0, (33 - width) // 2), y, 33, height))
+        y += height + gap
+    return words, tuple(lines)
+
+
 def prepare_moon(moon, options=None):
     options = options or MoonOptions()
+    if options.view == 'simple':
+        labels, lines = _simple_lines(moon.phase_name, options)
+        clipping = tuple(line[1] > line[4] for line in lines)
+        sprite = _tint(moon_sprite(28, moon.phase_degrees), options.moon_colour)
+        return PreparedMoon(labels, lines, moon.phase_degrees, options, clipping, moon.next_phase.time, sprite)
     if moon.horizon_state == 'always_above':
         horizon = 'Always above horizon'
     elif moon.horizon_state == 'always_below':
@@ -176,7 +232,8 @@ def prepare_moon(moon, options=None):
         (options.title_font, 17, 0, 47, 7), (options.detail_font, 17, 9, 47, 6),
         (options.detail_font, 0, 18, 64, 6), (options.detail_font, 0, 26, 64, 6))))
     clipping = tuple(any(py >= line[5] for px, py in line[0]) for line in lines)
-    return PreparedMoon(labels, lines, moon.phase_degrees, options, clipping, moon.next_phase.time)
+    sprite = _tint(moon_sprite(16, moon.phase_degrees), options.moon_colour)
+    return PreparedMoon(labels, lines, moon.phase_degrees, options, clipping, moon.next_phase.time, sprite)
 
 
 def prepare_pass(engine, now, location, *, current_moon=True, lunar_events=False,
@@ -221,28 +278,14 @@ def render_frame(card, tick=0, *, now=None):
         index = next(i for i, w in enumerate(card.event.windows) if w.end > now.astimezone(UTC))
         counter, _, _ = _countdown_line(card.countdown_fonts, countdown)
         lines = card.lines[:2] + (card.window_lines[index], counter)
-        # Bundled 8x7 schematic lunar icons; unknown types use a generic star.
-        icons = {'full_moon': (0x3c, 0x7e, 0xff, 0xff, 0xff, 0x7e, 0x3c),
-                 'new_moon': (0x3c, 0x42, 0x81, 0x81, 0x81, 0x42, 0x3c)}
-        icon = icons.get(card.event.kind, (0x10, 0x54, 0x38, 0xfe, 0x38, 0x54, 0x10))
-        colour = tuple(bytes.fromhex(card.options.accent[1:]))
-        for y, row in enumerate(icon):
-            for x in range(8):
-                if row & (0x80 >> x):
-                    image.putpixel((x, y), colour)
+        # Aseprite 8x8 event icons (tinted with the accent); unknown types use a star.
+        image.paste(_tint(event_icon(card.event.kind), card.options.accent), (0, 0), event_icon(card.event.kind))
     else:
         lines = card.lines
-        moon_colour = tuple(bytes.fromhex(card.options.moon_colour[1:]))
-        # Orthographic sphere shading with a fixed schematic waxing-right view.
-        angle = math.radians(card.phase_degrees)
-        sx, sz = math.sin(angle), -math.cos(angle)
-        for y in range(16):
-            for x in range(16):
-                nx, ny = (x - 7.5) / 7.5, (y - 7.5) / 7.5
-                radius = nx * nx + ny * ny
-                if radius <= 1:
-                    lit = nx * sx + math.sqrt(1 - radius) * sz > 0
-                    image.putpixel((x, y), moon_colour if lit else (25, 25, 25))
+        # Aseprite-drawn phase sprite: 28 px simple view, 16 px advanced view.
+        # Fixed waxing-right schematic, not a sky-oriented render.
+        top = 2 if card.options.view == 'simple' else 0
+        image.paste(card.sprite, (top, top), card.sprite)
     for points, measured, x, y, width, height in lines:
         offset = -tick if measured > width and tick <= measured else 0
         for px, py in points:

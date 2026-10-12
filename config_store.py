@@ -26,7 +26,7 @@ from PIL import Image, ImageSequence
 from module_options import LAVA_PALETTES
 from event_countdown_config import DEFAULTS as COUNTDOWN_DEFAULTS, validate as validate_countdown
 from rss_config import DEFAULTS as RSS_DEFAULTS, validate as validate_rss
-from astronomy_config import DEFAULTS as ASTRONOMY_DEFAULTS, validate as validate_astronomy
+from astronomy_config import DEFAULTS as ASTRONOMY_DEFAULTS, PROJECTED_FIELDS as ASTRONOMY_PROJECTED_FIELDS, validate as validate_astronomy
 from font_catalog import available_font_names, text_width
 from modules.scroll_timing import duration_milliseconds, scroll_frames
 from media_resolver import candidate_media_references
@@ -84,6 +84,12 @@ def _serialize_config(config):
         for key in RSS_PROJECTED_FIELDS:
             if compact["rss"].get(key) == RSS_DEFAULTS[key]:
                 compact["rss"].pop(key, None)
+        data = json.dumps(compact, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    if len(data) > CONFIG_SNAPSHOT_LIMIT and isinstance(compact.get("astronomy"), dict):
+        compact["astronomy"] = dict(compact["astronomy"])
+        for key in ASTRONOMY_PROJECTED_FIELDS:
+            if compact["astronomy"].get(key) == ASTRONOMY_DEFAULTS[key]:
+                compact["astronomy"].pop(key, None)
         data = json.dumps(compact, sort_keys=True, separators=(",", ":")).encode("utf-8")
     return data
 
@@ -1454,6 +1460,10 @@ def _project_persisted_screen_rows(config):
     if isinstance(rss, dict):
         for key in RSS_PROJECTED_FIELDS:
             rss.setdefault(key, copy.deepcopy(RSS_DEFAULTS[key]))
+    astronomy = config.get("astronomy")
+    if isinstance(astronomy, dict):
+        for key in ASTRONOMY_PROJECTED_FIELDS:
+            astronomy.setdefault(key, copy.deepcopy(ASTRONOMY_DEFAULTS[key]))
     missing_modules = [name for name in ("event_countdown", "rss", "astronomy") if name not in config]
     for name in missing_modules:
         config[name] = copy.deepcopy(DEFAULT_CONFIG[name])

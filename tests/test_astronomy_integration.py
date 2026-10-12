@@ -175,6 +175,9 @@ class HostTests(unittest.TestCase):
         config = copy.deepcopy(DEFAULT_CONFIG)
         config['revision'] = revision
         config['astronomy']['timezone'] = 'Europe/London'
+        # Refresh-boundary assertions need the dated, scrolling Advanced labels;
+        # the Simple view (phase name only) is covered by the renderer tests.
+        config['astronomy']['view'] = 'advanced'
         for row in config['playlist']:
             if row['module'] == 'astronomy':
                 row['enabled'] = True
@@ -274,6 +277,27 @@ class SettingsTests(unittest.TestCase):
             rows = [r for r in saved['playlist'] if r['module'] != 'astronomy']
             store.update({'playlist': rows})
             self.assertEqual(ConfigStore(store.path).get()['playlist'], rows)
+
+    def test_view_defaults_simple_projects_old_saves_and_persists_advanced(self):
+        from config_store import ConfigStore
+        from astronomy_config import DEFAULTS, validate
+        self.assertEqual(DEFAULTS['view'], 'simple')
+        with self.assertRaises(ValueError):
+            validate(dict(DEFAULTS, view='fancy'))
+        with tempfile.TemporaryDirectory() as directory:
+            store = ConfigStore(Path(directory) / 'config.json')
+            saved = store.update({'astronomy': {'timezone': 'Europe/London', 'moon_colour': '#ABCDEF'}})
+            # A save written before the toggle existed has no 'view' key.
+            old = json.loads(store.path.read_text())
+            old['astronomy'].pop('view')
+            store.path.write_text(json.dumps(old))
+            before = store.path.read_bytes()
+            projected = ConfigStore(store.path).get()
+            self.assertEqual(projected['astronomy'], saved['astronomy'])
+            self.assertEqual(store.path.read_bytes(), before)  # read never rewrites
+            advanced = ConfigStore(store.path).update({'astronomy': {'view': 'advanced'}})
+            self.assertEqual(advanced['astronomy']['moon_colour'], '#ABCDEF')
+            self.assertEqual(ConfigStore(store.path).get()['astronomy']['view'], 'advanced')
 
     def test_capacity_predecessor_with_both_nondefault_modules_is_preserved(self):
         from config_store import ConfigStore, DEFAULT_CONFIG, CONFIG_SNAPSHOT_LIMIT

@@ -18,7 +18,7 @@ class RendererTests(unittest.TestCase):
         from modules import astronomy_renderer as r
         with Astronomy() as engine:
             moon = engine.moon(dt.datetime(2024, 4, 8, 12, tzinfo=UTC), Location(51.4779, 0, 'Europe/London', 'Greenwich', 'weather'))
-        p = r.prepare_moon(moon)
+        p = r.prepare_moon(moon, r.MoonOptions(view='advanced'))
         self.assertEqual(p.labels[0], 'New Moon')
         self.assertEqual(p.labels[1], '0% lit')
         self.assertEqual(p.labels[2], 'R 06:15  S 19:41')
@@ -75,6 +75,58 @@ class RendererTests(unittest.TestCase):
             self.assertEqual(r.run(matrix, (p,), stop, clock=clock), 0)
         self.assertEqual(list(r.preview_frames((p,), stop)), [])
 
+    def test_simple_view_is_sprite_moon_and_phase_name_only(self):
+        from astronomy import Astronomy, Location, UTC
+        from modules import astronomy_renderer as r
+        location = Location(51.4779, 0, 'Europe/London', 'Greenwich', 'weather')
+        with Astronomy() as engine:
+            full = engine.moon(dt.datetime(2024, 4, 23, 23, 49, tzinfo=UTC), location)
+            crescent = engine.moon(dt.datetime(2024, 4, 12, 12, tzinfo=UTC), location)
+        self.assertEqual(r.MoonOptions().view, 'simple')
+        with self.assertRaises(ValueError):
+            r.MoonOptions(view='fancy')
+        card = r.prepare_moon(full)
+        self.assertEqual(card.labels, ('Full', 'Moon'))
+        self.assertEqual(len(card.lines), 2)
+        image = list(r.image_frames((card,)))[-1][0]
+        # Large Aseprite sprite occupies the left 28x28 region, centred vertically.
+        moon_box = image.crop((0, 0, 32, 32)).getbbox()
+        self.assertIsNotNone(moon_box)
+        self.assertGreaterEqual(moon_box[2] - moon_box[0], 26)
+        self.assertGreaterEqual(moon_box[3] - moon_box[1], 26)
+        # Shaded sprite: several real tones, not a flat two-colour disc.
+        colours = {image.getpixel((x, y)) for x in range(32) for y in range(32)}
+        self.assertGreaterEqual(len(colours), 4)
+        # Simple view never shows illumination, rise/set or next-phase details.
+        self.assertFalse(any('%' in label or 'Next' in label or 'R ' in label for label in card.labels))
+        # Waxing crescent is lit on the right-hand side of the disc.
+        thin = list(r.image_frames((r.prepare_moon(crescent),)))[-1][0]
+        brightness = lambda x0, x1: sum(sum(thin.getpixel((x, y))) for x in range(x0, x1) for y in range(2, 30))
+        self.assertGreater(brightness(16, 30), brightness(2, 16) * 2)
+        self.assertEqual(r.prepare_moon(crescent).labels, ('Waxing', 'Crescent'))
+
+    def test_advanced_view_keeps_details_with_sprite_moon(self):
+        from astronomy import Astronomy, Location, UTC
+        from modules import astronomy_renderer as r
+        with Astronomy() as engine:
+            moon = engine.moon(dt.datetime(2024, 4, 8, 12, tzinfo=UTC), Location(51.4779, 0, 'Europe/London', 'Greenwich', 'weather'))
+        card = r.prepare_moon(moon, r.MoonOptions(view='advanced'))
+        self.assertEqual(card.labels[0], 'New Moon')
+        self.assertEqual(len(card.labels), 4)
+        image = list(r.image_frames((card,)))[-1][0]
+        self.assertIsNotNone(image.crop((0, 0, 16, 16)).getbbox())
+
+    def test_moon_sprites_are_versioned_aseprite_exports(self):
+        from pathlib import Path
+        from modules import astronomy_renderer as r
+        sprites = Path(r.__file__).resolve().parent.parent / 'resources' / 'astronomy' / 'sprites'
+        for size in (28, 16):
+            self.assertTrue((sprites / f'moon_{size}.aseprite').is_file())
+            sheet = Image.open(sprites / f'moon_{size}.png')
+            self.assertEqual(sheet.size, (size * r.MOON_FRAMES, size))
+        self.assertTrue((sprites / 'event_icons.aseprite').is_file())
+        self.assertEqual(Image.open(sprites / 'event_icons.png').size, (24, 8))
+
     def test_rounding_is_on_utc_timeline_at_dst_fold(self):
         self.assertIsNotNone(importlib.util.find_spec('modules.astronomy_renderer'), 'Astronomy shared renderer absent')
         from modules.astronomy_renderer import minute_label
@@ -102,7 +154,7 @@ class RendererTests(unittest.TestCase):
             self.assertEqual(r.prepare_pass(engine, now, location, stop_event=stop), ())
             moon = engine.moon(now, location)
         for name in available_font_names():
-            options = r.MoonOptions(title_font=name, detail_font=name, hold_seconds=3, background='#010203', text_colour='#102030', moon_colour='#abcdef')
+            options = r.MoonOptions(title_font=name, detail_font=name, hold_seconds=3, background='#010203', text_colour='#102030', moon_colour='#abcdef', view='advanced')
             card = r.prepare_moon(moon, options)
             frames = list(r.image_frames((card,)))
             self.assertEqual(frames[-1][1], 3)

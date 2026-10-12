@@ -92,16 +92,21 @@ function renderAstronomyEditor(container) {
     const input=key==='timezone'?editorTimezoneSelect(astronomySettings[key]):document.createElement(options?'select':'input');input.dataset.astronomySetting=key;
     if(options)for(const value of options){const option=document.createElement('option');option.value=value;option.textContent=value;input.append(option)}
     else if(key!=='timezone')input.type=type;
-    if(type==='checkbox')input.checked=astronomySettings[key];else input.value=astronomySettings[key];
+    // 'view' is stored as 'simple'/'advanced' but edited as one checkbox.
+    if(key==='view')input.checked=astronomySettings.view==='advanced';else if(type==='checkbox')input.checked=astronomySettings[key];else input.value=astronomySettings[key];
     if(min!==null)input.min=min;if(max!==null)input.max=max;if(type==='number')input.step=key.includes('days')||key==='event_limit'?'1':'any';
     input.addEventListener(type==='checkbox'||options||key==='timezone'?'change':'input',()=>{
-      astronomySettings[key]=type==='checkbox'?input.checked:type==='number'?Number(input.value):input.value;
+      astronomySettings[key]=key==='view'?(input.checked?'advanced':'simple'):type==='checkbox'?input.checked:type==='number'?Number(input.value):input.value;
       astronomyChanged();
       if(key==='location_source')updateLocationFields();
     });
     wrapper.append(input);fields.append(wrapper);return input;
   }
-  control('current_moon','Current Moon','checkbox');control('lunar_events','Local new/full Moon events','checkbox');
+  control('current_moon','Current Moon','checkbox');
+  control('view','Advanced Moon view','checkbox');
+  editorParagraph(content,'Simple shows only the Moon picture and its phase name. Advanced adds illumination, rise and set times and the next phase.');
+  switchFields(content);
+  control('lunar_events','Local new/full Moon events','checkbox');
   control('horizon_days','Search ahead (local dates including today)','number',null,1,366);
   control('event_limit','Maximum event cards per pass','number',null,1,50);
   switchFields(location);
@@ -125,7 +130,7 @@ function renderAstronomyEditor(container) {
   const timing=document.createElement('p');timing.dataset.astronomyTiming='';timing.setAttribute('role','status');timing.textContent='Draft not calculated. Select a timezone and content, then Calculate. All content disabled safely yields to the next module.';actions.append(timing);
   const details=document.createElement('details'),summary=document.createElement('summary'),text=document.createElement('p');
   summary.textContent='Offline source and limitations';
-  text.textContent='Eclipses, supermoon/blue-moon labels, meteor showers and planetary events are not implemented. No provider is connected. Phase time is the global instant; countdown targets the next local observing window, not a phase duration. Moon icon is schematic, not sky-oriented. Place search/map remains unavailable in this local slice. NASA/JPL DE440s, Skyfield 1.54, checksum verified in background before use; supported dates 2000–2100. Bundled time tables; future UTC/UT1 uncertainty. Moon >10° and Sun <−18° for at least 10 continuous minutes. No terrain or weather visibility model. No event catalogue or updater installed. Production static-data/dependency delivery remains blocked.';
+  text.textContent='Eclipses, supermoon/blue-moon labels, meteor showers and planetary events are not implemented. No provider is connected. Phase time is the global instant; countdown targets the next local observing window, not a phase duration. Moon picture is a pixel-art schematic drawn in Aseprite (waxing lit on the right), not sky-oriented. Place search/map remains unavailable in this local slice. NASA/JPL DE440s, Skyfield 1.54, checksum verified in background before use; supported dates 2000–2100. Bundled time tables; future UTC/UT1 uncertainty. Moon >10° and Sun <−18° for at least 10 continuous minutes. No terrain or weather visibility model. No event catalogue or updater installed. Production static-data/dependency delivery remains blocked.';
   details.append(summary,text);actions.append(details);
 }
 window.addEventListener('beforeunload',()=>astronomyTimingRequest?.abort(),{once:true});
