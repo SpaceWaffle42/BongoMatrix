@@ -67,6 +67,29 @@ class TransportTests(unittest.TestCase):
             server.server_close()
             thread.join()
 
+    def test_default_resolver_queries_each_family_separately(self):
+        # Some LAN resolvers drop glibc's parallel A+AAAA query, so AF_UNSPEC
+        # stalls for libc's 5 s retry and exceeds the DNS deadline.
+        import rss_transport as api
+        families = []
+        def getaddrinfo(host, port, family=0, type=0, *rest):
+            families.append(family)
+            if family == socket.AF_UNSPEC:
+                time.sleep(5)
+            if family == socket.AF_INET6:
+                raise socket.gaierror(socket.EAI_NONAME, 'no AAAA')
+            return [(socket.AF_INET, type, 6, '', ('93.184.216.34', port))]
+        with patch.object(api.socket, 'getaddrinfo', getaddrinfo):
+            started = time.monotonic()
+            self.assertEqual(api._resolve('feed.example', 443), ['93.184.216.34'])
+            self.assertLess(time.monotonic() - started, 1)
+        self.assertNotIn(socket.AF_UNSPEC, families)
+        self.assertEqual(sorted(families), sorted([socket.AF_INET, socket.AF_INET6]))
+        def both_fail(*args, **kwargs):
+            raise socket.gaierror(socket.EAI_NONAME, 'missing')
+        with patch.object(api.socket, 'getaddrinfo', both_fail), self.assertRaises(OSError):
+            api._resolve('missing.example', 443)
+
     def test_dns_slot_wait_is_part_of_total_deadline(self):
         import rss_transport as api
         class Slots:

@@ -21,7 +21,20 @@ _DNS_SLOTS = threading.BoundedSemaphore(4)
 
 
 def _resolve(host, port):
-    return [row[4][0] for row in socket.getaddrinfo(host, port, type=socket.SOCK_STREAM)]
+    # Query A and AAAA separately. Some LAN resolvers drop glibc's parallel
+    # AF_UNSPEC A+AAAA request, stalling until libc's 5 s retry. Every returned
+    # address still passes the caller's public-destination checks.
+    addresses, failure = [], None
+    for family in (socket.AF_INET, socket.AF_INET6):
+        try:
+            rows = socket.getaddrinfo(host, port, family, socket.SOCK_STREAM)
+        except OSError as error:
+            failure = error
+            continue
+        addresses.extend(row[4][0] for row in rows if row[4][0] not in addresses)
+    if not addresses:
+        raise failure or OSError('DNS unavailable')
+    return addresses
 
 
 def _bounded_resolve(resolver, host, port, timeout):
