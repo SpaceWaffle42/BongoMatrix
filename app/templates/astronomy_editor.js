@@ -40,14 +40,16 @@ function astronomyChanged() {
 }
 function astronomyWeatherDependency() {
   const weather=configBody().weather;
-  return astronomySettings.location_source==='weather'?JSON.stringify([weather.latitude,weather.longitude,weather.location]):'';
+  // A blank astronomy timezone follows Weather's, so a Weather zone change matters for either source.
+  return JSON.stringify([astronomySettings.location_source==='weather'?[weather.latitude,weather.longitude,weather.location]:null,astronomySettings.timezone?null:weather.timezone]);
 }
 let astronomyLastWeatherDependency;
 function astronomyWeatherChanged() {
   const dependency=astronomyWeatherDependency();
   if(dependency===astronomyLastWeatherDependency)return;
   astronomyLastWeatherDependency=dependency;
-  if(astronomySettings.location_source==='weather')astronomyChanged();
+  astronomyFollowWeatherOption(document.querySelector('[data-astronomy-setting="timezone"]'));
+  astronomyChanged();
 }
 const resetBuiltInWithoutAstronomy = resetBuiltInModule;
 resetBuiltInModule = function(module) {
@@ -71,7 +73,7 @@ async function calculateAstronomy(container) {
       astronomyTiming=result;syncPlaylistDurations();
       note.textContent=`${result.status} · ${result.ready_count} cards · ${result.duration_seconds.toFixed(2)} s. ${result.error||''}`;
       if(result.clipping?.some(card=>card.some(Boolean)))note.textContent+=' Font clipping: choose a smaller installed font.';
-      if(result.status==='location_required')note.textContent+=' Enter an explicit IANA timezone; none is inferred from weather.';
+      if(result.status==='location_required')note.textContent+=' No timezone known: choose the Weather location from search again, or pick a timezone here.';
       if(result.status!=='preparing')return;
       await new Promise(resolve=>setTimeout(resolve,100));
       if(request.signal.aborted||generation!==astronomyTimingGeneration)return;
@@ -79,10 +81,17 @@ async function calculateAstronomy(container) {
     note.textContent='Preparation still pending; retry Calculate.';
   } catch(error) {if(generation===astronomyTimingGeneration&&error.name!=='AbortError')note.textContent=error.message;}
 }
+// The blank timezone option means "same as Weather"; label it with Weather's current zone.
+function astronomyFollowWeatherOption(select) {
+  if(!select)return;
+  // Read the Weather field directly: editors render before configBody() is ready.
+  const zone=document.querySelector('#weather-timezone')?.value||'';
+  select.options[0].textContent=zone?`Same as Weather (${zone})`:'Same as Weather (unknown: choose Weather location again)';
+}
 function renderAstronomyEditor(container) {
   editorCloseHelp(container);container.replaceChildren();
   const note=document.createElement('p');note.dataset.astronomyNote='';
-  note.textContent='Offline current Moon and local new/full Moon events only. Other astronomy events are not implemented. Choose content and an explicit timezone, then Calculate or Preview your draft. Save applies changes to playback.';
+  note.textContent='Offline current Moon and local new/full Moon events only. Other astronomy events are not implemented. Choose content, then Calculate or Preview your draft. Save applies changes to playback.';
   container.append(note);
   const content=editorSection(container,'Content'),location=editorSection(container,'Location'),playback=editorSection(container,'Playback'),appearance=editorSection(container,'Appearance',true),actions=editorSection(container,'Status and actions');
   let fields=document.createElement('div');fields.className='editor-fields';content.append(fields);
@@ -112,12 +121,13 @@ function renderAstronomyEditor(container) {
   switchFields(location);
   control('location_source','Coordinate source','text',['weather','override']);
   const source=fields.querySelector('[data-astronomy-setting="location_source"]');source.options[0].textContent='Use Weather coordinates';source.options[1].textContent='Use separate coordinates';
-  control('timezone','Timezone (required for either source)');
+  control('timezone','Timezone');
+  astronomyFollowWeatherOption(fields.querySelector('[data-astronomy-setting="timezone"]'));
   const locationNote=editorParagraph(location,'');
   switchFields(location);const overrides=fields;
   control('location_label','Override place label');
   control('latitude','Override latitude','number',null,-90,90);control('longitude','Override longitude','number',null,-180,180);
-  function updateLocationFields(){overrides.hidden=astronomySettings.location_source!=='override';locationNote.textContent=overrides.hidden?'Uses the coordinates selected in Weather. Choose the timezone explicitly; none is inferred. Blank timezone skips playback.':'Enter decimal coordinates for this module only. Weather is unchanged. Choose a timezone explicitly; blank skips playback.'}
+  function updateLocationFields(){overrides.hidden=astronomySettings.location_source!=='override';locationNote.textContent=overrides.hidden?'Uses the coordinates selected in Weather. Timezone follows the Weather location unless you pick one.':'Enter decimal coordinates for this module only. Weather is unchanged. Timezone follows the Weather location unless you pick one.'}
   updateLocationFields();switchFields(playback);
   control('moon_hold_seconds','Moon hold seconds','number',null,1,300);control('event_hold_seconds','Event hold seconds','number',null,1,300);
   control('frame_delay','Scroll frame delay seconds','number',null,.01,1);

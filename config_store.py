@@ -20,6 +20,7 @@ import threading
 from decimal import Decimal
 from pathlib import Path
 from time import monotonic, sleep
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from PIL import Image, ImageSequence
 
@@ -85,6 +86,15 @@ def _serialize_config(config):
             if compact["rss"].get(key) == RSS_DEFAULTS[key]:
                 compact["rss"].pop(key, None)
         data = json.dumps(compact, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    if (
+        len(data) > CONFIG_SNAPSHOT_LIMIT
+        and isinstance(compact.get("weather"), dict)
+        and compact["weather"].get("timezone") == _projected_weather_timezone(compact["weather"])
+    ):
+        # Lossless: read projection reconstructs exactly this value.
+        compact["weather"] = dict(compact["weather"])
+        compact["weather"].pop("timezone", None)
+        data = json.dumps(compact, sort_keys=True, separators=(",", ":")).encode("utf-8")
     if len(data) > CONFIG_SNAPSHOT_LIMIT and isinstance(compact.get("astronomy"), dict):
         compact["astronomy"] = dict(compact["astronomy"])
         for key in ASTRONOMY_PROJECTED_FIELDS:
@@ -149,6 +159,9 @@ DEFAULT_CONFIG = {
         "location": "London, England, GB",
         "latitude": 51.5074,
         "longitude": -0.1278,
+        # IANA zone of the chosen location (from search); "" when unknown.
+        # Astronomy follows it unless the user picks its own timezone.
+        "timezone": "Europe/London",
         "units": "celsius",
         "temperature_y": 17,
         "ticker_y": 31,
@@ -884,6 +897,7 @@ def validate_config(
             raise ValueError("weather latitude must be between -90 and 90")
         if isinstance(longitude, bool) or not isinstance(longitude, (int, float)) or not -180 <= longitude <= 180:
             raise ValueError("weather longitude must be between -180 and 180")
+    _validate_weather_timezone(config["weather"]["timezone"])
     if config["weather"]["scroll_direction"] not in {"left", "right"}:
         raise ValueError("weather scroll direction must be left or right")
     _validate_frame_delay(config["weather"]["scroll_speed"], "weather")
@@ -1447,6 +1461,28 @@ def _validate_client_contract(client_contract):
         raise ValueError("client contract is invalid")
 
 
+def _validate_weather_timezone(zone):
+    if not isinstance(zone, str) or len(zone) > 100:
+        raise ValueError("weather timezone must be an IANA timezone name")
+    if zone:
+        try:
+            ZoneInfo(zone)
+        except (ValueError, ZoneInfoNotFoundError) as exc:
+            raise ValueError("weather timezone must be an IANA timezone name") from exc
+
+
+def _projected_weather_timezone(weather):
+    """Zone for saves made before weather.timezone existed.
+
+    Only the untouched default London coordinates imply a zone; any other
+    place stays unknown ("") until it is chosen again from search.
+    """
+    default = DEFAULT_CONFIG["weather"]
+    if (weather.get("latitude"), weather.get("longitude")) == (default["latitude"], default["longitude"]):
+        return default["timezone"]
+    return ""
+
+
 def _project_persisted_screen_rows(config):
     """Read schema-4 single-source rows without migrating the saved document.
 
@@ -1464,6 +1500,9 @@ def _project_persisted_screen_rows(config):
     if isinstance(astronomy, dict):
         for key in ASTRONOMY_PROJECTED_FIELDS:
             astronomy.setdefault(key, copy.deepcopy(ASTRONOMY_DEFAULTS[key]))
+    weather = config.get("weather")
+    if isinstance(weather, dict) and "timezone" not in weather:
+        weather["timezone"] = _projected_weather_timezone(weather)
     missing_modules = [name for name in ("event_countdown", "rss", "astronomy") if name not in config]
     for name in missing_modules:
         config[name] = copy.deepcopy(DEFAULT_CONFIG[name])

@@ -264,7 +264,7 @@ class SettingsTests(unittest.TestCase):
             store = ConfigStore(Path(directory) / 'config.json')
             self.assertIn('astronomy', store.get(), 'Astronomy settings not integrated')
             settings = store.get()['astronomy']
-            self.assertEqual(settings['timezone'], '')  # weather has no timezone
+            self.assertEqual(settings['timezone'], '')  # blank = follow the Weather timezone
             self.assertEqual(settings['location_source'], 'weather')
             saved = store.update({'astronomy': {'timezone': 'Europe/London', 'lunar_events': True}})
             self.assertEqual(ConfigStore(store.path).get(), saved)
@@ -646,3 +646,59 @@ class WebTests(unittest.TestCase):
                 release.set()
                 worker.join(2)
                 callback['request'].cleanup()
+
+
+class WeatherTimezoneDefaultTests(unittest.TestCase):
+    """Owner: Astronomy timezone defaults to the Weather location's; user may override."""
+
+    def test_blank_astronomy_timezone_follows_weather_and_explicit_overrides(self):
+        from astronomy_config import DEFAULTS, location_values
+        from config_store import DEFAULT_CONFIG
+        self.assertEqual(DEFAULTS['timezone'], '')
+        self.assertEqual(DEFAULT_CONFIG['weather']['timezone'], 'Europe/London')
+        weather = dict(DEFAULT_CONFIG['weather'], latitude=42.24, longitude=-8.72,
+                       location='Vigo, Galicia, ES', timezone='Europe/Madrid')
+        follow = location_values({'astronomy': dict(DEFAULTS), 'weather': weather})
+        self.assertEqual(follow[:4], (42.24, -8.72, 'Europe/Madrid', 'Vigo, Galicia, ES'))
+        self.assertIn('Weather timezone', follow[4])
+        own = location_values({'astronomy': dict(DEFAULTS, timezone='Asia/Tokyo'), 'weather': weather})
+        self.assertEqual(own[2], 'Asia/Tokyo')
+        override = location_values({'astronomy': dict(DEFAULTS, location_source='override', latitude=1, longitude=2),
+                                    'weather': weather})
+        self.assertEqual(override[:3], (1, 2, 'Europe/Madrid'))
+        self.assertIsNone(location_values({'astronomy': dict(DEFAULTS), 'weather': dict(weather, timezone='')}))
+
+    def test_weather_timezone_validated_and_projected_for_old_saves_without_rewrite(self):
+        from config_store import ConfigStore, DEFAULT_CONFIG
+        with tempfile.TemporaryDirectory() as directory:
+            store = ConfigStore(Path(directory) / 'config.json')
+            for bad in ('Not/AZone', 5, 'x' * 101):
+                with self.subTest(bad=bad), self.assertRaises(ValueError):
+                    store.update({'weather': {'timezone': bad}})
+            saved = store.update({'weather': {'location': 'Vigo, Galicia, ES', 'latitude': 42.24,
+                                              'longitude': -8.72, 'timezone': 'Europe/Madrid'}})
+            self.assertEqual(ConfigStore(store.path).get()['weather']['timezone'], 'Europe/Madrid')
+            self.assertEqual(saved['openweather_overview'].get('timezone'), None)
+            # Saves written before weather.timezone existed.
+            for coords, expected in (((51.5074, -0.1278), 'Europe/London'), ((42.24, -8.72), '')):
+                old = json.loads(store.path.read_text())
+                old['weather'].pop('timezone', None)
+                old['weather']['latitude'], old['weather']['longitude'] = coords
+                store.path.write_text(json.dumps(old))
+                before = store.path.read_bytes()
+                with self.subTest(coords=coords):
+                    self.assertEqual(ConfigStore(store.path).get()['weather']['timezone'], expected)
+                    self.assertEqual(store.path.read_bytes(), before)
+            self.assertEqual(ConfigStore(store.path).update({})['weather']['timezone'], '')
+
+    def test_location_search_carries_provider_timezone(self):
+        from unittest.mock import patch
+        from modules.weather_app import OpenMeteoClient
+        result = {'results': [
+            {'name': 'Vigo', 'admin1': 'Galicia', 'country_code': 'ES', 'latitude': 42.24, 'longitude': -8.72,
+             'timezone': 'Europe/Madrid'},
+            {'name': 'Nowhere', 'country_code': 'XX', 'latitude': 1, 'longitude': 2, 'timezone': 'Bad/Zone'},
+            {'name': 'Plain', 'country_code': 'YY', 'latitude': 3, 'longitude': 4}]}
+        with patch.object(OpenMeteoClient, '_get_json', return_value=result):
+            places = OpenMeteoClient().search_locations('x')
+        self.assertEqual([p['timezone'] for p in places], ['Europe/Madrid', '', ''])

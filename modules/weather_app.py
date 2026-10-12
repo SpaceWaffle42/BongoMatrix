@@ -8,10 +8,22 @@ import time
 from dataclasses import dataclass
 from urllib.parse import urlencode
 from urllib.request import Request, urlopen
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from api_timeouts import DEFAULT_API_TIMEOUT_SECONDS
 from font_catalog import text_width
 from modules.scroll_timing import duration_milliseconds, frame_delay_seconds, scroll_frames
+
+
+def _known_timezone(zone):
+    """Provider timezone accepted only if this host's tz database knows it."""
+    if not isinstance(zone, str) or not zone or len(zone) > 100:
+        return False
+    try:
+        ZoneInfo(zone)
+    except (ValueError, ZoneInfoNotFoundError):
+        return False
+    return True
 
 
 @dataclass(frozen=True)
@@ -100,10 +112,12 @@ class OpenMeteoClient:
             if not label or key in seen:
                 continue
             seen.add(key)
+            zone = place.get("timezone")
             suggestions.append({
                 "label": label,
                 "latitude": place["latitude"],
                 "longitude": place["longitude"],
+                "timezone": zone if _known_timezone(zone) else "",
             })
         return suggestions
 

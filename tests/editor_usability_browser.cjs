@@ -57,8 +57,14 @@ try{
   await send('Page.navigate',{url:`http://127.0.0.1:${appPort}/`});await waitFor(`typeof matrixEditorsReady!=='undefined'&&matrixEditorsReady`);
   await assert(`configBody().astronomy.timezone==='UTC'&&configBody().event_countdown.timezone==='UTC'`,'Zone save/reload failed');
   await click('[data-module="astronomy"] button:last-child');await change('[data-astronomy-setting="timezone"]','');await click('[data-astronomy-calculate]');
+  // Blank astronomy zone = follow Weather (default London location carries Europe/London).
+  await waitFor(`!document.querySelector('[data-astronomy-timing]').textContent.includes('Preparing')&&!document.querySelector('[data-astronomy-timing]').textContent.includes('not calculated')`);
+  await assert(`!document.querySelector('[data-astronomy-timing]').textContent.includes('location_required')`,'Blank zone did not follow Weather');
+  await assert(`document.querySelector('[data-astronomy-setting="timezone"]').selectedOptions[0].textContent==='Same as Weather (Europe/London)'&&configBody().astronomy.timezone===''`,'Follow-Weather default not shown or override stored');
+  await evaluate(`document.querySelector('#weather-timezone').value='';astronomyWeatherChanged();true`);
+  await assert(`document.querySelector('[data-astronomy-setting="timezone"]').selectedOptions[0].textContent.startsWith('Same as Weather (unknown')`,'Unknown Weather zone not explained');
+  await click('[data-astronomy-calculate]');
   await waitFor(`document.querySelector('[data-astronomy-timing]').textContent.includes('location_required')`);
-  await assert(`document.querySelector('[data-astronomy-setting="timezone"]').selectedOptions[0].textContent==='Select timezone'&&configBody().astronomy.timezone===''`,'Blank zone silently inferred');
  }
  if(scenario==='help'){
   await click('[data-module="rss"] button:last-child');await assert(`!!document.querySelector('[data-help="feed-enabled"]')`,'Contextual help missing');

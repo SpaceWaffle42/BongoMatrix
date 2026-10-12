@@ -40,6 +40,8 @@ class ConfigStoreTests(unittest.TestCase):
                 projected = store.get()
                 expected = json.loads(json.dumps(predecessor))
                 expected.setdefault("screen_enabled", {"splash": True, "sleep": True})
+                # Additive on read: the default London weather location implies its zone.
+                expected["weather"]["timezone"] = "Europe/London"
                 expected["event_countdown"] = json.loads(json.dumps(DEFAULT_CONFIG["event_countdown"]))
                 expected["playlist"].append({"module": "event_countdown", "duration": 15, "enabled": False})
                 expected["rss"] = json.loads(json.dumps(DEFAULT_CONFIG["rss"]))

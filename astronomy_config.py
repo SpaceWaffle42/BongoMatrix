@@ -1,4 +1,8 @@
-"""Bounded offline-only settings; weather coordinates never imply a timezone."""
+"""Bounded offline-only settings.
+
+A blank astronomy timezone follows the Weather location's timezone; choosing
+one here overrides it.
+"""
 import math
 import re
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
@@ -53,14 +57,20 @@ def validate(settings):
 
 
 def location_values(config):
-    """Return immutable arguments, or no location until timezone is explicit."""
+    """Return immutable arguments, or None when no timezone is known.
+
+    Timezone: the astronomy setting if chosen, else the Weather location's.
+    """
     settings = config['astronomy']
     validate(settings)
-    if not settings['timezone']:
+    weather = config['weather']
+    zone, zone_source = settings['timezone'], 'explicit astronomy timezone'
+    if not zone:
+        zone, zone_source = weather.get('timezone') or '', 'Weather timezone'
+    if not zone:
         return None
     if settings['location_source'] == 'weather':
-        weather = config['weather']
-        return (weather['latitude'], weather['longitude'], settings['timezone'],
-                weather['location'], 'Weather coordinates; explicit astronomy timezone')
-    return (settings['latitude'], settings['longitude'], settings['timezone'],
-            settings['location_label'], 'Explicit astronomy coordinate override')
+        return (weather['latitude'], weather['longitude'], zone,
+                weather['location'], 'Weather coordinates; ' + zone_source)
+    return (settings['latitude'], settings['longitude'], zone,
+            settings['location_label'], 'Explicit astronomy coordinate override; ' + zone_source)
