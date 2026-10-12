@@ -166,6 +166,7 @@ def _draw(area, run, x, y, colour):
 
 HEADLINE_GAP = 16  # Pixels between the end of a looping headline and its repeat.
 READ_HOLD = 40  # Minimum ticks (2 s at normal speed) before the summary starts to move.
+SUMMARY_GAP = 8  # Pixels between the end of a looping summary and its repeat (continuous mode).
 
 
 def _headline_x(p):
@@ -187,6 +188,8 @@ def render_frame(prepared, tick, *, thumbnail_index=0):
         image.paste(Image.frombytes('RGB', (b.width, b.height), b.pixels), (0, 0))
     title = Image.new('RGB', (64 - tx, hh), background)
     loop, hold, scroll, _ = _phases(prepared)
+    if prepared.options.headline_mode == 'continuous':
+        return _render_continuous(prepared, tick, image, title, tx, hh, sh, loop, scroll)
     # Phase 1 (tick < hold): a too-wide headline loops once, seamlessly, with a
     # repeat following HEADLINE_GAP pixels behind; the summary's first lines wait
     # (at least READ_HOLD ticks so short stories stay readable).
@@ -205,16 +208,49 @@ def render_frame(prepared, tick, *, thumbnail_index=0):
     return image, {'summary_y': sy, 'headline_x': x, 'summary_done': tick >= hold + scroll}
 
 
+def _render_continuous(prepared, tick, image, title, tx, hh, sh, loop, cycle):
+    """Headline and summary move together from the first frame.
+
+    The headline loops across (seamless repeat HEADLINE_GAP behind); the summary
+    is a seamless upward ribbon (repeat SUMMARY_GAP below) that keeps cycling
+    until the headline is back at its start.
+    """
+    background = prepared.options.background_colour
+    x = -(tick % loop) if loop else 0
+    colour = tuple(bytes.fromhex(prepared.options.headline_colour[1:]))
+    _draw(title, prepared.headline, x, 0, colour)
+    if x:
+        _draw(title, prepared.headline, x + loop, 0, colour)
+    image.paste(title, (tx, 0))
+    summary = Image.new('RGB', (64, sh), background)
+    sy = -(tick % cycle) if cycle else 0
+    summary_colour = tuple(bytes.fromhex(prepared.options.summary_colour[1:]))
+    for offset in ((0, cycle) if cycle else (0,)):
+        for index, line in enumerate(prepared.lines):
+            _draw(summary, line, 0, sy + offset + index * prepared.line_pitch, summary_colour)
+    image.paste(summary, (0, hh + 1))
+    _, _, _, count = _phases(prepared)
+    return image, {'summary_y': sy, 'headline_x': x, 'summary_done': tick >= count - 1}
+
+
 def _phases(p):
     """(headline loop ticks, summary start tick, summary scroll ticks, total frames).
 
-    headline_mode is a legacy saved field and has no effect.
+    'once' (default): headline loops once, then the summary scrolls up and off.
+    'continuous': both move from the start; the summary cycles (scroll = one
+    cycle incl. SUMMARY_GAP) until the headline loop and at least one summary
+    cycle (and READ_HOLD) are complete.
     """
     width = 64 - _headline_x(p)
     loop = p.headline.width + HEADLINE_GAP if p.headline.width > width else 0
     scroll = (len(p.lines) - 1) * p.line_pitch + p.lines[-1].height if p.lines else 0
+    visible = p.headline.height or p.lines or p.thumbnail or p.banner
+    if p.options.headline_mode == 'continuous':
+        cycle = scroll + SUMMARY_GAP if p.lines else 0
+        span = max(loop, cycle, READ_HOLD if p.lines else 0)
+        return loop, 0, cycle, span + 1 if visible else 0
     hold = max(loop, READ_HOLD) if p.lines else loop
-    count = hold + scroll + 1 if p.headline.height or p.lines or p.thumbnail or p.banner else 0
+    count = hold + scroll + 1 if visible else 0
     return loop, hold, scroll, count
 
 

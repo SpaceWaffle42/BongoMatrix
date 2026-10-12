@@ -77,6 +77,7 @@ const rssHelpText={
   count:'Maximum stories in one module pass, not per feed. Eligible stories rotate across feeds; fewer may appear if filters or empty feeds leave too few stories. Previously seen stories rotate back after the unseen set is exhausted.',
   include:'Comma-separated whole words, matched without case sensitivity against headline, summary and categories. Any include word is enough. Blank includes everything. Example: science, space. Phrases and punctuation are not supported.',
   exclude:'Any matching exclude word removes a story, even if it matches Include. Matching uses whole words without case sensitivity in headline, summary and categories. Example: sport, football. Blank excludes nothing.',
+  headline_mode:'Headline first: a long headline scrolls across once while the start of the summary waits, then the summary scrolls up. Together: the summary keeps looping upward while the headline scrolls across, and the story ends when the headline is back at its start.',
   frame_delay:'Seconds between one-pixel scroll steps: 0.1 = slow, 0.05 = normal, 0.025 = fast. Smaller delay is faster. Story length and font affect the total runtime.',
   layout:'Automatic shows a small site banner (for example BBC: red with BBC on it) at the start of the headline; story photos are not used. Text only hides the banner.',
   headline_font:'Installed BDF font for headlines. Inspect the 64×32 Edit Preview for clipping; exact clipping measurements are not available.',
@@ -111,11 +112,12 @@ function renderRSSEditor(container){
   rssControl(fields,'headline_colour','Headline colour','color');
   rssControl(fields,'summary_colour','Summary colour','color');
   rssControl(fields,'background_colour','Background colour','color');
+  rssControl(fields,'headline_mode','Scrolling','text',[['once','Headline first, then summary'],['continuous','Summary loops while headline scrolls']]);
   rssControl(fields,'frame_delay','Scroll frame delay (seconds)','text',[[.1,'Slow · 0.1 s'],[.05,'Normal · 0.05 s'],[.025,'Fast · 0.025 s']]);
   const appearanceFields=document.createElement('div');appearanceFields.className='editor-fields';appearance.append(appearanceFields);
   const playbackFields=document.createElement('div');playbackFields.className='editor-fields';playback.append(playbackFields);
   for(const key of ['headline_font','summary_font','layout','headline_colour','summary_colour','background_colour'])appearanceFields.append(fields.querySelector(`[data-rss-setting="${key}"]`).closest('.ux-control'));
-  for(const key of ['frame_delay'])playbackFields.append(fields.querySelector(`[data-rss-setting="${key}"]`).closest('.ux-control'));
+  for(const key of ['headline_mode','frame_delay'])playbackFields.append(fields.querySelector(`[data-rss-setting="${key}"]`).closest('.ux-control'));
   editorParagraph(appearance,'Installed BDF fonts. Inspect the shared 64×32 Edit Preview for clipping.');
   const feedFields=document.createElement('div');feedFields.className='editor-fields';feeds.append(feedFields);
   const presetLabel=document.createElement('label');presetLabel.textContent='Verified BBC preset';const presets=document.createElement('select');presets.dataset.rssPresets='';rssFillPresets(presets);presetLabel.append(presets);feedFields.append(presetLabel,makeButton('Add BBC preset',()=>{if(presets.value)rssAddFeed(presets.value)}));

@@ -104,7 +104,7 @@ class RendererTests(unittest.TestCase):
         from rss_config import RenderOptions
         from rss_data import Story
         self.assertTrue(hasattr(r, 'image_frames'), 'Shared frame timeline absent')
-        for mode in ('once', 'continuous'):
+        for mode in ('once',):
             for summary in ('A', 'A ' * 160):
                 p = r.prepare_story(Story(('a',), 'A' * 20, summary, '', None), RenderOptions(headline_mode=mode))
                 frames = list(r.image_frames((p,)))
@@ -140,6 +140,46 @@ class RendererTests(unittest.TestCase):
         # A short static header without overview is a single bounded tick.
         short = r.prepare_story(Story((), 'A', '', '', None))
         self.assertEqual(len(list(r.image_frames((short,)))), 1)
+
+    def test_continuous_mode_loops_summary_while_headline_scrolls(self):
+        """Owner option: summary loops upward continuously while the headline crosses."""
+        from modules import rss_renderer as r
+        from rss_config import RenderOptions
+        from rss_data import Story
+        continuous = RenderOptions(headline_mode='continuous')
+        # Long headline, short summary: the summary wraps round several times.
+        p = r.prepare_story(Story(('a',), 'A' * 20, 'A ' * 20, '', None), continuous)
+        loop = p.headline.width + r.HEADLINE_GAP
+        cycle = (len(p.lines) - 1) * p.line_pitch + p.lines[-1].height + r.SUMMARY_GAP
+        self.assertGreater(loop, cycle)
+        frames = list(r.image_frames((p,)))
+        self.assertEqual(len(frames), loop + 1)
+        self.assertEqual(r.duration_seconds((p,)), (loop + 1) * .05)
+        start_row = frames[0][0].crop((0, 0, 64, 7)).tobytes()
+        start_summary = frames[0][0].crop((0, 8, 64, 32)).tobytes()
+        for tick in (1, cycle - 1, cycle + 1, loop - 1):
+            # Both move together from the first frame.
+            self.assertEqual(frames[tick][2]['headline_x'], -(tick % loop))
+            self.assertEqual(frames[tick][2]['summary_y'], -(tick % cycle))
+            self.assertIsNotNone(frames[tick][0].crop((0, 0, 64, 7)).getbbox(), 'headline row never blank')
+        # The summary wraps seamlessly to its start and keeps going.
+        self.assertEqual(frames[cycle][0].crop((0, 8, 64, 32)).tobytes(), start_summary)
+        self.assertEqual(frames[cycle][2]['summary_y'], 0)
+        # Pass ends with the headline back at its start.
+        self.assertEqual(frames[loop][0].crop((0, 0, 64, 7)).tobytes(), start_row)
+        self.assertTrue(frames[loop][2]['summary_done'])
+        # Short headline, long summary: the summary completes one full cycle.
+        q = r.prepare_story(Story(('a',), 'Hi', 'A ' * 160, '', None), continuous)
+        qcycle = (len(q.lines) - 1) * q.line_pitch + q.lines[-1].height + r.SUMMARY_GAP
+        qframes = list(r.image_frames((q,)))
+        self.assertEqual(len(qframes), qcycle + 1)
+        self.assertTrue(all(info['headline_x'] == 0 for _, _, info in qframes))
+        self.assertEqual(qframes[qcycle][0].crop((0, 8, 64, 32)).tobytes(), qframes[0][0].crop((0, 8, 64, 32)).tobytes())
+        # Very short story still holds READ_HOLD ticks.
+        s = r.prepare_story(Story(('a',), 'Hi', 'A', '', None), continuous)
+        self.assertEqual(len(list(r.image_frames((s,)))), max(r.READ_HOLD, s.lines[-1].height + r.SUMMARY_GAP) + 1)
+        # Default stays headline-first.
+        self.assertEqual(RenderOptions().headline_mode, 'once')
 
     def test_short_headline_does_not_scroll_and_banner_narrows_the_row(self):
         from modules import rss_renderer as r
