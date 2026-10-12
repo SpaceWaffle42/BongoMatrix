@@ -100,6 +100,20 @@ class PreparedThumbnail:
 
 
 @dataclass(frozen=True)
+class PreparedBanner:
+    """Still site banner on the headline row: exact RGB bytes, no I/O at render time."""
+    width: int
+    height: int
+    pixels: bytes
+
+    def __post_init__(self):
+        if (type(self.width) is not int or type(self.height) is not int
+                or not 1 <= self.width <= 32 or not 1 <= self.height <= 7
+                or type(self.pixels) is not bytes or len(self.pixels) != self.width * self.height * 3):
+            raise ValueError('Expected a still banner at most 32x7 with exact RGB bytes')
+
+
+@dataclass(frozen=True)
 class PreparedStory:
     headline: TextRun
     lines: tuple[TextRun, ...]
@@ -107,14 +121,19 @@ class PreparedStory:
     options: RenderOptions
     warnings: object
     thumbnail: PreparedThumbnail | None = None
+    banner: PreparedBanner | None = None
 
 
-def prepare_story(story, options=None, *, thumbnail=None):
+def prepare_story(story, options=None, *, thumbnail=None, banner=None):
     options = options or RenderOptions()
     if thumbnail is not None and not isinstance(thumbnail, PreparedThumbnail):
         raise ValueError('Thumbnail must be prepared before rendering')
+    if banner is not None and not isinstance(banner, PreparedBanner):
+        raise ValueError('Banner must be prepared before rendering')
     if options.layout == 'text':
-        thumbnail = None
+        thumbnail = banner = None
+    if thumbnail is not None:
+        banner = None  # A 16x16 thumbnail already occupies the headline corner.
     if not isinstance(story.title, str) or len(story.title) > 300 or not isinstance(story.summary, str) or len(story.summary) > 2000:
         raise ValueError('Prepared story exceeds normalized text bounds')
     headline = _measure(_font(options.headline_font), ' '.join(story.title.split()))
@@ -127,7 +146,7 @@ def prepare_story(story, options=None, *, thumbnail=None):
                                 'summary_clipped': any(line.width > 64 or line.height > sh for line in lines),
                                 'summary_max_height': max((line.height for line in lines), default=0),
                                 'summary_available_height': sh})
-    return PreparedStory(headline, lines, pitch, options, warnings, thumbnail)
+    return PreparedStory(headline, lines, pitch, options, warnings, thumbnail, banner)
 
 
 def _draw(area, run, x, y, colour):
@@ -145,12 +164,23 @@ def _draw(area, run, x, y, colour):
                         area.putpixel((px, py), colour)
 
 
+def _headline_x(p):
+    """Headline column: after a 16px thumbnail, or after the banner plus a 1px gap."""
+    if p.thumbnail:
+        return 17
+    return p.banner.width + 1 if p.banner else 0
+
+
 def render_frame(prepared, tick, *, thumbnail_index=0):
     background = prepared.options.background_colour
     image = Image.new('RGB', (64, 32), background)
-    tx, hh, sh = (17, 16, 15) if prepared.thumbnail else (0, 7, 24)
+    hh, sh = (16, 15) if prepared.thumbnail else (7, 24)
+    tx = _headline_x(prepared)
     if prepared.thumbnail:
         image.paste(Image.frombytes('RGB', (16, 16), prepared.thumbnail.frames[thumbnail_index]), (0, 0))
+    elif prepared.banner:
+        b = prepared.banner
+        image.paste(Image.frombytes('RGB', (b.width, b.height), b.pixels), (0, 0))
     title = Image.new('RGB', (64 - tx, hh), background)
     title_end, summary_end, _ = _timing(prepared)
     x = 0
@@ -167,10 +197,10 @@ def render_frame(prepared, tick, *, thumbnail_index=0):
 
 
 def _timing(p):
-    width, height = (47, 15) if p.thumbnail else (64, 24)
+    width, height = (64 - _headline_x(p), 15) if p.thumbnail else (64 - _headline_x(p), 24)
     title_end = p.headline.width + 1 if p.headline.width > width else 0
     summary_end = height + (len(p.lines) - 1) * p.line_pitch + p.lines[-1].height if p.lines else 0
-    count = max(title_end, summary_end) + 1 if p.headline.height or p.lines or p.thumbnail else 0
+    count = max(title_end, summary_end) + 1 if p.headline.height or p.lines or p.thumbnail or p.banner else 0
     return title_end, summary_end, count
 
 

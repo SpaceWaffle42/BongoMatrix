@@ -1,7 +1,8 @@
-"""Site banner tiles for RSS stories: the publisher's colour with its name over it.
+"""Site banners for RSS stories: the publisher's colour with its name over it.
 
 Pure computation (no network, no files beyond the bundled BDF font). Replaces
-per-story image downloads: every story from a site shows the same 16x16 banner.
+per-story image downloads: every story from a site shows the same small
+rectangle (15x7) at the start of the headline row; the summary keeps full width.
 Known publishers match on exact host or a dot-delimited suffix, never substring.
 """
 from functools import lru_cache
@@ -9,9 +10,9 @@ from hashlib import sha256
 import re
 from urllib.parse import urlsplit
 
-from modules.rss_renderer import PreparedThumbnail, _font
+from modules.rss_renderer import PreparedBanner, _font
 
-SIZE = 16
+WIDTH, HEIGHT = 15, 7  # Fits 3 tom_thumb letters (4px advance) with a 1px margin.
 FONT = 'tom_thumb'
 WHITE = (255, 255, 255)
 # (host suffixes, banner text, background RGB). Colours from each brand's masthead.
@@ -70,17 +71,17 @@ def _tile(text, colour):
     dx = dy = 0
     if points:
         xs, ys = [x for x, _ in points], [y for _, y in points]
-        dx = (SIZE - (max(xs) - min(xs) + 1)) // 2 - min(xs)
-        dy = (SIZE - (max(ys) - min(ys) + 1)) // 2 - min(ys)
-    pixels = bytearray(bytes(colour) * SIZE * SIZE)
+        dx = (WIDTH - (max(xs) - min(xs) + 1)) // 2 - min(xs)
+        dy = (HEIGHT - (max(ys) - min(ys) + 1)) // 2 - min(ys)
+    pixels = bytearray(bytes(colour) * WIDTH * HEIGHT)
     for x, y in points:
         x, y = x + dx, y + dy
-        if 0 <= x < SIZE and 0 <= y < SIZE:
-            pixels[(y * SIZE + x) * 3:(y * SIZE + x) * 3 + 3] = bytes(WHITE)
-    return PreparedThumbnail((bytes(pixels),), (1000,))
+        if 0 <= x < WIDTH and 0 <= y < HEIGHT:
+            pixels[(y * WIDTH + x) * 3:(y * WIDTH + x) * 3 + 3] = bytes(WHITE)
+    return PreparedBanner(WIDTH, HEIGHT, bytes(pixels))
 
 
 def site_banner(url, title=''):
-    """16x16 still banner for a feed URL; known publishers get their own branding."""
+    """15x7 still banner for a feed URL; known publishers get their own branding."""
     text = banner_text(url, title)
     return _tile(text, _colour(url, text))

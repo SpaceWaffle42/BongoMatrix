@@ -185,8 +185,9 @@ class PreparedServiceTests(unittest.TestCase):
             self.assertEqual(first.items[0].story.keys, ('id:one',))
             self.assertEqual(first.items[0].source, 'https://example.com/feed')
             from rss_banners import site_banner
-            self.assertEqual(first.stories[0].thumbnail, site_banner('https://example.com/feed', ''))
-            self.assertEqual(first.stories[0].warnings['headline_available_height'], 16)
+            self.assertEqual(first.stories[0].banner, site_banner('https://example.com/feed', ''))
+            self.assertIsNone(first.stories[0].thumbnail)
+            self.assertEqual(first.stories[0].warnings['headline_available_height'], 7)
             self.assertEqual(first.duration, duration_seconds(first.stories))
             with patch('builtins.open', side_effect=AssertionError('disk')), patch('modules.rss_renderer._font', side_effect=AssertionError('font')), patch.object(service.client, 'fetch', side_effect=AssertionError('network')):
                 for _ in range(3):

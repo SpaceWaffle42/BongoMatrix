@@ -292,9 +292,9 @@ class PreparedFeedService(FeedService):
                     break
                 # Owner decision: stories show their site's banner (e.g. BBC red
                 # with "BBC"), never per-story publisher images; no media download.
-                thumbnail, warning = site_banner(source.url, source.feed.title if source.feed else ''), ''
+                banner, warning = site_banner(source.url, source.feed.title if source.feed else ''), ''
                 try:
-                    prepared = prepare_story(story, options, thumbnail=thumbnail)
+                    prepared = prepare_story(story, options, banner=banner)
                 except Exception:
                     with self._lock:
                         if generation == self._generation and not cancel.is_set():
