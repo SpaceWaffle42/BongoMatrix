@@ -37,7 +37,12 @@ class RSSEditorWebTests(unittest.TestCase):
         from rss_config import DEFAULTS, RenderOptions
         self.assertEqual(DEFAULTS['headline_colour'], '#eea62b')
         self.assertEqual(RenderOptions().headline_colour, '#eea62b')
+        # Owner 2026-10-12: default summary font 5x8 (backend, options and editor reset agree).
+        self.assertEqual(DEFAULTS['summary_font'], '5x8')
+        self.assertEqual(RenderOptions().summary_font, '5x8')
         js = (Path(__file__).parents[1] / 'app/templates/rss_editor.js').read_text()
+        self.assertIn("summary_font:'5x8'", js)
+        self.assertNotIn("summary_font:'4x6'", js)
         # Site banners are still images: an animation speed control does nothing.
         self.assertNotIn("rssControl(appearanceFields,'thumbnail_speed'", js)
         self.assertNotIn('Thumbnail animation speed', js)

@@ -45,7 +45,7 @@ class RendererTests(unittest.TestCase):
         self.assertEqual(dict(SPEED_DELAYS), {'slow': .1, 'normal': .05, 'fast': .025})
         options = RenderOptions()
         self.assertEqual((options.headline_font, options.summary_font, options.frame_delay,
-                          options.headline_mode, options.thumbnail_speed), ('5x7', '4x6', .05, 'once', 100.0))
+                          options.headline_mode, options.thumbnail_speed), ('5x7', '5x8', .05, 'once', 100.0))
         for name in available_font_names():
             self.assertEqual(RenderOptions(headline_font=name, summary_font=name).headline_font, name)
         for kwargs in ({'frame_delay': True}, {'frame_delay': float('nan')}, {'frame_delay': .001},
@@ -331,8 +331,10 @@ class RendererTests(unittest.TestCase):
         from PIL import Image
         from edit_preview import CaptureMatrix
         from modules import rss_renderer as r
+        from rss_config import RenderOptions
         from rss_data import Story
-        p = r.prepare_story(Story((), 'A' * 20, 'A', '', None))
+        # Pinned to 4x6 so the 5px summary arithmetic below is independent of the default font.
+        p = r.prepare_story(Story((), 'A' * 20, 'A', '', None), RenderOptions(summary_font='4x6'))
         frames = list(r.image_frames((p,)))
         # 100px headline loops once (100 + 16 gap = 116 ticks), then the 5px summary scrolls off.
         self.assertEqual(len(frames), 116 + 5 + 1)
