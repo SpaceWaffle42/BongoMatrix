@@ -21,7 +21,7 @@ class RendererTests(unittest.TestCase):
             p = r.prepare_story(story, render_options(settings), thumbnail=thumbnail)
             expected = list(r.image_frames((p,)))
             image, _ = r.render_frame(p, 10)
-            hh = 16 if layout == 'auto' else 7
+            hh = 16 if layout == 'auto' else 9  # 6x9 default headline row
             self.assertEqual(p.warnings['headline_available_height'], hh)
             self.assertEqual(image.getpixel((63, hh)), (1, 2, 3))
             self.assertIn((18, 171, 52), set(image.crop((17 if layout == 'auto' else 0, 0, 64, hh)).getdata()))
@@ -45,7 +45,7 @@ class RendererTests(unittest.TestCase):
         self.assertEqual(dict(SPEED_DELAYS), {'slow': .1, 'normal': .05, 'fast': .025})
         options = RenderOptions()
         self.assertEqual((options.headline_font, options.summary_font, options.frame_delay,
-                          options.headline_mode, options.thumbnail_speed), ('5x7', '5x8', .05, 'once', 100.0))
+                          options.headline_mode, options.thumbnail_speed), ('6x9', '5x8', .05, 'once', 100.0))
         for name in available_font_names():
             self.assertEqual(RenderOptions(headline_font=name, summary_font=name).headline_font, name)
         for kwargs in ({'frame_delay': True}, {'frame_delay': float('nan')}, {'frame_delay': .001},
@@ -59,7 +59,7 @@ class RendererTests(unittest.TestCase):
 
     def test_preparation_is_immutable_bounded_measured_and_clipped(self):
         self.assertIsNotNone(importlib.util.find_spec('modules.rss_renderer'), 'Prepared renderer absent')
-        from modules.rss_renderer import prepare_story, render_frame
+        from modules.rss_renderer import prepare_story, render_frame, _line_box
         from rss_config import RenderOptions
         from rss_data import Story
         from font_catalog import FONT_DIR, available_font_names, font_key
@@ -73,15 +73,20 @@ class RendererTests(unittest.TestCase):
                 _, points = font.text_pixels(0, 0, 'Ag')
                 height = max(y for x, y in points) - min(y for x, y in points) + 1
                 self.assertEqual(p.headline.height, height)
-                self.assertEqual(p.warnings['headline_clipped'], height > 7)
+                # The headline row grows to the font's ASCII line box (7..16px); ink sits on a shared baseline.
+                box_top, box_height = _line_box(name)
+                hh = min(16, max(7, box_height))
+                base = p.headline.top - box_top
+                self.assertEqual(p.warnings['headline_available_height'], hh)
+                self.assertEqual(p.warnings['headline_clipped'], base < 0 or base + height > hh)
                 image, info = render_frame(p, 0)
                 self.assertEqual(image.size, (64, 32))
                 # Summary's first lines are visible and still at tick 0 (no empty area, no rise from below).
-                self.assertIsNotNone(image.crop((0, 8, 64, 32)).getbbox())
+                self.assertIsNotNone(image.crop((0, hh + 1, 64, 32)).getbbox())
                 self.assertEqual(info['summary_y'], 0)
-                expected = {(x - min(0, min(a for a, b in points)), y - min(b for a, b in points)) for x, y in points}
-                actual = {(x, y) for y in range(7) for x in range(64) if image.getpixel((x, y)) != (0, 0, 0)}
-                self.assertEqual(actual, {(x, y) for x, y in expected if 0 <= x < 64 and 0 <= y < 7})
+                expected = {(x - min(0, min(a for a, b in points)), y - min(b for a, b in points) + base) for x, y in points}
+                actual = {(x, y) for y in range(hh) for x in range(64) if image.getpixel((x, y)) != (0, 0, 0)}
+                self.assertEqual(actual, {(x, y) for x, y in expected if 0 <= x < 64 and 0 <= y < hh})
                 with self.assertRaises(TypeError):
                     p.warnings['headline_clipped'] = False
                 with self.assertRaises(dataclasses.FrozenInstanceError):
@@ -181,11 +186,38 @@ class RendererTests(unittest.TestCase):
         # Default stays headline-first.
         self.assertEqual(RenderOptions().headline_mode, 'once')
 
-    def test_short_headline_does_not_scroll_and_banner_narrows_the_row(self):
+    def test_tall_headline_font_gets_a_taller_row_and_no_clipping(self):
+        """6x9 headline (owner default): row grows to the font, summary moves down, nothing clipped."""
         from modules import rss_renderer as r
+        from rss_config import RenderOptions
         from rss_data import Story
         from rss_banners import site_banner
-        p = r.prepare_story(Story(('a',), 'Hi', 'A', '', None))
+        tall = RenderOptions(headline_font='6x9', summary_font='5x8')
+        p = r.prepare_story(Story(('a',), 'Gypsy jumpy quay', 'Summary text', '', None), tall)
+        self.assertEqual(p.warnings['headline_available_height'], 9)
+        self.assertEqual(p.warnings['summary_available_height'], 22)
+        self.assertFalse(p.warnings['headline_clipped'])
+        image, info = r.render_frame(p, 0)
+        # Descenders reach row 7 (inside the 9px row); row 9 is the gap; summary starts at row 10.
+        self.assertIsNotNone(image.crop((0, 7, 64, 9)).getbbox(), 'descenders drawn, not clipped')
+        self.assertIsNone(image.crop((0, 9, 64, 10)).getbbox(), 'gap row between headline and summary')
+        self.assertIsNotNone(image.crop((0, 10, 64, 32)).getbbox())
+        # Banner still fits on the taller row.
+        b = r.prepare_story(Story(('a',), 'Gypsy', 'S', '', None), tall,
+                            banner=site_banner('https://feeds.bbci.co.uk/news/rss.xml', ''))
+        self.assertIsNotNone(r.render_frame(b, 0)[0].crop((0, 0, 15, 7)).getbbox())
+        # 5x7 keeps the original 7px row.
+        small = r.prepare_story(Story(('a',), 'Gypsy', 'S', '', None), RenderOptions(headline_font='5x7'))
+        self.assertEqual(small.warnings['headline_available_height'], 7)
+        self.assertEqual(small.warnings['summary_available_height'], 24)
+
+    def test_short_headline_does_not_scroll_and_banner_narrows_the_row(self):
+        from modules import rss_renderer as r
+        from rss_config import RenderOptions
+        from rss_data import Story
+        from rss_banners import site_banner
+        five = RenderOptions(headline_font='5x7')  # width arithmetic below is for the 5px-advance font
+        p = r.prepare_story(Story(('a',), 'Hi', 'A', '', None), five)
         frames = list(r.image_frames((p,)))
         scroll = p.lines[-1].height
         # Nothing to loop: the summary is held still for READ_HOLD ticks, then scrolls off.
@@ -195,9 +227,9 @@ class RendererTests(unittest.TestCase):
         self.assertEqual(frames[r.READ_HOLD + 1][2]['summary_y'], -1)
         # 47px headline fits a plain row (64) but not beside the 15px banner (48).
         title = 'A' * 12
-        plain = r.prepare_story(Story(('a',), title, 'A', '', None))
+        plain = r.prepare_story(Story(('a',), title, 'A', '', None), five)
         self.assertLessEqual(plain.headline.width, 64)
-        banner = r.prepare_story(Story(('a',), title, 'A', '', None),
+        banner = r.prepare_story(Story(('a',), title, 'A', '', None), five,
                                  banner=site_banner('https://feeds.bbci.co.uk/news/rss.xml', ''))
         if banner.headline.width > 64 - 16:
             loop = banner.headline.width + r.HEADLINE_GAP
@@ -333,8 +365,8 @@ class RendererTests(unittest.TestCase):
         from modules import rss_renderer as r
         from rss_config import RenderOptions
         from rss_data import Story
-        # Pinned to 4x6 so the 5px summary arithmetic below is independent of the default font.
-        p = r.prepare_story(Story((), 'A' * 20, 'A', '', None), RenderOptions(summary_font='4x6'))
+        # Pinned to 5x7/4x6 so the 100px headline / 5px summary arithmetic below is independent of the default font.
+        p = r.prepare_story(Story((), 'A' * 20, 'A', '', None), RenderOptions(headline_font='5x7', summary_font='4x6'))
         frames = list(r.image_frames((p,)))
         # 100px headline loops once (100 + 16 gap = 116 ticks), then the 5px summary scrolls off.
         self.assertEqual(len(frames), 116 + 5 + 1)

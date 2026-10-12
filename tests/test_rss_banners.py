@@ -38,17 +38,19 @@ class SiteBannerTests(unittest.TestCase):
         from modules.rss_renderer import prepare_story, render_frame
         story = Story(('k',), 'Headline text', 'A summary line', '', None)
         p = prepare_story(story, banner=site_banner('https://feeds.bbci.co.uk/news/rss.xml', ''))
-        self.assertEqual(p.warnings['headline_available_height'], 7)
-        self.assertEqual(p.warnings['summary_available_height'], 24)
+        self.assertEqual(p.warnings['headline_available_height'], 9)  # 6x9 default row
+        self.assertEqual(p.warnings['summary_available_height'], 22)
         image, _ = render_frame(p, 0)
         self.assertEqual(image.getpixel((0, 0)), (0xBB, 0x19, 0x19))
         self.assertEqual(image.getpixel((W - 1, H - 1)), (0xBB, 0x19, 0x19))
-        # Nothing of the banner below the headline row: rows 7+ match the text-only layout.
-        self.assertEqual(image.crop((0, H, 64, 32)).tobytes(), render_frame(prepare_story(story), 0)[0].crop((0, H, 64, 32)).tobytes())
+        # Nothing of the banner below its 7px tile: rows 7-8 of the banner columns are background,
+        # and the summary area (row 10+) matches the text-only layout.
+        self.assertIsNone(image.crop((0, H, W, 9)).getbbox())
+        self.assertEqual(image.crop((0, 10, 64, 32)).tobytes(), render_frame(prepare_story(story), 0)[0].crop((0, 10, 64, 32)).tobytes())
         # Summary starts at column 0 (full width), as in the text-only layout.
         text_only = render_frame(prepare_story(story), 24)[0]
         banner_frame = render_frame(p, 24)[0]
-        self.assertEqual(banner_frame.crop((0, 8, 64, 32)).tobytes(), text_only.crop((0, 8, 64, 32)).tobytes())
+        self.assertEqual(banner_frame.crop((0, 10, 64, 32)).tobytes(), text_only.crop((0, 10, 64, 32)).tobytes())
 
     def test_lookalike_hosts_do_not_get_bbc_branding(self):
         from rss_banners import banner_text
@@ -77,7 +79,7 @@ class SiteBannerTests(unittest.TestCase):
         story = service.peek().stories[0]
         self.assertEqual(story.banner, site_banner('https://feeds.bbci.co.uk/news/rss.xml', 'BBC News'))
         self.assertIsNone(story.thumbnail)
-        self.assertEqual(story.warnings['headline_available_height'], 7)
+        self.assertEqual(story.warnings['headline_available_height'], 9)  # 6x9 default row
         service.close()
 
     def test_text_layout_still_has_no_banner(self):

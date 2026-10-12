@@ -13,7 +13,7 @@ DEFAULTS = {
     'feeds': ['https://feeds.bbci.co.uk/news/rss.xml'],
     'disabled_feeds': [],
     'refresh_seconds': 1800, 'count': 5, 'include': [], 'exclude': [],
-    'headline_font': '5x7', 'summary_font': '5x8',
+    'headline_font': '6x9', 'summary_font': '5x8',
     'frame_delay': SPEED_DELAYS['normal'], 'headline_mode': 'once',
     'thumbnail_speed': 100.0,
     'layout': 'auto', 'headline_colour': '#eea62b',
@@ -74,7 +74,7 @@ def validate(settings):
 
 @dataclass(frozen=True)
 class RenderOptions:
-    headline_font: str = '5x7'
+    headline_font: str = '6x9'
     summary_font: str = '5x8'
     frame_delay: float = SPEED_DELAYS['normal']
     headline_mode: str = 'once'

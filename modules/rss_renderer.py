@@ -58,6 +58,26 @@ def _measure(font, text):
                    bottom - top if top is not None else 0, left, top or 0)
 
 
+@lru_cache(maxsize=64)
+def _line_box(name):
+    """(ink top, ink height) of the font's printable ASCII: one baseline for every headline."""
+    run = _measure(_font(name), ''.join(chr(c) for c in range(32, 127)))
+    return run.top, run.height
+
+
+def _rows(prepared_or_options, thumbnail):
+    """(headline row height, summary area height). Text rows grow to the headline font (min 7px for the banner)."""
+    if thumbnail:
+        return 16, 15
+    hh = min(16, max(7, _line_box(prepared_or_options.headline_font)[1]))
+    return hh, 32 - hh - 1
+
+
+def _headline_base(headline, options, thumbnail):
+    """Row offset of the headline's ink: a shared baseline so the row never jumps between stories."""
+    return 0 if thumbnail else headline.top - _line_box(options.headline_font)[0]
+
+
 def _wrap(font, text):
     # Word wrapping with hard breaks for overlong tokens, bounded by 2000 chars.
     lines, current = [], ''
@@ -140,8 +160,9 @@ def prepare_story(story, options=None, *, thumbnail=None, banner=None):
     summary_font = _font(options.summary_font)
     lines = _wrap(summary_font, story.summary)
     pitch = max(1, max(g.height for g in summary_font.glyphs.values()))
-    hh, sh = (16, 15) if thumbnail else (7, 24)
-    warnings = MappingProxyType({'headline_clipped': headline.height > hh,
+    hh, sh = _rows(options, thumbnail)
+    base = _headline_base(headline, options, thumbnail)
+    warnings = MappingProxyType({'headline_clipped': base < 0 or base + headline.height > hh,
                                 'headline_height': headline.height, 'headline_available_height': hh,
                                 'summary_clipped': any(line.width > 64 or line.height > sh for line in lines),
                                 'summary_max_height': max((line.height for line in lines), default=0),
@@ -179,7 +200,8 @@ def _headline_x(p):
 def render_frame(prepared, tick, *, thumbnail_index=0):
     background = prepared.options.background_colour
     image = Image.new('RGB', (64, 32), background)
-    hh, sh = (16, 15) if prepared.thumbnail else (7, 24)
+    hh, sh = _rows(prepared.options, prepared.thumbnail)
+    base = _headline_base(prepared.headline, prepared.options, prepared.thumbnail)
     tx = _headline_x(prepared)
     if prepared.thumbnail:
         image.paste(Image.frombytes('RGB', (16, 16), prepared.thumbnail.frames[thumbnail_index]), (0, 0))
@@ -189,16 +211,16 @@ def render_frame(prepared, tick, *, thumbnail_index=0):
     title = Image.new('RGB', (64 - tx, hh), background)
     loop, hold, scroll, _ = _phases(prepared)
     if prepared.options.headline_mode == 'continuous':
-        return _render_continuous(prepared, tick, image, title, tx, hh, sh, loop, scroll)
+        return _render_continuous(prepared, tick, image, title, tx, hh, sh, loop, scroll, base)
     # Phase 1 (tick < hold): a too-wide headline loops once, seamlessly, with a
     # repeat following HEADLINE_GAP pixels behind; the summary's first lines wait
     # (at least READ_HOLD ticks so short stories stay readable).
     # Phase 2: the headline rests at its start while the summary scrolls up/off.
     x = -tick if tick < loop else 0
     colour = tuple(bytes.fromhex(prepared.options.headline_colour[1:]))
-    _draw(title, prepared.headline, x, 0, colour)
+    _draw(title, prepared.headline, x, base, colour)
     if x:
-        _draw(title, prepared.headline, x + loop, 0, colour)
+        _draw(title, prepared.headline, x + loop, base, colour)
     image.paste(title, (tx, 0))
     summary = Image.new('RGB', (64, sh), background)
     sy = -max(0, tick - hold)
@@ -208,7 +230,7 @@ def render_frame(prepared, tick, *, thumbnail_index=0):
     return image, {'summary_y': sy, 'headline_x': x, 'summary_done': tick >= hold + scroll}
 
 
-def _render_continuous(prepared, tick, image, title, tx, hh, sh, loop, cycle):
+def _render_continuous(prepared, tick, image, title, tx, hh, sh, loop, cycle, base=0):
     """Headline and summary move together from the first frame.
 
     The headline loops across (seamless repeat HEADLINE_GAP behind); the summary
@@ -218,9 +240,9 @@ def _render_continuous(prepared, tick, image, title, tx, hh, sh, loop, cycle):
     background = prepared.options.background_colour
     x = -(tick % loop) if loop else 0
     colour = tuple(bytes.fromhex(prepared.options.headline_colour[1:]))
-    _draw(title, prepared.headline, x, 0, colour)
+    _draw(title, prepared.headline, x, base, colour)
     if x:
-        _draw(title, prepared.headline, x + loop, 0, colour)
+        _draw(title, prepared.headline, x + loop, base, colour)
     image.paste(title, (tx, 0))
     summary = Image.new('RGB', (64, sh), background)
     sy = -(tick % cycle) if cycle else 0

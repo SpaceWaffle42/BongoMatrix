@@ -43,6 +43,11 @@ class RSSEditorWebTests(unittest.TestCase):
         js = (Path(__file__).parents[1] / 'app/templates/rss_editor.js').read_text()
         self.assertIn("summary_font:'5x8'", js)
         self.assertNotIn("summary_font:'4x6'", js)
+        # Owner 2026-10-12: default headline font 6x9.
+        self.assertEqual(DEFAULTS['headline_font'], '6x9')
+        self.assertEqual(RenderOptions().headline_font, '6x9')
+        self.assertIn("headline_font:'6x9'", js)
+        self.assertNotIn("headline_font:'5x7'", js)
         # Site banners are still images: an animation speed control does nothing.
         self.assertNotIn("rssControl(appearanceFields,'thumbnail_speed'", js)
         self.assertNotIn('Thumbnail animation speed', js)
