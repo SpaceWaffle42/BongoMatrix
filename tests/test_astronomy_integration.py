@@ -448,6 +448,11 @@ class WebTests(unittest.TestCase):
                 self.assertEqual(response.status_code, 400)
             response = f.paired_request('post', '/api/scroll-timing/astronomy', json=dict(payload, base_revision=-1))
             self.assertEqual(response.status_code, 412)
+            # MR !159 review finding 2b: a pre-deploy page omits weather.timezone.
+            stale = {k: v for k, v in weather.items() if k != 'timezone'}
+            settings.update(location_source='weather', timezone='')
+            response = f.paired_request('post', '/api/scroll-timing/astronomy', json=dict(payload, weather=stale))
+            self.assertEqual(response.status_code, 200, response.json)
         self.assertEqual(f.store.path.read_bytes(), before)
 
     @unittest.skipUnless(os.environ.get('MATRIX_CHROMIUM'), 'Chromium required')
@@ -690,6 +695,58 @@ class WeatherTimezoneDefaultTests(unittest.TestCase):
                     self.assertEqual(ConfigStore(store.path).get()['weather']['timezone'], expected)
                     self.assertEqual(store.path.read_bytes(), before)
             self.assertEqual(ConfigStore(store.path).update({})['weather']['timezone'], '')
+
+    def test_pre_v4_migration_projects_weather_timezone_instead_of_default(self):
+        # Second review MR !159 finding 1: migration must not stamp London on other places.
+        from config_store import ConfigStore, DEFAULT_CONFIG
+        for schema in (2, 3):
+            for coords, expected in (((35.7, 139.7), ''), ((51.5074, -0.1278), 'Europe/London')):
+                with self.subTest(schema=schema, coords=coords), tempfile.TemporaryDirectory() as directory:
+                    path = Path(directory) / 'config.json'
+                    legacy = json.loads(json.dumps(DEFAULT_CONFIG))
+                    legacy['schema_version'] = schema
+                    legacy['weather'].pop('timezone')
+                    legacy['weather']['latitude'], legacy['weather']['longitude'] = coords
+                    path.write_text(json.dumps(legacy))
+                    self.assertEqual(ConfigStore(path).get()['weather']['timezone'], expected)
+                    self.assertEqual(json.loads(path.read_text())['weather']['timezone'], expected)
+
+    def test_moving_weather_without_timezone_clears_stale_zone(self):
+        # MR !159 review finding 2a: coordinates changed without a zone must not keep the old one.
+        from config_store import ConfigStore
+        with tempfile.TemporaryDirectory() as directory:
+            store = ConfigStore(Path(directory) / 'config.json')
+            self.assertEqual(store.get()['weather']['timezone'], 'Europe/London')
+            vigo = {'location': 'Vigo', 'latitude': 42.24, 'longitude': -8.72}
+            self.assertEqual(store.validate_candidate({'weather': vigo})['weather']['timezone'], '')
+            self.assertEqual(store.update({'weather': vigo})['weather']['timezone'], '')
+            self.assertEqual(store.update({'weather': dict(vigo, timezone='Europe/Madrid')})['weather']['timezone'],
+                             'Europe/Madrid')
+            # Same coordinates or unrelated weather edits keep the chosen zone.
+            self.assertEqual(store.update({'weather': {'location': 'Vigo, ES'}})['weather']['timezone'], 'Europe/Madrid')
+            self.assertEqual(store.update({'weather': dict(vigo)})['weather']['timezone'], 'Europe/Madrid')
+
+    def test_size_limit_compaction_drops_only_reconstructible_projected_fields(self):
+        # Second reviews MR !157 #1 / MR !159 #4: compaction branch must be lossless.
+        from unittest.mock import patch
+        import config_store
+        from config_store import DEFAULT_CONFIG, _project_persisted_screen_rows, _serialize_config
+        cases = (
+            ({}, {}, None, None),  # London default zone, simple view: both reconstructed
+            ({'latitude': 42.24, 'longitude': -8.72, 'timezone': 'Europe/Madrid'}, {'view': 'advanced'},
+             'Europe/Madrid', 'advanced'),
+        )
+        for weather, astronomy, kept_zone, kept_view in cases:
+            config = json.loads(json.dumps(DEFAULT_CONFIG))
+            config['weather'].update(weather)
+            config['astronomy'] = dict(config['astronomy'], enabled=True, **astronomy)
+            with self.subTest(weather=weather), patch.object(config_store, 'CONFIG_SNAPSHOT_LIMIT', 0):
+                stored = json.loads(_serialize_config(config))
+            self.assertEqual(stored['weather'].get('timezone'), kept_zone)
+            self.assertEqual(stored['astronomy'].get('view'), kept_view)
+            restored = _project_persisted_screen_rows(stored)
+            self.assertEqual(restored['weather'], config['weather'])
+            self.assertEqual(restored['astronomy'], config['astronomy'])
 
     def test_location_search_carries_provider_timezone(self):
         from unittest.mock import patch

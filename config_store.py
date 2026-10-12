@@ -1483,6 +1483,20 @@ def _projected_weather_timezone(weather):
     return ""
 
 
+def weather_with_timezone(previous, changes):
+    """Weather after ``changes``; a move without an explicit zone drops the stale one.
+
+    Clients loaded before weather.timezone existed send coordinates only, so the
+    old zone must not silently follow the new place.
+    """
+    weather = _merge(previous, changes)
+    if "timezone" not in changes and any(
+        key in changes and changes[key] != previous.get(key) for key in ("latitude", "longitude")
+    ):
+        weather["timezone"] = _projected_weather_timezone(weather)
+    return weather
+
+
 def _project_persisted_screen_rows(config):
     """Read schema-4 single-source rows without migrating the saved document.
 
@@ -1773,6 +1787,9 @@ sys.stdout.write(json.dumps(result, separators=(",", ":")))
             _replace_canvas_media_references(
                 current.get("custom_modules", []), available_migrations
             )
+            weather = current.get("weather")
+            if isinstance(weather, dict) and "timezone" not in weather:
+                weather["timezone"] = _projected_weather_timezone(weather)
             migrated = _merge(DEFAULT_CONFIG, current)
             migrated["schema_version"] = CURRENT_CONFIG_SCHEMA_VERSION
             migrated["revision"] = current["revision"] + 1
@@ -2182,6 +2199,8 @@ sys.stdout.write(json.dumps(result, separators=(",", ":")))
         with self._lock:
             current = self.get()
             candidate = _merge(current, changes)
+            if isinstance(changes.get("weather"), dict):
+                candidate["weather"] = weather_with_timezone(current["weather"], changes["weather"])
             candidate = _synchronize_media_playlist_changes(
                 candidate, changes, current, client_contract=client_contract,
             )
@@ -2262,6 +2281,8 @@ sys.stdout.write(json.dumps(result, separators=(",", ":")))
             if base_revision is not None and base_revision != current["revision"]:
                 raise ConfigConflictError(current["revision"])
             updated = _merge(current, changes)
+            if isinstance(changes.get("weather"), dict):
+                updated["weather"] = weather_with_timezone(current["weather"], changes["weather"])
             updated = _synchronize_media_playlist_changes(
                 updated, changes, current, client_contract=client_contract,
             )

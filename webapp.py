@@ -38,6 +38,7 @@ from display_controller import playlist_item_config, playlist_module_config
 from config_store import (
     ALLOWED_MODULES, DEFAULT_CONFIG, ConfigConflictError, ConfigDurabilityError,
     MEDIA_PLAYLIST_CLIENT_CONTRACT, GROUPED_SCREEN_CLIENT_CONTRACT, validate_config,
+    weather_with_timezone,
 )
 from font_catalog import available_font_names, font_advance_catalog
 from module_options import COLOUR_HEX, LAVA_PALETTES
@@ -449,6 +450,12 @@ def _edit_preview_iterator(
     return custom_text_preview_frames(
         matrix, custom, preview_duration(candidate, module_name), stop_event,
     )
+
+
+def _draft_weather(saved, weather):
+    """Unsaved timing weather; pages loaded before weather.timezone derive it like a save."""
+    weather = copy.deepcopy(weather)
+    return weather if "timezone" in weather else weather_with_timezone(saved, weather)
 
 
 def _revision_etag(revision):
@@ -1823,7 +1830,7 @@ def create_app(
                 if 'weather' in payload:
                     if not isinstance(payload['weather'], dict):
                         raise ValueError('Invalid weather draft')
-                    draft['weather'] = copy.deepcopy(payload['weather'])
+                    draft['weather'] = _draft_weather(draft['weather'], payload['weather'])
                 validate_config(draft, allow_legacy_announcements=False, enforce_save_bounds=True)
                 snapshot = astronomy_host.preview(draft, owner=('timing', *identity))
             except PreparationBusy:
@@ -1861,7 +1868,7 @@ def create_app(
         if module_name != "weather" and "weather" in payload:
             if not isinstance(payload["weather"], dict):
                 return jsonify({"error": "Timing draft is invalid."}), 400
-            draft["weather"] = copy.deepcopy(payload["weather"])
+            draft["weather"] = _draft_weather(draft["weather"], payload["weather"])
         try:
             validate_config(draft, allow_legacy_announcements=False, enforce_save_bounds=True)
         except (KeyError, TypeError, ValueError):
