@@ -12,6 +12,26 @@ def pixels(banner):
 
 
 class SiteBannerTests(unittest.TestCase):
+    def test_default_feed_publishers_get_readable_banners(self):
+        # Owner 2026-10-13 default feeds: proxy/aggregator hosts name the real publisher.
+        from rss_banners import banner_text
+        cases = {
+            ('https://www.reddit.com/r/worldnews/.rss', 'World News'): 'RED',
+            ('http://www.espn.com/espn/rss/news', 'www.espn.com - TOP'): 'ESP',
+            ('https://www.allsides.com/rss/news', 'AllSides News'): 'AS',
+            ('https://news.google.com/rss/search?q=when:7d+site:reuters.com&ceid=US:en&hl=en-US&gl=US',
+             '"when:7d site:reuters.com" - Google News'): 'R',
+            ('https://feedx.net/rss/ap.xml', 'Associated Press'): 'AP',
+            ('http://feeds.skynews.com/feeds/rss/world.xml', 'Sky News'): 'SKY',
+            ('https://rss.nytimes.com/services/xml/rss/nyt/World.xml', 'NYT > World News'): 'NYT',
+            ('https://www.theguardian.com/uk/rss', 'The Guardian'): 'G',
+        }
+        for (url, title), text in cases.items():
+            with self.subTest(url=url):
+                self.assertEqual(banner_text(url, title), text)
+        # Google News only maps to Reuters when the query names reuters.com.
+        self.assertNotEqual(banner_text('https://news.google.com/rss/search?q=cats', 'cats - Google News'), 'R')
+
     def test_bbc_is_red_rectangle_with_white_bbc_text(self):
         from rss_banners import site_banner
         for url in ('https://feeds.bbci.co.uk/news/rss.xml', 'https://www.bbc.co.uk/sport/rss.xml', 'https://bbc.com/x'):

@@ -5,6 +5,19 @@ import tempfile
 from pathlib import Path
 from rss_service import PreparedFeedService, FeedService
 
+# Owner 2026-10-13: default feeds (each verified live through SafeFeedClient + parse_feed before adding).
+DEFAULT_FEEDS = (
+    'https://feeds.bbci.co.uk/news/rss.xml',
+    'https://www.reddit.com/r/worldnews/.rss',
+    'http://feeds.skynews.com/feeds/rss/world.xml',
+    'http://www.espn.com/espn/rss/news',
+    'https://rss.nytimes.com/services/xml/rss/nyt/World.xml',
+    'https://www.theguardian.com/uk/rss',
+    'https://www.allsides.com/rss/news',
+    'https://news.google.com/rss/search?q=when:7d+site:reuters.com&ceid=US:en&hl=en-US&gl=US',
+    'https://feedx.net/rss/ap.xml',
+)
+
 
 class ConfigIntegrationTests(unittest.TestCase):
     def test_nondefault_predecessor_at_byte_limit_opens_updates_and_retains_removed_rows(self):
@@ -111,7 +124,8 @@ class ConfigIntegrationTests(unittest.TestCase):
             store = ConfigStore(Path(directory) / 'config.json')
             config = store.get()
             self.assertIn('rss', config)
-            self.assertEqual(config['rss']['feeds'], ['https://feeds.bbci.co.uk/news/rss.xml'])
+            self.assertEqual(config['rss']['feeds'], list(DEFAULT_FEEDS))
+            self.assertEqual(config['rss']['disabled_feeds'], [])
             self.assertEqual(config['rss']['refresh_seconds'], 1800)
             self.assertEqual(config['rss']['count'], 5)
             self.assertIsInstance(config['rss']['frame_delay'], (int, float))
@@ -567,6 +581,7 @@ class WebIntegrationTests(unittest.TestCase):
         before = f.store.path.read_bytes()
         settings = copy.deepcopy(f.store.get()['rss'])
         settings['frame_delay'] = .1
+        settings['feeds'], settings['disabled_feeds'] = settings['feeds'][:1], []  # one fixture story
         with patch('rss_transport.SafeFeedClient.fetch', return_value=b'<rss><channel><item><title>Headline</title><description>Overview</description></item></channel></rss>'):
             result = f.paired_request('post', '/api/scroll-timing/rss', json={
                 'base_revision': f.store.get()['revision'], 'settings': settings})

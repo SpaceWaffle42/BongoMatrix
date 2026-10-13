@@ -16,6 +16,9 @@ try{
  await send('Page.navigate',{url:`http://127.0.0.1:${appPort}/`});await waitFor(`typeof matrixEditorsReady!=='undefined'&&matrixEditorsReady`);
  if(!await evaluate(`!!document.querySelector('[data-rss-add]')`))throw Error('RSS Add feed control missing from loaded dashboard');
  await click('[data-module="rss"] button:last-child');
+ // Owner 2026-10-13 defaults: nine verified feeds, BBC first. Then work with BBC alone.
+ if(!await evaluate(`configBody().rss.feeds.length===9&&configBody().rss.feeds[0]==='https://feeds.bbci.co.uk/news/rss.xml'&&configBody().rss.feeds.includes('https://feedx.net/rss/ap.xml')&&document.querySelectorAll('[data-rss-row]').length===9`))throw Error('Default feeds missing '+JSON.stringify(await evaluate('configBody().rss.feeds')));
+ await evaluate(`(()=>{rssSettings.feeds=rssSettings.feeds.slice(0,1);rssSettings.disabled_feeds=[];rssChanged();renderRSSEditors();return true})()`);
  if(!await evaluate(`!!document.querySelector('[data-rss-enabled]')`))throw Error('Per-feed enabled control missing');
  await click('[data-rss-enabled]');
  if(!await evaluate(`configBody().rss.feeds.length===1&&configBody().rss.disabled_feeds[0]===configBody().rss.feeds[0]`))throw Error('Disabling removed source instead of retaining it');
@@ -65,7 +68,7 @@ try{
  await evaluate(`window.confirm=()=>false`);await click('[data-rss-reset-draft]');
  if(!await evaluate(`configBody().rss.count===3`))throw Error('Cancelled reset changed draft');
  await evaluate(`window.confirm=()=>true`);await click('[data-rss-reset-draft]');
- if(!await evaluate(`configBody().rss.count===5&&configBody().rss.feeds.length===1&&configBody().rss.frame_delay===.05&&matrixHasUnsavedDraft()`))throw Error('Draft reset defaults incorrect');
+ if(!await evaluate(`configBody().rss.count===5&&configBody().rss.feeds.length===9&&configBody().rss.feeds.at(-1)==='https://feedx.net/rss/ap.xml'&&configBody().rss.frame_delay===.05&&matrixHasUnsavedDraft()`))throw Error('Draft reset defaults incorrect');
  if(!await evaluate(`fetch('/api/config').then(r=>r.json()).then(c=>c.rss.count===3)`))throw Error('Draft reset silently saved');
  if(!await evaluate(`rssResetCalls===0`))throw Error('Draft-only reset cleared shared caches');
  await change('[data-rss-setting="count"]','7');
@@ -73,7 +76,7 @@ try{
  if(!await evaluate(`configBody().rss.count===7&&rssResetCalls===0`))throw Error('Cancelled cache reset changed draft or called backend');
  await evaluate(`window.confirm=()=>true`);await click('[data-rss-reset-all]');
  await waitFor(`rssResetCalls===1&&configBody().rss.count===5&&document.querySelector('#message').textContent.includes('Caches and seen stories cleared')`);
- if(!await evaluate(`matrixHasUnsavedDraft()&&configBody().rss.feeds.length===1&&configBody().rss.frame_delay===.05`))throw Error('Cache reset did not restore unsaved defaults');
+ if(!await evaluate(`matrixHasUnsavedDraft()&&configBody().rss.feeds.length===9&&configBody().rss.frame_delay===.05`))throw Error('Cache reset did not restore unsaved defaults');
  if(!await evaluate(`fetch('/api/config').then(r=>r.json()).then(c=>c.rss.count===3)`))throw Error('Cache reset silently saved defaults');
  await change('[data-rss-setting="count"]','6');
  if(!await evaluate(`configBody().rss.count===6&&matrixHasUnsavedDraft()`))throw Error('Editor unusable after reset redraw');

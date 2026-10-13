@@ -42,6 +42,7 @@ from config_store import (
 )
 from font_catalog import available_font_names, font_advance_catalog
 from holiday_calendar import catalogue as holiday_dates_catalogue
+from rss_config import DEFAULTS as RSS_DEFAULTS
 from modules.event_countdown import icon_catalogue as countdown_icon_catalogue
 from module_options import COLOUR_HEX, LAVA_PALETTES
 from modules.weather_app import OpenMeteoClient
@@ -1754,6 +1755,7 @@ def create_app(
                 "sleep": DEFAULT_CONFIG["media_layout"]["sleep"],
             },
             installed_fonts=available_font_names(),
+            rss_default_feeds=RSS_DEFAULTS["feeds"],
             holiday_catalogue=holiday_dates_catalogue(),  # packs + calculated dates, embedded for offline editing
             countdown_icon_art=countdown_icon_catalogue(),
             editor_timezones=sorted(available_timezones() | {"UTC"}),

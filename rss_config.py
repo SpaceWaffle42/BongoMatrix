@@ -10,7 +10,18 @@ from modules.scroll_timing import LEGACY_FRAME_DELAYS, MINIMUM_FRAME_DELAY, MAXI
 SPEED_DELAYS = MappingProxyType(dict(LEGACY_FRAME_DELAYS))
 
 DEFAULTS = {
-    'feeds': ['https://feeds.bbci.co.uk/news/rss.xml'],
+    # Owner 2026-10-13: each default verified live through SafeFeedClient + parse_feed before adding.
+    'feeds': [
+        'https://feeds.bbci.co.uk/news/rss.xml',
+        'https://www.reddit.com/r/worldnews/.rss',
+        'http://feeds.skynews.com/feeds/rss/world.xml',
+        'http://www.espn.com/espn/rss/news',
+        'https://rss.nytimes.com/services/xml/rss/nyt/World.xml',
+        'https://www.theguardian.com/uk/rss',
+        'https://www.allsides.com/rss/news',
+        'https://news.google.com/rss/search?q=when:7d+site:reuters.com&ceid=US:en&hl=en-US&gl=US',
+        'https://feedx.net/rss/ap.xml',
+    ],
     'disabled_feeds': [],
     'refresh_seconds': 1800, 'count': 5, 'include': [], 'exclude': [],
     'headline_font': '6x9', 'summary_font': '5x8',

@@ -1,5 +1,6 @@
 // RSS shares the dashboard's serializer, revision gate and Save lifecycle.
 let rssSettings = {{ config.rss|tojson }};
+const rssDefaultFeeds = {{ rss_default_feeds|tojson }};
 let rssCatalogue=null, rssStatus=null, rssDuration=null, rssTimingGeneration=0, rssTimingController=null;
 const configBodyWithoutRSS=configBody;
 configBody=function(previewMedia=false){return {...configBodyWithoutRSS(previewMedia),rss:structuredClone(rssSettings)}};
@@ -174,7 +175,7 @@ function renderRSSEditor(container){
   editorHelp(actions,'duration','Computed timing','Duration comes from prepared eligible stories, fonts, scrolling and thumbnail timing, not the playlist compatibility duration. Change settings, then Calculate again. No prepared stories means duration is unavailable; check feeds and filters.');
   const reset=makeButton('Reset draft to defaults',()=>{
     if(!confirm('Replace this RSS draft with defaults? Nothing is saved and playback/cache are unchanged.'))return;
-    rssSettings={feeds:['https://feeds.bbci.co.uk/news/rss.xml'],disabled_feeds:[],refresh_seconds:1800,count:5,include:[],exclude:[],headline_font:'6x9',summary_font:'5x8',frame_delay:.05,headline_mode:'once',thumbnail_speed:100,layout:'auto',headline_colour:'#eea62b',summary_colour:'#ffffff',background_colour:'#000000'};
+    rssSettings={feeds:structuredClone(rssDefaultFeeds),disabled_feeds:[],refresh_seconds:1800,count:5,include:[],exclude:[],headline_font:'6x9',summary_font:'5x8',frame_delay:.05,headline_mode:'once',thumbnail_speed:100,layout:'auto',headline_colour:'#eea62b',summary_colour:'#ffffff',background_colour:'#000000'};
     rssChanged();renderRSSEditors();
   },'btn danger');reset.dataset.rssResetDraft='';
   const resetAll=makeButton('Reset to defaults and clear caches',async()=>{

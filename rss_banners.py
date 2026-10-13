@@ -8,7 +8,7 @@ Known publishers match on exact host or a dot-delimited suffix, never substring.
 from functools import lru_cache
 from hashlib import sha256
 import re
-from urllib.parse import urlsplit
+from urllib.parse import unquote_plus, urlsplit
 
 from modules.rss_renderer import PreparedBanner, _font
 
@@ -25,6 +25,14 @@ KNOWN_SITES = (
     (('nytimes.com',), 'NYT', (0x12, 0x12, 0x12)),
     (('cnn.com',), 'CNN', (0xCC, 0x00, 0x00)),
     (('aljazeera.com',), 'AJ', (0xD2, 0x8A, 0x00)),
+    (('reddit.com',), 'RED', (0xFF, 0x45, 0x00)),
+    (('espn.com',), 'ESP', (0xC8, 0x10, 0x2E)),
+    (('allsides.com',), 'AS', (0x1E, 0x4B, 0x8C)),
+)
+# Aggregator hosts whose feed is one publisher: (host, query marker, text, colour).
+PROXY_SITES = (
+    ('news.google.com', 'site:reuters.com', 'R', (0xFA, 0x64, 0x00)),
+    ('feedx.net', '/ap.xml', 'AP', (0xCC, 0x00, 0x00)),
 )
 # Dark, saturated fallbacks so white text always reads on the panel.
 FALLBACK_COLOURS = ((0x1E, 0x4B, 0x8C), (0x6A, 0x1B, 0x9A), (0x00, 0x69, 0x5C), (0x8E, 0x24, 0x24),
@@ -40,6 +48,13 @@ def _host(url):
 
 def _known(url):
     host = _host(url)
+    try:
+        tail = unquote_plus(urlsplit(url).path + '?' + urlsplit(url).query).lower()
+    except ValueError:
+        tail = ''
+    for proxy, marker, text, colour in PROXY_SITES:
+        if host == proxy and marker in tail:
+            return text, colour
     for suffixes, text, colour in KNOWN_SITES:
         if any(host == s or host.endswith('.' + s) for s in suffixes):
             return text, colour
