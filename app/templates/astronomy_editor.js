@@ -18,14 +18,17 @@ const syncDurationsWithoutAstronomy = syncPlaylistDurations;
 syncPlaylistDurations = function() {
   syncDurationsWithoutAstronomy();
   for(const row of document.querySelectorAll('.module-row[data-module="astronomy"]')) {
-    const input=row.querySelector('.duration');input.hidden=true;input.readOnly=true;
+    // Same as the other automatic modules: visible, read-only box holding the calculated seconds.
+    const input=row.querySelector('.duration');input.hidden=false;input.readOnly=true;
     input.title='Runtime is calculated from the prepared Moon cards, hold times, and scroll speed';
+    if(astronomyTiming?.status==='ready'){const value=Math.min(3600,Math.max(.1,astronomyTiming.duration_seconds)).toFixed(2);if(input.value!==value)input.value=value}
     row.querySelector('.physical-time').textContent='Physical time · '+astronomyTimingText();
   }
 };
 // Same as the other modules: worked out automatically and shown as "N.N s".
 function astronomyTimingText() {
-  if(!astronomyTiming)return 'Calculating…';
+  // Not in use: show the final text from the first render so the row never shifts after load.
+  if(!astronomyTiming)return astronomyInUse()?'Calculating…':'Worked out when switched on';
   if(astronomyTiming.status==='ready')return oneDecimalSeconds(Math.round(astronomyTiming.duration_seconds*1000));
   if(astronomyTiming.status==='preparing')return 'Calculating…';
   if(astronomyTiming.status==='idle')return 'Worked out when switched on';
@@ -83,7 +86,8 @@ resetBuiltInModule = function(module) {
 async function calculateAstronomy() {
   if(!matrixEditorsReady){scheduleAstronomyTiming();return}
   // Like the other playlist modules: only work it out when Astronomy is in use.
-  if(!astronomyInUse()){astronomyTiming={status:'idle'};astronomyRenderTiming();return}
+  // Not in use: idle, and the row already says so, so don't re-sync the playlist (it disturbs Splash/Sleep pickers).
+  if(!astronomyInUse()){const shown=astronomyTiming===null||astronomyTiming.status==='idle';astronomyTiming={status:'idle'};if(!shown)astronomyRenderTiming();return}
   const generation=++astronomyTimingGeneration;astronomyTimingRequest?.abort();
   const request=new AbortController();astronomyTimingRequest=request;
   const dependency=astronomyWeatherDependency();

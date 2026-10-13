@@ -61,6 +61,9 @@ try{
   await evaluate(`(()=>{const box=document.querySelector('.module-row[data-module="astronomy"] input.enabled');if(!box.checked){box.checked=true;box.dispatchEvent(new Event('change',{bubbles:true}))}return true})()`);
   await waitFor(`${re}.test(document.querySelector('${row}').textContent)`).catch(async()=>{throw Error('astronomy not auto-calculated on load: '+await evaluate(`document.querySelector('${row}').textContent`))});
   const weatherFormat=await evaluate(`document.querySelector('.module-row[data-module="weather"] .physical-time').textContent`);
+  // Seconds box behaves like the other automatic modules: visible, read-only, holding the calculated seconds.
+  const box=await evaluate(`(()=>{const a=document.querySelector('.module-row[data-module="astronomy"] .duration'),t=document.querySelector('${row}').textContent;return {hidden:a.hidden,readOnly:a.readOnly,value:Number(a.value),shown:parseFloat(t.split('· ')[1])}})()`);
+  if(box.hidden||!box.readOnly||Math.abs(box.value-box.shown)>0.051)throw Error('astronomy seconds box is not an automatic (visible, read-only, calculated) box: '+JSON.stringify(box));
   await click('[data-module="astronomy"] button:last-child');
   await assert(`!document.querySelector('[data-astronomy-calculate]')`,'astronomy still needs a manual calculate button');
   const before=await evaluate(`parseFloat(document.querySelector('${row}').textContent.split('· ')[1])`);
