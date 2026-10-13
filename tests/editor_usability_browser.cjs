@@ -53,6 +53,21 @@ try{
   await assert(`!document.querySelector('[data-module-editor="astronomy"] [data-advanced-toggle]').checked`,'Advanced preference leaked to another module');
   await evaluate(`localStorage.removeItem('matrix.editorAdvanced.v1'),true`);
  }
+ if(scenario==='astronomy-timing'){
+  // Owner: Astronomy time is calculated exactly like the other modules: automatically, no button,
+  // shown in the playlist row as "Physical time · N.N s" and refreshed when a setting changes.
+  const row='.module-row[data-module="astronomy"] .physical-time',re='/^Physical time · \\d+\\.\\d s$/';
+  // Switched-off modules are not prepared; switching Astronomy on works the time out at once.
+  await evaluate(`(()=>{const box=document.querySelector('.module-row[data-module="astronomy"] input.enabled');if(!box.checked){box.checked=true;box.dispatchEvent(new Event('change',{bubbles:true}))}return true})()`);
+  await waitFor(`${re}.test(document.querySelector('${row}').textContent)`).catch(async()=>{throw Error('astronomy not auto-calculated on load: '+await evaluate(`document.querySelector('${row}').textContent`))});
+  const weatherFormat=await evaluate(`document.querySelector('.module-row[data-module="weather"] .physical-time').textContent`);
+  await click('[data-module="astronomy"] button:last-child');
+  await assert(`!document.querySelector('[data-astronomy-calculate]')`,'astronomy still needs a manual calculate button');
+  const before=await evaluate(`parseFloat(document.querySelector('${row}').textContent.split('· ')[1])`);
+  await change('[data-astronomy-setting="moon_hold_seconds"]',String((await evaluate('astronomySettings.moon_hold_seconds'))+10));
+  await waitFor(`Math.abs(parseFloat(document.querySelector('${row}').textContent.split('· ')[1])-${before}-10)<0.11`).catch(async()=>{throw Error('astronomy time did not follow a setting change: before '+before+' now '+await evaluate(`document.querySelector('${row}').textContent`)+' weather '+weatherFormat)});
+  await assert(`/^\\d+\\.\\d s$/.test(document.querySelector('[data-astronomy-timing]').textContent)`,'editor timing readout differs from other modules');
+ }
  if(scenario==='rss-add'){
   // Owner: left column = "Default presets" dropdown with "Add preset" below; right column = custom RSS URL with "Add custom RSS" below. Visible in Simple.
   await evaluate(`localStorage.removeItem('matrix.editorAdvanced.v1'),true`);
@@ -148,15 +163,14 @@ try{
   await click('#save-config');await waitFor('!matrixHasUnsavedDraft()');
   await send('Page.navigate',{url:`http://127.0.0.1:${appPort}/`});await waitFor(`typeof matrixEditorsReady!=='undefined'&&matrixEditorsReady`);
   await assert(`configBody().astronomy.timezone==='UTC'&&configBody().event_countdown.timezone==='UTC'`,'Zone save/reload failed');
-  await click('[data-module="astronomy"] button:last-child');await change('[data-astronomy-setting="timezone"]','');await click('[data-astronomy-calculate]');
-  // Blank astronomy zone = follow Weather (default London location carries Europe/London).
-  await waitFor(`!document.querySelector('[data-astronomy-timing]').textContent.includes('Preparing')&&!document.querySelector('[data-astronomy-timing]').textContent.includes('not calculated')`);
-  await assert(`!document.querySelector('[data-astronomy-timing]').textContent.includes('location_required')`,'Blank zone did not follow Weather');
+  await click('[data-module="astronomy"] button:last-child');await change('[data-astronomy-setting="timezone"]','');
+  // Blank astronomy zone = follow Weather (default London location carries Europe/London). Timing is automatic.
+  await waitFor(`!!astronomyTiming&&astronomyTiming.status!=='preparing'`);
+  await assert(`astronomyTiming.status!=='location_required'`,'Blank zone did not follow Weather');
   await assert(`document.querySelector('[data-astronomy-setting="timezone"]').selectedOptions[0].textContent==='Same as Weather (Europe/London)'&&configBody().astronomy.timezone===''`,'Follow-Weather default not shown or override stored');
   await evaluate(`document.querySelector('#weather-timezone').value='';astronomyWeatherChanged();true`);
   await assert(`document.querySelector('[data-astronomy-setting="timezone"]').selectedOptions[0].textContent.startsWith('Same as Weather (unknown')`,'Unknown Weather zone not explained');
-  await click('[data-astronomy-calculate]');
-  await waitFor(`document.querySelector('[data-astronomy-timing]').textContent.includes('location_required')`);
+  await waitFor(`astronomyTiming?.status==='location_required'&&document.querySelector('[data-astronomy-timing-detail]').textContent.includes('No timezone known')`);
  }
  if(scenario==='help'){
   await click('[data-module="rss"] button:last-child');await assert(`!!document.querySelector('[data-help="feed-enabled"]')`,'Contextual help missing');
@@ -168,7 +182,9 @@ try{
   for(const width of [390,768,1280]){
    await evaluate(`document.activeElement.blur()`);
    await send('Emulation.setDeviceMetricsOverride',{width,height:900,deviceScaleFactor:1,mobile:false});
-   const p=await point(selector);await send('Input.dispatchMouseEvent',{type:'mouseMoved',...p});
+   // Let the reflow after the viewport change settle so the pointer lands on the button.
+   let p=await point(selector);for(let i=0;i<20;i++){await sleep(50);const q=await point(selector);if(q.x===p.x&&q.y===p.y)break;p=q}
+   await send('Input.dispatchMouseEvent',{type:'mouseMoved',...p});
    await assert(`document.querySelector('${selector}').getAttribute('aria-expanded')==='true'`,'Hover help missing');
    await assert(`(()=>{const button=document.querySelector('${selector}'),e=document.getElementById(button.getAttribute('aria-controls'));const r=e.getBoundingClientRect();return e.checkVisibility()&&r.left>=0&&r.right<=document.documentElement.clientWidth&&button.getBoundingClientRect().width<=48&&document.documentElement.scrollWidth<=innerWidth})()`,'Help clipped by scrollbar or not beside control at '+width);
    const shot=await send('Page.captureScreenshot',{format:'png'});require('node:fs').writeFileSync('/tmp/matrix-editor-help-'+width+'.png',Buffer.from(shot.data,'base64'));

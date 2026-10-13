@@ -37,6 +37,9 @@ class EditorUsabilityTests(unittest.TestCase):
     def test_editors_open_simple_with_remembered_advanced_toggle(self):
         self.probe('simple')
 
+    def test_astronomy_time_calculated_like_other_modules(self):
+        self.probe('astronomy-timing')
+
     def test_rss_add_presets_left_custom_url_right(self):
         self.probe('rss-add')
 

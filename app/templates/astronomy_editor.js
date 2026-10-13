@@ -19,22 +19,46 @@ syncPlaylistDurations = function() {
   syncDurationsWithoutAstronomy();
   for(const row of document.querySelectorAll('.module-row[data-module="astronomy"]')) {
     const input=row.querySelector('.duration');input.hidden=true;input.readOnly=true;
-    input.closest('label').childNodes[0].textContent='Prepared card duration ';
-    row.querySelector('.physical-time').textContent=astronomyTiming?`${astronomyTiming.status} · ${astronomyTiming.duration_seconds.toFixed(2)} s`:'Not calculated · use Astronomy editor';
+    input.title='Runtime is calculated from the prepared Moon cards, hold times, and scroll speed';
+    row.querySelector('.physical-time').textContent='Physical time · '+astronomyTimingText();
   }
 };
+// Same as the other modules: worked out automatically and shown as "N.N s".
+function astronomyTimingText() {
+  if(!astronomyTiming)return 'Calculating…';
+  if(astronomyTiming.status==='ready')return oneDecimalSeconds(Math.round(astronomyTiming.duration_seconds*1000));
+  if(astronomyTiming.status==='preparing')return 'Calculating…';
+  if(astronomyTiming.status==='idle')return 'Worked out when switched on';
+  if(['disabled','empty'].includes(astronomyTiming.status))return 'Skipped (nothing to show)';
+  return 'Unavailable';
+}
+function astronomyRenderTiming(detail='') {
+  for(const note of document.querySelectorAll('[data-astronomy-timing]'))note.textContent=astronomyTimingText();
+  for(const note of document.querySelectorAll('[data-astronomy-timing-detail]'))note.textContent=detail;
+  syncPlaylistDurations();
+}
+let astronomyTimingDebounce=null;
+function astronomyInUse() {
+  const row=document.querySelector('.module-row[data-module="astronomy"]'),editor=document.querySelector('.module-editor[data-module-editor="astronomy"]');
+  return !!(row?.querySelector('input.enabled')?.checked||(editor&&!editor.hidden));
+}
+function scheduleAstronomyTiming(delay=300) {
+  clearTimeout(astronomyTimingDebounce);astronomyTimingDebounce=setTimeout(calculateAstronomy,delay);
+}
 {
   const marker=document.createElement('div');marker.dataset.moduleEditor='astronomy';
   document.querySelector('#built-in-editor-templates').content.append(marker);
   for(const row of document.querySelectorAll('.module-row[data-module="astronomy"]')) {
     const editor=marker.cloneNode();editor.className='module-editor';editor.hidden=true;
     row.closest('.module-item').append(editor);
+    // Work the time out as soon as Astronomy is switched on or its editor opens.
+    row.querySelector('input.enabled')?.addEventListener('change',()=>scheduleAstronomyTiming(0));
+    new MutationObserver(()=>{if(!editor.hidden&&!astronomyTiming?.duration_seconds)scheduleAstronomyTiming(0)}).observe(editor,{attributes:true,attributeFilter:['hidden']});
   }
 }
 function astronomyChanged() {
   astronomyTiming=null;astronomyTimingGeneration++;astronomyTimingRequest?.abort();
-  for(const note of document.querySelectorAll('[data-astronomy-timing]'))note.textContent='Draft changed; calculate prepared duration again.';
-  syncPlaylistDurations();markMatrixDirty();
+  astronomyRenderTiming();markMatrixDirty();scheduleAstronomyTiming();
   globalThis.publishDeviceDraftMutation?.('astronomy',150);
   if(previewMode==='edit'&&previewModule==='astronomy')scheduleEditPreview(150);
 }
@@ -56,30 +80,41 @@ resetBuiltInModule = function(module) {
   resetBuiltInWithoutAstronomy(module);
   if(module==='weather')astronomyWeatherChanged();
 };
-async function calculateAstronomy(container) {
+async function calculateAstronomy() {
+  if(!matrixEditorsReady){scheduleAstronomyTiming();return}
+  // Like the other playlist modules: only work it out when Astronomy is in use.
+  if(!astronomyInUse()){astronomyTiming={status:'idle'};astronomyRenderTiming();return}
   const generation=++astronomyTimingGeneration;astronomyTimingRequest?.abort();
   const request=new AbortController();astronomyTimingRequest=request;
   const dependency=astronomyWeatherDependency();
   astronomyLastWeatherDependency=dependency;
   const payload={base_revision:matrixLoadedRevision,settings:structuredClone(astronomySettings),
     weather:structuredClone(configBody().weather),preview_instance:previewInstance};
-  const note=container.querySelector('[data-astronomy-timing]');
-  note.textContent='Preparing offline cards…';
+  const current=()=>!request.signal.aborted&&generation===astronomyTimingGeneration&&dependency===astronomyWeatherDependency();
+  astronomyTiming=null;astronomyRenderTiming();
   try {
     for(let attempt=0;attempt<300;attempt++) {
-      const result=await api('/api/scroll-timing/astronomy',{method:'POST',headers:{'Content-Type':'application/json'},
-        body:JSON.stringify(payload),signal:request.signal});
-      if(generation!==astronomyTimingGeneration||dependency!==astronomyWeatherDependency())return;
-      astronomyTiming=result;syncPlaylistDurations();
-      note.textContent=`${result.status} · ${result.ready_count} cards · ${result.duration_seconds.toFixed(2)} s. ${result.error||''}`;
-      if(result.clipping?.some(card=>card.some(Boolean)))note.textContent+=' Font clipping: choose a smaller installed font.';
-      if(result.status==='location_required')note.textContent+=' No timezone known: choose the Weather location from search again, or pick a timezone here.';
+      let result;
+      try {
+        result=await api('/api/scroll-timing/astronomy',{method:'POST',headers:{'Content-Type':'application/json'},
+          body:JSON.stringify(payload),signal:request.signal});
+      } catch(error) {
+        if(error.status!==429)throw error;
+        await new Promise(resolve=>setTimeout(resolve,1000));if(!current())return;continue;
+      }
+      if(!current())return;
+      astronomyTiming=result;
+      let detail=result.error||'';
+      if(result.clipping?.some(card=>card.some(Boolean)))detail+=' Font clipping: choose a smaller installed font.';
+      if(result.status==='location_required')detail+=' No timezone known: choose the Weather location from search again, or pick a timezone here.';
+      if(['disabled','empty'].includes(result.status))detail+=' Nothing to show, so the display skips to the next module.';
+      astronomyRenderTiming(detail.trim());
       if(result.status!=='preparing')return;
       await new Promise(resolve=>setTimeout(resolve,100));
-      if(request.signal.aborted||generation!==astronomyTimingGeneration)return;
+      if(!current())return;
     }
-    note.textContent='Preparation still pending; retry Calculate.';
-  } catch(error) {if(generation===astronomyTimingGeneration&&error.name!=='AbortError')note.textContent=error.message;}
+    astronomyTiming={status:'error'};astronomyRenderTiming('Preparation is taking too long; change a setting to try again.');
+  } catch(error) {if(generation===astronomyTimingGeneration&&error.name!=='AbortError'){astronomyTiming={status:'error'};astronomyRenderTiming(error.message)}}
 }
 // The blank timezone option means "same as Weather"; label it with Weather's current zone.
 function astronomyFollowWeatherOption(select) {
@@ -140,8 +175,12 @@ function renderAstronomyEditor(container) {
   // Separate colours per text role (owner); text_colour remains as the legacy base value.
   for(const [key,label] of [['title_colour','Title colour'],['date_colour','Date colour'],['description_colour','Description colour'],['background','Background colour'],['moon_colour','Moon colour'],['accent','Event icon colour']])control(key,label,'color');
   editorParagraph(appearance,'Title: phase name or event name. Date: event date, next phase and countdown. Description: illumination, rise/set and visibility window.');
-  const calculate=makeButton('Work out time on screen',()=>calculateAstronomy(container));calculate.dataset.astronomyCalculate='';actions.append(makeButton('Preview my changes',()=>editorDraftPreview('astronomy')),calculate);
-  const timing=document.createElement('p');timing.dataset.astronomyTiming='';timing.setAttribute('role','status');timing.textContent='Time on screen not worked out yet. Press “Work out time on screen”. If everything is switched off, the display skips to the next module.';actions.append(timing);
+  actions.append(makeButton('Preview my changes',()=>editorDraftPreview('astronomy')));
+  // Same readout as the other modules' calculated runtime (e.g. Weather's "15.5 s").
+  const timingRow=document.createElement('p'),timingLabel=document.createElement('span'),timing=document.createElement('strong'),timingDetail=document.createElement('p');
+  timingLabel.textContent='Time on screen: ';timing.dataset.astronomyTiming='';timing.setAttribute('role','status');timing.textContent=astronomyTimingText();
+  timingDetail.dataset.astronomyTimingDetail='';timingDetail.className='editor-note';
+  timingRow.append(timingLabel,timing);actions.append(timingRow,timingDetail);
   const details=document.createElement('details'),summary=document.createElement('summary'),text=document.createElement('p');
   summary.textContent='How the Moon is calculated';editorAdvanced(details);
   text.textContent='Eclipses, supermoon/blue-moon labels, meteor showers and planetary events are not implemented. No provider is connected. Phase time is the global instant; countdown targets the next local observing window, not a phase duration. Moon picture is a pixel-art schematic drawn in Aseprite (waxing lit on the right), not sky-oriented. Place search/map remains unavailable in this local slice. NASA/JPL DE440s, Skyfield 1.54, checksum verified in background before use; supported dates 2000–2100. Bundled time tables; future UTC/UT1 uncertainty. Moon >10° and Sun <−18° for at least 10 continuous minutes. No terrain or weather visibility model. No event catalogue or updater installed. Production static-data/dependency delivery remains blocked.';

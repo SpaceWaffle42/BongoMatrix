@@ -94,6 +94,10 @@ class PreparationLane:
                 force = True
             now = time.monotonic()
             self._owners = {o: expiry for o, expiry in self._owners.items() if expiry > now}
+            if self._snapshot.status != 'preparing':
+                # Short timing claims only protect a preparation that is still running;
+                # waiting (preview/display) claims keep their protection.
+                self._owners = {o: expiry for o, expiry in self._owners.items() if o[1] is not None}
             if key != self._key or force:
                 if any(o[0] != owner for o in self._owners):
                     raise PreparationBusy('Astronomy preparation is busy.')

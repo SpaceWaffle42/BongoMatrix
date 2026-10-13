@@ -87,6 +87,23 @@ class HostTests(unittest.TestCase):
         finally:
             release.set()
 
+    def test_finished_timing_claim_does_not_block_another_page(self):
+        # Automatic timing: a page's short claim protects only a running preparation.
+        from astronomy_host import PreparationBusy
+        host = self.host_class()(preparer=lambda *args: ())
+        self.addCleanup(host.close)
+        first = self.config()
+        changed = copy.deepcopy(first)
+        changed['astronomy']['moon_hold_seconds'] += 1
+        host.preview(first, owner=('timing', 'device', 'page-a'))
+        self.assertTrue(host.draft.wait_idle(2))
+        # Page A reloads before polling again: its claim is never released by a later poll.
+        try:
+            replacement = host.preview(changed, owner=('timing', 'device', 'page-b'))
+        except PreparationBusy:
+            self.fail('finished timing claim from another page blocked a new draft')
+        self.assertIn(replacement.status, ('preparing', 'empty'))
+
     def test_owner_replacement_distinct_contention_and_bounded_sharing(self):
         from astronomy_host import PreparationBusy
         entered, release = threading.Event(), threading.Event()
@@ -523,23 +540,21 @@ class WebTests(unittest.TestCase):
  await change('#weather-location','Sydney');
  await waitFor(`!!document.querySelector('#weather-results [role="option"]')`);
  await click('#weather-results [role="option"]');
- await click('[data-astronomy-calculate]');
- await waitFor(`document.querySelector('[data-astronomy-timing]').textContent.includes('ready')`);
- const result=await evaluate(`({request:window.astronomyRequests[0],draftWeather:configBody().weather,unsaved:matrixHasUnsavedDraft()})`);
+ await waitFor(`astronomyTiming?.status==='ready'&&window.astronomyRequests.length>0`);
+ const result=await evaluate(`({request:window.astronomyRequests.at(-1),draftWeather:configBody().weather,unsaved:matrixHasUnsavedDraft()})`);
  await evaluate(`resetBuiltInModule('weather');true`);
  result.resetInvalidated=await evaluate(`astronomyTiming===null`);
  await change('#weather-location','Sydney');
  await waitFor(`!!document.querySelector('#weather-results [role="option"]')`);
  await click('#weather-results [role="option"]');
- await click('[data-astronomy-calculate]');
- await waitFor(`document.querySelector('[data-astronomy-timing]').textContent.includes('ready')`);
+ await waitFor(`astronomyTiming?.status==='ready'`);
  await evaluate(`(()=>{const original=window.fetch;window.fetch=(url,options)=>{const promise=original(url,options);return url==='/api/scroll-timing/astronomy'?promise.then(response=>new Promise(resolve=>{window.releaseAstronomyTiming=()=>resolve(response)})):promise};return true})()`);
- await click('[data-astronomy-calculate]');
+ await evaluate(`scheduleAstronomyTiming(0),true`);
  await waitFor(`typeof window.releaseAstronomyTiming==='function'`);
  await change('#weather-location','changed');
  await evaluate(`window.releaseAstronomyTiming();true`);
  await sleep(100);
- result.invalidated=await evaluate(`astronomyTiming===null&&document.querySelector('[data-astronomy-timing]').textContent.includes('changed')`);
+ result.invalidated=await evaluate(`astronomyTiming===null&&document.querySelector('[data-astronomy-timing]').textContent==='Calculating…'`);
  result.errors=errors;
  console.log(JSON.stringify(result));
 }finally{socket.close()}

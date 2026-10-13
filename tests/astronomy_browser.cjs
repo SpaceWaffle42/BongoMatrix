@@ -32,8 +32,7 @@ try{
  await change('[data-astronomy-setting="date_colour"]','#00ff00');
  await change('[data-astronomy-setting="description_colour"]','#0000ff');
  await click('[data-astronomy-setting="lunar_events"]');
- await click('[data-astronomy-calculate]');
- await waitFor(`document.querySelector('[data-astronomy-timing]').textContent.includes('ready')`);
+ await waitFor(`astronomyTiming?.status==='ready'&&/^\\d+\\.\\d s$/.test(document.querySelector('[data-astronomy-timing]').textContent)`);
  if(!await evaluate(`document.querySelector('[data-astronomy-note]').textContent.includes('not implemented')`))throw Error('Unsupported capabilities not disclosed');
  if(await evaluate(`!!document.querySelector('[data-astronomy-setting="meteor_showers"]')`))throw Error('Fake enabled capability');
  await click('#save-config');await waitFor(`!matrixHasUnsavedDraft()`);
