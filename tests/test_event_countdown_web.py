@@ -100,3 +100,11 @@ class CountdownWebTests(unittest.TestCase):
         self.assertEqual(result['artwork'], 'countdown-art.png')
         self.assertEqual(result['errors'], [])
         self.assertEqual(self.fixture.store.get()['event_countdown']['events'][0]['title'], 'Browser launch')
+
+    def test_calendar_packs_holiday_icons_date_edits_and_birthday(self):
+        probe = Path(__file__).with_name('calendar_browser.cjs').read_text()
+        result = self.fixture.run_live_chromium_probe(probe, timeout=90)
+        self.assertGreaterEqual(result['packs'], 6)
+        saved = self.fixture.store.get()['event_countdown']
+        self.assertTrue(saved['packs']['christian'])
+        self.assertEqual(saved['events'][-1]['icon'], 'birthday')

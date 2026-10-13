@@ -44,8 +44,12 @@ try{
   }
   // Preference persists per module across reloads; toggling never changes the draft.
   await click(`[data-module="rss"] .module-actions button:last-child`);await waitFor(`!document.querySelector('[data-module-editor="rss"]').hidden`);
+  // Opening Astronomy above starts its automatic timing, which may still be filling in its
+  // calculated seconds; let it settle so only the toggle itself is measured.
+  await waitFor(`!!astronomyTiming&&astronomyTiming.status!=='preparing'`);
+  const beforeToggle=await evaluate(draft);
   await click(`[data-module-editor="rss"] [data-advanced-toggle]`);
-  if(await evaluate(draft)!==before)throw Error('Advanced toggle changed the draft');
+  if(await evaluate(draft)!==beforeToggle)throw Error('Advanced toggle changed the draft');
   await send('Page.reload');await sleep(300);await waitFor(`typeof matrixEditorsReady!=='undefined'&&matrixEditorsReady`);
   await click(`[data-module="rss"] .module-actions button:last-child`);await waitFor(`!document.querySelector('[data-module-editor="rss"]').hidden`);
   await assert(`document.querySelector('[data-module-editor="rss"] [data-advanced-toggle]').checked&&document.querySelector('[data-module-editor="rss"] [data-rss-setting="include"]').checkVisibility()`,'RSS Advanced preference not remembered');

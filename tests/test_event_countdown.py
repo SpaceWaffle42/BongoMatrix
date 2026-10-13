@@ -73,8 +73,9 @@ class CountdownTests(unittest.TestCase):
                     store = ConfigStore(path)
                     projected = store.get()
                     expected = copy.deepcopy(rows)
-                    # Full defaults plus a row need 303 bytes with these fixtures.
-                    if count == 255 and (spare is None or spare >= 303):
+                    # Full defaults plus a row: 303 bytes before holiday packs; derive the rest.
+                    pack_bytes = len(encode({k: DEFAULT_CONFIG['event_countdown'][k] for k in ('packs', 'holiday_dates', 'hidden_holidays')})) - 2 + 1
+                    if count == 255 and (spare is None or spare >= 303 + pack_bytes):
                         expected.append(dict(module='event_countdown', duration=15, enabled=False))
                     self.assertEqual(projected['playlist'], expected)
                     self.assertEqual(path.read_bytes(), before)

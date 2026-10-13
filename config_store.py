@@ -25,7 +25,10 @@ from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 from PIL import Image, ImageSequence
 
 from module_options import LAVA_PALETTES
-from event_countdown_config import DEFAULTS as COUNTDOWN_DEFAULTS, validate as validate_countdown
+from event_countdown_config import (
+    DEFAULTS as COUNTDOWN_DEFAULTS, PROJECTED_FIELDS as COUNTDOWN_PROJECTED_FIELDS,
+    project as project_countdown, validate as validate_countdown,
+)
 from rss_config import DEFAULTS as RSS_DEFAULTS, validate as validate_rss
 from astronomy_config import (
     DEFAULTS as ASTRONOMY_DEFAULTS, PROJECTED_FIELDS as ASTRONOMY_PROJECTED_FIELDS,
@@ -98,6 +101,13 @@ def _serialize_config(config):
         # Lossless: read projection reconstructs exactly this value.
         compact["weather"] = dict(compact["weather"])
         compact["weather"].pop("timezone", None)
+        data = json.dumps(compact, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    if len(data) > CONFIG_SNAPSHOT_LIMIT and isinstance(compact.get("event_countdown"), dict):
+        # Lossless: read projection refills default pack fields.
+        compact["event_countdown"] = dict(compact["event_countdown"])
+        for key in COUNTDOWN_PROJECTED_FIELDS:
+            if compact["event_countdown"].get(key) == COUNTDOWN_DEFAULTS[key]:
+                compact["event_countdown"].pop(key, None)
         data = json.dumps(compact, sort_keys=True, separators=(",", ":")).encode("utf-8")
     if len(data) > CONFIG_SNAPSHOT_LIMIT and isinstance(compact.get("astronomy"), dict):
         compact["astronomy"] = dict(compact["astronomy"])
@@ -1523,6 +1533,7 @@ def _project_persisted_screen_rows(config):
         for key in ASTRONOMY_PROJECTED_FIELDS:
             astronomy.setdefault(key, copy.deepcopy(ASTRONOMY_DEFAULTS[key]))
         project_astronomy_role_colours(astronomy)
+    project_countdown(config.get("event_countdown"))
     weather = config.get("weather")
     if isinstance(weather, dict) and "timezone" not in weather:
         weather["timezone"] = _projected_weather_timezone(weather)

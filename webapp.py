@@ -41,6 +41,8 @@ from config_store import (
     weather_with_timezone,
 )
 from font_catalog import available_font_names, font_advance_catalog
+from holiday_calendar import catalogue as holiday_dates_catalogue
+from modules.event_countdown import icon_catalogue as countdown_icon_catalogue
 from module_options import COLOUR_HEX, LAVA_PALETTES
 from modules.weather_app import OpenMeteoClient
 from modules.scroll_timing_cache import ScrollTimingCache, TimingCacheBusy
@@ -1727,7 +1729,7 @@ def create_app(
             module_labels={
                 "astronomy": "Astronomy (local Moon)",
                 "rss": "RSS News",
-                "event_countdown": "Event Countdown",
+                "event_countdown": "Calendar",
                 "announcement_board": "Announcement Board",
                 "weather": "Weather (Free · Open-Meteo)",
                 "openweather_overview": "OpenWeather Overview",
@@ -1752,6 +1754,8 @@ def create_app(
                 "sleep": DEFAULT_CONFIG["media_layout"]["sleep"],
             },
             installed_fonts=available_font_names(),
+            holiday_catalogue=holiday_dates_catalogue(),  # packs + calculated dates, embedded for offline editing
+            countdown_icon_art=countdown_icon_catalogue(),
             editor_timezones=sorted(available_timezones() | {"UTC"}),
             font_advances=font_advance_catalog(),
             scroll_timing_javascript=timing_javascript(),

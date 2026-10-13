@@ -10,6 +10,7 @@ from PIL import Image, ImageDraw
 from edit_preview import _png_frame, CaptureMatrix
 from frame_capture import BdfFont
 from font_catalog import FONT_DIR, font_key
+from holiday_calendar import pack_events
 
 
 UTC = dt.timezone.utc
@@ -21,6 +22,43 @@ ICONS = {
     'holiday': (0x18, 0x3c, 0x18, 0x7e, 0x3c, 0xff, 0x18, 0x18),
     'opening': (0x7e, 0x42, 0x5e, 0x52, 0x56, 0x52, 0x7e, 0xff),
 }
+# Coloured 8x8 holiday art: one character per pixel, '.' is transparent.
+_ART_COLOURS = {
+    'g': (40, 170, 60), 'G': (20, 110, 40), 'y': (255, 215, 0), 'o': (255, 120, 20), 'O': (200, 80, 0),
+    'b': (130, 80, 40), 'r': (230, 40, 50), 'p': (255, 105, 180), 'w': (255, 255, 255), 'c': (90, 200, 255),
+    'B': (60, 110, 255), 'v': (170, 90, 255), 'k': (60, 60, 60), 'l': (180, 255, 120), 's': (200, 200, 210),
+}
+ART = {
+    'birthday': ('..y.y.y.', '..w.w.w.', '.pppppp.', '.pwpwpp.', '.pppppp.', 'rrrrrrrr', 'wwwwwwww', 'rrrrrrrr'),
+    'tree': ('...yy...', '...gg...', '..gggg..', '..grgg..', '.gggygg.', '.ggggrg.', 'gggggggg', '...bb...'),
+    'pumpkin': ('....G...', '...G....', '.oooooo.', 'oOooooOo', 'oyoooyoo', 'oooooooo', 'oyyyyyoo', '.oooooo.'),
+    'egg': ('...pp...', '..pppp..', '.cccccc.', '.yyyyyy.', 'pppppppp', 'cccccccc', '.yyyyyy.', '..pppp..'),
+    'cross': ('...yy...', '...yy...', 'yyyyyyyy', 'yyyyyyyy', '...yy...', '...yy...', '...yy...', '...yy...'),
+    'dove': ('........', '.ww.....', 'wwww..w.', '.wwwwww.', '..wwwwwo', '...www..', '..w.....', '........'),
+    'star': ('...y....', '...y....', '..yyy...', 'yyyyyyy.', '.yyyyy..', '..yyy...', '.yy.yy..', 'yy...yy.'),
+    'heart': ('.rr..rr.', 'rrrrrrrr', 'rrrrrrrr', 'rrrrrrrr', '.rrrrrr.', '..rrrr..', '...rr...', '........'),
+    'firework': ('y..r..y.', '.y.r.y..', '..yry...', 'rrrwrrr.', '..yry...', '.y.r.y..', 'y..r..y.', '........'),
+    'crescent': ('..yyy...', '.yy.....', 'yy......', 'yy....y.', 'yy...yyy', 'yy....y.', '.yy.....', '..yyy...'),
+    'lantern': ('...yy...', '..rrrr..', '.rryyrr.', '.rryyrr.', '.rryyrr.', '..rrrr..', '...yy...', '...y....'),
+    'star_of_david': ('...B....', '..B.B...', 'BBBBBBB.', '.B...B..', '.B...B..', 'BBBBBBB.', '..B.B...', '...B....'),
+    'menorah': ('y.y.y.y.', 'y.y.y.y.', 'c.c.c.c.', 'cccccccc', '...cc...', '...cc...', '..cccc..', '.cccccc.'),
+    'shofar': ('........', 'b.......', 'bb......', '.bb.....', '..bbb...', '...bbbb.', '....bbbb', '......bb'),
+    'diya': ('...y....', '..yoy...', '...o....', '........', 'O......O', 'OOOOOOOO', '.OOOOOO.', '..OOOO..'),
+    'holi': ('p...B...', '..y...g.', '.pp..BB.', 'ppp.BBB.', '.p.y.B..', '..yyy...', 'g.yyy.v.', 'gg...vv.'),
+    'lotus': ('...p....', '..ppp...', '.p.p.p..', 'pp.p.pp.', 'pppppppp', '.pppppp.', 'gggggggg', '.gggggg.'),
+    'khanda': ('...B....', '..BBB...', '.B.B.B..', 'B..B..B.', 'B..B..B.', '.B.B.B..', '..BBB...', '.BBBBB..'),
+    'leaf': ('......gg', '....gggg', '...ggggg', '..gggglg', '.gggglgg', '.ggglgg.', '.glgg...', 'l.......'),
+}
+def icon_catalogue():
+    """Icon pixels for the dashboard calendar: 8 rows of 8 '#rrggbb' or None."""
+    result = {name: [[None if key == '.' else '#%02x%02x%02x' % _ART_COLOURS[key] for key in row] for row in rows]
+              for name, rows in ART.items()}
+    for name, rows in ICONS.items():
+        result.setdefault(name, [['#ffffff' if row & (0x80 >> x) else None for x in range(8)] for row in rows])
+    return result
+
+
+CONFETTI = ((255, 60, 60), (255, 210, 0), (60, 200, 255), (120, 255, 120), (255, 105, 180), (170, 90, 255))
 
 
 def local_time(value, zone):
@@ -45,7 +83,9 @@ def select_event(settings, *, now=None):
     now = now.astimezone(UTC)
     local_year = now.astimezone(zone).year
     best = None
-    for order, item in enumerate(settings['events']):
+    # Holiday packs add all-day events for this and next year (dates calculated offline).
+    events = [*settings['events'], *pack_events(settings, (local_year - 1, local_year, local_year + 1))]
+    for order, item in enumerate(events):
         if not item['enabled']:
             continue
         original = local_time(item['start'], zone)
@@ -168,6 +208,27 @@ def _text(image, name, text, x, y, colour):
                     image.putpixel((px, py), colour)
 
 
+def _art(draw, name, left, top, height):
+    for y, row in enumerate(ART[name]):
+        for x, key in enumerate(row):
+            if key != '.' and top + y < height:
+                draw.point((left + x, top + y), fill=_ART_COLOURS[key])
+
+
+def _confetti(area, elapsed):
+    """Falling multicoloured confetti over the card (birthday NOW only); deterministic."""
+    width, height = area.size
+    for index in range(28):
+        seed = (index * 2654435761) & 0xffffffff
+        speed = 10 + seed % 14
+        x = (seed >> 8) % width + int(2 * math.sin(elapsed * 3 + index))
+        y = int(((seed >> 16) % (height + 8)) + elapsed * speed) % (height + 8) - 4
+        if 0 <= x < width and 0 <= y < height:
+            area.putpixel((x, y), CONFETTI[index % len(CONFETTI)])
+            if index % 3 == 0 and y + 1 < height:
+                area.putpixel((x, y + 1), CONFETTI[index % len(CONFETTI)])
+
+
 def render_frame(settings, selected, *, elapsed=0, initial_seconds=None, artwork=None):
     """Render BDF pixels once; both outputs use this exact clipped image."""
     inset = settings['insets']
@@ -201,6 +262,8 @@ def render_frame(settings, selected, *, elapsed=0, initial_seconds=None, artwork
     draw = ImageDraw.Draw(area)
     if icon_width and artwork is not None:
         area.paste(artwork, (0, text_y))
+    elif icon_width and item.get('icon') in ART:
+        _art(draw, item['icon'], 0, text_y, height)  # coloured pixel art (cake, tree, pumpkin, ...)
     elif icon_width:
         for y, row in enumerate(ICONS.get(item.get('icon'), ICONS['calendar'])):
             for x in range(8):
@@ -213,6 +276,8 @@ def render_frame(settings, selected, *, elapsed=0, initial_seconds=None, artwork
         fill = min(width, max(0, math.ceil(width * seconds / horizon)))
         if fill:
             draw.rectangle((0, height - bar_height, fill - 1, height - 1), fill=accent)
+    if seconds <= 0 and item.get('icon') == 'birthday':
+        _confetti(area, elapsed)
     image.paste(area, (inset['left'], inset['top']))
     return image, dict(title_width=title_width, title_scrolls=title_width > width, title_x=title_x,
                       title_height=measured_title_height, title_available_width=width,

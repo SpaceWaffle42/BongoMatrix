@@ -12747,6 +12747,10 @@ process.stdout.write(JSON.stringify({
         candidate["astronomy"].update(
             title_colour="#fedcba", date_colour="#123456", description_colour="#654321",
         )
+        # Calendar pack fields equal to defaults are reconstructible; use real values.
+        candidate["event_countdown"]["packs"]["christian"] = True
+        candidate["event_countdown"]["holiday_dates"] = {"christian.easter": {"2027": "2027-03-29"}}
+        candidate["event_countdown"]["hidden_holidays"] = ["general.halloween"]
         bitmap = base64.b64encode(bytes(64 * 32 * 4)).decode("ascii")
         pixels = [
             {

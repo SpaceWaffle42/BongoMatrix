@@ -1,5 +1,132 @@
 let countdownSettings = {{ config.event_countdown|tojson }};
 let countdownPreviewInfo = null;
+// Holiday packs and their offline-calculated dates (server), plus the panel's icon pixels.
+const holidayCatalogue = {{ holiday_catalogue|tojson }};
+const countdownIconArt = {{ countdown_icon_art|tojson }};
+const countdownIconNames = {calendar:'Calendar',birthday:'Birthday cake',anniversary:'Heart (anniversary)',launch:'Rocket',holiday:'Holiday',opening:'Door (opening)',
+  tree:'Christmas tree',pumpkin:'Pumpkin',egg:'Easter egg',cross:'Cross',dove:'Dove',star:'Star',heart:'Heart',firework:'Fireworks',crescent:'Crescent moon',
+  lantern:'Lantern',star_of_david:'Star of David',menorah:'Menorah',shofar:'Shofar',diya:'Diya lamp',holi:'Holi colours',lotus:'Lotus',khanda:'Khanda',leaf:'Leaf'};
+let calendarMonth = null; // {year, month 0-11} shown in the grid
+function countdownIcon(name,scale=2) {
+  const canvas=document.createElement('canvas');canvas.width=canvas.height=8;canvas.dataset.icon=name;canvas.className='calendar-icon';
+  canvas.style.width=canvas.style.height=8*scale+'px';canvas.setAttribute('aria-hidden','true');
+  const context=canvas.getContext('2d');(countdownIconArt[name]||countdownIconArt.calendar).forEach((row,y)=>row.forEach((colour,x)=>{if(colour){context.fillStyle=colour;context.fillRect(x,y,1,1)}}));
+  return canvas;
+}
+function calendarTodayParts() {
+  try{return Object.fromEntries(new Intl.DateTimeFormat('en-CA',{timeZone:countdownSettings.timezone,year:'numeric',month:'2-digit',day:'2-digit'}).formatToParts(new Date()).map(p=>[p.type,Number(p.value)]))}
+  catch(_){const d=new Date();return {year:d.getFullYear(),month:d.getMonth()+1,day:d.getDate()}}
+}
+function holidayDatesFor(key,year) {
+  const edited=countdownSettings.holiday_dates?.[key]?.[String(year)];
+  if(edited)return [edited];
+  for(const pack of Object.values(holidayCatalogue))for(const item of pack.holidays)if(item.key===key)return item.dates[String(year)]||[];
+  return [];
+}
+// Every event shown on a given day: own events (incl. yearly ones) and holidays from switched-on packs.
+function calendarEventsByDay(year) {
+  const days=new Map(),add=(date,entry)=>{if(!days.has(date))days.set(date,[]);days.get(date).push(entry)};
+  for(const event of countdownSettings.events){
+    if(!event.start)continue;const date=countdownLocalDate(event.start);
+    if(event.annual){const [_,m,d]=date.split('-');const last=new Date(Date.UTC(year,Number(m),0)).getUTCDate();add(`${year}-${m}-${String(Math.min(Number(d),last)).padStart(2,'0')}`,{title:event.title,icon:event.icon,own:event,enabled:event.enabled})}
+    else if(date.startsWith(year+'-'))add(date,{title:event.title,icon:event.icon,own:event,enabled:event.enabled});
+  }
+  for(const [packId,pack] of Object.entries(holidayCatalogue)){
+    if(!countdownSettings.packs?.[packId])continue;
+    for(const item of pack.holidays){
+      if(countdownSettings.hidden_holidays.includes(item.key))continue;
+      for(const date of holidayDatesFor(item.key,year))add(date,{title:item.name,icon:item.icon,holiday:item.key,enabled:true});
+    }
+  }
+  return days;
+}
+function calendarShowMonth(year,month) {calendarMonth={year,month};for(const grid of document.querySelectorAll('[data-calendar-root]'))renderCalendarGrid(grid)}
+function renderCalendarGrid(root) {
+  root.replaceChildren();
+  const today=calendarTodayParts();calendarMonth??={year:today.year,month:today.month-1};
+  const {year,month}=calendarMonth,head=document.createElement('div');head.className='calendar-head';
+  const title=document.createElement('strong');title.dataset.calendarTitle='';title.textContent=new Date(Date.UTC(year,month,1)).toLocaleDateString(undefined,{month:'long',year:'numeric',timeZone:'UTC'});
+  const previous=makeButton('‹',()=>calendarShowMonth(month?year:year-1,month?month-1:11));previous.setAttribute('aria-label','Previous month');
+  const next=makeButton('›',()=>calendarShowMonth(month===11?year+1:year,(month+1)%12));next.setAttribute('aria-label','Next month');
+  const todayButton=makeButton('Today',()=>calendarShowMonth(today.year,today.month-1));
+  head.append(previous,title,next,todayButton);root.append(head);
+  const grid=document.createElement('div');grid.className='calendar-grid';grid.dataset.calendarGrid='';grid.setAttribute('role','grid');
+  for(const name of ['Mon','Tue','Wed','Thu','Fri','Sat','Sun']){const cell=document.createElement('div');cell.className='calendar-weekday';cell.textContent=name;grid.append(cell)}
+  const first=new Date(Date.UTC(year,month,1)),offset=(first.getUTCDay()+6)%7,length=new Date(Date.UTC(year,month+1,0)).getUTCDate();
+  for(let i=0;i<offset;i++){const blank=document.createElement('div');blank.className='calendar-day empty';grid.append(blank)}
+  const events=calendarEventsByDay(year);
+  for(let day=1;day<=length;day++){
+    const date=`${year}-${String(month+1).padStart(2,'0')}-${String(day).padStart(2,'0')}`,cell=document.createElement('div');
+    cell.className='calendar-day';cell.dataset.calendarDay=date;cell.setAttribute('role','gridcell');
+    if(year===today.year&&month===today.month-1&&day===today.day)cell.classList.add('today');
+    const number=document.createElement('span');number.className='calendar-number';number.textContent=day;cell.append(number);
+    for(const entry of events.get(date)||[]){
+      const chip=document.createElement('div');chip.className='calendar-event'+(entry.holiday?' holiday':'')+(entry.enabled?'':' off');chip.dataset.calendarEvent=entry.holiday||entry.own?.id||'';
+      chip.title=entry.title;const label=document.createElement('span');label.textContent=entry.title;chip.append(countdownIcon(entry.icon||'calendar'),label);cell.append(chip);
+    }
+    cell.addEventListener('dblclick',()=>calendarAddEvent({start:date}));
+    grid.append(cell);
+  }
+  root.append(grid);
+  const hint=document.createElement('p');hint.className='editor-note';hint.textContent='Double-click a day to add an event on it. Holidays from switched-on packs show automatically.';root.append(hint);
+}
+function calendarAddEvent(changes={}) {
+  const bytes=crypto.getRandomValues(new Uint8Array(12)),id='event_'+Array.from(bytes,b=>b.toString(16).padStart(2,'0')).join('');
+  countdownSettings.events.push({id,title:'New event',start:countdownLocalDate(new Date().toISOString()),end:null,all_day:true,annual:false,enabled:true,now_minutes:15,accent:null,icon:'calendar',...changes});
+  countdownChanged();renderCountdownEditors();
+}
+function renderHolidayPacks(container) {
+  const group=document.createElement('details');group.className='editor-group calendar-packs';group.open=true;
+  const summary=document.createElement('summary');summary.textContent='Holiday packs';group.append(summary);
+  editorParagraph(group,'Switch on the holidays you celebrate. Dates are worked out automatically for every year, offline. You can change a date for one year if your community marks it on a different day.');
+  const list=document.createElement('div');list.className='calendar-pack-list';group.append(list);
+  for(const [packId,pack] of Object.entries(holidayCatalogue)){
+    const row=document.createElement('div');row.className='calendar-pack';
+    const label=document.createElement('label');label.className='editor-check';
+    const box=document.createElement('input');box.type='checkbox';box.dataset.calendarPack=packId;box.checked=!!countdownSettings.packs?.[packId];
+    box.addEventListener('change',()=>{countdownSettings.packs[packId]=box.checked;countdownChanged();renderCountdownEditors()});
+    const name=document.createElement('span');name.textContent=pack.name;label.append(box,name);
+    const icons=document.createElement('span');icons.className='calendar-pack-icons';for(const icon of [...new Set(pack.holidays.map(item=>item.icon))].slice(0,4))icons.append(countdownIcon(icon,1.5));
+    const edit=makeButton('Dates',()=>{const panel=row.querySelector('.calendar-pack-dates');panel.hidden=!panel.hidden;edit.setAttribute('aria-expanded',String(!panel.hidden));if(!panel.hidden)renderPackDates(panel,packId)});
+    edit.dataset.calendarPackEdit=packId;edit.setAttribute('aria-expanded','false');
+    const panel=document.createElement('div');panel.className='calendar-pack-dates';panel.hidden=true;
+    row.append(label,icons,edit,panel);list.append(row);
+  }
+  container.append(group);
+}
+function renderPackDates(panel,packId) {
+  const pack=holidayCatalogue[packId];panel.replaceChildren();
+  editorParagraph(panel,pack.note);
+  const today=calendarTodayParts(),years=Object.keys(pack.holidays[0]?.dates||{}).map(Number).filter(year=>year>=today.year);
+  const yearSelect=document.createElement('select');yearSelect.dataset.calendarDatesYear=packId;
+  for(const year of years){const option=document.createElement('option');option.value=year;option.textContent=year;yearSelect.append(option)}
+  yearSelect.value=String(panel.dataset.year||years[0]);
+  const yearLabel=document.createElement('label');yearLabel.textContent='Year ';yearLabel.append(yearSelect);panel.append(yearLabel);
+  const table=document.createElement('div');table.className='calendar-date-table';panel.append(table);
+  const fill=()=>{
+    panel.dataset.year=yearSelect.value;table.replaceChildren();
+    for(const year of years.length>2?[Number(yearSelect.value),Number(yearSelect.value)+1]:years)for(const item of pack.holidays){
+      const calculated=item.dates[String(year)]||[],edited=countdownSettings.holiday_dates?.[item.key]?.[String(year)];
+      if(!calculated.length)continue;
+      const line=document.createElement('div');line.className='calendar-date-row';
+      const show=document.createElement('input');show.type='checkbox';show.dataset.holidayShow=item.key;show.checked=!countdownSettings.hidden_holidays.includes(item.key);show.setAttribute('aria-label','Show '+item.name);
+      show.addEventListener('change',()=>{const hidden=new Set(countdownSettings.hidden_holidays);show.checked?hidden.delete(item.key):hidden.add(item.key);countdownSettings.hidden_holidays=[...hidden];countdownChanged();for(const grid of document.querySelectorAll('[data-calendar-root]'))renderCalendarGrid(grid)});
+      const name=document.createElement('span');name.className='calendar-date-name';name.append(countdownIcon(item.icon,1.5),document.createTextNode(` ${item.name} ${year}`));
+      const input=document.createElement('input');input.type='date';input.dataset.holidayDate=item.key;input.dataset.year=year;input.value=edited||calculated[0];
+      input.min=`${year-1}-12-01`;input.max=`${year+1}-01-31`;input.setAttribute('aria-label',`${item.name} ${year} date`);
+      const status=document.createElement('small');status.textContent=edited?'Edited':'Calculated';
+      const reset=makeButton('Use calculated',()=>{const dates=countdownSettings.holiday_dates[item.key];if(dates){delete dates[String(year)];if(!Object.keys(dates).length)delete countdownSettings.holiday_dates[item.key]}countdownChanged();fill();for(const grid of document.querySelectorAll('[data-calendar-root]'))renderCalendarGrid(grid)});
+      reset.dataset.holidayReset=item.key;reset.dataset.year=year;reset.disabled=!edited;
+      input.addEventListener('change',()=>{
+        if(!input.value||input.value===calculated[0]){reset.click();return}
+        (countdownSettings.holiday_dates[item.key]??={})[String(year)]=input.value;countdownChanged();status.textContent='Edited';reset.disabled=false;
+        for(const grid of document.querySelectorAll('[data-calendar-root]'))renderCalendarGrid(grid);
+      });
+      line.append(show,name,input,status,reset);table.append(line);
+    }
+  };
+  yearSelect.addEventListener('change',fill);fill();
+}
 function syncCountdownMediaSelects() {
   const choices=basicMediaChoices();
   for(const select of document.querySelectorAll('select[data-countdown-field="artwork"]')){
@@ -48,6 +175,7 @@ configBody = function(previewMedia=false) {
 }
 function countdownChanged() {
   clearCountdownPreviewInfo();
+  for(const grid of document.querySelectorAll('[data-calendar-root]'))renderCalendarGrid(grid);
   markMatrixDirty();
   globalThis.publishDeviceDraftMutation?.('event_countdown',150);
   if(previewMode==='edit' && previewModule==='event_countdown') scheduleEditPreview(150);
@@ -67,8 +195,14 @@ function countdownLocalDate(value) {
 function renderCountdownEditor(container) {
   container.replaceChildren();
   const note=document.createElement('p');
-  note.textContent='Count down to birthdays, holidays and other days. Add an event, pick its date, and press Preview to see it. Save applies changes.';
+  note.textContent='Your calendar: birthdays, holidays and other days. The display counts down to the next one. Switch on holiday packs below, or add your own events. Save applies changes.';
   container.append(note);
+  const calendar=document.createElement('div');calendar.className='calendar';calendar.dataset.calendarRoot='';container.append(calendar);renderCalendarGrid(calendar);
+  const quick=document.createElement('div');quick.className='editor-toolbar';
+  const birthday=makeButton('Add my birthday',()=>{const t=calendarTodayParts();calendarAddEvent({title:'My birthday',icon:'birthday',annual:true,all_day:true,start:`${t.year}-${String(t.month).padStart(2,'0')}-${String(t.day).padStart(2,'0')}`})});
+  birthday.dataset.calendarAddBirthday='';quick.append(birthday);container.append(quick);
+  editorParagraph(container,'Birthdays (cake icon) show confetti on the day.').className='editor-note';
+  renderHolidayPacks(container);
   const details=document.createElement('details');details.className='editor-group';const summary=document.createElement('summary');summary.textContent='How dates and the progress bar work';
   const detailText=document.createElement('p');detailText.textContent='Dates use the time zone below (UTC by default). For all-day events, the end date is the day after the last day. If a clock change makes a time happen twice, the first one is used; times skipped by a clock change are rejected. Long titles scroll once, then stay still. The progress bar fills over the 30 days before the event (full more than 30 days out, empty at NOW). Google Calendar is not connected.';
   details.append(summary,detailText);editorAdvanced(details);container.append(details);
@@ -123,7 +257,10 @@ function renderCountdownEditor(container) {
     const legend=document.createElement('legend');legend.textContent=(event.title||'Event '+(index+1));card.append(legend);
     control(card,event,'title','Event name');
     const start=control(card,event,'start','Date (and time, e.g. 2026-12-25 or 2026-12-25T18:00)');start.placeholder='YYYY-MM-DD';
-    control(card,event,'icon','Icon','text',['calendar','birthday','anniversary','launch','holiday','opening']);
+    const icon=control(card,event,'icon','Icon','text',Object.keys(countdownIconNames));
+    for(const option of icon.options)option.textContent=countdownIconNames[option.value];
+    let iconPreview=countdownIcon(event.icon,2);icon.closest('label').append(iconPreview);
+    icon.addEventListener('change',()=>{const next=countdownIcon(icon.value,2);iconPreview.replaceWith(next);iconPreview=next});
     control(card,event,'enabled','Show this event','checkbox');
     control(card,event,'all_day','All day','checkbox');
     control(card,event,'annual','Every year','checkbox');

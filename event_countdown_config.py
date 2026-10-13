@@ -1,17 +1,35 @@
 """Strict local countdown schema; no credentials or provider state in config."""
+import copy
 import datetime as dt
 import re
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 from font_catalog import available_font_names
 from media_resolver import MediaResolver, MediaResolutionError
+from holiday_calendar import PACKS, HOLIDAYS, YEARS, HOLIDAY_ICONS
 
 DEFAULTS = {
     'timezone': 'UTC', 'events': [], 'layout': 'large',
     'background': '#000000', 'text_colour': '#FFFFFF', 'accent': '#7170FF',
     'title_font': '5x7', 'countdown_font': 'auto', 'progress_height': 2,
     'insets': dict(top=0, right=0, bottom=0, left=0),
+    # Holiday packs (all off by default), per-year date edits and hidden holidays.
+    'packs': {pack: False for pack in PACKS}, 'holiday_dates': {}, 'hidden_holidays': [],
 }
-ICONS = ('calendar', 'birthday', 'anniversary', 'launch', 'holiday', 'opening')
+# Additive fields: missing on older saves, refilled from DEFAULTS on read.
+PROJECTED_FIELDS = ('packs', 'holiday_dates', 'hidden_holidays')
+ICONS = ('calendar', 'birthday', 'anniversary', 'launch', 'holiday', 'opening', *HOLIDAY_ICONS)
+MAX_HOLIDAY_EDITS = 400
+
+
+def project(settings):
+    """Fill additive pack fields (older saves, or new packs added later)."""
+    if isinstance(settings, dict):
+        for key in PROJECTED_FIELDS:
+            settings.setdefault(key, copy.deepcopy(DEFAULTS[key]))
+        if isinstance(settings['packs'], dict):
+            for pack in PACKS:
+                settings['packs'].setdefault(pack, False)
+    return settings
 
 
 def validate(settings):
@@ -37,6 +55,28 @@ def validate(settings):
     insets = settings['insets']
     require(isinstance(insets, dict) and set(insets) == {'top', 'right', 'bottom', 'left'}, 'invalid insets')
     require(all(integer(value, 0, 8) for value in insets.values()), 'insets must be 0..8')
+    packs = settings['packs']
+    require(isinstance(packs, dict) and set(packs) == set(PACKS), 'invalid holiday packs')
+    require(all(type(value) is bool for value in packs.values()), 'holiday pack switches must be booleans')
+    edits = settings['holiday_dates']
+    require(isinstance(edits, dict) and set(edits) <= set(HOLIDAYS), 'unknown holiday in edited dates')
+    count = 0
+    for years in edits.values():
+        require(isinstance(years, dict) and years, 'invalid edited holiday dates')
+        for year, value in years.items():
+            count += 1
+            require(isinstance(year, str) and re.fullmatch(r'\d{4}', year) and int(year) in YEARS, 'edited year must be 1950..2150')
+            require(isinstance(value, str) and re.fullmatch(r'\d{4}-\d{2}-\d{2}', value), 'edited date must be YYYY-MM-DD')
+            try:
+                parsed = dt.date.fromisoformat(value)
+            except ValueError as exc:
+                raise ValueError('event_countdown: invalid edited date') from exc
+            # Within a day or two of its year (Hebrew/Islamic dates can straddle New Year).
+            require(abs((parsed - dt.date(int(year), 7, 2)).days) <= 200, 'edited date must fall in its year')
+    require(count <= MAX_HOLIDAY_EDITS, 'too many edited holiday dates')
+    hidden = settings['hidden_holidays']
+    require(isinstance(hidden, list) and all(isinstance(key, str) and key in HOLIDAYS for key in hidden)
+            and len(set(hidden)) == len(hidden), 'invalid hidden holidays')
     require(isinstance(settings['events'], list), 'events must be a list')
     ids = set()
     for item in settings['events']:
