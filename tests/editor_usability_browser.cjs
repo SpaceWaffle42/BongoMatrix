@@ -7,7 +7,7 @@ await new Promise((resolve,reject)=>{socket.onopen=resolve;socket.onerror=reject
 const send=(method,params={})=>new Promise((resolve,reject)=>{const request=++id;pending.set(request,{resolve,reject});socket.send(JSON.stringify({id:request,method,params}))});
 const evaluate=async expression=>{const result=await send('Runtime.evaluate',{expression,returnByValue:true,awaitPromise:true});if(result.exceptionDetails)throw Error(JSON.stringify(result.exceptionDetails));return result.result.value};
 const waitFor=async expression=>{for(let i=0;i<200;i++){if(await evaluate(expression))return;await sleep(50)}throw Error('timeout: '+expression)};
-const point=async selector=>evaluate(`(()=>{const el=document.querySelector(${JSON.stringify(selector)});if(!el)throw Error('Missing '+${JSON.stringify(selector)});el.scrollIntoView({block:'center',behavior:'instant'});const r=el.getBoundingClientRect(),x=r.x+r.width/2,y=r.y+r.height/2;if(x<0||y<0||x>innerWidth||y>innerHeight||!el.contains(document.elementFromPoint(x,y)))throw Error('Occluded '+${JSON.stringify(selector)});return {x,y}})()`);
+const point=async selector=>evaluate(`(()=>{const el=document.querySelector(${JSON.stringify(selector)});if(!el)throw Error('Missing '+${JSON.stringify(selector)});el.scrollIntoView({block:'center',behavior:'instant'});const r=el.getBoundingClientRect(),x=r.x+r.width/2,y=r.y+r.height/2;if(x<0||y<0||x>innerWidth||y>innerHeight||!el.contains(document.elementFromPoint(x,y)))throw Error('Occluded '+${JSON.stringify(selector)}+' by '+(document.elementFromPoint(x,y)?.outerHTML||'nothing').slice(0,160)+' at '+[x,y,innerWidth,innerHeight]);return {x,y}})()`);
 const click=async selector=>{const p=await point(selector);await send('Input.dispatchMouseEvent',{type:'mousePressed',button:'left',clickCount:1,...p});await send('Input.dispatchMouseEvent',{type:'mouseReleased',button:'left',clickCount:1,...p})};
 const change=async(selector,value)=>evaluate(`(()=>{const el=document.querySelector(${JSON.stringify(selector)});el.value=${JSON.stringify(value)};el.dispatchEvent(new Event('input',{bubbles:true}));el.dispatchEvent(new Event('change',{bubbles:true}));return true})()`);
 const assert=async(expression,message)=>{if(!await evaluate(expression))throw Error(message)};
@@ -18,6 +18,26 @@ try{
  await evaluate(`fetch('/pair',{method:'POST',headers:{'Content-Type':'application/x-www-form-urlencoded'},body:new URLSearchParams({device_name:'Editor UX browser',pin:'123456'})}).then(()=>true)`);
  await send('Page.navigate',{url:`http://127.0.0.1:${appPort}/`});await waitFor(`typeof matrixEditorsReady!=='undefined'&&matrixEditorsReady`);
  const scenario='__SCENARIO__';let zones=null;
+ if(scenario==='accordion'){
+  // Owner: opening one module editor closes every other open editor.
+  await send('Emulation.setDeviceMetricsOverride',{width:1280,height:900,deviceScaleFactor:1,mobile:false});
+  const openEditors=`[...document.querySelectorAll('#playlist .module-editor')].filter(e=>!e.hidden)`;
+  const rows=await evaluate(`[...document.querySelectorAll('#playlist > .module-item')].map((item,i)=>({i,hasEditor:!!item.querySelector('.module-editor')&&item.getBoundingClientRect().height>0})).filter(r=>r.hasEditor).map(r=>r.i)`);
+  if(rows.length<4)throw Error('too few editors to test: '+rows.length+' '+await evaluate(`[...document.querySelectorAll('#playlist > *')].map(e=>e.className+':'+(e.querySelector('.module-row')?.dataset.module)+':'+e.getBoundingClientRect().height).join('|')`));
+  await evaluate(`document.querySelector('#playlist').scrollIntoView()`);
+  for(const index of rows){
+   const button=`#playlist > .module-item:nth-child(${index+1}) .module-actions button:last-child`;
+   if(!await evaluate(`document.querySelector('${button}').getBoundingClientRect().width>0`))throw Error('zero-size '+index+' '+await evaluate(`[...document.querySelectorAll('#playlist > *')].map(e=>(e.querySelector('.module-row')?.dataset.module)+':'+e.getBoundingClientRect().height+':'+getComputedStyle(e).display).join('|')+' sec:'+getComputedStyle(document.querySelector('#playlist').closest('section')||document.body).display`));
+   await click(button);
+   try{await waitFor(`!document.querySelector('#playlist > .module-item:nth-child(${index+1}) .module-editor').hidden`)}catch(e){throw Error('row '+index+' did not open; label='+await evaluate(`document.querySelector('${button}').textContent`)+' open='+await evaluate(`${openEditors}.map(e=>e.dataset.moduleEditor).join(',')`))}
+   await assert(`${openEditors}.length===1`,'more than one editor open after opening row '+index);
+   await assert(`[...document.querySelectorAll('#playlist .module-actions button:last-child')].filter(b=>b.textContent==='Close').length===1&&document.querySelector('${button}').textContent==='Close'`,'Edit/Close labels out of sync at row '+index);
+   await assert(`document.querySelector('${button}').getAttribute('aria-expanded')==='true'`,'open editor button lacks aria-expanded=true at row '+index);
+  }
+  const last=`#playlist > .module-item:nth-child(${rows.at(-1)+1}) .module-actions button:last-child`;
+  await click(last);
+  await assert(`${openEditors}.length===0&&document.querySelector('${last}').getAttribute('aria-expanded')==='false'`,'Close did not close the editor');
+ }
  if(scenario==='groups'){
   for(const [module,names] of [['rss',['Feeds','Story selection','Playback','Appearance','Status and actions']],['astronomy',['Content','Location','Playback','Appearance','Status and actions']]]){
    await click(`[data-module="${module}"] button:last-child`);

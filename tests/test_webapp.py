@@ -14964,7 +14964,7 @@ console.log('EDITED_MODULE_EDIT_PREVIEW_SELECTION_PASS');
         source = (Path(__file__).parents[1] / "app" / "templates" / "dashboard.html").read_text()
         select_start = source.index("function selectEditPreviewModule")
         select_end = source.index("\nfunction cyclePreview", select_start)
-        toggle_start = source.index("async function toggleModuleEditor")
+        toggle_start = source.index("function editorToggleButton")
         toggle_end = source.index("\nfunction updatePaletteGroupCounts", toggle_start)
         function_source = source[select_start:select_end] + "\n" + source[toggle_start:toggle_end]
         harness = r"""
@@ -14976,9 +14976,9 @@ function moduleButton(module,hasEditor=true){
  const editor=hasEditor?{hidden:true}:null;
  if(editor)editors.set(module,editor);
  const item={isConnected:true,querySelector(selector){if(selector!=='.module-editor')throw new Error('unexpected editor selector');return editor;}};
- return {textContent:'Edit',disabled:false,closest(selector){if(selector!=='.module-item')throw new Error('unexpected closest selector');return item;}};
+ return {textContent:'Edit',disabled:false,setAttribute(){},closest(selector){if(selector!=='.module-item')throw new Error('unexpected closest selector');return item;}};
 }
-global.document={querySelector(selector){
+global.document={querySelectorAll(){return [];},querySelector(selector){
  if(selector==='#preview-select')return select;
  if(selector==='#custom-module-builder')return {scrollIntoView(){scrolled++}};
  if(selector.startsWith('#')&&selector.endsWith('-slot-editor'))return editors.get(selector.slice(1,-12));
@@ -14987,6 +14987,7 @@ global.document={querySelector(selector){
 global.scheduleEditPreview=delay=>previewSchedules.push(delay);
 global.automaticWeatherModules=new Set();
 global.providerTimingRequests=new Map();
+global.requestAnimationFrame=()=>0;
 """ + function_source + r"""
 for(const module of ['clock_lava','weather']){
  const button=moduleButton(module);
