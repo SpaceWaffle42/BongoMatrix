@@ -37,6 +37,9 @@ class EditorUsabilityTests(unittest.TestCase):
     def test_editors_open_simple_with_remembered_advanced_toggle(self):
         self.probe('simple')
 
+    def test_lava_palette_checkbox_left_of_scheme_name(self):
+        self.probe('lava-palettes')
+
     def test_opening_one_editor_closes_the_others(self):
         self.probe('accordion')
 

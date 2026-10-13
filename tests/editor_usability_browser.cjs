@@ -53,6 +53,19 @@ try{
   await assert(`!document.querySelector('[data-module-editor="astronomy"] [data-advanced-toggle]').checked`,'Advanced preference leaked to another module');
   await evaluate(`localStorage.removeItem('matrix.editorAdvanced.v1'),true`);
  }
+ if(scenario==='lava-palettes'){
+  // Owner: each Lava palette checkbox sits on the left, on the same line as the colour-scheme name, and is labelled by that name.
+  for(const [width,height,mobile] of [[1280,900,false],[390,844,true]]){
+   await send('Emulation.setDeviceMetricsOverride',{width,height,deviceScaleFactor:1,mobile});
+   await evaluate(`(()=>{const b=document.querySelector('[data-module="clock_lava"] .module-actions button:last-child');if(document.querySelector('[data-module-editor="clock_lava"]').hidden)b.click();const d=[...document.querySelectorAll('[data-module-editor="clock_lava"] details')].find(x=>x.querySelector('summary')?.textContent.trim()==='Palettes');d.open=true;return true})()`);
+   const rows=await evaluate(`[...document.querySelectorAll('#lava-palettes .palette-choice')].map(c=>{const i=c.querySelector('input.lava-palette'),n=c.querySelector('.palette-name'),ri=i.getBoundingClientRect(),rn=n?n.getBoundingClientRect():null,cr=c.getBoundingClientRect();return {value:i.value,label:i.labels[0]?.textContent.replace(/\\s+/g,' ').trim(),accessible:i.getAttribute('aria-label')||'',name:n?.textContent.trim()||'',left:ri.left-cr.left<24,before:!!rn&&ri.right<=rn.left,sameLine:!!rn&&Math.abs((ri.top+ri.bottom)/2-(rn.top+rn.bottom)/2)<6}})`);
+   if(rows.length<10)throw Error('expected built-in palettes, got '+rows.length);
+   for(const r of rows){const pretty=r.value.replace(/_/g,' ');if(r.name!==pretty||r.label!==pretty||!r.left||!r.before||!r.sameLine)throw Error(width+'px palette layout/label wrong: '+JSON.stringify(r))}
+  }
+  const custom=await evaluate(`(()=>{const saved=structuredClone(customLavaPalettesFromEditor());addCustomLavaPalette();const c=document.querySelector('.custom-lava-card:last-child'),i=c.querySelector('[data-field=enabled]'),t=i.parentElement.querySelector('strong'),ri=i.getBoundingClientRect(),rt=t.getBoundingClientRect();const r={label:i.labels[0]?.textContent.trim(),name:t.textContent.trim(),before:ri.right<=rt.left,sameLine:Math.abs((ri.top+ri.bottom)/2-(rt.top+rt.bottom)/2)<6};customLavaPalettes=saved;renderCustomLavaPalettes();return r})()`);
+  if(custom.label!==custom.name||!custom.before||!custom.sameLine)throw Error('custom palette checkbox layout wrong: '+JSON.stringify(custom));
+  await click(`[data-module="clock_lava"] .module-actions button:last-child`);
+ }
  if(scenario==='accordion'){
   // Owner: opening one module editor closes every other open editor.
   await send('Emulation.setDeviceMetricsOverride',{width:1280,height:900,deviceScaleFactor:1,mobile:false});
