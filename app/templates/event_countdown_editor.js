@@ -23,7 +23,7 @@ function renderCountdownWarning() {
     if(info.countdown_overflow)messages.push(`Countdown clips (${info.countdown_font}): ${info.countdown_width} × ${info.countdown_height} px in ${info.countdown_available_width} × ${info.countdown_available_height} px.`);
     if(!info.title_overflow&&!info.countdown_overflow)messages.push('Measured layout fits (horizontal title overflow scrolls).');
   }
-  for(const warning of document.querySelectorAll('[data-countdown-warning]'))warning.textContent=info?messages.join(' '):'Run Edit Preview to measure this draft’s title and countdown layout.';
+  for(const warning of document.querySelectorAll('[data-countdown-warning]'))warning.textContent=info?messages.join(' '):(countdownSettings.events.length?'Press Preview to check that the title and countdown fit.':'');
 }
 function clearCountdownPreviewInfo() {countdownPreviewInfo=null;renderCountdownWarning();}
 function updateCountdownPreviewInfo(info,generation) {

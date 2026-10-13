@@ -135,7 +135,8 @@ function renderRSSEditor(container){
   const add=makeButton('Add feed',()=>{const value=url.value.trim();if(!value||!url.checkValidity())return url.reportValidity();rssAddFeed(value)});add.dataset.rssAdd='';feedFields.append(add);editorAdvanced(add);
   rssSettings.feeds.forEach((feed,index)=>{
     const row=document.createElement('fieldset');row.dataset.rssRow='';row.className='editor-fields';row.style.minWidth='0';
-    const name=document.createElement('legend');name.textContent=rssFeedName(feed);name.title=feed;name.style.overflowWrap='anywhere';row.append(name);
+    const name=document.createElement('legend');name.className='visually-hidden';name.textContent=rssFeedName(feed);row.append(name);
+    const title=document.createElement('strong');title.className='rss-feed-title';title.textContent=rssFeedName(feed);title.title=feed;row.append(title);
     const enabledLabel=document.createElement('label');enabledLabel.textContent='Use this feed';
     const enabled=document.createElement('input');enabled.type='checkbox';enabled.dataset.rssEnabled='';enabled.checked=!rssSettings.disabled_feeds.includes(feed);enabled.setAttribute('aria-label','Enable feed '+feed);
     enabled.addEventListener('change',()=>{rssSettings.disabled_feeds=rssSettings.disabled_feeds.filter(url=>url!==feed);if(!enabled.checked)rssSettings.disabled_feeds.push(feed);rssChanged()});enabledLabel.prepend(enabled);enabledLabel.classList.add('editor-check');const enabledCell=document.createElement('div');enabledCell.className='ux-control';enabledCell.append(enabledLabel);row.append(enabledCell);
