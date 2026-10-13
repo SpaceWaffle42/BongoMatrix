@@ -127,6 +127,45 @@ class RendererTests(unittest.TestCase):
         self.assertTrue((sprites / 'event_icons.aseprite').is_file())
         self.assertEqual(Image.open(sprites / 'event_icons.png').size, (24, 8))
 
+    def test_title_date_and_description_colours_are_separate(self):
+        """Owner 2026-10-12: Appearance colours for title, date and description."""
+        from astronomy import Astronomy, AstronomyEvent, Location, VisibilityWindow, UTC
+        from modules import astronomy_renderer as r
+        T, D, S = (250, 10, 10), (10, 250, 10), (10, 10, 250)
+        hexes = dict(title_colour='#FA0A0A', date_colour='#0AFA0A', description_colour='#0A0AFA')
+        location = Location(51.4779, 0, 'Europe/London', 'Greenwich', 'weather')
+        with Astronomy() as engine:
+            moon = engine.moon(dt.datetime(2024, 4, 8, 12, tzinfo=UTC), location)
+        def colours(image, box):
+            return set(image.crop(box).getdata()) - {(0, 0, 0)}
+        # Simple: the phase-name words are the title.
+        simple = list(r.image_frames((r.prepare_moon(moon, r.MoonOptions(**hexes)),)))[-1][0]
+        self.assertEqual(colours(simple, (31, 0, 64, 32)), {T})
+        # Advanced: phase name = title; illumination and rise/set = description; next phase (with date) = date.
+        adv = list(r.image_frames((r.prepare_moon(moon, r.MoonOptions(view='advanced', **hexes)),)))[-1][0]
+        self.assertEqual(colours(adv, (17, 0, 64, 7)), {T})
+        self.assertEqual(colours(adv, (17, 9, 64, 15)), {S})
+        self.assertEqual(colours(adv, (0, 18, 64, 24)), {S})
+        self.assertEqual(colours(adv, (0, 26, 64, 32)), {D})
+        # Event: title; date line; visibility window = description; countdown = date.
+        now = dt.datetime(2024, 10, 27, 0, 30, tzinfo=UTC)
+        start = now + dt.timedelta(days=2, hours=3)
+        event = AstronomyEvent('test:full', 'full_moon', 'Full Moon', start, location,
+            (VisibilityWindow(start, start + dt.timedelta(hours=1)),), 'fixture')
+        ev = r.render_frame(r.prepare_event(event, now, r.EventOptions(**hexes)), 0, now=now)
+        self.assertEqual(colours(ev, (10, 0, 64, 7)), {T})
+        self.assertEqual(colours(ev, (0, 9, 64, 15)), {D})
+        self.assertEqual(colours(ev, (0, 17, 64, 23)), {S})
+        self.assertEqual(colours(ev, (0, 25, 64, 32)), {D})
+        # Unset role colours fall back to text_colour (legacy callers unchanged).
+        legacy = r.render_frame(r.prepare_event(event, now, r.EventOptions(text_colour='#123456')), 0, now=now)
+        self.assertEqual(colours(legacy, (0, 9, 64, 32)), {(0x12, 0x34, 0x56)})
+        for bad in ({'title_colour': 'red'}, {'date_colour': '#12345'}, {'description_colour': 7}):
+            with self.subTest(bad=bad), self.assertRaises(ValueError):
+                r.MoonOptions(**bad)
+            with self.assertRaises(ValueError):
+                r.EventOptions(**bad)
+
     def test_rounding_is_on_utc_timeline_at_dst_fold(self):
         self.assertIsNotNone(importlib.util.find_spec('modules.astronomy_renderer'), 'Astronomy shared renderer absent')
         from modules.astronomy_renderer import minute_label

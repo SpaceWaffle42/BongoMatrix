@@ -12741,6 +12741,10 @@ process.stdout.write(JSON.stringify({
             headline_colour="#12ab34", summary_colour="#abcdef",
             background_colour="#010203",
         )
+        # Astronomy role colours equal to text_colour are reconstructible too.
+        candidate["astronomy"].update(
+            title_colour="#fedcba", date_colour="#123456", description_colour="#654321",
+        )
         bitmap = base64.b64encode(bytes(64 * 32 * 4)).decode("ascii")
         pixels = [
             {

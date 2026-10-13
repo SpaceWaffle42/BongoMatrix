@@ -16,12 +16,25 @@ DEFAULTS = {
     'event_hold_seconds': 8, 'frame_delay': .05,
     'title_font': '5x7', 'detail_font': '4x6', 'countdown_font': 'auto',
     'background': '#000000', 'text_colour': '#FFFFFF',
+    'title_colour': '#FFFFFF', 'date_colour': '#FFFFFF', 'description_colour': '#FFFFFF',
     'moon_colour': '#D9D9D9', 'accent': '#B388FF',
     'view': 'simple',
 }
 VIEWS = ('simple', 'advanced')
 # Additive fields reconstructed on read for saves made before they existed.
 PROJECTED_FIELDS = ('view',)
+# Per-role text colours. A save without them keeps its look: each inherits
+# that save's text_colour (see project_role_colours).
+ROLE_COLOURS = ('title_colour', 'date_colour', 'description_colour')
+
+
+def project_role_colours(settings):
+    """Fill missing role colours from text_colour in place (old saves keep their look)."""
+    if isinstance(settings, dict):
+        inherited = settings.get('text_colour', DEFAULTS['text_colour'])
+        for key in ROLE_COLOURS:
+            settings.setdefault(key, inherited)
+    return settings
 
 
 def validate(settings):
@@ -51,7 +64,7 @@ def validate(settings):
     fonts = available_font_names()
     for key in ('title_font', 'detail_font', 'countdown_font'):
         require(settings[key] in (('auto', *fonts) if key == 'countdown_font' else fonts), 'installed font required')
-    for key in ('background', 'text_colour', 'moon_colour', 'accent'):
+    for key in ('background', 'text_colour', 'moon_colour', 'accent', *ROLE_COLOURS):
         require(isinstance(settings[key], str) and re.fullmatch(r'#[0-9a-fA-F]{6}', settings[key]), 'invalid colour')
     require(settings['view'] in VIEWS, 'invalid view')
 

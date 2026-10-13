@@ -299,6 +299,55 @@ class SettingsTests(unittest.TestCase):
             self.assertEqual(advanced['astronomy']['moon_colour'], '#ABCDEF')
             self.assertEqual(ConfigStore(store.path).get()['astronomy']['view'], 'advanced')
 
+    def test_role_colours_default_white_and_old_saves_inherit_text_colour(self):
+        # Owner 2026-10-12: separate title/date/description colours. A save made before
+        # they existed keeps its look: missing role colours project from its text_colour.
+        from unittest.mock import patch
+        import config_store
+        from config_store import ConfigStore, DEFAULT_CONFIG, _project_persisted_screen_rows, _serialize_config
+        from astronomy_config import DEFAULTS, ROLE_COLOURS, validate
+        self.assertEqual(ROLE_COLOURS, ('title_colour', 'date_colour', 'description_colour'))
+        self.assertTrue(all(DEFAULTS[k] == '#FFFFFF' for k in ROLE_COLOURS))
+        for key in ROLE_COLOURS:
+            with self.subTest(key=key), self.assertRaises(ValueError):
+                validate(dict(DEFAULTS, **{key: 'blue'}))
+        with tempfile.TemporaryDirectory() as directory:
+            store = ConfigStore(Path(directory) / 'config.json')
+            saved = store.update({'astronomy': {'timezone': 'Europe/London', 'text_colour': '#FFCC00'}})
+            old = json.loads(store.path.read_text())
+            for key in ROLE_COLOURS:
+                old['astronomy'].pop(key)
+            store.path.write_text(json.dumps(old))
+            before = store.path.read_bytes()
+            projected = ConfigStore(store.path).get()['astronomy']
+            self.assertEqual({k: projected[k] for k in ROLE_COLOURS}, dict.fromkeys(ROLE_COLOURS, '#FFCC00'))
+            self.assertEqual(store.path.read_bytes(), before)  # read never rewrites
+            updated = ConfigStore(store.path).update({'astronomy': {'date_colour': '#00FF00'}})['astronomy']
+            self.assertEqual((updated['title_colour'], updated['date_colour'], updated['description_colour']),
+                             ('#FFCC00', '#00FF00', '#FFCC00'))
+            self.assertEqual(ConfigStore(store.path).get()['astronomy'], updated)
+        # Pre-v4 migration inherits text_colour too (not the white default).
+        for schema in (2, 3):
+            with self.subTest(schema=schema), tempfile.TemporaryDirectory() as directory:
+                legacy = json.loads(json.dumps(DEFAULT_CONFIG))
+                legacy['schema_version'] = schema
+                legacy['astronomy'] = {k: v for k, v in legacy['astronomy'].items() if k not in ROLE_COLOURS}
+                legacy['astronomy']['text_colour'] = '#ABCDEF'
+                path = Path(directory) / 'config.json'
+                path.write_text(json.dumps(legacy))
+                migrated = ConfigStore(path).get()['astronomy']
+                self.assertEqual({k: migrated[k] for k in ROLE_COLOURS}, dict.fromkeys(ROLE_COLOURS, '#ABCDEF'))
+        # Size-limit compaction drops a role colour only when it equals text_colour (lossless).
+        config = json.loads(json.dumps(DEFAULT_CONFIG))
+        config['astronomy'] = dict(config['astronomy'], text_colour='#111111', title_colour='#111111',
+                                   date_colour='#FFFFFF', description_colour='#111111')
+        with patch.object(config_store, 'CONFIG_SNAPSHOT_LIMIT', 0):
+            stored = json.loads(_serialize_config(config))
+        self.assertNotIn('title_colour', stored['astronomy'])
+        self.assertNotIn('description_colour', stored['astronomy'])
+        self.assertEqual(stored['astronomy']['date_colour'], '#FFFFFF')
+        self.assertEqual(_project_persisted_screen_rows(stored)['astronomy'], config['astronomy'])
+
     def test_capacity_predecessor_with_both_nondefault_modules_is_preserved(self):
         from config_store import ConfigStore, DEFAULT_CONFIG, CONFIG_SNAPSHOT_LIMIT
         encode = lambda v: json.dumps(v, sort_keys=True, separators=(',', ':')).encode()

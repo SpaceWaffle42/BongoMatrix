@@ -27,7 +27,11 @@ from PIL import Image, ImageSequence
 from module_options import LAVA_PALETTES
 from event_countdown_config import DEFAULTS as COUNTDOWN_DEFAULTS, validate as validate_countdown
 from rss_config import DEFAULTS as RSS_DEFAULTS, validate as validate_rss
-from astronomy_config import DEFAULTS as ASTRONOMY_DEFAULTS, PROJECTED_FIELDS as ASTRONOMY_PROJECTED_FIELDS, validate as validate_astronomy
+from astronomy_config import (
+    DEFAULTS as ASTRONOMY_DEFAULTS, PROJECTED_FIELDS as ASTRONOMY_PROJECTED_FIELDS,
+    ROLE_COLOURS as ASTRONOMY_ROLE_COLOURS, project_role_colours as project_astronomy_role_colours,
+    validate as validate_astronomy,
+)
 from font_catalog import available_font_names, text_width
 from modules.scroll_timing import duration_milliseconds, scroll_frames
 from media_resolver import candidate_media_references
@@ -99,6 +103,10 @@ def _serialize_config(config):
         compact["astronomy"] = dict(compact["astronomy"])
         for key in ASTRONOMY_PROJECTED_FIELDS:
             if compact["astronomy"].get(key) == ASTRONOMY_DEFAULTS[key]:
+                compact["astronomy"].pop(key, None)
+        for key in ASTRONOMY_ROLE_COLOURS:
+            # Lossless: read projection refills a missing role colour from text_colour.
+            if "text_colour" in compact["astronomy"] and compact["astronomy"].get(key) == compact["astronomy"]["text_colour"]:
                 compact["astronomy"].pop(key, None)
         data = json.dumps(compact, sort_keys=True, separators=(",", ":")).encode("utf-8")
     return data
@@ -1514,6 +1522,7 @@ def _project_persisted_screen_rows(config):
     if isinstance(astronomy, dict):
         for key in ASTRONOMY_PROJECTED_FIELDS:
             astronomy.setdefault(key, copy.deepcopy(ASTRONOMY_DEFAULTS[key]))
+        project_astronomy_role_colours(astronomy)
     weather = config.get("weather")
     if isinstance(weather, dict) and "timezone" not in weather:
         weather["timezone"] = _projected_weather_timezone(weather)
@@ -1790,6 +1799,7 @@ sys.stdout.write(json.dumps(result, separators=(",", ":")))
             weather = current.get("weather")
             if isinstance(weather, dict) and "timezone" not in weather:
                 weather["timezone"] = _projected_weather_timezone(weather)
+            project_astronomy_role_colours(current.get("astronomy"))
             migrated = _merge(DEFAULT_CONFIG, current)
             migrated["schema_version"] = CURRENT_CONFIG_SCHEMA_VERSION
             migrated["revision"] = current["revision"] + 1

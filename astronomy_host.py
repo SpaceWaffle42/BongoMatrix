@@ -47,7 +47,8 @@ def _prepare(settings, location, now, stop):
     from astronomy import Astronomy, Location, check_cancel
     from modules.astronomy_renderer import MoonOptions, EventOptions, prepare_pass
     check_cancel(stop)
-    common = {key: settings[key] for key in ('title_font', 'detail_font', 'frame_delay', 'background', 'text_colour')}
+    common = {key: settings[key] for key in ('title_font', 'detail_font', 'frame_delay', 'background', 'text_colour',
+                                             'title_colour', 'date_colour', 'description_colour')}
     moon = MoonOptions(**common, hold_seconds=settings['moon_hold_seconds'], moon_colour=settings['moon_colour'], view=settings['view'])
     events = EventOptions(**common, hold_seconds=settings['event_hold_seconds'], accent=settings['accent'], countdown_font=settings['countdown_font'])
     with Astronomy() as engine:

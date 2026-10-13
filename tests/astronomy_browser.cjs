@@ -24,6 +24,13 @@ try{
  await change('[data-astronomy-setting="location_label"]','London test');
  await change('[data-astronomy-setting="title_font"]','5x7');
  await change('[data-astronomy-setting="moon_hold_seconds"]','3');
+ // Owner: separate title/date/description colours, each a labelled colour picker.
+ for(const [key,label] of [['title_colour','Title colour'],['date_colour','Date colour'],['description_colour','Description colour']]){
+  if(!await evaluate(`(()=>{const el=document.querySelector('[data-astronomy-setting="${key}"]');return !!el&&el.type==='color'&&el.closest('label').textContent.includes('${label}')})()`))throw Error('Missing colour control '+key);
+ }
+ await change('[data-astronomy-setting="title_colour"]','#ff0000');
+ await change('[data-astronomy-setting="date_colour"]','#00ff00');
+ await change('[data-astronomy-setting="description_colour"]','#0000ff');
  await click('[data-astronomy-setting="lunar_events"]');
  await click('[data-astronomy-calculate]');
  await waitFor(`document.querySelector('[data-astronomy-timing]').textContent.includes('ready')`);
@@ -32,6 +39,7 @@ try{
  await click('#save-config');await waitFor(`!matrixHasUnsavedDraft()`);
  const saved=await evaluate(`fetch('/api/config').then(r=>r.json()).then(c=>c.astronomy)`);
  if(saved.timezone!=='Europe/London'||!saved.lunar_events||saved.moon_hold_seconds!==3||saved.latitude!==51.5)throw Error('Native Save mismatch');
+ if(saved.title_colour!=='#ff0000'||saved.date_colour!=='#00ff00'||saved.description_colour!=='#0000ff')throw Error('Role colours not saved');
  await click('label[for="preview-mode-edit"]');
  await waitFor(`document.querySelector('#preview-frame').textContent.includes('Unsaved draft frame')`);
  if(!await evaluate(`editPreviewLastBitmap.width===64&&editPreviewLastBitmap.height===32`))throw Error('Preview raster not 64x32');

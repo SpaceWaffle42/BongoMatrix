@@ -53,6 +53,20 @@ def minute_label(value, pattern='%H:%M'):
     return rounded.replace(second=0, microsecond=0).astimezone(value.tzinfo).strftime(pattern)
 
 
+ROLES = ('title', 'date', 'description')
+
+
+def _check_role_colours(options):
+    for role in ROLES:
+        value = getattr(options, role + '_colour')
+        if value is not None and (not isinstance(value, str) or not re.fullmatch(r'#[0-9A-Fa-f]{6}', value)):
+            raise ValueError('RGB hex colours required')
+
+
+def _role_rgb(options, role):
+    return tuple(bytes.fromhex((getattr(options, role + '_colour') or options.text_colour)[1:]))
+
+
 @dataclass(frozen=True)
 class MoonOptions:
     title_font: str = '5x7'
@@ -63,8 +77,13 @@ class MoonOptions:
     text_colour: str = '#FFFFFF'
     moon_colour: str = '#D9D9D9'
     view: str = 'simple'
+    # Per-role colours; None follows text_colour (callers predating them are unchanged).
+    title_colour: str | None = None
+    date_colour: str | None = None
+    description_colour: str | None = None
 
     def __post_init__(self):
+        _check_role_colours(self)
         if self.view not in VIEWS:
             raise ValueError('Moon view must be simple or advanced')
         for value, low, high in ((self.hold_seconds, 1, 300), (self.frame_delay, .01, 1)):
@@ -98,8 +117,12 @@ class EventOptions:
     background: str = '#000000'
     text_colour: str = '#FFFFFF'
     accent: str = '#B388FF'
+    title_colour: str | None = None
+    date_colour: str | None = None
+    description_colour: str | None = None
 
     def __post_init__(self):
+        _check_role_colours(self)
         MoonOptions(self.title_font, self.detail_font, self.hold_seconds,
                     self.frame_delay, self.background, self.text_colour, self.accent)
         if self.countdown_font != 'auto' and self.countdown_font not in available_font_names():
@@ -226,6 +249,7 @@ def prepare_moon(moon, options=None):
         rises = ','.join(minute_label(t) for t in moon.rises) or '--'
         sets = ','.join(minute_label(t) for t in moon.sets) or '--'
         horizon = f'R {rises}  S {sets}'
+    # Roles: phase name = title; illumination and rise/set = description; next phase = date.
     labels = (moon.phase_name, f'{moon.illumination * 100:.0f}% lit', horizon,
               f'Next {moon.next_phase.name} {minute_label(moon.next_phase.time, "%d %b %H:%M")}')
     lines = tuple(_line(text, *geometry) for text, geometry in zip(labels, (
@@ -269,7 +293,6 @@ def _scroll_ticks(card):
 
 def render_frame(card, tick=0, *, now=None):
     image = Image.new('RGB', (64, 32), card.options.background)
-    text_colour = tuple(bytes.fromhex(card.options.text_colour[1:]))
     if isinstance(card, PreparedEvent):
         now = now or card.prepared_at
         countdown = event_countdown(card.event, now)
@@ -278,21 +301,29 @@ def render_frame(card, tick=0, *, now=None):
         index = next(i for i, w in enumerate(card.event.windows) if w.end > now.astimezone(UTC))
         counter, _, _ = _countdown_line(card.countdown_fonts, countdown)
         lines = card.lines[:2] + (card.window_lines[index], counter)
+        roles = EVENT_ROLES
         # Aseprite 8x8 event icons (tinted with the accent); unknown types use a star.
         image.paste(_tint(event_icon(card.event.kind), card.options.accent), (0, 0), event_icon(card.event.kind))
     else:
         lines = card.lines
+        roles = ('title',) * len(lines) if card.options.view == 'simple' else ADVANCED_MOON_ROLES
         # Aseprite-drawn phase sprite: 28 px simple view, 16 px advanced view.
         # Fixed waxing-right schematic, not a sky-oriented render.
         top = 2 if card.options.view == 'simple' else 0
         image.paste(card.sprite, (top, top), card.sprite)
-    for points, measured, x, y, width, height in lines:
+    for (points, measured, x, y, width, height), role in zip(lines, roles, strict=True):
+        colour = _role_rgb(card.options, role)
         offset = -tick if measured > width and tick <= measured else 0
         for px, py in points:
             px += offset
             if 0 <= px < width and 0 <= py < height:
-                image.putpixel((x + px, y + py), text_colour)
+                image.putpixel((x + px, y + py), colour)
     return image
+
+
+# Event card: title, date line, visibility window (description), countdown (date).
+EVENT_ROLES = ('title', 'date', 'description', 'date')
+ADVANCED_MOON_ROLES = ('title', 'description', 'description', 'date')
 
 
 def _pass(cards):

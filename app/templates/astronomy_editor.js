@@ -135,7 +135,9 @@ function renderAstronomyEditor(container) {
   switchFields(appearance);
   control('title_font','Title font','text',installedFonts);control('detail_font','Detail font','text',installedFonts);
   control('countdown_font','Countdown font','text',['auto',...installedFonts]);
-  for(const key of ['background','text_colour','moon_colour','accent'])control(key,key.replaceAll('_',' '),'color');
+  // Separate colours per text role (owner); text_colour remains as the legacy base value.
+  for(const [key,label] of [['title_colour','Title colour'],['date_colour','Date colour'],['description_colour','Description colour'],['background','Background colour'],['moon_colour','Moon colour'],['accent','Event icon colour']])control(key,label,'color');
+  editorParagraph(appearance,'Title: phase name or event name. Date: event date, next phase and countdown. Description: illumination, rise/set and visibility window.');
   const calculate=makeButton('Calculate prepared duration',()=>calculateAstronomy(container));calculate.dataset.astronomyCalculate='';actions.append(calculate,makeButton('Preview unsaved draft',()=>editorDraftPreview('astronomy')));
   const timing=document.createElement('p');timing.dataset.astronomyTiming='';timing.setAttribute('role','status');timing.textContent='Draft not calculated. Select a timezone and content, then Calculate. All content disabled safely yields to the next module.';actions.append(timing);
   const details=document.createElement('details'),summary=document.createElement('summary'),text=document.createElement('p');
