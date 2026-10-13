@@ -12,7 +12,7 @@ const change=async(selector,value)=>evaluate(`(()=>{const el=document.querySelec
 try{
 
  await send('Runtime.enable');await send('Page.enable');
- await send('Page.navigate',{url:`http://127.0.0.1:${appPort}/pair`});await waitFor(`document.querySelector('form')`);
+ await send('Page.navigate',{url:`http://127.0.0.1:${appPort}/pair`});await waitFor(`document.querySelector('form')`);await send('Runtime.evaluate',{expression:"localStorage.setItem('matrix.editorAdvanced.v1',JSON.stringify(Object.fromEntries(['weather','openweather_overview','openweather_forecast','clock_lava','rss','astronomy','event_countdown'].map(m=>[m,true]))))"});
  await evaluate(`fetch('/pair',{method:'POST',headers:{'Content-Type':'application/x-www-form-urlencoded'},body:new URLSearchParams({device_name:'Astronomy browser',pin:'123456'})}).then(()=>true)`);
  await send('Page.navigate',{url:`http://127.0.0.1:${appPort}/`});await waitFor(`typeof matrixEditorsReady!=='undefined'&&matrixEditorsReady`);
  if(!await evaluate(`!!document.querySelector('[data-astronomy-setting="timezone"]')`))throw Error('Astronomy editor absent from loaded dashboard');

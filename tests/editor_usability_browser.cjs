@@ -14,10 +14,45 @@ const assert=async(expression,message)=>{if(!await evaluate(expression))throw Er
 const key=async(key,code,n)=>{await send('Input.dispatchKeyEvent',{type:'keyDown',key,code,windowsVirtualKeyCode:n,...(key==='Enter'?{text:'\r'}:{})});await send('Input.dispatchKeyEvent',{type:'keyUp',key,code,windowsVirtualKeyCode:n})};
 try{
  await send('Runtime.enable');await send('Page.enable');
- await send('Page.navigate',{url:`http://127.0.0.1:${appPort}/pair`});await waitFor(`!!document.querySelector('form')`);
+ await send('Page.navigate',{url:`http://127.0.0.1:${appPort}/pair`});await waitFor(`!!document.querySelector('form')`);await send('Runtime.evaluate',{expression:"localStorage.setItem('matrix.editorAdvanced.v1',JSON.stringify(Object.fromEntries(['weather','openweather_overview','openweather_forecast','clock_lava','rss','astronomy','event_countdown'].map(m=>[m,true]))))"});
  await evaluate(`fetch('/pair',{method:'POST',headers:{'Content-Type':'application/x-www-form-urlencoded'},body:new URLSearchParams({device_name:'Editor UX browser',pin:'123456'})}).then(()=>true)`);
  await send('Page.navigate',{url:`http://127.0.0.1:${appPort}/`});await waitFor(`typeof matrixEditorsReady!=='undefined'&&matrixEditorsReady`);
  const scenario='__SCENARIO__';let zones=null;
+ if(scenario==='simple'){
+  // Owner: editors open Simple by default; an Advanced toggle reveals the rest. Plain-language labels.
+  await send('Emulation.setDeviceMetricsOverride',{width:1280,height:900,deviceScaleFactor:1,mobile:false});
+  await evaluate(`localStorage.removeItem('matrix.editorAdvanced.v1'),true`);await send('Page.reload');await sleep(300);await waitFor(`typeof matrixEditorsReady!=='undefined'&&matrixEditorsReady`);
+  const draft=`JSON.stringify(configBody())`,before=await evaluate(draft);
+  const cases=[['weather','[data-setting="now_x"]'],['openweather_overview','[data-setting="icon_x"]'],['openweather_forecast','[data-setting="time_y"]'],['clock_lava','[data-setting="field_threshold"]'],['rss','[data-rss-setting="include"]'],['astronomy','[data-astronomy-setting="horizon_days"]'],['event_countdown','[data-countdown-setting="top"]']];
+  for(const [module,advanced] of cases){
+   const editor=`[data-module-editor="${module}"]`;
+   await click(`[data-module="${module}"] .module-actions button:last-child`);
+   await waitFor(`!document.querySelector('${editor}').hidden`);
+   const toggle=`${editor} [data-advanced-toggle]`;
+   await assert(`(()=>{const t=document.querySelector('${toggle}');return !!t&&t.type==='checkbox'&&!t.checked&&t.closest('label').textContent.includes('Show advanced options')})()`,module+' lacks an unchecked Show advanced options toggle');
+   const count=`[...document.querySelectorAll('${editor} input:not([data-advanced-toggle]),${editor} select,${editor} textarea')].filter(e=>e.checkVisibility()).length`;
+   const simple=await evaluate(count);
+   await assert(`!(document.querySelector('${editor} ${advanced}')?.checkVisibility())`,module+' shows advanced control '+advanced+' in Simple');
+   await assert(`!/IANA|baseline|safe inset|#RRGGBB|exclusive|Frame delay|frame delay/.test([...document.querySelectorAll('${editor} label,${editor} summary,${editor} h3,${editor} legend')].filter(e=>e.checkVisibility()).map(e=>e.textContent).join(' '))`,module+' Simple view still shows jargon');
+   await click(toggle);
+   await waitFor(`!!document.querySelector('${editor} ${advanced}')?.checkVisibility()`);
+   const full=await evaluate(count);
+   if(!(full>simple))throw Error(module+' Advanced did not reveal more controls: '+simple+' -> '+full);
+   await assert(`!/IANA|baseline|safe inset|#RRGGBB|exclusive/.test([...document.querySelectorAll('${editor} label,${editor} summary,${editor} h3,${editor} legend')].filter(e=>e.checkVisibility()).map(e=>e.textContent).join(' '))`,module+' Advanced view still shows jargon');
+   await click(toggle);
+   await assert(`!(document.querySelector('${editor} ${advanced}')?.checkVisibility())`,module+' toggle did not return to Simple');
+  }
+  // Preference persists per module across reloads; toggling never changes the draft.
+  await click(`[data-module="rss"] .module-actions button:last-child`);await waitFor(`!document.querySelector('[data-module-editor="rss"]').hidden`);
+  await click(`[data-module-editor="rss"] [data-advanced-toggle]`);
+  if(await evaluate(draft)!==before)throw Error('Advanced toggle changed the draft');
+  await send('Page.reload');await sleep(300);await waitFor(`typeof matrixEditorsReady!=='undefined'&&matrixEditorsReady`);
+  await click(`[data-module="rss"] .module-actions button:last-child`);await waitFor(`!document.querySelector('[data-module-editor="rss"]').hidden`);
+  await assert(`document.querySelector('[data-module-editor="rss"] [data-advanced-toggle]').checked&&document.querySelector('[data-module-editor="rss"] [data-rss-setting="include"]').checkVisibility()`,'RSS Advanced preference not remembered');
+  await click(`[data-module="astronomy"] .module-actions button:last-child`);await waitFor(`!document.querySelector('[data-module-editor="astronomy"]').hidden`);
+  await assert(`!document.querySelector('[data-module-editor="astronomy"] [data-advanced-toggle]').checked`,'Advanced preference leaked to another module');
+  await evaluate(`localStorage.removeItem('matrix.editorAdvanced.v1'),true`);
+ }
  if(scenario==='accordion'){
   // Owner: opening one module editor closes every other open editor.
   await send('Emulation.setDeviceMetricsOverride',{width:1280,height:900,deviceScaleFactor:1,mobile:false});

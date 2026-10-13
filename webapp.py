@@ -1726,6 +1726,7 @@ def create_app(
             modules=sorted(ALLOWED_MODULES) + custom_names,
             module_labels={
                 "astronomy": "Astronomy (local Moon)",
+                "rss": "RSS News",
                 "event_countdown": "Event Countdown",
                 "announcement_board": "Announcement Board",
                 "weather": "Weather (Free · Open-Meteo)",

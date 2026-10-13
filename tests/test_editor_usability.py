@@ -34,6 +34,9 @@ class EditorUsabilityTests(unittest.TestCase):
             result = self.probe('zones')
         self.assertEqual(set(result['zones']), available_timezones() | {'UTC'})
 
+    def test_editors_open_simple_with_remembered_advanced_toggle(self):
+        self.probe('simple')
+
     def test_opening_one_editor_closes_the_others(self):
         self.probe('accordion')
 

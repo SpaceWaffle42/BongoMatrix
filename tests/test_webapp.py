@@ -7682,8 +7682,8 @@ globalThis.document=document;globalThis.window=window;globalThis.fetch=fetch;
         self.assertIn("forecast_items", body)
         self.assertNotIn("field:'card_seconds'", body)
         self.assertEqual(body.count("field:'scroll_loops'"), 3)
-        self.assertEqual(body.count("field:'scroll_loops',label:'Scroll loops'"), 3)
-        self.assertEqual(body.count("field:'scroll_speed',label:'Frame delay (seconds)'"), 3)
+        self.assertEqual(body.count("field:'scroll_loops',label:'Times to scroll'"), 3)
+        self.assertEqual(body.count("field:'scroll_speed',label:'Scroll step time (seconds; smaller is faster)'"), 3)
         self.assertNotIn("makeWeatherLocationGroup", body)
         config = self.store.get()
         self.assertTrue(next(item for item in config["playlist"] if item["module"] == "weather")["enabled"])
@@ -11022,7 +11022,7 @@ console.log('PLAYLIST_TIMING_DOM_PASS');
         self.assertIn("duration.step=.01", body)
         self.assertNotIn("duration.step=1", body)
         self.assertIn("announcementStaticTimingFields=[{label:'Display duration (seconds)',path:'timing.duration_seconds',type:'number',min:1,max:3600,step:.01}]", body)
-        self.assertEqual(body.count("label:'Frame delay (seconds)',type:'number',min:.01,max:1,step:.000001"), 3)
+        self.assertEqual(body.count("label:'Scroll step time (seconds; smaller is faster)',type:'number',min:.01,max:1,step:.000001"), 3)
         self.assertIn("if(field==='speed'){control.min=.01;control.max=1;control.step=.000001}", body)
 
     @unittest.skipUnless(shutil.which("node"), "Node.js is required")
@@ -11212,8 +11212,8 @@ timingSettingsDigest('weather',payload).then(value=>console.log(value)).catch(er
         self.pair_browser()
         body = self.client.get("/").get_data(as_text=True)
 
-        self.assertEqual(body.count("field:'scroll_speed',label:'Frame delay (seconds)',type:'number',min:.01,max:1,step:.000001"), 3)
-        self.assertEqual(body.count("field:'scroll_loops',label:'Scroll loops',type:'number'"), 3)
+        self.assertEqual(body.count("field:'scroll_speed',label:'Scroll step time (seconds; smaller is faster)',type:'number',min:.01,max:1,step:.000001"), 3)
+        self.assertEqual(body.count("field:'scroll_loops',label:'Times to scroll',type:'number'"), 3)
         self.assertNotIn("label:'Tick speed'", body)
         self.assertNotIn("label:'Ticker loops'", body)
 
@@ -14793,10 +14793,10 @@ console.log('ANNOUNCEMENT_HEADING_SYNC_PASS');
         ):
             self.assertIn(f"field:'{field}'", body)
         self.assertIn("{name:'Separator'", body)
-        self.assertIn("{name:'Ticker'", body)
-        self.assertIn("field:'temperature_y',label:'Temperature height',type:'number',min:0,max:31", body)
-        self.assertIn("field:'ticker_y',label:'Ticker height',type:'number',min:0,max:31", body)
-        self.assertIn("field:'now_x',label:'NOW horizontal position',type:'number',min:-63,max:63", body)
+        self.assertIn("{name:'Scrolling text'", body)
+        self.assertIn("field:'temperature_y',label:'Temperature up/down position',type:'number',min:0,max:31", body)
+        self.assertIn("field:'ticker_y',label:'Scrolling text up/down position',type:'number',min:0,max:31", body)
+        self.assertIn("field:'now_x',label:'NOW left/right position',type:'number',min:-63,max:63", body)
 
     def test_dashboard_groups_built_in_and_saved_custom_lava_palettes(self):
         self.store.update({"lava": {

@@ -67,8 +67,11 @@ function countdownLocalDate(value) {
 function renderCountdownEditor(container) {
   container.replaceChildren();
   const note=document.createElement('p');
-  note.textContent='Local events work without an account. Dates use the Matrix timezone below (UTC by default). All-day end dates are exclusive. Ambiguous local times use the first occurrence; nonexistent DST times are rejected. Long titles scroll one measured pass with a 4 px gap, then restore and freeze. Progress shows a fixed 30-day window before the event (full beyond 30 days, empty at NOW), unchanged by playlist restarts. Google Calendar is not connected in this local-event version.';
+  note.textContent='Count down to birthdays, holidays and other days. Add an event, pick its date, and press Preview to see it. Save applies changes.';
   container.append(note);
+  const details=document.createElement('details');details.className='editor-group';const summary=document.createElement('summary');summary.textContent='How dates and the progress bar work';
+  const detailText=document.createElement('p');detailText.textContent='Dates use the time zone below (UTC by default). For all-day events, the end date is the day after the last day. If a clock change makes a time happen twice, the first one is used; times skipped by a clock change are rejected. Long titles scroll once, then stay still. The progress bar fills over the 30 days before the event (full more than 30 days out, empty at NOW). Google Calendar is not connected.';
+  details.append(summary,detailText);editorAdvanced(details);container.append(details);
   const fields=document.createElement('div');fields.className='editor-fields';container.append(fields);
   function control(parent,obj,key,label,type='text',options=null,scope='field') {
     const wrapper=document.createElement('label');wrapper.textContent=label;
@@ -92,15 +95,18 @@ function renderCountdownEditor(container) {
       }
       countdownChanged();
     });
+    if(type==='checkbox')wrapper.classList.add('editor-check');
     wrapper.append(input);parent.append(wrapper);return input;
   }
-  control(fields,countdownSettings,'timezone','Matrix event timezone (IANA)','text',null,'setting');
-  control(fields,countdownSettings,'layout','Layout','text',['large','icon','progress'],'setting');
-  control(fields,countdownSettings,'title_font','Title font','text',installedFonts,'setting');
-  control(fields,countdownSettings,'countdown_font','Countdown font','text',['auto',...installedFonts],'setting');
-  for(const key of ['background','text_colour','accent'])control(fields,countdownSettings,key,key.replace('_',' '),'color',null,'setting');
-  const bar=control(fields,countdownSettings,'progress_height','Progress height (1–4 px)','number',null,'setting');bar.min=1;bar.max=4;
-  for(const edge of ['top','right','bottom','left']){const input=control(fields,countdownSettings.insets,edge,edge+' safe inset (0–8 px)','number',null,'setting');input.min=0;input.max=8;}
+  const field=input=>input.closest('label');
+  const layout=control(fields,countdownSettings,'layout','Style','text',['large','icon','progress'],'setting');
+  for(const [value,text] of [['large','Big countdown'],['icon','Icon and countdown'],['progress','Countdown with progress bar']])layout.querySelector(`option[value="${value}"]`).textContent=text;
+  for(const [key,text] of [['background','Background colour'],['text_colour','Text colour'],['accent','Highlight colour']])control(fields,countdownSettings,key,text,'color',null,'setting');
+  editorAdvanced(field(control(fields,countdownSettings,'timezone','Time zone','text',null,'setting')));
+  editorAdvanced(field(control(fields,countdownSettings,'title_font','Title font','text',installedFonts,'setting')));
+  editorAdvanced(field(control(fields,countdownSettings,'countdown_font','Countdown font','text',['auto',...installedFonts],'setting')));
+  const bar=control(fields,countdownSettings,'progress_height','Progress bar thickness (1–4 pixels)','number',null,'setting');bar.min=1;bar.max=4;editorAdvanced(field(bar));
+  for(const edge of ['top','right','bottom','left']){const input=control(fields,countdownSettings.insets,edge,'Space from '+edge+' edge (0–8 pixels)','number',null,'setting');input.min=0;input.max=8;editorAdvanced(field(input));}
   const warning=document.createElement('p');warning.dataset.countdownWarning='';warning.setAttribute('role','status');container.append(warning);renderCountdownWarning();
   const add=makeButton('Add event',()=>{
     let parts;
@@ -114,23 +120,24 @@ function renderCountdownEditor(container) {
   });add.dataset.countdownAdd='';container.append(add);
   countdownSettings.events.forEach((event,index)=>{
     const card=document.createElement('fieldset');card.className='countdown-event editor-fields';card.dataset.countdownId=event.id;
-    const legend=document.createElement('legend');legend.textContent='Local event '+(index+1);card.append(legend);
-    control(card,event,'enabled','Enabled','checkbox');
-    control(card,event,'title','Event title');
-    control(card,event,'start','Start (YYYY-MM-DD or YYYY-MM-DDTHH:MM)');
-    control(card,event,'end','End (optional; exclusive)');
-    control(card,event,'all_day','All day (date only)','checkbox');
-    control(card,event,'annual','Repeat annually','checkbox');
-    const minutes=control(card,event,'now_minutes','NOW duration (minutes)','number');minutes.min=1;minutes.max=10080;
-    control(card,event,'accent','Accent override (#RRGGBB, blank = shared)');
-    control(card,event,'icon','Bundled icon','text',['calendar','birthday','anniversary','launch','holiday','opening']);
-    const artwork=control(card,event,'artwork','Library artwork (icon layout; first frame, up to 8 × 8 px)','text',['',...basicMediaChoices()]);
-    artwork.options[0].textContent='Bundled type icon (no artwork)';
+    const legend=document.createElement('legend');legend.textContent=(event.title||'Event '+(index+1));card.append(legend);
+    control(card,event,'title','Event name');
+    const start=control(card,event,'start','Date (and time, e.g. 2026-12-25 or 2026-12-25T18:00)');start.placeholder='YYYY-MM-DD';
+    control(card,event,'icon','Icon','text',['calendar','birthday','anniversary','launch','holiday','opening']);
+    control(card,event,'enabled','Show this event','checkbox');
+    control(card,event,'all_day','All day','checkbox');
+    control(card,event,'annual','Every year','checkbox');
+    editorAdvanced(field(control(card,event,'end','End date (optional; the day after it finishes)')));
+    const minutes=control(card,event,'now_minutes','Show “NOW” for (minutes)','number');minutes.min=1;minutes.max=10080;editorAdvanced(field(minutes));
+    const accent=control(card,event,'accent','Own highlight colour (e.g. #FF8800; blank uses the shared one)');accent.placeholder='Shared colour';editorAdvanced(field(accent));
+    const artwork=control(card,event,'artwork','Picture from media library (icon style; up to 8×8)','text',['',...basicMediaChoices()]);editorAdvanced(field(artwork));
+    artwork.options[0].textContent='Use the icon above';
     if(event.artwork&&!basicMediaChoices().includes(event.artwork)){
       const missing=document.createElement('option');missing.value=event.artwork;missing.textContent=event.artwork+' (missing)';artwork.append(missing);artwork.value=event.artwork;
     }
     const remove=makeButton('Delete event',()=>{countdownSettings.events.splice(index,1);countdownChanged();renderCountdownEditors()},'btn danger');remove.dataset.countdownDelete='';card.append(remove);
-    const up=makeButton('Move event up',()=>{if(index){const events=countdownSettings.events;[events[index-1],events[index]]=[events[index],events[index-1]];countdownChanged();renderCountdownEditors()}});up.disabled=index===0;card.append(up);
+    const up=makeButton('Move event up',()=>{if(index){const events=countdownSettings.events;[events[index-1],events[index]]=[events[index],events[index-1]];countdownChanged();renderCountdownEditors()}});up.disabled=index===0;card.append(up);editorAdvanced(up);
     container.append(card);
   });
+  editorAdvancedToggle(container,'event_countdown');
 }

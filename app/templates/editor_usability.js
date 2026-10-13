@@ -18,6 +18,23 @@ function editorSection(container,title,collapsed=false) {
   heading.id='editor-section-'+(++editorElementSequence);section.setAttribute('aria-labelledby',heading.id);
   const body=document.createElement('div');body.className='ux-section-body';section.append(heading,body);container.append(section);return body;
 }
+// Owner: every editor opens Simple; one remembered per-module toggle reveals Advanced.
+// Presentation only: hidden controls keep their values and serializers are untouched.
+const EDITOR_ADVANCED_KEY='matrix.editorAdvanced.v1';
+function editorAdvancedPreference(module){try{return Boolean(JSON.parse(localStorage.getItem(EDITOR_ADVANCED_KEY)||'{}')[module])}catch(_){return false}}
+function editorSetAdvancedPreference(module,on){try{const all=JSON.parse(localStorage.getItem(EDITOR_ADVANCED_KEY)||'{}');if(on)all[module]=true;else delete all[module];localStorage.setItem(EDITOR_ADVANCED_KEY,JSON.stringify(all))}catch(_){}}
+function editorAdvanced(...elements){for(const element of elements)element?.setAttribute?.('data-advanced','');return elements[0]}
+function editorAdvancedToggle(container,module){
+  const bar=document.createElement('div');bar.className='editor-mode-bar';
+  const label=document.createElement('label');label.className='editor-mode-toggle';
+  const input=document.createElement('input');input.type='checkbox';input.dataset.advancedToggle=module;
+  const apply=on=>{input.checked=on;container.toggleAttribute('data-show-advanced',on)};
+  apply(editorAdvancedPreference(module));
+  input.addEventListener('change',()=>{editorCloseHelp(container);editorSetAdvancedPreference(module,input.checked);apply(input.checked)});
+  label.append(input,document.createTextNode(' Show advanced options'));
+  const hint=document.createElement('span');hint.className='editor-note';hint.textContent='Simple shows the everyday settings. Advanced adds fine-tuning; nothing is lost when hidden.';
+  bar.append(label,hint);container.prepend(bar);return input;
+}
 function editorParagraph(parent,text){const p=document.createElement('p');p.textContent=text;parent.append(p);return p}
 function editorCloseHelp(container=null){
   if(!editorActiveHelp||(container&&!container.contains(editorActiveHelp.button)))return;

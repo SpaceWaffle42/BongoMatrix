@@ -94,6 +94,11 @@ function rssControl(parent,key,label,type='text',options=null){
     rssSettings[key]=['include','exclude'].includes(key)?input.value.split(',').map(value=>value.trim()).filter(Boolean):['count','frame_delay','thumbnail_speed'].includes(key)?Number(input.value):input.value;rssChanged();
   });wrapper.append(input);const cell=document.createElement('div');cell.className='ux-control';cell.append(wrapper);if(rssHelpText[key])editorHelp(cell,key,label,rssHelpText[key]);parent.append(cell);return input;
 }
+// Friendly feed title: catalogue name when known, else the site's host name.
+function rssFeedName(feed){
+  const known=(rssCatalogue?.feeds||[]).find(item=>item.url===feed);if(known)return 'BBC · '+known.name;
+  try{const url=new URL(feed);return url.hostname.replace(/^(www|feeds)\./,'')+(url.pathname.length>1?' · '+url.pathname.replace(/\/(rss\.xml)?$/,'').split('/').filter(Boolean).slice(-1)[0]||'':'')}catch(_){return feed}
+}
 function rssAddFeed(value){
   if(rssSettings.feeds.includes(value)){setMessage('Feed is already added.',true);return}
   if(rssSettings.feeds.length>=20){setMessage('At most 20 feeds are supported.',true);return}
@@ -101,11 +106,12 @@ function rssAddFeed(value){
 }
 function renderRSSEditor(container){
   editorCloseHelp(container);container.replaceChildren();container.style.minWidth='0';
-  const note=document.createElement('p');note.textContent='Add RSS or Atom feeds, choose stories, then test and preview your draft. Save applies settings to playback.';container.append(note);
+  const note=document.createElement('p');note.textContent='Pick news sources, then press Preview to see it on the 64×32 display. Save applies changes.';container.append(note);
   const feeds=editorSection(container,'Feeds'),selection=editorSection(container,'Story selection'),playback=editorSection(container,'Playback'),appearance=editorSection(container,'Appearance',true),actions=editorSection(container,'Status and actions');
+  const quick=document.createElement('div');quick.className='editor-quick-actions';quick.append(makeButton('Preview my changes',()=>editorDraftPreview('rss')));container.insertBefore(quick,feeds.parentElement);
   const fields=document.createElement('div');fields.className='editor-fields';selection.append(fields);
-  const count=rssControl(fields,'count','Stories per pass (1–50; default 5)','number');count.min=1;count.max=50;
-  rssControl(fields,'include','Include whole words (comma-separated)');rssControl(fields,'exclude','Exclude whole words (comma-separated)');
+  const count=rssControl(fields,'count','Stories to show each time (1–50)','number');count.min=1;count.max=50;
+  editorAdvanced(rssControl(fields,'include','Only show stories with these words (comma-separated)').closest('.ux-control'));editorAdvanced(rssControl(fields,'exclude','Hide stories with these words (comma-separated)').closest('.ux-control'));
   rssControl(fields,'headline_font','Headline font','text',installedFonts.map(font=>[font,font]));
   rssControl(fields,'summary_font','Summary font','text',installedFonts.map(font=>[font,font]));
   rssControl(fields,'layout','Story layout','text',[['auto','Site banner + text'],['text','Text only']]);
@@ -113,22 +119,23 @@ function renderRSSEditor(container){
   rssControl(fields,'summary_colour','Summary colour','color');
   rssControl(fields,'background_colour','Background colour','color');
   rssControl(fields,'headline_mode','Scrolling','text',[['once','Headline first, then summary'],['continuous','Summary loops while headline scrolls']]);
-  rssControl(fields,'frame_delay','Scroll frame delay (seconds)','text',[[.1,'Slow · 0.1 s'],[.05,'Normal · 0.05 s'],[.025,'Fast · 0.025 s']]);
+  rssControl(fields,'frame_delay','Scroll speed','text',[[.1,'Slow'],[.05,'Normal'],[.025,'Fast']]);
   const appearanceFields=document.createElement('div');appearanceFields.className='editor-fields';appearance.append(appearanceFields);
   const playbackFields=document.createElement('div');playbackFields.className='editor-fields';playback.append(playbackFields);
   for(const key of ['headline_font','summary_font','layout','headline_colour','summary_colour','background_colour'])appearanceFields.append(fields.querySelector(`[data-rss-setting="${key}"]`).closest('.ux-control'));
+  for(const key of ['headline_font','summary_font','layout'])editorAdvanced(appearanceFields.querySelector(`[data-rss-setting="${key}"]`).closest('.ux-control'));
   for(const key of ['headline_mode','frame_delay'])playbackFields.append(fields.querySelector(`[data-rss-setting="${key}"]`).closest('.ux-control'));
-  editorParagraph(appearance,'Installed BDF fonts. Inspect the shared 64×32 Edit Preview for clipping.');
+  editorAdvanced(editorParagraph(appearance,'Fonts are the display’s pixel fonts. Check the preview for text that is cut off.'));
   const feedFields=document.createElement('div');feedFields.className='editor-fields';feeds.append(feedFields);
-  const presetLabel=document.createElement('label');presetLabel.textContent='Verified BBC preset';const presets=document.createElement('select');presets.dataset.rssPresets='';rssFillPresets(presets);presetLabel.append(presets);feedFields.append(presetLabel,makeButton('Add BBC preset',()=>{if(presets.value)rssAddFeed(presets.value)}));
-  editorParagraph(feeds,'BBC headline and UK nation presets are available. City and county presets are not in the verified catalogue.');
-  const urlLabel=document.createElement('label');urlLabel.textContent='Custom RSS or Atom feed URL';
-  const url=document.createElement('input');url.type='url';url.dataset.rssUrl='';urlLabel.append(url);const urlCell=document.createElement('div');urlCell.className='ux-control';urlCell.append(urlLabel);feedFields.append(urlCell);
+  const presetLabel=document.createElement('label');presetLabel.textContent='BBC news source';const presets=document.createElement('select');presets.dataset.rssPresets='';rssFillPresets(presets);presetLabel.append(presets);feedFields.append(presetLabel,makeButton('Add BBC source',()=>{if(presets.value)rssAddFeed(presets.value)}));
+  editorAdvanced(editorParagraph(feeds,'BBC headline and UK nation sources are available. City and county sources are not in the checked list.'));
+  const urlLabel=document.createElement('label');urlLabel.textContent='Other news feed web address (RSS or Atom)';
+  const url=document.createElement('input');url.type='url';url.dataset.rssUrl='';urlLabel.append(url);const urlCell=document.createElement('div');urlCell.className='ux-control';urlCell.append(urlLabel);feedFields.append(urlCell);editorAdvanced(urlCell);
   editorHelp(urlCell,'feed-url','Source and feed URL','Use the publisher’s public RSS or Atom feed URL, not its homepage or an article link. Example: https://feeds.bbci.co.uk/news/rss.xml. Adding a feed changes this draft only. Private/local network sources are not allowed.');
-  const add=makeButton('Add feed',()=>{const value=url.value.trim();if(!value||!url.checkValidity())return url.reportValidity();rssAddFeed(value)});add.dataset.rssAdd='';feedFields.append(add);
+  const add=makeButton('Add feed',()=>{const value=url.value.trim();if(!value||!url.checkValidity())return url.reportValidity();rssAddFeed(value)});add.dataset.rssAdd='';feedFields.append(add);editorAdvanced(add);
   rssSettings.feeds.forEach((feed,index)=>{
     const row=document.createElement('fieldset');row.dataset.rssRow='';row.className='editor-fields';row.style.minWidth='0';
-    const name=document.createElement('legend');name.textContent=`Feed ${index+1} of ${rssSettings.feeds.length}: ${feed}`;name.style.overflowWrap='anywhere';row.append(name);
+    const name=document.createElement('legend');name.textContent=rssFeedName(feed);name.title=feed;name.style.overflowWrap='anywhere';row.append(name);
     const enabledLabel=document.createElement('label');enabledLabel.textContent='Use this feed';
     const enabled=document.createElement('input');enabled.type='checkbox';enabled.dataset.rssEnabled='';enabled.checked=!rssSettings.disabled_feeds.includes(feed);enabled.setAttribute('aria-label','Enable feed '+feed);
     enabled.addEventListener('change',()=>{rssSettings.disabled_feeds=rssSettings.disabled_feeds.filter(url=>url!==feed);if(!enabled.checked)rssSettings.disabled_feeds.push(feed);rssChanged()});enabledLabel.prepend(enabled);const enabledCell=document.createElement('div');enabledCell.className='ux-control';enabledCell.append(enabledLabel);row.append(enabledCell);
@@ -140,17 +147,18 @@ function renderRSSEditor(container){
       try{const value=await api('/api/rss/test',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({url:feed})});
         result.textContent=`${value.title} · ${value.count} items · Newest: ${value.newest||'unknown'} · Image hints: ${value.image_available?'available (not decoded)':'none'} · ${(value.warnings||[]).join('; ')}`;
       }catch(error){result.textContent='Feed rejected: '+error.message}finally{test.disabled=false}
-    };const test=makeButton('Test feed',runTest);test.rssRunTest=runTest;test.dataset.rssTest='';test.setAttribute('aria-label','Test feed '+feed);row.append(test,result);
+    };const test=makeButton('Test feed',runTest);test.rssRunTest=runTest;test.dataset.rssTest='';test.setAttribute('aria-label','Test feed '+feed);row.append(test,result);editorAdvanced(test);
     for(const [step,label,key] of [[-1,'Move up','rssUp'],[1,'Move down','rssDown']]){
       const move=makeButton(label,()=>{const next=index+step;[rssSettings.feeds[index],rssSettings.feeds[next]]=[rssSettings.feeds[next],rssSettings.feeds[index]];rssChanged();renderRSSEditors()});
-      move.dataset[key]='';move.disabled=index+step<0||index+step>=rssSettings.feeds.length;move.setAttribute('aria-label',label+' '+feed);row.append(move);
+      move.dataset[key]='';move.disabled=index+step<0||index+step>=rssSettings.feeds.length;move.setAttribute('aria-label',label+' '+feed);row.append(move);editorAdvanced(move);
     }
     const remove=makeButton('Delete feed',()=>{rssSettings.feeds.splice(index,1);rssSettings.disabled_feeds=rssSettings.disabled_feeds.filter(url=>url!==feed);rssChanged();renderRSSEditors()},'btn danger');remove.dataset.rssDelete='';remove.setAttribute('aria-label','Delete feed '+feed);row.append(remove);feeds.append(row);
   });
+  editorAdvanced(actions.parentElement);
   editorParagraph(actions,'Saved feed health below is separate from the unsaved draft. Refresh reads saved status; Test feeds diagnoses the draft URLs. Calculate and Preview use draft settings.');
   const status=document.createElement('div');status.dataset.rssStatus='';status.setAttribute('role','status');status.style.overflowWrap='anywhere';actions.append(status,makeButton('Refresh feed status',rssRefreshStatus));
   editorHelp(actions,'refresh','Refresh, cache and staleness','Saved feeds refresh in the background every 30 minutes. Refresh feed status only reads that status; it does not force a fetch. Stale means an update failed and a usable cached copy remains. Expired cache is not played; empty or unusable feeds skip.');
-  const testAll=makeButton('Test feeds',async()=>{testAll.disabled=true;try{for(const button of container.querySelectorAll('[data-rss-test]')){if(!container.isConnected)break;await button.rssRunTest()}}finally{testAll.disabled=false}});testAll.dataset.rssTestAll='';feeds.append(testAll);
+  const testAll=makeButton('Test feeds',async()=>{testAll.disabled=true;try{for(const button of container.querySelectorAll('[data-rss-test]')){if(!container.isConnected)break;await button.rssRunTest()}}finally{testAll.disabled=false}});testAll.dataset.rssTestAll='';feeds.append(testAll);editorAdvanced(testAll,testAll.nextSibling);
   editorHelp(feeds,'test','Test feeds','Fetch and validate each draft feed URL, including unchecked feeds, without saving configuration. Reports item count and publisher image hints; an image hint does not prove decoding will succeed. This is a diagnostic, not a guarantee of prepared playback.');
   const duration=document.createElement('p');duration.dataset.rssDuration='';duration.setAttribute('role','status');actions.append(duration,makeButton('Calculate prepared duration',rssCalculate),makeButton('Preview unsaved draft',()=>editorDraftPreview('rss')));
   editorHelp(actions,'duration','Computed timing','Duration comes from prepared eligible stories, fonts, scrolling and thumbnail timing, not the playlist compatibility duration. Change settings, then Calculate again. No prepared stories means duration is unavailable; check feeds and filters.');
@@ -176,5 +184,6 @@ function renderRSSEditor(container){
   actions.append(reset,resetAll,resetNote);
   editorHelp(actions,'reset','Reset and clear caches','Reset draft to defaults only replaces unsaved settings. Reset to defaults and clear caches also immediately clears shared feed/thumbnail caches and seen-story history. Neither saves configuration. Both ask for confirmation; Save is needed to apply default settings.');
   rssRenderStatus();rssRenderDuration();if(!rssCatalogue)rssRefreshStatus();
+  editorAdvancedToggle(container,'rss');
 }
 window.addEventListener('beforeunload',()=>{rssTimingGeneration++;rssTimingController?.abort()},{once:true});
