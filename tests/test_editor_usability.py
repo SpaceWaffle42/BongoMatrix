@@ -37,6 +37,9 @@ class EditorUsabilityTests(unittest.TestCase):
     def test_editors_open_simple_with_remembered_advanced_toggle(self):
         self.probe('simple')
 
+    def test_rss_add_presets_left_custom_url_right(self):
+        self.probe('rss-add')
+
     def test_lava_palette_checkbox_left_of_scheme_name(self):
         self.probe('lava-palettes')
 

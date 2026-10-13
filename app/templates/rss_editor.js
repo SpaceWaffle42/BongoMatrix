@@ -126,13 +126,22 @@ function renderRSSEditor(container){
   for(const key of ['headline_font','summary_font','layout'])editorAdvanced(appearanceFields.querySelector(`[data-rss-setting="${key}"]`).closest('.ux-control'));
   for(const key of ['headline_mode','frame_delay'])playbackFields.append(fields.querySelector(`[data-rss-setting="${key}"]`).closest('.ux-control'));
   editorAdvanced(editorParagraph(appearance,'Fonts are the display’s pixel fonts. Check the preview for text that is cut off.'));
-  const feedFields=document.createElement('div');feedFields.className='editor-fields';feeds.append(feedFields);
-  const presetLabel=document.createElement('label');presetLabel.textContent='BBC news source';const presets=document.createElement('select');presets.dataset.rssPresets='';rssFillPresets(presets);presetLabel.append(presets);feedFields.append(presetLabel,makeButton('Add BBC source',()=>{if(presets.value)rssAddFeed(presets.value)}));
-  editorAdvanced(editorParagraph(feeds,'BBC headline and UK nation sources are available. City and county sources are not in the checked list.'));
-  const urlLabel=document.createElement('label');urlLabel.textContent='Other news feed web address (RSS or Atom)';
-  const url=document.createElement('input');url.type='url';url.dataset.rssUrl='';urlLabel.append(url);const urlCell=document.createElement('div');urlCell.className='ux-control';urlCell.append(urlLabel);feedFields.append(urlCell);editorAdvanced(urlCell);
-  editorHelp(urlCell,'feed-url','Source and feed URL','Use the publisher’s public RSS or Atom feed URL, not its homepage or an article link. Example: https://feeds.bbci.co.uk/news/rss.xml. Adding a feed changes this draft only. Private/local network sources are not allowed.');
-  const add=makeButton('Add feed',()=>{const value=url.value.trim();if(!value||!url.checkValidity())return url.reportValidity();rssAddFeed(value)});add.dataset.rssAdd='';feedFields.append(add);editorAdvanced(add);
+  // Owner: left = default presets dropdown with Add preset below; right = custom RSS URL with Add custom RSS below.
+  const feedFields=document.createElement('div');feedFields.className='rss-add-grid';feeds.append(feedFields);
+  const presetCol=document.createElement('div');presetCol.className='rss-add-col';presetCol.dataset.rssAddPresetCol='';
+  const presets=document.createElement('select');presets.id='rss-presets';presets.dataset.rssPresets='';rssFillPresets(presets);
+  const presetLabel=document.createElement('label');presetLabel.htmlFor=presets.id;presetLabel.textContent='Default presets';
+  const addPreset=makeButton('Add preset',()=>{if(presets.value)rssAddFeed(presets.value)});addPreset.dataset.rssAddPreset='';
+  presetCol.append(presetLabel,presets,addPreset);
+  const customCol=document.createElement('div');customCol.className='rss-add-col ux-control';customCol.dataset.rssAddCustomCol='';
+  const url=document.createElement('input');url.type='url';url.id='rss-custom-url';url.dataset.rssUrl='';url.placeholder='https://example.com/rss.xml';
+  const urlLabel=document.createElement('label');urlLabel.htmlFor=url.id;urlLabel.textContent='Custom RSS feed address';
+  const add=makeButton('Add custom RSS',()=>{const value=url.value.trim();if(!value||!url.checkValidity())return url.reportValidity();rssAddFeed(value)});add.dataset.rssAdd='';
+  const urlHead=document.createElement('div');urlHead.className='rss-add-head';urlHead.append(urlLabel);
+  customCol.append(urlHead,url,add);
+  feedFields.append(presetCol,customCol);
+  editorHelp(urlHead,'feed-url','Custom RSS feed address','Use the publisher’s public RSS or Atom feed address, not its homepage or an article link. Example: https://feeds.bbci.co.uk/news/rss.xml. Adding a feed changes this draft only. Private/local network sources are not allowed.');
+  editorAdvanced(editorParagraph(feeds,'Default presets are BBC headline and UK nation feeds. City and county sources are not in the checked list.'));
   rssSettings.feeds.forEach((feed,index)=>{
     const row=document.createElement('fieldset');row.dataset.rssRow='';row.className='editor-fields';row.style.minWidth='0';
     const name=document.createElement('legend');name.className='visually-hidden';name.textContent=rssFeedName(feed);row.append(name);

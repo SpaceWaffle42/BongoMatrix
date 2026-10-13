@@ -53,6 +53,30 @@ try{
   await assert(`!document.querySelector('[data-module-editor="astronomy"] [data-advanced-toggle]').checked`,'Advanced preference leaked to another module');
   await evaluate(`localStorage.removeItem('matrix.editorAdvanced.v1'),true`);
  }
+ if(scenario==='rss-add'){
+  // Owner: left column = "Default presets" dropdown with "Add preset" below; right column = custom RSS URL with "Add custom RSS" below. Visible in Simple.
+  await evaluate(`localStorage.removeItem('matrix.editorAdvanced.v1'),true`);
+  for(const [width,height,mobile] of [[1280,900,false],[390,844,true]]){
+   await send('Emulation.setDeviceMetricsOverride',{width,height,deviceScaleFactor:1,mobile});
+   await evaluate(`(()=>{const b=document.querySelector('[data-module="rss"] .module-actions button:last-child');if(document.querySelector('[data-module-editor="rss"]').hidden)b.click();const t=document.querySelector('[data-module-editor="rss"] [data-advanced-toggle]');if(t.checked)t.click();return true})()`);
+   const g=await evaluate(`(()=>{const ed=document.querySelector('[data-module-editor="rss"]'),box=e=>{const r=e.getBoundingClientRect();return {l:r.left,r:r.right,t:r.top,b:r.bottom,v:e.checkVisibility()}};
+     const sel=ed.querySelector('[data-rss-presets]'),url=ed.querySelector('[data-rss-url]'),addP=ed.querySelector('[data-rss-add-preset]'),addC=ed.querySelector('[data-rss-add]');
+     return {advanced:ed.querySelector('[data-advanced-toggle]').checked,selLabel:sel.labels[0]?.textContent.trim(),urlLabel:url.labels[0]?.textContent.trim(),addPText:addP?.textContent.trim(),addCText:addC?.textContent.trim(),sel:box(sel),url:box(url),addP:addP&&box(addP),addC:box(addC),W:document.documentElement.clientWidth,scrollW:document.documentElement.scrollWidth}})()`);
+   const fail=m=>{throw Error(width+'px rss add layout: '+m+' '+JSON.stringify(g))};
+   if(g.advanced)fail('expected Simple mode');
+   if(g.selLabel!=='Default presets')fail('preset label');
+   if(g.addPText!=='Add preset'||g.addCText!=='Add custom RSS')fail('button text');
+   if(!g.urlLabel||!/custom rss/i.test(g.urlLabel))fail('custom url label');
+   for(const k of ['sel','url','addP','addC'])if(!g[k]?.v)fail(k+' not visible in Simple');
+   if(!(g.addP.t>=g.sel.b-1&&Math.abs(g.addP.l-g.sel.l)<4))fail('Add preset not below the dropdown');
+   if(!(g.addC.t>=g.url.b-1&&Math.abs(g.addC.l-g.url.l)<4))fail('Add custom RSS not below the URL');
+   if(!mobile&&!(g.url.l>=g.sel.r&&Math.abs(g.url.t-g.sel.t)<4))fail('custom URL not on the right of the presets');
+   if(mobile&&!(g.url.t>=g.addP.b))fail('mobile: custom group should stack below presets');
+   if(g.scrollW>g.W)fail('horizontal overflow');
+  }
+  await evaluate(`(()=>{const t=document.querySelector('[data-module-editor="rss"] [data-advanced-toggle]');if(!t.checked)t.click();return true})()`);
+  await click(`[data-module="rss"] .module-actions button:last-child`);
+ }
  if(scenario==='lava-palettes'){
   // Owner: each Lava palette checkbox sits on the left, on the same line as the colour-scheme name, and is labelled by that name.
   for(const [width,height,mobile] of [[1280,900,false],[390,844,true]]){
