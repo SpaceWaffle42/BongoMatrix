@@ -32,7 +32,10 @@ try{
  await assert(`configBody().event_countdown.packs.christian===true&&matrixHasUnsavedDraft()`,'pack switch not in draft');
  // Edit a holiday date for one year from inside the pack.
  await click('[data-calendar-pack-edit="christian"]');
- await waitFor(`!!document.querySelector('[data-holiday-date="christian.easter"][data-year="2027"]')`,'pack date editor missing');
+ // Reviewer r2: the Year select shows exactly one year.
+ await waitFor(`!!document.querySelector('[data-calendar-dates-year="christian"]')`,'pack date editor missing');
+ await change('[data-calendar-dates-year="christian"]','2027');
+ await waitFor(`!!document.querySelector('[data-holiday-date="christian.easter"][data-year="2027"]')&&!document.querySelector('[data-holiday-date][data-year="2028"]')&&!document.querySelector('[data-holiday-date][data-year="2026"]')`,'year select does not filter');
  await assert(`document.querySelector('[data-holiday-date="christian.easter"][data-year="2027"]').value==='2027-03-28'`,'calculated Easter 2027 not shown');
  await change('[data-holiday-date="christian.easter"][data-year="2027"]','2027-04-04');
  await assert(`configBody().event_countdown.holiday_dates['christian.easter']['2027']==='2027-04-04'`,'edited date not in draft');
@@ -40,13 +43,18 @@ try{
  await assert(`!configBody().event_countdown.holiday_dates['christian.easter']&&document.querySelector('[data-holiday-date="christian.easter"][data-year="2027"]').value==='2027-03-28'`,'reset to calculated date failed');
  await change('[data-holiday-show="christian.ash_wednesday"]',false);
  await assert(`configBody().event_countdown.hidden_holidays.includes('christian.ash_wednesday')`,'hiding a holiday failed');
- // Birthday quick-add uses the cake icon, all day, every year.
+ // Reviewer r2 blocker: an override must survive Save (not only reset-then-save).
+ await change('[data-calendar-dates-year="christian"]','2026');
+ await change('[data-holiday-date="christian.christmas"][data-year="2026"]','2026-12-26');
+ // Birthday quick-add asks for the date first; uses the cake icon, all day, every year.
  await click('[data-calendar-add-birthday]');
- await assert(`(()=>{const e=countdownSettings.events.at(-1);return e.icon==='birthday'&&e.annual&&e.all_day&&e.title==='My birthday'})()`,'birthday quick add wrong');
+ await change('[data-calendar-birthday-date]','1990-05-14');
+ await click('[data-calendar-birthday-confirm]');
+ await assert(`(()=>{const e=countdownSettings.events.at(-1);return e.icon==='birthday'&&e.annual&&e.all_day&&e.title==='My birthday'&&e.start==='1990-05-14'})()`,'birthday quick add wrong');
  // Save and reload keep everything.
  await click('#save-config');await waitFor(`!matrixHasUnsavedDraft()`,'save failed');
  const saved=await evaluate(`fetch('/api/config').then(r=>r.json()).then(c=>c.event_countdown)`);
- if(!saved.packs.christian||!saved.hidden_holidays.includes('christian.ash_wednesday')||saved.events.at(-1).icon!=='birthday')throw Error('save mismatch '+JSON.stringify(saved));
+ if(!saved.packs.christian||!saved.hidden_holidays.includes('christian.ash_wednesday')||saved.events.at(-1).icon!=='birthday'||saved.holiday_dates['christian.christmas']?.['2026']!=='2026-12-26')throw Error('save mismatch '+JSON.stringify(saved));
  // Mobile: no horizontal overflow; grid fits.
  for(const width of [390,1280]){
   await send('Emulation.setDeviceMetricsOverride',{width,height:900,deviceScaleFactor:1,mobile:width<500});await sleep(150);

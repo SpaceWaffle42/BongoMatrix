@@ -17,7 +17,7 @@ DEFAULTS = {
 }
 # Additive fields: missing on older saves, refilled from DEFAULTS on read.
 PROJECTED_FIELDS = ('packs', 'holiday_dates', 'hidden_holidays')
-ICONS = ('calendar', 'birthday', 'anniversary', 'launch', 'holiday', 'opening', *HOLIDAY_ICONS)
+ICONS = ('calendar', 'birthday', 'anniversary', 'launch', 'holiday', 'opening', 'scissors', 'clock', 'book', 'plane', 'ball', 'tooth', *HOLIDAY_ICONS)
 MAX_HOLIDAY_EDITS = 400
 
 

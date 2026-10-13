@@ -48,6 +48,13 @@ ART = {
     'lotus': ('...p....', '..ppp...', '.p.p.p..', 'pp.p.pp.', 'pppppppp', '.pppppp.', 'gggggggg', '.gggggg.'),
     'khanda': ('...B....', '..BBB...', '.B.B.B..', 'B..B..B.', 'B..B..B.', '.B.B.B..', '..BBB...', '.BBBBB..'),
     'leaf': ('......gg', '....gggg', '...ggggg', '..gggglg', '.gggglgg', '.ggglgg.', '.glgg...', 'l.......'),
+    # Everyday presets: haircut, appointment, school, trip.
+    'scissors': ('ss....ss', '.ss..ss.', '..ssss..', '...ss...', '..r..r..', '.r.rr.r.', '.r.rr.r.', '..r..r..'),
+    'clock': ('..wwww..', '.w..w.w.', 'w...w..w', 'w...www.', 'w......w', 'w......w', '.w....w.', '..wwww..'),
+    'book': ('........', 'BBB.BBB.', 'BwB.BwBB', 'BwBBBwBB', 'BwBBBwBB', 'BBBBBBBB', '.bbbbbb.', '........'),
+    'plane': ('...c....', '...cc...', 'c..cc...', 'cccccccc', 'c..cc...', '...cc...', '...c....', '........'),
+    'ball': ('..wwww..', '.wwkkww.', 'wwkkkkww', 'wkwwwwkw', 'wkwwwwkw', 'wwkkkkww', '.wwkkww.', '..wwww..'),
+    'tooth': ('.ww..ww.', 'wwwwwwww', 'wwwwwwww', 'wwwwwwww', '.wwwwww.', '.ww..ww.', '.ww..ww.', '.w....w.'),
 }
 def icon_catalogue():
     """Icon pixels for the dashboard calendar: 8 rows of 8 '#rrggbb' or None."""

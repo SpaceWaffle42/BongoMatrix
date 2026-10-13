@@ -473,7 +473,9 @@ HOLIDAYS = {f"{pack}.{item['id']}": dict(item, pack=pack) for pack, data in PACK
 # Pixel-art icons that holidays use, in addition to the original event types.
 HOLIDAY_ICONS = ('tree', 'pumpkin', 'egg', 'cross', 'dove', 'star', 'heart', 'firework', 'crescent',
                  'lantern', 'star_of_david', 'menorah', 'shofar', 'diya', 'holi', 'lotus', 'khanda', 'leaf')
-assert {item['icon'] for item in HOLIDAYS.values()} <= set(HOLIDAY_ICONS)
+_UNKNOWN_ICONS = {item['icon'] for item in HOLIDAYS.values()} - set(HOLIDAY_ICONS)
+if _UNKNOWN_ICONS:
+    raise RuntimeError(f"holiday packs use unknown icons: {sorted(_UNKNOWN_ICONS)}")
 
 
 @lru_cache(maxsize=4096)

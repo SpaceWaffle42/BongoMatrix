@@ -18,8 +18,11 @@ try{
  await click('[data-module="event_countdown"] button:last-child');
  await change('[data-countdown-setting="timezone"]','Pacific/Kiritimati');
  await click('[data-countdown-add]');
- const zoned=await evaluate(`(()=>{const parts=Object.fromEntries(new Intl.DateTimeFormat('en-CA',{timeZone:'Pacific/Kiritimati',year:'numeric',month:'2-digit',day:'2-digit',hour:'2-digit',minute:'2-digit',hourCycle:'h23'}).formatToParts(new Date()).map(p=>[p.type,p.value]));return parts.year+'-'+parts.month+'-'+parts.day+'T'+parts.hour+':'+parts.minute})()`);
+ const zoned=await evaluate(`(()=>{const parts=Object.fromEntries(new Intl.DateTimeFormat('en-CA',{timeZone:'Pacific/Kiritimati',year:'numeric',month:'2-digit',day:'2-digit'}).formatToParts(new Date()).map(p=>[p.type,p.value]));return parts.year+'-'+parts.month+'-'+parts.day})()`);
+ // Reviewer finding 2026-10-13: Add event creates an all-day event for today in the configured zone.
  if(await evaluate(`document.querySelector('[data-countdown-field="start"]').value`)!==zoned)throw Error('New event does not use configured timezone');
+ await click('[data-countdown-field="all_day"]');
+ if(await evaluate(`document.querySelector('[data-countdown-field="start"]').value`)!==zoned+'T00:00')throw Error('New event did not switch to timed');
  await change('[data-countdown-field="title"]','Browser launch');
  // Offset-bearing instants must be localized before discarding the time.
  for(const [zone,start,end,wantStart,wantEnd] of [

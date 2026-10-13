@@ -108,3 +108,15 @@ class CountdownWebTests(unittest.TestCase):
         saved = self.fixture.store.get()['event_countdown']
         self.assertTrue(saved['packs']['christian'])
         self.assertEqual(saved['events'][-1]['icon'], 'birthday')
+
+    def test_calendar_researched_layout_tap_presets_agenda_keyboard_and_phone(self):
+        probe = Path(__file__).with_name('calendar_ux_browser.cjs').read_text()
+        result = self.fixture.run_live_chromium_probe(probe, timeout=120)
+        self.assertGreaterEqual(result['agenda'], 3)
+        saved = self.fixture.store.get()['event_countdown']
+        self.assertIn('scissors', [event['icon'] for event in saved['events']])
+
+    def test_calendar_reviewer_findings_dates_birthday_undo_contrast_and_touch(self):
+        probe = Path(__file__).with_name('calendar_review_browser.cjs').read_text()
+        result = self.fixture.run_live_chromium_probe(probe, timeout=150)
+        self.assertTrue(result['ok'])

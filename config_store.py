@@ -314,6 +314,12 @@ def _validate_time(value):
         raise ValueError(f"Invalid time: {value!r}")
 
 
+#: Maps whose keys are data (ids), not schema. Their contents are validated by
+#: the owning module validator (e.g. event_countdown_config.validate checks
+#: holiday ids, years and dates), so key-shape checks stop at the map itself.
+_OPEN_MAP_PATHS = frozenset({"event_countdown.holiday_dates."})
+
+
 def _validate_update_keys(changes, schema, prefix=""):
     for key, value in changes.items():
         if key not in schema:
@@ -321,6 +327,8 @@ def _validate_update_keys(changes, schema, prefix=""):
         if isinstance(value, dict):
             if not isinstance(schema[key], dict):
                 raise ValueError(f"{prefix}{key} must not be an object")
+            if f"{prefix}{key}." in _OPEN_MAP_PATHS:
+                continue
             _validate_update_keys(value, schema[key], f"{prefix}{key}.")
 
 

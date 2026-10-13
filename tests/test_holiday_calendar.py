@@ -110,6 +110,23 @@ class PackSettingsTests(unittest.TestCase):
             with self.subTest(bad=bad), self.assertRaises(ValueError):
                 validate(dict(good, **bad))
 
+    def test_holiday_date_override_saves_through_config_store_update(self):
+        # Reviewer r2 2026-10-13 blocker: holiday_dates keys are holiday ids (open map), so
+        # ConfigStore.update must not reject them as unknown keys.
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / 'config.json'
+            store = ConfigStore(path)
+            store.update({'event_countdown': {
+                'packs': dict(settings()['packs'], christian=True),
+                'holiday_dates': {'christian.christmas': {'2026': '2026-12-26'}},
+                'hidden_holidays': ['christian.ash_wednesday']}})
+            saved = ConfigStore(path).get()['event_countdown']
+            self.assertEqual(saved['holiday_dates'], {'christian.christmas': {'2026': '2026-12-26'}})
+            with self.assertRaises(ValueError):
+                store.update({'event_countdown': {'holiday_dates': {'christian.nope': {'2026': '2026-12-26'}}}})
+            with self.assertRaises(ValueError):
+                store.update({'event_countdown': {'unknown_key': 1}})
+
 
 class PackSelectionTests(unittest.TestCase):
     def test_enabled_pack_supplies_the_next_event_with_its_icon(self):
@@ -148,6 +165,18 @@ class IconAndConfettiTests(unittest.TestCase):
         self.assertTrue(any(r > 200 and 60 < g < 170 and b < 60 for r, g, b in colours(pumpkin)), 'pumpkin is not orange')
         self.assertTrue(any(g > 120 and r < 100 for r, g, b in colours(tree)), 'tree is not green')
         self.assertNotEqual(pumpkin.tobytes(), tree.tobytes())
+
+    def test_everyday_preset_icons_are_valid_and_drawn(self):
+        # Calendar presets (Haircut, Appointment, School, Trip) need real panel icons.
+        from event_countdown_config import ICONS as VALID
+        from modules.event_countdown import ART, icon_catalogue
+        catalogue = icon_catalogue()
+        for name in ('scissors', 'clock', 'book', 'plane', 'ball', 'tooth'):
+            self.assertIn(name, VALID)
+            self.assertIn(name, ART)
+            self.assertEqual(len(catalogue[name]), 8)
+            self.assertTrue(all(len(row) == 8 for row in catalogue[name]))
+            self.assertGreater(sum(1 for row in catalogue[name] for pixel in row if pixel), 10)
 
     def test_birthday_now_shows_moving_confetti_only_then(self):
         from modules import event_countdown as module
