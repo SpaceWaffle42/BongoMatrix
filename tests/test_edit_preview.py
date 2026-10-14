@@ -2504,7 +2504,7 @@ class EditPreviewTests(unittest.TestCase):
                 lava_config=config["lava"],
             )
         self.assertEqual(shared.call_count, 1)
-        self.assertEqual(clock_lava.clock.__defaults__, (300, None, None, None))
+        self.assertEqual(clock_lava.clock.__defaults__, (300, None, None, None, None))  # + local_zone (Weather zone)
         self.assertEqual(clock_lava.run.__defaults__, (300, None))
 
     def test_finite_cycle_can_restart_only_after_terminal_page(self):
