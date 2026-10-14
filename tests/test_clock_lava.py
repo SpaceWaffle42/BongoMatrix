@@ -165,7 +165,7 @@ class ClockLavaOptionsTests(unittest.TestCase):
             matrix=matrix,
             stop_event="stop",
             lava_config=options,
-            local_zone="UTC",  # no Weather zone in this config: UTC fallback
+            local_zone=None,  # no Weather zone in this config: device clock
         )
 
 

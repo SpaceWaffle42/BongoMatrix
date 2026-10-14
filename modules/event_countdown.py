@@ -83,7 +83,7 @@ def _year(value, year):
 def effective_settings(config):
     """Countdown settings with a blank zone resolved to the Weather location's."""
     settings = config['event_countdown']
-    zone = local_clock.effective_zone(config, settings.get('timezone'))
+    zone = local_clock.effective_zone(config, settings.get('timezone')) or local_clock.system_zone()
     return settings if settings.get('timezone') == zone else {**settings, 'timezone': zone}
 
 
@@ -94,7 +94,7 @@ def select_event(settings, *, now=None):
     dates are exclusive. Annual occurrences keep their local wall clock.
     """
     # Blank = follow Weather; callers resolve it via effective_settings(config).
-    zone = ZoneInfo(settings['timezone'] or 'UTC')
+    zone = ZoneInfo(settings['timezone'] or local_clock.system_zone())
     now = now or dt.datetime.now(UTC)
     if now.tzinfo is None:
         raise ValueError('now must be timezone-aware')

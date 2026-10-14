@@ -29,7 +29,7 @@ def _scheduled_interval(schedule):
 
 
 def local_now_provider(config, *, utc_now=None):
-    """Schedule clock: the Weather location's wall time (UTC if unknown)."""
+    """Schedule clock: the Weather location's wall time (device clock if unknown)."""
     zone = local_clock.weather_zone(config)
     return lambda: local_clock.now_in(zone, utc_now=utc_now() if utc_now else None)
 

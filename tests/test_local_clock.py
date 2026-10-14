@@ -2,8 +2,8 @@
 
 Every wall-clock feature (night/active window, clocks, time layers, countdown,
 announcement schedules) uses the Weather location's IANA zone unless the user
-explicitly chose another zone for that feature. Owner follow-up: "but fallback
-to UTC" - an unknown Weather zone ("") uses UTC, never the device clock.
+explicitly chose another zone for that feature. An unknown Weather zone ("")
+falls back to the system clock (owner: "make the final fall back system clock").
 """
 import copy
 import datetime as dt
@@ -32,28 +32,34 @@ class LocalClockTests(unittest.TestCase):
         self.assertIsNone(now.tzinfo)
         self.assertEqual(now, dt.datetime(2026, 7, 2, 9, 30))
 
-    def test_unknown_weather_zone_falls_back_to_utc(self):
+    def test_unknown_weather_zone_keeps_device_clock(self):
         config = sydney_config()
         config["weather"]["timezone"] = ""
-        self.assertEqual(local_clock.weather_zone(config), "UTC")
-        self.assertEqual(local_clock.effective_zone(config, ""), "UTC")
-        self.assertEqual(local_clock.effective_zone(config, "Nope/Zone"), "UTC")
-        with patch.object(local_clock, "_utc_now", return_value=INSTANT):
-            self.assertEqual(local_clock.local_now(config), dt.datetime(2026, 7, 1, 23, 30))
-            self.assertEqual(local_clock.now_in(None), dt.datetime(2026, 7, 1, 23, 30))
-        self.assertEqual(local_clock.to_utc(dt.datetime(2026, 7, 1, 23, 30), None),
-                         dt.datetime(2026, 7, 1, 23, 30, tzinfo=dt.timezone.utc))
+        self.assertIsNone(local_clock.weather_zone(config))
+        device = dt.datetime(2026, 7, 2, 0, 30)
+        with patch.object(local_clock, "_device_now", return_value=device):
+            self.assertEqual(local_clock.local_now(config), device)
 
-    def test_no_wall_clock_code_reads_the_device_zone(self):
-        import re
-        from pathlib import Path as P
-        root = P(__file__).resolve().parents[1]
-        for name in ("local_clock.py", "modules/clock_lava.py", "modules/custom_text.py",
-                     "modules/announcement_board.py", "modules/event_countdown.py", "display_controller.py"):
-            source = (root / name).read_text()
-            self.assertIsNone(re.search(r"datetime\.now\(\)|\.astimezone\(\)", source), name)
-        js = (root / "app/templates/editor_usability.js").read_text()
-        self.assertIn("||'UTC'", js.replace(" ", ""))
+    def test_system_zone_names_the_system_clock(self):
+        import os
+        with patch.dict(os.environ, {"TZ": "Asia/Tokyo"}):
+            self.assertEqual(local_clock.system_zone(), "Asia/Tokyo")
+        with patch.dict(os.environ, {"TZ": ""}), \
+                patch("local_clock.os.path.realpath", return_value="/usr/share/zoneinfo/Europe/Paris"):
+            self.assertEqual(local_clock.system_zone(), "Europe/Paris")
+        with patch.dict(os.environ, {"TZ": "Bogus/Zone"}), \
+                patch("local_clock.os.path.realpath", return_value="/nowhere"), \
+                patch("local_clock.Path.read_text", side_effect=OSError):
+            self.assertEqual(local_clock.system_zone(), "UTC")
+
+    def test_countdown_without_weather_uses_system_zone(self):
+        import os
+        from modules import event_countdown
+        config = sydney_config()
+        config["weather"]["timezone"] = ""
+        config["event_countdown"]["timezone"] = ""
+        with patch.dict(os.environ, {"TZ": "Asia/Tokyo"}):
+            self.assertEqual(event_countdown.effective_settings(config)["timezone"], "Asia/Tokyo")
 
     def test_feature_zone_explicitly_saved_wins_over_weather(self):
         self.assertEqual(local_clock.effective_zone(sydney_config(), "Europe/London"), "Europe/London")
@@ -77,11 +83,11 @@ class LocalClockTests(unittest.TestCase):
         class Frozen(dt.datetime):
             @classmethod
             def now(cls, tz=None):
-                return INSTANT.astimezone(tz) if tz else (INSTANT + dt.timedelta(hours=5)).replace(tzinfo=None)  # device clock: must not be used
+                return INSTANT.astimezone(tz) if tz else INSTANT.replace(tzinfo=None)
 
         with patch("modules.clock_lava.datetime.datetime", Frozen):
             self.assertEqual(clock_lava.clock_texts("Australia/Sydney"), ("09:30", "02 Jul"))
-            self.assertEqual(clock_lava.clock_texts(None), ("23:30", "01 Jul"))  # UTC fallback
+            self.assertEqual(clock_lava.clock_texts(None), ("23:30", "01 Jul"))
 
     def test_canvas_time_layer_uses_weather_location(self):
         from modules import custom_text

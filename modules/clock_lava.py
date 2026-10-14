@@ -225,8 +225,9 @@ def prepare_lava_frame_state(matrix, lava_config=None, *, local_zone=None):
 
 
 def clock_texts(zone):
-    """Time/date text in the Weather location's zone (UTC if unknown)."""
-    now = datetime.datetime.now(local_clock.valid_zone_info(zone))
+    """Time/date text in the Weather location's zone (device clock if unknown)."""
+    zone = local_clock.valid_zone_info(zone)
+    now = datetime.datetime.now(zone) if zone else datetime.datetime.now()
     return now.strftime("%H:%M"), now.strftime("%d %b")
 
 
