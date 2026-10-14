@@ -83,7 +83,7 @@ def _year(value, year):
 def effective_settings(config):
     """Countdown settings with a blank zone resolved to the Weather location's."""
     settings = config['event_countdown']
-    zone = local_clock.effective_zone(config, settings.get('timezone')) or 'UTC'
+    zone = local_clock.effective_zone(config, settings.get('timezone'))
     return settings if settings.get('timezone') == zone else {**settings, 'timezone': zone}
 
 

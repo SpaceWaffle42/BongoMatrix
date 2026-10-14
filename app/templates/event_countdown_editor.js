@@ -73,7 +73,7 @@ function countdownIcon(name,scale=2) {
 }
 function calendarTodayParts() {
   try{return Object.fromEntries(new Intl.DateTimeFormat('en-CA',{timeZone:editorEffectiveZone(countdownSettings.timezone),year:'numeric',month:'2-digit',day:'2-digit'}).formatToParts(new Date()).map(p=>[p.type,Number(p.value)]))}
-  catch(_){const d=new Date();return {year:d.getFullYear(),month:d.getMonth()+1,day:d.getDate()}}
+  catch(_){const d=new Date();return {year:d.getUTCFullYear(),month:d.getUTCMonth()+1,day:d.getUTCDate()}}
 }
 function holidayDatesFor(key,year) {
   const edited=countdownSettings.holiday_dates?.[key]?.[String(year)];
