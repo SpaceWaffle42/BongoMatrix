@@ -12751,6 +12751,9 @@ process.stdout.write(JSON.stringify({
         candidate["event_countdown"]["packs"]["christian"] = True
         candidate["event_countdown"]["holiday_dates"] = {"christian.easter": {"2027": "2027-03-29"}}
         candidate["event_countdown"]["hidden_holidays"] = ["general.halloween"]
+        # Newer reconstructible calendar/RSS defaults: nondefault so compaction keeps them.
+        candidate["event_countdown"].update(title_align="left", progress_style="stripes")
+        candidate["rss"]["headline_mode"] = "once"
         bitmap = base64.b64encode(bytes(64 * 32 * 4)).decode("ascii")
         pixels = [
             {
