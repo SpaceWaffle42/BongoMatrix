@@ -17,7 +17,6 @@ import json
 from pathlib import Path
 import sys
 import unittest
-import xml.etree.ElementTree as ET
 
 ROOT = Path(__file__).resolve().parents[1]
 
@@ -103,11 +102,17 @@ def run(args):
 
 
 def junit_cases(results):
+    from defusedxml import ElementTree as ET
+    from defusedxml.common import DefusedXmlException
+
     files = sorted(Path(results).glob('*.xml'))
     if not files:
         raise ShardError('no JUnit reports')
-    return [(case.get('classname') or '') + '.' + (case.get('name') or '')
-            for path in files for case in ET.parse(path).getroot().iter('testcase')]
+    try:
+        return [(case.get('classname') or '') + '.' + (case.get('name') or '')
+                for path in files for case in ET.parse(path).getroot().iter('testcase')]
+    except (DefusedXmlException, ET.ParseError) as error:
+        raise ShardError(f'unsafe or invalid JUnit report: {error}') from error
 
 
 def verify(args):

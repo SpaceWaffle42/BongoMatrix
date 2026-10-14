@@ -129,6 +129,20 @@ class ShardContractTests(unittest.TestCase):
             self.assertNotEqual(dropped.returncode, 0)
             self.assertIn('missing=', dropped.stderr)
 
+    def test_junit_reports_are_parsed_with_defusedxml(self):
+        """semgrep bandit.B314: report XML must not use xml.etree directly."""
+        source = SHARD.read_text(encoding='utf-8')
+        self.assertNotRegex(source, r'(?m)^\s*import xml\.etree|^\s*from xml\.etree')
+        self.assertIn('from defusedxml import ElementTree as ET', source)
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            (root / 'TEST-bomb.xml').write_text(
+                '<?xml version="1.0"?><!DOCTYPE t [<!ENTITY a "aaaaaaaa">]>'
+                '<testsuite><testcase classname="x" name="&a;"/></testsuite>', encoding='utf-8')
+            shard = load_shard_module()
+            with self.assertRaisesRegex(shard.ShardError, 'unsafe or invalid'):
+                shard.junit_cases(root)
+
     def test_import_error_fails_every_shard(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
