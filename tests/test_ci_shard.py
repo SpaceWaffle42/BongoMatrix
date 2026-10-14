@@ -49,6 +49,8 @@ class ShardContractTests(unittest.TestCase):
         weights.write_text(json.dumps({'default_seconds': 1, 'tests': WEIGHTS}), encoding='utf-8')
         required = root / 'required.json'
         required.write_text(json.dumps({'test_alpha': ['Alpha.test_a']}), encoding='utf-8')
+        # Disposable trees have no quarantined tests (main's list names real modules).
+        (root / 'non-essential.json').write_text(json.dumps({'tests': {}}), encoding='utf-8')
         return tests, weights, required
 
     def call(self, *args, cwd):
@@ -60,6 +62,7 @@ class ShardContractTests(unittest.TestCase):
         (root / 'shards').mkdir()
         for index in range(1, total + 1):
             collected = self.call(COLLECT, '--tests', tests, '--required', required,
+                                  '--non-essential', root / 'non-essential.json',
                                   '--output', root / f'shards/collection-{index}.json', cwd=root)
             self.assertEqual(collected.returncode, 0, collected.stderr)
             if index in skip:
