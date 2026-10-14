@@ -12,18 +12,15 @@ read-only ``/api/directory/self`` summary.  Nothing here can change settings.
 
 from __future__ import annotations
 
-import http.client
 import ipaddress
 import json
 import logging
 import random
 import re
+import socket
 import subprocess
 import threading
 import time
-import urllib.error
-import urllib.request
-from concurrent.futures import ThreadPoolExecutor
 
 LOGGER = logging.getLogger(__name__)
 
@@ -34,6 +31,8 @@ BROWSE_TIMEOUT_SECONDS = 4
 PEER_TIMEOUT_SECONDS = 1.5  # whole fetch: connect + headers + body, not per socket read
 PEER_TOTAL_DEADLINE_SECONDS = 3.0  # one directory build waits at most this long for peers
 PEER_RESPONSE_LIMIT = 4096
+PEER_FETCH_WORKERS = 8  # shared pool: the most peer-fetch threads that can ever exist
+PEER_FETCH_LIMIT = 32  # peers fetched per build; more announcements are ignored
 STALE_DROP_SECONDS = 600  # quiet displays are listed greyed, then dropped
 HOLD_RETRY_SECONDS = (6, 10)  # matrix.local takeover attempt interval
 SUPERVISE_SECONDS = 2
@@ -107,55 +106,76 @@ def _version_key(version):
     return tuple(int(part) for part in re.findall(r"\d+", version or ""))
 
 
-class _NoRedirect(urllib.request.HTTPRedirectHandler):
-    """A peer may not send this display anywhere else (loopback, other hosts)."""
-
-    def redirect_request(self, req, fp, code, msg, headers, newurl):
-        return None
+PEER_HEADER_LIMIT = 4096  # status line + headers; a real Matrix answer needs ~200 bytes
 
 
-def peer_opener():
-    return urllib.request.build_opener(urllib.request.ProxyHandler({}), _NoRedirect())
+class _PeerAnswerError(Exception):
+    pass
 
 
-def _read_before(response, limit, deadline):
-    """Read up to ``limit`` + 1 bytes, failing once the monotonic ``deadline`` passes.
+def _recv_until_deadline(sock, deadline, limit):
+    """All bytes until the peer closes, or raise past ``deadline`` or ``limit``.
 
-    ``read1`` returns whatever has arrived, so a peer dripping one byte at a time
-    is checked against the deadline after every socket read (each read is itself
-    bounded by the opener timeout).
+    Every recv is given only the time left, so no phase of the exchange
+    (connect, status line, headers, body) can outlast the deadline.
     """
-    if not isinstance(response, http.client.HTTPResponse):
-        return response.read(limit + 1)
-    chunks, size = [], 0
-    while size <= limit:
-        if time.monotonic() >= deadline:
-            raise TimeoutError("peer answer exceeded its deadline")
-        chunk = response.read1(limit + 1 - size)
+    data = bytearray()
+    while True:
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            raise _PeerAnswerError("deadline")
+        sock.settimeout(remaining)
+        chunk = sock.recv(min(1024, limit + 1 - len(data)))
         if not chunk:
-            break
-        chunks.append(chunk)
-        size += len(chunk)
-    return b"".join(chunks)
+            return bytes(data)
+        data += chunk
+        if len(data) > limit:
+            raise _PeerAnswerError("too large")
 
 
-def fetch_peer(address, port, timeout=PEER_TIMEOUT_SECONDS, opener=None):
-    """GET a peer's public summary; None unless it is a well-formed Matrix answer.
+def _http_get(address, port, path, timeout, connect=socket.create_connection):
+    """Minimal HTTP/1.0 GET with one total deadline. Returns the 200 body or None.
 
-    Redirects are refused and the whole exchange is bounded by ``timeout``.
+    Deliberately not urllib/http.client: those bound each socket operation, not
+    the exchange, so a dripping peer could hold a thread for minutes. No
+    redirects (any non-200 is a failure), no proxies, no chunked encoding.
     """
-    url = f"http://{address}:{int(port)}/api/directory/self"
-    opener = opener or peer_opener()
     deadline = time.monotonic() + timeout
     try:
-        with opener.open(url, timeout=timeout) as response:
-            if response.status != 200:
-                return None
-            body = _read_before(response, PEER_RESPONSE_LIMIT, deadline)
-    except urllib.error.HTTPError as error:  # includes refused redirects
-        error.close()
+        with connect((address, int(port)), timeout=timeout) as sock:
+            sock.settimeout(max(0.001, deadline - time.monotonic()))
+            sock.sendall(
+                f"GET {path} HTTP/1.0\r\nHost: {address}:{int(port)}\r\n"
+                "Accept: application/json\r\nConnection: close\r\n\r\n".encode("ascii")
+            )
+            raw = _recv_until_deadline(sock, deadline, PEER_HEADER_LIMIT + PEER_RESPONSE_LIMIT)
+    except (OSError, ValueError, _PeerAnswerError):
         return None
-    except (OSError, ValueError, TimeoutError, http.client.HTTPException):
+    head, separator, body = raw.partition(b"\r\n\r\n")
+    if not separator or len(head) > PEER_HEADER_LIMIT:
+        return None
+    lines = head.split(b"\r\n")
+    status = lines[0].split(None, 2)
+    if len(status) < 2 or not status[0].startswith(b"HTTP/1.") or status[1] != b"200":
+        return None
+    for line in lines[1:]:
+        name, _, value = line.partition(b":")
+        name, value = name.strip().lower(), value.strip().lower()
+        if name == b"transfer-encoding" and value != b"identity":
+            return None
+        if name == b"content-length":
+            if not value.isdigit() or int(value) != len(body):
+                return None
+    return body
+
+
+def fetch_peer(address, port, timeout=PEER_TIMEOUT_SECONDS, connect=socket.create_connection):
+    """GET a peer's public summary; None unless it is a well-formed Matrix answer.
+
+    The whole exchange is bounded by ``timeout``; redirects are never followed.
+    """
+    body = _http_get(address, port, "/api/directory/self", timeout, connect=connect)
+    if body is None:
         return None
     if len(body) > PEER_RESPONSE_LIMIT:
         return None
@@ -251,6 +271,60 @@ class AvahiProcess:
                 process.kill()
 
 
+class _PeerPool:
+    """Fixed set of daemon worker threads for peer fetches.
+
+    ThreadPoolExecutor workers are joined at interpreter exit, so one stuck
+    fetch would delay service shutdown; daemon workers never do. The pool never
+    grows past ``workers`` threads, and queued work is dropped when it is full.
+    """
+
+    def __init__(self, workers, prefix, backlog=64):
+        import queue
+
+        self._queue = queue.Queue(maxsize=backlog)
+        self._closed = threading.Event()
+        for index in range(workers):
+            threading.Thread(target=self._work, name=f"{prefix}-{index}", daemon=True).start()
+
+    def _work(self):
+        while not self._closed.is_set():
+            item = self._queue.get()
+            if item is None:
+                return
+            future, fn, args = item
+            if not future.set_running_or_notify_cancel():
+                continue
+            try:
+                future.set_result(fn(*args))
+            except BaseException as error:  # reported through the future
+                future.set_exception(error)
+
+    def submit(self, fn, *args):
+        import queue
+        from concurrent.futures import Future
+
+        future = Future()
+        if self._closed.is_set():
+            future.cancel()
+            return future
+        try:
+            self._queue.put_nowait((future, fn, args))
+        except queue.Full:
+            future.cancel()
+        return future
+
+    def shutdown(self):
+        self._closed.set()
+        while True:
+            try:
+                item = self._queue.get_nowait()
+            except Exception:
+                break
+            if item is not None:
+                item[0].cancel()
+
+
 class Directory:
     """Announce this display, try to hold matrix.local, list all displays."""
 
@@ -273,6 +347,7 @@ class Directory:
         self._cache = None
         self._cache_at = None
         self._building = False
+        self._pool = _PeerPool(PEER_FETCH_WORKERS, "matrix-directory-peer")
         self._known = {}
         self._shutdown = threading.Event()
         self._thread = None
@@ -345,6 +420,7 @@ class Directory:
         self._shutdown.set()
         self.service.stop()
         self.holder.stop()
+        self._pool.shutdown()
 
     # -- listing --------------------------------------------------------
     def _browse(self):
@@ -389,18 +465,20 @@ class Directory:
         peers = {key: peer for key, peer in self._browse().items() if key != me_id}
         if not peers:
             return {}
-        pool = ThreadPoolExecutor(max_workers=8)
-        futures = {key: pool.submit(self._fetch, peer["address"], peer["port"])
-                   for key, peer in peers.items()}
+        # One shared, bounded pool for the life of the directory: at most
+        # PEER_FETCH_WORKERS fetch threads ever exist, and each fetch ends by its
+        # own deadline, so hostile peers cannot grow the thread count.
+        futures = {key: self._pool.submit(self._fetch, peer["address"], peer["port"])
+                   for key, peer in list(peers.items())[:PEER_FETCH_LIMIT]}
         deadline = time.monotonic() + PEER_TOTAL_DEADLINE_SECONDS
         answers = {}
         for key, future in futures.items():
             try:
                 answer = future.result(timeout=max(0.0, deadline - time.monotonic()))
-            except Exception:  # timeout or fetch failure: this peer is unconfirmed
+            except BaseException:  # timeout, cancelled or failed: this peer is unconfirmed
+                future.cancel()
                 continue
             answers[key] = (peers[key], answer)
-        pool.shutdown(wait=False, cancel_futures=True)
         return answers
 
     def _assemble(self, now, answers):

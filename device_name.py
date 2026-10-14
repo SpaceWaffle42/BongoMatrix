@@ -55,7 +55,7 @@ def builtin_mac(sysfs=SYSFS_NET):
         if _read(iface / "addr_assign_type") not in ("0", None):
             continue
         mac = (_read(iface / "address") or "").lower()
-        if not _MAC.match(mac) or mac == "00:00:00:00:00:00":
+        if not _MAC.fullmatch(mac) or mac == "00:00:00:00:00:00":
             continue
         if int(mac[:2], 16) & 0x02:  # locally administered / randomised
             continue

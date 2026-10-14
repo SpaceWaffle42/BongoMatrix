@@ -7,7 +7,7 @@ import threading
 import time
 import unittest
 from pathlib import Path
-from unittest.mock import Mock
+from unittest.mock import Mock, patch
 
 import directory
 from config_store import ConfigStore
@@ -223,29 +223,65 @@ class DirectoryTests(unittest.TestCase):
         self.assertTrue(holder.terminated)
 
 
+class FakeSocket:
+    def __init__(self, reply):
+        self.reply = reply
+        self.sent = b""
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc):
+        return False
+
+    def settimeout(self, value):
+        pass
+
+    def sendall(self, data):
+        self.sent += data
+
+    def recv(self, size):
+        chunk, self.reply = self.reply[:size], self.reply[size:]
+        return chunk
+
+
+def http_reply(body, status=b"200 OK", headers=b""):
+    return (b"HTTP/1.0 " + status + b"\r\nContent-Type: application/json\r\n" + headers
+            + b"Content-Length: " + str(len(body)).encode() + b"\r\n\r\n" + body)
+
+
 class FetchPeerTests(unittest.TestCase):
-    def opener(self, body, status=200):
-        response = Mock(status=status)
-        response.read.return_value = body
-        response.__enter__ = Mock(return_value=response)
-        response.__exit__ = Mock(return_value=False)
-        opener = Mock()
-        opener.open.return_value = response
-        return opener
+    def fetch(self, reply, **kwargs):
+        self.calls = []
+
+        def connect(address, timeout):
+            self.calls.append((address, timeout))
+            self.sock = FakeSocket(reply)
+            return self.sock
+        return directory.fetch_peer("192.168.1.23", 5000, connect=connect, **kwargs)
 
     def test_accepts_matrix_summary(self):
-        opener = self.opener(b'{"service":"matrix","id":"matrix-71c2","name":"x","version":"0.3.71-preview","playing":"Clock"}')
-        peer = directory.fetch_peer("192.168.1.23", 5000, opener=opener)
+        peer = self.fetch(http_reply(
+            b'{"service":"matrix","id":"matrix-71c2","name":"x","version":"0.3.71-preview","playing":"Clock"}'))
         self.assertEqual(peer["id"], "matrix-71c2")
-        opener.open.assert_called_once_with("http://192.168.1.23:5000/api/directory/self", timeout=1.5)
+        self.assertEqual(self.calls, [(("192.168.1.23", 5000), 1.5)])
+        self.assertTrue(self.sock.sent.startswith(b"GET /api/directory/self HTTP/1.0\r\n"))
 
     def test_rejects_non_matrix_large_or_bad_answers(self):
         for body in (b'{"service":"other","id":"a"}', b"x" * 5000, b"not json",
                      b'{"service":"matrix","id":"<b>"}'):
-            self.assertIsNone(directory.fetch_peer("192.168.1.23", 5000, opener=self.opener(body)))
-        failing = Mock()
-        failing.open.side_effect = OSError("refused")
-        self.assertIsNone(directory.fetch_peer("192.168.1.23", 5000, opener=failing))
+            self.assertIsNone(self.fetch(http_reply(body)), body[:20])
+        good = b'{"service":"matrix","id":"matrix-71c2"}'
+        for reply in (http_reply(good, status=b"302 Found", headers=b"Location: http://127.0.0.1/\r\n"),
+                      http_reply(good, headers=b"Transfer-Encoding: chunked\r\n"),
+                      http_reply(good).replace(b"Content-Length: 39", b"Content-Length: 99"),
+                      b"HTTP/1.0 200 OK\r\n" + b"X: " + b"a" * 9000 + b"\r\n\r\n" + good,
+                      b"garbage"):
+            self.assertIsNone(self.fetch(reply), reply[:30])
+
+        def refused(address, timeout):
+            raise OSError("refused")
+        self.assertIsNone(directory.fetch_peer("192.168.1.23", 5000, connect=refused))
 
 
 class LivePeerServer:
@@ -300,6 +336,51 @@ class FetchPeerLiveTests(unittest.TestCase):
         self.assertEqual(peer.hits, ["/api/directory/self"])
         self.assertEqual(internal.hits, [])
 
+    def raw_drip(self, prefix, drip_byte=b"a", interval=0.1, count=200):
+        """A raw TCP peer that sends ``prefix`` then drips forever (no HTTP framing)."""
+        import socket as socket_module
+
+        listener = socket_module.socket()
+        listener.bind(("127.0.0.1", 0))
+        listener.listen()
+        self.addCleanup(listener.close)
+        stop = threading.Event()
+        self.addCleanup(stop.set)
+
+        def serve():
+            try:
+                conn, _ = listener.accept()
+            except OSError:
+                return
+            with conn:
+                try:
+                    conn.recv(4096)
+                    conn.sendall(prefix)
+                    for _ in range(count):
+                        if stop.wait(interval):
+                            return
+                        conn.sendall(drip_byte)
+                except OSError:
+                    return
+        thread = threading.Thread(target=serve, daemon=True)
+        thread.start()
+        return listener.getsockname()[1]
+
+    def assert_cut_off(self, port, timeout=0.5):
+        started = time.monotonic()
+        self.assertIsNone(directory.fetch_peer("127.0.0.1", port, timeout=timeout))
+        self.assertLess(time.monotonic() - started, timeout + 0.5)
+
+    def test_header_drip_is_cut_off_at_the_total_deadline(self):  # r3 MUST-FIX 1
+        self.assert_cut_off(self.raw_drip(b"HTTP/1.0 200 OK\r\nX-A: "))
+
+    def test_status_line_drip_is_cut_off(self):
+        self.assert_cut_off(self.raw_drip(b"", drip_byte=b"H"))
+
+    def test_chunked_size_line_drip_is_cut_off(self):
+        self.assert_cut_off(self.raw_drip(
+            b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n", drip_byte=b"f"))
+
     def test_slow_drip_peer_is_cut_off_at_the_total_deadline(self):
         def drip(handler):
             handler.send_response(200)
@@ -346,6 +427,29 @@ class DirectoryNonBlockingTests(unittest.TestCase):
         self.assertLess(time.monotonic() - started, directory.PEER_TOTAL_DEADLINE_SECONDS + 2)
         for listing in results:
             self.assertEqual(listing["displays"][0]["serving"], True)
+
+    def test_repeated_builds_against_hung_peers_do_not_grow_threads(self):  # r3 MUST-FIX 1
+        release = threading.Event()
+        self.addCleanup(release.set)
+
+        def hung_fetch(address, port):
+            release.wait(30)
+            return None
+        clock = [1000.0]
+        service = directory.Directory(
+            device_name=fake_name(), version="0.3.73-preview", port=5000,
+            status=lambda: {"current_module": "clock_lava"}, address=lambda: "192.168.1.5",
+            run=lambda argv, **kwargs: subprocess.CompletedProcess(argv, 0, BROWSE, ""),
+            popen=lambda argv, **kwargs: FakeProcess(argv), fetch=hung_fetch,
+            clock=lambda: clock[0],
+        )
+        self.addCleanup(service.stop)
+        with patch.object(directory, "PEER_TOTAL_DEADLINE_SECONDS", 0.05):
+            for _ in range(6):
+                clock[0] += directory.DIRECTORY_CACHE_SECONDS + 1
+                service.listing()
+        peer_threads = [t for t in threading.enumerate() if t.name.startswith("matrix-directory-peer")]
+        self.assertLessEqual(len(peer_threads), directory.PEER_FETCH_WORKERS)
 
 
 class DirectoryRouteTests(unittest.TestCase):
