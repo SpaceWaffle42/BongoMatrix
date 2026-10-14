@@ -153,6 +153,8 @@ non_essential_browser_tests:
       artifacts: false
   when: always
   allow_failure: true
+  # extends full_test_suite but is one job, not a shard set.
+  parallel: 1
   timeout: 20m
   retry:
     max: 1
@@ -163,7 +165,7 @@ non_essential_browser_tests:
   variables:
     MATRIX_CI_SKIP_NON_ESSENTIAL: "0"
   script:
-    - mkdir -p test-results
+    - mkdir -p test-results coverage-data
     - non_essential=$(.venv-ci/bin/python scripts/ci_collection.py --print-non-essential)
     - test -n "$non_essential"
     - 'echo "non-essential tests - $non_essential"'

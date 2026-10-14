@@ -457,6 +457,8 @@ class GitLabPipelineContractTests(unittest.TestCase):
         self.assertIn("extends: full_test_suite", job)
         self.assertIn('MATRIX_CI_SKIP_NON_ESSENTIAL: "0"', job)
         self.assertIn("allow_failure: true", job)
+        # Inherits full_test_suite's parallel; must run once, not per shard.
+        self.assertIn("parallel: 1", job)
         self.assertIn("when: always", job)
         # At most two passes per pipeline: the first run plus one retry, including on test failure.
         self.assertRegex(job, r"retry:\n\s+max: 1\n\s+when:\n\s+- script_failure")
