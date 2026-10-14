@@ -45,7 +45,7 @@ class RendererTests(unittest.TestCase):
         self.assertEqual(dict(SPEED_DELAYS), {'slow': .1, 'normal': .05, 'fast': .025})
         options = RenderOptions()
         self.assertEqual((options.headline_font, options.summary_font, options.frame_delay,
-                          options.headline_mode, options.thumbnail_speed), ('6x9', '5x8', .05, 'once', 100.0))
+                          options.headline_mode, options.thumbnail_speed), ('6x9', '5x8', .05, 'continuous', 100.0))
         for name in available_font_names():
             self.assertEqual(RenderOptions(headline_font=name, summary_font=name).headline_font, name)
         for kwargs in ({'frame_delay': True}, {'frame_delay': float('nan')}, {'frame_delay': .001},
@@ -183,8 +183,8 @@ class RendererTests(unittest.TestCase):
         # Very short story still holds READ_HOLD ticks.
         s = r.prepare_story(Story(('a',), 'Hi', 'A', '', None), continuous)
         self.assertEqual(len(list(r.image_frames((s,)))), max(r.READ_HOLD, s.lines[-1].height + r.SUMMARY_GAP) + 1)
-        # Default stays headline-first.
-        self.assertEqual(RenderOptions().headline_mode, 'once')
+        # Owner 2026-10-14: together (summary loops while headline scrolls) is the default.
+        self.assertEqual(RenderOptions().headline_mode, 'continuous')
 
     def test_tall_headline_font_gets_a_taller_row_and_no_clipping(self):
         """6x9 headline (owner default): row grows to the font, summary moves down, nothing clipped."""
@@ -216,7 +216,7 @@ class RendererTests(unittest.TestCase):
         from rss_config import RenderOptions
         from rss_data import Story
         from rss_banners import site_banner
-        five = RenderOptions(headline_font='5x7')  # width arithmetic below is for the 5px-advance font
+        five = RenderOptions(headline_font='5x7', headline_mode='once')  # 5px-advance font; headline-first timing
         p = r.prepare_story(Story(('a',), 'Hi', 'A', '', None), five)
         frames = list(r.image_frames((p,)))
         scroll = p.lines[-1].height
@@ -366,7 +366,7 @@ class RendererTests(unittest.TestCase):
         from rss_config import RenderOptions
         from rss_data import Story
         # Pinned to 5x7/4x6 so the 100px headline / 5px summary arithmetic below is independent of the default font.
-        p = r.prepare_story(Story((), 'A' * 20, 'A', '', None), RenderOptions(headline_font='5x7', summary_font='4x6'))
+        p = r.prepare_story(Story((), 'A' * 20, 'A', '', None), RenderOptions(headline_font='5x7', summary_font='4x6', headline_mode='once'))
         frames = list(r.image_frames((p,)))
         # 100px headline loops once (100 + 16 gap = 116 ticks), then the 5px summary scrolls off.
         self.assertEqual(len(frames), 116 + 5 + 1)

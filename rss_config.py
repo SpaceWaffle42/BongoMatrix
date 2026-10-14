@@ -10,22 +10,14 @@ from modules.scroll_timing import LEGACY_FRAME_DELAYS, MINIMUM_FRAME_DELAY, MAXI
 SPEED_DELAYS = MappingProxyType(dict(LEGACY_FRAME_DELAYS))
 
 DEFAULTS = {
-    # Owner 2026-10-13: each default verified live through SafeFeedClient + parse_feed before adding.
-    'feeds': [
-        'https://feeds.bbci.co.uk/news/rss.xml',
-        'https://www.reddit.com/r/worldnews/.rss',
-        'http://feeds.skynews.com/feeds/rss/world.xml',
-        'http://www.espn.com/espn/rss/news',
-        'https://rss.nytimes.com/services/xml/rss/nyt/World.xml',
-        'https://www.theguardian.com/uk/rss',
-        'https://www.allsides.com/rss/news',
-        'https://news.google.com/rss/search?q=when:7d+site:reuters.com&ceid=US:en&hl=en-US&gl=US',
-        'https://feedx.net/rss/ap.xml',
-    ],
+    # Owner 2026-10-14: the verified feeds are offered in the Default presets
+    # dropdown (rss_presets.json), not pre-added. Saved lists are untouched.
+    'feeds': ['https://feeds.bbci.co.uk/news/rss.xml'],
     'disabled_feeds': [],
     'refresh_seconds': 1800, 'count': 5, 'include': [], 'exclude': [],
     'headline_font': '6x9', 'summary_font': '5x8',
-    'frame_delay': SPEED_DELAYS['normal'], 'headline_mode': 'once',
+    # Owner 2026-10-14: summary loops while the headline scrolls by default.
+    'frame_delay': SPEED_DELAYS['normal'], 'headline_mode': 'continuous',
     'thumbnail_speed': 100.0,
     'layout': 'auto', 'headline_colour': '#eea62b',
     'summary_colour': '#ffffff', 'background_colour': '#000000',
@@ -88,7 +80,7 @@ class RenderOptions:
     headline_font: str = '6x9'
     summary_font: str = '5x8'
     frame_delay: float = SPEED_DELAYS['normal']
-    headline_mode: str = 'once'
+    headline_mode: str = 'continuous'
     thumbnail_speed: float = 100.0
     layout: str = 'auto'
     headline_colour: str = '#eea62b'

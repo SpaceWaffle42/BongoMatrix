@@ -5,18 +5,8 @@ import tempfile
 from pathlib import Path
 from rss_service import PreparedFeedService, FeedService
 
-# Owner 2026-10-13: default feeds (each verified live through SafeFeedClient + parse_feed before adding).
-DEFAULT_FEEDS = (
-    'https://feeds.bbci.co.uk/news/rss.xml',
-    'https://www.reddit.com/r/worldnews/.rss',
-    'http://feeds.skynews.com/feeds/rss/world.xml',
-    'http://www.espn.com/espn/rss/news',
-    'https://rss.nytimes.com/services/xml/rss/nyt/World.xml',
-    'https://www.theguardian.com/uk/rss',
-    'https://www.allsides.com/rss/news',
-    'https://news.google.com/rss/search?q=when:7d+site:reuters.com&ceid=US:en&hl=en-US&gl=US',
-    'https://feedx.net/rss/ap.xml',
-)
+# Owner 2026-10-14: fresh configs start with BBC only; the verified feeds are dropdown presets.
+DEFAULT_FEEDS = ('https://feeds.bbci.co.uk/news/rss.xml',)
 
 
 class ConfigIntegrationTests(unittest.TestCase):
@@ -661,7 +651,7 @@ class WebIntegrationTests(unittest.TestCase):
         status = f.client.get('/api/rss/status')
         self.assertEqual(status.status_code, 200)
         self.assertFalse(status.json['running'])
-        self.assertEqual(len(status.json['presets']['feeds']), 7)
+        self.assertEqual(len(status.json['presets']['feeds']), 15)  # BBC 7 + 8 verified (owner 2026-10-14)
         self.assertEqual(f.client.post('/api/rss/test', json={'url': 'https://example.com/rss'}).status_code, 403)
         with patch('rss_transport.SafeFeedClient.fetch', return_value=b'<rss><channel><title>News</title><item><title>one</title><pubDate>Sun, 11 Oct 2026 12:00:00 GMT</pubDate></item></channel></rss>') as fetch:
             result = f.paired_request('post', '/api/rss/test', json={'url': 'https://example.com/rss'})

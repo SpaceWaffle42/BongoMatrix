@@ -16,8 +16,8 @@ try{
  await send('Page.navigate',{url:`http://127.0.0.1:${appPort}/`});await waitFor(`typeof matrixEditorsReady!=='undefined'&&matrixEditorsReady`);
  if(!await evaluate(`!!document.querySelector('[data-rss-add]')`))throw Error('RSS Add feed control missing from loaded dashboard');
  await click('[data-module="rss"] button:last-child');
- // Owner 2026-10-13 defaults: nine verified feeds, BBC first. Then work with BBC alone.
- if(!await evaluate(`configBody().rss.feeds.length===9&&configBody().rss.feeds[0]==='https://feeds.bbci.co.uk/news/rss.xml'&&configBody().rss.feeds.includes('https://feedx.net/rss/ap.xml')&&document.querySelectorAll('[data-rss-row]').length===9`))throw Error('Default feeds missing '+JSON.stringify(await evaluate('configBody().rss.feeds')));
+ // Owner 2026-10-14: fresh default is BBC only; the verified feeds are offered in Default presets.
+ if(!await evaluate(`configBody().rss.feeds.length===1&&configBody().rss.feeds[0]==='https://feeds.bbci.co.uk/news/rss.xml'&&document.querySelectorAll('[data-rss-row]').length===1&&[...document.querySelectorAll('[data-rss-presets] option')].some(o=>o.value==='https://feedx.net/rss/ap.xml')`))throw Error('Default feeds missing '+JSON.stringify(await evaluate('configBody().rss.feeds')));
  await evaluate(`(()=>{rssSettings.feeds=rssSettings.feeds.slice(0,1);rssSettings.disabled_feeds=[];rssChanged();renderRSSEditors();return true})()`);
  if(!await evaluate(`!!document.querySelector('[data-rss-enabled]')`))throw Error('Per-feed enabled control missing');
  await click('[data-rss-enabled]');
@@ -25,7 +25,7 @@ try{
  await change('[data-rss-url]','https://example.com/rss');await click('[data-rss-add]');
  await click('[data-rss-row]:last-of-type [data-rss-test]');
  await waitFor(`document.querySelector('[data-rss-row]:last-of-type [role="status"]').textContent.includes('Fixture news')`);
- if(!await evaluate(`document.querySelectorAll('[data-rss-presets] option').length===7`))throw Error('Verified grouped BBC presets missing');
+ if(!await evaluate(`document.querySelectorAll('[data-rss-presets] option').length===15&&document.querySelectorAll('[data-rss-presets] optgroup').length===3`))throw Error('Verified grouped presets missing');
  if(!await evaluate(`document.querySelector('[data-rss-row]:last-of-type [role="status"]').textContent.includes('Fixture news')&&!document.querySelector('[data-rss-row] img')`))throw Error('Publisher content escaped incorrectly');
  await click('[data-rss-row]:last-of-type [data-rss-up]');
  if(!await evaluate(`configBody().rss.feeds[0]==='https://example.com/rss'`))throw Error('Feed reorder failed');
@@ -33,8 +33,10 @@ try{
  await change('[data-rss-setting="frame_delay"]','0.025');
  await change('[data-rss-setting="count"]','3');
  if(await evaluate(`!!document.querySelector('[data-rss-setting="thumbnail_speed"]')`))throw Error('Redundant animation speed control still shown');
- await change('[data-rss-setting="headline_mode"]','continuous');
- if(!await evaluate(`configBody().rss.headline_mode==='continuous'`))throw Error('Scrolling mode not in draft');
+ // Owner 2026-10-14: together is the default; switching to headline-first is recorded.
+ if(!await evaluate(`configBody().rss.headline_mode==='continuous'`))throw Error('Default scrolling mode not together');
+ await change('[data-rss-setting="headline_mode"]','once');
+ if(!await evaluate(`configBody().rss.headline_mode==='once'`))throw Error('Scrolling mode not in draft');
  if(!await evaluate(`!!document.querySelector('[data-rss-setting="layout"]')&&!!document.querySelector('[data-rss-setting="headline_colour"]')&&!!document.querySelector('[data-rss-setting="summary_colour"]')&&!!document.querySelector('[data-rss-setting="background_colour"]')`))throw Error('Layout or colour controls missing');
  await change('[data-rss-setting="layout"]','text');
  await change('[data-rss-setting="headline_colour"]','#12ab34');
@@ -68,7 +70,7 @@ try{
  await evaluate(`window.confirm=()=>false`);await click('[data-rss-reset-draft]');
  if(!await evaluate(`configBody().rss.count===3`))throw Error('Cancelled reset changed draft');
  await evaluate(`window.confirm=()=>true`);await click('[data-rss-reset-draft]');
- if(!await evaluate(`configBody().rss.count===5&&configBody().rss.feeds.length===9&&configBody().rss.feeds.at(-1)==='https://feedx.net/rss/ap.xml'&&configBody().rss.frame_delay===.05&&matrixHasUnsavedDraft()`))throw Error('Draft reset defaults incorrect');
+ if(!await evaluate(`configBody().rss.count===5&&configBody().rss.feeds.length===1&&configBody().rss.feeds[0]==='https://feeds.bbci.co.uk/news/rss.xml'&&configBody().rss.headline_mode==='continuous'&&configBody().rss.frame_delay===.05&&matrixHasUnsavedDraft()`))throw Error('Draft reset defaults incorrect');
  if(!await evaluate(`fetch('/api/config').then(r=>r.json()).then(c=>c.rss.count===3)`))throw Error('Draft reset silently saved');
  if(!await evaluate(`rssResetCalls===0`))throw Error('Draft-only reset cleared shared caches');
  await change('[data-rss-setting="count"]','7');
@@ -76,7 +78,7 @@ try{
  if(!await evaluate(`configBody().rss.count===7&&rssResetCalls===0`))throw Error('Cancelled cache reset changed draft or called backend');
  await evaluate(`window.confirm=()=>true`);await click('[data-rss-reset-all]');
  await waitFor(`rssResetCalls===1&&configBody().rss.count===5&&document.querySelector('#message').textContent.includes('Caches and seen stories cleared')`);
- if(!await evaluate(`matrixHasUnsavedDraft()&&configBody().rss.feeds.length===9&&configBody().rss.frame_delay===.05`))throw Error('Cache reset did not restore unsaved defaults');
+ if(!await evaluate(`matrixHasUnsavedDraft()&&configBody().rss.feeds.length===1&&configBody().rss.frame_delay===.05`))throw Error('Cache reset did not restore unsaved defaults');
  if(!await evaluate(`fetch('/api/config').then(r=>r.json()).then(c=>c.rss.count===3)`))throw Error('Cache reset silently saved defaults');
  await change('[data-rss-setting="count"]','6');
  if(!await evaluate(`configBody().rss.count===6&&matrixHasUnsavedDraft()`))throw Error('Editor unusable after reset redraw');

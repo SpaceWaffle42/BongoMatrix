@@ -49,11 +49,11 @@ async function rssCalculate(){
 }
 function rssFillPresets(select){
   const selected=select.value;select.replaceChildren();
-  for(const [label,names] of [['BBC headlines',['Top Stories','World','UK']],['BBC UK nations',['England','Northern Ireland','Scotland','Wales']]]){
-    const group=document.createElement('optgroup');group.label=label;
-    for(const feed of rssCatalogue?.feeds||[])if(names.includes(feed.name)){
-      const option=document.createElement('option');option.value=feed.url;option.textContent=feed.name;group.append(option);
-    }select.append(group);
+  // Owner 2026-10-14: verified feeds are offered here (grouped by feed.group), not pre-added.
+  const groups=new Map();
+  for(const feed of rssCatalogue?.feeds||[]){
+    if(!groups.has(feed.group)){const group=document.createElement('optgroup');group.label=feed.group||'Feeds';groups.set(feed.group,group);select.append(group)}
+    const option=document.createElement('option');option.value=feed.url;option.textContent=feed.name;groups.get(feed.group).append(option);
   }
   if([...select.options].some(option=>option.value===selected))select.value=selected;
 }
@@ -97,7 +97,7 @@ function rssControl(parent,key,label,type='text',options=null){
 }
 // Friendly feed title: catalogue name when known, else the site's host name.
 function rssFeedName(feed){
-  const known=(rssCatalogue?.feeds||[]).find(item=>item.url===feed);if(known)return 'BBC · '+known.name;
+  const known=(rssCatalogue?.feeds||[]).find(item=>item.url===feed);if(known)return (known.group?.startsWith('BBC')?'BBC · ':'')+known.name;
   try{const url=new URL(feed);return url.hostname.replace(/^(www|feeds)\./,'')+(url.pathname.length>1?' · '+url.pathname.replace(/\/(rss\.xml)?$/,'').split('/').filter(Boolean).slice(-1)[0]||'':'')}catch(_){return feed}
 }
 function rssAddFeed(value){
@@ -142,7 +142,7 @@ function renderRSSEditor(container){
   customCol.append(urlHead,url,add);
   feedFields.append(presetCol,customCol);
   editorHelp(urlHead,'feed-url','Custom RSS feed address','Use the publisher’s public RSS or Atom feed address, not its homepage or an article link. Example: https://feeds.bbci.co.uk/news/rss.xml. Adding a feed changes this draft only. Private/local network sources are not allowed.');
-  editorAdvanced(editorParagraph(feeds,'Default presets are BBC headline and UK nation feeds. City and county sources are not in the checked list.'));
+  editorAdvanced(editorParagraph(feeds,'Default presets: BBC headlines and UK nations, plus world and sport feeds that were checked live. Pick one and press Add preset.'));
   rssSettings.feeds.forEach((feed,index)=>{
     const row=document.createElement('fieldset');row.dataset.rssRow='';row.className='editor-fields';row.style.minWidth='0';
     const name=document.createElement('legend');name.className='visually-hidden';name.textContent=rssFeedName(feed);row.append(name);
@@ -175,7 +175,7 @@ function renderRSSEditor(container){
   editorHelp(actions,'duration','Computed timing','Duration comes from prepared eligible stories, fonts, scrolling and thumbnail timing, not the playlist compatibility duration. Change settings, then Calculate again. No prepared stories means duration is unavailable; check feeds and filters.');
   const reset=makeButton('Reset draft to defaults',()=>{
     if(!confirm('Replace this RSS draft with defaults? Nothing is saved and playback/cache are unchanged.'))return;
-    rssSettings={feeds:structuredClone(rssDefaultFeeds),disabled_feeds:[],refresh_seconds:1800,count:5,include:[],exclude:[],headline_font:'6x9',summary_font:'5x8',frame_delay:.05,headline_mode:'once',thumbnail_speed:100,layout:'auto',headline_colour:'#eea62b',summary_colour:'#ffffff',background_colour:'#000000'};
+    rssSettings={feeds:structuredClone(rssDefaultFeeds),disabled_feeds:[],refresh_seconds:1800,count:5,include:[],exclude:[],headline_font:'6x9',summary_font:'5x8',frame_delay:.05,headline_mode:'continuous',thumbnail_speed:100,layout:'auto',headline_colour:'#eea62b',summary_colour:'#ffffff',background_colour:'#000000'};
     rssChanged();renderRSSEditors();
   },'btn danger');reset.dataset.rssResetDraft='';
   const resetAll=makeButton('Reset to defaults and clear caches',async()=>{
