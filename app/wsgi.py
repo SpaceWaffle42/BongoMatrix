@@ -17,6 +17,9 @@ if str(ROOT) not in sys.path:
 import app as _entrypoint_owner
 from app.testing_pin import load_testing_pin
 from config_store import ConfigStore
+from device_name import DeviceName, DisplayNameStore
+from directory import Directory
+from display_controller import local_ip_address
 from display_controller import DisplayController
 from hardware_lock import DisplayOwnershipLock
 from matrix_framework import Matrix
@@ -62,10 +65,21 @@ with _entrypoint_owner._wsgi_runtime_lock:
         openweather_secrets = SecretStore(
             ROOT / "data" / "secrets" / "openweather-api-key"
         )
+        display_name = DeviceName.for_device(
+            store=DisplayNameStore(ROOT / "data" / "display-name"),
+        )
         controller = DisplayController(
             matrix, config_store, openweather_secrets=openweather_secrets,
             announce_address=True,
             address_port=int(os.environ.get("MATRIX_PORT", "5000")),
+            device_name=display_name,
+        )
+        directory = Directory(
+            version=APPLICATION_VERSION,
+            port=int(os.environ.get("MATRIX_PORT", "5000")),
+            device_name=display_name,
+            status=controller.status,
+            address=local_ip_address,
         )
         pairing = PairingManager(
             ttl_seconds=600,
@@ -95,6 +109,8 @@ with _entrypoint_owner._wsgi_runtime_lock:
             config_exclusion_sentinel="/var/lib/matrix-release/active-config-exclusion-v1.json",
             config_exclusion_marker="/run/matrix-release/config-write.lock",
             config_exclusion_authority="/run/matrix-release/config-write-authority-v1.json",
+            display_name=display_name,
+            directory=directory,
             device_restart_runner=(
                 RestartRequest("/run/matrix-device-restart/submit/request")
                 if os.environ.get("MATRIX_DEVICE_RESTART_ENABLED") == "1"
@@ -108,6 +124,8 @@ with _entrypoint_owner._wsgi_runtime_lock:
         # valid until they expire, unpair, or are removed.
         initialize_pairing_display(controller, pairing, device_store)
         atexit.register(controller.stop)
+        directory.start()
+        atexit.register(directory.stop)
         runtime = {
             "app": app,
             "config_store": config_store,

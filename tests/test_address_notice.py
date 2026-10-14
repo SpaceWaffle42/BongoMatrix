@@ -233,6 +233,70 @@ class ControllerNoticeTests(unittest.TestCase):
             watcher.join(1)
             self.assertFalse(watcher.is_alive())
 
+    def test_notice_text_leads_with_device_name(self):
+        self.assertEqual(
+            address_notice_text(("start", "192.168.1.5"), 5000, "matrix-7d03.local"),
+            ("ADDRESS", "matrix-7d03.local  192.168.1.5:5000"),
+        )
+        self.assertEqual(
+            address_notice_text(("renamed", "192.168.1.5"), 5000, "matrix-7d03-2.local"),
+            ("NEW NAME", "matrix-7d03-2.local  192.168.1.5:5000"),
+        )
+        self.assertEqual(address_notice_text(("offline", None), 5000, "matrix-7d03.local"),
+                         ("NO NETWORK", "check Wi-Fi"))
+
+    def test_start_up_publishes_name_and_panel_shows_actual_name(self):
+        name = Mock()
+        name.refresh.return_value = "matrix-7d03.local"
+        name.current.return_value = "matrix-7d03.local"
+        controller, _ = self.make(["192.168.1.5"], device_name=name)
+        with patch("display_controller.ADDRESS_POLL_SECONDS", 0.01), \
+                patch.object(controller, "_run_loop"):
+            controller.start()
+            for _ in range(100):
+                if controller._address_notice is not None:
+                    break
+                threading.Event().wait(0.01)
+            controller._shutdown.set()
+            controller._address_thread.join(1)
+        name.refresh.assert_called()
+        self.assertEqual(controller._announced_name, "matrix-7d03.local")
+        self.assertEqual(controller.status()["device_name"], "matrix-7d03.local")
+        controller._shutdown.clear()
+        drawn = []
+        controller.matrix.draw_text = lambda font, x, y, colour, text: drawn.append(text)
+        with patch("display_controller.ADDRESS_NOTICE_SECONDS", (0.05, 0.05)), \
+                patch("display_controller.ADDRESS_NOTICE_FRAME_SECONDS", 0.01):
+            controller._draw_address_notice(("start", "192.168.1.5"), threading.Event())
+        self.assertIn("matrix-7d03.local  192.168.1.5:5000", drawn)
+
+    def test_clash_rename_queues_new_name_notice(self):
+        controller, _ = self.make(["192.168.1.5"], device_name=Mock())
+        controller._address_watch.start("192.168.1.5")
+        controller._announced_name = "matrix-7d03.local"
+        controller._name_seen("matrix-7d03.local")
+        self.assertIsNone(controller._address_notice)
+        controller._name_seen(None)
+        self.assertIsNone(controller._address_notice, "avahi down keeps last name")
+        controller._name_seen("matrix-7d03-2.local")
+        self.assertEqual(controller._address_notice, ("renamed", "192.168.1.5"))
+        self.assertEqual(controller._announced_name, "matrix-7d03-2.local")
+
+    def test_name_failure_never_breaks_address_notice(self):
+        name = Mock()
+        name.refresh.side_effect = RuntimeError("dbus gone")
+        controller, _ = self.make(["192.168.1.4"], device_name=name)
+        controller._address_watch.start("192.168.1.4")
+        controller._address_seen("192.168.1.5")
+        controller._address_seen("192.168.1.5")
+        self.assertEqual(controller._address_notice, ("changed", "192.168.1.5"))
+        self.assertIsNone(controller._announced_name)
+
+    def test_without_device_name_status_reports_none(self):
+        controller, _ = self.make(["192.168.1.5"])
+        self.assertIsNone(controller.status()["device_name"])
+        self.assertIsNone(controller._refresh_name())
+
     def test_provider_failure_counts_as_no_network(self):
         controller, _ = self.make(["192.168.1.5"])
         controller._ip_address_provider = Mock(side_effect=OSError("down"))

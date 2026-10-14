@@ -335,7 +335,8 @@ Before enabling protected CI, run the appliance-gated lifecycle acceptance that 
 
 Configure:
 
-- `MATRIX_DEVICE_TARGET`: a protected variable containing the fixed SSH target.
+- `MATRIX_DEVICE_TARGET`: a protected variable with the SSH user and the device's usual address (`user@address`). Since 1.10f it is only a first guess: `deploy/locate_device.py` connects to whichever address presents the pinned host key (hint, then mDNS `_matrix._tcp`, then the local /24) and refuses everything else.
+- `MATRIX_DEVICE_SUBNETS` (optional): private IPv4 networks to scan when the runner is not on the device's LAN, e.g. `192.168.1.0/24`.
 - `MATRIX_DEVICE_SSH_KEY`: a protected FILE variable containing only the dedicated private key.
 - `MATRIX_DEVICE_KNOWN_HOSTS`: a protected FILE variable containing the pinned appliance host key.
 

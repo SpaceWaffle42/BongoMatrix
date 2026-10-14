@@ -30,6 +30,8 @@ python3 deploy/ship.py --apply    # deploy origin/main
 python3 deploy/ship.py --rollback /var/tmp/matrix-ship-<n>   # printed after every deploy
 ```
 `ship.py` refuses unless main's CI succeeded, the version changed and only runtime code differs.
+It finds the device by its pinned SSH host key (`/root/.config/matrix/device-known-hosts`, one host;
+`MATRIX_PROD_HOST=user@address` is only a first guess, `MATRIX_PROD_SUBNETS` adds networks to scan).
 It backs up code + state, publishes atomically, restarts, checks the public version and rolls
 back by itself on failure. It never writes `data/`, `resources/media`, config, drafts, uploads,
 secrets or the pairing PIN. Production checkout stays `admin:matrix-web` mode `0750`.
