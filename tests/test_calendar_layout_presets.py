@@ -21,7 +21,7 @@ ZONE = dt.timezone.utc
 
 def event(**changes):
     result = dict(id='party', title='Party', start='2030-12-25', end=None, all_day=True, annual=False,
-                  enabled=True, now_minutes=15, accent=None, icon='birthday')
+                  enabled=True, now_seconds=900, accent=None, icon='birthday')
     result.update(changes)
     return result
 

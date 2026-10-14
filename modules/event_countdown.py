@@ -129,7 +129,7 @@ def select_event(settings, *, now=None):
                 elif item['all_day']:
                     end = start + dt.timedelta(days=1)
                 else:
-                    end = start.astimezone(UTC) + dt.timedelta(minutes=item['now_minutes'])
+                    end = start.astimezone(UTC) + dt.timedelta(seconds=item['now_seconds'])
                 start_utc, end_utc = start.astimezone(UTC), end.astimezone(UTC)
             except (ValueError, OverflowError):
                 # A valid stored span can exceed datetime's range on recurrence.

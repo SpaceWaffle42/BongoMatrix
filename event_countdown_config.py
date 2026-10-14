@@ -30,8 +30,22 @@ ICONS = ('calendar', 'birthday', 'anniversary', 'launch', 'holiday', 'opening', 
 MAX_HOLIDAY_EDITS = 400
 
 
+NOW_SECONDS_MAX = 7 * 86400
+
+
+def project_event_now(item):
+    """Owner 2026-10-14: NOW window in seconds. Older saves stored minutes."""
+    if isinstance(item, dict) and 'now_minutes' in item and 'now_seconds' not in item:
+        minutes = item.pop('now_minutes')
+        item['now_seconds'] = minutes * 60 if type(minutes) is int else minutes
+    return item
+
+
 def project(settings):
     """Fill additive pack fields (older saves, or new packs added later)."""
+    if isinstance(settings, dict) and isinstance(settings.get('events'), list):
+        for item in settings['events']:
+            project_event_now(item)
     if isinstance(settings, dict):
         for key in PROJECTED_FIELDS:
             settings.setdefault(key, copy.deepcopy(DEFAULTS[key]))
@@ -94,7 +108,7 @@ def validate(settings):
     require(isinstance(settings['events'], list), 'events must be a list')
     ids = set()
     for item in settings['events']:
-        require(isinstance(item, dict) and set(item) - {'artwork'} == {'id', 'title', 'start', 'end', 'all_day', 'annual', 'enabled', 'now_minutes', 'accent', 'icon'}, 'invalid event fields')
+        require(isinstance(item, dict) and set(item) - {'artwork'} == {'id', 'title', 'start', 'end', 'all_day', 'annual', 'enabled', 'now_seconds', 'accent', 'icon'}, 'invalid event fields')
         if item.get('artwork') is not None:
             try:
                 parts = MediaResolver._normalize(item['artwork'])
@@ -106,7 +120,7 @@ def validate(settings):
         ids.add(item['id'])
         require(isinstance(item['title'], str) and item['title'].strip() and item['title'].isprintable(), 'title must be printable and nonempty')
         require(all(type(item[key]) is bool for key in ('enabled', 'annual', 'all_day')), 'event flags must be booleans')
-        require(integer(item['now_minutes'], 1, 10080), 'NOW minutes must be 1..10080')
+        require(integer(item['now_seconds'], 1, NOW_SECONDS_MAX), 'NOW seconds must be 1..604800')
         require(item['accent'] is None or colour(item['accent']), 'invalid event accent')
         require(item['icon'] in ICONS, 'invalid icon')
         times = []

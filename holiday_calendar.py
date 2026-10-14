@@ -515,7 +515,7 @@ def pack_events(settings, years):
                 for index, date in enumerate(holiday_dates(key, year, overrides)):
                     events.append(dict(id=f'{pack}-{item["id"]}-{year}-{index}', title=item['name'],
                                        start=date.isoformat(), end=None, all_day=True, annual=False,
-                                       enabled=True, now_minutes=15, accent=None, icon=item['icon'],
+                                       enabled=True, now_seconds=900, accent=None, icon=item['icon'],
                                        holiday=key))
     return events
 

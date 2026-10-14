@@ -21,7 +21,7 @@ from webapp import _edit_preview_iterator
 def event(**changes):
     result = dict(id='launch', title='Launch', start='2030-01-01T12:00',
                   end=None, all_day=False, annual=False, enabled=True,
-                  now_minutes=15, accent=None, icon='calendar')
+                  now_seconds=900, accent=None, icon='calendar')
     result.update(changes)
     return result
 
@@ -601,7 +601,7 @@ class CountdownTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             store = ConfigStore(Path(directory) / 'config.json')
             before = store.path.read_bytes()
-            invalid = [event(now_minutes=True), event(title=''), event(start='not a date'),
+            invalid = [event(now_seconds=True), event(title=''), event(start='not a date'),
                        event(end='2020-01-01T12:00'), event(annual='yes'), event(extra=1),
                        event(all_day=True), event(accent='red'), event(icon='../secret'),
                        event(start='2026-03-29T02:30')]

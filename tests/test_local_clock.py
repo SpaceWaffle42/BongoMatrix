@@ -112,7 +112,7 @@ class CountdownTimezoneDefaultTests(unittest.TestCase):
         config["event_countdown"] = copy.deepcopy(event_countdown_config.DEFAULTS)
         config["event_countdown"]["events"] = [{
             "id": "e1", "title": "Party", "start": "2026-07-02", "end": None, "all_day": True,
-            "annual": False, "enabled": True, "now_minutes": 15, "accent": None, "icon": "calendar",
+            "annual": False, "enabled": True, "now_seconds": 900, "accent": None, "icon": "calendar",
         }]
         event_countdown_config.validate(config["event_countdown"])
         # 22:30 UTC: 08:30 on 2 July in Sydney, 23:30 on 1 July in London (BST).

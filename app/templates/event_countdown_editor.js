@@ -281,7 +281,7 @@ function calendarRevealDayPanel() {
 }
 function calendarAddEvent(changes={},focus=true) {
   const bytes=crypto.getRandomValues(new Uint8Array(12)),id='event_'+Array.from(bytes,b=>b.toString(16).padStart(2,'0')).join('');
-  countdownSettings.events.push({id,title:'New event',start:countdownLocalDate(new Date().toISOString()),end:null,all_day:true,annual:false,enabled:true,now_minutes:15,accent:null,icon:'calendar',...changes});
+  countdownSettings.events.push({id,title:'New event',start:countdownLocalDate(new Date().toISOString()),end:null,all_day:true,annual:false,enabled:true,now_seconds:900,accent:null,icon:'calendar',...changes});
   if(focus)calendarOpenEvent=id;
   countdownChanged();renderCountdownEditors();
   if(focus){const input=document.querySelector(`[data-countdown-id="${id}"] [data-countdown-field="title"]`);if(input){input.scrollIntoView({block:'center',behavior:'instant'});input.focus();input.select()}}
@@ -533,7 +533,7 @@ function renderCountdownEditor(container) {
     control(card,event,'all_day','All day','checkbox');
     control(card,event,'annual','Every year','checkbox');
     {const end=dateEntry('end','End date (optional; the day after it finishes)',true);editorAdvanced(field(end.input),end.picker,end.error);}
-    const minutes=control(card,event,'now_minutes','Show “NOW” for (minutes)','number');minutes.min=1;minutes.max=10080;editorAdvanced(field(minutes));
+    const nowSeconds=control(card,event,'now_seconds','Show “NOW” for (seconds)','number');nowSeconds.min=1;nowSeconds.max=604800;editorAdvanced(field(nowSeconds));
     const accent=control(card,event,'accent','Own highlight colour (e.g. #FF8800; blank uses the shared one)');accent.placeholder='Shared colour';editorAdvanced(field(accent));
     const artwork=control(card,event,'artwork','Picture from media library (Icon, Progress ring and Big icon styles; up to 8×8)','text',['',...basicMediaChoices()]);editorAdvanced(field(artwork));
     artwork.options[0].textContent='Use the icon above';

@@ -33,6 +33,23 @@ class CountdownWebTests(unittest.TestCase):
                 self.assertFalse(path.exists())
                 self.assertEqual(self.fixture.store.path.read_bytes(), cleared)
 
+    def test_stale_editor_now_minutes_saves_and_previews_as_seconds(self):
+        # Owner 2026-10-14: NOW timer in seconds. A page from the previous build sends now_minutes.
+        self.fixture.pair_browser()
+        old = event()
+        old.pop('now_seconds')
+        old['now_minutes'] = 2
+        revision = self.fixture.store.get()['revision']
+        response = self.fixture.paired_request(
+            'post', '/api/config', json={'event_countdown': {'events': [old]}},
+            headers={'If-Match': f'"{revision}"', 'X-Matrix-Client-Contract': '5'})
+        self.assertEqual(response.status_code, 200, response.get_data(as_text=True))
+        saved = self.fixture.store.get()['event_countdown']['events'][0]
+        self.assertEqual(saved['now_seconds'], 120)
+        self.assertNotIn('now_minutes', self.fixture.store.path.read_text())
+        candidate = self.fixture.store.validate_candidate({'event_countdown': {'events': [old]}})
+        self.assertEqual(candidate['event_countdown']['events'][0]['now_seconds'], 120)
+
     def test_preview_artwork_cancel_closes_admitted_handles_without_saving(self):
         from media_resolver import MediaResolver
         self.fixture.pair_browser()

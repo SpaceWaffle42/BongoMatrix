@@ -27,7 +27,7 @@ from PIL import Image, ImageSequence
 from module_options import LAVA_PALETTES
 from event_countdown_config import (
     DEFAULTS as COUNTDOWN_DEFAULTS, PROJECTED_FIELDS as COUNTDOWN_PROJECTED_FIELDS,
-    project as project_countdown, validate as validate_countdown,
+    project as project_countdown, project_event_now, validate as validate_countdown,
 )
 from rss_config import DEFAULTS as RSS_DEFAULTS, validate as validate_rss
 from astronomy_config import (
@@ -1523,6 +1523,19 @@ def weather_with_timezone(previous, changes):
     return weather
 
 
+def _project_incoming_countdown_now(changes):
+    """Convert now_minutes sent by an editor page from an older build (x60).
+
+    Shared by ConfigStore.update and validate_candidate (save, edit preview and
+    device preview), so every web entry point accepts the same drafts.
+    """
+    countdown = changes.get("event_countdown")
+    if not (isinstance(countdown, dict) and isinstance(countdown.get("events"), list)):
+        return changes
+    events = [project_event_now(copy.deepcopy(item)) for item in countdown["events"]]
+    return {**changes, "event_countdown": {**countdown, "events": events}}
+
+
 def _project_persisted_screen_rows(config):
     """Read schema-4 single-source rows without migrating the saved document.
 
@@ -2227,6 +2240,7 @@ sys.stdout.write(json.dumps(result, separators=(",", ":")))
         _validate_update_keys(changes, DEFAULT_CONFIG)
         with self._lock:
             current = self.get()
+            changes = _project_incoming_countdown_now(changes)
             candidate = _merge(current, changes)
             if isinstance(changes.get("weather"), dict):
                 candidate["weather"] = weather_with_timezone(current["weather"], changes["weather"])
@@ -2309,6 +2323,7 @@ sys.stdout.write(json.dumps(result, separators=(",", ":")))
             current = self.get()
             if base_revision is not None and base_revision != current["revision"]:
                 raise ConfigConflictError(current["revision"])
+            changes = _project_incoming_countdown_now(changes)
             updated = _merge(current, changes)
             if isinstance(changes.get("weather"), dict):
                 updated["weather"] = weather_with_timezone(current["weather"], changes["weather"])

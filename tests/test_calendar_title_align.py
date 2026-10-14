@@ -13,7 +13,7 @@ from config_store import ConfigStore, DEFAULT_CONFIG
 
 def event(**changes):
     result = dict(id='launch', title='Hi', start='2030-01-01T12:00', end=None, all_day=False,
-                  annual=False, enabled=True, now_minutes=15, accent=None, icon='calendar')
+                  annual=False, enabled=True, now_seconds=900, accent=None, icon='calendar')
     result.update(changes)
     return result
 
