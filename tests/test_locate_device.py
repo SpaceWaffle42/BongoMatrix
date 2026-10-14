@@ -101,6 +101,23 @@ class LocateDeviceTests(unittest.TestCase):
         with self.assertRaisesRegex(self.mod.LocateError, 'no pinned host key'):
             self.locate(FakeNetwork({}))
 
+    def test_pin_file_wider_than_one_device_is_refused(self):  # review r2 finding 9
+        for line in (f'@cert-authority * {DEVICE_KEY[0]} {DEVICE_KEY[1]}',
+                     f'|1|abc=|def= {DEVICE_KEY[0]} {DEVICE_KEY[1]}',
+                     f'* {DEVICE_KEY[0]} {DEVICE_KEY[1]}',
+                     f'matrix-device,192.168.* {DEVICE_KEY[0]} {DEVICE_KEY[1]}',
+                     'matrix-device garbage'):
+            self.known.write_text(f'matrix-device {DEVICE_KEY[0]} {DEVICE_KEY[1]}\n{line}\n')
+            with self.assertRaises(self.mod.LocateError, msg=line):
+                self.locate(FakeNetwork({}))
+
+    def test_ssh_user_must_be_a_plain_login(self):  # review r2 finding 8
+        for hint in ('-oProxyCommand=x@10.9.8.5', 'Admin@10.9.8.5', 'a b@10.9.8.5'):
+            with self.assertRaisesRegex(self.mod.LocateError, 'not a plain login', msg=hint):
+                self.locate(FakeNetwork({'10.9.8.5': DEVICE_KEY}), hint=hint)
+        with self.assertRaises(self.mod.LocateError):
+            self.locate(FakeNetwork({}), user='-x')
+
     def test_ssh_options_accept_only_the_pinned_key(self):
         options = self.mod.ssh_options(self.known, 'matrix-device')
         self.assertIn('StrictHostKeyChecking=yes', options)
@@ -140,7 +157,7 @@ class ShipLocatesDeviceTests(unittest.TestCase):
         with mock.patch.object(self.ship.locate_device, 'locate', return_value=found):
             self.ship.locate_target()
         argv = self.ship.ssh_argv()
-        self.assertEqual(argv[-1], 'admin@10.9.8.3')
+        self.assertEqual(argv[-2:], ['--', 'admin@10.9.8.3'])
         self.assertIn('HostKeyAlias=matrix-device', argv)
         self.assertEqual(self.ship.PUBLIC_URL, 'http://10.9.8.3:5000/pair')
 

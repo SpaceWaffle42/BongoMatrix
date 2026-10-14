@@ -140,7 +140,7 @@ def name_problem(name):
         return "Enter a name."
     if len(name) > MAX_NAME_LENGTH:
         return f"Use at most {MAX_NAME_LENGTH} characters."
-    if not _NAME.match(name):
+    if not _NAME.fullmatch(name):
         return "Use letters, digits and hyphens only, not starting or ending with a hyphen."
     if name.lower() in RESERVED_NAMES:
         return "\"matrix\" is reserved for the directory page."

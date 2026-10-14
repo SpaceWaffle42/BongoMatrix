@@ -52,10 +52,19 @@ def pinned_keys(known_hosts: Path) -> tuple[str, set[tuple[str, str]]]:
         raise LocateError(f'cannot read pinned host keys {known_hosts}: {error}') from error
     alias, keys = None, set()
     for line in text.splitlines():
-        match = _KEY_LINE.match(line.strip())
-        if not match or match.group(1).startswith(('#', '|', '@')):
+        line = line.strip()
+        if not line or line.startswith('#'):
             continue
+        # ssh honours markers, hashed and wildcard hosts; this file must be exactly
+        # what locate checks, so anything wider is refused, not skipped.
+        if line.startswith(('@', '|')):
+            raise LocateError(f'{known_hosts}: markers and hashed hosts are not a single-device pin')
+        match = _KEY_LINE.match(line)
+        if not match:
+            raise LocateError(f'{known_hosts}: unreadable line; expected "<alias> <type> <key>"')
         names = match.group(1).split(',')
+        if any(ch in name for name in names for ch in '*?!['):
+            raise LocateError(f'{known_hosts}: wildcard hosts are not a single-device pin')
         if alias is None:
             alias = names[0]
         elif alias not in names:
@@ -76,11 +85,17 @@ def _ipv4(value: str) -> str | None:
     return str(address)
 
 
+_USER = re.compile(r'[a-z_][a-z0-9_-]{0,31}')
+
+
 def split_target(target: str | None, user: str) -> tuple[str, str | None]:
-    if not target:
-        return user, None
-    who, _, where = target.rpartition('@')
-    return (who or user), where or None
+    who, where = user, None
+    if target:
+        found, _, where = target.rpartition('@')
+        who, where = (found or user), (where or None)
+    if not _USER.fullmatch(who):
+        raise LocateError(f'ssh user {who!r} is not a plain login name')
+    return who, where
 
 
 def resolve(host: str) -> list[str]:

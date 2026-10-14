@@ -266,7 +266,7 @@ physical_device_acceptance:
       [[ -n "$DEVICE_TARGET" && -n "$DEVICE_ALIAS" ]]
       SSH=(ssh -i "$HOME/.ssh/matrix-device" -o IdentitiesOnly=yes -o BatchMode=yes -o StrictHostKeyChecking=yes -o UserKnownHostsFile="$HOME/.ssh/known_hosts" -o GlobalKnownHostsFile=/dev/null -o HostKeyAlias="$DEVICE_ALIAS" -o ConnectTimeout=10 -o ServerAliveInterval=10 -o ServerAliveCountMax=2)
       set +e
-      "${SSH[@]}" "$DEVICE_TARGET" "verify $CI_COMMIT_SHA $CI_PIPELINE_ID" | head -c 4097 > physical-device-report.txt
+      "${SSH[@]}" -- "$DEVICE_TARGET" "verify $CI_COMMIT_SHA $CI_PIPELINE_ID" | head -c 4097 > physical-device-report.txt
       acceptance_status="${PIPESTATUS[0]}"
       overflow_status=0
       if [[ "$(wc -c < physical-device-report.txt)" -gt 4096 ]]; then

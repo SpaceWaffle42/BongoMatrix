@@ -148,7 +148,7 @@ def ssh_argv() -> list[str]:
         raise ShipError('device not located; refusing to connect')
     return ['ssh', '-F', '/dev/null', '-i', SSH_KEY, '-o', 'IdentitiesOnly=yes', '-o', 'BatchMode=yes',
             *HOST_KEY_OPTIONS, '-o', 'ConnectTimeout=10', '-o', 'ServerAliveInterval=10',
-            '-o', 'ServerAliveCountMax=2', HOST]
+            '-o', 'ServerAliveCountMax=2', '--', HOST]
 
 
 def remote(command: str, data: bytes | None = None, timeout: int = 120) -> bytes:

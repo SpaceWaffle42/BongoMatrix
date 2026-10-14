@@ -3,6 +3,8 @@
 import shutil
 import subprocess
 import tempfile
+import threading
+import time
 import unittest
 from pathlib import Path
 from unittest.mock import Mock
@@ -46,8 +48,16 @@ class ParseTests(unittest.TestCase):
 
     def test_playing_label(self):
         self.assertEqual(playing_label("clock_lava"), "Clock lava")
-        self.assertEqual(playing_label("device-draft:pet_cat"), "Pet cat")
+        # Review r2 finding 3: filenames and draft names are never published.
+        self.assertEqual(playing_label("device-draft:pet_cat"), "Preview")
+        self.assertEqual(playing_label("media:Holiday photo of kids.png"), "Media")
+        self.assertEqual(playing_label("other:secret"), "Display")
         self.assertIsNone(playing_label(None))
+
+    def test_trailing_newline_is_not_a_valid_value(self):  # review r2 finding 7
+        self.assertIsNone(directory._clean("abc\n"))
+        from device_name import name_problem
+        self.assertIsNotNone(name_problem("kitchen\n"))
 
 
 def fake_name(default="matrix-7d03", current="kitchen.local"):
@@ -236,6 +246,106 @@ class FetchPeerTests(unittest.TestCase):
         failing = Mock()
         failing.open.side_effect = OSError("refused")
         self.assertIsNone(directory.fetch_peer("192.168.1.23", 5000, opener=failing))
+
+
+class LivePeerServer:
+    """A real HTTP peer on loopback; ``behaviour`` decides each answer."""
+
+    def __init__(self, behaviour):
+        import http.server
+        import socketserver
+
+        self.hits = []
+        server_self = self
+
+        class Handler(http.server.BaseHTTPRequestHandler):
+            def log_message(self, *args):
+                pass
+
+            def do_GET(self):
+                server_self.hits.append(self.path)
+                behaviour(self)
+
+        class Server(socketserver.ThreadingMixIn, http.server.HTTPServer):
+            daemon_threads = True
+
+        self.server = Server(("127.0.0.1", 0), Handler)
+        self.port = self.server.server_address[1]
+        self.thread = threading.Thread(target=self.server.serve_forever, daemon=True)
+        self.thread.start()
+
+    def close(self):
+        self.server.shutdown()
+        self.server.server_close()
+
+
+class FetchPeerLiveTests(unittest.TestCase):
+    """1.10 review r2 findings 1-2, against a real socket (no opener mock)."""
+
+    def serve(self, behaviour):
+        server = LivePeerServer(behaviour)
+        self.addCleanup(server.close)
+        return server
+
+    def test_redirects_are_never_followed(self):
+        internal = self.serve(lambda h: (h.send_response(200), h.end_headers(),
+                                         h.wfile.write(b'{"service":"matrix","id":"matrix-0001"}')))
+
+        def redirect(handler):
+            handler.send_response(302)
+            handler.send_header("Location", f"http://127.0.0.1:{internal.port}/secret-internal")
+            handler.end_headers()
+        peer = self.serve(redirect)
+        self.assertIsNone(directory.fetch_peer("127.0.0.1", peer.port))
+        self.assertEqual(peer.hits, ["/api/directory/self"])
+        self.assertEqual(internal.hits, [])
+
+    def test_slow_drip_peer_is_cut_off_at_the_total_deadline(self):
+        def drip(handler):
+            handler.send_response(200)
+            handler.send_header("Content-Length", "4000")
+            handler.end_headers()
+            for _ in range(60):
+                try:
+                    handler.wfile.write(b" ")
+                    handler.wfile.flush()
+                except OSError:
+                    return
+                time.sleep(0.2)
+        peer = self.serve(drip)
+        started = time.monotonic()
+        self.assertIsNone(directory.fetch_peer("127.0.0.1", peer.port, timeout=0.5))
+        self.assertLess(time.monotonic() - started, 1.5)
+
+
+class DirectoryNonBlockingTests(unittest.TestCase):
+    """Finding 2: a slow peer must not wedge /api/directory or hold the lock."""
+
+    def test_slow_peer_does_not_block_listing_past_the_deadline(self):
+        release = threading.Event()
+        self.addCleanup(release.set)
+
+        def slow_fetch(address, port):
+            release.wait(30)
+            return None
+        directory_service = directory.Directory(
+            device_name=fake_name(), version="0.3.73-preview", port=5000,
+            status=lambda: {"current_module": "clock_lava"}, address=lambda: "192.168.1.5",
+            run=lambda argv, **kwargs: subprocess.CompletedProcess(argv, 0, BROWSE, ""),
+            popen=lambda argv, **kwargs: FakeProcess(argv), fetch=slow_fetch,
+        )
+        results, threads = [], []
+        for _ in range(3):
+            thread = threading.Thread(target=lambda: results.append(directory_service.listing()))
+            threads.append(thread)
+            thread.start()
+        started = time.monotonic()
+        for thread in threads:
+            thread.join(directory.PEER_TOTAL_DEADLINE_SECONDS + 2)
+        self.assertEqual(len(results), 3, "listing() calls were still blocked")
+        self.assertLess(time.monotonic() - started, directory.PEER_TOTAL_DEADLINE_SECONDS + 2)
+        for listing in results:
+            self.assertEqual(listing["displays"][0]["serving"], True)
 
 
 class DirectoryRouteTests(unittest.TestCase):

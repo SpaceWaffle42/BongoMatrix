@@ -165,7 +165,7 @@ class GitLabPipelineContractTests(unittest.TestCase):
         physical = block(self.sections, "physical_device_acceptance")
         self.assertIn("python deploy/locate_device.py --known-hosts", physical)
         self.assertIn('HostKeyAlias="$DEVICE_ALIAS"', physical)
-        self.assertIn('"${SSH[@]}" "$DEVICE_TARGET"', physical)
+        self.assertIn('"${SSH[@]}" -- "$DEVICE_TARGET"', physical)
         self.assertNotIn('"${SSH[@]}" "$MATRIX_DEVICE_TARGET"', physical)
         self.assertNotRegex(physical, r"\b\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}\b")
 

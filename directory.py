@@ -12,6 +12,7 @@ read-only ``/api/directory/self`` summary.  Nothing here can change settings.
 
 from __future__ import annotations
 
+import http.client
 import ipaddress
 import json
 import logging
@@ -20,6 +21,7 @@ import re
 import subprocess
 import threading
 import time
+import urllib.error
 import urllib.request
 from concurrent.futures import ThreadPoolExecutor
 
@@ -29,7 +31,8 @@ SERVICE_TYPE = "_matrix._tcp"
 DIRECTORY_HOST = "matrix.local"
 DIRECTORY_CACHE_SECONDS = 5
 BROWSE_TIMEOUT_SECONDS = 4
-PEER_TIMEOUT_SECONDS = 1.5
+PEER_TIMEOUT_SECONDS = 1.5  # whole fetch: connect + headers + body, not per socket read
+PEER_TOTAL_DEADLINE_SECONDS = 3.0  # one directory build waits at most this long for peers
 PEER_RESPONSE_LIMIT = 4096
 STALE_DROP_SECONDS = 600  # quiet displays are listed greyed, then dropped
 HOLD_RETRY_SECONDS = (6, 10)  # matrix.local takeover attempt interval
@@ -47,7 +50,7 @@ def is_directory_host(host):
 
 
 def _clean(value, limit=63):
-    return value if isinstance(value, str) and _TXT_VALUE.match(value) and len(value) <= limit else None
+    return value if isinstance(value, str) and _TXT_VALUE.fullmatch(value) and len(value) <= limit else None
 
 
 def _unescape(value):
@@ -104,16 +107,55 @@ def _version_key(version):
     return tuple(int(part) for part in re.findall(r"\d+", version or ""))
 
 
+class _NoRedirect(urllib.request.HTTPRedirectHandler):
+    """A peer may not send this display anywhere else (loopback, other hosts)."""
+
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        return None
+
+
+def peer_opener():
+    return urllib.request.build_opener(urllib.request.ProxyHandler({}), _NoRedirect())
+
+
+def _read_before(response, limit, deadline):
+    """Read up to ``limit`` + 1 bytes, failing once the monotonic ``deadline`` passes.
+
+    ``read1`` returns whatever has arrived, so a peer dripping one byte at a time
+    is checked against the deadline after every socket read (each read is itself
+    bounded by the opener timeout).
+    """
+    if not isinstance(response, http.client.HTTPResponse):
+        return response.read(limit + 1)
+    chunks, size = [], 0
+    while size <= limit:
+        if time.monotonic() >= deadline:
+            raise TimeoutError("peer answer exceeded its deadline")
+        chunk = response.read1(limit + 1 - size)
+        if not chunk:
+            break
+        chunks.append(chunk)
+        size += len(chunk)
+    return b"".join(chunks)
+
+
 def fetch_peer(address, port, timeout=PEER_TIMEOUT_SECONDS, opener=None):
-    """GET a peer's public summary; None unless it is a well-formed Matrix answer."""
+    """GET a peer's public summary; None unless it is a well-formed Matrix answer.
+
+    Redirects are refused and the whole exchange is bounded by ``timeout``.
+    """
     url = f"http://{address}:{int(port)}/api/directory/self"
-    opener = opener or urllib.request.build_opener(urllib.request.ProxyHandler({}))
+    opener = opener or peer_opener()
+    deadline = time.monotonic() + timeout
     try:
         with opener.open(url, timeout=timeout) as response:
             if response.status != 200:
                 return None
-            body = response.read(PEER_RESPONSE_LIMIT + 1)
-    except (OSError, ValueError):
+            body = _read_before(response, PEER_RESPONSE_LIMIT, deadline)
+    except urllib.error.HTTPError as error:  # includes refused redirects
+        error.close()
+        return None
+    except (OSError, ValueError, TimeoutError, http.client.HTTPException):
         return None
     if len(body) > PEER_RESPONSE_LIMIT:
         return None
@@ -140,7 +182,9 @@ def playing_label(module):
         return None
     if module == "address_notice":
         return "Address notice"
-    module = module.split(":", 1)[-1]
+    kind, _, rest = module.partition(":")
+    if rest:  # media:<file>, device-draft:<name>: owner content stays private
+        return {"media": "Media", "device-draft": "Preview"}.get(kind, "Display")
     return module.replace("_", " ").strip().capitalize()[:60] or None
 
 
@@ -228,6 +272,7 @@ class Directory:
         self._lock = threading.Lock()
         self._cache = None
         self._cache_at = None
+        self._building = False
         self._known = {}
         self._shutdown = threading.Event()
         self._thread = None
@@ -313,24 +358,57 @@ class Directory:
         return parse_browse(result.stdout or "")
 
     def listing(self):
+        """Single-flight: one caller does network I/O; others get the last listing.
+
+        Network I/O (avahi-browse, peer fetches) never runs under ``self._lock``,
+        so a slow LAN host cannot pile up request threads behind it.
+        """
         with self._lock:
             now = self._clock()
             if self._cache is not None and now - self._cache_at < DIRECTORY_CACHE_SECONDS:
                 return self._cache
-            listing = self._build(now)
-            self._cache, self._cache_at = listing, now
-            return listing
+            if self._building:
+                if self._cache is not None:
+                    return self._cache
+                return self._assemble(now, {})
+            self._building = True
+        try:
+            answers = self._gather()
+            with self._lock:
+                now = self._clock()
+                listing = self._assemble(now, answers)
+                self._cache, self._cache_at = listing, now
+                return listing
+        finally:
+            with self._lock:
+                self._building = False
 
-    def _build(self, now):
+    def _gather(self):
+        """Browse and fetch peers, bounded by PEER_TOTAL_DEADLINE_SECONDS overall."""
+        me_id, _ = self._identity()
+        peers = {key: peer for key, peer in self._browse().items() if key != me_id}
+        if not peers:
+            return {}
+        pool = ThreadPoolExecutor(max_workers=8)
+        futures = {key: pool.submit(self._fetch, peer["address"], peer["port"])
+                   for key, peer in peers.items()}
+        deadline = time.monotonic() + PEER_TOTAL_DEADLINE_SECONDS
+        answers = {}
+        for key, future in futures.items():
+            try:
+                answer = future.result(timeout=max(0.0, deadline - time.monotonic()))
+            except Exception:  # timeout or fetch failure: this peer is unconfirmed
+                continue
+            answers[key] = (peers[key], answer)
+        pool.shutdown(wait=False, cancel_futures=True)
+        return answers
+
+    def _assemble(self, now, answers):
         me = self.self_summary()
         address = _lan_ipv4(self._address() or "") or None
-        peers = {key: peer for key, peer in self._browse().items() if key != me["id"]}
-        with ThreadPoolExecutor(max_workers=8) as pool:
-            answers = dict(zip(peers, pool.map(
-                lambda peer: self._fetch(peer["address"], peer["port"]), peers.values(),
-            )))
-        for key, peer in peers.items():
-            answer = answers.get(key)
+        for key, (peer, answer) in answers.items():
+            if key == me["id"]:
+                continue
             if answer is None or answer["id"] != key:
                 continue
             self._known[key] = {
