@@ -14297,7 +14297,10 @@ console.log('TERMINAL_MEDIA_PREVIEW_PASS');
         self.assertIn("rerenderAnnouncementEditorsWithFocus(announcement,'transition.type')", body)
 
     @unittest.skipUnless(shutil.which("node"), "Node.js is required")
-    def test_announcement_client_validation_allows_backend_valid_media_fallback(self):
+    def test_announcement_client_validation_refuses_picture_layout_without_media(self):
+        # Owner 5002 NOT OK 2026-10-14 supersedes eacc2a5: the editor refuses to save a picture
+        # layout with no media. The backend still accepts it (old saves load; panel shows
+        # "Media unavailable"), so this is an editor rule only; text_notice without media is fine.
         source = (Path(__file__).parents[1] / "app" / "templates" / "dashboard.html").read_text()
         start = source.index("function validateAnnouncement(announcement)")
         end = source.index("\nfunction applyAnnouncementValidation", start)
@@ -14306,7 +14309,7 @@ console.log('TERMINAL_MEDIA_PREVIEW_PASS');
         announcement["schedule"]["days"] = list(range(7))
         announcement["layout"] = "image_banner"
         announcement["media"] = None
-        harness = function_source + "\nconst errors=validateAnnouncement(" + json.dumps(announcement) + ");if(errors.media)throw new Error(errors.media);console.log('MEDIA_FALLBACK_VALIDATION_PASS');"
+        harness = function_source + "\nconst a=" + json.dumps(announcement) + ";const errors=validateAnnouncement(a);if(!errors.media||!/text notice/.test(errors.media))throw new Error('picture layout without media accepted');a.layout='text_notice';if(validateAnnouncement(a).media)throw new Error('text notice without media refused');a.layout='image_banner';a.media='picture.png';if(validateAnnouncement(a).media)throw new Error('picture layout with media refused');console.log('MEDIA_FALLBACK_VALIDATION_PASS');"
         node = shutil.which("node")
         assert node is not None
         result = subprocess.run(
@@ -14362,7 +14365,9 @@ console.log('TERMINAL_MEDIA_PREVIEW_PASS');
         self.assertIn("control.setAttribute('aria-describedby',status.id)", body)
         self.assertIn("validateAnnouncementBoard()", body)
         self.assertIn("if(typeof validateAnnouncementBoard==='function'&&!validateAnnouncementBoard({focusFirst:true}))", body)
-        self.assertIn("return {saved:false,warning:'Fix the highlighted announcement fields before saving.'}", body)
+        self.assertIn("'Fix the highlighted announcement fields before saving.';setMessage(warning,true);return {saved:false,warning}}", body)
+        # Owner 5002 NOT OK 2026-10-14: picture layout with no media cannot be saved.
+        self.assertIn("if(announcement.layout!=='text_notice'&&!announcement.media)errors.media=", body)
         self.assertLess(
             body.index("if(typeof validateAnnouncementBoard==='function'&&!validateAnnouncementBoard({focusFirst:true}))"),
             body.index("await api('/api/config'"),

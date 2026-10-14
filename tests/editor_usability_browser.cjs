@@ -226,6 +226,16 @@ try{
   await evaluate(`(()=>{const m=document.querySelector('${card} select[data-announcement-path="media"]');m.value='';m.dispatchEvent(new Event('input',{bubbles:true}));return true})()`);
   const cleared=await evaluate(state);
   if(cleared.value!=='image_banner'||!cleared.hint.includes('Media Library item'))throw Error('saved picture layout without media must keep value and explain: '+JSON.stringify(cleared));
+  // Owner 5002 NOT OK 2026-10-14: "select media > change mode > set media to none > can save". Saving must be refused.
+  const savedBefore=await evaluate(`fetch('/api/config').then(r=>r.json()).then(c=>JSON.stringify(c.announcements))`);
+  const blocked=await evaluate(`Promise.resolve(saveConfig(true)).then(r=>({saved:!!(r&&r.saved),warning:(r&&r.warning)||'',message:document.querySelector('#message')?.textContent||''}))`);
+  if(blocked.saved||!/picture/i.test(blocked.warning)||!/choose|text notice/i.test(blocked.warning))throw Error('picture layout without media was saved: '+JSON.stringify(blocked));
+  const savedAfter=await evaluate(`fetch('/api/config').then(r=>r.json()).then(c=>JSON.stringify(c.announcements))`);
+  if(savedAfter!==savedBefore)throw Error('server config changed despite refused save');
+  await assert(`document.activeElement===document.querySelector('${card} select[data-announcement-path="media"]')`,'refused save must focus the media picker');
+  await change(`${card} select[data-announcement-path="layout"]`,'text_notice');
+  const textOk=await evaluate(`Promise.resolve(saveConfig(true)).then(r=>({saved:!!(r&&r.saved),warning:(r&&r.warning)||''}))`);
+  if(!textOk.saved)throw Error('text notice without media must save: '+JSON.stringify(textOk));
  }
  console.log(JSON.stringify({errors,scenario,zones}));
 }finally{socket.close()}
