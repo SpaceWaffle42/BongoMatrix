@@ -34,6 +34,7 @@ from werkzeug.utils import secure_filename
 from acceptance_artifacts import AcceptanceArtifactTransaction
 from api_timeouts import DEFAULT_API_TIMEOUT_SECONDS
 from device_name import name_problem
+from directory import is_directory_host
 from display_controller import playlist_item_config, playlist_module_config
 from config_store import (
     ALLOWED_MODULES, DEFAULT_CONFIG, ConfigConflictError, ConfigDurabilityError,
@@ -662,6 +663,7 @@ def create_app(
     config_exclusion_marker="/run/matrix-release/config-write.lock",
     config_exclusion_authority="/run/matrix-release/config-write-authority-v1.json",
     display_name=None,
+    directory=None,
 ):
     session_generation = session_generation or secrets.token_hex(16)
     media_root = Path(media_dir or Path(__file__).resolve().parent / "resources" / "media")
@@ -792,6 +794,40 @@ def create_app(
     app.extensions["get_edit_preview_services"] = get_edit_preview_services
     app.extensions["close_edit_preview_services"] = close_edit_preview_services
     app.extensions["media_timeline_slots"] = media_timeline_slots
+    @app.before_request
+    def serve_matrix_local_directory():
+        """1.10e: requests for matrix.local only ever get the read-only list."""
+        if not is_directory_host(request.host):
+            return None
+        if request.method not in ("GET", "HEAD"):
+            return jsonify({"error": "matrix.local is read-only."}), 405
+        if request.path == "/":
+            response = app.make_response(render_template("directory.html"))
+        elif request.path == "/api/directory" and directory is not None:
+            response = jsonify(directory.listing())
+        elif request.path == "/api/directory/self" and directory is not None:
+            response = jsonify(directory.self_summary())
+        elif request.path == "/api/directory":
+            response = jsonify({"served_by": None, "holds_matrix_local": False, "displays": []})
+        else:
+            response = app.make_response(("Not found. matrix.local only lists displays.", 404))
+        response.headers["Cache-Control"] = "no-store"
+        response.headers["X-Frame-Options"] = "DENY"
+        response.headers["Content-Security-Policy"] = (
+            "default-src 'none'; script-src 'unsafe-inline'; style-src 'unsafe-inline'; "
+            "connect-src 'self'; frame-ancestors 'none'; base-uri 'none'; form-action 'none'"
+        )
+        return response
+
+    @app.get("/api/directory/self")
+    def directory_self():
+        """Public, read-only summary that other displays use to list this one."""
+        if directory is None:
+            abort(404)
+        response = jsonify(directory.self_summary())
+        response.headers["Cache-Control"] = "no-store"
+        return response
+
     app.config.update(
         SECRET_KEY=secret_key,
         SESSION_COOKIE_HTTPONLY=True,

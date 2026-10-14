@@ -3248,6 +3248,9 @@ try{
             ("POST", "/api/system/restart"),
             ("POST", "/api/release-acceptance/transaction"),
             ("POST", "/api/release-acceptance/transaction/status"),
+            ("POST", "/api/display-name/start"),
+            ("POST", "/api/display-name/confirm"),
+            ("POST", "/api/display-name/cancel"),
         }
         self.assertEqual(unsafe_routes, expected_routes)
         concrete_routes = [
@@ -3277,6 +3280,9 @@ try{
             ("POST", "/api/system/restart"),
             ("POST", "/api/release-acceptance/transaction"),
             ("POST", "/api/release-acceptance/transaction/status"),
+            ("POST", "/api/display-name/start"),
+            ("POST", "/api/display-name/confirm"),
+            ("POST", "/api/display-name/cancel"),
         ]
         config_before = self.store.get()
         devices_before = self.device_store.list()
@@ -22238,6 +22244,9 @@ class FakeController(Passive):
     def stop(self):
         self.stop_calls += 1
 
+    def status(self):
+        return {}
+
 class FakeLock(Passive):
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
@@ -22252,6 +22261,13 @@ class FakeLock(Passive):
 
 class FakePairing(Passive):
     pass
+
+class FakeDirectory(Passive):
+    def start(self):
+        pass
+
+    def stop(self):
+        pass
 
 class FakeDeviceStore(Passive):
     def any_devices(self):
@@ -22348,7 +22364,12 @@ with tempfile.TemporaryDirectory() as temp:
     fake_modules = {}
     for name, attributes in {
         "config_store": {"ConfigStore": Passive},
-        "display_controller": {"DisplayController": FakeController},
+        "display_controller": {
+            "DisplayController": FakeController,
+            "local_ip_address": lambda: None,
+        },
+        # Roadmap 1.10d/e: the directory must not publish on the test network.
+        "directory": {"Directory": FakeDirectory},
         "hardware_lock": {"DisplayOwnershipLock": FakeLock},
         "matrix_framework": {"Matrix": Passive},
         "pairing": {
