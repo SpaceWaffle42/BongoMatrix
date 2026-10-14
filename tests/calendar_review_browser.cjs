@@ -67,6 +67,16 @@ try{
  await waitFor(`/Haircut/.test(document.querySelector('#message')?.textContent||'')&&matrixHasUnsavedDraft()`,'save error does not name the event');
  await change(`${c} [data-countdown-field="start"]`,'2031-03-18');
  await assert(`document.querySelector('${c} [data-countdown-field="start"]').getAttribute('aria-invalid')!=='true'`,'fixed date still invalid');
+ // Owner 2026-10-14: the end date is entered and shown exactly like the start date.
+ await assert(`(()=>{const s=document.querySelector('${c} [data-countdown-field="start"]'),e=document.querySelector('${c} [data-countdown-field="end"]'),p=document.querySelector('${c} [data-countdown-picker="end"]');return e.placeholder===s.placeholder&&e.type===s.type&&p?.type==='date'&&p.value===''})()`,'end date not formatted like start');
+ await change(`${c} [data-countdown-field="end"]`,'20/03/2031');
+ await assert(`${last}.end==='2031-03-20'&&document.querySelector('${c} [data-countdown-field="end"]').value==='2031-03-20'&&document.querySelector('${c} [data-countdown-picker="end"]').value==='2031-03-20'`,'UK end date not converted');
+ await change(`${c} [data-countdown-picker="end"]`,'2031-03-21');
+ await assert(`${last}.end==='2031-03-21'&&document.querySelector('${c} [data-countdown-field="end"]').value==='2031-03-21'`,'end picker did not set date');
+ await change(`${c} [data-countdown-field="end"]`,'whenever');
+ await assert(`document.querySelector('${c} [data-countdown-field="end"]').getAttribute('aria-invalid')==='true'&&/date/i.test(document.querySelector('${c} [data-countdown-date-error="end"]')?.textContent||'')`,'invalid end date not flagged inline');
+ await change(`${c} [data-countdown-field="end"]`,'');
+ await assert(`${last}.end===null&&document.querySelector('${c} [data-countdown-field="end"]').getAttribute('aria-invalid')!=='true'&&!document.querySelector('${c} [data-countdown-date-error="end"]').textContent`,'blank end date not optional');
  // Round 2 (r1 N1/N5): a typed time switches an all-day event to timed; D/M/YY means 20YY.
  await change(`${c} [data-countdown-field="start"]`,'18/03/31 16:15');
  await assert(`${last}.start==='2031-03-18T16:15'&&${last}.all_day===false`,'typed time on all-day event was dropped '+JSON.stringify(await evaluate(`[${last},countdownParseDate('18/03/31 16:15',true),countdownParseDate('18/03/31 16:15',false),document.querySelector('${c} [data-countdown-field="start"]').value]`)));

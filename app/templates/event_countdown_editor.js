@@ -497,20 +497,26 @@ function renderCountdownEditor(container) {
     const summaryLabel=document.createElement('span');summaryLabel.textContent=summaryText();legend.append(countdownIcon(event.icon,2),summaryLabel);card.append(legend);
     card.addEventListener('input',()=>{summaryLabel.textContent=summaryText()});card.addEventListener('change',()=>{summaryLabel.textContent=summaryText();legend.querySelector('canvas').replaceWith(countdownIcon(event.icon,2))});
     control(card,event,'title','Event name');
-    const start=control(card,event,'start','Date (pick it, or type e.g. 25/12/2026 or 25/12/2026 18:00)');start.placeholder='DD/MM/YYYY';start.autocomplete='off';
-    const picker=document.createElement('input');picker.dataset.countdownPicker='';picker.setAttribute('aria-label',`${event.title||'Event'} date picker`);
-    const dateError=document.createElement('small');dateError.className='calendar-error';dateError.dataset.countdownDateError='';dateError.setAttribute('role','alert');
-    const syncPicker=()=>{picker.type=event.all_day?'date':'datetime-local';const ok=countdownParseDate(event.start,event.all_day);picker.value=ok?(event.all_day?ok:ok.slice(0,16)):'';
-      start.toggleAttribute('aria-invalid',!ok);if(ok)start.removeAttribute('aria-invalid');else start.setAttribute('aria-invalid','true');
-      dateError.textContent=ok?'':'Not a date the calendar understands. Use the picker, or type it like 25/12/2026'+(event.all_day?'.':' 18:00.')};
-    // Typed dates are normalised to ISO when you leave the field (or press Enter).
-    start.addEventListener('change',()=>{
-      // A typed time on an all-day event makes it a timed event rather than silently dropping the time.
-      if(event.all_day&&!countdownParseDate(start.value,true)&&countdownParseDate(start.value,false)){event.all_day=false;const box=card.querySelector('[data-countdown-field="all_day"]');if(box)box.checked=false}
-      const ok=countdownParseDate(start.value,event.all_day);if(ok){const changed=ok!==event.start;event.start=ok;start.value=ok;if(changed)countdownChanged()}syncPicker()});
-    picker.addEventListener('change',()=>{if(!picker.value)return;event.start=picker.value;start.value=picker.value;syncPicker();countdownChanged();card.dispatchEvent(new Event('change'))});
-    start.closest('label').after(picker,dateError);syncPicker();
-    card.addEventListener('change',event2=>{if(event2.target?.dataset?.countdownField==='all_day')syncPicker()});
+    // Owner 2026-10-14: start and end dates share one entry format (typed UK date, picker, inline error).
+    const dateEntry=(key,label,optional)=>{
+      const input=control(card,event,key,label);input.placeholder='DD/MM/YYYY';input.autocomplete='off';
+      const picker=document.createElement('input');picker.dataset.countdownPicker=key;picker.setAttribute('aria-label',`${event.title||'Event'} ${key==='end'?'end ':''}date picker`);
+      const error=document.createElement('small');error.className='calendar-error';error.dataset.countdownDateError=key;error.setAttribute('role','alert');
+      const sync=()=>{picker.type=event.all_day?'date':'datetime-local';const blank=optional&&!event[key];const ok=blank?null:countdownParseDate(event[key],event.all_day);picker.value=ok?(event.all_day?ok:ok.slice(0,16)):'';
+        if(ok||blank)input.removeAttribute('aria-invalid');else input.setAttribute('aria-invalid','true');
+        error.textContent=ok||blank?'':'Not a date the calendar understands. Use the picker, or type it like 25/12/2026'+(event.all_day?'.':' 18:00.')};
+      // Typed dates are normalised to ISO when you leave the field (or press Enter).
+      input.addEventListener('change',()=>{
+        if(optional&&!input.value.trim()){event[key]=null;sync();return}
+        // A typed time on an all-day event makes it a timed event rather than silently dropping the time.
+        if(key==='start'&&event.all_day&&!countdownParseDate(input.value,true)&&countdownParseDate(input.value,false)){event.all_day=false;const box=card.querySelector('[data-countdown-field="all_day"]');if(box)box.checked=false}
+        const ok=countdownParseDate(input.value,event.all_day);if(ok){const changed=ok!==event[key];event[key]=ok;input.value=ok;if(changed)countdownChanged()}sync()});
+      picker.addEventListener('change',()=>{if(!picker.value)return;event[key]=picker.value;input.value=picker.value;sync();countdownChanged();card.dispatchEvent(new Event('change'))});
+      input.closest('label').after(picker,error);sync();
+      card.addEventListener('change',event2=>{if(event2.target?.dataset?.countdownField==='all_day')sync()});
+      return {input,picker,error};
+    };
+    dateEntry('start','Date (pick it, or type e.g. 25/12/2026 or 25/12/2026 18:00)',false);
     const icon=control(card,event,'icon','Icon','text',Object.keys(countdownIconNames));
     for(const option of icon.options)option.textContent=countdownIconNames[option.value];
     let iconPreview=countdownIcon(event.icon,2);icon.closest('label').append(iconPreview);
@@ -518,7 +524,7 @@ function renderCountdownEditor(container) {
     control(card,event,'enabled','Show this event','checkbox');
     control(card,event,'all_day','All day','checkbox');
     control(card,event,'annual','Every year','checkbox');
-    editorAdvanced(field(control(card,event,'end','End date (optional; the day after it finishes)')));
+    {const end=dateEntry('end','End date (optional; the day after it finishes)',true);editorAdvanced(field(end.input),end.picker,end.error);}
     const minutes=control(card,event,'now_minutes','Show “NOW” for (minutes)','number');minutes.min=1;minutes.max=10080;editorAdvanced(field(minutes));
     const accent=control(card,event,'accent','Own highlight colour (e.g. #FF8800; blank uses the shared one)');accent.placeholder='Shared colour';editorAdvanced(field(accent));
     const artwork=control(card,event,'artwork','Picture from media library (icon style; up to 8×8)','text',['',...basicMediaChoices()]);editorAdvanced(field(artwork));
