@@ -1499,7 +1499,7 @@
     "WebAppTests.test_announcement_board_editor_serializes_ordered_state_in_config_body",
     "WebAppTests.test_announcement_board_has_friendly_label_and_automatic_playlist_timing",
     "WebAppTests.test_announcement_card_previews_unsaved_draft_without_saving",
-    "WebAppTests.test_announcement_client_validation_allows_backend_valid_media_fallback",
+    "WebAppTests.test_announcement_client_validation_refuses_picture_layout_without_media",
     "WebAppTests.test_announcement_client_validation_matches_contextual_scrolling_schema",
     "WebAppTests.test_announcement_client_validation_rejects_backend_nonprintable_unicode",
     "WebAppTests.test_announcement_content_group_exposes_bound_schema_fields",
