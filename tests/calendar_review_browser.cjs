@@ -67,6 +67,11 @@ try{
  await waitFor(`/Haircut/.test(document.querySelector('#message')?.textContent||'')&&matrixHasUnsavedDraft()`,'save error does not name the event');
  await change(`${c} [data-countdown-field="start"]`,'2031-03-18');
  await assert(`document.querySelector('${c} [data-countdown-field="start"]').getAttribute('aria-invalid')!=='true'`,'fixed date still invalid');
+ // Owner 2026-10-14: titles centred by default; alignment is an Advanced option.
+ await assert(`(()=>{const s=document.querySelector('${ed} [data-countdown-setting="title_align"]');return s&&s.value==='center'&&s.closest('[data-advanced]')&&[...s.options].map(o=>o.textContent).join()==='Centre,Left,Right'})()`,'title alignment not an Advanced option defaulting to Centre');
+ await change(`${ed} [data-countdown-setting="title_align"]`,'right');
+ await assert(`countdownSettings.title_align==='right'&&matrixHasUnsavedDraft()`,'title alignment change not recorded');
+ await change(`${ed} [data-countdown-setting="title_align"]`,'center');
  // Owner 2026-10-14: the end date is entered and shown exactly like the start date.
  await assert(`(()=>{const s=document.querySelector('${c} [data-countdown-field="start"]'),e=document.querySelector('${c} [data-countdown-field="end"]'),p=document.querySelector('${c} [data-countdown-picker="end"]');return e.placeholder===s.placeholder&&e.type===s.type&&p?.type==='date'&&p.value===''})()`,'end date not formatted like start');
  await change(`${c} [data-countdown-field="end"]`,'20/03/2031');

@@ -473,6 +473,9 @@ function renderCountdownEditor(container) {
   for(const [key,text] of [['background','Background colour'],['text_colour','Text colour'],['accent','Highlight colour']])control(fields,countdownSettings,key,text,'color',null,'setting');
   editorAdvanced(field(control(fields,countdownSettings,'timezone','Time zone','text',null,'setting')));
   editorAdvanced(field(control(fields,countdownSettings,'title_font','Title font','text',installedFonts,'setting')));
+  const titleAlign=control(fields,countdownSettings,'title_align','Title alignment','text',['center','left','right'],'setting');
+  for(const [value,text] of [['center','Centre'],['left','Left'],['right','Right']])titleAlign.querySelector(`option[value="${value}"]`).textContent=text;
+  editorAdvanced(field(titleAlign));
   editorAdvanced(field(control(fields,countdownSettings,'countdown_font','Countdown font','text',['auto',...installedFonts],'setting')));
   const bar=control(fields,countdownSettings,'progress_height','Progress bar thickness (1–4 pixels)','number',null,'setting');bar.min=1;bar.max=4;editorAdvanced(field(bar));
   for(const edge of ['top','right','bottom','left']){const input=control(fields,countdownSettings.insets,edge,'Space from '+edge+' edge (0–8 pixels)','number',null,'setting');input.min=0;input.max=8;editorAdvanced(field(input));}

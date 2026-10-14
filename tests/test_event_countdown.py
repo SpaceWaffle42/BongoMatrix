@@ -462,7 +462,7 @@ class CountdownTests(unittest.TestCase):
             value.glyphs = {0: Glyph(width, height, bearing, 0, width, (255,) * height, 8)}
             return value
         settings = copy.deepcopy(DEFAULT_CONFIG['event_countdown'])
-        settings.update(title_font='title', countdown_font='auto')
+        settings.update(title_font='title', countdown_font='auto', title_align='left')  # bearing check at x=0
         selected = dict(event=event(title='A'), seconds=0)
         with patch.object(module, 'fonts', return_value={'title': font(3, 3, -2), 'small': font(4, 6), 'large': font(6, 15)}):
             image, info = module.render_frame(settings, selected)

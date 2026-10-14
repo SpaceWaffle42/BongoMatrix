@@ -11,12 +11,15 @@ DEFAULTS = {
     'timezone': 'UTC', 'events': [], 'layout': 'large',
     'background': '#000000', 'text_colour': '#FFFFFF', 'accent': '#7170FF',
     'title_font': '5x7', 'countdown_font': 'auto', 'progress_height': 2,
+    # Owner 2026-10-14: titles centred by default; left/right in Advanced.
+    'title_align': 'center',
     'insets': dict(top=0, right=0, bottom=0, left=0),
     # Holiday packs (all off by default), per-year date edits and hidden holidays.
     'packs': {pack: False for pack in PACKS}, 'holiday_dates': {}, 'hidden_holidays': [],
 }
 # Additive fields: missing on older saves, refilled from DEFAULTS on read.
-PROJECTED_FIELDS = ('packs', 'holiday_dates', 'hidden_holidays')
+PROJECTED_FIELDS = ('packs', 'holiday_dates', 'hidden_holidays', 'title_align')
+TITLE_ALIGNS = ('center', 'left', 'right')
 ICONS = ('calendar', 'birthday', 'anniversary', 'launch', 'holiday', 'opening', 'scissors', 'clock', 'book', 'plane', 'ball', 'tooth', *HOLIDAY_ICONS)
 MAX_HOLIDAY_EDITS = 400
 
@@ -46,6 +49,7 @@ def validate(settings):
     except (ZoneInfoNotFoundError, ValueError, TypeError) as exc:
         raise ValueError('event_countdown: invalid IANA timezone') from exc
     require(settings['layout'] in ('large', 'icon', 'progress'), 'invalid layout')
+    require(settings['title_align'] in TITLE_ALIGNS, 'title alignment must be center, left or right')
     for key in ('background', 'text_colour', 'accent'):
         require(colour(settings[key]), 'invalid colour')
     fonts = available_font_names()

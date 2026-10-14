@@ -249,8 +249,13 @@ def render_frame(settings, selected, *, elapsed=0, initial_seconds=None, artwork
     measured_title_height = title_height
     title_height = min(title_height, max(1, height // 2 - 1))
     title_x = -int(elapsed / .05) if title_width > width and elapsed < (title_width + 4) * .05 else 0
+    # Titles that fit use the chosen alignment; wider titles scroll from the left and rest at 0.
+    title_offset = 0
+    if title_width <= width:
+        align = settings.get('title_align', 'center')
+        title_offset = (width - title_width) // 2 if align == 'center' else width - title_width if align == 'right' else 0
     title = Image.new('RGB', (width, title_height), settings['background'])
-    _text(title, title_font, item['title'], title_x, 0, settings['text_colour'])
+    _text(title, title_font, item['title'], title_x + title_offset, 0, settings['text_colour'])
     area.paste(title, (0, 0))
     bar_height = settings['progress_height'] if settings['layout'] == 'progress' else 0
     text_y = title_height + 2
