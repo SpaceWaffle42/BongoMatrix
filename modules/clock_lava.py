@@ -3,6 +3,7 @@ import datetime
 import random
 import time
 from PIL import Image, ImageDraw, ImageFilter
+import local_clock
 from module_options import LAVA_PALETTES
 
 WIDTH = 64
@@ -202,11 +203,12 @@ def selected_lava_config(lava_config, selected_palette):
     raise ValueError("selected Lava palette is not in the candidate")
 
 
-def prepare_lava_frame_state(matrix, lava_config=None):
+def prepare_lava_frame_state(matrix, lava_config=None, *, local_zone=None):
     """Prepare one physical Lava invocation without changing palette selection."""
     settings = lava_config or {}
     return {
         "settings": settings,
+        "local_zone": local_zone,
         "colours": pick_palette(matrix, lava_config),
         "blobs": make_blobs(settings),
         "font_time": matrix.font(settings.get("time_font", "9x18B")),
@@ -220,6 +222,13 @@ def prepare_lava_frame_state(matrix, lava_config=None):
             if "border_colour" in settings else matrix.colour("black")
         ),
     }
+
+
+def clock_texts(zone):
+    """Time/date text in the Weather location's zone (device clock if unknown)."""
+    zone = local_clock.valid_zone_info(zone)
+    now = datetime.datetime.now(zone) if zone else datetime.datetime.now()
+    return now.strftime("%H:%M"), now.strftime("%d %b")
 
 
 def render_lava_frame(matrix, state, canvas, temp_canvas):
@@ -245,9 +254,7 @@ def render_lava_frame(matrix, state, canvas, temp_canvas):
             image.filter(ImageFilter.BoxBlur(radius=settings.get("blur_radius", 2))),
             canvas,
         )
-    now = datetime.datetime.now()
-    time_text = now.strftime("%H:%M")
-    date_text = now.strftime("%d %b")
+    time_text, date_text = clock_texts(state.get("local_zone"))
     time_y = settings.get("time_y", 15)
     date_y = settings.get("date_y", 27)
     time_width = measure_text(
@@ -273,13 +280,13 @@ def render_lava_frame(matrix, state, canvas, temp_canvas):
     return canvas
 
 
-def clock(duration=300, matrix=None, stop_event=None, lava_config=None):
+def clock(duration=300, matrix=None, stop_event=None, lava_config=None, local_zone=None):
     """Run the lava clock for a set duration of seconds."""
     if matrix is None:
         from matrix_framework import Matrix
 
         matrix = Matrix(rows=HEIGHT, cols=WIDTH)
-    state = prepare_lava_frame_state(matrix, lava_config)
+    state = prepare_lava_frame_state(matrix, lava_config, local_zone=local_zone)
     canvas = matrix.matrix.CreateFrameCanvas()
     temp_canvas = matrix.matrix.CreateFrameCanvas()
     end_time = time.time() + duration
@@ -308,6 +315,7 @@ def run(matrix, config, duration=300, stop_event=None, *, selected_palette=None)
         matrix=matrix,
         stop_event=stop_event,
         lava_config=lava_config,
+        local_zone=local_clock.weather_zone(config),
     )
 
 

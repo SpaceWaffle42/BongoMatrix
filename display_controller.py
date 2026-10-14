@@ -16,6 +16,8 @@ import time
 
 from PIL import Image
 
+import local_clock
+
 from media_resolver import MediaResolutionError, MediaResolver, module_media_references
 from screen_media import (
     ScreenMediaCatalog,
@@ -36,6 +38,9 @@ from preview_provider import (
 
 LOGGER = logging.getLogger(__name__)
 MODULES = {
+    "event_countdown": "modules.event_countdown",
+    "rss": "modules.rss",
+    "astronomy": "modules.astronomy_display",
     "announcement_board": "modules.announcement_board",
     "clock_lava": "modules.clock_lava",
     "weather": "modules.weather_app",
@@ -376,6 +381,8 @@ class DisplayController:
     ):
         self.matrix = matrix
         self.config_store = config_store
+        self.rss_host = None
+        self.astronomy_host = None
         self._shutdown = threading.Event()
         self._reload_requested = threading.Event()
         self._pairing_pause = threading.Event()
@@ -992,7 +999,8 @@ class DisplayController:
         with self._state_lock:
             if self._device_draft_stop is not None:
                 self._device_draft_stop.set()
-            if self._device_draft_pending is not None and self._device_draft_pending[0] is lease:
+            # Heartbeat renews the lease record, but not its owned request.
+            if self._device_draft_pending is not None and self._device_draft_pending[0].request is lease.request:
                 self._device_draft_pending = None
         with self._display_lock:
             pass
@@ -1003,10 +1011,15 @@ class DisplayController:
     def _execute_pending_device_draft(self):
         with self._state_lock:
             pending = self._device_draft_pending
-            self._device_draft_pending = None
             if pending is None:
                 return False
             lease, renderer = pending
+            # Admission polls only prepared memory. Keep the owned lease pending
+            # while the host worker prepares; never enter the render/display lock
+            # with a cold snapshot, nor fetch/decode/wait for I/O here.
+            if lease.request.ready is not None and not lease.request.ready():
+                return False
+            self._device_draft_pending = None
             stop_event = threading.Event()
             admission_generation = self._module_admission_snapshot_locked()
             self._device_draft_active_lease = lease
@@ -1105,7 +1118,7 @@ class DisplayController:
             if pinned_handle is None:
                 raise ValueError("built-in device draft media is not pinned")
             options["pinned_handle"] = pinned_handle
-        elif module_name == "announcement_board":
+        elif module_name in {"announcement_board", "event_countdown"}:
             options["pinned_handles"] = request.pinned_media
         elif custom is not None:
             options["module_config"] = custom
@@ -1115,7 +1128,7 @@ class DisplayController:
                 def fetch(self, *_args, **_kwargs):
                     return prepared
             options["client"] = PreparedWeatherClient()
-        elif module_name in {"openweather_overview", "openweather_forecast"}:
+        elif module_name in {"openweather_overview", "openweather_forecast", "rss", "astronomy"}:
             options["prepared"] = prepared
         if stop_event.is_set():
             return False
@@ -1127,10 +1140,22 @@ class DisplayController:
                 else module.run
             )
             rendered = runner(matrix, candidate, **options)
-            if request.timeout_seconds is not None or rendered is False:
+            astronomy_empty = (module_name == 'astronomy' and options.get('prepared') is not None
+                               and options['prepared'].status == 'empty')
+            if request.timeout_seconds is not None or (rendered is False and not astronomy_empty):
                 return rendered
-            if stop_event.is_set() or stop_event.wait(0.01):
+            if stop_event.is_set() or stop_event.wait(1 if astronomy_empty else 0.01):
                 break
+            if module_name == 'astronomy' and self.astronomy_host is not None:
+                from astronomy_host import PreparationBusy
+                while not stop_event.is_set():
+                    try:
+                        options['prepared'] = self.astronomy_host.wait_preview(
+                            candidate, stop_event,
+                            owner=('device', request.owner.device_id, request.owner.preview_instance))
+                        break
+                    except PreparationBusy:
+                        stop_event.wait(.1)
         return rendered
 
     def _preview_admission_generation(self):
@@ -1556,7 +1581,7 @@ class DisplayController:
 
     @staticmethod
     def _is_active(config, now=None):
-        now = now or dt.datetime.now()
+        now = now or local_clock.local_now(config)
         current = now.time()
         start = dt.time.fromisoformat(config["display"]["active_start"])
         end = dt.time.fromisoformat(config["display"]["active_end"])
@@ -1568,7 +1593,7 @@ class DisplayController:
 
     @staticmethod
     def _seconds_until_schedule_change(config, now=None):
-        now = now or dt.datetime.now()
+        now = now or local_clock.local_now(config)
         display = config["display"]
         start = dt.time.fromisoformat(display["active_start"])
         end = dt.time.fromisoformat(display["active_end"])
@@ -1810,7 +1835,7 @@ class DisplayController:
                 if reference is not None and pinned_handles is not None:
                     options["pinned_handle"] = pinned_handles[reference]
                 options["maximum_duration"] = config.get("_screen_maximum_duration")
-            if name == "announcement_board" and pinned_handles is not None:
+            if name in {"announcement_board", "event_countdown"} and pinned_handles is not None:
                 options["pinned_handles"] = pinned_handles
             if custom is not None:
                 options["module_config"] = custom
@@ -1847,12 +1872,16 @@ class DisplayController:
                 if stop_event.is_set():
                     return False
                 options["prepared"] = _prepared_openweather(name, transported)
+            if name == 'astronomy':
+                options['prepared'] = self.astronomy_host.prepare_saved_pass(config, stop_event) if self.astronomy_host else None
             with self._display_lock:
                 with self._state_lock:
                     if not self._module_admission_current_locked(
                         admission_generation, stop_event,
                     ):
                         return False
+                    if name == 'rss':
+                        options['prepared'] = self.rss_host.service.admit() if self.rss_host else None
                 return module.run(
                     self.matrix,
                     config,
@@ -1919,7 +1948,8 @@ class DisplayController:
             with self._state_lock:
                 device_draft_pending = self._device_draft_pending is not None
             if device_draft_pending:
-                self._execute_pending_device_draft()
+                if not self._execute_pending_device_draft():
+                    self._shutdown.wait(0.01)
                 self._mark_scheduler_healthy()
                 continue
             config = self.config_store.get()
@@ -2017,7 +2047,7 @@ class DisplayController:
                             break
                         duration = item["duration"]
                         if acceptance_inactive is None:
-                            schedule_now = dt.datetime.now()
+                            schedule_now = local_clock.local_now(config)
                             if self._is_active(config, schedule_now):
                                 break
                             maximum_duration = self._seconds_until_schedule_change(
@@ -2080,7 +2110,7 @@ class DisplayController:
                 with self._state_lock:
                     if self._device_draft_pending is not None:
                         break
-                schedule_now = dt.datetime.now()
+                schedule_now = local_clock.local_now(config)
                 if not self._is_active(config, schedule_now):
                     break
                 announcement_preview = self._take_announcement_preview()

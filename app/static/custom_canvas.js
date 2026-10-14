@@ -899,10 +899,23 @@
   }
   window.pixelBitmapCells = pixelBitmapCells;
 
+  // Wall clock in the Weather location's zone (browser clock when unknown), like the Matrix.
+  function zonedClock(now) {
+    const zone = typeof globalThis.editorEffectiveZone === 'function' ? globalThis.editorEffectiveZone('') : undefined;
+    if (zone) {
+      try {
+        const parts = Object.fromEntries(new Intl.DateTimeFormat('en-GB', {timeZone: zone, hourCycle: 'h23', hour: '2-digit', minute: '2-digit', second: '2-digit'}).formatToParts(now).map(part => [part.type, Number(part.value)]));
+        return {hours: parts.hour, minutes: parts.minute, seconds: parts.second};
+      } catch (_) { /* invalid zone: browser clock */ }
+    }
+    return {hours: now.getHours(), minutes: now.getMinutes(), seconds: now.getSeconds()};
+  }
+
   function currentTimeText(format, now = new Date()) {
-    let hours = now.getHours();
-    const minutes = String(now.getMinutes()).padStart(2, '0');
-    const seconds = String(now.getSeconds()).padStart(2, '0');
+    const clock = zonedClock(now);
+    let hours = clock.hours;
+    const minutes = String(clock.minutes).padStart(2, '0');
+    const seconds = String(clock.seconds).padStart(2, '0');
     const withSeconds = format.endsWith('_seconds');
     if (format.startsWith('12h')) {
       const suffix = hours >= 12 ? 'PM' : 'AM';

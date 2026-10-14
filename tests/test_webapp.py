@@ -1800,7 +1800,7 @@ try{
         body = self.client.get("/").get_data(as_text=True)
 
         application_version = getattr(webapp, "APPLICATION_VERSION", None)
-        self.assertEqual(application_version, "0.3.71-preview")
+        self.assertEqual(application_version, "0.3.72-preview")
         self.assertEqual(body.count(f"Version {application_version}"), 1)
         self.assertRegex(
             body,
@@ -3234,6 +3234,8 @@ try{
             ("POST", "/api/media/<path:filename>/preview"),
             ("DELETE", "/api/media/<path:filename>"),
             ("POST", "/api/config"),
+            ("POST", "/api/rss/test"),
+            ("POST", "/api/rss/reset"),
             ("PUT", "/api/secrets/openweather"),
             ("DELETE", "/api/secrets/openweather"),
             ("POST", "/api/edit-preview/<module_name>"),
@@ -3263,6 +3265,8 @@ try{
             ("POST", "/api/media/missing.gif/preview"),
             ("DELETE", "/api/media/missing.gif"),
             ("POST", "/api/config"),
+            ("POST", "/api/rss/test"),
+            ("POST", "/api/rss/reset"),
             ("PUT", "/api/secrets/openweather"),
             ("DELETE", "/api/secrets/openweather"),
             ("POST", "/api/edit-preview/clock_lava"),
@@ -3286,6 +3290,11 @@ try{
         self.pairing.reset_mock()
         self.device_restart_runner.reset_mock()
 
+        rss_actions = []
+        for action in ("test_feed", "reset"):
+            patcher = patch.object(self.app.extensions["rss_host"], action)
+            rss_actions.append(patcher.start())
+            self.addCleanup(patcher.stop)
         for signal in (None, "wrong-value"):
             for method, path in concrete_routes:
                 with self.subTest(signal=signal, method=method, path=path):
@@ -3310,6 +3319,8 @@ try{
             action.assert_not_called()
         self.pairing.issue_pin.assert_not_called()
         self.device_restart_runner.assert_not_called()
+        for action in rss_actions:
+            action.assert_not_called()
         self.assertIsNone(self.app.extensions.get("edit_preview_registry"))
         self.assertIsNone(self.app.extensions.get("edit_preview_provider"))
 
@@ -7671,8 +7682,8 @@ globalThis.document=document;globalThis.window=window;globalThis.fetch=fetch;
         self.assertIn("forecast_items", body)
         self.assertNotIn("field:'card_seconds'", body)
         self.assertEqual(body.count("field:'scroll_loops'"), 3)
-        self.assertEqual(body.count("field:'scroll_loops',label:'Scroll loops'"), 3)
-        self.assertEqual(body.count("field:'scroll_speed',label:'Frame delay (seconds)'"), 3)
+        self.assertEqual(body.count("field:'scroll_loops',label:'Times to scroll'"), 3)
+        self.assertEqual(body.count("field:'scroll_speed',label:'Scroll step time (seconds; smaller is faster)'"), 3)
         self.assertNotIn("makeWeatherLocationGroup", body)
         config = self.store.get()
         self.assertTrue(next(item for item in config["playlist"] if item["module"] == "weather")["enabled"])
@@ -10478,7 +10489,7 @@ await send('Runtime.enable');await send('Page.enable');await send('Emulation.set
 if(!await evaluate(`matrixEditorsReady&&Boolean(screenMediaCatalog?.splash?.choices.length)&&Boolean(screenMediaCatalog?.sleep?.choices.length)`))throw Error('shipped editors/catalogue not ready');
 const vectors=await evaluate(`JSON.stringify([[1.25,100,1],[.1,100,2],[999,100,2],[9.84,82,3]].map(v=>frameDelayForSeconds(...v)))`);
 if(JSON.stringify(JSON.parse(vectors))!==JSON.stringify(expected))throw Error('Python/JavaScript timing vector mismatch');
-const provider=await evaluate(`(async()=>{let aborted=0,calls=0;api=async(_path,options)=>{calls++;const payload=JSON.parse(options.body),digest=await timingSettingsDigest('weather',payload);await new Promise((resolve,reject)=>{const timer=setTimeout(resolve,30);options.signal.addEventListener('abort',()=>{aborted++;clearTimeout(timer);reject(new DOMException('Aborted','AbortError'))},{once:true})});return {status:'fresh',milliseconds:5000,frames_per_loop:100,loops:1,settings_digest:digest,settings_correlation:payload.settings_correlation}};const row=document.querySelector('.module-row[data-module="weather"]'),edit=row.querySelector('.module-actions button:last-child');edit.click();setTimeout(()=>{document.querySelector('#weather-location').value='NEW DRAFT'},5);await new Promise(r=>setTimeout(r,420));return JSON.stringify({calls,aborted,state:row.closest('.module-item').querySelector('[data-provider-timing-state]').textContent,hidden:row.closest('.module-item').querySelector('.module-editor').hidden})})()`);
+const provider=await evaluate(`(async()=>{let aborted=0,calls=0;const realApi=api;api=async(_path,options)=>{if(_path!=='/api/scroll-timing/weather')return realApi(_path,options);calls++;const payload=JSON.parse(options.body),digest=await timingSettingsDigest('weather',payload);await new Promise((resolve,reject)=>{const timer=setTimeout(resolve,30);options.signal.addEventListener('abort',()=>{aborted++;clearTimeout(timer);reject(new DOMException('Aborted','AbortError'))},{once:true})});return {status:'fresh',milliseconds:5000,frames_per_loop:100,loops:1,settings_digest:digest,settings_correlation:payload.settings_correlation}};const row=document.querySelector('.module-row[data-module="weather"]'),edit=row.querySelector('.module-actions button:last-child');edit.click();setTimeout(()=>{document.querySelector('#weather-location').value='NEW DRAFT'},5);await new Promise(r=>setTimeout(r,420));return JSON.stringify({calls,aborted,state:row.closest('.module-item').querySelector('[data-provider-timing-state]').textContent,hidden:row.closest('.module-item').querySelector('.module-editor').hidden})})()`);
 const providerResult=JSON.parse(provider);if(providerResult.calls!==2||providerResult.hidden||!providerResult.state.includes('5.5 s'))throw Error('provider lifecycle mismatch: '+provider);
 const announcementOrder=await evaluate(`(async()=>{const pending=[];api=(_path,options)=>new Promise(resolve=>pending.push({resolve,body:options.body}));const first=loadAnnouncementTiming();announcements.push({id:'newer'});const second=loadAnnouncementTiming();pending[1].resolve({status:'fresh',milliseconds:2000,refresh_at:new Date(Date.now()+60000).toISOString()});await second;pending[0].resolve({status:'fresh',milliseconds:1000,refresh_at:new Date(Date.now()+60000).toISOString()});await first;return announcementTimingPlan.milliseconds})()`);if(announcementOrder!==2000)throw Error('announcement timing regressed to older draft: '+announcementOrder);
 await evaluate(`(()=>{const input=[...document.querySelectorAll('.custom-module-card')].at(-1).querySelector('[data-field="text"]');input.value='PRESERVED DRAFT';input.dispatchEvent(new Event('input',{bubbles:true}));input.focus();return true})()`);
@@ -10668,6 +10679,8 @@ try{
  if(fallback.readOnly||fallback.physical!=='Physical time · 00:00:06'||fallback.loopsAfter!==fallback.loopsBefore||fallback.delayAfter!==fallback.delayBefore)throw Error('unresolved duration fallback mismatch: '+JSON.stringify(fallback));
  await evaluate(`(()=>{const button=document.querySelector('.module-row[data-module="weather"] .module-actions button:last-child');button.scrollIntoView({block:'center',behavior:'instant'});button.click();return true})()`);
  await waitFor(`!document.querySelector('.module-row[data-module="weather"]').closest('.module-item').querySelector('.module-editor').hidden`);
+ // The editor opens at once; provider timing then resolves in place and adjusts delay only.
+ await waitFor(`document.querySelector('.module-row[data-module="weather"] .physical-time').textContent.endsWith(' s')`);
  const resolvedFallback=await evaluate(`(()=>{const row=document.querySelector('.module-row[data-module="weather"]'),editor=row.closest('.module-item').querySelector('.module-editor');return {loops:Number(editor.querySelector('[data-setting="scroll_loops"]').value),delay:Number(editor.querySelector('[data-setting="scroll_speed"]').value),duration:Number(row.querySelector('.duration').value),physical:row.querySelector('.physical-time').textContent}})()`);
  if(resolvedFallback.loops!==fallback.loopsBefore||resolvedFallback.delay===fallback.delayBefore||!resolvedFallback.physical.endsWith(' s'))throw Error('resolved duration did not adjust delay only: '+JSON.stringify({fallback,resolvedFallback}));
  let timingRect=await evaluate(`(()=>{const e=document.querySelector('.module-row[data-module="weather"] .duration');e.scrollIntoView({block:'center'});const r=e.getBoundingClientRect();return {x:r.left+r.width/2,y:r.top+r.height/2}})()`);
@@ -11011,7 +11024,7 @@ console.log('PLAYLIST_TIMING_DOM_PASS');
         self.assertIn("duration.step=.01", body)
         self.assertNotIn("duration.step=1", body)
         self.assertIn("announcementStaticTimingFields=[{label:'Display duration (seconds)',path:'timing.duration_seconds',type:'number',min:1,max:3600,step:.01}]", body)
-        self.assertEqual(body.count("label:'Frame delay (seconds)',type:'number',min:.01,max:1,step:.000001"), 3)
+        self.assertEqual(body.count("label:'Scroll step time (seconds; smaller is faster)',type:'number',min:.01,max:1,step:.000001"), 3)
         self.assertIn("if(field==='speed'){control.min=.01;control.max=1;control.step=.000001}", body)
 
     @unittest.skipUnless(shutil.which("node"), "Node.js is required")
@@ -11044,6 +11057,7 @@ const container={querySelector(selector){return selector==='[data-provider-timin
 const controls={
   '#weather-location':{value:builtInSettings.weather.location},
   '#weather-latitude':{value:'1e-7'},'#weather-longitude':{value:'-1e-7'},
+  '#weather-timezone':{value:builtInSettings.weather.timezone},
   '#weather-units':{value:builtInSettings.weather.units},
 };
 global.document={activeElement:null,querySelector(selector){return controls[selector]||null}};
@@ -11200,8 +11214,8 @@ timingSettingsDigest('weather',payload).then(value=>console.log(value)).catch(er
         self.pair_browser()
         body = self.client.get("/").get_data(as_text=True)
 
-        self.assertEqual(body.count("field:'scroll_speed',label:'Frame delay (seconds)',type:'number',min:.01,max:1,step:.000001"), 3)
-        self.assertEqual(body.count("field:'scroll_loops',label:'Scroll loops',type:'number'"), 3)
+        self.assertEqual(body.count("field:'scroll_speed',label:'Scroll step time (seconds; smaller is faster)',type:'number',min:.01,max:1,step:.000001"), 3)
+        self.assertEqual(body.count("field:'scroll_loops',label:'Times to scroll',type:'number'"), 3)
         self.assertNotIn("label:'Tick speed'", body)
         self.assertNotIn("label:'Ticker loops'", body)
 
@@ -11210,7 +11224,8 @@ timingSettingsDigest('weather',payload).then(value=>console.log(value)).catch(er
         self.pair_browser()
         body = self.client.get("/").get_data(as_text=True)
         helper_start = body.index("function withSharedWeatherLocation(settings)")
-        helper_end = body.index("\nasync function saveConfig", helper_start)
+        # Extract the serializer functions, not unrelated editor DOM startup.
+        helper_end = body.index("\n", body.index("function configBody(", helper_start))
         harness = body[helper_start:helper_end] + r"""
 const values={
   '#max-paired-devices':'5','#day-brightness':'50','#night-brightness':'25',
@@ -12717,6 +12732,28 @@ process.stdout.write(JSON.stringify({
         candidate = copy.deepcopy(config_store.DEFAULT_CONFIG)
         candidate.pop("revision")
         candidate.pop("schema_version")
+        # Non-default settings must survive serialization, even at the limit.
+        candidate["event_countdown"]["layout"] = "icon"
+        candidate["astronomy"]["event_limit"] = 6
+        candidate["rss"]["count"] = 4
+        # RSS editor defaults are individually reconstructible at the budget.
+        # Exercise meaningful values so boundary cases cannot omit those fields.
+        candidate["rss"].update(
+            disabled_feeds=candidate["rss"]["feeds"][:1], layout="text",
+            headline_colour="#12ab34", summary_colour="#abcdef",
+            background_colour="#010203",
+        )
+        # Astronomy role colours equal to text_colour are reconstructible too.
+        candidate["astronomy"].update(
+            title_colour="#fedcba", date_colour="#123456", description_colour="#654321",
+        )
+        # Calendar pack fields equal to defaults are reconstructible; use real values.
+        candidate["event_countdown"]["packs"]["christian"] = True
+        candidate["event_countdown"]["holiday_dates"] = {"christian.easter": {"2027": "2027-03-29"}}
+        candidate["event_countdown"]["hidden_holidays"] = ["general.halloween"]
+        # Newer reconstructible calendar/RSS defaults: nondefault so compaction keeps them.
+        candidate["event_countdown"].update(title_align="left", progress_style="stripes")
+        candidate["rss"]["headline_mode"] = "once"
         bitmap = base64.b64encode(bytes(64 * 32 * 4)).decode("ascii")
         pixels = [
             {
@@ -12823,9 +12860,9 @@ process.stdout.write(JSON.stringify({
             # A full Save omits the two server-owned fields. Their canonical compact
             # representation adds 32 bytes, while Python's canonical persistence
             # retains bounded integral floats that JSON.stringify emits as
-            # integers. The two v4 media playlist layouts add two more such
-            # values, so 1,048,534 is the largest valid browser Save body.
-            maximum = self._pixel_payload_config(bitmap_layers, 1_048_534)
+            # integers. RSS thumbnail_speed and Astronomy's two coordinates
+            # add integral floats; 1,048,528 is this fixture's lossless maximum.
+            maximum = self._pixel_payload_config(bitmap_layers, 1_048_528)
             full = copy.deepcopy(maximum)
             full.update({"revision": 0, "schema_version": config_store.CURRENT_CONFIG_SCHEMA_VERSION})
             validated = config_store.validate_config(
@@ -12834,8 +12871,9 @@ process.stdout.write(JSON.stringify({
             )
             canonical_size = len(config_store._serialize_config(validated))
             self.assertEqual(canonical_size, 1_048_576)
+            self.assertEqual(json.loads(config_store._serialize_config(validated)), validated)
             maxima[str(bitmap_layers)] = {
-                "request": 1_048_534,
+                "request": 1_048_528,
                 "canonical": canonical_size,
             }
             cases.append({"label": f"save-max-{bitmap_layers}", "payload": maximum, "ok": True})
@@ -12906,13 +12944,13 @@ process.stdout.write(JSON.stringify(observations));
         for observed in observations:
             item = expected[observed["label"]]
             suffix = observed["label"].rsplit("-", 1)[-1]
-            target = 1_048_534 if observed["label"].startswith("save-max-") else int(suffix)
+            target = 1_048_528 if observed["label"].startswith("save-max-") else int(suffix)
             self.assertEqual(observed["bytes"], target, observed["label"])
             self.assertEqual(observed["admitted"], item["ok"], observed)
             self.assertEqual(observed["code"], None if item["ok"] else "MATRIX_REQUEST_TOO_LARGE")
         self.assertEqual(maxima, {
-            "1": {"request": 1_048_534, "canonical": 1_048_576},
-            "64": {"request": 1_048_534, "canonical": 1_048_576},
+            "1": {"request": 1_048_528, "canonical": 1_048_576},
+            "64": {"request": 1_048_528, "canonical": 1_048_576},
         })
 
     @unittest.skipUnless(shutil.which("node"), "Node.js is required")
@@ -14259,7 +14297,10 @@ console.log('TERMINAL_MEDIA_PREVIEW_PASS');
         self.assertIn("rerenderAnnouncementEditorsWithFocus(announcement,'transition.type')", body)
 
     @unittest.skipUnless(shutil.which("node"), "Node.js is required")
-    def test_announcement_client_validation_allows_backend_valid_media_fallback(self):
+    def test_announcement_client_validation_refuses_picture_layout_without_media(self):
+        # Owner 5002 NOT OK 2026-10-14 supersedes eacc2a5: the editor refuses to save a picture
+        # layout with no media. The backend still accepts it (old saves load; panel shows
+        # "Media unavailable"), so this is an editor rule only; text_notice without media is fine.
         source = (Path(__file__).parents[1] / "app" / "templates" / "dashboard.html").read_text()
         start = source.index("function validateAnnouncement(announcement)")
         end = source.index("\nfunction applyAnnouncementValidation", start)
@@ -14268,7 +14309,7 @@ console.log('TERMINAL_MEDIA_PREVIEW_PASS');
         announcement["schedule"]["days"] = list(range(7))
         announcement["layout"] = "image_banner"
         announcement["media"] = None
-        harness = function_source + "\nconst errors=validateAnnouncement(" + json.dumps(announcement) + ");if(errors.media)throw new Error(errors.media);console.log('MEDIA_FALLBACK_VALIDATION_PASS');"
+        harness = function_source + "\nconst a=" + json.dumps(announcement) + ";const errors=validateAnnouncement(a);if(!errors.media||!/text notice/.test(errors.media))throw new Error('picture layout without media accepted');a.layout='text_notice';if(validateAnnouncement(a).media)throw new Error('text notice without media refused');a.layout='image_banner';a.media='picture.png';if(validateAnnouncement(a).media)throw new Error('picture layout with media refused');console.log('MEDIA_FALLBACK_VALIDATION_PASS');"
         node = shutil.which("node")
         assert node is not None
         result = subprocess.run(
@@ -14324,7 +14365,9 @@ console.log('TERMINAL_MEDIA_PREVIEW_PASS');
         self.assertIn("control.setAttribute('aria-describedby',status.id)", body)
         self.assertIn("validateAnnouncementBoard()", body)
         self.assertIn("if(typeof validateAnnouncementBoard==='function'&&!validateAnnouncementBoard({focusFirst:true}))", body)
-        self.assertIn("return {saved:false,warning:'Fix the highlighted announcement fields before saving.'}", body)
+        self.assertIn("'Fix the highlighted announcement fields before saving.';setMessage(warning,true);return {saved:false,warning}}", body)
+        # Owner 5002 NOT OK 2026-10-14: picture layout with no media cannot be saved.
+        self.assertIn("if(announcement.layout!=='text_notice'&&!announcement.media)errors.media=", body)
         self.assertLess(
             body.index("if(typeof validateAnnouncementBoard==='function'&&!validateAnnouncementBoard({focusFirst:true}))"),
             body.index("await api('/api/config'"),
@@ -14764,10 +14807,10 @@ console.log('ANNOUNCEMENT_HEADING_SYNC_PASS');
         ):
             self.assertIn(f"field:'{field}'", body)
         self.assertIn("{name:'Separator'", body)
-        self.assertIn("{name:'Ticker'", body)
-        self.assertIn("field:'temperature_y',label:'Temperature height',type:'number',min:0,max:31", body)
-        self.assertIn("field:'ticker_y',label:'Ticker height',type:'number',min:0,max:31", body)
-        self.assertIn("field:'now_x',label:'NOW horizontal position',type:'number',min:-63,max:63", body)
+        self.assertIn("{name:'Scrolling text'", body)
+        self.assertIn("field:'temperature_y',label:'Temperature up/down position',type:'number',min:0,max:31", body)
+        self.assertIn("field:'ticker_y',label:'Scrolling text up/down position',type:'number',min:0,max:31", body)
+        self.assertIn("field:'now_x',label:'NOW left/right position',type:'number',min:-63,max:63", body)
 
     def test_dashboard_groups_built_in_and_saved_custom_lava_palettes(self):
         self.store.update({"lava": {
@@ -14935,7 +14978,7 @@ console.log('EDITED_MODULE_EDIT_PREVIEW_SELECTION_PASS');
         source = (Path(__file__).parents[1] / "app" / "templates" / "dashboard.html").read_text()
         select_start = source.index("function selectEditPreviewModule")
         select_end = source.index("\nfunction cyclePreview", select_start)
-        toggle_start = source.index("async function toggleModuleEditor")
+        toggle_start = source.index("function editorToggleButton")
         toggle_end = source.index("\nfunction updatePaletteGroupCounts", toggle_start)
         function_source = source[select_start:select_end] + "\n" + source[toggle_start:toggle_end]
         harness = r"""
@@ -14947,9 +14990,9 @@ function moduleButton(module,hasEditor=true){
  const editor=hasEditor?{hidden:true}:null;
  if(editor)editors.set(module,editor);
  const item={isConnected:true,querySelector(selector){if(selector!=='.module-editor')throw new Error('unexpected editor selector');return editor;}};
- return {textContent:'Edit',disabled:false,closest(selector){if(selector!=='.module-item')throw new Error('unexpected closest selector');return item;}};
+ return {textContent:'Edit',disabled:false,setAttribute(){},closest(selector){if(selector!=='.module-item')throw new Error('unexpected closest selector');return item;}};
 }
-global.document={querySelector(selector){
+global.document={querySelectorAll(){return [];},querySelector(selector){
  if(selector==='#preview-select')return select;
  if(selector==='#custom-module-builder')return {scrollIntoView(){scrolled++}};
  if(selector.startsWith('#')&&selector.endsWith('-slot-editor'))return editors.get(selector.slice(1,-12));
@@ -14958,6 +15001,7 @@ global.document={querySelector(selector){
 global.scheduleEditPreview=delay=>previewSchedules.push(delay);
 global.automaticWeatherModules=new Set();
 global.providerTimingRequests=new Map();
+global.requestAnimationFrame=()=>0;
 """ + function_source + r"""
 for(const module of ['clock_lava','weather']){
  const button=moduleButton(module);
@@ -22222,6 +22266,7 @@ atexit.register = lambda callback, *args, **kwargs: registered.append(callback) 
 
 # Importing the reusable factory is not a process-entrypoint side effect.
 import webapp
+from config_store import ConfigStore
 real_create_app = webapp.create_app
 
 class Passive:
@@ -22333,7 +22378,7 @@ with tempfile.TemporaryDirectory() as temp:
     def tracked_create_app(*args, **kwargs):
         create_calls.append((args, kwargs))
         return real_create_app(
-            FakeController(), Passive(), FakePairing(), secret_key="test",
+            FakeController(), ConfigStore(runtime_data / "config.json"), FakePairing(), secret_key="test",
             session_generation="wsgi-test", media_dir=temp / "media",
             location_search=lambda query: [], device_store=FakeDeviceStore(),
             openweather_secrets=Passive(),

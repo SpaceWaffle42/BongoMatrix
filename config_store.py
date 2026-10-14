@@ -20,10 +20,21 @@ import threading
 from decimal import Decimal
 from pathlib import Path
 from time import monotonic, sleep
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from PIL import Image, ImageSequence
 
 from module_options import LAVA_PALETTES
+from event_countdown_config import (
+    DEFAULTS as COUNTDOWN_DEFAULTS, PROJECTED_FIELDS as COUNTDOWN_PROJECTED_FIELDS,
+    project as project_countdown, project_event_now, validate as validate_countdown,
+)
+from rss_config import DEFAULTS as RSS_DEFAULTS, validate as validate_rss
+from astronomy_config import (
+    DEFAULTS as ASTRONOMY_DEFAULTS, PROJECTED_FIELDS as ASTRONOMY_PROJECTED_FIELDS,
+    ROLE_COLOURS as ASTRONOMY_ROLE_COLOURS, project_role_colours as project_astronomy_role_colours,
+    validate as validate_astronomy,
+)
 from font_catalog import available_font_names, text_width
 from modules.scroll_timing import duration_milliseconds, scroll_frames
 from media_resolver import candidate_media_references
@@ -46,7 +57,7 @@ class ConfigConflictError(ValueError):
 
 ALLOWED_MODULES = {
     "clock_lava", "weather", "openweather_overview", "openweather_forecast",
-    "announcement_board", "splash", "sleep",
+    "announcement_board", "event_countdown", "rss", "astronomy", "splash", "sleep",
 }
 MEDIA_PLAYLIST_MODULES = {"splash", "sleep"}
 PLAYLIST_LIMIT = 256
@@ -63,8 +74,52 @@ BASIC_BORDER_STYLES = ("none", "solid", "inset", "dotted", "dashed", "double")
 BASIC_ANIMATED_MEDIA_SUFFIXES = frozenset({".gif", ".mp4"})
 BASIC_MEDIA_SUFFIXES = BASIC_ANIMATED_MEDIA_SUFFIXES | {".png", ".jpg", ".jpeg", ".webp"}
 
+RSS_PROJECTED_FIELDS = ("disabled_feeds", "layout", "headline_colour", "summary_colour", "background_colour")
+
 def _serialize_config(config):
-    return json.dumps(config, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    data = json.dumps(config, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    compact = dict(config)
+    for key, defaults in (("event_countdown", COUNTDOWN_DEFAULTS), ("rss", RSS_DEFAULTS), ("astronomy", ASTRONOMY_DEFAULTS)):
+        if len(data) > CONFIG_SNAPSHOT_LIMIT and config.get(key) == defaults:
+            # Only unused defaults can be reconstructed losslessly on read.
+            compact.pop(key, None)
+            data = json.dumps(compact, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    if len(data) > CONFIG_SNAPSHOT_LIMIT and isinstance(compact.get("rss"), dict):
+        # These additive fields are reconstructed even when the RSS object is
+        # nondefault. Retain the object itself: absence also controls legacy row
+        # introduction, whereas field omission must never change the playlist.
+        compact["rss"] = dict(compact["rss"])
+        for key in RSS_PROJECTED_FIELDS:
+            if compact["rss"].get(key) == RSS_DEFAULTS[key]:
+                compact["rss"].pop(key, None)
+        data = json.dumps(compact, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    if (
+        len(data) > CONFIG_SNAPSHOT_LIMIT
+        and isinstance(compact.get("weather"), dict)
+        and compact["weather"].get("timezone") == _projected_weather_timezone(compact["weather"])
+    ):
+        # Lossless: read projection reconstructs exactly this value.
+        compact["weather"] = dict(compact["weather"])
+        compact["weather"].pop("timezone", None)
+        data = json.dumps(compact, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    if len(data) > CONFIG_SNAPSHOT_LIMIT and isinstance(compact.get("event_countdown"), dict):
+        # Lossless: read projection refills default pack fields.
+        compact["event_countdown"] = dict(compact["event_countdown"])
+        for key in COUNTDOWN_PROJECTED_FIELDS:
+            if compact["event_countdown"].get(key) == COUNTDOWN_DEFAULTS[key]:
+                compact["event_countdown"].pop(key, None)
+        data = json.dumps(compact, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    if len(data) > CONFIG_SNAPSHOT_LIMIT and isinstance(compact.get("astronomy"), dict):
+        compact["astronomy"] = dict(compact["astronomy"])
+        for key in ASTRONOMY_PROJECTED_FIELDS:
+            if compact["astronomy"].get(key) == ASTRONOMY_DEFAULTS[key]:
+                compact["astronomy"].pop(key, None)
+        for key in ASTRONOMY_ROLE_COLOURS:
+            # Lossless: read projection refills a missing role colour from text_colour.
+            if "text_colour" in compact["astronomy"] and compact["astronomy"].get(key) == compact["astronomy"]["text_colour"]:
+                compact["astronomy"].pop(key, None)
+        data = json.dumps(compact, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    return data
 
 
 def scrolling_text_duration(module, matrix_width=64):
@@ -122,6 +177,9 @@ DEFAULT_CONFIG = {
         "location": "London, England, GB",
         "latitude": 51.5074,
         "longitude": -0.1278,
+        # IANA zone of the chosen location (from search); "" when unknown.
+        # Astronomy follows it unless the user picks its own timezone.
+        "timezone": "Europe/London",
         "units": "celsius",
         "temperature_y": 17,
         "ticker_y": 31,
@@ -198,6 +256,9 @@ DEFAULT_CONFIG = {
         "splash": {"x": 0, "y": 0, "width": 64, "height": 32, "keep_aspect": True, "video_fps": 20, "playback_speed_percent": 100.0},
         "sleep": {"x": 0, "y": 0, "width": 64, "height": 32, "keep_aspect": True, "video_fps": 20, "playback_speed_percent": 100.0},
     },
+    "event_countdown": copy.deepcopy(COUNTDOWN_DEFAULTS),
+    "rss": copy.deepcopy(RSS_DEFAULTS),
+    "astronomy": copy.deepcopy(ASTRONOMY_DEFAULTS),
     "announcement_board": {"announcements": []},
     "custom_modules": [],
     "playlist": [
@@ -228,6 +289,9 @@ DEFAULT_CONFIG = {
                 "playback_speed_percent": 100.0,
             },
         },
+        {"module": "event_countdown", "duration": 15, "enabled": False},
+        {"module": "rss", "duration": 15, "enabled": False},
+        {"module": "astronomy", "duration": 15, "enabled": False},
     ],
 }
 
@@ -250,6 +314,12 @@ def _validate_time(value):
         raise ValueError(f"Invalid time: {value!r}")
 
 
+#: Maps whose keys are data (ids), not schema. Their contents are validated by
+#: the owning module validator (e.g. event_countdown_config.validate checks
+#: holiday ids, years and dates), so key-shape checks stop at the map itself.
+_OPEN_MAP_PATHS = frozenset({"event_countdown.holiday_dates."})
+
+
 def _validate_update_keys(changes, schema, prefix=""):
     for key, value in changes.items():
         if key not in schema:
@@ -257,6 +327,8 @@ def _validate_update_keys(changes, schema, prefix=""):
         if isinstance(value, dict):
             if not isinstance(schema[key], dict):
                 raise ValueError(f"{prefix}{key} must not be an object")
+            if f"{prefix}{key}." in _OPEN_MAP_PATHS:
+                continue
             _validate_update_keys(value, schema[key], f"{prefix}{key}.")
 
 
@@ -810,6 +882,9 @@ def validate_config(
     if isinstance(revision, bool) or not isinstance(revision, int) or revision < 0:
         raise ValueError("revision must be a nonnegative integer")
 
+    validate_countdown(config.get("event_countdown", COUNTDOWN_DEFAULTS))
+    validate_rss(config.get("rss", RSS_DEFAULTS))
+    validate_astronomy(config.get("astronomy", ASTRONOMY_DEFAULTS))
     name = config["device"]["name"]
     if not isinstance(name, str) or not name.strip() or len(name.strip()) > 40:
         raise ValueError("device name must be 1-40 characters")
@@ -848,6 +923,7 @@ def validate_config(
             raise ValueError("weather latitude must be between -90 and 90")
         if isinstance(longitude, bool) or not isinstance(longitude, (int, float)) or not -180 <= longitude <= 180:
             raise ValueError("weather longitude must be between -180 and 180")
+    _validate_weather_timezone(config["weather"]["timezone"])
     if config["weather"]["scroll_direction"] not in {"left", "right"}:
         raise ValueError("weather scroll direction must be left or right")
     _validate_frame_delay(config["weather"]["scroll_speed"], "weather")
@@ -1411,6 +1487,55 @@ def _validate_client_contract(client_contract):
         raise ValueError("client contract is invalid")
 
 
+def _validate_weather_timezone(zone):
+    if not isinstance(zone, str) or len(zone) > 100:
+        raise ValueError("weather timezone must be an IANA timezone name")
+    if zone:
+        try:
+            ZoneInfo(zone)
+        except (ValueError, ZoneInfoNotFoundError) as exc:
+            raise ValueError("weather timezone must be an IANA timezone name") from exc
+
+
+def _projected_weather_timezone(weather):
+    """Zone for saves made before weather.timezone existed.
+
+    Only the untouched default London coordinates imply a zone; any other
+    place stays unknown ("") until it is chosen again from search.
+    """
+    default = DEFAULT_CONFIG["weather"]
+    if (weather.get("latitude"), weather.get("longitude")) == (default["latitude"], default["longitude"]):
+        return default["timezone"]
+    return ""
+
+
+def weather_with_timezone(previous, changes):
+    """Weather after ``changes``; a move without an explicit zone drops the stale one.
+
+    Clients loaded before weather.timezone existed send coordinates only, so the
+    old zone must not silently follow the new place.
+    """
+    weather = _merge(previous, changes)
+    if "timezone" not in changes and any(
+        key in changes and changes[key] != previous.get(key) for key in ("latitude", "longitude")
+    ):
+        weather["timezone"] = _projected_weather_timezone(weather)
+    return weather
+
+
+def _project_incoming_countdown_now(changes):
+    """Convert now_minutes sent by an editor page from an older build (x60).
+
+    Shared by ConfigStore.update and validate_candidate (save, edit preview and
+    device preview), so every web entry point accepts the same drafts.
+    """
+    countdown = changes.get("event_countdown")
+    if not (isinstance(countdown, dict) and isinstance(countdown.get("events"), list)):
+        return changes
+    events = [project_event_now(copy.deepcopy(item)) for item in countdown["events"]]
+    return {**changes, "event_countdown": {**countdown, "events": events}}
+
+
 def _project_persisted_screen_rows(config):
     """Read schema-4 single-source rows without migrating the saved document.
 
@@ -1420,6 +1545,34 @@ def _project_persisted_screen_rows(config):
     """
     if config.get("schema_version") != CURRENT_CONFIG_SCHEMA_VERSION:
         return config
+    rss = config.get("rss")
+    if isinstance(rss, dict):
+        for key in RSS_PROJECTED_FIELDS:
+            rss.setdefault(key, copy.deepcopy(RSS_DEFAULTS[key]))
+    astronomy = config.get("astronomy")
+    if isinstance(astronomy, dict):
+        for key in ASTRONOMY_PROJECTED_FIELDS:
+            astronomy.setdefault(key, copy.deepcopy(ASTRONOMY_DEFAULTS[key]))
+        project_astronomy_role_colours(astronomy)
+    project_countdown(config.get("event_countdown"))
+    weather = config.get("weather")
+    if isinstance(weather, dict) and "timezone" not in weather:
+        weather["timezone"] = _projected_weather_timezone(weather)
+    missing_modules = [name for name in ("event_countdown", "rss", "astronomy") if name not in config]
+    for name in missing_modules:
+        config[name] = copy.deepcopy(DEFAULT_CONFIG[name])
+    for name in missing_modules:
+        playlist = config.get("playlist")
+        if isinstance(playlist, list) and len(playlist) < PLAYLIST_LIMIT and not any(
+            isinstance(row, dict) and row.get("module") == name for row in playlist
+        ):
+            row = {"module": name, "duration": 15, "enabled": False}
+            candidate = dict(config, playlist=[*playlist, row])
+            # Omitted defaults can also come from a current-format save. Only
+            # introduce a row when the FULL reconstruction fits; using the
+            # compact serializer here could resurrect an explicitly removed row.
+            if len(json.dumps(candidate, sort_keys=True, separators=(",", ":")).encode("utf-8")) <= CONFIG_SNAPSHOT_LIMIT:
+                playlist.append(row)
     projected = False
     playlist = config.get("playlist")
     for item in playlist if isinstance(playlist, list) else []:
@@ -1616,7 +1769,7 @@ sys.stdout.write(json.dumps(result, separators=(",", ":")))
                 for item in DEFAULT_CONFIG["playlist"]:
                     if (
                         item["module"] in {
-                            "openweather_overview", "openweather_forecast", "announcement_board",
+                            "openweather_overview", "openweather_forecast", "announcement_board", "event_countdown", "rss",
                         }
                         and item["module"] not in existing_modules
                     ):
@@ -1675,6 +1828,10 @@ sys.stdout.write(json.dumps(result, separators=(",", ":")))
             _replace_canvas_media_references(
                 current.get("custom_modules", []), available_migrations
             )
+            weather = current.get("weather")
+            if isinstance(weather, dict) and "timezone" not in weather:
+                weather["timezone"] = _projected_weather_timezone(weather)
+            project_astronomy_role_colours(current.get("astronomy"))
             migrated = _merge(DEFAULT_CONFIG, current)
             migrated["schema_version"] = CURRENT_CONFIG_SCHEMA_VERSION
             migrated["revision"] = current["revision"] + 1
@@ -2083,7 +2240,10 @@ sys.stdout.write(json.dumps(result, separators=(",", ":")))
         _validate_update_keys(changes, DEFAULT_CONFIG)
         with self._lock:
             current = self.get()
+            changes = _project_incoming_countdown_now(changes)
             candidate = _merge(current, changes)
+            if isinstance(changes.get("weather"), dict):
+                candidate["weather"] = weather_with_timezone(current["weather"], changes["weather"])
             candidate = _synchronize_media_playlist_changes(
                 candidate, changes, current, client_contract=client_contract,
             )
@@ -2163,7 +2323,10 @@ sys.stdout.write(json.dumps(result, separators=(",", ":")))
             current = self.get()
             if base_revision is not None and base_revision != current["revision"]:
                 raise ConfigConflictError(current["revision"])
+            changes = _project_incoming_countdown_now(changes)
             updated = _merge(current, changes)
+            if isinstance(changes.get("weather"), dict):
+                updated["weather"] = weather_with_timezone(current["weather"], changes["weather"])
             updated = _synchronize_media_playlist_changes(
                 updated, changes, current, client_contract=client_contract,
             )

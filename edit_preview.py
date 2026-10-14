@@ -18,6 +18,7 @@ from types import SimpleNamespace
 
 from PIL import Image
 
+import local_clock
 from frame_capture import BdfFont, FrameCapture
 
 
@@ -639,7 +640,9 @@ def lava_preview_frames(matrix, config):
     from modules import clock_lava
 
     duration = max(0.0, float(preview_duration(config, "clock_lava")))
-    state = clock_lava.prepare_lava_frame_state(matrix, config.get("lava"))
+    state = clock_lava.prepare_lava_frame_state(
+        matrix, config.get("lava"), local_zone=local_clock.weather_zone(config),
+    )
     canvas = matrix.matrix.CreateFrameCanvas()
     temp_canvas = matrix.matrix.CreateFrameCanvas()
     elapsed = 0.0
@@ -656,7 +659,9 @@ def continuous_lava_preview_frames(matrix, config, selected_palette, stop_event=
     from modules import clock_lava
 
     lava = clock_lava.selected_lava_config(config["lava"], selected_palette)
-    state = clock_lava.prepare_lava_frame_state(matrix, lava)
+    state = clock_lava.prepare_lava_frame_state(
+        matrix, lava, local_zone=local_clock.weather_zone(config),
+    )
     canvas = matrix.matrix.CreateFrameCanvas()
     temp_canvas = matrix.matrix.CreateFrameCanvas()
     while not (stop_event and stop_event.is_set()):
@@ -678,12 +683,14 @@ def _png_frame(image, delay_ms):
 
 def advanced_canvas_preview_frames(
     matrix, module_config, duration, stop_event=None, *, pinned_handles=None,
+    local_zone=None,
 ):
     """Encode the shared Advanced Canvas invocation timeline without sleeping."""
     from modules.custom_text import canvas_timeline_frames
 
     for canvas, delay in canvas_timeline_frames(
         matrix, duration, stop_event, module_config, pinned_handles=pinned_handles,
+        local_zone=local_zone,
     ):
         yield _png_frame(matrix.snapshot(canvas), round(delay * 1000, 9))
 

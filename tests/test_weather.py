@@ -90,6 +90,7 @@ class WeatherTests(unittest.TestCase):
             "label": "Brighton, England, GB",
             "latitude": 50.82,
             "longitude": -0.14,
+            "timezone": "",  # provider gave none
         }])
 
     @patch("modules.weather_app.urlopen")
