@@ -720,6 +720,8 @@ def create_app(
     rename_lock = threading.Lock()
     rename_pending = None
     rename_next_start = 0.0
+    # Wrong codes count across challenges; a new code never resets them.
+    rename_failures = []
     pairing_installation = _pairing_installation_identity(config_store, device_store)
     pairing_pin_display = _pairing_pin_display_authority(config_store, device_store)
 
@@ -2982,11 +2984,13 @@ def create_app(
     def display_name_payload():
         custom = display_name.store.get() if display_name.store is not None else None
         published = display_name.current()
+        wanted = (custom or display_name.default) + ".local"
         return {
             "name": custom or display_name.default,
             "default": display_name.default,
             "custom": custom is not None,
             "address": published,
+            "published": bool(published) and published.lower() == wanted.lower(),
             "port": port if (port := request.host.rpartition(":")[2]).isdigit() else "5000",
         }
 
@@ -3043,7 +3047,8 @@ def create_app(
             return jsonify({
                 "error": f"{name}.local is already used by another device on this network.",
             }), 409
-        with rename_lock:
+        # Lock order matches confirm (pairing authority first) to avoid deadlock.
+        with pairing_pin_display.lock, rename_lock:
             now = time.monotonic()
             pending = rename_pending
             if (
@@ -3053,6 +3058,13 @@ def create_app(
                 and controller.panel_code_current(pending["token"])
             ):
                 return jsonify({"error": "Another browser is renaming this display. Try again in two minutes."}), 409
+            rename_failures[:] = [
+                at for at in rename_failures if now - at < RENAME_LOCKOUT_SECONDS
+            ]
+            if len(rename_failures) >= RENAME_CODE_ATTEMPTS:
+                rename_next_start = max(
+                    rename_next_start, rename_failures[-RENAME_CODE_ATTEMPTS] + RENAME_LOCKOUT_SECONDS,
+                )
             if now < rename_next_start:
                 wait = max(1, int(rename_next_start - now + 0.999))
                 response = jsonify({"error": f"Wait {wait} seconds before asking for another code."})
@@ -3061,15 +3073,14 @@ def create_app(
             rename_next_start = now + RENAME_START_COOLDOWN_SECONDS
             clear_rename_locked()
             code = f"{secrets.randbelow(10_000):04d}"
-            with pairing_pin_display.lock:
-                if controller.pairing_active:
-                    return jsonify({"error": "The display is showing a pairing PIN. Try again after pairing."}), 409
-                try:
-                    token = controller.show_panel_code(
-                        RENAME_PANEL_LABEL, code, RENAME_CODE_TTL_SECONDS,
-                    )
-                except RuntimeError:
-                    return jsonify({"error": "The display could not show a code. Try again."}), 503
+            if controller.pairing_active:
+                return jsonify({"error": "The display is showing a pairing PIN. Try again after pairing."}), 409
+            try:
+                token = controller.show_panel_code(
+                    RENAME_PANEL_LABEL, code, RENAME_CODE_TTL_SECONDS,
+                )
+            except RuntimeError:
+                return jsonify({"error": "The display could not show a code. Try again."}), 503
             rename_pending = {
                 "device_id": session.get("device_id"),
                 "name": None if reset else name,
@@ -3096,7 +3107,9 @@ def create_app(
         if not isinstance(submitted, str) or not re.fullmatch(r"[0-9]{4}", submitted.strip()):
             return jsonify({"error": "Enter the 4-digit code shown on the display."}), 400
         submitted = submitted.strip()
-        with rename_lock:
+        # Same authority as pairing PIN takeover: no pairing request can take
+        # the panel between checking the code and saving the name.
+        with pairing_pin_display.lock, rename_lock:
             pending = rename_pending
             if (
                 pending is None
@@ -3108,17 +3121,26 @@ def create_app(
                     clear_rename_locked()
                 return jsonify({"error": "The code expired. Start the rename again."}), 410
             if not secrets.compare_digest(submitted, pending["code"]):
+                now = time.monotonic()
                 pending["tries"] += 1
+                rename_failures[:] = [
+                    at for at in rename_failures if now - at < RENAME_LOCKOUT_SECONDS
+                ] + [now]
                 left = RENAME_CODE_ATTEMPTS - pending["tries"]
-                if left <= 0:
+                if left <= 0 or len(rename_failures) >= RENAME_CODE_ATTEMPTS:
                     clear_rename_locked()
-                    rename_next_start = time.monotonic() + RENAME_LOCKOUT_SECONDS
-                    return jsonify({"error": "Too many wrong codes. Rename cancelled."}), 410
+                    rename_next_start = now + RENAME_LOCKOUT_SECONDS
+                    return jsonify({"error": "Too many wrong codes. Rename cancelled; try again in 5 minutes."}), 410
                 return jsonify({
                     "error": f"Wrong code. {left} {'try' if left == 1 else 'tries'} left.",
                     "attempts_left": left,
                 }), 403
             name = pending["name"]
+            if name is not None and display_name.in_use_elsewhere(name):
+                clear_rename_locked()
+                return jsonify({
+                    "error": f"{name}.local is now used by another device on this network. Pick another name.",
+                }), 409
             try:
                 if name is None:
                     display_name.store.clear()
@@ -3129,6 +3151,7 @@ def create_app(
                 clear_rename_locked()
                 return jsonify({"error": "The new name could not be saved."}), 500
             clear_rename_locked()
+            rename_failures.clear()
         try:
             controller.refresh_device_name()
         except Exception:

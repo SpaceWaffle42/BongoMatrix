@@ -373,6 +373,13 @@ def _lan_address(value):
     return str(parsed)
 
 
+def _blank_frame_png(width=64, height=32):
+    output = io.BytesIO()
+    Image.new("RGB", (width, height), "black").save(output, format="PNG")
+    output.seek(0)
+    return output
+
+
 class DisplayController:
     def __init__(
         self, matrix, config_store, ip_address_provider=None, openweather_secrets=None,
@@ -411,6 +418,8 @@ class DisplayController:
         self._pairing_page_timer = None
         self._pairing_pin = None
         self._pairing_label = "PAIR"
+        # Frames up to this revision may show a PIN/code; None while drawing one.
+        self._credential_frames_through = 0
         self._pairing_ip = None
         self._pairing_show_ip = False
         self._pairing_generation = 0
@@ -1418,8 +1427,25 @@ class DisplayController:
         }
 
     def frame_png(self):
-        """Return the exact last frame submitted to the owned physical Matrix."""
-        return self.matrix.latest_frame_png()
+        """Return the last frame submitted to the owned physical Matrix.
+
+        Pairing PINs and rename codes are only for someone at the panel, so
+        while one is shown, and for any frame published while one was being
+        drawn, browsers get a blank frame instead (1.10c review).
+        """
+        frame, revision = self.matrix.latest_frame_png()
+        with self._state_lock:
+            hidden = (
+                self._pairing_pause.is_set()
+                or self._credential_frames_through is None
+                or (
+                    isinstance(revision, int)
+                    and revision <= self._credential_frames_through
+                )
+            )
+        if hidden:
+            return _blank_frame_png(), revision
+        return frame, revision
 
     def show_panel_code(self, label, code, ttl_seconds):
         """Take over the panel with ``label`` over ``code`` (1.10c rename code).
@@ -1539,12 +1565,30 @@ class DisplayController:
             return self._draw_pairing_page_owned(show_ip, generation)
 
     def _draw_pairing_page_owned(self, show_ip, generation=None):
-        if (
-            not self._pairing_pause.is_set()
-            or generation is not None
-            and generation != self._pairing_generation
-        ):
-            return False
+        with self._state_lock:
+            if (
+                not self._pairing_pause.is_set()
+                or generation is not None
+                and generation != self._pairing_generation
+            ):
+                return False
+            self._credential_frames_through = None
+        try:
+            return self._draw_pairing_frame(show_ip)
+        finally:
+            revision = self._published_revision()
+            with self._state_lock:
+                self._credential_frames_through = revision
+
+    def _published_revision(self):
+        try:
+            revision = self.matrix.latest_frame_png()[1]
+        except Exception:
+            revision = None
+        # Unknown revisions keep every frame hidden until the next pairing ends.
+        return revision if isinstance(revision, int) else float("inf")
+
+    def _draw_pairing_frame(self, show_ip):
         self.matrix.clear()
         white = self.matrix.colour("white")
         cyan = self.matrix.colour("vapor_cyan")

@@ -470,7 +470,7 @@ class Matrix:
 
     def latest_frame_png(self):
         """Return the last frame submitted to the physical panel and its revision."""
-        return self._frame_capture.png(), self._frame_capture.revision
+        return self._frame_capture.png_with_revision()
 
     def show(self, delay=None):
         """Display the current canvas. delay=None means return immediately."""

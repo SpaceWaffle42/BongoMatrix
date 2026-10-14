@@ -1,5 +1,6 @@
 """Roadmap 1.10c: rename only at the display (PIN-paired browser + panel code)."""
 
+import io
 import shutil
 import tempfile
 import threading
@@ -295,6 +296,138 @@ class RenameFlowTests(unittest.TestCase):
         self.assertIn("RENAME?", drawn)
         self.assertIn(code, drawn)
         self.assertNotIn("PAIR", drawn)
+
+    # -- 1.10c review findings (1-10c-review.md) -------------------------
+    def frame_body(self, client=None):
+        response = (client or self.client).get("/api/display-frame")
+        self.assertEqual(response.status_code, 200)
+        return response.get_data()
+
+    def test_browsers_never_see_a_frame_with_the_rename_code(self):
+        """Finding 1: the code is only for someone at the panel."""
+        self.pair()
+        other = self.pair(self.app.test_client(), name="Kid tablet")
+        secret = b"frame-with-code"
+        self.capture.latest_frame_png.side_effect = lambda: (io.BytesIO(secret), 5)
+        self.post("/api/display-name/start", {"name": "kitchen"})
+        self.panel_code()
+        self.assertNotEqual(self.frame_body(), secret)
+        self.assertNotEqual(self.frame_body(other), secret)
+        self.post("/api/display-name/cancel")
+        self.assertNotEqual(self.frame_body(other), secret, "stale code frame stays hidden")
+        self.capture.latest_frame_png.side_effect = lambda: (io.BytesIO(b"next"), 6)
+        self.assertEqual(self.frame_body(other), b"next", "later frames are visible again")
+
+    def test_browsers_never_see_a_frame_with_the_pairing_pin(self):
+        self.pair()
+        secret = b"frame-with-pin"
+        self.capture.latest_frame_png.side_effect = lambda: (io.BytesIO(secret), 9)
+        self.controller.show_pairing_pin("654321", ttl_seconds=60)
+        self.assertNotEqual(self.frame_body(), secret)
+
+    def test_wrong_codes_count_across_new_challenges(self):
+        """Finding 2: asking for a new code never resets the failure count."""
+        self.pair()
+        clock = [1000.0]
+        with patch("webapp.time.monotonic", side_effect=lambda: clock[0]):
+            self.post("/api/display-name/start", {"name": "kitchen"})
+            code = self.panel_code()
+            wrong = "0000" if code != "0000" else "1111"
+            for _ in range(2):
+                self.assertEqual(self.post("/api/display-name/confirm", {"code": wrong}).status_code, 403)
+            self.post("/api/display-name/cancel")
+            clock[0] += 11
+            self.assertEqual(self.post("/api/display-name/start", {"name": "kitchen"}).status_code, 202)
+            code = self.panel_code()
+            wrong = "0000" if code != "0000" else "1111"
+            locked = self.post("/api/display-name/confirm", {"code": wrong})
+            self.assertEqual(locked.status_code, 410, "third failure overall locks out")
+            clock[0] += 11
+            self.assertEqual(self.post("/api/display-name/start", {"name": "kitchen"}).status_code, 429)
+            clock[0] += 300
+            self.assertEqual(self.post("/api/display-name/start", {"name": "kitchen"}).status_code, 202)
+        self.assertIsNone(self.names.get())
+
+    def test_pairing_request_cannot_interleave_with_confirm(self):
+        """Finding 3: code check and save are atomic with pairing takeover."""
+        self.pair()
+        other = self.pair(self.app.test_client(), name="Kid tablet")
+        self.pairing.issue_pin.return_value = "654321"
+        self.pairing.remaining_seconds.return_value = 60
+        self.post("/api/display-name/start", {"name": "kitchen"})
+        code = self.panel_code()
+        real_set = self.names.set
+        observed = {}
+
+        def set_while_pairing_races(name):
+            results = []
+            racer = threading.Thread(target=lambda: results.append(
+                self.post("/api/devices/pair", client=other).status_code), daemon=True)
+            racer.start()
+            racer.join(0.3)
+            observed["blocked"] = racer.is_alive()
+            observed["racer"], observed["results"] = racer, results
+            real_set(name)
+
+        with patch.object(self.names, "set", side_effect=set_while_pairing_races):
+            saved = self.post("/api/display-name/confirm", {"code": code})
+        self.assertEqual(saved.status_code, 200)
+        self.assertTrue(observed["blocked"], "pairing waits for the rename to commit")
+        observed["racer"].join(5)
+        self.assertEqual(observed["results"], [202])
+        self.assertEqual(self.controller._pairing_pin, "654321", "PIN shown after the rename")
+
+    def test_start_and_confirm_take_locks_in_the_same_order(self):
+        """No deadlock when a confirm arrives while a new code is being issued."""
+        self.pair()
+        cooldown = patch("webapp.RENAME_START_COOLDOWN_SECONDS", 0)
+        cooldown.start()
+        self.addCleanup(cooldown.stop)
+        self.post("/api/display-name/start", {"name": "kitchen"})
+        real_end = self.controller.end_panel_code
+        racers = []
+
+        def end_while_confirm_races(token):
+            racer = threading.Thread(target=lambda: self.post(
+                "/api/display-name/confirm", {"code": "0000"}), daemon=True)
+            racer.start()
+            racer.join(0.2)
+            racers.append(racer)
+            return real_end(token)
+
+        with patch.object(self.controller, "end_panel_code", side_effect=end_while_confirm_races):
+            starter = threading.Thread(target=lambda: self.post(
+                "/api/display-name/start", {"name": "kitchen"}), daemon=True)
+            starter.start()
+            starter.join(5)
+        self.assertFalse(starter.is_alive(), "start deadlocked against confirm")
+        self.assertEqual(len(racers), 1, "start replaced the pending code")
+        racers[0].join(5)
+        self.assertFalse(racers[0].is_alive(), "confirm deadlocked against start")
+
+    def test_name_taken_during_confirmation_window_is_refused(self):
+        """Finding 4: occupancy is rechecked right before saving."""
+        self.pair()
+        self.post("/api/display-name/start", {"name": "kitchen"})
+        code = self.panel_code()
+        self.avahi.taken.add("kitchen")
+        refused = self.post("/api/display-name/confirm", {"code": code})
+        self.assertEqual(refused.status_code, 409)
+        self.assertIsNone(self.names.get())
+        self.assertEqual(self.avahi.host, "matrix-7d03")
+
+    def test_publish_failure_is_not_reported_as_new_address(self):
+        """Finding 5: saved but unpublished keeps showing the verified address."""
+        self.pair()
+        self.avahi.set = lambda name: False
+        self.post("/api/display-name/start", {"name": "kitchen"})
+        saved = self.post("/api/display-name/confirm", {"code": self.panel_code()})
+        self.assertEqual(saved.status_code, 200)
+        data = saved.get_json()
+        self.assertTrue(data["saved"])
+        self.assertEqual(data["name"], "kitchen")
+        self.assertFalse(data["published"])
+        self.assertEqual(data["address"], "matrix-7d03.local")
 
     def test_unavailable_without_device_name(self):
         app = create_app(
