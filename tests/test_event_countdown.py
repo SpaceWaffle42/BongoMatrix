@@ -662,7 +662,8 @@ class CountdownTests(unittest.TestCase):
             self.assertEqual(projected['playlist'][-1], dict(module='event_countdown', duration=15, enabled=False))
             self.assertEqual(projected['playlist'][:-1], old['playlist'])
             self.assertEqual(path.read_bytes(), original)
-            self.assertEqual(projected['event_countdown']['timezone'], 'UTC')
+            # Owner 2026-10-14: a new countdown follows the Weather location's zone.
+            self.assertEqual(projected['event_countdown']['timezone'], '')
             self.assertEqual(ConfigStore(path).get(), projected)
 
     def test_saved_local_event_renders_through_server_preview(self):

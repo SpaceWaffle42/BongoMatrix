@@ -16,6 +16,8 @@ import time
 
 from PIL import Image
 
+import local_clock
+
 from media_resolver import MediaResolutionError, MediaResolver, module_media_references
 from screen_media import (
     ScreenMediaCatalog,
@@ -1579,7 +1581,7 @@ class DisplayController:
 
     @staticmethod
     def _is_active(config, now=None):
-        now = now or dt.datetime.now()
+        now = now or local_clock.local_now(config)
         current = now.time()
         start = dt.time.fromisoformat(config["display"]["active_start"])
         end = dt.time.fromisoformat(config["display"]["active_end"])
@@ -1591,7 +1593,7 @@ class DisplayController:
 
     @staticmethod
     def _seconds_until_schedule_change(config, now=None):
-        now = now or dt.datetime.now()
+        now = now or local_clock.local_now(config)
         display = config["display"]
         start = dt.time.fromisoformat(display["active_start"])
         end = dt.time.fromisoformat(display["active_end"])
@@ -2045,7 +2047,7 @@ class DisplayController:
                             break
                         duration = item["duration"]
                         if acceptance_inactive is None:
-                            schedule_now = dt.datetime.now()
+                            schedule_now = local_clock.local_now(config)
                             if self._is_active(config, schedule_now):
                                 break
                             maximum_duration = self._seconds_until_schedule_change(
@@ -2108,7 +2110,7 @@ class DisplayController:
                 with self._state_lock:
                     if self._device_draft_pending is not None:
                         break
-                schedule_now = dt.datetime.now()
+                schedule_now = local_clock.local_now(config)
                 if not self._is_active(config, schedule_now):
                     break
                 announcement_preview = self._take_announcement_preview()

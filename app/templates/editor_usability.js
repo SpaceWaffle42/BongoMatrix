@@ -1,6 +1,16 @@
 // Shared presentation only: existing serializers remain the source of draft state.
 const editorTimezones = {{ editor_timezones|tojson }};
 let editorElementSequence=0, editorActiveHelp=null;
+// Owner 2026-10-14: all time defaults from the Weather location. A blank
+// feature zone follows Weather; a chosen zone wins; unknown Weather = browser clock.
+function editorWeatherZone(){return document.querySelector('#weather-timezone')?.value||''}
+function editorEffectiveZone(zone){return zone||editorWeatherZone()||undefined}
+globalThis.editorEffectiveZone=editorEffectiveZone;
+function editorFollowWeatherLabel(select){
+  if(!select||!select.options.length||select.options[0].value!=='')return;
+  const zone=editorWeatherZone();
+  select.options[0].textContent=zone?`Same as Weather (${zone})`:'Same as Weather (unknown: choose Weather location again)';
+}
 function editorTimezoneSelect(value) {
   const select=document.createElement('select');
   const values=['', 'UTC', ...editorTimezones.filter(zone=>zone!=='UTC')];

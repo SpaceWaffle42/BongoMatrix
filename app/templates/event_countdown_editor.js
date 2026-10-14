@@ -72,7 +72,7 @@ function countdownIcon(name,scale=2) {
   return canvas;
 }
 function calendarTodayParts() {
-  try{return Object.fromEntries(new Intl.DateTimeFormat('en-CA',{timeZone:countdownSettings.timezone,year:'numeric',month:'2-digit',day:'2-digit'}).formatToParts(new Date()).map(p=>[p.type,Number(p.value)]))}
+  try{return Object.fromEntries(new Intl.DateTimeFormat('en-CA',{timeZone:editorEffectiveZone(countdownSettings.timezone),year:'numeric',month:'2-digit',day:'2-digit'}).formatToParts(new Date()).map(p=>[p.type,Number(p.value)]))}
   catch(_){const d=new Date();return {year:d.getFullYear(),month:d.getMonth()+1,day:d.getDate()}}
 }
 function holidayDatesFor(key,year) {
@@ -419,7 +419,7 @@ function countdownLocalDate(value) {
   // the browser's timezone reinterpret them; only offset-bearing values are instants.
   if(!/T.*(?:Z|[+-]\d{2}:\d{2})$/.test(value))return value.slice(0,10);
   const parts=Object.fromEntries(new Intl.DateTimeFormat('en-CA',{
-    timeZone:countdownSettings.timezone,year:'numeric',month:'2-digit',day:'2-digit'
+    timeZone:editorEffectiveZone(countdownSettings.timezone),year:'numeric',month:'2-digit',day:'2-digit'
   }).formatToParts(new Date(value)).map(part=>[part.type,part.value]));
   return `${parts.year}-${parts.month}-${parts.day}`;
 }
@@ -439,7 +439,7 @@ function renderCountdownEditor(container) {
   editorParagraph(container,'Birthdays (cake icon) show confetti on the day.').className='editor-note';
   renderHolidayPacks(container);
   const details=document.createElement('details');details.className='editor-group';const summary=document.createElement('summary');summary.textContent='How dates and the progress bar work';
-  const detailText=document.createElement('p');detailText.textContent='Dates use the time zone below (UTC by default). For all-day events, the end date is the day after the last day. If a clock change makes a time happen twice, the first one is used; times skipped by a clock change are rejected. Long titles scroll once, then stay still. The progress bar fills over the 30 days before the event (full more than 30 days out, empty at NOW). Google Calendar is not connected.';
+  const detailText=document.createElement('p');detailText.textContent='Dates use the time zone below (the Weather location’s by default). For all-day events, the end date is the day after the last day. If a clock change makes a time happen twice, the first one is used; times skipped by a clock change are rejected. Long titles scroll once, then stay still. The progress bar fills over the 30 days before the event (full more than 30 days out, empty at NOW). Google Calendar is not connected.';
   details.append(summary,detailText);editorAdvanced(details);container.append(details);
   const fields=document.createElement('div');fields.className='editor-fields';container.append(fields);
   function control(parent,obj,key,label,type='text',options=null,scope='field') {
@@ -471,7 +471,7 @@ function renderCountdownEditor(container) {
   const layout=control(fields,countdownSettings,'layout','Style','text',['large','icon','progress','tearoff','flip','ring','hero','date'],'setting');
   for(const [value,text] of [['large','Big countdown'],['icon','Icon and countdown'],['progress','Countdown with progress bar'],['tearoff','Tear-off calendar page'],['flip','Flip clock (days, hours, minutes)'],['ring','Progress ring'],['hero','Big icon with sparkles'],['date','Date card']])layout.querySelector(`option[value="${value}"]`).textContent=text;
   for(const [key,text] of [['background','Background colour'],['text_colour','Text colour'],['accent','Highlight colour']])control(fields,countdownSettings,key,text,'color',null,'setting');
-  editorAdvanced(field(control(fields,countdownSettings,'timezone','Time zone','text',null,'setting')));
+  const zoneSelect=control(fields,countdownSettings,'timezone','Time zone','text',null,'setting');editorFollowWeatherLabel(zoneSelect);editorAdvanced(field(zoneSelect));
   editorAdvanced(field(control(fields,countdownSettings,'title_font','Title font','text',installedFonts,'setting')));
   const titleAlign=control(fields,countdownSettings,'title_align','Title alignment','text',['center','left','right'],'setting');
   for(const [value,text] of [['center','Centre'],['left','Left'],['right','Right']])titleAlign.querySelector(`option[value="${value}"]`).textContent=text;
@@ -487,7 +487,7 @@ function renderCountdownEditor(container) {
   const warning=document.createElement('p');warning.dataset.countdownWarning='';warning.setAttribute('role','status');container.append(warning);renderCountdownWarning();
   const add=makeButton('Add event',()=>{
     let parts;
-    try{parts=Object.fromEntries(new Intl.DateTimeFormat('en-CA',{timeZone:countdownSettings.timezone,year:'numeric',month:'2-digit',day:'2-digit'}).formatToParts(new Date()).map(part=>[part.type,part.value]));}
+    try{parts=Object.fromEntries(new Intl.DateTimeFormat('en-CA',{timeZone:editorEffectiveZone(countdownSettings.timezone),year:'numeric',month:'2-digit',day:'2-digit'}).formatToParts(new Date()).map(part=>[part.type,part.value]));}
     catch(_){setMessage('Enter a valid Matrix event timezone before adding an event.',true);return;}
     calendarAddEvent({title:'New event',all_day:true,start:`${parts.year}-${parts.month}-${parts.day}`});
   });add.dataset.countdownAdd='';container.append(add);

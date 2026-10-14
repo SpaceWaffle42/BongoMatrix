@@ -10,6 +10,7 @@ from zoneinfo import ZoneInfo
 from PIL import Image, ImageDraw
 from edit_preview import _png_frame, CaptureMatrix
 from frame_capture import BdfFont
+import local_clock
 from font_catalog import FONT_DIR, font_key
 from holiday_calendar import pack_events
 from modules import calendar_layouts, progress_styles
@@ -79,13 +80,21 @@ def _year(value, year):
     return value.replace(year=year, day=min(value.day, calendar.monthrange(year, value.month)[1]))
 
 
+def effective_settings(config):
+    """Countdown settings with a blank zone resolved to the Weather location's."""
+    settings = config['event_countdown']
+    zone = local_clock.effective_zone(config, settings.get('timezone')) or 'UTC'
+    return settings if settings.get('timezone') == zone else {**settings, 'timezone': zone}
+
+
 def select_event(settings, *, now=None):
     """Select earliest still eligible occurrence; UTC arithmetic across DST.
 
     Naive local timestamps use the configured zone (first fold). All-day end
     dates are exclusive. Annual occurrences keep their local wall clock.
     """
-    zone = ZoneInfo(settings['timezone'])
+    # Blank = follow Weather; callers resolve it via effective_settings(config).
+    zone = ZoneInfo(settings['timezone'] or 'UTC')
     now = now or dt.datetime.now(UTC)
     if now.tzinfo is None:
         raise ValueError('now must be timezone-aware')
@@ -308,7 +317,7 @@ def render_frame(settings, selected, *, elapsed=0, initial_seconds=None, artwork
 
 
 def image_frames(config, duration=15, stop_event=None, *, realtime=False, pinned_handles=None):
-    settings = config['event_countdown']
+    settings = effective_settings(config)
     origin = utc_now()
     started = time.monotonic()
     elapsed, event_started, identity, initial = 0.0, 0.0, None, None

@@ -43,6 +43,7 @@ from config_store import (
 from font_catalog import available_font_names, font_advance_catalog
 from holiday_calendar import catalogue as holiday_dates_catalogue
 from rss_config import DEFAULTS as RSS_DEFAULTS
+import local_clock
 from modules.event_countdown import icon_catalogue as countdown_icon_catalogue
 from module_options import COLOUR_HEX, LAVA_PALETTES
 from modules.weather_app import OpenMeteoClient
@@ -439,7 +440,7 @@ def _edit_preview_iterator(
     if custom["type"] == "canvas":
         return advanced_canvas_preview_frames(
             matrix, custom, preview_duration(candidate, module_name), stop_event,
-            pinned_handles=pinned_media,
+            pinned_handles=pinned_media, local_zone=local_clock.weather_zone(candidate),
         )
     if custom["type"] == "media":
         source = custom["source"]
@@ -1865,13 +1866,21 @@ def create_app(
                             **({'settings_correlation': correlation} if correlation is not None else {})})
         if module_name == "announcement_board":
             try:
+                if "weather" in payload:
+                    # Schedules run in the Weather zone, so an unsaved Weather draft counts.
+                    if not isinstance(payload["weather"], dict):
+                        raise ValueError("Invalid weather draft")
+                    draft["weather"] = _draft_weather(draft["weather"], payload["weather"])
                 validate_config(draft, allow_legacy_announcements=False, enforce_save_bounds=True)
             except (KeyError, TypeError, ValueError):
                 return jsonify({"error": "Timing draft is invalid."}), 400
             plan = announcement_board.announcement_timing_plan(
-                draft["announcement_board"]["announcements"], now=dt.datetime.now(),
+                draft["announcement_board"]["announcements"], now=local_clock.local_now(draft),
             )
-            return jsonify({**plan, "refresh_at": plan["refresh_at"].isoformat()})
+            # The plan is naive wall time in the Weather zone; the browser may be in
+            # another zone, so send an absolute UTC instant.
+            refresh_at = local_clock.to_utc(plan["refresh_at"], local_clock.weather_zone(draft))
+            return jsonify({**plan, "refresh_at": refresh_at.isoformat().replace("+00:00", "Z")})
         if module_name != "weather" and "weather" in payload:
             if not isinstance(payload["weather"], dict):
                 return jsonify({"error": "Timing draft is invalid."}), 400

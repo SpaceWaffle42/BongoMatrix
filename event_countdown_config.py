@@ -8,7 +8,8 @@ from media_resolver import MediaResolver, MediaResolutionError
 from holiday_calendar import PACKS, HOLIDAYS, YEARS, HOLIDAY_ICONS
 
 DEFAULTS = {
-    'timezone': 'UTC', 'events': [], 'layout': 'large',
+    # '' = same as the Weather location's zone (owner 2026-10-14); a chosen zone wins.
+    'timezone': '', 'events': [], 'layout': 'large',
     'background': '#000000', 'text_colour': '#FFFFFF', 'accent': '#7170FF',
     'title_font': '5x7', 'countdown_font': 'auto', 'progress_height': 2,
     # Owner 2026-10-14: titles centred by default; left/right in Advanced.
@@ -49,8 +50,11 @@ def validate(settings):
     def integer(value, lo, hi):
         return type(value) is int and lo <= value <= hi
     require(isinstance(settings, dict) and set(settings) == set(DEFAULTS), 'invalid settings fields')
+    require(isinstance(settings['timezone'], str) and len(settings['timezone']) <= 100, 'invalid IANA timezone')
     try:
-        zone = ZoneInfo(settings['timezone'])
+        # Blank follows Weather; DST-gap checks then use UTC (no gaps) here and
+        # the effective zone at render time.
+        zone = ZoneInfo(settings['timezone'] or 'UTC')
     except (ZoneInfoNotFoundError, ValueError, TypeError) as exc:
         raise ValueError('event_countdown: invalid IANA timezone') from exc
     require(settings['layout'] in LAYOUTS, 'invalid layout')

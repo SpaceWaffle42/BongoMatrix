@@ -9,6 +9,7 @@ import time
 
 from PIL import Image
 
+import local_clock
 from modules.frame_appearance import draw_frame_border
 
 CANVAS_MEDIA_PREPARE_TIMEOUT = 5
@@ -26,14 +27,14 @@ def _fill_background(matrix, canvas, colour):
     matrix.fill(colour.red, colour.green, colour.blue, canvas=canvas)
 
 
-def _time_text(time_format):
+def _time_text(time_format, zone=None):
     patterns = {
         "24h": "%H:%M",
         "24h_seconds": "%H:%M:%S",
         "12h": "%I:%M %p",
         "12h_seconds": "%I:%M:%S %p",
     }
-    text = time.strftime(patterns[time_format])
+    text = local_clock.now_in(zone).strftime(patterns[time_format])
     return text.lstrip("0") if time_format.startswith("12h") else text
 
 
@@ -180,7 +181,7 @@ def media_frame_index(layer, frame):
     return max(0, frame - start_frame)
 
 
-def _draw_layer(matrix, canvas, layer, properties, *, media_cache=None, frame=0):
+def _draw_layer(matrix, canvas, layer, properties, *, media_cache=None, frame=0, local_zone=None):
     layer_type = layer["type"]
     if layer_type == "media":
         cache_key = (
@@ -233,7 +234,7 @@ def _draw_layer(matrix, canvas, layer, properties, *, media_cache=None, frame=0)
             text_options["rotation"] = properties["rotation"]
         matrix.draw_text(
             matrix.font(properties["font"]), round(properties["x"]), round(properties["y"]),
-            colour, _time_text(properties["format"]), **text_options,
+            colour, _time_text(properties["format"], local_zone), **text_options,
         )
     elif layer_type == "pixels":
         for x, y in _rotated(properties["points"], properties.get("rotation", 0)):
@@ -329,7 +330,7 @@ def _canvas_media_cache(matrix, stop_event, module_config, pinned_handles=None):
 
 def canvas_timeline_frames(
     matrix, duration, stop_event, module_config, *, monotonic=None,
-    pinned_handles=None,
+    pinned_handles=None, local_zone=None,
 ):
     """Yield rendered Advanced Canvas frames and deadline-clipped delays."""
     duration = max(0.0, float(duration))
@@ -359,7 +360,7 @@ def canvas_timeline_frames(
             if layer["visible"] and properties.get("present", True):
                 _draw_layer(
                     matrix, canvas, layer, properties,
-                    media_cache=media_cache, frame=frame,
+                    media_cache=media_cache, frame=frame, local_zone=local_zone,
                 )
         if stop_event is not None and stop_event.is_set() is True:
             return
@@ -372,11 +373,11 @@ def canvas_timeline_frames(
             cycle_index = (cycle_index + 1) % len(sequence)
 
 
-def _run_canvas(matrix, duration, stop_event, module_config, pinned_handles=None):
+def _run_canvas(matrix, duration, stop_event, module_config, pinned_handles=None, local_zone=None):
     rendered = False
     for canvas, delay in canvas_timeline_frames(
         matrix, duration, stop_event, module_config, monotonic=time.monotonic,
-        pinned_handles=pinned_handles,
+        pinned_handles=pinned_handles, local_zone=local_zone,
     ):
         if stop_event is not None and stop_event.is_set() is True:
             break
@@ -507,7 +508,7 @@ def run(
     if module_config["type"] == "canvas":
         return _run_canvas(
             matrix, duration, stop_event, module_config,
-            pinned_handles=pinned_handles,
+            pinned_handles=pinned_handles, local_zone=local_clock.weather_zone(config),
         )
     if module_config["type"] == "media":
         source = module_config["source"]

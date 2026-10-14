@@ -11,6 +11,7 @@ from pathlib import Path
 
 from PIL import Image
 
+import local_clock
 from font_catalog import text_width
 from modules.frame_appearance import draw_frame_border
 from modules.scroll_timing import duration_milliseconds, format_duration_seconds, scroll_frames
@@ -25,6 +26,12 @@ def _scheduled_interval(schedule):
     start_time = dt.time.fromisoformat(schedule["start_time"])
     end_time = dt.time.fromisoformat(schedule["end_time"])
     return start_date, end_date, start_time, end_time
+
+
+def local_now_provider(config, *, utc_now=None):
+    """Schedule clock: the Weather location's wall time (device clock if unknown)."""
+    zone = local_clock.weather_zone(config)
+    return lambda: local_clock.now_in(zone, utc_now=utc_now() if utc_now else None)
 
 
 def is_announcement_active(announcement, *, now):
@@ -849,11 +856,13 @@ def run_draft(
 
 
 def run(
-    matrix, config, duration, stop_event=None, now_provider=dt.datetime.now,
+    matrix, config, duration, stop_event=None, now_provider=None,
     *, pinned_handles=None,
 ):
     """Render each eligible announcement once in configured order, rechecking at start."""
     announcements = config["announcement_board"]["announcements"]
+    if now_provider is None:
+        now_provider = local_now_provider(config)
     return _run_announcements(
         matrix,
         announcements,

@@ -76,6 +76,7 @@ function astronomyWeatherChanged() {
   if(dependency===astronomyLastWeatherDependency)return;
   astronomyLastWeatherDependency=dependency;
   astronomyFollowWeatherOption(document.querySelector('[data-astronomy-setting="timezone"]'));
+  editorFollowWeatherLabel(document.querySelector('[data-countdown-setting="timezone"]'));
   astronomyChanged();
 }
 const resetBuiltInWithoutAstronomy = resetBuiltInModule;
@@ -122,10 +123,8 @@ async function calculateAstronomy() {
 }
 // The blank timezone option means "same as Weather"; label it with Weather's current zone.
 function astronomyFollowWeatherOption(select) {
-  if(!select)return;
   // Read the Weather field directly: editors render before configBody() is ready.
-  const zone=document.querySelector('#weather-timezone')?.value||'';
-  select.options[0].textContent=zone?`Same as Weather (${zone})`:'Same as Weather (unknown: choose Weather location again)';
+  editorFollowWeatherLabel(select);
 }
 function renderAstronomyEditor(container) {
   editorCloseHelp(container);container.replaceChildren();
