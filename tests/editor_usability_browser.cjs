@@ -206,6 +206,27 @@ try{
   }
   await assert(`JSON.stringify(configBody().rss)===${JSON.stringify(before)}`,'Help changed RSS settings');
  }
+ if(scenario==='announcement-media'){
+  // Owner 5002 note 2026-10-14: picture layouts greyed out with a reason until media is chosen.
+  await click('[data-module="announcement_board"] .module-actions button:last-child');
+  await waitFor(`!!document.querySelector('.module-editor[data-module-editor="announcement_board"]:not([hidden])')`);
+  await evaluate(`(()=>{const ed=document.querySelector('.module-editor[data-module-editor="announcement_board"]');if(!ed.querySelector('.announcement-card'))[...ed.querySelectorAll('button')].find(b=>b.textContent.startsWith('Add announcement')).click();return true})()`);
+  const card='.module-editor[data-module-editor="announcement_board"] .announcement-card:last-of-type';
+  await waitFor(`!!document.querySelector('${card} select[data-announcement-path="layout"]')`);
+  const state=`(()=>{const c=document.querySelector('${card}'),l=c.querySelector('select[data-announcement-path="layout"]'),h=c.querySelector('[data-announcement-layout-hint]');return {value:l.value,disabled:[...l.options].filter(o=>o.disabled).map(o=>o.value),labels:[...l.options].map(o=>o.textContent),hint:h&&!h.hidden?h.textContent:''}})()`;
+  await change(`${card} select[data-announcement-path="layout"]`,'text_notice');
+  await change(`${card} select[data-announcement-path="media"]`,'');
+  const none=await evaluate(state);
+  if(none.value!=='text_notice'||none.disabled.sort().join()!=='full_image_notice,icon_notice,image_banner'||!none.labels.some(t=>t.includes('choose media first'))||!none.hint.includes('Media Library item'))throw Error('no-media layouts not greyed with reason: '+JSON.stringify(none));
+  await assert(`!document.querySelector('${card} select[data-announcement-path="media"]').closest('label').hidden`,'media picker must stay visible for text layout so pictures can be chosen');
+  await evaluate(`(()=>{const m=document.querySelector('${card} select[data-announcement-path="media"]');m.value=m.options[1].value;m.dispatchEvent(new Event('input',{bubbles:true}));return true})()`);
+  const some=await evaluate(state);
+  if(some.disabled.length||some.hint||some.labels.some(t=>t.includes('choose media first')))throw Error('layouts still greyed with media: '+JSON.stringify(some));
+  await change(`${card} select[data-announcement-path="layout"]`,'image_banner');
+  await evaluate(`(()=>{const m=document.querySelector('${card} select[data-announcement-path="media"]');m.value='';m.dispatchEvent(new Event('input',{bubbles:true}));return true})()`);
+  const cleared=await evaluate(state);
+  if(cleared.value!=='image_banner'||!cleared.hint.includes('Media Library item'))throw Error('saved picture layout without media must keep value and explain: '+JSON.stringify(cleared));
+ }
  console.log(JSON.stringify({errors,scenario,zones}));
 }finally{socket.close()}
 })().catch(error=>{console.error(error.stack);process.exitCode=1});
