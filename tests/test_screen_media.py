@@ -1468,7 +1468,9 @@ class ScreenMediaRevisionTests(unittest.TestCase):
             def swap(self):
                 self.frames.append(self.pixel)
 
-        for screen in ("splash", "sleep"):
+        # Sleep no longer stops after one pass (it loops until wake; see
+        # test_saved_sleep_gif_loops_seamlessly_in_one_execution_until_night_ends).
+        for screen in ("splash",):
             for legacy_duration in (1, 99, 3600):
                 with self.subTest(screen=screen, legacy_duration=legacy_duration):
                     with tempfile.TemporaryDirectory() as directory:
@@ -1514,6 +1516,71 @@ class ScreenMediaRevisionTests(unittest.TestCase):
 
                         self.assertTrue(rendered)
                         self.assertEqual(matrix.frames, [0, 40, 80, 120, 160])
+
+    def test_saved_sleep_gif_loops_seamlessly_in_one_execution_until_night_ends(self):
+        """Owner 2026-10-13: Sleep froze between passes because each GIF pass was
+        a separate scheduler turn (repair, resolve, reopen, decode). It must keep
+        looping in one uninterrupted playback until wake; Splash stays one pass."""
+        from matrix_framework import Matrix
+
+        class HardwareBoundary:
+            show_gif = Matrix.show_gif
+
+            def __init__(self):
+                self.frames = []
+                self.pixel = None
+
+            def clear(self):
+                pass
+
+            def draw_image(self, image, **_kwargs):
+                self.pixel = image.convert("RGB").getpixel((0, 0))[0]
+
+            def swap(self):
+                self.frames.append(self.pixel)
+
+        reds = (0, 40, 80, 120, 160)
+        for screen in ("sleep", "splash"):
+            with self.subTest(screen=screen), tempfile.TemporaryDirectory() as directory:
+                root = Path(directory)
+                media_root = root / "media"
+                media_root.mkdir()
+                reference = f"{screen}_loop.gif"
+                frames = [Image.new("RGB", (2, 2), (red, 0, 0)) for red in reds]
+                frames[0].save(
+                    media_root / reference, format="GIF", save_all=True,
+                    append_images=frames[1:], duration=20, loop=0, optimize=False,
+                )
+                for frame in frames:
+                    frame.close()
+                store = ConfigStore(root / "config.json", media_dir=media_root)
+                config = store.get()
+                row = next(i for i in config["playlist"] if i["module"] == screen)
+                row.update(source=reference, sources=[reference], duration=1)
+                config["media"][screen] = reference
+                store._write(config)
+                matrix = HardwareBoundary()
+                controller = DisplayController(matrix, store)
+                controller._execute = Mock(wraps=controller._execute)
+                try:
+                    rendered = controller._execute_scheduled_screen(
+                        config, row, maximum_duration=0.45,
+                        entering_sleep=screen == "sleep",
+                    )
+                finally:
+                    controller._openweather_provider.shutdown()
+
+                self.assertTrue(rendered)
+                self.assertEqual(controller._execute.call_count, 1)
+                if screen == "splash":
+                    self.assertEqual(matrix.frames, list(reds))
+                    continue
+                # One 100 ms pass repeats in the same playback, frames in order.
+                self.assertGreaterEqual(len(matrix.frames), 3 * len(reds))
+                self.assertEqual(
+                    matrix.frames,
+                    [reds[i % len(reds)] for i in range(len(matrix.frames))],
+                )
 
     def test_real_schedule_deadline_truncates_gif_and_preserves_splash_choice(self):
         from matrix_framework import Matrix

@@ -11,6 +11,13 @@ def run(
         raise ValueError("sleep media capability is missing")
     filename = config.get("media", {}).get("sleep", "sleep.gif")
     settings = config.get("media_layout", {}).get("sleep")
+    if maximum_duration is not None and filename.lower().endswith((".gif", ".mp4")):
+        # Scheduled nights pass the time until wake: loop seamlessly in one
+        # playback instead of reopening the media (a visible freeze) each pass.
+        return play_media(
+            matrix, filename, maximum_duration, stop_event, settings=settings,
+            pinned_handle=pinned_handle, gif_loops=0,
+        )
     return play_media(
         matrix, filename, duration, stop_event, settings=settings,
         pinned_handle=pinned_handle, gif_loops=1,
