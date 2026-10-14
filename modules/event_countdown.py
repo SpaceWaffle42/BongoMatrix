@@ -2,6 +2,7 @@
 import datetime as dt
 import calendar
 import math
+import sys
 import time
 from functools import lru_cache
 from bisect import bisect_left, bisect_right
@@ -11,6 +12,7 @@ from edit_preview import _png_frame, CaptureMatrix
 from frame_capture import BdfFont
 from font_catalog import FONT_DIR, font_key
 from holiday_calendar import pack_events
+from modules import calendar_layouts
 
 
 UTC = dt.timezone.utc
@@ -244,6 +246,12 @@ def render_frame(settings, selected, *, elapsed=0, initial_seconds=None, artwork
     area = Image.new('RGB', (width, height), settings['background'])
     item, seconds = selected['event'], selected['seconds']
     accent = item['accent'] or settings['accent']
+    if settings['layout'] in calendar_layouts.PRESETS:
+        info = calendar_layouts.render(sys.modules[__name__], area, settings, selected, elapsed, accent, artwork)
+        if seconds <= 0 and item.get('icon') == 'birthday':
+            _confetti(area, elapsed)
+        image.paste(area, (inset['left'], inset['top']))
+        return image, info
     title_font = settings['title_font']
     title_width, title_height, _ = _measure(title_font, item['title'])
     measured_title_height = title_height
@@ -318,7 +326,7 @@ def image_frames(config, duration=15, stop_event=None, *, realtime=False, pinned
         if key != identity:
             artwork = None
             reference = selected['event'].get('artwork')
-            if settings['layout'] == 'icon' and reference:
+            if settings['layout'] in ('icon', 'ring', 'hero') and reference:
                 handle = (pinned_handles or {}).get(reference)
                 if handle is None:
                     raise ValueError('countdown artwork capability is missing')
@@ -335,7 +343,9 @@ def image_frames(config, duration=15, stop_event=None, *, realtime=False, pinned
                     artwork.thumbnail((8, 8), Image.Resampling.LANCZOS)
             identity, event_started, initial = key, elapsed, selected['seconds']
             title_width = _measure(settings['title_font'], selected['event']['title'])[0]
-            available = 64 - settings['insets']['left'] - settings['insets']['right']
+            available = calendar_layouts.title_column_width(
+                settings['layout'], 64 - settings['insets']['left'] - settings['insets']['right'],
+                32 - settings['insets']['top'] - settings['insets']['bottom'])
             pass_seconds = (title_width + 4) * .05 if title_width > available else 0.0
             deadline = max(duration, event_started + pass_seconds)
             restored = not pass_seconds

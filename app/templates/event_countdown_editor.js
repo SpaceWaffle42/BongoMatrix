@@ -468,8 +468,8 @@ function renderCountdownEditor(container) {
     wrapper.append(input);parent.append(wrapper);return input;
   }
   const field=input=>input.closest('label');
-  const layout=control(fields,countdownSettings,'layout','Style','text',['large','icon','progress'],'setting');
-  for(const [value,text] of [['large','Big countdown'],['icon','Icon and countdown'],['progress','Countdown with progress bar']])layout.querySelector(`option[value="${value}"]`).textContent=text;
+  const layout=control(fields,countdownSettings,'layout','Style','text',['large','icon','progress','tearoff','flip','ring','hero','date'],'setting');
+  for(const [value,text] of [['large','Big countdown'],['icon','Icon and countdown'],['progress','Countdown with progress bar'],['tearoff','Tear-off calendar page'],['flip','Flip clock (days, hours, minutes)'],['ring','Progress ring'],['hero','Big icon with sparkles'],['date','Date card']])layout.querySelector(`option[value="${value}"]`).textContent=text;
   for(const [key,text] of [['background','Background colour'],['text_colour','Text colour'],['accent','Highlight colour']])control(fields,countdownSettings,key,text,'color',null,'setting');
   editorAdvanced(field(control(fields,countdownSettings,'timezone','Time zone','text',null,'setting')));
   editorAdvanced(field(control(fields,countdownSettings,'title_font','Title font','text',installedFonts,'setting')));
@@ -530,7 +530,7 @@ function renderCountdownEditor(container) {
     {const end=dateEntry('end','End date (optional; the day after it finishes)',true);editorAdvanced(field(end.input),end.picker,end.error);}
     const minutes=control(card,event,'now_minutes','Show “NOW” for (minutes)','number');minutes.min=1;minutes.max=10080;editorAdvanced(field(minutes));
     const accent=control(card,event,'accent','Own highlight colour (e.g. #FF8800; blank uses the shared one)');accent.placeholder='Shared colour';editorAdvanced(field(accent));
-    const artwork=control(card,event,'artwork','Picture from media library (icon style; up to 8×8)','text',['',...basicMediaChoices()]);editorAdvanced(field(artwork));
+    const artwork=control(card,event,'artwork','Picture from media library (Icon, Progress ring and Big icon styles; up to 8×8)','text',['',...basicMediaChoices()]);editorAdvanced(field(artwork));
     artwork.options[0].textContent='Use the icon above';
     if(event.artwork&&!basicMediaChoices().includes(event.artwork)){
       const missing=document.createElement('option');missing.value=event.artwork;missing.textContent=event.artwork+' (missing)';artwork.append(missing);artwork.value=event.artwork;

@@ -20,6 +20,8 @@ DEFAULTS = {
 # Additive fields: missing on older saves, refilled from DEFAULTS on read.
 PROJECTED_FIELDS = ('packs', 'holiday_dates', 'hidden_holidays', 'title_align')
 TITLE_ALIGNS = ('center', 'left', 'right')
+# Classic three plus the decorative presets in modules/calendar_layouts.py.
+LAYOUTS = ('large', 'icon', 'progress', 'tearoff', 'flip', 'ring', 'hero', 'date')
 ICONS = ('calendar', 'birthday', 'anniversary', 'launch', 'holiday', 'opening', 'scissors', 'clock', 'book', 'plane', 'ball', 'tooth', *HOLIDAY_ICONS)
 MAX_HOLIDAY_EDITS = 400
 
@@ -48,7 +50,7 @@ def validate(settings):
         zone = ZoneInfo(settings['timezone'])
     except (ZoneInfoNotFoundError, ValueError, TypeError) as exc:
         raise ValueError('event_countdown: invalid IANA timezone') from exc
-    require(settings['layout'] in ('large', 'icon', 'progress'), 'invalid layout')
+    require(settings['layout'] in LAYOUTS, 'invalid layout')
     require(settings['title_align'] in TITLE_ALIGNS, 'title alignment must be center, left or right')
     for key in ('background', 'text_colour', 'accent'):
         require(colour(settings[key]), 'invalid colour')
