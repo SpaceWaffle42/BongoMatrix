@@ -12,7 +12,7 @@ from edit_preview import _png_frame, CaptureMatrix
 from frame_capture import BdfFont
 from font_catalog import FONT_DIR, font_key
 from holiday_calendar import pack_events
-from modules import calendar_layouts
+from modules import calendar_layouts, progress_styles
 
 
 UTC = dt.timezone.utc
@@ -294,8 +294,8 @@ def render_frame(settings, selected, *, elapsed=0, initial_seconds=None, artwork
         # More distant events remain full; NOW is empty.
         horizon = 30 * 86400
         fill = min(width, max(0, math.ceil(width * seconds / horizon)))
-        if fill:
-            draw.rectangle((0, height - bar_height, fill - 1, height - 1), fill=accent)
+        progress_styles.draw(draw, settings.get('progress_style', 'solid'), 0, height - bar_height,
+                             fill, bar_height, accent, settings['background'], elapsed)
     if seconds <= 0 and item.get('icon') == 'birthday':
         _confetti(area, elapsed)
     image.paste(area, (inset['left'], inset['top']))

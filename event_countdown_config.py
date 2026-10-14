@@ -13,13 +13,16 @@ DEFAULTS = {
     'title_font': '5x7', 'countdown_font': 'auto', 'progress_height': 2,
     # Owner 2026-10-14: titles centred by default; left/right in Advanced.
     'title_align': 'center',
+    # Owner 2026-10-14: choosable progress-bar animations; solid is the original bar.
+    'progress_style': 'solid',
     'insets': dict(top=0, right=0, bottom=0, left=0),
     # Holiday packs (all off by default), per-year date edits and hidden holidays.
     'packs': {pack: False for pack in PACKS}, 'holiday_dates': {}, 'hidden_holidays': [],
 }
 # Additive fields: missing on older saves, refilled from DEFAULTS on read.
-PROJECTED_FIELDS = ('packs', 'holiday_dates', 'hidden_holidays', 'title_align')
+PROJECTED_FIELDS = ('packs', 'holiday_dates', 'hidden_holidays', 'title_align', 'progress_style')
 TITLE_ALIGNS = ('center', 'left', 'right')
+PROGRESS_STYLES = ('solid', 'gradient', 'shimmer', 'pulse', 'stripes', 'segments', 'dots', 'rainbow')
 # Classic three plus the decorative presets in modules/calendar_layouts.py.
 LAYOUTS = ('large', 'icon', 'progress', 'tearoff', 'flip', 'ring', 'hero', 'date')
 ICONS = ('calendar', 'birthday', 'anniversary', 'launch', 'holiday', 'opening', 'scissors', 'clock', 'book', 'plane', 'ball', 'tooth', *HOLIDAY_ICONS)
@@ -52,6 +55,7 @@ def validate(settings):
         raise ValueError('event_countdown: invalid IANA timezone') from exc
     require(settings['layout'] in LAYOUTS, 'invalid layout')
     require(settings['title_align'] in TITLE_ALIGNS, 'title alignment must be center, left or right')
+    require(settings['progress_style'] in PROGRESS_STYLES, 'invalid progress bar animation')
     for key in ('background', 'text_colour', 'accent'):
         require(colour(settings[key]), 'invalid colour')
     fonts = available_font_names()

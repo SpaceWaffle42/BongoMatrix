@@ -477,6 +477,11 @@ function renderCountdownEditor(container) {
   for(const [value,text] of [['center','Centre'],['left','Left'],['right','Right']])titleAlign.querySelector(`option[value="${value}"]`).textContent=text;
   editorAdvanced(field(titleAlign));
   editorAdvanced(field(control(fields,countdownSettings,'countdown_font','Countdown font','text',['auto',...installedFonts],'setting')));
+  // Owner 2026-10-14: bar animations (Solid is one option). Shown in Simple mode with the Style.
+  const barStyle=control(fields,countdownSettings,'progress_style','Bar animation','text',['solid','gradient','shimmer','pulse','stripes','segments','dots','rainbow'],'setting');
+  for(const [value,text] of [['solid','Solid'],['gradient','Gradient'],['shimmer','Shimmer (light sweeps along)'],['pulse','Pulse (gently breathes)'],['stripes','Moving stripes'],['segments','Segments'],['dots','Dots'],['rainbow','Rainbow (colours flow)']])barStyle.querySelector(`option[value="${value}"]`).textContent=text;
+  const barStyleField=field(barStyle);barStyleField.dataset.countdownBarStyle='';
+  const syncBarStyle=()=>{barStyleField.hidden=countdownSettings.layout!=='progress'};syncBarStyle();layout.addEventListener('change',syncBarStyle);
   const bar=control(fields,countdownSettings,'progress_height','Progress bar thickness (1–4 pixels)','number',null,'setting');bar.min=1;bar.max=4;editorAdvanced(field(bar));
   for(const edge of ['top','right','bottom','left']){const input=control(fields,countdownSettings.insets,edge,'Space from '+edge+' edge (0–8 pixels)','number',null,'setting');input.min=0;input.max=8;editorAdvanced(field(input));}
   const warning=document.createElement('p');warning.dataset.countdownWarning='';warning.setAttribute('role','status');container.append(warning);renderCountdownWarning();

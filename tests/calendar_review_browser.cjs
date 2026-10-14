@@ -75,6 +75,13 @@ try{
  // Owner 2026-10-14: more (less boring) layout presets in the Style list.
  await assert(`[...document.querySelector('${ed} [data-countdown-setting="layout"]').options].map(o=>o.value).join()==='large,icon,progress,tearoff,flip,ring,hero,date'`,'new calendar styles missing');
  await assert(`!document.querySelector('${ed} [data-countdown-setting="layout"]').closest('[data-advanced]')`,'Style must stay in Simple mode');
+ // Owner 2026-10-14: progress bar animations, Solid default; only shown for the progress-bar style.
+ await change(`${ed} [data-countdown-setting="layout"]`,'progress');
+ await assert(`(()=>{const s=document.querySelector('${ed} [data-countdown-setting="progress_style"]');return !!s&&!s.closest('[data-countdown-bar-style]').hidden&&s.value==='solid'&&[...s.options].map(o=>o.value).join()==='solid,gradient,shimmer,pulse,stripes,segments,dots,rainbow'})()`,'bar animation control missing');
+ await change(`${ed} [data-countdown-setting="progress_style"]`,'shimmer');
+ await assert(`countdownSettings.progress_style==='shimmer'`,'bar animation not recorded');
+ await change(`${ed} [data-countdown-setting="layout"]`,'large');
+ await assert(`document.querySelector('${ed} [data-countdown-bar-style]').hidden`,'bar animation shown without a bar');
  // Owner 2026-10-14: the end date is entered and shown exactly like the start date.
  await assert(`(()=>{const s=document.querySelector('${c} [data-countdown-field="start"]'),e=document.querySelector('${c} [data-countdown-field="end"]'),p=document.querySelector('${c} [data-countdown-picker="end"]');return e.placeholder===s.placeholder&&e.type===s.type&&p?.type==='date'&&p.value===''})()`,'end date not formatted like start');
  await change(`${c} [data-countdown-field="end"]`,'20/03/2031');
