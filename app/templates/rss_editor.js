@@ -79,7 +79,7 @@ const rssHelpText={
   include:'Comma-separated whole words, matched without case sensitivity against headline, summary and categories. Any include word is enough. Blank includes everything. Example: science, space. Phrases and punctuation are not supported.',
   exclude:'Any matching exclude word removes a story, even if it matches Include. Matching uses whole words without case sensitivity in headline, summary and categories. Example: sport, football. Blank excludes nothing.',
   headline_mode:'Headline first: a long headline scrolls across once while the start of the summary waits, then the summary scrolls up. Together: the summary keeps looping upward while the headline scrolls across, and the story ends when the headline is back at its start.',
-  frame_delay:'Seconds between one-pixel scroll steps: 0.1 = slow, 0.05 = normal, 0.025 = fast. Smaller delay is faster. Story length and font affect the total runtime.',
+  frame_delay:'Seconds between one-pixel scroll steps. Drag the slider or type a value: 0.025 is fastest, 0.1 is slowest (0.05 = normal). Story length and font affect the total runtime.',
   layout:'Automatic shows a small site banner (for example BBC: red with BBC on it) at the start of the headline; story photos are not used. Text only hides the banner.',
   headline_font:'Installed BDF font for headlines. Inspect the 64×32 Edit Preview for clipping; exact clipping measurements are not available.',
   summary_font:'Installed BDF font for story summaries. A larger font can increase scroll duration. Inspect Edit Preview for clipping.',
@@ -94,6 +94,28 @@ function rssControl(parent,key,label,type='text',options=null){
   input.addEventListener(options?'change':'input',()=>{
     rssSettings[key]=['include','exclude'].includes(key)?input.value.split(',').map(value=>value.trim()).filter(Boolean):['count','frame_delay','thumbnail_speed'].includes(key)?Number(input.value):input.value;rssChanged();
   });wrapper.append(input);const cell=document.createElement('div');cell.className='ux-control';cell.append(wrapper);if(rssHelpText[key])editorHelp(cell,key,label,rssHelpText[key]);parent.append(cell);return input;
+}
+// Owner 2026-10-15: scroll speed is a slider (left = fastest 0.025 s, right = slowest 0.1 s)
+// with an editable number beside it; both stay in sync and save the step delay in seconds.
+const RSS_FASTEST_DELAY=.025,RSS_SLOWEST_DELAY=.1;
+function rssSpeedControl(parent){
+  const cell=document.createElement('div');cell.className='ux-control';
+  const wrapper=document.createElement('label');wrapper.textContent='Scroll speed (seconds per step; smaller is faster)';
+  const row=document.createElement('div');row.className='rss-speed-row';row.style.cssText='display:flex;align-items:center;gap:8px';
+  const fast=document.createElement('span');fast.textContent='Fast';fast.className='hint';
+  const slow=document.createElement('span');slow.textContent='Slow';slow.className='hint';
+  const slider=document.createElement('input');slider.type='range';slider.min=RSS_FASTEST_DELAY;slider.max=RSS_SLOWEST_DELAY;slider.step=.001;slider.style.flex='1';slider.style.minWidth='0';slider.setAttribute('aria-label','Scroll speed slider');
+  const number=document.createElement('input');number.type='number';number.min=RSS_FASTEST_DELAY;number.max=RSS_SLOWEST_DELAY;number.step=.001;number.dataset.rssSetting='frame_delay';number.style.width='6.5em';number.setAttribute('aria-label','Scroll speed in seconds');
+  const clamp=value=>Math.min(RSS_SLOWEST_DELAY,Math.max(RSS_FASTEST_DELAY,value));
+  const show=value=>{slider.value=clamp(value);number.value=value};
+  show(Number(rssSettings.frame_delay)||.05);
+  const apply=value=>{if(!Number.isFinite(value))return;rssSettings.frame_delay=Math.round(clamp(value)*1000)/1000;rssChanged()};
+  slider.addEventListener('input',()=>{number.value=slider.value;apply(Number(slider.value))});
+  number.addEventListener('input',()=>{const value=Number(number.value);if(number.value!==''&&Number.isFinite(value)){slider.value=clamp(value);if(value>=RSS_FASTEST_DELAY&&value<=RSS_SLOWEST_DELAY)apply(value)}});
+  number.addEventListener('change',()=>{const value=Number(number.value);const next=Number.isFinite(value)&&number.value!==''?clamp(value):Number(rssSettings.frame_delay)||.05;apply(next);show(rssSettings.frame_delay)});
+  row.append(fast,slider,slow,number);wrapper.append(row);cell.append(wrapper);
+  if(rssHelpText.frame_delay)editorHelp(cell,'frame_delay','Scroll speed',rssHelpText.frame_delay);
+  parent.append(cell);return number;
 }
 // Friendly feed title: catalogue name when known, else the site's host name.
 function rssFeedName(feed){
@@ -120,7 +142,7 @@ function renderRSSEditor(container){
   rssControl(fields,'summary_colour','Summary colour','color');
   rssControl(fields,'background_colour','Background colour','color');
   rssControl(fields,'headline_mode','Scrolling','text',[['once','Headline first, then summary'],['continuous','Summary loops while headline scrolls']]);
-  rssControl(fields,'frame_delay','Scroll speed','text',[[.1,'Slow'],[.05,'Normal'],[.025,'Fast']]);
+  rssSpeedControl(fields);
   const appearanceFields=document.createElement('div');appearanceFields.className='editor-fields';appearance.append(appearanceFields);
   const playbackFields=document.createElement('div');playbackFields.className='editor-fields';playback.append(playbackFields);
   for(const key of ['headline_font','summary_font','layout','headline_colour','summary_colour','background_colour'])appearanceFields.append(fields.querySelector(`[data-rss-setting="${key}"]`).closest('.ux-control'));
