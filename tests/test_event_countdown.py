@@ -27,6 +27,14 @@ def event(**changes):
 
 
 class CountdownTests(unittest.TestCase):
+    def setUp(self):
+        # These check layout geometry on the full panel; the 2px frame border
+        # (FRAME_MARGIN, owner 2026-10-15) is covered in test_calendar_frame_margin.
+        from modules import event_countdown as module
+        margin = patch.object(module, 'FRAME_MARGIN', 0)
+        margin.start()
+        self.addCleanup(margin.stop)
+
     def test_default_omission_roundtrips_explicit_playlist_removal(self):
         from config_store import CONFIG_SNAPSHOT_LIMIT
         encode = lambda value: json.dumps(value, sort_keys=True, separators=(',', ':')).encode()
@@ -420,7 +428,8 @@ class CountdownTests(unittest.TestCase):
             self.assertEqual(frames[-1][1], 0)
             longer = list(module.image_frames(config, pass_seconds + .2))
             self.assertAlmostEqual(sum(frame[1] for frame in longer), pass_seconds + .2)
-            self.assertTrue(all(frame[2]['title_x'] == 0 for frame in longer[-3:]))
+            # Owner 2026-10-15: overflowing titles keep scrolling (wrap) after one loop.
+            self.assertTrue(any(frame[2]['title_x'] < 0 for frame in longer[-3:]))
             stop = threading.Event()
             stream = module.preview_frames(config, .1, stop)
             next(stream)
@@ -450,8 +459,10 @@ class CountdownTests(unittest.TestCase):
              patch.object(module, 'render_frame', side_effect=render):
             module.run(SlowMatrix(), config, duration=.1)
         self.assertGreater(len(positions), 2)
-        self.assertEqual(positions[1][1], -int(positions[1][0] / .05))
-        self.assertEqual(positions[-1][1], 0)
+        loop = module._measure(module.effective_settings(config)['title_font'], 'Title ' * 3)[0] + module.SCROLL_GAP
+        self.assertEqual(positions[1][1], -(int(positions[1][0] / .05) % loop))
+        # The slot ends after whole loops, so the title is back at (or wrapping to) its start.
+        self.assertLessEqual(abs(positions[-1][1]), loop)
 
     def test_measured_bearings_auto_font_and_truthful_overflow(self):
         from modules import event_countdown as module

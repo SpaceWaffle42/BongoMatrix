@@ -247,9 +247,36 @@ def _confetti(area, elapsed):
                 area.putpixel((x, y + 1), CONFETTI[index % len(CONFETTI)])
 
 
+# Owner 2026-10-15: the panel sits in a frame that hides its outer pixels, so the
+# calendar never draws in a 2-pixel border round the whole 64x32 display. Layouts
+# fit the inner 60x28; the editor's per-edge "Space from edge" adds on top of it.
+FRAME_MARGIN = 2
+
+
+# Owner 2026-10-15: calendar text that does not fit scrolls continuously (wraps with a
+# 4-pixel gap) for as long as the event is shown, instead of one pass then resting.
+SCROLL_GAP = 4
+
+
+def scroll_x(text_width, available, elapsed):
+    if text_width <= available:
+        return 0
+    return -(int(elapsed / .05) % (text_width + SCROLL_GAP))
+
+
+def draw_scrolling(image, font, text, x, y, colour, text_width, available):
+    _text(image, font, text, x, y, colour)
+    if text_width > available:
+        _text(image, font, text, x + text_width + SCROLL_GAP, y, colour)
+
+
+def drawable_insets(settings):
+    return {edge: FRAME_MARGIN + settings['insets'][edge] for edge in ('top', 'right', 'bottom', 'left')}
+
+
 def render_frame(settings, selected, *, elapsed=0, initial_seconds=None, artwork=None):
     """Render BDF pixels once; both outputs use this exact clipped image."""
-    inset = settings['insets']
+    inset = drawable_insets(settings)
     width, height = 64 - inset['left'] - inset['right'], 32 - inset['top'] - inset['bottom']
     image = Image.new('RGB', (64, 32), settings['background'])
     area = Image.new('RGB', (width, height), settings['background'])
@@ -265,14 +292,14 @@ def render_frame(settings, selected, *, elapsed=0, initial_seconds=None, artwork
     title_width, title_height, _ = _measure(title_font, item['title'])
     measured_title_height = title_height
     title_height = min(title_height, max(1, height // 2 - 1))
-    title_x = -int(elapsed / .05) if title_width > width and elapsed < (title_width + 4) * .05 else 0
+    title_x = scroll_x(title_width, width, elapsed)
     # Titles that fit use the chosen alignment; wider titles scroll from the left and rest at 0.
     title_offset = 0
     if title_width <= width:
         align = settings.get('title_align', 'center')
         title_offset = (width - title_width) // 2 if align == 'center' else width - title_width if align == 'right' else 0
     title = Image.new('RGB', (width, title_height), settings['background'])
-    _text(title, title_font, item['title'], title_x + title_offset, 0, settings['text_colour'])
+    draw_scrolling(title, title_font, item['title'], title_x + title_offset, 0, settings['text_colour'], title_width, width)
     area.paste(title, (0, 0))
     bar_height = settings['progress_height'] if settings['layout'] == 'progress' else 0
     text_y = title_height + 2
@@ -352,9 +379,10 @@ def image_frames(config, duration=15, stop_event=None, *, realtime=False, pinned
                     artwork.thumbnail((8, 8), Image.Resampling.LANCZOS)
             identity, event_started, initial = key, elapsed, selected['seconds']
             title_width = _measure(settings['title_font'], selected['event']['title'])[0]
+            inset = drawable_insets(settings)
             available = calendar_layouts.title_column_width(
-                settings['layout'], 64 - settings['insets']['left'] - settings['insets']['right'],
-                32 - settings['insets']['top'] - settings['insets']['bottom'])
+                settings['layout'], 64 - inset['left'] - inset['right'],
+                32 - inset['top'] - inset['bottom'])
             pass_seconds = (title_width + 4) * .05 if title_width > available else 0.0
             deadline = max(duration, event_started + pass_seconds)
             restored = not pass_seconds

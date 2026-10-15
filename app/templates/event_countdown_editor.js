@@ -483,7 +483,7 @@ function renderCountdownEditor(container) {
   const barStyleField=field(barStyle);barStyleField.dataset.countdownBarStyle='';
   const syncBarStyle=()=>{barStyleField.hidden=countdownSettings.layout!=='progress'};syncBarStyle();layout.addEventListener('change',syncBarStyle);
   const bar=control(fields,countdownSettings,'progress_height','Progress bar thickness (1–4 pixels)','number',null,'setting');bar.min=1;bar.max=4;editorAdvanced(field(bar));
-  for(const edge of ['top','right','bottom','left']){const input=control(fields,countdownSettings.insets,edge,'Space from '+edge+' edge (0–8 pixels)','number',null,'setting');input.min=0;input.max=8;editorAdvanced(field(input));}
+  for(const edge of ['top','right','bottom','left']){const input=control(fields,countdownSettings.insets,edge,'Extra space from '+edge+' edge (0–8 pixels, on top of the 2-pixel frame border)','number',null,'setting');input.min=0;input.max=8;editorAdvanced(field(input));}
   const warning=document.createElement('p');warning.dataset.countdownWarning='';warning.setAttribute('role','status');container.append(warning);renderCountdownWarning();
   const add=makeButton('Add event',()=>{
     let parts;

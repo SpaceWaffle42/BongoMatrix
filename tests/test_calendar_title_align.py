@@ -6,6 +6,7 @@ import copy
 import json
 import tempfile
 import unittest
+from unittest.mock import patch
 from pathlib import Path
 
 from config_store import ConfigStore, DEFAULT_CONFIG
@@ -24,6 +25,14 @@ def title_columns(image, title_height):
 
 
 class CalendarTitleAlignTests(unittest.TestCase):
+    def setUp(self):
+        # These check layout geometry on the full panel; the 2px frame border
+        # (FRAME_MARGIN, owner 2026-10-15) is covered in test_calendar_frame_margin.
+        from modules import event_countdown as module
+        margin = patch.object(module, 'FRAME_MARGIN', 0)
+        margin.start()
+        self.addCleanup(margin.stop)
+
     def render(self, **changes):
         from modules import event_countdown as module
         settings = copy.deepcopy(DEFAULT_CONFIG['event_countdown'])
