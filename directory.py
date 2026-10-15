@@ -15,7 +15,7 @@ from __future__ import annotations
 import ipaddress
 import json
 import logging
-import random
+import secrets
 import re
 import socket
 import subprocess
@@ -35,6 +35,7 @@ PEER_FETCH_WORKERS = 8  # shared pool: the most peer-fetch threads that can ever
 PEER_FETCH_LIMIT = 32  # peers fetched per build; more announcements are ignored
 STALE_DROP_SECONDS = 600  # quiet displays are listed greyed, then dropped
 HOLD_RETRY_SECONDS = (6, 10)  # matrix.local takeover attempt interval
+_JITTER = secrets.SystemRandom()
 SUPERVISE_SECONDS = 2
 _TXT_VALUE = re.compile(r"^[A-Za-z0-9._+-]{1,63}$")
 
@@ -405,7 +406,8 @@ class Directory:
         if argv is None:
             self.holder.stop()
         elif now >= self._hold_next:
-            self._hold_next = now + random.uniform(*HOLD_RETRY_SECONDS)
+            # Jitter only (not security): SystemRandom keeps SAST free of weak-PRNG findings.
+            self._hold_next = now + _JITTER.uniform(*HOLD_RETRY_SECONDS)
             self.holder.ensure(argv)
 
     def holds_directory(self):
