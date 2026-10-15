@@ -124,6 +124,42 @@ class DisplayControllerTests(unittest.TestCase):
         for text in pages[1]:
             self.assertLessEqual(4 * len(text), 62, text)
 
+    def test_invalid_published_name_falls_back_to_pin_and_ip(self):  # review SHOULD-1
+        for name in ("kitchen display.local", "kü che.local", "x" * 64 + ".local", "-bad.local"):
+            pages, _ = self._pairing_pages(name)
+            self.assertEqual(pages[1], ["PAIR IP", "192.168.1.5", "PORT 5000"], name)
+        pages, _ = self._pairing_pages("kitchen-2.local")  # avahi clash suffix is a valid name
+        self.assertEqual(pages[1], ["PAIR AT", "kitchen-2", ".local:5000"])
+
+    def test_name_and_scroll_frames_are_hidden_from_browsers(self):  # review SHOULD-2
+        from edit_preview import CaptureMatrix
+
+        published = []
+        matrix = CaptureMatrix()
+        named = {"white": "#ffffff", "vapor_cyan": "#01cdfe", "black": "#000000"}
+        matrix.colour = lambda name: CaptureMatrix.colour_rgb(named[name])
+        matrix.latest_frame_png = lambda: (b"panel-frame", len(published))
+        matrix.swap = lambda canvas=None: published.append(1) or matrix.canvas
+        device_name = Mock()
+        device_name.current.return_value = "a-very-long-kitchen-display.local"
+        controller = DisplayController(
+            matrix, Mock(), ip_address_provider=lambda: "192.168.1.5", device_name=device_name,
+        )
+        with patch("display_controller.threading.Timer") as timer:
+            controller.show_pairing_pin("123456", ttl_seconds=60)
+            generation = controller._pairing_generation
+            controller._pairing_page_index = 0
+            controller._rotate_pairing_page(generation)  # name page
+            for _ in range(5):
+                controller._scroll_pairing_name(generation)  # scroll frames
+            self.assertGreaterEqual(len(published), 7)
+            self.assertNotEqual(controller.frame_png()[0], b"panel-frame")
+            controller.end_pairing()
+        self.assertTrue(timer.called)
+        self.assertNotEqual(controller.frame_png()[0], b"panel-frame")  # still hidden afterwards
+        published.append(1)  # first normal frame after pairing is visible again
+        self.assertEqual(controller.frame_png()[0], b"panel-frame")
+
     def test_missing_name_falls_back_to_pin_and_ip_only(self):
         pages, _ = self._pairing_pages(None)
         self.assertIn("123456", pages[0])

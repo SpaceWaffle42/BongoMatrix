@@ -434,7 +434,6 @@ class DisplayController:
         self._credential_frames_through = 0
         self._pairing_ip = None
         self._pairing_name = None
-        self._pairing_show_ip = False
         self._pairing_page_index = 0
         self._pairing_scroll_x = 2
         self._pairing_generation = 0
@@ -1541,7 +1540,6 @@ class DisplayController:
                     self._pairing_label = str(label)
                     self._pairing_ip = pairing_ip
                     self._pairing_name = self._pairing_name_label()
-                    self._pairing_show_ip = False
                     self._pairing_page_index = 0
                     self._pairing_timer = threading.Timer(
                         max(1, float(ttl_seconds)), lambda: self.end_pairing(generation)
@@ -1624,38 +1622,51 @@ class DisplayController:
         return revision if isinstance(revision, int) else float("inf")
 
     def _pairing_name_label(self):
-        """This display's mDNS host (``matrix-7d03``) if it fits the 4x6 panel line, else None."""
+        """This display's mDNS host (``matrix-7d03``), or None to keep the PIN/IP screen.
+
+        Only a valid display name (letters, digits, hyphens, at most 63) is shown;
+        anything else avahi reports falls back. Names over 15 characters scroll.
+        """
         if self._device_name is None:
             return None
         try:
+            from device_name import name_problem
+
             name = self._device_name.current()
+            host = str(name or "").removesuffix(".local")
+            # "matrix" is reserved for renames, but harmless to show; check the rest.
+            invalid = host.lower() != "matrix" and name_problem(host) is not None
         except Exception:
             return None
-        host = str(name or "").removesuffix(".local")
-        return host or None
+        return None if not host or invalid else host
 
     def _draw_pairing_frame(self, show_ip):
+        """Draw one pairing page: False = PIN/code, True = IP, "name" = network name."""
+        with self._state_lock:
+            name, scroll_x = self._pairing_name, self._pairing_scroll_x
+            pairing_ip, pin = self._pairing_ip, self._pairing_pin
+        if show_ip == "name" and not name:
+            return False  # pairing ended mid-draw; draw nothing rather than a None address
         self.matrix.clear()
         white = self.matrix.colour("white")
         cyan = self.matrix.colour("vapor_cyan")
         black = self.matrix.colour("black")
-        name = self._pairing_name
-        if show_ip == "name" and name:
+        if show_ip == "name":
             small = self.matrix.font("4x6")
             centred = lambda text: max(1, (64 - 4 * len(text)) // 2)  # noqa: E731
-            name_x = self._pairing_scroll_x if len(name) > PAIRING_NAME_MAX_CHARS else centred(name)
+            name_x = scroll_x if len(name) > PAIRING_NAME_MAX_CHARS else centred(name)
             for x, y, colour, text in (
                 (centred("PAIR AT"), 7, cyan, "PAIR AT"),
                 (name_x, 17, white, name),
                 (centred(PAIRING_NAME_SUFFIX), 27, white, PAIRING_NAME_SUFFIX),
             ):
                 self.matrix.draw_text_with_border(small, x, y, colour, black, text)
-        elif show_ip:
+        elif show_ip is True:
             self.matrix.draw_text_with_border(
                 self.matrix.font("4x6"), 18, 7, cyan, black, "PAIR IP"
             )
             self.matrix.draw_text_with_border(
-                self.matrix.font("4x6"), 8, 17, white, black, self._pairing_ip
+                self.matrix.font("4x6"), 8, 17, white, black, pairing_ip
             )
             self.matrix.draw_text_with_border(
                 self.matrix.font("4x6"), 14, 27, white, black, "PORT 5000"
@@ -1667,15 +1678,15 @@ class DisplayController:
                 cyan, black, label,
             )
             self.matrix.draw_text_with_border(
-                self.matrix.font("6x10"), max(1, (64 - 6 * len(self._pairing_pin)) // 2), 25,
-                white, black, self._pairing_pin,
+                self.matrix.font("6x10"), max(1, (64 - 6 * len(pin)) // 2), 25,
+                white, black, pin,
             )
         else:
             self.matrix.draw_text_with_border(
                 self.matrix.font("5x7"), 20, 10, cyan, black, "PAIR"
             )
             self.matrix.draw_text_with_border(
-                self.matrix.font("6x10"), 12, 25, white, black, self._pairing_pin
+                self.matrix.font("6x10"), 12, 25, white, black, pin
             )
         self.matrix.swap()
         return True
@@ -1691,7 +1702,6 @@ class DisplayController:
             pages = ("pin", "name", "pin", "ip") if self._pairing_name else ("pin", "ip")
             self._pairing_page_index = (self._pairing_page_index + 1) % len(pages)
             page = pages[self._pairing_page_index]
-            self._pairing_show_ip = page != "pin"
             show_ip = {"pin": False, "ip": True, "name": "name"}[page]
             if page == "name" and len(self._pairing_name) > PAIRING_NAME_MAX_CHARS:
                 self._pairing_scroll_x = 2
