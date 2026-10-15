@@ -126,6 +126,13 @@ def sast_baseline(findings):
     }
 
 
+def write_shard_verification(root, tests, **overrides):
+    report = {"collected": tests, "junit_cases": tests, "shards": 2,
+              "missing": [], "foreign": [], "duplicated": []}
+    report.update(overrides)
+    write_json(root / "shard-verification.json", report)
+
+
 def write_clean_reports(root):
     results = root / "test-results"
     results.mkdir()
@@ -137,6 +144,8 @@ def write_clean_reports(root):
         '<coverage line-rate="1" lines-covered="1" lines-valid="1"/>',
         encoding="utf-8",
     )
+    write_shard_verification(root, 1)
+    write_shard_verification(root, 1)
     write_json(root / "gl-code-quality-report.json", [])
     write_json(
         root / "dependency-audit.json",
@@ -163,6 +172,7 @@ class CiSummaryTests(unittest.TestCase):
                 '<coverage line-rate="0.81" lines-covered="81" lines-valid="100"/>',
                 encoding="utf-8",
             )
+            write_shard_verification(root, 3)
             write_json(root / "gl-code-quality-report.json", [])
             write_json(
                 root / "dependency-audit.json",
@@ -224,12 +234,21 @@ class CiSummaryTests(unittest.TestCase):
                 '<testsuite tests="0" failures="0" errors="0" skipped="0"/>',
                 encoding="utf-8",
             )
+            # An empty run cannot carry a valid shard proof, so it never passes.
             empty_suite = module.build_summary(root, root / "sast-baseline.json", SOURCE_COMMIT)
-            self.assertEqual("FAIL", empty_suite["overall_status"])
+            self.assertNotEqual("PASS", empty_suite["overall_status"])
             (results / "suite.xml").write_text(
                 '<testsuite tests="3" failures="0" errors="0" skipped="0"/>',
                 encoding="utf-8",
             )
+            for bad in ({"missing": ["test_x.T.test_y"]}, {"duplicated": ["test_x.T.test_y"]},
+                        {"foreign": ["test_x.T.test_y"]}, {"junit_cases": 2}, {"collected": 4}):
+                with self.subTest(shard_proof=bad):
+                    write_shard_verification(root, 3, **bad)
+                    rejected = module.build_summary(root, root / "sast-baseline.json", SOURCE_COMMIT)
+                    self.assertEqual("INCOMPLETE", rejected["overall_status"])
+                    self.assertEqual(["shard-verification.json"], rejected["invalid_reports"])
+            write_shard_verification(root, 3)
 
             write_json(
                 root / "sast-baseline.json",
@@ -253,6 +272,7 @@ class CiSummaryTests(unittest.TestCase):
                 '<coverage line-rate="0.5" lines-covered="5" lines-valid="10"/>',
                 encoding="utf-8",
             )
+            write_shard_verification(root, 2)
             write_json(root / "gl-code-quality-report.json", [code_quality_finding()])
             write_json(
                 root / "dependency-audit.json",
@@ -343,6 +363,7 @@ class CiSummaryTests(unittest.TestCase):
                 [
                     "test-results/*.xml",
                     "coverage.xml",
+                    "shard-verification.json",
                     "gl-code-quality-report.json",
                     "dependency-audit.json",
                     "gl-sast-report.json",
@@ -365,6 +386,7 @@ class CiSummaryTests(unittest.TestCase):
                 '<coverage line-rate="1" lines-covered="1" lines-valid="1"/>',
                 encoding="utf-8",
             )
+            write_shard_verification(root, 1)
             for name in (
                 "gl-code-quality-report.json",
                 "dependency-audit.json",
@@ -419,6 +441,7 @@ class CiSummaryTests(unittest.TestCase):
                 '<coverage line-rate="1" lines-covered="1" lines-valid="1"/>',
                 encoding="utf-8",
             )
+            write_shard_verification(root, 1)
             write_json(root / "gl-code-quality-report.json", [])
             write_json(
                 root / "dependency-audit.json",
@@ -839,6 +862,7 @@ class CiSummaryTests(unittest.TestCase):
                 encoding="utf-8",
             )
             (root / "coverage.xml").write_text("<coverage secret-invalid-xml", encoding="utf-8")
+            write_shard_verification(root, 1)
             write_json(root / "gl-code-quality-report.json", [])
             write_json(
                 root / "dependency-audit.json",

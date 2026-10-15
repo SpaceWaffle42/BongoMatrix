@@ -60,14 +60,18 @@ full_test_suite:
   extends: .default_project_job
   image: node:22-bookworm
   stage: test
-  # The pixel-editor browser journeys add about two minutes to the prior
-  # canonical runtime; keep a narrow margin below the project 60-minute cap.
+  # The canonical suite is split into balanced shards of whole TestCase classes
+  # (scripts/ci_shard.py, weights in ci/test-weights.json). Every shard loads the
+  # complete suite with the canonical loader; test_results proves the shards
+  # together ran exactly the collected inventory once.
+  parallel: 2
   timeout: 60m
   variables:
     MATRIX_CHROMIUM: /usr/bin/chromium
     # Tests listed in ci/non-essential-tests.json skip here and run in
     # non_essential_browser_tests instead (see tests/ci_quarantine.py).
     MATRIX_CI_SKIP_NON_ESSENTIAL: "1"
+    COVERAGE_RCFILE: ci/coveragerc
   before_script:
     - apt-get update -qq
     # The sanitizer tests invoke /usr/bin/python3 directly, outside .venv-ci.
@@ -85,37 +89,56 @@ full_test_suite:
     - test "$(readlink .venv)" = ".venv-ci"
     - .venv-ci/bin/python -m pip install -r requirements.txt coverage unittest-xml-reporting
   script:
-    - mkdir -p test-results
+    - mkdir -p test-results shards coverage-data
     # Collect every owning module before the long suite; missing behavior/import
     # errors/duplicate or foreign cases fail without weakening full discovery.
-    - .venv-ci/bin/python scripts/ci_collection.py --output collection.json
+    - .venv-ci/bin/python scripts/ci_collection.py --output "shards/collection-$CI_NODE_INDEX.json"
     - |
       set +e
-      .venv-ci/bin/coverage run --source=. --omit='tests/*' -m xmlrunner discover -s tests -o test-results
+      .venv-ci/bin/coverage run --source=. --omit='tests/*' scripts/ci_shard.py run --index "$CI_NODE_INDEX" --total "$CI_NODE_TOTAL" --manifest "shards/shard-$CI_NODE_INDEX.json" --output test-results
       test_status=$?
       set -e
-      if [ "$test_status" -eq 0 ]; then
-        .venv-ci/bin/coverage report --show-missing
-        .venv-ci/bin/coverage xml -o coverage.xml
-      else
-        .venv-ci/bin/coverage report --show-missing || true
-        .venv-ci/bin/coverage xml -o coverage.xml || true
-      fi
       exit "$test_status"
-  coverage: '/TOTAL\s+\d+\s+\d+\s+(\d+%)/'
   artifacts:
     when: always
     expire_in: 14 days
     reports:
       junit:
         - test-results/*.xml
+    paths:
+      - test-results/
+      - shards/
+      - coverage-data/
+
+# Joins the shards: exact-partition proof plus combined coverage. Runs even when a
+# shard fails so the coverage and accounting evidence is still published.
+test_results:
+  extends: .default_project_job
+  stage: summary
+  when: always
+  variables:
+    COVERAGE_RCFILE: ci/coveragerc
+  needs:
+    - job: full_test_suite
+      artifacts: true
+  before_script:
+    - python -m pip install --no-cache-dir 'coverage>=7.6,<8' defusedxml==0.7.1
+  script:
+    - python scripts/ci_shard.py verify --collections shards --manifests shards --results test-results --output shard-verification.json
+    - coverage combine coverage-data
+    - coverage report --show-missing
+    - coverage xml -o coverage.xml
+  coverage: '/TOTAL\s+\d+\s+\d+\s+(\d+%)/'
+  artifacts:
+    when: always
+    expire_in: 14 days
+    reports:
       coverage_report:
         coverage_format: cobertura
         path: coverage.xml
     paths:
       - coverage.xml
-      - test-results/
-      - collection.json
+      - shard-verification.json
 
 # Quarantined flaky browser tests (#32). Same runtime as the blocking suite,
 # but non-essential: a failure is reported, never blocks the pipeline, and the
@@ -130,6 +153,8 @@ non_essential_browser_tests:
       artifacts: false
   when: always
   allow_failure: true
+  # extends full_test_suite but is one job, not a shard set.
+  parallel: 1
   timeout: 20m
   retry:
     max: 1
@@ -140,7 +165,7 @@ non_essential_browser_tests:
   variables:
     MATRIX_CI_SKIP_NON_ESSENTIAL: "0"
   script:
-    - mkdir -p test-results
+    - mkdir -p test-results coverage-data
     - non_essential=$(.venv-ci/bin/python scripts/ci_collection.py --print-non-essential)
     - test -n "$non_essential"
     - 'echo "non-essential tests - $non_essential"'
@@ -163,6 +188,7 @@ non_essential_browser_tests:
 python_static_analysis:
   extends: .default_project_job
   stage: quality
+  needs: []
   before_script:
     - python -m pip install 'ruff>=0.12,<1'
   script:
@@ -178,6 +204,7 @@ python_static_analysis:
 dependency_audit:
   extends: .default_project_job
   stage: quality
+  needs: []
   before_script:
     - python -m pip install 'pip-audit>=2.9,<3'
   script:
@@ -190,12 +217,14 @@ dependency_audit:
 
 semgrep-sast:
   stage: security
+  needs: []
   tags:
     - matrix-docker
   interruptible: true
 
 secret_detection:
   stage: security
+  needs: []
   tags:
     - matrix-docker
   interruptible: true
@@ -208,6 +237,8 @@ ci_summary:
     - python -m pip install --no-cache-dir defusedxml==0.7.1
   needs:
     - job: full_test_suite
+      artifacts: true
+    - job: test_results
       artifacts: true
     - job: python_static_analysis
       artifacts: true
