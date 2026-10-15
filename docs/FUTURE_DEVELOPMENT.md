@@ -407,6 +407,21 @@ Split into independently mergeable sub-items, in this order:
 
 Open before 1.10d/e can ship: they need avahi (`avahi-daemon`, publishing via `avahi-publish`) on the device; whether it is installed is not yet checked, and installing a package is a system change that needs the owner's go-ahead. Limits to state in the UI: guest or business networks that isolate clients only list the serving display; the first visit needs `http://` and `:5000`.
 
+### 1.11 System-wide Screen Safe Area — Owner-requested 2026-10-15, planned
+
+Matrix panels sit in frames of different sizes, and a frame can hide the outer pixels. One device-wide safe area tells every module where it may draw.
+
+- **Where:** a "Screen Safe Area" setting in Device settings, on that display's own paired dashboard. It is saved per display.
+- **Shape:** space from the top, right, bottom and left edges, in whole physical pixels.
+- **Marking the area:** while the setting is being edited, the physical panel and the dashboard preview show the edge of the safe area as a **dotted, pulsing yellow line**. The line is never drawn during normal playback.
+- **Applies everywhere:** all modules respect it. That covers the clock, weather, RSS, announcements, calendar, custom modules and Advanced Canvas, plus the system screens (pairing PIN, address/name banner, splash, sleep). Edit Preview and Live preview show the same clipped result as the panel.
+- **Replaces per-module margins:** the calendar's fixed 2-pixel frame border (0.3.75) becomes the default value of this setting. The calendar's own per-edge "space from edge" settings then add on top of the system safe area. No saved settings are lost.
+- **To decide before building:**
+  - the default (0, or 2 to match the calendar today);
+  - the maximum per edge;
+  - whether background colours and full-screen media fill under the frame or stop at the line;
+  - whether the setting needs the panel-shown code like Rename (1.10c).
+
 ## Priority 2 — New playlist modules
 
 Implement these only after higher-priority fixes and workflow improvements are complete. Their order favors lower-friction local or free-data behavior before more provider-dependent integrations.
