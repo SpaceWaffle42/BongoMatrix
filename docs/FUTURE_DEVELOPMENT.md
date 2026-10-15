@@ -412,15 +412,15 @@ Open before 1.10d/e can ship: they need avahi (`avahi-daemon`, publishing via `a
 Matrix panels sit in frames of different sizes, and a frame can hide the outer pixels. One device-wide safe area tells every module where it may draw.
 
 - **Where:** a "Screen Safe Area" setting in Device settings, on that display's own paired dashboard. It is saved per display.
-- **Shape:** space from the top, right, bottom and left edges, in whole physical pixels.
+- **Shape:** space from the top, right, bottom and left edges, in whole physical pixels, 0 to 6 per edge (owner 2026-10-15: maximum 6).
+- **Full-screen media toggle:** "Full-screen media stays inside the safe area", default **on**. On: splash, sleep, GIF/video and image screens are fitted inside the safe area like everything else. Off: they fill the whole 64×32 panel, under the frame.
+- **No confirmation code:** changing the safe area does not need a code shown on the panel (owner 2026-10-15); any paired browser on that display can change it.
 - **Marking the area:** while the setting is being edited, the physical panel and the dashboard preview show the edge of the safe area as a **dotted, pulsing yellow line**. The line is never drawn during normal playback.
 - **Applies everywhere:** all modules respect it. That covers the clock, weather, RSS, announcements, calendar, custom modules and Advanced Canvas, plus the system screens (pairing PIN, address/name banner, splash, sleep). Edit Preview and Live preview show the same clipped result as the panel.
 - **Removes the calendar border (owner 2026-10-15):** once the safe area ships, the calendar's fixed 2-pixel frame border (0.3.75, `FRAME_MARGIN` in `modules/event_countdown.py`) is redundant and is removed; the system safe area alone defines the frame. The calendar's own per-edge "space from edge" settings stay as optional extra spacing inside the safe area. No saved settings are lost. To keep calendars that have the border today unchanged, existing displays should start with a 2-pixel safe area.
 - **To decide before building:**
   - the default for new displays (0 or 2);
-  - the maximum per edge;
-  - whether background colours and full-screen media fill under the frame or stop at the line;
-  - whether the setting needs the panel-shown code like Rename (1.10c).
+  - whether background colours (not media) fill under the frame or stop at the line.
 
 ## Priority 2 — New playlist modules
 
