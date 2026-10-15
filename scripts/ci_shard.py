@@ -176,7 +176,7 @@ def main(argv=None):
             print(json.dumps([{'tests': len(s), 'estimated_seconds': round(x, 1)} for s, x in zip(shards, load)]))
             return 0
         return verify(args)
-    except (ShardError, OSError, ValueError, KeyError, TypeError, ET.ParseError) as error:
+    except (ShardError, OSError, ValueError, KeyError, TypeError) as error:  # XML errors arrive as ShardError
         print(f'ci shard {args.command} failed: {error}', file=sys.stderr)
         return 1
 

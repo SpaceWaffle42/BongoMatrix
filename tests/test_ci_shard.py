@@ -129,6 +129,27 @@ class ShardContractTests(unittest.TestCase):
             self.assertNotEqual(dropped.returncode, 0)
             self.assertIn('missing=', dropped.stderr)
 
+    def test_script_has_no_undefined_names(self):  # pipeline 574: F821 `ET` in main()
+        import ast
+        import builtins
+
+        source = (ROOT / 'scripts' / 'ci_shard.py').read_text()
+        tree = ast.parse(source)
+        module_names = set(dir(builtins))
+        for node in ast.walk(tree):
+            if isinstance(node, (ast.Import, ast.ImportFrom)) and node.col_offset == 0:
+                module_names.update((a.asname or a.name).split('.')[0] for a in node.names)
+            elif isinstance(node, (ast.FunctionDef, ast.ClassDef)) and node.col_offset == 0:
+                module_names.add(node.name)
+            elif isinstance(node, ast.Assign) and node.col_offset == 0:
+                module_names.update(t.id for t in node.targets if isinstance(t, ast.Name))
+        main = next(n for n in tree.body if isinstance(n, ast.FunctionDef) and n.name == 'main')
+        local = {a.arg for a in main.args.args} | {
+            n.id for n in ast.walk(main) if isinstance(n, ast.Name) and isinstance(n.ctx, ast.Store)}
+        local |= {n.name for n in ast.walk(main) if isinstance(n, ast.ExceptHandler) and n.name}
+        loads = {n.id for n in ast.walk(main) if isinstance(n, ast.Name) and isinstance(n.ctx, ast.Load)}
+        self.assertEqual(loads - module_names - local, set())
+
     def test_junit_reports_are_parsed_with_defusedxml(self):
         """semgrep bandit.B314: report XML must not use xml.etree directly."""
         source = SHARD.read_text(encoding='utf-8')
