@@ -1,0 +1,10 @@
+{% if canonical_host %}<script>
+/* Opened by IP: move to this display's .local name, but only if this device can reach it.
+   A paired browser carries its pairing over with a single-use token (cookies are per address). */
+(()=>{const root=document.documentElement,host=root.dataset.canonicalHost,port=location.port?':'+location.port:'';
+const target=location.protocol+'//'+host+port,here=location.pathname+location.search+location.hash,stop=new AbortController();setTimeout(()=>stop.abort(),2500);
+fetch(target+'/api/directory/self',{mode:'no-cors',cache:'no-store',credentials:'omit',signal:stop.signal}).then(async()=>{
+if(root.dataset.canonicalHandoff!=='1'){location.replace(target+here);return}
+const response=await fetch('/api/pairing/handoff',{method:'POST',headers:{'X-Matrix-Action':'paired-request'},cache:'no-store'});if(!response.ok)return;
+const {token}=await response.json();location.replace(target+'/pair/handoff?t='+encodeURIComponent(token)+'&next='+encodeURIComponent(here))}).catch(()=>{})})();
+</script>{% endif %}

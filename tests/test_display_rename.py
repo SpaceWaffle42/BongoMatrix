@@ -429,6 +429,124 @@ class RenameFlowTests(unittest.TestCase):
         self.assertFalse(data["published"])
         self.assertEqual(data["address"], "matrix-7d03.local")
 
+    # -- owner 2026-10-15: visiting the IP moves to the .local name when reachable --
+    def page(self, path, host, client=None):
+        response = (client or self.client).get(path, base_url=f"http://{host}")
+        self.assertEqual(response.status_code, 200, (path, host))
+        return response.get_data(as_text=True)
+
+    def test_ip_pages_move_to_the_local_name_when_it_answers(self):
+        pair_page = self.page("/pair", "192.168.1.5:5000")
+        self.assertIn('data-canonical-host="matrix-7d03.local"', pair_page)
+        self.assertIn("mode:'no-cors'", pair_page)  # probe: only switch if the name answers
+        self.assertIn("location.replace", pair_page)
+        paired = self.app.test_client()
+        self.pairing.verify.return_value = True
+        paired.post("/pair", data={"pin": "123456", "device_name": "Phone"},
+                    base_url="http://192.168.1.5:5000")
+        self.pairing.verify.return_value = False
+        dashboard = self.page("/", "192.168.1.5:5000", client=paired)
+        self.assertIn('data-canonical-host="matrix-7d03.local"', dashboard)
+        named = self.app.test_client()
+        self.pairing.verify.return_value = True
+        named.post("/pair", data={"pin": "123456", "device_name": "Laptop"},
+                   base_url="http://matrix-7d03.local:5000")
+        self.pairing.verify.return_value = False
+        self.assertNotIn("data-canonical-host", self.page("/", "matrix-7d03.local:5000", client=named))
+
+    def test_name_pages_and_other_hosts_never_redirect(self):
+        for host in ("matrix-7d03.local:5000", "MATRIX-7D03.local", "kitchen.local:5000", "localhost:5000"):
+            self.assertNotIn("data-canonical-host", self.page("/pair", host), host)
+
+    def test_ipv6_literal_also_moves_to_the_name(self):
+        self.assertIn('data-canonical-host="matrix-7d03.local"', self.page("/pair", "[fe80::1]:5000"))
+
+    def test_no_redirect_without_a_valid_published_name(self):
+        for odd in ("bad name.local", "matrix-7d03", None):
+            with patch.object(self.display_name, "current", return_value=odd):
+                self.assertNotIn("data-canonical-host", self.page("/pair", "192.168.1.5:5000"), odd)
+        app = create_app(
+            self.controller, self.store, self.pairing, secret_key="test",
+            session_generation="generation-one", media_dir=Path(self.temp.name) / "media",
+            device_store=self.device_store,
+            openweather_secrets=SecretStore(Path(self.temp.name) / "s" / "k"),
+        )
+        self.assertNotIn("data-canonical-host", self.page("/pair", "192.168.1.5:5000", app.test_client()))
+
+    def test_renamed_display_moves_to_its_new_name(self):
+        self.pair()
+        self.post("/api/display-name/start", {"name": "kitchen"})
+        self.post("/api/display-name/confirm", {"code": self.panel_code()})
+        self.assertIn('data-canonical-host="kitchen.local"', self.page("/pair", "192.168.1.5:5000"))
+
+    def ip_paired_client(self):
+        client = self.app.test_client()
+        self.pairing.verify.return_value = True
+        client.post("/pair", data={"pin": "123456", "device_name": "Phone"},
+                    base_url="http://192.168.1.5:5000")
+        self.pairing.verify.return_value = False
+        return client
+
+    def handoff(self, client, host="192.168.1.5:5000"):
+        return client.post("/api/pairing/handoff", headers=ACTION, base_url=f"http://{host}")
+
+    def test_paired_browser_stays_paired_when_moving_to_the_name(self):
+        """Cookies are per address: the move carries the pairing with a one-time token."""
+        ip_client = self.ip_paired_client()
+        page = self.page("/", "192.168.1.5:5000", client=ip_client)
+        self.assertIn('data-canonical-handoff="1"', page)
+        issued = self.handoff(ip_client)
+        self.assertEqual(issued.status_code, 200, issued.get_json())
+        token = issued.get_json()["token"]
+        self.assertRegex(token, r"^[A-Za-z0-9_-]{32,}$")
+        browser_on_name = self.app.test_client()
+        moved = browser_on_name.get(f"/pair/handoff?t={token}&next=/%3Ftab%3Dscreens",
+                                    base_url="http://matrix-7d03.local:5000")
+        # A same-host page navigates on, so the SameSite=Strict cookie is sent next.
+        self.assertEqual(moved.status_code, 200)
+        self.assertIn('location.replace("/?tab=screens")', moved.get_data(as_text=True))
+        self.assertEqual(moved.headers["Referrer-Policy"], "no-referrer")
+        self.assertEqual(moved.headers["Cache-Control"], "no-store")
+        self.assertEqual(self.page("/", "matrix-7d03.local:5000", client=browser_on_name).count("<html"), 1)
+        devices = self.device_store.list()
+        self.assertEqual(len(devices), 1, "same paired device, no new pairing slot used")
+        again = self.app.test_client().get(f"/pair/handoff?t={token}", base_url="http://matrix-7d03.local:5000")
+        self.assertEqual(again.headers["Location"], "/pair", "token is single use")
+
+    def test_handoff_refuses_unpaired_wrong_host_expired_and_bad_next(self):
+        self.assertEqual(self.handoff(self.app.test_client()).status_code, 401)
+        named = self.app.test_client()
+        self.pairing.verify.return_value = True
+        named.post("/pair", data={"pin": "123456", "device_name": "Laptop"},
+                   base_url="http://matrix-7d03.local:5000")
+        self.pairing.verify.return_value = False
+        self.assertEqual(self.handoff(named, "matrix-7d03.local:5000").status_code, 409)
+        ip_client = self.ip_paired_client()
+        self.assertEqual(ip_client.post("/api/pairing/handoff", base_url="http://192.168.1.5:5000").status_code, 403)
+        token = self.handoff(ip_client).get_json()["token"]
+        on_ip = self.app.test_client().get(f"/pair/handoff?t={token}", base_url="http://192.168.1.5:5000")
+        self.assertEqual(on_ip.headers["Location"], "/pair", "only redeemable on the name")
+        for nxt in ("//evil.example/", "http://evil.example/", "/\\\\evil", "javascript:x",
+                    "/%3C/script%3E%3Cscript%3Ealert(1)%3C/script%3E"):
+            token = self.handoff(ip_client).get_json()["token"]
+            moved = self.app.test_client().get(f"/pair/handoff?t={token}&next={nxt}",
+                                               base_url="http://matrix-7d03.local:5000")
+            body = moved.get_data(as_text=True)
+            self.assertNotIn("evil", body.split("<a")[0].replace('location.replace("/")', ""), nxt)
+            self.assertNotIn("<script>alert", body, nxt)
+        token = self.handoff(ip_client).get_json()["token"]
+        with patch("webapp.time.monotonic", return_value=time.monotonic() + 31):
+            late = self.app.test_client().get(f"/pair/handoff?t={token}", base_url="http://matrix-7d03.local:5000")
+        self.assertEqual(late.headers["Location"], "/pair", "expires after 30 s")
+
+    def test_handoff_dies_with_the_paired_device(self):
+        ip_client = self.ip_paired_client()
+        token = self.handoff(ip_client).get_json()["token"]
+        for device in self.device_store.list():
+            self.device_store.remove(device["id"])
+        moved = self.app.test_client().get(f"/pair/handoff?t={token}", base_url="http://matrix-7d03.local:5000")
+        self.assertEqual(moved.headers["Location"], "/pair")
+
     def test_unavailable_without_device_name(self):
         app = create_app(
             self.controller, self.store, self.pairing, secret_key="test",
