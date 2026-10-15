@@ -18,13 +18,30 @@ Do not rerun the complete suite, repository-wide lint, coverage, dependency audi
 
 ## Collection and local verification
 
-`full_test_suite` first runs `scripts/ci_collection.py --output collection.json`
-with the same dependency-bearing interpreter as canonical discovery. It loads,
-but does not execute, every `tests/test_*.py` module. Import/load errors, empty
-collection, foreign imported TestCases, duplicate IDs, or missing required named
-behaviors fail before the long run. This is not a replacement test tier: complete
-`coverage run --source=. --omit='tests/*' -m xmlrunner discover -s tests` remains
+`full_test_suite` runs as GitLab `parallel: 2` shards. Each shard first runs
+`scripts/ci_collection.py --output shards/collection-$CI_NODE_INDEX.json` with the
+same dependency-bearing interpreter as canonical discovery. It loads, but does not
+execute, every `tests/test_*.py` module. Import/load errors, empty collection,
+foreign imported TestCases, duplicate IDs, or missing required named behaviors fail
+before the long run. This is not a replacement test tier: the complete suite remains
 mandatory, including real Chromium/media journeys.
+
+Each shard then runs `scripts/ci_shard.py run` under `coverage run`. It loads the
+whole suite with the canonical loader (`discover -s tests`, so every module is
+imported exactly as in a single-process run; any load error fails every shard) and
+executes only its share. Shards are whole TestCase classes, so `setUpClass` and
+in-class order are unchanged, balanced longest-processing-time first by
+`ci/test-weights.json` (per-test seconds from pipeline 418; unknown tests count
+`default_seconds`). Weights only balance wall time; a stale file cannot drop a test.
+Refresh it when shard durations drift apart.
+
+`test_results` joins the shards even when one fails. `ci_shard.py verify` requires
+identical collection inventories, a complete set of shard manifests whose
+assignments exactly partition the inventory, and JUnit cases covering every
+collected test exactly once with nothing foreign. It writes
+`shard-verification.json`, then `coverage combine` (via `ci/coveragerc`) produces the
+Cobertura `coverage.xml`. `ci_summary` requires that proof, and its JUnit case count
+must equal the summary test count, so a dropped or duplicated shard cannot pass.
 
 `ci/required-tests.json` is an independent named-behavior preservation contract
 seeded from exact base `7ae96302ada12fecc6e36d5494bfb1862962da47`, plus the new
@@ -54,7 +71,8 @@ or physical acceptance.
 
 The pipeline publishes the following reports for 14 days:
 
-- collection ownership inventory, JUnit XML and Cobertura coverage from `full_test_suite`;
+- per-shard collection inventories, shard manifests and JUnit XML from `full_test_suite`;
+- `shard-verification.json` and combined Cobertura coverage from `test_results`;
 - GitLab code-quality JSON from Ruff;
 - `dependency-audit.json` from `pip-audit`;
 - GitLab SAST and secret-detection reports;
@@ -64,7 +82,7 @@ The GitLab schedule reruns the complete pipeline on `main` so dependency and sec
 
 The summary contains counts and status only. It deliberately excludes vulnerability descriptions and candidate secret text so routine agent reads cannot echo sensitive report content.
 
-`ci_summary` runs even when an upstream job fails. Security-template `needs` are optional only so GitLab can construct the summary job when a template omits a scanner; the missing report still fails closed. Missing, malformed, truncated, inconsistent, or schema-invalid artifacts produce a sanitized `INCOMPLETE`; this includes malformed required or optional scanner metadata, warning/fatal analyzer messages, duplicate security IDs, inconsistent JUnit testcase outcomes, unresolved dependency metadata, and invalid vulnerability records. Informational analyzer messages are accepted only in GitLab's documented shape. Test, quality, dependency, new SAST, or secret findings produce `FAIL`; a complete clean result produces `PASS`. Summary counters are capped at 10,000,000 to keep hostile numeric input bounded. The parser currently accepts GitLab security-report schema major version 15 and fails closed when GitLab introduces an unsupported schema.
+Ruff, dependency audit, SAST and secret detection declare `needs: []`, so they run at pipeline start alongside the suite instead of waiting for (or being skipped by) it. `ci_summary` uses `needs` on every report producer, so it starts only after those jobs finish. `ci_summary` runs even when an upstream job fails. Security-template `needs` are optional only so GitLab can construct the summary job when a template omits a scanner; the missing report still fails closed. Missing, malformed, truncated, inconsistent, or schema-invalid artifacts produce a sanitized `INCOMPLETE`; this includes malformed required or optional scanner metadata, warning/fatal analyzer messages, duplicate security IDs, inconsistent JUnit testcase outcomes, unresolved dependency metadata, and invalid vulnerability records. Informational analyzer messages are accepted only in GitLab's documented shape. Test, quality, dependency, new SAST, or secret findings produce `FAIL`; a complete clean result produces `PASS`. Summary counters are capped at 10,000,000 to keep hostile numeric input bounded. The parser currently accepts GitLab security-report schema major version 15 and fails closed when GitLab introduces an unsupported schema.
 
 ## SAST baseline
 

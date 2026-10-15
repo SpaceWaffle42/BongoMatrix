@@ -152,6 +152,24 @@ def _coverage(root: Path) -> dict[str, float | int]:
         raise InvalidReport("coverage.xml") from error
 
 
+def _valid_shard_verification(report: Any, tests: dict[str, int]) -> bool:
+    """The sharded suite must have executed exactly the collected inventory once."""
+    if not isinstance(report, dict):
+        return False
+    counts = ("collected", "junit_cases", "shards")
+    lists = ("missing", "foreign", "duplicated")
+    if not all(
+        isinstance(report.get(key), int)
+        and not isinstance(report.get(key), bool)
+        and 0 < report[key] <= MAX_SUMMARY_COUNT
+        for key in counts
+    ):
+        return False
+    if not all(report.get(key) == [] for key in lists):
+        return False
+    return report["junit_cases"] == tests["tests"] and report["collected"] <= tests["tests"]
+
+
 def _valid_code_quality_findings(findings: Any) -> bool:
     valid_severities = {"info", "minor", "major", "critical", "blocker"}
     if not isinstance(findings, list):
@@ -679,6 +697,7 @@ def build_summary(
     required_reports = [
         ("test-results/*.xml", bool(list((root / "test-results").glob("*.xml")))),
         ("coverage.xml", (root / "coverage.xml").is_file()),
+        ("shard-verification.json", (root / "shard-verification.json").is_file()),
         (
             "gl-code-quality-report.json",
             (root / "gl-code-quality-report.json").is_file(),
@@ -701,6 +720,9 @@ def build_summary(
     tests = _test_counts(root)
     coverage = _coverage(root)
     invalid_reports = []
+    shards = _read_report_json(root / "shard-verification.json", invalid_reports)
+    if not _valid_shard_verification(shards, tests) and "shard-verification.json" not in invalid_reports:
+        invalid_reports.append("shard-verification.json")
     code_quality = _read_report_json(
         root / "gl-code-quality-report.json", invalid_reports
     )
