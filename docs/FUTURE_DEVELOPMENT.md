@@ -415,9 +415,9 @@ Matrix panels sit in frames of different sizes, and a frame can hide the outer p
 - **Shape:** space from the top, right, bottom and left edges, in whole physical pixels.
 - **Marking the area:** while the setting is being edited, the physical panel and the dashboard preview show the edge of the safe area as a **dotted, pulsing yellow line**. The line is never drawn during normal playback.
 - **Applies everywhere:** all modules respect it. That covers the clock, weather, RSS, announcements, calendar, custom modules and Advanced Canvas, plus the system screens (pairing PIN, address/name banner, splash, sleep). Edit Preview and Live preview show the same clipped result as the panel.
-- **Replaces per-module margins:** the calendar's fixed 2-pixel frame border (0.3.75) becomes the default value of this setting. The calendar's own per-edge "space from edge" settings then add on top of the system safe area. No saved settings are lost.
+- **Removes the calendar border (owner 2026-10-15):** once the safe area ships, the calendar's fixed 2-pixel frame border (0.3.75, `FRAME_MARGIN` in `modules/event_countdown.py`) is redundant and is removed; the system safe area alone defines the frame. The calendar's own per-edge "space from edge" settings stay as optional extra spacing inside the safe area. No saved settings are lost. To keep calendars that have the border today unchanged, existing displays should start with a 2-pixel safe area.
 - **To decide before building:**
-  - the default (0, or 2 to match the calendar today);
+  - the default for new displays (0 or 2);
   - the maximum per edge;
   - whether background colours and full-screen media fill under the frame or stop at the line;
   - whether the setting needs the panel-shown code like Rename (1.10c).
