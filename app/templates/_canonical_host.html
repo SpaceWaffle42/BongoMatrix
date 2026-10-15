@@ -1,4 +1,4 @@
-{% if canonical_host %}<p class="canonical-link" id="canonical-link" hidden style="margin:10px auto 0;max-width:22rem;padding:6px 10px;border:1px solid #ffffff24;border-radius:6px;color:#d0d6e0;font-size:12px;overflow-wrap:anywhere;text-align:center"><a href="#">Open this display by name ({{ canonical_host }})</a>{% if not canonical_auto %} · you will pair once with the PIN on that address{% endif %}</p>
+{% if canonical_host %}<p class="canonical-link" id="canonical-link" hidden style="margin:12px auto;max-width:40rem;box-sizing:border-box;padding:6px 10px;border:1px solid #ffffff24;border-radius:6px;color:#d0d6e0;font-size:12px;overflow-wrap:anywhere;text-align:center"><a href="#">Open this display by name ({{ canonical_host }})</a>{% if not canonical_auto %} · you will pair once with the PIN on that address{% endif %}</p>
 <script>
 /* Opened by IP: if this display's .local name answers *as this display* (same id),
    an unpaired pair page moves there; a paired page only shows a link. No pairing
@@ -8,6 +8,6 @@ const target=location.protocol+'//'+host+port,here=location.pathname+location.se
 let touched=false;for(const kind of ['input','keydown','pointerdown'])addEventListener(kind,()=>{touched=true},{capture:true,once:true});
 fetch(target+'/api/directory/self',{mode:'cors',cache:'no-store',credentials:'omit',signal:stop.signal}).then(r=>r.ok?r.json():null).then(d=>{
 if(!d||d.service!=='matrix'||d.id!==root.dataset.canonicalId)return;
-const link=document.getElementById('canonical-link');if(link){link.querySelector('a').href=target+here;document.querySelector('.sidebar-foot')?.append(link);link.hidden=false}
+const link=document.getElementById('canonical-link');if(link){link.querySelector('a').href=target+here;document.querySelector('main')?.prepend(link);link.hidden=false}
 if(root.dataset.canonicalAuto==='1'&&!touched)location.assign(target+here)}).catch(()=>{})})();
 </script>{% endif %}
