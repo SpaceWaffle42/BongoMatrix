@@ -247,9 +247,19 @@ def _confetti(area, elapsed):
                 area.putpixel((x, y + 1), CONFETTI[index % len(CONFETTI)])
 
 
+# Owner 2026-10-15: the panel sits in a frame that hides its outer pixels, so the
+# calendar never draws in a 2-pixel border round the whole 64x32 display. Layouts
+# fit the inner 60x28; the editor's per-edge "Space from edge" adds on top of it.
+FRAME_MARGIN = 2
+
+
+def drawable_insets(settings):
+    return {edge: FRAME_MARGIN + settings['insets'][edge] for edge in ('top', 'right', 'bottom', 'left')}
+
+
 def render_frame(settings, selected, *, elapsed=0, initial_seconds=None, artwork=None):
     """Render BDF pixels once; both outputs use this exact clipped image."""
-    inset = settings['insets']
+    inset = drawable_insets(settings)
     width, height = 64 - inset['left'] - inset['right'], 32 - inset['top'] - inset['bottom']
     image = Image.new('RGB', (64, 32), settings['background'])
     area = Image.new('RGB', (width, height), settings['background'])
@@ -352,9 +362,10 @@ def image_frames(config, duration=15, stop_event=None, *, realtime=False, pinned
                     artwork.thumbnail((8, 8), Image.Resampling.LANCZOS)
             identity, event_started, initial = key, elapsed, selected['seconds']
             title_width = _measure(settings['title_font'], selected['event']['title'])[0]
+            inset = drawable_insets(settings)
             available = calendar_layouts.title_column_width(
-                settings['layout'], 64 - settings['insets']['left'] - settings['insets']['right'],
-                32 - settings['insets']['top'] - settings['insets']['bottom'])
+                settings['layout'], 64 - inset['left'] - inset['right'],
+                32 - inset['top'] - inset['bottom'])
             pass_seconds = (title_width + 4) * .05 if title_width > available else 0.0
             deadline = max(duration, event_started + pass_seconds)
             restored = not pass_seconds
