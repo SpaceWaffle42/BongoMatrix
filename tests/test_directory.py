@@ -104,7 +104,7 @@ class DirectoryTests(unittest.TestCase):
             self.started.append(process)
             return process
 
-        return Directory(
+        service = Directory(
             version="0.3.71-preview", port=5000, device_name=fake_name(),
             status=lambda: {"current_module": "clock_lava"},
             address=lambda: "192.168.1.5",
@@ -113,6 +113,8 @@ class DirectoryTests(unittest.TestCase):
             fetch=lambda address, port: answers.get(address),
             clock=lambda: self.clock[0], wall=lambda: 1_790_000_000,
         )
+        self.addCleanup(service._pool.shutdown)
+        return service
 
     def test_self_summary_is_public_and_minimal(self):
         self.assertEqual(self.make().self_summary(), {
@@ -448,8 +450,28 @@ class DirectoryNonBlockingTests(unittest.TestCase):
             for _ in range(6):
                 clock[0] += directory.DIRECTORY_CACHE_SECONDS + 1
                 service.listing()
-        peer_threads = [t for t in threading.enumerate() if t.name.startswith("matrix-directory-peer")]
-        self.assertLessEqual(len(peer_threads), directory.PEER_FETCH_WORKERS)
+        # This service's own pool, so other tests' Directory objects cannot skew it.
+        self.assertEqual(len(service._pool.threads), directory.PEER_FETCH_WORKERS)
+        self.assertTrue(all(thread.daemon for thread in service._pool.threads))
+
+    def test_pool_drops_work_when_full_and_shutdown_wakes_idle_workers(self):  # r4 1, 3
+        release = threading.Event()
+        self.addCleanup(release.set)
+        pool = directory._PeerPool(2, "test-peer-pool", backlog=3)
+        stuck = [pool.submit(release.wait, 30) for _ in range(2)]
+        time.sleep(0.1)  # both workers are now busy
+        queued = [pool.submit(lambda: "late") for _ in range(3)]
+        overflow = pool.submit(lambda: "dropped")
+        self.assertTrue(overflow.cancelled())
+        pool.shutdown()
+        self.assertTrue(all(future.cancelled() for future in queued))
+        self.assertTrue(pool.submit(lambda: "after").cancelled())
+        release.set()
+        for future in stuck:
+            future.result(timeout=2)
+        for thread in pool.threads:
+            thread.join(2)
+        self.assertFalse(any(thread.is_alive() for thread in pool.threads))
 
 
 class DirectoryRouteTests(unittest.TestCase):

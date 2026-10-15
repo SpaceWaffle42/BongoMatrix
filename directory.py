@@ -284,8 +284,10 @@ class _PeerPool:
 
         self._queue = queue.Queue(maxsize=backlog)
         self._closed = threading.Event()
-        for index in range(workers):
-            threading.Thread(target=self._work, name=f"{prefix}-{index}", daemon=True).start()
+        self.threads = [threading.Thread(target=self._work, name=f"{prefix}-{index}", daemon=True)
+                        for index in range(workers)]
+        for thread in self.threads:
+            thread.start()
 
     def _work(self):
         while not self._closed.is_set():
@@ -315,14 +317,22 @@ class _PeerPool:
         return future
 
     def shutdown(self):
+        """Cancel queued work and wake every idle worker so it exits."""
+        import queue
+
         self._closed.set()
         while True:
             try:
                 item = self._queue.get_nowait()
-            except Exception:
+            except queue.Empty:
                 break
             if item is not None:
                 item[0].cancel()
+        for _ in self.threads:  # one sentinel per worker; busy workers exit after their fetch
+            try:
+                self._queue.put_nowait(None)
+            except queue.Full:
+                break
 
 
 class Directory:
