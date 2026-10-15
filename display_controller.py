@@ -301,6 +301,11 @@ def local_ip_address():
 
 
 # Roadmap 1.10a: the panel tells people where the dashboard went.
+# Pairing screen name page: 4x6 font, 64 px panel, 1 px border each side -> 15 chars
+# fit; longer names (up to 63) scroll right to left on the middle line, then rotate.
+PAIRING_NAME_MAX_CHARS = 15
+PAIRING_NAME_SUFFIX = ".local:5000"
+PAIRING_SCROLL_FRAME_SECONDS = 0.04  # same speed as the address notice
 ADDRESS_POLL_SECONDS = 5
 ADDRESS_NOTICE_SECONDS = (10, 15)  # keep scrolling at least / at most this long
 ADDRESS_NOTICE_FRAME_SECONDS = 0.04
@@ -428,7 +433,10 @@ class DisplayController:
         # Frames up to this revision may show a PIN/code; None while drawing one.
         self._credential_frames_through = 0
         self._pairing_ip = None
+        self._pairing_name = None
         self._pairing_show_ip = False
+        self._pairing_page_index = 0
+        self._pairing_scroll_x = 2
         self._pairing_generation = 0
         self._ip_address_provider = ip_address_provider or local_ip_address
         self._address_watch = AddressWatch() if announce_address else None
@@ -1532,7 +1540,9 @@ class DisplayController:
                     self._pairing_pin = str(pin)
                     self._pairing_label = str(label)
                     self._pairing_ip = pairing_ip
+                    self._pairing_name = self._pairing_name_label()
                     self._pairing_show_ip = False
+                    self._pairing_page_index = 0
                     self._pairing_timer = threading.Timer(
                         max(1, float(ttl_seconds)), lambda: self.end_pairing(generation)
                     )
@@ -1613,12 +1623,34 @@ class DisplayController:
         # Unknown revisions keep every frame hidden until the next pairing ends.
         return revision if isinstance(revision, int) else float("inf")
 
+    def _pairing_name_label(self):
+        """This display's mDNS host (``matrix-7d03``) if it fits the 4x6 panel line, else None."""
+        if self._device_name is None:
+            return None
+        try:
+            name = self._device_name.current()
+        except Exception:
+            return None
+        host = str(name or "").removesuffix(".local")
+        return host or None
+
     def _draw_pairing_frame(self, show_ip):
         self.matrix.clear()
         white = self.matrix.colour("white")
         cyan = self.matrix.colour("vapor_cyan")
         black = self.matrix.colour("black")
-        if show_ip:
+        name = self._pairing_name
+        if show_ip == "name" and name:
+            small = self.matrix.font("4x6")
+            centred = lambda text: max(1, (64 - 4 * len(text)) // 2)  # noqa: E731
+            name_x = self._pairing_scroll_x if len(name) > PAIRING_NAME_MAX_CHARS else centred(name)
+            for x, y, colour, text in (
+                (centred("PAIR AT"), 7, cyan, "PAIR AT"),
+                (name_x, 17, white, name),
+                (centred(PAIRING_NAME_SUFFIX), 27, white, PAIRING_NAME_SUFFIX),
+            ):
+                self.matrix.draw_text_with_border(small, x, y, colour, black, text)
+        elif show_ip:
             self.matrix.draw_text_with_border(
                 self.matrix.font("4x6"), 18, 7, cyan, black, "PAIR IP"
             )
@@ -1655,14 +1687,46 @@ class DisplayController:
             if generation != self._pairing_generation or not self._pairing_pause.is_set():
                 self._pairing_page_timer = None
                 return
-            self._pairing_show_ip = not self._pairing_show_ip
-            show_ip = self._pairing_show_ip
-            self._pairing_page_timer = threading.Timer(
-                3, lambda: self._rotate_pairing_page(generation)
-            )
+            # PIN, name, PIN, IP: the PIN stays up half the time; no name -> PIN, IP.
+            pages = ("pin", "name", "pin", "ip") if self._pairing_name else ("pin", "ip")
+            self._pairing_page_index = (self._pairing_page_index + 1) % len(pages)
+            page = pages[self._pairing_page_index]
+            self._pairing_show_ip = page != "pin"
+            show_ip = {"pin": False, "ip": True, "name": "name"}[page]
+            if page == "name" and len(self._pairing_name) > PAIRING_NAME_MAX_CHARS:
+                self._pairing_scroll_x = 2
+                self._pairing_page_timer = threading.Timer(
+                    PAIRING_SCROLL_FRAME_SECONDS, lambda: self._scroll_pairing_name(generation)
+                )
+            else:
+                self._pairing_page_timer = threading.Timer(
+                    3, lambda: self._rotate_pairing_page(generation)
+                )
             self._pairing_page_timer.daemon = True
             self._pairing_page_timer.start()
         self._draw_pairing_page(show_ip=show_ip, generation=generation)
+
+    def _scroll_pairing_name(self, generation):
+        """Move a name too wide for the panel one pixel left; rotate on once it has gone."""
+        with self._state_lock:
+            if generation != self._pairing_generation or not self._pairing_pause.is_set():
+                self._pairing_page_timer = None
+                return
+            self._pairing_scroll_x -= 1
+            if self._pairing_scroll_x + 4 * len(self._pairing_name) < 0:
+                self._pairing_page_timer = None
+                rotate = True
+            else:
+                rotate = False
+                self._pairing_page_timer = threading.Timer(
+                    PAIRING_SCROLL_FRAME_SECONDS, lambda: self._scroll_pairing_name(generation)
+                )
+                self._pairing_page_timer.daemon = True
+                self._pairing_page_timer.start()
+        if rotate:
+            self._rotate_pairing_page(generation)
+        else:
+            self._draw_pairing_page(show_ip="name", generation=generation)
 
     def end_pairing(self, generation=None, timeout=None):
         deadline = None if timeout is None else time.monotonic() + max(0, timeout)
@@ -1684,6 +1748,8 @@ class DisplayController:
             self._pairing_pin = None
             self._pairing_label = "PAIR"
             self._pairing_ip = None
+            self._pairing_name = None
+            self._pairing_page_index = 0
         finally:
             self._state_lock.release()
         # A callback can pass its generation check before the state above changes.
