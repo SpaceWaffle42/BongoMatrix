@@ -253,6 +253,23 @@ def _confetti(area, elapsed):
 FRAME_MARGIN = 2
 
 
+# Owner 2026-10-15: calendar text that does not fit scrolls continuously (wraps with a
+# 4-pixel gap) for as long as the event is shown, instead of one pass then resting.
+SCROLL_GAP = 4
+
+
+def scroll_x(text_width, available, elapsed):
+    if text_width <= available:
+        return 0
+    return -(int(elapsed / .05) % (text_width + SCROLL_GAP))
+
+
+def draw_scrolling(image, font, text, x, y, colour, text_width, available):
+    _text(image, font, text, x, y, colour)
+    if text_width > available:
+        _text(image, font, text, x + text_width + SCROLL_GAP, y, colour)
+
+
 def drawable_insets(settings):
     return {edge: FRAME_MARGIN + settings['insets'][edge] for edge in ('top', 'right', 'bottom', 'left')}
 
@@ -275,14 +292,14 @@ def render_frame(settings, selected, *, elapsed=0, initial_seconds=None, artwork
     title_width, title_height, _ = _measure(title_font, item['title'])
     measured_title_height = title_height
     title_height = min(title_height, max(1, height // 2 - 1))
-    title_x = -int(elapsed / .05) if title_width > width and elapsed < (title_width + 4) * .05 else 0
+    title_x = scroll_x(title_width, width, elapsed)
     # Titles that fit use the chosen alignment; wider titles scroll from the left and rest at 0.
     title_offset = 0
     if title_width <= width:
         align = settings.get('title_align', 'center')
         title_offset = (width - title_width) // 2 if align == 'center' else width - title_width if align == 'right' else 0
     title = Image.new('RGB', (width, title_height), settings['background'])
-    _text(title, title_font, item['title'], title_x + title_offset, 0, settings['text_colour'])
+    draw_scrolling(title, title_font, item['title'], title_x + title_offset, 0, settings['text_colour'], title_width, width)
     area.paste(title, (0, 0))
     bar_height = settings['progress_height'] if settings['layout'] == 'progress' else 0
     text_y = title_height + 2

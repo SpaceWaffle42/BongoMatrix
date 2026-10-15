@@ -58,17 +58,17 @@ def big_number(seconds):
 
 
 def title_band(ec, area, settings, item, x, y, width, height, elapsed, colour=None):
-    """Title in a column/band: alignment when it fits, one left-to-right scroll pass when not."""
+    """Title in a column/band: alignment when it fits, continuous right-to-left scroll when not."""
     font = settings['title_font']
     title_width, measured, _ = ec._measure(font, item['title'])
     available_height = max(1, min(measured, height))
-    title_x = -int(elapsed / .05) if title_width > width and elapsed < (title_width + 4) * .05 else 0
+    title_x = ec.scroll_x(title_width, width, elapsed)
     offset = 0
     if title_width <= width:
         align = settings.get('title_align', 'center')
         offset = (width - title_width) // 2 if align == 'center' else width - title_width if align == 'right' else 0
     band = Image.new('RGB', (max(1, width), available_height), area.getpixel((x, y)) if 0 <= x < area.width and 0 <= y < area.height else settings['background'])
-    ec._text(band, font, item['title'], title_x + offset, 0, colour or settings['text_colour'])
+    ec.draw_scrolling(band, font, item['title'], title_x + offset, 0, colour or settings['text_colour'], title_width, width)
     area.paste(band, (x, y))
     return dict(title_width=title_width, title_scrolls=title_width > width, title_x=title_x,
                 title_height=measured, title_available_width=width,
