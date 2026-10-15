@@ -1,10 +1,13 @@
-{% if canonical_host %}<script>
-/* Opened by IP: move to this display's .local name, but only if this device can reach it.
-   A paired browser carries its pairing over with a single-use token (cookies are per address). */
+{% if canonical_host %}<p class="canonical-link" id="canonical-link" hidden style="margin:10px auto 0;max-width:22rem;padding:6px 10px;border:1px solid #ffffff24;border-radius:6px;color:#d0d6e0;font-size:12px;overflow-wrap:anywhere;text-align:center"><a href="#">Open this display by name ({{ canonical_host }})</a>{% if not canonical_auto %} · you will pair once with the PIN on that address{% endif %}</p>
+<script>
+/* Opened by IP: if this display's .local name answers *as this display* (same id),
+   an unpaired pair page moves there; a paired page only shows a link. No pairing
+   or token ever travels between addresses (review 2026-10-15). */
 (()=>{const root=document.documentElement,host=root.dataset.canonicalHost,port=location.port?':'+location.port:'';
 const target=location.protocol+'//'+host+port,here=location.pathname+location.search+location.hash,stop=new AbortController();setTimeout(()=>stop.abort(),2500);
-fetch(target+'/api/directory/self',{mode:'no-cors',cache:'no-store',credentials:'omit',signal:stop.signal}).then(async()=>{
-if(root.dataset.canonicalHandoff!=='1'){location.replace(target+here);return}
-const response=await fetch('/api/pairing/handoff',{method:'POST',headers:{'X-Matrix-Action':'paired-request'},cache:'no-store'});if(!response.ok)return;
-const {token}=await response.json();location.replace(target+'/pair/handoff?t='+encodeURIComponent(token)+'&next='+encodeURIComponent(here))}).catch(()=>{})})();
+let touched=false;for(const kind of ['input','keydown','pointerdown'])addEventListener(kind,()=>{touched=true},{capture:true,once:true});
+fetch(target+'/api/directory/self',{mode:'cors',cache:'no-store',credentials:'omit',signal:stop.signal}).then(r=>r.ok?r.json():null).then(d=>{
+if(!d||d.service!=='matrix'||d.id!==root.dataset.canonicalId)return;
+const link=document.getElementById('canonical-link');if(link){link.querySelector('a').href=target+here;document.querySelector('.sidebar-foot')?.append(link);link.hidden=false}
+if(root.dataset.canonicalAuto==='1'&&!touched)location.assign(target+here)}).catch(()=>{})})();
 </script>{% endif %}

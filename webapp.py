@@ -28,10 +28,7 @@ from functools import wraps
 from pathlib import Path
 from zoneinfo import available_timezones
 
-from flask import (
-    Flask, abort, jsonify, redirect, render_template, render_template_string, request, send_file,
-    session, url_for,
-)
+from flask import Flask, abort, jsonify, redirect, render_template, request, send_file, session, url_for
 from PIL import Image, UnidentifiedImageError
 from werkzeug.exceptions import HTTPException, RequestEntityTooLarge
 from werkzeug.utils import secure_filename
@@ -89,8 +86,6 @@ CONFIG_REQUEST_LIMIT = 1_048_576
 CONDITIONAL_HEADER_LIMIT = 4096
 MINIMUM_CLIENT_CONTRACT = 3
 APPLICATION_VERSION = "0.3.74-preview"
-PAIRING_HANDOFF_TTL_SECONDS = 30
-PAIRING_HANDOFF_MAX_TOKENS = 32
 DEVICE_RESTART_PENDING_TTL_SECONDS = 60
 PAIRED_ACTION_HEADER = "X-Matrix-Action"
 PAIRED_ACTION_VALUE = "paired-request"
@@ -874,12 +869,6 @@ def create_app(
             return None
         return f"{name}.local"
 
-    def request_hostname():
-        host = (request.host or "").strip().lower()
-        if host.startswith("["):
-            return host[1:].partition("]")[0]
-        return host if host.count(":") > 1 else host.partition(":")[0]
-
     def canonical_host():
         """This display's published .local name when the page was opened by IP, else None.
 
@@ -899,71 +888,30 @@ def create_app(
             return None
         return own_published_host()
 
-    # Cookies belong to one address, so a paired browser moving from the IP to
-    # the name carries its pairing over with a single-use, 30 s token bound to
-    # the same paired device (no new pairing slot, no PIN).
-    handoff_tokens = {}
-    handoff_lock = threading.Lock()
-
     @app.context_processor
     def inject_canonical_host():
-        host = canonical_host()
+        """Owner 2026-10-15: opening the IP moves to the .local name when reachable.
+
+        Review 2026-10-15: no pairing ever travels between addresses (mDNS is
+        unauthenticated, so a token sent to "the name" could reach an impostor).
+        Only an unpaired GET page moves automatically, and only after the name
+        answers with this display's id. Paired IP browsers get a link instead.
+        Pages rendered by POST never carry it, so form results are not re-fetched.
+        """
+        host = canonical_host() if request.method == "GET" else None
+        device_id = None
+        if host is not None:
+            try:
+                device_id = getattr(display_name, "default", None)
+            except Exception:
+                device_id = None
+            if not isinstance(device_id, str) or name_problem(device_id) is not None:
+                host = None
         return {
             "canonical_host": host,
-            "canonical_handoff": bool(host and pairing_session_is_current()),
+            "canonical_id": device_id,
+            "canonical_auto": bool(host) and not pairing_session_is_current(),
         }
-
-    @app.post("/api/pairing/handoff")
-    def pairing_handoff_issue():
-        if not pairing_session_is_current():
-            return pairing_expired_response()
-        if canonical_host() is None:
-            return jsonify({"error": "Already on this display's name."}), 409
-        token = secrets.token_urlsafe(32)
-        now = time.monotonic()
-        with handoff_lock:
-            for stale in [key for key, (_, until) in handoff_tokens.items() if until <= now]:
-                del handoff_tokens[stale]
-            while len(handoff_tokens) >= PAIRING_HANDOFF_MAX_TOKENS:
-                del handoff_tokens[next(iter(handoff_tokens))]
-            handoff_tokens[token] = (session["device_id"], now + PAIRING_HANDOFF_TTL_SECONDS)
-        response = jsonify({"token": token, "expires_in": PAIRING_HANDOFF_TTL_SECONDS})
-        response.headers["Cache-Control"] = "no-store"
-        return response
-
-    @app.get("/pair/handoff")
-    def pairing_handoff_redeem():
-        token = request.args.get("t", "")
-        target = request.args.get("next", "/")
-        if not (target.startswith("/") and not target.startswith(("//", "/\\"))) or any(
-            character in target for character in "\\\r\n\t"
-        ):
-            target = "/"
-        with handoff_lock:
-            entry = handoff_tokens.pop(token, None) if isinstance(token, str) else None
-        own = own_published_host()
-        device = None
-        if entry is not None and own is not None and request_hostname() == own.lower():
-            device_id, until = entry
-            if time.monotonic() < until and device_store.contains(device_id):
-                device = next(
-                    (item for item in device_store.list() if item["id"] == device_id), None,
-                )
-        if device is None:
-            response = redirect(url_for("pair"))
-        else:
-            establish_paired_session(device)
-            # Not a 302: this navigation began on the IP (another site), so a
-            # redirect would still not send the SameSite=Strict cookie. A page
-            # on this host navigating itself does.
-            response = app.make_response(render_template_string(
-                "<!doctype html><meta charset=utf-8><title>Matrix</title>"
-                "<script>location.replace({{ target|tojson }})</script>"
-                "<a href=\"{{ target }}\">Continue</a>", target=target,
-            ))
-        response.headers["Cache-Control"] = "no-store"
-        response.headers["Referrer-Policy"] = "no-referrer"
-        return response
 
     @app.get("/api/directory/self")
     def directory_self():
@@ -972,6 +920,9 @@ def create_app(
             abort(404)
         response = jsonify(directory.self_summary())
         response.headers["Cache-Control"] = "no-store"
+        # Public read-only summary; an IP page reads it from the .local origin
+        # to confirm the name really is this display before moving there.
+        response.headers["Access-Control-Allow-Origin"] = "*"
         return response
 
     app.config.update(

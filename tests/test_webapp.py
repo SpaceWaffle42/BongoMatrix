@@ -3253,7 +3253,6 @@ try{
             ("POST", "/api/display-name/start"),
             ("POST", "/api/display-name/confirm"),
             ("POST", "/api/display-name/cancel"),
-            ("POST", "/api/pairing/handoff"),
         }
         self.assertEqual(unsafe_routes, expected_routes)
         concrete_routes = [
@@ -3288,7 +3287,6 @@ try{
             ("POST", "/api/display-name/start"),
             ("POST", "/api/display-name/confirm"),
             ("POST", "/api/display-name/cancel"),
-            ("POST", "/api/pairing/handoff"),
         ]
         config_before = self.store.get()
         devices_before = self.device_store.list()

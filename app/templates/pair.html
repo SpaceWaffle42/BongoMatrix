@@ -1,5 +1,5 @@
 <!doctype html>
-<html lang="en"{% if canonical_host %} data-canonical-host="{{ canonical_host }}"{% if canonical_handoff %} data-canonical-handoff="1"{% endif %}{% endif %}>
+<html lang="en"{% if canonical_host %} data-canonical-host="{{ canonical_host }}" data-canonical-id="{{ canonical_id }}"{% if canonical_auto %} data-canonical-auto="1"{% endif %}{% endif %}>
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width,initial-scale=1">
