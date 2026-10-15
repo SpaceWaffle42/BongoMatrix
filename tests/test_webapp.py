@@ -1800,7 +1800,7 @@ try{
         body = self.client.get("/").get_data(as_text=True)
 
         application_version = getattr(webapp, "APPLICATION_VERSION", None)
-        self.assertEqual(application_version, "0.3.73-preview")
+        self.assertEqual(application_version, "0.3.74-preview")
         self.assertEqual(body.count(f"Version {application_version}"), 1)
         self.assertRegex(
             body,
@@ -16357,6 +16357,13 @@ try{
         self.assertEqual(response.status_code, 200)
 
     def tearDown(self):
+        # Live-browser journeys admit edit previews that pin media descriptors;
+        # close them so later descriptor-accounting tests start from a clean slate.
+        close_previews = getattr(getattr(self, "app", None), "extensions", {}).get(
+            "close_edit_preview_services"
+        )
+        if close_previews is not None:
+            close_previews()
         self.temp.cleanup()
         for offline in getattr(self, "_offline_providers", ()):
             offline.stop()
@@ -17288,6 +17295,19 @@ try{
         registry = self.app.extensions.get("edit_preview_registry")
         if registry is not None:
             registry.close()
+
+    def test_fixture_teardown_closes_edit_preview_services(self):
+        # CI shard 1 (pipeline 589): a live-browser journey left an admitted edit
+        # preview (and its pinned media descriptors) open past tearDown, so later
+        # /proc/self/fd accounting tests in the same shard failed.
+        closed = []
+        real_close = self.app.extensions["close_edit_preview_services"]
+        self.app.extensions["close_edit_preview_services"] = (
+            lambda: closed.append(True) or real_close()
+        )
+        self.tearDown()
+        self.assertEqual(closed, [True])
+        self.setUp()
 
     @unittest.skipUnless(shutil.which("node"), "Node.js is required")
     @unittest.skipUnless(

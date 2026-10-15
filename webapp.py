@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import base64
 import hashlib
+import ipaddress
 import io
 import json
 import math
@@ -84,7 +85,7 @@ MEDIA_METADATA_ERRORS = (
 CONFIG_REQUEST_LIMIT = 1_048_576
 CONDITIONAL_HEADER_LIMIT = 4096
 MINIMUM_CLIENT_CONTRACT = 3
-APPLICATION_VERSION = "0.3.73-preview"
+APPLICATION_VERSION = "0.3.74-preview"
 DEVICE_RESTART_PENDING_TTL_SECONDS = 60
 PAIRED_ACTION_HEADER = "X-Matrix-Action"
 PAIRED_ACTION_VALUE = "paired-request"
@@ -855,6 +856,63 @@ def create_app(
         )
         return response
 
+    def own_published_host():
+        """``matrix-7d03.local`` when avahi publishes a valid name for us, else None."""
+        if display_name is None:
+            return None
+        try:
+            published = display_name.current() or ""
+        except Exception:
+            return None
+        name = published.removesuffix(".local")
+        if not published.endswith(".local") or name_problem(name) is not None:
+            return None
+        return f"{name}.local"
+
+    def canonical_host():
+        """This display's published .local name when the page was opened by IP, else None.
+
+        Owner 2026-10-15: opening the IP should move to the name if the name is
+        reachable. The browser probes the name first (see _canonical_host.html),
+        so a phone without mDNS stays on the IP.
+        """
+        if display_name is None:
+            return None
+        host = (request.host or "").strip()
+        literal = host[1:].partition("]")[0] if host.startswith("[") else host.rpartition(":")[0] or host
+        if host.count(":") > 1 and not host.startswith("["):
+            literal = host  # bare IPv6 without a port
+        try:
+            ipaddress.ip_address(literal)
+        except ValueError:
+            return None
+        return own_published_host()
+
+    @app.context_processor
+    def inject_canonical_host():
+        """Owner 2026-10-15: opening the IP moves to the .local name when reachable.
+
+        Review 2026-10-15: no pairing ever travels between addresses (mDNS is
+        unauthenticated, so a token sent to "the name" could reach an impostor).
+        Only an unpaired GET page moves automatically, and only after the name
+        answers with this display's id. Paired IP browsers get a link instead.
+        Pages rendered by POST never carry it, so form results are not re-fetched.
+        """
+        host = canonical_host() if request.method == "GET" else None
+        device_id = None
+        if host is not None:
+            try:
+                device_id = getattr(display_name, "default", None)
+            except Exception:
+                device_id = None
+            if not isinstance(device_id, str) or name_problem(device_id) is not None:
+                host = None
+        return {
+            "canonical_host": host,
+            "canonical_id": device_id,
+            "canonical_auto": bool(host) and not pairing_session_is_current(),
+        }
+
     @app.get("/api/directory/self")
     def directory_self():
         """Public, read-only summary that other displays use to list this one."""
@@ -862,6 +920,9 @@ def create_app(
             abort(404)
         response = jsonify(directory.self_summary())
         response.headers["Cache-Control"] = "no-store"
+        # Public read-only summary; an IP page reads it from the .local origin
+        # to confirm the name really is this display before moving there.
+        response.headers["Access-Control-Allow-Origin"] = "*"
         return response
 
     app.config.update(

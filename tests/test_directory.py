@@ -538,6 +538,13 @@ class DirectoryRouteTests(unittest.TestCase):
                          "matrix-7d03")
         self.assertEqual(self.get("/api/directory/self").get_json()["id"], "matrix-7d03")
 
+    def test_self_summary_is_cors_readable_without_credentials(self):
+        """An IP page confirms the .local name is this display before moving there."""
+        for host in ("matrix-7d03.local:5000", "192.168.1.5:5000"):
+            response = self.get("/api/directory/self", host=host)
+            self.assertEqual(response.headers.get("Access-Control-Allow-Origin"), "*", host)
+            self.assertNotIn("Access-Control-Allow-Credentials", response.headers)
+
 
 if __name__ == "__main__":
     unittest.main()

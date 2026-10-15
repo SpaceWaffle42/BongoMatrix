@@ -78,6 +78,148 @@ class DisplayControllerTests(unittest.TestCase):
             self.assertTrue(all(timer.cancelled for timer in timers))
 
 
+    def _pairing_pages(self, name):
+        matrix = Mock()
+        matrix.matrix.width = 64
+        timers = []
+
+        class FakeTimer:
+            def __init__(self, interval, callback):
+                self.interval, self.callback, self.daemon = interval, callback, False
+                timers.append(self)
+
+            def start(self):
+                pass
+
+            def cancel(self):
+                pass
+
+        device_name = Mock()
+        device_name.current.return_value = name
+        with patch("display_controller.threading.Timer", FakeTimer):
+            controller = DisplayController(
+                matrix, Mock(), ip_address_provider=lambda: "192.168.1.5", device_name=device_name,
+            )
+            controller.show_pairing_pin("123456", ttl_seconds=60)
+            pages = []
+            for _ in range(4):
+                pages.append([c.args[5] for c in matrix.draw_text_with_border.call_args_list])
+                matrix.draw_text_with_border.reset_mock()
+                rotation = [timer for timer in timers if timer.interval == 3][-1]
+                rotation.callback()
+            controller.end_pairing()
+        return pages, matrix
+
+    def test_pairing_screen_also_shows_the_network_name(self):  # owner 2026-10-15
+        pages, _ = self._pairing_pages("matrix-7d03.local")
+        self.assertIn("123456", pages[0])
+        self.assertEqual(pages[1], ["PAIR AT", "matrix-7d03", ".local:5000"])
+        self.assertIn("123456", pages[2])  # the PIN stays on screen half the time
+        self.assertEqual(pages[3], ["PAIR IP", "192.168.1.5", "PORT 5000"])
+
+    def test_pairing_name_page_fits_the_64px_panel(self):
+        pages, matrix = self._pairing_pages("matrix-7d03.local")
+        widths = {"matrix-7d03": 44, ".local:5000": 44, "PAIR AT": 28}
+        self.assertEqual(set(pages[1]), set(widths))
+        for text in pages[1]:
+            self.assertLessEqual(4 * len(text), 62, text)
+
+    def test_invalid_published_name_falls_back_to_pin_and_ip(self):  # review SHOULD-1
+        for name in ("kitchen display.local", "kü che.local", "x" * 64 + ".local", "-bad.local"):
+            pages, _ = self._pairing_pages(name)
+            self.assertEqual(pages[1], ["PAIR IP", "192.168.1.5", "PORT 5000"], name)
+        pages, _ = self._pairing_pages("kitchen-2.local")  # avahi clash suffix is a valid name
+        self.assertEqual(pages[1], ["PAIR AT", "kitchen-2", ".local:5000"])
+
+    def test_name_and_scroll_frames_are_hidden_from_browsers(self):  # review SHOULD-2
+        from edit_preview import CaptureMatrix
+
+        published = []
+        matrix = CaptureMatrix()
+        named = {"white": "#ffffff", "vapor_cyan": "#01cdfe", "black": "#000000"}
+        matrix.colour = lambda name: CaptureMatrix.colour_rgb(named[name])
+        matrix.latest_frame_png = lambda: (b"panel-frame", len(published))
+        matrix.swap = lambda canvas=None: published.append(1) or matrix.canvas
+        device_name = Mock()
+        device_name.current.return_value = "a-very-long-kitchen-display.local"
+        controller = DisplayController(
+            matrix, Mock(), ip_address_provider=lambda: "192.168.1.5", device_name=device_name,
+        )
+        with patch("display_controller.threading.Timer") as timer:
+            controller.show_pairing_pin("123456", ttl_seconds=60)
+            generation = controller._pairing_generation
+            controller._pairing_page_index = 0
+            controller._rotate_pairing_page(generation)  # name page
+            for _ in range(5):
+                controller._scroll_pairing_name(generation)  # scroll frames
+            self.assertGreaterEqual(len(published), 7)
+            self.assertNotEqual(controller.frame_png()[0], b"panel-frame")
+            controller.end_pairing()
+        self.assertTrue(timer.called)
+        self.assertNotEqual(controller.frame_png()[0], b"panel-frame")  # still hidden afterwards
+        published.append(1)  # first normal frame after pairing is visible again
+        self.assertEqual(controller.frame_png()[0], b"panel-frame")
+
+    def test_missing_name_falls_back_to_pin_and_ip_only(self):
+        pages, _ = self._pairing_pages(None)
+        self.assertIn("123456", pages[0])
+        self.assertEqual(pages[1], ["PAIR IP", "192.168.1.5", "PORT 5000"])
+        self.assertIn("123456", pages[2])
+
+    def test_name_too_wide_for_the_panel_scrolls_then_rotation_continues(self):  # owner
+        long_name = "a-very-long-kitchen-display"  # 27 chars = 108 px in 4x6
+        matrix = Mock()
+        matrix.matrix.width = 64
+        timers = []
+
+        class FakeTimer:
+            def __init__(self, interval, callback):
+                self.interval, self.callback, self.daemon = interval, callback, False
+                self.cancelled = False
+                timers.append(self)
+
+            def start(self):
+                pass
+
+            def cancel(self):
+                self.cancelled = True
+
+        device_name = Mock()
+        device_name.current.return_value = long_name + ".local"
+        with patch("display_controller.threading.Timer", FakeTimer):
+            controller = DisplayController(
+                matrix, Mock(), ip_address_provider=lambda: "192.168.1.5", device_name=device_name,
+            )
+            controller.show_pairing_pin("123456", ttl_seconds=60)
+            [t for t in timers if t.interval == 3][-1].callback()  # PIN -> name page
+            positions = []
+            for _ in range(500):
+                calls = matrix.draw_text_with_border.call_args_list
+                positions += [c.args[1] for c in calls if c.args[5] == long_name]
+                texts = [c.args[5] for c in calls]
+                matrix.draw_text_with_border.reset_mock()
+                pending = [t for t in timers if not t.cancelled and t.callback is not None]
+                nxt = pending[-1]
+                nxt.cancelled = True
+                if nxt.interval == 3:
+                    break
+                self.assertIn("PAIR AT", texts)
+                self.assertIn(".local:5000", texts)
+                nxt.callback()
+            else:
+                self.fail("scroll never handed back to the page rotation")
+            self.assertGreater(len(positions), 60)
+            self.assertEqual(positions, sorted(positions, reverse=True))  # moves left only
+            self.assertLessEqual(positions[0], 2)
+            self.assertLess(positions[-1] + 4 * len(long_name), 4)  # fully read off the left edge
+            frame = [t for t in timers if t.interval < 1][0].interval
+            self.assertLessEqual(frame, 0.06)
+            controller.end_pairing()
+            stale = [t for t in timers if t.interval < 1][-1]
+            matrix.reset_mock()
+            stale.callback()  # a frame racing end_pairing draws nothing
+            matrix.swap.assert_not_called()
+
     def test_show_pairing_pin_draws_pin_on_matrix(self):
         matrix = Mock()
         matrix.matrix.width = 64

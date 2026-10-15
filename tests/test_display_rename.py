@@ -429,6 +429,87 @@ class RenameFlowTests(unittest.TestCase):
         self.assertFalse(data["published"])
         self.assertEqual(data["address"], "matrix-7d03.local")
 
+    # -- owner 2026-10-15: visiting the IP moves to the .local name when reachable --
+    def page(self, path, host, client=None):
+        response = (client or self.client).get(path, base_url=f"http://{host}")
+        self.assertEqual(response.status_code, 200, (path, host))
+        return response.get_data(as_text=True)
+
+    def ip_paired_client(self):
+        client = self.app.test_client()
+        self.pairing.verify.return_value = True
+        client.post("/pair", data={"pin": "123456", "device_name": "Phone"},
+                    base_url="http://192.168.1.5:5000")
+        self.pairing.verify.return_value = False
+        return client
+
+    def test_unpaired_ip_pair_page_moves_to_the_verified_name(self):
+        page = self.page("/pair", "192.168.1.5:5000")
+        self.assertIn('data-canonical-host="matrix-7d03.local"', page)
+        self.assertIn('data-canonical-id="matrix-7d03"', page)
+        self.assertIn('data-canonical-auto="1"', page)
+        # Only an answer that proves it is this display (same id) moves the page,
+        # and assign() keeps the IP page in history so Back still works.
+        self.assertIn("mode:'cors'", page)
+        self.assertIn("d.id!==root.dataset.canonicalId", page)
+        self.assertIn("location.assign", page)
+        self.assertNotIn("location.replace", page)
+        self.assertIn("touched", page, "no move once the visitor has started typing")
+
+    def test_paired_ip_browser_is_never_moved_only_offered_a_link(self):
+        """Review 2026-10-15 MUST 2: no pairing travels between addresses."""
+        dashboard = self.page("/", "192.168.1.5:5000", client=self.ip_paired_client())
+        self.assertIn('data-canonical-host="matrix-7d03.local"', dashboard)
+        self.assertNotIn("data-canonical-auto", dashboard)
+        self.assertIn('id="canonical-link"', dashboard)
+        self.assertNotIn("handoff", dashboard)
+
+    def test_handoff_routes_do_not_exist(self):
+        rules = {rule.rule for rule in self.app.url_map.iter_rules()}
+        self.assertNotIn("/api/pairing/handoff", rules)
+        self.assertNotIn("/pair/handoff", rules)
+
+    def test_post_result_pages_never_carry_the_move(self):
+        """Review MUST 1: a page rendered by a POST must not be turned into a GET."""
+        self.pairing.verify.return_value = False
+        failed = self.client.post("/pair", data={"pin": "000000", "device_name": "Phone"},
+                                  base_url="http://192.168.1.5:5000")
+        self.assertNotIn("data-canonical", failed.get_data(as_text=True))
+
+    def test_name_pages_and_other_hosts_never_redirect(self):
+        for host in ("matrix-7d03.local:5000", "MATRIX-7D03.local", "kitchen.local:5000", "localhost:5000"):
+            self.assertNotIn("data-canonical-host", self.page("/pair", host), host)
+        named = self.app.test_client()
+        self.pairing.verify.return_value = True
+        named.post("/pair", data={"pin": "123456", "device_name": "Laptop"},
+                   base_url="http://matrix-7d03.local:5000")
+        self.pairing.verify.return_value = False
+        self.assertNotIn("data-canonical-host", self.page("/", "matrix-7d03.local:5000", client=named))
+
+    def test_ipv6_literals_also_move_to_the_name(self):
+        for host in ("[fe80::1]:5000", "[fe80::1]"):
+            self.assertIn('data-canonical-host="matrix-7d03.local"', self.page("/pair", host), host)
+
+    def test_no_redirect_without_a_valid_published_name(self):
+        for odd in ("bad name.local", "matrix-7d03", None):
+            with patch.object(self.display_name, "current", return_value=odd):
+                self.assertNotIn("data-canonical-host", self.page("/pair", "192.168.1.5:5000"), odd)
+        app = create_app(
+            self.controller, self.store, self.pairing, secret_key="test",
+            session_generation="generation-one", media_dir=Path(self.temp.name) / "media",
+            device_store=self.device_store,
+            openweather_secrets=SecretStore(Path(self.temp.name) / "s" / "k"),
+        )
+        self.assertNotIn("data-canonical-host", self.page("/pair", "192.168.1.5:5000", app.test_client()))
+
+    def test_renamed_display_moves_to_its_new_name_with_the_same_id(self):
+        self.pair()
+        self.post("/api/display-name/start", {"name": "kitchen"})
+        self.post("/api/display-name/confirm", {"code": self.panel_code()})
+        page = self.page("/pair", "192.168.1.5:5000", self.app.test_client())
+        self.assertIn('data-canonical-host="kitchen.local"', page)
+        self.assertIn('data-canonical-id="matrix-7d03"', page)
+
     def test_unavailable_without_device_name(self):
         app = create_app(
             self.controller, self.store, self.pairing, secret_key="test",
