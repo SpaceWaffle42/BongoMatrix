@@ -58,6 +58,9 @@ class ShipRefusalTests(unittest.TestCase):
         mock.patch.object(self.ship, 'write_result', return_value=Path('/dev/null')).start()
         self.addCleanup(mock.patch.stopall)
         mock.patch.object(self.ship, 'git', side_effect=lambda *a: b'f' * 40 + b'\n').start()
+        mock.patch.object(self.ship, 'locate_target', return_value={  # 1.10f: device I/O faked
+            'target': 'admin@10.9.8.3', 'address': '10.9.8.3', 'alias': 'matrix-device',
+            'found_by': 'hint'}).start()
 
     def scenario(self, ci='success', files=('webapp.py',), version='0.3.68-preview', live=('0.3.67-preview',), apply=True,
                  unsupported=(), argv=None):
@@ -150,6 +153,9 @@ class ShipApplyTests(unittest.TestCase):
         self.addCleanup(mock.patch.stopall)
         mock.patch.object(self.ship, 'write_result', return_value=Path('/dev/null')).start()
         mock.patch.object(self.ship, 'git', side_effect=lambda *a: b'f' * 40 + b'\n').start()
+        mock.patch.object(self.ship, 'locate_target', return_value={  # 1.10f: device I/O faked
+            'target': 'admin@10.9.8.3', 'address': '10.9.8.3', 'alias': 'matrix-device',
+            'found_by': 'hint'}).start()
         mock.patch.object(self.ship, 'ci_status', return_value=('success', 430)).start()
         mock.patch.object(self.ship, 'build_plan', return_value=(['webapp.py'], '0.3.68-preview', {})).start()
 

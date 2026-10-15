@@ -188,11 +188,15 @@ class FrameCapture:
             return self._buffer(canvas).copy()
 
     def png(self):
+        return self.png_with_revision()[0]
+
+    def png_with_revision(self):
+        """Encode the latest publication and return it with its own revision."""
         with self._lock:
             output = io.BytesIO()
             self._latest.save(output, format="PNG", optimize=False)
             output.seek(0)
-            return output
+            return output, self._revision
 
     @property
     def revision(self):

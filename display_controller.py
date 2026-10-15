@@ -305,6 +305,7 @@ ADDRESS_POLL_SECONDS = 5
 ADDRESS_NOTICE_SECONDS = (10, 15)  # keep scrolling at least / at most this long
 ADDRESS_NOTICE_FRAME_SECONDS = 0.04
 ADDRESS_STABLE_READINGS = 2
+NAME_REFRESH_POLLS = 6  # re-check the published mDNS name every ~30 s (1.10b)
 
 
 class AddressWatch:
@@ -346,13 +347,16 @@ class AddressWatch:
         return ("reconnected", address) if address == previous else ("changed", address)
 
 
-def address_notice_text(event, port):
+def address_notice_text(event, port, name=None):
     """Return the (label, detail) lines the panel shows for an address event."""
     kind, address = event
     if kind == "offline":
         return "NO NETWORK", "check Wi-Fi"
-    label = {"changed": "NEW ADDRESS", "reconnected": "CONNECTED"}.get(kind, "ADDRESS")
-    return label, f"{address}:{port}"
+    label = {
+        "changed": "NEW ADDRESS", "reconnected": "CONNECTED", "renamed": "NEW NAME",
+    }.get(kind, "ADDRESS")
+    detail = f"{address}:{port}"
+    return label, f"{name}  {detail}" if name else detail
 
 
 def _text_width(font_name, text):
@@ -374,10 +378,17 @@ def _lan_address(value):
     return str(parsed)
 
 
+def _blank_frame_png(width=64, height=32):
+    output = io.BytesIO()
+    Image.new("RGB", (width, height), "black").save(output, format="PNG")
+    output.seek(0)
+    return output
+
+
 class DisplayController:
     def __init__(
         self, matrix, config_store, ip_address_provider=None, openweather_secrets=None,
-        *, announce_address=False, address_port=5000,
+        *, announce_address=False, address_port=5000, device_name=None,
     ):
         self.matrix = matrix
         self.config_store = config_store
@@ -413,6 +424,9 @@ class DisplayController:
         self._pairing_timer = None
         self._pairing_page_timer = None
         self._pairing_pin = None
+        self._pairing_label = "PAIR"
+        # Frames up to this revision may show a PIN/code; None while drawing one.
+        self._credential_frames_through = 0
         self._pairing_ip = None
         self._pairing_show_ip = False
         self._pairing_generation = 0
@@ -421,6 +435,8 @@ class DisplayController:
         self._address_port = int(address_port)
         self._address_notice = None
         self._address_thread = None
+        self._device_name = device_name
+        self._announced_name = None
         self._openweather_secrets = openweather_secrets
         self._openweather_provider = PreviewProvider()
         self.current_module = None
@@ -530,12 +546,27 @@ class DisplayController:
         except Exception:
             return None
 
+    def _refresh_name(self):
+        """Publish this device's mDNS name; return the actual name or None."""
+        if self._device_name is None:
+            return None
+        try:
+            return self._device_name.refresh()
+        except Exception:
+            LOGGER.exception("Matrix mDNS name refresh failed")
+            return None
+
     def _watch_address(self):
         """Poll the LAN address until shutdown; queue a panel notice on changes."""
         try:
             if not self._address_watch.started:
+                self._announced_name = self._refresh_name()
                 self._queue_address_notice(self._address_watch.start(self._read_address()))
+            polls = 0
             while not self._shutdown.wait(ADDRESS_POLL_SECONDS):
+                polls += 1
+                if polls % NAME_REFRESH_POLLS == 0:
+                    self._name_seen(self._refresh_name())
                 self._address_seen(self._read_address())
         except Exception:
             LOGGER.exception("Matrix address watcher stopped")
@@ -543,7 +574,25 @@ class DisplayController:
     def _address_seen(self, address):
         event = self._address_watch.observe(address)
         if event is not None:
+            if event[0] != "offline":
+                self._announced_name = self._refresh_name() or self._announced_name
             self._queue_address_notice(event)
+
+    def refresh_device_name(self):
+        """Re-publish after a rename; return the actual name (1.10c)."""
+        name = self._refresh_name()
+        if self._address_watch is not None:
+            self._name_seen(name)
+        return name
+
+    def _name_seen(self, name):
+        """Announce a new published name (for example an avahi clash rename)."""
+        if name is None or name == self._announced_name:
+            return
+        previous, self._announced_name = self._announced_name, name
+        address = self._address_watch.known
+        if address is not None:
+            self._queue_address_notice(("renamed" if previous else "start", address))
 
     def _address_notice_may_interrupt(self):
         """Only cut into the ordinary daytime playlist, never owner work."""
@@ -611,7 +660,9 @@ class DisplayController:
                     self._module_stop = None
 
     def _draw_address_notice(self, event, stop_event):
-        label, detail = address_notice_text(event, self._address_port)
+        label, detail = address_notice_text(
+            event, self._address_port, self._announced_name,
+        )
         matrix = self.matrix
         label_font, detail_font = matrix.font("5x7"), matrix.font("6x10")
         label_colour = matrix.colour_rgb("#ff7070" if event[0] == "offline" else "#01cdfe")
@@ -1395,13 +1446,53 @@ class DisplayController:
             "current_module": self.current_module,
             "last_error": self.last_error,
             "pairing_active": self.pairing_active,
+            "device_name": (
+                self._device_name.current() if self._device_name is not None else None
+            ),
         }
 
     def frame_png(self):
-        """Return the exact last frame submitted to the owned physical Matrix."""
-        return self.matrix.latest_frame_png()
+        """Return the last frame submitted to the owned physical Matrix.
 
-    def show_pairing_pin(self, pin, ttl_seconds=600):
+        Pairing PINs and rename codes are only for someone at the panel, so
+        while one is shown, and for any frame published while one was being
+        drawn, browsers get a blank frame instead (1.10c review).
+        """
+        frame, revision = self.matrix.latest_frame_png()
+        with self._state_lock:
+            hidden = (
+                self._pairing_pause.is_set()
+                or self._credential_frames_through is None
+                or (
+                    isinstance(revision, int)
+                    and revision <= self._credential_frames_through
+                )
+            )
+        if hidden:
+            return _blank_frame_png(), revision
+        return frame, revision
+
+    def show_panel_code(self, label, code, ttl_seconds):
+        """Take over the panel with ``label`` over ``code`` (1.10c rename code).
+
+        Shares the pairing takeover, so a pairing PIN request replaces it.
+        Returns a token for ``panel_code_current`` / ``end_panel_code``.
+        """
+        return self.show_pairing_pin(code, ttl_seconds=ttl_seconds, label=label, rotate=False)
+
+    def panel_code_current(self, token):
+        with self._state_lock:
+            return (
+                token is not None
+                and token == self._pairing_generation
+                and self._pairing_pause.is_set()
+                and self._pairing_label != "PAIR"
+            )
+
+    def end_panel_code(self, token):
+        return self.end_pairing(token)
+
+    def show_pairing_pin(self, pin, ttl_seconds=600, *, label="PAIR", rotate=True):
         with self._lifecycle_lock:
             if self._shutdown.is_set():
                 raise RuntimeError("pairing display unavailable")
@@ -1439,6 +1530,7 @@ class DisplayController:
                     if self._pairing_page_timer is not None:
                         self._pairing_page_timer.cancel()
                     self._pairing_pin = str(pin)
+                    self._pairing_label = str(label)
                     self._pairing_ip = pairing_ip
                     self._pairing_show_ip = False
                     self._pairing_timer = threading.Timer(
@@ -1446,11 +1538,13 @@ class DisplayController:
                     )
                     self._pairing_timer.daemon = True
                     self._pairing_timer.start()
-                    self._pairing_page_timer = threading.Timer(
-                        3, lambda: self._rotate_pairing_page(generation)
-                    )
-                    self._pairing_page_timer.daemon = True
-                    self._pairing_page_timer.start()
+                    self._pairing_page_timer = None
+                    if rotate:
+                        self._pairing_page_timer = threading.Timer(
+                            3, lambda: self._rotate_pairing_page(generation)
+                        )
+                        self._pairing_page_timer.daemon = True
+                        self._pairing_page_timer.start()
             if abort:
                 self.end_pairing(generation)
                 raise RuntimeError("pairing display unavailable")
@@ -1487,6 +1581,7 @@ class DisplayController:
             raise
         finally:
             self._pairing_setup.clear()
+        return generation
 
     def _draw_pairing_page(self, show_ip, generation=None, *, display_owned=False):
         if display_owned:
@@ -1495,12 +1590,30 @@ class DisplayController:
             return self._draw_pairing_page_owned(show_ip, generation)
 
     def _draw_pairing_page_owned(self, show_ip, generation=None):
-        if (
-            not self._pairing_pause.is_set()
-            or generation is not None
-            and generation != self._pairing_generation
-        ):
-            return False
+        with self._state_lock:
+            if (
+                not self._pairing_pause.is_set()
+                or generation is not None
+                and generation != self._pairing_generation
+            ):
+                return False
+            self._credential_frames_through = None
+        try:
+            return self._draw_pairing_frame(show_ip)
+        finally:
+            revision = self._published_revision()
+            with self._state_lock:
+                self._credential_frames_through = revision
+
+    def _published_revision(self):
+        try:
+            revision = self.matrix.latest_frame_png()[1]
+        except Exception:
+            revision = None
+        # Unknown revisions keep every frame hidden until the next pairing ends.
+        return revision if isinstance(revision, int) else float("inf")
+
+    def _draw_pairing_frame(self, show_ip):
         self.matrix.clear()
         white = self.matrix.colour("white")
         cyan = self.matrix.colour("vapor_cyan")
@@ -1514,6 +1627,16 @@ class DisplayController:
             )
             self.matrix.draw_text_with_border(
                 self.matrix.font("4x6"), 14, 27, white, black, "PORT 5000"
+            )
+        elif self._pairing_label != "PAIR":
+            label = self._pairing_label
+            self.matrix.draw_text_with_border(
+                self.matrix.font("5x7"), max(1, (64 - 5 * len(label)) // 2), 10,
+                cyan, black, label,
+            )
+            self.matrix.draw_text_with_border(
+                self.matrix.font("6x10"), max(1, (64 - 6 * len(self._pairing_pin)) // 2), 25,
+                white, black, self._pairing_pin,
             )
         else:
             self.matrix.draw_text_with_border(
@@ -1559,6 +1682,7 @@ class DisplayController:
             self._pairing_timer = None
             self._pairing_page_timer = None
             self._pairing_pin = None
+            self._pairing_label = "PAIR"
             self._pairing_ip = None
         finally:
             self._state_lock.release()

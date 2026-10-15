@@ -40,8 +40,18 @@ from typing import Any
 import urllib.request
 
 REPO = Path(__file__).resolve().parents[1]
-HOST = os.environ.get('MATRIX_PROD_HOST', 'admin@192.168.1.4')
-PUBLIC_URL = os.environ.get('MATRIX_PROD_URL', 'http://192.168.1.4:5000/pair')
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+import locate_device  # noqa: E402  (deploy/locate_device.py, roadmap 1.10f)
+
+# 1.10f: the device is found by its pinned SSH host key, never by a fixed IP.
+# MATRIX_PROD_HOST is only a first guess (user@address); HOST/PUBLIC_URL are set by locate_target().
+HOST_HINT = os.environ.get('MATRIX_PROD_HOST')
+PROD_USER = os.environ.get('MATRIX_PROD_USER', 'admin')
+PROD_PORT = int(os.environ.get('MATRIX_PROD_PORT', '5000'))
+KNOWN_HOSTS = Path(os.environ.get('MATRIX_PROD_KNOWN_HOSTS', '/root/.config/matrix/device-known-hosts'))
+HOST: str | None = None
+PUBLIC_URL: str | None = None
+HOST_KEY_OPTIONS: list[str] = []
 SSH_KEY = os.environ.get('MATRIX_PROD_SSH_KEY', '/root/.ssh/id_ed25519_matrix')
 GITLAB_API = os.environ.get('MATRIX_GITLAB_API', 'http://gitlab.home.lan/api/v4/projects/2')
 TOKEN_FILE = Path(os.environ.get('MATRIX_GITLAB_TOKEN_FILE', '/root/.config/gitlab/token'))
@@ -117,10 +127,28 @@ def git(*args) -> bytes:
     return run(['git', '-C', str(REPO), *args])
 
 
+def locate_target() -> dict[str, str]:
+    """Find the device by pinned host key; every later ssh accepts only that key."""
+    global HOST, PUBLIC_URL, HOST_KEY_OPTIONS
+    try:
+        found = locate_device.locate(
+            KNOWN_HOSTS, user=PROD_USER, hint=HOST_HINT, memory=RESULTS / 'device-address.json',
+            scan=locate_device.parse_subnets(os.environ.get('MATRIX_PROD_SUBNETS')),
+        )
+    except (locate_device.LocateError, ValueError) as error:
+        raise ShipError(str(error)) from error
+    HOST = found['target']
+    PUBLIC_URL = f"http://{found['address']}:{PROD_PORT}/pair"
+    HOST_KEY_OPTIONS = locate_device.ssh_options(KNOWN_HOSTS, found['alias'])
+    return found
+
+
 def ssh_argv() -> list[str]:
+    if not HOST or not HOST_KEY_OPTIONS:
+        raise ShipError('device not located; refusing to connect')
     return ['ssh', '-F', '/dev/null', '-i', SSH_KEY, '-o', 'IdentitiesOnly=yes', '-o', 'BatchMode=yes',
-            '-o', 'StrictHostKeyChecking=yes', '-o', 'ConnectTimeout=10', '-o', 'ServerAliveInterval=10',
-            '-o', 'ServerAliveCountMax=2', HOST]
+            *HOST_KEY_OPTIONS, '-o', 'ConnectTimeout=10', '-o', 'ServerAliveInterval=10',
+            '-o', 'ServerAliveCountMax=2', '--', HOST]
 
 
 def remote(command: str, data: bytes | None = None, timeout: int = 120) -> bytes:
@@ -154,6 +182,8 @@ def ci_status(sha: str) -> tuple[str, int | None]:
 
 
 def fetch_public() -> bytes:
+    if not PUBLIC_URL:
+        raise ShipError('device not located; no public URL')
     opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
     with opener.open(PUBLIC_URL, timeout=10) as response:
         return response.read()
@@ -270,6 +300,9 @@ def main(argv=None) -> int:
     mode = 'rollback' if args.rollback else 'apply' if args.apply else 'dry-run'
     result: dict[str, Any] = {'mode': mode, 'started_utc': datetime.datetime.now(datetime.timezone.utc).isoformat(timespec='seconds')}
     try:
+        found = locate_target()
+        result['device'] = found
+        print(f"device {found['target']} (pinned host key {found['alias']}, found by {found['found_by']})")
         if args.rollback:
             result['execution'] = stage_and_run([], '', rollback_stage=args.rollback)
             result['public_versions'] = public_versions(fetch_public())

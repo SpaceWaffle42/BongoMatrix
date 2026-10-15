@@ -291,9 +291,13 @@ physical_device_acceptance:
       set -Eeuo pipefail
       [[ "$CI_COMMIT_SHA" =~ ^[0-9a-f]{40}$ ]]
       [[ "$CI_PIPELINE_ID" =~ ^[0-9]+$ ]]
-      SSH=(ssh -i "$HOME/.ssh/matrix-device" -o IdentitiesOnly=yes -o BatchMode=yes -o StrictHostKeyChecking=yes -o UserKnownHostsFile="$HOME/.ssh/known_hosts" -o ConnectTimeout=10 -o ServerAliveInterval=10 -o ServerAliveCountMax=2)
+      # 1.10f: MATRIX_DEVICE_TARGET is only a first guess; the device is whichever
+      # address presents the pinned host key, and ssh then accepts only that key.
+      read -r DEVICE_TARGET DEVICE_ALIAS < <(python deploy/locate_device.py --known-hosts "$HOME/.ssh/known_hosts" --hint "$MATRIX_DEVICE_TARGET" --user "${MATRIX_DEVICE_TARGET%%@*}" --subnet "${MATRIX_DEVICE_SUBNETS:-}")
+      [[ -n "$DEVICE_TARGET" && -n "$DEVICE_ALIAS" ]]
+      SSH=(ssh -i "$HOME/.ssh/matrix-device" -o IdentitiesOnly=yes -o BatchMode=yes -o StrictHostKeyChecking=yes -o UserKnownHostsFile="$HOME/.ssh/known_hosts" -o GlobalKnownHostsFile=/dev/null -o HostKeyAlias="$DEVICE_ALIAS" -o ConnectTimeout=10 -o ServerAliveInterval=10 -o ServerAliveCountMax=2)
       set +e
-      "${SSH[@]}" "$MATRIX_DEVICE_TARGET" "verify $CI_COMMIT_SHA $CI_PIPELINE_ID" | head -c 4097 > physical-device-report.txt
+      "${SSH[@]}" -- "$DEVICE_TARGET" "verify $CI_COMMIT_SHA $CI_PIPELINE_ID" | head -c 4097 > physical-device-report.txt
       acceptance_status="${PIPESTATUS[0]}"
       overflow_status=0
       if [[ "$(wc -c < physical-device-report.txt)" -gt 4096 ]]; then

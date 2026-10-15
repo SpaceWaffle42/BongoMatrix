@@ -160,6 +160,15 @@ class GitLabPipelineContractTests(unittest.TestCase):
         self.assertIn("ServerAliveInterval=10", physical)
         self.assertIn("ServerAliveCountMax=2", physical)
 
+    def test_physical_job_finds_device_by_pinned_host_key(self):
+        """1.10f: no fixed address; ssh accepts only the pinned key."""
+        physical = block(self.sections, "physical_device_acceptance")
+        self.assertIn("python deploy/locate_device.py --known-hosts", physical)
+        self.assertIn('HostKeyAlias="$DEVICE_ALIAS"', physical)
+        self.assertIn('"${SSH[@]}" -- "$DEVICE_TARGET"', physical)
+        self.assertNotIn('"${SSH[@]}" "$MATRIX_DEVICE_TARGET"', physical)
+        self.assertNotRegex(physical, r"\b\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}\b")
+
     def test_physical_job_drops_privilege_and_bounds_remote_output_with_primary_status(self):
         physical = block(self.sections, "physical_device_acceptance")
         self.assertLess(physical.index("apt-get install"), physical.index("setpriv"))
