@@ -1310,6 +1310,32 @@
     "RestartRequestDropInTests.test_install_documentation_installs_and_verifies_the_dropin",
     "RestartRequestDropInTests.test_publisher_accepts_submit_directory_only_when_its_group_is_the_process_group"
   ],
+  "test_safe_area": [
+    "CalendarSafeAreaTests.test_frame_margin_is_gone",
+    "CalendarSafeAreaTests.test_two_pixel_safe_area_is_pixel_identical_to_the_old_calendar_border",
+    "CaptureMatrixSafeAreaTests.test_preview_adapter_matches_physical_semantics",
+    "FullScreenMediaFitTests.test_custom_media_screen_with_manual_geometry_is_fitted",
+    "FullScreenMediaFitTests.test_edit_preview_media_matches_the_panel",
+    "FullScreenMediaFitTests.test_play_media_covers_the_whole_panel_when_media_may_go_under_the_frame",
+    "FullScreenMediaFitTests.test_play_media_fits_a_full_panel_still_inside_the_safe_area",
+    "LegacyMigrationSafeAreaTests.test_fresh_install_has_no_safe_area",
+    "LegacyMigrationSafeAreaTests.test_older_schema_config_keeps_an_explicit_safe_area",
+    "LegacyMigrationSafeAreaTests.test_older_schema_configs_are_migrated_with_a_two_pixel_safe_area",
+    "ModuleMediaToggleTests.test_calendar_preview_composes_the_inner_render_onto_the_panel",
+    "ModuleMediaToggleTests.test_clock_lava_centres_inside_the_safe_area",
+    "ModuleMediaToggleTests.test_media_modules_follow_the_toggle_and_other_modules_never_do",
+    "ModuleMediaToggleTests.test_scope_is_a_no_op_for_plain_mocks",
+    "PairingSafeAreaTests.test_pairing_screens_use_the_saved_safe_area_before_the_scheduler_and_after_a_save",
+    "SafeAreaConfigTests.test_existing_display_without_the_key_reads_two_pixels_without_rewriting",
+    "SafeAreaConfigTests.test_explicit_safe_area_save_persists_and_survives_unrelated_saves",
+    "SafeAreaConfigTests.test_fresh_install_defaults_to_zero",
+    "SafeAreaConfigTests.test_unrelated_saves_keep_an_existing_display_loadable_by_0_3_75",
+    "SafeAreaConfigTests.test_validation_is_strict",
+    "SafeAreaDrawingTests.test_images_fit_inside_and_media_toggle_controls_full_screen_media",
+    "SafeAreaDrawingTests.test_pixel_is_translated_and_clipped_and_fill_covers_the_panel",
+    "SafeAreaDrawingTests.test_text_and_lines_never_reach_the_edge_on_hardware_or_preview",
+    "SafeAreaDrawingTests.test_zero_safe_area_keeps_the_raw_hardware_object"
+  ],
   "test_safe_area_browser": [
     "SafeAreaBrowserTests.test_device_settings_edit_marker_save_and_reload"
   ],
