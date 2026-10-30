@@ -424,6 +424,39 @@ class LegacyMigrationSafeAreaTests(unittest.TestCase):
                              {"top": 0, "right": 0, "bottom": 0, "left": 0, "media_inside": True})
 
 
+class PairingSafeAreaTests(unittest.TestCase):
+    """Auditor S1: pairing PIN/address screens use the saved area without waiting for the scheduler."""
+
+    @staticmethod
+    def outside_is_dark(frame, area):
+        return all(frame.getpixel((x, y)) == (0, 0, 0)
+                   for x in range(64) for y in range(32)
+                   if not (area.left <= x < 64 - area.right and area.top <= y < 32 - area.bottom))
+
+    def test_pairing_screens_use_the_saved_safe_area_before_the_scheduler_and_after_a_save(self):
+        from display_controller import DisplayController
+        matrix, patcher = physical_matrix()
+        self.addCleanup(patcher.stop)
+        with tempfile.TemporaryDirectory() as directory:
+            store = ConfigStore(Path(directory) / "config.json")
+            three = {"top": 3, "right": 3, "bottom": 3, "left": 3, "media_inside": True}
+            store.update({"device": {"safe_area": three}}, base_revision=0)
+            controller = DisplayController(matrix, store, ip_address_provider=lambda: "192.168.1.4")
+            self.addCleanup(controller.end_pairing)
+            # No scheduler loop has run: the PIN page still uses the saved 3 px area.
+            controller.show_pairing_pin("123456", ttl_seconds=60, rotate=False)
+            self.assertEqual(matrix.safe_area, SafeArea.from_mapping(three))
+            shown = matrix._hardware.shown
+            self.assertTrue(self.outside_is_dark(shown, SafeArea.from_mapping(three)))
+            self.assertGreater(sum(1 for pixel in shown.getdata() if pixel != (0, 0, 0)), 0)
+            # A save while the pairing screen is up applies on the next pairing page.
+            five = {"top": 5, "right": 5, "bottom": 5, "left": 5, "media_inside": True}
+            store.update({"device": {"safe_area": five}}, base_revision=1)
+            self.assertTrue(controller._draw_pairing_page(show_ip=True))
+            self.assertEqual(matrix.safe_area, SafeArea.from_mapping(five))
+            self.assertTrue(self.outside_is_dark(matrix._hardware.shown, SafeArea.from_mapping(five)))
+
+
 class ModuleMediaToggleTests(unittest.TestCase):
     """Controller/preview dispatch: which modules count as full-screen media."""
 

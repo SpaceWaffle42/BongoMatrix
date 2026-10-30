@@ -1669,6 +1669,20 @@ class DisplayController:
             return None
         return None if not host or invalid else host
 
+    def _apply_saved_safe_area(self):
+        """Pairing pages use the saved Screen Safe Area (caller holds ``_display_lock``).
+
+        The scheduler only applies it between modules, so a PIN shown before the
+        first loop or after a save would otherwise use a stale area. An
+        unreadable config keeps the current area: pairing must still draw.
+        """
+        if not callable(getattr(type(self.matrix), "set_safe_area", None)):
+            return
+        try:
+            apply_safe_area(self.matrix, self.config_store.get())
+        except Exception:
+            LOGGER.warning("Pairing screen kept the current safe area: config unreadable", exc_info=True)
+
     def _draw_pairing_frame(self, show_ip):
         """Draw one pairing page: False = PIN/code, True = IP, "name" = network name."""
         with self._state_lock:
@@ -1676,6 +1690,7 @@ class DisplayController:
             pairing_ip, pin = self._pairing_ip, self._pairing_pin
         if show_ip == "name" and not name:
             return False  # pairing ended mid-draw; draw nothing rather than a None address
+        self._apply_saved_safe_area()
         self.matrix.clear()
         white = self.matrix.colour("white")
         cyan = self.matrix.colour("vapor_cyan")
