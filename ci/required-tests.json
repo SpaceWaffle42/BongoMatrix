@@ -1310,6 +1310,9 @@
     "RestartRequestDropInTests.test_install_documentation_installs_and_verifies_the_dropin",
     "RestartRequestDropInTests.test_publisher_accepts_submit_directory_only_when_its_group_is_the_process_group"
   ],
+  "test_safe_area_browser": [
+    "SafeAreaBrowserTests.test_device_settings_edit_marker_save_and_reload"
+  ],
   "test_screen_media": [
     "ScreenMediaRevisionTests.test_active_scheduler_does_not_treat_screen_row_duration_as_a_deadline",
     "ScreenMediaRevisionTests.test_active_scheduler_routes_splash_through_the_stateful_runtime",
