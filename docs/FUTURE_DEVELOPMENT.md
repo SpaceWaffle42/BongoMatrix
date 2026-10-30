@@ -433,6 +433,28 @@ Matrix panels sit in frames of different sizes, and a frame can hide the outer p
 - RSS and astronomy layouts are translated and clipped into the safe area rather than re-laid-out for the smaller size; at 2 px the astronomy countdown row is partly clipped.
 - The dotted yellow marker is shown on the dashboard preview only. The physical panel does not show it yet: `Matrix.set_safe_area_marker` exists, but nothing in the device-preview path turns it on while the inputs are being edited.
 
+### 1.12 Trusted HTTPS on `<id>.mtx.xert.me` — Owner-requested 2026-10-15, planned
+
+Browsers only trust certificates for public names, so `.local` cannot get one. Each display gets its own name under the owner's domain `xert.me` (DNS on Cloudflare). For example, `7d03.mtx.xert.me` points to the display's LAN IP and carries an automatic Let's Encrypt certificate. The display never needs to be reachable from the internet.
+
+- **Name and DNS:** `<id>.mtx.xert.me`, an A record set to the display's LAN IP, DNS-only (grey cloud). It is updated when the address changes; 1.10a already detects address changes.
+- **Certificate:** Let's Encrypt with the DNS-01 challenge. Renewal is automatic and well ahead of expiry, because certificate lifetimes are shrinking toward about 47 days. The web server serves HTTPS on 443 (`--certfile`/`--keyfile`) and reloads when the certificate is renewed.
+- **Redirects:** port 80 sends browsers to `https://<id>.mtx.xert.me`. The IP, `matrix.local` and `<name>.local` all end on the padlock address when it is reachable; the probe checks the id, as in 1.10g.
+- **Fallback:** if the network blocks public names that point to private addresses (DNS rebinding protection), or there is no internet, the display stays on `http://<name>.local:5000`. It can test which case applies and show it.
+- **Credentials:**
+  - **Stage A (owner's display):** a Cloudflare API token limited to Zone DNS Edit on xert.me, stored only on that device. The owner places the token; it is never pasted into chat.
+  - **Stage B (product):** a small xert.me service holds the token. Each display gets a key at first boot and may only edit its own `<id>.mtx` records, so no Cloudflare credential ever ships on a device.
+- **Knock-on work:**
+  - the 1.10g name probe moves to HTTPS (mixed content);
+  - cookies become `Secure`;
+  - browsers paired over HTTP pair once more;
+  - a matching systemd unit change.
+
+  The work touches auth and the unit, so it needs the second reviewer.
+- **Limits:** Let's Encrypt allows about 50 new certificates per registered domain per week. That is fine for early sales; at volume it needs a rate-limit increase.
+- **Benefit:** it closes the #33 risk of a spoofing device phishing the PIN, because an impostor cannot get the display's certificate.
+- **Waiting on:** the owner's Cloudflare token for Stage A.
+
 ## Priority 2 — New playlist modules
 
 Implement these only after higher-priority fixes and workflow improvements are complete. Their order favors lower-friction local or free-data behavior before more provider-dependent integrations.
