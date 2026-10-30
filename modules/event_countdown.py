@@ -10,6 +10,7 @@ from zoneinfo import ZoneInfo
 from PIL import Image, ImageDraw
 from edit_preview import _png_frame, CaptureMatrix
 from frame_capture import BdfFont
+from safe_area import SafeArea
 import local_clock
 from font_catalog import FONT_DIR, font_key
 from holiday_calendar import pack_events
@@ -247,10 +248,10 @@ def _confetti(area, elapsed):
                 area.putpixel((x, y + 1), CONFETTI[index % len(CONFETTI)])
 
 
-# Owner 2026-10-15: the panel sits in a frame that hides its outer pixels, so the
-# calendar never draws in a 2-pixel border round the whole 64x32 display. Layouts
-# fit the inner 60x28; the editor's per-edge "Space from edge" adds on top of it.
-FRAME_MARGIN = 2
+# The 0.3.75 fixed 2-pixel calendar border (owner 2026-10-15) is replaced by the
+# system-wide Screen Safe Area (1.11): the calendar renders at the inner size the
+# safe area leaves and the editor's per-edge "Space from edge" adds on top of it.
+PANEL_SIZE = (64, 32)
 
 
 # Owner 2026-10-15: calendar text that does not fit scrolls continuously (wraps with a
@@ -271,14 +272,16 @@ def draw_scrolling(image, font, text, x, y, colour, text_width, available):
 
 
 def drawable_insets(settings):
-    return {edge: FRAME_MARGIN + settings['insets'][edge] for edge in ('top', 'right', 'bottom', 'left')}
+    return {edge: settings['insets'][edge] for edge in ('top', 'right', 'bottom', 'left')}
 
 
-def render_frame(settings, selected, *, elapsed=0, initial_seconds=None, artwork=None):
-    """Render BDF pixels once; both outputs use this exact clipped image."""
+def render_frame(settings, selected, *, elapsed=0, initial_seconds=None, artwork=None, size=None):
+    """Render BDF pixels once at ``size`` (the safe area's inner size, default the full panel)."""
+    frame_width, frame_height = size or PANEL_SIZE
     inset = drawable_insets(settings)
-    width, height = 64 - inset['left'] - inset['right'], 32 - inset['top'] - inset['bottom']
-    image = Image.new('RGB', (64, 32), settings['background'])
+    width = max(1, frame_width - inset['left'] - inset['right'])
+    height = max(1, frame_height - inset['top'] - inset['bottom'])
+    image = Image.new('RGB', (frame_width, frame_height), settings['background'])
     area = Image.new('RGB', (width, height), settings['background'])
     item, seconds = selected['event'], selected['seconds']
     accent = item['accent'] or settings['accent']
@@ -343,8 +346,9 @@ def render_frame(settings, selected, *, elapsed=0, initial_seconds=None, artwork
                       countdown_font=font, countdown_overflow=measured_width > text_width or measured_height > text_height)
 
 
-def image_frames(config, duration=15, stop_event=None, *, realtime=False, pinned_handles=None):
+def image_frames(config, duration=15, stop_event=None, *, realtime=False, pinned_handles=None, size=None):
     settings = effective_settings(config)
+    frame_width, frame_height = size or PANEL_SIZE
     origin = utc_now()
     started = time.monotonic()
     elapsed, event_started, identity, initial = 0.0, 0.0, None, None
@@ -381,13 +385,14 @@ def image_frames(config, duration=15, stop_event=None, *, realtime=False, pinned
             title_width = _measure(settings['title_font'], selected['event']['title'])[0]
             inset = drawable_insets(settings)
             available = calendar_layouts.title_column_width(
-                settings['layout'], 64 - inset['left'] - inset['right'],
-                32 - inset['top'] - inset['bottom'])
+                settings['layout'], max(1, frame_width - inset['left'] - inset['right']),
+                max(1, frame_height - inset['top'] - inset['bottom']))
             pass_seconds = (title_width + 4) * .05 if title_width > available else 0.0
             deadline = max(duration, event_started + pass_seconds)
             restored = not pass_seconds
         event_elapsed = elapsed - event_started
-        image, info = render_frame(settings, selected, elapsed=event_elapsed, initial_seconds=initial, artwork=artwork)
+        image, info = render_frame(settings, selected, elapsed=event_elapsed, initial_seconds=initial,
+                                   artwork=artwork, size=(frame_width, frame_height))
         restored = event_elapsed >= pass_seconds
         delay = max(0.0, min(.05, deadline - elapsed))
         yield image, delay, info
@@ -397,17 +402,36 @@ def image_frames(config, duration=15, stop_event=None, *, realtime=False, pinned
 
 
 def preview_frames(config, duration=15, stop_event=None, *, pinned_handles=None):
-    for image, delay, info in image_frames(config, duration, stop_event, pinned_handles=pinned_handles):
-        frame = _png_frame(image, delay * 1000)
+    safe_area = SafeArea.from_config(config)
+    background = effective_settings(config)['background']
+    for image, delay, info in image_frames(config, duration, stop_event, pinned_handles=pinned_handles,
+                                           size=safe_area.inner_size(*PANEL_SIZE)):
+        frame = _png_frame(safe_area.compose(image, background, *PANEL_SIZE), delay * 1000)
         frame['countdown'] = info
         yield frame
 
 
+def _inner_size(matrix):
+    inner = getattr(matrix, 'matrix', None)
+    width, height = getattr(inner, 'width', None), getattr(inner, 'height', None)
+    if isinstance(width, int) and isinstance(height, int) and width > 0 and height > 0:
+        return width, height
+    return PANEL_SIZE
+
+
 def run(matrix, config, duration=15, stop_event=None, *, pinned_handles=None):
     rendered = False
-    for image, delay, _ in image_frames(config, duration, stop_event, realtime=True, pinned_handles=pinned_handles):
+    size = _inner_size(matrix)
+    background = None
+    if size != PANEL_SIZE:
+        background = Image.new('RGB', (1, 1), effective_settings(config)['background']).getpixel((0, 0))
+    for image, delay, _ in image_frames(config, duration, stop_event, realtime=True,
+                                        pinned_handles=pinned_handles, size=size):
         if stop_event and stop_event.is_set():
             break
+        if background is not None:
+            # Background covers the whole panel; the inner frame sits inside the safe area.
+            matrix.fill(*background)
         matrix.draw_image(image)
         matrix.swap()
         rendered = True
