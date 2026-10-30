@@ -208,7 +208,11 @@ def _load_with_0_3_75(test, *config_paths):
         test.skipTest(f"0.3.75 sources unavailable (shallow clone?): {error}")
     with tempfile.TemporaryDirectory() as old_tree:
         with tarfile.open(fileobj=io.BytesIO(archive)) as tar:
-            tar.extractall(old_tree, filter="data")
+            # CI's Debian Python 3.11.2 predates extraction filters; the archive is our own git tree.
+            if hasattr(tarfile, "data_filter"):
+                tar.extractall(old_tree, filter="data")
+            else:
+                tar.extractall(old_tree)
         probe = ("import sys; from pathlib import Path; from config_store import ConfigStore;"
                  "ConfigStore(Path(sys.argv[1]), media_dir=Path(sys.argv[2])); print('LOADED')")
         results = []
