@@ -59,10 +59,13 @@ class RedirectServerTests(unittest.TestCase):
 
     def test_idle_connections_are_capped_and_cut_at_deadline(self):
         port = self.server.server_address[1]
+        baseline = threading.active_count()
         idle = [socket.create_connection(('127.0.0.1', port)) for _ in range(redirect.MAX_CONNECTIONS + 8)]
         try:
             time.sleep(0.3)
-            self.assertLessEqual(threading.active_count(), redirect.MAX_CONNECTIONS + 10)
+            # Count this server's handlers only: the shared CI process has other tests' threads.
+            self.assertLessEqual(len(self.server._open), redirect.MAX_CONNECTIONS)
+            self.assertLessEqual(threading.active_count() - baseline, redirect.MAX_CONNECTIONS + 2)
             # A slow-drip client is closed by the wall-clock deadline, not kept alive by bytes.
             drip = idle[0]
             drip.settimeout(redirect.REQUEST_DEADLINE + 3)
