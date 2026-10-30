@@ -15,10 +15,11 @@ Rollback: `sudo systemctl disable --now matrix-port80.service && sudo rm /etc/sy
 Preflight (port 80 must be free): `ss -ltn 'sport = :80'` prints only the header line.
 After a reboot: `systemctl is-active matrix-port80` and the curl check above.
 
-First-run setup portal: it binds 10.42.0.1:80 while the setup hotspot is up. The redirect checks
-every second and closes its listener while 10.42.0.1 is a local address, so the portal can always
-bind. If the portal ever loses a race it exits and matrix-network-setup restarts it 5 s later, when
-the listener is already closed. Manual recovery if setup ever loops: `sudo systemctl stop matrix-port80`.
+First-run setup portal: it binds 10.42.0.1:80 while the setup hotspot is up. The redirect never
+binds 10.42.0.1 or the wildcard address; it listens on each concrete local IPv4 address (checked
+every second), and different specific addresses never collide, so the portal can always bind.
+New addresses (DHCP change) are picked up within about a second.
+Manual stop if ever needed: `sudo systemctl stop matrix-port80`.
 
 Limits: 16 connections at once (more are dropped), 3 s per connection, no journal output.
 Paths over 2 KB or with spaces/non-ASCII redirect to `/` on :5000.

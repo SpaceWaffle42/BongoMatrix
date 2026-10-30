@@ -6,10 +6,9 @@ probe), so port 80 only answers with a redirect to the same host on :5000, keepi
 the path and query. It serves nothing else, reads no files and holds no state.
 
 First-run setup portal: setup/first_run.py binds 10.42.0.1:80 while the setup hotspot
-is up. A wildcard :80 listener would make that bind fail, so this server steps aside
-(closes its listener) whenever 10.42.0.1 is a local address and comes back when the
-hotspot is gone. If the portal ever loses a race it exits, matrix-network-setup restarts
-it 5 s later, and by then this listener is closed.
+is up. This server never binds the wildcard address or 10.42.0.1: it listens on each
+concrete local IPv4 address (re-checked every second) except the hotspot address, and two
+different specific addresses on the same port never collide. So the portal can always bind.
 
 Installed once (by hand, like the restart broker) as /usr/local/libexec/matrix-port80-redirect.py
 and run by deploy/matrix-port80.service (DynamicUser, CAP_NET_BIND_SERVICE only). Stdlib only,
@@ -19,7 +18,9 @@ from __future__ import annotations
 
 import os
 import re
+import fcntl
 import socket
+import struct
 import threading
 import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -43,16 +44,29 @@ def redirect_location(host_header: str | None, path: str, fallback_host: str, po
     return f'http://{host}:{port}{path}'
 
 
-def hotspot_active(address: str = HOTSPOT_ADDRESS) -> bool:
-    """True when ``address`` is assigned locally (binding port 0 needs no privilege)."""
-    probe = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+def local_ipv4_addresses() -> set[str]:
+    """Concrete IPv4 addresses on up interfaces (SIOCGIFADDR per /sys/class/net entry)."""
+    found = {'127.0.0.1'}
     try:
-        probe.bind((address, 0))
-        return True
+        names = os.listdir('/sys/class/net')
     except OSError:
-        return False
+        return found
+    probe = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    try:
+        for name in names:
+            try:
+                packed = fcntl.ioctl(probe.fileno(), 0x8915, struct.pack('256s', name[:15].encode()))  # SIOCGIFADDR
+            except OSError:
+                continue
+            found.add(socket.inet_ntoa(packed[20:24]))
     finally:
         probe.close()
+    return found
+
+
+def wanted_addresses(addresses: set[str]) -> set[str]:
+    """Never the hotspot address (the setup portal owns 10.42.0.1:80) or the wildcard."""
+    return {address for address in addresses if address not in (HOTSPOT_ADDRESS, '0.0.0.0')}
 
 
 class RedirectHandler(BaseHTTPRequestHandler):
@@ -82,10 +96,15 @@ class Server(ThreadingHTTPServer):
 
     def __init__(self, *args, **kwargs):
         self._slots = threading.BoundedSemaphore(MAX_CONNECTIONS)
-        self._open: dict[socket.socket, float] = {}
+        self._open: dict = {}
         self._lock = threading.Lock()
+        self._stopped = threading.Event()
         super().__init__(*args, **kwargs)
         threading.Thread(target=self._reap, daemon=True).start()
+
+    def server_close(self):
+        self._stopped.set()          # ends the reaper thread with the server
+        super().server_close()
 
     def process_request(self, request, client_address):
         if not self._slots.acquire(blocking=False):
@@ -112,8 +131,7 @@ class Server(ThreadingHTTPServer):
         self._slots.release()
 
     def _reap(self):
-        while True:
-            time.sleep(0.5)
+        while not self._stopped.wait(0.5):
             now = time.monotonic()
             with self._lock:
                 late = [sock for sock, deadline in self._open.items() if deadline <= now]
@@ -127,25 +145,38 @@ class Server(ThreadingHTTPServer):
         return
 
 
-def main() -> None:
-    bind = os.environ.get('MATRIX_REDIRECT_BIND', '0.0.0.0')
-    port = int(os.environ.get('MATRIX_REDIRECT_PORT', '80'))
-    server = thread = None
-    while True:
-        if hotspot_active():
-            if server is not None:          # setup portal needs 10.42.0.1:80
-                server.shutdown()
-                server.server_close()
-                thread.join(timeout=5)
-                server = thread = None
-        elif server is None:
+class Listeners:
+    """One bounded Server per concrete address; follows address changes."""
+
+    def __init__(self, port: int):
+        self.port = port
+        self.servers: dict[str, tuple[Server, threading.Thread]] = {}
+
+    def sync(self, addresses: set[str]) -> None:
+        wanted = wanted_addresses(addresses)
+        for address in list(self.servers):
+            if address not in wanted:
+                self.close(address)
+        for address in wanted - set(self.servers):
             try:
-                server = Server((bind, port), RedirectHandler)
+                server = Server((address, self.port), RedirectHandler)
             except OSError:
-                server = None               # port busy (portal still closing): retry
-            else:
-                thread = threading.Thread(target=server.serve_forever, kwargs={'poll_interval': 0.5}, daemon=True)
-                thread.start()
+                continue                    # busy or address gone: retry next second
+            thread = threading.Thread(target=server.serve_forever, kwargs={'poll_interval': 0.5}, daemon=True)
+            thread.start()
+            self.servers[address] = (server, thread)
+
+    def close(self, address: str) -> None:
+        server, thread = self.servers.pop(address)
+        server.shutdown()
+        server.server_close()
+        thread.join(timeout=5)
+
+
+def main() -> None:
+    listeners = Listeners(int(os.environ.get('MATRIX_REDIRECT_PORT', '80')))
+    while True:
+        listeners.sync(local_ipv4_addresses())
         time.sleep(1)
 
 

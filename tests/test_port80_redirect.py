@@ -81,40 +81,38 @@ class RedirectServerTests(unittest.TestCase):
         self.assertEqual(response.status, 301)
 
 
-class HotspotTests(unittest.TestCase):
-    def test_hotspot_probe(self):
-        self.assertTrue(redirect.hotspot_active('127.0.0.1'))
-        self.assertFalse(redirect.hotspot_active('192.0.2.123'))  # TEST-NET, never local
+class AddressTests(unittest.TestCase):
+    def test_local_addresses_are_concrete_and_include_loopback(self):
+        found = redirect.local_ipv4_addresses()
+        self.assertIn('127.0.0.1', found)
+        self.assertNotIn('0.0.0.0', found)
 
-    def test_listener_closes_while_setup_hotspot_is_up(self):
-        """The portal's 10.42.0.1:80 bind must not meet a wildcard listener (review MUST-FIX 1)."""
-        state = {'hotspot': False}
+    def test_never_binds_hotspot_or_wildcard(self):
+        self.assertEqual(redirect.wanted_addresses({'127.0.0.1', '10.42.0.1', '0.0.0.0', '192.168.1.7'}),
+                         {'127.0.0.1', '192.168.1.7'})
+
+    def test_portal_bind_coexists_and_listeners_follow_addresses(self):
+        """Review MUST-FIX 1: the portal's specific-address bind always succeeds (deterministic)."""
         probe = socket.socket(); probe.bind(('127.0.0.1', 0)); port = probe.getsockname()[1]; probe.close()
-        env = {'MATRIX_REDIRECT_BIND': '127.0.0.1', 'MATRIX_REDIRECT_PORT': str(port)}
-        with patch.dict('os.environ', env), patch.object(redirect, 'hotspot_active', lambda: state['hotspot']):
-            threading.Thread(target=redirect.main, daemon=True).start()
-
-            def listening():
-                try:
-                    socket.create_connection(('127.0.0.1', port), timeout=0.5).close()
-                    return True
-                except OSError:
-                    return False
-
-            def wait(expected):
-                for _ in range(40):
-                    if listening() is expected:
-                        return True
-                    time.sleep(0.1)
-                return False
-
-            self.assertTrue(wait(True), 'redirect should listen with no hotspot')
-            state['hotspot'] = True
-            self.assertTrue(wait(False), 'redirect must free port 80 while the setup hotspot is up')
-            portal = socket.socket(); portal.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-            portal.bind(('127.0.0.1', port)); portal.listen(); portal.close()   # the portal's bind works
-            state['hotspot'] = False
-            self.assertTrue(wait(True), 'redirect should return after setup')
+        listeners = redirect.Listeners(port)
+        self.addCleanup(lambda: [listeners.close(a) for a in list(listeners.servers)])
+        baseline = threading.active_count()
+        listeners.sync({'127.0.0.1', '10.42.0.1'})
+        self.assertEqual(set(listeners.servers), {'127.0.0.1'})
+        # Stand-in for the portal on another specific loopback address, same port, SO_REUSEADDR like werkzeug.
+        portal = socket.socket(); portal.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        portal.bind(('127.0.0.2', port)); portal.listen(); portal.close()
+        response = http.client.HTTPConnection('127.0.0.1', port, timeout=5)
+        response.request('GET', '/x', headers={'Host': 'matrix.local'})
+        self.assertEqual(response.getresponse().getheader('Location'), 'http://matrix.local:5000/x')
+        response.close()
+        for _ in range(5):                  # open/close cycles must not leak reaper threads
+            listeners.sync(set())
+            listeners.sync({'127.0.0.1'})
+        listeners.sync(set())
+        self.assertEqual(listeners.servers, {})
+        time.sleep(0.8)
+        self.assertLessEqual(threading.active_count(), baseline)
 
 
 class UnitTests(unittest.TestCase):
