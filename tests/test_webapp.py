@@ -1761,6 +1761,18 @@ try{
         self.assertIn("{label:'Message font',path:'style.message_font',type:'select',options:installedFonts}", body)
         self.assertIn("const fonts = globalThis.matrixInstalledFonts || [];", canvas_source)
 
+    def test_dashboard_reads_unchanged_media_files_once(self):
+        """Dashboard speed: GIF metadata is cached per file revision, not re-decoded per page load."""
+        from unittest.mock import patch
+        import webapp as webapp_module
+
+        self.pair_browser()
+        self.client.get("/")  # warm
+        with patch.object(webapp_module.Image, "open", wraps=webapp_module.Image.open) as opened:
+            self.client.get("/")
+            self.client.get("/")
+        self.assertEqual(opened.call_count, 0)
+
     def test_priority_1_6_dashboard_uses_shared_speed_control_for_every_media_editor(self):
         self.pair_browser()
         body = self.client.get("/").get_data(as_text=True)
