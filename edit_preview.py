@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import base64
+import contextlib
 import copy
 import io
 import inspect
@@ -20,6 +21,7 @@ from PIL import Image
 
 import local_clock
 from frame_capture import BdfFont, FrameCapture
+from safe_area import ZERO as NO_SAFE_AREA, SafeArea
 
 
 class _Canvas:
@@ -31,15 +33,47 @@ class _Canvas:
 class CaptureMatrix:
     """Matrix primitive adapter backed by the production framebuffer mirror."""
 
-    def __init__(self, width=64, height=32):
+    def __init__(self, width=64, height=32, *, safe_area=None, media=False):
         self.width = int(width)
         self.height = int(height)
         self.canvas = _Canvas(self.width, self.height)
-        self.matrix = SimpleNamespace(
-            width=self.width, height=self.height, CreateFrameCanvas=self._new_canvas,
-        )
         self._capture = FrameCapture(self.width, self.height)
         self._capture.register(self.canvas)
+        self._matrix_override = None
+        self.set_safe_area(safe_area or NO_SAFE_AREA, media=media)
+
+    @property
+    def matrix(self):
+        """Driver view for modules: reports the inner safe-area size."""
+        if self._matrix_override is not None:
+            return self._matrix_override
+        width, height = self.safe_area.inner_size(
+            self.width, self.height, media=self._safe_area_media,
+        )
+        return SimpleNamespace(
+            width=width, height=height, CreateFrameCanvas=self._new_canvas,
+        )
+
+    @matrix.setter
+    def matrix(self, value):
+        self._matrix_override = value
+
+    def set_safe_area(self, safe_area, *, media=False):
+        """Same translate-and-clip contract as matrix_framework.Matrix."""
+        if not isinstance(safe_area, SafeArea):
+            raise TypeError("safe area must be a SafeArea")
+        self.safe_area = safe_area
+        self._safe_area_media = bool(media)
+        self._capture.viewport = safe_area.viewport(self.width, self.height, media=media)
+
+    @contextlib.contextmanager
+    def safe_area_scope(self, safe_area, *, media=False):
+        previous = (self.safe_area, self._safe_area_media)
+        self.set_safe_area(safe_area, media=media)
+        try:
+            yield self
+        finally:
+            self.set_safe_area(previous[0], media=previous[1])
 
     def _new_canvas(self):
         canvas = _Canvas(self.width, self.height)
@@ -86,14 +120,16 @@ class CaptureMatrix:
         canvas = canvas or self.canvas
         prepared = image.convert("RGB")
         if fit is not None:
+            target = self.matrix
+            target_width, target_height = int(target.width), int(target.height)
             source_width, source_height = prepared.size
             if fit == "contain":
-                scale = min(1, canvas.width / source_width, canvas.height / source_height)
+                scale = min(1, target_width / source_width, target_height / source_height)
             elif fit == "cover":
-                scale = max(canvas.width / source_width, canvas.height / source_height)
+                scale = max(target_width / source_width, target_height / source_height)
             elif fit == "stretch":
                 scale = None
-                width, height, x, y = canvas.width, canvas.height, 0, 0
+                width, height, x, y = target_width, target_height, 0, 0
             elif fit == "manual":
                 scale = None
             else:
@@ -101,9 +137,9 @@ class CaptureMatrix:
             if scale is not None:
                 width = max(1, round(source_width * scale))
                 height = max(1, round(source_height * scale))
-                x, y = (canvas.width - width) // 2, (canvas.height - height) // 2
-            width = canvas.width if width is None else width
-            height = canvas.height if height is None else height
+                x, y = (target_width - width) // 2, (target_height - height) // 2
+            width = target_width if width is None else width
+            height = target_height if height is None else height
             if prepared.size != (int(width), int(height)):
                 # Same filter as Matrix._prepare_media_fit so preview pixels match the panel.
                 prepared = prepared.resize((int(width), int(height)), Image.Resampling.LANCZOS)
@@ -159,11 +195,12 @@ class CaptureMatrix:
     def widget_scroll(self, text, font, x, y, colour, canvas=None, step=1, wrap=True):
         canvas = canvas or self.canvas
         text_len = self.draw_text(font, x, y, colour, text, canvas=canvas)
+        width = self.matrix.width
         x -= step
         if wrap:
             if step >= 0 and x + text_len < 0:
-                x = canvas.width
-            elif step < 0 and x > canvas.width:
+                x = width
+            elif step < 0 and x > width:
                 x = -text_len
         return x, text_len
 
@@ -192,8 +229,8 @@ class CaptureMatrix:
 
         return Matrix._video_frame_timeline(
             self, path,
-            int(settings.get("width") or self.width),
-            int(settings.get("height") or self.height),
+            int(settings.get("width") or self.matrix.width),
+            int(settings.get("height") or self.matrix.height),
             settings.get("keep_aspect", True), stop_event=stop_event,
             deadline=deadline, pinned_handle=pinned_handle,
         )

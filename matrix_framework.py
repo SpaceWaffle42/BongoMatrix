@@ -1,3 +1,4 @@
+import contextlib
 import math
 import os
 import pwd
@@ -32,6 +33,7 @@ from PIL import Image, ImageSequence
 
 from font_catalog import FONT_DIR, font_key
 from frame_capture import BdfFont, FrameCapture
+from safe_area import ZERO as _NO_SAFE_AREA, SafeArea, clip_image as _clip_image
 
 root_path = pathlib.Path(__file__).resolve().parent
 fonts_path = FONT_DIR
@@ -302,7 +304,81 @@ def _swap_admitted(matrix):
     return True if admission is None else bool(admission(matrix))
 
 
+class _InnerMatrixView:
+    """The driver as modules see it: inner safe-area size, everything else delegated."""
+
+    __slots__ = ("_hardware", "width", "height")
+
+    def __init__(self, hardware, width, height):
+        object.__setattr__(self, "_hardware", hardware)
+        object.__setattr__(self, "width", width)
+        object.__setattr__(self, "height", height)
+
+    def __getattr__(self, name):
+        return getattr(self._hardware, name)
+
+    def __setattr__(self, name, value):
+        setattr(self._hardware, name, value)
+
+
 class Matrix:
+    @property
+    def matrix(self):
+        """Driver handle; reports the inner safe-area size while one is active."""
+        hardware = self.__dict__.get("_hardware")
+        viewport = self._viewport()
+        if viewport is None:
+            return hardware
+        return _InnerMatrixView(hardware, viewport[2], viewport[3])
+
+    @matrix.setter
+    def matrix(self, value):
+        self.__dict__["_hardware"] = value
+
+    @property
+    def safe_area(self):
+        return self.__dict__.get("_safe_area", _NO_SAFE_AREA)
+
+    def _viewport(self):
+        safe_area = self.__dict__.get("_safe_area")
+        hardware = self.__dict__.get("_hardware")
+        if safe_area is None or hardware is None:
+            return None
+        return safe_area.viewport(
+            hardware.width, hardware.height,
+            media=self.__dict__.get("_safe_area_media", False),
+        )
+
+    def _sync_viewport(self):
+        capture = self.__dict__.get("_frame_capture")
+        if capture is not None and hasattr(capture, "viewport"):
+            capture.viewport = self._viewport()
+
+    def set_safe_area(self, safe_area, *, media=False):
+        """Apply the display's safe area; ``media`` marks full-screen media drawing."""
+        if not isinstance(safe_area, SafeArea):
+            raise TypeError("safe area must be a SafeArea")
+        self.__dict__["_safe_area"] = safe_area
+        self.__dict__["_safe_area_media"] = bool(media)
+        self._sync_viewport()
+
+    def set_safe_area_marker(self, enabled):
+        """Show the dotted, pulsing safe-area edge on published frames (editing only)."""
+        self.__dict__["_safe_area_marker"] = bool(enabled)
+
+    @contextlib.contextmanager
+    def safe_area_scope(self, safe_area, *, media=False):
+        previous = (self.safe_area, self.__dict__.get("_safe_area_media", False))
+        self.set_safe_area(safe_area, media=media)
+        try:
+            yield self
+        finally:
+            self.set_safe_area(previous[0], media=previous[1])
+
+    def _offset(self):
+        viewport = self._viewport()
+        return (0, 0) if viewport is None else (viewport[0], viewport[1])
+
     def __init__(
         self,
         rows: int = 32,
@@ -448,6 +524,7 @@ class Matrix:
         if guard is not None and not guard():
             self._last_swap_admitted = False
             return submitted
+        self._finish_safe_area_frame(submitted)
         raw = self._frame_capture.raw_snapshot(submitted)
         returned = self.matrix.SwapOnVSync(submitted)
         revision = self._frame_capture.publish(submitted)
@@ -459,6 +536,46 @@ class Matrix:
             observer(raw, revision)
         self._last_swap_admitted = True
         return returned
+
+    def _finish_safe_area_frame(self, canvas):
+        """Restore the frame edge from the clipped mirror and add the edit marker.
+
+        Native text/line/circle primitives clip only at the panel edge. Within the
+        safe area's margin only fill/clear (or full-screen media) may draw, and the
+        software mirror already holds exactly that, so copy those strips back.
+        """
+        viewport = self._viewport()
+        marker = self.__dict__.get("_safe_area_marker", False)
+        if viewport is None and not marker:
+            return
+        capture = self._frame_capture
+        if viewport is not None:
+            frame = capture.snapshot(canvas)
+            x, y, width, height = viewport
+            panel_width, panel_height = frame.size
+            for left, top, right, bottom in (
+                (0, 0, panel_width, y),
+                (0, y + height, panel_width, panel_height),
+                (0, y, x, y + height),
+                (x + width, y, panel_width, y + height),
+            ):
+                if right > left and bottom > top:
+                    canvas.SetImage(frame.crop((left, top, right, bottom)), left, top)
+        if marker:
+            from safe_area import marker_colour, marker_points
+
+            tick = int(time.monotonic() * 4)
+            red, green, blue = marker_colour(tick)
+            saved = capture.viewport
+            capture.viewport = None
+            try:
+                for px, py in marker_points(
+                    viewport, capture.width, capture.height, phase=tick % 2,
+                ):
+                    capture.pixel(canvas, px, py, red, green, blue)
+                    canvas.SetPixel(px, py, red, green, blue)
+            finally:
+                capture.viewport = saved
 
     def latest_frame_rgb(self):
         """Return immutable RGB bytes from the latest successful physical swap."""
@@ -493,16 +610,23 @@ class Matrix:
 
     def pixel(self, x, y, r, g, b, canvas=None):
         canvas = canvas or self.canvas
-        if 0 <= x < self.matrix.width and 0 <= y < self.matrix.height:
+        viewport = self._viewport()
+        if viewport is None:
+            if 0 <= x < self.matrix.width and 0 <= y < self.matrix.height:
+                self._frame_capture.pixel(canvas, x, y, r, g, b)
+                canvas.SetPixel(x, y, r, g, b)
+            return
+        if 0 <= x < viewport[2] and 0 <= y < viewport[3]:
             self._frame_capture.pixel(canvas, x, y, r, g, b)
-            canvas.SetPixel(x, y, r, g, b)
+            canvas.SetPixel(x + viewport[0], y + viewport[1], r, g, b)
 
     def draw_line(self, x0, y0, x1, y1, colour, width=1, canvas=None):
         canvas = canvas or self.canvas
+        ox, oy = self._offset()
 
         if width <= 1:
             self._frame_capture.line(canvas, x0, y0, x1, y1, colour)
-            graphics.DrawLine(canvas, x0, y0, x1, y1, colour)
+            graphics.DrawLine(canvas, x0 + ox, y0 + oy, x1 + ox, y1 + oy, colour)
             return
 
         offset = width // 2
@@ -510,36 +634,38 @@ class Matrix:
         if abs(x1 - x0) >= abs(y1 - y0):
             for dy in range(-offset, offset + 1):
                 self._frame_capture.line(canvas, x0, y0 + dy, x1, y1 + dy, colour)
-                graphics.DrawLine(canvas, x0, y0 + dy, x1, y1 + dy, colour)
+                graphics.DrawLine(canvas, x0 + ox, y0 + dy + oy, x1 + ox, y1 + dy + oy, colour)
         else:
             for dx in range(-offset, offset + 1):
                 self._frame_capture.line(canvas, x0 + dx, y0, x1 + dx, y1, colour)
-                graphics.DrawLine(canvas, x0 + dx, y0, x1 + dx, y1, colour)
+                graphics.DrawLine(canvas, x0 + dx + ox, y0 + oy, x1 + dx + ox, y1 + oy, colour)
 
     def draw_circle(self, x, y, radius, colour, width=1, filled=False, canvas=None):
         canvas = canvas or self.canvas
+        ox, oy = self._offset()
 
         if filled:
             for r in range(radius, -1, -1):
                 self._frame_capture.circle(canvas, x, y, r, colour)
-                graphics.DrawCircle(canvas, x, y, r, colour)
+                graphics.DrawCircle(canvas, x + ox, y + oy, r, colour)
             return
 
         if width <= 1:
             self._frame_capture.circle(canvas, x, y, radius, colour)
-            graphics.DrawCircle(canvas, x, y, radius, colour)
+            graphics.DrawCircle(canvas, x + ox, y + oy, radius, colour)
             return
 
         for r in range(radius, max(radius - width, -1), -1):
             self._frame_capture.circle(canvas, x, y, r, colour)
-            graphics.DrawCircle(canvas, x, y, r, colour)
+            graphics.DrawCircle(canvas, x + ox, y + oy, r, colour)
 
     def draw_text(self, font, x, y, colour, text, canvas=None, rotation=0):
         canvas = canvas or self.canvas
         capture_font = self._capture_fonts[id(font)]
         if not rotation % 360:
             self._frame_capture.text(canvas, capture_font, x, y, colour, text)
-            return graphics.DrawText(canvas, font, x, y, colour, text)
+            ox, oy = self._offset()
+            return graphics.DrawText(canvas, font, x + ox, y + oy, colour, text)
 
         advance, points = capture_font.text_pixels(x, y, text)
         if not points:
@@ -568,6 +694,7 @@ class Matrix:
 
         if width < 1:
             width = 1
+        ox, oy = self._offset()
 
         for dirx in range(-width, width + 1):
             for diry in range(-width, width + 1):
@@ -581,13 +708,13 @@ class Matrix:
                         text,
                     )
                     graphics.DrawText(
-                        canvas, font, x + dirx, y + diry, border_color, text
+                        canvas, font, x + dirx + ox, y + diry + oy, border_color, text
                     )
 
         self._frame_capture.text(
             canvas, self._capture_fonts[id(font)], x, y, fill_color, text
         )
-        return graphics.DrawText(canvas, font, x, y, fill_color, text)
+        return graphics.DrawText(canvas, font, x + ox, y + oy, fill_color, text)
 
     def flash(self, flashes=3, on_time=0.15, off_time=0.15, colour=(255, 255, 255)):
         """Flash the whole display on and off using the RGB."""
@@ -598,12 +725,13 @@ class Matrix:
             self.show(off_time)
 
     def scroll_text(self, text, font, y, colour, speed=0.03, direction="left", loops=1):
+        ox, oy = self._offset()
         if direction == "left":
             pos = self.matrix.width
             completed = 0
             while loops == 0 or completed < loops:
                 self.clear()
-                text_len = graphics.DrawText(self.canvas, font, pos, y, colour, text)
+                text_len = graphics.DrawText(self.canvas, font, pos + ox, y + oy, colour, text)
                 self.swap()
                 time.sleep(speed)
                 pos -= 1
@@ -612,12 +740,12 @@ class Matrix:
                     completed += 1
 
         elif direction == "right":
-            text_len = graphics.DrawText(self.canvas, font, 0, y, colour, text)
+            text_len = graphics.DrawText(self.canvas, font, ox, y + oy, colour, text)
             pos = -text_len
             completed = 0
             while loops == 0 or completed < loops:
                 self.clear()
-                graphics.DrawText(self.canvas, font, pos, y, colour, text)
+                graphics.DrawText(self.canvas, font, pos + ox, y + oy, colour, text)
                 self.swap()
                 time.sleep(speed)
                 pos += 1
@@ -628,11 +756,12 @@ class Matrix:
     def widget_scroll(self, text, font, x, y, colour, canvas=None, step=1, wrap=True):
         canvas = canvas or self.canvas
         text_len = self.draw_text(font, x, y, colour, text, canvas=canvas)
+        width = canvas.width if self._viewport() is None else self.matrix.width
         x -= step
         if wrap:
             if step >= 0 and x + text_len < 0:
-                x = canvas.width
-            elif step < 0 and x > canvas.width:
+                x = width
+            elif step < 0 and x > width:
                 x = -text_len
         return x, text_len
 
@@ -739,16 +868,29 @@ class Matrix:
             )
             draw_x, draw_y = int(x), int(y)
         else:
-            target_width, target_height = int(canvas.width), int(canvas.height)
+            if self._viewport() is None:
+                target_width, target_height = int(canvas.width), int(canvas.height)
+            else:
+                target_width, target_height = int(self.matrix.width), int(self.matrix.height)
             prepared, draw_x, draw_y = self._prepare_media_fit(
                 image, fit, target_width, target_height,
                 x=x, y=y, width=width, height=height,
             )
         if rotation:
             prepared = prepared.rotate(-rotation, expand=False)
-        canvas.SetImage(prepared, draw_x, draw_y)
+        self._set_image(canvas, prepared, draw_x, draw_y)
         self._frame_capture.set_image(canvas, prepared, draw_x, draw_y)
         return prepared
+
+    def _set_image(self, canvas, image, x, y):
+        """SetImage at inner (x, y), translated and clipped to the safe area."""
+        viewport = self._viewport()
+        if viewport is None:
+            canvas.SetImage(image, x, y)
+            return
+        clipped = _clip_image(image.convert("RGB"), x, y, viewport)
+        if clipped is not None:
+            canvas.SetImage(*clipped)
 
     def media_frames(
         self, filename, frame_count, fps, stop_event=None, decode_timeout=45,
@@ -810,7 +952,7 @@ class Matrix:
                     "-map", "0:v:0", "-an", "-sn", "-dn",
                     "-vf", (
                         timing_filter + f"scale=w='min({self.matrix.width},iw)':h='min({self.matrix.height},ih)':force_original_aspect_ratio=decrease,fps={fps}:eof_action=pass" if preserve_size else
-                        timing_filter + f"scale=64:32:force_original_aspect_ratio=decrease,pad=64:32:(ow-iw)/2:(oh-ih)/2,fps={fps}:eof_action=pass"
+                        timing_filter + f"scale={self.matrix.width}:{self.matrix.height}:force_original_aspect_ratio=decrease,pad={self.matrix.width}:{self.matrix.height}:(ow-iw)/2:(oh-ih)/2,fps={fps}:eof_action=pass"
                     ),
                     "-frames:v", str(frame_count),
                 ]
@@ -946,7 +1088,7 @@ class Matrix:
         if stop_event is not None and stop_event.is_set():
             return False
 
-        self.canvas.SetImage(image, x, y)
+        self._set_image(self.canvas, image, x, y)
         if stop_event is not None and stop_event.is_set():
             return False
         self._frame_capture.set_image(self.canvas, image, x, y)
