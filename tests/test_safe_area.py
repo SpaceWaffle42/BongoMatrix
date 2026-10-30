@@ -188,6 +188,40 @@ def _encode(value):
     return json.dumps(value, sort_keys=True, separators=(",", ":")).encode()
 
 
+ROLLBACK_COMMIT = "5eb747b"  # 0.3.75-preview, the release before 1.11
+
+
+def _load_with_0_3_75(test, *config_paths):
+    """Load each path with the real 0.3.75 ConfigStore (git archive, subprocess).
+
+    Returns one ``(loaded, stderr)`` pair per path.
+    """
+    import io
+    import subprocess
+    import sys
+    import tarfile
+    repo = Path(__file__).resolve().parents[1]
+    try:
+        archive = subprocess.run(["git", "-C", str(repo), "archive", ROLLBACK_COMMIT],
+                                 check=True, capture_output=True, timeout=60).stdout
+    except (OSError, subprocess.CalledProcessError) as error:
+        test.skipTest(f"0.3.75 sources unavailable (shallow clone?): {error}")
+    with tempfile.TemporaryDirectory() as old_tree:
+        with tarfile.open(fileobj=io.BytesIO(archive)) as tar:
+            tar.extractall(old_tree, filter="data")
+        probe = ("import sys; from pathlib import Path; from config_store import ConfigStore;"
+                 "ConfigStore(Path(sys.argv[1]), media_dir=Path(sys.argv[2])); print('LOADED')")
+        results = []
+        for config_path in config_paths:
+            result = subprocess.run(
+                [sys.executable, "-c", probe, str(config_path), str(Path(old_tree) / "media")],
+                cwd=old_tree, capture_output=True, text=True, timeout=120,
+                env={"PATH": "/usr/bin:/bin", "PYTHONPATH": old_tree, "PYTHONDONTWRITEBYTECODE": "1"},
+            )
+            results.append((result.stdout.strip() == "LOADED", result.stderr[-2000:]))
+        return results
+
+
 class SafeAreaConfigTests(unittest.TestCase):
     def test_fresh_install_defaults_to_zero(self):
         self.assertEqual(DEFAULT_CONFIG["device"]["safe_area"],
@@ -208,10 +242,58 @@ class SafeAreaConfigTests(unittest.TestCase):
             self.assertEqual(store.get()["device"]["safe_area"],
                              {"top": 2, "right": 2, "bottom": 2, "left": 2, "media_inside": True})
             self.assertEqual(path.read_bytes(), before, "reading never rewrites the saved file")
-            # The first real save persists the projected value; nothing else is lost.
+            # An unrelated save keeps the projected value in memory but never writes the
+            # new key, so the file stays loadable by 0.3.75 (rollback safety, M1).
             updated = store.update({"device": {"name": "Hall"}}, base_revision=0)
             self.assertEqual(updated["device"]["safe_area"]["left"], 2)
-            self.assertEqual(json.loads(path.read_bytes())["device"]["safe_area"]["top"], 2)
+            written = json.loads(path.read_bytes())
+            self.assertEqual(written["device"]["name"], "Hall")
+            self.assertNotIn("safe_area", written["device"])
+            self.assertEqual(store.get()["device"]["safe_area"]["top"], 2)
+
+    def test_unrelated_saves_keep_an_existing_display_loadable_by_0_3_75(self):
+        saved = copy.deepcopy(DEFAULT_CONFIG)
+        del saved["device"]["safe_area"]
+        projected = {"top": 2, "right": 2, "bottom": 2, "left": 2, "media_inside": True}
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "config.json"
+            path.write_bytes(_encode(saved))
+            store = ConfigStore(path, media_dir=Path(directory) / "media")
+            store.update({"device": {"name": "Hall"}, "display": {"day_brightness": 70}}, base_revision=0)
+            # Sending the unchanged projected value is the same as not sending it.
+            store.update({"device": {"name": "Hall 2", "safe_area": dict(projected)}}, base_revision=1)
+            store.validate_candidate({"device": {"safe_area": dict(projected)}})
+            written = json.loads(path.read_bytes())
+            self.assertNotIn("safe_area", written["device"])
+            self.assertEqual((written["device"]["name"], written["display"]["day_brightness"]), ("Hall 2", 70))
+            # Control: the same file with the key is exactly what 0.3.75 rejects.
+            with_key = Path(directory) / "with-key.json"
+            written["device"]["safe_area"] = dict(projected)
+            with_key.write_bytes(_encode(written))
+            (loaded, error), (control_loaded, control_error) = _load_with_0_3_75(self, path, with_key)
+            self.assertTrue(loaded, error)
+            self.assertFalse(control_loaded)
+            self.assertIn("device.safe_area", control_error)
+
+    def test_explicit_safe_area_save_persists_and_survives_unrelated_saves(self):
+        saved = copy.deepcopy(DEFAULT_CONFIG)
+        del saved["device"]["safe_area"]
+        chosen = {"top": 1, "right": 3, "bottom": 0, "left": 4, "media_inside": False}
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "config.json"
+            path.write_bytes(_encode(saved))
+            store = ConfigStore(path)
+            self.assertEqual(store.update({"device": {"safe_area": chosen}}, base_revision=0)["device"]["safe_area"],
+                             chosen)
+            self.assertEqual(json.loads(path.read_bytes())["device"]["safe_area"], chosen)
+            store.update({"device": {"name": "Hall"}}, base_revision=1)
+            self.assertEqual(json.loads(path.read_bytes())["device"]["safe_area"], chosen)
+            # Once saved explicitly, the 2 px value is a real choice and is kept too.
+            two = {"top": 2, "right": 2, "bottom": 2, "left": 2, "media_inside": True}
+            store.update({"device": {"safe_area": two}}, base_revision=2)
+            self.assertEqual(json.loads(path.read_bytes())["device"]["safe_area"], two)
+            store.update({"device": {"name": "Hall 2"}}, base_revision=3)
+            self.assertEqual(json.loads(path.read_bytes())["device"]["safe_area"], two)
 
     def test_validation_is_strict(self):
         valid = {"top": 0, "right": 6, "bottom": 3, "left": 1, "media_inside": False}

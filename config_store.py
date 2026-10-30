@@ -358,6 +358,34 @@ def _project_safe_area(config):
     return config
 
 
+def _saved_file_has_safe_area(path):
+    """True when the file on disk carries ``device.safe_area`` explicitly."""
+    saved = json.loads(Path(path).read_text())
+    device = saved.get("device") if isinstance(saved, dict) else None
+    return isinstance(device, dict) and "safe_area" in device
+
+
+def _without_projected_safe_area(config, changes, saved_has_safe_area):
+    """Rollback safety (1.11): keep ``device.safe_area`` out of files that never had it.
+
+    0.3.75 rejects the unknown key at startup and a code-only rollback never
+    rewrites data/config.json, so the key is written only once the owner has
+    actually chosen a Screen Safe Area. Re-sending the read-time projection
+    (the unchanged 2 px default) is not a choice: it reads back identically.
+    """
+    if saved_has_safe_area:
+        return config
+    device_changes = changes.get("device") if isinstance(changes, dict) else None
+    sent = device_changes.get("safe_area") if isinstance(device_changes, dict) else None
+    if sent is not None and sent != SAFE_AREA_EXISTING_DISPLAY_DEFAULT:
+        return config
+    device = config.get("device")
+    if isinstance(device, dict) and device.get("safe_area") == SAFE_AREA_EXISTING_DISPLAY_DEFAULT:
+        config = copy.deepcopy(config)
+        del config["device"]["safe_area"]
+    return config
+
+
 def _validate_required_config_keys(config, schema, prefix=""):
     if not isinstance(config, dict):
         raise ValueError(f"current configuration field {prefix or '<root>'} must be an object")
@@ -2394,6 +2422,7 @@ sys.stdout.write(json.dumps(result, separators=(",", ":")))
             latest = self.get()
             if latest["revision"] != current["revision"]:
                 raise ConfigConflictError(latest["revision"])
+            saved_has_safe_area = _saved_file_has_safe_area(self.path)
             if self._test_before_media_commit_check is not None:
                 self._test_before_media_commit_check()
             if admitted_media is not None:
@@ -2403,7 +2432,7 @@ sys.stdout.write(json.dumps(result, separators=(",", ":")))
             # Exact admission boundary: no hook, await, or unchecked work follows this
             # final deadline/descriptor/directory-entry check before atomic persistence.
             self._remaining(deadline)
-            self._write(updated)
+            self._write(_without_projected_safe_area(updated, changes, saved_has_safe_area))
             return copy.deepcopy(updated)
         finally:
             if acquired:
