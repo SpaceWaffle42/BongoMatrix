@@ -117,6 +117,20 @@ def scheduled_playlist_items(config, *, active):
     return sleep_items
 
 
+def splash_playlist_slots(playlist):
+    """Treat every enabled Splash row as one selection played at the first row's place.
+
+    The dashboard saves each ticked Splash item as its own (hidden) row so it keeps
+    its own layout; those rows can sit anywhere in the playlist. Returns
+    ``(slots, lead)``: ``slots[id(first)]`` lists every Splash row and
+    ``lead[id(row)]`` is the first row, so the others never play as extra slots.
+    """
+    rows = [item for item in playlist if item.get("module") == "splash"]
+    if not rows:
+        return {}, {}
+    return {id(rows[0]): rows}, {id(row): rows[0] for row in rows}
+
+
 def _provider_image(image):
     output = io.BytesIO()
     image.save(output, format="PNG")
@@ -2357,6 +2371,9 @@ class DisplayController:
                 continue
 
             cycle_rendered = False
+            # Owner (2026-10-30, repeated): all selected Splash items are one pool;
+            # Splash plays one random pick from it, never every selected item in turn.
+            splash_slots, splash_slot_lead = splash_playlist_slots(playlist)
             for item in playlist:
                 if (
                     self._shutdown.is_set()
@@ -2420,9 +2437,18 @@ class DisplayController:
                     config, schedule_now,
                 )
                 if item["module"] == "splash":
-                    rendered = self._execute_scheduled_screen(
-                        config, item, maximum_duration=maximum_duration,
-                    )
+                    if item is not splash_slot_lead.get(id(item), item):
+                        continue
+                    for splash_item in self._screen_runtime.splash_slot_rows(
+                        splash_slots.get(id(item), [item]),
+                    ):
+                        rendered = self._execute_scheduled_screen(
+                            config, splash_item, maximum_duration=maximum_duration,
+                        )
+                        if rendered or not self._screen_runtime.splash_row_unrendered(
+                            splash_item,
+                        ):
+                            break
                 else:
                     rendered = self._execute(
                         item["module"],
