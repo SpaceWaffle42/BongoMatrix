@@ -48,6 +48,8 @@ class ConfigStoreTests(unittest.TestCase):
                 expected["playlist"].append({"module": "rss", "duration": 15, "enabled": False})
                 expected["astronomy"] = json.loads(json.dumps(DEFAULT_CONFIG["astronomy"]))
                 expected["playlist"].append({"module": "astronomy", "duration": 15, "enabled": False})
+                # 1.11: displays saved before the Screen Safe Area read as 2 px (old calendar border).
+                expected["device"]["safe_area"] = {"top": 2, "right": 2, "bottom": 2, "left": 2, "media_inside": True}
                 for row in expected["playlist"]:
                     if row["module"] in {"splash", "sleep"}:
                         row["sources"] = [row["source"]]
@@ -83,7 +85,10 @@ class ConfigStoreTests(unittest.TestCase):
             self.assertEqual(saved["revision"], 18)
             self.assertEqual(saved["schema_version"], snapshot["schema_version"])
             self.assertEqual(first.get(), saved)
-            self.assertEqual(json.loads(path.read_text()), saved)
+            # 1.11 rollback safety: the read-time safe_area projection is not persisted.
+            persisted = json.loads(json.dumps(saved))
+            del persisted["device"]["safe_area"]
+            self.assertEqual(json.loads(path.read_text()), persisted)
             self.assertEqual([r.get("id") for r in saved["playlist"]], [r.get("id") for r in snapshot["playlist"]])
             self.assertEqual([(r["module"], r["duration"], r["enabled"]) for r in saved["playlist"]],
                              [(r["module"], r["duration"], r["enabled"]) for r in snapshot["playlist"]])

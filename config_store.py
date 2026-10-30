@@ -38,6 +38,11 @@ from astronomy_config import (
 from font_catalog import available_font_names, text_width
 from modules.scroll_timing import duration_milliseconds, scroll_frames
 from media_resolver import candidate_media_references
+from safe_area import (
+    EXISTING_DISPLAY_DEFAULT as SAFE_AREA_EXISTING_DISPLAY_DEFAULT,
+    NEW_DISPLAY_DEFAULT as SAFE_AREA_NEW_DISPLAY_DEFAULT,
+    validate as validate_safe_area,
+)
 
 
 class ConfigDurabilityError(OSError):
@@ -165,7 +170,9 @@ def _mp4_physical_duration(path, loops, playback_rate, physical_fps=20.0, *, tim
 DEFAULT_CONFIG = {
     "schema_version": CURRENT_CONFIG_SCHEMA_VERSION,
     "revision": 0,
-    "device": {"name": "Matrix"},
+    # Fresh installs start with no Screen Safe Area (owner 2026-10-30); saved
+    # configurations without the key read as 2 px (see _project_safe_area).
+    "device": {"name": "Matrix", "safe_area": copy.deepcopy(SAFE_AREA_NEW_DISPLAY_DEFAULT)},
     "pairing": {"max_devices": 4},
     "display": {
         "day_brightness": 100,
@@ -330,6 +337,53 @@ def _validate_update_keys(changes, schema, prefix=""):
             if f"{prefix}{key}." in _OPEN_MAP_PATHS:
                 continue
             _validate_update_keys(value, schema[key], f"{prefix}{key}.")
+
+
+def _validate_safe_area_change(changes):
+    """A Screen Safe Area edit always sends the complete, exact setting."""
+    device = changes.get("device")
+    if isinstance(device, dict) and "safe_area" in device:
+        validate_safe_area(device["safe_area"])
+
+
+def _project_safe_area(config):
+    """Read-time default for displays saved before 1.11: keep the old 2 px border.
+
+    Fresh installs are written from DEFAULT_CONFIG (0 px) and so already carry
+    the key; only a saved file lacking it is projected, and never rewritten here.
+    """
+    device = config.get("device")
+    if isinstance(device, dict) and "safe_area" not in device:
+        device["safe_area"] = copy.deepcopy(SAFE_AREA_EXISTING_DISPLAY_DEFAULT)
+    return config
+
+
+def _saved_file_has_safe_area(path):
+    """True when the file on disk carries ``device.safe_area`` explicitly."""
+    saved = json.loads(Path(path).read_text())
+    device = saved.get("device") if isinstance(saved, dict) else None
+    return isinstance(device, dict) and "safe_area" in device
+
+
+def _without_projected_safe_area(config, changes, saved_has_safe_area):
+    """Rollback safety (1.11): keep ``device.safe_area`` out of files that never had it.
+
+    0.3.75 rejects the unknown key at startup and a code-only rollback never
+    rewrites data/config.json, so the key is written only once the owner has
+    actually chosen a Screen Safe Area. Re-sending the read-time projection
+    (the unchanged 2 px default) is not a choice: it reads back identically.
+    """
+    if saved_has_safe_area:
+        return config
+    device_changes = changes.get("device") if isinstance(changes, dict) else None
+    sent = device_changes.get("safe_area") if isinstance(device_changes, dict) else None
+    if sent is not None and sent != SAFE_AREA_EXISTING_DISPLAY_DEFAULT:
+        return config
+    device = config.get("device")
+    if isinstance(device, dict) and device.get("safe_area") == SAFE_AREA_EXISTING_DISPLAY_DEFAULT:
+        config = copy.deepcopy(config)
+        del config["device"]["safe_area"]
+    return config
 
 
 def _validate_required_config_keys(config, schema, prefix=""):
@@ -888,6 +942,8 @@ def validate_config(
     name = config["device"]["name"]
     if not isinstance(name, str) or not name.strip() or len(name.strip()) > 40:
         raise ValueError("device name must be 1-40 characters")
+    if "safe_area" in config["device"]:
+        validate_safe_area(config["device"]["safe_area"])
 
     max_devices = config["pairing"]["max_devices"]
     if isinstance(max_devices, bool) or not isinstance(max_devices, int) or not 1 <= max_devices <= 10:
@@ -1545,6 +1601,7 @@ def _project_persisted_screen_rows(config):
     """
     if config.get("schema_version") != CURRENT_CONFIG_SCHEMA_VERSION:
         return config
+    _project_safe_area(config)
     rss = config.get("rss")
     if isinstance(rss, dict):
         for key in RSS_PROJECTED_FIELDS:
@@ -1832,6 +1889,10 @@ sys.stdout.write(json.dumps(result, separators=(",", ":")))
             if isinstance(weather, dict) and "timezone" not in weather:
                 weather["timezone"] = _projected_weather_timezone(weather)
             project_astronomy_role_colours(current.get("astronomy"))
+            # Displays upgraded from older schemas existed before 1.11.
+            if "device" not in current:
+                current["device"] = {}
+            _project_safe_area(current)
             migrated = _merge(DEFAULT_CONFIG, current)
             migrated["schema_version"] = CURRENT_CONFIG_SCHEMA_VERSION
             migrated["revision"] = current["revision"] + 1
@@ -2238,6 +2299,7 @@ sys.stdout.write(json.dumps(result, separators=(",", ":")))
             raise ValueError("revision and schema_version are server-owned")
         _validate_client_contract(client_contract)
         _validate_update_keys(changes, DEFAULT_CONFIG)
+        _validate_safe_area_change(changes)
         with self._lock:
             current = self.get()
             changes = _project_incoming_countdown_now(changes)
@@ -2319,6 +2381,7 @@ sys.stdout.write(json.dumps(result, separators=(",", ":")))
             raise ValueError("base revision must be a nonnegative integer")
 
         _validate_update_keys(changes, DEFAULT_CONFIG)
+        _validate_safe_area_change(changes)
         with self._lock:
             current = self.get()
             if base_revision is not None and base_revision != current["revision"]:
@@ -2359,6 +2422,7 @@ sys.stdout.write(json.dumps(result, separators=(",", ":")))
             latest = self.get()
             if latest["revision"] != current["revision"]:
                 raise ConfigConflictError(latest["revision"])
+            saved_has_safe_area = _saved_file_has_safe_area(self.path)
             if self._test_before_media_commit_check is not None:
                 self._test_before_media_commit_check()
             if admitted_media is not None:
@@ -2368,7 +2432,7 @@ sys.stdout.write(json.dumps(result, separators=(",", ":")))
             # Exact admission boundary: no hook, await, or unchecked work follows this
             # final deadline/descriptor/directory-entry check before atomic persistence.
             self._remaining(deadline)
-            self._write(updated)
+            self._write(_without_projected_safe_area(updated, changes, saved_has_safe_area))
             return copy.deepcopy(updated)
         finally:
             if acquired:

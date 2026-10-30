@@ -8,7 +8,7 @@ import time
 from api_timeouts import DEFAULT_API_TIMEOUT_SECONDS
 from font_catalog import text_width
 from modules.openweather_common import OpenWeatherClient, OpenWeatherError, composite_icon
-from modules.scroll_timing import duration_milliseconds, frame_delay_seconds, scroll_frames
+from modules.scroll_timing import drawable_width, duration_milliseconds, frame_delay_seconds, scroll_frames
 from modules.weather_app import (
     _hex_rgb, _render_error, _wait, measure_ticker, ticker_positions,
 )
@@ -116,7 +116,7 @@ def overview_frames(matrix, config, prepared, stop_event=None):
     step = -1 if direction == "right" else 1
     frame_delay = frame_delay_seconds(settings.get("scroll_speed", 0.05))
     for scroll_x in ticker_positions(
-        canvas.width, text_width, settings.get("scroll_loops", 1), direction,
+        drawable_width(matrix, canvas), text_width, settings.get("scroll_loops", 1), direction,
     ):
         if stop_event and stop_event.is_set():
             return

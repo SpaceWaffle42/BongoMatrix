@@ -27,14 +27,6 @@ def event(**changes):
 
 
 class CountdownTests(unittest.TestCase):
-    def setUp(self):
-        # These check layout geometry on the full panel; the 2px frame border
-        # (FRAME_MARGIN, owner 2026-10-15) is covered in test_calendar_frame_margin.
-        from modules import event_countdown as module
-        margin = patch.object(module, 'FRAME_MARGIN', 0)
-        margin.start()
-        self.addCleanup(margin.stop)
-
     def test_default_omission_roundtrips_explicit_playlist_removal(self):
         from config_store import CONFIG_SNAPSHOT_LIMIT
         encode = lambda value: json.dumps(value, sort_keys=True, separators=(',', ':')).encode()

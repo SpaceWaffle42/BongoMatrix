@@ -99,7 +99,12 @@ class WebAppTests(unittest.TestCase):
                                     headers={"If-Match": '"17"', "X-Matrix-Client-Contract": "5"})
         self.assertEqual(saved.status_code, 200, saved.get_data(as_text=True))
         self.assertEqual(saved.headers["ETag"], '"18"')
-        self.assertEqual(json.loads(self.store.path.read_text()), self.store.get())
+        on_disk, served = json.loads(self.store.path.read_text()), self.store.get()
+        # 1.11: the Screen Safe Area is projected on read, never written by an
+        # unrelated save, so 0.3.75 can still load the file after a rollback.
+        self.assertNotIn("safe_area", on_disk["device"])
+        self.assertEqual(served["device"].pop("safe_area"), {"top": 2, "right": 2, "bottom": 2, "left": 2, "media_inside": True})
+        self.assertEqual(on_disk, served)
         self.assertEqual([r.get("id") for r in self.store.get()["playlist"]], [r.get("id") for r in snapshot["playlist"]])
 
     def test_predecessor_catalog_preview_and_save_preserve_exact_selections(self):
@@ -1800,7 +1805,7 @@ try{
         body = self.client.get("/").get_data(as_text=True)
 
         application_version = getattr(webapp, "APPLICATION_VERSION", None)
-        self.assertEqual(application_version, "0.3.75-preview")
+        self.assertEqual(application_version, "0.3.78-preview")
         self.assertEqual(body.count(f"Version {application_version}"), 1)
         self.assertRegex(
             body,

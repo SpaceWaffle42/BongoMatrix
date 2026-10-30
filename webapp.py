@@ -37,7 +37,8 @@ from acceptance_artifacts import AcceptanceArtifactTransaction
 from api_timeouts import DEFAULT_API_TIMEOUT_SECONDS
 from device_name import name_problem
 from directory import is_directory_host
-from display_controller import playlist_item_config, playlist_module_config
+from display_controller import is_full_screen_media, playlist_item_config, playlist_module_config
+from safe_area import SafeArea
 from config_store import (
     ALLOWED_MODULES, DEFAULT_CONFIG, ConfigConflictError, ConfigDurabilityError,
     MEDIA_PLAYLIST_CLIENT_CONTRACT, GROUPED_SCREEN_CLIENT_CONTRACT, validate_config,
@@ -85,7 +86,7 @@ MEDIA_METADATA_ERRORS = (
 CONFIG_REQUEST_LIMIT = 1_048_576
 CONDITIONAL_HEADER_LIMIT = 4096
 MINIMUM_CLIENT_CONTRACT = 3
-APPLICATION_VERSION = "0.3.75-preview"
+APPLICATION_VERSION = "0.3.78-preview"
 DEVICE_RESTART_PENDING_TTL_SECONDS = 60
 PAIRED_ACTION_HEADER = "X-Matrix-Action"
 PAIRED_ACTION_VALUE = "paired-request"
@@ -392,7 +393,9 @@ def _edit_preview_iterator(
         )
         if screen_duration is None:
             return iter(())
-    matrix = CaptureMatrix()
+    # 1.11: Edit Preview shows the same safe-area clip as the panel (candidate setting).
+    safe_area = SafeArea.from_config(candidate)
+    matrix = CaptureMatrix(safe_area=safe_area, media=is_full_screen_media(candidate, module_name))
     if module_name in {"splash", "sleep"}:
         filename = candidate["media"][module_name]
         pinned_handle = pinned_media.get(filename)
@@ -423,11 +426,11 @@ def _edit_preview_iterator(
         )
     if module_name == 'rss':
         from modules.rss_renderer import preview_frames
-        return preview_frames(prepared.stories, stop_event)
+        return preview_frames(prepared.stories, stop_event, safe_area=safe_area)
     if module_name == 'astronomy':
         from modules.astronomy_renderer import preview_frames
         return preview_frames(prepared.cards if prepared else (), stop_event,
-                              now=prepared.prepared_at if prepared else None)
+                              now=prepared.prepared_at if prepared else None, safe_area=safe_area)
     if module_name == "event_countdown":
         from modules.event_countdown import preview_frames
         return preview_frames(candidate, preview_duration(candidate, module_name, 15), stop_event,

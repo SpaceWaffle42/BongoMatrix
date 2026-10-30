@@ -97,11 +97,6 @@ class CountdownWebTests(unittest.TestCase):
         self.assertEqual(self.fixture.store.path.read_bytes(), before)
 
     def setUp(self):
-        # Pixel probes here assume the full panel; FRAME_MARGIN has its own owner-tested behaviour.
-        from modules import event_countdown as module
-        margin = patch.object(module, 'FRAME_MARGIN', 0)
-        margin.start()
-        self.addCleanup(margin.stop)
         self.fixture = fixtures.WebAppTests()
         self.fixture.setUp()
         self.addCleanup(self.fixture.tearDown)

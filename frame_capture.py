@@ -100,6 +100,15 @@ class FrameCapture:
         self._buffers = {}
         self._latest = Image.new("RGB", (self.width, self.height), "black")
         self._revision = 0
+        # Screen Safe Area: (x, y, width, height) of the drawable rectangle, or
+        # None for the full panel. fill/clear always cover the whole panel.
+        self.viewport = None
+
+    def _box(self):
+        viewport = self.viewport
+        if viewport is None:
+            return 0, 0, self.width, self.height
+        return viewport
 
     def register(self, canvas):
         with self._lock:
@@ -128,40 +137,65 @@ class FrameCapture:
 
     def pixel(self, canvas, x, y, red, green, blue):
         x, y = int(x), int(y)
-        if not (0 <= x < self.width and 0 <= y < self.height):
+        ox, oy, width, height = self._box()
+        if not (0 <= x < width and 0 <= y < height):
             return
         with self._lock:
-            self._buffer(canvas).putpixel((x, y), (int(red), int(green), int(blue)))
+            self._buffer(canvas).putpixel((x + ox, y + oy), (int(red), int(green), int(blue)))
 
     def set_image(self, canvas, image, x=0, y=0):
+        image = image.convert("RGB")
+        viewport = self.viewport
+        if viewport is not None:
+            from safe_area import clip_image
+
+            clipped = clip_image(image, x, y, viewport)
+            if clipped is None:
+                return
+            image, x, y = clipped
         with self._lock:
-            self._buffer(canvas).paste(image.convert("RGB"), (int(x), int(y)))
+            self._buffer(canvas).paste(image, (int(x), int(y)))
+
+    def _inner_draw(self, canvas, draw):
+        """Run a PIL draw on the inner rectangle so it is translated and clipped."""
+        with self._lock:
+            buffer = self._buffer(canvas)
+            viewport = self.viewport
+            if viewport is None:
+                draw(ImageDraw.Draw(buffer))
+                return
+            x, y, width, height = viewport
+            inner = buffer.crop((x, y, x + width, y + height))
+            draw(ImageDraw.Draw(inner))
+            buffer.paste(inner, (x, y))
 
     def line(self, canvas, x0, y0, x1, y1, colour, width=1):
-        with self._lock:
-            ImageDraw.Draw(self._buffer(canvas)).line(
-                (int(x0), int(y0), int(x1), int(y1)),
-                fill=self._rgb(colour),
-                width=max(1, int(width)),
-            )
+        self._inner_draw(canvas, lambda draw: draw.line(
+            (int(x0), int(y0), int(x1), int(y1)),
+            fill=self._rgb(colour),
+            width=max(1, int(width)),
+        ))
 
     def circle(self, canvas, x, y, radius, colour, width=1, filled=False):
         box = (x - radius, y - radius, x + radius, y + radius)
-        with self._lock:
-            draw = ImageDraw.Draw(self._buffer(canvas))
+
+        def draw_circle(draw):
             if filled:
                 draw.ellipse(box, fill=self._rgb(colour))
             else:
                 draw.ellipse(box, outline=self._rgb(colour), width=max(1, int(width)))
 
+        self._inner_draw(canvas, draw_circle)
+
     def text(self, canvas, font, x, baseline, colour, text):
         rgb = self._rgb(colour)
         advance, points = font.text_pixels(x, baseline, text)
+        ox, oy, width, height = self._box()
         with self._lock:
             image = self._buffer(canvas)
             for px, py in points:
-                if 0 <= px < self.width and 0 <= py < self.height:
-                    image.putpixel((px, py), rgb)
+                if 0 <= px < width and 0 <= py < height:
+                    image.putpixel((px + ox, py + oy), rgb)
         return advance
 
     def publish(self, canvas):

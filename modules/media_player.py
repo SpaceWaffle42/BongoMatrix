@@ -348,6 +348,9 @@ def play_media(
         raise ValueError("media playback capability is missing")
     if stop_event is not None and stop_event.is_set():
         return False
+    from safe_area import fit_media_geometry
+
+    settings = fit_media_geometry(matrix, settings)
     geometry = {}
     if settings:
         geometry = {

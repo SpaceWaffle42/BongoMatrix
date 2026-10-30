@@ -407,7 +407,7 @@ Split into independently mergeable sub-items, in this order:
 
 Open before 1.10d/e can ship: they need avahi (`avahi-daemon`, publishing via `avahi-publish`) on the device; whether it is installed is not yet checked, and installing a package is a system change that needs the owner's go-ahead. Limits to state in the UI: guest or business networks that isolate clients only list the serving display; the first visit needs `http://` and `:5000`.
 
-### 1.11 System-wide Screen Safe Area — Owner-requested 2026-10-15, planned
+### 1.11 System-wide Screen Safe Area — Owner-requested 2026-10-15, implemented in 0.3.78-preview (branch `feat/safe-area`, not yet merged/deployed)
 
 Matrix panels sit in frames of different sizes, and a frame can hide the outer pixels. One device-wide safe area tells every module where it may draw.
 
@@ -418,9 +418,20 @@ Matrix panels sit in frames of different sizes, and a frame can hide the outer p
 - **Marking the area:** while the setting is being edited, the physical panel and the dashboard preview show the edge of the safe area as a **dotted, pulsing yellow line**. The line is never drawn during normal playback.
 - **Applies everywhere:** all modules respect it. That covers the clock, weather, RSS, announcements, calendar, custom modules and Advanced Canvas, plus the system screens (pairing PIN, address/name banner, splash, sleep). Edit Preview and Live preview show the same clipped result as the panel.
 - **Removes the calendar border (owner 2026-10-15):** once the safe area ships, the calendar's fixed 2-pixel frame border (0.3.75, `FRAME_MARGIN` in `modules/event_countdown.py`) is redundant and is removed; the system safe area alone defines the frame. The calendar's own per-edge "space from edge" settings stay as optional extra spacing inside the safe area. No saved settings are lost. To keep calendars that have the border today unchanged, existing displays should start with a 2-pixel safe area.
-- **To decide before building:**
-  - the default for new displays (0 or 2);
-  - whether background colours (not media) fill under the frame or stop at the line.
+- **Decided while building:** new displays start at 0 px; displays saved before 1.11 read as 2 px on every edge (so calendars keep the old border). Background colours (`fill`/`clear`) cover the whole panel, under the frame; all other drawing is translated and clipped to the inner rectangle.
+
+**Implementation status (0.3.78-preview):**
+- `safe_area.py` holds the setting (`config["device"]["safe_area"] = {top, right, bottom, left (0..6), media_inside}`); `Matrix`, `FrameCapture` and the Edit Preview `CaptureMatrix` translate and clip identically, so Edit/Live preview match the panel.
+- Calendar `FRAME_MARGIN` removed; calendar, clock lava and the weather tickers lay out at the inner size.
+- Full-screen media (splash, sleep, `media:*` playlist items and custom media screens) with the toggle on is **scaled** into the inner rectangle (saved panel geometry such as x0 y0 w64 h32 becomes the full inner area), identically in `play_media`, Edit Preview `media_preview_frames` and custom media screens; with the toggle off it covers the whole 64×32 panel.
+- Device settings has a "Screen Safe Area" group (Top/Right/Bottom/Left 0..6 and the media toggle) saved through the normal Save. While those inputs are focused the dashboard preview shows the unsaved edge as a dotted, pulsing yellow line; it disappears on blur/save and never shows otherwise.
+
+**Rollback to 0.3.75 (release-auditor M1):** 0.3.75 refuses to start with an unknown `device.safe_area` key, and `ship.py --rollback` restores code only (never `data/`). So an existing display's `data/config.json` gets the key **only when the owner actually changes the safe area**: `ConfigStore.update()` drops the read-time 2 px projection before writing (also when a client re-sends that unchanged 2 px value), and the dashboard sends `device.safe_area` only after the inputs were changed. Untouched displays stay loadable by 0.3.75. Fresh installs (and legacy schema 0..3 migrations) write the key at first start; they have no 0.3.75 config to roll back to.
+- **Rollback after the owner has changed the safe area requires removing `device.safe_area` from `data/config.json`** on the display (e.g. `jq 'del(.device.safe_area)'` into a temp file, then replace atomically, keeping owner/mode) before or right after `ship.py --rollback`; otherwise 0.3.75's matrix-web fails to load its configuration. Tell the owner this in the DEPLOYED message for 0.3.78.
+
+**Known limitations:**
+- RSS and astronomy layouts are translated and clipped into the safe area rather than re-laid-out for the smaller size; at 2 px the astronomy countdown row is partly clipped.
+- The dotted yellow marker is shown on the dashboard preview only. The physical panel does not show it yet: `Matrix.set_safe_area_marker` exists, but nothing in the device-preview path turns it on while the inputs are being edited.
 
 ### 1.12 Trusted HTTPS on `<id>.mtx.xert.me` — Owner-requested 2026-10-15, planned
 
