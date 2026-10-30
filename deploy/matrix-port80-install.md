@@ -12,5 +12,13 @@ curl -sI http://127.0.0.1/pair | grep -i '^location'   # -> http://127.0.0.1:500
 
 Rollback: `sudo systemctl disable --now matrix-port80.service && sudo rm /etc/systemd/system/matrix-port80.service /usr/local/libexec/matrix-port80-redirect.py && sudo systemctl daemon-reload`.
 
-Note: the first-run setup portal binds 10.42.0.1:80 only while the hotspot is up (matrix-network-setup.service,
-ordered before this unit). If port 80 is busy the unit retries every 3 s; the panel on :5000 is unaffected.
+Preflight (port 80 must be free): `ss -ltn 'sport = :80'` prints only the header line.
+After a reboot: `systemctl is-active matrix-port80` and the curl check above.
+
+First-run setup portal: it binds 10.42.0.1:80 while the setup hotspot is up. The redirect checks
+every second and closes its listener while 10.42.0.1 is a local address, so the portal can always
+bind. If the portal ever loses a race it exits and matrix-network-setup restarts it 5 s later, when
+the listener is already closed. Manual recovery if setup ever loops: `sudo systemctl stop matrix-port80`.
+
+Limits: 16 connections at once (more are dropped), 3 s per connection, no journal output.
+Paths over 2 KB or with spaces/non-ASCII redirect to `/` on :5000.
