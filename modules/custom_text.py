@@ -511,6 +511,9 @@ def run(
             pinned_handles=pinned_handles, local_zone=local_clock.weather_zone(config),
         )
     if module_config["type"] == "media":
+        from safe_area import fit_media_geometry
+
+        module_config = fit_media_geometry(matrix, module_config)
         source = module_config["source"]
         pinned_handle = (pinned_handles or {}).get(source)
         if pinned_handle is None:

@@ -127,3 +127,40 @@ def marker_points(viewport, width=PANEL_WIDTH, height=PANEL_HEIGHT, *, phase=0):
     perimeter.extend((x, y1) for x in range(x1 - 1, x0 - 1, -1))
     perimeter.extend((x0, y) for y in range(y1 - 1, y0, -1))
     return [point for index, point in enumerate(perimeter) if (index + phase) % 2 == 0]
+
+
+def fit_media_geometry(matrix, settings):
+    """Scale panel-space media geometry into the active full-screen-media safe area.
+
+    Saved splash/sleep layouts and custom media screens store absolute panel
+    geometry (usually x0 y0 w64 h32). With ``media_inside`` on, the safe-area
+    scope already translates drawing by (left, top), so this only rescales from
+    the panel size to the inner size: x' = x*iw/pw, w' = (x+w)*iw/pw - x'.
+    Anything else (no scope, toggle off, plain mocks) returns ``settings`` as is.
+    """
+    if not settings:
+        return settings
+    safe_area = getattr(matrix, "safe_area", None)
+    state = getattr(matrix, "__dict__", {})
+    if (not isinstance(safe_area, SafeArea) or not state.get("_safe_area_media", False)
+            or safe_area.is_zero or not safe_area.media_inside):
+        return settings
+    inner = matrix.matrix
+    inner_width, inner_height = int(inner.width), int(inner.height)
+    panel_width = inner_width + safe_area.left + safe_area.right
+    panel_height = inner_height + safe_area.top + safe_area.bottom
+    scaled = dict(settings)
+    for position, size, inner_size, panel_size in (
+        ("x", "width", inner_width, panel_width),
+        ("y", "height", inner_height, panel_height),
+    ):
+        start = settings.get(position)
+        extent = settings.get(size)
+        numeric = lambda value: isinstance(value, (int, float)) and not isinstance(value, bool)
+        if numeric(start):
+            scaled[position] = round(start * inner_size / panel_size)
+        if numeric(extent):
+            origin = start if numeric(start) else 0
+            end = round((origin + extent) * inner_size / panel_size)
+            scaled[size] = max(1, end - round(origin * inner_size / panel_size))
+    return scaled

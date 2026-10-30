@@ -407,5 +407,94 @@ class ModuleMediaToggleTests(unittest.TestCase):
             self.assertEqual(image.getpixel(point), (0x10, 0x20, 0x30))
 
 
+
+def _edge_marked_png():
+    """64x32 red source whose right 4 columns are green and bottom 4 rows blue."""
+    import io
+    image = Image.new("RGB", (64, 32), (255, 0, 0))
+    image.paste((0, 255, 0), (60, 0, 64, 28))
+    image.paste((0, 0, 255), (0, 28, 64, 32))
+    buffer = io.BytesIO()
+    image.save(buffer, format="PNG")
+    return buffer.getvalue()
+
+
+class _BytesPin:
+    def __init__(self, data):
+        self.data = data
+
+    def fileno(self):
+        return 0
+
+    def dup_file(self):
+        import io
+        return io.BytesIO(self.data)
+
+
+FULL_PANEL = {"x": 0, "y": 0, "width": 64, "height": 32, "keep_aspect": False}
+
+
+class FullScreenMediaFitTests(unittest.TestCase):
+    """Full-screen media is scaled into the safe area, not translated and cut off."""
+
+    def assert_fitted(self, frame):
+        for x in range(64):
+            for y in range(32):
+                if not (2 <= x <= 61 and 2 <= y <= 29):
+                    self.assertEqual(frame.getpixel((x, y)), (0, 0, 0), (x, y))
+        right = frame.getpixel((61, 12))
+        self.assertGreater(right[1], right[0], f"right source edge visible: {right}")
+        bottom = frame.getpixel((20, 29))
+        self.assertGreater(bottom[2], bottom[0], f"bottom source edge visible: {bottom}")
+        self.assertEqual(frame.getpixel((2, 2)), (255, 0, 0))
+
+    def assert_full_panel(self, frame):
+        self.assertEqual(frame.getpixel((0, 0)), (255, 0, 0))
+        self.assertEqual(frame.getpixel((63, 12)), (0, 255, 0))
+        self.assertEqual(frame.getpixel((20, 31)), (0, 0, 255))
+
+    def physical_play(self, safe_area):
+        from modules.media_player import play_media
+        matrix, patcher = physical_matrix()
+        self.addCleanup(patcher.stop)
+        with matrix.safe_area_scope(safe_area, media=True):
+            play_media(matrix, "edge.png", 0.01, settings=dict(FULL_PANEL),
+                       pinned_handle=_BytesPin(_edge_marked_png()))
+        return matrix._hardware.shown, Image.frombytes("RGB", (64, 32), matrix.latest_frame_rgb()[0])
+
+    def test_play_media_fits_a_full_panel_still_inside_the_safe_area(self):
+        for frame in self.physical_play(EDGES2):
+            self.assert_fitted(frame)
+
+    def test_play_media_covers_the_whole_panel_when_media_may_go_under_the_frame(self):
+        outside = SafeArea(top=2, right=2, bottom=2, left=2, media_inside=False)
+        for frame in self.physical_play(outside):
+            self.assert_full_panel(frame)
+
+    def test_edit_preview_media_matches_the_panel(self):
+        from edit_preview import media_preview_frames
+        for safe_area, check in ((EDGES2, self.assert_fitted),
+                                 (SafeArea(top=2, right=2, bottom=2, left=2, media_inside=False),
+                                  self.assert_full_panel)):
+            capture = CaptureMatrix(safe_area=safe_area, media=True)
+            frames = list(media_preview_frames(
+                capture, "edge.png", 1, dict(FULL_PANEL), pinned_handle=_BytesPin(_edge_marked_png()),
+            ))
+            self.assertTrue(frames)
+            check(capture.snapshot())
+            panel = self.physical_play(safe_area)[0]
+            self.assertEqual(capture.snapshot().tobytes(), panel.tobytes(), "preview == panel")
+
+    def test_custom_media_screen_with_manual_geometry_is_fitted(self):
+        from modules import custom_text
+        matrix, patcher = physical_matrix()
+        self.addCleanup(patcher.stop)
+        module_config = {"type": "media", "source": "edge.png", "fit": "manual", **FULL_PANEL}
+        with matrix.safe_area_scope(EDGES2, media=True), \
+                patch.object(custom_text, "_wait", lambda *args: False):
+            custom_text.run(matrix, {}, 0.01, module_config=module_config,
+                            pinned_handles={"edge.png": _BytesPin(_edge_marked_png())})
+        self.assert_fitted(matrix._hardware.shown)
+
 if __name__ == "__main__":
     unittest.main()

@@ -511,7 +511,9 @@ def media_preview_frames(
         gif_composited_frames, gif_media_frames, video_media_frames,
     )
 
-    settings = settings or {}
+    from safe_area import fit_media_geometry
+
+    settings = fit_media_geometry(matrix, settings or {}) or {}
     duration = max(0.0, float(duration))
     started = monotonic()
     decode_timeout = duration if decode_timeout is None else max(0.0, float(decode_timeout))
