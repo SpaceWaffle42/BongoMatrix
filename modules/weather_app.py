@@ -12,7 +12,7 @@ from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from api_timeouts import DEFAULT_API_TIMEOUT_SECONDS
 from font_catalog import text_width
-from modules.scroll_timing import duration_milliseconds, frame_delay_seconds, scroll_frames
+from modules.scroll_timing import drawable_width, duration_milliseconds, frame_delay_seconds, scroll_frames
 
 
 def _known_timezone(zone):
@@ -284,7 +284,7 @@ def weather_frames(matrix, config, weather, stop_event=None):
     )
     scroll_step = -1 if scroll_direction == "right" else 1
     for scroll_x in ticker_positions(
-        canvas.width, text_width, weather_config.get("scroll_loops", 1),
+        drawable_width(matrix, canvas), text_width, weather_config.get("scroll_loops", 1),
         scroll_direction,
     ):
         if stop_event and stop_event.is_set():

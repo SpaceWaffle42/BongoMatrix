@@ -62,12 +62,21 @@ def make_blobs(settings=None):
     ]
 
 
-def aligned_x(alignment, text_width):
+def aligned_x(alignment, text_width, width=WIDTH):
     if alignment == "left":
         return 2
     if alignment == "right":
-        return max(0, WIDTH - text_width - 2)
-    return max(0, int((WIDTH - text_width) / 2))
+        return max(0, width - text_width - 2)
+    return max(0, int((width - text_width) / 2))
+
+
+def drawable_size(matrix):
+    """Inner size left by the Screen Safe Area (1.11); the full panel otherwise."""
+    inner = getattr(matrix, "matrix", None)
+    width, height = getattr(inner, "width", None), getattr(inner, "height", None)
+    if isinstance(width, int) and isinstance(height, int) and width > 0 and height > 0:
+        return min(width, WIDTH), min(height, HEIGHT)
+    return WIDTH, HEIGHT
 
 
 def pick_palette(matrix, lava_config=None):
@@ -167,8 +176,9 @@ def draw_lava(
 def image_to_canvas(matrix, image, canvas):
     """Copy the image onto the matrix using framework pixels."""
     pixels = image.load()
-    for y in range(HEIGHT):
-        for x in range(WIDTH):
+    width, height = drawable_size(matrix)
+    for y in range(height):
+        for x in range(width):
             r, g, b = pixels[x, y]
             matrix.pixel(x, y, r, g, b, canvas=canvas)
 
@@ -255,6 +265,7 @@ def render_lava_frame(matrix, state, canvas, temp_canvas):
             canvas,
         )
     time_text, date_text = clock_texts(state.get("local_zone"))
+    width = drawable_size(matrix)[0]
     time_y = settings.get("time_y", 15)
     date_y = settings.get("date_y", 27)
     time_width = measure_text(
@@ -267,13 +278,13 @@ def render_lava_frame(matrix, state, canvas, temp_canvas):
     )
     if settings.get("show_time", True):
         matrix.draw_text_with_border(
-            state["font_time"], aligned_x(settings.get("time_align", "center"), time_width),
+            state["font_time"], aligned_x(settings.get("time_align", "center"), time_width, width),
             time_y, state["text_colour"], state["border_colour"], time_text,
             canvas=canvas,
         )
     if settings.get("show_date", True):
         matrix.draw_text_with_border(
-            state["font_date"], aligned_x(settings.get("date_align", "center"), date_width),
+            state["font_date"], aligned_x(settings.get("date_align", "center"), date_width, width),
             date_y, state["text_colour"], state["border_colour"], date_text,
             canvas=canvas,
         )

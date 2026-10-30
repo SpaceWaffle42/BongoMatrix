@@ -315,12 +315,18 @@ def image_frames(stories, stop_event=None):
             elapsed = next_time
 
 
-def preview_frames(stories, stop_event=None):
-    """Lazy PNG stream of exactly the physical timeline, without sleeping."""
+def preview_frames(stories, stop_event=None, *, safe_area=None):
+    """Lazy PNG stream of exactly the physical timeline, without sleeping.
+
+    With a Screen Safe Area (1.11) the 64x32 layout is translated and clipped
+    to the inner rectangle exactly as Matrix.draw_image does on the panel.
+    """
     from edit_preview import _png_frame
     for image, delay, info in image_frames(stories, stop_event):
         if stop_event is not None and stop_event.is_set():
             return
+        if safe_area is not None and stories:
+            image = safe_area.compose(image, stories[0].options.background_colour)
         frame = _png_frame(image, delay * 1000)
         frame['rss'] = info
         if stop_event is not None and stop_event.is_set():

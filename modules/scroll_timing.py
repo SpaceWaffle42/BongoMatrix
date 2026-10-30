@@ -16,6 +16,15 @@ FRAME_DELAY_STEP = 0.000001
 MATRIX_WIDTH = 64
 
 
+def drawable_width(matrix, canvas):
+    """Ticker width inside the Screen Safe Area (1.11): matrix.matrix reports the inner
+    width; fall back to the canvas (full panel) for drivers/mocks without it."""
+    width = getattr(getattr(matrix, "matrix", None), "width", None)
+    if isinstance(width, int) and not isinstance(width, bool) and width > 0:
+        return width
+    return canvas.width
+
+
 def frame_delay_seconds(value, default=0.05):
     """Return numeric frame-delay seconds, accepting legacy speed presets."""
     if isinstance(value, bool):

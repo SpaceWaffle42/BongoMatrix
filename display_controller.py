@@ -16,7 +16,10 @@ import time
 
 from PIL import Image
 
+import contextlib
+
 import local_clock
+from safe_area import SafeArea
 
 from media_resolver import MediaResolutionError, MediaResolver, module_media_references
 from screen_media import (
@@ -210,6 +213,31 @@ def custom_module(config, module_name):
         (item for item in config.get("custom_modules", []) if item.get("id") == module_name),
         None,
     )
+
+
+def is_full_screen_media(config, module_name):
+    """Splash, sleep and custom media screens follow the safe area's media toggle (1.11)."""
+    if module_name in {"splash", "sleep"} or str(module_name).startswith("media:"):
+        return True
+    custom = custom_module(config, module_name) if isinstance(config, dict) else None
+    return custom is not None and custom.get("type") == "media"
+
+
+def safe_area_scope(matrix, config, module_name=None, *, media=None):
+    """Draw one module inside the config's Screen Safe Area; no-op for plain mocks."""
+    scope = getattr(type(matrix), "safe_area_scope", None)
+    if not callable(scope):
+        return contextlib.nullcontext()
+    if media is None:
+        media = is_full_screen_media(config, module_name)
+    return matrix.safe_area_scope(SafeArea.from_config(config), media=media)
+
+
+def apply_safe_area(matrix, config):
+    """Baseline for system screens (pairing PIN, address/name banner) between modules."""
+    setter = getattr(type(matrix), "set_safe_area", None)
+    if callable(setter):
+        matrix.set_safe_area(SafeArea.from_config(config))
 
 
 class _PinnedModulePreview:
@@ -1197,7 +1225,8 @@ class DisplayController:
                 if module_name == "announcement_board"
                 else module.run
             )
-            rendered = runner(matrix, candidate, **options)
+            with safe_area_scope(matrix, candidate, module_name):
+                rendered = runner(matrix, candidate, **options)
             astronomy_empty = (module_name == 'astronomy' and options.get('prepared') is not None
                                and options['prepared'].status == 'empty')
             if request.timeout_seconds is not None or (rendered is False and not astronomy_empty):
@@ -1886,13 +1915,14 @@ class DisplayController:
                         admission_generation, stop_event,
                     ):
                         return False
-                return play_media(
-                    self.matrix,
-                    preview.filename,
-                    duration,
-                    stop_event=stop_event,
-                    pinned_handle=preview.pinned_handle,
-                )
+                with safe_area_scope(self.matrix, self.config_store.get(), media=True):
+                    return play_media(
+                        self.matrix,
+                        preview.filename,
+                        duration,
+                        stop_event=stop_event,
+                        pinned_handle=preview.pinned_handle,
+                    )
         except Exception as exc:
             LOGGER.exception("Matrix media preview %s failed", preview.filename)
             self.last_error = f"{type(exc).__name__}: {exc}"
@@ -2082,11 +2112,12 @@ class DisplayController:
                         return False
                     if name == 'rss':
                         options['prepared'] = self.rss_host.service.admit() if self.rss_host else None
-                return module.run(
-                    self.matrix,
-                    config,
-                    **options,
-                )
+                with safe_area_scope(self.matrix, config, name):
+                    return module.run(
+                        self.matrix,
+                        config,
+                        **options,
+                    )
         except Exception as exc:
             self.last_error = f"{type(exc).__name__}: {exc}"
             raise
@@ -2153,6 +2184,8 @@ class DisplayController:
                 self._mark_scheduler_healthy()
                 continue
             config = self.config_store.get()
+            with self._display_lock:
+                apply_safe_area(self.matrix, config)
 
             announcement_preview = self._take_announcement_preview()
             if announcement_preview:

@@ -393,11 +393,14 @@ def image_frames(cards, stop_event=None, *, now=None, utc_clock=None):
         yield image, delay, info
 
 
-def preview_frames(cards, stop_event=None, *, now=None):
+def preview_frames(cards, stop_event=None, *, now=None, safe_area=None):
+    """With a Screen Safe Area (1.11) frames are translated and clipped like Matrix.draw_image."""
     from edit_preview import _png_frame
     for image, delay, info in image_frames(cards, stop_event, now=now):
         if _stopped(stop_event):
             return
+        if safe_area is not None:
+            image = safe_area.compose(image, cards[info['card_index']].options.background)
         frame = _png_frame(image, delay * 1000)
         frame['astronomy'] = info
         if _stopped(stop_event):

@@ -305,5 +305,107 @@ class CalendarSafeAreaTests(unittest.TestCase):
                         patcher.stop()
 
 
+class LegacyMigrationSafeAreaTests(unittest.TestCase):
+    def test_older_schema_configs_are_migrated_with_a_two_pixel_safe_area(self):
+        for keep_device in (True, False):
+            with self.subTest(keep_device=keep_device), tempfile.TemporaryDirectory() as directory:
+                path = Path(directory) / "config.json"
+                legacy = copy.deepcopy(DEFAULT_CONFIG)
+                legacy["schema_version"] = 3
+                if keep_device:
+                    del legacy["device"]["safe_area"]
+                else:
+                    del legacy["device"]
+                path.write_text(json.dumps(legacy))
+                migrated = ConfigStore(path, media_dir=Path(directory) / "media").get()
+                self.assertEqual(migrated["device"]["safe_area"],
+                                 {"top": 2, "right": 2, "bottom": 2, "left": 2, "media_inside": True})
+                # The migration is persisted, so the next read sees the same value.
+                self.assertEqual(json.loads(path.read_text())["device"]["safe_area"],
+                                 migrated["device"]["safe_area"])
+
+    def test_older_schema_config_keeps_an_explicit_safe_area(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "config.json"
+            legacy = copy.deepcopy(DEFAULT_CONFIG)
+            legacy["schema_version"] = 3
+            chosen = {"top": 1, "right": 0, "bottom": 3, "left": 6, "media_inside": False}
+            legacy["device"]["safe_area"] = chosen
+            path.write_text(json.dumps(legacy))
+            self.assertEqual(ConfigStore(path, media_dir=Path(directory) / "media").get()["device"]["safe_area"],
+                             chosen)
+
+    def test_fresh_install_has_no_safe_area(self):
+        with tempfile.TemporaryDirectory() as directory:
+            store = ConfigStore(Path(directory) / "config.json")
+            self.assertEqual(store.get()["device"]["safe_area"],
+                             {"top": 0, "right": 0, "bottom": 0, "left": 0, "media_inside": True})
+
+
+class ModuleMediaToggleTests(unittest.TestCase):
+    """Controller/preview dispatch: which modules count as full-screen media."""
+
+    def config(self, media_inside):
+        config = copy.deepcopy(DEFAULT_CONFIG)
+        config["device"]["safe_area"] = {"top": 2, "right": 3, "bottom": 1, "left": 4, "media_inside": media_inside}
+        config["custom_modules"] = [{"id": "custom_media_1", "type": "media"}, {"id": "custom_text_1", "type": "text"}]
+        return config
+
+    def test_media_modules_follow_the_toggle_and_other_modules_never_do(self):
+        from display_controller import is_full_screen_media, safe_area_scope
+        white = Image.new("RGB", (64, 32), "white")
+        for media_inside in (True, False):
+            config = self.config(media_inside)
+            for name, media in (("splash", True), ("sleep", True), ("custom_media_1", True), ("media:clip.gif", True),
+                                ("custom_text_1", False), ("event_countdown", False), ("clock_lava", False)):
+                with self.subTest(media_inside=media_inside, module=name):
+                    self.assertEqual(is_full_screen_media(config, name), media)
+                    matrix = CaptureMatrix()
+                    canvas = matrix.matrix.CreateFrameCanvas()
+                    with safe_area_scope(matrix, config, name):
+                        full = media and not media_inside
+                        self.assertEqual((matrix.matrix.width, matrix.matrix.height), (64, 32) if full else (57, 29))
+                        matrix.fill(0, 0, 0, canvas=canvas)
+                        matrix.draw_image(white, canvas=canvas)
+                        frame = matrix.snapshot(canvas)
+                    self.assertEqual(frame.getpixel((0, 0)), (255, 255, 255) if full else (0, 0, 0))
+                    self.assertEqual(frame.getpixel((4, 2)), (255, 255, 255))
+                    self.assertEqual(frame.getpixel((63, 31)), (255, 255, 255) if full else (0, 0, 0))
+                    # The scope restores the previous (zero) area afterwards.
+                    self.assertEqual((matrix.matrix.width, matrix.matrix.height), (64, 32))
+
+    def test_scope_is_a_no_op_for_plain_mocks(self):
+        from unittest.mock import Mock
+        from display_controller import apply_safe_area, safe_area_scope
+        matrix = Mock()
+        with safe_area_scope(matrix, self.config(True), "splash"):
+            pass
+        apply_safe_area(matrix, self.config(True))
+        matrix.safe_area_scope.assert_not_called()
+        matrix.set_safe_area.assert_not_called()
+
+    def test_clock_lava_centres_inside_the_safe_area(self):
+        from modules import clock_lava
+        matrix = CaptureMatrix(safe_area=SafeArea(top=2, right=2, bottom=2, left=2))
+        self.assertEqual(clock_lava.drawable_size(matrix), (60, 28))
+        self.assertEqual(clock_lava.aligned_x("center", 20, 60), 20)
+        self.assertEqual(clock_lava.aligned_x("right", 20, 60), 38)
+
+    def test_calendar_preview_composes_the_inner_render_onto_the_panel(self):
+        import base64
+        import io
+        from modules import event_countdown as ec
+        config = CalendarSafeAreaTests().config("large", {"top": 0, "right": 0, "bottom": 0, "left": 0})
+        config["event_countdown"]["background"] = "#102030"
+        frame = next(ec.preview_frames(config, duration=1))
+        data = frame.get("png") or frame.get("data") or frame.get("image")
+        if isinstance(data, str):
+            data = base64.b64decode(data.split(",", 1)[-1])
+        image = Image.open(io.BytesIO(data)).convert("RGB")
+        self.assertEqual(image.size, (64, 32))
+        for point in ((0, 0), (1, 31), (63, 0), (62, 31)):
+            self.assertEqual(image.getpixel(point), (0x10, 0x20, 0x30))
+
+
 if __name__ == "__main__":
     unittest.main()
