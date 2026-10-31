@@ -87,7 +87,7 @@ MEDIA_METADATA_ERRORS = (
 CONFIG_REQUEST_LIMIT = 1_048_576
 CONDITIONAL_HEADER_LIMIT = 4096
 MINIMUM_CLIENT_CONTRACT = 3
-APPLICATION_VERSION = "0.3.82-preview"
+APPLICATION_VERSION = "0.3.83-preview"
 DEVICE_RESTART_PENDING_TTL_SECONDS = 60
 PAIRED_ACTION_HEADER = "X-Matrix-Action"
 PAIRED_ACTION_VALUE = "paired-request"
@@ -2049,7 +2049,11 @@ def create_app(
                 return response
             except (KeyError, TypeError, ValueError):
                 return jsonify({'error': 'Timing draft is invalid.'}), 400
-            return jsonify({'module': 'astronomy', 'duration_seconds': snapshot.duration,
+            # The panel plays the cards on the safe area's inner canvas; time that canvas.
+            from modules.astronomy_renderer import duration_seconds as astronomy_duration
+            duration = astronomy_duration(snapshot.cards, now=snapshot.prepared_at,
+                                          size=SafeArea.from_config(draft).inner_size())
+            return jsonify({'module': 'astronomy', 'duration_seconds': duration,
                             'ready_count': len(snapshot.cards), 'generation': snapshot.generation,
                             'clipping': [card.clipping for card in snapshot.cards],
                             'status': snapshot.status, 'error': snapshot.error,
@@ -2061,7 +2065,9 @@ def create_app(
                 snapshot = rss_host.preview(settings)
             except (KeyError, TypeError, ValueError):
                 return jsonify({'error': 'Timing draft is invalid.'}), 400
-            return jsonify({'module': 'rss', 'duration_seconds': snapshot.duration,
+            from modules.rss_renderer import duration_seconds as rss_duration
+            duration = rss_duration(snapshot.stories, size=SafeArea.from_config(draft).inner_size())
+            return jsonify({'module': 'rss', 'duration_seconds': duration,
                             'ready_count': len(snapshot.items), 'generation': snapshot.generation,
                             'status': 'ready' if snapshot.items else 'preparing',
                             **({'settings_correlation': correlation} if correlation is not None else {})})

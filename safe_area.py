@@ -94,6 +94,20 @@ class SafeArea:
 ZERO = SafeArea()
 
 
+def canvas_size(matrix):
+    """(width, height) a module draws on: the driver's inner safe-area size, else the panel.
+
+    Both matrix_framework.Matrix and edit_preview.CaptureMatrix report it via
+    ``matrix.matrix.width/height``; plain test doubles fall back to 64x32.
+    """
+    driver = getattr(matrix, "matrix", None)
+    width, height = getattr(driver, "width", None), getattr(driver, "height", None)
+    if (type(width) is int and type(height) is int
+            and 0 < width <= PANEL_WIDTH and 0 < height <= PANEL_HEIGHT):
+        return width, height
+    return PANEL_WIDTH, PANEL_HEIGHT
+
+
 def clip_image(image, x, y, viewport):
     """Crop an image drawn at inner (x, y) to the viewport; return (image, panel_x, panel_y) or None."""
     vx, vy, vw, vh = viewport

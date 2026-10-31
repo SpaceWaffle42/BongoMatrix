@@ -3,7 +3,7 @@
 Preparation loads installed BDFs outside playback; immutable glyph runs, not
 unbounded text bitmaps, cross the render boundary. Coordinates use ink tops.
 """
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from functools import lru_cache
 from fractions import Fraction
 from types import MappingProxyType
@@ -65,12 +65,13 @@ def _line_box(name):
     return run.top, run.height
 
 
-def _rows(prepared_or_options, thumbnail):
+PANEL = (64, 32)
+
+
+def _rows(prepared_or_options, thumbnail, height=32):
     """(headline row height, summary area height). Text rows grow to the headline font (min 7px for the banner)."""
-    if thumbnail:
-        return 16, 15
-    hh = min(16, max(7, _line_box(prepared_or_options.headline_font)[1]))
-    return hh, 32 - hh - 1
+    hh = 16 if thumbnail else min(16, max(7, _line_box(prepared_or_options.headline_font)[1]))
+    return hh, max(1, height - hh - 1)
 
 
 def _headline_base(headline, options, thumbnail):
@@ -78,19 +79,19 @@ def _headline_base(headline, options, thumbnail):
     return 0 if thumbnail else headline.top - _line_box(options.headline_font)[0]
 
 
-def _wrap(font, text):
+def _wrap(font, text, width=64):
     # Word wrapping with hard breaks for overlong tokens, bounded by 2000 chars.
     lines, current = [], ''
     for word in text.split():
         candidate = (current + ' ' + word).strip()
-        if _measure(font, candidate).width <= 64:
+        if _measure(font, candidate).width <= width:
             current = candidate
             continue
         if current:
             lines.append(_measure(font, current))
             current = ''
         for character in word:
-            if current and _measure(font, current + character).width > 64:
+            if current and _measure(font, current + character).width > width:
                 lines.append(_measure(font, current))
                 current = ''
             current += character
@@ -142,6 +143,42 @@ class PreparedStory:
     warnings: object
     thumbnail: PreparedThumbnail | None = None
     banner: PreparedBanner | None = None
+    # Canvas the story is laid out for (the Screen Safe Area inner size) and the
+    # summary text, kept so playback can re-wrap it for a smaller canvas.
+    size: tuple = PANEL
+    summary: str = ''
+
+
+def _check_size(size):
+    if (type(size) is not tuple or len(size) != 2 or any(type(v) is not int for v in size)
+            or not (1 <= size[0] <= 64 and 1 <= size[1] <= 32)):
+        raise ValueError('RSS canvas size must be (1..64, 1..32)')
+    return size
+
+
+def _warnings(headline, lines, options, thumbnail, size):
+    hh, sh = _rows(options, thumbnail, size[1])
+    base = _headline_base(headline, options, thumbnail)
+    return MappingProxyType({'headline_clipped': base < 0 or base + headline.height > hh,
+                             'headline_height': headline.height, 'headline_available_height': hh,
+                             'summary_clipped': any(line.width > size[0] or line.height > sh for line in lines),
+                             'summary_max_height': max((line.height for line in lines), default=0),
+                             'summary_available_height': sh})
+
+
+def layout_for_size(prepared, size):
+    """The same story laid out as if the panel were SIZE (the safe area's inner canvas).
+
+    Only the canvas changes: the summary re-wraps at the inner width and rows use
+    the inner height. Fonts, line pitch, thumbnail and banner keep their size;
+    whatever does not fit is clipped like on a real smaller panel.
+    """
+    size = _check_size(tuple(size))
+    if size == prepared.size:
+        return prepared
+    lines = _wrap(_font(prepared.options.summary_font), prepared.summary, size[0])
+    return replace(prepared, lines=lines, size=size, warnings=_warnings(
+        prepared.headline, lines, prepared.options, prepared.thumbnail, size))
 
 
 def prepare_story(story, options=None, *, thumbnail=None, banner=None):
@@ -160,14 +197,8 @@ def prepare_story(story, options=None, *, thumbnail=None, banner=None):
     summary_font = _font(options.summary_font)
     lines = _wrap(summary_font, story.summary)
     pitch = max(1, max(g.height for g in summary_font.glyphs.values()))
-    hh, sh = _rows(options, thumbnail)
-    base = _headline_base(headline, options, thumbnail)
-    warnings = MappingProxyType({'headline_clipped': base < 0 or base + headline.height > hh,
-                                'headline_height': headline.height, 'headline_available_height': hh,
-                                'summary_clipped': any(line.width > 64 or line.height > sh for line in lines),
-                                'summary_max_height': max((line.height for line in lines), default=0),
-                                'summary_available_height': sh})
-    return PreparedStory(headline, lines, pitch, options, warnings, thumbnail, banner)
+    warnings = _warnings(headline, lines, options, thumbnail, PANEL)
+    return PreparedStory(headline, lines, pitch, options, warnings, thumbnail, banner, PANEL, story.summary)
 
 
 def _draw(area, run, x, y, colour):
@@ -199,8 +230,9 @@ def _headline_x(p):
 
 def render_frame(prepared, tick, *, thumbnail_index=0):
     background = prepared.options.background_colour
-    image = Image.new('RGB', (64, 32), background)
-    hh, sh = _rows(prepared.options, prepared.thumbnail)
+    width, height = prepared.size
+    image = Image.new('RGB', (width, height), background)
+    hh, sh = _rows(prepared.options, prepared.thumbnail, height)
     base = _headline_base(prepared.headline, prepared.options, prepared.thumbnail)
     tx = _headline_x(prepared)
     if prepared.thumbnail:
@@ -208,7 +240,7 @@ def render_frame(prepared, tick, *, thumbnail_index=0):
     elif prepared.banner:
         b = prepared.banner
         image.paste(Image.frombytes('RGB', (b.width, b.height), b.pixels), (0, 0))
-    title = Image.new('RGB', (64 - tx, hh), background)
+    title = Image.new('RGB', (max(1, width - tx), hh), background)
     loop, hold, scroll, _ = _phases(prepared)
     if prepared.options.headline_mode == 'continuous':
         return _render_continuous(prepared, tick, image, title, tx, hh, sh, loop, scroll, base)
@@ -222,7 +254,7 @@ def render_frame(prepared, tick, *, thumbnail_index=0):
     if x:
         _draw(title, prepared.headline, x + loop, base, colour)
     image.paste(title, (tx, 0))
-    summary = Image.new('RGB', (64, sh), background)
+    summary = Image.new('RGB', (image.width, sh), background)
     sy = -max(0, tick - hold)
     for index, line in enumerate(prepared.lines):
         _draw(summary, line, 0, sy + index * prepared.line_pitch, tuple(bytes.fromhex(prepared.options.summary_colour[1:])))
@@ -244,7 +276,7 @@ def _render_continuous(prepared, tick, image, title, tx, hh, sh, loop, cycle, ba
     if x:
         _draw(title, prepared.headline, x + loop, base, colour)
     image.paste(title, (tx, 0))
-    summary = Image.new('RGB', (64, sh), background)
+    summary = Image.new('RGB', (image.width, sh), background)
     sy = -(tick % cycle) if cycle else 0
     summary_colour = tuple(bytes.fromhex(prepared.options.summary_colour[1:]))
     for offset in ((0, cycle) if cycle else (0,)):
@@ -263,7 +295,7 @@ def _phases(p):
     cycle incl. SUMMARY_GAP) until the headline loop and at least one summary
     cycle (and READ_HOLD) are complete.
     """
-    width = 64 - _headline_x(p)
+    width = p.size[0] - _headline_x(p)
     loop = p.headline.width + HEADLINE_GAP if p.headline.width > width else 0
     scroll = (len(p.lines) - 1) * p.line_pitch + p.lines[-1].height if p.lines else 0
     visible = p.headline.height or p.lines or p.thumbnail or p.banner
@@ -287,13 +319,18 @@ def _validated_pass(stories):
     return stories
 
 
-def duration_seconds(stories):
+def _sized(stories, size):
+    stories = _validated_pass(stories)
+    return stories if size is None else tuple(layout_for_size(p, size) for p in stories)
+
+
+def duration_seconds(stories, *, size=None):
     """One duration source: inclusive timeline submissions and their waits."""
-    return sum(_timing(p)[2] * p.options.frame_delay for p in _validated_pass(stories))
+    return sum(_timing(p)[2] * p.options.frame_delay for p in _sized(stories, size))
 
 
-def image_frames(stories, stop_event=None):
-    for p in _validated_pass(stories):
+def image_frames(stories, stop_event=None, *, size=None):
+    for p in _sized(stories, size):
         delay = Fraction(str(p.options.frame_delay))
         end = _timing(p)[2] * delay
         elapsed, index = Fraction(0), 0
@@ -318,11 +355,12 @@ def image_frames(stories, stop_event=None):
 def preview_frames(stories, stop_event=None, *, safe_area=None):
     """Lazy PNG stream of exactly the physical timeline, without sleeping.
 
-    With a Screen Safe Area (1.11) the 64x32 layout is translated and clipped
-    to the inner rectangle exactly as Matrix.draw_image does on the panel.
+    With a Screen Safe Area the story is laid out on the inner canvas, exactly
+    as run() does on the panel, and placed inside the safe area.
     """
     from edit_preview import _png_frame
-    for image, delay, info in image_frames(stories, stop_event):
+    size = safe_area.inner_size() if safe_area is not None else None
+    for image, delay, info in image_frames(stories, stop_event, size=size):
         if stop_event is not None and stop_event.is_set():
             return
         if safe_area is not None and stories:
@@ -347,11 +385,19 @@ def run(matrix, stories, stop_event=None, *, clock=time.monotonic, sleep=time.sl
     than the calculated timeline; return actual elapsed time, not a fabricated
     sum of requested waits. The caller owns selection and preparation.
     """
+    from safe_area import canvas_size
+    size = canvas_size(matrix)
+    margin = None
+    if size != PANEL and stories:
+        # Smaller (safe-area) canvas: the story background also covers the margin, as in the preview.
+        margin = Image.new('RGB', (1, 1), stories[0].options.background_colour).getpixel((0, 0))
     started = deadline = clock()
     count = 0
-    for image, delay, _ in image_frames(stories, stop_event):
+    for image, delay, _ in image_frames(stories, stop_event, size=size):
         if stop_event is not None and stop_event.is_set():
             break
+        if margin is not None:
+            matrix.fill(*margin)
         matrix.draw_image(image)
         if stop_event is not None and stop_event.is_set():
             break
