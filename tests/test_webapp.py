@@ -1817,7 +1817,7 @@ try{
         body = self.client.get("/").get_data(as_text=True)
 
         application_version = getattr(webapp, "APPLICATION_VERSION", None)
-        self.assertEqual(application_version, "0.3.78-preview")
+        self.assertEqual(application_version, "0.3.79-preview")
         self.assertEqual(body.count(f"Version {application_version}"), 1)
         self.assertRegex(
             body,
@@ -9397,7 +9397,7 @@ globalThis.document=document;globalThis.window=window;globalThis.fetch=fetch;
         with self.client.session_transaction() as browser_session:
             self.assertNotIn("pairing_recovery", browser_session)
             self.assertEqual(browser_session["device_id"], replacement["id"])
-        self.controller.end_pairing.assert_called_once_with()
+        self.controller.end_pairing.assert_called_once_with(timeout=webapp.PAIRING_DISPLAY_CLEANUP_TIMEOUT_SECONDS)
         self.controller.start.assert_called_once_with()
 
     def test_replayed_replacement_authorization_cannot_mutate_registry_twice(self):
@@ -9523,7 +9523,7 @@ globalThis.document=document;globalThis.window=window;globalThis.fetch=fetch;
             self.assertNotIn("pairing_recovery", browser_session)
             self.assertEqual(browser_session["device_id"], devices[1]["id"])
         self.controller.cancel_device_drafts_for_device.assert_called_once_with(stale["id"])
-        self.controller.end_pairing.assert_called_once_with()
+        self.controller.end_pairing.assert_called_once_with(timeout=webapp.PAIRING_DISPLAY_CLEANUP_TIMEOUT_SECONDS)
         self.controller.start.assert_called_once_with()
 
     def test_uncommitted_replacement_write_failure_preserves_registry_and_recovery(self):
@@ -16432,6 +16432,21 @@ try{
         self.assertIn("/pair", dashboard.headers["Location"])
         self.assertEqual(timing_api.status_code, 401)
         self.assertEqual(timing_api.get_json(), {"error": "Pairing session expired."})
+
+    def test_pairing_never_waits_unbounded_for_the_display_lock(self):
+        """Prod hang: a running module (Sleep GIF) holds the display lock, so an unbounded
+        end_pairing() froze pair_submit while it held the PIN and device-store locks."""
+        self.pairing.verify.return_value = True
+
+        def end_pairing(*args, **kwargs):
+            if kwargs.get("timeout") is None:
+                raise AssertionError("end_pairing must be bounded")
+            return False  # display lock still held by the running module
+
+        self.controller.end_pairing.side_effect = end_pairing
+        response = self.paired_request("POST", "/pair", data={"pin": "123456", "device_name": "Night phone"})
+        self.assertNotIn(response.status_code, (500, 503))
+        self.assertEqual(len(self.device_store.list()), 1)
 
     def test_valid_pin_unlocks_dashboard_and_updates_configuration(self):
         self.pairing.verify.return_value = True

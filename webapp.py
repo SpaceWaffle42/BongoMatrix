@@ -86,11 +86,15 @@ MEDIA_METADATA_ERRORS = (
 CONFIG_REQUEST_LIMIT = 1_048_576
 CONDITIONAL_HEADER_LIMIT = 4096
 MINIMUM_CLIENT_CONTRACT = 3
-APPLICATION_VERSION = "0.3.78-preview"
+APPLICATION_VERSION = "0.3.79-preview"
 DEVICE_RESTART_PENDING_TTL_SECONDS = 60
 PAIRED_ACTION_HEADER = "X-Matrix-Action"
 PAIRED_ACTION_VALUE = "paired-request"
 PAIRING_RECOVERY_TTL_SECONDS = 300
+# Pairing holds the PIN-display and device-store locks while it ends the pairing
+# screen. Ending it waits for the display lock, which a running module (a Sleep
+# GIF can hold it all night) keeps, so an unbounded wait froze every web request.
+PAIRING_DISPLAY_CLEANUP_TIMEOUT_SECONDS = 3.0
 PAIRING_PIN_REQUEST_COOLDOWN_SECONDS = 60
 RENAME_CODE_TTL_SECONDS = 120
 RENAME_CODE_ATTEMPTS = 3
@@ -1549,7 +1553,8 @@ def create_app(
                             error="The Matrix has reached its paired-device limit. Try pairing again to replace an existing device.",
                         ), 409
                 for action_name, action in (
-                    ("pairing display cleanup", controller.end_pairing),
+                    ("pairing display cleanup", lambda: controller.end_pairing(
+                        timeout=PAIRING_DISPLAY_CLEANUP_TIMEOUT_SECONDS)),
                     ("display restart", controller.start),
                 ):
                     try:
@@ -1707,7 +1712,8 @@ def create_app(
             ]
             if pairing.active_pin() is None:
                 actions.extend((
-                    ("pairing display cleanup", controller.end_pairing),
+                    ("pairing display cleanup", lambda: controller.end_pairing(
+                        timeout=PAIRING_DISPLAY_CLEANUP_TIMEOUT_SECONDS)),
                     ("display restart", controller.start),
                 ))
             for action_name, action in actions:
