@@ -37,6 +37,7 @@ from acceptance_artifacts import AcceptanceArtifactTransaction
 from api_timeouts import DEFAULT_API_TIMEOUT_SECONDS
 from device_name import name_problem
 from directory import is_directory_host
+from http_compression import register_http_compression
 from display_controller import is_full_screen_media, playlist_item_config, playlist_module_config
 from safe_area import SafeArea
 from config_store import (
@@ -823,6 +824,7 @@ def create_app(
             scroll_timing_cache.clear(provider="openweather")
 
     app = Flask(__name__, template_folder="app/templates", static_folder="app/static")
+    register_http_compression(app)  # gzip text responses; registered first so it sees final headers
     from rss_host import RSSHost
     rss_host = RSSHost(Path(config_store.path).parent / 'rss-cache')
     rss_host.sync(config_store.get())
