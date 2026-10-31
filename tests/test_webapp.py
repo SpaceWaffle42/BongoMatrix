@@ -221,6 +221,36 @@ class WebAppTests(unittest.TestCase):
     def paired_client_request(self, method, client, path, **kwargs):
         return self.paired_request(method, path, client=client, **kwargs)
 
+    DASHBOARD_ASSET_TAG = re.compile(
+        r'<script src="(/api/dashboard-script/[0-9a-f]+\.js)"></script>'
+        r'|<link rel="stylesheet" href="(/api/dashboard-style/[0-9a-f]+\.css)">'
+    )
+
+    def dashboard_asset_urls(self, body):
+        return [script or style for script, style in self.DASHBOARD_ASSET_TAG.findall(body)]
+
+    def dashboard_html(self, client=None):
+        """The dashboard document as the browser executes it.
+
+        The page links its cacheable paired script and stylesheet; this fetches them
+        with the same paired client and inlines them at their exact positions.
+        """
+        client = client or self.client
+        return self.inline_dashboard_assets(client.get("/").get_data(as_text=True), client)
+
+    def inline_dashboard_assets(self, body, client=None):
+        client = client or self.client
+
+        def inline(match):
+            script, style = match.groups()
+            asset = client.get(script or style)
+            if asset.status_code != 200:
+                raise AssertionError(f"{script or style} -> {asset.status_code}")
+            text = asset.get_data(as_text=True)
+            return f"<script>{text}</script>" if script else f"<style>{text}</style>"
+
+        return self.DASHBOARD_ASSET_TAG.sub(inline, body)
+
     def test_b1_durable_exclusion_rejects_config_before_body_parsing(self):
         release_root = Path(self.temp.name) / "release-authority"
         persistent = release_root / "var/active-config-exclusion-v1.json"
@@ -488,7 +518,7 @@ class WebAppTests(unittest.TestCase):
 
     def test_basic_custom_appearance_controls_serialize_defaults_reset_and_preserve_hidden_colour(self):
         self.pair_browser()
-        body = self.client.get("/").get_data(as_text=True)
+        body = self.dashboard_html()
         canvas = (Path(__file__).parents[1] / "app/static/custom_canvas.js").read_text()
 
         for source in (body, canvas):
@@ -535,7 +565,7 @@ class WebAppTests(unittest.TestCase):
         }
         self.store.update({"custom_modules": [module]})
         self.pair_browser()
-        body = self.client.get("/").get_data(as_text=True)
+        body = self.dashboard_html()
         probe = r"""
 const port=process.argv[1],pagePath=process.argv[2];let endpoint;
 for(let attempt=0;attempt<50;attempt++){try{endpoint=await fetch(`http://127.0.0.1:${port}/json/new`,{method:'PUT'}).then(r=>r.json());break}catch(_){await new Promise(r=>setTimeout(r,50))}}
@@ -585,7 +615,7 @@ console.log(JSON.stringify({layouts,reset}));}finally{socket.close()}
         }
         self.store.update({"custom_modules": [module]})
         self.pair_browser()
-        body = self.client.get("/").get_data(as_text=True)
+        body = self.dashboard_html()
         probe = r"""
 const port=process.argv[1],pagePath=process.argv[2];let endpoint;
 for(let attempt=0;attempt<50;attempt++){try{endpoint=await fetch(`http://127.0.0.1:${port}/json/new`,{method:'PUT'}).then(r=>r.json());break}catch(_){await new Promise(r=>setTimeout(r,50))}}
@@ -628,7 +658,7 @@ console.log(JSON.stringify(report));}finally{socket.close()}
     )
     def test_shared_playback_speed_control_keeps_one_canonical_numeric_state(self):
         self.pair_browser()
-        body = self.client.get("/").get_data(as_text=True)
+        body = self.dashboard_html()
         probe = r"""
 const port=process.argv[1],pagePath=process.argv[2];let endpoint;
 for(let attempt=0;attempt<50;attempt++){try{endpoint=await fetch(`http://127.0.0.1:${port}/json/new`,{method:'PUT'}).then(r=>r.json());break}catch(_){await new Promise(r=>setTimeout(r,50))}}
@@ -1219,7 +1249,7 @@ try{
 
     def test_logs_popup_is_accessible_only_from_navigation_and_renders_text_safely(self):
         self.pair_browser()
-        body = self.client.get("/").get_data(as_text=True)
+        body = self.dashboard_html()
         navigation = re.search(r'<nav class="nav"[^>]*>(.*?)</nav>', body, re.DOTALL)
 
         self.assertIsNotNone(navigation)
@@ -1251,7 +1281,7 @@ try{
     @unittest.skipUnless(shutil.which("node"), "Node.js is required")
     def test_logs_dialog_close_tolerates_missing_optional_colour_controls(self):
         self.pair_browser()
-        body = self.client.get("/").get_data(as_text=True)
+        body = self.dashboard_html()
         start = body.index("const logsDialog=")
         end = body.index("\nfor(const button of document.querySelectorAll?.('button[data-paired-action]')", start)
         script = body[start:end]
@@ -1281,7 +1311,7 @@ console.log('MINIMAL_LOGS_CLOSE_PASS');
     )
     def test_logs_popup_opens_refreshes_and_closes_in_real_chromium(self):
         self.pair_browser()
-        body = self.client.get("/").get_data(as_text=True)
+        body = self.dashboard_html()
         probe = r"""
 const port=process.argv[1],pagePath=process.argv[2];let endpoint;
 for(let attempt=0;attempt<50;attempt++){try{endpoint=await fetch(`http://127.0.0.1:${port}/json/new`,{method:'PUT'}).then(r=>r.json());break}catch(_){await new Promise(r=>setTimeout(r,50))}}
@@ -1749,7 +1779,7 @@ try{
     def test_dashboard_exposes_every_installed_font_to_all_font_editors(self):
         self.pair_browser()
 
-        body = self.client.get("/").get_data(as_text=True)
+        body = self.dashboard_html()
         match = re.search(r"const installedFonts=(.*?);", body)
         self.assertIsNotNone(match)
         fonts = json.loads(match.group(1))
@@ -1773,9 +1803,120 @@ try{
             self.client.get("/")
         self.assertEqual(opened.call_count, 0)
 
+    def test_dashboard_lists_editor_timezones_without_rescanning_tzdata_per_load(self):
+        """available_timezones() walks the tzdata tree (~10 ms x86, far more on the Pi)."""
+        self.pair_browser()
+        self.dashboard_html()  # warm
+        with patch.object(webapp, "available_timezones", wraps=webapp.available_timezones) as scanned:
+            self.dashboard_html()
+            self.dashboard_html()
+        self.assertEqual(scanned.call_count, 0)
+
+    def test_dashboard_first_load_html_stays_under_payload_ceiling(self):
+        """Hotfix 0.3.79: editor code, catalogues and CSS leave the per-load HTML."""
+        self.pair_browser()
+        response = self.client.get("/")
+        body = response.get_data(as_text=True)
+
+        self.assertEqual(response.status_code, 200)
+        self.assertLess(len(response.get_data()), 80_000)
+        self.assertEqual(response.headers["Cache-Control"], "no-store")
+        urls = self.dashboard_asset_urls(body)
+        self.assertEqual(len(urls), 2, urls)
+        self.assertEqual(sum(url.endswith(".js") for url in urls), 1)
+        for embedded in ("const customFontAdvances", "const holidayCatalogue", "const countdownIconArt",
+                         "const editorTimezones", "function calculatedMediaDuration", ".calendar-day{"):
+            self.assertNotIn(embedded, body)
+        # Per-request state the editors read synchronously stays inline, ahead of the script.
+        self.assertLess(body.index("const initialMedia="), body.index('<script src="/api/dashboard-script/'))
+        self.assertLess(body.index('<link rel="stylesheet" href="/api/dashboard-style/'), body.index("</head>"))
+
+    def test_dashboard_assets_are_paired_read_only_and_revalidate(self):
+        self.pair_browser()
+        urls = self.dashboard_asset_urls(self.client.get("/").data.decode())
+        self.assertEqual(len(urls), 2, urls)
+        stranger = self.app.test_client()
+        for url in urls:
+            with self.subTest(url=url):
+                asset = self.client.get(url)
+                self.assertEqual(asset.status_code, 200)
+                self.assertEqual(
+                    asset.mimetype, "text/javascript" if url.endswith(".js") else "text/css",
+                )
+                digest = url.rsplit("/", 1)[1].split(".", 1)[0]
+                self.assertEqual(asset.headers["ETag"], f'"{digest}"')
+                self.assertEqual(hashlib.sha256(asset.get_data()).hexdigest()[:len(digest)], digest)
+                self.assertIn("private", asset.headers["Cache-Control"])
+                self.assertIn("immutable", asset.headers["Cache-Control"])
+                revalidated = self.client.get(url, headers={"If-None-Match": asset.headers["ETag"]})
+                self.assertEqual(revalidated.status_code, 304)
+                self.assertEqual(revalidated.get_data(), b"")
+                for method in ("post", "put", "delete"):
+                    self.assertEqual(self.paired_request(method, url).status_code, 405)
+                unpaired = stranger.get(url)
+                self.assertEqual(unpaired.status_code, 401)
+                self.assertEqual(unpaired.get_json(), {"error": "Pairing session expired."})
+                # A stale digest (page rendered before an upgrade) still gets working
+                # current bytes, but never under an immutable cache entry.
+                stale = self.client.get(url.replace(digest, "0" * len(digest)))
+                self.assertEqual(stale.status_code, 200)
+                self.assertEqual(stale.get_data(), asset.get_data())
+                self.assertNotIn("immutable", stale.headers["Cache-Control"])
+                self.assertIn("no-cache", stale.headers["Cache-Control"])
+
+    def test_dashboard_assets_keep_former_inline_values_and_no_per_request_state(self):
+        from holiday_calendar import catalogue as holiday_catalogue
+        from modules.event_countdown import icon_catalogue
+        from font_catalog import font_advance_catalog
+        from rss_config import DEFAULTS as rss_defaults
+        from zoneinfo import available_timezones
+
+        self.pair_browser()
+        body = self.client.get("/").data.decode()
+        urls = self.dashboard_asset_urls(body)
+        script = self.client.get(urls[1] if urls[1].endswith(".js") else urls[0]).get_data(as_text=True)
+
+        def value(source, pattern):
+            match = re.search(pattern, source)
+            self.assertIsNotNone(match, pattern)
+            return json.loads(match.group(1))
+
+        self.assertEqual(value(script, r"const customFontAdvances=(.*?);\n"), font_advance_catalog())
+        self.assertEqual(value(script, r"const holidayCatalogue = (.*?);\n"), holiday_catalogue())
+        self.assertEqual(value(script, r"const countdownIconArt = (.*?);\n"), icon_catalogue())
+        self.assertEqual(value(script, r"const editorTimezones = (.*?);\n"),
+                         sorted(available_timezones() | {"UTC"}))
+        self.assertEqual(value(script, r"const rssDefaultFeeds = (.*?);\n"), rss_defaults["feeds"])
+        config = self.store.get()
+        self.assertEqual(value(body, r"const initialMedia=(.*?);\n"), self.client.get("/api/media").get_json())
+        self.assertEqual(value(body, r"const initialAstronomySettings=(.*?);\n"), config["astronomy"])
+        self.assertEqual(value(body, r"const initialCountdownSettings=(.*?);\n"), config["event_countdown"])
+        self.assertEqual(value(body, r"const initialRssSettings=(.*?);\n"), config["rss"])
+        self.assertEqual(value(body, r"const initialConfigRevision=(.*?);\n"), config["revision"])
+
+        self.store.update({"device": {**config["device"], "name": "Kitchen sign"}})
+        changed = self.client.get("/").data.decode()
+        self.assertIn("Kitchen sign", changed)
+        self.assertEqual(self.dashboard_asset_urls(changed), urls)
+        self.assertNotIn("Kitchen sign", script)
+
+    def test_dashboard_script_digest_follows_catalogue_changes(self):
+        """The rendered asset is reused across loads but never outlives its inputs."""
+        self.pair_browser()
+        before = self.dashboard_asset_urls(self.client.get("/").data.decode())
+        self.assertEqual(self.dashboard_asset_urls(self.client.get("/").data.decode()), before)
+        with patch.object(webapp, "timing_javascript", return_value="/* timing v2 */"):
+            after = self.dashboard_asset_urls(self.client.get("/").data.decode())
+            script_url = next(url for url in after if url.endswith(".js"))
+            script = self.client.get(script_url)
+        self.assertNotEqual(set(after), set(before))
+        self.assertIn([url for url in before if url.endswith(".css")][0], after)
+        self.assertIn("/* timing v2 */", script.get_data(as_text=True))
+        self.assertIn("immutable", script.headers["Cache-Control"])
+
     def test_priority_1_6_dashboard_uses_shared_speed_control_for_every_media_editor(self):
         self.pair_browser()
-        body = self.client.get("/").get_data(as_text=True)
+        body = self.dashboard_html()
 
         self.assertIn("function playbackSpeedControl", body)
         self.assertIn("field:'playback_speed_percent',label:'Playback speed (%)',type:'playback_speed'", body)
@@ -1791,7 +1932,7 @@ try{
 
     def test_priority_1_6_media_runtime_uses_metadata_loops_and_speed_for_readout_and_playlist(self):
         self.pair_browser()
-        body = self.client.get("/").get_data(as_text=True)
+        body = self.dashboard_html()
 
         self.assertIn("function calculatedMediaDuration(module)", body)
         self.assertIn("frame_delays_ms", body)
@@ -1805,7 +1946,7 @@ try{
 
     def test_priority_1_6_static_announcement_media_hides_speed_control(self):
         self.pair_browser()
-        body = self.client.get("/").get_data(as_text=True)
+        body = self.dashboard_html()
 
         self.assertIn("animated=/\\.(gif|mp4)$/i.test(announcement.media||'')", body)
         self.assertIn("speedControl.hidden=hidden||!animated", body)
@@ -1814,10 +1955,10 @@ try{
     def test_dashboard_renders_the_canonical_preview_version_beneath_lan_control(self):
         self.pair_browser()
 
-        body = self.client.get("/").get_data(as_text=True)
+        body = self.dashboard_html()
 
         application_version = getattr(webapp, "APPLICATION_VERSION", None)
-        self.assertEqual(application_version, "0.3.81-preview")
+        self.assertEqual(application_version, "0.3.82-preview")
         self.assertEqual(body.count(f"Version {application_version}"), 1)
         self.assertRegex(
             body,
@@ -1835,7 +1976,7 @@ try{
     )
     def test_canonical_version_remains_visible_across_mobile_layouts(self):
         self.pair_browser()
-        body = self.client.get("/").get_data(as_text=True)
+        body = self.dashboard_html()
         probe = r"""
 const port=process.argv[1],pagePath=process.argv[2];let endpoint;
 for(let attempt=0;attempt<50;attempt++){try{endpoint=await fetch(`http://127.0.0.1:${port}/json/new`,{method:'PUT'}).then(r=>r.json());break}catch(_){await new Promise(r=>setTimeout(r,50))}}
@@ -1901,7 +2042,7 @@ try{
             "last_error": None,
         }
         self.pair_browser()
-        body = self.client.get("/").get_data(as_text=True)
+        body = self.dashboard_html()
         start = body.index("function dashboardPreviewModule")
         function = body[start:body.index("\nlet builtInSettings", start)]
         script = function + "\nconsole.log(JSON.stringify([dashboardPreviewModule('device-draft:openweather_forecast'),dashboardPreviewModule('device-draft:'),dashboardPreviewModule('clock_lava'),dashboardPreviewModule(null)]))"
@@ -1913,10 +2054,8 @@ try{
             json.loads(completed.stdout),
             ["openweather_forecast", "clock_lava", "clock_lava", "clock_lava"],
         )
-        self.assertIn(
-            'previewModule=dashboardPreviewModule("device-draft:openweather_forecast")',
-            body,
-        )
+        self.assertIn('const initialPreviewModuleName="device-draft:openweather_forecast";', body)
+        self.assertIn("previewModule=dashboardPreviewModule(initialPreviewModuleName),", body)
 
     @unittest.skipUnless(shutil.which("node"), "Node.js is required")
     def test_status_poll_keeps_private_runtime_label_out_of_sticky_retry_route(self):
@@ -1926,14 +2065,14 @@ try{
             "last_error": None,
         }
         self.pair_browser()
-        body = self.client.get("/").get_data(as_text=True)
+        body = self.dashboard_html()
         status_badge = re.search(r'id="status"[^>]*>([^<]*)</span>', body)
         self.assertIsNotNone(status_badge)
         self.assertEqual(status_badge.group(1), "openweather_forecast")
         self.controller.status.return_value = {
             "running": True, "current_module": "device-draft:", "last_error": None,
         }
-        empty_status_body = self.client.get("/").get_data(as_text=True)
+        empty_status_body = self.dashboard_html()
         empty_status_badge = re.search(r'id="status"[^>]*>([^<]*)</span>', empty_status_body)
         self.assertIsNotNone(empty_status_badge)
         self.assertEqual(empty_status_badge.group(1), "clock_lava")
@@ -1983,7 +2122,7 @@ context.globalThis=context;vm.createContext(context);vm.runInContext(process.arg
     def test_dashboard_exposes_unbounded_device_preview_controls(self):
         self.pair_browser()
 
-        body = self.client.get("/").get_data(as_text=True)
+        body = self.dashboard_html()
 
         preview = re.search(r'<article class="card preview-card">(.*?)</article>', body, re.DOTALL)
         self.assertIsNotNone(preview)
@@ -2143,7 +2282,7 @@ context.globalThis=context;vm.createContext(context);vm.runInContext(process.arg
     def test_dashboard_device_preview_client_uses_transient_lifecycle_contract(self):
         self.pair_browser()
 
-        body = self.client.get("/").get_data(as_text=True)
+        body = self.dashboard_html()
 
         for fragment in (
             "function scheduleDevicePreview(delay,retireInFlight=false)",
@@ -2168,7 +2307,7 @@ context.globalThis=context;vm.createContext(context);vm.runInContext(process.arg
     def test_dashboard_device_preview_closes_lifecycle_and_mutation_races(self):
         self.pair_browser()
 
-        body = self.client.get("/").get_data(as_text=True)
+        body = self.dashboard_html()
 
         for fragment in (
             "devicePreviewRequestPromise",
@@ -2881,7 +3020,7 @@ vm.createContext(context);vm.runInContext(process.argv[1],context);(async()=>{to
     def test_dashboard_groups_a_confirmed_whole_device_restart_action(self):
         self.pair_browser()
 
-        body = self.client.get("/").get_data(as_text=True)
+        body = self.dashboard_html()
 
         device_card = re.search(r'<article class="card half" id="device">(.*?)</article>', body, re.DOTALL)
         if device_card is None:
@@ -3070,7 +3209,7 @@ vm.createContext(context);vm.runInContext(process.argv[1],context);(async()=>{to
     @unittest.skipUnless(shutil.which("node"), "Node.js is required")
     def test_restart_button_cancel_confirm_and_failure_paths_execute_without_saving(self):
         self.pair_browser()
-        body = self.client.get("/").get_data(as_text=True)
+        body = self.dashboard_html()
         match = re.search(
             r"(async function restartDevice\(\)\{.*?\})\nasync function startAdditionalPairing",
             body,
@@ -3128,7 +3267,7 @@ console.log(JSON.stringify({{cancelled,confirmed,failed,uncertain:{{disabled:but
     @unittest.skipUnless(shutil.which("node"), "Node.js is required")
     def test_restart_button_recovers_for_every_manual_terminal_state(self):
         self.pair_browser()
-        body = self.client.get("/").get_data(as_text=True)
+        body = self.dashboard_html()
         match = re.search(
             r"(async function restartDevice\(\)\{.*?\})\nasync function startAdditionalPairing",
             body,
@@ -3174,7 +3313,7 @@ console.log(JSON.stringify(results));
     )
     def test_restart_button_is_mobile_safe_and_confirms_in_real_chromium(self):
         self.pair_browser()
-        body = self.client.get("/").get_data(as_text=True)
+        body = self.dashboard_html()
         probe = r"""
 const port=process.argv[1],pagePath=process.argv[2];let endpoint;
 for(let attempt=0;attempt<50;attempt++){try{endpoint=await fetch(`http://127.0.0.1:${port}/json/new`,{method:'PUT'}).then(r=>r.json());break}catch(_){await new Promise(r=>setTimeout(r,50))}}
@@ -3511,7 +3650,7 @@ try{
         self.pair_browser()
         self.controller.reset_mock()
 
-        body = self.client.get("/").get_data(as_text=True)
+        body = self.dashboard_html()
 
         self.controller.start.assert_not_called()
         self.assertIn("const PAIRED_ACTION_SIGNAL='paired-request'", body)
@@ -3853,7 +3992,7 @@ console.log('PAIR_NETWORK_PASS');
     def test_javascript_only_paired_actions_are_explicit_buttons(self):
         self.pair_browser()
 
-        dashboard = self.client.get("/").get_data(as_text=True)
+        dashboard = self.dashboard_html()
         pair_page = self.client.get("/pair").get_data(as_text=True)
 
         self.assertIn('type="button" data-paired-action="/logout"', dashboard)
@@ -4688,10 +4827,11 @@ console.log('PAIR_NETWORK_PASS');
     @unittest.skipUnless(shutil.which("node"), "Node.js is required")
     def test_dashboard_conditionally_saves_loaded_revision(self):
         self.pair_browser()
-        body = self.client.get("/").get_data(as_text=True)
+        body = self.dashboard_html()
 
         self.assertIn("const MATRIX_CLIENT_CONTRACT=5", body)
-        self.assertIn("let matrixLoadedRevision=0", body)
+        self.assertIn("const initialConfigRevision=0;", body)
+        self.assertIn("let matrixLoadedRevision=initialConfigRevision,", body)
         self.assertIn("'If-Match':matrixRevisionETag()", body)
         self.assertIn("matrixLoadedRevision=saved.revision", body)
         self.assertIn("matrixLoadedRevision=error.data.config.revision", body)
@@ -4699,7 +4839,7 @@ console.log('PAIR_NETWORK_PASS');
     @unittest.skipUnless(shutil.which("node"), "Node.js is required")
     def test_dashboard_preload_edit_remains_dirty_when_sync_starts(self):
         self.pair_browser()
-        body = self.client.get("/").get_data(as_text=True)
+        body = self.dashboard_html()
         sync_start = body.index("const MATRIX_CLIENT_CONTRACT=5")
         sync_end = body.index("const customFontAdvances", sync_start)
         save_start = body.index("async function saveConfig(")
@@ -4717,7 +4857,8 @@ console.log('PAIR_NETWORK_PASS');
             if line.startswith("matrixEditorsReady=globalThis.matrixCustomCanvasReady===true")
         )
         production = (
-            body[sync_start:sync_end] + body[save_start:save_end] + "\n"
+            re.search(r"^const initialConfigRevision=.*$", body, re.M).group(0) + "\n"
+            + body[sync_start:sync_end] + body[save_start:save_end] + "\n"
             + editor_initialization + "\n"
             + "globalThis.matrixCustomCanvasReady=true;window.renderCustomModules=renderCustomModules;window.customModulesFromEditor=()=>[];window.orderedLayersForFrame=()=>[];\n"
             + readiness_initialization + "\n"
@@ -4851,7 +4992,7 @@ const run=preloadEdit=>vm.runInNewContext(
         self.store.update({"custom_modules": [advanced_canvas]})
         expected_canvas = self.store.get()["custom_modules"][0]
         self.pair_browser()
-        body = self.client.get("/").get_data(as_text=True)
+        body = self.dashboard_html()
         asset = (Path(__file__).parents[1] / "app/static/custom_canvas.js").read_text()
         chromium = os.environ["MATRIX_CHROMIUM"]
         node = shutil.which("node")
@@ -5009,7 +5150,7 @@ try{
         self.store.update({"custom_modules": [advanced_canvas, basic_text]})
         expected_modules = self.store.get()["custom_modules"]
         self.pair_browser()
-        body = self.client.get("/").get_data(as_text=True)
+        body = self.dashboard_html()
         asset = (Path(__file__).parents[1] / "app/static/custom_canvas.js").read_bytes()
         screen_asset = self.client.get("/static/screen_media.js").data
         screen_catalogue = self.client.get("/api/screen-media").data
@@ -5244,7 +5385,7 @@ try{
         self.store.update({"custom_modules": [advanced_canvas, basic_text]})
         expected_modules = self.store.get()["custom_modules"]
         self.pair_browser()
-        body = self.client.get("/").get_data(as_text=True)
+        body = self.dashboard_html()
         asset = (Path(__file__).parents[1] / "app/static/custom_canvas.js").read_bytes()
         initialization_exception = asset.replace(
             b"  const editorState = new Map();",
@@ -5375,7 +5516,7 @@ try{
     )
     def test_delayed_canvas_asset_preserves_prebaseline_real_input(self):
         self.pair_browser()
-        body = self.client.get("/").get_data(as_text=True)
+        body = self.dashboard_html()
         asset = (Path(__file__).parents[1] / "app/static/custom_canvas.js").read_bytes()
         state = {
             name: {"pages": 0, "assets": 0, "gets": 0, "posts": 0}
@@ -5560,7 +5701,7 @@ try{
         self.pair_browser()
         winner = self.post_config(json={"device": {"name": "Winner"}}, headers={"If-Match": '"0"'})
         stale = self.post_config(json={"device": {"name": "Draft"}}, headers={"If-Match": '"0"'})
-        body = self.client.get("/").get_data(as_text=True)
+        body = self.dashboard_html()
 
         self.assertEqual(winner.status_code, 200)
         self.assertEqual(stale.status_code, 412)
@@ -5597,7 +5738,7 @@ async function api(path,options){request={path,options};const error=new Error('C
     @unittest.skipUnless(shutil.which("node"), "Node.js is required")
     def test_paired_revision_sync_preserves_dirty_draft_and_orders_responses(self):
         self.pair_browser()
-        body = self.client.get("/").get_data(as_text=True)
+        body = self.dashboard_html()
 
         required = (
             "let highestNotifiedRemoteRevision=matrixLoadedRevision",
@@ -5621,7 +5762,10 @@ async function api(path,options){request={path,options};const error=new Error('C
 
         start = body.index("const MATRIX_CLIENT_CONTRACT=5")
         end = body.index("const customFontAdvances", start)
-        synchronization = body[start:end]
+        synchronization = (
+            re.search(r"^const initialConfigRevision=.*$", body, re.M).group(0) + "\n"
+            + body[start:end]
+        )
         save_start = body.index("async function saveConfig(")
         save_end = body.index("\nfunction updateOpenWeatherSecretStatus", save_start)
         save_function = body[save_start:save_end]
@@ -5914,7 +6058,7 @@ globalThis.document=document;globalThis.window=window;globalThis.fetch=fetch;
             self.media_dir / "built-in" / "splash_still.png", format="PNG",
         )
         self.pair_browser()
-        body = self.client.get("/").get_data(as_text=True)
+        body = self.dashboard_html()
         probe = r"""
 const port=process.argv[1],pagePath=process.argv[2],sleep=ms=>new Promise(resolve=>setTimeout(resolve,ms));let endpoint;
 for(let attempt=0;attempt<50;attempt++){try{endpoint=await fetch(`http://127.0.0.1:${port}/json/new`,{method:'PUT'}).then(response=>response.json());break}catch(_){await sleep(100)}}
@@ -5961,7 +6105,7 @@ try{
     )
     def test_screen_rows_omit_duration_controls_without_losing_legacy_serialization(self):
         self.pair_browser()
-        body = self.client.get("/").get_data(as_text=True)
+        body = self.dashboard_html()
         probe = r"""
 const port=process.argv[1],pagePath=process.argv[2],sleep=ms=>new Promise(resolve=>setTimeout(resolve,ms));let endpoint;
 for(let attempt=0;attempt<50;attempt++){try{endpoint=await fetch(`http://127.0.0.1:${port}/json/new`,{method:'PUT'}).then(response=>response.json());break}catch(_){await sleep(100)}}
@@ -6082,7 +6226,7 @@ try{
             path.relative_to(self.media_dir): path.read_bytes()
             for path in self.media_dir.rglob("*") if path.is_file()
         }
-        body = self.client.get("/").get_data(as_text=True)
+        body = self.dashboard_html()
         self.controller.reset_mock()
         probe = r"""
 const port=process.argv[1],pagePath=process.argv[2],sleep=ms=>new Promise(resolve=>setTimeout(resolve,ms));let endpoint;
@@ -6249,7 +6393,7 @@ try{
     def test_live_edit_segmented_control_updates_unsaved_preview_without_saving(self):
         self.pair_browser()
         before_config = Path(self.store.path).read_bytes()
-        body = self.client.get("/").get_data(as_text=True)
+        body = self.dashboard_html()
         self.controller.reset_mock()
         probe = r"""
 const port=process.argv[1],pagePath=process.argv[2];let endpoint;
@@ -6366,7 +6510,7 @@ try{
         }})
         self.pair_browser()
         before_config = Path(self.store.path).read_bytes()
-        body = self.client.get("/").get_data(as_text=True)
+        body = self.dashboard_html()
         self.controller.reset_mock()
         probe = r"""
 const port=process.argv[1],pagePath=process.argv[2];let endpoint;
@@ -6479,7 +6623,7 @@ try{
     def test_malformed_edit_preview_continuation_cancels_session_and_recovers(self):
         self.pair_browser()
         before_config = Path(self.store.path).read_bytes()
-        body = self.client.get("/").get_data(as_text=True)
+        body = self.dashboard_html()
         self.controller.reset_mock()
         probe = r"""
 const port=process.argv[1],pagePath=process.argv[2];let endpoint;
@@ -6558,7 +6702,7 @@ try{
     def test_edit_preview_switch_away_requires_exact_unsaved_choice(self):
         self.pair_browser()
         before_config = Path(self.store.path).read_bytes()
-        body = self.client.get("/").get_data(as_text=True)
+        body = self.dashboard_html()
         self.controller.reset_mock()
         probe = r"""
 const port=process.argv[1],pagePath=process.argv[2];let endpoint;
@@ -6645,7 +6789,7 @@ try{
     def test_live_edit_preview_is_responsive_accessible_and_preserves_sticky_preview(self):
         self.pair_browser()
         before_config = Path(self.store.path).read_bytes()
-        body = self.client.get("/").get_data(as_text=True)
+        body = self.dashboard_html()
         self.controller.reset_mock()
         probe = r"""
 const port=process.argv[1],path=process.argv[2];let target;
@@ -6695,7 +6839,7 @@ const dprs=[];for(const dpr of[1,2,3]){await send('Emulation.setDeviceMetricsOve
     )
     def test_matrix_preview_matches_original_at_top_and_pops_out_after_scroll(self):
         self.pair_browser()
-        body = self.client.get("/").get_data(as_text=True)
+        body = self.dashboard_html()
         probe = r"""
 const port=process.argv[1],pagePath=process.argv[2];let endpoint;
 for(let attempt=0;attempt<50;attempt++){try{endpoint=await fetch(`http://127.0.0.1:${port}/json/new`,{method:'PUT'}).then(r=>r.json());break}catch(_){await new Promise(r=>setTimeout(r,100))}}
@@ -6751,7 +6895,7 @@ try{
     )
     def test_matrix_preview_popout_preserves_mobile_document_flow(self):
         self.pair_browser()
-        body = self.client.get("/").get_data(as_text=True)
+        body = self.dashboard_html()
         probe = r"""
 const port=process.argv[1],pagePath=process.argv[2];let endpoint;
 for(let attempt=0;attempt<50;attempt++){try{endpoint=await fetch(`http://127.0.0.1:${port}/json/new`,{method:'PUT'}).then(r=>r.json());break}catch(_){await new Promise(r=>setTimeout(r,100))}}
@@ -6786,7 +6930,7 @@ try{
     )
     def test_matrix_preview_popout_remeasures_placeholder_across_breakpoints(self):
         self.pair_browser()
-        body = self.client.get("/").get_data(as_text=True)
+        body = self.dashboard_html()
         probe = r"""
 const port=process.argv[1],pagePath=process.argv[2];let endpoint;
 for(let attempt=0;attempt<50;attempt++){try{endpoint=await fetch(`http://127.0.0.1:${port}/json/new`,{method:'PUT'}).then(r=>r.json());break}catch(_){await new Promise(r=>setTimeout(r,100))}}
@@ -6829,7 +6973,7 @@ try{
     )
     def test_matrix_preview_stays_below_topbar_while_desktop_editors_scroll(self):
         self.pair_browser()
-        body = self.client.get("/").get_data(as_text=True)
+        body = self.dashboard_html()
         probe = r"""
 const port=process.argv[1],pagePath=process.argv[2];let endpoint;
 for(let attempt=0;attempt<50;attempt++){try{endpoint=await fetch(`http://127.0.0.1:${port}/json/new`,{method:'PUT'}).then(r=>r.json());break}catch(_){await new Promise(r=>setTimeout(r,100))}}
@@ -6887,7 +7031,7 @@ try{
     )
     def test_matrix_preview_remains_compact_reachable_and_sticky_across_responsive_matrix(self):
         self.pair_browser()
-        body = self.client.get("/").get_data(as_text=True)
+        body = self.dashboard_html()
         probe = r"""
 const port=process.argv[1],pagePath=process.argv[2];let endpoint;
 for(let attempt=0;attempt<50;attempt++){try{endpoint=await fetch(`http://127.0.0.1:${port}/json/new`,{method:'PUT'}).then(r=>r.json());break}catch(_){await new Promise(r=>setTimeout(r,100))}}
@@ -6953,7 +7097,7 @@ try{
     )
     def test_edit_only_device_preview_checkbox_and_status_remain_reachable_in_popped_strip(self):
         self.pair_browser()
-        body = self.client.get("/").get_data(as_text=True)
+        body = self.dashboard_html()
         probe = r"""
 const port=process.argv[1],pagePath=process.argv[2];let endpoint;
 for(let attempt=0;attempt<50;attempt++){try{endpoint=await fetch(`http://127.0.0.1:${port}/json/new`,{method:'PUT'}).then(r=>r.json());break}catch(_){await new Promise(r=>setTimeout(r,100))}}
@@ -7069,7 +7213,7 @@ console.log(JSON.stringify({states,coarse,keyboard:{before:keyboardBefore,after:
     )
     def test_device_preview_checkbox_is_below_sticky_window_and_hidden_in_live_mode(self):
         self.pair_browser()
-        body = self.client.get("/").get_data(as_text=True)
+        body = self.dashboard_html()
         probe = r"""
 const port=process.argv[1],pagePath=process.argv[2];let endpoint;
 for(let attempt=0;attempt<50;attempt++){try{endpoint=await fetch(`http://127.0.0.1:${port}/json/new`,{method:'PUT'}).then(r=>r.json());break}catch(_){await new Promise(r=>setTimeout(r,100))}}
@@ -7100,7 +7244,7 @@ console.log(JSON.stringify({initial,edit,liveActive}));ws.close();
     )
     def test_real_chromium_paired_sync_conflict_matrix(self):
         self.pair_browser()
-        body = self.client.get("/").get_data(as_text=True)
+        body = self.dashboard_html()
         chromium = os.environ["MATRIX_CHROMIUM"]
         node = shutil.which("node")
         assert node is not None
@@ -7231,10 +7375,11 @@ try{
     @unittest.skipUnless(shutil.which("node"), "Node.js is required")
     def test_open_b1_dashboard_transitions_safely_to_b2_server(self):
         self.pair_browser()
-        body = self.client.get("/").get_data(as_text=True)
+        body = self.dashboard_html()
 
         self.assertIn("const MATRIX_CLIENT_CONTRACT=5", body)
-        self.assertIn("let matrixLoadedRevision=0", body)
+        self.assertIn("const initialConfigRevision=0;", body)
+        self.assertIn("let matrixLoadedRevision=initialConfigRevision,", body)
         self.assertIn("'X-Matrix-Client-Contract':String(MATRIX_CLIENT_CONTRACT)", body)
         self.assertIn("'If-Match':matrixRevisionETag()", body)
         self.assertIn("function matrixHasUnsavedDraft()", body)
@@ -7250,7 +7395,10 @@ try{
         frozen_b1 = body.replace("const MATRIX_CLIENT_CONTRACT=5", "const MATRIX_CLIENT_CONTRACT=1", 1)
         start = frozen_b1.index("const MATRIX_CLIENT_CONTRACT=1")
         end = frozen_b1.index("const customFontAdvances", start)
-        bridge = frozen_b1[start:end]
+        bridge = (
+            re.search(r"^const initialConfigRevision=.*$", body, re.M).group(0) + "\n"
+            + frozen_b1[start:end]
+        )
         harness = r"""
 class Element {
   constructor(tag='div'){this.tag=tag;this.children=[];this.textContent='';this.open=false;this.listeners={};}
@@ -7320,7 +7468,7 @@ globalThis.document=document;globalThis.window=window;globalThis.fetch=fetch;
 
     def test_dashboard_programmatic_editor_mutations_mark_the_draft_dirty(self):
         self.pair_browser()
-        body = self.client.get("/").get_data(as_text=True)
+        body = self.dashboard_html()
 
         mutators = (
             "moveModule", "duplicateAnnouncement", "deleteAnnouncement",
@@ -7609,7 +7757,7 @@ globalThis.document=document;globalThis.window=window;globalThis.fetch=fetch;
         self.assertEqual(cleared.status_code, 503)
         self.assertEqual(cleared.get_json()["configured"], False)
 
-        body = self.client.get("/").get_data(as_text=True)
+        body = self.dashboard_html()
         self.assertIn("error.data=data", body)
         self.assertIn("error.data?.configured", body)
 
@@ -7648,7 +7796,7 @@ globalThis.document=document;globalThis.window=window;globalThis.fetch=fetch;
             response = self.client.get("/")
 
         self.assertEqual(response.status_code, 200)
-        body = response.get_data(as_text=True)
+        body = self.inline_dashboard_assets(response.get_data(as_text=True))
         self.assertIn("Secret storage unavailable", body)
         self.assertIn("initialOpenWeatherSecretUnavailable=true", body)
         self.assertNotIn("/private/secret", body)
@@ -7667,7 +7815,7 @@ globalThis.document=document;globalThis.window=window;globalThis.fetch=fetch;
         self.assertEqual(status.content_type, "application/json")
         self.assertEqual(status.get_json(), {"error": "Secret storage is unavailable."})
         self.assertEqual(dashboard.status_code, 200)
-        body = dashboard.get_data(as_text=True)
+        body = self.inline_dashboard_assets(dashboard.get_data(as_text=True))
         self.assertIn("initialOpenWeatherSecretUnavailable=true", body)
         self.assertNotIn("Stored API key", status.get_data(as_text=True))
         self.assertNotIn("Stored API key", body)
@@ -7677,7 +7825,7 @@ globalThis.document=document;globalThis.window=window;globalThis.fetch=fetch;
         self.openweather_secrets.set(key)
         self.pair_browser()
 
-        body = self.client.get("/").get_data(as_text=True)
+        body = self.dashboard_html()
 
         self.assertIn('id="openweather-api-key"', body)
         self.assertIn('type="password"', body)
@@ -7690,7 +7838,7 @@ globalThis.document=document;globalThis.window=window;globalThis.fetch=fetch;
     def test_dashboard_offers_two_disabled_openweather_apps_with_independent_settings_editors(self):
         self.pair_browser()
 
-        body = self.client.get("/").get_data(as_text=True)
+        body = self.dashboard_html()
 
         self.assertIn('data-module="weather"', body)
         self.assertIn('data-module="openweather_overview"', body)
@@ -9596,7 +9744,7 @@ globalThis.document=document;globalThis.window=window;globalThis.fetch=fetch;
         self.pair_browser()
         self.device_store.add("Second browser", max_devices=4)
 
-        body = self.client.get("/").get_data(as_text=True)
+        body = self.dashboard_html()
         self.assertIn('id="paired-devices"', body)
         self.assertIn('id="max-paired-devices"', body)
         self.assertIn('min="1" max="10"', body)
@@ -9642,7 +9790,7 @@ globalThis.document=document;globalThis.window=window;globalThis.fetch=fetch;
     def test_dashboard_has_matrix_preview_and_structured_media_workspace(self):
         self.pair_browser()
         response = self.client.get("/")
-        body = response.get_data(as_text=True)
+        body = self.inline_dashboard_assets(response.get_data(as_text=True))
         self.assertEqual(response.status_code, 200)
         self.assertIn('id="matrix-preview"', body)
         self.assertIn('id="media-library"', body)
@@ -9664,7 +9812,7 @@ globalThis.document=document;globalThis.window=window;globalThis.fetch=fetch;
 
     def test_dashboard_uses_one_top_level_location_for_every_weather_app(self):
         self.pair_browser()
-        body = self.client.get("/").get_data(as_text=True)
+        body = self.dashboard_html()
 
         self.assertEqual(body.count('id="weather-location"'), 1)
         self.assertIn("Used by all weather apps", body)
@@ -9751,7 +9899,7 @@ async function settle(){await new Promise(resolve=>setImmediate(resolve));await 
 
     def test_dashboard_dropdowns_have_contrasting_background_and_text(self):
         self.pair_browser()
-        body = self.client.get("/").get_data(as_text=True)
+        body = self.dashboard_html()
 
         self.assertIn(
             "select{background-color:var(--surface);color:var(--text);color-scheme:dark}",
@@ -9866,7 +10014,7 @@ function setMessage(text,error=false){messages.push({text,error});}
     @unittest.skipUnless(shutil.which("node"), "Node.js is required")
     def test_standard_upload_preserves_committed_warning_when_refresh_fails(self):
         self.pair_browser()
-        page = self.client.get("/").get_data(as_text=True)
+        page = self.dashboard_html()
         start = page.index("async function uploadMedia()")
         end = page.index("\n\nasync function removeMedia", start)
         function_source = page[start:end]
@@ -9901,7 +10049,7 @@ async function refreshMedia(){throw new Error('Library refresh failed.');}
     @unittest.skipUnless(shutil.which("node"), "Node.js is required")
     def test_standard_successful_upload_reports_later_refresh_failure_as_committed(self):
         self.pair_browser()
-        page = self.client.get("/").get_data(as_text=True)
+        page = self.dashboard_html()
         start = page.index("async function uploadMedia()")
         end = page.index("\n\nasync function removeMedia", start)
         function_source = page[start:end]
@@ -9935,7 +10083,7 @@ globalThis.reconcileMediaItem=()=>{throw new Error('Local reconciliation failed.
     @unittest.skipUnless(shutil.which("node"), "Node.js is required")
     def test_committed_device_removal_reconciles_current_and_other_devices(self):
         self.pair_browser()
-        page = self.client.get("/").get_data(as_text=True)
+        page = self.dashboard_html()
         start = page.index("async function removePairedDevice")
         end = page.index("\nasync function preview", start)
         function_source = page[start:end]
@@ -10023,7 +10171,7 @@ console.log('LOCAL_MEDIA_RECONCILIATION_PASS');
     @unittest.skipUnless(shutil.which("node"), "Node.js is required")
     def test_committed_media_removal_preserves_warning_when_refresh_fails(self):
         self.pair_browser()
-        page = self.client.get("/").get_data(as_text=True)
+        page = self.dashboard_html()
         start = page.index("async function removeMedia")
         end = page.index("\nasync function assignMedia", start)
         function_source = page[start:end]
@@ -10055,7 +10203,7 @@ async function refreshMedia(){throw new Error('Library refresh failed.');}
     @unittest.skipUnless(shutil.which("node"), "Node.js is required")
     def test_successful_media_removal_reports_later_refresh_failure_as_committed(self):
         self.pair_browser()
-        page = self.client.get("/").get_data(as_text=True)
+        page = self.dashboard_html()
         start = page.index("async function removeMedia")
         end = page.index("\nasync function assignMedia", start)
         function_source = page[start:end]
@@ -10134,7 +10282,7 @@ async function api(path,options){apiCalls.push({path,method:options?.method});re
             "playlist": [{"module": "custom_saved", "duration": 10, "enabled": True}],
         })
         self.pair_browser()
-        body = self.client.get("/").get_data(as_text=True)
+        body = self.dashboard_html()
         probe = r"""
 const port=process.argv[1],pagePath=process.argv[2],sleep=ms=>new Promise(resolve=>setTimeout(resolve,ms));let endpoint;
 for(let attempt=0;attempt<50;attempt++){try{endpoint=await fetch(`http://127.0.0.1:${port}/json/new`,{method:'PUT'}).then(response=>response.json());break}catch(_){await sleep(50)}}
@@ -10202,7 +10350,7 @@ async function api(path){
     @unittest.skipUnless(shutil.which("node"), "Node.js is required")
     def test_playlist_uses_one_physical_time_format_for_rows_with_duration_controls(self):
         self.pair_browser()
-        body = self.client.get("/").get_data(as_text=True)
+        body = self.dashboard_html()
 
         timed_rows = sum(
             item["module"] not in {"splash", "sleep"}
@@ -10237,7 +10385,7 @@ console.log('UNIFIED_PHYSICAL_TIME_FORMAT_PASS');
 
     def timing_dashboard_with_shipped_assets(self):
         """File-based timing probes still execute both shipped editor assets/catalogue."""
-        body = self.client.get("/").get_data(as_text=True)
+        body = self.dashboard_html()
         response = self.client.get("/api/screen-media")
         self.assertEqual(response.status_code, 200)
         catalogue = response.get_json()
@@ -10264,7 +10412,7 @@ console.log('UNIFIED_PHYSICAL_TIME_FORMAT_PASS');
 
     def test_physical_time_wraps_on_narrow_mobile_layouts(self):
         self.pair_browser()
-        body = self.client.get("/").get_data(as_text=True)
+        body = self.dashboard_html()
         mobile = body[body.index("@media(max-width:600px)"):body.index("</style>")]
         self.assertIn("@media(max-width:600px)", body)
         self.assertIn(".module-row{grid-template-columns:24px minmax(0,1fr)}", body)
@@ -10396,7 +10544,7 @@ console.log(JSON.stringify({result:JSON.parse(evaluated.result.value),exceptions
             "module": "custom_timing_fixture", "duration": 15, "enabled": True,
         }]})
         self.pair_browser()
-        body = self.client.get("/").get_data(as_text=True)
+        body = self.dashboard_html()
         chromium = os.environ["MATRIX_CHROMIUM"]
         probe = r"""
 const port=process.argv[1],pagePath=process.argv[2];let endpoint;
@@ -10795,7 +10943,7 @@ try{
     @unittest.skipUnless(shutil.which("node"), "Node.js is required")
     def test_provider_completion_preserves_focused_hundredth_target_and_delay_precision(self):
         self.pair_browser()
-        body = self.client.get("/").get_data(as_text=True)
+        body = self.dashboard_html()
         timing_start = body.index("const MATRIX_SCROLL_WIDTH=")
         timing_end = body.index("\nfunction fontCharacterAdvance", timing_start)
         ticker_start = body.index("function tickerFrames(")
@@ -10845,7 +10993,7 @@ async function api(){return {status:'fresh',frames_per_loop:127,settings_digest:
     @unittest.skipUnless(shutil.which("node"), "Node.js is required")
     def test_announcement_unavailable_response_and_failure_preserve_enabled_draft_timing(self):
         self.pair_browser()
-        body = self.client.get("/").get_data(as_text=True)
+        body = self.dashboard_html()
         function_start = body.index("const customFontAdvances=")
         function_end = body.index("\nfunction playlist()", function_start)
         load_start = body.index("async function loadAnnouncementTiming()")
@@ -10890,7 +11038,7 @@ api=async()=>({status:'unavailable',milliseconds:null,refresh_at:new Date(Date.n
     @unittest.skipUnless(shutil.which("node"), "Node.js is required")
     def test_announcement_server_timing_does_not_replace_multiple_enabled_draft_total(self):
         self.pair_browser()
-        body = self.client.get("/").get_data(as_text=True)
+        body = self.dashboard_html()
         function_start = body.index("const customFontAdvances=")
         function_end = body.index("\nfunction playlist()", function_start)
         load_start = body.index("async function loadAnnouncementTiming()")
@@ -10929,7 +11077,7 @@ api=async()=>({status:'fresh',milliseconds:8000,refresh_at:new Date(Date.now()+6
     @unittest.skipUnless(shutil.which("node"), "Node.js is required")
     def test_playlist_physical_time_readouts_synchronize_in_the_browser(self):
         self.pair_browser()
-        body = self.client.get("/").get_data(as_text=True)
+        body = self.dashboard_html()
         function_start = body.index("const customFontAdvances=")
         function_end = body.index("\nfunction playlist()", function_start)
         function_source = body[function_start:function_end]
@@ -10995,7 +11143,7 @@ console.log('PLAYLIST_TIMING_DOM_PASS');
 
     def test_announcement_board_has_friendly_label_and_automatic_playlist_timing(self):
         self.pair_browser()
-        body = self.client.get("/").get_data(as_text=True)
+        body = self.dashboard_html()
 
         self.assertIn(">Announcement Board<", body)
         self.assertIn(
@@ -11007,7 +11155,7 @@ console.log('PLAYLIST_TIMING_DOM_PASS');
 
     def test_scrolling_seconds_resync_and_provider_digest_lifecycle_are_wired(self):
         self.pair_browser()
-        body = self.client.get("/").get_data(as_text=True)
+        body = self.dashboard_html()
         self.assertIn("stableJSONStringify", body)
         self.assertIn("currentDigest!==result.settings_correlation", body)
         self.assertIn("scheduleProviderTiming", body)
@@ -11017,7 +11165,7 @@ console.log('PLAYLIST_TIMING_DOM_PASS');
 
     def test_scrolling_text_duration_is_automatic_in_the_playlist_editor(self):
         self.pair_browser()
-        body = self.client.get("/").get_data(as_text=True)
+        body = self.dashboard_html()
 
         self.assertIn("function calculatedScrollDuration(module)", body)
         self.assertIn("duration.readOnly=isBoardAutomatic", body)
@@ -11031,7 +11179,7 @@ console.log('PLAYLIST_TIMING_DOM_PASS');
 
     def test_automatic_ticker_rows_do_not_render_playlist_defaults_as_runtime(self):
         self.pair_browser()
-        body = self.client.get("/").get_data(as_text=True)
+        body = self.dashboard_html()
 
         row = re.search(r'data-module="weather".*?class="duration"[^>]+', body)
         if row is None:
@@ -11041,7 +11189,7 @@ console.log('PLAYLIST_TIMING_DOM_PASS');
 
     def test_timing_increments_are_consistent_across_editors(self):
         self.pair_browser()
-        body = self.client.get("/").get_data(as_text=True)
+        body = self.dashboard_html()
 
         self.assertIn('class="duration" type="number" min="1" max="3600" step=".01"', body)
         self.assertIn("duration.step=.01", body)
@@ -11055,7 +11203,7 @@ console.log('PLAYLIST_TIMING_DOM_PASS');
         self.pairing.active_pin.return_value = "123456"
         self.pairing.verify.return_value = True
         self.pair_browser()
-        body = self.client.get("/").get_data(as_text=True)
+        body = self.dashboard_html()
         provider_start = body.index("function providerTimingPayload(module)")
         provider_end = body.index("\nlet announcementTimingRequest", provider_start)
         shipped_provider_handling = body[provider_start:provider_end]
@@ -11133,7 +11281,7 @@ console.log(JSON.stringify({attempts,accepted,correlated,state,result,currentDig
     @unittest.skipUnless(shutil.which("node"), "Node.js is required")
     def test_provider_timing_route_digest_matches_browser_effective_unicode_drafts(self):
         self.pair_browser()
-        body = self.client.get("/").get_data(as_text=True)
+        body = self.dashboard_html()
         shared_start = body.index("function withSharedWeatherLocation(settings)")
         shared_end = body.index("\nfunction configBody", shared_start)
         provider_start = body.index("function providerTimingPayload(module)")
@@ -11199,7 +11347,7 @@ global.document={querySelector(selector){return {value:values[selector]??''}}};
     @unittest.skipUnless(shutil.which("node"), "Node.js is required")
     def test_timing_digest_falls_back_on_insecure_lan_origins(self):
         self.pair_browser()
-        body = self.client.get("/").get_data(as_text=True)
+        body = self.dashboard_html()
         start = body.index("function stableJSONStringify")
         end = body.index("\nfunction scheduleProviderTiming", start)
         functions = body[start:end]
@@ -11228,14 +11376,14 @@ timingSettingsDigest('weather',payload).then(value=>console.log(value)).catch(er
 
     def test_dynamic_playlist_reorder_buttons_have_accessible_names(self):
         self.pair_browser()
-        body = self.client.get("/").get_data(as_text=True)
+        body = self.dashboard_html()
 
         self.assertIn("moveUp.setAttribute('aria-label','Move up')", body)
         self.assertIn("moveDown.setAttribute('aria-label','Move down')", body)
 
     def test_weather_scroll_controls_use_numeric_frame_delay(self):
         self.pair_browser()
-        body = self.client.get("/").get_data(as_text=True)
+        body = self.dashboard_html()
 
         self.assertEqual(body.count("field:'scroll_speed',label:'Scroll step time (seconds; smaller is faster)',type:'number',min:.01,max:1,step:.000001"), 3)
         self.assertEqual(body.count("field:'scroll_loops',label:'Times to scroll',type:'number'"), 3)
@@ -11245,7 +11393,7 @@ timingSettingsDigest('weather',payload).then(value=>console.log(value)).catch(er
     @unittest.skipUnless(shutil.which("node"), "Node.js is required")
     def test_weather_frame_delay_serializes_as_a_number(self):
         self.pair_browser()
-        body = self.client.get("/").get_data(as_text=True)
+        body = self.dashboard_html()
         helper_start = body.index("function withSharedWeatherLocation(settings)")
         # Extract the serializer functions, not unrelated editor DOM startup.
         helper_end = body.index("\n", body.index("function configBody(", helper_start))
@@ -11286,7 +11434,7 @@ console.log('WEATHER_FRAME_DELAY_SERIALIZATION_PASS');
     @unittest.skipUnless(shutil.which("node"), "Node.js is required")
     def test_all_scroll_editors_share_labels_and_physical_time_readouts(self):
         self.pair_browser()
-        body = self.client.get("/").get_data(as_text=True)
+        body = self.dashboard_html()
         asset = (Path(__file__).parents[1] / "app" / "static" / "custom_canvas.js").read_text()
 
         self.assertIn("function calculatedAnnouncementDuration(announcement)", body)
@@ -11332,7 +11480,7 @@ console.log('UNIFIED_SCROLL_RUNTIME_PASS');
     def test_custom_scrolling_text_editor_has_bounded_loop_count_defaulting_to_one(self):
         self.pair_browser()
 
-        body = self.client.get("/").get_data(as_text=True)
+        body = self.dashboard_html()
         asset = (Path(__file__).parents[1] / "app" / "static" / "custom_canvas.js").read_text()
 
         self.assertIn("customControl('Scroll loops','loops','number'", body)
@@ -11344,7 +11492,7 @@ console.log('UNIFIED_SCROLL_RUNTIME_PASS');
     def test_dashboard_has_advanced_canvas_timeline_creation_controls(self):
         self.pair_browser()
 
-        body = self.client.get("/").get_data(as_text=True)
+        body = self.dashboard_html()
 
         self.assertIn("Convert to advanced canvas", body)
         self.assertIn("advanced-canvas-editor", body)
@@ -11436,7 +11584,7 @@ console.log(JSON.stringify({
         }
         self.store.update({"custom_modules": [module]})
         self.pair_browser()
-        body = self.client.get("/").get_data(as_text=True)
+        body = self.dashboard_html()
         probe = r"""
 const port=process.argv[1],pagePath=process.argv[2],sleep=ms=>new Promise(r=>setTimeout(r,ms));let endpoint;
 for(let attempt=0;attempt<50;attempt++){try{endpoint=await fetch(`http://127.0.0.1:${port}/json/new`,{method:'PUT'}).then(r=>r.json());break}catch(_){await sleep(50)}}
@@ -11912,7 +12060,7 @@ console.log(JSON.stringify({json.dumps(cases)}.map(probe)));
         )
         self.store.update({"custom_modules": [module]})
         self.pair_browser()
-        body = self.client.get("/").get_data(as_text=True)
+        body = self.dashboard_html()
         css = (Path(__file__).parents[1] / "app/static/custom_canvas.css").read_text()
         javascript = (Path(__file__).parents[1] / "app/static/custom_canvas.js").read_text()
         stylesheet = '<link rel="stylesheet" href="/static/custom_canvas.css">'
@@ -12225,7 +12373,7 @@ console.log(JSON.stringify(result.module));
         )
         self.store.update({"custom_modules": [module]})
         self.pair_browser()
-        body = self.client.get("/").get_data(as_text=True)
+        body = self.dashboard_html()
         root = Path(__file__).parents[1]
         body = body.replace('<link rel="stylesheet" href="/static/custom_canvas.css">',
                             f"<style>{(root / 'app/static/custom_canvas.css').read_text()}</style>", 1)
@@ -12349,7 +12497,7 @@ try{
         )
         self.store.update({"custom_modules": [module]})
         self.pair_browser()
-        body = self.client.get("/").get_data(as_text=True)
+        body = self.dashboard_html()
         css = (Path(__file__).parents[1] / "app/static/custom_canvas.css").read_text()
         javascript = (Path(__file__).parents[1] / "app/static/custom_canvas.js").read_text()
         stylesheet = '<link rel="stylesheet" href="/static/custom_canvas.css">'
@@ -12871,7 +13019,7 @@ process.stdout.write(JSON.stringify({
     def _assert_pixel_json_request_exact_schema_boundaries(self):
         """Exact request bytes use valid bounded fields, never unknown padding."""
         self.pair_browser()
-        dashboard = self.client.get("/").get_data(as_text=True)
+        dashboard = self.dashboard_html()
         source = re.search(
             r"const MATRIX_JSON_REQUEST_LIMIT=1048576;.*?globalThis\.matrixJsonRequestBody=matrixJsonRequestBody;",
             dashboard, re.DOTALL,
@@ -13006,7 +13154,7 @@ process.stdout.write(JSON.stringify(observations));
                 "edit": self._pixel_wrapper_config(count, 1_048_577, "edit"),
                 "device": self._pixel_wrapper_config(count, 1_048_577, "device"),
             }
-        body = self.client.get("/").get_data(as_text=True).replace(
+        body = self.dashboard_html().replace(
             "</head>",
             "<script>globalThis.__pixelBoundaryFixtures="
             + json.dumps(fixtures, separators=(",", ":"))
@@ -13157,7 +13305,7 @@ process.stdout.write(JSON.stringify({shapes, blended, blendEmpty, erased: at(1, 
         second_module["layers"][1]["id"] = "layer_text_second"
         self.store.update({"custom_modules": [module, second_module]})
         self.pair_browser()
-        body = self.client.get("/").get_data(as_text=True)
+        body = self.dashboard_html()
         css = (Path(__file__).parents[1] / "app/static/custom_canvas.css").read_text()
         javascript = (Path(__file__).parents[1] / "app/static/custom_canvas.js").read_text()
         body = body.replace('<link rel="stylesheet" href="/static/custom_canvas.css">', f"<style>{css}</style>", 1)
@@ -13273,7 +13421,7 @@ try{
         )
         self.store.update({"custom_modules": [module]})
         self.pair_browser()
-        body = self.client.get("/").get_data(as_text=True)
+        body = self.dashboard_html()
         css = (Path(__file__).parents[1] / "app/static/custom_canvas.css").read_text()
         javascript = (Path(__file__).parents[1] / "app/static/custom_canvas.js").read_text()
         body = body.replace('<link rel="stylesheet" href="/static/custom_canvas.css">', f"<style>{css}</style>", 1)
@@ -13830,7 +13978,7 @@ try{await send('Runtime.enable');await send('Page.enable');await navigate(`http:
         )
         self.store.update({"custom_modules": [module]})
         self.pair_browser()
-        body = self.client.get("/").get_data(as_text=True)
+        body = self.dashboard_html()
         probe = r"""
 const port=process.argv[1],pagePath=process.argv[2];let endpoint;
 for(let attempt=0;attempt<50;attempt++){try{endpoint=await fetch(`http://127.0.0.1:${port}/json/new`,{method:'PUT'}).then(response=>response.json());break}catch(_){await new Promise(resolve=>setTimeout(resolve,100))}}
@@ -14206,7 +14354,7 @@ console.log('TERMINAL_MEDIA_PREVIEW_PASS');
         dashboard_response = self.client.get("/")
         asset_response = self.client.get("/static/custom_canvas.js")
         try:
-            body = dashboard_response.get_data(as_text=True)
+            body = self.inline_dashboard_assets(dashboard_response.get_data(as_text=True))
             asset = asset_response.get_data(as_text=True)
         finally:
             dashboard_response.close()
@@ -14225,7 +14373,7 @@ console.log('TERMINAL_MEDIA_PREVIEW_PASS');
     def test_dashboard_groups_media_without_reclassification_controls(self):
         self.pair_browser()
 
-        body = self.client.get("/").get_data(as_text=True)
+        body = self.dashboard_html()
 
         self.assertIn("Built-in media", body)
         self.assertIn("My media", body)
@@ -14243,7 +14391,7 @@ console.log('TERMINAL_MEDIA_PREVIEW_PASS');
         }})
         self.pair_browser()
 
-        body = self.client.get("/").get_data(as_text=True)
+        body = self.dashboard_html()
 
         self.assertIn('id="weather-units"', body)
         for control_id in (
@@ -14260,7 +14408,7 @@ console.log('TERMINAL_MEDIA_PREVIEW_PASS');
 
     def test_announcement_board_editor_has_accessible_grouped_foundation(self):
         self.pair_browser()
-        body = self.client.get("/").get_data(as_text=True)
+        body = self.dashboard_html()
 
         self.assertIn('data-module-editor="announcement_board"', body)
         self.assertIn("initialAnnouncements", body)
@@ -14274,7 +14422,7 @@ console.log('TERMINAL_MEDIA_PREVIEW_PASS');
 
     def test_announcement_native_constraints_are_required_and_announced(self):
         self.pair_browser()
-        body = self.client.get("/").get_data(as_text=True)
+        body = self.dashboard_html()
 
         self.assertIn("if(['date','time','number'].includes(type))control.required=true", body)
         self.assertIn("nativeMessages=[]", body)
@@ -14311,7 +14459,7 @@ console.log('TERMINAL_MEDIA_PREVIEW_PASS');
 
     def test_announcement_context_rerender_restores_focused_control(self):
         self.pair_browser()
-        body = self.client.get("/").get_data(as_text=True)
+        body = self.dashboard_html()
 
         self.assertIn("function rerenderAnnouncementEditorsWithFocus(announcement,path)", body)
         self.assertIn("CSS.escape(announcement.id)", body)
@@ -14362,7 +14510,7 @@ console.log('TERMINAL_MEDIA_PREVIEW_PASS');
 
     def test_global_action_message_is_an_adaptive_live_region(self):
         self.pair_browser()
-        body = self.client.get("/").get_data(as_text=True)
+        body = self.dashboard_html()
 
         self.assertIn('id="message" role="status" aria-live="polite" aria-atomic="true"', body)
         self.assertIn("message.setAttribute('role',error?'alert':'status')", body)
@@ -14370,7 +14518,7 @@ console.log('TERMINAL_MEDIA_PREVIEW_PASS');
 
     def test_announcement_editor_enforces_backend_board_limit(self):
         self.pair_browser()
-        body = self.client.get("/").get_data(as_text=True)
+        body = self.dashboard_html()
 
         self.assertIn("if(announcements.length>=50)", body)
         self.assertIn("Announcement Board supports up to 50 announcements.", body)
@@ -14378,7 +14526,7 @@ console.log('TERMINAL_MEDIA_PREVIEW_PASS');
 
     def test_announcement_validation_marks_controls_and_blocks_save(self):
         self.pair_browser()
-        body = self.client.get("/").get_data(as_text=True)
+        body = self.dashboard_html()
 
         self.assertIn("function validateAnnouncement(announcement)", body)
         self.assertIn("function validateAnnouncementBoard({focusFirst=false}={})", body)
@@ -14398,7 +14546,7 @@ console.log('TERMINAL_MEDIA_PREVIEW_PASS');
 
     def test_announcement_board_editor_serializes_ordered_state_in_config_body(self):
         self.pair_browser()
-        body = self.client.get("/").get_data(as_text=True)
+        body = self.dashboard_html()
 
         self.assertIn("function announcementsFromEditor()", body)
         self.assertIn("announcement_board:{announcements:announcementsFromEditor()}", body)
@@ -14426,7 +14574,7 @@ console.log('TERMINAL_MEDIA_PREVIEW_PASS');
 
     def test_add_announcement_creates_disabled_schema_valid_draft(self):
         self.pair_browser()
-        body = self.client.get("/").get_data(as_text=True)
+        body = self.dashboard_html()
 
         self.assertIn("function addAnnouncement()", body)
         self.assertIn("id:nextAnnouncementId()", body)
@@ -14440,7 +14588,7 @@ console.log('TERMINAL_MEDIA_PREVIEW_PASS');
 
     def test_announcement_content_group_exposes_bound_schema_fields(self):
         self.pair_browser()
-        body = self.client.get("/").get_data(as_text=True)
+        body = self.dashboard_html()
 
         self.assertIn("function announcementControl(announcement,labelText,path,type", body)
         for field in ("enabled", "name", "layout", "headline", "message", "media"):
@@ -14451,7 +14599,7 @@ console.log('TERMINAL_MEDIA_PREVIEW_PASS');
 
     def test_announcement_media_control_tracks_layout_without_saving(self):
         self.pair_browser()
-        body = self.client.get("/").get_data(as_text=True)
+        body = self.dashboard_html()
 
         self.assertIn("function renderAnnouncementContent(announcement,fieldset)", body)
         self.assertIn("mediaControl.hidden=hidden", body)
@@ -14504,7 +14652,7 @@ console.log('ANNOUNCEMENT_MEDIA_SELECT_REFRESH_PASS');
 
     def test_announcement_schedule_group_binds_dates_times_and_weekdays(self):
         self.pair_browser()
-        body = self.client.get("/").get_data(as_text=True)
+        body = self.dashboard_html()
 
         for path in ("schedule.start_date", "schedule.end_date", "schedule.start_time", "schedule.end_time"):
             self.assertIn(f"path:'{path}'", body)
@@ -14515,7 +14663,7 @@ console.log('ANNOUNCEMENT_MEDIA_SELECT_REFRESH_PASS');
 
     def test_announcement_appearance_group_exposes_all_style_fields(self):
         self.pair_browser()
-        body = self.client.get("/").get_data(as_text=True)
+        body = self.dashboard_html()
 
         for path in ("style.headline_font", "style.message_font", "style.foreground", "style.background", "style.alignment", "style.border", "style.border_colour"):
             self.assertIn(f"path:'{path}'", body)
@@ -14526,7 +14674,7 @@ console.log('ANNOUNCEMENT_MEDIA_SELECT_REFRESH_PASS');
 
     def test_announcement_timing_switches_between_exact_static_and_scroll_schemas(self):
         self.pair_browser()
-        body = self.client.get("/").get_data(as_text=True)
+        body = self.dashboard_html()
 
         self.assertIn("function renderAnnouncementTiming(announcement,fieldset)", body)
         self.assertIn("announcement.timing={mode:'static',duration_seconds:8}", body)
@@ -14539,7 +14687,7 @@ console.log('ANNOUNCEMENT_MEDIA_SELECT_REFRESH_PASS');
 
     def test_announcement_transition_switches_to_exact_contextual_schema(self):
         self.pair_browser()
-        body = self.client.get("/").get_data(as_text=True)
+        body = self.dashboard_html()
 
         self.assertIn("function renderAnnouncementTransition(announcement,fieldset)", body)
         self.assertIn("['cut','fade','slide','wipe','pixel_dissolve']", body)
@@ -14552,7 +14700,7 @@ console.log('ANNOUNCEMENT_MEDIA_SELECT_REFRESH_PASS');
 
     def test_announcement_card_previews_unsaved_draft_without_saving(self):
         self.pair_browser()
-        body = self.client.get("/").get_data(as_text=True)
+        body = self.dashboard_html()
 
         self.assertIn("function previewAnnouncement(id)", body)
         self.assertIn("makeButton('Preview on Matrix',()=>previewAnnouncement(announcement.id),'btn primary')", body)
@@ -14563,7 +14711,7 @@ console.log('ANNOUNCEMENT_MEDIA_SELECT_REFRESH_PASS');
 
     def test_announcement_actions_duplicate_delete_reorder_and_confirm_reset(self):
         self.pair_browser()
-        body = self.client.get("/").get_data(as_text=True)
+        body = self.dashboard_html()
 
         self.assertIn("function duplicateAnnouncement(id)", body)
         self.assertIn("copy.id=nextAnnouncementId()", body)
@@ -14708,7 +14856,7 @@ console.log('ANNOUNCEMENT_HEADING_SYNC_PASS');
 
     def test_playlist_builtin_editors_are_grouped_complete_and_resettable(self):
         self.pair_browser()
-        body = self.client.get("/").get_data(as_text=True)
+        body = self.dashboard_html()
 
         self.assertIn('class="module-item"', body)
         self.assertIn('data-module-editor="weather"', body)
@@ -14737,7 +14885,7 @@ console.log('ANNOUNCEMENT_HEADING_SYNC_PASS');
     def test_lava_palettes_are_the_dropdown_body_inside_the_lava_clock_editor(self):
         self.pair_browser()
 
-        body = self.client.get("/").get_data(as_text=True)
+        body = self.dashboard_html()
 
         self.assertIn('id="lava-palette-editor"', body)
         self.assertIn("summary.textContent='Palettes'", body)
@@ -14761,7 +14909,7 @@ console.log('ANNOUNCEMENT_HEADING_SYNC_PASS');
         self.store.update({"media_layout": {"sleep": {"playback_speed_percent": 175.0}}})
         self.pair_browser()
 
-        body = self.client.get("/").get_data(as_text=True)
+        body = self.dashboard_html()
 
         self.assertEqual(
             body.count("field:'playback_speed_percent',label:'Playback speed (%)',type:'playback_speed'"),
@@ -14822,7 +14970,7 @@ console.log('ANNOUNCEMENT_HEADING_SYNC_PASS');
     def test_weather_editor_has_full_positioning_and_separate_separator_and_ticker_controls(self):
         self.pair_browser()
 
-        body = self.client.get("/").get_data(as_text=True)
+        body = self.dashboard_html()
 
         for field in (
             "now_x", "now_y", "temperature_x", "temperature_y",
@@ -14847,7 +14995,7 @@ console.log('ANNOUNCEMENT_HEADING_SYNC_PASS');
         self.pair_browser()
 
         response = self.client.get("/")
-        body = response.get_data(as_text=True)
+        body = self.inline_dashboard_assets(response.get_data(as_text=True))
 
         self.assertEqual(response.status_code, 200)
         self.assertIn('id="lava-palette-groups"', body)
@@ -14864,7 +15012,7 @@ console.log('ANNOUNCEMENT_HEADING_SYNC_PASS');
     def test_dashboard_exposes_grouped_lava_palette_bulk_controls(self):
         self.pair_browser()
 
-        body = self.client.get("/").get_data(as_text=True)
+        body = self.dashboard_html()
 
         self.assertIn('class="palette-bulk-actions"', body)
         self.assertIn('role="group"', body)
@@ -15150,7 +15298,7 @@ console.log('ZERO_LAVA_EDIT_PREVIEW_DESCRIPTOR_PASS');
         }})
         self.pair_browser()
         before_config = Path(self.store.path).read_bytes()
-        body = self.client.get("/").get_data(as_text=True)
+        body = self.dashboard_html()
         self.controller.reset_mock()
         probe = r"""
 const port=process.argv[1],pagePath=process.argv[2];let endpoint;
@@ -15252,7 +15400,7 @@ try{
             "enabled": False,
         }]}})
         self.pair_browser()
-        body = self.client.get("/").get_data(as_text=True)
+        body = self.dashboard_html()
         probe = r"""
 const port=process.argv[1],pagePath=process.argv[2];let endpoint;
 for(let attempt=0;attempt<50;attempt++){try{endpoint=await fetch(`http://127.0.0.1:${port}/json/new`,{method:'PUT'}).then(r=>r.json());break}catch(_){await new Promise(r=>setTimeout(r,50))}}
@@ -16387,7 +16535,7 @@ try{
 
     def test_dashboard_handles_committed_partial_success_without_blind_retry(self):
         self.pair_browser()
-        page = self.client.get("/").get_data(as_text=True)
+        page = self.dashboard_html()
 
         self.assertIn(
             "if(error.data?.committed){matrixLoadedRevision=error.data.config.revision;highestNotifiedRemoteRevision=Math.max(highestNotifiedRemoteRevision,matrixLoadedRevision);dismissMatrixRevisionDialogThrough(matrixLoadedRevision);matrixSavedSnapshot=submittedSnapshot;matrixDirty=false;globalThis.matrixCustomCanvasSaved?.();if(!silent)setMessage(error.message,true);return {saved:true,warning:error.message,data:error.data}}",
@@ -16399,7 +16547,7 @@ try{
     def test_rendered_inline_javascript_is_syntactically_valid(self):
         self.pair_browser()
         pages = [
-            self.client.get("/").get_data(as_text=True),
+            self.dashboard_html(),
             self.client.get("/pair").get_data(as_text=True),
         ]
         node = shutil.which("node")
@@ -17390,7 +17538,7 @@ try{
             sum(frame["delay_ms"] for frame in page["frames"]), 400,
             delta=1,
         )
-        body = self.client.get("/").get_data(as_text=True)
+        body = self.dashboard_html()
         probe = r"""
 const port=process.argv[1],pagePath=process.argv[2];let endpoint;
 for(let attempt=0;attempt<50;attempt++){try{endpoint=await fetch(`http://127.0.0.1:${port}/json/new`,{method:'PUT'}).then(r=>r.json());break}catch(_){await new Promise(r=>setTimeout(r,100))}}

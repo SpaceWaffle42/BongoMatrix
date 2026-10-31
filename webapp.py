@@ -87,7 +87,7 @@ MEDIA_METADATA_ERRORS = (
 CONFIG_REQUEST_LIMIT = 1_048_576
 CONDITIONAL_HEADER_LIMIT = 4096
 MINIMUM_CLIENT_CONTRACT = 3
-APPLICATION_VERSION = "0.3.81-preview"
+APPLICATION_VERSION = "0.3.82-preview"
 DEVICE_RESTART_PENDING_TTL_SECONDS = 60
 PAIRED_ACTION_HEADER = "X-Matrix-Action"
 PAIRED_ACTION_VALUE = "paired-request"
@@ -1889,16 +1889,84 @@ def create_app(
                 "sleep": DEFAULT_CONFIG["media_layout"]["sleep"],
             },
             installed_fonts=available_font_names(),
-            rss_default_feeds=RSS_DEFAULTS["feeds"],
-            holiday_catalogue=holiday_dates_catalogue(),  # packs + calculated dates, embedded for offline editing
-            countdown_icon_art=countdown_icon_catalogue(),
-            editor_timezones=sorted(available_timezones() | {"UTC"}),
-            font_advances=font_advance_catalog(),
-            scroll_timing_javascript=timing_javascript(),
+            dashboard_script_url=url_for(
+                "dashboard_script_asset", digest=dashboard_asset("script")[0],
+            ),
+            dashboard_style_url=url_for(
+                "dashboard_style_asset", digest=dashboard_asset("style")[0],
+            ),
             application_version=APPLICATION_VERSION,
         ))
         response.headers["Cache-Control"] = "no-store"
         return response
+
+    # Dashboard code, its static catalogues and CSS hold no per-request state, so they
+    # leave the no-store HTML and are served as content-addressed paired assets the
+    # browser caches (and compiles) once per release instead of on every page load.
+    dashboard_asset_blocks = {
+        "script": ("text/javascript", ("dashboard_script",)),
+        "style": ("text/css", (
+            "dashboard_style_base", "dashboard_style_ui", "dashboard_style_screen_media",
+        )),
+    }
+    dashboard_asset_cache = {}
+    editor_timezone_names = []
+
+    def editor_timezones():
+        # available_timezones() walks the whole tzdata tree (~10 ms on x86, far more
+        # on the Pi); tzdata only changes with a system update and service restart.
+        if not editor_timezone_names:
+            editor_timezone_names.append(tuple(sorted(available_timezones() | {"UTC"})))
+        return list(editor_timezone_names[0])
+
+    def dashboard_asset(kind):
+        _mimetype, blocks = dashboard_asset_blocks[kind]
+        template = app.jinja_env.get_template("dashboard.html")
+        variables = {}
+        if kind == "script":
+            variables = {
+                "rss_default_feeds": RSS_DEFAULTS["feeds"],
+                # packs + calculated dates, embedded for offline editing
+                "holiday_catalogue": holiday_dates_catalogue(),
+                "countdown_icon_art": countdown_icon_catalogue(),
+                "editor_timezones": editor_timezones(),
+                "font_advances": font_advance_catalog(),
+                "scroll_timing_javascript": timing_javascript(),
+            }
+        # Each page load needs the digest and the asset request needs the bytes:
+        # re-render only when the template or one of the catalogues changed.
+        cached = dashboard_asset_cache.get(kind)
+        if cached is not None and cached[0] is template and cached[1] == variables:
+            return cached[2], cached[3]
+        context = template.new_context(variables)
+        body = "\n".join(
+            "".join(template.blocks[name](context)) for name in blocks
+        ).encode("utf-8")
+        digest = hashlib.sha256(body).hexdigest()[:20]
+        dashboard_asset_cache[kind] = (template, variables, digest, body)
+        return digest, body
+
+    def dashboard_asset_response(kind, requested_digest):
+        digest, body = dashboard_asset(kind)
+        response = app.response_class(body, mimetype=dashboard_asset_blocks[kind][0])
+        response.set_etag(digest)
+        # A stale digest (page rendered before an upgrade or a catalogue change) still
+        # gets the current bytes, revalidated on every use instead of cached forever.
+        response.headers["Cache-Control"] = (
+            "private, max-age=31536000, immutable"
+            if requested_digest == digest else "private, no-cache"
+        )
+        return response.make_conditional(request)
+
+    @app.get("/api/dashboard-script/<digest>.js")
+    @requires_pairing
+    def dashboard_script_asset(digest):
+        return dashboard_asset_response("script", digest)
+
+    @app.get("/api/dashboard-style/<digest>.css")
+    @requires_pairing
+    def dashboard_style_asset(digest):
+        return dashboard_asset_response("style", digest)
 
     @app.get("/api/media")
     @requires_pairing
