@@ -499,12 +499,24 @@ def _regular_names(directory: Path):
     return tuple(names)
 
 
+_DECODE_CACHE = {}
+
+
 def _decodes(resolver: MediaResolver, reference: str) -> bool:
     try:
         with resolver.resolve(reference) as pinned:
             with pinned.dup_file() as source:
+                suffix = Path(reference).suffix.lower()
+                # A full decode of every frame on each dashboard load was slow; the
+                # verdict is kept per file revision (the pinned fd's identity).
+                info = os.fstat(source.fileno())
+                fingerprint = (
+                    suffix, info.st_dev, info.st_ino, info.st_size,
+                    info.st_mtime_ns, info.st_ctime_ns,
+                )
+                if _DECODE_CACHE.get(fingerprint) is True:
+                    return True
                 with Image.open(source) as image:
-                    suffix = Path(reference).suffix.lower()
                     if image.format != _EXPECTED_FORMAT[suffix]:
                         return False
                     if suffix == ".gif":
@@ -512,6 +524,9 @@ def _decodes(resolver: MediaResolver, reference: str) -> bool:
                             frame.load()
                     else:
                         image.load()
+        if len(_DECODE_CACHE) >= 512:
+            _DECODE_CACHE.clear()
+        _DECODE_CACHE[fingerprint] = True
         return True
     except (
         KeyError,

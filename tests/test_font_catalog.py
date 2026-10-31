@@ -41,6 +41,29 @@ class FontCatalogTests(unittest.TestCase):
                 "tiny": {"default": 3, "ranges": [[65, 65, 3]]},
             })
 
+    def test_advance_catalog_is_parsed_once_until_a_font_file_changes(self):
+        """Dashboard speed: every page load used to re-parse every BDF font."""
+        import font_catalog
+        from unittest.mock import patch
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            font = root / "tiny.bdf"
+            source = (
+                "STARTFONT 2.1\nDEFAULT_CHAR 65\nSTARTCHAR A\nENCODING 65\n"
+                "DWIDTH 3 0\nBBX 1 1 0 0\nBITMAP\n80\nENDCHAR\nENDFONT\n"
+            )
+            font.write_text(source)
+            with patch.object(font_catalog, "BdfFont", wraps=font_catalog.BdfFont) as parsed:
+                first = font_catalog.font_advance_catalog(root)
+                second = font_catalog.font_advance_catalog(root)
+                self.assertEqual(first, second)
+                self.assertEqual(parsed.call_count, 1)
+                font.write_text(source.replace("DWIDTH 3 0", "DWIDTH 5 0"))
+                changed = font_catalog.font_advance_catalog(root)
+                self.assertEqual(changed["tiny"]["ranges"], [[65, 65, 5]])
+                self.assertEqual(parsed.call_count, 2)
+
 
 if __name__ == "__main__":
     unittest.main()

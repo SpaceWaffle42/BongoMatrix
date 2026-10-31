@@ -29,10 +29,28 @@ def text_width(font_name, text, font_dir=FONT_DIR):
     return advance
 
 
+_ADVANCE_CACHE = {}
+
+
 def font_advance_catalog(font_dir=FONT_DIR):
-    """Return compact Unicode glyph-advance ranges for every installed font."""
+    """Return compact Unicode glyph-advance ranges for every installed font.
+
+    Parsing every BDF took most of each dashboard load, so the result is kept
+    until a font file is added, removed or changed (path, size, mtime).
+    """
+    paths = sorted(Path(font_dir).glob("*.bdf"))
+    stamp = tuple((str(p), p.stat().st_size, p.stat().st_mtime_ns) for p in paths)
+    cached = _ADVANCE_CACHE.get(str(font_dir))
+    if cached is not None and cached[0] == stamp:
+        return cached[1]
+    catalog = _build_advance_catalog(paths)
+    _ADVANCE_CACHE[str(font_dir)] = (stamp, catalog)
+    return catalog
+
+
+def _build_advance_catalog(paths):
     catalog = {}
-    for path in sorted(Path(font_dir).glob("*.bdf")):
+    for path in paths:
         font = BdfFont(path)
         default = font.glyphs.get(font.default_codepoint)
         ranges = []

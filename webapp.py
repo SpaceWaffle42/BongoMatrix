@@ -1221,12 +1221,21 @@ def create_app(
             "frame_delays_ms": None,
         }
 
+    media_metadata_cache = {}
+
     def media_item(path):
         fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW)
         try:
             info = os.fstat(fd)
             if not stat.S_ISREG(info.st_mode):
                 raise OSError("not a regular file")
+            fingerprint = (
+                str(path), info.st_dev, info.st_ino, info.st_size,
+                info.st_mtime_ns, info.st_ctime_ns,
+            )
+            cached = media_metadata_cache.get(fingerprint)
+            if cached is not None:
+                return dict(cached)  # unchanged file: no decode on this page load
             animation = {
                 "animated": False, "source_frames": 1,
                 "frame_count": 1, "fps": 1, "duration_ms": None,
@@ -1262,7 +1271,7 @@ def create_app(
                                 "frame_delays_ms": frame_delays_ms,
                             }
             relative_name = path.relative_to(media_root).as_posix()
-            return {
+            item = {
                 "name": relative_name,
                 "size": info.st_size,
                 "revision": hashlib.sha256(
@@ -1277,6 +1286,10 @@ def create_app(
                 "built_in": relative_name.startswith("built-in/"),
                 **animation,
             }
+            if len(media_metadata_cache) >= 512:
+                media_metadata_cache.clear()
+            media_metadata_cache[fingerprint] = item
+            return dict(item)
         finally:
             os.close(fd)
 
