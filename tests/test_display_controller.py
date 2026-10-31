@@ -691,6 +691,25 @@ class DisplayControllerTests(unittest.TestCase):
         self.assertTrue(rendered)
         matrix.swap.assert_called_once_with("canvas")
 
+    def test_device_draft_shows_the_safe_area_marker_only_while_asked(self):
+        """Owner 2026-10-31: the flashing yellow safe-zone edge must appear on the physical panel."""
+        for asked in (True, False):
+            with self.subTest(asked=asked):
+                candidate = copy.deepcopy(DEFAULT_CONFIG)
+                config = {"module": "announcement_board", "candidate": candidate}
+                if asked:
+                    config["safe_area_marker"] = True
+                request = Mock(config=config, timeout_seconds=1, pinned_media={})
+                matrix = Mock()
+                seen = []
+                matrix.set_safe_area_marker.side_effect = lambda enabled: seen.append(bool(enabled))
+                stop = Mock()
+                stop.is_set.return_value = False
+                stop.wait.return_value = False
+                with patch("modules.announcement_board.run_draft", return_value=True):
+                    DisplayController(Mock(), Mock()).render_device_draft(matrix, request, stop_event=stop)
+                self.assertEqual(seen, [True, False] if asked else [])
+
     def test_announcement_device_draft_consumes_admitted_media_inode(self):
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / "announcement.png"

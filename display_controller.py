@@ -1218,31 +1218,41 @@ class DisplayController:
             options["prepared"] = prepared
         if stop_event.is_set():
             return False
-        rendered = False
-        while not stop_event.is_set():
-            runner = (
-                module.run_draft
-                if module_name == "announcement_board"
-                else module.run
-            )
-            with safe_area_scope(matrix, candidate, module_name):
-                rendered = runner(matrix, candidate, **options)
-            astronomy_empty = (module_name == 'astronomy' and options.get('prepared') is not None
-                               and options['prepared'].status == 'empty')
-            if request.timeout_seconds is not None or (rendered is False and not astronomy_empty):
-                return rendered
-            if stop_event.is_set() or stop_event.wait(1 if astronomy_empty else 0.01):
-                break
-            if module_name == 'astronomy' and self.astronomy_host is not None:
-                from astronomy_host import PreparationBusy
-                while not stop_event.is_set():
-                    try:
-                        options['prepared'] = self.astronomy_host.wait_preview(
-                            candidate, stop_event,
-                            owner=('device', request.owner.device_id, request.owner.preview_instance))
-                        break
-                    except PreparationBusy:
-                        stop_event.wait(.1)
+        # Owner 2026-10-31: while the Safe Area is being edited, the page asks for the
+        # pulsing dotted yellow edge on the physical panel too (live preview).
+        set_marker = getattr(matrix, "set_safe_area_marker", None)
+        marker = bool(request.config.get("safe_area_marker")) and callable(set_marker)
+        if marker:
+            set_marker(True)
+        try:
+            rendered = False
+            while not stop_event.is_set():
+                runner = (
+                    module.run_draft
+                    if module_name == "announcement_board"
+                    else module.run
+                )
+                with safe_area_scope(matrix, candidate, module_name):
+                    rendered = runner(matrix, candidate, **options)
+                astronomy_empty = (module_name == 'astronomy' and options.get('prepared') is not None
+                                   and options['prepared'].status == 'empty')
+                if request.timeout_seconds is not None or (rendered is False and not astronomy_empty):
+                    return rendered
+                if stop_event.is_set() or stop_event.wait(1 if astronomy_empty else 0.01):
+                    break
+                if module_name == 'astronomy' and self.astronomy_host is not None:
+                    from astronomy_host import PreparationBusy
+                    while not stop_event.is_set():
+                        try:
+                            options['prepared'] = self.astronomy_host.wait_preview(
+                                candidate, stop_event,
+                                owner=('device', request.owner.device_id, request.owner.preview_instance))
+                            break
+                        except PreparationBusy:
+                            stop_event.wait(.1)
+        finally:
+            if marker:
+                set_marker(False)
         return rendered
 
     def _preview_admission_generation(self):

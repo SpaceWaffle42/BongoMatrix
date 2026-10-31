@@ -431,7 +431,7 @@ Matrix panels sit in frames of different sizes, and a frame can hide the outer p
 
 **Known limitations:**
 - RSS and astronomy layouts are translated and clipped into the safe area rather than re-laid-out for the smaller size; at 2 px the astronomy countdown row is partly clipped.
-- The dotted yellow marker is shown on the dashboard preview only. The physical panel does not show it yet: `Matrix.set_safe_area_marker` exists, but nothing in the device-preview path turns it on while the inputs are being edited.
+- The dotted yellow marker is shown on the dashboard preview and, since 0.3.81-preview (owner 2026-10-31), on the physical panel while Preview edits on device is on and a Screen Safe Area field is focused or edited: the page sends `safe_area_marker` with the device-preview request and the controller turns `Matrix.set_safe_area_marker` on for that draft only.
 
 ### 1.12 Trusted HTTPS on `<id>.mtx.xert.me` — Owner-requested 2026-10-15, planned
 

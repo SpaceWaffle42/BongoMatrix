@@ -87,7 +87,7 @@ MEDIA_METADATA_ERRORS = (
 CONFIG_REQUEST_LIMIT = 1_048_576
 CONDITIONAL_HEADER_LIMIT = 4096
 MINIMUM_CLIENT_CONTRACT = 3
-APPLICATION_VERSION = "0.3.80-preview"
+APPLICATION_VERSION = "0.3.81-preview"
 DEVICE_RESTART_PENDING_TTL_SECONDS = 60
 PAIRED_ACTION_HEADER = "X-Matrix-Action"
 PAIRED_ACTION_VALUE = "paired-request"
@@ -3000,9 +3000,12 @@ def create_app(
             )
             payload = edit_preview_json(
                 {"config", "generation", "preview_instance"},
-                {"timeout_seconds", "selected_lava_palette"},
+                {"timeout_seconds", "selected_lava_palette", "safe_area_marker"},
             )
             generation = payload["generation"]
+            safe_area_marker = payload.get("safe_area_marker", False)
+            if not isinstance(safe_area_marker, bool):
+                raise ValueError("safe_area_marker must be a boolean")
             has_timeout = "timeout_seconds" in payload
             timeout_seconds = payload.get("timeout_seconds")
             if (
@@ -3052,6 +3055,7 @@ def create_app(
                     "module": module_name,
                     "candidate": candidate,
                     "selected_lava_palette": selected_palette,
+                    "safe_area_marker": safe_area_marker,
                 },
                 timeout_seconds=timeout_seconds,
                 cleanup=stack.close,
