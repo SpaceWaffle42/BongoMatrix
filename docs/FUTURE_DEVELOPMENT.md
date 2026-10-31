@@ -455,6 +455,17 @@ Browsers only trust certificates for public names, so `.local` cannot get one. E
 - **Benefit:** it closes the #33 risk of a spoofing device phishing the PIN, because an impostor cannot get the display's certificate.
 - **Waiting on:** the owner's Cloudflare token for Stage A.
 
+## Web app architecture and load-time hardening — Owner-approved 2026-10-31
+
+Plan: [`docs/WEB_ARCHITECTURE_PLAN.md`](WEB_ARCHITECTURE_PLAN.md). Trigger: dashboard first load was 509 KB uncompressed and the web UI froze while pairing during a long module (hotfixes !185 and !186, shipped 2026-10-31).
+
+- **P0 (in flight)** hotfix: gzip + cache headers, slim dashboard payload, measurement script.
+- **P1 safety net (start now):** route-manifest test, page-weight budget in CI, `/api/health`, Server-Timing and slow-request log, `tests/web/` fixtures.
+- **P2 backend:** split `create_app()` (~2,800 lines, 48 routes) into blueprints on a shared services object, one domain per MR; pairing and release-acceptance last, with the second reviewer.
+- **P3 front end:** thin dashboard shell plus lazily loaded native ES modules per editor, **no build step** (owner rule), cacheable data endpoints.
+- **P4 deployment:** teach `ship.py` the new paths and fix the data-file gap (#33) first.
+- P2-P4 run between features, one MR at a time; they never block a feature. P5 (a framework/build) only if P3 leaves state management hard to maintain.
+
 ## Priority 2 — New playlist modules
 
 Implement these only after higher-priority fixes and workflow improvements are complete. Their order favors lower-friction local or free-data behavior before more provider-dependent integrations.
