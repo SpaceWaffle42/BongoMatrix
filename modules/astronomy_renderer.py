@@ -7,7 +7,7 @@ import datetime as dt
 import math
 import re
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from functools import lru_cache
 from PIL import Image
 from font_catalog import FONT_DIR, font_key, available_font_names
@@ -18,6 +18,7 @@ UTC = dt.timezone.utc
 SPRITES = FONT_DIR.parent / 'astronomy' / 'sprites'
 MOON_FRAMES = 32  # Aseprite sheet frames: index i covers phase angle i*360/32.
 VIEWS = ('simple', 'advanced')
+PANEL = (64, 32)
 
 
 @lru_cache(maxsize=4)
@@ -105,6 +106,7 @@ class PreparedMoon:
     clipping: tuple
     refresh_at: dt.datetime | None = None
     sprite: Image.Image | None = None
+    size: tuple = PANEL  # Canvas the card is laid out for (the safe area's inner size).
 
 
 @dataclass(frozen=True)
@@ -139,6 +141,7 @@ class PreparedEvent:
     countdown_fonts: tuple
     options: EventOptions
     clipping: tuple
+    size: tuple = PANEL
 
 
 def event_countdown(event, now):
@@ -179,7 +182,8 @@ def _pixel_line(advance, pixels, x, y, width, height):
             max(advance, right) - min(0, left), x, y, width, height)
 
 
-def _countdown_line(fonts, text):
+def _countdown_line(fonts, text, width=64):
+    # The font choice never depends on the canvas: a smaller canvas clips, it does not step down.
     candidates = []
     for name, glyphs in fonts:
         glyphs = dict(glyphs)
@@ -188,12 +192,12 @@ def _countdown_line(fonts, text):
             size, points = glyphs[character]
             pixels.extend((px + advance, py) for px, py in points)
             advance += size
-        line = _pixel_line(advance, pixels, 0, 25, 64, 7)
+        line = _pixel_line(advance, pixels, 0, 25, width, 7)
         height = max((py for px, py in line[0]), default=-1) + 1
         candidates.append((height, line[1], name, line))
     fitting = [c for c in candidates if c[0] <= 7 and c[1] <= 64]
     selected = max(fitting) if fitting else min(candidates)
-    return selected[3], selected[2], selected[0] > 7 or selected[1] > 64
+    return selected[3], selected[2], selected[0] > 7 or selected[1] > width
 
 
 def prepare_event(event, now, options=None):
@@ -225,13 +229,48 @@ def _simple_lines(phase_name, options):
         if all(line[1] <= 33 for line in measured):
             break
     heights = [max((py for _, py in line[0]), default=-1) + 1 for line in measured]
+    return words, _place_simple(tuple((points, width, 0, 0, 33, height)
+                                      for (points, width, *_), height in zip(measured, heights)), PANEL)
+
+
+def _place_simple(lines, size):
+    """Centre the phase words in the column right of the 28 px moon, on a SIZE canvas."""
+    column = size[0] - 31
     gap = 2
-    top = (32 - sum(heights) - gap) // 2
-    lines, y = [], top
-    for (points, width, _, _, _, _), height in zip(measured, heights):
-        lines.append((points, width, 31 + max(0, (33 - width) // 2), y, 33, height))
+    placed, y = [], (size[1] - sum(line[5] for line in lines) - gap) // 2
+    for points, width, _, _, _, height in lines:
+        placed.append((points, width, 31 + max(0, (column - width) // 2), y, column, height))
         y += height + gap
-    return words, tuple(lines)
+    return tuple(placed)
+
+
+def _check_size(size):
+    if (type(size) is not tuple or len(size) != 2 or any(type(v) is not int for v in size)
+            or not (1 <= size[0] <= 64 and 1 <= size[1] <= 32)):
+        raise ValueError('Astronomy canvas size must be (1..64, 1..32)')
+    return size
+
+
+def layout_for_size(card, size):
+    """The same card laid out as if the panel were SIZE (the safe area's inner canvas).
+
+    Lines keep their font, position and glyph pixels; lines that reach the right
+    edge now end at the inner width (and scroll if they no longer fit). The moon,
+    icons and fonts are never resized: what does not fit is clipped.
+    """
+    size = _check_size(tuple(size))
+    if size == card.size:
+        return card
+    if isinstance(card, PreparedMoon) and card.options.view == 'simple':
+        lines = _place_simple(card.lines, size)
+        return replace(card, lines=lines, size=size, clipping=tuple(line[1] > line[4] for line in lines))
+    grow = size[0] - card.size[0]
+    def widen(lines):  # Every non-simple line runs to the right edge of the canvas.
+        return tuple((points, measured, x, y, width + grow, height)
+                     for points, measured, x, y, width, height in lines)
+    if isinstance(card, PreparedEvent):
+        return replace(card, lines=widen(card.lines), window_lines=widen(card.window_lines), size=size)
+    return replace(card, lines=widen(card.lines), size=size)
 
 
 def prepare_moon(moon, options=None):
@@ -292,14 +331,14 @@ def _scroll_ticks(card):
 
 
 def render_frame(card, tick=0, *, now=None):
-    image = Image.new('RGB', (64, 32), card.options.background)
+    image = Image.new('RGB', card.size, card.options.background)
     if isinstance(card, PreparedEvent):
         now = now or card.prepared_at
         countdown = event_countdown(card.event, now)
         if countdown is None:
             return image
         index = next(i for i, w in enumerate(card.event.windows) if w.end > now.astimezone(UTC))
-        counter, _, _ = _countdown_line(card.countdown_fonts, countdown)
+        counter, _, _ = _countdown_line(card.countdown_fonts, countdown, card.size[0])
         lines = card.lines[:2] + (card.window_lines[index], counter)
         roles = EVENT_ROLES
         # Aseprite 8x8 event icons (tinted with the accent); unknown types use a star.
@@ -316,7 +355,7 @@ def render_frame(card, tick=0, *, now=None):
         offset = -tick if measured > width and tick <= measured else 0
         for px, py in points:
             px += offset
-            if 0 <= px < width and 0 <= py < height:
+            if 0 <= px < width and 0 <= py < height and y + py < image.height:
                 image.putpixel((x + px, y + py), colour)
     return image
 
@@ -326,15 +365,15 @@ EVENT_ROLES = ('title', 'date', 'description', 'date')
 ADVANCED_MOON_ROLES = ('title', 'description', 'description', 'date')
 
 
-def _pass(cards):
+def _pass(cards, size=None):
     if type(cards) is not tuple or len(cards) > 51 or any(not isinstance(c, (PreparedMoon, PreparedEvent)) for c in cards):
         raise ValueError('Expected immutable bounded prepared cards')
-    return cards
+    return cards if size is None else tuple(layout_for_size(card, size) for card in cards)
 
 
-def duration_seconds(cards, *, now=None):
+def duration_seconds(cards, *, now=None, size=None):
     """Exact shared virtual timeline; slow hardware/cancellation can differ."""
-    return sum(delay for _, _, delay, _ in _frame_specs(cards, now=now))
+    return sum(delay for _, _, delay, _ in _frame_specs(_pass(cards, size), now=now))
 
 
 def _stopped(stop_event):
@@ -378,13 +417,13 @@ def _frame_specs(cards, stop_event=None, *, now=None, utc_clock=None):
                 remaining -= delay
 
 
-def image_frames(cards, stop_event=None, *, now=None, utc_clock=None):
-    for card, moment, delay, info in _frame_specs(cards, stop_event, now=now, utc_clock=utc_clock):
+def image_frames(cards, stop_event=None, *, now=None, utc_clock=None, size=None):
+    for card, moment, delay, info in _frame_specs(_pass(cards, size), stop_event, now=now, utc_clock=utc_clock):
         if _stopped(stop_event):
             return
         if isinstance(card, PreparedEvent):
             image = render_frame(card, info['tick'], now=moment)
-            _, font, clipping = _countdown_line(card.countdown_fonts, info['countdown'])
+            _, font, clipping = _countdown_line(card.countdown_fonts, info['countdown'], card.size[0])
             info = dict(info, countdown_font=font, countdown_clipped=clipping)
         else:
             image = render_frame(card, info['tick'])
@@ -394,9 +433,10 @@ def image_frames(cards, stop_event=None, *, now=None, utc_clock=None):
 
 
 def preview_frames(cards, stop_event=None, *, now=None, safe_area=None):
-    """With a Screen Safe Area (1.11) frames are translated and clipped like Matrix.draw_image."""
+    """With a Screen Safe Area cards are laid out on the inner canvas, exactly as run() does."""
     from edit_preview import _png_frame
-    for image, delay, info in image_frames(cards, stop_event, now=now):
+    size = safe_area.inner_size() if safe_area is not None else None
+    for image, delay, info in image_frames(cards, stop_event, now=now, size=size):
         if _stopped(stop_event):
             return
         if safe_area is not None:
@@ -409,9 +449,11 @@ def preview_frames(cards, stop_event=None, *, now=None, safe_area=None):
 
 
 def run(matrix, cards, stop_event=None, *, clock=time.monotonic, sleep=time.sleep, utc_clock=None):
+    from safe_area import canvas_size
     utc_clock = utc_clock or (lambda: dt.datetime.now(UTC))
+    size = canvas_size(matrix)
     deadline, count = clock(), 0
-    for image, delay, info in image_frames(cards, stop_event, utc_clock=utc_clock):
+    for image, delay, info in image_frames(cards, stop_event, utc_clock=utc_clock, size=size):
         if _stopped(stop_event):
             break
         card = cards[info['card_index']]
@@ -423,6 +465,9 @@ def run(matrix, cards, stop_event=None, *, clock=time.monotonic, sleep=time.slee
             return index == info['window_index'] and event_countdown(card.event, now) == info['countdown']
         if not still_eligible():
             continue
+        if size != PANEL:
+            # Smaller (safe-area) canvas: the card background also covers the margin, as in the preview.
+            matrix.fill(*Image.new('RGB', (1, 1), card.options.background).getpixel((0, 0)))
         matrix.draw_image(image)
         if _stopped(stop_event):
             break
