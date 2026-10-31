@@ -1,5 +1,5 @@
 // RSS shares the dashboard's serializer, revision gate and Save lifecycle.
-let rssSettings = {{ config.rss|tojson }};
+let rssSettings = initialRssSettings;
 const rssDefaultFeeds = {{ rss_default_feeds|tojson }};
 let rssCatalogue=null, rssStatus=null, rssDuration=null, rssTimingGeneration=0, rssTimingController=null;
 const configBodyWithoutRSS=configBody;

@@ -1,5 +1,5 @@
 // Implemented local cards only. Native Save and preview serialize this same draft.
-let astronomySettings = {{ config.astronomy|tojson }};
+let astronomySettings = initialAstronomySettings;
 let astronomyTiming = null, astronomyTimingGeneration = 0, astronomyTimingRequest = null;
 const animateWithoutAstronomy = animateEditPreview;
 animateEditPreview = function(generation, controller, complete) {

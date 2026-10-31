@@ -1,4 +1,4 @@
-let countdownSettings = {{ config.event_countdown|tojson }};
+let countdownSettings = initialCountdownSettings;
 let countdownPreviewInfo = null;
 // Holiday packs and their offline-calculated dates (server), plus the panel's icon pixels.
 const holidayCatalogue = {{ holiday_catalogue|tojson }};
