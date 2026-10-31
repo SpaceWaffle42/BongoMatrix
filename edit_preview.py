@@ -205,8 +205,13 @@ class CaptureMatrix:
         return x, text_len
 
     def snapshot(self, canvas=None):
-        """Return an isolated copy without changing publication or revision state."""
-        return self._capture.snapshot(canvas or self.canvas)
+        """Return an isolated copy without changing publication or revision state.
+
+        Like the physical swap, the safe-area margin ring is blacked out first.
+        """
+        canvas = canvas or self.canvas
+        self._capture.blank_margin(canvas)
+        return self._capture.snapshot(canvas)
 
     def swap(self, canvas=None):
         """Capture a submitted preview canvas and return a fresh drawing canvas."""

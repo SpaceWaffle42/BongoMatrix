@@ -538,29 +538,21 @@ class Matrix:
         return returned
 
     def _finish_safe_area_frame(self, canvas):
-        """Restore the frame edge from the clipped mirror and add the edit marker.
+        """Black out the safe-area margin on hardware and mirror; add the edit marker.
 
-        Native text/line/circle primitives clip only at the panel edge. Within the
-        safe area's margin only fill/clear (or full-screen media) may draw, and the
-        software mirror already holds exactly that, so copy those strips back.
+        The margin ring is never lit, as if the panel were physically smaller:
+        fill/clear and native text/line/circle primitives (which clip only at the
+        panel edge) may have painted it, so every frame ends with black strips on
+        both the hardware canvas and the software mirror. Full-screen media with
+        ``media_inside`` off has no viewport and keeps the whole panel.
         """
         viewport = self._viewport()
         marker = self.__dict__.get("_safe_area_marker", False)
         if viewport is None and not marker:
             return
         capture = self._frame_capture
-        if viewport is not None:
-            frame = capture.snapshot(canvas)
-            x, y, width, height = viewport
-            panel_width, panel_height = frame.size
-            for left, top, right, bottom in (
-                (0, 0, panel_width, y),
-                (0, y + height, panel_width, panel_height),
-                (0, y, x, y + height),
-                (x + width, y, panel_width, y + height),
-            ):
-                if right > left and bottom > top:
-                    canvas.SetImage(frame.crop((left, top, right, bottom)), left, top)
+        for left, top, right, bottom in capture.blank_margin(canvas):
+            canvas.SetImage(Image.new("RGB", (right - left, bottom - top)), left, top)
         if marker:
             from safe_area import marker_colour, marker_points
 

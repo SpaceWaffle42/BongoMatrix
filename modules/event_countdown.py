@@ -422,16 +422,10 @@ def _inner_size(matrix):
 def run(matrix, config, duration=15, stop_event=None, *, pinned_handles=None):
     rendered = False
     size = _inner_size(matrix)
-    background = None
-    if size != PANEL_SIZE:
-        background = Image.new('RGB', (1, 1), effective_settings(config)['background']).getpixel((0, 0))
     for image, delay, _ in image_frames(config, duration, stop_event, realtime=True,
                                         pinned_handles=pinned_handles, size=size):
         if stop_event and stop_event.is_set():
             break
-        if background is not None:
-            # Background covers the whole panel; the inner frame sits inside the safe area.
-            matrix.fill(*background)
         matrix.draw_image(image)
         matrix.swap()
         rendered = True
