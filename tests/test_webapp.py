@@ -1817,7 +1817,7 @@ try{
         body = self.client.get("/").get_data(as_text=True)
 
         application_version = getattr(webapp, "APPLICATION_VERSION", None)
-        self.assertEqual(application_version, "0.3.80-preview")
+        self.assertEqual(application_version, "0.3.81-preview")
         self.assertEqual(body.count(f"Version {application_version}"), 1)
         self.assertRegex(
             body,
@@ -21672,6 +21672,24 @@ try{
             "POST", client, "/api/device-preview/heartbeat", json=control,
         )
         self.assertEqual(admitted.status_code, 202, admitted.get_json())
+        manager.close()
+
+    def test_device_preview_accepts_a_boolean_safe_area_marker_flag(self):
+        """Owner 2026-10-31: the editing marker is requested by the page and reaches the renderer request."""
+        client, _device_id, manager = self.physical_draft_fixture()
+        candidate = {key: copy.deepcopy(value) for key, value in self.store.get().items() if key not in {"revision", "schema_version"}}
+        started = self.paired_client_request("POST", client, "/api/device-preview/weather", json={
+            "config": candidate, "generation": 1, "preview_instance": "8" * 32,
+            "timeout_seconds": 60, "safe_area_marker": True,
+        })
+        self.assertEqual(started.status_code, 202, started.get_json())
+        request = self.controller.submit_device_draft.call_args.args[0]
+        self.assertIs(request.config["safe_area_marker"], True)
+        bad = self.paired_client_request("POST", client, "/api/device-preview/weather", json={
+            "config": candidate, "generation": 2, "preview_instance": "8" * 32,
+            "timeout_seconds": 60, "safe_area_marker": "yes",
+        })
+        self.assertEqual(bad.status_code, 400, bad.get_json())
         manager.close()
 
     def test_physical_draft_lava_selection_is_strict_fail_closed_and_blank_is_neutral(self):
