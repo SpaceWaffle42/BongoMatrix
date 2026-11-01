@@ -411,7 +411,11 @@ def rendered(case, safe_area):
     """surfaces() once per process for each (case, inset); the frames are read-only."""
     key = (case.label, safe_area)
     if key not in _RENDERED:
-        _RENDERED[key] = surfaces(case, safe_area)
+        # A loaded CI shard can exceed the 5 s announcement decode budget, which
+        # swaps the picture for "Media unavailable" and changes the digest.
+        from modules import announcement_board
+        with patch.object(announcement_board, "ANNOUNCEMENT_MEDIA_DECODE_TIMEOUT", 60):
+            _RENDERED[key] = surfaces(case, safe_area)
     return _RENDERED[key]
 
 
