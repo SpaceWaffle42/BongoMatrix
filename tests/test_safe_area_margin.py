@@ -433,7 +433,7 @@ def combined_digest(case, safe_areas, crop):
     return value.hexdigest()
 
 
-# Rendered by origin/main ba6725d (0.3.83-preview) with this file's fixtures:
+# Rendered by origin/main ba6725d (0.3.83-preview) on Pillow 13.0.0 (CI/prod) with this file's fixtures:
 # (0 px full frames on every surface, inner pixels at 2/4/6/uneven on every surface).
 # The black margin must leave both unchanged. Calendar (real-time countdown) and
 # Lava (random blobs, wall clock) are not deterministic and are checked for
@@ -442,7 +442,7 @@ MAIN_DIGESTS = {
     'address-notice': ('ecd5a684e12622ece098f6080eab0df780d08cc08d16647aeb44034476e636f1',
                        'f76caa0cd4a43ab0a8ece82d414436b6bd6b81399661cc6d2e253fa8b742c85f'),
     'announcement/banner/inset': ('d43559ec124e1586ed9b44366a6b7ad936ae413fb494aa4e5b001f73cf8d5f6b',
-                                  'e128f51ce2ef7182bebeae35404d89f5bd2f3e92a6a002d9d4701fb48ba1213a'),
+                                  '6b2616478b9d28bd1ee9ffcbfc603fdf34a3ea66a400f42c8f3aa03176378e41'),
     'announcement/full-image/solid': ('0d95dac918ce123c2da22cdaffb494e583c75b43d29979252c140408fe71d312',
                                       'c0ed57a8be2509b96a0f36e0213c1dac54d219d8978bc5caac9fa9b6e19b18cc'),
     'announcement/icon/solid': ('b6a5161009193f7edf44f90bea9c581d47d9a13e1d48d42022af7a40cf19a567',
