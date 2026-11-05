@@ -1,10 +1,12 @@
 """System-wide Screen Safe Area (Priority 1.11).
 
 A display sits in a frame that may hide its outer pixels. The safe area is the
-space, in whole physical pixels, kept clear from each panel edge. Background
-colours (Matrix.fill/clear) still cover the whole panel; every other drawing
-operation is translated by (left, top) and clipped to the inner rectangle.
-Full-screen media follows the ``media_inside`` toggle.
+space, in whole physical pixels, kept clear from each panel edge. Every drawing
+operation is translated by (left, top) and clipped to the inner rectangle. The
+margin ring outside it is always black, as if the panel were physically smaller
+(owner decision 2026-10-31): fills, backgrounds and borders never light it. The
+one exception is full-screen media with the ``media_inside`` toggle off, which
+has no viewport and may cover the whole panel.
 """
 
 from __future__ import annotations
@@ -81,11 +83,15 @@ class SafeArea:
         return (int(width), int(height)) if viewport is None else viewport[2:]
 
     def compose(self, inner, background, width=PANEL_WIDTH, height=PANEL_HEIGHT):
-        """Place an inner-sized render on a full panel filled with ``background``."""
+        """Place an inner-sized render on a full panel whose margin stays black.
+
+        ``background`` is kept for callers but never paints the margin ring.
+        """
+        del background
         viewport = self.viewport(width, height)
         if viewport is None:
             return inner.convert("RGB")
-        panel = Image.new("RGB", (int(width), int(height)), background)
+        panel = Image.new("RGB", (int(width), int(height)), "black")
         x, y, inner_width, inner_height = viewport
         panel.paste(inner.convert("RGB").crop((0, 0, inner_width, inner_height)), (x, y))
         return panel
@@ -106,6 +112,21 @@ def canvas_size(matrix):
             and 0 < width <= PANEL_WIDTH and 0 < height <= PANEL_HEIGHT):
         return width, height
     return PANEL_WIDTH, PANEL_HEIGHT
+
+
+def margin_boxes(viewport, width=PANEL_WIDTH, height=PANEL_HEIGHT):
+    """(left, top, right, bottom) panel boxes of the margin ring around ``viewport``."""
+    if viewport is None:
+        return ()
+    x, y, inner_width, inner_height = viewport
+    width, height = int(width), int(height)
+    boxes = (
+        (0, 0, width, y),
+        (0, y + inner_height, width, height),
+        (0, y, x, y + inner_height),
+        (x + inner_width, y, width, y + inner_height),
+    )
+    return tuple(box for box in boxes if box[2] > box[0] and box[3] > box[1])
 
 
 def clip_image(image, x, y, viewport):

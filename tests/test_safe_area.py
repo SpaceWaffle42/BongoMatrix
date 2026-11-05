@@ -99,7 +99,7 @@ class SafeAreaDrawingTests(unittest.TestCase):
     def published(self):
         return self.matrix._hardware.shown, Image.frombytes("RGB", (64, 32), self.matrix.latest_frame_rgb()[0])
 
-    def test_pixel_is_translated_and_clipped_and_fill_covers_the_panel(self):
+    def test_pixel_is_translated_and_clipped_and_fill_never_lights_the_margin(self):
         self.matrix.set_safe_area(EDGES2)
         self.assertEqual((self.matrix.matrix.width, self.matrix.matrix.height), (60, 28))
         self.matrix.fill(0, 0, 90)
@@ -109,10 +109,14 @@ class SafeAreaDrawingTests(unittest.TestCase):
         self.matrix.swap()
         for frame in self.published():
             self.assertEqual(frame.getpixel((2, 2)), (255, 0, 0))
-            self.assertEqual(frame.getpixel((0, 0)), (0, 0, 90), "fill covers the frame edge")
-            self.assertEqual(frame.getpixel((62, 7)), (0, 0, 90), "clipped pixel stays background")
-            self.assertEqual(frame.getpixel((1, 7)), (0, 0, 90))
-            self.assertEqual({c: n for n, c in frame.getcolors()}[(0, 0, 90)], 64 * 32 - 1)
+            # 0.3.84 (owner decision 6): the margin ring is always black, fill included.
+            self.assertEqual(frame.getpixel((0, 0)), (0, 0, 0), "fill stops at the safe area")
+            self.assertEqual(frame.getpixel((62, 7)), (0, 0, 0), "clipped pixel never lights the margin")
+            self.assertEqual(frame.getpixel((1, 7)), (0, 0, 0))
+            self.assertEqual(frame.getpixel((61, 7)), (0, 0, 90), "fill covers the inner canvas")
+            colours = {c: n for n, c in frame.getcolors()}
+            self.assertEqual(colours[(0, 0, 90)], 60 * 28 - 1)
+            self.assertEqual(colours[(0, 0, 0)], 64 * 32 - 60 * 28)
 
     def test_text_and_lines_never_reach_the_edge_on_hardware_or_preview(self):
         self.matrix.set_safe_area(EDGES2)
@@ -127,7 +131,7 @@ class SafeAreaDrawingTests(unittest.TestCase):
         for x in range(64):
             for y in range(32):
                 if not (2 <= x < 62 and 2 <= y < 30):
-                    self.assertEqual(hardware.getpixel((x, y)), (10, 10, 10), (x, y))
+                    self.assertEqual(hardware.getpixel((x, y)), (0, 0, 0), (x, y))  # black margin
         self.assertEqual(hardware.getpixel((2, 29)), (255, 255, 255))
 
     def test_images_fit_inside_and_media_toggle_controls_full_screen_media(self):
@@ -177,11 +181,12 @@ class CaptureMatrixSafeAreaTests(unittest.TestCase):
         capture.draw_line(-10, 3, 100, 3, capture.colour_rgb("#ffffff"))
         frame = capture.snapshot()
         self.assertEqual(frame.getpixel((6, 1)), (255, 255, 255))
-        self.assertEqual(frame.getpixel((61, 1)), (0, 50, 0))
-        self.assertEqual(frame.getpixel((5, 4)), (0, 50, 0))
+        self.assertEqual(frame.getpixel((61, 1)), (0, 0, 0), "margin stays black (0.3.84)")
+        self.assertEqual(frame.getpixel((5, 4)), (0, 0, 0))
         self.assertEqual(frame.getpixel((6, 4)), (255, 255, 255))
         self.assertEqual(frame.getpixel((60, 4)), (255, 255, 255))
-        self.assertEqual(frame.getpixel((61, 4)), (0, 50, 0))
+        self.assertEqual(frame.getpixel((61, 4)), (0, 0, 0))
+        self.assertEqual(frame.getpixel((60, 5)), (0, 50, 0), "fill covers the inner canvas")
 
 
 def _encode(value):
@@ -522,8 +527,11 @@ class ModuleMediaToggleTests(unittest.TestCase):
             data = base64.b64decode(data.split(",", 1)[-1])
         image = Image.open(io.BytesIO(data)).convert("RGB")
         self.assertEqual(image.size, (64, 32))
+        # 0.3.84 (owner decision 6): the background fills the inner canvas, never the margin.
         for point in ((0, 0), (1, 31), (63, 0), (62, 31)):
-            self.assertEqual(image.getpixel(point), (0x10, 0x20, 0x30))
+            self.assertEqual(image.getpixel(point), (0, 0, 0))
+        inner = image.crop((2, 2, 62, 30))
+        self.assertEqual(max(inner.getcolors(4096))[1], (0x10, 0x20, 0x30), "background inside")
 
 
 

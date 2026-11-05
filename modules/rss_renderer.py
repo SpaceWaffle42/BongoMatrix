@@ -387,17 +387,11 @@ def run(matrix, stories, stop_event=None, *, clock=time.monotonic, sleep=time.sl
     """
     from safe_area import canvas_size
     size = canvas_size(matrix)
-    margin = None
-    if size != PANEL and stories:
-        # Smaller (safe-area) canvas: the story background also covers the margin, as in the preview.
-        margin = Image.new('RGB', (1, 1), stories[0].options.background_colour).getpixel((0, 0))
     started = deadline = clock()
     count = 0
     for image, delay, _ in image_frames(stories, stop_event, size=size):
         if stop_event is not None and stop_event.is_set():
             break
-        if margin is not None:
-            matrix.fill(*margin)
         matrix.draw_image(image)
         if stop_event is not None and stop_event.is_set():
             break

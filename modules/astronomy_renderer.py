@@ -465,9 +465,6 @@ def run(matrix, cards, stop_event=None, *, clock=time.monotonic, sleep=time.slee
             return index == info['window_index'] and event_countdown(card.event, now) == info['countdown']
         if not still_eligible():
             continue
-        if size != PANEL:
-            # Smaller (safe-area) canvas: the card background also covers the margin, as in the preview.
-            matrix.fill(*Image.new('RGB', (1, 1), card.options.background).getpixel((0, 0)))
         matrix.draw_image(image)
         if _stopped(stop_event):
             break

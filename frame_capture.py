@@ -101,7 +101,7 @@ class FrameCapture:
         self._latest = Image.new("RGB", (self.width, self.height), "black")
         self._revision = 0
         # Screen Safe Area: (x, y, width, height) of the drawable rectangle, or
-        # None for the full panel. fill/clear always cover the whole panel.
+        # None for the full panel. The margin around it is blacked out per frame.
         self.viewport = None
 
     def _box(self):
@@ -134,6 +134,18 @@ class FrameCapture:
     def fill(self, canvas, red, green, blue):
         with self._lock:
             self._buffer(canvas).paste((int(red), int(green), int(blue)), (0, 0, self.width, self.height))
+
+    def blank_margin(self, canvas):
+        """Black out the safe-area margin ring of a buffer; return the boxes painted."""
+        from safe_area import margin_boxes
+
+        boxes = margin_boxes(self.viewport, self.width, self.height)
+        if boxes:
+            with self._lock:
+                buffer = self._buffer(canvas)
+                for box in boxes:
+                    buffer.paste((0, 0, 0), box)
+        return boxes
 
     def pixel(self, canvas, x, y, red, green, blue):
         x, y = int(x), int(y)

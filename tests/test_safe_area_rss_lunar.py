@@ -66,7 +66,7 @@ def rss_cases():
             story, RenderOptions(layout='auto', headline_mode=mode), thumbnail=thumbnail)
         cases[f'banner-{mode}'] = r.prepare_story(
             story, RenderOptions(layout='auto', headline_mode=mode), banner=banner)
-    # A non-black background proves the margin matches on every surface.
+    # A non-black background proves the margin stays black on every surface.
     cases['text-once-blue'] = r.prepare_story(
         story, RenderOptions(layout='text', headline_mode='once', background_colour='#000040'))
     return cases
@@ -190,8 +190,12 @@ def edit_preview_frames(module_name, prepared, safe_area):
     return [(_decode(frame), frame['delay_ms']) for frame in frames]
 
 
-def inner_canvas_frames(test, module_name, prepared, safe_area, background):
-    """A plain CaptureMatrix that really is inner-sized, composed onto the panel."""
+def inner_canvas_frames(test, module_name, prepared, safe_area):
+    """A plain CaptureMatrix that really is inner-sized, placed on a panel with a black margin.
+
+    0.3.84 (owner decision 6): the margin ring is always black, so the reference
+    panel is black rather than the story/card background.
+    """
     from edit_preview import CaptureMatrix
     from modules import astronomy_display, rss
     width, height = safe_area.inner_size()
@@ -201,7 +205,7 @@ def inner_canvas_frames(test, module_name, prepared, safe_area, background):
 
     def record_swap(canvas=None):
         inner = capture.snapshot(canvas)
-        panel = Image.new('RGB', (64, 32), background)
+        panel = Image.new('RGB', (64, 32), 'black')
         panel.paste(inner, (safe_area.left, safe_area.top))
         frames.append(panel)
         return swap(canvas)
@@ -219,7 +223,7 @@ def _differing(a, b):
 class InnerCanvasParityTests(unittest.TestCase):
     """(b) playback == edit preview, (c) both == a real inner-size canvas; no resize anywhere."""
 
-    def assert_surfaces_agree(self, module_name, label, prepared, background):
+    def assert_surfaces_agree(self, module_name, label, prepared):
         for safe_area in INSETS:
             with self.subTest(case=label, safe_area=safe_area):
                 published, drawn, resized, inner = scheduled_frames(self, module_name, prepared, safe_area)
@@ -227,7 +231,7 @@ class InnerCanvasParityTests(unittest.TestCase):
                 self.assertEqual(set(drawn), {inner}, 'module must hand over an inner-size frame')
                 self.assertEqual(resized, [], 'no frame may be resized on the panel')
                 preview = edit_preview_frames(module_name, prepared, safe_area)
-                inner_frames = inner_canvas_frames(self, module_name, prepared, safe_area, background)
+                inner_frames = inner_canvas_frames(self, module_name, prepared, safe_area)
                 self.assertEqual(len(published), len(preview))
                 self.assertEqual(len(published), len(inner_frames))
                 for index, (panel, (shown, _), reference) in enumerate(zip(published, preview, inner_frames)):
@@ -236,11 +240,11 @@ class InnerCanvasParityTests(unittest.TestCase):
 
     def test_rss_layouts_match_a_real_inner_canvas(self):
         for name, story in rss_cases().items():
-            self.assert_surfaces_agree('rss', name, _rss_prepared(story), story.options.background_colour)
+            self.assert_surfaces_agree('rss', name, _rss_prepared(story))
 
     def test_lunar_views_match_a_real_inner_canvas(self):
         for name, card in lunar_cases().items():
-            self.assert_surfaces_agree('astronomy', name, _lunar_prepared(card), card.options.background)
+            self.assert_surfaces_agree('astronomy', name, _lunar_prepared(card))
 
 
 class ZeroSafeAreaTests(unittest.TestCase):
