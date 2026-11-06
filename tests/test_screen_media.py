@@ -1854,10 +1854,12 @@ class ScreenMediaRevisionTests(unittest.TestCase):
 
         controller._run_loop_unchecked()
 
-        self.assertEqual(controller._execute_scheduled_screen.call_args_list, [
-            call(config, first, maximum_duration=100),
-            call(config, second, maximum_duration=100),
-        ])
+        # Both rows are one Splash pool (owner 2026-10-30): one pick per cycle, the shuffled
+        # bag plays each row once before repeats; neither row's duration is a deadline.
+        calls = controller._execute_scheduled_screen.call_args_list
+        self.assertEqual(len(calls), 2)
+        self.assertTrue(all(c.args[0] is config and c.kwargs == {"maximum_duration": 100} for c in calls))
+        self.assertEqual(sorted(c.args[1]["id"] for c in calls), ["splash_short", "splash_shorter"])
 
     def test_short_splash_rows_still_render_stills_for_the_seven_second_fallback(self):
         from screen_media import MediaInfo, ScreenMediaRuntime
