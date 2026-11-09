@@ -33,6 +33,7 @@ from PIL import Image, ImageSequence
 
 from font_catalog import FONT_DIR, font_key
 from frame_capture import BdfFont, FrameCapture
+import safe_area as _safe_area_module
 from safe_area import ZERO as _NO_SAFE_AREA, SafeArea, clip_image as _clip_image
 
 root_path = pathlib.Path(__file__).resolve().parent
@@ -811,42 +812,24 @@ class Matrix:
         self, image, fit, target_width, target_height, *, x=0, y=0,
         width=None, height=None,
     ):
-        """Return the fitted image and its top-left panel placement."""
-        image = image.convert("RGB")
-        source_width, source_height = image.size
-        if fit == "contain":
-            scale = min(1, target_width / source_width, target_height / source_height)
-            draw_width = max(1, round(source_width * scale))
-            draw_height = max(1, round(source_height * scale))
-            draw_x = (target_width - draw_width) // 2
-            draw_y = (target_height - draw_height) // 2
-        elif fit == "cover":
-            scale = max(target_width / source_width, target_height / source_height)
-            draw_width = max(target_width, round(source_width * scale))
-            draw_height = max(target_height, round(source_height * scale))
-            draw_x = (target_width - draw_width) // 2
-            draw_y = (target_height - draw_height) // 2
-        elif fit == "stretch":
-            draw_width, draw_height = target_width, target_height
-            draw_x, draw_y = 0, 0
-        elif fit == "manual":
-            if (
-                isinstance(x, bool) or not isinstance(x, int)
-                or isinstance(y, bool) or not isinstance(y, int)
-                or isinstance(width, bool) or not isinstance(width, int) or width < 1
-                or isinstance(height, bool) or not isinstance(height, int) or height < 1
-            ):
-                raise ValueError("manual media fit requires integer geometry")
-            draw_width, draw_height = width, height
-            draw_x, draw_y = x, y
-        else:
-            raise ValueError(f"unknown media fit: {fit}")
+        """Return the fitted image and its top-left placement (safe_area.place_media)."""
+        return _safe_area_module.render_media(
+            image, fit, {"x": x, "y": y, "width": width, "height": height},
+            (target_width, target_height),
+        )
 
-        if image.size != (draw_width, draw_height):
-            image = image.resize(
-                (draw_width, draw_height), Image.Resampling.LANCZOS,
-            )
-        return image, draw_x, draw_y
+    def _place_media(self, image, fit, layout, canvas_size):
+        """Shared placement seam (safe_area.render_media): (prepared, x, y)."""
+        return _safe_area_module.render_media(image, fit, layout, canvas_size)
+
+    @staticmethod
+    def _media_canvas_size(*sources):
+        """First real (width, height) among sources; None when only test doubles answer."""
+        for source in sources:
+            width, height = getattr(source, "width", None), getattr(source, "height", None)
+            if isinstance(width, int) and isinstance(height, int) and width > 0 and height > 0:
+                return (width, height)
+        return None
 
     def draw_image(
         self, image, x=0, y=0, width=None, height=None, keep_aspect=True,
@@ -854,20 +837,13 @@ class Matrix:
     ):
         """Resize/rotate an image and mirror the exact canvas submission."""
         canvas = canvas or self.canvas
-        if fit is None:
-            prepared = self._prepare_image(
-                image, width=width, height=height, keep_aspect=keep_aspect
-            )
-            draw_x, draw_y = int(x), int(y)
-        else:
-            if self._viewport() is None:
-                target_width, target_height = int(canvas.width), int(canvas.height)
-            else:
-                target_width, target_height = int(self.matrix.width), int(self.matrix.height)
-            prepared, draw_x, draw_y = self._prepare_media_fit(
-                image, fit, target_width, target_height,
-                x=x, y=y, width=width, height=height,
-            )
+        sources = (canvas, self.matrix) if self._viewport() is None else (self.matrix, canvas)
+        canvas_size = self._media_canvas_size(*sources) or tuple(image.size)
+        prepared, draw_x, draw_y = self._place_media(
+            image, fit,
+            {"x": x, "y": y, "width": width, "height": height, "keep_aspect": keep_aspect},
+            canvas_size,
+        )
         if rotation:
             prepared = prepared.rotate(-rotation, expand=False)
         self._set_image(canvas, prepared, draw_x, draw_y)
@@ -1179,6 +1155,13 @@ class Matrix:
             ),
             completion=completion,
         )
+        if fit is None and width is None and height is None:
+            # A GIF played with no saved layout (media library preview) fits the
+            # canvas, as on a panel that really is this size; draw_image itself
+            # never resizes an unsized image (shared placement, 0.3.86).
+            canvas_size = self._media_canvas_size(self.matrix, getattr(self, "canvas", None))
+            if canvas_size is not None:
+                width, height = canvas_size
         try:
             for image, frame_delay in timeline:
                 try:

@@ -36,6 +36,11 @@ from media_resolver import module_media_references
 Matrix = framework.Matrix
 
 
+
+def _passthrough_placement(image, fit, layout, canvas_size):
+    """Placement stub for Mock frames: draw as given at the requested origin."""
+    return image, int(layout.get("x") or 0), int(layout.get("y") or 0)
+
 class MatrixFrameworkTests(unittest.TestCase):
     def test_import_without_rgbmatrix_allows_capture_but_physical_matrix_fails_closed(self):
         script = """
@@ -228,15 +233,19 @@ else:
         source = Mock()
         prepared = Mock()
         rotated = Mock()
-        matrix._prepare_image = Mock(return_value=prepared)
+        matrix._viewport = Mock(return_value=None)
+        canvas.width, canvas.height = 64, 32
         prepared.rotate.return_value = rotated
 
-        matrix.draw_image(
-            source, 4, 5, width=20, height=10, keep_aspect=False,
-            rotation=30, canvas=canvas,
-        )
+        with patch("safe_area.render_media", return_value=(prepared, 4, 5)) as render:
+            matrix.draw_image(
+                source, 4, 5, width=20, height=10, keep_aspect=False,
+                rotation=30, canvas=canvas,
+            )
 
-        matrix._prepare_image.assert_called_once_with(source, width=20, height=10, keep_aspect=False)
+        render.assert_called_once_with(
+            source, None, {"x": 4, "y": 5, "width": 20, "height": 10, "keep_aspect": False}, (64, 32),
+        )
         prepared.rotate.assert_called_once_with(-30, expand=False)
         canvas.SetImage.assert_called_once_with(rotated, 4, 5)
         matrix._frame_capture.set_image.assert_called_once_with(canvas, rotated, 4, 5)
@@ -1778,7 +1787,7 @@ else:
         matrix.swap = Mock(return_value=matrix.canvas)
         frame = Mock(info={"duration": 100})
         frame.copy.return_value = frame
-        matrix._prepare_image = Mock(return_value=frame)
+        matrix._place_media = _passthrough_placement
         stop = threading.Event()
         stop.set()
         path = Mock()
@@ -2223,7 +2232,7 @@ else:
         matrix.swap = Mock(return_value=matrix.canvas)
         frame = Mock(info={"duration": 200})
         frame.copy.return_value = frame
-        matrix._prepare_image = Mock(return_value=frame)
+        matrix._place_media = _passthrough_placement
         matrix._media_file = Mock(return_value=Mock())
 
         for rate, expected_delay in ((0.1, 2.0), (1.0, 0.2), (4.0, 0.05)):
@@ -2272,7 +2281,7 @@ else:
         matrix.swap = Mock(return_value=matrix.canvas)
         frame = Mock(info={"duration": 0})
         frame.copy.return_value = frame
-        matrix._prepare_image = Mock(return_value=frame)
+        matrix._place_media = _passthrough_placement
         matrix._media_file = Mock(return_value=Mock())
 
         with patch.object(framework.Image, "open", return_value=Mock()), patch.object(
@@ -2291,7 +2300,7 @@ else:
         matrix.swap = Mock(return_value=matrix.canvas)
         frame = Mock(info={"duration": 10_000})
         frame.copy.return_value = frame
-        matrix._prepare_image = Mock(return_value=frame)
+        matrix._place_media = _passthrough_placement
         matrix._media_file = Mock(return_value=Mock())
 
         with patch.object(framework.Image, "open", return_value=Mock()), patch.object(
@@ -2317,7 +2326,7 @@ else:
         matrix.swap = Mock(side_effect=lambda: frame_ready.set() or matrix.canvas)
         frame = Mock(info={"duration": 10_000})
         frame.copy.return_value = frame
-        matrix._prepare_image = Mock(return_value=frame)
+        matrix._place_media = _passthrough_placement
         matrix._media_file = Mock(return_value=Mock())
         stop = threading.Event()
         result = []
@@ -2360,7 +2369,6 @@ else:
             matrix._frame_capture = Mock()
             matrix.clear = Mock()
             matrix.swap = Mock(return_value=matrix.canvas)
-            matrix._prepare_image = Mock(side_effect=lambda frame, **_: frame.copy())
             matrix._media_file = Mock(return_value=path)
 
             with patch.object(framework.Image, "open", side_effect=PillowImage.open), patch.object(
@@ -2387,6 +2395,7 @@ else:
 
     def test_show_video_cancelled_during_capture_update_is_not_published(self):
         matrix = Matrix.__new__(Matrix)
+        matrix._place_media = _passthrough_placement
         matrix.canvas = Mock()
         matrix.matrix = Mock(width=64, height=32)
         matrix.matrix.SwapOnVSync.return_value = matrix.canvas
@@ -2417,6 +2426,7 @@ else:
         from modules.media_player import play_media
 
         matrix = Matrix.__new__(Matrix)
+        matrix._place_media = _passthrough_placement
         matrix.canvas = Mock()
         matrix.matrix = Mock(width=64, height=32)
         matrix.matrix.SwapOnVSync.return_value = matrix.canvas
@@ -2445,6 +2455,7 @@ else:
         from modules.media_player import play_media
 
         matrix = Matrix.__new__(Matrix)
+        matrix._place_media = _passthrough_placement
         matrix.canvas = Mock()
         matrix.matrix = Mock(width=64, height=32)
         matrix.matrix.SwapOnVSync.return_value = matrix.canvas
@@ -2472,6 +2483,7 @@ else:
 
     def test_show_video_decodes_frames_into_hardware_and_live_preview(self):
         matrix = Matrix.__new__(Matrix)
+        matrix._place_media = lambda image, fit, layout, size: (image.convert("RGB").copy(), 0, 0)
         matrix.matrix = Mock(width=64, height=32)
         matrix.canvas = Mock()
         matrix._frame_capture = Mock()
@@ -2510,6 +2522,7 @@ else:
 
     def test_video_playback_rate_scales_timeline_without_changing_default(self):
         matrix = Matrix.__new__(Matrix)
+        matrix._place_media = _passthrough_placement
         matrix.matrix = Mock(width=64, height=32)
         matrix.canvas = Mock()
         matrix._frame_capture = Mock()

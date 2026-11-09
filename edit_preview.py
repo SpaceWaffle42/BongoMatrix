@@ -118,37 +118,14 @@ class CaptureMatrix:
         rotation=0, canvas=None, fit=None,
     ):
         canvas = canvas or self.canvas
-        prepared = image.convert("RGB")
-        if fit is not None:
-            target = self.matrix
-            target_width, target_height = int(target.width), int(target.height)
-            source_width, source_height = prepared.size
-            if fit == "contain":
-                scale = min(1, target_width / source_width, target_height / source_height)
-            elif fit == "cover":
-                scale = max(target_width / source_width, target_height / source_height)
-            elif fit == "stretch":
-                scale = None
-                width, height, x, y = target_width, target_height, 0, 0
-            elif fit == "manual":
-                scale = None
-            else:
-                raise ValueError(f"unknown media fit: {fit}")
-            if scale is not None:
-                width = max(1, round(source_width * scale))
-                height = max(1, round(source_height * scale))
-                x, y = (target_width - width) // 2, (target_height - height) // 2
-            width = target_width if width is None else width
-            height = target_height if height is None else height
-            if prepared.size != (int(width), int(height)):
-                # Same filter as Matrix._prepare_media_fit so preview pixels match the panel.
-                prepared = prepared.resize((int(width), int(height)), Image.Resampling.LANCZOS)
-        elif width is not None and height is not None:
-            if keep_aspect:
-                prepared = prepared.copy()
-                prepared.thumbnail((width, height), Image.Resampling.LANCZOS)
-            else:
-                prepared = prepared.resize((width, height), Image.Resampling.LANCZOS)
+        import safe_area as safe_area_module
+
+        target = self.matrix
+        prepared, x, y = safe_area_module.render_media(
+            image, fit,
+            {"x": x, "y": y, "width": width, "height": height, "keep_aspect": keep_aspect},
+            (int(target.width), int(target.height)),
+        )
         if rotation:
             prepared = prepared.rotate(-rotation, expand=False)
         self._capture.set_image(canvas, prepared, x, y)
@@ -516,9 +493,7 @@ def media_preview_frames(
         gif_composited_frames, gif_media_frames, video_media_frames,
     )
 
-    from safe_area import fit_media_geometry
-
-    settings = fit_media_geometry(matrix, settings or {}) or {}
+    settings = settings or {}
     duration = max(0.0, float(duration))
     started = monotonic()
     decode_timeout = duration if decode_timeout is None else max(0.0, float(decode_timeout))

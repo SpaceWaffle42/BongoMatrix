@@ -3,6 +3,7 @@ import copy
 import datetime as dt
 import hashlib
 import json
+import io
 import tempfile
 import types
 import unittest
@@ -562,18 +563,20 @@ FULL_PANEL = {"x": 0, "y": 0, "width": 64, "height": 32, "keep_aspect": False}
 
 
 class FullScreenMediaFitTests(unittest.TestCase):
-    """Full-screen media is scaled into the safe area, not translated and cut off."""
+    """Owner decision 2 (0.3.86): saved media x/y/w/h are pixels on the inner canvas.
 
-    def assert_fitted(self, frame):
+    A 64x32 layout on a 2 px safe area is cropped at the inner 60x28 canvas exactly as on a
+    panel that really is 60x28 (it was scaled into the safe area before 0.3.86)."""
+
+    def assert_cropped(self, frame):
         for x in range(64):
             for y in range(32):
                 if not (2 <= x <= 61 and 2 <= y <= 29):
                     self.assertEqual(frame.getpixel((x, y)), (0, 0, 0), (x, y))
-        right = frame.getpixel((61, 12))
-        self.assertGreater(right[1], right[0], f"right source edge visible: {right}")
-        bottom = frame.getpixel((20, 29))
-        self.assertGreater(bottom[2], bottom[0], f"bottom source edge visible: {bottom}")
-        self.assertEqual(frame.getpixel((2, 2)), (255, 0, 0))
+        with Image.open(io.BytesIO(_edge_marked_png())) as source:
+            expected = source.convert("RGB").crop((0, 0, 60, 28))
+        self.assertEqual(frame.crop((2, 2, 62, 30)).tobytes(), expected.tobytes(),
+                         "inner canvas shows the source 1:1 from its top-left, cut at 60x28")
 
     def assert_full_panel(self, frame):
         self.assertEqual(frame.getpixel((0, 0)), (255, 0, 0))
@@ -589,9 +592,9 @@ class FullScreenMediaFitTests(unittest.TestCase):
                        pinned_handle=_BytesPin(_edge_marked_png()))
         return matrix._hardware.shown, Image.frombytes("RGB", (64, 32), matrix.latest_frame_rgb()[0])
 
-    def test_play_media_fits_a_full_panel_still_inside_the_safe_area(self):
+    def test_play_media_crops_a_full_panel_layout_at_the_inner_canvas(self):
         for frame in self.physical_play(EDGES2):
-            self.assert_fitted(frame)
+            self.assert_cropped(frame)
 
     def test_play_media_covers_the_whole_panel_when_media_may_go_under_the_frame(self):
         outside = SafeArea(top=2, right=2, bottom=2, left=2, media_inside=False)
@@ -600,7 +603,7 @@ class FullScreenMediaFitTests(unittest.TestCase):
 
     def test_edit_preview_media_matches_the_panel(self):
         from edit_preview import media_preview_frames
-        for safe_area, check in ((EDGES2, self.assert_fitted),
+        for safe_area, check in ((EDGES2, self.assert_cropped),
                                  (SafeArea(top=2, right=2, bottom=2, left=2, media_inside=False),
                                   self.assert_full_panel)):
             capture = CaptureMatrix(safe_area=safe_area, media=True)
@@ -612,7 +615,7 @@ class FullScreenMediaFitTests(unittest.TestCase):
             panel = self.physical_play(safe_area)[0]
             self.assertEqual(capture.snapshot().tobytes(), panel.tobytes(), "preview == panel")
 
-    def test_custom_media_screen_with_manual_geometry_is_fitted(self):
+    def test_custom_media_screen_with_manual_geometry_is_cropped(self):
         from modules import custom_text
         matrix, patcher = physical_matrix()
         self.addCleanup(patcher.stop)
@@ -621,7 +624,7 @@ class FullScreenMediaFitTests(unittest.TestCase):
                 patch.object(custom_text, "_wait", lambda *args: False):
             custom_text.run(matrix, {}, 0.01, module_config=module_config,
                             pinned_handles={"edge.png": _BytesPin(_edge_marked_png())})
-        self.assert_fitted(matrix._hardware.shown)
+        self.assert_cropped(matrix._hardware.shown)
 
 if __name__ == "__main__":
     unittest.main()

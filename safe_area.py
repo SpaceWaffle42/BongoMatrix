@@ -164,38 +164,96 @@ def marker_points(viewport, width=PANEL_WIDTH, height=PANEL_HEIGHT, *, phase=0):
     return [point for index, point in enumerate(perimeter) if (index + phase) % 2 == 0]
 
 
-def fit_media_geometry(matrix, settings):
-    """Scale panel-space media geometry into the active full-screen-media safe area.
+FITS = ("contain", "cover", "stretch", "manual")
 
-    Saved splash/sleep layouts and custom media screens store absolute panel
-    geometry (usually x0 y0 w64 h32). With ``media_inside`` on, the safe-area
-    scope already translates drawing by (left, top), so this only rescales from
-    the panel size to the inner size: x' = x*iw/pw, w' = (x+w)*iw/pw - x'.
-    Anything else (no scope, toggle off, plain mocks) returns ``settings`` as is.
+
+def _whole(value):
+    return isinstance(value, int) and not isinstance(value, bool)
+
+
+def _thumbnail_size(source, box):
+    """The size Pillow's ``Image.thumbnail(box)`` produces (never enlarges)."""
+    import math
+
+    width, height = source
+    box_width, box_height = box
+    if box_width >= width and box_height >= height:
+        return width, height
+    aspect = width / height
+
+    def round_aspect(number, key):
+        return max(min(math.floor(number), math.ceil(number), key=key), 1)
+
+    if box_width / box_height >= aspect:
+        box_width = round_aspect(box_height * aspect, key=lambda n: abs(aspect - n / box_height))
+    else:
+        box_height = round_aspect(
+            box_width / aspect, key=lambda n: 0 if n == 0 else abs(aspect - box_width / n),
+        )
+    return box_width, box_height
+
+
+def place_media(source_size, fit, layout, canvas_size):
+    """Where one image goes on the canvas: ``((draw_w, draw_h), (draw_x, draw_y))``.
+
+    The single media placement rule for the physical Matrix and the Edit Preview
+    (owner decision 2, 2026-10-31). ``canvas_size`` is the drawing canvas: the inner
+    size under a safe area, so the panel behaves as if it were really that small.
+    Saved x/y/width/height are pixels on that canvas, never rescaled; anything past
+    its edge is clipped by the caller's viewport.
+
+    ``fit`` contain/cover/stretch size against the canvas; manual uses the layout as
+    authored. With no ``fit``: width+height is a box (``keep_aspect`` fits inside it the
+    way ``Image.thumbnail`` does, otherwise exact), one side scales proportionally, and
+    no size at all is a 1:1 blit.
     """
-    if not settings:
-        return settings
-    safe_area = getattr(matrix, "safe_area", None)
-    state = getattr(matrix, "__dict__", {})
-    if (not isinstance(safe_area, SafeArea) or not state.get("_safe_area_media", False)
-            or safe_area.is_zero or not safe_area.media_inside):
-        return settings
-    inner = matrix.matrix
-    inner_width, inner_height = int(inner.width), int(inner.height)
-    panel_width = inner_width + safe_area.left + safe_area.right
-    panel_height = inner_height + safe_area.top + safe_area.bottom
-    scaled = dict(settings)
-    for position, size, inner_size, panel_size in (
-        ("x", "width", inner_width, panel_width),
-        ("y", "height", inner_height, panel_height),
-    ):
-        start = settings.get(position)
-        extent = settings.get(size)
-        numeric = lambda value: isinstance(value, (int, float)) and not isinstance(value, bool)
-        if numeric(start):
-            scaled[position] = round(start * inner_size / panel_size)
-        if numeric(extent):
-            origin = start if numeric(start) else 0
-            end = round((origin + extent) * inner_size / panel_size)
-            scaled[size] = max(1, end - round(origin * inner_size / panel_size))
-    return scaled
+    source_width, source_height = (int(value) for value in source_size)
+    canvas_width, canvas_height = (int(value) for value in canvas_size)
+    layout = layout or {}
+    x, y = layout.get("x", 0), layout.get("y", 0)
+    width, height = layout.get("width"), layout.get("height")
+    if fit is None:
+        if width is not None and height is not None:
+            if layout.get("keep_aspect", True):
+                size = _thumbnail_size((source_width, source_height), (int(width), int(height)))
+            else:
+                size = (int(width), int(height))
+        elif width is not None:
+            size = (int(width), int(source_height * (width / source_width)))
+        elif height is not None:
+            size = (int(source_width * (height / source_height)), int(height))
+        else:
+            size = (source_width, source_height)
+        return size, (int(x), int(y))
+    if fit == "contain":
+        scale = min(1, canvas_width / source_width, canvas_height / source_height)
+        size = (max(1, round(source_width * scale)), max(1, round(source_height * scale)))
+    elif fit == "cover":
+        scale = max(canvas_width / source_width, canvas_height / source_height)
+        size = (max(canvas_width, round(source_width * scale)),
+                max(canvas_height, round(source_height * scale)))
+    elif fit == "stretch":
+        return (canvas_width, canvas_height), (0, 0)
+    elif fit == "manual":
+        if not all(_whole(value) for value in (x, y, width, height)) or width < 1 or height < 1:
+            raise ValueError("manual media fit requires integer geometry")
+        return (width, height), (x, y)
+    else:
+        raise ValueError(f"unknown media fit: {fit}")
+    return size, ((canvas_width - size[0]) // 2, (canvas_height - size[1]) // 2)
+
+
+def render_media(image, fit, layout, canvas_size):
+    """Resample ``image`` once per :func:`place_media`; returns ``(image, x, y)``."""
+    image = image.convert("RGB")
+    size, (x, y) = place_media(image.size, fit, layout, canvas_size)
+    if image.size != size:
+        layout = layout or {}
+        if (fit is None and layout.get("width") is not None and layout.get("height") is not None
+                and layout.get("keep_aspect", True)):
+            # Same pixels as before: Image.thumbnail (reducing_gap draft + LANCZOS).
+            image = image.copy()
+            image.thumbnail((int(layout["width"]), int(layout["height"])), Image.Resampling.LANCZOS)
+        else:
+            image = image.resize(size, Image.Resampling.LANCZOS)
+    return image, x, y

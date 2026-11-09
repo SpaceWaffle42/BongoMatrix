@@ -438,6 +438,9 @@ def combined_digest(case, safe_areas, crop):
 # The black margin must leave both unchanged. Calendar (real-time countdown) and
 # Lava (random blobs, wall clock) are not deterministic and are checked for
 # surface agreement instead.
+# 0.3.86-preview, owner decision 2: splash/sleep inner pixels re-pinned. Their 64x32 layout is
+# now cropped at the inner canvas (verified: every surface/inset == source.crop((0,0,w,h)))
+# instead of being scaled into it; their 0 px digests are unchanged.
 MAIN_DIGESTS = {
     'address-notice': ('ecd5a684e12622ece098f6080eab0df780d08cc08d16647aeb44034476e636f1',
                        'f76caa0cd4a43ab0a8ece82d414436b6bd6b81399661cc6d2e253fa8b742c85f'),
@@ -482,9 +485,9 @@ MAIN_DIGESTS = {
     'rss': ('92aebb3cd650334a180070b2927d950689acf4f7caaa50e79e59475637797f01',
             '64405088cdef716a35fff54cd0a26fdba54d8a719e1257f8813fc385a9efc5a0'),
     'sleep': ('8d6e1463d82258ec6e286684f797ca4920a31405cb5cb436d92f2dae95c63429',
-              '2b591469b59b9f6e54f5f379c0ec9f39e7a3d2c1e6ab32e836a23f6a5cf50b35'),
+              '1772d5b92324730634a14980d629aba14e0bce93bf1dd2f6f99242eb5824a95c'),
     'splash': ('9c36daa82109b9fce1d4606381ec32704f6beb00a087f4b9db2b6ea44200cf7f',
-               '599ccade8db218e77e1ea8aa926034711e838d9e9b7e6c28cbca2070bdefd8c6'),
+               'f5a565a57a324abb80ac153c824bf1a422ca29d9c7978dff6cc835a167e3e3e9'),
     'weather': ('88bd4d84afc4382b4023e11d5e2ff9a05f71e87b95d6d8a7ff59f2fc64c3009a',
                 '7f94bd1f8c44cd2bebf864e5e397d40d2b2c089dc13f9656553f89866d4f128b'),
 }

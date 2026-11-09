@@ -250,6 +250,8 @@ class GroupedScreenIntegrationTests(unittest.TestCase):
         self.assertEqual(sorted(report['roles']), ['sleep', 'splash'])
         self.assertTrue(report['phone_dialog_fits'])
         self.assertFalse(report['phone_overflow'])
+        # Owner decision 2: presets and stage use the Safe Area's inner canvas.
+        self.assertEqual(report['safe_area_editor'], {'fill': [52, 20], 'canvas': '52x20'})
 
     def test_dashboard_modules_share_visual_contract(self):
         fixture = test_webapp.WebAppTests()
