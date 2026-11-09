@@ -322,6 +322,15 @@ class _InnerMatrixView:
         setattr(self._hardware, name, value)
 
 
+def _media_canvas_size(*sources):
+    """First real (width, height) among sources; None when only test doubles answer."""
+    for source in sources:
+        width, height = getattr(source, "width", None), getattr(source, "height", None)
+        if isinstance(width, int) and isinstance(height, int) and width > 0 and height > 0:
+            return (width, height)
+    return None
+
+
 class Matrix:
     @property
     def matrix(self):
@@ -822,15 +831,6 @@ class Matrix:
         """Shared placement seam (safe_area.render_media): (prepared, x, y)."""
         return _safe_area_module.render_media(image, fit, layout, canvas_size)
 
-    @staticmethod
-    def _media_canvas_size(*sources):
-        """First real (width, height) among sources; None when only test doubles answer."""
-        for source in sources:
-            width, height = getattr(source, "width", None), getattr(source, "height", None)
-            if isinstance(width, int) and isinstance(height, int) and width > 0 and height > 0:
-                return (width, height)
-        return None
-
     def draw_image(
         self, image, x=0, y=0, width=None, height=None, keep_aspect=True,
         rotation=0, canvas=None, fit=None,
@@ -838,7 +838,7 @@ class Matrix:
         """Resize/rotate an image and mirror the exact canvas submission."""
         canvas = canvas or self.canvas
         sources = (canvas, self.matrix) if self._viewport() is None else (self.matrix, canvas)
-        canvas_size = self._media_canvas_size(*sources) or tuple(image.size)
+        canvas_size = _media_canvas_size(*sources) or tuple(image.size)
         prepared, draw_x, draw_y = self._place_media(
             image, fit,
             {"x": x, "y": y, "width": width, "height": height, "keep_aspect": keep_aspect},
@@ -1159,7 +1159,7 @@ class Matrix:
             # A GIF played with no saved layout (media library preview) fits the
             # canvas, as on a panel that really is this size; draw_image itself
             # never resizes an unsized image (shared placement, 0.3.86).
-            canvas_size = self._media_canvas_size(self.matrix, getattr(self, "canvas", None))
+            canvas_size = _media_canvas_size(getattr(self, "matrix", None), getattr(self, "canvas", None))
             if canvas_size is not None:
                 width, height = canvas_size
         try:
