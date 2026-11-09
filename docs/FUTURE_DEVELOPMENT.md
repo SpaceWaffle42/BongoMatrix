@@ -356,6 +356,7 @@ Whole-project review findings F1–F15 were reproduced, fixed under TDD, indepen
 
 - ~~One flow per screen with screen-specific media, saved-state repair, and a selected-GIF still-duration calculation.~~
 - ~~Splash plays a shuffled bag of its enabled screens.~~
+- **Fix (owner, 2026-10-30; 0.3.85-preview):** each Splash slot plays exactly **one** random pick from everything ticked, then the playlist moves on. The dashboard saves every ticked item as its own (hidden) Splash row, and those rows used to play one after another; the scheduler now treats all Splash rows as one pool (shuffled bag: every item once before repeats) played at the first row's place.
 - ~~Sleep picks one enabled screen at random as the night begins and plays only that one until wake; the next night picks again.~~
 - ~~The pick survives previews, reloads and pairing; it moves to another enabled screen only when the picked one has no usable media.~~
 - ~~A Sleep screen with several sources keeps its one retained media choice for the night.~~

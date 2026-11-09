@@ -1854,10 +1854,12 @@ class ScreenMediaRevisionTests(unittest.TestCase):
 
         controller._run_loop_unchecked()
 
-        self.assertEqual(controller._execute_scheduled_screen.call_args_list, [
-            call(config, first, maximum_duration=100),
-            call(config, second, maximum_duration=100),
-        ])
+        # Both rows are one Splash pool (owner 2026-10-30): one pick per cycle, the shuffled
+        # bag plays each row once before repeats; neither row's duration is a deadline.
+        calls = controller._execute_scheduled_screen.call_args_list
+        self.assertEqual(len(calls), 2)
+        self.assertTrue(all(c.args[0] is config and c.kwargs == {"maximum_duration": 100} for c in calls))
+        self.assertEqual(sorted(c.args[1]["id"] for c in calls), ["splash_short", "splash_shorter"])
 
     def test_short_splash_rows_still_render_stills_for_the_seven_second_fallback(self):
         from screen_media import MediaInfo, ScreenMediaRuntime
@@ -1952,6 +1954,65 @@ class ScreenMediaRevisionTests(unittest.TestCase):
             config, splash, maximum_duration=5,
         )
         controller._execute.assert_not_called()
+
+    def test_several_selected_splash_rows_play_one_random_pick_per_slot(self):
+        """Owner (2026-10-30, repeated): Splash picks ONE random item from the
+        selection each time it is called; it never plays every selected item in a row."""
+        for placement in ("adjacent", "appended"):
+            with self.subTest(placement=placement):
+                self._assert_one_splash_pick_per_cycle(placement)
+
+    def _assert_one_splash_pick_per_cycle(self, placement):
+        from screen_media import MediaInfo, ScreenMediaRuntime
+
+        names = ("a.gif", "b.gif", "c.gif")
+        catalog = lambda _screen: {
+            name: MediaInfo(name, (1, index, 1, 1, 1), "gif", 2000, frame_delays_ms=(2000,))
+            for index, name in enumerate(names)
+        }
+        config = copy.deepcopy(DEFAULT_CONFIG)
+        splash = next(item for item in config["playlist"] if item["module"] == "splash")
+        splash.update(source="a.gif", sources=["a.gif"], enabled=True, id="splash-a")
+        position = config["playlist"].index(splash)
+        # The dashboard saves each ticked item as its own row: split pools sit beside
+        # the first row, later ticks are appended to the end of the playlist.
+        for name in names[1:]:
+            row = copy.deepcopy(splash)
+            row.update(source=name, sources=[name], id="splash-" + name[0])
+            if placement == "adjacent":
+                position += 1
+                config["playlist"].insert(position, row)
+            else:
+                config["playlist"].append(row)
+        for item in config["playlist"]:
+            if item["module"] not in {"splash", "sleep"}:
+                item["enabled"] = item["module"] in {"weather", "clock_lava"}
+        store = Mock(get=Mock(return_value=config), media_root=Path("/nonexistent"))
+        controller = DisplayController(Mock(), store)
+        controller._screen_runtime = ScreenMediaRuntime(catalog=catalog)
+        controller._take_preview = Mock(return_value=None)
+        controller._take_media_preview = Mock(return_value=None)
+        controller._take_announcement_preview = Mock(return_value=None)
+        controller._is_active = Mock(return_value=True)
+        controller._seconds_until_schedule_change = Mock(return_value=3600)
+        played = []
+
+        def execute(name, selected, _duration, **_kwargs):
+            played.append(selected["media"]["splash"] if name == "splash" else name)
+            if len(played) >= 40:
+                controller._shutdown.set()
+            return True
+
+        controller._execute = execute
+        controller._run_loop_unchecked()
+
+        cycles = [cycle.split() for cycle in " ".join(played).split("clock_lava")]
+        cycles = [[name for name in cycle if name != "weather"] for cycle in cycles[:-1]]
+        self.assertGreater(len(cycles), 3, played)
+        for cycle in cycles:
+            self.assertEqual(len(cycle), 1, f"one cycle played splash {cycle}, not one pick")
+        picks = [cycle[0] for cycle in cycles]
+        self.assertEqual(set(picks[:3]), set(names), f"bag did not use every item once: {picks}")
 
     def test_scheduled_sleep_retains_choice_and_caps_duration_at_wake_boundary(self):
         from screen_media import MediaInfo, ScreenMediaRuntime

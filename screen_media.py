@@ -225,6 +225,7 @@ class ScreenMediaRuntime:
         self._splash_states = {}
         self._retired_splash = {}
         self._last_splash_row_key = None
+        self._splash_slot_bags = {}
         self._retired_sleep = {}
         self._last_sleep_row_key = None
         self._sleep_active = False
@@ -407,6 +408,36 @@ class ScreenMediaRuntime:
                 )
             chosen = keys.index(self._night_sleep_row_key)
             return [rows[chosen], *rows[:chosen], *rows[chosen + 1:]]
+
+    def splash_slot_rows(self, rows):
+        """Order one Splash slot's rows: one random pick first, the rest as fallbacks.
+
+        Rows come from a shuffled bag, so every selected row is used once before any
+        repeats; a slot with one row is returned unchanged.
+        """
+        rows = [row for row in rows if isinstance(row, dict)]
+        if len(rows) < 2:
+            return rows
+        with self._lock:
+            keys = [self._splash_row_key(row) for row in rows]
+            slot = tuple(keys)
+            bag = [key for key in self._splash_slot_bags.get(slot, []) if key in keys]
+            if not bag:
+                bag = list(keys)
+                self._shuffle(bag)
+            pick = bag.pop()
+            self._splash_slot_bags[slot] = bag
+            chosen = keys.index(pick)
+            return [rows[chosen], *rows[:chosen], *rows[chosen + 1:]]
+
+    def splash_row_unrendered(self, row) -> bool:
+        """True when a Splash row has no usable media (so a fallback row may play)."""
+        with self._lock:
+            return not self._effective({"playlist": [row]}, "splash", row)
+
+    @staticmethod
+    def _splash_row_key(row):
+        return row.get("id") if isinstance(row.get("id"), str) else "splash"
 
     def keep_night_sleep_row(self, row) -> None:
         """Record the row that rendered as tonight's Sleep screen."""
