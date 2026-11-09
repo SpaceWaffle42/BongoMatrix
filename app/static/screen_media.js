@@ -116,14 +116,24 @@ const SCREEN_LAYOUT_FIELDS = [
   ['playback', 'Playback', [['playback_speed_percent', 'Speed (%)']]],
 ];
 let screenMediaDialogSerial = 0;
+// The media canvas: the Screen Safe Area's inner size (owner decision 2), so saved
+// x/y/width/height are pixels on the smaller canvas; the full 64x32 panel with no safe
+// area or with "media stays inside" off.
+function screenCanvasSize() {
+  const area = typeof safeAreaFromInputs === 'function' ? safeAreaFromInputs() : null;
+  if (!area || area.media_inside === false) return [64, 32];
+  const edge = name => Math.max(0, Number(area[name]) || 0);
+  return [Math.max(1, 64 - edge('left') - edge('right')), Math.max(1, 32 - edge('top') - edge('bottom'))];
+}
 function screenLayoutSummary(layout) {
-  const full = layout.x === 0 && layout.y === 0 && layout.width === 64 && layout.height === 32;
+  const [canvasWidth, canvasHeight] = screenCanvasSize();
+  const full = layout.x === 0 && layout.y === 0 && layout.width === canvasWidth && layout.height === canvasHeight;
   const parts = [full ? 'Full screen' : layout.width + '×' + layout.height + ' at ' + layout.x + ', ' + layout.y];
   if (!layout.keep_aspect) parts.push('stretched');
   if (layout.playback_speed_percent !== 100) parts.push(layout.playback_speed_percent + '% speed');
   return parts.join(' · ');
 }
-// Mirrors MatrixFramework._prepare_image: keep_aspect fits inside the box without enlarging; otherwise stretches.
+// Mirrors safe_area.place_media: keep_aspect fits inside the box without enlarging; otherwise stretches.
 function screenLayoutDrawSize(layout, media) {
   const sourceWidth = Number(media.width) || 64, sourceHeight = Number(media.height) || 32;
   if (!layout.keep_aspect) return [layout.width, layout.height];
@@ -164,17 +174,21 @@ function screenMediaCard(role, media, row) {
   inspect.classList.add('palette-inspect');
   inspect.setAttribute('aria-label', 'Inspect ' + media.name + ' in Edit Preview');
   actions.append(edit, inspect); card.append(actions);
-  let dialog = null, stageImage = null, stageBox = null;
+  let dialog = null, stageImage = null, stageBox = null, stageFrame = null;
   function refreshLayout() {
     if (!row) return;
     const layout = mediaPlaylistLayout(row);
     summary.textContent = screenLayoutSummary(layout);
     if (!dialog) return;
     const [drawWidth, drawHeight] = screenLayoutDrawSize(layout, media);
-    Object.assign(stageBox.style, {left: layout.x / 64 * 100 + '%', top: layout.y / 32 * 100 + '%',
-      width: layout.width / 64 * 100 + '%', height: layout.height / 32 * 100 + '%'});
-    Object.assign(stageImage.style, {left: layout.x / 64 * 100 + '%', top: layout.y / 32 * 100 + '%',
-      width: drawWidth / 64 * 100 + '%', height: drawHeight / 32 * 100 + '%'});
+    const [cw, ch] = screenCanvasSize();
+    stageFrame.style.aspectRatio = cw + ' / ' + ch; stageFrame.dataset.canvas = cw + 'x' + ch;
+    stageFrame.style.backgroundSize = 'calc(100% / ' + (cw / 4) + ') calc(100% / ' + (ch / 4) + ')';
+    stageFrame.setAttribute('aria-label', 'Layout preview on the ' + cw + ' by ' + ch + ' Matrix canvas');
+    Object.assign(stageBox.style, {left: layout.x / cw * 100 + '%', top: layout.y / ch * 100 + '%',
+      width: layout.width / cw * 100 + '%', height: layout.height / ch * 100 + '%'});
+    Object.assign(stageImage.style, {left: layout.x / cw * 100 + '%', top: layout.y / ch * 100 + '%',
+      width: drawWidth / cw * 100 + '%', height: drawHeight / ch * 100 + '%'});
   }
   card.refreshScreenLayout = refreshLayout;
   function openDialog() {
@@ -191,7 +205,8 @@ function screenMediaCard(role, media, row) {
   }
   function centred(layout) {
     const [drawWidth, drawHeight] = screenLayoutDrawSize(layout, media);
-    return {x: Math.max(0, Math.floor((64 - drawWidth) / 2)), y: Math.max(0, Math.floor((32 - drawHeight) / 2))};
+    const [cw, ch] = screenCanvasSize();
+    return {x: Math.max(0, Math.floor((cw - drawWidth) / 2)), y: Math.max(0, Math.floor((ch - drawHeight) / 2))};
   }
   function buildDialog(original) {
     const serial = ++screenMediaDialogSerial, element = document.createElement('dialog');
@@ -202,7 +217,7 @@ function screenMediaCard(role, media, row) {
     const heading = document.createElement('h2'); heading.id = 'screen-media-dialog-title-' + serial; heading.textContent = media.name;
     const note = document.createElement('p'); note.textContent = (role === 'splash' ? 'Splash' : 'Sleep') + ' screen layout · changes apply when saved';
     head.append(heading, note);
-    const frame = document.createElement('div'); frame.className = 'screen-media-frame';
+    const frame = stageFrame = document.createElement('div'); frame.className = 'screen-media-frame';
     frame.setAttribute('role', 'img'); frame.setAttribute('aria-label', 'Layout preview on the 64 by 32 Matrix');
     stageImage = document.createElement('img'); stageImage.className = 'screen-media-stage-image'; stageImage.alt = '';
     stageImage.src = lazyMediaPlaceholder;
@@ -210,10 +225,11 @@ function screenMediaCard(role, media, row) {
     frame.append(stageImage, stageBox);
     const presets = document.createElement('div'); presets.className = 'screen-media-presets';
     presets.append(
-      makeButton('Fill screen', () => setLayout({x: 0, y: 0, width: 64, height: 32})),
+      makeButton('Fill screen', () => { const [cw, ch] = screenCanvasSize(); setLayout({x: 0, y: 0, width: cw, height: ch}); }),
       makeButton('Centre', () => setLayout(centred(mediaPlaylistLayout(row)))),
       makeButton('Original size', () => {
-        const size = {width: Math.min(64, Number(media.width) || 64), height: Math.min(32, Number(media.height) || 32)};
+        const [cw, ch] = screenCanvasSize();
+        const size = {width: Math.min(cw, Number(media.width) || cw), height: Math.min(ch, Number(media.height) || ch)};
         setLayout({...size, ...centred({...mediaPlaylistLayout(row), ...size})});
       }));
     const fields = document.createElement('div'); fields.className = 'screen-media-fields';

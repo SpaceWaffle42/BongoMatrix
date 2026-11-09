@@ -52,6 +52,36 @@ try{
   await click(card+' .screen-media-selected');await until('!'+editDisabled);
   report.roles[role]={row_id_ok:true,edited_x:edited.layout.x,edit_follows_selection:true};
  }
+ // Owner decision 2: under a Screen Safe Area the layout editor works on the inner canvas.
+ {
+  const card='#screen-media-splash .screen-media-choice[data-source="editor_upload.gif"]';
+  await evaluate(`(()=>{for(const edge of ['top','right','bottom','left']){const el=document.querySelector('#safe-area-'+edge);el.value='6';el.dispatchEvent(new Event('input',{bubbles:true}))}const inside=document.querySelector('#safe-area-media-inside');inside.checked=true;inside.dispatchEvent(new Event('change',{bubbles:true}));return true})()`);
+  assert.deepEqual(await evaluate('screenCanvasSize()'),[52,20],'inner canvas = 64-6-6 x 32-6-6');
+  await click(card+' .screen-media-edit');await until(`document.querySelector(${JSON.stringify(card+' dialog[open]')})`);
+  const rowId=await evaluate(`document.querySelector(${JSON.stringify(card)}).dataset.rowId`);
+  const preset=name=>evaluate(`[...document.querySelectorAll(${JSON.stringify(card+' dialog[open] .screen-media-presets button')})].find(b=>b.textContent===${JSON.stringify(name)}).click()`);
+  await preset('Fill screen');
+  const filled=(await layout(rowId)).layout;
+  assert.deepEqual([filled.x,filled.y,filled.width,filled.height],[0,0,52,20],'Fill screen = inner canvas');
+  assert.equal(await evaluate(`document.querySelector(${JSON.stringify(card+' .screen-media-frame')}).dataset.canvas`),'52x20','stage is the inner canvas');
+  assert.match(await evaluate(`document.querySelector(${JSON.stringify(card+' .screen-media-summary')}).textContent`),/^Full screen/,'inner-size layout reads as Full screen');
+  await click(card+' dialog[open] [data-media-layout="width"]');
+  await send('Input.dispatchKeyEvent',{type:'keyDown',key:'a',code:'KeyA',windowsVirtualKeyCode:65,modifiers:2});await send('Input.dispatchKeyEvent',{type:'keyUp',key:'a',code:'KeyA',windowsVirtualKeyCode:65,modifiers:2});
+  await send('Input.insertText',{text:'32'});
+  await click(card+' dialog[open] [data-media-layout="height"]');
+  await send('Input.dispatchKeyEvent',{type:'keyDown',key:'a',code:'KeyA',windowsVirtualKeyCode:65,modifiers:2});await send('Input.dispatchKeyEvent',{type:'keyUp',key:'a',code:'KeyA',windowsVirtualKeyCode:65,modifiers:2});
+  await send('Input.insertText',{text:'32'});
+  await preset('Centre');
+  const centred=(await layout(rowId)).layout;
+  // 64x32 source kept in aspect inside a 32x32 box draws 32x16: centred on 52x20 that is (10, 2);
+  // on the full 64x32 panel it would be (16, 8).
+  assert.deepEqual([centred.x,centred.y,centred.width,centred.height],[10,2,32,32],'Centre uses the inner canvas');
+  await evaluate(`[...document.querySelectorAll(${JSON.stringify(card+' dialog[open] button')})].find(b=>b.textContent==='Reset layout').click()`);
+  await send('Input.dispatchKeyEvent',{type:'keyDown',key:'Escape',code:'Escape',windowsVirtualKeyCode:27});await send('Input.dispatchKeyEvent',{type:'keyUp',key:'Escape',code:'Escape',windowsVirtualKeyCode:27});
+  await until(`!document.querySelector(${JSON.stringify(card+' dialog[open]')})`);
+  report.safe_area_editor={fill:[filled.width,filled.height],canvas:'52x20'};
+  await evaluate(`(()=>{for(const edge of ['top','right','bottom','left']){const el=document.querySelector('#safe-area-'+edge);el.value='0';el.dispatchEvent(new Event('input',{bubbles:true}))}return true})()`);
+ }
  await send('Emulation.setDeviceMetricsOverride',{width:390,height:844,deviceScaleFactor:1,mobile:true});await until('innerWidth===390');
  const phone='#screen-media-sleep .screen-media-choice[data-source="editor_upload.gif"]';
  await click(phone+' .screen-media-edit');await until(`document.querySelector(${JSON.stringify(phone+' dialog[open]')})`);
