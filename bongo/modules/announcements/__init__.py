@@ -218,10 +218,43 @@ class Flash(Base, Style):
         return img
 
 
+class Ribbon(Base, Style):
+    """Overlay: the current notice crawls along a slim band over whatever module is playing.
+    Fully transparent when nothing is scheduled, so it can stay switched on all day."""
+    fps = 20
+    defaults = {"scroll_speed": 18, "position": "bottom"}
+    choices = {"position": ["bottom", "top"]}
+
+    def render(self, now):
+        w, h = self.ctx.width, self.ctx.height
+        img = Image.new("RGBA", (w, h), (0, 0, 0, 0))
+        item, t = self.pick(now)
+        if item is None:
+            return img
+        font = self.F["5x7"] if h >= 24 else self.F["tom-thumb"]
+        band = font.cap + 4
+        y0 = h - band if self.settings["position"] == "bottom" else 0
+        acc = self.accent(item)
+        img.paste(self.dark + (240,), (0, y0, w, y0 + band))
+        rule = y0 if self.settings["position"] == "bottom" else y0 + band - 1
+        img.paste(acc + (255,), (0, rule, w, rule + 1))
+        title, text = item.get("title", ""), item.get("text", "")
+        parts = [(title.upper() + "  ", acc)] if title else []
+        parts.append((text, self.ink))
+        total = sum(font.width(p) for p, _ in parts) + w // 2
+        x = w - int(t * self.settings["scroll_speed"]) % (total + w)
+        base = y0 + (2 if self.settings["position"] == "bottom" else 1) + font.cap
+        for part, ink in parts:
+            font.draw(img, x, base, part, ink + (255,))
+            x += font.width(part)
+        return img
+
+
 MODULE = Module(
     id="announcements", name="Announcements",
     description="Scheduled notices that rotate: Banner scrolls the text, Card fits it, Flash pulses a title.",
     styles={"banner": Banner, "card": Card, "flash": Flash},
+    overlays={"ribbon": Ribbon},
     defaults=dict(
         items=[{"title": "Welcome", "text": "Notices you add on the dashboard appear here", "start": None,
                 "end": None, "days": None, "from": None, "to": None, "accent": None}],
