@@ -5,11 +5,11 @@ import math
 import numpy as np
 from PIL import Image, ImageFilter
 
-from bongo.fonts import align_x, middle
+from bongo.fonts import align_x, middle, names
 from bongo.module import Style
 
 from .field import field
-from .palettes import METRO, rgb
+from .palettes import METRO, enabled_custom, metro_from, rgb
 
 SAMPLES = 2  # supersampling per axis for smooth edges
 
@@ -19,11 +19,19 @@ def _smooth(a, lo, hi):
     return t * t * (3 - 2 * t)
 
 
+def fitting(fonts, font, text, width):
+    """``font`` if ``text`` fits, else the first smaller bold font that does (e.g. HH:MM:SS)."""
+    for f in (font, *map(fonts, ("7x13B", "6x13B", "6x10"))):
+        if f.width(text) <= width - 2:
+            return f
+    return f
+
+
 class Metro(Style):
     fps = 30
-    choices = {"palette": list(METRO)}
+    choices = {"palettes": ["all", *METRO], "time_font": names(), "date_font": names()}
     defaults = dict(
-        palette="magma",          # name from palettes.METRO
+        palettes=["magma"],       # "all" or names from palettes.METRO; enabled custom ones join in
         blob_count=4, speed=1.0,  # speed scales how fast the wax drifts
         glow=0.6,                 # halo strength around the wax, 0-1
         text_halo=0.75,           # how much the lava darkens around the text, 0-1
@@ -33,9 +41,10 @@ class Metro(Style):
 
     def setup(self):
         s, rng, w, h = self.settings, self.ctx.rng, self.ctx.width, self.ctx.height
-        if s["palette"] not in METRO:
-            raise ValueError(f"lava_lamp/metro: no palette {s['palette']!r} (have {sorted(METRO)})")
-        p = {k: np.array(rgb(v), float) for k, v in METRO[s["palette"]].items()}
+        names = list(METRO) if s["palettes"] == "all" else s["palettes"]
+        pool = [METRO[n] for n in names] + [
+            metro_from(c["background"], c["wax"], c["highlight"]) for c in enabled_custom(s["custom_palettes"])]
+        p = {k: np.array(rgb(v), float) for k, v in rng.choice(pool).items()}
         self.p = p
         # Each blob: lane, rise/sink period, phase, sway, size, breathing.
         self.blobs = [dict(
