@@ -75,6 +75,9 @@ class Module:
     # longtext, date, time, days, colour; ``"more": True`` tucks a field under the entry's "More".
     basic: tuple = ()
     item_fields: dict = field(default_factory=dict)
+    # ``places={"location": ("latitude", "longitude")}``: the dashboard turns that setting into a place
+    # search; picking a result fills in the name and both coordinates together.
+    places: dict = field(default_factory=dict)
 
     @property
     def default_style(self) -> str:

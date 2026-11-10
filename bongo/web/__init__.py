@@ -20,7 +20,7 @@ from flask import Flask, abort, jsonify, request, send_file, send_from_directory
 from werkzeug.exceptions import HTTPException
 
 from bongo import config as cfg
-from bongo import media
+from bongo import media, places
 from bongo.module import Context
 from bongo.player import Entry
 from bongo.schema import describe
@@ -270,6 +270,16 @@ def create_app(*, modules, live, pairing, config_path, logs: LogBuffer | None = 
         out = io.BytesIO()
         img.save(out, "PNG")
         return send_file(io.BytesIO(out.getvalue()), mimetype="image/png", max_age=0)
+
+    @app.get("/api/places")
+    def place_search():
+        """Real places matching what's typed, for location settings (name -> coordinates)."""
+        query = request.args.get("q", "")
+        try:
+            return jsonify(places=places.search(query))
+        except (OSError, ValueError) as error:
+            logging.getLogger("bongo.web").warning("place search failed: %s", error)
+            return jsonify(error="Couldn't search for places just now; check the Matrix's internet connection."), 502
 
     # -- devices and logs ---------------------------------------------------------------------
     @app.get("/api/media")

@@ -130,7 +130,7 @@ export function render(view, match) {
   }
 
   function fieldRow(f) {
-    const row = h('div', { class: ['items', 'palettes', 'media'].includes(f.type) || f.swatches ? 'field wide' : 'field' });
+    const row = h('div', { class: ['items', 'palettes', 'media', 'place'].includes(f.type) || f.swatches ? 'field wide' : 'field' });
     const id = `f-${f.name}`;
     const cur = () => (f.name in e.settings ? e.settings[f.name] : f.default);
     const differs = () => differsFrom(f, e.settings);
@@ -148,7 +148,13 @@ export function render(view, match) {
           h('span', { class: 'changed-mark' }, 'changed'),
           h('button', { type: 'button', class: 'link reset', 'aria-label': `Reset ${humanize(f.name)} to default`,
             onclick: () => { delete e.settings[f.name]; changed(); paint(); } }, 'Reset')),
-        control(f, id, cur(), set),
+        control(f, id, cur(), set, {
+          // a place search also fills in the coordinates, then the form is redrawn to show them
+          picked: (place) => {
+            e.settings[f.latitude] = place.latitude; e.settings[f.longitude] = place.longitude;
+            paintFields(); changed();
+          },
+        }),
         h('div', { class: 'tiny muted' }, `Default: ${showDefault(f)}`));
     };
     paint();
@@ -231,8 +237,9 @@ function rangeFor(f) {
 }
 
 /** One input for one setting, by schema type. `set(value, repaint)` stores it. */
-function control(f, id, v, set) {
+function control(f, id, v, set, hooks = {}) {
   const T = f.type;
+  if (T === 'place') return placePicker(id, v, set, hooks.picked);
   if (T === 'bool') { const t = toggle(v, v ? 'On' : 'Off', (x) => set(x, true)); t.id = id; return t; }
   if (T === 'int' || T === 'number') return numberInput(f, id, v, set);
   if (T === 'media') return mediaPicker(id, v, set);
@@ -387,6 +394,56 @@ function itemList(f, id, v, set) {
   add.addEventListener('click', () => { list.push({}); paint(); box.querySelector(`#${id}-${list.length - 1}-${f.fields[0].name}`)?.focus(); });
   paint();
   return box;
+}
+
+/** Type a town and pick it from a list of real places (as in v2): the name and its latitude and
+ *  longitude are set together, so the location is always one that exists. Typing alone saves nothing. */
+function placePicker(id, v, set, picked) {
+  const input = h('input', { class: 'input', id, value: v ?? '', autocomplete: 'off', spellcheck: 'false', role: 'combobox',
+    'aria-autocomplete': 'list', 'aria-expanded': 'false', 'aria-controls': `${id}-list`, placeholder: 'Start typing a town or city' });
+  const list = h('ul', { class: 'place-list', id: `${id}-list`, role: 'listbox', hidden: true });
+  const note = h('span', { class: 'tiny muted', role: 'status' }, v ? `Using ${v}` : '');
+  let results = [], active = -1, timer = 0, seq = 0;
+  const close = () => { list.hidden = true; input.setAttribute('aria-expanded', 'false'); active = -1; };
+  const choose = (p) => {
+    input.value = p.label; close();
+    note.textContent = `Using ${p.label} (${p.latitude.toFixed(2)}, ${p.longitude.toFixed(2)})`;
+    set(p.label); picked?.(p);
+  };
+  const paint = () => {
+    list.replaceChildren(...results.map((p, i) => {
+      const li = h('li', { role: 'option', id: `${id}-opt-${i}`, class: 'place-option', 'aria-selected': String(i === active) },
+        h('span', { class: 'strong' }, p.name), h('span', { class: 'muted small' }, [p.region, p.country].filter(Boolean).join(', ')));
+      li.addEventListener('mousedown', (ev) => { ev.preventDefault(); choose(p); });
+      return li;
+    }));
+    list.hidden = !results.length; input.setAttribute('aria-expanded', String(!list.hidden));
+    input.setAttribute('aria-activedescendant', active >= 0 ? `${id}-opt-${active}` : '');
+  };
+  input.addEventListener('input', () => {
+    clearTimeout(timer);
+    const q = input.value.trim();
+    note.textContent = q && q !== v ? 'Pick a place from the list to use it.' : (v ? `Using ${v}` : '');
+    if (q.length < 2) { results = []; paint(); return; }
+    timer = setTimeout(async () => {
+      const mine = ++seq;
+      try {
+        const res = await get(`/api/places?q=${encodeURIComponent(q)}`);
+        if (mine !== seq) return;
+        results = res.places || []; active = results.length ? 0 : -1; paint();
+        if (!results.length) note.textContent = `No places called “${q}” found. Try another spelling.`;
+      } catch (err) { if (mine === seq) note.textContent = err.message; }
+    }, 250);
+  });
+  input.addEventListener('keydown', (ev) => {
+    if (list.hidden) return;
+    if (ev.key === 'ArrowDown' || ev.key === 'ArrowUp') {
+      ev.preventDefault(); active = (active + (ev.key === 'ArrowDown' ? 1 : -1) + results.length) % results.length; paint();
+    } else if (ev.key === 'Enter' && active >= 0) { ev.preventDefault(); choose(results[active]); }
+    else if (ev.key === 'Escape') close();
+  });
+  input.addEventListener('blur', () => setTimeout(close, 100));
+  return h('div', { class: 'place-picker stack-s' }, h('div', { class: 'place-box' }, input, list), note);
 }
 
 /** Pick a file from the media library (built-in/ and uploaded/), or upload a new one. */
