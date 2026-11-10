@@ -150,3 +150,99 @@ def test_waiting_screen_and_animation():
         inst = RSS.create(style, {"feeds": [FEED]}, Context(rng=random.Random(1)))
         a, b = inst.render(at(0)), inst.render(at(0.5))
         assert a.getbbox() and a.tobytes() != b.tobytes()
+
+
+THUMB_FEED = b"""<?xml version="1.0"?>
+<rss version="2.0" xmlns:media="http://search.yahoo.com/mrss/"><channel><title>Wire</title>
+<item><title>With thumbnail</title><media:thumbnail width="240" height="135" url="https://img.test/a.jpg"/></item>
+<item><title>With enclosure</title><enclosure url="https://img.test/b.png" type="image/png" length="1"/></item>
+<item><title>Not an image</title><enclosure url="https://x.test/c.mp3" type="audio/mpeg" length="1"/></item>
+<item><title>Bad scheme</title><media:thumbnail url="file:///etc/passwd"/></item>
+</channel></rss>"""
+
+
+def test_thumbnail_urls_are_parsed():
+    from bongo.modules.rss import data
+    images = [i.image for i in data.parse(THUMB_FEED).items]
+    assert images == ["https://img.test/a.jpg", "https://img.test/b.png", None, None]
+
+
+def test_picture_style_uses_the_thumbnail_and_crawls_long_headlines():
+    import datetime as dt
+    import random
+
+    import numpy as np
+    from PIL import Image
+
+    from bongo.module import Context
+    from bongo.modules.rss import MODULE, data
+    url = "https://pic.test/feed.xml"
+    long = "A rather long headline that cannot possibly fit in the narrow column beside the picture"
+    data.seed(url, data.Feed("Wire", (data.Item(long, None, "Wire", "https://img.test/red.jpg"),)))
+    data.seed_image("https://img.test/red.jpg", Image.new("RGB", (120, 80), (255, 0, 0)))
+    style = MODULE.create("picture", {"feeds": [url]}, Context(width=64, height=32, rng=random.Random(1)))
+    start = dt.datetime(2026, 11, 10, 12, 0, 0, tzinfo=dt.timezone.utc)
+    a = np.asarray(style.render(start))
+    assert tuple(a[16, 8]) == (255, 0, 0)  # the picture fills the left square
+    b = np.asarray(style.render(start + dt.timedelta(seconds=5)))
+    assert (a[:, 34:] != b[:, 34:]).any()  # headline has crawled
+    data.seed(url, data.Feed("Wire", (data.Item("Short", None, "Wire", None),)))
+    assert np.asarray(style.render(start))[16, 8].any()  # tile without a picture
+
+
+def test_only_rss_or_atom_documents_count_as_feeds():
+    import pytest
+
+    from bongo.modules.rss import data
+    for doc in (b"<html><body>router admin</body></html>", b"<svg/>"):
+        with pytest.raises(ValueError, match="not an RSS or Atom feed"):
+            data.parse(doc)
+    assert data.parse(b'<feed xmlns="http://www.w3.org/2005/Atom"><title>A</title></feed>').title == "A"
+    assert data.parse(b'<rdf:RDF xmlns:rdf="http://www.w3.org/1999/02/22-rdf-syntax-ns#"/>').items == ()
+
+
+def test_feed_addresses_must_be_web_addresses():
+    import pytest
+
+    from bongo.modules.rss import MODULE
+    for bad in (["file:///etc/passwd"], ["ftp://x.test/feed"], ["not a url"], ["https://"]):
+        with pytest.raises(ValueError, match="isn't a web address"):
+            MODULE.settings_for("ticker", {"feeds": bad})
+    MODULE.settings_for("ticker", {"feeds": ["https://feeds.bbci.co.uk/news/rss.xml", "http://example.com/a.xml"]})
+
+
+def test_saving_checks_new_feeds_are_really_feeds(monkeypatch, tmp_path):
+    from bongo.live import Live
+    from bongo.modules.rss import data
+    from bongo.pairing import Pairing
+    from bongo.registry import discover
+    from bongo.web import create_app
+
+    monkeypatch.delenv("BONGO_OFFLINE", raising=False)
+    good = b'<rss version="2.0"><channel><title>Good</title><item><title>Hi</title></item></channel></rss>'
+    pages = {"https://good.test/rss": good, "https://bad.test/page": b"<html><body>hi</body></html>"}
+    calls = []
+
+    def fake_fetch(url):
+        calls.append(url)
+        if url not in pages:
+            raise OSError("no route to host")
+        return pages[url]
+
+    monkeypatch.setattr(data, "fetch_bytes", fake_fetch)
+    pairing = Pairing(tmp_path / "p.json")
+    client = create_app(modules=discover(), live=Live(), pairing=pairing, config_path=tmp_path / "c.json").test_client()
+    pairing.show_pin()
+    client.post("/api/pair", json={"pin": pairing.pin, "name": "t"})
+
+    def save(*feeds):
+        return client.put("/api/config", json={"playlist": [{"module": "rss", "settings": {"feeds": list(feeds)}}]})
+
+    bad = save("https://bad.test/page", "https://gone.test/rss")
+    assert bad.status_code == 422
+    problems = " ".join(bad.get_json()["problems"])
+    assert "not an RSS or Atom feed" in problems and "couldn't reach it" in problems
+    assert save("https://good.test/rss").status_code == 200
+    calls.clear()
+    assert client.put("/api/config", json={"timezone": "Europe/London"}).status_code == 200
+    assert calls == []  # unchanged feeds aren't fetched again
