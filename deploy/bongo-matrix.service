@@ -1,0 +1,19 @@
+[Unit]
+Description=Bongo Matrix v3 display
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+# Root is needed for GPIO access by rgbmatrix.
+User=root
+WorkingDirectory=/home/admin/matrix
+ExecStart=/home/admin/matrix/venv/bin/python -m bongo run
+Restart=on-failure
+RestartSec=3
+NoNewPrivileges=true
+ProtectHome=read-only
+ReadWritePaths=/home/admin/matrix/data
+PrivateTmp=true
+
+[Install]
+WantedBy=multi-user.target
