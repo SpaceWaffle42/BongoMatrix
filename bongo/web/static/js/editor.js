@@ -63,10 +63,15 @@ export function render(view, match) {
   };
   function pickStyle(name) {
     if (styleOf(e) === name) return;
-    const dropped = Object.keys(e.settings).filter((k) => !(k in validFor(name, e.settings)));
+    const kept = validFor(name, e.settings);
+    const dropped = Object.keys(e.settings).filter((k) => !(k in kept));
+    const { shared, own } = schemaFor(mod, name);
+    const has = new Set([...shared, ...own].map((f) => f.name));
+    const reset = dropped.filter((k) => has.has(k)), gone = dropped.filter((k) => !has.has(k));
     e.style = name;
-    e.settings = validFor(name, e.settings);
-    if (dropped.length) toast(`${humanize(name)} has no ${dropped.map(humanize).join(', ')}; ${dropped.length > 1 ? 'those were' : 'that was'} dropped.`);
+    e.settings = kept;
+    if (gone.length) toast(`${humanize(name)} has no ${gone.map(humanize).join(', ')}; ${gone.length > 1 ? 'those were' : 'that was'} dropped.`);
+    if (reset.length) toast(`${reset.map(humanize).join(', ')} went back to ${humanize(name)}'s default${reset.length > 1 ? 's' : ''}.`);
     styles.querySelectorAll('.style-card').forEach((b, k) => b.setAttribute('aria-pressed', String(Object.keys(mod.styles)[k] === name)));
     paintFields(); changed();
   }
@@ -266,7 +271,7 @@ function control(f, id, v, set) {
 /** Tick any number of choices (e.g. which palettes are in rotation). "all" is its own chip when offered. */
 function multiChoice(f, id, v, set) {
   const options = f.choices.filter((c) => c !== 'all');
-  const box = h('div', { class: 'chip-grid', role: 'group', id, 'aria-labelledby': `${id}-l` });
+  const box = h('div', { class: f.swatches ? 'chip-grid palette-grid' : 'chip-grid', role: 'group', id, 'aria-labelledby': `${id}-l` });
   const paint = (value) => {
     const all = value === 'all';
     const picked = new Set(all ? [] : value || []);
@@ -274,12 +279,13 @@ function multiChoice(f, id, v, set) {
       ...(f.choices.includes('all') ? [h('button', { type: 'button', class: 'chip', 'aria-pressed': String(all),
         onclick: () => { const next = all ? [] : 'all'; set(next); paint(next); } }, 'All')] : []),
       ...options.map((c) => h('button', { type: 'button', class: f.swatches?.[c] ? 'chip palette-chip' : 'chip', 'aria-pressed': String(all || picked.has(c)),
+        title: f.swatches ? humanize(c) : null,  // the full name when a long one is cut short
         onclick: () => {
           const now = new Set(all ? options : picked);
           if (now.has(c)) now.delete(c); else now.add(c);
           const next = options.filter((o) => now.has(o));
           set(next); paint(next);
-        } }, f.swatches?.[c] ? swatch(f.swatches[c]) : null, humanize(c))));
+        } }, f.swatches?.[c] ? swatch(f.swatches[c]) : null, h('span', { class: 'chip-label' }, humanize(c)))));
   };
   paint(v);
   return box;
