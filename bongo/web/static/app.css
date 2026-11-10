@@ -372,3 +372,11 @@ body.drag-active { user-select: none; -webkit-user-select: none; }
 .item-more summary { cursor: pointer; color: var(--soft); font-size: 13px; min-height: 32px; display: flex; align-items: center; }
 .item-more[open] summary { margin-bottom: 8px; }
 .eyebrow.flush { margin: 0; }
+
+/* Palette choices: an even grid, three to a row; long names truncate (full name on hover) */
+.chip-grid.palette-grid { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); }
+.palette-grid .chip { min-width: 0; justify-content: flex-start; }
+.palette-grid .palette-swatch.small { flex: none; width: 36px; height: 18px; }
+.palette-grid .chip.palette-chip { gap: 8px; padding: 6px 8px; }
+.chip-label { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+@media (max-width: 520px) { .chip-grid.palette-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); } }
