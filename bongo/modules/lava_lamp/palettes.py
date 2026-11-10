@@ -66,6 +66,17 @@ METRO = {
 }
 
 
+def hex_of(value: str) -> str:
+    """#RRGGBB for a named or hex colour."""
+    return NAMED.get(value, value).upper()
+
+
+# What the dashboard shows for each palette, in the same order as a custom palette:
+# background, wax, highlight.
+CLASSIC_SWATCHES = {name: [hex_of(c) for c in colours] for name, colours in CLASSIC.items()}
+METRO_SWATCHES = {name: [p["bg_top"], p["mid"], p["core"]] for name, p in METRO.items()}
+
+
 def rgb(value: str) -> tuple[int, int, int]:
     value = NAMED.get(value, value).lstrip("#")
     return tuple(int(value[i:i + 2], 16) for i in (0, 2, 4))

@@ -29,4 +29,5 @@ MODULE = Module(
         custom_palettes=[],
     ),
     check=check,
+    basic=("show_time", "show_date", "custom_palettes"),
 )

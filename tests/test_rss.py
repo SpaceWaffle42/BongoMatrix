@@ -246,3 +246,54 @@ def test_saving_checks_new_feeds_are_really_feeds(monkeypatch, tmp_path):
     calls.clear()
     assert client.put("/api/config", json={"timezone": "Europe/London"}).status_code == 200
     assert calls == []  # unchanged feeds aren't fetched again
+
+
+STORY_FEED = b"""<?xml version="1.0"?><rss version="2.0"><channel><title>Wire</title>
+<item><title>Bridge reopens</title><description><![CDATA[<p>Bridge reopens - The <b>old</b> bridge reopened today after two years of repairs. Traffic is light.</p>]]></description></item>
+<item><title>No text here</title></item>
+</channel></rss>"""
+
+
+def test_story_text_is_parsed_without_html_or_a_repeated_title():
+    a, b = data.parse(STORY_FEED).items
+    assert a.summary == "The old bridge reopened today after two years of repairs. Traffic is light."
+    assert b.summary == ""
+    atom = b'<feed xmlns="http://www.w3.org/2005/Atom"><title>A</title><entry><title>T</title><summary>Body text</summary></entry></feed>'
+    assert data.parse(atom).items[0].summary == "Body text"
+
+
+def colours_in(img, box=None):
+    region = img.crop(box) if box else img
+    return {c for _, c in region.getcolors(1 << 16)}
+
+
+HEAD, BODY = (255, 210, 122), (184, 199, 220)  # the default headline_colour / summary_colour
+
+
+def story_feed(summary="The old bridge reopened today after two years of repairs and traffic is light again."):
+    data.seed(FEED, data.Feed("Wire", (data.Item("Bridge reopens", NOW, "Wire", None, summary),)))
+
+
+@pytest.mark.parametrize("style", ["ticker", "story", "picture"])
+def test_headline_and_story_text_use_different_colours(style):
+    story_feed()
+    s = RSS.create(style, {"feeds": [FEED]}, Context(rng=random.Random(1)))
+    seen = set()
+    for k in range(0, 200):
+        seen |= colours_in(s.render(dt.datetime.fromtimestamp(k * 0.5, UTC)))
+    assert HEAD in seen and BODY in seen
+
+
+def test_story_puts_the_headline_on_top_and_the_text_below():
+    story_feed()
+    s = RSS.create("story", {"feeds": [FEED]}, Context(rng=random.Random(1)))
+    frame = s.render(dt.datetime.fromtimestamp(0.5, UTC))
+    assert HEAD in colours_in(frame, (0, 0, 64, s.row)) and BODY not in colours_in(frame, (0, 0, 64, s.row))
+    assert BODY in colours_in(frame, (0, s.row, 64, 32)) and HEAD not in colours_in(frame, (0, s.row, 64, 32))
+
+
+def test_story_text_can_be_switched_off():
+    story_feed()
+    s = RSS.create("ticker", {"feeds": [FEED], "show_summary": False}, Context(rng=random.Random(1)))
+    seen = set().union(*(colours_in(s.render(dt.datetime.fromtimestamp(k * 0.5, UTC))) for k in range(100)))
+    assert BODY not in seen

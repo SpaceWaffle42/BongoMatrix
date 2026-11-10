@@ -127,3 +127,19 @@ def test_only_one_process_can_drive_the_panel(tmp_path):
     held.close()
     claim_panel(lock).close()  # free again once the first driver is gone
     assert PanelBusy
+
+
+def test_editor_schema_marks_advanced_settings_and_entry_forms():
+    from bongo.schema import describe
+    mods = discover()
+    ann = describe(mods["announcements"])
+    shared = {f["name"]: f for f in ann["settings"]}
+    assert shared["items"]["type"] == "items" and not shared["items"]["advanced"]
+    assert {f["name"] for f in shared["items"]["fields"]} >= {"title", "text", "start", "days"}
+    assert shared["background_top"]["advanced"] and ann["styles"]["banner"]["settings"][0]["advanced"]
+    lava = describe(mods["lava_lamp"])
+    assert not next(f for f in lava["styles"]["metro"]["settings"] if f["name"] == "palettes")["advanced"]
+    for m in mods.values():  # every module leads with something simple to change
+        d = describe(m)
+        everything = d["settings"] + [f for s in d["styles"].values() for f in s["settings"]]
+        assert any(not f["advanced"] for f in everything), m.id

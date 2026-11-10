@@ -7,7 +7,7 @@ from bongo.module import Style
 
 from .field import field
 from .metro import fitting
-from .palettes import CLASSIC, enabled_custom, rgb
+from .palettes import CLASSIC, CLASSIC_SWATCHES, enabled_custom, rgb
 
 # Marching-squares segments per corner pattern (corners: top-left=8, top-right=4,
 # bottom-right=2, bottom-left=1). Unchanged from v2.
@@ -23,6 +23,8 @@ EDGES = {
 class Classic(Style):
     fps = 33
     choices = {"palettes": ["all", *CLASSIC], "time_font": names(), "date_font": names()}
+    swatches = {"palettes": CLASSIC_SWATCHES}
+    basic = ("palettes",)
     defaults = dict(
         palettes="all",          # "all" or a list of names from palettes.CLASSIC; enabled custom ones join in
         blob_count=4, blob_min_radius=5, blob_max_radius=10, blob_speed=0.25,

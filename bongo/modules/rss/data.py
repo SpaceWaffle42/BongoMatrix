@@ -35,6 +35,7 @@ class Item:
     published: dt.datetime | None  # timezone-aware UTC
     source: str
     image: str | None = None  # thumbnail URL, if the feed gives one
+    summary: str = ""  # the story's text (description / summary), plain, shortened
 
 
 @dataclass(frozen=True)
@@ -76,6 +77,20 @@ def _when(text: str | None) -> dt.datetime | None:
     return when.replace(tzinfo=dt.timezone.utc) if when.tzinfo is None else when.astimezone(dt.timezone.utc)
 
 
+SUMMARY_CHARS = 600  # more than a 64x32 panel can show while a story is up
+
+
+def _summary(el, title: str) -> str:
+    """The story text: RSS description, Atom summary or content, as plain text without the title."""
+    node = _child(el, "description", "summary", "content", "encoded")
+    text = clean("".join(node.itertext())) if node is not None else ""
+    if text.lower().startswith(title.lower()):
+        text = text[len(title):].lstrip(" -:.|")
+    if len(text) > SUMMARY_CHARS:
+        text = text[:SUMMARY_CHARS].rsplit(" ", 1)[0] + "..."
+    return text
+
+
 def _image(el) -> str | None:
     """Thumbnail URL from media:thumbnail, media:content, an image enclosure or an Atom enclosure link."""
     best = None
@@ -111,7 +126,8 @@ def parse(raw: bytes, fetched: float | None = None) -> Feed:
         title = clean("".join(node.itertext())) if node is not None else ""
         stamp = _child(el, "pubDate", "published", "updated", "date")
         if title:
-            items.append(Item(title, _when(stamp.text) if stamp is not None else None, source, _image(el)))
+            items.append(Item(title, _when(stamp.text) if stamp is not None else None, source, _image(el),
+                              _summary(el, title)))
     return Feed(source, tuple(items), time.time() if fetched is None else fetched)
 
 

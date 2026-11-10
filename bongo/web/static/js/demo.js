@@ -98,7 +98,7 @@ export async function start() {
       const f = fields[k];
       const ok = { bool: typeof v === 'boolean', int: Number.isInteger(v), number: typeof v === 'number', text: typeof v === 'string',
         colour: typeof v === 'string' && /^#[0-9a-fA-F]{6}$/.test(v), list: Array.isArray(v), object: !!v && typeof v === 'object' && !Array.isArray(v),
-        choice: (f.choices || []).includes(v), auto: true }[f.type];
+        choice: Array.isArray(v) ? v.every((x) => (f.choices || []).includes(x)) : (f.choices || []).includes(v), auto: true }[f.type];
       if (ok === false) return `${where}: ${m.id}: ${k}: expected ${f.type === 'choice' ? `one of ${JSON.stringify(f.choices)}` : `a ${f.type}`}, got ${JSON.stringify(v)}`;
     }
     return null;

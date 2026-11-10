@@ -101,3 +101,15 @@ def test_seconds_shrink_the_time_font_instead_of_clipping():
         font = fitting(fonts, fonts(name), "22:58:58", 60)
         assert font.width("22:58:58") <= 58 and font is not fonts(name)
     assert fitting(fonts, fonts("10x20"), "22:58", 60) is fonts("10x20")
+
+
+def test_every_built_in_palette_shows_its_colours_in_the_dashboard():
+    import re
+
+    from bongo.schema import describe
+    styles = describe(LAVA)["styles"]
+    for style, names in (("classic", CLASSIC), ("metro", METRO)):
+        field = next(f for f in styles[style]["settings"] if f["name"] == "palettes")
+        assert set(field["swatches"]) == set(names)
+        for colours in field["swatches"].values():
+            assert len(colours) == 3 and all(re.fullmatch(r"#[0-9A-F]{6}", c) for c in colours)

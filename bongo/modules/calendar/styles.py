@@ -175,6 +175,7 @@ class Progress(_Base):
     fps = 2
     defaults = dict(bars=["year", "month", "week", "day"])
     choices = {"bars": ["year", "month", "week", "day"]}
+    basic = ("bars",)
 
     def fractions(self, now):
         start_day = dt.datetime.combine(now.date(), dt.time(), tzinfo=now.tzinfo)

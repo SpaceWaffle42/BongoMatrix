@@ -162,4 +162,5 @@ MODULE = Module(
     styles={"fit": Fit, "fill": Fill, "pixel": Pixel},
     defaults=dict(file="built-in/splash_loading_squares.gif", background="#000000", speed=1.0, brightness=1.0),
     choices={"file": "media"},  # picked from the media library (built-in/ or uploaded/)
+    basic=("file",),
 )

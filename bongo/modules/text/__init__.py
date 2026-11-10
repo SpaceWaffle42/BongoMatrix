@@ -123,4 +123,5 @@ MODULE = Module(
         background_style="solid", y=None, align="center", uppercase=False,
     ),
     choices={"font": names(), "background_style": ["solid", "gradient"], "align": ["left", "center", "right"]},
+    basic=("text", "colour", "align"),
 )

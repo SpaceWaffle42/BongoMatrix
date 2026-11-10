@@ -19,4 +19,9 @@ MODULE = Module(
         text_colour="#ECEEF1", accent="#FFB547", event_colour="#5AC8FA", background="#0B0C0E",
     ),
     choices={"holidays": list(RULES), "week_start": ["monday", "sunday"]},
+    basic=("holidays", "events", "week_start"),
+    item_fields={"events": [
+        {"name": "title", "type": "text", "label": "What", "placeholder": "Mum's birthday"},
+        {"name": "date", "type": "text", "label": "When", "placeholder": "11-21 every year, or 2026-11-21 once"},
+    ]},
 )
