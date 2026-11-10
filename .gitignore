@@ -6,3 +6,11 @@ data/
 *.gif
 !resources/**/*.gif
 report.xml
+
+# Uploaded media is the user's own state, not source (same rule as v2). Keep bundled assets.
+resources/media/*
+!resources/media/built-in/
+!resources/media/built-in/**
+
+# Demo sprite sheets: generated when publishing the dashboard demo
+bongo/web/static/demo/
