@@ -9,6 +9,8 @@ workflow:
 
 test:
   image: python:3.13-slim
+  variables:
+    BONGO_OFFLINE: "1"  # modules never fetch live data in CI
   script:
     - pip install --quiet -r requirements.txt pytest
     - python -m bongo list
