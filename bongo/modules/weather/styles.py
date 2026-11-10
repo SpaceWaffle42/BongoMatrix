@@ -78,10 +78,44 @@ class Overview(_Weather):
             font.draw(img, 1, h - 7, name, ACCENT)
         else:
             self.marquee(img, self.small, name, h - 7, now, ACCENT)
-        self.tiny.draw(img, 1, h - 1, f"H{round(r.high)} L{round(r.low)}", DIM)
-        loc = self.settings["location"].upper()
-        self.tiny.draw(img, align_x("right", self.tiny.width(loc), self.ctx.width, 1), h - 1, loc, DIM)
+        self.bottom_line(img, f"H{round(r.high)} L{round(r.low)}", h - 1, now)
         return img
+
+    def bottom_line(self, img, high_low, baseline, now):
+        """High/low on the left, the location on the right, never drawn over each other.
+        With ``scroll_location`` (default) a location too long for its space scrolls there as a
+        ticker; without it the town alone is shown, taking turns with high/low if need be."""
+        w, tiny = self.ctx.width, self.tiny
+        place = self.settings["location"].strip().upper()
+        if self.settings["scroll_location"] and place:
+            left = tiny.width(high_low) + 4
+            tiny.draw(img, 1, baseline, high_low, DIM)
+            if tiny.width(place) <= w - left - 1:
+                tiny.draw(img, align_x("right", tiny.width(place), w, 1), baseline, place, DIM)
+                return
+            top = baseline - tiny.cap
+            left += 3  # a gap and a thin divider, so high/low and the ticker read as two things
+            for y in range(top, baseline + 1):
+                img.putpixel((left - 3, y), (70, 80, 96))
+            lane = img.crop((left, top, w, baseline + tiny.descent + 1))  # scroll only in the space to the right
+            period, speed = tiny.width(place) + 16, max(1, self.settings["scroll_speed"])
+            x = -(int(now.timestamp() * speed) % period)  # seamless: a repeat follows 16 px behind
+            while x < lane.width:
+                tiny.draw(lane, x, tiny.cap, place, DIM)
+                x += period
+            img.paste(lane, (left, top))
+            return
+        town = place.split(",")[0].strip()  # "CHELTENHAM, ENGLAND, GB" -> CHELTENHAM
+        if not town or tiny.width(high_low) + 4 + tiny.width(town) <= w - 2:
+            tiny.draw(img, 1, baseline, high_low, DIM)
+            if town:
+                tiny.draw(img, align_x("right", tiny.width(town), w, 1), baseline, town, DIM)
+        elif int(now.timestamp() // 4) % 2 == 0:
+            tiny.draw(img, 1, baseline, high_low, DIM)
+        elif tiny.width(town) <= w - 2:
+            tiny.draw(img, align_x("right", tiny.width(town), w, 1), baseline, town, DIM)
+        else:
+            self.marquee(img, tiny, town, baseline, now, DIM)
 
 
 class Forecast(_Weather):

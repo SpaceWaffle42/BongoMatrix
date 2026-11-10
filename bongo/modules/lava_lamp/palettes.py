@@ -10,45 +10,42 @@ NAMED = {
     "retro_slate": "#455f65",
 }
 
-# Classic: (outside, inside, line) — carried over unchanged from v2.
+# Classic: (background, wax, highlight). Redesigned from v2's 37, which had near-copies (three were
+# identical): every pair here differs clearly at a glance; tests/test_lava_lamp.py keeps it that way.
 CLASSIC = {
-    "fire_burst": ("black", "red", "yellow"),
-    "ember_glow": ("black", "orange", "red"),
-    "royal_fizz": ("black", "magenta", "purple"),
-    "ocean_wave": ("black", "cyan", "blue"),
-    "miami_vice": ("cyan", "magenta", "black"),
-    "sun_drop": ("black", "yellow", "orange"),
-    "sunset_punch": ("black", "orange", "magenta"),
-    "candy_cyan": ("magenta", "cyan", "black"),
-    "vapor_pink_cyan": ("retro_deep_purple", "vapor_pink", "vapor_cyan"),
-    "miami_sunset": ("retro_slate", "neon_coral", "vapor_mint"),
-    "midnight_grid": ("black", "vapor_lilac", "neon_blue"),
-    "electric_lagoon": ("teal", "vapor_mint", "neon_yellow"),
-    "neon_arcade": ("black", "vapor_pink", "vapor_cyan"),
-    "sunset_dream": ("retro_purple", "vapor_cream", "neon_yellow"),
-    "aqua_glow": ("navy", "vapor_mint", "vapor_cyan"),
-    "laser_grid": ("black", "neon_purple", "cyan"),
-    "cotton_candy": ("black", "vapor_pink", "vapor_cream"),
-    "midnight_soda": ("navy", "neon_coral", "vapor_mint"),
-    "twilight_wave": ("retro_deep_purple", "neon_blue", "vapor_mint"),
-    "neon_dream": ("black", "neon_purple", "vapor_cream"),
-    "pastel_breeze": ("retro_slate", "vapor_pink", "vapor_cyan"),
-    "mint_cloud": ("black", "vapor_mint", "vapor_cream"),
-    "lilac_milk": ("black", "vapor_lilac", "vapor_cream"),
-    "petal_night": ("retro_deep_purple", "vapor_pink", "vapor_lilac"),
-    "teal_mist": ("teal", "vapor_cyan", "vapor_mint"),
-    "sugar_fizz": ("black", "vapor_pink", "vapor_cream"),
-    "mint_soda": ("black", "vapor_mint", "vapor_cyan"),
-    "lilac_fizz": ("black", "vapor_lilac", "vapor_pink"),
-    "cyan_haze": ("black", "vapor_cyan", "vapor_lilac"),
-    "teal_cotton": ("teal", "vapor_pink", "vapor_cyan"),
-    "starlight_cream": ("black", "vapor_pink", "vapor_cream"),
-    "navy_mist": ("navy", "vapor_mint", "vapor_lilac"),
-    "seafoam_glow": ("black", "vapor_cyan", "vapor_mint"),
-    "dusk_cotton": ("retro_deep_purple", "vapor_cream", "vapor_cyan"),
-    "cyan_candy": ("cyan", "vapor_pink", "vapor_cream"),
-    "cyan_dream": ("cyan", "vapor_mint", "vapor_lilac"),
-    "magenta_mist": ("magenta", "vapor_cream", "vapor_mint"),
+    # warm
+    "fire_burst":      ("#000000", "#FF1A00", "#FFD400"),
+    "ember_glow":      ("#1A0600", "#FF7A00", "#FFE7B0"),
+    "sun_drop":        ("#000000", "#FFE100", "#FF5A00"),
+    "blood_moon":      ("#0A0000", "#8E0010", "#FF6A5A"),
+    "sunset_punch":    ("#2B0F3A", "#FF6F3C", "#B04DFF"),
+    "terracotta":      ("#0A0A0A", "#C2410C", "#5FE1F0"),
+    # greens
+    "lime_fizz":       ("#000000", "#A8FF00", "#FF4FA0"),
+    "matrix":          ("#000000", "#00C838", "#B6FFB0"),
+    "toxic":           ("#200030", "#39FF14", "#FFFFFF"),
+    "electric_lagoon": ("#003030", "#FFB300", "#00FF9C"),
+    "mint_cloud":      ("#0D2B26", "#3FE0A8", "#FF9E6E"),
+    # blues
+    "ocean_wave":      ("#00121F", "#00A8FF", "#9CF6FF"),
+    "deep_sea":        ("#000000", "#1F4BFF", "#FFFFFF"),
+    "aqua_glow":       ("#00323C", "#00B3A6", "#FFE14D"),
+    "arctic":          ("#0B2E4A", "#BFEFFF", "#2E7DFF"),
+    "midnight_soda":   ("#00004A", "#FF3B3B", "#FFFFFF"),
+    # purples and pinks
+    "laser_grid":      ("#000000", "#7A00FF", "#FF2BD6"),
+    "royal_fizz":      ("#12002A", "#C04DFF", "#FFD000"),
+    "lilac_milk":      ("#2A1650", "#B48CFF", "#FFE9F6"),
+    "neon_dream":      ("#000000", "#FF00C8", "#FFFF66"),
+    "cotton_candy":    ("#3B1030", "#FF7EC2", "#FFF59E"),
+    "vapor_pink_cyan": ("#2C0452", "#FF71CE", "#01CDFE"),
+    "twilight_wave":   ("#16102E", "#4F7BFF", "#FFA94D"),
+    # bright backgrounds
+    "miami_vice":      ("#00D8F0", "#FF2D95", "#101010"),
+    "candy_cyan":      ("#FF2D95", "#00E5FF", "#FFFFFF"),
+    "sunny_side":      ("#FFC400", "#7A1FA0", "#FFFFFF"),
+    # neutral
+    "moonlight":       ("#000000", "#8C97A6", "#FFFFFF"),
 }
 
 # Metro: smooth gradients. bg top/bottom, halo glow, wax edge -> mid -> hot core, text, date accent.
