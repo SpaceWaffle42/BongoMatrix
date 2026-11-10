@@ -24,8 +24,8 @@ class Days(Base, Style):
         caption = f"{unit} TO {label}"
         if self.small.width(caption) > self.ctx.width - 2:  # too long: alternate unit / label every 3s
             caption = unit if int(now.timestamp() // 3) % 2 == 0 else f"TO {label}"
-        w = self.ctx.width
-        items = [(self.big, (w - self.big.width(text)) // 2, 19, text, self.ink)]
-        items += self.line(self.small, caption, 28, self.accent, now)
+        w, h = self.ctx.width, self.ctx.height
+        items = [(self.big, (w - self.big.width(text)) // 2, h - 13, text, self.ink)]
+        items += self.line(self.small, caption, h - 4, self.accent, now)
         return self.paint(items, progress)
 

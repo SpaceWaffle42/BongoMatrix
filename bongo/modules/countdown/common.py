@@ -73,4 +73,4 @@ class Base:
         k = 0.8 + 0.2 * math.sin(now.timestamp() * 2)
         ink = tuple(int(a + (b - a) * k) for a, b in zip(self.ink, self.accent))
         ink = tuple(int(c * (0.75 + 0.25 * k)) for c in ink)
-        return self.paint(self.line(font, msg, 21, ink, now), 1.0)
+        return self.paint(self.line(font, msg, (self.ctx.height + 10) // 2, ink, now), 1.0)

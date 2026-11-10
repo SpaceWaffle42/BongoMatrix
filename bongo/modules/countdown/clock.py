@@ -34,5 +34,5 @@ class Clock(Base, Style):
         parts = [d] + parts if d else parts
         font = self.mid if d else self.big
         items = self.line(self.small, s["label"].upper(), 8, self.accent, now)
-        items += self.groups(font, parts, 23, now)
+        items += self.groups(font, parts, self.ctx.height - 9, now)
         return self.paint(items, progress)
