@@ -123,8 +123,12 @@ def test_validate_reports_bad_splash_and_sleep(tmp_path):
     for bit in ("'/etc/passwd' isn't a GIF", "'uploaded/clip.mp4' isn't a GIF", "splash.speed",
                 "sleep.sources: pick at least one", "sleep.from"):
         assert bit in problems, bit
+    config["splash"] = {"sources": ["built-in/sleep_default.gif"]}
+    config["sleep"] = {"from": "23:00", "to": "07:00", "sources": ["built-in/splash_loading_squares.gif"]}
+    crossed = " | ".join(cfg.validate(config, discover()))
+    assert "isn't a built-in splash screen" in crossed and "isn't a built-in sleep screen" in crossed
     config["splash"] = {"sources": ["built-in/splash_loading_squares.gif"]}
-    config["sleep"] = {"from": "23:00", "to": "07:00", "sources": ["built-in/sleep.gif"], "brightness": 15}
+    config["sleep"] = {"from": "23:00", "to": "07:00", "sources": ["built-in/sleep_default.gif"], "brightness": 15}
     assert cfg.validate(config, discover()) == []
 
 

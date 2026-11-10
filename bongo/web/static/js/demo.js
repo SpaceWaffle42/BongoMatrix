@@ -41,9 +41,9 @@ export async function start() {
       { module: 'text', style: 'scroll', seconds: 15, settings: { text: 'Welcome home!' }, enabled: false },
     ],
     splash: { sources: ['built-in/splash_loading_squares.gif'], speed: 100, fit: 'fit', enabled: true },
-    sleep: { from: '23:00', to: '07:00', brightness: 15, sources: ['built-in/sleep.gif'], speed: 100, fit: 'fit', enabled: true },
+    sleep: { from: '23:00', to: '07:00', brightness: 15, sources: ['built-in/sleep_default.gif'], speed: 100, fit: 'fit', enabled: true },
   };
-  const BUILT_IN = ['rubik_squares.gif', 'splash_loading_squares.gif', 'sleep.gif'];
+  const BUILT_IN = ['splash_loading_squares.gif', 'sleep_default.gif'];
   const uploads = [{ name: 'uploaded/garden-timelapse.mp4', file: 'garden-timelapse.mp4', bytes: 8650000, kind: 'video' }];
   const devices = [
     { id: 'd3m0a1b2', name: 'This browser (demo)', paired: iso(86400 * 41), seen: iso(5), me: true },
@@ -179,7 +179,7 @@ export async function start() {
     }
     if (p === '/api/media' && method === 'GET') {
       const used = uploads.reduce((n, f) => n + f.bytes, 0);
-      return json({ folders: { 'built-in': BUILT_IN.map((f) => ({ name: `built-in/${f}`, file: f, bytes: 40960, kind: 'image' })), uploaded: uploads },
+      return json({ folders: { 'built-in': BUILT_IN.map((f) => ({ name: `built-in/${f}`, file: f, bytes: 40960, kind: 'image', screen: f.split('_')[0] })), uploaded: uploads },
         used, limits: { file: 52428800, library: 1073741824 }, types: ['.gif', '.jpg', '.mp4', '.png', '.webp'] });
     }
     if (p === '/api/media' && method === 'POST') {

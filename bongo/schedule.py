@@ -3,7 +3,7 @@
     "splash": {"sources": ["built-in/splash_loading_squares.gif", "uploaded/logo.png"],
                "speed": 100, "fit": "fit"}
     "sleep":  {"from": "23:00", "to": "07:00", "brightness": 15,
-               "sources": ["built-in/sleep.gif"], "speed": 100, "fit": "fit"}
+               "sources": ["built-in/sleep_default.gif"], "speed": 100, "fit": "fit"}
 
 Splash plays at start-up. Each time, the next file comes from a shuffled bag, so every
 source plays once before any repeats. A GIF plays exactly one pass at ``speed`` percent; a
@@ -74,8 +74,11 @@ def screen_problems(where: str, rule, *, sleep: bool = False) -> list[str]:
         problems.append(f"{where}.sources: pick at least one image or GIF")
     else:
         for s in sources:
+            screen = "sleep" if sleep else "splash"
             if not media.valid_name(s) or "." + s.rsplit(".", 1)[-1].lower() not in SCREEN_TYPES:
                 problems.append(f"{where}.sources: {s!r} isn't a GIF or image from built-in/ or uploaded/")
+            elif s.startswith("built-in/") and media.screen_of(s) != screen:
+                problems.append(f"{where}.sources: {s!r} isn't a built-in {screen} screen (those are built-in/{screen}_*)")
     speed = rule.get("speed", 100)
     if isinstance(speed, bool) or not isinstance(speed, (int, float)) or not 10 <= speed <= 400:
         problems.append(f"{where}.speed: a percentage from 10 to 400")

@@ -32,7 +32,7 @@ def upload(client, name, data, header=True):
 
 
 def test_names_must_be_in_one_of_the_two_folders():
-    assert media.valid_name("built-in/sleep.gif") and media.valid_name("uploaded/cat.mp4")
+    assert media.valid_name("built-in/sleep_default.gif") and media.valid_name("uploaded/cat.mp4")
     for bad in ("sleep.gif", "/etc/passwd", "uploaded/../x.gif", "other/x.gif", "uploaded/notes.txt", None, 3):
         assert not media.valid_name(bad), bad
 
@@ -53,7 +53,7 @@ def test_upload_list_use_and_delete(client):
     busy = client.delete("/api/media/uploaded/Red-square.png", json={})
     assert busy.status_code == 409 and "playlist entry 1" in busy.get_json()["error"]
     assert client.delete("/api/media/uploaded/Red-square-2.png", json={}).status_code == 200
-    assert client.delete("/api/media/built-in/sleep.gif", json={}).status_code == 403
+    assert client.delete("/api/media/built-in/sleep_default.gif", json={}).status_code == 403
     assert client.delete("/api/media/uploaded/nope.png", json={}).status_code == 404
 
 
@@ -86,3 +86,18 @@ def test_files_used_by_splash_or_sleep_cannot_be_deleted(client):
     assert client.put("/api/config", json={"splash": {"sources": ["uploaded/logo.png"]}}).status_code == 200
     busy = client.delete("/api/media/uploaded/logo.png", json={})
     assert busy.status_code == 409 and "splash" in busy.get_json()["error"]
+
+
+def test_built_in_holds_only_splash_and_sleep_screens(tmp_path, monkeypatch):
+    for f in ("splash_logo.gif", "sleep_moon.gif", "rubik_squares.gif", "sleepy.gif"):
+        (tmp_path / f).write_bytes(png())
+    monkeypatch.setattr(media, "BUILT_IN", tmp_path)
+    monkeypatch.setattr(media, "UPLOADED", tmp_path / "none")
+    built_in = {f["file"]: f["screen"] for f in media.library()["built-in"]}
+    assert built_in == {"sleep_moon.gif": "sleep", "splash_logo.gif": "splash"}
+    assert media.screen_of("uploaded/splash_x.gif") is None
+
+
+def test_the_shipped_built_in_folder_follows_the_naming_rule():
+    shipped = [p.name for p in media.REPO.joinpath("resources", "media", "built-in").glob("*") if p.is_file()]
+    assert all(n.startswith(("splash_", "sleep_")) for n in shipped), shipped
