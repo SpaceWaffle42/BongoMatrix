@@ -1,10 +1,12 @@
 """The media library: two folders the Media module (and splash/sleep) can show files from.
 
-    built-in/   resources/media/built-in, shipped with Bongo Matrix (read-only)
+    built-in/   resources/media/built-in, shipped with Bongo Matrix (read-only). Only Splash and
+                Sleep screens live here: ``splash_*`` files are built-in splash screens and
+                ``sleep_*`` files are built-in sleep screens. Anything else is the user's own.
     uploaded/   resources/media/uploaded, files added from the dashboard (git-ignored, like v2,
                 so updates never touch them)
 
-Settings name files as ``built-in/sleep.gif`` or ``uploaded/cat.mp4``. Nothing outside these
+Settings name files as ``built-in/sleep_default.gif`` or ``uploaded/cat.mp4``. Nothing outside these
 two folders can be shown, so a setting can't point the panel (or the preview) at other files
 on the Pi. Uploads are checked before they are kept: allowed type, size, and that the file
 really decodes as an image or a video.
@@ -31,6 +33,15 @@ VIDEOS = {".mp4", ".mov", ".webm", ".mkv", ".avi", ".m4v"}
 MAX_UPLOAD = 50 * 1024 * 1024        # one file
 MAX_LIBRARY = 1024 * 1024 * 1024     # everything in uploaded/
 MAX_PIXELS = 16_000_000              # refuse decompression bombs
+SCREENS = ("splash", "sleep")        # built-in files are named <screen>_*.ext
+
+
+def screen_of(name) -> str | None:
+    """'splash' or 'sleep' for a built-in screen file (by its prefix), else None."""
+    if not isinstance(name, str) or not name.startswith("built-in/"):
+        return None
+    file = name.split("/", 1)[1]
+    return next((s for s in SCREENS if file.startswith(f"{s}_")), None)
 
 
 def folders() -> dict[str, Path]:
@@ -69,8 +80,11 @@ def library() -> dict[str, list[dict]]:
                 hidden = any(part.startswith(".") for part in p.relative_to(root).parts)  # half-done uploads
                 if p.is_file() and not hidden and p.suffix.lower() in IMAGES | VIDEOS:
                     rel = p.relative_to(root).as_posix()
-                    files.append({"name": f"{folder}/{rel}", "file": rel, "bytes": p.stat().st_size,
-                                  "kind": "video" if is_video(p) else "image"})
+                    name = f"{folder}/{rel}"
+                    if folder == "built-in" and screen_of(name) is None:
+                        continue  # only splash_* and sleep_* are built-in
+                    files.append({"name": name, "file": rel, "bytes": p.stat().st_size,
+                                  "kind": "video" if is_video(p) else "image", "screen": screen_of(name)})
         out[folder] = files
     return out
 

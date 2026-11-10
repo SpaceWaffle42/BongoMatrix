@@ -73,9 +73,10 @@ Previews are LED-look GIFs rendered by exactly the code that drives the panel.
 4. `sudo ./venv/bin/python -m bongo run`, or install `deploy/bongo-matrix.service`.
 
 Media comes from two folders: `built-in/` (`resources/media/built-in`, shipped
-with the project) and `uploaded/` (`resources/media/uploaded`, git-ignored, added from the dashboard under
+with the project, holding only screens: `splash_*` files are built-in Splash screens and
+`sleep_*` files are built-in Sleep screens) and `uploaded/` (`resources/media/uploaded`, git-ignored, added from the dashboard under
 Settings → Media library, up to 50 MB a file and 1 GB in all). Settings name files
-as `built-in/sleep.gif` or `uploaded/holiday.mp4`; nothing outside those folders
+as `built-in/sleep_default.gif` or `uploaded/holiday.mp4`; nothing outside those folders
 can be shown.
 
 **Splash and Sleep** work as in v2. Splash plays at start-up: tick any GIFs or images

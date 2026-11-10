@@ -51,7 +51,7 @@
     "to": "07:00",
     "brightness": 15,
     "sources": [
-      "built-in/sleep.gif"
+      "built-in/sleep_default.gif"
     ],
     "speed": 100,
     "fit": "fit"

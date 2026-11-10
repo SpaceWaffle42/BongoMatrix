@@ -2,7 +2,7 @@
 import { get, del, uploadMedia } from './api.js';
 import { h, icon, toast, fail, clone, same, clamp, humanize, ago, toggle } from './ui.js';
 import { FrameLoop } from './led.js';
-import { S, onLeave, go, moduleById, saveConfig } from './app.js';
+import { S, onLeave, go, saveConfig } from './app.js';
 
 export function render(view) {
   view.append(h('div', { class: 'page-head' }, h('h1', { class: 'h1' }, 'Settings'),
@@ -82,11 +82,10 @@ function deviceCard() {
     h('div', { class: 'row end' }, save));
 }
 
-/** Module + style + seconds picker for splash and sleep entries. */
 const SCREEN_TYPES = /\.(gif|png|jpe?g|webp)$/i;
 
 /** Pick the files a Splash or Sleep screen draws from (GIFs and stills, like v2), plus speed and fit. */
-function screenPicker(rule, idPrefix) {
+function screenPicker(rule, idPrefix, screen) {
   rule.sources ||= [];
   const grid = h('div', { class: 'screen-sources', role: 'group', 'aria-label': 'Files' }, h('p', { class: 'muted small flush' }, 'Loading media…'));
   const speed = h('input', { class: 'input num', type: 'number', id: `${idPrefix}-speed`, min: 10, max: 400, step: 10, value: rule.speed ?? 100 });
@@ -96,7 +95,8 @@ function screenPicker(rule, idPrefix) {
   (async () => {
     try {
       const lib = await get('/api/media');
-      const files = [...lib.folders.uploaded, ...lib.folders['built-in']].filter((f) => SCREEN_TYPES.test(f.name));
+      // built-in files serve one screen each (splash_* or sleep_*); uploads can go on either
+      const files = [...lib.folders.uploaded, ...lib.folders['built-in'].filter((f) => f.screen === screen)].filter((f) => SCREEN_TYPES.test(f.name));
       const known = new Set(files.map((f) => f.name));
       const missing = rule.sources.filter((n) => !known.has(n)).map((n) => ({ name: n, file: `${n} (missing)` }));
       grid.replaceChildren(...[...missing, ...files].map((f, i) => {
@@ -121,7 +121,7 @@ function splashCard() {
   const start = S.config.splash;
   let on = !!start && start.enabled !== false;
   const rule = clone(start) || { sources: ['built-in/splash_loading_squares.gif'], speed: 100, fit: 'fit' };
-  const body = h('div', { class: 'stack' }, screenPicker(rule, 'sp'),
+  const body = h('div', { class: 'stack' }, screenPicker(rule, 'sp', 'splash'),
     h('p', { class: 'muted tiny flush' }, 'Each start-up shows the next file from a shuffled list, so every one plays before any repeats. A GIF plays once through; a still stays up about as long as your GIFs (7 s if there are none).'));
   body.hidden = !on;
   const save = h('button', { type: 'button', class: 'btn primary' }, 'Save');
@@ -138,7 +138,7 @@ function splashCard() {
 function sleepCard() {
   const s = S.config.sleep;
   let on = !!s && s.enabled !== false;
-  const sleep = clone(s) || { from: '23:00', to: '07:00', brightness: 15, sources: ['built-in/sleep.gif'], speed: 100, fit: 'fit' };
+  const sleep = clone(s) || { from: '23:00', to: '07:00', brightness: 15, sources: ['built-in/sleep_default.gif'], speed: 100, fit: 'fit' };
   delete sleep.playlist;
   const from = h('input', { class: 'input', type: 'time', id: 'sl-from', value: sleep.from });
   const to = h('input', { class: 'input', type: 'time', id: 'sl-to', value: sleep.to });
@@ -148,7 +148,7 @@ function sleepCard() {
       h('label', { class: 'field-col', for: 'sl-from' }, 'From', from),
       h('label', { class: 'field-col', for: 'sl-to' }, 'Until', to),
       h('label', { class: 'field-col', for: 'sl-b' }, 'Brightness %', bright)),
-    screenPicker(sleep, 'sl'),
+    screenPicker(sleep, 'sl', 'sleep'),
     h('p', { class: 'muted tiny flush' }, 'Each night one of the ticked files is picked at random and stays up until morning.'));
   body.hidden = !on;
   const save = h('button', { type: 'button', class: 'btn primary' }, 'Save');

@@ -160,6 +160,6 @@ MODULE = Module(
     id="media", name="Media",
     description="Shows an image, animated GIF or short video. Fit letterboxes, fill crops, pixel scales by whole numbers.",
     styles={"fit": Fit, "fill": Fill, "pixel": Pixel},
-    defaults=dict(file="built-in/rubik_squares.gif", background="#000000", speed=1.0, brightness=1.0),
+    defaults=dict(file="built-in/splash_loading_squares.gif", background="#000000", speed=1.0, brightness=1.0),
     choices={"file": "media"},  # picked from the media library (built-in/ or uploaded/)
 )
