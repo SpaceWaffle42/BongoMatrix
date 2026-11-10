@@ -1,7 +1,7 @@
 """Text: your own words on the panel. ``scroll`` is a marquee, ``static`` stays put."""
 import math
 
-from bongo.fonts import align_x
+from bongo.fonts import align_x, names
 from bongo.module import Module, Style
 
 FALLBACK = ("6x10", "5x7", "tom-thumb")  # tried in order when static text is too wide
@@ -122,4 +122,5 @@ MODULE = Module(
         text="Hello from Bongo Matrix", font="6x13B", colour="#FFF4DE", background="#0B0C0E",
         background_style="solid", y=None, align="center", uppercase=False,
     ),
+    choices={"font": names(), "background_style": ["solid", "gradient"], "align": ["left", "center", "right"]},
 )

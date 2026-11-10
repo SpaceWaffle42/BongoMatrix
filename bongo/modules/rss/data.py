@@ -191,3 +191,50 @@ def seed(url: str, feed: Feed) -> None:
     """Put a feed in the cache (previews and tests)."""
     with _lock:
         _cache[url] = replace(feed, fetched=feed.fetched or time.time())
+
+
+# -- thumbnails ------------------------------------------------------------------------------
+MAX_IMAGE_BYTES = 1_500_000
+_images: dict[str, object] = {}  # url -> small PIL image, or None after a failed fetch
+_image_order: list[str] = []
+
+
+def _fetch_image(url: str) -> None:
+    from PIL import Image
+    try:
+        raw = fetch_bytes(url)[:MAX_IMAGE_BYTES]
+        import io
+        with Image.open(io.BytesIO(raw)) as im:
+            if im.width * im.height > 16_000_000:
+                raise ValueError("image too large")
+            im.draft("RGB", (128, 128))  # JPEGs decode straight to a small size
+            small = im.convert("RGB")
+            small.thumbnail((128, 128))
+    except Exception as error:
+        log.info("no thumbnail from %s: %s", url, error)
+        small = None
+    with _lock:
+        _images[url] = small
+        _in_flight.discard(url)
+
+
+def image(url: str | None):
+    """The thumbnail for ``url`` if it has loaded, else None (and a fetch starts in the background)."""
+    if not url:
+        return None
+    with _lock:
+        if url in _images:
+            return _images[url]
+        if url not in _in_flight and not os.environ.get("BONGO_OFFLINE"):
+            _in_flight.add(url)
+            _image_order.append(url)
+            while len(_image_order) > 40:  # keep the cache small
+                _images.pop(_image_order.pop(0), None)
+            threading.Thread(target=_fetch_image, args=(url,), daemon=True, name="rss-image").start()
+    return None
+
+
+def seed_image(url: str, img) -> None:
+    """Put a thumbnail in the cache (previews and tests)."""
+    with _lock:
+        _images[url] = img
