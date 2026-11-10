@@ -58,7 +58,7 @@ class Ticker(_Weather):
         ticker = (f"{label(r.code, r.is_day)}  ·  Feels {temp_text(r.feels)}  ·  "
                   f"H {temp_text(r.high)} L {temp_text(r.low)}  ·  Wind {round(r.wind)} {unit}  ·  "
                   f"Humidity {r.humidity}%")
-        self.marquee(img, self.small, ticker.replace("·", "-"), 29, now, ACCENT)
+        self.marquee(img, self.small, ticker.replace("·", "-"), self.ctx.height - 3, now, ACCENT)
         return img
 
 
@@ -71,15 +71,16 @@ class Overview(_Weather):
         self.place_icon(img, r.code, r.is_day, 20, 0, 0, now)
         temp = temp_text(r.temp)
         self.big.draw(img, align_x("right", self.big.width(temp), self.ctx.width, 1), 15, temp, TEXT)
+        h = self.ctx.height
         name = label(r.code, r.is_day).upper()
         font = next((f for f in (self.small, self.tiny) if f.width(name) <= self.ctx.width - 2), None)
         if font:
-            font.draw(img, 1, 25, name, ACCENT)
+            font.draw(img, 1, h - 7, name, ACCENT)
         else:
-            self.marquee(img, self.small, name, 25, now, ACCENT)
-        self.tiny.draw(img, 1, 31, f"H{round(r.high)} L{round(r.low)}", DIM)
+            self.marquee(img, self.small, name, h - 7, now, ACCENT)
+        self.tiny.draw(img, 1, h - 1, f"H{round(r.high)} L{round(r.low)}", DIM)
         loc = self.settings["location"].upper()
-        self.tiny.draw(img, align_x("right", self.tiny.width(loc), self.ctx.width, 1), 31, loc, DIM)
+        self.tiny.draw(img, align_x("right", self.tiny.width(loc), self.ctx.width, 1), h - 1, loc, DIM)
         return img
 
 
@@ -88,7 +89,8 @@ class Forecast(_Weather):
     defaults = {"columns": 4, "step_hours": 3}
 
     def draw(self, r, now):
-        cols, step = self.settings["columns"], self.settings["step_hours"]
+        step = self.settings["step_hours"]
+        cols = max(1, min(self.settings["columns"], self.ctx.width // 15))  # keep columns readable
         img = sky(r.code, r.is_day, self.ctx.width, self.ctx.height)
         here = now.replace(tzinfo=None, minute=0, second=0, microsecond=0)
         upcoming = [h for h in r.hours if h.time >= here][::step][:cols]
@@ -96,11 +98,11 @@ class Forecast(_Weather):
         for i, hour in enumerate(upcoming):
             x0 = i * width
             if i:
-                for y in range(4, 28):
+                for y in range(4, self.ctx.height - 4):
                     img.putpixel((x0, y), tuple(c // 3 for c in img.getpixel((x0, y))))
             stamp = "NOW" if i == 0 else hour.time.strftime("%H")
             self.tiny.draw(img, x0 + (width - self.tiny.width(stamp)) // 2 + 1, 6, stamp, DIM)
             self.place_icon(img, hour.code, hour.is_day, 11, x0 + (width - 11) // 2 + 1, 8, now)
             t = temp_text(hour.temp)
-            self.small.draw(img, x0 + (width - self.small.width(t)) // 2 + 1, 28, t, TEXT)
+            self.small.draw(img, x0 + (width - self.small.width(t)) // 2 + 1, self.ctx.height - 4, t, TEXT)
         return img
