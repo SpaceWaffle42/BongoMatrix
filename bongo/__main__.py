@@ -18,6 +18,7 @@ from bongo.module import Context
 from bongo.panel import RecordingPanel
 from bongo.registry import discover
 from bongo.safe_area import SafeArea
+from bongo.schedule import Schedule
 
 
 def _setting(text: str):
@@ -123,7 +124,7 @@ def main(argv=None) -> int:
     panel = HardwarePanel(**config["panel"])
     try:
         play(cfg.playlist(config, modules), modules, panel, cfg.context_factory(config),
-             place=cfg.safe_area(config).place)
+             place=cfg.safe_area(config).place, schedule=Schedule.from_config(config))
     except KeyboardInterrupt:
         panel.clear()
     return 1 if problems else 0
