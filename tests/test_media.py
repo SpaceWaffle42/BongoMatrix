@@ -6,9 +6,33 @@ import pytest
 from bongo.module import Context
 from bongo.modules import media as mm
 
-FIX = Path(__file__).parent / "fixtures" / "media"
 MODULE = mm.MODULE
 RED, GREEN, BLUE = (255, 0, 0), (0, 255, 0), (0, 0, 255)
+
+
+def _make_fixtures(folder: Path) -> Path:
+    """Tiny test images, drawn here so no binary files live in the repo."""
+    from PIL import Image, ImageDraw
+    folder.mkdir(parents=True, exist_ok=True)
+    frames = [Image.new("RGB", (16, 8), c) for c in (RED, GREEN, BLUE)]
+    for i, f in enumerate(frames):  # 3 frames lasting 100/200/300 ms, white square moving
+        ImageDraw.Draw(f).rectangle([i, i, i + 3, i + 3], fill=(255, 255, 255))
+    frames[0].save(folder / "anim.gif", save_all=True, append_images=frames[1:], duration=[100, 200, 300], loop=0)
+    t = Image.new("RGBA", (8, 8), (0, 0, 0, 0))
+    ImageDraw.Draw(t).rectangle([2, 2, 5, 5], fill=(255, 0, 0, 255))
+    t.save(folder / "transparent.png")
+    w = Image.new("RGB", (40, 10), (0, 0, 200))
+    d = ImageDraw.Draw(w)
+    d.rectangle([0, 0, 9, 9], fill=RED)
+    d.rectangle([30, 0, 39, 9], fill=GREEN)
+    d.rectangle([15, 3, 24, 6], fill=(255, 255, 0))
+    w.save(folder / "wide.png")
+    return folder
+
+
+import tempfile  # noqa: E402
+
+FIX = _make_fixtures(Path(tempfile.mkdtemp(prefix="bongo-media-")))
 
 
 def near(a, b, tol=12):
