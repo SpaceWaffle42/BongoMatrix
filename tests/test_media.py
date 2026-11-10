@@ -130,4 +130,4 @@ def test_built_in_gifs_decode_and_animate(path):
     assert len(style.frames) > 1
     frames = {style.render(at(ms)).tobytes() for ms in range(0, 3000, 50)}
     assert len(frames) > 1
-    assert style.frames[0].getbbox() is not None
+    assert any(f.getbbox() for f in style.frames)  # some loaders start from a black frame
