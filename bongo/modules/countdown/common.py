@@ -6,13 +6,23 @@ import numpy as np
 from PIL import Image, ImageFilter
 
 
+def cap(font):
+    """Cap height (the 'H') of a BDF font, measured locally so this module needs nothing new."""
+    glyph = font.glyphs.get(ord("H"))
+    return glyph[2] if glyph else font.ascent
+
+
 def rgb(hex_colour):
     h = hex_colour.lstrip("#")
     return tuple(int(h[i:i + 2], 16) for i in (0, 2, 4))
 
 
 def parse(text, now):
-    """ISO string -> datetime comparable with ``now`` (naive stays naive, aware adopts now's zone)."""
+    """ISO string or ``next:<holiday>`` -> datetime comparable with ``now`` (naive stays naive,
+    aware adopts now's zone)."""
+    if text.startswith("next:"):
+        from .holidays import resolve
+        return resolve(text, now)[0]
     d = dt.datetime.fromisoformat(text)
     if now.tzinfo is None:
         return d.replace(tzinfo=None)
@@ -21,7 +31,8 @@ def parse(text, now):
 
 def remaining(s, now):
     """(whole seconds left, progress 0-1 between start and target, target reached?)."""
-    target, start = parse(s["target"], now), parse(s["start"], now)
+    target = parse(s["target"], now)
+    start = parse(s["start"], now) if s["start"] else target - dt.timedelta(days=30)
     left = (target - now).total_seconds()
     span = (target - start).total_seconds()
     done = 1.0 if span <= 0 else min(1.0, max(0.0, (now - start).total_seconds() / span))
@@ -74,3 +85,17 @@ class Base:
         ink = tuple(int(a + (b - a) * k) for a, b in zip(self.ink, self.accent))
         ink = tuple(int(c * (0.75 + 0.25 * k)) for c in ink)
         return self.paint(self.line(font, msg, (self.ctx.height + 10) // 2, ink, now), 1.0)
+
+
+def fit_font(fonts, names, text, max_w, max_h):
+    """First font in ``names`` (biggest first) whose ``text`` fits max_w wide and cap height max_h."""
+    for name in names:
+        f = fonts(name)
+        if f.width(text) <= max_w and cap(f) <= max_h:
+            return f
+    return fonts(names[-1])
+
+
+def mix(a, b, k):
+    """Blend colour a towards b by k (0-1)."""
+    return tuple(round(x + (y - x) * k) for x, y in zip(a, b))
