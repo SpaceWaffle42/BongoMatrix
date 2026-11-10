@@ -113,3 +113,27 @@ def test_every_built_in_palette_shows_its_colours_in_the_dashboard():
         assert set(field["swatches"]) == set(names)
         for colours in field["swatches"].values():
             assert len(colours) == 3 and all(re.fullmatch(r"#[0-9A-F]{6}", c) for c in colours)
+
+
+def _lab(hex_colour):
+    r, g, b = (int(hex_colour[i:i + 2], 16) / 255 for i in (1, 3, 5))
+    lin = [((c + 0.055) / 1.055) ** 2.4 if c > 0.04045 else c / 12.92 for c in (r, g, b)]
+    x = (lin[0] * .4124 + lin[1] * .3576 + lin[2] * .1805) / .95047
+    y = lin[0] * .2126 + lin[1] * .7152 + lin[2] * .0722
+    z = (lin[0] * .0193 + lin[1] * .1192 + lin[2] * .9505) / 1.08883
+    f = [v ** (1 / 3) if v > .008856 else 7.787 * v + 16 / 116 for v in (x, y, z)]
+    return 116 * f[1] - 16, 500 * (f[0] - f[1]), 200 * (f[1] - f[2])
+
+
+def test_classic_palettes_are_clearly_different_from_each_other():
+    """No two palettes may look alike: perceptual (CIELAB) distance, weighted to the wax."""
+    import itertools
+    import math
+
+    from bongo.modules.lava_lamp.palettes import hex_of
+    weights = (0.25, 0.5, 0.25)  # background, wax (most of what you see), highlight
+
+    def apart(a, b):
+        return sum(w * math.dist(_lab(hex_of(x)), _lab(hex_of(y))) for w, x, y in zip(weights, a, b))
+    closest = min(itertools.combinations(CLASSIC, 2), key=lambda p: apart(CLASSIC[p[0]], CLASSIC[p[1]]))
+    assert apart(CLASSIC[closest[0]], CLASSIC[closest[1]]) >= 28, closest

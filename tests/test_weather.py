@@ -79,3 +79,23 @@ def test_ticker_scrolls():
 def test_url_carries_units_and_location():
     url = data.request_url(WEATHER.settings_for("overview", {"units": "fahrenheit", "latitude": 40.7}))
     assert "temperature_unit=fahrenheit" in url and "latitude=40.7" in url
+
+
+def test_overview_never_draws_the_town_over_high_low():
+    import numpy as np
+    lamp = seeded("overview", location="Cheltenham, England, GB", scroll_location=False)
+    rows = lambda t: np.asarray(lamp.render(dt.datetime.fromtimestamp(t)))[-6:]
+    with_hl, with_town = rows(0.5), rows(4.5)  # they take turns every 4 s
+    assert (with_hl != with_town).any()
+    short = seeded("overview", location="Bath")  # fits beside high/low: both stay put
+    a, b = (np.asarray(short.render(dt.datetime.fromtimestamp(t)))[-6:] for t in (0.5, 4.5))
+    assert (a == b).all()
+
+
+def test_a_long_location_scrolls_beside_high_low_by_default():
+    import numpy as np
+    lamp = seeded("overview", location="Cheltenham, England, GB")
+    frames = [np.asarray(lamp.render(dt.datetime.fromtimestamp(t))) for t in (0.5, 1.0)]
+    left = lamp.tiny.width("H15 L6") + 2
+    assert (frames[0][-6:, :left] == frames[1][-6:, :left]).all()  # high/low stays put
+    assert (frames[0][-6:, left + 3:] != frames[1][-6:, left + 3:]).any()  # the location moves
