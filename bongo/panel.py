@@ -1,7 +1,40 @@
 """Where frames go: the real LED panel, or a recorder for previews and tests."""
 from __future__ import annotations
 
+import os
+from pathlib import Path
+
 from PIL import Image, ImageDraw
+
+
+LOCK_PATH = Path(os.environ.get("BONGO_LOCK", "/run/lock/bongo-matrix.lock"))
+
+
+class PanelBusy(RuntimeError):
+    pass
+
+
+def claim_panel(path: Path = LOCK_PATH):
+    """Make this process the panel's only driver. Two drivers on the GPIO pins garble the
+    display, so a second ``bongo run`` or ``bongo calibrate`` stops with a clear message.
+    The lock is an flock, released by the kernel when the process ends (even on a crash)."""
+    import fcntl
+
+    path.parent.mkdir(parents=True, exist_ok=True)
+    handle = open(path, "a+")
+    try:
+        fcntl.flock(handle, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except BlockingIOError:
+        handle.seek(0)
+        owner = handle.read().strip() or "another process"
+        handle.close()
+        raise PanelBusy(f"the panel is already being driven by pid {owner}; stop it first "
+                        "(sudo systemctl stop bongo-matrix)") from None
+    handle.seek(0)
+    handle.truncate()
+    handle.write(str(os.getpid()))
+    handle.flush()
+    return handle  # keep a reference: closing it releases the lock
 
 
 class HardwarePanel:
@@ -9,6 +42,7 @@ class HardwarePanel:
 
     def __init__(self, rows=32, cols=64, hardware_mapping="adafruit-hat-pwm",
                  gpio_slowdown=4, brightness=100, chain_length=1, parallel=1):
+        self._lock = claim_panel()
         from rgbmatrix import RGBMatrix, RGBMatrixOptions  # only exists on the Pi
 
         opts = RGBMatrixOptions()

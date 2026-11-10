@@ -31,6 +31,15 @@ def kind(default) -> str:
 
 def check(name: str, default, value, choices=None) -> None:
     """Raise ValueError if ``value`` can't stand in for a setting whose default is ``default``."""
+    if choices == "media":  # a file from the media library
+        from bongo import media
+        if not media.valid_name(value):
+            raise ValueError(f"{name}: {value!r} isn't a media file; use built-in/<file> or uploaded/<file>")
+        return
+    if choices == "palettes":  # a module-specific list of objects, checked by the module's own check()
+        if not isinstance(value, list):
+            raise ValueError(f"{name}: expected a list")
+        return
     if choices is not None:
         allowed = choices if not isinstance(value, list) else None
         if allowed is not None and value not in allowed:
@@ -57,9 +66,13 @@ def check(name: str, default, value, choices=None) -> None:
 def describe(module) -> dict:
     """JSON-ready description of a module: shared settings and each style's own."""
     def fields(defaults, choices):
-        return [{"name": n, "type": "choice" if n in choices else kind(d), "default": d,
-                 **({"choices": list(choices[n])} if n in choices else {})}
-                for n, d in defaults.items()]
+        def typed(n, d):
+            if choices.get(n) in ("media", "palettes"):
+                return {"type": choices[n]}
+            if n in choices:
+                return {"type": "choice", "choices": list(choices[n])}
+            return {"type": kind(d)}
+        return [{"name": n, "default": d, **typed(n, d)} for n, d in defaults.items()]
     shared_choices = module.choices
     return {
         "id": module.id, "name": module.name, "description": module.description,
