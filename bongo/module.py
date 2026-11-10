@@ -36,6 +36,8 @@ class Style:
     """One look of a module. Subclass it, set ``defaults``, implement ``render``."""
     defaults: dict = {}
     choices: dict = {}  # setting name -> allowed values, for settings with a fixed set
+    swatches: dict = {}  # setting name -> {choice: [colours]}, so the dashboard shows each choice's colours
+    basic: tuple = ()  # this style's settings shown up front in the dashboard; the rest sit under Advanced
     fps: int = 30
 
     def __init__(self, ctx: Context, settings: dict):
@@ -66,6 +68,13 @@ class Module:
     # dashboard saves new settings; it returns a list of problems (empty = fine).
     check: Callable[[dict], None] | None = None
     verify: Callable[[dict], list[str]] | None = None
+    # Dashboard hints. ``basic``: the few settings most people change, shown up front; the rest
+    # go under "Advanced settings". Leave it empty to show everything. ``item_fields``: for a
+    # list-of-entries setting, the fields of one entry, so it gets a form instead of raw JSON:
+    # {"items": [{"name": "title", "type": "text", "label": "Title"}, ...]}. Field types: text,
+    # longtext, date, time, days, colour; ``"more": True`` tucks a field under the entry's "More".
+    basic: tuple = ()
+    item_fields: dict = field(default_factory=dict)
 
     @property
     def default_style(self) -> str:

@@ -65,19 +65,27 @@ def check(name: str, default, value, choices=None) -> None:
 
 def describe(module) -> dict:
     """JSON-ready description of a module: shared settings and each style's own."""
-    def fields(defaults, choices):
+    tiered = bool(module.basic or any(cls.basic for cls in module.styles.values()))
+
+    def fields(defaults, choices, swatches=None, basic=()):
+        swatches = swatches or {}
+
         def typed(n, d):
+            if n in module.item_fields:
+                return {"type": "items", "fields": module.item_fields[n]}
             if choices.get(n) in ("media", "palettes"):
                 return {"type": choices[n]}
             if n in choices:
-                return {"type": "choice", "choices": list(choices[n])}
+                extra = {"swatches": swatches[n]} if n in swatches else {}
+                return {"type": "choice", "choices": list(choices[n]), **extra}
             return {"type": kind(d)}
-        return [{"name": n, "default": d, **typed(n, d)} for n, d in defaults.items()]
+        return [{"name": n, "default": d, **typed(n, d), "advanced": tiered and n not in basic}
+                for n, d in defaults.items()]
     shared_choices = module.choices
     return {
         "id": module.id, "name": module.name, "description": module.description,
         "default_style": module.default_style,
-        "settings": fields(module.defaults, shared_choices),
-        "styles": {name: {"settings": fields(cls.defaults, {**shared_choices, **cls.choices})}
+        "settings": fields(module.defaults, shared_choices, basic=module.basic),
+        "styles": {name: {"settings": fields(cls.defaults, {**shared_choices, **cls.choices}, cls.swatches, cls.basic)}
                    for name, cls in module.styles.items()},
     }

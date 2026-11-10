@@ -13,4 +13,5 @@ MODULE = Module(
         units="celsius", wind_unit="kmh", refresh_minutes=10,
     ),
     choices={"units": ["celsius", "fahrenheit"], "wind_unit": ["kmh", "mph", "ms", "kn"]},
+    basic=("location", "latitude", "longitude", "units"),
 )

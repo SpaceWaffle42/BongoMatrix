@@ -261,4 +261,15 @@ MODULE = Module(
         rotate_seconds=8, idle_text="", text_colour="#FFF4DE", accent="#FFB547",
         background_top="#14161A", background_bottom="#08090A",
     ),
+    basic=("items",),
+    item_fields={"items": [
+        {"name": "title", "type": "text", "label": "Title", "placeholder": "Bin day"},
+        {"name": "text", "type": "longtext", "label": "Message", "placeholder": "Green bin goes out tonight"},
+        {"name": "start", "type": "date", "label": "Show from", "more": True},
+        {"name": "end", "type": "date", "label": "Show until (not including)", "more": True},
+        {"name": "days", "type": "days", "label": "Only on these days", "more": True},
+        {"name": "from", "type": "time", "label": "From time", "more": True},
+        {"name": "to", "type": "time", "label": "Until time", "more": True},
+        {"name": "accent", "type": "colour", "label": "Own accent colour", "more": True},
+    ]},
 )

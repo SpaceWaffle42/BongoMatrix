@@ -18,4 +18,5 @@ MODULE = Module(
         background_top="#2A0A06", background_bottom="#0E0201",
         progress_bar=True, start=None,
     ),
+    basic=("label", "target", "done_message"),
 )

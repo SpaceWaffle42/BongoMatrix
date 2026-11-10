@@ -1,4 +1,5 @@
-"""Two looks of the same headlines: a scrolling ticker and a rotating headline card."""
+"""Four looks of the same stories. Headlines are drawn in ``headline_colour`` and story text in
+``summary_colour`` everywhere, so the two never blur together."""
 from __future__ import annotations
 
 import numpy as np
@@ -25,6 +26,34 @@ def fit(font, text: str, width: int) -> str:
     return text
 
 
+def wrap(font, text, width):
+    """Lines no wider than ``width``; a word longer than the line is hard-broken."""
+    lines = [""]
+    for word in text.split():
+        while font.width(word) > width:
+            cut = len(word)
+            while cut > 1 and font.width(word[:cut]) > width:
+                cut -= 1
+            if lines[-1]:
+                lines.append("")
+            lines[-1], word = word[:cut], word[cut:]
+            lines.append("")
+        trial = f"{lines[-1]} {word}".strip()
+        if font.width(trial) <= width:
+            lines[-1] = trial
+        else:
+            lines.append(word)
+    return [l for l in lines if l]
+
+
+def first_sentence(text: str, limit: int = 160) -> str:
+    """The opening of the story, for one-line styles."""
+    for stop in (". ", "! ", "? "):
+        if stop in text[:limit]:
+            return text[:text.index(stop, 0, limit) + 1]
+    return text if len(text) <= limit else text[:limit].rsplit(" ", 1)[0] + "..."
+
+
 def age(now, published) -> str:
     if published is None:
         return ""
@@ -39,7 +68,7 @@ class _News(Style):
 
     def setup(self):
         s = self.settings
-        self.accent, self.text = rgb(s["accent"]), rgb(s["text_colour"])
+        self.accent, self.text, self.body = rgb(s["accent"]), rgb(s["headline_colour"]), rgb(s["summary_colour"])
         self.bg_top, self.bg_bottom = rgb(s["background_top"]), rgb(s["background_bottom"])
         self.tiny = self.ctx.fonts("tom-thumb")
         self.sizes = [self.ctx.fonts(n) for n in ("10x20", "9x18B", "7x13B", "6x10", "5x7", "tom-thumb")]
@@ -50,6 +79,30 @@ class _News(Style):
     def render(self, now):
         items = data.latest(self.settings)
         return self.waiting(now) if items is None else self.draw(items, now)
+
+    def summary(self, item) -> str:
+        return item.summary if self.settings["show_summary"] else ""
+
+    @staticmethod
+    def pick(items, now, seconds):
+        """(item, seconds into it): stories take turns, each for ``seconds(item)``."""
+        spans = [seconds(i) for i in items]
+        t = now.timestamp() % sum(spans)
+        for item, span in zip(items, spans):
+            if t < span:
+                return item, t
+            t -= span
+        return items[-1], 0.0
+
+    def lines(self, font, text, width):
+        """Wrapped lines, cached: spans are worked out every frame."""
+        cache = self.__dict__.setdefault("_wrapped", {})
+        key = (id(font), text, width)
+        if key not in cache:
+            if len(cache) > 256:
+                cache.clear()
+            cache[key] = wrap(font, text, width)
+        return cache[key]
 
     def waiting(self, now):
         img, font = self.backdrop.copy(), self.ctx.fonts("6x10")
@@ -64,19 +117,27 @@ class _News(Style):
 class Ticker(_News):
     """Source tag on top, the current headline scrolling right-to-left in the biggest font that fits."""
 
+    GAP = "  -  "
+
+    def line(self, font, item):
+        tail = first_sentence(self.summary(item))
+        return item.title, (self.GAP + tail) if tail else ""
+
     def draw(self, items, now):
         img, w, h = self.backdrop.copy(), self.ctx.width, self.ctx.height
         top = self.tiny.cap + 3  # below the tag pill
         font = next((f for f in self.sizes if f.cap + f.descent <= h - top), self.tiny)
         speed = max(1, self.settings["scroll_speed"])
-        spans = [(w + font.width(i.title) + 8) / speed for i in items]  # seconds from entering to gone
-        t = now.timestamp() % sum(spans)
-        index = 0
-        while t >= spans[index]:
-            t -= spans[index]
-            index += 1
-        item = items[index]
-        font.draw(img, w - round(t * speed), top + middle(font, h - top), item.title, self.text)
+
+        def seconds(i):  # from entering on the right to gone on the left
+            head, tail = self.line(font, i)
+            return (w + font.width(head) + font.width(tail) + 8) / speed
+        item, t = self.pick(items, now, seconds)
+        head, tail = self.line(font, item)
+        x, base = w - round(t * speed), top + middle(font, h - top)
+        font.draw(img, x, base, head, self.text)
+        if tail:
+            font.draw(img, x + font.width(head), base, tail, self.body)
         tag = fit(self.tiny, (item.source or "NEWS").upper(), w - 3)
         draw = ImageDraw.Draw(img)
         draw.rectangle([0, 0, self.tiny.width(tag) + 2, self.tiny.cap + 1], fill=mix(self.bg_top, self.accent, 0.22))
@@ -165,48 +226,98 @@ class Picture(_News):
         font.draw(img, (side - font.width(letter)) // 2, middle(font, side), letter, mix(self.bg_bottom, self.accent, 0.7))
         return img
 
+    HOLD = 1.5  # seconds still at the start and at the end of a crawl
+
+    def column(self, item, room):
+        """(font, [(line, colour)]) for the text column: headline lines, a gap, story lines."""
+        small = self.ctx.fonts("5x7")  # 5x7 unless a word would have to be broken; then tom-thumb
+        text = f"{item.title} {self.summary(item)}"
+        font = small if all(small.width(word) <= room for word in text.split()) else self.tiny
+        rows = [(l, self.text) for l in self.lines(font, item.title, room)]
+        if self.summary(item):
+            rows += [("", None)] + [(l, self.body) for l in self.lines(font, self.summary(item), room)]
+        return font, rows
+
     def draw(self, items, now):
         img, w, h = self.backdrop.copy(), self.ctx.width, self.ctx.height
-        item = items[int(now.timestamp() // max(1, self.settings["rotate_seconds"])) % len(items)]
         side = min(h, round(w * 0.42))
+        room, space = w - side - 3, h - self.tiny.cap - 2
+        speed = max(1, self.settings["scroll_speed"])
+
+        def seconds(i):  # long stories stay up until they've crawled all the way
+            font, rows = self.column(i, room)
+            travel = max(0, len(rows) * (font.cap + font.descent + 1) - space)
+            return max(self.settings["rotate_seconds"], travel / speed + 2 * self.HOLD) if travel else self.settings["rotate_seconds"]
+        item, elapsed = self.pick(items, now, seconds)
         img.paste(self.tile(item, side), (0, (h - side) // 2))
         x0 = side + 2
         room = w - x0 - 1
         stamp = age(now, item.published) or (item.source or "NEWS").upper()
         self.tiny.draw(img, x0, self.tiny.cap, fit(self.tiny, stamp, room), self.accent)
-        top = self.tiny.cap + 2
-        small = self.ctx.fonts("5x7")  # 5x7 unless a word would have to be broken; then tom-thumb
-        font = small if all(small.width(word) <= room for word in item.title.split()) else self.tiny
-        lines = self.wrap(font, item.title, room)
+        top = h - space
+        font, rows = self.column(item, room)
         pitch = font.cap + font.descent + 1
-        height = len(lines) * pitch
-        space = h - top
-        offset = 0
-        if height > space:  # crawl up: hold 1.5 s, move, hold at the end
-            travel = height - space
-            elapsed = now.timestamp() % max(1, self.settings["rotate_seconds"])
-            offset = int(min(travel, max(0.0, (elapsed - 1.5) * self.settings["scroll_speed"])))
-        text = Image.new("L", (room, space))
-        for n, line in enumerate(lines):
-            font.draw(text, 0, font.cap + n * pitch - offset, line, 255)
-        img.paste(self.text, (x0, top, x0 + room, h), text)
+        travel = max(0, len(rows) * pitch - space)
+        offset = int(min(travel, max(0.0, (elapsed - self.HOLD) * speed))) if travel else 0
+        area = img.crop((x0, top, x0 + room, h))  # draw clipped to the column
+        for n, (line, colour) in enumerate(rows):
+            if line:
+                font.draw(area, 0, font.cap + n * pitch - offset, line, colour)
+        img.paste(area, (x0, top))
         return img
 
-    @staticmethod
-    def wrap(font, text, width):
-        lines = [""]
-        for word in text.split():
-            while font.width(word) > width:  # a word longer than the column: hard-break it
-                cut = len(word)
-                while cut > 1 and font.width(word[:cut]) > width:
-                    cut -= 1
-                if lines[-1]:
-                    lines.append("")
-                lines[-1], word = word[:cut], word[cut:]
-                lines.append("")
-            trial = f"{lines[-1]} {word}".strip()
-            if font.width(trial) <= width:
-                lines[-1] = trial
-            else:
-                lines.append(word)
-        return [l for l in lines if l]
+
+class Story(Headline):
+    """v2's layout: the headline on a row of its own (sliding across once if it's too wide), and the
+    story text below it in its own colour, crawling up once the headline has been read."""
+    defaults = {"scroll_speed": 12}
+    HOLD = 2.0  # seconds before the text starts to move, and at its end
+    GAP = 16    # pixels between a sliding headline and its repeat
+
+    def setup(self):
+        super().setup()
+        self.head = self.ctx.fonts("6x10") if self.ctx.height >= 20 else self.ctx.fonts("5x7")
+        self.small = self.ctx.fonts("5x7") if self.ctx.width >= 40 else self.tiny
+        self.row = self.head.cap + self.head.descent + 1
+
+    def timing(self, item):
+        """(headline slide seconds, text travel in pixels)."""
+        w, speed = self.ctx.width, max(1, self.settings["scroll_speed"])
+        wide = self.head.width(item.title) > w - 2
+        slide = (self.head.width(item.title) + self.GAP) / speed if wide else 0.0
+        text = self.lines(self.small, self.summary(item), w - 2)
+        pitch = self.small.cap + self.small.descent + 1
+        return slide, max(0, len(text) * pitch - (self.ctx.height - self.row - 1))
+
+    def seconds(self, item):
+        slide, travel = self.timing(item)
+        speed = max(1, self.settings["scroll_speed"])
+        return max(self.settings["rotate_seconds"], max(slide, self.HOLD) + travel / speed + self.HOLD)
+
+    def draw(self, items, now):
+        if not any(self.summary(i) for i in items):  # nothing but headlines: the card shows them best
+            return super().draw(items, now)
+        img, w, h = self.backdrop.copy(), self.ctx.width, self.ctx.height
+        item, t = self.pick(items, now, self.seconds)
+        speed = max(1, self.settings["scroll_speed"])
+        slide, travel = self.timing(item)
+        # headline row: slides across once, seamlessly, then rests at its start
+        head = img.crop((0, 0, w, self.row))
+        x = 1 - (round(t * speed) if t < slide else 0)
+        self.head.draw(head, x, self.head.cap, item.title, self.text)
+        if x < 1:
+            self.head.draw(head, x + self.head.width(item.title) + self.GAP, self.head.cap, item.title, self.text)
+        img.paste(head, (0, 0))
+        ImageDraw.Draw(img).line([(0, self.row - 1), (w - 1, self.row - 1)], fill=mix(self.bg_top, self.accent, 0.35))
+        # story text: waits until the headline has been read, then crawls up
+        text = self.summary(item)
+        if not text:
+            return img
+        area = img.crop((0, self.row + 1, w, h))
+        pitch = self.small.cap + self.small.descent + 1
+        start = max(slide, self.HOLD)
+        offset = int(min(travel, max(0.0, (t - start) * speed)))
+        for n, line in enumerate(self.lines(self.small, text, w - 2)):
+            self.small.draw(area, 1, self.small.cap + n * pitch - offset, line, self.body)
+        img.paste(area, (0, self.row + 1))
+        return img

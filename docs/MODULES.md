@@ -69,6 +69,19 @@ Types and `choices` cover most settings. When a value needs more, give the `Modu
 News uses both: `check` insists every feed is an `http(s)://` address, and `verify`
 fetches each new feed once and refuses anything that isn't RSS or Atom.
 
+## Keeping the dashboard simple
+
+The dashboard builds each module's editor from its settings. Two hints keep it friendly:
+
+- `basic=("text", "colour")` on the `Module` (and `basic = (...)` on a `Style`): the settings
+  most people change, shown up front. Everything else goes under a folded **Advanced settings**
+  card. Leave it out and every setting is shown.
+- `item_fields={"items": [{"name": "title", "type": "text", "label": "Title"}, ...]}`: a
+  setting that is a list of entries gets a small form per entry instead of raw JSON. Field
+  types: `text`, `longtext`, `date`, `time`, `days`, `colour`; `"more": True` tucks a field
+  under the entry's "More options".
+- `swatches = {"palettes": {name: [colours]}}` on a `Style`: each choice is shown with its colours.
+
 ## Overlays
 
 An overlay is drawn *over* whatever module is playing: a notice ribbon now, the pet

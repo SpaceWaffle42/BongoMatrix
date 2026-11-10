@@ -11,4 +11,5 @@ MODULE = Module(
     styles={"moon": Moon, "sun": Sun},
     defaults=dict(location="London", latitude=51.5074, longitude=-0.1278,
                   accent="#FFB547", text_colour="#FFF4DE"),
+    basic=("location", "latitude", "longitude"),
 )

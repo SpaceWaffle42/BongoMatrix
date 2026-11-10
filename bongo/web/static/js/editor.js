@@ -56,8 +56,10 @@ export function render(view, match) {
   }
   const validFor = (style, settings) => {
     const { shared, own } = schemaFor(mod, style);
-    const ok = new Set([...shared, ...own].map((f) => f.name));
-    return Object.fromEntries(Object.entries(settings).filter(([k]) => ok.has(k)));
+    const fields = Object.fromEntries([...shared, ...own].map((f) => [f.name, f]));
+    // a setting the new style lacks, or a choice it doesn't offer (Metro's palettes on Classic), is dropped
+    const fits = (f, v) => f.type !== 'choice' || (Array.isArray(v) ? v.every((x) => f.choices.includes(x)) : f.choices.includes(v));
+    return Object.fromEntries(Object.entries(settings).filter(([k, v]) => fields[k] && fits(fields[k], v)));
   };
   function pickStyle(name) {
     if (styleOf(e) === name) return;
@@ -79,21 +81,51 @@ export function render(view, match) {
         h('div', { class: 'grid-2' },
           h('label', { class: 'field-col', for: 'f-seconds' }, 'Seconds on the panel', seconds),
           h('div', { class: 'field-col' }, h('span', null, 'Rotation'), toggle(e.enabled, 'Enabled', (v) => { e.enabled = v; changed(); })))),
-      shared.length ? group(`${mod.name} settings`, 'Shared by every style', shared) : null,
-      own.length ? group(`${humanize(styleOf(e))} style`, 'Only for this look', own) : null);
+      basicCard([...shared, ...own].filter((f) => !f.advanced)),
+      advancedCard(shared.filter((f) => f.advanced), own.filter((f) => f.advanced)));
   }
-  function group(title, sub, fields) {
+  const counter = (fields) => {
     const count = h('span', { class: 'tiny pill-warn changed-count' });
-    const sec = h('section', { class: 'card stack', 'aria-label': title },
-      h('div', { class: 'row between wrap' }, h('div', null, h('h2', { class: 'h2' }, title), h('p', { class: 'muted small flush' }, sub)), count),
+    count.recount = () => { const n = fields.filter((f) => differsFrom(f, e.settings)).length; count.textContent = `${n} changed`; count.hidden = !n; };
+    count.recount();
+    return count;
+  };
+  /** The settings most people change, always open. */
+  function basicCard(fields) {
+    if (!fields.length) return null;
+    const count = counter(fields);
+    const sec = h('section', { class: 'card stack', 'aria-label': 'Settings' },
+      h('div', { class: 'row between wrap' }, h('h2', { class: 'h2' }, `${mod.name} settings`), count),
       h('div', { class: 'fields' }, fields.map(fieldRow)));
-    sec.recount = () => { const n = fields.filter((f) => differsFrom(f, e.settings)).length; count.textContent = `${n} changed`; count.hidden = !n; };
-    sec.recount();
+    sec.recount = count.recount;
+    return sec;
+  }
+  /** Everything else, folded away until asked for. Shows how many are changed even when closed. */
+  function advancedCard(shared, own) {
+    const all = [...shared, ...own];
+    if (!all.length) return null;
+    const count = counter(all);
+    let open = store.get('editorAdvanced', false);
+    const body = h('div', { class: 'stack' },
+      shared.length ? h('div', { class: 'stack-s' }, h('h3', { class: 'eyebrow flush' }, 'Every style'), h('div', { class: 'fields' }, shared.map(fieldRow))) : null,
+      own.length ? h('div', { class: 'stack-s' }, h('h3', { class: 'eyebrow flush' }, `${humanize(styleOf(e))} only`), h('div', { class: 'fields' }, own.map(fieldRow))) : null);
+    const btn = h('button', { type: 'button', class: 'disclosure', 'aria-expanded': String(open) },
+      h('span', { class: 'disclosure-mark', 'aria-hidden': 'true' }, open ? '−' : '+'),
+      h('span', { class: 'h2' }, 'Advanced settings'),
+      h('span', { class: 'muted small' }, `${all.length} more: fonts, sizes, timings, colours`));
+    body.hidden = !open;
+    btn.addEventListener('click', () => {
+      open = !open; store.set('editorAdvanced', open);
+      body.hidden = !open; btn.setAttribute('aria-expanded', String(open));
+      btn.querySelector('.disclosure-mark').textContent = open ? '−' : '+';
+    });
+    const sec = h('section', { class: 'card stack', 'aria-label': 'Advanced settings' }, h('div', { class: 'row between wrap' }, btn, count), body);
+    sec.recount = count.recount;
     return sec;
   }
 
   function fieldRow(f) {
-    const row = h('div', { class: 'field' });
+    const row = h('div', { class: ['items', 'palettes', 'media'].includes(f.type) || f.swatches ? 'field wide' : 'field' });
     const id = `f-${f.name}`;
     const cur = () => (f.name in e.settings ? e.settings[f.name] : f.default);
     const differs = () => differsFrom(f, e.settings);
@@ -200,6 +232,7 @@ function control(f, id, v, set) {
   if (T === 'int' || T === 'number') return numberInput(f, id, v, set);
   if (T === 'media') return mediaPicker(id, v, set);
   if (T === 'palettes') return paletteList(id, v, set);
+  if (T === 'items') return itemList(f, id, v, set);
   if (T === 'colour') {
     const hex = h('input', { class: 'input mono hex', value: v, maxlength: 7, 'aria-label': `${humanize(f.name)} hex value`, spellcheck: 'false' });
     const pick = h('input', { type: 'color', class: 'swatch-input', id, value: /^#[0-9a-f]{6}$/i.test(v) ? v : '#000000' });
@@ -240,13 +273,13 @@ function multiChoice(f, id, v, set) {
     box.replaceChildren(
       ...(f.choices.includes('all') ? [h('button', { type: 'button', class: 'chip', 'aria-pressed': String(all),
         onclick: () => { const next = all ? [] : 'all'; set(next); paint(next); } }, 'All')] : []),
-      ...options.map((c) => h('button', { type: 'button', class: 'chip', 'aria-pressed': String(all || picked.has(c)),
+      ...options.map((c) => h('button', { type: 'button', class: f.swatches?.[c] ? 'chip palette-chip' : 'chip', 'aria-pressed': String(all || picked.has(c)),
         onclick: () => {
           const now = new Set(all ? options : picked);
           if (now.has(c)) now.delete(c); else now.add(c);
           const next = options.filter((o) => now.has(o));
           set(next); paint(next);
-        } }, humanize(c))));
+        } }, f.swatches?.[c] ? swatch(f.swatches[c]) : null, humanize(c))));
   };
   paint(v);
   return box;
@@ -254,6 +287,9 @@ function multiChoice(f, id, v, set) {
 
 /** Your own palettes: a name and three colours each, like v2. Shared by every style of the module. */
 const PALETTE_PARTS = [['background', 'Background'], ['wax', 'Wax'], ['highlight', 'Highlight']];
+/** Background | wax | highlight, drawn the same way for built-in and custom palettes. */
+const paint3 = (el, [bg, wax, hi]) => { el.style.background = `linear-gradient(90deg, ${bg} 0 34%, ${wax} 34% 72%, ${hi} 72%)`; };
+const swatch = (colours) => { const s = h('span', { class: 'palette-swatch small', 'aria-hidden': 'true' }); paint3(s, colours); return s; };
 function paletteList(id, v, set) {
   let list = clone(Array.isArray(v) ? v : []);
   const box = h('div', { class: 'stack-s', id });
@@ -261,8 +297,8 @@ function paletteList(id, v, set) {
   const paint = () => {
     box.replaceChildren(
       ...list.map((p, i) => {
-        const swatch = h('div', { class: 'palette-swatch', 'aria-hidden': 'true' });
-        const tint = () => { swatch.style.background = `linear-gradient(90deg, ${p.background} 0 34%, ${p.wax} 34% 72%, ${p.highlight} 72%)`; };
+        const tile = h('div', { class: 'palette-swatch', 'aria-hidden': 'true' });
+        const tint = () => paint3(tile, [p.background, p.wax, p.highlight]);
         tint();
         const name = h('input', { class: 'input', id: `${id}-${i}-name`, value: p.name || '', maxlength: 24, 'aria-label': `Palette ${i + 1} name` });
         name.addEventListener('input', () => { p.name = name.value; save(); });
@@ -274,7 +310,7 @@ function paletteList(id, v, set) {
         const on = toggle(p.enabled !== false, 'In rotation', (x) => { p.enabled = x; save(); });
         const remove = h('button', { type: 'button', class: 'btn ghost danger-btn', 'aria-label': `Remove palette ${p.name || i + 1}` }, 'Remove');
         remove.addEventListener('click', () => { list.splice(i, 1); save(); paint(); });
-        return h('div', { class: 'palette-row' }, swatch,
+        return h('div', { class: 'palette-row' }, tile,
           h('div', { class: 'stack-s grow' }, name, h('div', { class: 'row gap-s wrap' }, ...colours)),
           h('div', { class: 'stack-s end' }, on, remove));
       }),
@@ -287,6 +323,62 @@ function paletteList(id, v, set) {
     save(); paint();
     box.querySelector(`#${id}-${list.length - 1}-name`)?.select();
   });
+  paint();
+  return box;
+}
+
+/** A list of entries (notices, events...) as small forms, from the module's ``item_fields``.
+ *  Fields marked ``more`` are tucked under each entry's "More options". Empty fields are left out. */
+const DAY_NAMES = ['mon', 'tue', 'wed', 'thu', 'fri', 'sat', 'sun'];
+function itemList(f, id, v, set) {
+  const list = clone(Array.isArray(v) ? v : []);
+  const box = h('div', { class: 'stack-s', id });
+  const save = () => set(clone(list.map((it) => Object.fromEntries(Object.entries(it).filter(([, x]) => x !== '' && x != null && !(Array.isArray(x) && !x.length))))), false);
+  const label = humanize(f.name).replace(/s$/, '').toLowerCase();
+  const input = (fd, it, fid) => {
+    const value = it[fd.name] ?? '';
+    const put = (x) => { it[fd.name] = x; save(); };
+    if (fd.type === 'longtext') {
+      const ta = h('textarea', { class: 'input', id: fid, rows: 2, placeholder: fd.placeholder || '' }); ta.value = value;
+      ta.addEventListener('input', () => put(ta.value)); return ta;
+    }
+    if (fd.type === 'days') {
+      const picked = new Set(Array.isArray(value) ? value.map((d) => String(d).toLowerCase().slice(0, 3)) : []);
+      return h('div', { class: 'chip-grid', role: 'group', id: fid }, DAY_NAMES.map((d) => {
+        const b = h('button', { type: 'button', class: 'chip', 'aria-pressed': String(picked.has(d)) }, humanize(d));
+        b.addEventListener('click', () => { picked.has(d) ? picked.delete(d) : picked.add(d); b.setAttribute('aria-pressed', String(picked.has(d))); put(DAY_NAMES.filter((x) => picked.has(x))); });
+        return b;
+      }));
+    }
+    if (fd.type === 'colour') {
+      const on = !!value;
+      const pick = h('input', { type: 'color', class: 'swatch-input', id: fid, value: /^#[0-9a-f]{6}$/i.test(value) ? value : '#FFB547', disabled: !on });
+      pick.addEventListener('input', () => put(pick.value.toUpperCase()));
+      return h('div', { class: 'row gap-s' }, toggle(on, on ? 'Own colour' : 'Module colour', (x) => { pick.disabled = !x; put(x ? pick.value.toUpperCase() : null); }), pick);
+    }
+    const type = { date: 'date', time: 'time' }[fd.type] || 'text';
+    const inp = h('input', { class: 'input', id: fid, type, placeholder: fd.placeholder || '', value: type === 'date' ? String(value).slice(0, 10) : value });
+    inp.addEventListener('input', () => put(inp.value));
+    return inp;
+  };
+  const paint = () => {
+    box.replaceChildren(
+      ...list.map((it, i) => {
+        const main = f.fields.filter((fd) => !fd.more), more = f.fields.filter((fd) => fd.more);
+        const cell = (fd) => { const fid = `${id}-${i}-${fd.name}`; return h('label', { class: 'field-col', for: fid }, fd.label || humanize(fd.name), input(fd, it, fid)); };
+        const extra = more.length ? h('details', { class: 'item-more', open: more.some((fd) => it[fd.name] != null && it[fd.name] !== '') },
+          h('summary', null, 'More options (dates, days, times)'), h('div', { class: 'grid-2' }, more.map(cell))) : null;
+        const remove = h('button', { type: 'button', class: 'btn ghost danger-btn', 'aria-label': `Remove ${label} ${i + 1}` }, 'Remove');
+        remove.addEventListener('click', () => { list.splice(i, 1); save(); paint(); });
+        return h('div', { class: 'item-card stack-s' },
+          h('div', { class: 'row between' }, h('span', { class: 'eyebrow' }, `${humanize(label)} ${i + 1}`), remove),
+          h('div', { class: main.length > 1 && !main.some((fd) => fd.type === 'longtext') ? 'grid-2' : 'stack-s' }, main.map(cell)), extra);
+      }),
+      ...(list.length ? [] : [h('p', { class: 'muted small flush' }, `Nothing here yet.`)]),
+      h('div', null, add));
+  };
+  const add = h('button', { type: 'button', class: 'btn' }, `+ Add ${label}`);
+  add.addEventListener('click', () => { list.push({}); paint(); box.querySelector(`#${id}-${list.length - 1}-${f.fields[0].name}`)?.focus(); });
   paint();
   return box;
 }

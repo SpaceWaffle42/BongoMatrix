@@ -9,7 +9,7 @@ from bongo.fonts import align_x, middle, names
 from bongo.module import Style
 
 from .field import field
-from .palettes import METRO, enabled_custom, metro_from, rgb
+from .palettes import METRO, METRO_SWATCHES, enabled_custom, metro_from, rgb
 
 SAMPLES = 2  # supersampling per axis for smooth edges
 
@@ -30,6 +30,8 @@ def fitting(fonts, font, text, width):
 class Metro(Style):
     fps = 30
     choices = {"palettes": ["all", *METRO], "time_font": names(), "date_font": names()}
+    swatches = {"palettes": METRO_SWATCHES}
+    basic = ("palettes",)
     defaults = dict(
         palettes=["magma"],       # "all" or names from palettes.METRO; enabled custom ones join in
         blob_count=4, speed=1.0,  # speed scales how fast the wax drifts
