@@ -21,6 +21,7 @@ def _smooth(a, lo, hi):
 
 class Metro(Style):
     fps = 30
+    choices = {"palette": list(METRO)}
     defaults = dict(
         palette="magma",          # name from palettes.METRO
         blob_count=4, speed=1.0,  # speed scales how fast the wax drifts

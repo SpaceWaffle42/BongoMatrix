@@ -21,6 +21,7 @@ EDGES = {
 
 class Classic(Style):
     fps = 33
+    choices = {"palettes": ["all", *CLASSIC]}
     defaults = dict(
         palettes="all",          # "all" or a list of names from palettes.CLASSIC
         custom_palettes=[],      # extra [outside, inside, line] hex triples
