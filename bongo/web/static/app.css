@@ -380,3 +380,11 @@ body.drag-active { user-select: none; -webkit-user-select: none; }
 .palette-grid .chip.palette-chip { gap: 8px; padding: 6px 8px; }
 .chip-label { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 @media (max-width: 520px) { .chip-grid.palette-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); } }
+
+/* Place search (Weather, Sky) */
+.place-box { position: relative; }
+.place-list { position: absolute; z-index: 10; left: 0; right: 0; top: calc(100% + 2px); margin: 0; padding: 0; list-style: none;
+  background: var(--card-2); border: 1px solid var(--line-2); box-shadow: 0 10px 30px rgba(0,0,0,.5); max-height: 280px; overflow: auto; }
+.place-option { display: flex; flex-direction: column; gap: 1px; padding: 8px 12px; cursor: pointer; border-bottom: 1px solid var(--line-3); }
+.place-option:hover, .place-option[aria-selected="true"] { background: var(--amber-card); }
+.place-option[aria-selected="true"] .strong { color: var(--amber-hover); }

@@ -196,6 +196,15 @@ export async function start() {
       uploads.splice(k, 1);
       return json({ ok: true });
     }
+    if (p === '/api/places') {  // a few real places so the location search can be tried in the demo
+      const q = (url.searchParams.get('q') || '').toLowerCase();
+      const all = [['Cheltenham', 'England', 'United Kingdom', 'GB', 51.9, -2.0783], ['Chester', 'England', 'United Kingdom', 'GB', 53.1934, -2.8931],
+        ['Chelmsford', 'England', 'United Kingdom', 'GB', 51.7356, 0.4685], ['London', 'England', 'United Kingdom', 'GB', 51.5085, -0.1257],
+        ['London', 'Ontario', 'Canada', 'CA', 42.9834, -81.233], ['Bath', 'England', 'United Kingdom', 'GB', 51.3794, -2.3656],
+        ['Paris', 'Île-de-France', 'France', 'FR', 48.8534, 2.3488], ['Paris', 'Texas', 'United States', 'US', 33.6609, -95.5555]];
+      return json({ places: all.filter(([n]) => n.toLowerCase().startsWith(q)).map(([name, region, country, cc, latitude, longitude]) =>
+        ({ label: `${name}, ${region}, ${cc}`, name, region, country, latitude, longitude })) });
+    }
     if (p === '/api/devices') return json(devices);
     if (p.startsWith('/api/devices/') && method === 'DELETE') {
       const id = decodeURIComponent(p.split('/').pop()), k = devices.findIndex((d) => d.id === id);

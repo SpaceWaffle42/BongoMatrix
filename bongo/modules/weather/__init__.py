@@ -14,5 +14,6 @@ MODULE = Module(
         scroll_location=True,  # a location too long for its space scrolls like a ticker
     ),
     choices={"units": ["celsius", "fahrenheit"], "wind_unit": ["kmh", "mph", "ms", "kn"]},
-    basic=("location", "latitude", "longitude", "units", "scroll_location"),
+    basic=("location", "units", "scroll_location"),
+    places={"location": ("latitude", "longitude")},  # pick a real place; coordinates follow
 )

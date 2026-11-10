@@ -71,6 +71,9 @@ def describe(module) -> dict:
         swatches = swatches or {}
 
         def typed(n, d):
+            if n in module.places:
+                lat, lon = module.places[n]
+                return {"type": "place", "latitude": lat, "longitude": lon}
             if n in module.item_fields:
                 return {"type": "items", "fields": module.item_fields[n]}
             if choices.get(n) in ("media", "palettes"):
