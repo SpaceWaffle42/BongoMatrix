@@ -69,3 +69,55 @@ METRO = {
 def rgb(value: str) -> tuple[int, int, int]:
     value = NAMED.get(value, value).lstrip("#")
     return tuple(int(value[i:i + 2], 16) for i in (0, 2, 4))
+
+
+# -- custom palettes ------------------------------------------------------------------------
+# Like v2: a custom palette is just three colours, shared by both styles.
+#   {"name": "Bedroom", "background": "#000000", "wax": "#ff0000", "highlight": "#ffff00", "enabled": true}
+# Classic uses them directly (outside, inside, line). Metro derives its gradients from them.
+CUSTOM_KEYS = ("background", "wax", "highlight")
+
+
+def _mix(a, b, k):
+    a, b = rgb(a), rgb(b)
+    return "#%02X%02X%02X" % tuple(round(x + (y - x) * k) for x, y in zip(a, b))
+
+
+def metro_from(background: str, wax: str, highlight: str) -> dict:
+    """A full Metro palette worked out from three colours."""
+    return dict(
+        bg_top=_mix(background, wax, 0.12), bg_bottom=_mix(background, "#000000", 0.6),
+        glow=_mix(background, wax, 0.3), edge=_mix(wax, "#000000", 0.35), mid=wax,
+        core=highlight, text=_mix(highlight, "#FFFFFF", 0.85), accent=_mix(highlight, "#FFFFFF", 0.4),
+    )
+
+
+def check_custom(palettes) -> None:
+    """Raise ValueError with a readable message unless ``palettes`` is a list of good custom palettes."""
+    if not isinstance(palettes, list):
+        raise ValueError("custom_palettes must be a list")
+    names = set()
+    for i, p in enumerate(palettes):
+        where = f"custom palette {i + 1}"
+        if not isinstance(p, dict):
+            raise ValueError(f"{where}: must be an object with a name and three colours")
+        unknown = set(p) - {"name", "enabled", *CUSTOM_KEYS}
+        if unknown:
+            raise ValueError(f"{where}: unknown keys {sorted(unknown)}")
+        name = p.get("name")
+        if not isinstance(name, str) or not name.strip() or len(name) > 24:
+            raise ValueError(f"{where}: give it a name (up to 24 characters)")
+        if name.strip().lower() in names:
+            raise ValueError(f"{where}: another palette is already called {name!r}")
+        names.add(name.strip().lower())
+        for key in CUSTOM_KEYS:
+            value = p.get(key)
+            if not (isinstance(value, str) and len(value) == 7 and value[0] == "#"
+                    and all(c in "0123456789abcdefABCDEF" for c in value[1:])):
+                raise ValueError(f"{where} ({name}): {key} must be a colour like #FF8800")
+        if not isinstance(p.get("enabled", True), bool):
+            raise ValueError(f"{where} ({name}): enabled must be true or false")
+
+
+def enabled_custom(palettes) -> list[dict]:
+    return [p for p in palettes if p.get("enabled", True)]

@@ -144,3 +144,69 @@ class Headline(_News):
             x = w - int(now.timestamp() * self.settings["scroll_speed"]) % period
             font.draw(img, x, top + middle(font, h - top), item.title, self.text)
         return img
+
+
+class Picture(_News):
+    """The story's thumbnail on the left; its age and headline on the right, crawling upwards
+    when it's longer than the space. Stories without a picture get a tinted tile instead."""
+    defaults = {"rotate_seconds": 10, "scroll_speed": 6}
+
+    def tile(self, item, side):
+        thumb = data.image(item.image)
+        if thumb is not None:
+            k = max(side / thumb.width, side / thumb.height)
+            size = (max(side, round(thumb.width * k)), max(side, round(thumb.height * k)))
+            big = thumb.resize(size, Image.LANCZOS)
+            x, y = (size[0] - side) // 2, (size[1] - side) // 2
+            return big.crop((x, y, x + side, y + side))
+        img = Image.new("RGB", (side, side), mix(self.bg_bottom, self.accent, 0.18))
+        letter = (item.source or "N")[:1].upper()
+        font = next((f for f in self.sizes if f.width(letter) <= side - 4 and f.cap <= side - 4), self.tiny)
+        font.draw(img, (side - font.width(letter)) // 2, middle(font, side), letter, mix(self.bg_bottom, self.accent, 0.7))
+        return img
+
+    def draw(self, items, now):
+        img, w, h = self.backdrop.copy(), self.ctx.width, self.ctx.height
+        item = items[int(now.timestamp() // max(1, self.settings["rotate_seconds"])) % len(items)]
+        side = min(h, round(w * 0.42))
+        img.paste(self.tile(item, side), (0, (h - side) // 2))
+        x0 = side + 2
+        room = w - x0 - 1
+        stamp = age(now, item.published) or (item.source or "NEWS").upper()
+        self.tiny.draw(img, x0, self.tiny.cap, fit(self.tiny, stamp, room), self.accent)
+        top = self.tiny.cap + 2
+        small = self.ctx.fonts("5x7")  # 5x7 unless a word would have to be broken; then tom-thumb
+        font = small if all(small.width(word) <= room for word in item.title.split()) else self.tiny
+        lines = self.wrap(font, item.title, room)
+        pitch = font.cap + font.descent + 1
+        height = len(lines) * pitch
+        space = h - top
+        offset = 0
+        if height > space:  # crawl up: hold 1.5 s, move, hold at the end
+            travel = height - space
+            elapsed = now.timestamp() % max(1, self.settings["rotate_seconds"])
+            offset = int(min(travel, max(0.0, (elapsed - 1.5) * self.settings["scroll_speed"])))
+        text = Image.new("L", (room, space))
+        for n, line in enumerate(lines):
+            font.draw(text, 0, font.cap + n * pitch - offset, line, 255)
+        img.paste(self.text, (x0, top, x0 + room, h), text)
+        return img
+
+    @staticmethod
+    def wrap(font, text, width):
+        lines = [""]
+        for word in text.split():
+            while font.width(word) > width:  # a word longer than the column: hard-break it
+                cut = len(word)
+                while cut > 1 and font.width(word[:cut]) > width:
+                    cut -= 1
+                if lines[-1]:
+                    lines.append("")
+                lines[-1], word = word[:cut], word[cut:]
+                lines.append("")
+            trial = f"{lines[-1]} {word}".strip()
+            if font.width(trial) <= width:
+                lines[-1] = trial
+            else:
+                lines.append(word)
+        return [l for l in lines if l]

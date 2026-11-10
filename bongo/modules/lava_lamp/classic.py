@@ -2,11 +2,12 @@
 import numpy as np
 from PIL import ImageDraw, ImageFilter
 
-from bongo.fonts import align_x
+from bongo.fonts import align_x, names
 from bongo.module import Style
 
 from .field import field
-from .palettes import CLASSIC, rgb
+from .metro import fitting
+from .palettes import CLASSIC, enabled_custom, rgb
 
 # Marching-squares segments per corner pattern (corners: top-left=8, top-right=4,
 # bottom-right=2, bottom-left=1). Unchanged from v2.
@@ -21,10 +22,9 @@ EDGES = {
 
 class Classic(Style):
     fps = 33
-    choices = {"palettes": ["all", *CLASSIC]}
+    choices = {"palettes": ["all", *CLASSIC], "time_font": names(), "date_font": names()}
     defaults = dict(
-        palettes="all",          # "all" or a list of names from palettes.CLASSIC
-        custom_palettes=[],      # extra [outside, inside, line] hex triples
+        palettes="all",          # "all" or a list of names from palettes.CLASSIC; enabled custom ones join in
         blob_count=4, blob_min_radius=5, blob_max_radius=10, blob_speed=0.25,
         threshold=1.0, edge_width=4, blur_radius=2,
         time_font="9x18B", date_font="clR6x12", time_y=None, date_y=None,  # None: fit the canvas
@@ -34,7 +34,8 @@ class Classic(Style):
     def setup(self):
         s, rng, w, h = self.settings, self.ctx.rng, self.ctx.width, self.ctx.height
         names = list(CLASSIC) if s["palettes"] == "all" else s["palettes"]
-        choices = [CLASSIC[n] for n in names] + [tuple(p) for p in s["custom_palettes"]]
+        choices = [CLASSIC[n] for n in names] + [
+            (p["background"], p["wax"], p["highlight"]) for p in enabled_custom(s["custom_palettes"])]
         self.outside, self.inside, self.line = (rgb(c) for c in rng.choice(choices))
         self.blobs = [
             [rng.uniform(0, w), rng.uniform(0, h), rng.uniform(-s["blob_speed"], s["blob_speed"]),
@@ -83,5 +84,6 @@ class Classic(Style):
         ):
             if show:
                 label = now.strftime(fmt)
+                font = fitting(self.ctx.fonts, font, label, img.width)
                 font.draw(img, align_x(align, font.width(label), img.width), y, label, text, border)
         return img

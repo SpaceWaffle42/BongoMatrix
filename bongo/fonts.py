@@ -94,6 +94,11 @@ def _load(path: Path) -> BdfFont:
     return BdfFont(path)
 
 
+def names(directory: Path = FONT_DIR) -> list[str]:
+    """Every font a setting may name, for the dashboard's font pickers."""
+    return sorted(p.stem for p in Path(directory).glob("*.bdf"))
+
+
 def middle(font: BdfFont, height: int, lines: int = 1, gap: int = 1) -> int:
     """Baseline of the first line so ``lines`` lines of ``font`` sit centred in ``height``."""
     pitch = font.cap + font.descent + gap

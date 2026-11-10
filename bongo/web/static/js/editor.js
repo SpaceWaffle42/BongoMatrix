@@ -1,0 +1,368 @@
+// Module editor: style picker + a form generated from /api/modules, with a live preview.
+import { previewPath, get, uploadMedia } from './api.js';
+import { h, icon, toast, clone, same, humanize, toggle, segmented, store, reducedMotion } from './ui.js';
+import { FrameLoop } from './led.js';
+import { S, onLeave, go, href, moduleById, styleOf, entryName, applyDraft, draftChanged } from './app.js';
+
+/** Settings for a style: shared ones (unless the style redefines them) and the style's own. */
+export function schemaFor(mod, style) {
+  const own = mod?.styles?.[style]?.settings || [];
+  const names = new Set(own.map((f) => f.name));
+  return { shared: (mod?.settings || []).filter((f) => !names.has(f.name)), own };
+}
+
+export function render(view, match) {
+  const i = Number(match[1]);
+  if (!S.draft?.[i]) { toast('That playlist entry no longer exists'); go('/', { replace: true }); return; }
+  const e = clone(S.draft[i]);
+  const original = clone(e);
+  const mod = moduleById(e.module);
+  let showSafe = store.get('editorSafe', true);
+
+  const edited = h('span', { class: 'pill-warn', hidden: true }, 'Edited');
+  const head = h('div', { class: 'editor-head' },
+    h('div', { class: 'row gap-s wrap' },
+      h('a', { href: href('/playlist'), 'data-route': '/playlist', class: 'crumb' }, icon('left'), 'Playlist'),
+      h('span', { class: 'crumb-sep', 'aria-hidden': 'true' }, '/'),
+      h('h1', { class: 'h1 small-h' }, entryName(e)), edited),
+    h('div', { class: 'row gap-s wrap' },
+      h('button', { type: 'button', class: 'btn ghost', onclick: cancel }, 'Cancel'),
+      h('button', { type: 'button', class: 'btn', onclick: keepDraft, title: 'Keep these edits in the playlist draft without sending them yet' }, 'Save to draft'),
+      h('button', { type: 'button', class: 'btn primary', onclick: apply }, 'Apply to Matrix')));
+  view.append(head);
+  if (!mod) {
+    view.append(h('div', { class: 'card stack' }, h('p', { class: 'error-box' }, `The module “${e.module}” isn't installed on this Matrix, so it can't be edited.`),
+      h('button', { type: 'button', class: 'btn', onclick: () => go('/playlist') }, 'Back to the playlist')));
+    return;
+  }
+
+  const problems = h('div', { class: 'error-box', role: 'alert', hidden: true });
+  const styles = h('div', { class: 'style-grid' });
+  const sections = h('div', { class: 'stack' });
+  let thumbs = [];
+  onLeave(() => thumbs.forEach((t) => t.stop()));
+
+  // -- style picker ------------------------------------------------------------------------
+  function paintStyles() {
+    thumbs.forEach((t) => t.stop()); thumbs = [];
+    styles.replaceChildren(...Object.keys(mod.styles).map((name) => {
+      const canvas = h('canvas', { class: 'led-canvas mini', 'aria-hidden': 'true' });
+      const btn = h('button', { type: 'button', class: 'style-card', 'aria-pressed': String(styleOf(e) === name),
+        onclick: () => pickStyle(name) }, h('span', { class: 'led-frame mini' }, canvas), h('span', null, humanize(name)));
+      thumbs.push(new FrameLoop(canvas, { interval: Infinity,
+        path: () => previewPath({ module: e.module, style: name, settings: validFor(name, e.settings) }) }));
+      return btn;
+    }));
+  }
+  const validFor = (style, settings) => {
+    const { shared, own } = schemaFor(mod, style);
+    const ok = new Set([...shared, ...own].map((f) => f.name));
+    return Object.fromEntries(Object.entries(settings).filter(([k]) => ok.has(k)));
+  };
+  function pickStyle(name) {
+    if (styleOf(e) === name) return;
+    const dropped = Object.keys(e.settings).filter((k) => !(k in validFor(name, e.settings)));
+    e.style = name;
+    e.settings = validFor(name, e.settings);
+    if (dropped.length) toast(`${humanize(name)} has no ${dropped.map(humanize).join(', ')}; ${dropped.length > 1 ? 'those were' : 'that was'} dropped.`);
+    styles.querySelectorAll('.style-card').forEach((b, k) => b.setAttribute('aria-pressed', String(Object.keys(mod.styles)[k] === name)));
+    paintFields(); changed();
+  }
+
+  // -- generated form ----------------------------------------------------------------------
+  function paintFields() {
+    const { shared, own } = schemaFor(mod, styleOf(e));
+    const seconds = h('input', { class: 'input', type: 'number', id: 'f-seconds', min: 1, max: 3600, step: 'any', value: e.seconds });
+    seconds.addEventListener('input', () => { const v = Number(seconds.value); if (v > 0) { e.seconds = v; changed(); } });
+    sections.replaceChildren(
+      h('section', { class: 'card stack', 'aria-label': 'Timing' }, h('h2', { class: 'h2' }, 'Timing'),
+        h('div', { class: 'grid-2' },
+          h('label', { class: 'field-col', for: 'f-seconds' }, 'Seconds on the panel', seconds),
+          h('div', { class: 'field-col' }, h('span', null, 'Rotation'), toggle(e.enabled, 'Enabled', (v) => { e.enabled = v; changed(); })))),
+      shared.length ? group(`${mod.name} settings`, 'Shared by every style', shared) : null,
+      own.length ? group(`${humanize(styleOf(e))} style`, 'Only for this look', own) : null);
+  }
+  function group(title, sub, fields) {
+    const count = h('span', { class: 'tiny pill-warn changed-count' });
+    const sec = h('section', { class: 'card stack', 'aria-label': title },
+      h('div', { class: 'row between wrap' }, h('div', null, h('h2', { class: 'h2' }, title), h('p', { class: 'muted small flush' }, sub)), count),
+      h('div', { class: 'fields' }, fields.map(fieldRow)));
+    sec.recount = () => { const n = fields.filter((f) => differsFrom(f, e.settings)).length; count.textContent = `${n} changed`; count.hidden = !n; };
+    sec.recount();
+    return sec;
+  }
+
+  function fieldRow(f) {
+    const row = h('div', { class: 'field' });
+    const id = `f-${f.name}`;
+    const cur = () => (f.name in e.settings ? e.settings[f.name] : f.default);
+    const differs = () => differsFrom(f, e.settings);
+    const set = (v, repaint = false) => {
+      if (isDefault(f, v)) delete e.settings[f.name]; else e.settings[f.name] = v;
+      row.classList.toggle('changed', differs());
+      changed();
+      if (repaint) paint();
+    };
+    const paint = () => {
+      row.classList.toggle('changed', differs());
+      row.replaceChildren(
+        h('div', { class: 'field-head' },
+          h('label', { class: 'field-label', for: id, id: `${id}-l` }, humanize(f.name)),
+          h('span', { class: 'changed-mark' }, 'changed'),
+          h('button', { type: 'button', class: 'link reset', 'aria-label': `Reset ${humanize(f.name)} to default`,
+            onclick: () => { delete e.settings[f.name]; changed(); paint(); } }, 'Reset')),
+        control(f, id, cur(), set),
+        h('div', { class: 'tiny muted' }, `Default: ${showDefault(f)}`));
+    };
+    paint();
+    return row;
+  }
+
+  // -- preview -------------------------------------------------------------------------------
+  const canvas = h('canvas', { class: 'led-canvas', role: 'img', 'aria-label': `Draft preview of ${entryName(e)}` });
+  const err = h('p', { class: 'error-box small', role: 'status', hidden: true });
+  const safeBtn = h('button', { type: 'button', class: 'chip', 'aria-pressed': String(showSafe) }, 'Safe area');
+  const playBtn = h('button', { type: 'button', class: 'chip', 'aria-pressed': String(!reducedMotion()) }, 'Animate');
+  let t0 = Date.now() / 1000, frames = 0;
+  const preview = new FrameLoop(canvas, {
+    interval: reducedMotion() ? Infinity : 120,
+    path: () => previewPath({ ...e, style: styleOf(e) }, t0 + (frames++) * 0.12),
+    led: () => ({ safeArea: S.config?.safe_area, panel: S.state?.panel, showSafe }),
+    onError: (x) => { err.hidden = !x || x.status === 401; err.textContent = x ? `Preview failed: ${x.message}` : ''; },
+  });
+  onLeave(() => preview.stop());
+  safeBtn.onclick = () => { showSafe = !showSafe; store.set('editorSafe', showSafe); safeBtn.setAttribute('aria-pressed', String(showSafe)); preview.redraw(); };
+  playBtn.onclick = () => {
+    const on = playBtn.getAttribute('aria-pressed') !== 'true';
+    playBtn.setAttribute('aria-pressed', String(on));
+    preview.o.interval = on ? 120 : Infinity;
+    preview.refresh();
+  };
+  const sa = S.config?.safe_area || {};
+  const aside = h('section', { class: 'editor-preview', 'aria-label': 'Preview' },
+    h('div', { class: 'card stack' },
+      h('div', { class: 'row between wrap' }, h('h2', { class: 'h2' }, 'Draft preview'), h('div', { class: 'row gap-s' }, playBtn, safeBtn)),
+      h('div', { class: 'led-frame' }, canvas), err,
+      h('p', { class: 'muted tiny flush mono' }, `Safe area T${sa.top || 0} R${sa.right || 0} B${sa.bottom || 0} L${sa.left || 0} · `,
+        h('a', { href: href('/settings'), 'data-route': '/settings' }, 'change'))),
+    h('div', { class: 'note' }, icon('info'), h('span', null, 'Drawn by the Matrix itself, frame by frame, with your unsaved settings. Nothing changes on the panel until you apply.')));
+
+  view.append(h('div', { class: 'editor-grid' },
+    h('div', { class: 'editor-form stack' }, problems,
+      h('section', { class: 'card stack', 'aria-label': 'Style' }, h('h2', { class: 'h2' }, 'Style'),
+        mod.description ? h('p', { class: 'muted small flush' }, mod.description) : null, styles),
+      sections),
+    aside));
+  let thumbTimer = 0;
+  paintStyles(); paintFields(); changed();
+
+  function changed() {
+    edited.hidden = same(e, original);
+    sections.querySelectorAll('section').forEach((s) => s.recount?.());
+    if (!Number.isFinite(preview.o.interval)) preview.refresh();
+    clearTimeout(thumbTimer);
+    thumbTimer = setTimeout(() => thumbs.forEach((t) => t.refresh()), 800);
+  }
+  function cancel() {
+    if (!same(e, original) && !confirm('Throw away your edits to this module?')) return;
+    go('/playlist');
+  }
+  function keepDraft() { S.draft[i] = clone(e); draftChanged(); go('/playlist'); }
+  async function apply() {
+    S.draft[i] = clone(e);
+    draftChanged();
+    if (await applyDraft()) { go('/playlist'); return; }
+    const mine = S.problems.filter((p) => !/^playlist\[\d+\]/.test(p) || p.startsWith(`playlist[${i}]`));
+    problems.hidden = !S.problems.length;
+    problems.replaceChildren(h('strong', null, "The Matrix didn't accept this:"), h('ul', null, (mine.length ? mine : S.problems).map((p) => h('li', null, p))));
+    problems.scrollIntoView({ block: 'nearest' });
+  }
+}
+
+const isDefault = (f, v) => same(v, f.default) || (f.type === 'colour' && String(v).toLowerCase() === String(f.default).toLowerCase());
+/** A setting counts as changed only when its value differs from the default (an explicit default is not a change). */
+const differsFrom = (f, settings) => f.name in settings && !isDefault(f, settings[f.name]);
+const showDefault = (f) => (f.default == null ? 'Auto' : typeof f.default === 'object' ? (Array.isArray(f.default) ? `${f.default.length} item${f.default.length === 1 ? '' : 's'}` : 'object')
+  : typeof f.default === 'boolean' ? (f.default ? 'On' : 'Off') : String(f.default) || '(empty)');
+
+function rangeFor(f) {
+  const d = Number(f.default), n = f.name;
+  if (/speed/.test(n)) return f.type === 'int' ? { min: 1, max: Math.max(100, d * 3), step: 1 } : { min: 0, max: Math.max(4, d * 4), step: 0.05 };
+  if (f.type === 'number' && d >= 0 && d <= 1) return { min: 0, max: 1, step: 0.05 };
+  if (/brightness|glow|halo|opacity/.test(n)) return { min: 0, max: Math.max(1, d * 2), step: 0.05 };
+  return null;
+}
+
+/** One input for one setting, by schema type. `set(value, repaint)` stores it. */
+function control(f, id, v, set) {
+  const T = f.type;
+  if (T === 'bool') { const t = toggle(v, v ? 'On' : 'Off', (x) => set(x, true)); t.id = id; return t; }
+  if (T === 'int' || T === 'number') return numberInput(f, id, v, set);
+  if (T === 'media') return mediaPicker(id, v, set);
+  if (T === 'palettes') return paletteList(id, v, set);
+  if (T === 'colour') {
+    const hex = h('input', { class: 'input mono hex', value: v, maxlength: 7, 'aria-label': `${humanize(f.name)} hex value`, spellcheck: 'false' });
+    const pick = h('input', { type: 'color', class: 'swatch-input', id, value: /^#[0-9a-f]{6}$/i.test(v) ? v : '#000000' });
+    pick.addEventListener('input', () => { hex.value = pick.value.toUpperCase(); set(hex.value); });
+    hex.addEventListener('input', () => { if (/^#[0-9a-f]{6}$/i.test(hex.value)) { pick.value = hex.value; set(hex.value.toUpperCase()); } });
+    return h('div', { class: 'row gap-s' }, pick, hex);
+  }
+  if (T === 'choice' && (Array.isArray(f.default) || (f.default === 'all' && f.choices.includes('all')))) return multiChoice(f, id, v, set);
+  if (T === 'choice' && !Array.isArray(f.default)) {
+    if (f.choices.length <= 4) { const s = segmented(f.choices, v, (x) => set(x)); s.setAttribute('aria-labelledby', `${id}-l`); return s; }
+    const sel = h('select', { class: 'input', id }, f.choices.map((c) => h('option', { value: c, selected: c === v }, humanize(c))));
+    sel.addEventListener('change', () => set(sel.value));
+    return sel;
+  }
+  if (T === 'text') {
+    const inp = h('input', { class: 'input', id, value: v ?? '', spellcheck: 'false' });
+    inp.addEventListener('input', () => set(inp.value));
+    return inp;
+  }
+  if (T === 'auto') {
+    const auto = v == null;
+    const t = toggle(auto, 'Auto', (on) => set(on ? null : 0, true));
+    t.id = id;
+    return h('div', { class: 'row gap-s wrap' }, t, auto ? h('span', { class: 'muted small' }, 'Worked out automatically')
+      : numberInput({ ...f, type: 'number' }, `${id}-n`, v, set, `${humanize(f.name)} value`));
+  }
+  if (T === 'list' && Array.isArray(f.default) && f.default.length && f.default.every((x) => typeof x === 'string')) return chips(f, id, v, set);
+  return jsonArea(f, id, v, set);
+}
+
+/** Tick any number of choices (e.g. which palettes are in rotation). "all" is its own chip when offered. */
+function multiChoice(f, id, v, set) {
+  const options = f.choices.filter((c) => c !== 'all');
+  const box = h('div', { class: 'chip-grid', role: 'group', id, 'aria-labelledby': `${id}-l` });
+  const paint = (value) => {
+    const all = value === 'all';
+    const picked = new Set(all ? [] : value || []);
+    box.replaceChildren(
+      ...(f.choices.includes('all') ? [h('button', { type: 'button', class: 'chip', 'aria-pressed': String(all),
+        onclick: () => { const next = all ? [] : 'all'; set(next); paint(next); } }, 'All')] : []),
+      ...options.map((c) => h('button', { type: 'button', class: 'chip', 'aria-pressed': String(all || picked.has(c)),
+        onclick: () => {
+          const now = new Set(all ? options : picked);
+          if (now.has(c)) now.delete(c); else now.add(c);
+          const next = options.filter((o) => now.has(o));
+          set(next); paint(next);
+        } }, humanize(c))));
+  };
+  paint(v);
+  return box;
+}
+
+/** Your own palettes: a name and three colours each, like v2. Shared by every style of the module. */
+const PALETTE_PARTS = [['background', 'Background'], ['wax', 'Wax'], ['highlight', 'Highlight']];
+function paletteList(id, v, set) {
+  let list = clone(Array.isArray(v) ? v : []);
+  const box = h('div', { class: 'stack-s', id });
+  const save = () => set(clone(list), false);
+  const paint = () => {
+    box.replaceChildren(
+      ...list.map((p, i) => {
+        const swatch = h('div', { class: 'palette-swatch', 'aria-hidden': 'true' });
+        const tint = () => { swatch.style.background = `linear-gradient(90deg, ${p.background} 0 34%, ${p.wax} 34% 72%, ${p.highlight} 72%)`; };
+        tint();
+        const name = h('input', { class: 'input', id: `${id}-${i}-name`, value: p.name || '', maxlength: 24, 'aria-label': `Palette ${i + 1} name` });
+        name.addEventListener('input', () => { p.name = name.value; save(); });
+        const colours = PALETTE_PARTS.map(([key, label]) => {
+          const pick = h('input', { type: 'color', class: 'swatch-input', id: `${id}-${i}-${key}`, value: /^#[0-9a-f]{6}$/i.test(p[key]) ? p[key] : '#000000' });
+          pick.addEventListener('input', () => { p[key] = pick.value.toUpperCase(); tint(); save(); });
+          return h('label', { class: 'palette-colour tiny muted', for: pick.id }, pick, label);
+        });
+        const on = toggle(p.enabled !== false, 'In rotation', (x) => { p.enabled = x; save(); });
+        const remove = h('button', { type: 'button', class: 'btn ghost danger-btn', 'aria-label': `Remove palette ${p.name || i + 1}` }, 'Remove');
+        remove.addEventListener('click', () => { list.splice(i, 1); save(); paint(); });
+        return h('div', { class: 'palette-row' }, swatch,
+          h('div', { class: 'stack-s grow' }, name, h('div', { class: 'row gap-s wrap' }, ...colours)),
+          h('div', { class: 'stack-s end' }, on, remove));
+      }),
+      ...(list.length ? [] : [h('p', { class: 'muted small flush' }, 'No custom palettes yet. Each one is a name and three colours.')]),
+      h('div', null, addBtn));
+  };
+  const addBtn = h('button', { type: 'button', class: 'btn' }, '+ Add palette');
+  addBtn.addEventListener('click', () => {
+    list.push({ name: `My palette ${list.length + 1}`, background: '#000000', wax: '#FF5A1F', highlight: '#FFB547', enabled: true });
+    save(); paint();
+    box.querySelector(`#${id}-${list.length - 1}-name`)?.select();
+  });
+  paint();
+  return box;
+}
+
+/** Pick a file from the media library (built-in/ and uploaded/), or upload a new one. */
+function mediaPicker(id, v, set) {
+  const sel = h('select', { class: 'input', id });
+  const file = h('input', { type: 'file', class: 'sr', id: `${id}-up`, accept: 'image/*,video/*,.gif,.webp,.mkv' });
+  const upBtn = h('button', { type: 'button', class: 'btn' }, icon('upload'), 'Upload…');
+  const note = h('span', { class: 'muted tiny', role: 'status' });
+  const fill = async (want) => {
+    try {
+      const lib = await get('/api/media');
+      const group = (label, files) => h('optgroup', { label }, files.map((f) => h('option', { value: f.name, selected: f.name === want }, `${f.file}${f.kind === 'video' ? ' (video)' : ''}`)));
+      const known = [...lib.folders['built-in'], ...lib.folders.uploaded].some((f) => f.name === want);
+      sel.replaceChildren(
+        ...(known ? [] : [h('option', { value: want, selected: true }, `${want} (missing)`)]),
+        group('Uploaded', lib.folders.uploaded), group('Built-in', lib.folders['built-in']));
+    } catch (err) { note.textContent = `Couldn't list media: ${err.message}`; }
+  };
+  sel.addEventListener('change', () => set(sel.value));
+  upBtn.addEventListener('click', () => file.click());
+  file.addEventListener('change', async () => {
+    const pick = file.files?.[0];
+    if (!pick) return;
+    upBtn.disabled = true;
+    note.textContent = `Uploading ${pick.name}…`;
+    try {
+      const { name } = await uploadMedia(pick);
+      note.textContent = '';
+      toast(`Added ${name.replace('uploaded/', '')}`, 'success');
+      await fill(name);
+      set(name);
+    } catch (err) { note.textContent = ''; toast(err.message, 'error', 8000); }
+    finally { upBtn.disabled = false; file.value = ''; }
+  });
+  fill(v);
+  return h('div', { class: 'stack-s' }, h('div', { class: 'row gap-s wrap' }, sel, upBtn, file), note);
+}
+
+function numberInput(f, id, v, set, label) {
+  const int = f.type === 'int';
+  const num = h('input', { class: 'input num', type: 'number', id, value: v ?? 0, step: int ? 1 : 'any', inputmode: int ? 'numeric' : 'decimal', 'aria-label': label });
+  const r = rangeFor(f);
+  const rng = r && h('input', { type: 'range', class: 'range grow', min: r.min, max: r.max, step: int ? 1 : r.step, value: v ?? 0, 'aria-label': `${humanize(f.name)} slider` });
+  num.addEventListener('input', () => {
+    if (num.value === '') return;
+    const x = int ? Math.round(Number(num.value)) : Number(num.value);
+    if (Number.isFinite(x)) { set(x); if (rng) rng.value = x; }
+  });
+  rng?.addEventListener('input', () => { num.value = rng.value; set(int ? Math.round(Number(rng.value)) : Number(rng.value)); });
+  return rng ? h('div', { class: 'row gap-s' }, rng, num) : num;
+}
+
+function chips(f, id, v, set) {
+  const list = Array.isArray(v) ? [...v] : [];
+  const inp = h('input', { class: 'input grow', id, placeholder: 'Add an item and press Enter', spellcheck: 'false' });
+  const add = () => { const x = inp.value.trim(); if (!x) return; set([...list, x], true); };
+  inp.addEventListener('keydown', (ev) => { if (ev.key === 'Enter') { ev.preventDefault(); add(); } });
+  return h('div', { class: 'stack-s' },
+    h('ul', { class: 'chips' }, list.map((x, k) => h('li', { class: 'chip-item' }, h('span', { class: 'chip-text', title: x }, x),
+      h('button', { type: 'button', class: 'chip-x', 'aria-label': `Remove ${x}`, onclick: () => set(list.filter((_, j) => j !== k), true) }, icon('x'))))),
+    h('div', { class: 'row gap-s' }, inp, h('button', { type: 'button', class: 'btn', onclick: add }, 'Add')));
+}
+
+function jsonArea(f, id, v, set) {
+  const ta = h('textarea', { class: 'input mono json', id, rows: Math.min(14, JSON.stringify(v ?? null, null, 2).split('\n').length + 1), spellcheck: 'false' });
+  ta.value = JSON.stringify(v ?? null, null, 2);
+  const msg = h('span', { class: 'tiny danger', 'aria-live': 'polite' });
+  ta.addEventListener('input', () => {
+    let x;
+    try { x = JSON.parse(ta.value); } catch { msg.textContent = 'Not valid JSON yet'; return; }
+    const want = f.type === 'list' ? Array.isArray(x) : f.type === 'object' ? x && typeof x === 'object' && !Array.isArray(x) : true;
+    if (!want) { msg.textContent = f.type === 'list' ? 'Needs to be a list: [ … ]' : 'Needs to be an object: { … }'; return; }
+    msg.textContent = '';
+    set(x);
+  });
+  return h('div', { class: 'stack-s' }, ta, msg);
+}

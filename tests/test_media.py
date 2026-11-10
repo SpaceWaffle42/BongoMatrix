@@ -3,6 +3,7 @@ from pathlib import Path
 
 import pytest
 
+from bongo import media as library
 from bongo.module import Context
 from bongo.modules import media as mm
 
@@ -35,6 +36,12 @@ import tempfile  # noqa: E402
 FIX = _make_fixtures(Path(tempfile.mkdtemp(prefix="bongo-media-")))
 
 
+@pytest.fixture(autouse=True)
+def uploads(monkeypatch):
+    """The test images play the part of the uploaded/ folder."""
+    monkeypatch.setattr(library, "UPLOADED", FIX)
+
+
 def near(a, b, tol=12):
     return all(abs(x - y) <= tol for x, y in zip(a, b))
 
@@ -44,7 +51,7 @@ def at(ms):
 
 
 def make(style="fit", file="anim.gif", size=(64, 32), **kw):
-    return MODULE.create(style, {"file": str(FIX / file), **kw}, Context(width=size[0], height=size[1]))
+    return MODULE.create(style, {"file": f"uploaded/{file}", **kw}, Context(width=size[0], height=size[1]))
 
 
 def test_frame_selected_by_time_with_durations():
@@ -91,27 +98,36 @@ def test_brightness_dims():
     assert half.getpixel((32, 0)) == (127, 0, 0) and full.getpixel((32, 0)) == RED
 
 
-@pytest.mark.parametrize("file", ["nope.gif", "clip.mp4", "../../../etc/passwd", "/definitely/not/here.gif"])
+@pytest.mark.parametrize("file", ["uploaded/nope.gif", "uploaded/clip.mp4", "uploaded/../../../etc/passwd",
+                                  "/definitely/not/here.gif", "anim.gif", "elsewhere/anim.gif"])
 def test_missing_or_unsafe_file_gives_placeholder(file, tmp_path, monkeypatch):
-    monkeypatch.setattr(mm, "ROOT", tmp_path)
+    monkeypatch.setattr(library, "UPLOADED", tmp_path)
     (tmp_path.parent / "clip.mp4").write_bytes(b"x")
-    m = MODULE.create("fit", {"file": file}, Context())
+    m = MODULE.create("fit", {"file": file}, Context()) if library.valid_name(file) else None
+    if m is None:  # not even a valid setting: the config check refuses it
+        with pytest.raises(ValueError, match="isn't a media file"):
+            MODULE.create("fit", {"file": file}, Context())
+        return
     f = m.render(at(0))
     assert f.size == (64, 32) and f.getcolors(5000) and len(f.getcolors(5000)) > 1
 
 
-def test_path_escape_rejected_even_if_target_exists(tmp_path, monkeypatch):
+def test_only_the_two_media_folders_can_be_opened(tmp_path, monkeypatch):
     root = tmp_path / "media"
     root.mkdir()
-    (tmp_path / "secret.gif").write_bytes((FIX / "anim.gif").read_bytes())
-    monkeypatch.setattr(mm, "ROOT", root)
-    assert mm.locate("../secret.gif") is None
-    assert mm.locate(str(tmp_path / "secret.gif")) is not None  # absolute + exists is allowed
+    secret = tmp_path / "secret.gif"
+    secret.write_bytes((FIX / "anim.gif").read_bytes())
+    monkeypatch.setattr(library, "UPLOADED", root)
+    assert mm.locate("uploaded/../secret.gif") is None
+    assert mm.locate(str(secret)) is None  # absolute paths are never opened
+    (root / "link.gif").symlink_to(secret)
+    assert mm.locate("uploaded/link.gif") is None  # nor symlinks leading out
+    (root / "ok.gif").write_bytes(secret.read_bytes())
+    assert mm.locate("uploaded/ok.gif") == (root / "ok.gif").resolve()
 
 
-def test_relative_path_resolves_against_root(monkeypatch):
-    monkeypatch.setattr(mm, "ROOT", FIX)
-    m = MODULE.create("fit", {"file": "anim.gif"}, Context())
+def test_uploaded_name_plays():
+    m = MODULE.create("fit", {"file": "uploaded/anim.gif"}, Context())
     assert m.render(at(150)).getpixel((32, 0)) == GREEN
 
 
@@ -119,7 +135,8 @@ def test_default_file_works_whether_or_not_it_exists():
     assert MODULE.create(None, None, Context(width=32, height=16)).render(at(0)).size == (32, 16)
 
 
-BUILT_IN = sorted((mm.ROOT / "built-in").glob("*.gif"))
+
+BUILT_IN = sorted(library.BUILT_IN.glob("*.gif"))
 
 
 @pytest.mark.skipif(not BUILT_IN, reason="repo media not present locally (it is in CI)")
@@ -131,3 +148,19 @@ def test_built_in_gifs_decode_and_animate(path):
     frames = {style.render(at(ms)).tobytes() for ms in range(0, 3000, 50)}
     assert len(frames) > 1
     assert any(f.getbbox() for f in style.frames)  # some loaders start from a black frame
+
+
+@pytest.mark.skipif(not (__import__("shutil").which("ffmpeg") and __import__("shutil").which("ffprobe")),
+                    reason="ffmpeg not installed")
+def test_video_plays_at_20fps_and_loops(tmp_path):
+    import subprocess
+    clip = tmp_path / "clip.mp4"  # 1 s red, then 1 s blue, 160x80
+    subprocess.run(["ffmpeg", "-v", "error", "-f", "lavfi", "-i", "color=red:s=160x80:d=1:r=25",
+                    "-f", "lavfi", "-i", "color=blue:s=160x80:d=1:r=25", "-filter_complex", "[0][1]concat=n=2",
+                    "-pix_fmt", "yuv420p", str(clip)], check=True)
+    library.UPLOADED = tmp_path  # restored by the autouse fixture
+    style = MODULE.create("fill", {"file": "uploaded/clip.mp4"}, Context())
+    assert len(style.frames) == 40 and style.ends[-1] == 2000
+    red, blue = style.render(at(500)).getpixel((32, 16)), style.render(at(1500)).getpixel((32, 16))
+    assert red[0] > 200 > red[2] and blue[2] > 200 > blue[0]
+    assert style.render(at(2500)).getpixel((32, 16)) == red  # loops

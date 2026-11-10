@@ -21,7 +21,7 @@ def parse(text, now):
     """ISO string or ``next:<holiday>`` -> datetime comparable with ``now`` (naive stays naive,
     aware adopts now's zone)."""
     if text.startswith("next:"):
-        from .holidays import resolve
+        from bongo.holidays import resolve
         return resolve(text, now)[0]
     d = dt.datetime.fromisoformat(text)
     if now.tzinfo is None:

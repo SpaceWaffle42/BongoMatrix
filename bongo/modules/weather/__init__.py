@@ -12,4 +12,5 @@ MODULE = Module(
         location="London", latitude=51.5074, longitude=-0.1278,
         units="celsius", wind_unit="kmh", refresh_minutes=10,
     ),
+    choices={"units": ["celsius", "fahrenheit"], "wind_unit": ["kmh", "mph", "ms", "kn"]},
 )

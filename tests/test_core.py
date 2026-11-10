@@ -63,7 +63,7 @@ def test_config_defaults_round_trip_and_validation(tmp_path):
     path = tmp_path / "config.json"
     config = cfg.load(path)
     assert config["panel"]["cols"] == 64
-    config["playlist"] = [{"module": "lava_lamp", "style": "metro", "settings": {"palette": "ocean"}},
+    config["playlist"] = [{"module": "lava_lamp", "style": "metro", "settings": {"palettes": ["ocean"]}},
                           {"module": "lava_lamp", "settings": {"typo": 1}},
                           {"module": "nope"}]
     cfg.save(config, path)
@@ -106,8 +106,24 @@ def test_describe_builds_an_editor_schema():
     shared = {f["name"]: f for f in d["settings"]}
     assert shared["show_time"]["type"] == "bool" and shared["time_align"]["type"] == "choice"
     metro = {f["name"]: f for f in d["styles"]["metro"]["settings"]}
-    assert metro["palette"]["choices"][0] == "magma" and metro["time_y"]["type"] == "auto"
+    assert metro["palettes"]["choices"][:2] == ["all", "magma"] and metro["time_y"]["type"] == "auto"
     classic = {f["name"]: f for f in d["styles"]["classic"]["settings"]}
     assert classic["text_colour"]["type"] == "colour" and classic["blob_speed"]["type"] == "number"
     import json
     json.dumps([describe(m) for m in discover().values()])  # every module's schema is JSON-ready
+
+
+def test_only_one_process_can_drive_the_panel(tmp_path):
+    import subprocess
+    import sys
+
+    from bongo.panel import PanelBusy, claim_panel
+    lock = tmp_path / "panel.lock"
+    held = claim_panel(lock)
+    other = subprocess.run([sys.executable, "-c",
+                            f"from bongo.panel import claim_panel; from pathlib import Path; claim_panel(Path({str(lock)!r}))"],
+                           capture_output=True, text=True)
+    assert other.returncode != 0 and "already being driven" in other.stderr and str(__import__("os").getpid()) in other.stderr
+    held.close()
+    claim_panel(lock).close()  # free again once the first driver is gone
+    assert PanelBusy

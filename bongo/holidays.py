@@ -1,4 +1,4 @@
-"""Offline holiday date rules, so a countdown can target "the next X" without a fixed date.
+"""Offline holiday date rules (shared by Countdown and Calendar), so modules can use "the next X" without a fixed date.
 
 Spec grammar: "MM-DD" | "easter[+N|-N]" | "<1st|2nd|3rd|4th|5th|last>-<mon..sun>-MM" | "MM-DD!sub"
 ("!sub" is the UK bank-holiday substitution). Pure arithmetic: no network, no dependencies.

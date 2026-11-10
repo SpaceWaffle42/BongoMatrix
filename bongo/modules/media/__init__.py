@@ -1,12 +1,41 @@
-"""Media: show an image or animated GIF (fit, fill or pixel-art scaling). Video is not supported."""
-from pathlib import Path
+"""Media: show an image, animated GIF or short video (fit, fill or pixel-art scaling).
+Video is decoded once by ffmpeg (if installed) at 20 fps, up to 15 s, then loops like a GIF."""
+import functools
+import json
+import logging
+import shutil
+import subprocess
 
 from PIL import Image, ImageDraw, ImageSequence
 
+from bongo import media as library
 from bongo.module import Module, Style
 
-ROOT = Path(__file__).parents[3] / "resources" / "media"
 MAX_FRAMES = 300
+VIDEO_FPS = 20
+
+
+@functools.lru_cache(maxsize=4)
+def video_frames(path: str, mtime: float, box: tuple[int, int]) -> tuple:
+    """Decode up to MAX_FRAMES frames of ``path``, scaled to fit ``box``, as RGB images.
+    Cached by path + mtime, so a looping playlist doesn't decode the file every time."""
+    if not (shutil.which("ffmpeg") and shutil.which("ffprobe")):
+        raise OSError("ffmpeg is not installed")
+    probe = subprocess.run(["ffprobe", "-v", "error", "-select_streams", "v:0", "-show_entries",
+                            "stream=width,height", "-of", "json", path],
+                           capture_output=True, timeout=20, check=True)
+    stream = json.loads(probe.stdout)["streams"][0]
+    k = min(box[0] / stream["width"], box[1] / stream["height"], 1.0)
+    w, h = max(2, int(stream["width"] * k) // 2 * 2), max(2, int(stream["height"] * k) // 2 * 2)
+    raw = subprocess.run(["ffmpeg", "-v", "error", "-nostdin", "-i", path, "-an",
+                          "-vf", f"fps={VIDEO_FPS},scale={w}:{h}:flags=area", "-frames:v", str(MAX_FRAMES),
+                          "-f", "rawvideo", "-pix_fmt", "rgb24", "-"],
+                         capture_output=True, timeout=120, check=True).stdout
+    size = w * h * 3
+    frames = tuple(Image.frombytes("RGB", (w, h), raw[i:i + size]) for i in range(0, len(raw) - size + 1, size))
+    if not frames:
+        raise OSError("no video frames")
+    return frames
 
 
 def rgb(hex_colour):
@@ -15,13 +44,9 @@ def rgb(hex_colour):
 
 
 def locate(file):
-    """Resolve a setting to an existing file, or None (missing, unsafe, or not a file)."""
-    p = Path(str(file)).expanduser()
-    if p.is_absolute():
-        return p if p.is_file() else None
-    root = ROOT.resolve()
-    p = (root / p).resolve()
-    return p if p.is_relative_to(root) and p.is_file() else None
+    """The file a setting names (``built-in/x.gif`` or ``uploaded/y.mp4``), or None. Paths outside
+    the two media folders are never opened (see bongo/media.py)."""
+    return library.resolve(file)
 
 
 class Fit(Style):
@@ -47,8 +72,15 @@ class Fit(Style):
         self.frames, self.ends = [], []
         try:
             path = locate(s["file"])
-            if path is None or path.suffix.lower() in (".mp4", ".mov", ".webm", ".mkv", ".avi"):
+            if path is None:
                 raise OSError("no media")
+            if library.is_video(path):
+                # decode at up to 4x the canvas so fill/fit still have detail to scale from
+                box = (self.ctx.width * 4, self.ctx.height * 4)
+                for i, frame in enumerate(video_frames(str(path), path.stat().st_mtime, box)):
+                    self.frames.append(self.compose(frame.convert("RGBA"), s["brightness"]))
+                    self.ends.append((i + 1) * 1000 // VIDEO_FPS)
+                return
             with Image.open(path) as im:
                 total = 0
                 for i, frame in enumerate(ImageSequence.Iterator(im)):
@@ -57,7 +89,8 @@ class Fit(Style):
                     total += frame.info.get("duration") or 100
                     self.frames.append(self.compose(frame.convert("RGBA"), s["brightness"]))
                     self.ends.append(total)
-        except Exception:
+        except Exception as error:
+            logging.getLogger(__name__).warning("can't show %r: %s", s["file"], error)
             self.frames, self.ends = [self.placeholder()], [1]
 
     def compose(self, rgba, brightness):
@@ -125,7 +158,8 @@ class Pixel(Fit):
 
 MODULE = Module(
     id="media", name="Media",
-    description="Shows an image or animated GIF. Fit letterboxes, fill crops, pixel scales by whole numbers.",
+    description="Shows an image, animated GIF or short video. Fit letterboxes, fill crops, pixel scales by whole numbers.",
     styles={"fit": Fit, "fill": Fill, "pixel": Pixel},
     defaults=dict(file="built-in/rubik_squares.gif", background="#000000", speed=1.0, brightness=1.0),
+    choices={"file": "media"},  # picked from the media library (built-in/ or uploaded/)
 )

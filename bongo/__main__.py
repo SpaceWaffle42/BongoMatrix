@@ -38,6 +38,34 @@ def _margins(text: str) -> dict:
     return dict(top=top, right=right, bottom=bottom, left=left)
 
 
+def _start_dashboard(config, modules, live, config_path) -> None:
+    """Serve the dashboard on a background thread; the player keeps the main thread."""
+    import threading
+
+    from werkzeug.serving import make_server
+
+    from bongo.pairing import Pairing
+    from bongo.web import LogBuffer, create_app
+
+    logs = LogBuffer()
+    logging.getLogger().addHandler(logs)
+    pairing = Pairing(config_path.parent / "paired-devices.json")
+    live.overlay = pairing.overlay(Context().fonts)
+    app = create_app(modules=modules, live=live, pairing=pairing, config_path=config_path, logs=logs)
+    server = make_server(config["web"]["host"], config["web"]["port"], app, threaded=True)
+    threading.Thread(target=server.serve_forever, daemon=True, name="dashboard").start()
+    logging.info("dashboard on http://%s:%s", config["web"]["host"], config["web"]["port"])
+
+
+def _hardware(config):
+    from bongo.panel import HardwarePanel, PanelBusy
+
+    try:
+        return HardwarePanel(**config["panel"])
+    except PanelBusy as error:
+        sys.exit(f"bongo: {error}")
+
+
 def main(argv=None) -> int:
     parser = argparse.ArgumentParser(prog="bongo")
     sub = parser.add_subparsers(dest="command", required=True)
@@ -97,9 +125,7 @@ def main(argv=None) -> int:
         else:
             import time
 
-            from bongo.panel import HardwarePanel
-
-            panel = HardwarePanel(**config["panel"])
+            panel = _hardware(config)
             print(f"showing safe area {area.margins} ({area.width}x{area.height}); Ctrl-C to stop")
             try:
                 step = 0
@@ -114,17 +140,45 @@ def main(argv=None) -> int:
             print(f"saved safe_area to {args.config}")
         return 0
 
-    from bongo.panel import HardwarePanel
+    from pathlib import Path
+
+    from bongo.live import Live
+    from bongo.overlays import Overlays
     from bongo.player import play
 
     config = cfg.load(args.config)
     problems = cfg.validate(config, modules)
     for problem in problems:
         logging.error(problem)
-    panel = HardwarePanel(**config["panel"])
+    live = Live()
+    if config["web"]["enabled"]:
+        _start_dashboard(config, modules, live, Path(args.config))
+    panel = _hardware(config)
+    good, first = None, True  # last config that played; the splash only plays at start-up
     try:
-        play(cfg.playlist(config, modules), modules, panel, cfg.context_factory(config),
-             place=cfg.safe_area(config).place, schedule=Schedule.from_config(config))
+        while True:  # play() returns when the dashboard saves a new config
+            try:
+                schedule = Schedule.from_config(config)
+                if not first:
+                    schedule.splash = None
+                first = False
+                factory = cfg.context_factory(config)
+                play(cfg.playlist(config, modules), modules, panel, factory,
+                     place=cfg.safe_area(config).place, schedule=schedule, live=live,
+                     overlays=Overlays.from_config(config, modules, factory))
+                good = config
+            except Exception:  # never exit: the dashboard stays up so the config can be fixed
+                logging.exception("can't play this config")
+                if good is not None and config is not good:
+                    logging.error("going back to the last config that worked")
+                    cfg.save(good, args.config)
+                    config = good
+                    continue
+                live.reload.wait(10)  # nothing better to play: wait for a fix from the dashboard
+            live.reload.clear()
+            live.skip.clear()
+            config = cfg.load(args.config)
+            logging.info("config reloaded")
     except KeyboardInterrupt:
         panel.clear()
     return 1 if problems else 0
