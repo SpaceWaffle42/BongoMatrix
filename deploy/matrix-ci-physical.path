@@ -1,9 +1,0 @@
-[Unit]
-Description=Host-owned physical Matrix CI admission watcher
-
-[Path]
-PathExists=/run/matrix-ci-physical/claim
-Unit=matrix-ci-physical.service
-
-[Install]
-WantedBy=multi-user.target

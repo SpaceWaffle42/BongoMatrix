@@ -1,51 +1,8 @@
-# Python bytecode and caches
 __pycache__/
-*.py[cod]
-*$py.class
-.pytest_cache/
-.mypy_cache/
-.ruff_cache/
-.coverage
-coverage.xml
-htmlcov/
-test-results/
-gl-code-quality-report.json
-dependency-audit.json
-ci-summary.json
-ci-summary.txt
-
-# Virtual environments
+*.pyc
 venv/
-.venv/
-.venv-ci/
-env/
-
-# Runtime state and secrets
+.pytest_cache/
 data/
-*.pid
-*.lock
-
-# Hermes local plans, review caches, and session artifacts
-.hermes/
-
-# Local/editor files
-.DS_Store
-.idea/
-.vscode/
-*~
-*.swp
-
-# Local backups and generated deployment artifacts
-*.pre-*
-*.bak
-matrix-backups/
-
-# Runtime/user media is persistent state, not source. Keep bundled assets.
-resources/media/*
-!resources/media/built-in/
-!resources/media/built-in/**
-
-# Temporary upload/sanitizer transaction files
-resources/media/.upload-*
-resources/media/.sanitized-*
-resources/media/.move-*
+*.gif
+!resources/**/*.gif
+report.xml

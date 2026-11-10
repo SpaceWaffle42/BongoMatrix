@@ -1,0 +1,14 @@
+{
+  "timezone": "Europe/London",
+  "panel": {
+    "rows": 32,
+    "cols": 64,
+    "hardware_mapping": "adafruit-hat-pwm",
+    "gpio_slowdown": 4,
+    "brightness": 80
+  },
+  "playlist": [
+    {"module": "lava_lamp", "style": "metro", "seconds": 30, "settings": {"palette": "magma"}},
+    {"module": "lava_lamp", "style": "classic", "seconds": 30}
+  ]
+}
