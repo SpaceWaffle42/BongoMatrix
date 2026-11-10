@@ -36,6 +36,10 @@ MODULE = Module(
 
 Rules that keep modules independent:
 
+- **Lay out relative to `ctx.width` and `ctx.height`.** The canvas is the panel's
+  *safe area* (the part the frame doesn't hide), which can be smaller than 64x32.
+  Anchor rows to the top or bottom of the canvas; `bongo.fonts.middle()` centres a
+  font vertically. The contract tests render every style at several sizes.
 - **Only use what `self.ctx` gives you**: size, timezone (`ctx.now()`), a seeded
   `ctx.rng`, `ctx.fonts`, `ctx.canvas()`. Never import another module.
 - **`render` draws one frame and returns it.** The player owns timing and the

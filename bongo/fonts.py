@@ -49,6 +49,18 @@ class BdfFont:
             elif key == "ENDCHAR":
                 return
 
+    @property
+    def cap(self) -> int:
+        """Pixels from the baseline to the top of a capital (the 'H')."""
+        glyph = self.glyphs.get(ord("H"))
+        return glyph[2] if glyph else self.ascent
+
+    @property
+    def descent(self) -> int:
+        """Pixels a descender (the 'g') drops below the baseline."""
+        glyph = self.glyphs.get(ord("g"))
+        return max(0, glyph[3].height - glyph[2]) if glyph and glyph[3] else 0
+
     def width(self, text: str) -> int:
         return sum(self.glyphs.get(ord(c), self.glyphs.get(ord("?"), (0,)))[0] for c in text)
 
@@ -80,6 +92,12 @@ class Fonts:
 @lru_cache(maxsize=None)
 def _load(path: Path) -> BdfFont:
     return BdfFont(path)
+
+
+def middle(font: BdfFont, height: int, lines: int = 1, gap: int = 1) -> int:
+    """Baseline of the first line so ``lines`` lines of ``font`` sit centred in ``height``."""
+    pitch = font.cap + font.descent + gap
+    return (height - (lines * pitch - gap)) // 2 + font.cap
 
 
 def align_x(alignment: str, text_width: int, canvas_width: int, margin: int = 2) -> int:
