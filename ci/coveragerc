@@ -1,5 +1,0 @@
-# Shared by every full_test_suite shard and the test_results combine step.
-[run]
-parallel = True
-relative_files = True
-data_file = coverage-data/.coverage
