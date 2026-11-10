@@ -56,3 +56,21 @@ def test_unknown_settings_are_rejected(module: Module):
 def test_unknown_style_is_rejected(module: Module):
     with pytest.raises(ValueError, match="no style"):
         module.create("no_such_style")
+
+
+OVERLAYS = [(m, o) for m in MODULES.values() for o in m.overlays]
+
+
+@pytest.mark.parametrize("module,overlay", OVERLAYS, ids=[f"{m.id}/{o}" for m, o in OVERLAYS])
+@pytest.mark.parametrize("size", [(64, 32), *SAFE_SIZES], ids=lambda s: f"{s[0]}x{s[1]}")
+def test_overlays_render_rgba_frames_of_the_canvas_size(module: Module, overlay: str, size):
+    instance = module.create(overlay, ctx=Context(width=size[0], height=size[1], rng=random.Random(1)), overlay=True)
+    for i in range(2):
+        frame = instance.render(NOW + dt.timedelta(seconds=i))
+        assert frame.size == size and frame.mode == "RGBA"
+    assert 1 <= instance.fps <= 60
+
+
+def test_overlays_are_not_playlist_styles():
+    for module in MODULES.values():
+        assert not set(module.overlays) & set(module.styles), module.id

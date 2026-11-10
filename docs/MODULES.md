@@ -57,6 +57,34 @@ Add a `Style` subclass and one line in `styles={...}`. Lava Lamp is the model:
 `classic.py` and `metro.py` share the module's clock settings and the
 `field()` maths, and each keeps its own palettes, fonts and drawing.
 
+## Checks beyond types
+
+Types and `choices` cover most settings. When a value needs more, give the `Module`:
+
+- `check(settings)`: quick, raises `ValueError` with a readable message. Runs whenever
+  settings are validated (config load, every dashboard save, previews).
+- `verify(settings) -> list[str]`: may be slow or use the network. Runs only when the
+  dashboard saves settings that are new, so an unchanged entry is never re-checked.
+
+News uses both: `check` insists every feed is an `http(s)://` address, and `verify`
+fetches each new feed once and refuses anything that isn't RSS or Atom.
+
+## Overlays
+
+An overlay is drawn *over* whatever module is playing: a notice ribbon now, the pet
+walking across later. It is a `Style` listed in the module's `overlays={...}` (not in
+`styles`), and its `render` returns an **RGBA** frame the size of the canvas, transparent
+wherever the module underneath should show. Return a fully transparent frame when there
+is nothing to draw. Announcements' `ribbon` is the example.
+
+Overlays are switched on in the config, on a timer (`every` 0 means always on):
+
+```json
+"overlays": [{"module": "announcements", "overlay": "ribbon", "every": 600, "seconds": 45}]
+```
+
+They play over the day playlist only, never over splash, sleep or pushed messages.
+
 ## Checking it
 
 ```bash

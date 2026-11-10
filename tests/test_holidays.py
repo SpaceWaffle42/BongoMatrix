@@ -2,7 +2,7 @@ import datetime as dt
 
 import pytest
 
-from bongo.modules.countdown import holidays as h
+from bongo import holidays as h
 
 D = dt.date
 

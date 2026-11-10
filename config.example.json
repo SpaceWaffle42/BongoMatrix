@@ -7,9 +7,53 @@
     "gpio_slowdown": 4,
     "brightness": 80
   },
-  "safe_area": {"top": 0, "right": 0, "bottom": 0, "left": 0},
+  "safe_area": {
+    "top": 0,
+    "right": 0,
+    "bottom": 0,
+    "left": 0
+  },
   "playlist": [
-    {"module": "lava_lamp", "style": "metro", "seconds": 30, "settings": {"palette": "magma"}},
-    {"module": "lava_lamp", "style": "classic", "seconds": 30}
-  ]
+    {
+      "module": "lava_lamp",
+      "style": "metro",
+      "seconds": 30,
+      "settings": {
+        "palettes": [
+          "magma"
+        ],
+        "custom_palettes": [
+          {
+            "name": "Bedroom",
+            "background": "#000000",
+            "wax": "#22CCFF",
+            "highlight": "#FFFFFF",
+            "enabled": true
+          }
+        ]
+      }
+    },
+    {
+      "module": "lava_lamp",
+      "style": "classic",
+      "seconds": 30
+    }
+  ],
+  "splash": {
+    "sources": [
+      "built-in/splash_loading_squares.gif"
+    ],
+    "speed": 100,
+    "fit": "fit"
+  },
+  "sleep": {
+    "from": "23:00",
+    "to": "07:00",
+    "brightness": 15,
+    "sources": [
+      "built-in/sleep.gif"
+    ],
+    "speed": 100,
+    "fit": "fit"
+  }
 }
