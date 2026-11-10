@@ -1,7 +1,6 @@
 """Plays a playlist: each entry is one module + style + settings for N seconds."""
 from __future__ import annotations
 
-import itertools
 import logging
 import threading
 import time
@@ -44,18 +43,37 @@ def play_entry(style: Style, seconds: float, panel, stop: threading.Event | None
 
 
 def play(playlist: list[Entry], modules: dict[str, Module], panel, ctx_factory=Context,
-         stop: threading.Event | None = None, loops: int | None = None, place=None) -> None:
+         stop: threading.Event | None = None, loops: int | None = None, place=None,
+         schedule=None) -> None:
+    """Cycle the playlist until ``stop`` (or ``loops`` passes). A ``Schedule`` adds a splash at
+    start-up and swaps in the sleep playlist, at sleep brightness, during its hours."""
     stop = stop or threading.Event()
-    active = [e for e in playlist if e.enabled]
-    if not active:
+    day = [e for e in playlist if e.enabled]
+    if not day:
         raise ValueError("playlist has no enabled entries")
-    cycle = itertools.cycle(active) if loops is None else itertools.chain.from_iterable([active] * loops)
-    for entry in cycle:
-        if stop.is_set():
-            return
+
+    def run(entry: Entry) -> bool:
         try:
             style = entry.build(modules, ctx_factory())
         except Exception:
             log.exception("skipping playlist entry %s", entry.module)
-            continue
+            return False
         play_entry(style, entry.seconds, panel, stop, place=place)
+        return True
+
+    if schedule and schedule.splash:
+        run(schedule.splash)
+    position: dict[int, int] = {}  # where each playlist (day or sleep) left off
+    played = 0
+    while not stop.is_set() and (loops is None or played < loops * len(day)):
+        now = ctx_factory().now()
+        current = [e for e in (schedule.playlist(now, day) if schedule else day) if e.enabled] or day
+        if schedule and hasattr(panel, "set_brightness"):
+            level = schedule.brightness(now)
+            if level is not None:
+                panel.set_brightness(level)
+        index = position.get(id(current), 0)
+        position[id(current)] = index + 1
+        played += 1
+        if not run(current[index % len(current)]):
+            stop.wait(0.2)  # never spin if every entry is broken

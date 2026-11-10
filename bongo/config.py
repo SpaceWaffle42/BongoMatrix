@@ -66,4 +66,18 @@ def validate(config: dict, modules: dict[str, Module]) -> list[str]:
             modules[entry.module].settings_for(entry.style, entry.settings)
         except ValueError as error:
             problems.append(f"playlist[{i}]: {error}")
+    try:
+        from bongo.schedule import Schedule
+        schedule = Schedule.from_config(config)
+        extra = [("splash", schedule.splash)] if schedule.splash else []
+        extra += [(f"sleep.playlist[{i}]", e) for i, e in enumerate(schedule.sleep_playlist)]
+        for where, entry in extra:
+            try:
+                if entry.module not in modules:
+                    raise ValueError(f"unknown module {entry.module!r}")
+                modules[entry.module].settings_for(entry.style, entry.settings)
+            except ValueError as error:
+                problems.append(f"{where}: {error}")
+    except (ValueError, TypeError) as error:
+        problems.append(f"schedule: {error}")
     return problems

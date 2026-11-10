@@ -29,6 +29,9 @@ class HardwarePanel:
     def clear(self) -> None:
         self.matrix.Clear()
 
+    def set_brightness(self, level: int) -> None:
+        self.matrix.brightness = max(1, min(100, int(level)))
+
 
 class RecordingPanel:
     """Keeps frames in memory; can save an LED-look GIF for review."""
@@ -36,12 +39,17 @@ class RecordingPanel:
     def __init__(self, width=64, height=32):
         self.width, self.height = width, height
         self.frames: list[Image.Image] = []
+        self.brightness: list[int] = []
 
     def show(self, frame: Image.Image) -> None:
         self.frames.append(frame.copy())
 
     def clear(self) -> None:
         pass
+
+    def set_brightness(self, level: int) -> None:
+        if not self.brightness or self.brightness[-1] != level:
+            self.brightness.append(level)
 
     def save_gif(self, path, fps=30, scale=8) -> None:
         big = [led_look(f, scale) for f in self.frames]
