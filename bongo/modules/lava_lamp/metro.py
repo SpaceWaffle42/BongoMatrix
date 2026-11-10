@@ -5,7 +5,7 @@ import math
 import numpy as np
 from PIL import Image, ImageFilter
 
-from bongo.fonts import align_x
+from bongo.fonts import align_x, middle
 from bongo.module import Style
 
 from .field import field
@@ -26,7 +26,7 @@ class Metro(Style):
         blob_count=4, speed=1.0,  # speed scales how fast the wax drifts
         glow=0.6,                 # halo strength around the wax, 0-1
         text_halo=0.75,           # how much the lava darkens around the text, 0-1
-        time_font="10x20", date_font="5x7", time_y=18, date_y=29,
+        time_font="10x20", date_font="5x7", time_y=None, date_y=None,  # None: fit the canvas
         date_format="%a %d %b", uppercase_date=True,
     )
 
@@ -72,13 +72,19 @@ class Metro(Style):
         pixels = colour.reshape(h, n, w, n, 3).mean(axis=(1, 3))
         img = Image.fromarray(pixels.clip(0, 255).astype(np.uint8), "RGB")
 
+        show_date = s["show_date"] and h >= 26  # too short for both lines: the time wins
+        date_y = s["date_y"] if s["date_y"] is not None else h - 3
+        if s["time_y"] is not None:
+            time_y = s["time_y"]
+        else:
+            time_y = h - 14 if show_date else middle(self.time_font, h)
         labels = []
         if s["show_time"]:
-            labels.append((self.time_font, now.strftime(s["time_format"]), s["time_align"], s["time_y"], p["text"]))
-        if s["show_date"]:
+            labels.append((self.time_font, now.strftime(s["time_format"]), s["time_align"], time_y, p["text"]))
+        if show_date:
             date = now.strftime(s["date_format"])
             labels.append((self.date_font, date.upper() if s["uppercase_date"] else date,
-                           s["date_align"], s["date_y"], p["accent"]))
+                           s["date_align"], date_y, p["accent"]))
         placed = [(font, label, align_x(align, font.width(label), w), y, ink)
                   for font, label, align, y, ink in labels]
         if s["text_halo"] and placed:

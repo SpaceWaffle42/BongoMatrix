@@ -9,6 +9,7 @@ from zoneinfo import ZoneInfo
 
 from bongo.module import Context, Module
 from bongo.player import Entry
+from bongo.safe_area import SafeArea
 
 DEFAULT_PATH = Path("data/config.json")
 
@@ -16,13 +17,15 @@ DEFAULTS = {
     "timezone": None,
     "panel": {"rows": 32, "cols": 64, "hardware_mapping": "adafruit-hat-pwm",
               "gpio_slowdown": 4, "brightness": 80},
+    "safe_area": {"top": 0, "right": 0, "bottom": 0, "left": 0},
     "playlist": [],
 }
 
 
 def load(path: Path = DEFAULT_PATH) -> dict:
     data = json.loads(Path(path).read_text()) if Path(path).exists() else {}
-    config = {**DEFAULTS, **data, "panel": {**DEFAULTS["panel"], **data.get("panel", {})}}
+    config = {**DEFAULTS, **data, "panel": {**DEFAULTS["panel"], **data.get("panel", {})},
+              "safe_area": {**DEFAULTS["safe_area"], **data.get("safe_area", {})}}
     return config
 
 
@@ -42,10 +45,15 @@ def playlist(config: dict, modules: dict[str, Module]) -> list[Entry]:
     return entries or [Entry(module=m) for m in modules]
 
 
+def safe_area(config: dict) -> SafeArea:
+    return SafeArea.from_config(config)
+
+
 def context_factory(config: dict):
+    """Modules get a canvas the size of the safe area, never the full panel."""
     tz = ZoneInfo(config["timezone"]) if config.get("timezone") else None
-    panel = config["panel"]
-    return lambda: Context(width=panel["cols"], height=panel["rows"], tz=tz)
+    area = safe_area(config)
+    return lambda: Context(width=area.width, height=area.height, tz=tz)
 
 
 def validate(config: dict, modules: dict[str, Module]) -> list[str]:

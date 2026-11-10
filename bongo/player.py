@@ -27,22 +27,24 @@ class Entry:
 
 
 def play_entry(style: Style, seconds: float, panel, stop: threading.Event | None = None,
-               clock=time.monotonic) -> int:
-    """Render one entry until its time is up; returns frames shown."""
+               clock=time.monotonic, place=None) -> int:
+    """Render one entry until its time is up; returns frames shown.
+    ``place`` puts the module's safe-area frame onto the full panel (see SafeArea.place)."""
     stop = stop or threading.Event()
     frame_time = 1 / style.fps
     end = clock() + seconds
     shown = 0
     while clock() < end and not stop.is_set():
         started = clock()
-        panel.show(style.render(style.ctx.now()))
+        frame = style.render(style.ctx.now())
+        panel.show(place(frame) if place else frame)
         shown += 1
         stop.wait(max(0.0, frame_time - (clock() - started)))
     return shown
 
 
 def play(playlist: list[Entry], modules: dict[str, Module], panel, ctx_factory=Context,
-         stop: threading.Event | None = None, loops: int | None = None) -> None:
+         stop: threading.Event | None = None, loops: int | None = None, place=None) -> None:
     stop = stop or threading.Event()
     active = [e for e in playlist if e.enabled]
     if not active:
@@ -56,4 +58,4 @@ def play(playlist: list[Entry], modules: dict[str, Module], panel, ctx_factory=C
         except Exception:
             log.exception("skipping playlist entry %s", entry.module)
             continue
-        play_entry(style, entry.seconds, panel, stop)
+        play_entry(style, entry.seconds, panel, stop, place=place)

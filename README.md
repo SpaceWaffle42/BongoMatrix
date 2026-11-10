@@ -57,6 +57,11 @@ Previews are LED-look GIFs rendered by exactly the code that drives the panel.
    An empty playlist plays every module in its default style.
 3. `sudo ./venv/bin/python -m bongo run`, or install `deploy/bongo-matrix.service`.
 
+If the frame around the panel hides its edges, set `safe_area` in the config
+(margins in pixels). Modules then draw only in the visible part. Find the right
+margins with the test card: `sudo ./venv/bin/python -m bongo calibrate --margins 1,2`
+(top/bottom, left/right; or four values T,R,B,L), and add `--save` when it lines up.
+
 The defaults target one 64×32 panel on an Adafruit RGB Matrix HAT/Bonnet
 (`adafruit-hat-pwm`); change `panel` in the config for anything else.
 

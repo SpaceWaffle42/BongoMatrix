@@ -25,6 +25,20 @@ def test_style_renders_panel_sized_rgb_frames(module: Module, style: str):
     assert 1 <= instance.fps <= 60
 
 
+SAFE_SIZES = [(62, 30), (58, 28), (56, 24), (48, 20), (32, 16)]
+
+
+@pytest.mark.parametrize("module,style", CASES, ids=[f"{m.id}/{s}" for m, s in CASES])
+@pytest.mark.parametrize("size", SAFE_SIZES, ids=[f"{w}x{h}" for w, h in SAFE_SIZES])
+def test_style_fits_any_safe_area(module: Module, style: str, size):
+    """Modules draw on a canvas the size of the safe area, so they must lay out relative to it."""
+    w, h = size
+    instance = module.create(style, ctx=Context(width=w, height=h, rng=random.Random(1)))
+    for i in range(2):
+        frame = instance.render(NOW + dt.timedelta(seconds=i))
+        assert frame.size == (w, h) and frame.mode == "RGB"
+
+
 @pytest.mark.parametrize("module,style", CASES, ids=[f"{m.id}/{s}" for m, s in CASES])
 def test_style_is_reproducible_with_a_seed(module: Module, style: str):
     a = module.create(style, ctx=Context(rng=random.Random(7))).render(NOW)

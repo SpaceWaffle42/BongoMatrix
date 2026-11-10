@@ -26,7 +26,7 @@ class Classic(Style):
         custom_palettes=[],      # extra [outside, inside, line] hex triples
         blob_count=4, blob_min_radius=5, blob_max_radius=10, blob_speed=0.25,
         threshold=1.0, edge_width=4, blur_radius=2,
-        time_font="9x18B", date_font="clR6x12", time_y=15, date_y=27,
+        time_font="9x18B", date_font="clR6x12", time_y=None, date_y=None,  # None: fit the canvas
         text_colour="#ffffff", border_colour="#000000", date_format="%d %b",
     )
 
@@ -73,9 +73,12 @@ class Classic(Style):
         img = img.filter(ImageFilter.BoxBlur(s["blur_radius"]))
 
         text, border = rgb(s["text_colour"]), rgb(s["border_colour"])
+        h = self.ctx.height  # v2 used 15 and 27 on a 32-row panel
+        time_y = s["time_y"] if s["time_y"] is not None else h // 2 - 1
+        date_y = s["date_y"] if s["date_y"] is not None else h - 5
         for show, font, fmt, align, y in (
-            (s["show_time"], self.time_font, s["time_format"], s["time_align"], s["time_y"]),
-            (s["show_date"], self.date_font, s["date_format"], s["date_align"], s["date_y"]),
+            (s["show_time"], self.time_font, s["time_format"], s["time_align"], time_y),
+            (s["show_date"], self.date_font, s["date_format"], s["date_align"], date_y),
         ):
             if show:
                 label = now.strftime(fmt)
