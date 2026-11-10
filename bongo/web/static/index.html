@@ -1,0 +1,54 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="theme-color" content="#0E1013">
+<meta name="color-scheme" content="dark">
+<title>Bongo Matrix</title>
+<script>
+  /* On the Pi the app uses history routing (/edit/2), so assets must resolve from the site root.
+     In ?demo mode it may be hosted under any folder and routes live in the hash, so stay relative. */
+  if (!/[?&]demo(=|&|$)/.test(location.search)) document.write('<base href="/">');
+</script>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600&amp;family=Space+Grotesk:wght@500;600;700&amp;family=JetBrains+Mono:wght@400;500;600&amp;display=swap">
+<link rel="stylesheet" href="app.css">
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 16'%3E%3Crect width='32' height='16' rx='3' fill='%23FFB547'/%3E%3C/svg%3E">
+<script type="module" src="js/app.js"></script>
+</head>
+<body>
+<a class="skip" href="#view">Skip to content</a>
+<div id="app" class="shell">
+  <header class="topbar" id="topbar">
+    <div class="topbar-left">
+      <a class="brand" href="./" data-route="/" aria-label="Bongo Matrix, now playing">
+        <span class="brand-led" aria-hidden="true"></span>
+        <span class="brand-name">Bongo Matrix</span>
+      </a>
+      <span class="device-pill" id="device-pill" title="Connection to the Matrix">
+        <span class="dot" id="device-dot" aria-hidden="true"></span>
+        <span id="device-name">Connecting…</span>
+        <span class="mono muted" id="device-host"></span>
+      </span>
+      <span class="demo-badge" id="demo-badge" hidden>Demo</span>
+    </div>
+    <div class="topbar-right" id="draft-bar" hidden>
+      <span class="pill-warn" id="draft-count">Unsaved changes</span>
+      <button type="button" class="btn ghost" id="draft-discard">Discard</button>
+      <button type="button" class="btn primary" id="draft-apply">Apply to Matrix</button>
+    </div>
+  </header>
+  <div class="body">
+    <nav class="sidenav" id="sidenav" aria-label="Sections"></nav>
+    <main id="view" class="view" tabindex="-1">
+      <div class="loading" role="status">Loading…</div>
+    </main>
+  </div>
+  <nav class="tabbar" id="tabbar" aria-label="Main"></nav>
+</div>
+<div class="toasts" id="toasts" role="status" aria-live="polite"></div>
+<noscript><p class="noscript">The Bongo Matrix dashboard needs JavaScript.</p></noscript>
+</body>
+</html>
