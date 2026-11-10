@@ -11,36 +11,34 @@ phone remote, pet screens, logs).
       hardware panel, recording panel + LED-look GIF previews, CLI.
 - [x] **Lava Lamp**: `classic` (v2 look and all 37 v2 palettes) and `metro`
       (refreshed look, 5 gradient palettes).
+- [x] **Safe area**: configurable margins for a frame that hides the panel
+      edges; modules draw only in the visible part. `bongo calibrate` test card.
+- [x] **Settings schema**: types, colours and choices inferred from defaults;
+      bad settings rejected with readable messages.
+- [x] **Splash and sleep**: playlist rules with their own brightness.
+- [x] **Weather**: `overview`, `ticker`, `forecast` (Open-Meteo, keyless).
+- [x] **Text**: `static`, `scroll`.
+- [x] **Countdown**: `days`, `clock`, `flip`, `ring`, `tearoff`; holiday targets.
+- [x] **Media**: `fit`, `fill`, `pixel` for images and GIFs.
+- [x] **Announcements**: `banner`, `card`, `flash`, scheduled by day and hour.
+- [x] **News (RSS)**: `ticker`, `headline`.
+- [x] **Sky (astronomy)**: `moon`, `sun`, without the 30 MB ephemeris.
 
 ## Screens (one module each, styles where v2 had variants)
 
-- [ ] **Weather**: styles `ticker` (v2 Weather), `overview`, `forecast`
-      (v2 OpenWeather modules). Provider is a setting: Open-Meteo (keyless) or
-      OpenWeather (key kept in `data/secrets/`).
-- [ ] **Text**: v2 Custom text (font, colour, position, speed, loops).
-- [ ] **Announcements**: scheduled static/scrolling notices, icon, banner,
-      full-image. Also powers "push a message" from the dashboard.
-- [ ] **Media**: images, GIFs, video, protected built-in library
-      (`resources/media/built-in`).
-- [ ] **Countdown**: v2 event countdown.
 - [ ] **Calendar**: v2 calendar layouts, holidays, progress styles.
-- [ ] **RSS**: feeds, banners, thumbnails.
-- [ ] **Astronomy**: moon phases and events (`resources/astronomy`).
+- [ ] **Media video** and **RSS thumbnails** (left out of the first port).
 - [ ] **Pet**: the cat (remastered Cat 10 sprites), needs, modes.
 
 ## Core features still to add
 
 - [ ] **Overlays**: things drawn over whatever module is playing (pet
       wandering, pushed messages, pairing PIN). One small layer in the player.
-- [ ] **Splash and sleep**: startup screen and night schedule, as playlist
-      rules rather than modules.
-- [ ] **Settings schema**: give `defaults` types/ranges so the dashboard can
-      build every module's editor automatically, with no per-module UI code.
 - [ ] **Web control panel** per the design refresh: now playing with live
       preview (frames from the same `render`), filmstrip playlist, module
       editor, phone remote, logs.
 - [ ] **Pairing** (PIN on the panel) and **first-run Wi-Fi** hotspot portal.
-- [ ] **Brightness schedule** and single-owner hardware lock.
+- [ ] **Single-owner hardware lock** (brightness schedule is done, in the sleep rules).
 
 ## Left behind on purpose
 
