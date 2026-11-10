@@ -34,6 +34,7 @@ class Context:
 class Style:
     """One look of a module. Subclass it, set ``defaults``, implement ``render``."""
     defaults: dict = {}
+    choices: dict = {}  # setting name -> allowed values, for settings with a fixed set
     fps: int = 30
 
     def __init__(self, ctx: Context, settings: dict):
@@ -55,18 +56,28 @@ class Module:
     styles: dict[str, type[Style]]
     defaults: dict = field(default_factory=dict)
     description: str = ""
+    choices: dict = field(default_factory=dict)
 
     @property
     def default_style(self) -> str:
         return next(iter(self.styles))
 
     def settings_for(self, style: str | None = None, overrides: dict | None = None) -> dict:
-        """Module defaults <- style defaults <- user overrides. Unknown keys are errors."""
+        """Module defaults <- style defaults <- user overrides. Unknown keys, wrong types and
+        values outside a setting's ``choices`` are errors, so typos surface early."""
+        from bongo.schema import check
+
         style_cls = self._style(style)
         merged = {**self.defaults, **style_cls.defaults}
         unknown = set(overrides or {}) - set(merged)
         if unknown:
             raise ValueError(f"{self.id}: unknown setting(s) {sorted(unknown)}")
+        choices = {**self.choices, **style_cls.choices}
+        for name, value in (overrides or {}).items():
+            try:
+                check(name, merged[name], value, choices.get(name))
+            except ValueError as error:
+                raise ValueError(f"{self.id}: {error}") from None
         merged.update(overrides or {})
         return merged
 

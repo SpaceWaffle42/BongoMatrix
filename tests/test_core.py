@@ -84,3 +84,30 @@ def test_context_uses_timezone():
 
 def test_led_look_upscales():
     assert led_look(Context().canvas(), 4).size == (256, 128)
+
+
+def test_setting_types_and_choices_are_checked():
+    from bongo.modules.lava_lamp import MODULE as LAVA
+    with pytest.raises(ValueError, match="expected a bool"):
+        LAVA.settings_for("metro", {"show_time": "yes"})
+    with pytest.raises(ValueError, match="colour like"):
+        LAVA.settings_for("classic", {"text_colour": "white"})
+    with pytest.raises(ValueError, match="not one of"):
+        LAVA.settings_for("metro", {"time_align": "middle"})
+    with pytest.raises(ValueError, match="not in"):
+        LAVA.settings_for("classic", {"palettes": ["fire_burst", "nope"]})
+    assert LAVA.settings_for("classic", {"palettes": ["fire_burst"], "blob_speed": 1, "time_y": 12})
+
+
+def test_describe_builds_an_editor_schema():
+    from bongo.schema import describe
+    from bongo.modules.lava_lamp import MODULE as LAVA
+    d = describe(LAVA)
+    shared = {f["name"]: f for f in d["settings"]}
+    assert shared["show_time"]["type"] == "bool" and shared["time_align"]["type"] == "choice"
+    metro = {f["name"]: f for f in d["styles"]["metro"]["settings"]}
+    assert metro["palette"]["choices"][0] == "magma" and metro["time_y"]["type"] == "auto"
+    classic = {f["name"]: f for f in d["styles"]["classic"]["settings"]}
+    assert classic["text_colour"]["type"] == "colour" and classic["blob_speed"]["type"] == "number"
+    import json
+    json.dumps([describe(m) for m in discover().values()])  # every module's schema is JSON-ready

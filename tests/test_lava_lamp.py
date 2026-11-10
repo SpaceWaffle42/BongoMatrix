@@ -43,7 +43,7 @@ def test_every_metro_palette_renders(name):
 
 
 def test_metro_rejects_unknown_palette():
-    with pytest.raises(ValueError, match="no palette"):
+    with pytest.raises(ValueError, match="plaid"):
         LAVA.create("metro", {"palette": "plaid"}, ctx())
 
 
