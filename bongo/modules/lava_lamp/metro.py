@@ -90,7 +90,8 @@ class Metro(Style):
             time_y = h - 14 if show_date else middle(self.time_font, h)
         labels = []
         if s["show_time"]:
-            labels.append((self.time_font, now.strftime(s["time_format"]), s["time_align"], time_y, p["text"]))
+            label = now.strftime(s["time_format"])
+            labels.append((fitting(self.ctx.fonts, self.time_font, label, w), label, s["time_align"], time_y, p["text"]))
         if show_date:
             date = now.strftime(s["date_format"])
             labels.append((self.date_font, date.upper() if s["uppercase_date"] else date,
