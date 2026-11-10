@@ -8,6 +8,7 @@ from __future__ import annotations
 import datetime as dt
 import random
 from dataclasses import dataclass, field
+from typing import Callable
 from zoneinfo import ZoneInfo
 
 from PIL import Image
@@ -57,17 +58,26 @@ class Module:
     defaults: dict = field(default_factory=dict)
     description: str = ""
     choices: dict = field(default_factory=dict)
+    # Overlays are styles drawn *over* whatever is playing (see bongo/overlays.py). Their
+    # render returns an RGBA frame where transparent pixels let the module underneath show.
+    overlays: dict[str, type[Style]] = field(default_factory=dict)
+    # Optional extra checks on the merged settings. ``check`` is quick and runs on every
+    # validation (raise ValueError). ``verify`` may use the network and runs only when the
+    # dashboard saves new settings; it returns a list of problems (empty = fine).
+    check: Callable[[dict], None] | None = None
+    verify: Callable[[dict], list[str]] | None = None
 
     @property
     def default_style(self) -> str:
         return next(iter(self.styles))
 
-    def settings_for(self, style: str | None = None, overrides: dict | None = None) -> dict:
+    def settings_for(self, style: str | None = None, overrides: dict | None = None,
+                     overlay: bool = False) -> dict:
         """Module defaults <- style defaults <- user overrides. Unknown keys, wrong types and
         values outside a setting's ``choices`` are errors, so typos surface early."""
         from bongo.schema import check
 
-        style_cls = self._style(style)
+        style_cls = self._style(style, overlay)
         merged = {**self.defaults, **style_cls.defaults}
         unknown = set(overrides or {}) - set(merged)
         if unknown:
@@ -79,14 +89,21 @@ class Module:
             except ValueError as error:
                 raise ValueError(f"{self.id}: {error}") from None
         merged.update(overrides or {})
+        if self.check:
+            try:
+                self.check(merged)
+            except ValueError as error:
+                raise ValueError(f"{self.id}: {error}") from None
         return merged
 
     def create(self, style: str | None = None, settings: dict | None = None,
-               ctx: Context | None = None) -> Style:
-        return self._style(style)(ctx or Context(), self.settings_for(style, settings))
+               ctx: Context | None = None, overlay: bool = False) -> Style:
+        return self._style(style, overlay)(ctx or Context(), self.settings_for(style, settings, overlay))
 
-    def _style(self, style: str | None) -> type[Style]:
-        name = style or self.default_style
-        if name not in self.styles:
-            raise ValueError(f"{self.id}: no style {name!r} (have {sorted(self.styles)})")
-        return self.styles[name]
+    def _style(self, style: str | None, overlay: bool = False) -> type[Style]:
+        kinds = self.overlays if overlay else self.styles
+        name = style or next(iter(kinds), None)
+        if name not in kinds:
+            kind = "overlay" if overlay else "style"
+            raise ValueError(f"{self.id}: no {kind} {name!r} (have {sorted(kinds)})")
+        return kinds[name]

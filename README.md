@@ -32,7 +32,7 @@ module. Styles share the module's settings (time format, alignment) and add
 their own. Picking a style is just a playlist setting:
 
 ```json
-{"module": "lava_lamp", "style": "metro", "seconds": 30, "settings": {"palette": "ocean"}}
+{"module": "lava_lamp", "style": "metro", "seconds": 30, "settings": {"palettes": ["ocean"]}}
 ```
 
 See [docs/MODULES.md](docs/MODULES.md) to write a module and
@@ -77,6 +77,16 @@ with the project) and `uploaded/` (`resources/media/uploaded`, git-ignored, adde
 Settings → Media library, up to 50 MB a file and 1 GB in all). Settings name files
 as `built-in/sleep.gif` or `uploaded/holiday.mp4`; nothing outside those folders
 can be shown.
+
+**Splash and Sleep** work as in v2. Splash plays at start-up: tick any GIFs or images
+(Settings → Splash) and each start-up shows the next one from a shuffled list, a GIF for
+exactly one pass. Sleep dims the panel between two times and shows one of its ticked files,
+picked at random each night and kept until morning.
+
+**Custom Lava Lamp palettes** are a name and three colours (background, wax, highlight),
+added in the module editor. Both styles use them: Classic directly, Metro works out its
+gradients from the three colours. Every pass picks one palette at random from the built-in
+ones you have ticked plus your custom ones that are switched on.
 
 If the frame around the panel hides its edges, set `safe_area` in the config
 (margins in pixels). Modules then draw only in the visible part. Find the right

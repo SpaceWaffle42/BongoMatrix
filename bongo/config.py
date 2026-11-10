@@ -11,6 +11,7 @@ from zoneinfo import ZoneInfo
 from bongo.module import Context, Module
 from bongo.player import Entry
 from bongo.safe_area import SafeArea
+from bongo.schedule import screen_problems
 
 DEFAULT_PATH = Path("data/config.json")
 
@@ -21,6 +22,7 @@ DEFAULTS = {
     "safe_area": {"top": 0, "right": 0, "bottom": 0, "left": 0},
     "web": {"enabled": True, "host": "0.0.0.0", "port": 5000},
     "playlist": [],
+    "splash": {"sources": ["built-in/splash_loading_squares.gif"]},  # v2's default start-up screen
 }
 
 
@@ -136,7 +138,7 @@ def validate(config: dict, modules: dict[str, Module]) -> list[str]:
     if entries and not any(isinstance(e, dict) and e.get("enabled", True) is not False for e in entries):
         problems.append("playlist: turn at least one entry on")
     if config.get("splash"):
-        problems += _entry("splash", config["splash"], modules)
+        problems += screen_problems("splash", config["splash"])
     overlays = config.get("overlays", [])
     if not isinstance(overlays, list):
         problems.append("overlays: must be a list")
@@ -162,18 +164,11 @@ def validate(config: dict, modules: dict[str, Module]) -> list[str]:
             problems.append(f"{where}: {error}")
     sleep = config.get("sleep")
     if sleep:
-        if not isinstance(sleep, dict):
-            problems.append("sleep: must be an object")
-        else:
+        problems += screen_problems("sleep", sleep, sleep=True)
+        if isinstance(sleep, dict):
             for key in ("from", "to"):
                 if not _time(sleep.get(key)):
                     problems.append(f"sleep.{key}: use a time like 23:00")
             if sleep.get("brightness") is not None and not _number(sleep["brightness"], 0, 100, whole=True):
                 problems.append("sleep.brightness: must be a whole number from 0 to 100")
-            items = sleep.get("playlist")
-            if not isinstance(items, list) or not items:
-                problems.append("sleep.playlist: add at least one entry")
-            else:
-                for i, raw in enumerate(items):
-                    problems += _entry(f"sleep.playlist[{i}]", raw, modules)
     return problems
