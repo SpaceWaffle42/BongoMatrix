@@ -63,7 +63,7 @@ def play(playlist: list[Entry], modules: dict[str, Module], panel, ctx_factory=C
 
     if schedule and schedule.splash:
         run(schedule.splash)
-    position: dict[int, int] = {}  # where each playlist (day or sleep) left off
+    position: dict[tuple, int] = {}  # where each playlist (day or sleep) left off
     played = 0
     while not stop.is_set() and (loops is None or played < loops * len(day)):
         now = ctx_factory().now()
@@ -72,8 +72,9 @@ def play(playlist: list[Entry], modules: dict[str, Module], panel, ctx_factory=C
             level = schedule.brightness(now)
             if level is not None:
                 panel.set_brightness(level)
-        index = position.get(id(current), 0)
-        position[id(current)] = index + 1
+        key = tuple(map(id, current))  # the list is rebuilt each pass; its entries are not
+        index = position.get(key, 0)
+        position[key] = index + 1
         played += 1
         if not run(current[index % len(current)]):
             stop.wait(0.2)  # never spin if every entry is broken
