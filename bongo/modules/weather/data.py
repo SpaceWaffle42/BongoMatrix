@@ -1,13 +1,14 @@
 """Open-Meteo (keyless) weather, fetched in the background and cached per location.
 
 ``latest(settings)`` never blocks: it returns the cached reading (or None) and starts a
-refresh when the cache is stale, so rendering stays smooth with a slow or absent network.
+refresh when the cache is stale, so rendering stays smooth with a slow or absent network. BONGO_OFFLINE=1 stops all fetching.
 """
 from __future__ import annotations
 
 import datetime as dt
 import json
 import logging
+import os
 import threading
 import time
 import urllib.parse
@@ -96,7 +97,7 @@ def latest(settings: dict) -> Reading | None:
     with _lock:
         reading = _cache.get(url)
         stale = reading is None or time.time() - reading.fetched > settings["refresh_minutes"] * 60
-        if stale and url not in _in_flight:
+        if stale and url not in _in_flight and not os.environ.get("BONGO_OFFLINE"):
             _in_flight.add(url)
             threading.Thread(target=_refresh, args=(url,), daemon=True, name="weather").start()
     return reading
