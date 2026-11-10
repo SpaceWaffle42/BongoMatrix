@@ -17,8 +17,10 @@ bongo/
   panel.py       HardwarePanel (rgbmatrix) and RecordingPanel (previews, tests)
   fonts.py       pixel-exact BDF fonts from resources/fonts
   config.py      data/config.json: panel, timezone, playlist
-  modules/
-    lava_lamp/   Lava Lamp, styles: classic, metro
+  safe_area.py   margins for a frame that hides the panel edges
+  schedule.py    splash, sleep hours and brightness
+  schema.py      setting types inferred from defaults, for validation and the dashboard
+  modules/       one folder per screen (table below)
 ```
 
 A **module** is one idea (a clock, the weather). A **style** is one look of that
@@ -37,6 +39,13 @@ See [docs/MODULES.md](docs/MODULES.md) to write a module and
 | Module | Styles | What it shows |
 | --- | --- | --- |
 | Lava Lamp | classic, metro | Time and date over moving wax. Classic is the v2 look (outlined, blurred blobs, 37 palettes). Metro is the refresh: wax that rises and sinks with a soft glow and hot core, clean type, 5 gradient palettes (magma, ocean, aurora, synthwave, mono). |
+| Weather | overview, ticker, forecast | Current conditions, high/low and a 4-day forecast from Open-Meteo (no key). |
+| Countdown | days, clock, flip, ring, tearoff | Time left to a date or a holiday (`next:christmas`), with a progress bar. |
+| Text | static, scroll | Your own message, centred or scrolling. |
+| Media | fit, fill, pixel | Images and animated GIFs; `pixel` scales pixel art crisply. |
+| Announcements | banner, card, flash | Notices scheduled by date, weekday and hour; several rotate. |
+| News | ticker, headline | Headlines from RSS/Atom feeds, newest first. |
+| Sky | moon, sun | Moon phase and next full/new moon; today's sun arc with sunrise and sunset. |
 
 ## Try it without a panel
 
