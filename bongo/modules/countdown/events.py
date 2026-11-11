@@ -20,9 +20,10 @@ import re
 from typing import NamedTuple
 
 from bongo.holidays import RULES, next_date
+from bongo.icons import ICONS
 
 REPEATS = ("once", "yearly")
-FIELDS = {"title", "date", "holiday", "repeat", "time", "until", "message", "colour", "from"}
+FIELDS = {"title", "date", "holiday", "repeat", "time", "until", "message", "colour", "from", "icon"}
 ON_FOR = dt.timedelta(hours=1)          # a timed event with no "until"
 PROGRESS = dt.timedelta(days=30)        # the bar fills over this unless "from" is set
 
@@ -90,6 +91,16 @@ def current(events: list[dict], now: dt.datetime) -> Occurrence | None:
     return min(found, key=lambda o: o.target, default=None)
 
 
+def icon_of(event: dict) -> str | None:
+    """The event's icon: its own pick, else its holiday's ("none" turns it off)."""
+    picked = event.get("icon") or ""
+    if picked == "none":
+        return None
+    if picked in ICONS:
+        return picked
+    return RULES[event["holiday"]].icon if event.get("holiday") in RULES else None
+
+
 def problems(events) -> list[str]:
     """What's wrong with an events list, in words for the dashboard."""
     if not isinstance(events, list):
@@ -116,6 +127,8 @@ def problems(events) -> list[str]:
                     out.append(f"{where}: {key} {e[key]!r} isn't a valid {'time' if key in ('time', 'until') else 'date'}")
         if e.get("repeat") not in (None, *REPEATS):
             out.append(f"{where}: repeat must be once or yearly")
+        if e.get("icon") and e["icon"] != "none" and e["icon"] not in ICONS:
+            out.append(f"{where}: unknown icon {e['icon']!r}")
         if e.get("colour") and not re.fullmatch(r"#[0-9A-Fa-f]{6}", str(e["colour"])):
             out.append(f"{where}: colour must look like #FFB547")
         for key in ("title", "message"):

@@ -1,6 +1,7 @@
 """Calendar: today's page with what's coming up, the month at a glance, and how far through
 the year, month, week and day we are. Holidays come from ``bongo.holidays``; your own dates
 are the ``events`` setting."""
+from bongo import icons
 from bongo.holidays import RULES, choice_groups, choice_labels
 from bongo.module import Module
 
@@ -17,6 +18,7 @@ MODULE = Module(
         events=[],  # [{"date": "MM-DD" or "YYYY-MM-DD" or a holiday spec, "title": "Mum's birthday"}]
         week_start="monday",
         text_colour="#ECEEF1", accent="#FFB547", event_colour="#5AC8FA", background="#0B0C0E",
+        icons=False,  # an 8x8 icon beside each upcoming date (Page); off by default, as titles then scroll sooner
     ),
     choices={"holidays": list(RULES), "week_start": ["monday", "sunday"]},
     basic=("holidays", "events", "week_start"),
@@ -24,5 +26,8 @@ MODULE = Module(
     item_fields={"events": [
         {"name": "title", "type": "text", "label": "What", "placeholder": "Mum's birthday"},
         {"name": "date", "type": "text", "label": "When", "placeholder": "11-21 every year, or 2026-11-21 once"},
+        {"name": "icon", "type": "choice", "label": "Icon", "more": True,
+         "options": [["", "No icon"]] + [[n, icons.label(n), "For events" if n in icons.EVENT_ICONS else "Holidays"]
+                                         for n in sorted(icons.ICONS, key=lambda n: (n not in icons.EVENT_ICONS, icons.label(n)))]},
     ]},
 )

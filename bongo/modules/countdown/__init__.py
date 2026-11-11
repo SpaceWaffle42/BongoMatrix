@@ -1,4 +1,5 @@
 """Countdown: days (or HH:MM) until the next of your events, over a dark gradient."""
+from bongo import icons
 from bongo.holidays import RULES, choice_groups, choice_labels
 from bongo.module import Module
 
@@ -20,7 +21,7 @@ MODULE = Module(
         done_message="It's here!", idle_text="",
         accent="#FFB547", text_colour="#FFF4DE",
         background_top="#2A0A06", background_bottom="#0E0201",
-        progress_bar=True,
+        progress_bar=True, icons=True,
     ),
     basic=("events", "done_message"),
     check=events.check,
@@ -36,6 +37,10 @@ MODULE = Module(
         {"name": "until", "type": "time", "label": "Ends at (else an hour later)", "more": True},
         {"name": "message", "type": "text", "label": "Message when it arrives", "placeholder": "Happy birthday!",
          "more": True},
+        {"name": "icon", "type": "choice", "label": "Icon", "more": True,
+         "options": [["", "Automatic (the holiday's)"], ["none", "No icon"]]
+                    + [[n, icons.label(n), "For events" if n in icons.EVENT_ICONS else "Holidays"]
+                       for n in sorted(icons.ICONS, key=lambda n: (n not in icons.EVENT_ICONS, icons.label(n)))]},
         {"name": "colour", "type": "colour", "label": "Own colour", "more": True},
         {"name": "from", "type": "date", "label": "Progress bar from (else 30 days before)", "more": True},
     ]},

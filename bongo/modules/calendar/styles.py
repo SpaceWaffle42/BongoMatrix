@@ -7,7 +7,7 @@ import math
 
 from PIL import Image, ImageDraw
 
-from bongo import holidays
+from bongo import holidays, icons
 from bongo.module import Style
 
 
@@ -28,9 +28,9 @@ class _Base(Style):
         self.ink, self.accent = rgb(s["text_colour"]), rgb(s["accent"])
         self.event_ink, self.bg = rgb(s["event_colour"]), rgb(s["background"])
         self.tiny, self.small = self.ctx.fonts("tom-thumb"), self.ctx.fonts("5x7")
-        self.dates = []  # (spec or one-off date, title, is_own_event)
+        self.dates = []  # (spec or one-off date, title, is_own_event, icon name or None)
         for hid in s["holidays"]:
-            self.dates.append((hid, holidays.label(hid), False))
+            self.dates.append((hid, holidays.label(hid), False, holidays.RULES[hid].icon))
         for i, event in enumerate(s["events"]):
             if not isinstance(event, dict) or not event.get("date") or not str(event.get("title", "")).strip():
                 raise ValueError(f"calendar: events[{i}] needs a date and a title")
@@ -42,7 +42,8 @@ class _Base(Style):
             except ValueError:
                 raise ValueError(f"calendar: events[{i}] has a date I can't read: {when!r} "
                                  "(use YYYY-MM-DD, MM-DD for every year, or a rule like last-mon-05)") from None
-            self.dates.append((spec, str(event["title"]).strip(), True))
+            mark = event.get("icon") if event.get("icon") in icons.ICONS else None
+            self.dates.append((spec, str(event["title"]).strip(), True, mark))
 
     def occurrence(self, spec, after: dt.date) -> dt.date | None:
         if isinstance(spec, dt.date):
@@ -50,14 +51,14 @@ class _Base(Style):
         return holidays.next_date(spec, after)
 
     def upcoming(self, today: dt.date, count: int):
-        found = [(d, title, own) for spec, title, own in self.dates if (d := self.occurrence(spec, today))]
+        found = [(d, title, own, mark) for spec, title, own, mark in self.dates if (d := self.occurrence(spec, today))]
         return sorted(found, key=lambda x: (x[0], not x[2]))[:count]
 
     def marked(self, year: int, month: int) -> set[int]:
         """Days of this month with a holiday or event."""
         first = dt.date(year, month, 1)
         days = set()
-        for spec, _, _ in self.dates:
+        for spec, *_ in self.dates:
             d = self.occurrence(spec, first)
             if d and (d.year, d.month) == (year, month):
                 days.add(d.day)
@@ -121,9 +122,14 @@ class Page(_Base):
             return img
         block = len(items) * pitch * 2 + (len(items) - 1) * 2 - 2
         y = (h - block) // 2 + self.tiny.cap
-        for d, title, own in items:
-            self.marquee(img, x0, y, room, title.upper(), self.event_ink if own else self.ink, now)
-            self.tiny.draw(img, x0, y + pitch, self.fit(self.tiny, when((d - today).days), room), self.accent)
+        with_icons = self.settings["icons"] and room >= 30 and any(mark for *_, mark in items)
+        tx, troom = (x0 + 10, room - 10) if with_icons else (x0, room)
+        for d, title, own, mark in items:
+            if with_icons and mark:  # centred on the item's two lines
+                tile = icons.icon(mark)
+                img.paste(tile, (x0, y - self.tiny.cap + (pitch + self.tiny.cap - 8) // 2), tile)
+            self.marquee(img, tx, y, troom, title.upper(), self.event_ink if own else self.ink, now)
+            self.tiny.draw(img, tx, y + pitch, self.fit(self.tiny, when((d - today).days), troom), self.accent)
             y += pitch * 2 + 2
         return img
 

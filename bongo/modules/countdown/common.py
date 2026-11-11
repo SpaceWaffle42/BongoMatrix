@@ -5,6 +5,8 @@ import math
 import numpy as np
 from PIL import Image, ImageFilter
 
+from bongo import icons
+
 
 def cap(font):
     """Cap height (the 'H') of a BDF font, measured locally so this module needs nothing new."""
@@ -35,13 +37,16 @@ class Base:
         from .events import current
         self.now_showing = on = current(self.settings["events"], now)
         if on is None:
-            self.accent = self.module_accent
+            self.accent, self.icon = self.module_accent, None
             return None
         e = on.event
         self.title = e["title"].upper()
         self.target = on.target
         self.message = e.get("message") or self.settings["done_message"]
         self.accent = rgb(e["colour"]) if e.get("colour") else self.module_accent
+        from .events import icon_of
+        name = icon_of(e) if self.settings["icons"] else None
+        self.icon = icons.icon(name) if name else None
         left = (on.target - now).total_seconds()
         span = (on.target - on.start).total_seconds()
         progress = 1.0 if span <= 0 else min(1.0, max(0.0, (now - on.start).total_seconds() / span))
@@ -65,7 +70,7 @@ class Base:
         off = int(now.timestamp() * 14) % (tw + gap)
         return [(font, 1 - off, y, text, ink), (font, 1 - off + tw + gap, y, text, ink)]
 
-    def paint(self, items, progress=None):
+    def paint(self, items, progress=None, icon_at=None):
         img = self.background.copy()
         mask = Image.new("L", img.size)
         for font, x, y, text, _ in items:
@@ -74,6 +79,8 @@ class Base:
         img = Image.composite(Image.new("RGB", img.size, self.dark), img, mask)
         for font, x, y, text, ink in items:
             font.draw(img, x, y, text, ink)
+        if icon_at is not None and getattr(self, "icon", None) is not None:
+            img.paste(self.icon, icon_at, self.icon)
         if progress is not None and self.settings["progress_bar"]:
             w, y = self.ctx.width, self.ctx.height - 1
             filled = round(progress * w)

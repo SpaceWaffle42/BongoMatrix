@@ -33,6 +33,11 @@ class Days(Base, Style):
         if not self.fits(caption):  # too long: alternate unit / label every 3s
             caption = unit if int(now.timestamp() // 3) % 2 == 0 else f"TO {label}"
         font = self.small if self.small.width(caption) <= w - 2 or not self.fits(caption) else self.tiny
-        items = [(self.big, (w - self.big.width(text)) // 2, h - 13, text, self.ink)]
+        tw, icon_at = self.big.width(text), None
+        x = (w - tw) // 2
+        if self.icon is not None and tw + 10 <= w - 2:  # the event's icon to the left of the number
+            x = (w - tw - 10) // 2 + 10
+            icon_at = (x - 10, h - 13 - self.big.cap // 2 - 4)
+        items = [(self.big, x, h - 13, text, self.ink)]
         items += self.line(font, caption, h - 4, self.accent, now)
-        return self.paint(items, progress)
+        return self.paint(items, progress, icon_at)
