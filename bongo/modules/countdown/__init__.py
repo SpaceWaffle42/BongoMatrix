@@ -1,5 +1,5 @@
 """Countdown: days (or HH:MM) until the next of your events, over a dark gradient."""
-from bongo.holidays import RULES
+from bongo.holidays import RULES, choice_groups, choice_labels
 from bongo.module import Module
 
 from . import events
@@ -29,7 +29,7 @@ MODULE = Module(
         {"name": "title", "type": "text", "label": "What", "placeholder": "Mum's birthday"},
         {"name": "date", "type": "date", "label": "Date"},
         {"name": "holiday", "type": "choice", "label": "Or a holiday (every year)",
-         "options": [["", "None"]] + [[k, r.label] for k, r in RULES.items()]},
+         "options": [["", "None"]] + [[k, choice_labels()[k], choice_groups()[k]] for k in RULES]},
         {"name": "repeat", "type": "choice", "label": "Repeats",
          "options": [["once", "Just once"], ["yearly", "Every year"]]},
         {"name": "time", "type": "time", "label": "At (blank = all day)", "more": True},

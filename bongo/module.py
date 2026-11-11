@@ -87,6 +87,9 @@ class Module:
     # ``suggestions={"feeds": [{"name": "BBC Top Stories", "value": "https://...", "group": "BBC"}]}``:
     # ready-made values for a list setting, offered as one-tap "Quick add" picks in the dashboard.
     suggestions: dict = field(default_factory=dict)
+    # ``choice_names={"holidays": {"labels": {"eid_al_fitr": "Eid al-Fitr"}, "groups": {"eid_al_fitr": "Islamic"}}}``:
+    # how the dashboard words a choice setting's values, and the headings it groups them under.
+    choice_names: dict = field(default_factory=dict)
 
     @property
     def default_style(self) -> str:

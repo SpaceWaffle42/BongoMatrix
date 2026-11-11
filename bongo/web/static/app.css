@@ -362,6 +362,12 @@ body.drag-active { user-select: none; -webkit-user-select: none; }
 .palette-row .grow { flex: 1 1 180px; min-width: 0; }
 .palette-row .end { align-items: flex-end; }
 
+/* Grouped chips (holidays by pack): one collapsible row per group */
+.chip-group { border: 1px solid var(--line); padding: 0 12px; }
+.chip-group > summary { display: flex; justify-content: space-between; align-items: center; gap: 10px; min-height: 40px; cursor: pointer; font-weight: 600; }
+.chip-group[open] > summary { border-bottom: 1px solid var(--line); margin-bottom: 10px; }
+.chip-group > .chip-grid { padding-bottom: 12px; }
+
 /* Splash / Sleep file picker */
 .screen-sources { display: grid; grid-template-columns: repeat(auto-fill, minmax(260px, 1fr)); gap: 6px; max-height: 320px; overflow: auto; }
 /* "Built in · 25" / "Uploaded · 3": a full-width heading with a rule, so the two kinds of file read apart */

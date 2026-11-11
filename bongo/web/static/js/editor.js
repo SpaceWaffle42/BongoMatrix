@@ -291,24 +291,44 @@ function control(f, id, v, set, hooks = {}) {
   return jsonArea(f, id, v, set);
 }
 
-/** Tick any number of choices (e.g. which palettes are in rotation). "all" is its own chip when offered. */
+/** Tick any number of choices (e.g. which palettes are in rotation). "all" is its own chip when offered.
+ * With ``f.groups`` (value -> heading) the chips sit under their headings (holidays by pack), each
+ * heading saying how many are ticked; ``f.labels`` (value -> words) names them. */
 function multiChoice(f, id, v, set) {
   const options = f.choices.filter((c) => c !== 'all');
-  const box = h('div', { class: f.swatches ? 'chip-grid palette-grid' : 'chip-grid', role: 'group', id, 'aria-labelledby': `${id}-l` });
+  const name = (c) => f.labels?.[c] ?? humanize(c);
+  const box = h('div', { class: f.swatches ? 'chip-grid palette-grid' : f.groups ? 'stack-s' : 'chip-grid', role: 'group', id, 'aria-labelledby': `${id}-l` });
+  const opened = new Set(), seen = new Set();  // which groups are open survives a repaint
   const paint = (value) => {
     const all = value === 'all';
     const picked = new Set(all ? [] : value || []);
+    const toggle = (c) => {
+      const now = new Set(all ? options : picked);
+      if (now.has(c)) now.delete(c); else now.add(c);
+      const next = options.filter((o) => now.has(o));
+      set(next); paint(next);
+    };
+    const chip = (c) => h('button', { type: 'button', class: f.swatches?.[c] ? 'chip palette-chip' : 'chip', 'aria-pressed': String(all || picked.has(c)),
+      title: f.swatches ? name(c) : null,  // the full name when a long one is cut short
+      onclick: () => toggle(c) }, f.swatches?.[c] ? swatch(f.swatches[c]) : null, h('span', { class: 'chip-label' }, name(c)));
+    if (f.groups) {
+      const heads = [...new Set(options.map((c) => f.groups[c] || 'Other'))];
+      box.replaceChildren(...heads.map((head) => {
+        const mine = options.filter((c) => (f.groups[c] || 'Other') === head);
+        const ticked = mine.filter((c) => all || picked.has(c)).length;
+        if (!seen.has(head)) { seen.add(head); if (ticked) opened.add(head); }  // start with the used groups open
+        const d = h('details', { class: 'chip-group', open: opened.has(head) || null },
+          h('summary', null, h('span', null, head), h('span', { class: 'muted small' }, ticked ? `${ticked} of ${mine.length}` : `${mine.length}`)),
+          h('div', { class: 'chip-grid' }, mine.map(chip)));
+        d.addEventListener('toggle', () => { if (d.open) opened.add(head); else opened.delete(head); });
+        return d;
+      }));
+      return;
+    }
     box.replaceChildren(
       ...(f.choices.includes('all') ? [h('button', { type: 'button', class: 'chip', 'aria-pressed': String(all),
         onclick: () => { const next = all ? [] : 'all'; set(next); paint(next); } }, 'All')] : []),
-      ...options.map((c) => h('button', { type: 'button', class: f.swatches?.[c] ? 'chip palette-chip' : 'chip', 'aria-pressed': String(all || picked.has(c)),
-        title: f.swatches ? humanize(c) : null,  // the full name when a long one is cut short
-        onclick: () => {
-          const now = new Set(all ? options : picked);
-          if (now.has(c)) now.delete(c); else now.add(c);
-          const next = options.filter((o) => now.has(o));
-          set(next); paint(next);
-        } }, f.swatches?.[c] ? swatch(f.swatches[c]) : null, h('span', { class: 'chip-label' }, humanize(c)))));
+      ...options.map(chip));
   };
   paint(v);
   return box;
@@ -379,9 +399,11 @@ function itemList(f, id, v, set) {
         return b;
       }));
     }
-    if (fd.type === 'choice') {  // options: [[value, label], ...]; '' means "not set"
-      const sel = h('select', { class: 'input', id: fid },
-        fd.options.map(([v, l]) => h('option', { value: v, selected: String(value) === v || null }, l)));
+    if (fd.type === 'choice') {  // options: [[value, label, group?], ...]; '' means "not set"
+      const option = ([v, l]) => h('option', { value: v, selected: String(value) === v || null }, l);
+      const groups = [...new Set(fd.options.map((o) => o[2]).filter(Boolean))];
+      const sel = h('select', { class: 'input', id: fid }, fd.options.filter((o) => !o[2]).map(option),
+        groups.map((g) => h('optgroup', { label: g }, fd.options.filter((o) => o[2] === g).map(option))));
       sel.addEventListener('change', () => put(sel.value));
       return sel;
     }

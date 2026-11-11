@@ -82,7 +82,7 @@ def describe(module) -> dict:
                 return {"type": choices[n]}
             if n in choices:
                 extra = {"swatches": swatches[n]} if n in swatches else {}
-                return {"type": "choice", "choices": list(choices[n]), **extra}
+                return {"type": "choice", "choices": list(choices[n]), **extra, **module.choice_names.get(n, {})}
             return {"type": kind(d)}
         return [{"name": n, "default": d, **typed(n, d), "advanced": tiered and n not in basic}
                 for n, d in defaults.items()]
