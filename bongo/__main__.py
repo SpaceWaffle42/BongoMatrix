@@ -150,6 +150,13 @@ def main(argv=None) -> int:
     config = cfg.load(args.config)
     for note in cfg.tidy(config, modules):
         logging.warning("old config: %s", note)
+    try:
+        from bongo import media
+
+        if moved := media.adopt_old_uploads():
+            logging.info("moved %d uploaded file(s) into %s", moved, media.UPLOADED)
+    except OSError as error:  # read-only checkout under the service: leave them, log why
+        logging.warning("couldn't move old uploads: %s", error)
     problems = cfg.validate(config, modules)
     for problem in problems:
         logging.error(problem)

@@ -101,3 +101,28 @@ def test_built_in_holds_only_splash_and_sleep_screens(tmp_path, monkeypatch):
 def test_the_shipped_built_in_folder_follows_the_naming_rule():
     shipped = [p.name for p in media.REPO.joinpath("resources", "media", "built-in").glob("*") if p.is_file()]
     assert all(n.startswith(("splash_", "sleep_")) for n in shipped), shipped
+
+
+def test_old_uploads_move_into_the_data_folder(tmp_path, monkeypatch):
+    old, new = tmp_path / "resources-uploaded", tmp_path / "data-uploads"
+    old.mkdir()
+    (old / "cat.gif").write_bytes(b"x")
+    (old / ".upload-half").write_bytes(b"x")  # an unfinished upload stays behind
+    new.mkdir()
+    (new / "dog.gif").write_bytes(b"new")
+    (old / "dog.gif").write_bytes(b"old")  # never overwrite one already moved
+    monkeypatch.setattr(media, "UPLOADED", new)
+    assert media.adopt_old_uploads(old) == 1
+    assert (new / "cat.gif").exists() and (new / "dog.gif").read_bytes() == b"new"
+    assert media.adopt_old_uploads(tmp_path / "missing") == 0
+
+
+def test_uploads_live_where_the_service_may_write():
+    import configparser
+    from pathlib import PurePosixPath
+    unit = configparser.ConfigParser(strict=False)
+    unit.read(media.REPO / "deploy" / "bongo-matrix.service")
+    home = PurePosixPath(unit["Service"]["WorkingDirectory"])
+    writable = [PurePosixPath(w) for w in unit["Service"]["ReadWritePaths"].split()]
+    uploads = home / (media.REPO / "data" / "uploads").relative_to(media.REPO).as_posix()
+    assert any(uploads.is_relative_to(w) for w in writable)

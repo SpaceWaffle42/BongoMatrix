@@ -70,3 +70,9 @@ def test_demo_assets_cover_every_module_style_and_stay_small():
             assert f"{module['id']}/{style}" in index["sheets"]
     total = sum(p.stat().st_size for p in Path(STATIC / "demo").iterdir()) + (STATIC / "js" / "demo-modules.json").stat().st_size
     assert total < 1_000_000  # ~80 animated styles (proposed modules included), 16 frames each
+
+
+def test_phone_tab_bar_stays_on_one_row():
+    css = (STATIC / "app.css").read_text()
+    rule = css[css.index("  .tabbar {"):].split("}", 1)[0]
+    assert "grid-auto-flow: column" in rule and "repeat(4" not in rule

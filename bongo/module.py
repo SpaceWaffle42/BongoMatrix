@@ -79,6 +79,9 @@ class Module:
     # ``places={"location": ("latitude", "longitude")}``: the dashboard turns that setting into a place
     # search; picking a result fills in the name and both coordinates together.
     places: dict = field(default_factory=dict)
+    # ``suggestions={"feeds": [{"name": "BBC Top Stories", "value": "https://...", "group": "BBC"}]}``:
+    # ready-made values for a list setting, offered as one-tap "Quick add" picks in the dashboard.
+    suggestions: dict = field(default_factory=dict)
 
     @property
     def default_style(self) -> str:

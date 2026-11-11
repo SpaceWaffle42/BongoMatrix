@@ -513,13 +513,37 @@ function numberInput(f, id, v, set, label) {
 
 function chips(f, id, v, set) {
   const list = Array.isArray(v) ? [...v] : [];
-  const inp = h('input', { class: 'input grow', id, placeholder: 'Add an item and press Enter', spellcheck: 'false' });
-  const add = () => { const x = inp.value.trim(); if (!x) return; set([...list, x], true); };
+  const known = new Map((f.suggestions || []).map((x) => [x.value, x]));
+  const inp = h('input', { class: 'input grow', id, placeholder: f.suggestions ? 'Or paste a web address and press Enter' : 'Add an item and press Enter', spellcheck: 'false' });
+  const add = () => { const x = inp.value.trim(); if (!x || list.includes(x)) return; set([...list, x], true); };
   inp.addEventListener('keydown', (ev) => { if (ev.key === 'Enter') { ev.preventDefault(); add(); } });
+  const label = (x) => known.get(x)?.name;
   return h('div', { class: 'stack-s' },
-    h('ul', { class: 'chips' }, list.map((x, k) => h('li', { class: 'chip-item' }, h('span', { class: 'chip-text', title: x }, x),
-      h('button', { type: 'button', class: 'chip-x', 'aria-label': `Remove ${x}`, onclick: () => set(list.filter((_, j) => j !== k), true) }, icon('x'))))),
+    h('ul', { class: 'chips' }, list.map((x, k) => h('li', { class: 'chip-item' },
+      label(x) ? h('span', { class: 'chip-text named', title: x }, label(x)) : h('span', { class: 'chip-text', title: x }, x),
+      h('button', { type: 'button', class: 'chip-x', 'aria-label': `Remove ${label(x) || x}`, onclick: () => set(list.filter((_, j) => j !== k), true) }, icon('x'))))),
+    f.suggestions ? quickAdd(f, list, set) : null,
     h('div', { class: 'row gap-s' }, inp, h('button', { type: 'button', class: 'btn', onclick: add }, 'Add')));
+}
+
+/** Ready-made values (e.g. news feeds) as tap-to-add chips, grouped; tapping an added one removes it. */
+const quickOpen = new Set();  // field names whose Quick add stays open while the form redraws
+function quickAdd(f, list, set) {
+  const suggestions = f.suggestions;
+  const groups = new Map();
+  for (const x of suggestions) groups.set(x.group || '', [...(groups.get(x.group || '') || []), x]);
+  const picked = suggestions.filter((x) => list.includes(x.value)).length;
+  const box = h('details', { class: 'item-more quick-add', open: quickOpen.has(f.name) || null },
+    h('summary', null, `Quick add (${suggestions.length} ready-made${picked ? `, ${picked} in use` : ''})`),
+    h('div', { class: 'stack-s' }, [...groups].map(([group, xs]) => h('div', { class: 'stack-xs' },
+      group ? h('div', { class: 'tiny muted' }, group) : null,
+      h('div', { class: 'chip-grid' }, xs.map((x) => {
+        const on = list.includes(x.value);
+        return h('button', { type: 'button', class: 'chip', 'aria-pressed': String(on), title: x.value,
+          onclick: () => set(on ? list.filter((y) => y !== x.value) : [...list, x.value], true) }, on ? icon('check') : icon('plus'), x.name);
+      }))))));
+  box.addEventListener('toggle', () => { if (box.open) quickOpen.add(f.name); else quickOpen.delete(f.name); });
+  return box;
 }
 
 function jsonArea(f, id, v, set) {

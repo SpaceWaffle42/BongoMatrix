@@ -74,6 +74,8 @@ def describe(module) -> dict:
             if n in module.places:
                 lat, lon = module.places[n]
                 return {"type": "place", "latitude": lat, "longitude": lon}
+            if n in module.suggestions:
+                return {"type": kind(d), "suggestions": module.suggestions[n]}
             if n in module.item_fields:
                 return {"type": "items", "fields": module.item_fields[n]}
             if choices.get(n) in ("media", "palettes"):

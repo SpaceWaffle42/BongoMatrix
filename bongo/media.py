@@ -17,6 +17,7 @@ import json
 import os
 import re
 import shutil
+import shutil
 import subprocess
 import tempfile
 import unicodedata
@@ -26,7 +27,9 @@ from PIL import Image
 
 REPO = Path(__file__).resolve().parents[1]
 BUILT_IN = REPO / "resources" / "media" / "built-in"
-UPLOADED = Path(os.environ.get("BONGO_UPLOADS", REPO / "resources" / "media" / "uploaded"))
+# data/ is the one folder the systemd service may write to (ReadWritePaths), so uploads live there
+UPLOADED = Path(os.environ.get("BONGO_UPLOADS", REPO / "data" / "uploads"))
+OLD_UPLOADED = REPO / "resources" / "media" / "uploaded"  # before 11 Nov 2026
 
 IMAGES = {".png", ".jpg", ".jpeg", ".gif", ".webp", ".bmp"}
 VIDEOS = {".mp4", ".mov", ".webm", ".mkv", ".avi", ".m4v"}
@@ -123,6 +126,20 @@ def check_file(path: Path) -> str:
     except Exception:
         raise ValueError("that file isn't an image Bongo Matrix can read") from None
     return "image"
+
+
+def adopt_old_uploads(old: Path = OLD_UPLOADED) -> int:
+    """Move files from the old uploads folder into UPLOADED (same names, so settings still match)."""
+    if not old.is_dir() or old.resolve() == UPLOADED.resolve():
+        return 0
+    moved = 0
+    for path in sorted(old.iterdir()):
+        target = UPLOADED / path.name
+        if path.is_file() and not path.name.startswith(".") and not target.exists():
+            UPLOADED.mkdir(parents=True, exist_ok=True)
+            shutil.move(str(path), target)
+            moved += 1
+    return moved
 
 
 def save_upload(filename: str, stream) -> str:

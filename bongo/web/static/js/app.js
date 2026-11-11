@@ -122,7 +122,7 @@ export async function applyDraft() {
     const res = await put('/api/config', { playlist });
     S.config.playlist = clone(playlist);
     S.problems = [];
-    toast(res?.restart_needed ? 'Saved. The Matrix uses the new playlist after its next restart.' : 'Playlist applied', 'success', 5000);
+    toast(res?.restart_needed ? 'Saved. Panel size and wiring changes take effect after the Matrix restarts.' : 'Playlist applied', 'success', 5000);
     paintHeader(); emit('draft');
     return true;
   } catch (err) {
@@ -140,9 +140,10 @@ export function discardDraft() {
 /** Save part of the config (safe area, schedule...). Returns true on success. */
 export async function saveConfig(part, what = 'Settings') {
   try {
-    await put('/api/config', part);
+    const res = await put('/api/config', part);
     Object.assign(S.config, clone(part));
-    toast(`${what} saved`, 'success');
+    if (res?.restart_needed) toast('Saved. Panel size and wiring changes take effect after the Matrix restarts.', 'success', 8000);
+    else toast(`${what} saved`, 'success');
     return true;
   } catch (err) {
     fail(`Couldn't save ${what.toLowerCase()}`)(err);
