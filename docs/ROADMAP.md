@@ -18,7 +18,7 @@ phone remote, pet screens, logs).
 - [x] **Splash and sleep** (v2 behaviour): Splash shuffles through its files, one GIF pass each; Sleep keeps one random pick all night at its own brightness.
 - [x] **Dashboard**: now playing with live preview, filmstrip playlist, module editor
       built from the settings schema, safe-area editor, logs, phone layout; PIN pairing.
-- [x] **Overlays**: styles drawn over the playing module on a timer; Announcements `ribbon` first, the pet next.
+- [x] **Overlays**: styles drawn over the playing module on a timer; Announcements `ribbon` and Pet `wander`.
 - [x] **Hardware lock**: one process drives the panel; a second `run`/`calibrate` stops with a clear message.
 - [x] **Weather**: `overview`, `ticker`, `forecast` (Open-Meteo, keyless).
 - [x] **Text**: `static`, `scroll`.
@@ -31,7 +31,7 @@ phone remote, pet screens, logs).
 
 ## Screens (one module each, styles where v2 had variants)
 
-- [ ] **Pet**: the cat (remastered Cat 10 sprites), needs, modes.
+- [x] **Pet**: the cat from the Cat 10 art; every engine mode is a style, `life` plays the ticked ones each day, `wander` overlay walks her across other screens.
 
 ## Core features still to add
 

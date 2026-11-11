@@ -204,6 +204,8 @@ body.drag-active { user-select: none; -webkit-user-select: none; }
 .style-card { display: flex; flex-direction: column; gap: 8px; padding: 8px; border-radius: 0; background: var(--page); border: 1px solid var(--line-2); color: var(--soft); font-size: 13px; text-align: left; }
 .style-card[aria-pressed="true"] { background: var(--amber-card); border-color: var(--amber); color: var(--amber-hover); }
 .style-card:hover { border-color: #3A3F47; }
+.style-groups { display: flex; flex-direction: column; gap: 14px; }
+.style-group-head { margin: 0 0 8px; font: 600 11px/1 var(--ui); letter-spacing: .12em; text-transform: uppercase; color: var(--amber); }
 .fields { display: grid; grid-template-columns: repeat(auto-fill, minmax(260px, 1fr)); gap: 16px 20px; }
 .field { display: flex; flex-direction: column; gap: 6px; min-width: 0; padding-left: 10px; border-left: 2px solid transparent; }
 .field.changed { border-left-color: var(--amber); }
@@ -358,9 +360,16 @@ body.drag-active { user-select: none; -webkit-user-select: none; }
 .palette-row .end { align-items: flex-end; }
 
 /* Splash / Sleep file picker */
-.screen-sources { display: grid; grid-template-columns: repeat(auto-fill, minmax(200px, 1fr)); gap: 6px; max-height: 240px; overflow: auto; }
-.screen-source { display: flex; align-items: center; gap: 8px; padding: 8px 10px; border: 1px solid var(--line); border-radius: 0; min-width: 0; cursor: pointer; }
-.screen-source .mono { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; flex: 1 1 auto; min-width: 0; }
+.screen-sources { display: grid; grid-template-columns: repeat(auto-fill, minmax(260px, 1fr)); gap: 6px; max-height: 320px; overflow: auto; }
+.screen-source { display: flex; align-items: center; gap: 8px; padding: 8px 10px; border: 1px solid var(--line); border-radius: 0; min-width: 0; }
+.screen-pick { display: flex; align-items: center; gap: 10px; flex: 1 1 auto; min-width: 0; cursor: pointer; }
+.screen-source .name, .device .name { display: block; align-self: stretch; max-width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.stack-xs { display: flex; flex-direction: column; align-items: flex-start; gap: 3px; }
+.min0 { min-width: 0; }
+.media-thumb { width: 64px; flex: 0 0 64px; }
+.media-thumb.empty { height: 32px; background: #050506; }
+.dialog.wide { width: min(640px, calc(100vw - 32px)); }
+.h2.truncate { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; min-width: 0; }
 .chip-grid { display: flex; flex-wrap: wrap; gap: 6px; }
 
 /* Simple first, advanced folded away */
@@ -388,3 +397,10 @@ body.drag-active { user-select: none; -webkit-user-select: none; }
 .place-option { display: flex; flex-direction: column; gap: 1px; padding: 8px 12px; cursor: pointer; border-bottom: 1px solid var(--line-3); }
 .place-option:hover, .place-option[aria-selected="true"] { background: var(--amber-card); }
 .place-option[aria-selected="true"] .strong { color: var(--amber-hover); }
+
+.fade-box { border: 1px solid var(--line); padding: 8px 10px 6px; background: var(--panel-2, transparent); }
+.fade-graph { display: block; width: 100%; height: 72px; }
+.fade-line { fill: none; stroke: var(--amber, #ffb547); stroke-width: 2; vector-effect: non-scaling-stroke; }
+.fade-mid { stroke: var(--line); stroke-dasharray: 3 3; vector-effect: non-scaling-stroke; }
+
+.animator-frame { width: 100%; height: 1000px; border: 1px solid var(--line); background: var(--page); display: block; }

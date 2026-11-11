@@ -86,11 +86,18 @@ def play(playlist: list[Entry], modules: dict[str, Module], panel, ctx_factory=C
     def brightness(now, forced_sleep):
         if not hasattr(panel, "set_brightness"):
             return
-        level = live.brightness if live and live.brightness is not None else None
-        if level is None and schedule:
-            asleep = forced_sleep and schedule.sleep_brightness is not None
-            level = schedule.sleep_brightness if asleep else schedule.brightness(now)
-        if level is not None:
+        if live and live.brightness is not None:  # the dashboard's override: straight there
+            panel.set_brightness(live.brightness)
+            return
+        if not schedule:
+            return
+        asleep = forced_sleep and schedule.sleep_brightness is not None
+        level = schedule.sleep_brightness if asleep else schedule.brightness(now)
+        if level is None:
+            return
+        if hasattr(panel, "ramp_to"):  # day <-> night glides (bongo.fade)
+            panel.ramp_to(level, schedule.fade_seconds, schedule.fade_curve)
+        else:
             panel.set_brightness(level)
 
     splash = schedule.splash if schedule else None  # each read takes the next file from the bag
@@ -116,7 +123,7 @@ def play(playlist: list[Entry], modules: dict[str, Module], panel, ctx_factory=C
         if forced and not (schedule and schedule.sleep_playlist):
             dark = ctx_factory().canvas()
             panel.show(place(dark) if place else dark)
-            stop.wait(1)  # dark until sleep_until or a wake from the dashboard
+            stop.wait(0.05 if getattr(panel, "ramping", False) else 1)  # dark until sleep_until or a wake
             continue
         if forced:
             current = schedule.sleep_playlist

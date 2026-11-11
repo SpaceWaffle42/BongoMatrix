@@ -115,7 +115,9 @@ def create_app(*, modules, live, pairing, config_path, logs: LogBuffer | None = 
         return jsonify(error="Something went wrong on the Matrix; see Logs."), 500
 
     def load():
-        return cfg.load(config_path)
+        config = cfg.load(config_path)
+        cfg.tidy(config, modules)  # an older build's settings never block a save
+        return config
 
     # -- auth -----------------------------------------------------------------------------
     @app.before_request
@@ -198,10 +200,22 @@ def create_app(*, modules, live, pairing, config_path, logs: LogBuffer | None = 
     @app.post("/api/push")
     def push():
         data = body()
+        seconds = number(data.get("seconds", 15), 3, 120, "seconds")
+        if data.get("file") is not None:  # "show it on the Matrix": try a media file on the real panel
+            name, fit = data["file"], data.get("fit", "fit")
+            if "media" not in modules:
+                return jsonify(error="no media module installed"), 409
+            if fit not in modules["media"].styles:
+                return jsonify(error=f"fit: one of {', '.join(modules['media'].styles)}"), 422
+            if media.resolve(name) is None or (name.startswith("built-in/") and media.screen_of(name) is None):
+                return jsonify(error=f"no such media file: {name}"), 404
+            speed = number(data.get("speed", 1), 0.1, 4, "speed")
+            live.push(Entry("media", fit, seconds, {"file": name, "speed": speed}))
+            logging.getLogger("bongo.web").info("showing %s on the panel for %s s", name, seconds)
+            return jsonify(ok=True, live=live.status())
         text = str(data.get("text", "")).strip()[:200]
         if not text:
             return jsonify(error="nothing to show"), 400
-        seconds = number(data.get("seconds", 15), 3, 120, "seconds")
         if "announcements" in modules:
             entry = Entry("announcements", "banner", seconds,
                           {"items": [{"title": str(data.get("title", ""))[:40], "text": text}]})
@@ -230,7 +244,10 @@ def create_app(*, modules, live, pairing, config_path, logs: LogBuffer | None = 
         for key in ("panel", "safe_area"):  # these merge key by key, so a page can send just one
             if isinstance(data.get(key), dict):
                 merged[key] = {**current[key], **data[key]}
-        problems = cfg.validate(merged, modules)
+        # only problems this save brings in block it: something already wrong elsewhere in the
+        # saved config (fix it on its own page) mustn't stop you saving, say, the safe area
+        before = set(cfg.validate(current, modules))
+        problems = [p for p in cfg.validate(merged, modules) if p not in before]
         if problems:
             return jsonify(problems=problems), 422
         if merged == current:

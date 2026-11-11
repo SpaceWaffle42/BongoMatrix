@@ -3,7 +3,7 @@
 import { ApiError } from './api.js';
 
 const DEMO_DIR = new URL('../demo/', import.meta.url);
-const FRAME_SECONDS = 0.6;
+const FRAME_SECONDS_DEFAULT = 0.6;
 const now = () => Date.now() / 1000;
 const iso = (secAgo) => new Date(Date.now() - secAgo * 1000).toISOString().replace(/\.\d+Z$/, '+00:00');
 const json = (data, status = 200) => new Response(JSON.stringify(data), { status, headers: { 'Content-Type': 'application/json' } });
@@ -12,11 +12,14 @@ const naiveLocal = (d) => new Date(d - d.getTimezoneOffset() * 60000).toISOStrin
 const wait = (ms) => new Promise((r) => setTimeout(r, ms));
 
 export async function start() {
-  const [modules, index] = await Promise.all([
+  const [built, proposed, index] = await Promise.all([
     fetch(new URL('./demo-modules.json', import.meta.url)).then((r) => r.json()),
+    // modules on the roadmap, shown so they can be tried in the dashboard before they exist (marked "proposed")
+    fetch(new URL('./demo-proposed.json', import.meta.url)).then((r) => r.json()).catch(() => []),
     // Sprite sheets are generated for published demos and aren't in the repo; without them the demo shows no frames.
     fetch(new URL('index.json', DEMO_DIR)).then((r) => r.json()).catch(() => ({ frames: 8, sheets: {} })),
   ]);
+  const modules = [...built, ...proposed];
   const sheets = {};
   const sheet = (key) => (sheets[key] ||= new Promise((resolve) => {
     if (!index.sheets[key]) { resolve(null); return; }
@@ -39,9 +42,14 @@ export async function start() {
       { module: 'announcements', style: 'banner', seconds: 20, settings: { items: [{ title: 'Bin day', text: 'Green bin goes out tonight' }] }, enabled: true },
       { module: 'rss', style: 'ticker', seconds: 30, settings: { feeds: ['https://feeds.bbci.co.uk/news/rss.xml'] }, enabled: true },
       { module: 'text', style: 'scroll', seconds: 15, settings: { text: 'Welcome home!' }, enabled: false },
+      // proposed modules (demo-proposed.json), so they can be seen playing
+      { module: 'clock', style: 'nixie', seconds: 20, settings: {}, enabled: true },
+      { module: 'ambient', style: 'aurora', seconds: 20, settings: {}, enabled: true },
+      { module: 'qr', style: 'standard', seconds: 15, settings: {}, enabled: true },
+      { module: 'spotify', style: 'cover', seconds: 20, settings: {}, enabled: true },
     ],
     splash: { sources: ['built-in/splash_loading_squares.gif'], speed: 100, fit: 'fit', enabled: true },
-    sleep: { from: '23:00', to: '07:00', brightness: 15, sources: ['built-in/sleep_default.gif'], speed: 100, fit: 'fit', enabled: true },
+    sleep: { from: '23:00', to: '07:00', brightness: 15, fade: 5, curve: 'smooth', sources: ['built-in/sleep_default.gif'], speed: 100, fit: 'fit', enabled: true },
   };
   const BUILT_IN = ['splash_loading_squares.gif', 'sleep_default.gif'];
   const uploads = [{ name: 'uploaded/garden-timelapse.mp4', file: 'garden-timelapse.mp4', bytes: 8650000, kind: 'video' }];
@@ -155,6 +163,15 @@ export async function start() {
       else return json({ error: `unknown action '${a}'` }, 400);
       return json({ live: status() });
     }
+    if (p === '/api/push' && body?.file) {
+      const all = [...BUILT_IN.map((f) => `built-in/${f}`), ...uploads.map((f) => f.name)];
+      if (!all.includes(body.file)) return json({ error: `no such media file: ${body.file}` }, 404);
+      live.queue.push({ module: 'media', style: body.fit || 'fit', seconds: Math.max(3, Math.min(120, Number(body.seconds) || 15)),
+        settings: { file: body.file, speed: Number(body.speed) || 1 } });
+      live.push = null; live.started = now() - 999;  // interrupt now
+      log('INFO', 'web', `showing ${body.file} on the panel for 15 s`);
+      return json({ ok: true, live: status() });
+    }
     if (p === '/api/push') {
       const text = String(body?.text || '').trim().slice(0, 200);
       if (!text) return json({ error: 'nothing to show' }, 400);
@@ -228,7 +245,7 @@ export async function start() {
     c.width = 64; c.height = 32;
     const ctx = c.getContext('2d');
     ctx.fillStyle = '#000'; ctx.fillRect(0, 0, 64, 32);
-    const k = Math.floor(t / FRAME_SECONDS) % index.frames;
+    const k = Math.floor(t / (index.seconds || FRAME_SECONDS_DEFAULT)) % index.frames;
     const sa = config.safe_area;
     ctx.imageSmoothingEnabled = false;
     ctx.globalAlpha = dim;  // the real module would draw into the smaller canvas; scaling is close enough here

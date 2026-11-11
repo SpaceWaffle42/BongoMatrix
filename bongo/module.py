@@ -38,6 +38,7 @@ class Style:
     choices: dict = {}  # setting name -> allowed values, for settings with a fixed set
     swatches: dict = {}  # setting name -> {choice: [colours]}, so the dashboard shows each choice's colours
     basic: tuple = ()  # this style's settings shown up front in the dashboard; the rest sit under Advanced
+    group: str | None = None  # heading the dashboard files this style under (a Clock's "Digital", "Word"...)
     fps: int = 30
 
     def __init__(self, ctx: Context, settings: dict):

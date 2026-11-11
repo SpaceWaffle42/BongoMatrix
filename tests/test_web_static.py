@@ -61,6 +61,7 @@ def test_index_html_is_well_formed():
 
 def test_demo_assets_cover_every_module_style_and_stay_small():
     modules = json.loads((STATIC / "js" / "demo-modules.json").read_text())
+    modules += json.loads((STATIC / "js" / "demo-proposed.json").read_text())
     if not (STATIC / "demo" / "index.json").exists():
         pytest.skip("demo sprite sheets are generated for published demos, not kept in the repo")
     index = json.loads((STATIC / "demo" / "index.json").read_text())
@@ -68,4 +69,4 @@ def test_demo_assets_cover_every_module_style_and_stay_small():
         for style in module["styles"]:
             assert f"{module['id']}/{style}" in index["sheets"]
     total = sum(p.stat().st_size for p in Path(STATIC / "demo").iterdir()) + (STATIC / "js" / "demo-modules.json").stat().st_size
-    assert total < 400_000
+    assert total < 1_000_000  # ~80 animated styles (proposed modules included), 16 frames each

@@ -230,7 +230,7 @@ function renderPlaylist() {
       'aria-label': `${i + 1}. ${entryName(e)}` },
       h('div', { class: 'row between' }, handle, h('span', { class: 'badge-playing', hidden: true }, 'PLAYING'), h('span', { class: 'mono tiny muted' }, `#${i + 1}`)),
       h('div', { class: 'led-frame mini' }, canvas),
-      h('div', { class: 'pl-text' }, h('span', { class: 'strong' }, entryName(e)),
+      h('div', { class: 'pl-text' }, h('span', { class: 'strong' }, entryName(e), mod?.proposed ? h('span', { class: 'tag' }, 'Proposed') : null),
         h('span', { class: 'mono tiny muted' }, `${humanize(styleOf(e))} · ${e.enabled ? dur(e.seconds, true) : 'skipped'}`)),
       problem ? h('p', { class: 'tiny danger flush' }, problem) : null,
       !mod ? h('p', { class: 'tiny danger flush' }, 'Module not installed') : null,
@@ -324,7 +324,7 @@ function buildAddDialog() {
   return {
     el: dlg,
     open() {
-      modSel.replaceChildren(...(S.modules || []).map((m) => h('option', { value: m.id }, m.name)));
+      modSel.replaceChildren(...(S.modules || []).map((m) => h('option', { value: m.id }, m.proposed ? `${m.name} (proposed)` : m.name)));
       modSel.dispatchEvent(new Event('change'));
       dlg.returnValue = '';
       if (dlg.showModal) dlg.showModal(); else dlg.setAttribute('open', '');

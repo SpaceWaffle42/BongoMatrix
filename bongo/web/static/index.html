@@ -9,7 +9,7 @@
 <script>
   /* On the Pi the app uses history routing (/edit/2), so assets must resolve from the site root.
      In ?demo mode it may be hosted under any folder and routes live in the hash, so stay relative. */
-  if (!/[?&]demo(=|&|$)/.test(location.search)) document.write('<base href="/">');
+  if (!window.BONGO_DEMO && !/[?&]demo(=|&|$)/.test(location.search)) document.write('<base href="/">');
 </script>
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
