@@ -1,0 +1,10 @@
+[Unit]
+Description=Bongo Matrix: start the updater when the dashboard asks for an update
+
+[Path]
+# The dashboard writes this file (data/ is the only folder the display service may write).
+PathChanged=/home/admin/matrix/data/update-request.json
+Unit=bongo-update.service
+
+[Install]
+WantedBy=multi-user.target

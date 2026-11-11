@@ -63,7 +63,7 @@ def context_factory(config: dict):
     return lambda: Context(width=area.width, height=area.height, tz=tz)
 
 
-KEYS = {"name", "timezone", "panel", "safe_area", "web", "playlist", "splash", "sleep", "overlays"}
+KEYS = {"name", "timezone", "panel", "safe_area", "web", "playlist", "splash", "sleep", "overlays", "update"}
 OVERLAY_KEYS = {"module", "overlay", "every", "seconds", "offset", "settings", "enabled"}
 PANEL = {"rows": (8, 128), "cols": (8, 256), "gpio_slowdown": (0, 5), "brightness": (1, 100),
          "chain_length": (1, 8), "parallel": (1, 3)}
@@ -193,6 +193,8 @@ def validate(config: dict, modules: dict[str, Module]) -> list[str]:
         problems.append("playlist: turn at least one entry on")
     if config.get("splash"):
         problems += screen_problems("splash", config["splash"])
+    from bongo.update import problems as update_problems
+    problems += update_problems(config.get("update"))
     overlays = config.get("overlays", [])
     if not isinstance(overlays, list):
         problems.append("overlays: must be a list")
