@@ -75,7 +75,7 @@ Previews are LED-look GIFs rendered by exactly the code that drives the panel.
 
 Media comes from two folders: `built-in/` (`resources/media/built-in`, shipped
 with the project, holding only screens: `splash_*` files are built-in Splash screens and
-`sleep_*` files are built-in Sleep screens) and `uploaded/` (`resources/media/uploaded`, git-ignored, added from the dashboard under
+`sleep_*` files are built-in Sleep screens) and `uploaded/` (`data/uploads`, git-ignored, added from the dashboard under
 Settings → Media library, up to 50 MB a file and 1 GB in all). Settings name files
 as `built-in/sleep_default.gif` or `uploaded/holiday.mp4`; nothing outside those folders
 can be shown.

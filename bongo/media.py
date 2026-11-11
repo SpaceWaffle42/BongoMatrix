@@ -3,8 +3,8 @@
     built-in/   resources/media/built-in, shipped with Bongo Matrix (read-only). Only Splash and
                 Sleep screens live here: ``splash_*`` files are built-in splash screens and
                 ``sleep_*`` files are built-in sleep screens. Anything else is the user's own.
-    uploaded/   resources/media/uploaded, files added from the dashboard (git-ignored, like v2,
-                so updates never touch them)
+    uploaded/   data/uploads, files added from the dashboard (git-ignored, like v2, so updates
+                never touch them; data/ is also where the systemd service may write)
 
 Settings name files as ``built-in/sleep_default.gif`` or ``uploaded/cat.mp4``. Nothing outside these
 two folders can be shown, so a setting can't point the panel (or the preview) at other files
@@ -26,7 +26,9 @@ from PIL import Image
 
 REPO = Path(__file__).resolve().parents[1]
 BUILT_IN = REPO / "resources" / "media" / "built-in"
-UPLOADED = Path(os.environ.get("BONGO_UPLOADS", REPO / "resources" / "media" / "uploaded"))
+# data/ is the one folder the systemd service may write to (ReadWritePaths), so uploads live there
+UPLOADED = Path(os.environ.get("BONGO_UPLOADS", REPO / "data" / "uploads"))
+OLD_UPLOADED = REPO / "resources" / "media" / "uploaded"  # before 11 Nov 2026
 
 IMAGES = {".png", ".jpg", ".jpeg", ".gif", ".webp", ".bmp"}
 VIDEOS = {".mp4", ".mov", ".webm", ".mkv", ".avi", ".m4v"}
@@ -123,6 +125,20 @@ def check_file(path: Path) -> str:
     except Exception:
         raise ValueError("that file isn't an image Bongo Matrix can read") from None
     return "image"
+
+
+def adopt_old_uploads(old: Path = OLD_UPLOADED) -> int:
+    """Move files from the old uploads folder into UPLOADED (same names, so settings still match)."""
+    if not old.is_dir() or old.resolve() == UPLOADED.resolve():
+        return 0
+    moved = 0
+    for path in sorted(old.iterdir()):
+        target = UPLOADED / path.name
+        if path.is_file() and not path.name.startswith(".") and not target.exists():
+            UPLOADED.mkdir(parents=True, exist_ok=True)
+            shutil.move(str(path), target)
+            moved += 1
+    return moved
 
 
 def save_upload(filename: str, stream) -> str:

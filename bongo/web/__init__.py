@@ -26,6 +26,7 @@ from bongo.player import Entry
 from bongo.schema import describe
 
 STATIC = Path(__file__).with_name("static")
+HARDWARE = ("rows", "cols", "hardware_mapping", "gpio_slowdown")  # panel keys fixed until a restart
 COOKIE = "bongo_device"
 YEAR = 365 * 86400
 
@@ -88,6 +89,11 @@ def create_app(*, modules, live, pairing, config_path, logs: LogBuffer | None = 
     logs = logs or LogBuffer()
     started = started or time.time()
     render_lock = threading.Lock()  # preview styles are cached and keep state between frames
+    # the panel driver reads these once when it starts; a saved change waits for a restart
+    running_panel = dict(cfg.load(config_path)["panel"])
+
+    def restart_needed(config) -> bool:
+        return any(config["panel"].get(k) != running_panel.get(k) for k in HARDWARE)
     last_show = [0.0]
 
     def body() -> dict:
@@ -251,7 +257,7 @@ def create_app(*, modules, live, pairing, config_path, logs: LogBuffer | None = 
         if problems:
             return jsonify(problems=problems), 422
         if merged == current:
-            return jsonify(ok=True, restart_needed=False, unchanged=True)
+            return jsonify(ok=True, restart_needed=restart_needed(current), unchanged=True)
         problems = verify_new(current, merged, modules)
         if problems:
             return jsonify(problems=problems), 422
@@ -259,7 +265,7 @@ def create_app(*, modules, live, pairing, config_path, logs: LogBuffer | None = 
         logging.getLogger("bongo.config").info("config saved by %s",
                                                (pairing.check(request.cookies.get(COOKIE)) or {}).get("name"))
         live.apply_config()
-        return jsonify(ok=True, restart_needed=False)
+        return jsonify(ok=True, restart_needed=restart_needed(merged))
 
     @lru_cache(maxsize=12)
     def preview_style(module, style, settings_json, width, height):

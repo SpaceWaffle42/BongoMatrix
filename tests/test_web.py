@@ -129,6 +129,17 @@ def test_saving_config_asks_the_player_to_reload(env):
     assert response.get_json()["restart_needed"] is False and live.reload.is_set() and live.skip.is_set()
 
 
+def test_changing_the_panel_wiring_says_a_restart_is_needed(env):
+    client, live, pairing = env
+    pair(client, pairing)
+    same = client.put("/api/config", json={"panel": {"brightness": 40}})
+    assert same.status_code == 200 and same.get_json()["restart_needed"] is False  # brightness is live
+    moved = client.put("/api/config", json={"panel": {"gpio_slowdown": 2}})
+    assert moved.status_code == 200 and moved.get_json()["restart_needed"] is True
+    again = client.put("/api/config", json={"panel": {"gpio_slowdown": 2}})  # still waiting for it
+    assert again.get_json()["restart_needed"] is True
+
+
 def test_unknown_timezone_is_rejected(env):
     client, _, pairing = env
     pair(client, pairing)
