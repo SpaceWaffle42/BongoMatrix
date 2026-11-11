@@ -59,8 +59,9 @@ def play_entry(style: Style, seconds: float, panel, stop: threading.Event | None
 def play(playlist: list[Entry], modules: dict[str, Module], panel, ctx_factory=Context,
          stop: threading.Event | None = None, loops: int | None = None, place=None,
          schedule=None, live=None, overlays=None) -> None:
-    """Cycle the playlist until ``stop`` (or ``loops`` passes). A ``Schedule`` adds a splash at
-    start-up and swaps in the sleep playlist, at sleep brightness, during its hours. ``live``
+    """Cycle the playlist until ``stop`` (or ``loops`` passes). A ``Schedule`` plays its boot screen
+    at start-up, fills ``splash`` items from the Splash pool and swaps in the sleep playlist, at
+    sleep brightness, during its hours (an entry is cut short when sleep starts or ends). ``live``
     lets the dashboard skip, pause, push a message, force sleep and override brightness.
     ``overlays`` (bongo.overlays.Overlays) draw over the day playlist, not splash, sleep or pushes."""
     stop = stop or threading.Event()
@@ -68,16 +69,24 @@ def play(playlist: list[Entry], modules: dict[str, Module], panel, ctx_factory=C
     if not day:
         raise ValueError("playlist has no enabled entries")
 
-    def run(entry: Entry, upcoming: Entry | None = None, index: int | None = None, extras=None) -> bool:
+    def run(entry: Entry, upcoming: Entry | None = None, index: int | None = None, extras=None,
+            limit: float | None = None) -> bool:
+        shown = entry
+        if entry.module == "splash":  # a Splash item: the next file from the Splash pool
+            entry = schedule.splash if schedule else None
+            if entry is None:
+                return False
+            extras = None  # overlays never cover the splash
+        seconds = entry.seconds if limit is None else max(0.0, min(entry.seconds, limit))
         try:
             style = entry.build(modules, ctx_factory())
         except Exception:
             log.exception("skipping playlist entry %s", entry.module)
             return False
         if live:
-            live.playing(entry, upcoming, index)
+            live.playing(shown, upcoming, index)
         try:
-            play_entry(style, entry.seconds, panel, stop, place=place, live=live, overlays=extras)
+            play_entry(style, seconds, panel, stop, place=place, live=live, overlays=extras)
         except Exception:  # one broken module must not stop the panel
             log.exception("%s/%s failed while playing; moving on", entry.module, entry.style)
             return False
@@ -100,9 +109,9 @@ def play(playlist: list[Entry], modules: dict[str, Module], panel, ctx_factory=C
         else:
             panel.set_brightness(level)
 
-    splash = schedule.splash if schedule else None  # each read takes the next file from the bag
-    if splash:
-        run(splash, day[0])
+    boot = schedule.boot_entry() if schedule else None
+    if boot:
+        run(boot, day[0])
     was_asleep = False
     position: dict[tuple, int] = {}  # where each playlist (day or sleep) left off
     played = 0
@@ -135,5 +144,7 @@ def play(playlist: list[Entry], modules: dict[str, Module], panel, ctx_factory=C
         played += 1
         entry = current[index % len(current)]
         where = None if forced else next((i for i, e in enumerate(playlist) if e is entry), None)
-        if not run(entry, current[(index + 1) % len(current)], where, None if asleep else overlays):  # where: slot in the saved playlist
+        limit = None if forced or not schedule else schedule.seconds_until_change(now)
+        if not run(entry, current[(index + 1) % len(current)], where, None if asleep else overlays,
+                   limit):  # where: slot in the saved playlist; limit: stop when sleep starts/ends
             stop.wait(0.2)  # never spin if every entry is broken

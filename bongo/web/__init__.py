@@ -55,6 +55,8 @@ def media_uses(config: dict):
     for screen in ("splash", "sleep"):
         for file in ((config.get(screen) or {}).get("sources") or []):
             yield f"the {screen} screen", file
+    if boot := (config.get("splash") or {}).get("boot"):
+        yield "the boot screen", boot
 
 
 def _entries(config: dict):

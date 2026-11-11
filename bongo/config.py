@@ -22,7 +22,9 @@ DEFAULTS = {
     "safe_area": {"top": 0, "right": 0, "bottom": 0, "left": 0},
     "web": {"enabled": True, "host": "0.0.0.0", "port": 5000},
     "playlist": [],
-    "splash": {"sources": ["built-in/splash_loading_squares.gif"]},  # v2's default start-up screen
+    # v2's default splash screen; "splash" items in the playlist play it. "boot": an optional file
+    # played once at start-up (None: none). A splash rule without "boot" is from before 11 Nov 2026.
+    "splash": {"sources": ["built-in/splash_loading_squares.gif"], "boot": None},
 }
 
 
@@ -108,6 +110,16 @@ def tidy(config: dict, modules: dict[str, Module]) -> list[str]:
     of stopping that entry from playing and every dashboard save. Changes ``config`` in place and
     returns what it changed, for the log."""
     notes = []
+    splash = config.get("splash")
+    if isinstance(splash, dict) and "boot" not in splash:
+        # Before 11 Nov 2026 the splash played only at start-up. It is a playlist item now (as in
+        # v2), so put one at the top of the playlist: it still plays first, and then every pass.
+        config["splash"] = splash = {**splash, "boot": None}
+        playlist = config.get("playlist")
+        if splash.get("enabled", True) and splash.get("sources") and isinstance(playlist, list) and playlist \
+                and not any(isinstance(e, dict) and e.get("module") == "splash" for e in playlist):
+            playlist.insert(0, {"module": "splash", "enabled": True})
+            notes.append("splash: now a playlist item; added one at the top of the playlist")
     for key in ("playlist", "overlays"):
         for i, entry in enumerate(config.get(key) or []):
             if not isinstance(entry, dict) or entry.get("module") not in modules or not isinstance(entry.get("settings"), dict):

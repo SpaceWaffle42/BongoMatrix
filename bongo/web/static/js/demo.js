@@ -36,6 +36,7 @@ export async function start() {
     safe_area: { top: 0, right: 0, bottom: 0, left: 0 },
     web: { enabled: true, host: '0.0.0.0', port: 5000 },
     playlist: [
+      { module: 'splash', style: 'screen', seconds: 8, settings: {}, enabled: true },
       { module: 'lava_lamp', style: 'metro', seconds: 30, settings: { palettes: ['magma'] }, enabled: true },
       { module: 'weather', style: 'overview', seconds: 20, settings: {}, enabled: true },
       { module: 'countdown', style: 'flip', seconds: 15, settings: {}, enabled: true },
@@ -48,7 +49,7 @@ export async function start() {
       { module: 'qr', style: 'standard', seconds: 15, settings: {}, enabled: true },
       { module: 'spotify', style: 'cover', seconds: 20, settings: {}, enabled: true },
     ],
-    splash: { sources: ['built-in/splash_loading_squares.gif'], speed: 100, fit: 'fit', enabled: true },
+    splash: { sources: ['built-in/splash_loading_squares.gif'], speed: 100, fit: 'fit', enabled: true, boot: 'built-in/splash_loading_squares.gif' },
     sleep: { from: '23:00', to: '07:00', brightness: 15, fade: 5, curve: 'smooth', sources: ['built-in/sleep_default.gif'], speed: 100, fit: 'fit', enabled: true },
   };
   const BUILT_IN = ['splash_loading_squares.gif', 'sleep_default.gif'];

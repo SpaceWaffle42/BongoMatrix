@@ -96,10 +96,12 @@ export function render(view, match) {
     sections.replaceChildren(
       h('section', { class: 'card stack', 'aria-label': 'Timing' }, h('h2', { class: 'h2' }, 'Timing'),
         h('div', { class: 'grid-2' },
-          h('label', { class: 'field-col', for: 'f-seconds' }, 'Seconds on the panel', seconds),
+          e.module === 'splash'  // its length comes from the picked file: one pass of a GIF
+            ? h('div', { class: 'field-col' }, h('span', null, 'Length'), h('span', { class: 'muted small' }, 'One pass of the picked Splash file. Choose the files in Settings › Splash.'))
+            : h('label', { class: 'field-col', for: 'f-seconds' }, 'Seconds on the panel', seconds),
           h('div', { class: 'field-col' }, h('span', null, 'Rotation'), toggle(e.enabled, 'Enabled', (v) => { e.enabled = v; changed(); })))),
-      basicCard([...shared, ...own].filter((f) => !f.advanced)),
-      advancedCard(shared.filter((f) => f.advanced), own.filter((f) => f.advanced)));
+      ...[basicCard([...shared, ...own].filter((f) => !f.advanced)),
+        advancedCard(shared.filter((f) => f.advanced), own.filter((f) => f.advanced))].filter(Boolean));  // none for Splash
   }
   const counter = (fields) => {
     const count = h('span', { class: 'tiny pill-warn changed-count' });

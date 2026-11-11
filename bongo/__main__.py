@@ -164,13 +164,13 @@ def main(argv=None) -> int:
     if config["web"]["enabled"]:
         _start_dashboard(config, modules, live, Path(args.config))
     panel = Fader(_hardware(config))  # day <-> night brightness glides instead of jumping
-    good, first = None, True  # last config that played; the splash only plays at start-up
+    good, first = None, True  # last config that played; the boot screen only plays at start-up
     try:
         while True:  # play() returns when the dashboard saves a new config
             try:
                 schedule = Schedule.from_config(config)
                 if not first:
-                    schedule.splash = None
+                    schedule.boot = None  # the boot screen plays once, not after a dashboard save
                 first = False
                 factory = cfg.context_factory(config)
                 play(cfg.playlist(config, modules), modules, panel, factory,
