@@ -3,8 +3,8 @@
     built-in/   resources/media/built-in, shipped with Bongo Matrix (read-only). Only Splash and
                 Sleep screens live here: ``splash_*`` files are built-in splash screens and
                 ``sleep_*`` files are built-in sleep screens. Anything else is the user's own.
-    uploaded/   resources/media/uploaded, files added from the dashboard (git-ignored, like v2,
-                so updates never touch them)
+    uploaded/   data/uploads, files added from the dashboard (git-ignored, like v2, so updates
+                never touch them; data/ is also where the systemd service may write)
 
 Settings name files as ``built-in/sleep_default.gif`` or ``uploaded/cat.mp4``. Nothing outside these
 two folders can be shown, so a setting can't point the panel (or the preview) at other files
@@ -16,7 +16,6 @@ from __future__ import annotations
 import json
 import os
 import re
-import shutil
 import shutil
 import subprocess
 import tempfile
