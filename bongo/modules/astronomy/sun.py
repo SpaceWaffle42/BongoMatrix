@@ -7,6 +7,7 @@ import math
 import numpy as np
 from PIL import Image, ImageDraw
 
+from bongo.fonts import names
 from bongo.module import Style
 
 from . import astro
@@ -25,9 +26,14 @@ def sky_colours(elev: float):
 
 class Sun(Style):
     fps = 5
+    # The day length in the middle ("9H 5M"): 6x10 is two sizes up from the tiny font, which was
+    # hard to read on a real panel. Too wide for the canvas falls back to the tiny font.
+    defaults = dict(day_length_font="6x10")
+    choices = {"day_length_font": names()}
 
     def setup(self):
         self.tiny = self.ctx.fonts("tom-thumb")
+        self.span_font = self.ctx.fonts(self.settings["day_length_font"])
 
     def render(self, now):
         w, h = self.ctx.width, self.ctx.height
@@ -114,6 +120,7 @@ class Sun(Style):
             self.tiny.draw(img, 1, base, rs, text)
             self.tiny.draw(img, w - 1 - self.tiny.width(ss), base, ss, text)
             if ry >= 12:
-                self.tiny.draw(img, (w - self.tiny.width(span)) // 2, horizon - 4, span, text, outline=tuple(int(c * 0.3) for c in sky))
+                font = self.span_font if self.span_font.width(span) <= w - 8 else self.tiny
+                font.draw(img, (w - font.width(span)) // 2, horizon - 4, span, text, outline=tuple(int(c * 0.3) for c in sky))
         else:
             self.tiny.draw(img, (w - self.tiny.width(span)) // 2, base, span, accent)
