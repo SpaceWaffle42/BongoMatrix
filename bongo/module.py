@@ -68,6 +68,9 @@ class Module:
     # validation (raise ValueError). ``verify`` may use the network and runs only when the
     # dashboard saves new settings; it returns a list of problems (empty = fine).
     check: Callable[[dict], None] | None = None
+    # ``migrate`` updates one entry's saved settings from an older Bongo, in place, before unknown
+    # settings are dropped (``config.tidy``); returns notes for the log.
+    migrate: Callable[[dict], list[str]] | None = None
     verify: Callable[[dict], list[str]] | None = None
     # Dashboard hints. ``basic``: the few settings most people change, shown up front; the rest
     # go under "Advanced settings". Leave it empty to show everything. ``item_fields``: for a

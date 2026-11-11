@@ -44,7 +44,7 @@ See [docs/MODULES.md](docs/MODULES.md) to write a module and
 | --- | --- | --- |
 | Lava Lamp | classic, metro | Time and date over moving wax. Classic is the v2 look (outlined, blurred blobs, 27 palettes). Metro is the refresh: wax that rises and sinks with a soft glow and hot core, clean type, 5 gradient palettes (magma, ocean, aurora, synthwave, mono). |
 | Weather | overview, ticker, forecast | Current conditions, high/low and a 4-day forecast from Open-Meteo (no key). |
-| Countdown | days, clock, flip, ring, tearoff | Time left to a date or a holiday (`next:christmas`), with a progress bar. |
+| Countdown | days, clock, flip, ring, tearoff | Time left to the next of your events (dates, yearly dates or holidays), each with its own time, message and colour, and a progress bar. |
 | Text | static, scroll | Your own message, centred or scrolling. |
 | Media | fit, fill, pixel | Images, animated GIFs and short videos (first 15 s, needs `ffmpeg`) from the media library; `pixel` scales pixel art crisply. |
 | Announcements | banner, card, flash | Notices scheduled by date, weekday and hour; several rotate. |

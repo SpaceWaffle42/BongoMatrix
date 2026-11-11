@@ -377,6 +377,12 @@ function itemList(f, id, v, set) {
         return b;
       }));
     }
+    if (fd.type === 'choice') {  // options: [[value, label], ...]; '' means "not set"
+      const sel = h('select', { class: 'input', id: fid },
+        fd.options.map(([v, l]) => h('option', { value: v, selected: String(value) === v || null }, l)));
+      sel.addEventListener('change', () => put(sel.value));
+      return sel;
+    }
     if (fd.type === 'colour') {
       const on = !!value;
       const pick = h('input', { type: 'color', class: 'swatch-input', id: fid, value: /^#[0-9a-f]{6}$/i.test(value) ? value : '#FFB547', disabled: !on });

@@ -3,7 +3,7 @@ from PIL import Image, ImageDraw
 
 from bongo.module import Style
 
-from .common import Base, cap, fit_font, mix, remaining
+from .common import Base, cap, fit_font, mix
 
 WINDOW = 30 * 86400
 K = 4  # supersampling factor
@@ -27,7 +27,10 @@ class Ring(Base, Style):
 
     def render(self, now):
         s, w, h = self.settings, self.ctx.width, self.ctx.height
-        left, progress, over = remaining(s, now)
+        picked = self.pick(now)
+        if picked is None:
+            return self.idle_frame(now)
+        left, progress, over = picked
         if over:
             return self.done_frame(now)
         if left >= 86400:
@@ -49,7 +52,7 @@ class Ring(Base, Style):
         if has_unit:
             items.append((self.small, tx + (avail - self.small.width(unit)) // 2, top + block, unit, self.accent))
         if label_h:
-            items += self.line(self.small, s["label"].upper(), h - 3, self.accent, now)
+            items += self.line(self.small, self.title, h - 3, self.accent, now)
         img = self.paint(items, progress)
         track, arc = self.ring(d, 3 if d >= 18 else 2, frac)
         img.paste(mix(self.dark, self.accent, .22), (2, 1), track)

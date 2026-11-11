@@ -3,7 +3,7 @@ from PIL import Image, ImageDraw
 
 from bongo.module import Style
 
-from .common import Base, cap, fit_font, mix, parse, remaining
+from .common import Base, cap, fit_font, mix
 
 FLIP = 0.25  # seconds a flip takes
 
@@ -39,10 +39,13 @@ class Flip(Base, Style):
 
     def render(self, now):
         s, w, h = self.settings, self.ctx.width, self.ctx.height
-        left, progress, over = remaining(s, now)
+        picked = self.pick(now)
+        if picked is None:
+            return self.idle_frame(now)
+        left, progress, over = picked
         if over:
             return self.done_frame(now)
-        exact = (parse(s["target"], now) - now).total_seconds()
+        exact = (self.target - now).total_seconds()
         since = (-exact) % 1  # seconds since the displayed second last changed
         days = left >= 86400
 

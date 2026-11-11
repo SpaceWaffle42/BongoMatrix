@@ -1,7 +1,7 @@
 """Tearoff: a desk-calendar page with the target month on the header and the day count in ink."""
 from bongo.module import Style
 
-from .common import Base, cap, fit_font, mix, parse, remaining
+from .common import Base, cap, fit_font, mix
 
 # LEDs show light, so the page is a dim warm glow and the ink is bright (dark ink reads as holes).
 PAGE, INK, HOLE = (52, 42, 30), (255, 244, 222), (8, 6, 4)
@@ -15,7 +15,10 @@ class Tearoff(Base, Style):
 
     def render(self, now):
         s, w, h = self.settings, self.ctx.width, self.ctx.height
-        left, progress, over = remaining(s, now)
+        picked = self.pick(now)
+        if picked is None:
+            return self.idle_frame(now)
+        left, progress, over = picked
         if over:
             return self.done_frame(now)
         if left >= 86400:
@@ -31,7 +34,7 @@ class Tearoff(Base, Style):
         img.paste(PAGE, (x0, y0, x1 + 1, y1 + 1))
         img.paste(mix(self.dark, self.accent, 0.3), (x0, y0, x1 + 1, y0 + hh - 1))
         img.paste(self.accent, (x0, y0 + hh - 1, x1 + 1, y0 + hh))  # tear line
-        month = parse(s["target"], now).strftime("%b").upper()
+        month = self.target.strftime("%b").upper()
         self.small.draw(img, x0 + (pw - self.small.width(month)) // 2, y0 + hh - 3, month, self.accent)
         if hh >= 9:  # binding holes
             for hx in range(x0 + 4, x1 - 2, max(5, (pw - 8) // 4)):
