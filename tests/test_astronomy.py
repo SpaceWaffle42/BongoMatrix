@@ -97,3 +97,13 @@ def test_all_styles_fit_small_canvases():
     for style in MODULE.styles:
         for w, h in ((32, 16), (40, 18), (58, 28)):
             assert frame(style, D(2024, 4, 12, 12), w, h).shape == (h, w, 3)
+
+
+def test_sun_day_length_font_is_a_setting_and_bigger_by_default():
+    import random
+    from bongo.module import Context
+    now = dt.datetime(2026, 11, 11, 15, 40, tzinfo=dt.timezone.utc)
+    draw = lambda **s: MODULE.create("sun", s, Context(rng=random.Random(1))).render(now).tobytes()
+    assert MODULE.settings_for("sun")["day_length_font"] == "6x10"
+    assert draw() != draw(day_length_font="tom-thumb")
+    assert draw(day_length_font="5x7") not in (draw(), draw(day_length_font="tom-thumb"))
