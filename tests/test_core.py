@@ -142,4 +142,4 @@ def test_editor_schema_marks_advanced_settings_and_entry_forms():
     for m in mods.values():  # every module leads with something simple to change
         d = describe(m)
         everything = d["settings"] + [f for s in d["styles"].values() for f in s["settings"]]
-        assert any(not f["advanced"] for f in everything), m.id
+        assert not everything or any(not f["advanced"] for f in everything), m.id  # Splash has none

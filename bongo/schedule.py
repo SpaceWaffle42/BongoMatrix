@@ -1,12 +1,13 @@
 """Splash and Sleep screens: config rules that pick from your media, as in v2.
 
     "splash": {"sources": ["built-in/splash_loading_squares.gif", "uploaded/logo.png"],
-               "speed": 100, "fit": "fit"}
+               "speed": 100, "fit": "fit", "boot": "built-in/splash_loading_squares.gif"}
     "sleep":  {"from": "23:00", "to": "07:00", "brightness": 15, "fade": 5, "curve": "smooth",
                "sources": ["built-in/sleep_default.gif"], "speed": 100, "fit": "fit"}
 
-Splash plays at start-up. Each time, the next file comes from a shuffled bag, so every
-source plays once before any repeats. A GIF plays exactly one pass at ``speed`` percent; a
+Splash plays wherever a ``splash`` item sits in the playlist (as in v2). Each time, the next
+file comes from a shuffled bag, so every source plays once before any repeats. ``boot`` is an
+optional single file played once at start-up; without one, start-up is nothing special. A GIF plays exactly one pass at ``speed`` percent; a
 still holds for the average pass of the row's GIFs when that is 5-10 s, else 7 s (v2's rule).
 
 Between ``from`` and ``to`` (overnight ranges allowed) the panel dims to ``brightness`` (gliding
@@ -68,7 +69,7 @@ def screen_problems(where: str, rule, *, sleep: bool = False) -> list[str]:
     """Readable problems with a splash or sleep rule (used by config.validate)."""
     if not isinstance(rule, dict):
         return [f"{where}: must be an object"]
-    allowed = {"sources", "speed", "fit", "enabled"} | ({"from", "to", "brightness", "fade", "curve"} if sleep else set())
+    allowed = {"sources", "speed", "fit", "enabled"} | ({"boot"} if not sleep else set()) | ({"from", "to", "brightness", "fade", "curve"} if sleep else set())
     problems = [f"{where}: unknown keys {sorted(set(rule) - allowed)}"] if set(rule) - allowed else []
     sources = rule.get("sources")
     if not isinstance(sources, list) or not sources:
@@ -80,6 +81,11 @@ def screen_problems(where: str, rule, *, sleep: bool = False) -> list[str]:
                 problems.append(f"{where}.sources: {s!r} isn't a GIF or image from built-in/ or uploaded/")
             elif s.startswith("built-in/") and media.screen_of(s) != screen:
                 problems.append(f"{where}.sources: {s!r} isn't a built-in {screen} screen (those are built-in/{screen}_*)")
+    boot = rule.get("boot")
+    if not sleep and boot is not None and (not media.valid_name(boot) or "." + str(boot).rsplit(".", 1)[-1].lower()
+                                           not in SCREEN_TYPES or (str(boot).startswith("built-in/")
+                                                                   and media.screen_of(boot) != "splash")):
+        problems.append(f"{where}.boot: {boot!r} isn't a GIF or image for the Splash screen")
     speed = rule.get("speed", 100)
     if isinstance(speed, bool) or not isinstance(speed, (int, float)) or not 10 <= speed <= 400:
         problems.append(f"{where}.speed: a percentage from 10 to 400")
@@ -105,6 +111,7 @@ class Schedule:
     splash_sources: list[str] = field(default_factory=list)
     splash_speed: float = 100
     splash_fit: str = "fit"
+    boot: str | None = None           # played once at start-up, if set
     sleep_from: str | None = None
     sleep_to: str | None = None
     sleep_brightness: int | None = None
@@ -132,6 +139,7 @@ class Schedule:
         return cls(
             splash_sources=own(splash, "splash"),
             splash_speed=splash.get("speed", 100), splash_fit=splash.get("fit", "fit"),
+            boot=next(iter(own({"sources": [splash.get("boot")]}, "splash")), None) if splash.get("boot") else None,
             sleep_from=sleep.get("from"), sleep_to=sleep.get("to"),
             sleep_brightness=sleep.get("brightness"),
             sleep_sources=own(sleep, "sleep"),
@@ -157,10 +165,12 @@ class Schedule:
         return Entry("media", self.splash_fit, settings={"file": name, "speed": self.splash_speed / 100},
                      seconds=hold_seconds(name, self.splash_sources, self.splash_speed))
 
-    @splash.setter
-    def splash(self, value) -> None:  # main() switches the splash off after start-up
-        if value is None:
-            self.splash_sources = []
+    def boot_entry(self) -> Entry | None:
+        """The start-up screen: one pass of the boot file (a still holds STILL_SECONDS)."""
+        if not self.boot:
+            return None
+        return Entry("media", self.splash_fit, settings={"file": self.boot, "speed": self.splash_speed / 100},
+                     seconds=hold_seconds(self.boot, [self.boot], self.splash_speed))
 
     # -- sleep ---------------------------------------------------------------------------
     @property
@@ -188,6 +198,16 @@ class Schedule:
     def sleep_playlist(self) -> list[Entry]:
         entry = self.sleep_entry()
         return [entry] if entry else []
+
+    def seconds_until_change(self, now: dt.datetime) -> float | None:
+        """Seconds until sleep starts or ends (None: no sleep times), so an entry stops in time."""
+        if not (self.sleeps and self.sleep_from and self.sleep_to):
+            return None
+        mark = dt.time.fromisoformat(self.sleep_to if self.asleep(now) else self.sleep_from)
+        when = dt.datetime.combine(now.date(), mark, tzinfo=now.tzinfo)
+        if when <= now:
+            when += dt.timedelta(days=1)
+        return (when - now).total_seconds()
 
     def brightness(self, now: dt.datetime) -> int | None:
         if self.asleep(now) and self.sleep_brightness is not None:

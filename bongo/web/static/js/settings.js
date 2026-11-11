@@ -2,7 +2,7 @@
 import { get, del, uploadMedia } from './api.js';
 import { h, icon, toast, fail, clone, same, clamp, humanize, ago, toggle } from './ui.js';
 import { FrameLoop } from './led.js';
-import { mediaThumb, previewButton } from './mediaview.js';
+import { mediaThumb, previewButton, openPreview } from './mediaview.js';
 import { S, onLeave, go, saveConfig } from './app.js';
 
 export function render(view) {
@@ -128,9 +128,15 @@ function screenPicker(rule, idPrefix, screen) {
 function splashCard() {
   const start = S.config.splash;
   let on = !!start && start.enabled !== false;
-  const rule = clone(start) || { sources: ['built-in/splash_loading_squares.gif'], speed: 100, fit: 'fit' };
+  const rule = clone(start) || { sources: ['built-in/splash_loading_squares.gif'], speed: 100, fit: 'fit', boot: null };
+  rule.boot ??= null;
+  const inPlaylist = (S.config.playlist || []).filter((e) => e.module === 'splash').length;
   const body = h('div', { class: 'stack' }, screenPicker(rule, 'sp', 'splash'),
-    h('p', { class: 'muted tiny flush' }, 'Each start-up shows the next file from a shuffled list, so every one plays before any repeats. A GIF plays once through; a still stays up about as long as your GIFs (7 s if there are none).'));
+    h('p', { class: 'muted tiny flush' }, 'Each time a Splash item comes round in the playlist it shows the next file from a shuffled list, so every one plays before any repeats. A GIF plays once through; a still stays up about as long as your GIFs (7 s if there are none).'),
+    h('p', { class: 'small flush' + (inPlaylist ? ' muted' : ' warn') }, inPlaylist
+      ? `In the playlist ${inPlaylist === 1 ? 'once' : `${inPlaylist} times`}. Add more, or move it, on the Playlist page.`
+      : 'Not in the playlist yet: add a Splash item on the Playlist page so it plays.'),
+    bootPicker(rule));
   body.hidden = !on;
   const save = h('button', { type: 'button', class: 'btn primary' }, 'Save');
   save.onclick = () => {
@@ -138,9 +144,29 @@ function splashCard() {
     saveConfig({ splash: on ? { ...rule, enabled: true } : null }, 'Splash');
   };
   return h('section', { class: 'card stack', 'aria-label': 'Splash' },
-    h('div', { class: 'row between wrap' }, h('div', null, h('h2', { class: 'h2' }, 'Splash'), h('p', { class: 'muted small flush' }, 'Plays when the Matrix starts.')),
-      toggle(on, 'Show a splash', (v) => { on = v; body.hidden = !v; })),
+    h('div', { class: 'row between wrap' }, h('div', null, h('h2', { class: 'h2' }, 'Splash'), h('p', { class: 'muted small flush' }, 'Plays wherever you put a Splash item in the playlist.')),
+      toggle(on, 'Use splash screens', (v) => { on = v; body.hidden = !v; })),
     body, h('div', { class: 'row end' }, save));
+}
+
+/** The boot screen: one Splash file played once when the Matrix starts, or none. */
+function bootPicker(rule) {
+  const sel = h('select', { class: 'input', id: 'sp-boot' }, h('option', { value: '' }, 'None (start straight into the playlist)'));
+  sel.addEventListener('change', () => { rule.boot = sel.value || null; });
+  (async () => {
+    try {
+      const lib = await get('/api/media');
+      const files = [...lib.folders['built-in'].filter((f) => f.screen === 'splash'), ...lib.folders.uploaded].filter((f) => SCREEN_TYPES.test(f.name));
+      if (rule.boot && !files.some((f) => f.name === rule.boot)) files.unshift({ name: rule.boot, file: `${rule.boot} (missing)` });
+      sel.append(...files.map((f) => h('option', { value: f.name, selected: f.name === rule.boot || null }, f.file)));
+    } catch { /* the list stays at "None"; saving keeps whatever was set */ }
+  })();
+  const opts = () => ({ fit: rule.fit || 'fit', speed: (rule.speed ?? 100) / 100 });
+  const preview = h('button', { type: 'button', class: 'btn small-btn' }, 'Preview');
+  preview.onclick = () => { if (rule.boot) openPreview(rule.boot, opts()); else toast('Pick a boot screen first'); };
+  return h('div', { class: 'stack-s' },
+    h('label', { class: 'field-col', for: sel.id }, 'Boot screen', h('div', { class: 'row gap-s' }, sel, preview)),
+    h('p', { class: 'muted tiny flush' }, 'Plays once when the Matrix starts, before the playlist. It can be any Splash file, ticked above or not.'));
 }
 
 function sleepCard() {
