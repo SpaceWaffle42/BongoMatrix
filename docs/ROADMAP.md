@@ -22,7 +22,7 @@ phone remote, pet screens, logs).
 - [x] **Hardware lock**: one process drives the panel; a second `run`/`calibrate` stops with a clear message.
 - [x] **Weather**: `overview`, `ticker`, `forecast` (Open-Meteo, keyless).
 - [x] **Text**: `static`, `scroll`.
-- [x] **Countdown**: `days`, `clock`, `flip`, `ring`, `tearoff`; holiday targets.
+- [x] **Countdown**: `days`, `clock`, `flip`, `ring`, `tearoff`; a list of events (the soonest unfinished one shows), holiday targets.
 - [x] **Media**: `fit`, `fill`, `pixel` for images, GIFs and video (ffmpeg).
 - [x] **Announcements**: `banner`, `card`, `flash`, scheduled by day and hour.
 - [x] **News (RSS)**: `ticker`, `headline`, `picture` (thumbnails).

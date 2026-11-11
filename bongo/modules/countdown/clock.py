@@ -1,7 +1,7 @@
 """Clock: a ticking DD:HH:MM:SS (HH:MM:SS under a day) with the label above."""
 from bongo.module import Style
 
-from .common import Base, remaining
+from .common import Base
 
 
 class Clock(Base, Style):
@@ -26,13 +26,16 @@ class Clock(Base, Style):
 
     def render(self, now):
         s = self.settings
-        left, progress, over = remaining(s, now)
+        picked = self.pick(now)
+        if picked is None:
+            return self.idle_frame(now)
+        left, progress, over = picked
         if over:
             return self.done_frame(now)
         d, r = divmod(left, 86400)
         parts = [r // 3600, r % 3600 // 60, r % 60]
         parts = [d] + parts if d else parts
         font = self.mid if d else self.big
-        items = self.line(self.small, s["label"].upper(), 8, self.accent, now)
+        items = self.line(self.small, self.title, 8, self.accent, now)
         items += self.groups(font, parts, self.ctx.height - 9, now)
         return self.paint(items, progress)

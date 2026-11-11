@@ -1,5 +1,5 @@
 """Days: a big day count with a small label; under a day it becomes HH:MM."""
-from .common import Base, remaining
+from .common import Base
 from bongo.module import Style
 
 
@@ -16,10 +16,13 @@ class Days(Base, Style):
 
     def render(self, now):
         s = self.settings
-        left, progress, over = remaining(s, now)
+        picked = self.pick(now)
+        if picked is None:
+            return self.idle_frame(now)
+        left, progress, over = picked
         if over:
             return self.done_frame(now)
-        label = s["label"].upper()
+        label = self.title
         if left >= 86400:
             n = left // 86400
             text, unit = str(n), "DAY" if n == 1 else "DAYS"

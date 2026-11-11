@@ -121,6 +121,8 @@ def tidy(config: dict, modules: dict[str, Module]) -> list[str]:
             known = {**module.defaults, **cls.defaults}
             choices = {**module.choices, **cls.choices}
             settings = entry["settings"]
+            if module.migrate:
+                notes += [f"{key}[{i}] {note}" for note in module.migrate(settings)]
             for name in list(settings):
                 value, offered = settings[name], choices.get(name)
                 if isinstance(offered, str):  # "media", "palettes": checked by their own rules
