@@ -27,7 +27,9 @@ class Classic(Style):
     basic = ("palettes",)
     defaults = dict(
         palettes="all",          # "all" or a list of names from palettes.CLASSIC; enabled custom ones join in
-        blob_count=4, blob_min_radius=5, blob_max_radius=10, blob_speed=0.25,
+        # drift: top speed of a blob, in pixels per second. v2 moved 0.25 px a frame at the ~10 fps a
+        # Pi managed with its pure-Python drawing, so 2.5 px/s keeps v2's pace at any frame rate.
+        blob_count=4, blob_min_radius=5, blob_max_radius=10, drift=2.5,
         threshold=1.0, edge_width=4, blur_radius=2,
         time_font="9x18B", date_font="clR6x12", time_y=None, date_y=None,  # None: fit the canvas
         text_colour="#ffffff", border_colour="#000000", date_format="%d %b",
@@ -40,19 +42,24 @@ class Classic(Style):
             (p["background"], p["wax"], p["highlight"]) for p in enabled_custom(s["custom_palettes"])]
         self.outside, self.inside, self.line = (rgb(c) for c in rng.choice(choices))
         self.blobs = [
-            [rng.uniform(0, w), rng.uniform(0, h), rng.uniform(-s["blob_speed"], s["blob_speed"]),
-             rng.uniform(-s["blob_speed"], s["blob_speed"]),
+            [rng.uniform(0, w), rng.uniform(0, h), rng.uniform(-s["drift"], s["drift"]),
+             rng.uniform(-s["drift"], s["drift"]),
              rng.uniform(s["blob_min_radius"], s["blob_max_radius"])]
             for _ in range(s["blob_count"])
         ]
         self.ys, self.xs = np.mgrid[0:h, 0:w].astype(float)
+        self.last = None  # time of the previous frame: blobs move by real time, not by frames
         self.time_font, self.date_font = self.ctx.fonts(s["time_font"]), self.ctx.fonts(s["date_font"])
 
-    def _step(self):
+    def _step(self, now):
         w, h = self.ctx.width, self.ctx.height
+        t = now.timestamp()
+        # seconds since the last frame (one frame's worth at first; a long gap doesn't jump)
+        step = 1 / self.fps if self.last is None else min(max(t - self.last, 0.0), 0.5)
+        self.last = t
         for b in self.blobs:
-            b[0] += b[2]
-            b[1] += b[3]
+            b[0] += b[2] * step
+            b[1] += b[3] * step
             if not 0 <= b[0] < w:
                 b[2], b[0] = -b[2], min(max(b[0], 0), w - 1)
             if not 0 <= b[1] < h:
@@ -60,7 +67,7 @@ class Classic(Style):
 
     def render(self, now):
         s = self.settings
-        self._step()
+        self._step(now)
         img = self.ctx.canvas(self.outside)
         draw = ImageDraw.Draw(img)
         inside = field(self.xs, self.ys, ((b[0], b[1], b[4]) for b in self.blobs)) > s["threshold"]
