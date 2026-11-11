@@ -5,6 +5,7 @@ JSON, and the cookie is SameSite=Strict, so other sites can't drive the panel.
 """
 from __future__ import annotations
 
+import base64
 import collections
 import datetime as dt
 import io
@@ -176,6 +177,23 @@ def create_app(*, modules, live, pairing, config_path, logs: LogBuffer | None = 
                        safe_area=dict(zip(("top", "right", "bottom", "left"), area.margins)),
                        uptime=round(time.time() - started), name=config.get("name", "Bongo Matrix"),
                        pet_kinds=pets.kinds())
+
+    @lru_cache(maxsize=128)
+    def face_uri(kind, coat):
+        from bongo.modules.pet.art import face  # the pet module's art, loaded only when asked for
+        img = face(kind, coat)
+        if img is None:
+            return None
+        out = io.BytesIO()
+        img.save(out, "PNG")
+        return "data:image/png;base64," + base64.b64encode(out.getvalue()).decode()
+
+    @app.get("/api/pets")
+    def pet_catalogue():
+        """The animals there's art for and their coats, each with a little face for the picker."""
+        return jsonify(kinds=[{"kind": k, "default": pets.default_coat(k),
+                               "coats": [{**c, "face": face_uri(k, c["id"])} for c in pets.coat_names(k)]}
+                              for k in pets.kinds()])
 
     @app.get("/api/frame.png")
     def frame():

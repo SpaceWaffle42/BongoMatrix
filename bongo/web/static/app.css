@@ -417,3 +417,10 @@ body.drag-active { user-select: none; -webkit-user-select: none; }
 .fade-mid { stroke: var(--line); stroke-dasharray: 3 3; vector-effect: non-scaling-stroke; }
 
 .animator-frame { width: 100%; height: 1000px; border: 1px solid var(--line); background: var(--page); display: block; }
+
+/* Settings > Pet: one button per coat, showing its face */
+.coat-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(44px, 1fr)); gap: 6px; max-height: 270px; overflow-y: auto; padding: 2px; }
+.coat { display: grid; place-items: center; aspect-ratio: 1; padding: 4px; border: 1px solid var(--line-2); background: var(--page); color: var(--text); cursor: pointer; }
+.coat img { width: 100%; image-rendering: pixelated; }
+.coat:hover { border-color: var(--muted); }
+.coat[aria-checked="true"] { border-color: var(--amber); box-shadow: inset 0 0 0 1px var(--amber); background: var(--amber-bg); }

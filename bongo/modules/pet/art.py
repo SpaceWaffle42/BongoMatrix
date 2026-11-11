@@ -1,4 +1,8 @@
-"""The Cat 10 art: the atlas built by tools/build_pet_atlas.py, unpacked once."""
+"""The pet art: the atlases built by tools/build_pet_atlas.py, unpacked once per coat.
+
+``<kind>.json`` holds one set of frame rectangles that fits every coat. Each coat names the
+drawing it uses (``<kind>.webp.b64`` for the default one, which also holds the room and the ball,
+or ``<kind>-<drawing>.webp.b64``) and, when it's a recolouring of that drawing, a colour swap."""
 from __future__ import annotations
 
 import base64
@@ -6,6 +10,8 @@ import io
 import json
 import math
 from dataclasses import dataclass
+
+import numpy as np
 from functools import lru_cache
 from pathlib import Path
 
@@ -33,16 +39,67 @@ class Art:
 
 
 @lru_cache(maxsize=4)
-def load(kind: str = "cat") -> Art:
-    """The art for one kind of pet (bongo/pets.py): ``<kind>.json`` and its atlas."""
-    index = json.loads((FOLDER / f"{kind}.json").read_text())
+def _index(kind: str) -> dict:
+    return json.loads((FOLDER / f"{kind}.json").read_text())
+
+
+@lru_cache(maxsize=8)
+def _atlas(name: str) -> Image.Image:
     # a lossless WebP kept as base64 text (see tools/build_pet_atlas.py)
-    atlas = Image.open(io.BytesIO(base64.b64decode((FOLDER / f"{kind}.webp.b64").read_text()))).convert("RGBA")
+    return Image.open(io.BytesIO(base64.b64decode((FOLDER / f"{name}.webp.b64").read_text()))).convert("RGBA")
+
+
+def _coat(kind: str, coat: str) -> dict:
+    index = _index(kind)
+    found = {c["id"]: c for c in index.get("coats", [])}
+    return found.get(coat) or found.get(index.get("default", ""), {})
+
+
+def recoloured(atlas: Image.Image, swap: dict) -> Image.Image:
+    """``atlas`` with every RGBA colour in ``swap`` (hex -> hex) replaced."""
+    if not swap:
+        return atlas
+    px = np.asarray(atlas).copy()
+    flat = px.reshape(-1, 4).view("u4").ravel()
+    for old, new in swap.items():
+        flat[flat == np.frombuffer(bytes.fromhex(old), "u4")[0]] = np.frombuffer(bytes.fromhex(new), "u4")[0]
+    return Image.fromarray(px, "RGBA")
+
+
+@lru_cache(maxsize=4)
+def sheet(kind: str = "cat", coat: str = "") -> Image.Image:
+    """The atlas for one coat (the kind's default for "" or an unknown coat)."""
+    index, found = _index(kind), _coat(kind, coat)
+    drawing = found.get("drawing", index.get("default"))
+    cats = recoloured(_atlas(kind if drawing in (None, index.get("default")) else f"{kind}-{drawing}"), found.get("swap", {}))
+    if drawing in (None, index.get("default")):
+        return cats
+    shared = _atlas(kind)  # the room and the ball live in the default atlas
+    for key in ("room", "ball"):
+        x, y, w, h = index[key]
+        cats.paste(shared.crop((x, y, x + w, y + h)), (x, y))
+    return cats
+
+
+@lru_cache(maxsize=4)
+def load(kind: str = "cat", coat: str = "") -> Art:
+    """The art for one pet (bongo/pets.py): ``<kind>.json`` and the coat's atlas."""
+    index, atlas = _index(kind), sheet(kind, coat)
     crop = lambda r: atlas.crop((r[0], r[1], r[0] + r[2], r[1] + r[3]))
     animations = {tag: [grounded(tag, i, Frame(crop(f), f[4], f[5], f[6])) for i, f in enumerate(frames)]
                   for tag, frames in index["animations"].items()}
     room = crop(index["room"]).convert("RGB")
     return Art(animations, room, empty_bowl(room), night(room), crop(index["ball"]))
+
+
+def face(kind: str = "cat", coat: str = "") -> Image.Image | None:
+    """A small picture of the coat's face for the dashboard's picker (None if the kind has none)."""
+    r = _index(kind).get("face")
+    if not r:
+        return None
+    img = sheet(kind, coat).crop((r[0], r[1], r[0] + r[2], r[1] + r[3]))
+    box = img.getchannel("A").getbbox()
+    return img.crop(box) if box else img
 
 
 # The source animations don't share a floor line: lying poses floated 1-2 px, the tall standing
