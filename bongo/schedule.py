@@ -2,14 +2,15 @@
 
     "splash": {"sources": ["built-in/splash_loading_squares.gif", "uploaded/logo.png"],
                "speed": 100, "fit": "fit"}
-    "sleep":  {"from": "23:00", "to": "07:00", "brightness": 15,
+    "sleep":  {"from": "23:00", "to": "07:00", "brightness": 15, "fade": 5, "curve": "smooth",
                "sources": ["built-in/sleep_default.gif"], "speed": 100, "fit": "fit"}
 
 Splash plays at start-up. Each time, the next file comes from a shuffled bag, so every
 source plays once before any repeats. A GIF plays exactly one pass at ``speed`` percent; a
 still holds for the average pass of the row's GIFs when that is 5-10 s, else 7 s (v2's rule).
 
-Between ``from`` and ``to`` (overnight ranges allowed) the panel dims to ``brightness`` and
+Between ``from`` and ``to`` (overnight ranges allowed) the panel dims to ``brightness`` (gliding
+over ``fade`` seconds along ``curve``, see bongo.fade; it brightens back the same way) and
 shows one Sleep source, chosen at random when the night starts and kept until wake. The
 dashboard's "Sleep now" uses the same screen. Either rule can be left out or switched off
 with ``"enabled": false``.
@@ -23,7 +24,7 @@ from fractions import Fraction
 
 from PIL import Image, ImageSequence
 
-from bongo import media
+from bongo import fade, media
 from bongo.player import Entry
 
 STILL_SECONDS = 7.0
@@ -67,7 +68,7 @@ def screen_problems(where: str, rule, *, sleep: bool = False) -> list[str]:
     """Readable problems with a splash or sleep rule (used by config.validate)."""
     if not isinstance(rule, dict):
         return [f"{where}: must be an object"]
-    allowed = {"sources", "speed", "fit", "enabled"} | ({"from", "to", "brightness"} if sleep else set())
+    allowed = {"sources", "speed", "fit", "enabled"} | ({"from", "to", "brightness", "fade", "curve"} if sleep else set())
     problems = [f"{where}: unknown keys {sorted(set(rule) - allowed)}"] if set(rule) - allowed else []
     sources = rule.get("sources")
     if not isinstance(sources, list) or not sources:
@@ -86,6 +87,11 @@ def screen_problems(where: str, rule, *, sleep: bool = False) -> list[str]:
         problems.append(f"{where}.fit: one of {', '.join(FITS)}")
     if not isinstance(rule.get("enabled", True), bool):
         problems.append(f"{where}.enabled: true or false")
+    seconds = rule.get("fade", fade.DEFAULT_SECONDS)
+    if isinstance(seconds, bool) or not isinstance(seconds, (int, float)) or not 0 <= seconds <= fade.MAX_SECONDS:
+        problems.append(f"{where}.fade: seconds from 0 to {fade.MAX_SECONDS}")
+    if rule.get("curve", fade.DEFAULT_CURVE) not in fade.CURVES:
+        problems.append(f"{where}.curve: one of {', '.join(fade.CURVES)}")
     return problems
 
 
@@ -106,10 +112,17 @@ class Schedule:
     sleep_speed: float = 100
     sleep_fit: str = "fit"
     day_brightness: int | None = None
+    fade_seconds: float = fade.DEFAULT_SECONDS
+    fade_curve: str = fade.DEFAULT_CURVE
     rng: random.Random = field(default_factory=random.Random)
 
     @classmethod
     def from_config(cls, config: dict) -> "Schedule":
+        def own(rule, screen):
+            # built-in files serve one screen each (splash_* / sleep_*); uploads serve either
+            return [s for s in (rule.get("sources") or [])
+                    if isinstance(s, str) and (not s.startswith("built-in/") or media.screen_of(s) == screen)]
+
         splash = config.get("splash") or {}
         sleep = config.get("sleep") or {}
         if splash.get("enabled") is False:
@@ -117,13 +130,15 @@ class Schedule:
         if sleep.get("enabled") is False:
             sleep = {}
         return cls(
-            splash_sources=list(splash.get("sources") or []),
+            splash_sources=own(splash, "splash"),
             splash_speed=splash.get("speed", 100), splash_fit=splash.get("fit", "fit"),
             sleep_from=sleep.get("from"), sleep_to=sleep.get("to"),
             sleep_brightness=sleep.get("brightness"),
-            sleep_sources=list(sleep.get("sources") or []),
+            sleep_sources=own(sleep, "sleep"),
             sleep_speed=sleep.get("speed", 100), sleep_fit=sleep.get("fit", "fit"),
             day_brightness=config.get("panel", {}).get("brightness"),
+            fade_seconds=sleep.get("fade", fade.DEFAULT_SECONDS),
+            fade_curve=sleep.get("curve", fade.DEFAULT_CURVE),
         )
 
     # -- splash --------------------------------------------------------------------------
