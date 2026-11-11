@@ -2,6 +2,7 @@
 import { get, del, uploadMedia } from './api.js';
 import { h, icon, toast, fail, clone, same, clamp, humanize, ago, toggle } from './ui.js';
 import { FrameLoop } from './led.js';
+import { mediaThumb, previewButton } from './mediaview.js';
 import { S, onLeave, go, saveConfig } from './app.js';
 
 export function render(view) {
@@ -98,14 +99,21 @@ function screenPicker(rule, idPrefix, screen) {
       // built-in files serve one screen each (splash_* or sleep_*); uploads can go on either
       const files = [...lib.folders.uploaded, ...lib.folders['built-in'].filter((f) => f.screen === screen)].filter((f) => SCREEN_TYPES.test(f.name));
       const known = new Set(files.map((f) => f.name));
+      // a built-in file meant for the other screen (or no screen) is dropped, never offered here
+      rule.sources = rule.sources.filter((n) => known.has(n) || !n.startsWith('built-in/'));
       const missing = rule.sources.filter((n) => !known.has(n)).map((n) => ({ name: n, file: `${n} (missing)` }));
       grid.replaceChildren(...[...missing, ...files].map((f, i) => {
         const box = h('input', { type: 'checkbox', id: `${idPrefix}-src-${i}`, checked: rule.sources.includes(f.name) });
         box.addEventListener('change', () => {
           rule.sources = box.checked ? [...new Set([...rule.sources, f.name])] : rule.sources.filter((n) => n !== f.name);
         });
-        return h('label', { class: 'screen-source', for: box.id }, box,
-          h('span', { class: 'mono small' }, f.file), h('span', { class: 'tag' }, f.name.startsWith('built-in/') ? 'built-in' : 'uploaded'));
+        const opts = () => ({ fit: rule.fit || 'fit', speed: (rule.speed ?? 100) / 100 });
+        const thumb = f.file.endsWith('(missing)') ? h('span', { class: 'media-thumb empty' }) : mediaThumb(f.name, opts())[0];
+        return h('div', { class: 'screen-source' },
+          h('label', { class: 'screen-pick', for: box.id }, box, thumb,
+            h('span', { class: 'stack-xs grow min0' }, h('span', { class: 'mono small name', title: f.file }, f.file),
+              h('span', { class: 'tag' }, f.name.startsWith('built-in/') ? 'built-in' : 'uploaded'))),
+          f.file.endsWith('(missing)') ? null : previewButton(f.name, opts));
       }));
       if (!files.length && !missing.length) grid.replaceChildren(h('p', { class: 'muted small flush' }, 'No GIFs or images yet. Upload some in the Media library.'));
     } catch (err) { grid.replaceChildren(h('p', { class: 'danger small' }, `Couldn't list media: ${err.message}`)); }
@@ -138,7 +146,8 @@ function splashCard() {
 function sleepCard() {
   const s = S.config.sleep;
   let on = !!s && s.enabled !== false;
-  const sleep = clone(s) || { from: '23:00', to: '07:00', brightness: 15, sources: ['built-in/sleep_default.gif'], speed: 100, fit: 'fit' };
+  const sleep = clone(s) || { from: '23:00', to: '07:00', brightness: 15, fade: 5, curve: 'smooth', sources: ['built-in/sleep_default.gif'], speed: 100, fit: 'fit' };
+  sleep.fade ??= 5; sleep.curve ??= 'smooth';
   delete sleep.playlist;
   const from = h('input', { class: 'input', type: 'time', id: 'sl-from', value: sleep.from });
   const to = h('input', { class: 'input', type: 'time', id: 'sl-to', value: sleep.to });
@@ -148,6 +157,7 @@ function sleepCard() {
       h('label', { class: 'field-col', for: 'sl-from' }, 'From', from),
       h('label', { class: 'field-col', for: 'sl-to' }, 'Until', to),
       h('label', { class: 'field-col', for: 'sl-b' }, 'Brightness %', bright)),
+    fadeEditor(sleep, () => S.config.panel?.brightness ?? 80, () => Number(bright.value) || 15, bright),
     screenPicker(sleep, 'sl', 'sleep'),
     h('p', { class: 'muted tiny flush' }, 'Each night one of the ticked files is picked at random and stays up until morning.'));
   body.hidden = !on;
@@ -161,6 +171,52 @@ function sleepCard() {
     h('div', { class: 'row between wrap' }, h('div', null, h('h2', { class: 'h2' }, 'Sleep'), h('p', { class: 'muted small flush' }, 'Dims the panel overnight and shows a calm screen.')),
       toggle(on, 'Sleep schedule', (v) => { on = v; body.hidden = !v; })),
     body, h('div', { class: 'row end' }, save));
+}
+
+// Day <-> night brightness glide: how long, and the shape, with a graph of night falling and
+// morning coming back. Mirrors bongo/fade.py.
+const CURVES = {
+  smooth: ['Smooth', 'gentle at both ends', (t) => t * t * (3 - 2 * t)],
+  linear: ['Linear', 'constant speed', (t) => t],
+  ease_in: ['Ease in', 'slow start, quick finish', (t) => t * t],
+  ease_out: ['Ease out', 'quick start, slow finish', (t) => 1 - (1 - t) * (1 - t)],
+  perceptual: ['Even to the eye', 'steps look the same size to you', null],
+};
+function levelAt(a, b, t, curve) {
+  if (curve === 'perceptual') { const la = Math.log(Math.max(a, 1)), lb = Math.log(Math.max(b, 1)); return Math.exp(la + (lb - la) * t); }
+  return a + (b - a) * (CURVES[curve] || CURVES.smooth)[2](t);
+}
+function fadeEditor(rule, dayLevel, nightLevel, nightInput) {
+  const NS = 'http://www.w3.org/2000/svg';
+  const svg = document.createElementNS(NS, 'svg');
+  svg.setAttribute('viewBox', '0 0 200 64'); svg.setAttribute('preserveAspectRatio', 'none'); svg.setAttribute('class', 'fade-graph'); svg.setAttribute('role', 'img');
+  const secs = h('input', { class: 'input num', type: 'number', id: 'sl-fade', min: 0, max: 600, step: 0.5, value: rule.fade });
+  const pick = h('select', { class: 'input', id: 'sl-curve' },
+    ...Object.entries(CURVES).map(([k, [label]]) => h('option', { value: k, selected: k === rule.curve }, label)));
+  const hint = h('p', { class: 'muted tiny flush' });
+  const draw = () => {
+    const a = dayLevel(), b = nightLevel(), y = (v) => 60 - (v / 100) * 56, pts = [];
+    for (let i = 0; i <= 40; i++) pts.push(`${(i / 40) * 96 + 2},${y(levelAt(a, b, i / 40, rule.curve)).toFixed(1)}`);
+    for (let i = 0; i <= 40; i++) pts.push(`${(i / 40) * 96 + 102},${y(levelAt(b, a, i / 40, rule.curve)).toFixed(1)}`);
+    svg.replaceChildren();
+    const line = (x1, y1, x2, y2, cls) => { const l = document.createElementNS(NS, 'line'); Object.entries({ x1, y1, x2, y2, class: cls }).forEach(([k, v]) => l.setAttribute(k, v)); svg.append(l); };
+    line(100, 2, 100, 62, 'fade-mid');
+    const p = document.createElementNS(NS, 'polyline'); p.setAttribute('points', pts.join(' ')); p.setAttribute('class', 'fade-line'); svg.append(p);
+    svg.setAttribute('aria-label', `Brightness ${a}% to ${b}% at night and back in the morning, over ${rule.fade} seconds, ${CURVES[rule.curve][0]}`);
+    hint.textContent = Number(rule.fade) > 0
+      ? `Going to sleep: ${a}% → ${b}% over ${rule.fade} s, ${CURVES[rule.curve][1]}. Waking up glides back the same way.`
+      : 'No fade: the brightness changes straight away.';
+  };
+  secs.oninput = () => { rule.fade = clamp(Number(secs.value) || 0, 0, 600); draw(); };
+  pick.onchange = () => { rule.curve = pick.value; draw(); };
+  nightInput.addEventListener('input', draw);
+  draw();
+  return h('div', { class: 'stack-s' },
+    h('div', { class: 'grid-2' },
+      h('label', { class: 'field-col', for: 'sl-fade' }, 'Fade (seconds)', secs),
+      h('label', { class: 'field-col', for: 'sl-curve' }, 'Fade curve', pick)),
+    h('div', { class: 'fade-box' }, svg, h('div', { class: 'row between tiny muted' }, h('span', null, 'Night falls'), h('span', null, 'Morning'))),
+    hint);
 }
 
 function devicesCard() {
@@ -201,7 +257,9 @@ function mediaCard() {
       const lib = await get('/api/media');
       usage.textContent = `${mb(lib.used)} of ${mb(lib.limits.library)} used · up to ${mb(lib.limits.file)} per file · ${lib.folders['built-in'].length} built-in files`;
       list.replaceChildren(...lib.folders.uploaded.map((f) => h('li', { class: 'device' },
-        h('div', { class: 'grow' }, h('div', { class: 'strong mono small' }, f.file), h('div', { class: 'tiny muted' }, `${f.kind} · ${mb(f.bytes)}`)),
+        mediaThumb(f.name)[0],
+        h('div', { class: 'grow min0' }, h('div', { class: 'strong mono small name', title: f.file }, f.file), h('div', { class: 'tiny muted' }, `${f.kind} · ${mb(f.bytes)}`)),
+        previewButton(f.name),
         h('button', { type: 'button', class: 'btn ghost danger-btn', 'aria-label': `Delete ${f.file}`, onclick: () => remove(f) }, 'Delete'))));
       if (!lib.folders.uploaded.length) list.replaceChildren(h('li', { class: 'muted' }, 'Nothing uploaded yet. Images, GIFs and short videos work.'));
     } catch (err) { list.replaceChildren(h('li', { class: 'danger' }, `Couldn't load media: ${err.message}`)); }
@@ -223,7 +281,7 @@ function mediaCard() {
   load();
   return h('section', { class: 'card stack', 'aria-label': 'Media library' },
     h('div', { class: 'row between wrap' },
-      h('div', null, h('h2', { class: 'h2' }, 'Media library'), h('p', { class: 'muted small flush' }, 'Your uploaded images and videos. Pick them in any Media module.')),
+      h('div', null, h('h2', { class: 'h2' }, 'Media library'), h('p', { class: 'muted small flush' }, 'Your uploaded images and videos. Preview one to see it as the panel draws it, or show it on the Matrix.')),
       h('div', null, add, file)),
     list, usage);
 }
