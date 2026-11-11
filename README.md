@@ -73,6 +73,34 @@ Previews are LED-look GIFs rendered by exactly the code that drives the panel.
    An empty playlist plays every module in its default style.
 4. `sudo ./venv/bin/python -m bongo run`, or install `deploy/bongo-matrix.service`.
 
+A display only needs the `prod_device` branch: the same code without tests, tools, docs or the
+dashboard demo (`tools/prod_tree.py` decides what goes in). Install it as a git checkout:
+
+```bash
+git clone -b prod_device http://gitlab.home.lan/matrix_display/bongo_matrix.git /home/admin/matrix
+```
+
+### Updates
+
+Settings → Software shows the running version, checks for a new one and pulls it. The
+display service can only write to `data/`, so it never replaces its own code: it leaves a
+request in `data/update-request.json`, and the updater (`deploy/bongo-update.path` +
+`deploy/bongo-update.service`) fetches the branch, installs it, reinstalls packages if
+`requirements.txt` changed, restarts the display and waits for the dashboard to answer. If the
+new version doesn't start, it puts the old one back. Install the updater once:
+
+```bash
+sudo cp deploy/bongo-update.path deploy/bongo-update.service /etc/systemd/system/
+sudo systemctl daemon-reload && sudo systemctl enable --now bongo-update.path
+```
+
+Updates come from `prod_device` on the GitLab above. Settings → Software → Advanced can point a
+display somewhere else (for example the public GitHub copy); it warns first, because whatever
+is at that address runs on the display. `python -m bongo update` checks from the command line.
+
+`prod_device` is rebuilt by CI after every green `main` (`tools/publish_prod.sh`), once a project
+access token with `write_repository` is saved as the masked CI/CD variable `PROD_PUSH_TOKEN`.
+
 Media comes from two folders: `built-in/` (`resources/media/built-in`, shipped
 with the project, holding only screens: `splash_*` files are built-in Splash screens and
 `sleep_*` files are built-in Sleep screens) and `uploaded/` (`data/uploads`, git-ignored, added from the dashboard under
@@ -80,10 +108,11 @@ Settings → Media library, up to 50 MB a file and 1 GB in all). Settings name f
 as `built-in/sleep_default.gif` or `uploaded/holiday.mp4`; nothing outside those folders
 can be shown.
 
-**Splash and Sleep** work as in v2. Splash plays at start-up: tick any GIFs or images
-(Settings → Splash) and each start-up shows the next one from a shuffled list, a GIF for
-exactly one pass. Sleep dims the panel between two times and shows one of its ticked files,
-picked at random each night and kept until morning.
+**Splash and Sleep** work as in v2. Put a Splash item anywhere in the playlist: each time it
+comes round it shows the next file from the ones ticked in Settings → Splash (a shuffled list),
+a GIF for exactly one pass. A **boot screen** can also be picked to play once at start-up.
+Sleep dims the panel between two times and shows one of its ticked files, picked at random
+each night and kept until morning; whatever is playing stops when sleep starts.
 
 **Custom Lava Lamp palettes** are a name and three colours (background, wax, highlight),
 added in the module editor. Both styles use them: Classic directly, Metro works out its

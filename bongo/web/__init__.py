@@ -19,7 +19,7 @@ from pathlib import Path
 from flask import Flask, abort, jsonify, request, send_file, send_from_directory
 from werkzeug.exceptions import HTTPException
 
-from bongo import config as cfg
+from bongo import config as cfg, update
 from bongo import media, places
 from bongo.module import Context
 from bongo.player import Entry
@@ -355,6 +355,34 @@ def create_app(*, modules, live, pairing, config_path, logs: LogBuffer | None = 
     def get_logs():
         since = number(request.args.get("since", 0), 0, 1e12, "since")
         return jsonify([r for r in logs.records if r["t"] > since])
+
+    # -- software updates (bongo/update.py): the dashboard only asks; a separate service installs --
+    data_dir = Path(config_path).parent
+
+    @app.get("/api/update")
+    def update_info():
+        url, branch = update.source(load())
+        return jsonify(version=update.version(), url=url, branch=branch, status=update.status(data_dir),
+                       default_url=update.DEFAULT_URL, default_branch=update.DEFAULT_BRANCH)
+
+    @app.post("/api/update/check")
+    def update_check():
+        url, branch = update.source(load())
+        here = update.version()
+        try:
+            newest = update.latest(url, branch)
+        except Exception as error:  # offline, wrong address, no such branch...
+            return jsonify(error=f"Couldn't reach the update source: {error}"), 502
+        return jsonify(latest=newest, current=here and here["commit"], available=not here or newest != here["commit"])
+
+    @app.post("/api/update")
+    def update_now():
+        if update.busy(data_dir):
+            return jsonify(error="An update is already under way"), 409
+        who = (pairing.check(request.cookies.get(COOKIE)) or {}).get("name")
+        update.ask(who, data_dir)
+        logging.getLogger("bongo.update").info("update requested by %s", who)
+        return jsonify(ok=True), 202
 
     # -- the page -----------------------------------------------------------------------------
     @app.get("/")

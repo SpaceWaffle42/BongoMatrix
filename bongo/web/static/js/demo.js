@@ -59,6 +59,7 @@ export async function start() {
     { id: 'f00dcafe', name: "Billy's phone", paired: iso(86400 * 37), seen: iso(3600 * 2) },
     { id: 'beadfeed', name: 'Kitchen tablet', paired: iso(86400 * 99), seen: iso(86400 * 1.2) },
   ];
+  let updateStatus = null;
   let paired = new URLSearchParams(location.search).get('demo') !== 'pair';
   let tries = 5;
   const started = now() - 3600 * 26.4;
@@ -191,7 +192,7 @@ export async function start() {
       if (problems.length) return json({ problems }, 422);
       Object.keys(config).forEach((k) => { if (!(k in merged)) delete config[k]; });
       Object.assign(config, merged);
-      for (const k of ['splash', 'sleep']) if (config[k] == null) delete config[k];
+      for (const k of ['splash', 'sleep', 'update']) if (config[k] == null) delete config[k];
       log('INFO', 'config', `config saved by ${devices[0].name}`);
       return json({ ok: true, restart_needed: false });
     }
@@ -222,6 +223,17 @@ export async function start() {
         ['Paris', 'Île-de-France', 'France', 'FR', 48.8534, 2.3488], ['Paris', 'Texas', 'United States', 'US', 33.6609, -95.5555]];
       return json({ places: all.filter(([n]) => n.toLowerCase().startsWith(q)).map(([name, region, country, cc, latitude, longitude]) =>
         ({ label: `${name}, ${region}, ${cc}`, name, region, country, latitude, longitude })) });
+    }
+    if (p === '/api/update' && method === 'GET') {  // software updates: pretend, nothing is installed
+      const DEF = ['http://gitlab.home.lan/matrix_display/bongo_matrix.git', 'prod_device'];
+      return json({ version: { commit: 'd3m0c0ffee', short: 'd3m0c0ff', date: new Date(started * 1000).toISOString(), subject: 'Demo build' },
+        url: config.update?.url || DEF[0], branch: config.update?.branch || DEF[1], status: updateStatus,
+        default_url: DEF[0], default_branch: DEF[1] });
+    }
+    if (p === '/api/update/check') return json({ latest: 'd3m0c0ffee', current: 'd3m0c0ffee', available: false });
+    if (p === '/api/update' && method === 'POST') {
+      updateStatus = { state: 'up_to_date', message: 'Already up to date (demo)', at: new Date().toISOString() };
+      return json({ ok: true }, 202);
     }
     if (p === '/api/devices') return json(devices);
     if (p.startsWith('/api/devices/') && method === 'DELETE') {

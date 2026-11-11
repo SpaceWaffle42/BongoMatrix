@@ -86,6 +86,9 @@ def main(argv=None) -> int:
     calibrate.add_argument("--save", action="store_true", help="write --margins into the config")
     calibrate.add_argument("--out", help="save the test card as an image instead of showing it")
     calibrate.add_argument("--config", default=str(cfg.DEFAULT_PATH))
+    update = sub.add_parser("update", help="check for, or install, a new version (see bongo/update.py)")
+    update.add_argument("--apply", action="store_true", help="install it (the updater service runs this)")
+    update.add_argument("--config", default=str(cfg.DEFAULT_PATH))
     run = sub.add_parser("run")
     run.add_argument("--config", default=str(cfg.DEFAULT_PATH))
     args = parser.parse_args(argv)
@@ -95,6 +98,19 @@ def main(argv=None) -> int:
     if args.command == "list":
         for module in modules.values():
             print(f"{module.id:<16} {module.name:<20} styles: {', '.join(module.styles)}")
+        return 0
+
+    if args.command == "update":
+        from bongo import update
+
+        config = cfg.load(args.config)
+        if args.apply:
+            result = update.apply(config)
+            print(result["message"])
+            return 0 if result["state"] in ("updated", "up_to_date") else 1
+        url, branch = update.source(config)
+        here, there = update.version(), update.latest(url, branch)
+        print(f"running {here['short'] if here else 'unknown'}; {branch} at {url} is {there[:8]}")
         return 0
 
     if args.command == "preview":

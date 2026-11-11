@@ -1,5 +1,5 @@
 // Settings: safe area (with a big LED preview), device, splash, sleep, paired devices.
-import { get, del, uploadMedia } from './api.js';
+import { get, del, post, uploadMedia } from './api.js';
 import { h, icon, toast, fail, clone, same, clamp, humanize, ago, toggle } from './ui.js';
 import { FrameLoop } from './led.js';
 import { mediaThumb, previewButton, openPreview } from './mediaview.js';
@@ -8,7 +8,7 @@ import { S, onLeave, go, saveConfig } from './app.js';
 export function render(view) {
   view.append(h('div', { class: 'page-head' }, h('h1', { class: 'h1' }, 'Settings'),
     h('p', { class: 'muted flush' }, 'Each card saves on its own.')),
-  h('div', { class: 'settings-grid' }, safeAreaCard(), h('div', { class: 'stack gap-20' }, deviceCard(), devicesCard()), h('div', { class: 'stack gap-20' }, sleepCard(), splashCard(), mediaCard())));
+  h('div', { class: 'settings-grid' }, safeAreaCard(), h('div', { class: 'stack gap-20' }, deviceCard(), updateCard(), devicesCard()), h('div', { class: 'stack gap-20' }, sleepCard(), splashCard(), mediaCard())));
 }
 
 function safeAreaCard() {
@@ -84,6 +84,91 @@ function deviceCard() {
 }
 
 const SCREEN_TYPES = /\.(gif|png|jpe?g|webp)$/i;
+
+/** Software updates: what's running, check and pull the latest, and (advanced) where updates come from. */
+const UPDATE_WORDS = {
+  requested: 'Update requested…', fetching: 'Downloading…', installing: 'Installing…', restarting: 'Restarting…',
+  updated: 'Updated', up_to_date: 'Already up to date', rolled_back: 'Rolled back', failed: 'Update failed', busy: 'Busy',
+};
+const UPDATE_RUNNING = new Set(['requested', 'fetching', 'installing', 'restarting']);
+
+function updateCard() {
+  const card = h('section', { class: 'card stack', 'aria-label': 'Software' }, h('h2', { class: 'h2' }, 'Software'),
+    h('p', { class: 'muted small flush' }, 'Loading…'));
+  let info = null, poll = null;
+  const stopPoll = () => { clearTimeout(poll); poll = null; };
+  onLeave(stopPoll);
+
+  const when = (iso) => { try { return new Date(iso).toLocaleString([], { dateStyle: 'medium', timeStyle: 'short' }); } catch { return iso; } };
+  async function refresh(quiet) {
+    try { info = await get('/api/update'); }
+    catch (err) { if (!quiet) card.replaceChildren(card.firstChild, h('p', { class: 'danger small' }, `Couldn't read the version: ${err.message}`)); return; }
+    paint();
+    const st = info.status?.state;
+    stopPoll();
+    if (UPDATE_RUNNING.has(st)) poll = setTimeout(() => refresh(true), 3000);  // the Matrix restarts mid-update: keep asking
+  }
+
+  function paint() {
+    const v = info.version, st = info.status;
+    const running = st && UPDATE_RUNNING.has(st.state);
+    const result = h('p', { class: 'small flush', 'aria-live': 'polite' });
+    const check = h('button', { type: 'button', class: 'btn' }, 'Check for updates');
+    const pull = h('button', { type: 'button', class: 'btn primary', disabled: running || null }, running ? 'Updating…' : 'Pull update');
+    check.onclick = async () => {
+      check.disabled = true; result.className = 'small flush muted'; result.textContent = 'Checking…';
+      try {
+        const r = await post('/api/update/check');
+        result.className = 'small flush' + (r.available ? ' warn' : ' muted');
+        result.textContent = r.available ? `A new version is ready (${r.latest.slice(0, 8)}).` : 'You have the latest version.';
+      } catch (err) { result.className = 'small flush danger'; result.textContent = err.message; }
+      check.disabled = false;
+    };
+    pull.onclick = async () => {
+      if (!confirm('Pull the latest version and restart the Matrix? The panel and this page go quiet for about a minute. If the new version won\'t start, the old one comes back by itself.')) return;
+      try { await post('/api/update'); toast('Update started', 'success'); refresh(); }
+      catch (err) { toast(err.message, 'error'); }
+    };
+    const stLine = st ? h('p', { class: 'small flush ' + (st.state === 'rolled_back' || st.state === 'failed' ? 'danger' : running ? 'warn' : 'muted') },
+      `${UPDATE_WORDS[st.state] || st.state}: ${st.message} · ${when(st.at)}`) : null;
+    card.replaceChildren(...[
+      h('h2', { class: 'h2' }, 'Software'),
+      h('div', { class: 'stack-xs' },
+        h('span', { class: 'field-label' }, 'Running'),
+        v ? h('span', { class: 'mono small' }, `${v.short} · ${when(v.date)}`) : h('span', { class: 'muted small' }, 'Unknown (not a git checkout)'),
+        v ? h('span', { class: 'muted tiny' }, v.subject) : null),
+      stLine,
+      h('div', { class: 'row gap-s wrap' }, check, pull), result,
+      sourceBox()].filter(Boolean));  // no status line until the first update
+  }
+
+  function sourceBox() {
+    const url = h('input', { class: 'input mono', id: 'upd-url', value: info.url, spellcheck: 'false', autocomplete: 'off' });
+    const branch = h('input', { class: 'input mono', id: 'upd-branch', value: info.branch, spellcheck: 'false', autocomplete: 'off' });
+    const save = h('button', { type: 'button', class: 'btn' }, 'Save source');
+    const reset = h('button', { type: 'button', class: 'link small' }, 'Use the default');
+    reset.onclick = () => { url.value = info.default_url; branch.value = info.default_branch; };
+    save.onclick = async () => {
+      const u = url.value.trim(), b = branch.value.trim() || info.default_branch;
+      const isDefault = u === info.default_url && b === info.default_branch;
+      if (u !== info.url && !isDefault && !confirm(
+        'Change where updates come from?\n\nWhatever is at this address will be installed and run on this Matrix with full access to it. ' +
+        'Only use a repository you control or completely trust. A wrong address can stop updates working, or worse.')) return;
+      const ok = await saveConfig({ update: isDefault ? null : { url: u, branch: b } }, 'Update source');
+      if (ok) refresh(true);
+    };
+    return h('details', { class: 'item-more' },
+      h('summary', null, 'Advanced: update source'),
+      h('div', { class: 'stack-s' },
+        h('p', { class: 'small flush warn' }, 'Only change this if you know why. Updates from this address run on the Matrix with full access.'),
+        h('label', { class: 'field-col', for: url.id }, 'Repository address', url),
+        h('label', { class: 'field-col', for: branch.id }, 'Branch', branch),
+        h('div', { class: 'row between' }, reset, save)));
+  }
+
+  refresh();
+  return card;
+}
 
 /** Pick the files a Splash or Sleep screen draws from (GIFs and stills, like v2), plus speed and fit. */
 function screenPicker(rule, idPrefix, screen) {

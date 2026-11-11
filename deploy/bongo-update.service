@@ -1,0 +1,14 @@
+[Unit]
+Description=Bongo Matrix updater (fetch, install, restart, roll back if it won't start)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+# Not sandboxed like bongo-matrix.service: it replaces the code and restarts that service.
+# It only runs when the dashboard asks (bongo-update.path), and only fetches the configured
+# update source, so change that address only to a repository you trust.
+Type=oneshot
+User=root
+WorkingDirectory=/home/admin/matrix
+ExecStart=/home/admin/matrix/venv/bin/python -m bongo update --apply
+TimeoutStartSec=20min
