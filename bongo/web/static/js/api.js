@@ -1,6 +1,7 @@
 // Talks to the Flask API, or to the in-browser fake when the page URL has ?demo.
 
-export const DEMO = new URLSearchParams(location.search).has('demo');
+// ?demo, or a published copy of the demo that sets window.BONGO_DEMO before loading
+export const DEMO = window.BONGO_DEMO === true || new URLSearchParams(location.search).has('demo');
 let demoBackend;
 const demo = () => (demoBackend ||= import('./demo.js').then((m) => m.start()));
 

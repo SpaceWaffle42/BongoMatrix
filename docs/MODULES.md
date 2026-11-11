@@ -84,8 +84,8 @@ The dashboard builds each module's editor from its settings. Two hints keep it f
 
 ## Overlays
 
-An overlay is drawn *over* whatever module is playing: a notice ribbon now, the pet
-walking across later. It is a `Style` listed in the module's `overlays={...}` (not in
+An overlay is drawn *over* whatever module is playing: a notice ribbon, or the pet
+walking across. It is a `Style` listed in the module's `overlays={...}` (not in
 `styles`), and its `render` returns an **RGBA** frame the size of the canvas, transparent
 wherever the module underneath should show. Return a fully transparent frame when there
 is nothing to draw. Announcements' `ribbon` is the example.

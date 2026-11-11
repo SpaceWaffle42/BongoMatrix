@@ -42,7 +42,7 @@ See [docs/MODULES.md](docs/MODULES.md) to write a module and
 
 | Module | Styles | What it shows |
 | --- | --- | --- |
-| Lava Lamp | classic, metro | Time and date over moving wax. Classic is the v2 look (outlined, blurred blobs, 37 palettes). Metro is the refresh: wax that rises and sinks with a soft glow and hot core, clean type, 5 gradient palettes (magma, ocean, aurora, synthwave, mono). |
+| Lava Lamp | classic, metro | Time and date over moving wax. Classic is the v2 look (outlined, blurred blobs, 27 palettes). Metro is the refresh: wax that rises and sinks with a soft glow and hot core, clean type, 5 gradient palettes (magma, ocean, aurora, synthwave, mono). |
 | Weather | overview, ticker, forecast | Current conditions, high/low and a 4-day forecast from Open-Meteo (no key). |
 | Countdown | days, clock, flip, ring, tearoff | Time left to a date or a holiday (`next:christmas`), with a progress bar. |
 | Text | static, scroll | Your own message, centred or scrolling. |
@@ -50,6 +50,7 @@ See [docs/MODULES.md](docs/MODULES.md) to write a module and
 | Announcements | banner, card, flash | Notices scheduled by date, weekday and hour; several rotate. |
 | News | ticker, headline, picture | Headlines from RSS/Atom feeds, newest first; `picture` shows the story's thumbnail beside it. A feed must be an http(s) address that really serves RSS or Atom; the dashboard checks new feeds when you save. |
 | Calendar | page, month, progress | Today's date with the next holidays and your own dates; the month as a grid; year/month/week/day progress bars. |
+| Pet | life, idle, eating, napping, playing, zoomies, … | Mochi the cat (your Cat 10 art) in her room. Life plays the ticked modes through the day; the `wander` overlay walks her across other screens. Name her in Settings. |
 | Sky | moon, sun | Moon phase and next full/new moon; today's sun arc with sunrise and sunset. |
 
 ## Try it without a panel

@@ -89,6 +89,7 @@ def describe(module) -> dict:
         "id": module.id, "name": module.name, "description": module.description,
         "default_style": module.default_style,
         "settings": fields(module.defaults, shared_choices, basic=module.basic),
-        "styles": {name: {"settings": fields(cls.defaults, {**shared_choices, **cls.choices}, cls.swatches, cls.basic)}
+        "styles": {name: {"settings": fields(cls.defaults, {**shared_choices, **cls.choices}, cls.swatches, cls.basic),
+                          **({"group": cls.group} if cls.group else {})}
                    for name, cls in module.styles.items()},
     }
