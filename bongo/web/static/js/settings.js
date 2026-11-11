@@ -176,10 +176,9 @@ function updateCard() {
 function screenFiles(lib, screen) {
   const builtIn = lib.folders['built-in'].filter((f) => f.screen === screen);
   const twins = new Set(builtIn.map((f) => f.file));
-  const files = [...builtIn, ...lib.folders.uploaded.filter((f) => f.screen === screen && !twins.has(f.file))]
-    .filter((f) => SCREEN_TYPES.test(f.name));
+  const uploaded = lib.folders.uploaded.filter((f) => f.screen === screen && !twins.has(f.file) && SCREEN_TYPES.test(f.name));
   const shipped = (n) => (n && n.startsWith('uploaded/') && twins.has(n.slice(9)) ? `built-in/${n.slice(9)}` : n);
-  return { files, shipped };
+  return { builtIn: builtIn.filter((f) => SCREEN_TYPES.test(f.name)), uploaded, shipped };
 }
 
 /** Pick the files a Splash or Sleep screen draws from (GIFs and stills, like v2), plus speed and fit. */
@@ -193,23 +192,28 @@ function screenPicker(rule, idPrefix, screen) {
   (async () => {
     try {
       const lib = await get('/api/media');
-      const { files, shipped } = screenFiles(lib, screen);
+      const { builtIn, uploaded, shipped } = screenFiles(lib, screen);
+      const files = [...builtIn, ...uploaded];
       const known = new Set(files.map((f) => f.name));
       rule.sources = [...new Set(rule.sources.map((n) => shipped(n)).filter((n) => n.split('/').pop().startsWith(`${screen}_`)))];
       const missing = rule.sources.filter((n) => !known.has(n)).map((n) => ({ name: n, file: `${n} (missing)` }));
-      grid.replaceChildren(...[...missing, ...files].map((f, i) => {
-        const box = h('input', { type: 'checkbox', id: `${idPrefix}-src-${i}`, checked: rule.sources.includes(f.name) });
+      const opts = () => ({ fit: rule.fit || 'fit', speed: (rule.speed ?? 100) / 100 });
+      let i = 0;
+      const card = (f) => {
+        const box = h('input', { type: 'checkbox', id: `${idPrefix}-src-${i++}`, checked: rule.sources.includes(f.name) });
         box.addEventListener('change', () => {
           rule.sources = box.checked ? [...new Set([...rule.sources, f.name])] : rule.sources.filter((n) => n !== f.name);
         });
-        const opts = () => ({ fit: rule.fit || 'fit', speed: (rule.speed ?? 100) / 100 });
-        const thumb = f.file.endsWith('(missing)') ? h('span', { class: 'media-thumb empty' }) : mediaThumb(f.name, opts())[0];
+        const gone = f.file.endsWith('(missing)');
+        const thumb = gone ? h('span', { class: 'media-thumb empty' }) : mediaThumb(f.name, opts())[0];
         return h('div', { class: 'screen-source' },
           h('label', { class: 'screen-pick', for: box.id }, box, thumb,
-            h('span', { class: 'stack-xs grow min0' }, h('span', { class: 'mono small name', title: f.file }, f.file),
-              h('span', { class: 'tag' }, f.name.startsWith('built-in/') ? 'built-in' : 'uploaded'))),
-          f.file.endsWith('(missing)') ? null : previewButton(f.name, opts));
-      }));
+            h('span', { class: 'mono small name grow min0', title: f.file }, f.file)),
+          gone ? null : previewButton(f.name, opts));
+      };
+      // built-in and uploaded files under their own headings, so it's clear which is which
+      const section = (title, list) => (list.length ? [h('div', { class: 'screen-divider', role: 'presentation' }, `${title} · ${list.length}`), ...list.map(card)] : []);
+      grid.replaceChildren(...section('Missing', missing), ...section('Built in', builtIn), ...section('Uploaded', uploaded));
       if (!files.length && !missing.length) grid.replaceChildren(h('p', { class: 'muted small flush' }, `No ${screen} screens yet. Upload a GIF or image named ${screen}_something in the Media library.`));
     } catch (err) { grid.replaceChildren(h('p', { class: 'danger small' }, `Couldn't list media: ${err.message}`)); }
   })();
@@ -251,10 +255,12 @@ function bootPicker(rule) {
   (async () => {
     try {
       const lib = await get('/api/media');
-      const { files, shipped } = screenFiles(lib, 'splash');
+      const { builtIn, uploaded, shipped } = screenFiles(lib, 'splash');
       rule.boot = shipped(rule.boot);
-      if (rule.boot && !files.some((f) => f.name === rule.boot)) files.unshift({ name: rule.boot, file: `${rule.boot} (missing)` });
-      sel.append(...files.map((f) => h('option', { value: f.name, selected: f.name === rule.boot || null }, f.file)));
+      const option = (f) => h('option', { value: f.name, selected: f.name === rule.boot || null }, f.file);
+      const group = (label, list) => (list.length ? h('optgroup', { label }, list.map(option)) : null);
+      const missing = rule.boot && ![...builtIn, ...uploaded].some((f) => f.name === rule.boot) ? [{ name: rule.boot, file: `${rule.boot} (missing)` }] : [];
+      sel.append(...[group('Missing', missing), group('Built in', builtIn), group('Uploaded', uploaded)].filter(Boolean));
     } catch { /* the list stays at "None"; saving keeps whatever was set */ }
   })();
   const opts = () => ({ fit: rule.fit || 'fit', speed: (rule.speed ?? 100) / 100 });
