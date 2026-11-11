@@ -137,3 +137,24 @@ def test_classic_palettes_are_clearly_different_from_each_other():
         return sum(w * math.dist(_lab(hex_of(x)), _lab(hex_of(y))) for w, x, y in zip(weights, a, b))
     closest = min(itertools.combinations(CLASSIC, 2), key=lambda p: apart(CLASSIC[p[0]], CLASSIC[p[1]]))
     assert apart(CLASSIC[closest[0]], CLASSIC[closest[1]]) >= 28, closest
+
+
+def test_classic_drifts_at_v2s_pace_whatever_the_frame_rate():
+    import datetime as dt
+    def travel(fps, seconds=4):
+        style = LAVA.create("classic", {"palettes": ["fire_burst"]}, ctx())
+        start = [list(b) for b in style.blobs]
+        t0 = dt.datetime(2026, 11, 11, 12)
+        for k in range(int(fps * seconds)):
+            style._step(t0 + dt.timedelta(seconds=k / fps))
+        return [abs(b[0] - a[0]) for a, b in zip(start, style.blobs)]
+    slow, fast = travel(10), travel(33)
+    assert all(abs(a - b) < 0.3 for a, b in zip(slow, fast))       # same distance at 10 or 33 fps
+    assert max(slow) <= 2.5 * 4 + 0.01                              # never faster than 2.5 px/s
+
+
+def test_old_per_frame_blob_speed_becomes_drift_per_second():
+    from bongo.modules.lava_lamp import migrate
+    settings = {"blob_speed": 0.25, "palettes": "all"}
+    assert migrate(settings) and settings == {"drift": 2.5, "palettes": "all"}
+    assert migrate(settings) == []

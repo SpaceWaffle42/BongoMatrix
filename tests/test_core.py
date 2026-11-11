@@ -96,7 +96,7 @@ def test_setting_types_and_choices_are_checked():
         LAVA.settings_for("metro", {"time_align": "middle"})
     with pytest.raises(ValueError, match="not in"):
         LAVA.settings_for("classic", {"palettes": ["fire_burst", "nope"]})
-    assert LAVA.settings_for("classic", {"palettes": ["fire_burst"], "blob_speed": 1, "time_y": 12})
+    assert LAVA.settings_for("classic", {"palettes": ["fire_burst"], "drift": 1, "time_y": 12})
 
 
 def test_describe_builds_an_editor_schema():
@@ -108,7 +108,7 @@ def test_describe_builds_an_editor_schema():
     metro = {f["name"]: f for f in d["styles"]["metro"]["settings"]}
     assert metro["palettes"]["choices"][:2] == ["all", "magma"] and metro["time_y"]["type"] == "auto"
     classic = {f["name"]: f for f in d["styles"]["classic"]["settings"]}
-    assert classic["text_colour"]["type"] == "colour" and classic["blob_speed"]["type"] == "number"
+    assert classic["text_colour"]["type"] == "colour" and classic["drift"]["type"] == "number"
     import json
     json.dumps([describe(m) for m in discover().values()])  # every module's schema is JSON-ready
 
