@@ -2,6 +2,7 @@
 import { previewPath, get, uploadMedia } from './api.js';
 import { h, icon, toast, clone, same, humanize, toggle, segmented, store, reducedMotion } from './ui.js';
 import { FrameLoop } from './led.js';
+import { openPreview } from './mediaview.js';
 import { S, onLeave, go, href, moduleById, styleOf, entryName, applyDraft, draftChanged } from './app.js';
 
 /** Settings for a style: shared ones (unless the style redefines them) and the style's own. */
@@ -45,14 +46,25 @@ export function render(view, match) {
   // -- style picker ------------------------------------------------------------------------
   function paintStyles() {
     thumbs.forEach((t) => t.stop()); thumbs = [];
-    styles.replaceChildren(...Object.keys(mod.styles).map((name) => {
+    const card = (name) => {
       const canvas = h('canvas', { class: 'led-canvas mini', 'aria-hidden': 'true' });
-      const btn = h('button', { type: 'button', class: 'style-card', 'aria-pressed': String(styleOf(e) === name),
+      const btn = h('button', { type: 'button', class: 'style-card', 'data-style': name, 'aria-pressed': String(styleOf(e) === name),
         onclick: () => pickStyle(name) }, h('span', { class: 'led-frame mini' }, canvas), h('span', null, humanize(name)));
       thumbs.push(new FrameLoop(canvas, { interval: Infinity,
         path: () => previewPath({ module: e.module, style: name, settings: validFor(name, e.settings) }) }));
       return btn;
-    }));
+    };
+    // styles with a group (a Clock's Digital, Word, Analogue...) sit under that heading, in first-seen order
+    const groups = new Map();
+    Object.entries(mod.styles).forEach(([name, s]) => {
+      const g = s.group || '';
+      if (!groups.has(g)) groups.set(g, []);
+      groups.get(g).push(name);
+    });
+    if (groups.size === 1 && groups.has('')) styles.replaceChildren(...Object.keys(mod.styles).map(card));
+    else styles.replaceChildren(...[...groups].map(([g, names]) => h('div', { class: 'style-group' },
+      g ? h('h3', { class: 'style-group-head' }, g) : null, h('div', { class: 'style-grid' }, ...names.map(card)))));
+    styles.className = groups.size === 1 && groups.has('') ? 'style-grid' : 'style-groups';
   }
   const validFor = (style, settings) => {
     const { shared, own } = schemaFor(mod, style);
@@ -72,7 +84,7 @@ export function render(view, match) {
     e.settings = kept;
     if (gone.length) toast(`${humanize(name)} has no ${gone.map(humanize).join(', ')}; ${gone.length > 1 ? 'those were' : 'that was'} dropped.`);
     if (reset.length) toast(`${reset.map(humanize).join(', ')} went back to ${humanize(name)}'s default${reset.length > 1 ? 's' : ''}.`);
-    styles.querySelectorAll('.style-card').forEach((b, k) => b.setAttribute('aria-pressed', String(Object.keys(mod.styles)[k] === name)));
+    styles.querySelectorAll('.style-card').forEach((b) => b.setAttribute('aria-pressed', String(b.dataset.style === name)));
     paintFields(); changed();
   }
 
@@ -193,7 +205,9 @@ export function render(view, match) {
   view.append(h('div', { class: 'editor-grid' },
     h('div', { class: 'editor-form stack' }, problems,
       h('section', { class: 'card stack', 'aria-label': 'Style' }, h('h2', { class: 'h2' }, 'Style'),
-        mod.description ? h('p', { class: 'muted small flush' }, mod.description) : null, styles),
+        mod.description ? h('p', { class: 'muted small flush' }, mod.description) : null,
+        mod.proposed ? h('div', { class: 'note' }, icon('info'), h('span', null, 'Proposed module: not built yet. The previews are prototypes, and saving it here only works in the demo.')) : null,
+        styles),
       sections),
     aside));
   let thumbTimer = 0;
@@ -479,7 +493,8 @@ function mediaPicker(id, v, set) {
     finally { upBtn.disabled = false; file.value = ''; }
   });
   fill(v);
-  return h('div', { class: 'stack-s' }, h('div', { class: 'row gap-s wrap' }, sel, upBtn, file), note);
+  const look = h('button', { type: 'button', class: 'btn', onclick: () => openPreview(sel.value) }, icon('play'), 'Preview');
+  return h('div', { class: 'stack-s' }, h('div', { class: 'row gap-s wrap' }, sel, look, upBtn, file), note);
 }
 
 function numberInput(f, id, v, set, label) {
