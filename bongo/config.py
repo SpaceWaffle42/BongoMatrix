@@ -8,6 +8,7 @@ import tempfile
 from pathlib import Path
 from zoneinfo import ZoneInfo
 
+from bongo import media
 from bongo.module import Context, Module
 from bongo.player import Entry
 from bongo.safe_area import SafeArea
@@ -104,6 +105,35 @@ def _time(value) -> bool:
         return False
 
 
+def _screen_files(rule, screen: str) -> list[str]:
+    """Since 11 Nov 2026 a screen only uses files named for it (splash_* / sleep_*), and v2's screen
+    GIFs ship built in. Point uploaded copies at the built-in ones and drop files of the wrong name."""
+    if not isinstance(rule, dict) or not isinstance(rule.get("sources"), list):
+        return []
+    notes, keep = [], []
+    for name in rule["sources"]:
+        twin = media.shipped(name)
+        if twin:
+            notes.append(f"{screen}: {name} is built in now, using {twin}")
+            name = twin
+        if isinstance(name, str) and media.screen_of(name) != screen:
+            notes.append(f"{screen}: dropped {name} (only {screen}_* files play here)")
+            continue
+        if name not in keep:
+            keep.append(name)
+    if not keep and rule["sources"]:
+        keep = [f"built-in/{'splash_loading_squares' if screen == 'splash' else 'sleep_default'}.gif"]
+        notes.append(f"{screen}: nothing left, using {keep[0]}")
+    rule["sources"] = keep
+    boot = rule.get("boot")
+    if boot is not None:
+        twin = media.shipped(boot)
+        rule["boot"] = twin or (boot if media.screen_of(boot) == "splash" else None)
+        if rule["boot"] != boot:
+            notes.append(f"{screen}: boot screen is now {rule['boot']}")
+    return notes
+
+
 def tidy(config: dict, modules: dict[str, Module]) -> list[str]:
     """Quietly update a config saved by an older Bongo: drop settings a module no longer has and
     choices it no longer offers (a renamed palette, say), so they fall back to the defaults instead
@@ -120,6 +150,8 @@ def tidy(config: dict, modules: dict[str, Module]) -> list[str]:
                 and not any(isinstance(e, dict) and e.get("module") == "splash" for e in playlist):
             playlist.insert(0, {"module": "splash", "enabled": True})
             notes.append("splash: now a playlist item; added one at the top of the playlist")
+    for screen in ("splash", "sleep"):
+        notes += _screen_files(config.get(screen), screen)
     for key in ("playlist", "overlays"):
         for i, entry in enumerate(config.get(key) or []):
             if not isinstance(entry, dict) or entry.get("module") not in modules or not isinstance(entry.get("settings"), dict):

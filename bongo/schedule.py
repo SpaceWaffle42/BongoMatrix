@@ -1,9 +1,12 @@
 """Splash and Sleep screens: config rules that pick from your media, as in v2.
 
-    "splash": {"sources": ["built-in/splash_loading_squares.gif", "uploaded/logo.png"],
+    "splash": {"sources": ["built-in/splash_loading_squares.gif", "uploaded/splash_logo.png"],
                "speed": 100, "fit": "fit", "boot": "built-in/splash_loading_squares.gif"}
     "sleep":  {"from": "23:00", "to": "07:00", "brightness": 15, "fade": 5, "curve": "smooth",
                "sources": ["built-in/sleep_default.gif"], "speed": 100, "fit": "fit"}
+
+A file belongs to a screen by its name: ``splash_*`` files are splash screens and ``sleep_*``
+files are sleep screens, whether built in or uploaded. Nothing else is offered or played.
 
 Splash plays wherever a ``splash`` item sits in the playlist (as in v2). Each time, the next
 file comes from a shuffled bag, so every source plays once before any repeats. ``boot`` is an
@@ -79,12 +82,11 @@ def screen_problems(where: str, rule, *, sleep: bool = False) -> list[str]:
             screen = "sleep" if sleep else "splash"
             if not media.valid_name(s) or "." + s.rsplit(".", 1)[-1].lower() not in SCREEN_TYPES:
                 problems.append(f"{where}.sources: {s!r} isn't a GIF or image from built-in/ or uploaded/")
-            elif s.startswith("built-in/") and media.screen_of(s) != screen:
-                problems.append(f"{where}.sources: {s!r} isn't a built-in {screen} screen (those are built-in/{screen}_*)")
+            elif media.screen_of(s) != screen:
+                problems.append(f"{where}.sources: {s!r} isn't a {screen} screen (those are named {screen}_*)")
     boot = rule.get("boot")
     if not sleep and boot is not None and (not media.valid_name(boot) or "." + str(boot).rsplit(".", 1)[-1].lower()
-                                           not in SCREEN_TYPES or (str(boot).startswith("built-in/")
-                                                                   and media.screen_of(boot) != "splash")):
+                                           not in SCREEN_TYPES or media.screen_of(boot) != "splash"):
         problems.append(f"{where}.boot: {boot!r} isn't a GIF or image for the Splash screen")
     speed = rule.get("speed", 100)
     if isinstance(speed, bool) or not isinstance(speed, (int, float)) or not 10 <= speed <= 400:
@@ -126,9 +128,8 @@ class Schedule:
     @classmethod
     def from_config(cls, config: dict) -> "Schedule":
         def own(rule, screen):
-            # built-in files serve one screen each (splash_* / sleep_*); uploads serve either
-            return [s for s in (rule.get("sources") or [])
-                    if isinstance(s, str) and (not s.startswith("built-in/") or media.screen_of(s) == screen)]
+            # each file serves one screen, by its name: splash_* or sleep_*
+            return [s for s in (rule.get("sources") or []) if media.screen_of(s) == screen]
 
         splash = config.get("splash") or {}
         sleep = config.get("sleep") or {}

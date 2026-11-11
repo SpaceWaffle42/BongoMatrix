@@ -170,6 +170,18 @@ function updateCard() {
   return card;
 }
 
+/** The files a screen can use: named for it (splash_* or sleep_*), built in or uploaded. An upload
+ * with a built-in file's name is a leftover copy of it, so only the built-in one is listed, and
+ * shipped(name) points a saved uploaded/ name at its built-in twin. */
+function screenFiles(lib, screen) {
+  const builtIn = lib.folders['built-in'].filter((f) => f.screen === screen);
+  const twins = new Set(builtIn.map((f) => f.file));
+  const files = [...builtIn, ...lib.folders.uploaded.filter((f) => f.screen === screen && !twins.has(f.file))]
+    .filter((f) => SCREEN_TYPES.test(f.name));
+  const shipped = (n) => (n && n.startsWith('uploaded/') && twins.has(n.slice(9)) ? `built-in/${n.slice(9)}` : n);
+  return { files, shipped };
+}
+
 /** Pick the files a Splash or Sleep screen draws from (GIFs and stills, like v2), plus speed and fit. */
 function screenPicker(rule, idPrefix, screen) {
   rule.sources ||= [];
@@ -181,11 +193,9 @@ function screenPicker(rule, idPrefix, screen) {
   (async () => {
     try {
       const lib = await get('/api/media');
-      // built-in files serve one screen each (splash_* or sleep_*); uploads can go on either
-      const files = [...lib.folders.uploaded, ...lib.folders['built-in'].filter((f) => f.screen === screen)].filter((f) => SCREEN_TYPES.test(f.name));
+      const { files, shipped } = screenFiles(lib, screen);
       const known = new Set(files.map((f) => f.name));
-      // a built-in file meant for the other screen (or no screen) is dropped, never offered here
-      rule.sources = rule.sources.filter((n) => known.has(n) || !n.startsWith('built-in/'));
+      rule.sources = [...new Set(rule.sources.map((n) => shipped(n)).filter((n) => n.split('/').pop().startsWith(`${screen}_`)))];
       const missing = rule.sources.filter((n) => !known.has(n)).map((n) => ({ name: n, file: `${n} (missing)` }));
       grid.replaceChildren(...[...missing, ...files].map((f, i) => {
         const box = h('input', { type: 'checkbox', id: `${idPrefix}-src-${i}`, checked: rule.sources.includes(f.name) });
@@ -200,7 +210,7 @@ function screenPicker(rule, idPrefix, screen) {
               h('span', { class: 'tag' }, f.name.startsWith('built-in/') ? 'built-in' : 'uploaded'))),
           f.file.endsWith('(missing)') ? null : previewButton(f.name, opts));
       }));
-      if (!files.length && !missing.length) grid.replaceChildren(h('p', { class: 'muted small flush' }, 'No GIFs or images yet. Upload some in the Media library.'));
+      if (!files.length && !missing.length) grid.replaceChildren(h('p', { class: 'muted small flush' }, `No ${screen} screens yet. Upload a GIF or image named ${screen}_something in the Media library.`));
     } catch (err) { grid.replaceChildren(h('p', { class: 'danger small' }, `Couldn't list media: ${err.message}`)); }
   })();
   return h('div', { class: 'stack-s' },
@@ -241,7 +251,8 @@ function bootPicker(rule) {
   (async () => {
     try {
       const lib = await get('/api/media');
-      const files = [...lib.folders['built-in'].filter((f) => f.screen === 'splash'), ...lib.folders.uploaded].filter((f) => SCREEN_TYPES.test(f.name));
+      const { files, shipped } = screenFiles(lib, 'splash');
+      rule.boot = shipped(rule.boot);
       if (rule.boot && !files.some((f) => f.name === rule.boot)) files.unshift({ name: rule.boot, file: `${rule.boot} (missing)` });
       sel.append(...files.map((f) => h('option', { value: f.name, selected: f.name === rule.boot || null }, f.file)));
     } catch { /* the list stays at "None"; saving keeps whatever was set */ }

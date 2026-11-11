@@ -35,15 +35,23 @@ VIDEOS = {".mp4", ".mov", ".webm", ".mkv", ".avi", ".m4v"}
 MAX_UPLOAD = 50 * 1024 * 1024        # one file
 MAX_LIBRARY = 1024 * 1024 * 1024     # everything in uploaded/
 MAX_PIXELS = 16_000_000              # refuse decompression bombs
-SCREENS = ("splash", "sleep")        # built-in files are named <screen>_*.ext
+SCREENS = ("splash", "sleep")        # screen files are named <screen>_*.ext, in either folder
 
 
 def screen_of(name) -> str | None:
-    """'splash' or 'sleep' for a built-in screen file (by its prefix), else None."""
-    if not isinstance(name, str) or not name.startswith("built-in/"):
+    """'splash' or 'sleep' for a screen file (by its prefix, built-in or uploaded), else None."""
+    if not isinstance(name, str) or "/" not in name:
         return None
-    file = name.split("/", 1)[1]
+    file = name.rsplit("/", 1)[1]
     return next((s for s in SCREENS if file.startswith(f"{s}_")), None)
+
+
+def shipped(name) -> str | None:
+    """The built-in twin of an uploaded screen file (v2 users uploaded what is now shipped), else None."""
+    if not isinstance(name, str) or not name.startswith("uploaded/") or screen_of(name) is None:
+        return None
+    twin = "built-in/" + name.split("/", 1)[1]
+    return twin if resolve(twin) else None
 
 
 def folders() -> dict[str, Path]:
