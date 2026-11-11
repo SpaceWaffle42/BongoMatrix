@@ -65,7 +65,10 @@ def problems(rule) -> list[str]:
 
 
 def _git(*args, repo: Path = REPO, timeout: float = GIT_TIMEOUT) -> str:
-    done = subprocess.run(["git", "-C", str(repo), *args], capture_output=True, text=True, timeout=timeout)
+    # Both services run as root but the checkout belongs to the Pi's user, and git refuses to work in
+    # someone else's repository ("dubious ownership") unless told that this one folder is trusted.
+    done = subprocess.run(["git", "-c", f"safe.directory={Path(repo).resolve()}", "-C", str(repo), *args],
+                          capture_output=True, text=True, timeout=timeout)
     if done.returncode:
         raise RuntimeError((done.stderr or done.stdout).strip().splitlines()[-1] if (done.stderr or done.stdout)
                            else f"git {args[0]} failed")
