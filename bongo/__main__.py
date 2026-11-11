@@ -14,6 +14,7 @@ import logging
 import sys
 
 from bongo import config as cfg
+from bongo.fade import Fader
 from bongo.module import Context
 from bongo.panel import RecordingPanel
 from bongo.registry import discover
@@ -147,13 +148,15 @@ def main(argv=None) -> int:
     from bongo.player import play
 
     config = cfg.load(args.config)
+    for note in cfg.tidy(config, modules):
+        logging.warning("old config: %s", note)
     problems = cfg.validate(config, modules)
     for problem in problems:
         logging.error(problem)
     live = Live()
     if config["web"]["enabled"]:
         _start_dashboard(config, modules, live, Path(args.config))
-    panel = _hardware(config)
+    panel = Fader(_hardware(config))  # day <-> night brightness glides instead of jumping
     good, first = None, True  # last config that played; the splash only plays at start-up
     try:
         while True:  # play() returns when the dashboard saves a new config
@@ -178,6 +181,7 @@ def main(argv=None) -> int:
             live.reload.clear()
             live.skip.clear()
             config = cfg.load(args.config)
+            cfg.tidy(config, modules)
             logging.info("config reloaded")
     except KeyboardInterrupt:
         panel.clear()

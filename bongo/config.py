@@ -102,6 +102,46 @@ def _time(value) -> bool:
         return False
 
 
+def tidy(config: dict, modules: dict[str, Module]) -> list[str]:
+    """Quietly update a config saved by an older Bongo: drop settings a module no longer has and
+    choices it no longer offers (a renamed palette, say), so they fall back to the defaults instead
+    of stopping that entry from playing and every dashboard save. Changes ``config`` in place and
+    returns what it changed, for the log."""
+    notes = []
+    for key in ("playlist", "overlays"):
+        for i, entry in enumerate(config.get(key) or []):
+            if not isinstance(entry, dict) or entry.get("module") not in modules or not isinstance(entry.get("settings"), dict):
+                continue
+            module, overlay = modules[entry["module"]], key == "overlays"
+            kinds = module.overlays if overlay else module.styles
+            style = entry.get("style")
+            if style is not None and style not in kinds:
+                continue  # validate() reports it; nothing safe to guess
+            cls = module._style(style, overlay)
+            known = {**module.defaults, **cls.defaults}
+            choices = {**module.choices, **cls.choices}
+            settings = entry["settings"]
+            for name in list(settings):
+                value, offered = settings[name], choices.get(name)
+                if isinstance(offered, str):  # "media", "palettes": checked by their own rules
+                    offered = None
+                if name not in known:
+                    del settings[name]
+                    notes.append(f"{key}[{i}] {entry['module']}: dropped old setting {name!r}")
+                elif offered is not None and isinstance(value, list):
+                    kept = [v for v in value if v in offered]
+                    if kept != value:
+                        notes.append(f"{key}[{i}] {entry['module']}: {name}: dropped {sorted(set(value) - set(kept))}")
+                        if kept:
+                            settings[name] = kept
+                        else:
+                            del settings[name]
+                elif offered is not None and isinstance(value, str) and value not in offered:
+                    del settings[name]
+                    notes.append(f"{key}[{i}] {entry['module']}: {name}: {value!r} is gone, back to the default")
+    return notes
+
+
 def validate(config: dict, modules: dict[str, Module]) -> list[str]:
     """Everything that could stop the player, as readable messages (empty list = fine).
     A config that passes here must be playable: the dashboard saves only what passes."""
