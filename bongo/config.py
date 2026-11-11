@@ -8,7 +8,7 @@ import tempfile
 from pathlib import Path
 from zoneinfo import ZoneInfo
 
-from bongo import media
+from bongo import media, pets
 from bongo.module import Context, Module
 from bongo.player import Entry
 from bongo.safe_area import SafeArea
@@ -61,10 +61,11 @@ def context_factory(config: dict):
     """Modules get a canvas the size of the safe area, never the full panel."""
     tz = ZoneInfo(config["timezone"]) if config.get("timezone") else None
     area = safe_area(config)
-    return lambda: Context(width=area.width, height=area.height, tz=tz)
+    pet = pets.of(config)
+    return lambda: Context(width=area.width, height=area.height, tz=tz, pet=pet)
 
 
-KEYS = {"name", "timezone", "panel", "safe_area", "web", "playlist", "splash", "sleep", "overlays", "update"}
+KEYS = {"name", "timezone", "panel", "safe_area", "web", "playlist", "splash", "sleep", "overlays", "update", "pet"}
 OVERLAY_KEYS = {"module", "overlay", "every", "seconds", "offset", "settings", "enabled"}
 PANEL = {"rows": (8, 128), "cols": (8, 256), "gpio_slowdown": (0, 5), "brightness": (1, 100),
          "chain_length": (1, 8), "parallel": (1, 3)}
@@ -152,6 +153,7 @@ def tidy(config: dict, modules: dict[str, Module]) -> list[str]:
             notes.append("splash: now a playlist item; added one at the top of the playlist")
     for screen in ("splash", "sleep"):
         notes += _screen_files(config.get(screen), screen)
+    notes += pets.adopt(config)  # before the Pet entries lose their own name
     for key in ("playlist", "overlays"):
         for i, entry in enumerate(config.get(key) or []):
             if not isinstance(entry, dict) or entry.get("module") not in modules or not isinstance(entry.get("settings"), dict):
@@ -227,6 +229,7 @@ def validate(config: dict, modules: dict[str, Module]) -> list[str]:
         problems += screen_problems("splash", config["splash"])
     from bongo.update import problems as update_problems
     problems += update_problems(config.get("update"))
+    problems += pets.problems(config.get("pet"))
     overlays = config.get("overlays", [])
     if not isinstance(overlays, list):
         problems.append("overlays: must be a list")

@@ -19,7 +19,7 @@ from pathlib import Path
 from flask import Flask, abort, jsonify, request, send_file, send_from_directory
 from werkzeug.exceptions import HTTPException
 
-from bongo import config as cfg, update
+from bongo import config as cfg, pets, update
 from bongo import media, places
 from bongo.module import Context
 from bongo.player import Entry
@@ -174,7 +174,8 @@ def create_app(*, modules, live, pairing, config_path, logs: LogBuffer | None = 
         area = cfg.safe_area(config)
         return jsonify(live=live.status(), panel={"width": area.panel_width, "height": area.panel_height},
                        safe_area=dict(zip(("top", "right", "bottom", "left"), area.margins)),
-                       uptime=round(time.time() - started), name=config.get("name", "Bongo Matrix"))
+                       uptime=round(time.time() - started), name=config.get("name", "Bongo Matrix"),
+                       pet_kinds=pets.kinds())
 
     @app.get("/api/frame.png")
     def frame():
@@ -270,9 +271,9 @@ def create_app(*, modules, live, pairing, config_path, logs: LogBuffer | None = 
         return jsonify(ok=True, restart_needed=restart_needed(merged))
 
     @lru_cache(maxsize=12)
-    def preview_style(module, style, settings_json, width, height):
+    def preview_style(module, style, settings_json, width, height, pet):
         return modules[module].create(style or None, json.loads(settings_json),
-                                      Context(width=width, height=height, fonts=fonts or Context().fonts))
+                                      Context(width=width, height=height, fonts=fonts or Context().fonts, pet=pet))
 
     @app.get("/api/preview.png")
     def preview():
@@ -284,8 +285,10 @@ def create_app(*, modules, live, pairing, config_path, logs: LogBuffer | None = 
         try:
             settings = json.loads(request.args.get("settings", "{}"))
             settings_json = json.dumps(settings, sort_keys=True)
-            area = cfg.safe_area(load())
-            style = preview_style(name, request.args.get("style", ""), settings_json, area.width, area.height)
+            config = load()
+            area = cfg.safe_area(config)
+            style = preview_style(name, request.args.get("style", ""), settings_json, area.width, area.height,
+                                  pets.of(config))
         except (ValueError, TypeError) as error:
             return jsonify(error=str(error)), 422
         t = number(request.args.get("t", time.time()), 0, 4_102_444_800, "t")  # up to 2100

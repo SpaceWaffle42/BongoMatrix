@@ -14,6 +14,7 @@ from zoneinfo import ZoneInfo
 from PIL import Image
 
 from bongo.fonts import Fonts
+from bongo.pets import Pet
 
 
 @dataclass
@@ -24,6 +25,7 @@ class Context:
     tz: ZoneInfo | None = None
     rng: random.Random = field(default_factory=random.Random)
     fonts: Fonts = field(default_factory=Fonts)
+    pet: Pet = field(default_factory=Pet)  # the Matrix's one pet (bongo/pets.py)
 
     def now(self) -> dt.datetime:
         return dt.datetime.now(self.tz)

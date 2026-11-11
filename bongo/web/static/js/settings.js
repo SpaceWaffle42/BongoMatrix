@@ -8,7 +8,7 @@ import { S, onLeave, go, saveConfig } from './app.js';
 export function render(view) {
   view.append(h('div', { class: 'page-head' }, h('h1', { class: 'h1' }, 'Settings'),
     h('p', { class: 'muted flush' }, 'Each card saves on its own.')),
-  h('div', { class: 'settings-grid' }, safeAreaCard(), h('div', { class: 'stack gap-20' }, deviceCard(), updateCard(), devicesCard()), h('div', { class: 'stack gap-20' }, sleepCard(), splashCard(), mediaCard())));
+  h('div', { class: 'settings-grid' }, safeAreaCard(), h('div', { class: 'stack gap-20' }, deviceCard(), petCard(), updateCard(), devicesCard()), h('div', { class: 'stack gap-20' }, sleepCard(), splashCard(), mediaCard())));
 }
 
 function safeAreaCard() {
@@ -80,6 +80,29 @@ function deviceCard() {
     h('datalist', { id: 'tz-list' }, zones.map((z) => h('option', { value: z }))),
     h('label', { class: 'field-col', for: 'set-bright' }, h('span', { class: 'row between' }, h('span', null, 'Panel brightness (daytime)'), bVal), bright),
     h('p', { class: 'muted tiny flush' }, `${c.panel?.cols || 64}×${c.panel?.rows || 32} panel · ${c.panel?.hardware_mapping || ''}`),
+    h('div', { class: 'row end' }, save));
+}
+
+/** The Matrix's one pet: which animal and its name, shared by the Pet module, Wander and the Pet clock. */
+const PET_NAME = /^[A-Za-z0-9 '.!?-]{1,12}$/;
+
+function petCard() {
+  const pet = { kind: 'cat', name: 'Mochi', ...(S.config.pet || {}) };
+  const kinds = S.state?.pet_kinds?.length ? S.state.pet_kinds : ['cat'];
+  const kind = h('select', { class: 'input', id: 'pet-kind' }, kinds.map((k) => h('option', { value: k, selected: k === pet.kind || null }, humanize(k))));
+  const name = h('input', { class: 'input', id: 'pet-name', maxlength: 12, value: pet.name, autocomplete: 'off', spellcheck: 'false' });
+  const save = h('button', { type: 'button', class: 'btn primary' }, 'Save');
+  save.onclick = () => {
+    const n = name.value.trim();
+    if (!PET_NAME.test(n)) { toast("Names are 1 to 12 letters, digits or spaces (and ' . ! ? -), so they fit her name tag", 'error'); name.focus(); return; }
+    saveConfig({ pet: { kind: kind.value, name: n } }, 'Pet');
+  };
+  return h('section', { class: 'card stack', 'aria-label': 'Pet' },
+    h('div', null, h('h2', { class: 'h2' }, 'Pet'),
+      h('p', { class: 'muted small flush' }, 'One pet per Matrix: the Pet screens, the Wander overlay and the Pet clock all show this one.')),
+    h('div', { class: 'grid-2' },
+      h('label', { class: 'field-col', for: kind.id }, 'Animal', kind),
+      h('label', { class: 'field-col', for: name.id }, 'Name', name)),
     h('div', { class: 'row end' }, save));
 }
 

@@ -84,8 +84,8 @@ class _Scene(Style):
     MODE: tuple[str, ...] = ()
 
     def setup(self):
-        self.art = load()
-        self.timeline = [(shot, mode) for mode in self.modes() for shot in record(self.art, mode, self.settings["name"])]
+        self.art = load(self.ctx.pet.kind)
+        self.timeline = [(shot, mode) for mode in self.modes() for shot in record(self.art, mode, self.ctx.pet.name)]
         self.starts, t = [], 0.0
         for shot, _ in self.timeline:
             self.starts.append(t)
@@ -148,7 +148,7 @@ class Wander(Style):
     choices = {"direction": ["both", "right", "left"]}
 
     def setup(self):
-        self.art = load()
+        self.art = load(self.ctx.pet.kind)
 
     def render(self, now):
         w, h = self.ctx.width, self.ctx.height

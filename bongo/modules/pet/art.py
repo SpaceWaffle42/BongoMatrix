@@ -32,11 +32,12 @@ class Art:
     ball: Image.Image   # RGBA
 
 
-@lru_cache(maxsize=1)
-def load() -> Art:
-    index = json.loads((FOLDER / "cat.json").read_text())
+@lru_cache(maxsize=4)
+def load(kind: str = "cat") -> Art:
+    """The art for one kind of pet (bongo/pets.py): ``<kind>.json`` and its atlas."""
+    index = json.loads((FOLDER / f"{kind}.json").read_text())
     # a lossless WebP kept as base64 text (see tools/build_pet_atlas.py)
-    atlas = Image.open(io.BytesIO(base64.b64decode((FOLDER / "cat.webp.b64").read_text()))).convert("RGBA")
+    atlas = Image.open(io.BytesIO(base64.b64decode((FOLDER / f"{kind}.webp.b64").read_text()))).convert("RGBA")
     crop = lambda r: atlas.crop((r[0], r[1], r[0] + r[2], r[1] + r[3]))
     animations = {tag: [grounded(tag, i, Frame(crop(f), f[4], f[5], f[6])) for i, f in enumerate(frames)]
                   for tag, frames in index["animations"].items()}
