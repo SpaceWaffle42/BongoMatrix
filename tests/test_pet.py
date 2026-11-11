@@ -65,3 +65,11 @@ def test_wander_is_mostly_transparent_and_moves():
 def test_pillow_reads_the_webp_atlas():
     from PIL import features
     assert features.check("webp")
+
+
+def test_every_pose_stands_on_the_same_floor_line():
+    from bongo.modules.pet.art import LIFT, load
+    for tag, frames in load().animations.items():
+        for i, f in enumerate(frames):
+            lowest = f.dy + f.image.getchannel("A").getbbox()[3] - 1
+            assert lowest == LIFT.get(tag, {}).get(i, -1), (tag, i, lowest)  # no floating, no sinking

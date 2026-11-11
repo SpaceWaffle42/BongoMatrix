@@ -69,7 +69,8 @@ class Script:
         if dist < 0.5:
             return
         ang = math.degrees(math.atan2(dy, dx)) % 360
-        tag = min(WALKS, key=lambda w: min(abs(ang - w[0]), 360 - abs(ang - w[0])))[1]
+        have = [w for w in WALKS if w[1] in self.art.animations]  # not every direction is in the atlas
+        tag = min(have, key=lambda w: min(abs(ang - w[0]), 360 - abs(ang - w[0])))[1]
         steps = max(1, int(round(dist / (STRIDE[tag] * stride_mult))))
         anim = self.art.animations[tag]
         sx, sy = self.cat
