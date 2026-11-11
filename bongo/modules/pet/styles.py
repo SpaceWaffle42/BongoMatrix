@@ -43,7 +43,8 @@ def overlay(draw, item, t, shot):
         for k in range(2):
             p = ((t / 120) + k * 12) % 24
             if p < 20:
-                text(draw, cx + 6 + int(p) // 4, cy - 12 - int(p) // 2, "Z", item[1])
+                # from her head: the sleeping poses face left, head about 10 px left of her feet point
+                text(draw, cx - 12 - int(p) // 4, cy - 14 - int(p) // 2, "Z", item[1])
     elif kind == "bubble" and (t // 600) % 2 == 0:
         x, y = cx + 6, cy - 22
         draw.rectangle([x - 1, y - 1, x + 3, y + 5], fill=(255, 250, 240))
@@ -166,6 +167,6 @@ class Wander(Style):
             t -= anim[i].ms
             i += 1
         frame = anim[i]
-        feet = h - 1 - self.settings["floor"]
+        feet = h - self.settings["floor"]  # paws on the bottom row (art: lowest pixel = feet - 1)
         img.paste(frame.image, (int(x) + frame.dx, feet + frame.dy), frame.image)
         return img

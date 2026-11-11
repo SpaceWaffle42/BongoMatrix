@@ -38,10 +38,26 @@ def load() -> Art:
     # a lossless WebP kept as base64 text (see tools/build_pet_atlas.py)
     atlas = Image.open(io.BytesIO(base64.b64decode((FOLDER / "cat.webp.b64").read_text()))).convert("RGBA")
     crop = lambda r: atlas.crop((r[0], r[1], r[0] + r[2], r[1] + r[3]))
-    animations = {tag: [Frame(crop(f), f[4], f[5], f[6]) for f in frames]
+    animations = {tag: [grounded(tag, i, Frame(crop(f), f[4], f[5], f[6])) for i, f in enumerate(frames)]
                   for tag, frames in index["animations"].items()}
     room = crop(index["room"]).convert("RGB")
     return Art(animations, room, empty_bowl(room), night(room), crop(index["ball"]))
+
+
+# The source animations don't share a floor line: lying poses floated 1-2 px, the tall standing
+# poses sank 2 px and the walk hopped 3 px. Every frame is set so its lowest pixel sits one row
+# above the feet point (the standing pose's convention), except the walk's two mid-stride
+# frames, which keep a 1 px lift so the gait still has a little bounce.
+FLOOR = -1
+LIFT = {"walk_left": {2: -2, 6: -2}, "walk_right": {2: -2, 6: -2}}
+
+
+def grounded(tag: str, i: int, frame: Frame) -> Frame:
+    box = frame.image.getchannel("A").getbbox()
+    if box is None:
+        return frame
+    lowest = box[3] - 1  # last opaque row inside the image
+    return Frame(frame.image, frame.dx, LIFT.get(tag, {}).get(i, FLOOR) - lowest, frame.ms)
 
 
 def empty_bowl(room: Image.Image) -> Image.Image:
