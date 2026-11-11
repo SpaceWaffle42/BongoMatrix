@@ -200,3 +200,38 @@ def test_unchanged_config_is_not_rewritten(env, tmp_path):
     live.reload.clear()
     assert client.put("/api/config", json={"name": "Hall"}).get_json().get("unchanged")
     assert not live.reload.is_set()
+
+
+def test_push_a_media_file_to_check_it_on_the_panel(env, tmp_path, monkeypatch):
+    from PIL import Image
+    from bongo import media
+    client, live, pairing = env
+    pair(client, pairing)
+    (tmp_path / "up").mkdir()
+    (tmp_path / "bi").mkdir()
+    Image.new("RGB", (8, 8), "red").save(tmp_path / "up" / "cat.png")
+    Image.new("RGB", (8, 8), "red").save(tmp_path / "bi" / "logo.png")
+    monkeypatch.setattr(media, "UPLOADED", tmp_path / "up")
+    monkeypatch.setattr(media, "BUILT_IN", tmp_path / "bi")
+    r = client.post("/api/push", json={"file": "uploaded/cat.png", "fit": "pixel", "seconds": 15})
+    assert r.status_code == 200
+    entry = live.take_push()
+    assert (entry.module, entry.style, entry.settings["file"]) == ("media", "pixel", "uploaded/cat.png")
+    assert client.post("/api/push", json={"file": "uploaded/nope.png"}).status_code == 404
+    assert client.post("/api/push", json={"file": "built-in/logo.png"}).status_code == 404  # not a screen file
+    assert client.post("/api/push", json={"file": "uploaded/cat.png", "fit": "zoom"}).status_code == 422
+
+
+def test_an_old_problem_elsewhere_does_not_block_saving_the_safe_area(env, tmp_path):
+    client, _, pairing = env
+    pair(client, pairing)
+    (tmp_path / "config.json").write_text(json.dumps({"playlist": [
+        {"module": "lava_lamp", "style": "classic", "seconds": 30, "settings": {"palettes": ["lilac_fizz"]}},
+        {"module": "nope", "seconds": 30}]}))
+    r = client.put("/api/config", json={"safe_area": {"top": 2, "right": 1, "bottom": 0, "left": 1}})
+    assert r.status_code == 200, r.get_json()
+    saved = json.loads((tmp_path / "config.json").read_text())
+    assert saved["safe_area"]["top"] == 2
+    assert client.get("/api/config").get_json()["playlist"][0]["settings"] == {}  # old palette dropped
+    # but a new mistake is still caught
+    assert client.put("/api/config", json={"safe_area": {"top": 40}}).status_code == 422

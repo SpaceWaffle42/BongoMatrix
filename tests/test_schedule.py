@@ -160,3 +160,13 @@ def test_a_module_that_crashes_while_playing_is_skipped():
     panel = RecordingPanel()
     play([Entry("boom", seconds=0.02), Entry("solid", seconds=0.02)], mods, panel, loops=1)
     assert panel.frames  # the good entry still played
+
+
+def test_screens_ignore_built_ins_meant_for_the_other_screen():
+    s = Schedule.from_config({
+        "splash": {"sources": ["built-in/sleep_default.gif", "built-in/logo.gif", "built-in/splash_a.gif", "uploaded/me.gif"]},
+        "sleep": {"from": "23:00", "to": "07:00",
+                  "sources": ["built-in/splash_a.gif", "built-in/sleep_default.gif", "uploaded/me.gif"]},
+    })
+    assert s.splash_sources == ["built-in/splash_a.gif", "uploaded/me.gif"]
+    assert s.sleep_sources == ["built-in/sleep_default.gif", "uploaded/me.gif"]
