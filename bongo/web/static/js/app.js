@@ -12,7 +12,7 @@ const NAV = [
   ['/playlist', 'Playlist', 'Playlist', 'playlist'],
   ['/settings', 'Settings', 'Settings', 'settings'],
   ['/logs', 'Logs', 'Logs', 'logs'],
-  ...(DEMO ? [['/animator', 'Animator (proposed)', 'Animator', 'edit']] : []),  // roadmap preview, demo only
+  ['/animator', 'Animator', 'Animator', 'edit'],
 ];
 const ROUTES = [
   [/^\/(playlist)?$/, () => import('./now.js')],
@@ -20,11 +20,10 @@ const ROUTES = [
   [/^\/settings$/, () => import('./settings.js')],
   [/^\/logs$/, () => import('./logs.js')],
   [/^\/pair$/, () => import('./pair.js')],
-  ...(DEMO ? [[/^\/animator$/, async () => ({ render(view) {  // demo only: the approved animator mock-up, framed in the dashboard
-    const frame = h('iframe', { src: 'demo-animator.html', title: 'Animator (proposed)', class: 'animator-frame' });
-    view.append(h('div', { class: 'stack' }, h('div', { class: 'note' }, icon('info'),
-      h('span', null, 'Proposed: the animator is not built yet. This is the approved mock-up; in v3 it will live here, and Save will add the GIF to your media library.')), frame));
-  } })]] : []),
+  [/^\/animator$/, async () => ({ render(view) {  // the animator page, framed in the dashboard
+    const frame = h('iframe', { src: DEMO ? 'demo-animator.html' : 'animator.html', title: 'Animator', class: 'animator-frame' });
+    view.append(h('div', { class: 'stack' }, frame));
+  } })],
 ];
 
 // -- routing -------------------------------------------------------------------------------

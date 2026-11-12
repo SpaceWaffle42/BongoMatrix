@@ -1,7 +1,7 @@
 """Command line.
 
     python -m bongo list                                  modules and their styles
-    python -m bongo preview lava_lamp --style metro       write an LED-look GIF
+    python -m bongo preview clock --style lava_metro      write an LED-look GIF
     python -m bongo calibrate --margins 1,2,1,2           show the safe-area test card on the panel
     python -m bongo run                                   drive the panel from data/config.json
 """

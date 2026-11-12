@@ -154,6 +154,17 @@ def tidy(config: dict, modules: dict[str, Module]) -> list[str]:
     for screen in ("splash", "sleep"):
         notes += _screen_files(config.get(screen), screen)
     notes += pets.adopt(config)  # before the Pet entries lose their own name
+    for key in ("playlist", "overlays"):  # entries of a module that moved into another one
+        for i, entry in enumerate(config.get(key) or []):
+            if not isinstance(entry, dict) or entry.get("module") in modules:
+                continue
+            for module in modules.values():
+                styles = module.renames.get(entry.get("module"))
+                if styles is not None and entry.get("style") in styles:
+                    old = f"{entry['module']}/{entry.get('style') or 'default'}"
+                    entry["module"], entry["style"] = module.id, styles[entry.get("style")]
+                    notes.append(f"{key}[{i}] {old} is now {module.id}/{entry['style']}")
+                    break
     for key in ("playlist", "overlays"):
         for i, entry in enumerate(config.get(key) or []):
             if not isinstance(entry, dict) or entry.get("module") not in modules or not isinstance(entry.get("settings"), dict):

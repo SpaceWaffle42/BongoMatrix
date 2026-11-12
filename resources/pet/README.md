@@ -12,7 +12,10 @@ allow redistributing it as files (edited or not), using it to build other asset 
 it for AI training. So:
 
 - these files live on the private GitLab and the devices it updates, and nowhere public;
-- a public (GitHub) build must leave this folder out and offer "Import your pet pack" instead,
-  so each owner brings their own copy of the pack.
+- a public (GitHub) build leaves the art out (`python tools/prod_tree.py --public`); its owner
+  uses **Settings > Pet > Import your pet pack** to upload the zip they bought, and the Matrix
+  builds the art into `data/pet` itself (`bongo/petpack.py`, with a room drawn in code from the
+  pack's bed and ball). Until then the Pet screens say where to import it.
 
-The atlases are built from the pack by `tools/build_pet_atlas.py` (it is not edited by hand).
+The atlases are built from the pack by `bongo/petpack.py` (`tools/build_pet_atlas.py` for this
+folder, with Billy's remastered room); they are not edited by hand.

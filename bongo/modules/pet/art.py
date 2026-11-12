@@ -17,7 +17,8 @@ from pathlib import Path
 
 from PIL import Image
 
-FOLDER = Path(__file__).resolve().parents[3] / "resources" / "pet"
+from bongo.pets import art_file
+
 W, H = 64, 32
 
 
@@ -42,13 +43,13 @@ class Art:
 
 @lru_cache(maxsize=4)
 def _index(kind: str) -> dict:
-    return json.loads((FOLDER / f"{kind}.json").read_text())
+    return json.loads(art_file(f"{kind}.json").read_text())
 
 
 @lru_cache(maxsize=8)
 def _atlas(name: str) -> Image.Image:
     # a lossless WebP kept as base64 text (see tools/build_pet_atlas.py)
-    return Image.open(io.BytesIO(base64.b64decode((FOLDER / f"{name}.webp.b64").read_text()))).convert("RGBA")
+    return Image.open(io.BytesIO(base64.b64decode(art_file(f"{name}.webp.b64").read_text()))).convert("RGBA")
 
 
 def _coat(kind: str, coat: str) -> dict:
@@ -111,7 +112,7 @@ def load(kind: str = "cat", coat: str = "", outfits: tuple = ()) -> Art:
 def toys() -> dict:
     """The toys (toys.json beside toys.webp.b64), or none if there's no toy art."""
     try:
-        index = json.loads((FOLDER / "toys.json").read_text())
+        index = json.loads(art_file("toys.json").read_text())
     except OSError:
         return {}
     sheet = _atlas("toys")
@@ -196,4 +197,25 @@ def night(room: Image.Image) -> Image.Image:
             bedlight = max(0.0, 1 - math.hypot(x - 16, (y - 20) * 1.6) / 22)
             k = 0.16 + 0.22 * bedlight
             px[x, y] = (int(lum * k * 0.75), int(lum * k * 0.85), int(lum * k * 1.25 + 6))
+    return img
+
+
+def forget() -> None:
+    """Drop every cached atlas and frame (a pack was just imported)."""
+    for f in (_index, _atlas, sheet, load, toys):
+        f.cache_clear()
+
+
+def missing(kind: str = "cat") -> bool:
+    """No art for ``kind`` on this Matrix (a public build before its owner imports a pack)."""
+    return not art_file(f"{kind}.json").exists()
+
+
+def no_art(width: int, height: int, fonts) -> Image.Image:
+    """What a Pet screen shows when there's no art yet: where to get some."""
+    img = Image.new("RGB", (width, height))
+    small = fonts("tom-thumb")
+    for i, (line, colour) in enumerate((("IMPORT YOUR", (255, 181, 71)), ("PET PACK IN", (230, 230, 230)),
+                                        ("SETTINGS >", (230, 230, 230)), ("PET", (230, 230, 230)))):
+        small.draw(img, max(0, (width - small.width(line)) // 2), 7 + i * 7, line, colour)
     return img

@@ -32,7 +32,7 @@ module. Styles share the module's settings (time format, alignment) and add
 their own. Picking a style is just a playlist setting:
 
 ```json
-{"module": "lava_lamp", "style": "metro", "seconds": 30, "settings": {"palettes": ["ocean"]}}
+{"module": "clock", "style": "lava_metro", "seconds": 30, "settings": {"palettes": ["ocean"]}}
 ```
 
 See [docs/MODULES.md](docs/MODULES.md) to write a module and
@@ -42,14 +42,16 @@ See [docs/MODULES.md](docs/MODULES.md) to write a module and
 
 | Module | Styles | What it shows |
 | --- | --- | --- |
-| Lava Lamp | classic, metro | Time and date over moving wax. Classic is the v2 look (outlined, blurred blobs, 27 palettes). Metro is the refresh: wax that rises and sinks with a soft glow and hot core, clean type, 5 gradient palettes (magma, ocean, aurora, synthwave, mono). |
+| Clock | lava_classic, lava_metro, big, flip, seven, nixie, nixie_seconds, word_grid, word_lines, dial, minimal, binary, pet | Every clock face in one place, in groups. **Lava**: time and date over moving wax; lava_classic is the v2 look (outlined, blurred blobs, 27 palettes). Metro is the refresh: wax that rises and sinks with a soft glow and hot core, clean type, 5 gradient palettes (magma, ocean, aurora, synthwave, mono). **Digital**: big, split-flap and seven-segment. **Glass tube**: nixie tubes. **Word**: a letter grid or typed-in lines ("twenty five past seven"). **Analogue**: a dial and a minimal wide face. **Binary**: BCD dots. **Pet**: a clock your pet visits now and then (walks by, naps on it, bats a ball, sits on the colon). 12 or 24 hours. Old `lava_lamp` playlist entries become `clock/lava_*` on their own. |
+| Ambient | digital_rain, starfield, fire, plasma, rain_on_glass, aurora, fireflies, ocean, snow, life, sand, starlings, maze, pipes | Calm moving pictures with nothing to read, grouped Retro, Sky, Weather and Patterns. Each is a small simulation that fills the safe area; `speed` (0.25-4) sets the pace. Snow melts, sand drains, mazes and pipes start again on their own. |
+| QR code | standard, wifi_guests, call_or_text, two_codes, code_only, code_and_message (+ `corner` overlay) | A real scannable code, one LED per module, with a label and the address scrolling underneath: a link, guest Wi-Fi (joins without typing), a number to call or text, two links side by side, a bigger code alone (about 50 characters), or swapping with a big message. Links too long to fit are refused on save with how much to cut. |
+| Spotify | cover, backdrop, vinyl (+ `ticker` overlay) | What's playing: the cover, title and artist (scrolling when long), time and progress in the cover's colour. Greys out when paused and hands over to the next screen after a while, or at once when nothing plays. Sign in once in Settings > Spotify with your own Spotify app's Client ID (Development Mode; the app owner needs Premium). |
 | Weather | overview, ticker, forecast | Current conditions, high/low and a 4-day forecast from Open-Meteo (no key). |
-| Countdown | days, clock, flip, ring, tearoff | Time left to the next of your events (dates, yearly dates or holidays), each with its own time, message and colour, and a progress bar. |
 | Text | static, scroll | Your own message, centred or scrolling. |
 | Media | fit, fill, pixel | Images, animated GIFs and short videos (first 15 s, needs `ffmpeg`) from the media library; `pixel` scales pixel art crisply. |
 | Announcements | banner, card, flash | Notices scheduled by date, weekday and hour; several rotate. |
 | News | ticker, headline, picture | Headlines from RSS/Atom feeds, newest first; `picture` shows the story's thumbnail beside it. A feed must be an http(s) address that really serves RSS or Atom; the dashboard checks new feeds when you save. |
-| Calendar | page, month, progress | Today's date with the next holidays and your own dates; the month as a grid; year/month/week/day progress bars. |
+| Calendar | Today: page, desk, date_line, week · Month: month, numbers, dots, year · Progress: progress, rings, weeks, percent · Countdown: countdown_days, countdown_clock, countdown_flip, countdown_ring, countdown_tearoff | One list of your dates (once, every year or a holiday; time, message, icon, colour) shown on the calendar looks; the countdowns count down to the soonest (or, with none, the next ticked holiday). The Countdown module moved in on 12 Nov 2026: saved entries move over by themselves. |
 | Pet | life, idle, eating, napping, playing, zoomies, … | Mochi the cat (your Cat 10 art) in her room. Life plays the ticked modes through the day; the `wander` overlay walks her across other screens. Name her in Settings. |
 | Sky | moon, sun | Moon phase and next full/new moon; today's sun arc with sunrise and sunset. |
 
@@ -58,8 +60,8 @@ See [docs/MODULES.md](docs/MODULES.md) to write a module and
 ```bash
 python3 -m venv venv && ./venv/bin/pip install -r requirements.txt
 ./venv/bin/python -m bongo list
-./venv/bin/python -m bongo preview lava_lamp --style metro --out metro.gif
-./venv/bin/python -m bongo preview lava_lamp --style classic --set 'palettes=["fire_burst"]'
+./venv/bin/python -m bongo preview clock --style lava_metro --out metro.gif
+./venv/bin/python -m bongo preview clock --style lava_classic --set 'palettes=["fire_burst"]'
 ```
 
 Previews are LED-look GIFs rendered by exactly the code that drives the panel.
@@ -114,7 +116,7 @@ a GIF for exactly one pass. A **boot screen** can also be picked to play once at
 Sleep dims the panel between two times and shows one of its ticked files, picked at random
 each night and kept until morning; whatever is playing stops when sleep starts.
 
-**Custom Lava Lamp palettes** are a name and three colours (background, wax, highlight),
+**Custom Lava palettes** (Clock) are a name and three colours (background, wax, highlight),
 added in the module editor. Both styles use them: Classic directly, Metro works out its
 gradients from the three colours. Every pass picks one palette at random from the built-in
 ones you have ticked plus your custom ones that are switched on.

@@ -15,8 +15,8 @@
   },
   "playlist": [
     {
-      "module": "lava_lamp",
-      "style": "metro",
+      "module": "clock",
+      "style": "lava_metro",
       "seconds": 30,
       "settings": {
         "palettes": [
@@ -34,8 +34,8 @@
       }
     },
     {
-      "module": "lava_lamp",
-      "style": "classic",
+      "module": "clock",
+      "style": "lava_classic",
       "seconds": 30
     }
   ],

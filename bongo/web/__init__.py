@@ -12,6 +12,9 @@ import io
 import json
 import logging
 import math
+import os
+import shutil
+import tempfile
 import threading
 import time
 from functools import lru_cache
@@ -20,7 +23,7 @@ from pathlib import Path
 from flask import Flask, abort, jsonify, request, send_file, send_from_directory
 from werkzeug.exceptions import HTTPException
 
-from bongo import config as cfg, pets, update
+from bongo import animator, config as cfg, pets, petpack, update
 from bongo import media, places
 from bongo.module import Context
 from bongo.player import Entry
@@ -85,6 +88,9 @@ def verify_new(current: dict, merged: dict, modules: dict) -> list[str]:
     return problems
 
 
+PACK_UPLOAD = 300 * 1024 * 1024  # a pet pack zip from itch.io
+
+
 def create_app(*, modules, live, pairing, config_path, logs: LogBuffer | None = None,
                fonts=None, started=None) -> Flask:
     app = Flask(__name__, static_folder=None)
@@ -134,7 +140,7 @@ def create_app(*, modules, live, pairing, config_path, logs: LogBuffer | None = 
         path = request.path
         if not path.startswith("/api/"):
             return None
-        upload = request.method == "POST" and path == "/api/media"
+        upload = request.method == "POST" and path in ("/api/media", "/api/pets/import")
         if upload and request.headers.get("X-Bongo-Upload") != "1":
             abort(415)  # a custom header: a cross-site form can't set it, and fetch would need CORS
         if request.method not in ("GET", "HEAD") and not upload and not request.is_json:
@@ -195,6 +201,47 @@ def create_app(*, modules, live, pairing, config_path, logs: LogBuffer | None = 
                                "coats": [{**c, "face": face_uri(k, c["id"])} for c in pets.coat_names(k)]}
                               for k in pets.kinds()])
 
+    pack_job = {"state": "idle", "message": "", "made": []}   # one pet pack import at a time
+
+    @app.get("/api/pets/import")
+    def pet_import_status():
+        return jsonify({**pack_job, "has_art": pets.has_art()})
+
+    @app.post("/api/pets/import")
+    def pet_import():
+        """The owner's own Last Tick pack zip: the Matrix builds the Pet art from it (it's licensed to
+        them, so the public build can't ship it). Building takes a minute or two on a Pi."""
+        if pack_job["state"] == "working":
+            return jsonify(error="A pet pack is already being imported."), 409
+        request.max_content_length = PACK_UPLOAD
+        upload = request.files.get("file")
+        if upload is None or not upload.filename:
+            abort(400, "choose the pack's zip file")
+        pets.IMPORTED.parent.mkdir(parents=True, exist_ok=True)
+        fd, tmp = tempfile.mkstemp(suffix=".zip", dir=pets.IMPORTED.parent)
+        with os.fdopen(fd, "wb") as f:
+            shutil.copyfileobj(upload.stream, f)
+        pack_job.update(state="working", message=f"Building the pet art from {upload.filename}...", made=[])
+
+        def build():
+            try:
+                made = petpack.import_zip(Path(tmp), pets.IMPORTED)
+                pets.reload()
+                face_uri.cache_clear()
+                pack_job.update(state="done", made=made,
+                                message="Imported. The Pet screens use it from the next time they come round.")
+                logging.getLogger("bongo.web").info("pet pack imported: %s", "; ".join(made))
+            except petpack.PackError as error:
+                pack_job.update(state="failed", message=f"Couldn't import {upload.filename}: {error}.")
+            except Exception:  # noqa: BLE001 - shown on the dashboard; details in the log
+                logging.getLogger("bongo.web").exception("pet pack import failed")
+                pack_job.update(state="failed", message="The import failed; see Logs.")
+            finally:
+                Path(tmp).unlink(missing_ok=True)
+
+        threading.Thread(target=build, name="pet-pack", daemon=True).start()
+        return jsonify(pack_job), 202
+
     @app.get("/api/frame.png")
     def frame():
         png = live.frame_png()
@@ -223,6 +270,63 @@ def create_app(*, modules, live, pairing, config_path, logs: LogBuffer | None = 
         else:
             return jsonify(error=f"unknown action {action!r}"), 400
         return jsonify(live=live.status())
+
+    @app.post("/api/animator")
+    def animator_save():
+        """Frames from the Animator: saved to the media library as a GIF, or just shown on the
+        Matrix for 15 s (``show``) without adding anything to the library."""
+        request.max_content_length = 16 * 1024 * 1024
+        data = body()
+        area = cfg.safe_area(load())
+        width, height = area.panel_width, area.panel_height
+        try:
+            gif = animator.gif(data.get("frames"), width, height, data.get("background", "#000000"),
+                               data.get("loop", "loop"))
+            if data.get("show"):
+                name = animator.save_preview(gif)
+            else:
+                name = animator.save(str(data.get("name", "animation")), gif)
+        except ValueError as error:
+            return jsonify(error=f"Couldn't make the GIF: {error}."), 422
+        if data.get("show"):
+            if "media" not in modules:
+                return jsonify(error="no media module installed"), 409
+            live.push(Entry("media", "pixel", 15, {"file": name}))
+            return jsonify(ok=True, name=name, live=live.status())
+        logging.getLogger("bongo.web").info("animation saved: %s", name)
+        return jsonify(ok=True, name=name), 201
+
+    # -- Spotify sign-in (bongo/modules/spotify/account.py) -------------------------------------
+    @app.get("/api/spotify")
+    def spotify_status():
+        from bongo.modules.spotify import account
+        return jsonify(connected=account.connected(), redirect=account.REDIRECT)
+
+    @app.post("/api/spotify/start")
+    def spotify_start():
+        from bongo.modules.spotify import account
+        try:
+            return jsonify(url=account.start(str(body().get("client_id", ""))))
+        except ValueError as error:
+            return jsonify(error=str(error)), 422
+
+    @app.post("/api/spotify/finish")
+    def spotify_finish():
+        from bongo.modules.spotify import account
+        try:
+            account.finish(str(body().get("url", "")))
+        except ValueError as error:
+            return jsonify(error=str(error)), 422
+        except OSError:
+            return jsonify(error="Couldn't reach Spotify from the Matrix; check its internet connection."), 502
+        logging.getLogger("bongo.web").info("spotify connected")
+        return jsonify(connected=True)
+
+    @app.delete("/api/spotify")
+    def spotify_forget():
+        from bongo.modules.spotify import account
+        account.forget()
+        return jsonify(connected=False)
 
     @app.post("/api/push")
     def push():

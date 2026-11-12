@@ -4,7 +4,7 @@ import { h, icon, toast, fail, same, humanize, dur, mmss, clock, reducedMotion, 
 import { FrameLoop } from './led.js';
 import { S, bus, onLeave, go, href, moduleById, styleOf, entryName, draftChanged, dirtyCount, applyDraft, discardDraft, normalise } from './app.js';
 
-const COLOURS = { lava_lamp: '#FF7A3D', weather: '#5B9BE8', announcements: '#FFB547', countdown: '#E879B7',
+const COLOURS = { clock: '#FF7A3D', weather: '#5B9BE8', announcements: '#FFB547', calendar: '#E879B7',
   rss: '#8B95A5', text: '#A78BFA', astronomy: '#4ADE80', media: '#2DD4BF' };
 export const colourOf = (id) => COLOURS[id] || `hsl(${[...String(id)].reduce((a, c) => a + c.charCodeAt(0) * 37, 0) % 360} 60% 62%)`;
 const matches = (a, b) => a && b && a.module === b.module && (a.style || null) === (b.style || null) && same(a.settings || {}, b.settings || {});

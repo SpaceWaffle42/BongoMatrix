@@ -40,6 +40,8 @@ def play_entry(style: Style, seconds: float, panel, stop: threading.Event | None
         if live and live.skip.is_set():
             live.skip.clear()
             break
+        if getattr(style, "finished", False):               # a style can hand over early (Spotify, nothing playing)
+            break
         started = clock()
         now = style.ctx.now()
         frame = style.render(now)

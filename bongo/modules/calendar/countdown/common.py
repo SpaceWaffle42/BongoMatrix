@@ -6,6 +6,7 @@ import numpy as np
 from PIL import Image, ImageFilter
 
 from bongo import icons
+from bongo.holidays import label
 
 
 def cap(font):
@@ -31,11 +32,15 @@ class Base:
         self.accent = self.module_accent = rgb(s["accent"])
         self.load_fonts()
 
+    def counted(self) -> list[dict]:
+        """Your dates; with none, the holidays the Calendar shows."""
+        return self.settings["events"] or [{"title": label(h), "holiday": h} for h in self.settings.get("holidays", [])]
+
     def pick(self, now):
         """Choose the event to show now; sets title, target, message and accent for this frame.
         Returns (whole seconds left, progress 0-1, is it on now?), or None with nothing coming up."""
         from .events import current
-        self.now_showing = on = current(self.settings["events"], now)
+        self.now_showing = on = current(self.counted(), now)
         if on is None:
             self.accent, self.icon = self.module_accent, None
             return None

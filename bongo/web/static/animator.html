@@ -1,0 +1,376 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Animator</title>
+<style>
+:root {
+  --page:#0B0C0E; --head:#0E1013; --card:#131519; --card-2:#181B1F; --well:#08090A; --raise:#1A1D22;
+  --line:#22262C; --line-2:#2C3139; --text:#ECEEF1; --soft:#C9CED6; --muted:#9AA1AC;
+  --amber:#FFB547; --amber-hover:#FFCB7A; --ink:#1A1300; --amber-bg:#2A2114; --danger:#FF8A92;
+  --ui: Inter, system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+  --mono: "JetBrains Mono", ui-monospace, Menlo, Consolas, monospace;
+  color-scheme: dark;
+}
+* { box-sizing:border-box; }
+body { margin:0; background:var(--page); color:var(--text); font:14px/1.45 var(--ui); }
+header { display:flex; align-items:center; gap:12px; padding:12px 16px; background:var(--head); border-bottom:1px solid var(--line); flex-wrap:wrap; }
+header h1 { font-size:17px; margin:0; font-weight:650; }
+header .crumb { color:var(--muted); }
+.grow { flex:1 1 auto; }
+.input { background:var(--well); border:1px solid var(--line-2); color:var(--text); padding:7px 9px; font:13px var(--mono); border-radius:0; }
+.btn { background:var(--raise); color:var(--text); border:1px solid var(--line-2); padding:7px 12px; font:600 13px var(--ui); cursor:pointer; border-radius:0; display:inline-flex; gap:6px; align-items:center; }
+.btn:hover { border-color:var(--muted); }
+.btn.primary { background:var(--amber); color:var(--ink); border-color:var(--amber); }
+.btn.primary:hover { background:var(--amber-hover); }
+.btn.on { background:var(--amber-bg); border-color:var(--amber); color:var(--amber); }
+.btn.icon { width:36px; height:36px; justify-content:center; padding:0; font-size:15px; }
+main { display:grid; grid-template-columns:64px minmax(0,1fr) 250px; gap:12px; padding:12px 16px; }
+.card { background:var(--card); border:1px solid var(--line); padding:10px; }
+.tools { display:flex; flex-direction:column; gap:6px; align-items:center; }
+.tools hr { width:100%; border:0; border-top:1px solid var(--line); margin:4px 0; }
+.stage { display:flex; flex-direction:column; gap:8px; min-width:0; }
+.stage-top { display:flex; gap:8px; align-items:center; color:var(--muted); font:12px var(--mono); flex-wrap:wrap; }
+#board-wrap { background:var(--well); border:1px solid var(--line); padding:10px; overflow:auto; }
+#board { display:block; width:100%; height:auto; image-rendering:pixelated; cursor:crosshair; touch-action:none; }
+.side { display:flex; flex-direction:column; gap:12px; }
+.label { font-size:11px; letter-spacing:.1em; text-transform:uppercase; color:var(--muted); margin:0 0 8px; }
+.swatches { display:grid; grid-template-columns:repeat(8,1fr); gap:3px; }
+.swatches button { aspect-ratio:1; border:1px solid var(--line-2); padding:0; cursor:pointer; border-radius:0; }
+.swatches button.sel { outline:2px solid var(--amber); outline-offset:1px; }
+.current { display:flex; gap:8px; align-items:center; margin-bottom:8px; }
+.current input[type=color] { width:44px; height:32px; border:1px solid var(--line-2); background:none; padding:0; }
+.led { position:relative; aspect-ratio:2/1; background:#000; }
+.led canvas { width:100%; height:100%; display:block; image-rendering:pixelated; }
+.led::after { content:""; position:absolute; inset:0; pointer-events:none; background:radial-gradient(circle at center, transparent 52%, rgba(0,0,0,.88) 64%); background-size:calc(100%/64) calc(100%/32); }
+.row { display:flex; gap:6px; align-items:center; flex-wrap:wrap; }
+.timeline { grid-column:1 / -1; }
+.frames { display:flex; gap:8px; overflow-x:auto; padding:4px 2px 8px; }
+.frame { flex:0 0 auto; width:116px; background:var(--card-2); border:1px solid var(--line-2); padding:5px; cursor:pointer; }
+.frame.sel { border-color:var(--amber); box-shadow:0 0 0 1px var(--amber); }
+.frame canvas { width:100%; display:block; image-rendering:pixelated; background:#000; }
+.frame .meta { display:flex; justify-content:space-between; align-items:center; margin-top:4px; font:11px var(--mono); color:var(--muted); }
+.frame input { width:52px; padding:2px 4px; font-size:11px; }
+.add { flex:0 0 auto; width:70px; border:1px dashed var(--line-2); display:flex; align-items:center; justify-content:center; color:var(--muted); cursor:pointer; background:none; font-size:22px; }
+.add:hover { border-color:var(--amber); color:var(--amber); }
+.muted { color:var(--muted); }
+.tiny { font-size:12px; }
+.note { background:var(--amber-bg); border:1px solid #4a3a1c; color:var(--soft); padding:8px 12px; margin:12px 16px 0; font-size:13px; }
+#toast { position:fixed; bottom:18px; left:50%; transform:translateX(-50%); background:var(--raise); border:1px solid var(--amber); padding:9px 14px; display:none; }
+kbd { font:11px var(--mono); border:1px solid var(--line-2); padding:0 4px; color:var(--muted); }
+@media (max-width: 900px) {
+  main { grid-template-columns:minmax(0,1fr); }
+  .tools { flex-direction:row; flex-wrap:wrap; }
+  .tools hr { display:none; }
+}
+</style>
+</head>
+<body>
+<header>
+  <h1><span class="crumb">Media /</span> Animator</h1>
+  <input class="input" id="name" value="bouncing_ball" aria-label="Animation name" style="width:180px">
+  <span class="muted tiny" id="size">64 × 32 · 8 frames</span>
+  <span class="grow"></span>
+  <button class="btn" id="undo" title="Undo (Ctrl+Z)">↶ Undo</button>
+  <button class="btn" id="redo" title="Redo (Ctrl+Y)">↷ Redo</button>
+  <button class="btn" id="show">▶ Show on Matrix</button>
+  <button class="btn primary" id="save">Save to library</button>
+</header>
+<div class="note">Draw it here; <b>Show on Matrix</b> plays it on the panel for 15 seconds, <b>Save to library</b> adds it as a GIF to your media (name it <span style="font-family:var(--mono)">splash_…</span> or <span style="font-family:var(--mono)">sleep_…</span> to use it on those screens).</div>
+<main>
+  <div class="card tools" role="toolbar" aria-label="Tools">
+    <button class="btn icon on" data-tool="pen" title="Pencil (P)">✎</button>
+    <button class="btn icon" data-tool="erase" title="Eraser (E)">⌫</button>
+    <button class="btn icon" data-tool="fill" title="Fill (F)">▧</button>
+    <button class="btn icon" data-tool="line" title="Line (L)">╱</button>
+    <button class="btn icon" data-tool="rect" title="Rectangle (R)">▭</button>
+    <button class="btn icon" data-tool="pick" title="Pick colour (I)">⌖</button>
+    <hr>
+    <button class="btn icon" id="mirror" title="Mirror drawing left/right (M)">⇋</button>
+    <button class="btn icon on" id="onion" title="Onion skin: see the previous frame faintly (O)">◐</button>
+    <button class="btn icon on" id="grid" title="Pixel grid (G)">#</button>
+    <button class="btn icon on" id="safe" title="Show the safe area">▢</button>
+  </div>
+
+  <div class="stage">
+    <div class="stage-top">
+      <span id="pos">x –, y –</span><span>·</span><span id="toolname">Pencil</span>
+      <span class="grow"></span>
+      <span><kbd>P</kbd> pencil <kbd>E</kbd> eraser <kbd>F</kbd> fill <kbd>←</kbd><kbd>→</kbd> frames <kbd>Space</kbd> play</span>
+    </div>
+    <div id="board-wrap"><canvas id="board" width="1280" height="640" aria-label="Drawing canvas, 64 by 32 pixels"></canvas></div>
+  </div>
+
+  <div class="side">
+    <section class="card">
+      <p class="label">Colour</p>
+      <div class="current"><input type="color" id="colour" value="#ffb547" aria-label="Current colour"><span class="tiny muted" style="font-family:var(--mono)" id="hex">#FFB547</span></div>
+      <div class="swatches" id="swatches"></div>
+      <p class="label" style="margin-top:12px">In this animation</p>
+      <div class="swatches" id="used"></div>
+    </section>
+    <section class="card">
+      <p class="label">Preview</p>
+      <div class="led"><canvas id="preview" width="64" height="32"></canvas></div>
+      <div class="row" style="margin-top:8px">
+        <button class="btn" id="play">❚❚ Pause</button>
+        <label class="tiny muted">Speed <input class="input" id="speed" type="number" min="10" max="400" value="100" style="width:64px">%</label>
+      </div>
+    </section>
+  </div>
+
+  <section class="card timeline">
+    <div class="row" style="margin-bottom:8px">
+      <p class="label" style="margin:0">Frames</p><span class="grow"></span>
+      <button class="btn" id="dup">Duplicate</button>
+      <button class="btn" id="left">◀ Move</button>
+      <button class="btn" id="right">Move ▶</button>
+      <button class="btn" id="clear">Clear frame</button>
+      <button class="btn" id="del" style="color:var(--danger)">Delete</button>
+    </div>
+    <div class="frames" id="frames"></div>
+  </section>
+</main>
+<div id="toast" role="status"></div>
+
+<script>
+const W = 64, H = 32, S = 20;
+const PALETTE = ['#000000','#ffffff','#9aa1ac','#3b4048','#ff3b30','#ff8a3d','#ffb547','#ffe066',
+                 '#4ade80','#1fbf8f','#2ec4ff','#3b6bff','#8a5cff','#ff5ccf','#8b5a2b','#f2c9a0'];
+const SAFE = { top: 1, right: 1, bottom: 1, left: 1 };
+const $ = (id) => document.getElementById(id);
+const board = $('board'), bx = board.getContext('2d');
+const preview = $('preview'), px = preview.getContext('2d');
+let frames = [], cur = 0, tool = 'pen', colour = '#ffb547', mirror = false, onion = true, grid = true, showSafe = true;
+let undo = [], redo = [];
+
+// -- starter animation: a ball bouncing with a squash, and its shadow ----------------------
+function blank() { return { px: new Array(W * H).fill(null), ms: 90 }; }
+function starter() {
+  const out = [];
+  const heights = [2, 5, 11, 19, 22, 19, 11, 5];
+  heights.forEach((y, i) => {
+    const f = blank();
+    for (let x = 0; x < W; x++) for (let yy = 28; yy < H; yy++) f.px[yy * W + x] = yy === 28 ? '#3b6bff' : '#1b2a55';
+    const squash = y === 22 ? 1 : 0, cx = 20 + i * 3, cy = 3 + y;
+    for (let dy = -4; dy <= 4; dy++) for (let dx = -5; dx <= 5; dx++) {
+      if ((dx * dx) / ((4 + squash) ** 2) + (dy * dy) / ((4 - squash) ** 2) <= 1) {
+        const yy = cy + dy, xx = cx + dx; if (yy >= 0 && yy < 28) f.px[yy * W + xx] = (dx < -1 && dy < -1) ? '#ffe066' : '#ff8a3d';
+      }
+    }
+    const sw = 2 + Math.round(y / 4);
+    for (let dx = -sw; dx <= sw; dx++) f.px[27 * W + cx + dx] = '#14161a';
+    f.ms = y === 22 ? 140 : 80;
+    out.push(f);
+  });
+  return out;
+}
+
+// -- drawing ----------------------------------------------------------------------------
+function snapshot() { undo.push(JSON.stringify({ frames, cur })); if (undo.length > 80) undo.shift(); redo = []; }
+function restore(s) { const o = JSON.parse(s); frames = o.frames; cur = Math.min(o.cur, frames.length - 1); renderAll(); }
+function setPx(f, x, y, c) {
+  if (x < 0 || y < 0 || x >= W || y >= H) return;
+  f.px[y * W + x] = c;
+  if (mirror) f.px[y * W + (W - 1 - x)] = c;
+}
+function lineCells(x0, y0, x1, y1) {
+  const cells = []; let dx = Math.abs(x1 - x0), dy = -Math.abs(y1 - y0), sx = x0 < x1 ? 1 : -1, sy = y0 < y1 ? 1 : -1, e = dx + dy;
+  for (;;) { cells.push([x0, y0]); if (x0 === x1 && y0 === y1) break; const e2 = 2 * e; if (e2 >= dy) { e += dy; x0 += sx; } if (e2 <= dx) { e += dx; y0 += sy; } }
+  return cells;
+}
+function fill(f, x, y, c) {
+  const target = f.px[y * W + x]; if (target === c) return;
+  const stack = [[x, y]];
+  while (stack.length) {
+    const [a, b] = stack.pop();
+    if (a < 0 || b < 0 || a >= W || b >= H || f.px[b * W + a] !== target) continue;
+    f.px[b * W + a] = c; stack.push([a + 1, b], [a - 1, b], [a, b + 1], [a, b - 1]);
+  }
+}
+
+function drawFrame(ctx, f, scale, ghost) {
+  ctx.fillStyle = '#000'; ctx.fillRect(0, 0, W * scale, H * scale);
+  if (ghost) {
+    ctx.globalAlpha = 0.22;
+    ghost.px.forEach((c, i) => { if (c) { ctx.fillStyle = c; ctx.fillRect((i % W) * scale, Math.floor(i / W) * scale, scale, scale); } });
+    ctx.globalAlpha = 1;
+  }
+  f.px.forEach((c, i) => { if (c) { ctx.fillStyle = c; ctx.fillRect((i % W) * scale, Math.floor(i / W) * scale, scale, scale); } });
+}
+
+let hover = null, dragStart = null, dragEnd = null;
+function renderBoard() {
+  const f = frames[cur];
+  drawFrame(bx, f, S, onion && cur > 0 ? frames[cur - 1] : (onion && frames.length > 1 ? frames[frames.length - 1] : null));
+  if (dragStart && dragEnd && (tool === 'line' || tool === 'rect')) {
+    bx.fillStyle = colour; bx.globalAlpha = 0.85;
+    shapeCells(dragStart, dragEnd).forEach(([x, y]) => { bx.fillRect(x * S, y * S, S, S); if (mirror) bx.fillRect((W - 1 - x) * S, y * S, S, S); });
+    bx.globalAlpha = 1;
+  }
+  if (grid) {
+    bx.strokeStyle = 'rgba(255,255,255,0.07)'; bx.lineWidth = 1; bx.beginPath();
+    for (let x = 1; x < W; x++) { bx.moveTo(x * S + .5, 0); bx.lineTo(x * S + .5, H * S); }
+    for (let y = 1; y < H; y++) { bx.moveTo(0, y * S + .5); bx.lineTo(W * S, y * S + .5); }
+    bx.stroke();
+    bx.strokeStyle = 'rgba(255,255,255,0.16)'; bx.beginPath();
+    for (let x = 8; x < W; x += 8) { bx.moveTo(x * S + .5, 0); bx.lineTo(x * S + .5, H * S); }
+    for (let y = 8; y < H; y += 8) { bx.moveTo(0, y * S + .5); bx.lineTo(W * S, y * S + .5); }
+    bx.stroke();
+  }
+  if (mirror) { bx.strokeStyle = 'rgba(159,194,255,0.6)'; bx.setLineDash([8, 6]); bx.beginPath(); bx.moveTo(W * S / 2, 0); bx.lineTo(W * S / 2, H * S); bx.stroke(); bx.setLineDash([]); }
+  if (showSafe) {
+    bx.strokeStyle = 'rgba(255,181,71,0.75)'; bx.setLineDash([10, 6]); bx.lineWidth = 2;
+    bx.strokeRect(SAFE.left * S + 1, SAFE.top * S + 1, (W - SAFE.left - SAFE.right) * S - 2, (H - SAFE.top - SAFE.bottom) * S - 2);
+    bx.setLineDash([]); bx.lineWidth = 1;
+  }
+  if (hover) { bx.strokeStyle = '#fff'; bx.strokeRect(hover[0] * S + .5, hover[1] * S + .5, S - 1, S - 1); }
+}
+function shapeCells(a, b) {
+  if (tool === 'line') return lineCells(a[0], a[1], b[0], b[1]);
+  const [x0, x1] = [Math.min(a[0], b[0]), Math.max(a[0], b[0])], [y0, y1] = [Math.min(a[1], b[1]), Math.max(a[1], b[1])], out = [];
+  for (let x = x0; x <= x1; x++) out.push([x, y0], [x, y1]);
+  for (let y = y0; y <= y1; y++) out.push([x0, y], [x1, y]);
+  return out;
+}
+
+function cell(e) {
+  const r = board.getBoundingClientRect();
+  return [Math.floor((e.clientX - r.left) / r.width * W), Math.floor((e.clientY - r.top) / r.height * H)];
+}
+let drawing = false, last = null;
+board.addEventListener('pointerdown', (e) => {
+  board.setPointerCapture(e.pointerId);
+  const [x, y] = cell(e), f = frames[cur];
+  if (tool === 'pick') { const c = f.px[y * W + x]; if (c) setColour(c); setTool('pen'); return; }
+  snapshot();
+  if (tool === 'fill') { fill(f, x, y, e.button === 2 ? null : colour); renderAll(); return; }
+  if (tool === 'line' || tool === 'rect') { dragStart = dragEnd = [x, y]; renderBoard(); return; }
+  drawing = true; last = [x, y]; setPx(f, x, y, tool === 'erase' || e.button === 2 ? null : colour); renderBoard();
+});
+board.addEventListener('pointermove', (e) => {
+  const [x, y] = cell(e); hover = [x, y]; $('pos').textContent = `x ${x}, y ${y}`;
+  if (dragStart) { dragEnd = [x, y]; }
+  else if (drawing) { lineCells(last[0], last[1], x, y).forEach(([a, b]) => setPx(frames[cur], a, b, tool === 'erase' || e.buttons === 2 ? null : colour)); last = [x, y]; }
+  renderBoard();
+});
+board.addEventListener('pointerup', () => {
+  if (dragStart) { shapeCells(dragStart, dragEnd).forEach(([x, y]) => setPx(frames[cur], x, y, colour)); dragStart = dragEnd = null; }
+  drawing = false; renderAll();
+});
+board.addEventListener('pointerleave', () => { hover = null; $('pos').textContent = 'x –, y –'; renderBoard(); });
+board.addEventListener('contextmenu', (e) => e.preventDefault());
+
+// -- colour -----------------------------------------------------------------------------
+function setColour(c) { colour = c; $('colour').value = c; $('hex').textContent = c.toUpperCase(); paintSwatches(); }
+$('colour').addEventListener('input', (e) => setColour(e.target.value));
+function swatch(c, holder) {
+  const b = document.createElement('button'); b.style.background = c; b.title = c; b.setAttribute('aria-label', `Colour ${c}`);
+  if (c.toLowerCase() === colour.toLowerCase()) b.className = 'sel';
+  b.onclick = () => { setColour(c); if (tool === 'erase' || tool === 'pick') setTool('pen'); };
+  holder.append(b);
+}
+function paintSwatches() {
+  $('swatches').replaceChildren(); PALETTE.forEach((c) => swatch(c, $('swatches')));
+  const used = [...new Set(frames.flatMap((f) => f.px).filter(Boolean))].slice(0, 16);
+  $('used').replaceChildren(); used.forEach((c) => swatch(c, $('used')));
+}
+
+// -- tools ------------------------------------------------------------------------------
+const NAMES = { pen: 'Pencil', erase: 'Eraser', fill: 'Fill', line: 'Line', rect: 'Rectangle', pick: 'Pick colour' };
+function setTool(t) { tool = t; document.querySelectorAll('[data-tool]').forEach((b) => b.classList.toggle('on', b.dataset.tool === t)); $('toolname').textContent = NAMES[t]; }
+document.querySelectorAll('[data-tool]').forEach((b) => b.onclick = () => setTool(b.dataset.tool));
+function toggle(id, get, set) { $(id).onclick = () => { set(!get()); $(id).classList.toggle('on', get()); renderBoard(); }; }
+toggle('mirror', () => mirror, (v) => mirror = v);
+toggle('onion', () => onion, (v) => onion = v);
+toggle('grid', () => grid, (v) => grid = v);
+toggle('safe', () => showSafe, (v) => showSafe = v);
+
+// -- frames -----------------------------------------------------------------------------
+function renderFrames() {
+  const box = $('frames'); box.replaceChildren();
+  frames.forEach((f, i) => {
+    const el = document.createElement('div'); el.className = 'frame' + (i === cur ? ' sel' : '');
+    const c = document.createElement('canvas'); c.width = W * 2; c.height = H * 2; drawFrame(c.getContext('2d'), f, 2);
+    const meta = document.createElement('div'); meta.className = 'meta';
+    const n = document.createElement('span'); n.textContent = String(i + 1).padStart(2, '0');
+    const ms = document.createElement('input'); ms.className = 'input'; ms.type = 'number'; ms.min = 20; ms.max = 5000; ms.step = 10; ms.value = f.ms; ms.title = 'How long this frame shows (ms)';
+    ms.onclick = (e) => e.stopPropagation(); ms.onchange = () => { f.ms = Math.max(20, Math.min(5000, Number(ms.value) || 90)); };
+    const unit = document.createElement('span'); unit.textContent = 'ms';
+    const r = document.createElement('span'); r.append(ms, ' ', unit);
+    meta.append(n, r); el.append(c, meta);
+    el.onclick = () => { cur = i; renderAll(); };
+    box.append(el);
+  });
+  const add = document.createElement('button'); add.className = 'add'; add.textContent = '+'; add.title = 'New blank frame';
+  add.onclick = () => { snapshot(); frames.splice(cur + 1, 0, blank()); cur++; renderAll(); };
+  box.append(add);
+  // keep the selected frame visible by scrolling the strip sideways only, never the page
+  const sel = box.children[cur];
+  if (sel) {
+    const l = sel.offsetLeft - box.offsetLeft, r = l + sel.offsetWidth;
+    if (l < box.scrollLeft) box.scrollLeft = l;
+    else if (r > box.scrollLeft + box.clientWidth) box.scrollLeft = r - box.clientWidth;
+  }
+  $('size').textContent = `64 × 32 · ${frames.length} frame${frames.length === 1 ? '' : 's'}`;
+}
+$('dup').onclick = () => { snapshot(); frames.splice(cur + 1, 0, JSON.parse(JSON.stringify(frames[cur]))); cur++; renderAll(); };
+$('del').onclick = () => { if (frames.length < 2) return toast('An animation needs at least one frame'); snapshot(); frames.splice(cur, 1); cur = Math.max(0, cur - 1); renderAll(); };
+$('clear').onclick = () => { snapshot(); frames[cur].px.fill(null); renderAll(); };
+function move(d) { const j = cur + d; if (j < 0 || j >= frames.length) return; snapshot(); [frames[cur], frames[j]] = [frames[j], frames[cur]]; cur = j; renderAll(); }
+$('left').onclick = () => move(-1); $('right').onclick = () => move(1);
+$('undo').onclick = () => { if (undo.length) { redo.push(JSON.stringify({ frames, cur })); restore(undo.pop()); } };
+$('redo').onclick = () => { if (redo.length) { undo.push(JSON.stringify({ frames, cur })); restore(redo.pop()); } };
+
+// -- preview playback -------------------------------------------------------------------
+let playing = true, pi = 0, timer = null;
+function tick() {
+  if (!frames.length) return;
+  pi = (pi + 1) % frames.length; drawFrame(px, frames[pi], 1);
+  const speed = Math.max(10, Math.min(400, Number($('speed').value) || 100)) / 100;
+  timer = setTimeout(tick, frames[pi].ms / speed);
+}
+$('play').onclick = () => { playing = !playing; $('play').textContent = playing ? '❚❚ Pause' : '▶ Play'; clearTimeout(timer); if (playing) tick(); else drawFrame(px, frames[cur], 1); };
+
+// -- pretend actions ----------------------------------------------------------------------
+function toast(t) { const el = $('toast'); el.textContent = t; el.style.display = 'block'; clearTimeout(toast.t); toast.t = setTimeout(() => el.style.display = 'none', 2600); }
+async function send(extra) {
+  const res = await fetch('/api/animator', { method: 'POST', credentials: 'same-origin',
+    headers: { 'Content-Type': 'application/json', Accept: 'application/json' },
+    body: JSON.stringify({ frames: frames.map((f) => ({ px: f.px, ms: f.ms })), ...extra }) });
+  let data = {};
+  try { data = await res.json(); } catch { /* no body */ }
+  if (!res.ok) throw new Error(data.error || (res.status === 401 ? 'This browser is not paired with the Matrix' : `${res.status} error`));
+  return data;
+}
+$('show').onclick = async () => {
+  $('show').disabled = true;
+  try { await send({ show: true }); toast('Playing on the Matrix for 15 seconds'); }
+  catch (e) { toast(e.message); } finally { $('show').disabled = false; }
+};
+$('save').onclick = async () => {
+  $('save').disabled = true;
+  try { const { name } = await send({ name: $('name').value || 'animation' }); toast(`Saved ${name.replace('uploaded/', '')} to your media library`); }
+  catch (e) { toast(e.message); } finally { $('save').disabled = false; }
+};
+
+// -- keys -------------------------------------------------------------------------------
+document.addEventListener('keydown', (e) => {
+  if (e.target.tagName === 'INPUT') return;
+  if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'z') { e.preventDefault(); (e.shiftKey ? $('redo') : $('undo')).click(); return; }
+  if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'y') { e.preventDefault(); $('redo').click(); return; }
+  const k = e.key.toLowerCase();
+  const map = { p: 'pen', e: 'erase', f: 'fill', l: 'line', r: 'rect', i: 'pick' };
+  if (map[k]) setTool(map[k]);
+  else if (k === 'm') $('mirror').click(); else if (k === 'o') $('onion').click(); else if (k === 'g') $('grid').click();
+  else if (e.key === 'ArrowLeft') { cur = (cur - 1 + frames.length) % frames.length; renderAll(); }
+  else if (e.key === 'ArrowRight') { cur = (cur + 1) % frames.length; renderAll(); }
+  else if (e.key === ' ') { e.preventDefault(); $('play').click(); }
+});
+
+function renderAll() { renderBoard(); renderFrames(); paintSwatches(); }
+frames = starter(); renderAll(); tick();
+</script>
+</body>
+</html>

@@ -22,7 +22,36 @@ from dataclasses import dataclass
 from functools import lru_cache
 from pathlib import Path
 
-FOLDER = Path(__file__).resolve().parents[1] / "resources" / "pet"
+import os
+
+BUILT_IN = Path(__file__).resolve().parents[1] / "resources" / "pet"
+# a pack the owner imported from the dashboard (bongo/petpack.py); it wins over built-in art
+IMPORTED = Path(os.environ.get("BONGO_PET_ART", Path(__file__).resolve().parents[1] / "data" / "pet"))
+NOT_ANIMALS = {"toys"}
+
+
+def art_file(name: str) -> Path:
+    """Where an art file (``cat.json``, ``cat-2.webp.b64``...) is: imported first, then built in."""
+    imported = IMPORTED / name
+    return imported if imported.exists() else BUILT_IN / name
+
+
+def has_art() -> bool:
+    return bool(kinds_found())
+
+
+def kinds_found() -> list[str]:
+    return sorted({p.stem for folder in (IMPORTED, BUILT_IN) for p in folder.glob("*.json")} - NOT_ANIMALS)
+
+
+def reload() -> None:
+    """Forget cached art (after an import)."""
+    _index.cache_clear()
+    try:
+        from bongo.modules.pet import art
+        art.forget()
+    except ImportError:
+        pass
 NAME = re.compile(r"[A-Za-z0-9 '.!?-]{1,12}")
 
 
@@ -38,7 +67,7 @@ class Pet:
 @lru_cache(maxsize=8)
 def _index(kind: str) -> dict:
     try:
-        return json.loads((FOLDER / f"{kind}.json").read_text())
+        return json.loads(art_file(f"{kind}.json").read_text())
     except (OSError, ValueError):
         return {}
 
@@ -75,7 +104,7 @@ def default_coat(kind: str) -> str:
 
 def kinds() -> list[str]:
     """The animals there is art for."""
-    return sorted(p.stem for p in FOLDER.glob("*.json")) or ["cat"]
+    return kinds_found() or ["cat"]
 
 
 def of(config: dict) -> Pet:

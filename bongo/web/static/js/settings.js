@@ -8,7 +8,7 @@ import { S, onLeave, go, saveConfig } from './app.js';
 export function render(view) {
   view.append(h('div', { class: 'page-head' }, h('h1', { class: 'h1' }, 'Settings'),
     h('p', { class: 'muted flush' }, 'Each card saves on its own.')),
-  h('div', { class: 'settings-grid' }, safeAreaCard(), h('div', { class: 'stack gap-20' }, deviceCard(), petCard(), updateCard(), devicesCard()), h('div', { class: 'stack gap-20' }, sleepCard(), splashCard(), mediaCard())));
+  h('div', { class: 'settings-grid' }, safeAreaCard(), h('div', { class: 'stack gap-20' }, deviceCard(), petCard(), spotifyCard(), updateCard(), devicesCard()), h('div', { class: 'stack gap-20' }, sleepCard(), splashCard(), mediaCard())));
 }
 
 function safeAreaCard() {
@@ -138,6 +138,45 @@ function petCard() {
     coatRow,
     wardrobe,
     h('div', { class: 'row end' }, save));
+}
+
+/** Spotify: sign in once so the Spotify screens can show what's playing. A Matrix has no https
+ * address of its own, so the sign-in ends on an address that doesn't load; its URL is pasted back here. */
+function spotifyCard() {
+  const body = h('div', { class: 'stack gap-s' }, h('p', { class: 'muted small flush' }, 'Loading…'));
+  const card = h('section', { class: 'card stack', 'aria-label': 'Spotify' },
+    h('div', null, h('h2', { class: 'h2' }, 'Spotify'),
+      h('p', { class: 'muted small flush' }, 'Sign in once so the Spotify screens can show what you\'re playing.')), body);
+  const show = (s) => {
+    if (s.connected) {
+      const off = h('button', { type: 'button', class: 'btn ghost danger-btn' }, 'Sign out');
+      off.onclick = async () => { try { await del('/api/spotify'); toast('Signed out of Spotify'); load(); } catch (e) { fail("Couldn't sign out")(e); } };
+      body.replaceChildren(h('div', { class: 'row between wrap' }, h('span', { class: 'strong' }, 'Connected'), off));
+      return;
+    }
+    const id = h('input', { class: 'input mono', id: 'spotify-id', placeholder: 'Client ID', autocomplete: 'off', spellcheck: 'false' });
+    const pasted = h('input', { class: 'input mono', id: 'spotify-url', placeholder: `${s.redirect}?code=…`, autocomplete: 'off', spellcheck: 'false' });
+    const go = h('button', { type: 'button', class: 'btn' }, 'Sign in with Spotify');
+    const done = h('button', { type: 'button', class: 'btn primary' }, 'Connect');
+    go.onclick = async () => {
+      try { const { url } = await post('/api/spotify/start', { client_id: id.value }); window.open(url, '_blank', 'noopener'); pasted.focus(); }
+      catch (e) { toast(e.message, 'error', 8000); }
+    };
+    done.onclick = async () => {
+      try { await post('/api/spotify/finish', { url: pasted.value }); toast('Spotify connected', 'success'); load(); }
+      catch (e) { toast(e.message, 'error', 10000); }
+    };
+    body.replaceChildren(
+      h('ol', { class: 'small stack gap-s', style: 'margin:0;padding-left:18px' },
+        h('li', null, 'At developer.spotify.com make an app (Web API). Add the redirect URI ', h('span', { class: 'mono' }, s.redirect), ' and copy its Client ID. (Spotify needs the app owner to have Premium.)'),
+        h('li', null, 'Paste the Client ID, then sign in and approve.'),
+        h('li', null, 'Your browser then goes to an address that doesn\'t load. That\'s expected: copy it from the address bar, paste it below and press Connect.')),
+      h('label', { class: 'field-col', for: id.id }, 'Client ID', h('div', { class: 'row gap-s wrap' }, id, go)),
+      h('label', { class: 'field-col', for: pasted.id }, 'The address it went to', h('div', { class: 'row gap-s wrap' }, pasted, done)));
+  };
+  const load = () => get('/api/spotify').then(show).catch(() => body.replaceChildren(h('p', { class: 'muted small flush' }, "Couldn't load Spotify's status.")));
+  load();
+  return card;
 }
 
 const SCREEN_TYPES = /\.(gif|png|jpe?g|webp)$/i;

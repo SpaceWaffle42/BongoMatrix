@@ -41,6 +41,7 @@ class Style:
     swatches: dict = {}  # setting name -> {choice: [colours]}, so the dashboard shows each choice's colours
     basic: tuple = ()  # this style's settings shown up front in the dashboard; the rest sit under Advanced
     group: str | None = None  # heading the dashboard files this style under (a Clock's "Digital", "Word"...)
+    finished: bool = False  # set True in render to hand over to the next entry before its time is up
     fps: int = 30
 
     def __init__(self, ctx: Context, settings: dict):
@@ -90,6 +91,9 @@ class Module:
     # ``choice_names={"holidays": {"labels": {"eid_al_fitr": "Eid al-Fitr"}, "groups": {"eid_al_fitr": "Islamic"}}}``:
     # how the dashboard words a choice setting's values, and the headings it groups them under.
     choice_names: dict = field(default_factory=dict)
+    # ``renames={"old_module": {"old_style": "new_style", None: "style for entries without one"}}``:
+    # entries saved for a module that has since moved into this one (config.tidy rewrites them).
+    renames: dict = field(default_factory=dict)
 
     @property
     def default_style(self) -> str:

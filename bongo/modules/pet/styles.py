@@ -8,7 +8,7 @@ from PIL import Image, ImageDraw
 
 from bongo.module import Style
 
-from .art import H, W, load
+from .art import H, W, load, missing, no_art
 from bongo.pets import wearing
 
 from .scenes import MODES, STRIDE, record
@@ -86,6 +86,9 @@ class _Scene(Style):
     MODE: tuple[str, ...] = ()
 
     def setup(self):
+        self.art = None
+        if missing(self.ctx.pet.kind):                  # a public build before a pack is imported
+            return
         self.art = load(self.ctx.pet.kind, self.ctx.pet.coat, wearing(self.ctx.pet, self.ctx.now().date()))
         self.timeline = [(shot, mode) for mode in self.modes() for shot in record(self.art, mode, self.ctx.pet.name)]
         self.starts, t = [], 0.0
@@ -104,6 +107,8 @@ class _Scene(Style):
         return list(self.MODE)
 
     def render(self, now):
+        if self.art is None:
+            return no_art(self.ctx.width, self.ctx.height, self.ctx.fonts)
         t = (now.timestamp() * 1000) % self.total
         k = bisect.bisect_right(self.starts, t) - 1
         shot = self.timeline[k][0]
@@ -177,11 +182,14 @@ class Wander(Style):
     choices = {"direction": ["both", "right", "left"]}
 
     def setup(self):
-        self.art = load(self.ctx.pet.kind, self.ctx.pet.coat, wearing(self.ctx.pet, self.ctx.now().date()))
+        self.art = None if missing(self.ctx.pet.kind) else \
+            load(self.ctx.pet.kind, self.ctx.pet.coat, wearing(self.ctx.pet, self.ctx.now().date()))
 
     def render(self, now):
         w, h = self.ctx.width, self.ctx.height
         img = Image.new("RGBA", (w, h), (0, 0, 0, 0))
+        if self.art is None:
+            return img
         path = w + 32                                   # off one edge to off the other
         seconds = path / STRIDE["walk_right"] / 10      # walk cycle: about 10 px a second
         lap = int(now.timestamp() // seconds)
