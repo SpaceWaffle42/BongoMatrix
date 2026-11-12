@@ -8,7 +8,7 @@ from __future__ import annotations
 import io
 import re
 
-from PIL import Image
+from PIL import Image, ImageSequence, UnidentifiedImageError
 
 from bongo import media
 
@@ -49,6 +49,33 @@ def gif(frames: list, width: int, height: int, background: str = "#000000", loop
     images[0].save(out, "GIF", save_all=True, append_images=images[1:], duration=times, optimize=False,
                    disposal=1, **extra)
     return out.getvalue()
+
+
+def frames_from(data: bytes, width: int, height: int) -> list:
+    """A GIF, PNG or WebP (still or animated) as Animator frames: each frame fitted inside the panel,
+    centred, transparent and black pixels left as background, its own timing kept (up to ``MAX_FRAMES``)."""
+    try:
+        img = Image.open(io.BytesIO(data))
+        img.load()
+    except (UnidentifiedImageError, OSError):
+        raise ValueError("that isn't a picture the Animator can read (try a GIF, PNG or WebP)") from None
+    frames = []
+    for k, frame in enumerate(ImageSequence.Iterator(img)):
+        if k >= MAX_FRAMES:
+            break
+        rgba = frame.convert("RGBA")
+        scale = min(width / rgba.width, height / rgba.height)
+        size = (max(1, round(rgba.width * scale)), max(1, round(rgba.height * scale)))
+        if size != rgba.size:   # shrinking smooths; growing a small sprite keeps its hard pixels
+            rgba = rgba.resize(size, Image.Resampling.LANCZOS if scale < 1 else Image.Resampling.NEAREST)
+        canvas = Image.new("RGBA", (width, height))
+        canvas.paste(rgba, ((width - size[0]) // 2, (height - size[1]) // 2))
+        rgba_px = canvas.tobytes()   # (getdata is deprecated in newer Pillow)
+        px = [None if rgba_px[i + 3] < 128 or not any(rgba_px[i:i + 3]) else "#%02x%02x%02x" % tuple(rgba_px[i:i + 3])
+              for i in range(0, len(rgba_px), 4)]   # black is an LED that's off: the background
+        ms = int(frame.info.get("duration") or img.info.get("duration") or 100)
+        frames.append({"px": px, "ms": max(20, min(10_000, ms))})
+    return frames
 
 
 def save(name: str, data: bytes) -> str:

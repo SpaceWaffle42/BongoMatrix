@@ -23,7 +23,7 @@ from pathlib import Path
 from flask import Flask, abort, jsonify, request, send_file, send_from_directory
 from werkzeug.exceptions import HTTPException
 
-from bongo import animator, config as cfg, pets, petpack, update
+from bongo import animator, config as cfg, netname, pets, petpack, update
 from bongo import media, places
 from bongo.module import Context
 from bongo.player import Entry
@@ -92,7 +92,7 @@ PACK_UPLOAD = 300 * 1024 * 1024  # a pet pack zip from itch.io
 
 
 def create_app(*, modules, live, pairing, config_path, logs: LogBuffer | None = None,
-               fonts=None, started=None) -> Flask:
+               fonts=None, started=None, network=None) -> Flask:
     app = Flask(__name__, static_folder=None)
     app.config["MAX_CONTENT_LENGTH"] = 64 * 1024  # a whole config is a few KB
     logs = logs or LogBuffer()
@@ -140,7 +140,7 @@ def create_app(*, modules, live, pairing, config_path, logs: LogBuffer | None = 
         path = request.path
         if not path.startswith("/api/"):
             return None
-        upload = request.method == "POST" and path in ("/api/media", "/api/pets/import")
+        upload = request.method == "POST" and path in ("/api/media", "/api/pets/import", "/api/animator/import")
         if upload and request.headers.get("X-Bongo-Upload") != "1":
             abort(415)  # a custom header: a cross-site form can't set it, and fetch would need CORS
         if request.method not in ("GET", "HEAD") and not upload and not request.is_json:
@@ -182,7 +182,12 @@ def create_app(*, modules, live, pairing, config_path, logs: LogBuffer | None = 
         return jsonify(live=live.status(), panel={"width": area.panel_width, "height": area.panel_height},
                        safe_area=dict(zip(("top", "right", "bottom", "left"), area.margins)),
                        uptime=round(time.time() - started), name=config.get("name", "Bongo Matrix"),
-                       pet_kinds=pets.kinds())
+                       pet_kinds=pets.kinds(), network=network_info(config))
+
+    def network_info(config):
+        suffix = netname.mac_suffix()
+        return {"host": netname.host_name(config.get("name"), suffix), "suffix": suffix,
+                "address": netname.address(), "default_name": netname.DEFAULT_NAME}
 
     @lru_cache(maxsize=128)
     def face_uri(kind, coat):
@@ -295,6 +300,42 @@ def create_app(*, modules, live, pairing, config_path, logs: LogBuffer | None = 
             return jsonify(ok=True, name=name, live=live.status())
         logging.getLogger("bongo.web").info("animation saved: %s", name)
         return jsonify(ok=True, name=name), 201
+
+    # -- Wi-Fi (bongo/net.py; only on a Pi where NetworkManager runs) ------------------------------
+    @app.get("/api/network")
+    def network_status():
+        if network is None:
+            return jsonify(managed=False)
+        scan = []
+        if network.status.state != "setup":   # the radio is busy being the hotspot during setup
+            try:
+                scan = [vars(n) for n in network.scan()][:12]
+            except RuntimeError:
+                pass
+        return jsonify(managed=True, **network.status.public(), networks=scan, saved=network.saved())
+
+    @app.post("/api/network/setup")
+    def network_setup():
+        """Settings > Wi-Fi > Reopen setup: the Matrix leaves its network and opens its setup hotspot."""
+        if network is None:
+            return jsonify(error="Wi-Fi isn't managed on this machine."), 409
+        network.reopen()
+        logging.getLogger("bongo.net").info("setup reopened by %s", (pairing.check(request.cookies.get(COOKIE)) or {}).get("name"))
+        return jsonify(network.status.public())
+
+    @app.post("/api/animator/import")
+    def animator_import():
+        """A GIF or picture turned into Animator frames to touch up (nothing is saved)."""
+        request.max_content_length = 8 * 1024 * 1024
+        upload = request.files.get("file")
+        if upload is None or not upload.filename:
+            abort(400, "choose a GIF or picture")
+        area = cfg.safe_area(load())
+        try:
+            frames = animator.frames_from(upload.read(), area.panel_width, area.panel_height)
+        except ValueError as error:
+            return jsonify(error=f"Couldn't import {upload.filename}: {error}."), 422
+        return jsonify(frames=frames)
 
     # -- Spotify sign-in (bongo/modules/spotify/account.py) -------------------------------------
     @app.get("/api/spotify")

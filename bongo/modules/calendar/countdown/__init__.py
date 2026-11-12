@@ -26,10 +26,10 @@ def grouped(cls):
 
 EVENT_FIELDS = [
     {"name": "title", "type": "text", "label": "What", "placeholder": "Mum's birthday"},
-    {"name": "date", "type": "date", "label": "Date"},
+    {"name": "date", "type": "date", "label": "Date", "hidden_when": "holiday"},
     {"name": "holiday", "type": "choice", "label": "Or a holiday (every year)",
      "options": [["", "None"]] + [[k, choice_labels()[k], choice_groups()[k]] for k in RULES]},
-    {"name": "repeat", "type": "choice", "label": "Repeats",
+    {"name": "repeat", "type": "choice", "label": "Repeats", "hidden_when": "holiday",  # a holiday is yearly anyway
      "options": [["once", "Just once"], ["yearly", "Every year"]]},
     {"name": "time", "type": "time", "label": "At (blank = all day)", "more": True},
     {"name": "until", "type": "time", "label": "Ends at (else an hour later)", "more": True},

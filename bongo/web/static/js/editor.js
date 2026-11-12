@@ -377,7 +377,8 @@ function paletteList(id, v, set) {
 }
 
 /** A list of entries (notices, events...) as small forms, from the module's ``item_fields``.
- *  Fields marked ``more`` are tucked under each entry's "More options". Empty fields are left out. */
+ *  Fields marked ``more`` are tucked under each entry's "More options"; a field with ``hidden_when: name``
+ *  is hidden while that field is set. Empty fields are left out. */
 const DAY_NAMES = ['mon', 'tue', 'wed', 'thu', 'fri', 'sat', 'sun'];
 function itemList(f, id, v, set) {
   const list = clone(Array.isArray(v) ? v : []);
@@ -404,7 +405,7 @@ function itemList(f, id, v, set) {
       const groups = [...new Set(fd.options.map((o) => o[2]).filter(Boolean))];
       const sel = h('select', { class: 'input', id: fid }, fd.options.filter((o) => !o[2]).map(option),
         groups.map((g) => h('optgroup', { label: g }, fd.options.filter((o) => o[2] === g).map(option))));
-      sel.addEventListener('change', () => put(sel.value));
+      sel.addEventListener('change', () => { put(sel.value); if (f.fields.some((x) => x.hidden_when === fd.name)) paint(); });
       return sel;
     }
     if (fd.type === 'colour') {
@@ -421,7 +422,8 @@ function itemList(f, id, v, set) {
   const paint = () => {
     box.replaceChildren(
       ...list.map((it, i) => {
-        const main = f.fields.filter((fd) => !fd.more), more = f.fields.filter((fd) => fd.more);
+        const shown = f.fields.filter((fd) => !(fd.hidden_when && it[fd.hidden_when]));  // e.g. no date for a holiday
+        const main = shown.filter((fd) => !fd.more), more = shown.filter((fd) => fd.more);
         const cell = (fd) => { const fid = `${id}-${i}-${fd.name}`; return h('label', { class: 'field-col', for: fid }, fd.label || humanize(fd.name), input(fd, it, fid)); };
         const extra = more.length ? h('details', { class: 'item-more', open: more.some((fd) => it[fd.name] != null && it[fd.name] !== '') },
           h('summary', null, 'More options (dates, days, times)'), h('div', { class: 'grid-2' }, more.map(cell))) : null;

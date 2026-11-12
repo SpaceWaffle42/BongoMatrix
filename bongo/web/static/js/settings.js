@@ -8,7 +8,7 @@ import { S, onLeave, go, saveConfig } from './app.js';
 export function render(view) {
   view.append(h('div', { class: 'page-head' }, h('h1', { class: 'h1' }, 'Settings'),
     h('p', { class: 'muted flush' }, 'Each card saves on its own.')),
-  h('div', { class: 'settings-grid' }, safeAreaCard(), h('div', { class: 'stack gap-20' }, deviceCard(), petCard(), spotifyCard(), updateCard(), devicesCard()), h('div', { class: 'stack gap-20' }, sleepCard(), splashCard(), mediaCard())));
+  h('div', { class: 'settings-grid' }, safeAreaCard(), h('div', { class: 'stack gap-20' }, deviceCard(), wifiCard(), petCard(), spotifyCard(), updateCard(), devicesCard()), h('div', { class: 'stack gap-20' }, sleepCard(), splashCard(), mediaCard())));
 }
 
 function safeAreaCard() {
@@ -67,6 +67,17 @@ function deviceCard() {
   const bright = h('input', { type: 'range', class: 'range', id: 'set-bright', min: 1, max: 100, value: c.panel?.brightness ?? 80 });
   const bVal = h('span', { class: 'mono strong' }, `${bright.value}%`);
   bright.addEventListener('input', () => { bVal.textContent = `${bright.value}%`; });
+  // the name it answers to on the network, as the Matrix makes it (bongo/netname.py host_name)
+  const net = S.state?.network || {};
+  const hostOf = (v) => {
+    const t = v.trim();
+    const slug = t.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '').slice(0, 63).replace(/-+$/, '');
+    return !t || t === (net.default_name || 'Bongo Matrix') || !slug ? `matrix-${net.suffix || '0000'}` : slug;
+  };
+  const host = h('span', { class: 'mono strong' });
+  const where = h('p', { class: 'muted tiny flush' }, 'On your network: ', host, net.address ? ` · ${net.address}` : '');
+  const showHost = () => { host.textContent = `${hostOf(name.value)}.local`; };
+  name.addEventListener('input', showHost); showHost();
   const save = h('button', { type: 'button', class: 'btn primary' }, 'Save');
   save.onclick = () => {
     if (tz.value && zones.length && !zones.includes(tz.value)) { toast(`“${tz.value}” isn't a time zone this browser knows. Use a name like Europe/London.`, 'error'); tz.focus(); return; }
@@ -74,13 +85,41 @@ function deviceCard() {
       panel: { ...c.panel, brightness: Number(bright.value) } }, 'Device settings');
   };
   return h('section', { class: 'card stack', 'aria-label': 'Device' }, h('h2', { class: 'h2' }, 'Device'),
-    h('label', { class: 'field-col', for: 'set-name' }, 'Display name', name),
+    h('label', { class: 'field-col', for: 'set-name' }, 'Display name', name, where),
     h('label', { class: 'field-col', for: 'set-tz' }, 'Time zone', tz,
       here && here !== tz.value ? h('button', { type: 'button', class: 'link small left', onclick: () => { tz.value = here; } }, `Use this browser's: ${here}`) : null),
     h('datalist', { id: 'tz-list' }, zones.map((z) => h('option', { value: z }))),
     h('label', { class: 'field-col', for: 'set-bright' }, h('span', { class: 'row between' }, h('span', null, 'Panel brightness (daytime)'), bVal), bright),
     h('p', { class: 'muted tiny flush' }, `${c.panel?.cols || 64}×${c.panel?.rows || 32} panel · ${c.panel?.hardware_mapping || ''}`),
     h('div', { class: 'row end' }, save));
+}
+
+/** Wi-Fi: which network it's on, and "Reopen setup" for a new router or password (bongo/net.py). */
+function wifiCard() {
+  const body = h('div', { class: 'stack gap-s' }, h('p', { class: 'muted small flush' }, 'Loading…'));
+  const card = h('section', { class: 'card stack', 'aria-label': 'Wi-Fi' }, h('h2', { class: 'h2' }, 'Wi-Fi'), body);
+  const STATES = { connected: 'Connected', connecting: 'Looking for a saved network', setup: 'Setup is open', starting: 'Starting' };
+  const show = (n) => {
+    if (!n.managed) { card.hidden = true; return; }   // not a Pi running NetworkManager (a laptop, the demo)
+    const what = n.wired ? 'On a cable' : n.ssid ? `On ${n.ssid}` : STATES[n.state] || n.state;
+    const rows = [h('div', { class: 'row between wrap' }, h('span', { class: 'strong' }, what), h('span', { class: 'muted small' }, STATES[n.state] || ''))];
+    if (n.hotspot) rows.push(h('p', { class: 'small flush' }, 'Join ', h('span', { class: 'mono strong' }, n.hotspot.ssid), ' with password ', h('span', { class: 'mono strong' }, n.hotspot.password), ' to choose a network.'));
+    if (n.saved?.length) rows.push(h('p', { class: 'muted tiny flush' }, `Saved: ${n.saved.join(', ')}`));
+    if (!(n.bands || []).includes('5')) rows.push(h('p', { class: 'muted tiny flush' }, 'This Matrix only has 2.4 GHz Wi-Fi (a Pi Zero): a 5 GHz-only network won\'t show up. Use your router\'s 2.4 GHz band or a USB Wi-Fi adapter.'));
+    const reopen = h('button', { type: 'button', class: 'btn' }, 'Reopen setup');
+    reopen.onclick = async () => {
+      reopen.disabled = true;
+      try { await post('/api/network/setup', {}); toast('Setup is open: join the Matrix-Setup network the panel shows', 'success', 8000); load(); }
+      catch (e) { toast(e.message, 'error'); reopen.disabled = false; }
+    };
+    if (n.state !== 'setup') rows.push(h('div', { class: 'stack gap-s' },
+      h('p', { class: 'muted tiny flush' }, 'New router or Wi-Fi password? Reopen setup: the Matrix leaves this network and shows a setup network to join from your phone. This dashboard goes offline until it\'s back on Wi-Fi.'),
+      h('div', { class: 'row end' }, reopen)));
+    body.replaceChildren(...rows);
+  };
+  const load = () => get('/api/network').then(show).catch(() => { card.hidden = true; });
+  load();
+  return card;
 }
 
 /** The Matrix's one pet: which animal and its name, shared by the Pet module, Wander and the Pet clock. */

@@ -74,13 +74,28 @@ class Script:
         ang = math.degrees(math.atan2(dy, dx)) % 360
         have = [w for w in WALKS if w[1] in self.art.animations]  # not every direction is in the atlas
         tag = min(have, key=lambda w: min(abs(ang - w[0]), 360 - abs(ang - w[0])))[1]
-        steps = max(1, int(round(dist / (STRIDE[tag] * stride_mult))))
         anim = self.art.animations[tag]
         sx, sy = self.cat
         self._moving = 1 if dx > 0.5 else -1 if dx < -0.5 else 0
-        for i in range(1, steps + 1):
-            self.cat = [sx + dx * i / steps, sy + dy * i / steps]
-            self.shot(tag, i % len(anim), anim[i % len(anim)].ms / speed)
+        sideways = tag == "walk_left_d" or abs(dx) >= abs(dy)   # a steep walk has no stepping art: it glides
+        gait = self.art.tuning.get("gait", {}).get(tag) if stride_mult == 1.0 and sideways else None
+        if gait:   # the gait drives the main axis exactly (x for a side walk); the other follows in whole pixels
+            sx, sy, tx, ty = round(sx), round(sy), round(x), round(y)
+            run, done, i = max(abs(tx - sx), abs(ty - sy)), 0, 0
+            while done < run:
+                i += 1
+                done = min(run, done + gait[i % len(gait)])
+                self.cat = [sx + round((tx - sx) * done / run), sy + round((ty - sy) * done / run)]
+                self.shot(tag, i % len(anim), anim[i % len(anim)].ms / speed)
+            last = i % len(anim)
+            if tag in ("walk_right", "walk_left") and last in (2, 4, 6):   # never stop mid-hop or mid-pass:
+                self.shot(tag, last + 1, anim[last + 1].ms / speed)         # land in place, then hand off
+            self.cat = [x, y]
+        else:
+            steps = max(1, int(round(dist / (STRIDE[tag] * stride_mult))))
+            for i in range(1, steps + 1):
+                self.cat = [sx + dx * i / steps, sy + dy * i / steps]
+                self.shot(tag, i % len(anim), anim[i % len(anim)].ms / speed)
         self._moving = 0
 
 
@@ -200,8 +215,8 @@ def hungry(s, name):                       # a banner scrolls "MOCHI IS HUNGRY!"
 
 def name_tag(s, name):
     s.cat = [-14, 26]
-    s.overlays.append(("tag", name.upper(), 4600))
     s.walk_to(32, 26)
+    s.overlays.append(("tag", name.upper(), s.elapsed))   # rises as she arrives, whatever the walk speed
     s.hold("meow_sit", 0, 2500)
 
 

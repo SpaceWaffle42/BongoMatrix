@@ -21,7 +21,7 @@ DEFAULTS = {
     "panel": {"rows": 32, "cols": 64, "hardware_mapping": "adafruit-hat-pwm",
               "gpio_slowdown": 4, "brightness": 80},
     "safe_area": {"top": 0, "right": 0, "bottom": 0, "left": 0},
-    "web": {"enabled": True, "host": "0.0.0.0", "port": 5000},
+    "web": {"enabled": True, "host": "0.0.0.0", "port": 5000, "port80": True},  # port80: plain http://name.local
     "playlist": [],
     # v2's default splash screen; "splash" items in the playlist play it. "boot": an optional file
     # played once at start-up (None: none). A splash rule without "boot" is from before 11 Nov 2026.

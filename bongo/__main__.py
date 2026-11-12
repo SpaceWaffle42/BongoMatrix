@@ -50,12 +50,25 @@ def _start_dashboard(config, modules, live, config_path) -> None:
 
     logs = LogBuffer()
     logging.getLogger().addHandler(logs)
+    from bongo import __version__, net, netname
+
+    network = None
+    if net.available():   # the Pi with NetworkManager: keep to the saved Wi-Fi, open setup as a last resort
+        network = net.Manager(netname.mac_suffix())
+        threading.Thread(target=network.run_forever, args=(threading.Event(),), daemon=True, name="wifi").start()
     pairing = Pairing(config_path.parent / "paired-devices.json")
-    live.overlay = pairing.overlay(Context().fonts)
-    app = create_app(modules=modules, live=live, pairing=pairing, config_path=config_path, logs=logs)
-    server = make_server(config["web"]["host"], config["web"]["port"], app, threaded=True)
+    fonts = Context().fonts
+    address = netname.AddressScreen(fonts)   # the frame it gets is already the safe area
+    live.overlay = netname.chain(pairing.overlay(fonts), address.overlay)   # the PIN wins over the address
+    app = create_app(modules=modules, live=live, pairing=pairing, config_path=config_path, logs=logs, network=network)
+    port = config["web"]["port"]
+    server = make_server(config["web"]["host"], port, app, threaded=True)
     threading.Thread(target=server.serve_forever, daemon=True, name="dashboard").start()
-    logging.info("dashboard on http://%s:%s", config["web"]["host"], config["web"]["port"])
+    logging.info("dashboard on http://%s:%s", config["web"]["host"], port)
+    plain = (config["web"].get("port80", True) and port != 80
+             and netname.redirect_server(80, port, config["web"]["host"]) is not None)
+    watch = netname.Watch(address, lambda: cfg.load(config_path), port, plain, __version__)
+    threading.Thread(target=watch.run, args=(threading.Event(),), daemon=True, name="network").start()
 
 
 def _hardware(config):

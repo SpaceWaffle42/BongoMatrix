@@ -191,18 +191,29 @@ class Wander(Style):
         if self.art is None:
             return img
         path = w + 32                                   # off one edge to off the other
-        seconds = path / STRIDE["walk_right"] / 10      # walk cycle: about 10 px a second
+        gait = self.art.tuning.get("gait", {}).get("walk_right")
+        if gait:   # pose and position from one frame count: she only moves when her legs do (no glide at 20 fps)
+            anim = self.art.animations["walk_right"]
+            per_cycle, cycle = sum(gait), sum(f.ms for f in anim)
+            seconds = path / per_cycle * cycle / 1000
+        else:
+            seconds = path / STRIDE["walk_right"] / 10      # walk cycle: about 10 px a second
         lap = int(now.timestamp() // seconds)
         rightwards = {"right": True, "left": False}.get(self.settings["direction"], lap % 2 == 0)
-        tag = "walk_right" if rightwards else "walk_left"
-        anim = self.art.animations[tag]
-        progress = (now.timestamp() % seconds) / seconds
-        x = -16 + progress * path if rightwards else w + 16 - progress * path
-        cycle = sum(f.ms for f in anim)
-        t, i = (now.timestamp() * 1000) % cycle, 0
-        while t >= anim[i].ms:
-            t -= anim[i].ms
-            i += 1
+        anim = self.art.animations["walk_right" if rightwards else "walk_left"]
+        if gait:
+            n = int((now.timestamp() % seconds) * 1000 // (cycle / len(anim)))
+            i = n % len(anim)
+            step = (n // len(anim)) * per_cycle + sum(gait[1:i + 1])
+            x = -16 + step if rightwards else w + 16 - step
+        else:      # no gait for this pet (the bunny): the walk glides as it always has
+            progress = (now.timestamp() % seconds) / seconds
+            x = -16 + progress * path if rightwards else w + 16 - progress * path
+            cycle = sum(f.ms for f in anim)
+            t, i = (now.timestamp() * 1000) % cycle, 0
+            while t >= anim[i].ms:
+                t -= anim[i].ms
+                i += 1
         frame = anim[i]
         feet = h - self.settings["floor"]  # paws on the bottom row (art: lowest pixel = feet - 1)
         img.paste(frame.image, (int(x) + frame.dx, feet + frame.dy), frame.image)

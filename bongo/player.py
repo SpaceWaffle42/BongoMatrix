@@ -34,6 +34,7 @@ def play_entry(style: Style, seconds: float, panel, stop: threading.Event | None
     frame_time = 1 / style.fps
     end = clock() + seconds
     shown = 0
+    last, last_at = None, -1e9   # the style's latest frame: while a screen covers it, it keeps its own pace
     while not stop.is_set():
         if clock() >= end and not (live and live.paused):
             break
@@ -44,17 +45,24 @@ def play_entry(style: Style, seconds: float, panel, stop: threading.Event | None
             break
         started = clock()
         now = style.ctx.now()
-        frame = style.render(now)
-        if overlays:
-            frame = overlays(frame, now)
+        if last is None or started - last_at >= frame_time - 1e-3:
+            last, last_at = style.render(now), started
+            if overlays:
+                last = overlays(last, now)
+        frame = last
+        wait = frame_time
         if live and live.overlay:
-            frame = live.overlay(frame)
+            covered = live.overlay(frame)
+            if covered is not frame:   # a screen over the style (PIN, address) scrolls at 20 fps whatever the style's rate;
+                frame, wait = covered, min(frame_time, 1 / 20)   # the style underneath still renders at its own
+            else:
+                last = None            # uncovered: every pass renders, exactly as before
         out = place(frame) if place else frame
         panel.show(out)
         if live:
             live.publish(out)
         shown += 1
-        stop.wait(max(0.0, frame_time - (clock() - started)))
+        stop.wait(max(0.0, wait - (clock() - started)))
     return shown
 
 

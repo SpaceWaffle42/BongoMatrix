@@ -37,7 +37,7 @@ class Art:
     empty: Image.Image  # the same with the bowl empty
     night: Image.Image  # dark, lit only around the bed
     ball: Image.Image   # RGBA
-    tuning: dict = field(default_factory=dict)  # per-animal scene tweaks (see scenes.py): bowl, ball, reach, zoomies, toy
+    tuning: dict = field(default_factory=dict)  # per-animal scene tweaks (see scenes.py): bowl, ball, reach, zoomies, toy, gait
     toys: dict = field(default_factory=dict)    # name -> (image, dx, dy): placed by the middle of its bottom edge
 
 
@@ -84,6 +84,16 @@ def sheet(kind: str = "cat", coat: str = "") -> Image.Image:
     return cats
 
 
+# How far the body moves on entering each walk frame: the pushes land on the frames where the art's
+# planted paws sweep back, so the paws stay put instead of treading (review, 12 Nov). 12 px per cycle.
+GAIT = {"cat": {"walk_right": (1, 2, 2, 1, 1, 2, 2, 1), "walk_left": (1, 2, 2, 1, 1, 2, 2, 1),
+                "walk_left_d": (1, 1, 1, 1, 1, 1)}}
+
+
+def tuned(kind: str, index: dict) -> dict:
+    return {**({"gait": GAIT[kind]} if kind in GAIT else {}), **index.get("tuning", {})}
+
+
 @lru_cache(maxsize=8)
 def load(kind: str = "cat", coat: str = "", outfits: tuple = ()) -> Art:
     """The art for one pet (bongo/pets.py): ``<kind>.json``, the coat's atlas, and the outfits
@@ -103,9 +113,9 @@ def load(kind: str = "cat", coat: str = "", outfits: tuple = ()) -> Art:
         animations[tag] = placed
     if "room_from" in index:  # this animal lives in another one's room (the bunny in the cat's)
         home = load(index["room_from"])
-        return Art(animations, home.room, home.empty, home.night, home.ball, index.get("tuning", {}), home.toys)
+        return Art(animations, home.room, home.empty, home.night, home.ball, tuned(kind, index), home.toys)
     room = crop(index["room"]).convert("RGB")
-    return Art(animations, room, empty_bowl(room), night(room), crop(index["ball"]), index.get("tuning", {}), toys())
+    return Art(animations, room, empty_bowl(room), night(room), crop(index["ball"]), tuned(kind, index), toys())
 
 
 @lru_cache(maxsize=1)

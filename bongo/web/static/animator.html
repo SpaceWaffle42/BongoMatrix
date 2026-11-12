@@ -72,6 +72,12 @@ kbd { font:11px var(--mono); border:1px solid var(--line-2); padding:0 4px; colo
   <input class="input" id="name" value="bouncing_ball" aria-label="Animation name" style="width:180px">
   <span class="muted tiny" id="size">64 × 32 · 8 frames</span>
   <span class="grow"></span>
+  <select class="input" id="template" aria-label="Start from a template" style="font-family:var(--ui)">
+    <option value="">Start from…</option><option value="blank">Blank</option><option value="ball">Bouncing ball</option>
+    <option value="heart">Pixel heart</option><option value="stars">Starfield</option><option value="rain">Digital rain</option>
+  </select>
+  <button class="btn" id="import" title="Turn a GIF or picture into frames to touch up">Import GIF…</button>
+  <input type="file" id="importfile" accept="image/gif,image/png,image/webp" hidden>
   <button class="btn" id="undo" title="Undo (Ctrl+Z)">↶ Undo</button>
   <button class="btn" id="redo" title="Redo (Ctrl+Y)">↷ Redo</button>
   <button class="btn" id="show">▶ Show on Matrix</button>
@@ -86,6 +92,7 @@ kbd { font:11px var(--mono); border:1px solid var(--line-2); padding:0 4px; colo
     <button class="btn icon" data-tool="line" title="Line (L)">╱</button>
     <button class="btn icon" data-tool="rect" title="Rectangle (R)">▭</button>
     <button class="btn icon" data-tool="pick" title="Pick colour (I)">⌖</button>
+    <button class="btn icon" data-tool="shift" title="Shift the whole drawing (V)">✥</button>
     <hr>
     <button class="btn icon" id="mirror" title="Mirror drawing left/right (M)">⇋</button>
     <button class="btn icon on" id="onion" title="Onion skin: see the previous frame faintly (O)">◐</button>
@@ -96,8 +103,9 @@ kbd { font:11px var(--mono); border:1px solid var(--line-2); padding:0 4px; colo
   <div class="stage">
     <div class="stage-top">
       <span id="pos">x –, y –</span><span>·</span><span id="toolname">Pencil</span>
+      <label class="tiny muted">Brush <select class="input" id="brush" title="Brush size for pencil and eraser ([ and ])"><option>1</option><option>2</option><option>3</option><option>4</option></select></label>
       <span class="grow"></span>
-      <span><kbd>P</kbd> pencil <kbd>E</kbd> eraser <kbd>F</kbd> fill <kbd>←</kbd><kbd>→</kbd> frames <kbd>Space</kbd> play</span>
+      <span><kbd>P</kbd> pencil <kbd>E</kbd> eraser <kbd>F</kbd> fill <kbd>V</kbd> shift <kbd>[</kbd><kbd>]</kbd> brush <kbd>←</kbd><kbd>→</kbd> frames <kbd>Space</kbd> play</span>
     </div>
     <div id="board-wrap"><canvas id="board" width="1280" height="640" aria-label="Drawing canvas, 64 by 32 pixels"></canvas></div>
   </div>
@@ -117,12 +125,20 @@ kbd { font:11px var(--mono); border:1px solid var(--line-2); padding:0 4px; colo
         <button class="btn" id="play">❚❚ Pause</button>
         <label class="tiny muted">Speed <input class="input" id="speed" type="number" min="10" max="400" value="100" style="width:64px">%</label>
       </div>
+      <div class="row" style="margin-top:8px">
+        <label class="tiny muted">Plays <select class="input" id="loop" style="font-family:var(--ui)"><option value="loop">On a loop</option><option value="pingpong">There and back</option><option value="once">Once</option></select></label>
+        <label class="tiny muted">Background <input type="color" id="bg" value="#000000" title="Shown wherever nothing is drawn" style="width:36px;height:26px;padding:0;border:1px solid var(--line-2);background:none"></label>
+      </div>
     </section>
   </div>
 
   <section class="card timeline">
     <div class="row" style="margin-bottom:8px">
       <p class="label" style="margin:0">Frames</p><span class="grow"></span>
+      <label class="tiny muted">Every frame <input class="input" id="allms" type="number" min="20" max="5000" step="10" value="90" style="width:64px"> ms</label>
+      <button class="btn" id="setall" title="Give every frame this timing">Set</button>
+      <button class="btn" id="copy" title="Copy this frame (Ctrl+C)">Copy</button>
+      <button class="btn" id="paste" title="Paste it after this frame (Ctrl+V)">Paste</button>
       <button class="btn" id="dup">Duplicate</button>
       <button class="btn" id="left">◀ Move</button>
       <button class="btn" id="right">Move ▶</button>
@@ -143,7 +159,9 @@ const $ = (id) => document.getElementById(id);
 const board = $('board'), bx = board.getContext('2d');
 const preview = $('preview'), px = preview.getContext('2d');
 let frames = [], cur = 0, tool = 'pen', colour = '#ffb547', mirror = false, onion = true, grid = true, showSafe = true;
-let undo = [], redo = [];
+let undo = [], redo = [], brush = 1, clip = null, dirty = false, bg = '#000000';
+const MAX = 300;   // the server's limit too (bongo/animator.py)
+function roomFor(n) { if (frames.length + n <= MAX) return true; toast(`An animation can have up to ${MAX} frames`); return false; }
 
 // -- starter animation: a ball bouncing with a squash, and its shadow ----------------------
 function blank() { return { px: new Array(W * H).fill(null), ms: 90 }; }
@@ -167,13 +185,54 @@ function starter() {
   return out;
 }
 
+function heart() {   // a pixel heart that beats
+  const shape = ['.XX.XX.', 'XXXXXXX', 'XXXXXXX', '.XXXXX.', '..XXX..', '...X...'];
+  return [3, 4, 4, 3, 3, 3].map((k, i) => {
+    const f = blank(); f.ms = i < 3 ? 90 : 160;
+    shape.forEach((row, y) => [...row].forEach((c, x) => {
+      if (c !== 'X') return;
+      for (let a = 0; a < k; a++) for (let b = 0; b < k; b++) f.px[(16 - 3 * k + y * k + b) * W + 32 - Math.floor(7 * k / 2) + x * k + a] = (x < 2 && y < 2) ? '#ff8aa0' : '#ff3b5c';
+    }));
+    return f;
+  });
+}
+function stars() {   // stars streaming past, three speeds
+  let seed = 7; const rnd = () => (seed = (seed * 16807) % 2147483647) / 2147483647;
+  const st = Array.from({ length: 40 }, () => [rnd() * W, Math.floor(rnd() * H), 1 + Math.floor(rnd() * 3)]);
+  return Array.from({ length: 16 }, (_, i) => {
+    const f = blank(); f.ms = 70;
+    st.forEach(([x, y, v]) => { const xx = Math.floor(((x - i * v * 4) % W + W) % W); f.px[y * W + xx] = ['#3b4048', '#9aa1ac', '#ffffff'][v - 1]; });
+    return f;
+  });
+}
+function rain() {   // green code falling down columns
+  let seed = 3; const rnd = () => (seed = (seed * 16807) % 2147483647) / 2147483647;
+  const cols = Array.from({ length: 16 }, () => [Math.floor(rnd() * W), Math.floor(rnd() * H), 4 + Math.floor(rnd() * 6)]);
+  return Array.from({ length: 16 }, (_, i) => {
+    const f = blank(); f.ms = 80;
+    cols.forEach(([x, y0, len]) => { const head = (y0 + i * 2) % (H + len);
+      for (let t = 0; t < len; t++) { const y = head - t; if (y >= 0 && y < H) f.px[y * W + x] = t === 0 ? '#d8ffe0' : t < 3 ? '#4ade80' : '#1f7a45'; } });
+    return f;
+  });
+}
+const TEMPLATES = { blank: () => [blank()], ball: starter, heart, stars, rain };
+
 // -- drawing ----------------------------------------------------------------------------
-function snapshot() { undo.push(JSON.stringify({ frames, cur })); if (undo.length > 80) undo.shift(); redo = []; }
+function snapshot() { undo.push(JSON.stringify({ frames, cur })); if (undo.length > 80) undo.shift(); redo = []; dirty = true; }
 function restore(s) { const o = JSON.parse(s); frames = o.frames; cur = Math.min(o.cur, frames.length - 1); renderAll(); }
-function setPx(f, x, y, c) {
+function dot(f, x, y, c) {
   if (x < 0 || y < 0 || x >= W || y >= H) return;
   f.px[y * W + x] = c;
   if (mirror) f.px[y * W + (W - 1 - x)] = c;
+}
+function setPx(f, x, y, c, size = 1) {   // a square brush centred on the pixel
+  const o = Math.floor((size - 1) / 2);
+  for (let a = 0; a < size; a++) for (let b = 0; b < size; b++) dot(f, x - o + a, y - o + b, c);
+}
+function shifted(px, dx, dy) {   // the whole drawing moved; what goes off the edge is dropped
+  const out = new Array(W * H).fill(null);
+  px.forEach((c, i) => { const x = i % W + dx, y = Math.floor(i / W) + dy; if (c && x >= 0 && y >= 0 && x < W && y < H) out[y * W + x] = c; });
+  return out;
 }
 function lineCells(x0, y0, x1, y1) {
   const cells = []; let dx = Math.abs(x1 - x0), dy = -Math.abs(y1 - y0), sx = x0 < x1 ? 1 : -1, sy = y0 < y1 ? 1 : -1, e = dx + dy;
@@ -191,7 +250,7 @@ function fill(f, x, y, c) {
 }
 
 function drawFrame(ctx, f, scale, ghost) {
-  ctx.fillStyle = '#000'; ctx.fillRect(0, 0, W * scale, H * scale);
+  ctx.fillStyle = bg; ctx.fillRect(0, 0, W * scale, H * scale);
   if (ghost) {
     ctx.globalAlpha = 0.22;
     ghost.px.forEach((c, i) => { if (c) { ctx.fillStyle = c; ctx.fillRect((i % W) * scale, Math.floor(i / W) * scale, scale, scale); } });
@@ -239,7 +298,7 @@ function cell(e) {
   const r = board.getBoundingClientRect();
   return [Math.floor((e.clientX - r.left) / r.width * W), Math.floor((e.clientY - r.top) / r.height * H)];
 }
-let drawing = false, last = null;
+let drawing = false, last = null, moving = null;
 board.addEventListener('pointerdown', (e) => {
   board.setPointerCapture(e.pointerId);
   const [x, y] = cell(e), f = frames[cur];
@@ -247,17 +306,19 @@ board.addEventListener('pointerdown', (e) => {
   snapshot();
   if (tool === 'fill') { fill(f, x, y, e.button === 2 ? null : colour); renderAll(); return; }
   if (tool === 'line' || tool === 'rect') { dragStart = dragEnd = [x, y]; renderBoard(); return; }
-  drawing = true; last = [x, y]; setPx(f, x, y, tool === 'erase' || e.button === 2 ? null : colour); renderBoard();
+  if (tool === 'shift') { moving = { from: [x, y], px: f.px.slice() }; return; }
+  drawing = true; last = [x, y]; setPx(f, x, y, tool === 'erase' || e.button === 2 ? null : colour, brush); renderBoard();
 });
 board.addEventListener('pointermove', (e) => {
   const [x, y] = cell(e); hover = [x, y]; $('pos').textContent = `x ${x}, y ${y}`;
   if (dragStart) { dragEnd = [x, y]; }
-  else if (drawing) { lineCells(last[0], last[1], x, y).forEach(([a, b]) => setPx(frames[cur], a, b, tool === 'erase' || e.buttons === 2 ? null : colour)); last = [x, y]; }
+  else if (moving) { frames[cur].px = shifted(moving.px, x - moving.from[0], y - moving.from[1]); }
+  else if (drawing) { lineCells(last[0], last[1], x, y).forEach(([a, b]) => setPx(frames[cur], a, b, tool === 'erase' || e.buttons === 2 ? null : colour, brush)); last = [x, y]; }
   renderBoard();
 });
 board.addEventListener('pointerup', () => {
   if (dragStart) { shapeCells(dragStart, dragEnd).forEach(([x, y]) => setPx(frames[cur], x, y, colour)); dragStart = dragEnd = null; }
-  drawing = false; renderAll();
+  drawing = false; moving = null; renderAll();
 });
 board.addEventListener('pointerleave', () => { hover = null; $('pos').textContent = 'x –, y –'; renderBoard(); });
 board.addEventListener('contextmenu', (e) => e.preventDefault());
@@ -278,7 +339,7 @@ function paintSwatches() {
 }
 
 // -- tools ------------------------------------------------------------------------------
-const NAMES = { pen: 'Pencil', erase: 'Eraser', fill: 'Fill', line: 'Line', rect: 'Rectangle', pick: 'Pick colour' };
+const NAMES = { pen: 'Pencil', erase: 'Eraser', fill: 'Fill', line: 'Line', rect: 'Rectangle', pick: 'Pick colour', shift: 'Shift drawing' };
 function setTool(t) { tool = t; document.querySelectorAll('[data-tool]').forEach((b) => b.classList.toggle('on', b.dataset.tool === t)); $('toolname').textContent = NAMES[t]; }
 document.querySelectorAll('[data-tool]').forEach((b) => b.onclick = () => setTool(b.dataset.tool));
 function toggle(id, get, set) { $(id).onclick = () => { set(!get()); $(id).classList.toggle('on', get()); renderBoard(); }; }
@@ -304,7 +365,7 @@ function renderFrames() {
     box.append(el);
   });
   const add = document.createElement('button'); add.className = 'add'; add.textContent = '+'; add.title = 'New blank frame';
-  add.onclick = () => { snapshot(); frames.splice(cur + 1, 0, blank()); cur++; renderAll(); };
+  add.onclick = () => { if (!roomFor(1)) return; snapshot(); frames.splice(cur + 1, 0, blank()); cur++; renderAll(); };
   box.append(add);
   // keep the selected frame visible by scrolling the strip sideways only, never the page
   const sel = box.children[cur];
@@ -315,8 +376,11 @@ function renderFrames() {
   }
   $('size').textContent = `64 × 32 · ${frames.length} frame${frames.length === 1 ? '' : 's'}`;
 }
-$('dup').onclick = () => { snapshot(); frames.splice(cur + 1, 0, JSON.parse(JSON.stringify(frames[cur]))); cur++; renderAll(); };
+$('dup').onclick = () => { if (!roomFor(1)) return; snapshot(); frames.splice(cur + 1, 0, JSON.parse(JSON.stringify(frames[cur]))); cur++; renderAll(); };
 $('del').onclick = () => { if (frames.length < 2) return toast('An animation needs at least one frame'); snapshot(); frames.splice(cur, 1); cur = Math.max(0, cur - 1); renderAll(); };
+$('copy').onclick = () => { clip = JSON.parse(JSON.stringify(frames[cur])); toast(`Frame ${cur + 1} copied`); };
+$('paste').onclick = () => { if (!clip) return toast('Copy a frame first'); if (!roomFor(1)) return; snapshot(); frames.splice(cur + 1, 0, JSON.parse(JSON.stringify(clip))); cur++; renderAll(); };
+$('setall').onclick = () => { const ms = Math.max(20, Math.min(5000, Number($('allms').value) || 90)); snapshot(); frames.forEach((f) => { f.ms = ms; }); renderFrames(); toast(`Every frame now shows for ${ms} ms`); };
 $('clear').onclick = () => { snapshot(); frames[cur].px.fill(null); renderAll(); };
 function move(d) { const j = cur + d; if (j < 0 || j >= frames.length) return; snapshot(); [frames[cur], frames[j]] = [frames[j], frames[cur]]; cur = j; renderAll(); }
 $('left').onclick = () => move(-1); $('right').onclick = () => move(1);
@@ -324,12 +388,17 @@ $('undo').onclick = () => { if (undo.length) { redo.push(JSON.stringify({ frames
 $('redo').onclick = () => { if (redo.length) { undo.push(JSON.stringify({ frames, cur })); restore(redo.pop()); } };
 
 // -- preview playback -------------------------------------------------------------------
-let playing = true, pi = 0, timer = null;
+let playing = true, pi = 0, dir = 1, timer = null;
 function tick() {
   if (!frames.length) return;
-  pi = (pi + 1) % frames.length; drawFrame(px, frames[pi], 1);
+  const mode = $('loop').value, n = frames.length;
+  let wait = 0;
+  if (mode === 'pingpong' && n > 2) { if (pi + dir < 0 || pi + dir >= n) dir = -dir; pi += dir; }
+  else if (mode === 'once' && pi + 1 >= n) { pi = 0; wait = 1200; }   // the preview pauses, then shows it again
+  else pi = (pi + 1) % n;
+  pi = Math.min(pi, n - 1); drawFrame(px, frames[pi], 1);
   const speed = Math.max(10, Math.min(400, Number($('speed').value) || 100)) / 100;
-  timer = setTimeout(tick, frames[pi].ms / speed);
+  timer = setTimeout(tick, frames[pi].ms / speed + wait);
 }
 $('play').onclick = () => { playing = !playing; $('play').textContent = playing ? '❚❚ Pause' : '▶ Play'; clearTimeout(timer); if (playing) tick(); else drawFrame(px, frames[cur], 1); };
 
@@ -338,7 +407,7 @@ function toast(t) { const el = $('toast'); el.textContent = t; el.style.display 
 async function send(extra) {
   const res = await fetch('/api/animator', { method: 'POST', credentials: 'same-origin',
     headers: { 'Content-Type': 'application/json', Accept: 'application/json' },
-    body: JSON.stringify({ frames: frames.map((f) => ({ px: f.px, ms: f.ms })), ...extra }) });
+    body: JSON.stringify({ frames: frames.map((f) => ({ px: f.px, ms: f.ms })), loop: $('loop').value, background: bg, ...extra }) });
   let data = {};
   try { data = await res.json(); } catch { /* no body */ }
   if (!res.ok) throw new Error(data.error || (res.status === 401 ? 'This browser is not paired with the Matrix' : `${res.status} error`));
@@ -351,18 +420,21 @@ $('show').onclick = async () => {
 };
 $('save').onclick = async () => {
   $('save').disabled = true;
-  try { const { name } = await send({ name: $('name').value || 'animation' }); toast(`Saved ${name.replace('uploaded/', '')} to your media library`); }
+  try { const { name } = await send({ name: $('name').value || 'animation' }); dirty = false; toast(`Saved ${name.replace('uploaded/', '')} to your media library`); }
   catch (e) { toast(e.message); } finally { $('save').disabled = false; }
 };
 
 // -- keys -------------------------------------------------------------------------------
 document.addEventListener('keydown', (e) => {
-  if (e.target.tagName === 'INPUT') return;
+  if (e.target.tagName === 'INPUT' || e.target.tagName === 'SELECT') return;
   if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'z') { e.preventDefault(); (e.shiftKey ? $('redo') : $('undo')).click(); return; }
   if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'y') { e.preventDefault(); $('redo').click(); return; }
+  if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'c') { e.preventDefault(); $('copy').click(); return; }
+  if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'v') { e.preventDefault(); $('paste').click(); return; }
   const k = e.key.toLowerCase();
-  const map = { p: 'pen', e: 'erase', f: 'fill', l: 'line', r: 'rect', i: 'pick' };
+  const map = { p: 'pen', e: 'erase', f: 'fill', l: 'line', r: 'rect', i: 'pick', v: 'shift' };
   if (map[k]) setTool(map[k]);
+  else if (k === '[' || k === ']') { brush = Math.max(1, Math.min(4, brush + (k === ']' ? 1 : -1))); $('brush').value = String(brush); }
   else if (k === 'm') $('mirror').click(); else if (k === 'o') $('onion').click(); else if (k === 'g') $('grid').click();
   else if (e.key === 'ArrowLeft') { cur = (cur - 1 + frames.length) % frames.length; renderAll(); }
   else if (e.key === 'ArrowRight') { cur = (cur + 1) % frames.length; renderAll(); }
@@ -370,6 +442,30 @@ document.addEventListener('keydown', (e) => {
 });
 
 function renderAll() { renderBoard(); renderFrames(); paintSwatches(); }
+
+$('brush').onchange = () => { brush = Number($('brush').value) || 1; };
+$('bg').addEventListener('input', () => { bg = $('bg').value; dirty = true; renderAll(); });
+$('template').onchange = () => {
+  const make = TEMPLATES[$('template').value]; $('template').value = '';
+  if (!make) return;
+  snapshot(); frames = make(); cur = 0; pi = 0; renderAll(); toast('Started from a template: Undo brings your frames back');
+};
+$('import').onclick = () => $('importfile').click();
+$('importfile').onchange = async () => {
+  const file = $('importfile').files[0]; $('importfile').value = '';
+  if (!file) return;
+  const form = new FormData(); form.append('file', file);
+  try {
+    const res = await fetch('/api/animator/import', { method: 'POST', credentials: 'same-origin', headers: { 'X-Bongo-Upload': '1', Accept: 'application/json' }, body: form });
+    let data = {}; try { data = await res.json(); } catch { /* no body */ }
+    if (!res.ok) throw new Error(data.error || (res.status === 401 ? 'This browser is not paired with the Matrix' : `${res.status} error`));
+    snapshot(); frames = data.frames; cur = 0; pi = 0;
+    $('name').value = file.name.replace(/\.[^.]+$/, '').replace(/[^A-Za-z0-9_-]+/g, '_').slice(0, 40) || 'animation';
+    renderAll(); toast(`Imported ${frames.length} frame${frames.length === 1 ? '' : 's'}: Undo brings your old ones back`);
+  } catch (e) { toast(e.message); }
+};
+window.addEventListener('beforeunload', (e) => { if (dirty) { e.preventDefault(); e.returnValue = ''; } });   // unsaved work
+
 frames = starter(); renderAll(); tick();
 </script>
 </body>
