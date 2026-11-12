@@ -93,7 +93,8 @@ def idle(s, name):
 def eating(s, name):                       # bed -> bowl -> eat -> wash
     s.cat = list(BED)
     s.hold("meow_sit", 0, 800)
-    s.walk_to(*BOWL_SPOT)
+    bx, by = s.art.tuning.get("bowl", (0, 0))  # a smaller animal stands nearer the bowl
+    s.walk_to(BOWL_SPOT[0] + bx, BOWL_SPOT[1] + by)
     s.play("eat_right", loops=4)
     s.walk_to(42, 25)
     s.play("wash_sit")
@@ -105,19 +106,25 @@ def washing(s, name):
     s.hold("meow_sit", 0, 900)
 
 
-def playing(s, name):                      # bat the ball, chase it, bat it back
-    s.cat, s.ball = [26, 28], [36, 28]
+def playing(s, name):                      # bat the ball, chase it, bat it off the wall and back
+    reach = s.art.tuning.get("reach", 10)  # how far in front of her feet the ball sits when she bats it
+    s.cat, s.ball = [36 - reach, 28], [36, 28]
+
+    def roll(to, speed, brake=True):       # the ball rolls towards ``to`` (slowing to a stop there, if braking)
+        while abs(s.ball[0] - to) > 0.25:
+            step = max(0.3, min(speed, abs(to - s.ball[0]) * 0.25)) if brake else min(speed, abs(to - s.ball[0]))
+            s.ball[0] += step if to > s.ball[0] else -step
+            s.shot("paw_right", 0, 60)
+        s.ball[0] = to
+
     s.play("paw_right")
-    for i in range(18):
-        s.ball[0] += max(0.3, 2.0 - i * 0.11)
-        s.shot("paw_right", 0, 60)
-    s.walk_to(s.ball[0] - 10, 28)
+    roll(46, 2.0)                          # across the room, slowing in the middle
+    s.walk_to(46 - reach, 28)              # she follows it
     s.play("paw_right")
-    for i in range(14):                    # bounces off the wall and rolls back
-        s.ball[0] -= max(0.3, 1.8 - i * 0.12)
-        s.shot("paw_right", 0, 60)
-    s.walk_to(s.ball[0] + 10, 28)
-    s.play("paw_left")
+    roll(58, 1.8, brake=False)             # hits the wall at speed...
+    roll(s.cat[0] + reach, 1.2)            # ...and bounces back, a little slower, to her paws
+    s.play("paw_right")
+    roll(s.ball[0] + 6, 1.2)               # one last little tap
     s.play("on_hind_legs")
     s.hold("on_hind_legs", 2, 600)
 
@@ -126,11 +133,12 @@ def zoomies(s, name):
     """No run cycle in the art, so the real walk cycles played fast with a long stride."""
     s.overlays.append(("dust",))
     s.cat = [-14, 26]
-    fast = dict(speed=3.0, stride_mult=3.0)
-    for x, y in ((30, 26), (50, 18), (78, 18)):
+    speed, stride = s.art.tuning.get("zoomies", (3.0, 3.0))
+    fast = dict(speed=speed, stride_mult=stride)
+    for x, y in ((30, 26), (50, 21), (78, 21)):
         s.walk_to(x, y, **fast)
-    s.cat = [78, 22]
-    for x, y in ((46, 22), (30, 28), (-14, 28)):
+    s.cat = [78, 23]
+    for x, y in ((46, 23), (30, 28), (-14, 28)):
         s.walk_to(x, y, **fast)
     s.cat = [-14, 24]
     s.walk_to(34, 26, **fast)
@@ -229,5 +237,7 @@ MODES = {f.__name__: f for f in (idle, eating, washing, playing, zoomies, nappin
 
 def record(art: Art, mode: str, name: str) -> list[Shot]:
     script = Script(art)
+    if "ball" in art.tuning:  # where the ball lies when nobody's playing (clear of where she sits)
+        script.ball = list(art.tuning["ball"])
     MODES[mode](script, name)
     return script.shots

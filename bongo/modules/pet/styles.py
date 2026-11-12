@@ -9,6 +9,8 @@ from PIL import Image, ImageDraw
 from bongo.module import Style
 
 from .art import H, W, load
+from bongo.pets import wearing
+
 from .scenes import MODES, STRIDE, record
 
 # The engine's 3x5 font: tiny, and the same on every panel.
@@ -44,7 +46,7 @@ def overlay(draw, item, t, shot):
             p = ((t / 120) + k * 12) % 24
             if p < 20:
                 # from her head: the sleeping poses face left, head about 10 px left of her feet point
-                text(draw, cx - 12 - int(p) // 4, cy - 14 - int(p) // 2, "Z", item[1])
+                text(draw, max(1, cx - 12 - int(p) // 4), cy - 14 - int(p) // 2, "Z", item[1])  # never off the left edge
     elif kind == "bubble" and (t // 600) % 2 == 0:
         x, y = cx + 6, cy - 22
         draw.rectangle([x - 1, y - 1, x + 3, y + 5], fill=(255, 250, 240))
@@ -84,7 +86,7 @@ class _Scene(Style):
     MODE: tuple[str, ...] = ()
 
     def setup(self):
-        self.art = load(self.ctx.pet.kind, self.ctx.pet.coat)
+        self.art = load(self.ctx.pet.kind, self.ctx.pet.coat, wearing(self.ctx.pet, self.ctx.now().date()))
         self.timeline = [(shot, mode) for mode in self.modes() for shot in record(self.art, mode, self.ctx.pet.name)]
         self.starts, t = [], 0.0
         for shot, _ in self.timeline:
@@ -148,7 +150,7 @@ class Wander(Style):
     choices = {"direction": ["both", "right", "left"]}
 
     def setup(self):
-        self.art = load(self.ctx.pet.kind, self.ctx.pet.coat)
+        self.art = load(self.ctx.pet.kind, self.ctx.pet.coat, wearing(self.ctx.pet, self.ctx.now().date()))
 
     def render(self, now):
         w, h = self.ctx.width, self.ctx.height

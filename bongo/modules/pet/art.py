@@ -9,7 +9,7 @@ import base64
 import io
 import json
 import math
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 import numpy as np
 from functools import lru_cache
@@ -36,6 +36,7 @@ class Art:
     empty: Image.Image  # the same with the bowl empty
     night: Image.Image  # dark, lit only around the bed
     ball: Image.Image   # RGBA
+    tuning: dict = field(default_factory=dict)  # per-animal scene tweaks (see scenes.py): bowl, ball, reach, zoomies
 
 
 @lru_cache(maxsize=4)
@@ -72,7 +73,7 @@ def sheet(kind: str = "cat", coat: str = "") -> Image.Image:
     index, found = _index(kind), _coat(kind, coat)
     drawing = found.get("drawing", index.get("default"))
     cats = recoloured(_atlas(kind if drawing in (None, index.get("default")) else f"{kind}-{drawing}"), found.get("swap", {}))
-    if drawing in (None, index.get("default")):
+    if drawing in (None, index.get("default")) or "room" not in index:
         return cats
     shared = _atlas(kind)  # the room and the ball live in the default atlas
     for key in ("room", "ball"):
@@ -81,15 +82,59 @@ def sheet(kind: str = "cat", coat: str = "") -> Image.Image:
     return cats
 
 
-@lru_cache(maxsize=4)
-def load(kind: str = "cat", coat: str = "") -> Art:
-    """The art for one pet (bongo/pets.py): ``<kind>.json`` and the coat's atlas."""
+@lru_cache(maxsize=8)
+def load(kind: str = "cat", coat: str = "", outfits: tuple = ()) -> Art:
+    """The art for one pet (bongo/pets.py): ``<kind>.json``, the coat's atlas, and the outfits
+    she's wearing (collar, Santa hat...: names from ``<kind>.json``; unknown ones are ignored)."""
     index, atlas = _index(kind), sheet(kind, coat)
     crop = lambda r: atlas.crop((r[0], r[1], r[0] + r[2], r[1] + r[3]))
-    animations = {tag: [grounded(tag, i, Frame(crop(f), f[4], f[5], f[6])) for i, f in enumerate(frames)]
-                  for tag, frames in index["animations"].items()}
+    airborne = set(index.get("airborne", ()))
+    animations = {}
+    for tag, frames in index["animations"].items():
+        raw = [Frame(crop(f), f[4], f[5], f[6]) for f in frames]
+        placed = aloft(raw) if tag in airborne else [grounded(tag, i, f) for i, f in enumerate(raw)]
+        worn = [o for o in outfits if o in index.get("outfits", {})]
+        if worn:
+            under = set(index.get("outfit_under", ()))
+            placed = [dressed(kind, f, f.dy - r.dy, [(index["outfits"][o].get(c), o in under) for o in worn])
+                      for f, r, c in zip(placed, raw, index["cells"][tag])]
+        animations[tag] = placed
+    if "room_from" in index:  # this animal lives in another one's room (the bunny in the cat's)
+        home = load(index["room_from"])
+        return Art(animations, home.room, home.empty, home.night, home.ball, index.get("tuning", {}))
     room = crop(index["room"]).convert("RGB")
-    return Art(animations, room, empty_bowl(room), night(room), crop(index["ball"]))
+    return Art(animations, room, empty_bowl(room), night(room), crop(index["ball"]), index.get("tuning", {}))
+
+
+def dressed(kind: str, frame: Frame, shift: int, pieces: list) -> Frame:
+    """``frame`` with accessory pieces ((piece, under): [x, y, w, h, dx, dy] in the outfit atlas,
+    drawn behind her if ``under``, else on top) moved by the same ``shift`` the frame got when it
+    was set on the floor."""
+    pieces = [(p, u) for p, u in pieces if p]
+    if not pieces:
+        return frame
+    sheet = _atlas(f"{kind}-outfits")
+    boxes = [(frame.dx, frame.dy, frame.dx + frame.image.width, frame.dy + frame.image.height)]
+    boxes += [(p[4], p[5] + shift, p[4] + p[2], p[5] + shift + p[3]) for p, _ in pieces]
+    x0, y0 = min(b[0] for b in boxes), min(b[1] for b in boxes)
+    x1, y1 = max(b[2] for b in boxes), max(b[3] for b in boxes)
+    img = Image.new("RGBA", (x1 - x0, y1 - y0))
+    put = lambda p: img.alpha_composite(sheet.crop((p[0], p[1], p[0] + p[2], p[1] + p[3])), (p[4] - x0, p[5] + shift - y0))
+    for p, under in pieces:
+        if under:
+            put(p)
+    img.alpha_composite(frame.image, (frame.dx - x0, frame.dy - y0))
+    for p, under in pieces:
+        if not under:
+            put(p)
+    return Frame(img, x0, y0, frame.ms)
+
+
+def aloft(frames: list) -> list:
+    """A hop: the frames keep their heights relative to each other (the art lifts her off the
+    ground mid-hop), and the whole animation is set so its lowest pose stands on the floor line."""
+    lowest = max((f.dy + f.image.getchannel("A").getbbox()[3] - 1) for f in frames if f.image.getbbox())
+    return [Frame(f.image, f.dx, f.dy + FLOOR - lowest, f.ms) for f in frames]
 
 
 def face(kind: str = "cat", coat: str = "") -> Image.Image | None:

@@ -191,7 +191,7 @@ def create_app(*, modules, live, pairing, config_path, logs: LogBuffer | None = 
     @app.get("/api/pets")
     def pet_catalogue():
         """The animals there's art for and their coats, each with a little face for the picker."""
-        return jsonify(kinds=[{"kind": k, "default": pets.default_coat(k),
+        return jsonify(kinds=[{"kind": k, "default": pets.default_coat(k), "collars": pets.collars(k),
                                "coats": [{**c, "face": face_uri(k, c["id"])} for c in pets.coat_names(k)]}
                               for k in pets.kinds()])
 

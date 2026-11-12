@@ -87,7 +87,7 @@ function deviceCard() {
 const PET_NAME = /^[A-Za-z0-9 '.!?-]{1,12}$/;
 
 function petCard() {
-  const pet = { kind: 'cat', name: 'Mochi', coat: '', ...(S.config.pet || {}) };
+  const pet = { kind: 'cat', name: 'Mochi', coat: '', collar: '', dress_up: true, ...(S.config.pet || {}) };
   const kinds = S.state?.pet_kinds?.length ? S.state.pet_kinds : ['cat'];
   const kind = h('select', { class: 'input', id: 'pet-kind' }, kinds.map((k) => h('option', { value: k, selected: k === pet.kind || null }, humanize(k))));
   const name = h('input', { class: 'input', id: 'pet-name', maxlength: 12, value: pet.name, autocomplete: 'off', spellcheck: 'false' });
@@ -96,6 +96,12 @@ function petCard() {
   const coatRow = h('div', { class: 'stack gap-s', hidden: true }, h('div', { class: 'row between' }, h('span', null, 'Coat'), coatName), grid);
   let catalogue = [];
   let coat = pet.coat;
+  let dressUp = pet.dress_up !== false;
+  const collar = h('select', { class: 'input', id: 'pet-collar' });
+  const wardrobe = h('div', { class: 'grid-2', hidden: true },
+    h('label', { class: 'field-col', for: collar.id }, 'Collar', collar),
+    h('div', { class: 'field-col' }, 'Seasonal outfits',
+      toggle(dressUp, 'Dress up for Christmas and Valentine’s', (v) => { dressUp = v; })));
   const pick = (id) => {
     coat = id;
     for (const b of grid.children) b.setAttribute('aria-checked', String(b.dataset.coat === id));
@@ -109,6 +115,10 @@ function petCard() {
       type: 'button', class: 'coat', role: 'radio', title: c.name, 'aria-label': c.name, 'data-coat': c.id, onclick: () => pick(c.id),
     }, c.face ? h('img', { src: c.face, alt: '' }) : h('span', { class: 'small' }, c.name))));
     pick(coats.some((c) => c.id === coat) ? coat : (entry?.default || coats[0]?.id || ''));
+    const colours = entry?.collars || [];
+    wardrobe.hidden = !colours.length;
+    collar.replaceChildren(h('option', { value: '' }, 'No collar'),
+      ...colours.map((c) => h('option', { value: c, selected: c === pet.collar || null }, humanize(c))));
   };
   kind.addEventListener('change', () => { coat = ''; showCoats(); });
   get('/api/pets').then((r) => { catalogue = r.kinds || []; showCoats(); }).catch(() => { /* older Pi: no coats to pick */ });
@@ -116,7 +126,8 @@ function petCard() {
   save.onclick = () => {
     const n = name.value.trim();
     if (!PET_NAME.test(n)) { toast("Names are 1 to 12 letters, digits or spaces (and ' . ! ? -), so they fit her name tag", 'error'); name.focus(); return; }
-    saveConfig({ pet: { kind: kind.value, name: n, ...(coat ? { coat } : {}) } }, 'Pet');
+    const outfits = wardrobe.hidden ? {} : { ...(collar.value ? { collar: collar.value } : {}), dress_up: dressUp };
+    saveConfig({ pet: { kind: kind.value, name: n, ...(coat ? { coat } : {}), ...outfits } }, 'Pet');
   };
   return h('section', { class: 'card stack', 'aria-label': 'Pet' },
     h('div', null, h('h2', { class: 'h2' }, 'Pet'),
@@ -125,6 +136,7 @@ function petCard() {
       h('label', { class: 'field-col', for: kind.id }, 'Animal', kind),
       h('label', { class: 'field-col', for: name.id }, 'Name', name)),
     coatRow,
+    wardrobe,
     h('div', { class: 'row end' }, save));
 }
 
