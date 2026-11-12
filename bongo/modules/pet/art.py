@@ -36,7 +36,8 @@ class Art:
     empty: Image.Image  # the same with the bowl empty
     night: Image.Image  # dark, lit only around the bed
     ball: Image.Image   # RGBA
-    tuning: dict = field(default_factory=dict)  # per-animal scene tweaks (see scenes.py): bowl, ball, reach, zoomies
+    tuning: dict = field(default_factory=dict)  # per-animal scene tweaks (see scenes.py): bowl, ball, reach, zoomies, toy
+    toys: dict = field(default_factory=dict)    # name -> (image, dx, dy): placed by the middle of its bottom edge
 
 
 @lru_cache(maxsize=4)
@@ -101,9 +102,20 @@ def load(kind: str = "cat", coat: str = "", outfits: tuple = ()) -> Art:
         animations[tag] = placed
     if "room_from" in index:  # this animal lives in another one's room (the bunny in the cat's)
         home = load(index["room_from"])
-        return Art(animations, home.room, home.empty, home.night, home.ball, index.get("tuning", {}))
+        return Art(animations, home.room, home.empty, home.night, home.ball, index.get("tuning", {}), home.toys)
     room = crop(index["room"]).convert("RGB")
-    return Art(animations, room, empty_bowl(room), night(room), crop(index["ball"]), index.get("tuning", {}))
+    return Art(animations, room, empty_bowl(room), night(room), crop(index["ball"]), index.get("tuning", {}), toys())
+
+
+@lru_cache(maxsize=1)
+def toys() -> dict:
+    """The toys (toys.json beside toys.webp.b64), or none if there's no toy art."""
+    try:
+        index = json.loads((FOLDER / "toys.json").read_text())
+    except OSError:
+        return {}
+    sheet = _atlas("toys")
+    return {name: (sheet.crop((r[0], r[1], r[0] + r[2], r[1] + r[3])), r[4], r[5]) for name, r in index.items()}
 
 
 def dressed(kind: str, frame: Frame, shift: int, pieces: list) -> Frame:

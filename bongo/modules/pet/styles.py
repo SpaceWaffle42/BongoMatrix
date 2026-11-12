@@ -111,15 +111,42 @@ class _Scene(Style):
         img = {"day": art.room, "empty": art.empty, "night": art.night}[shot.room].convert("RGBA")
         if shot.ball:
             img.alpha_composite(art.ball, (int(shot.ball[0]) - 4, int(shot.ball[1]) - 4))
+        # a bee flies in front of her; a toy on the floor is behind her, except beside a sitting cat,
+        # where it would hide under her tail
+        flying = shot.toy and (shot.toy[0] == "bee" or shot.tag in ("meow_sit", "wash_sit"))
+        if shot.toy and not flying:
+            self.draw_toy(img, shot.toy, t)
         frame = art.animations[shot.tag][shot.index]
         x, y = int(round(shot.cat[0])) + frame.dx, int(round(shot.cat[1])) + frame.dy
         layer = Image.new("RGBA", (W, H))
         layer.paste(frame.image, (x, y), frame.image)
         img.alpha_composite(layer)
+        if flying:
+            self.draw_toy(img, shot.toy, t)
         draw = ImageDraw.Draw(img)
         for item in shot.overlays:
             overlay(draw, item, t - self.run_start[k], shot)
         return fit(img.convert("RGB"), self.ctx.width, self.ctx.height)
+
+    def draw_toy(self, img, toy, t):
+        name, x, y, flipped, bitten = toy
+        if name not in self.art.toys:
+            return
+        pic, dx, dy = self.art.toys[name]
+        if name == "bee" and int(t // 100) % 2 == 0:  # buzzing: wings flick up above her body
+            wings = self.art.toys["bee_wings"][0]
+            up = Image.new("RGBA", (pic.width, pic.height + 3))
+            up.paste(wings, (0, 0), wings)
+            up.paste(pic, (0, 3), pic)
+            pic, dy = up, dy - 3
+        if flipped:
+            pic = pic.transpose(Image.Transpose.FLIP_LEFT_RIGHT)
+        if bitten:  # eaten from the end nearest her (the left, as she faces right)
+            pic = pic.crop((min(bitten, pic.width - 1), 0, pic.width, pic.height))
+            dx += bitten
+        layer = Image.new("RGBA", img.size)
+        layer.paste(pic, (int(round(x)) + dx, int(round(y)) + dy), pic)
+        img.alpha_composite(layer)
 
 
 def mode_style(mode: str) -> type:
@@ -128,7 +155,7 @@ def mode_style(mode: str) -> type:
 
 
 DAYTIME = ["idle", "eating", "washing", "playing", "scratching", "napping", "waking", "zoomies",
-           "asking", "begging", "grumpy", "name_tag"]
+           "asking", "begging", "grumpy", "name_tag", "toy", "bee"]
 
 
 class Life(_Scene):
