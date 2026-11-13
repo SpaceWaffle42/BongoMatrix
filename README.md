@@ -82,6 +82,14 @@ dashboard demo (`tools/prod_tree.py` decides what goes in). Install it as a git 
 git clone -b prod_device http://gitlab.home.lan/matrix_display/bongo_matrix.git /home/admin/matrix
 ```
 
+### Wi-Fi and finding it
+
+No keyboard or SSH needed: a Matrix with no Wi-Fi it knows opens a `Matrix-Setup-XXXX` network
+(the panel shows its password and a join code), and a phone that joins gets the setup page. Once
+on Wi-Fi it answers at `http://<its name>.local`, shows its address on the panel when that changes,
+and every Matrix on the network is listed at `http://matrix.local`. See
+[docs/NETWORK.md](docs/NETWORK.md), including what to test on a real Pi.
+
 ### Updates
 
 Settings → Software shows the running version, checks for a new one and pulls it. The

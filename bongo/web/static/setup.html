@@ -1,0 +1,242 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Set up your Matrix</title>
+<style>
+:root {
+  --page:#0B0C0E; --card:#131519; --well:#08090A; --raise:#1A1D22; --line:#22262C; --line-2:#2C3139;
+  --text:#ECEEF1; --soft:#C9CED6; --muted:#9AA1AC; --amber:#FFB547; --amber-hover:#FFCB7A; --ink:#1A1300;
+  --amber-bg:#2A2114; --danger:#FF8A92; --danger-bg:#2A1416; --good:#7BE0A6;
+  --ui: Inter, system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+  color-scheme: dark;
+}
+* { box-sizing:border-box; }
+body { margin:0; background:var(--page); color:var(--text); font:15px/1.5 var(--ui); }
+main { max-width:520px; margin:0 auto; padding:20px 16px 40px; }
+h1 { font-size:22px; margin:0 0 4px; font-weight:700; }
+h2 { font-size:15px; margin:22px 0 8px; font-weight:650; }
+p { margin:0 0 10px; color:var(--soft); }
+.muted { color:var(--muted); font-size:13px; }
+.card { background:var(--card); border:1px solid var(--line); padding:14px; margin-top:14px; }
+.banner { padding:12px 14px; margin-top:14px; border:1px solid var(--line-2); }
+.banner.error { background:var(--danger-bg); border-color:var(--danger); color:var(--text); }
+.banner.busy { background:var(--amber-bg); border-color:var(--amber); }
+ul.nets { list-style:none; margin:0; padding:0; border:1px solid var(--line); }
+ul.nets li + li { border-top:1px solid var(--line); }
+ul.nets button { width:100%; display:flex; align-items:center; gap:10px; padding:12px; background:var(--card);
+  color:var(--text); border:0; font:15px var(--ui); text-align:left; cursor:pointer; }
+ul.nets button[aria-pressed="true"] { background:var(--amber-bg); box-shadow:inset 3px 0 0 var(--amber); }
+.ssid { flex:1 1 auto; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+.tag { font-size:12px; color:var(--muted); border:1px solid var(--line-2); padding:1px 6px; }
+.bars { display:inline-flex; align-items:flex-end; gap:2px; height:14px; }
+.bars i { width:3px; background:var(--line-2); }
+.bars i.on { background:var(--soft); }
+label { display:block; font-size:13px; color:var(--muted); margin:12px 0 4px; }
+.input { width:100%; background:var(--well); border:1px solid var(--line-2); color:var(--text); padding:11px 12px;
+  font:16px var(--ui); border-radius:0; }
+.input:focus { outline:2px solid var(--amber); outline-offset:-1px; }
+.row { display:flex; gap:8px; align-items:center; }
+.btn { background:var(--raise); color:var(--text); border:1px solid var(--line-2); padding:11px 14px;
+  font:600 15px var(--ui); cursor:pointer; border-radius:0; }
+.btn.primary { background:var(--amber); color:var(--ink); border-color:var(--amber); width:100%; margin-top:16px; }
+.btn.primary:hover { background:var(--amber-hover); }
+.btn:disabled { opacity:.5; cursor:default; }
+.link { background:none; border:0; color:var(--amber); font:inherit; padding:8px 0; cursor:pointer; text-decoration:underline; }
+.check { display:flex; gap:8px; align-items:center; color:var(--soft); font-size:14px; margin-top:10px; }
+details { margin-top:22px; border:1px solid var(--line); background:var(--card); }
+summary { padding:12px 14px; cursor:pointer; font-weight:650; }
+details ul { margin:0; padding:0 14px 12px 32px; color:var(--soft); }
+details li { margin:6px 0; }
+.tip { border-left:3px solid var(--amber); padding-left:10px; }
+[hidden] { display:none !important; }
+</style>
+</head>
+<body>
+<main>
+  <h1>Set up your Matrix</h1>
+  <p id="intro">Choose the Wi-Fi it should join. It will try it, and keep it only if it works.</p>
+
+  <div id="error" class="banner error" role="alert" hidden></div>
+
+  <section id="form-view">
+    <h2>Your Wi-Fi</h2>
+    <ul class="nets" id="nets" aria-label="Networks the Matrix can see"></ul>
+    <p class="muted" id="none" hidden>The Matrix couldn't see any networks just now. Look again, or type yours in below.</p>
+    <p class="muted" id="scanning" role="status" hidden>Looking around… the setup network is off for a few seconds. Your phone should rejoin by itself; if it doesn't, join it again.</p>
+    <div class="row">
+      <button class="link" id="manual-toggle" type="button">My network isn't listed</button>
+      <button class="link" id="rescan" type="button">Look again</button>
+    </div>
+
+    <form id="form" class="card" autocomplete="off">
+      <div id="manual" hidden>
+        <label for="ssid">Network name</label>
+        <input class="input" id="ssid" maxlength="32" autocapitalize="off" autocorrect="off" spellcheck="false">
+        <label class="check"><input type="checkbox" id="hidden-net"> It's a hidden network</label>
+      </div>
+      <p id="chosen" class="muted">Choose a network above.</p>
+      <div id="pw-wrap">
+        <label for="password">Password</label>
+        <div class="row">
+          <input class="input" id="password" type="password" maxlength="64" autocapitalize="off" autocorrect="off" spellcheck="false">
+          <button class="btn" id="show" type="button" aria-pressed="false">Show</button>
+        </div>
+      </div>
+      <label for="country">Wi-Fi country</label>
+      <select class="input" id="country"></select>
+      <label for="name">Name this Matrix <span class="muted">(optional, e.g. Kitchen)</span></label>
+      <input class="input" id="name" maxlength="40" placeholder="Bongo Matrix">
+      <button class="btn primary" id="join" type="submit" disabled>Join</button>
+    </form>
+  </section>
+
+  <section id="joining-view" class="banner busy" hidden>
+    <h2 style="margin-top:0">Trying <span id="joining-ssid"></span>…</h2>
+    <p>Your phone will lose the setup network now. That's expected.</p>
+    <p><b>If it works,</b> the panel shows its new address and a code. Once your phone is back on your own Wi-Fi, scan the code to open the dashboard.</p>
+    <p><b>If it doesn't,</b> setup comes back in about a minute: join <b id="again-ssid"></b> again (same password) and this page will say what went wrong.</p>
+  </section>
+
+  <section id="done-view" class="banner" hidden>
+    <h2 style="margin-top:0">Joined <span id="done-ssid"></span></h2>
+    <p>Put your phone back on that Wi-Fi, then scan the code on the panel to open the dashboard.</p>
+  </section>
+
+  <details id="trouble">
+    <summary>Having trouble?</summary>
+    <ul>
+      <li id="band-tip" class="tip">This Matrix only does <b>2.4 GHz</b> Wi-Fi (a Pi Zero can't see 5 GHz). If your router gives each band its own name, pick the 2.4 GHz one. If it only has one name, check the router's settings that 2.4 GHz is switched on.</li>
+      <li>The setup page didn't open by itself? While joined to the setup network, open <b>10.42.0.1</b> in your browser. The panel shows it too.</li>
+      <li>Passwords are case-sensitive. Tap <b>Show</b> to check it. Some routers give 2.4 GHz and 5 GHz different names: check you picked the right one.</li>
+      <li>Hidden network? Tap <b>My network isn't listed</b>, type its exact name and tick <b>hidden</b>.</li>
+      <li>Wi-Fi with a sign-in page (hotels, some guest networks) and work or school Wi-Fi that asks for a username won't work.</li>
+      <li>Too far from the router? Try it closer first; it remembers the network when you move it back.</li>
+      <li>Setup closes after 15 minutes if nobody uses it, and comes back after 5 minutes without Wi-Fi (or from Settings &gt; Wi-Fi &gt; Reopen setup).</li>
+    </ul>
+  </details>
+</main>
+<script>
+const $ = (id) => document.getElementById(id);
+let chosen = null, manual = false, state = {}, polling = null;
+let localError = '', lastNets = '', nameTouched = false, countryTouched = false;
+const COUNTRY_NAMES = { GB: 'United Kingdom', IE: 'Ireland', US: 'United States', CA: 'Canada', AU: 'Australia', NZ: 'New Zealand',
+  DE: 'Germany', FR: 'France', ES: 'Spain', IT: 'Italy', NL: 'Netherlands', BE: 'Belgium', PT: 'Portugal', SE: 'Sweden', NO: 'Norway',
+  DK: 'Denmark', FI: 'Finland', PL: 'Poland', AT: 'Austria', CH: 'Switzerland', JP: 'Japan', IN: 'India', ZA: 'South Africa',
+  AE: 'United Arab Emirates', SG: 'Singapore' };
+
+function bars(signal) {
+  const n = signal >= 70 ? 4 : signal >= 50 ? 3 : signal >= 30 ? 2 : 1;
+  return `<span class="bars" aria-label="signal ${n} of 4">${[1, 2, 3, 4].map((k) => `<i class="${k <= n ? 'on' : ''}" style="height:${3 + k * 3}px"></i>`).join('')}</span>`;
+}
+const esc = (s) => String(s).replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
+
+function renderNets(nets, force) {
+  const sig = JSON.stringify([nets, chosen && chosen.ssid, manual]);
+  if (sig === lastNets && !force) return;   // unchanged: keep keyboard focus where it is
+  lastNets = sig;
+  const list = $('nets');
+  list.innerHTML = nets.map((n, i) => `<li><button type="button" data-i="${i}" aria-pressed="${!manual && chosen && chosen.ssid === n.ssid}">
+    ${bars(n.signal)}<span class="ssid">${esc(n.ssid)}</span>${n.saved ? '<span class="tag">saved</span>' : ''}${n.secure ? '<span aria-label="needs a password">🔒</span>' : ''}</button></li>`).join('');
+  list.hidden = !nets.length; $('none').hidden = !!nets.length;
+  list.querySelectorAll('button').forEach((b) => { b.onclick = () => choose(nets[Number(b.dataset.i)]); });
+}
+
+function needsPassword() { return manual ? false : !!(chosen && chosen.secure && !chosen.saved); }
+
+function choose(net) {
+  if (!chosen || chosen.ssid !== net.ssid) $('password').value = '';   // never carry one network's password to another
+  manual = false; chosen = net; $('manual').hidden = true; clearLocal();
+  $('chosen').textContent = net.saved && net.secure ? `Network: ${net.ssid} (saved: leave the password empty to use the saved one)` : `Network: ${net.ssid}`;
+  $('pw-wrap').hidden = !net.secure;
+  renderNets(state.networks || [], true);
+  update();
+  if (net.secure) $('password').focus();
+}
+
+$('manual-toggle').onclick = () => {
+  manual = true; chosen = null; $('manual').hidden = false; $('pw-wrap').hidden = false; clearLocal();
+  $('password').value = '';   // never carry a listed network's password to a typed-in one
+  $('chosen').textContent = 'Type the network\'s exact name.';
+  renderNets(state.networks || [], true); $('ssid').focus(); update();
+};
+$('rescan').onclick = async () => {
+  clearLocal();
+  try {
+    const res = await fetch('/api/setup/rescan', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: '{}' });
+    const data = await res.json().catch(() => ({}));
+    if (!res.ok) throw new Error(data.error || `${res.status} error`);
+    show({ ...state, ...data, scanning: true });
+  } catch (err) { localError = err.message; show(state); }
+};
+function clearLocal() { localError = ''; }
+$('show').onclick = () => {
+  const on = $('password').type === 'password';
+  $('password').type = on ? 'text' : 'password'; $('show').textContent = on ? 'Hide' : 'Show';
+  $('show').setAttribute('aria-pressed', String(on));
+};
+
+function wanted() {
+  const ssid = manual ? $('ssid').value : chosen && chosen.ssid;
+  const secure = manual || (chosen && chosen.secure);
+  return { ssid: ssid || '', password: secure ? $('password').value : '', hidden: manual && $('hidden-net').checked,
+    country: countryTouched ? $('country').value : '' };   // only a country the person chose: never overwrite one set already
+}
+function problem({ ssid, password }) {
+  if (!ssid) return 'Choose a network.';
+  if (new TextEncoder().encode(ssid).length > 32) return 'A network name is 1 to 32 characters.';
+  if (password && !(password.length >= 8 && password.length <= 63) && !/^[0-9a-fA-F]{64}$/.test(password)) return 'A Wi-Fi password is 8 to 63 characters.';
+  if (needsPassword() && !password) return 'Type the password.';
+  return null;
+}
+function update() { $('join').disabled = !!problem(wanted()); }
+['ssid', 'password', 'hidden-net'].forEach((id) => $(id).addEventListener('input', () => { clearLocal(); update(); }));
+$('name').addEventListener('input', () => { nameTouched = true; });
+$('country').addEventListener('change', () => { countryTouched = true; });
+
+$('form').onsubmit = async (e) => {
+  e.preventDefault();
+  clearLocal();   // a new try: an old refusal mustn't hide what happens to this one
+  const body = { ...wanted(), name: $('name').value.trim() };
+  const why = problem(body);
+  if (why) { localError = why; showError(why); return; }
+  $('join').disabled = true;
+  try {
+    const res = await fetch('/api/setup/join', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
+    const data = await res.json().catch(() => ({}));
+    if (!res.ok) throw new Error(data.error || `${res.status} error`);
+    show({ ...state, ...data, state: 'joining', joining: body.ssid, error: '' });
+  } catch (err) { localError = err.message; showError(err.message); update(); }
+};
+
+function showError(text) { $('error').hidden = !text; $('error').textContent = text || ''; }
+
+function show(s) {
+  state = s;
+  if (s.hotspot) $('again-ssid').textContent = s.hotspot.ssid;
+  $('band-tip').hidden = (s.bands || ['2.4']).includes('5');
+  const joining = s.state === 'joining', done = s.state === 'connected' && s.ssid;
+  $('form-view').hidden = joining || done; $('joining-view').hidden = !joining; $('done-view').hidden = !done;
+  $('joining-ssid').textContent = s.joining || ''; $('done-ssid').textContent = s.ssid || '';
+  showError(joining ? '' : (localError || s.error));
+  $('scanning').hidden = !s.scanning; $('rescan').disabled = !!s.scanning;
+  if (!joining && !done) renderNets(s.networks || []);
+  if (s.name && !nameTouched && !$('name').value) $('name').value = s.name;
+  const sel = $('country');
+  if (s.countries && sel.options.length !== s.countries.length) {
+    sel.innerHTML = s.countries.map((c) => `<option value="${c}">${esc(COUNTRY_NAMES[c] || c)}</option>`).join('');
+  }
+  if (s.country && !countryTouched) sel.value = s.country;
+}
+
+async function poll() {
+  try {
+    const res = await fetch('/api/setup', { headers: { Accept: 'application/json' } });
+    if (res.ok) show(await res.json());
+  } catch { /* the hotspot is down while it tries: keep the last view */ }
+}
+poll(); polling = setInterval(poll, 3000);
+</script>
+</body>
+</html>

@@ -9,6 +9,7 @@ import base64
 import collections
 import datetime as dt
 import io
+import ipaddress
 import json
 import logging
 import math
@@ -23,7 +24,7 @@ from pathlib import Path
 from flask import Flask, abort, jsonify, request, send_file, send_from_directory
 from werkzeug.exceptions import HTTPException
 
-from bongo import animator, config as cfg, netname, pets, petpack, update
+from bongo import animator, config as cfg, net, netname, pets, petpack, update
 from bongo import media, places
 from bongo.module import Context
 from bongo.player import Entry
@@ -92,7 +93,7 @@ PACK_UPLOAD = 300 * 1024 * 1024  # a pet pack zip from itch.io
 
 
 def create_app(*, modules, live, pairing, config_path, logs: LogBuffer | None = None,
-               fonts=None, started=None, network=None) -> Flask:
+               fonts=None, started=None, network=None, hub=None) -> Flask:
     app = Flask(__name__, static_folder=None)
     app.config["MAX_CONTENT_LENGTH"] = 64 * 1024  # a whole config is a few KB
     logs = logs or LogBuffer()
@@ -147,6 +148,10 @@ def create_app(*, modules, live, pairing, config_path, logs: LogBuffer | None = 
             abort(415)  # cross-site forms can't send JSON, so this is the CSRF check
         if path.startswith("/api/pair"):
             return None
+        if path.startswith("/api/setup") and setup_client():
+            return None
+        if request.method in ("GET", "HEAD") and (path.startswith("/api/public") or path == "/api/hub"):
+            return None   # read-only, nothing private: the hub page and other Matrices read these
         if pairing.check(request.cookies.get(COOKIE)) is None:
             return jsonify(error="not paired"), 401
         return None
@@ -183,6 +188,45 @@ def create_app(*, modules, live, pairing, config_path, logs: LogBuffer | None = 
                        safe_area=dict(zip(("top", "right", "bottom", "left"), area.margins)),
                        uptime=round(time.time() - started), name=config.get("name", "Bongo Matrix"),
                        pet_kinds=pets.kinds(), network=network_info(config))
+
+    # -- the public card and the hub (bongo/hub.py): read-only, open to the local network ------------
+    @app.get("/api/public")
+    def public_card():
+        """What the hub shows for this Matrix: never settings, feeds or messages."""
+        from bongo import __version__
+        from bongo.hub import label
+        config = load()
+        status = live.status()
+        entry = status.get("entry") or {}
+        warnings = []
+        if network is not None and network.status.state in ("connecting", "setup", "joining"):
+            warnings.append({"connecting": "Looking for its Wi-Fi", "setup": "Wi-Fi setup is open",
+                             "joining": "Joining a Wi-Fi network"}[network.status.state])
+        picture = config["web"].get("hub_picture", True) is not False
+        if picture and live.frame_png(public=True) is None:
+            warnings.append("No picture yet")
+        return jsonify(id=netname.mac_suffix(), name=config.get("name") or netname.DEFAULT_NAME, version=__version__,
+                       playing=label(entry["module"], entry.get("style")) if entry.get("module") else None,
+                       paused=status.get("paused", False), sleeping=bool(status.get("sleep_until")),
+                       uptime=round(time.time() - started), warnings=warnings, picture=picture,
+                       panel={"width": cfg.safe_area(config).panel_width, "height": cfg.safe_area(config).panel_height})
+
+    @app.get("/api/public/frame.png")
+    def public_frame():
+        if load()["web"].get("hub_picture", True) is False:
+            abort(404)                       # Settings > Device: picture off for the hub
+        png = live.frame_png(public=True)   # never the PIN, the setup password or the address screen
+        if png is None:
+            abort(404)
+        response = send_file(io.BytesIO(png), mimetype="image/png", max_age=0)
+        response.headers["Access-Control-Allow-Origin"] = "*"   # the hub page shows every Matrix's picture
+        return response
+
+    @app.get("/api/hub")
+    def hub_listing():
+        if hub is None:
+            return jsonify(hub=False, leader=None, newest="", matrices=[], available=False)
+        return jsonify(available=True, **hub.listing())
 
     def network_info(config):
         suffix = netname.mac_suffix()
@@ -302,6 +346,63 @@ def create_app(*, modules, live, pairing, config_path, logs: LogBuffer | None = 
         return jsonify(ok=True, name=name), 201
 
     # -- Wi-Fi (bongo/net.py; only on a Pi where NetworkManager runs) ------------------------------
+    def setup_client() -> bool:
+        """A phone on the setup hotspot while setup is open: it may use the setup page unpaired
+        (it can't pair: nobody may be near the panel, and the PIN would sit under the setup screens)."""
+        if network is None or network.status.state not in ("setup", "joining"):
+            return False
+        try:
+            return ipaddress.ip_address(request.remote_addr or "") in ipaddress.ip_network(net.SETUP_SUBNET)
+        except ValueError:
+            return False
+
+    @lru_cache(maxsize=1)
+    def current_country():
+        return net.current_country()   # what Raspberry Pi Imager (or raspi-config) set, asked once
+
+    @app.get("/api/setup")
+    def setup_status():
+        if network is None:
+            return jsonify(managed=False)
+        network.used()
+        config = load()
+        return jsonify(managed=True, **network.status.public(), networks=[vars(n) for n in network.nearby][:20],
+                       name=config.get("name") or "", default_name=netname.DEFAULT_NAME,
+                       country=config.get("wifi_country") or current_country() or "GB", countries=list(net.COUNTRIES))
+
+    @app.post("/api/setup/join")
+    def setup_join():
+        if network is None:
+            return jsonify(error="Wi-Fi isn't managed on this machine."), 409
+        body = request.get_json(silent=True) or {}
+        ssid, password = str(body.get("ssid") or ""), str(body.get("password") or "")
+        problem = net.valid_join(ssid, password)
+        if problem:
+            abort(422, problem)
+        country = str(body.get("country") or "").upper()
+        if country and country not in net.COUNTRIES:
+            abort(422, "Choose the Wi-Fi country from the list.")
+        network.used()
+        if not network.join(ssid, password, bool(body.get("hidden")), country):
+            abort(409, "Setup isn't open, or it's already trying a network. Give it a minute.")
+        name = str(body.get("name") or "").strip()[:40]
+        if name or country:   # "Name this Matrix" is the same as Settings > Display name
+            config = load()
+            if name:
+                config["name"] = name
+            if country:
+                config["wifi_country"] = country
+            cfg.save(config, config_path)
+        logging.getLogger("bongo.net").info("setup page: trying %s", ssid)
+        return jsonify(network.status.public()), 202
+
+    @app.post("/api/setup/rescan")
+    def setup_rescan():
+        if network is None or not network.rescan():
+            abort(409, "It can look again only while setup is open.")
+        network.used()
+        return jsonify(network.status.public()), 202
+
     @app.get("/api/network")
     def network_status():
         if network is None:
@@ -319,7 +420,8 @@ def create_app(*, modules, live, pairing, config_path, logs: LogBuffer | None = 
         """Settings > Wi-Fi > Reopen setup: the Matrix leaves its network and opens its setup hotspot."""
         if network is None:
             return jsonify(error="Wi-Fi isn't managed on this machine."), 409
-        network.reopen()
+        if not network.reopen():
+            abort(409, "It's trying a network from the setup page. Give it a minute.")
         logging.getLogger("bongo.net").info("setup reopened by %s", (pairing.check(request.cookies.get(COOKIE)) or {}).get("name"))
         return jsonify(network.status.public())
 
@@ -410,10 +512,19 @@ def create_app(*, modules, live, pairing, config_path, logs: LogBuffer | None = 
     @app.put("/api/config")
     def put_config():
         current, data = load(), body()
-        if "web" in data:
-            return jsonify(problems=["web: change the dashboard's address in data/config.json on the Pi"]), 422
+        for key in ("panel", "safe_area", "web"):   # merged key by key below: never replaced by null or a list
+            if key in data and not isinstance(data[key], dict):
+                return jsonify(problems=[f"{key}: send an object"]), 422
+        if "web" in data:   # only the hub picture can change here; the address stays in data/config.json
+            web, now = data["web"], current["web"]
+            if any(k != "hub_picture" and (k not in now or v != now[k] or type(v) is not type(now[k]))
+                   for k, v in web.items()):
+                return jsonify(problems=["web: change the dashboard's address in data/config.json on the Pi"]), 422
+            if not isinstance(web.get("hub_picture", True), bool):
+                return jsonify(problems=["web: hub_picture must be true or false"]), 422
+            data = {**data, "web": {k: v for k, v in web.items() if k == "hub_picture"}}
         merged = {**current, **data}
-        for key in ("panel", "safe_area"):  # these merge key by key, so a page can send just one
+        for key in ("panel", "safe_area", "web"):  # these merge key by key, so a page can send just one
             if isinstance(data.get(key), dict):
                 merged[key] = {**current[key], **data[key]}
         # only problems this save brings in block it: something already wrong elsewhere in the
@@ -557,6 +668,10 @@ def create_app(*, modules, live, pairing, config_path, logs: LogBuffer | None = 
         if path.startswith("api/"):
             abort(404)
         target = STATIC / path
+        if path in ("index.html", "setup") and (path == "setup" or setup_client()):
+            return send_from_directory(STATIC, "setup.html")   # a phone on the setup hotspot gets the setup page
+        if path == "hub" or (path == "index.html" and request.host.split(":")[0].lower() == "matrix.local"):
+            return send_from_directory(STATIC, "hub.html")     # http://matrix.local: every Matrix on the network
         return send_from_directory(STATIC, path if target.is_file() else "index.html")
 
     return app

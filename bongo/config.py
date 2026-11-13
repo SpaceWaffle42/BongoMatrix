@@ -21,7 +21,8 @@ DEFAULTS = {
     "panel": {"rows": 32, "cols": 64, "hardware_mapping": "adafruit-hat-pwm",
               "gpio_slowdown": 4, "brightness": 80},
     "safe_area": {"top": 0, "right": 0, "bottom": 0, "left": 0},
-    "web": {"enabled": True, "host": "0.0.0.0", "port": 5000, "port80": True},  # port80: plain http://name.local
+    # port80: plain http://name.local; hub_picture: the hub (matrix.local) may show its live picture
+    "web": {"enabled": True, "host": "0.0.0.0", "port": 5000, "port80": True, "hub_picture": True},
     "playlist": [],
     # v2's default splash screen; "splash" items in the playlist play it. "boot": an optional file
     # played once at start-up (None: none). A splash rule without "boot" is from before 11 Nov 2026.
@@ -65,7 +66,8 @@ def context_factory(config: dict):
     return lambda: Context(width=area.width, height=area.height, tz=tz, pet=pet)
 
 
-KEYS = {"name", "timezone", "panel", "safe_area", "web", "playlist", "splash", "sleep", "overlays", "update", "pet"}
+KEYS = {"name", "timezone", "panel", "safe_area", "web", "playlist", "splash", "sleep", "overlays", "update", "pet",
+        "wifi_country"}
 OVERLAY_KEYS = {"module", "overlay", "every", "seconds", "offset", "settings", "enabled"}
 PANEL = {"rows": (8, 128), "cols": (8, 256), "gpio_slowdown": (0, 5), "brightness": (1, 100),
          "chain_length": (1, 8), "parallel": (1, 3)}
@@ -207,6 +209,9 @@ def validate(config: dict, modules: dict[str, Module]) -> list[str]:
     problems = []
     if unknown := set(config) - KEYS:
         problems.append(f"unknown settings {sorted(unknown)}")
+    country = config.get("wifi_country")
+    if country is not None and not (isinstance(country, str) and len(country) == 2 and country.isalpha() and country.isupper()):
+        problems.append("wifi_country must be a two-letter country code such as GB")
     if config.get("timezone"):
         try:
             ZoneInfo(config["timezone"])

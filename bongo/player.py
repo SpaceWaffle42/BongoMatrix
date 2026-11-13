@@ -51,6 +51,7 @@ def play_entry(style: Style, seconds: float, panel, stop: threading.Event | None
                 last = overlays(last, now)
         frame = last
         wait = frame_time
+        under = frame             # what's playing, without any covering screen: the hub's public picture
         if live and live.overlay:
             covered = live.overlay(frame)
             if covered is not frame:   # a screen over the style (PIN, address) scrolls at 20 fps whatever the style's rate;
@@ -60,7 +61,7 @@ def play_entry(style: Style, seconds: float, panel, stop: threading.Event | None
         out = place(frame) if place else frame
         panel.show(out)
         if live:
-            live.publish(out)
+            live.publish(out, public=out if under is frame else (place(under) if place else under))
         shown += 1
         stop.wait(max(0.0, wait - (clock() - started)))
     return shown

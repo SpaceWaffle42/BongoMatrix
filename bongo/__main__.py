@@ -12,6 +12,7 @@ import datetime as dt
 import json
 import logging
 import sys
+import time
 
 from bongo import config as cfg
 from bongo.fade import Fader
@@ -50,24 +51,47 @@ def _start_dashboard(config, modules, live, config_path) -> None:
 
     logs = LogBuffer()
     logging.getLogger().addHandler(logs)
-    from bongo import __version__, net, netname
+    from bongo import __version__, hub as hubs, net, netname, setup_screen
 
     network = None
     if net.available():   # the Pi with NetworkManager: keep to the saved Wi-Fi, open setup as a last resort
+        if config.get("wifi_country"):          # chosen on the setup page: keep it set
+            net.apply_country(config["wifi_country"])
+        elif not net.current_country():         # none at all (not even from Raspberry Pi Imager): Wi-Fi stays off without one
+            net.apply_country("GB")
         network = net.Manager(netname.mac_suffix())
+        net.captive_rule()   # phones joining the setup hotspot are sent to the setup page
         threading.Thread(target=network.run_forever, args=(threading.Event(),), daemon=True, name="wifi").start()
     pairing = Pairing(config_path.parent / "paired-devices.json")
     fonts = Context().fonts
     address = netname.AddressScreen(fonts)   # the frame it gets is already the safe area
-    live.overlay = netname.chain(pairing.overlay(fonts), address.overlay)   # the PIN wins over the address
-    app = create_app(modules=modules, live=live, pairing=pairing, config_path=config_path, logs=logs, network=network)
+    setup = setup_screen.SetupScreen(fonts, lambda: network.status if network else None)
+    live.overlay = netname.chain(pairing.overlay(fonts), setup.overlay, address.overlay)   # PIN, then setup, then address
     port = config["web"]["port"]
+    started = float(round(time.time()))   # whole seconds: what it announces is what it compares (hub election)
+    hub = None
+    if hubs.available():   # every Matrix can be the hub at http://matrix.local (the longest-running one is)
+        suffix = netname.mac_suffix()
+
+        def whoami():
+            name = (cfg.load(config_path).get("name") or netname.DEFAULT_NAME).strip() or netname.DEFAULT_NAME
+            return hubs.Peer(suffix, name, netname.address() or "127.0.0.1", port, __version__, started)
+        try:
+            mdns = hubs.Zeroconf(netname.address, port, suffix)
+            hub = hubs.Hub(whoami(), browse=mdns.browse, alias=mdns.alias, whoami=whoami)
+            threading.Thread(target=hub.run, args=(threading.Event(),), daemon=True, name="hub").start()
+        except Exception as error:   # no multicast here: the Matrix works fine without the hub
+            logging.info("hub not started: %s", error)
+    app = create_app(modules=modules, live=live, pairing=pairing, config_path=config_path, logs=logs,
+                     network=network, hub=hub, started=started)
     server = make_server(config["web"]["host"], port, app, threaded=True)
     threading.Thread(target=server.serve_forever, daemon=True, name="dashboard").start()
     logging.info("dashboard on http://%s:%s", config["web"]["host"], port)
     plain = (config["web"].get("port80", True) and port != 80
-             and netname.redirect_server(80, port, config["web"]["host"]) is not None)
-    watch = netname.Watch(address, lambda: cfg.load(config_path), port, plain, __version__)
+             and netname.redirect_server(80, port, config["web"]["host"], override=lambda: (
+                 f"http://{net.SETUP_ADDRESS}:{port}/setup"
+                 if network and network.status.state in ("setup", "joining") else None)) is not None)
+    watch = netname.Watch(address, lambda: cfg.load(config_path), port, plain, __version__, started=started)
     threading.Thread(target=watch.run, args=(threading.Event(),), daemon=True, name="network").start()
 
 
@@ -189,6 +213,10 @@ def main(argv=None) -> int:
     problems = cfg.validate(config, modules)
     for problem in problems:
         logging.error(problem)
+    import signal
+    # systemctl stop/restart (and updates) send SIGTERM: treat it like Ctrl+C, so the panel is cleared
+    # and exit handlers run (the hub says goodbye on mDNS, so another Matrix can take matrix.local)
+    signal.signal(signal.SIGTERM, signal.default_int_handler)
     live = Live()
     if config["web"]["enabled"]:
         _start_dashboard(config, modules, live, Path(args.config))

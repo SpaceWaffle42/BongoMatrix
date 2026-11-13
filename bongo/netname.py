@@ -51,6 +51,8 @@ def host_name(name: str | None, suffix: str) -> str:
     if not name or name.strip() == DEFAULT_NAME:
         return f"matrix-{suffix}"
     slug = re.sub(r"[^a-z0-9]+", "-", name.lower()).strip("-")[:63].strip("-")
+    if slug == "matrix":
+        return f"matrix-{suffix}"   # matrix.local is the hub's (bongo/hub.py)
     return slug or f"matrix-{suffix}"
 
 
@@ -87,14 +89,17 @@ def apply_host_name(host: str, run=subprocess.run, hosts: Path = Path("/etc/host
         return False
 
 
-def announce(name: str, port: int, version: str, ident: str, folder: Path = AVAHI) -> bool:
-    """A ``_bongo._tcp`` service file for avahi (it notices new files by itself)."""
+def announce(name: str, port: int, version: str, ident: str, folder: Path = AVAHI, started: float = 0.0) -> bool:
+    """A ``_bongo._tcp`` service file for avahi (it notices new files by itself). ``started`` (when
+    this Matrix started) lets the Matrices agree which is the hub (bongo/hub.py)."""
     if not folder.is_dir() or not os.access(folder, os.W_OK):
         return False
     xml = (f'<?xml version="1.0" standalone="no"?>\n<!DOCTYPE service-group SYSTEM "avahi-service.dtd">\n'
            f'<service-group>\n  <name>{escape(name)}</name>\n  <service>\n    <type>_bongo._tcp</type>\n'
            f'    <port>{int(port)}</port>\n    <txt-record>id={escape(ident)}</txt-record>\n'
-           f'    <txt-record>version={escape(version)}</txt-record>\n  </service>\n</service-group>\n')
+           f'    <txt-record>version={escape(version)}</txt-record>\n'
+           + (f'    <txt-record>started={started:.0f}</txt-record>\n' if started else '')
+           + '  </service>\n</service-group>\n')
     path = folder / "bongo.service"
     if not path.exists() or path.read_text() != xml:
         path.write_text(xml)
@@ -309,11 +314,13 @@ class Watch:
     re-announce, and show the address screen. Runs on its own thread from ``bongo run``."""
 
     def __init__(self, screen: AddressScreen, read_config, port: int, plain_http: bool, version: str,
-                 suffix: str | None = None, get_address=address, set_host=apply_host_name, publish=announce):
+                 suffix: str | None = None, get_address=address, set_host=apply_host_name, publish=announce,
+                 started: float | None = None):
         self.screen, self.read_config, self.port, self.plain_http, self.version = screen, read_config, port, plain_http, version
         self.suffix = suffix or mac_suffix()
         self.get_address, self.set_host, self.publish = get_address, set_host, publish
         self.seen: tuple | None = None
+        self.started = time.time() if started is None else started
 
     def url(self, ip: str) -> str:
         return f"http://{ip}/" if self.plain_http else f"http://{ip}:{self.port}/"
@@ -328,7 +335,7 @@ class Watch:
         if self.seen is None or self.seen[0] != host:
             self.set_host(host)
         if self.seen is None or self.seen[1] != name:
-            self.publish(name, self.port, self.version, self.suffix)
+            self.publish(name, self.port, self.version, self.suffix, started=self.started)
         self.seen = (host, name, ip)
         if ip:
             self.screen.show(name, ip, self.url(ip), host)

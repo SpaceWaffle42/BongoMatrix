@@ -20,6 +20,7 @@ class Live:
     def __init__(self):
         self._lock = threading.Lock()
         self._frame: Image.Image | None = None
+        self._public: Image.Image | None = None   # the same without covering screens (bongo/hub.py)
         self.entry = None           # the Entry on the panel now
         self.upcoming = None        # the Entry after it
         self.started = 0.0          # time.time() it started
@@ -37,9 +38,12 @@ class Live:
         with self._lock:
             self.entry, self.upcoming, self.started, self.index = entry, upcoming, time.time(), index
 
-    def publish(self, frame: Image.Image) -> None:
+    def publish(self, frame: Image.Image, public: Image.Image | None = None) -> None:
+        """``frame``: what the panel shows (the paired dashboard's preview). ``public``: the same without
+        any covering screen (PIN, setup password, address), for the hub; defaults to ``frame``."""
         with self._lock:
             self._frame = frame
+            self._public = frame if public is None else public
 
     def take_push(self):
         with self._lock:
@@ -59,9 +63,10 @@ class Live:
         return True
 
     # -- dashboard side ----------------------------------------------------------------
-    def frame_png(self) -> bytes | None:
+    def frame_png(self, public: bool = False) -> bytes | None:
+        """The latest frame as PNG; ``public``: never with the PIN, setup or address screen on it."""
         with self._lock:
-            frame = self._frame
+            frame = self._public if public else self._frame
         if frame is None:
             return None
         out = io.BytesIO()
