@@ -224,7 +224,7 @@ function spotifyCard() {
   return card;
 }
 
-const SCREEN_TYPES = /\.(gif|png|jpe?g|webp)$/i;
+const SCREEN_TYPES = /\.(gif|png|jpe?g|webp|bmp|mp4|mov|webm|mkv|avi|m4v)$/i;   // bongo/media.py IMAGES | VIDEOS
 
 /** Software updates: what's running, check and pull the latest, and (advanced) where updates come from. */
 const UPDATE_WORDS = {
@@ -311,18 +311,20 @@ function updateCard() {
   return card;
 }
 
-/** The files a screen can use: named for it (splash_* or sleep_*), built in or uploaded. An upload
- * with a built-in file's name is a leftover copy of it, so only the built-in one is listed, and
- * shipped(name) points a saved uploaded/ name at its built-in twin. */
+/** The files a screen can use: the built-in ones made for it (splash_* or sleep_*) and everything
+ * you uploaded, whatever it's called (bongo/media.py for_screen). An upload with a built-in file's
+ * name is a leftover copy of one, so only the built-in one is listed, and shipped(name) points a
+ * saved uploaded/ name at its built-in twin. usable(name) says whether a saved name can stay. */
 function screenFiles(lib, screen) {
-  const builtIn = lib.folders['built-in'].filter((f) => f.screen === screen);
-  const twins = new Set(builtIn.map((f) => f.file));
-  const uploaded = lib.folders.uploaded.filter((f) => f.screen === screen && !twins.has(f.file) && SCREEN_TYPES.test(f.name));
+  const builtIn = lib.folders['built-in'].filter((f) => f.screen === screen && SCREEN_TYPES.test(f.name));
+  const twins = new Set(builtIn.map((f) => f.file));   // this screen's only: a copy of another's is just yours
+  const uploaded = lib.folders.uploaded.filter((f) => !twins.has(f.file) && SCREEN_TYPES.test(f.name));
   const shipped = (n) => (n && n.startsWith('uploaded/') && twins.has(n.slice(9)) ? `built-in/${n.slice(9)}` : n);
-  return { builtIn: builtIn.filter((f) => SCREEN_TYPES.test(f.name)), uploaded, shipped };
+  const usable = (n) => n.startsWith('uploaded/') || n.split('/').pop().startsWith(`${screen}_`);
+  return { builtIn, uploaded, shipped, usable };
 }
 
-/** Pick the files a Splash or Sleep screen draws from (GIFs and stills, like v2), plus speed and fit. */
+/** Pick the files a Splash or Sleep screen draws from (built-in screens and your own media), plus speed and fit. */
 function screenPicker(rule, idPrefix, screen) {
   rule.sources ||= [];
   const grid = h('div', { class: 'screen-sources', role: 'group', 'aria-label': 'Files' }, h('p', { class: 'muted small flush' }, 'Loading media…'));
@@ -333,10 +335,10 @@ function screenPicker(rule, idPrefix, screen) {
   (async () => {
     try {
       const lib = await get('/api/media');
-      const { builtIn, uploaded, shipped } = screenFiles(lib, screen);
+      const { builtIn, uploaded, shipped, usable } = screenFiles(lib, screen);
       const files = [...builtIn, ...uploaded];
       const known = new Set(files.map((f) => f.name));
-      rule.sources = [...new Set(rule.sources.map((n) => shipped(n)).filter((n) => n.split('/').pop().startsWith(`${screen}_`)))];
+      rule.sources = [...new Set(rule.sources.map((n) => shipped(n)).filter(usable))];
       const missing = rule.sources.filter((n) => !known.has(n)).map((n) => ({ name: n, file: `${n} (missing)` }));
       const opts = () => ({ fit: rule.fit || 'fit', speed: (rule.speed ?? 100) / 100 });
       let i = 0;
@@ -354,8 +356,8 @@ function screenPicker(rule, idPrefix, screen) {
       };
       // built-in and uploaded files under their own headings, so it's clear which is which
       const section = (title, list) => (list.length ? [h('div', { class: 'screen-divider', role: 'presentation' }, `${title} · ${list.length}`), ...list.map(card)] : []);
-      grid.replaceChildren(...section('Missing', missing), ...section('Built in', builtIn), ...section('Uploaded', uploaded));
-      if (!files.length && !missing.length) grid.replaceChildren(h('p', { class: 'muted small flush' }, `No ${screen} screens yet. Upload a GIF or image named ${screen}_something in the Media library.`));
+      grid.replaceChildren(...section('Missing', missing), ...section('Built in', builtIn), ...section('Your media', uploaded));
+      if (!files.length && !missing.length) grid.replaceChildren(h('p', { class: 'muted small flush' }, 'Nothing to pick from yet. Upload an image, GIF or video in the Media library.'));
     } catch (err) { grid.replaceChildren(h('p', { class: 'danger small' }, `Couldn't list media: ${err.message}`)); }
   })();
   return h('div', { class: 'stack-s' },
@@ -372,7 +374,7 @@ function splashCard() {
   rule.boot ??= null;
   const inPlaylist = (S.config.playlist || []).filter((e) => e.module === 'splash').length;
   const body = h('div', { class: 'stack' }, screenPicker(rule, 'sp', 'splash'),
-    h('p', { class: 'muted tiny flush' }, 'Each time a Splash item comes round in the playlist it shows the next file from a shuffled list, so every one plays before any repeats. A GIF plays once through; a still stays up about as long as your GIFs (7 s if there are none).'),
+    h('p', { class: 'muted tiny flush' }, 'Each time a Splash item comes round in the playlist it shows the next file from a shuffled list, so every one plays before any repeats. A GIF or video plays once through (a video up to 15 s); a still stays up about as long as your GIFs (7 s if there are none).'),
     h('p', { class: 'small flush' + (inPlaylist ? ' muted' : ' warn') }, inPlaylist
       ? `In the playlist ${inPlaylist === 1 ? 'once' : `${inPlaylist} times`}. Add more, or move it, on the Playlist page.`
       : 'Not in the playlist yet: add a Splash item on the Playlist page so it plays.'),
@@ -401,7 +403,7 @@ function bootPicker(rule) {
       const option = (f) => h('option', { value: f.name, selected: f.name === rule.boot || null }, f.file);
       const group = (label, list) => (list.length ? h('optgroup', { label }, list.map(option)) : null);
       const missing = rule.boot && ![...builtIn, ...uploaded].some((f) => f.name === rule.boot) ? [{ name: rule.boot, file: `${rule.boot} (missing)` }] : [];
-      sel.append(...[group('Missing', missing), group('Built in', builtIn), group('Uploaded', uploaded)].filter(Boolean));
+      sel.append(...[group('Missing', missing), group('Built in', builtIn), group('Your media', uploaded)].filter(Boolean));
     } catch { /* the list stays at "None"; saving keeps whatever was set */ }
   })();
   const opts = () => ({ fit: rule.fit || 'fit', speed: (rule.speed ?? 100) / 100 });
@@ -409,7 +411,7 @@ function bootPicker(rule) {
   preview.onclick = () => { if (rule.boot) openPreview(rule.boot, opts()); else toast('Pick a boot screen first'); };
   return h('div', { class: 'stack-s' },
     h('label', { class: 'field-col', for: sel.id }, 'Boot screen', h('div', { class: 'row gap-s' }, sel, preview)),
-    h('p', { class: 'muted tiny flush' }, 'Plays once when the Matrix starts, before the playlist. It can be any Splash file, ticked above or not.'));
+    h('p', { class: 'muted tiny flush' }, 'Plays once when the Matrix starts, before the playlist: a built-in splash or anything of your own, ticked above or not.'));
 }
 
 function sleepCard() {

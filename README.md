@@ -114,13 +114,14 @@ access token with `write_repository` is saved as the masked CI/CD variable `PROD
 Media comes from two folders: `built-in/` (`resources/media/built-in`, shipped
 with the project, holding only screens: `splash_*` files are built-in Splash screens and
 `sleep_*` files are built-in Sleep screens) and `uploaded/` (`data/uploads`, git-ignored, added from the dashboard under
-Settings → Media library, up to 50 MB a file and 1 GB in all). Settings name files
+Settings → Media library, up to 50 MB a file and 1 GB in all). Anything you upload can also be a
+Splash, boot or Sleep screen, whatever it's called; a built-in screen only goes on its own. Settings name files
 as `built-in/sleep_default.gif` or `uploaded/holiday.mp4`; nothing outside those folders
 can be shown.
 
 **Splash and Sleep** work as in v2. Put a Splash item anywhere in the playlist: each time it
 comes round it shows the next file from the ones ticked in Settings → Splash (a shuffled list),
-a GIF for exactly one pass. A **boot screen** can also be picked to play once at start-up.
+a GIF or video for exactly one pass. A **boot screen** can also be picked to play once at start-up.
 Sleep dims the panel between two times and shows one of its ticked files, picked at random
 each night and kept until morning; whatever is playing stops when sleep starts.
 

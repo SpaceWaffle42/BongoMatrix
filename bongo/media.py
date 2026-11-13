@@ -2,9 +2,12 @@
 
     built-in/   resources/media/built-in, shipped with Bongo Matrix (read-only). Only Splash and
                 Sleep screens live here: ``splash_*`` files are built-in splash screens and
-                ``sleep_*`` files are built-in sleep screens. Anything else is the user's own.
+                ``sleep_*`` files are built-in sleep screens, each made for its own screen.
     uploaded/   data/uploads, files added from the dashboard (git-ignored, like v2, so updates
                 never touch them; data/ is also where the systemd service may write)
+
+Your own uploads can go on any screen (Splash, boot or Sleep, whatever they're called), as well as
+in the Media module; see ``for_screen``.
 
 Settings name files as ``built-in/sleep_default.gif`` or ``uploaded/cat.mp4``. Nothing outside these
 two folders can be shown, so a setting can't point the panel (or the preview) at other files
@@ -44,6 +47,14 @@ def screen_of(name) -> str | None:
         return None
     file = name.rsplit("/", 1)[1]
     return next((s for s in SCREENS if file.startswith(f"{s}_")), None)
+
+
+def for_screen(name, screen: str) -> bool:
+    """Whether ``name`` can be a ``screen`` ("splash" or "sleep"; the boot screen is a splash) file:
+    any image, GIF or video you uploaded, or a built-in file made for that screen."""
+    if not valid_name(name):
+        return False
+    return name.startswith("uploaded/") or screen_of(name) == screen
 
 
 def shipped(name) -> str | None:

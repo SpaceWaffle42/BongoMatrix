@@ -5,13 +5,14 @@
     "sleep":  {"from": "23:00", "to": "07:00", "brightness": 15, "fade": 5, "curve": "smooth",
                "sources": ["built-in/sleep_default.gif"], "speed": 100, "fit": "fit"}
 
-A file belongs to a screen by its name: ``splash_*`` files are splash screens and ``sleep_*``
-files are sleep screens, whether built in or uploaded. Nothing else is offered or played.
+Built-in files serve the screen they were made for (``splash_*`` or ``sleep_*``); anything you
+uploaded, image, GIF or video, whatever it's called, can be a Splash, boot or Sleep screen.
 
 Splash plays wherever a ``splash`` item sits in the playlist (as in v2). Each time, the next
 file comes from a shuffled bag, so every source plays once before any repeats. ``boot`` is an
-optional single file played once at start-up; without one, start-up is nothing special. A GIF plays exactly one pass at ``speed`` percent; a
-still holds for the average pass of the row's GIFs when that is 5-10 s, else 7 s (v2's rule).
+optional single file played once at start-up; without one, start-up is nothing special. A GIF or a
+video plays exactly one pass at ``speed`` percent (the Media module hands over at its end); a still
+holds for the average pass of the row's GIFs when that is 5-10 s, else 7 s (v2's rule).
 
 Between ``from`` and ``to`` (overnight ranges allowed) the panel dims to ``brightness`` (gliding
 over ``fade`` seconds along ``curve``, see bongo.fade; it brightens back the same way) and
@@ -23,6 +24,7 @@ from __future__ import annotations
 
 import datetime as dt
 import random
+import shutil
 from dataclasses import dataclass, field
 from fractions import Fraction
 
@@ -32,7 +34,7 @@ from bongo import fade, media
 from bongo.player import Entry
 
 STILL_SECONDS = 7.0
-SCREEN_TYPES = {".gif", ".png", ".jpg", ".jpeg", ".webp"}  # what v2 allowed on Splash/Sleep
+VIDEO_CAP = 15.0   # seconds: the Media module plays a video's first 15 s (see bongo.modules.media)
 FITS = ("fit", "fill", "pixel")
 SLEEP_ENTRY_SECONDS = 60  # a sleep screen is re-shown (same file) every minute, so wakes are prompt
 
@@ -61,7 +63,12 @@ def gif_pass(name: str, speed: float) -> float | None:
 
 
 def hold_seconds(name: str, sources: list[str], speed: float) -> float:
-    """How long one Splash file stays up: a GIF's own pass; a still borrows the GIFs' average."""
+    """How long one Splash file stays up: a GIF's own pass; a still borrows the GIFs' average. A video
+    is allowed its longest pass: it hands over by itself when it has played through (one that can't be
+    played, with no ffmpeg or a missing file, is treated as a still)."""
+    if name.rsplit(".", 1)[-1].lower() in {v[1:] for v in media.VIDEOS} and media.resolve(name) \
+            and shutil.which("ffmpeg") and shutil.which("ffprobe"):
+        return VIDEO_CAP * 100 / speed
     one = gif_pass(name, speed)
     if one is not None:
         return one
@@ -78,18 +85,19 @@ def screen_problems(where: str, rule, *, sleep: bool = False) -> list[str]:
     problems = [f"{where}: unknown keys {sorted(set(rule) - allowed)}"] if set(rule) - allowed else []
     sources = rule.get("sources")
     if not isinstance(sources, list) or not sources:
-        problems.append(f"{where}.sources: pick at least one image or GIF")
+        problems.append(f"{where}.sources: pick at least one image, GIF or video")
     else:
+        screen = "sleep" if sleep else "splash"
         for s in sources:
-            screen = "sleep" if sleep else "splash"
-            if not media.valid_name(s) or "." + s.rsplit(".", 1)[-1].lower() not in SCREEN_TYPES:
-                problems.append(f"{where}.sources: {s!r} isn't a GIF or image from built-in/ or uploaded/")
-            elif media.screen_of(s) != screen:
-                problems.append(f"{where}.sources: {s!r} isn't a {screen} screen (those are named {screen}_*)")
+            if not media.valid_name(s):
+                problems.append(f"{where}.sources: {s!r} isn't an image, GIF or video from built-in/ or uploaded/")
+            elif not media.for_screen(s, screen):
+                made = media.screen_of(s)
+                problems.append(f"{where}.sources: {s!r} is the built-in {made} screen, so it can't be a {screen} screen"
+                                if made else f"{where}.sources: {s!r} isn't a built-in screen")
     boot = rule.get("boot")
-    if not sleep and boot is not None and (not media.valid_name(boot) or "." + str(boot).rsplit(".", 1)[-1].lower()
-                                           not in SCREEN_TYPES or media.screen_of(boot) != "splash"):
-        problems.append(f"{where}.boot: {boot!r} isn't a GIF or image for the Splash screen")
+    if not sleep and boot is not None and not media.for_screen(boot, "splash"):
+        problems.append(f"{where}.boot: {boot!r} isn't an image, GIF or video you uploaded, or a built-in splash")
     speed = rule.get("speed", 100)
     if isinstance(speed, bool) or not isinstance(speed, (int, float)) or not 10 <= speed <= 400:
         problems.append(f"{where}.speed: a percentage from 10 to 400")
@@ -130,8 +138,8 @@ class Schedule:
     @classmethod
     def from_config(cls, config: dict) -> "Schedule":
         def own(rule, screen):
-            # each file serves one screen, by its name: splash_* or sleep_*
-            return [s for s in (rule.get("sources") or []) if media.screen_of(s) == screen]
+            # your uploads go anywhere; a built-in file only on the screen it was made for
+            return [s for s in (rule.get("sources") or []) if media.for_screen(s, screen)]
 
         splash = config.get("splash") or {}
         sleep = config.get("sleep") or {}

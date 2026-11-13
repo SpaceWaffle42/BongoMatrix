@@ -109,18 +109,19 @@ def _time(value) -> bool:
 
 
 def _screen_files(rule, screen: str) -> list[str]:
-    """Since 11 Nov 2026 a screen only uses files named for it (splash_* / sleep_*), and v2's screen
-    GIFs ship built in. Point uploaded copies at the built-in ones and drop files of the wrong name."""
+    """v2's screen GIFs ship built in: point uploaded copies at the built-in ones. A built-in file only
+    plays on the screen it was made for (your uploads play anywhere), so drop one on the wrong screen."""
     if not isinstance(rule, dict) or not isinstance(rule.get("sources"), list):
         return []
     notes, keep = [], []
     for name in rule["sources"]:
         twin = media.shipped(name)
-        if twin:
+        if twin and media.for_screen(twin, screen):   # else it's just your own file, for this screen too
             notes.append(f"{screen}: {name} is built in now, using {twin}")
             name = twin
-        if isinstance(name, str) and media.screen_of(name) != screen:
-            notes.append(f"{screen}: dropped {name} (only {screen}_* files play here)")
+        if not media.for_screen(name, screen):
+            why = "made for another screen" if media.valid_name(name) else "not a media file"
+            notes.append(f"{screen}: dropped {name} ({why})")
             continue
         if name not in keep:
             keep.append(name)
@@ -131,7 +132,8 @@ def _screen_files(rule, screen: str) -> list[str]:
     boot = rule.get("boot")
     if boot is not None:
         twin = media.shipped(boot)
-        rule["boot"] = twin or (boot if media.screen_of(boot) == "splash" else None)
+        twin = twin if twin and media.for_screen(twin, "splash") else None
+        rule["boot"] = twin or (boot if media.for_screen(boot, "splash") else None)
         if rule["boot"] != boot:
             notes.append(f"{screen}: boot screen is now {rule['boot']}")
     return notes
