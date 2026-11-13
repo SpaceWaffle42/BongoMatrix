@@ -761,4 +761,6 @@
     P('wifi', 'Signal', 'Icons and loaders', wifiBars, 'Signal arcs lighting up.', false),
   ];
   window.ANIMATOR_PRESETS = PRESETS;
+  // the drawing kit, for more presets in their own files (js/animator-sleep.js: the built-in sleep screens)
+  window.AnimatorKit = { W, H, TAU, Frame, frames, hsv, rng, tri, wave, dim, textWidth, P };
 })();
