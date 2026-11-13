@@ -36,6 +36,17 @@ main { display:grid; grid-template-columns:64px minmax(0,1fr) 250px; gap:12px; p
 .opts label { display:inline-flex; gap:5px; align-items:center; }
 .opts select { padding:3px 6px; font:12px var(--ui); }
 .opts [hidden] { display:none; }
+.layers { display:flex; flex-direction:column; gap:4px; margin-bottom:8px; }
+.layer { display:flex; align-items:center; gap:8px; padding:4px 6px; border:1px solid var(--line-2); background:none; color:var(--text); font:inherit; font-size:13px; text-align:left; cursor:pointer; }
+.layer.sel { border-color:var(--amber); }
+.layer canvas { width:48px; height:24px; image-rendering:pixelated; background:#000; flex:none; }
+.layer .name { flex:1; min-width:0; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+.layer .eye { width:30px; height:30px; display:grid; place-items:center; flex:none; border:1px solid var(--line-2); background:none; color:var(--text); cursor:pointer; padding:0; }
+.layer.hidden .name, .layer.hidden canvas { opacity:.4; }
+.layer-btns { display:flex; gap:6px; flex-wrap:wrap; }
+.layer:focus-visible { outline:2px solid var(--amber); outline-offset:1px; }
+.btn:disabled { opacity:.4; cursor:default; }
+@media (pointer: coarse) { .layer .eye { width:38px; height:38px; } .layer-btns .btn { min-height:36px; } }
 .swatch-col { display:inline-flex; flex-direction:column; align-items:center; gap:2px; font-size:11px; color:var(--muted); }
 #colour2 { width:44px; height:32px; border:1px solid var(--line-2); background:none; padding:0; }
 @media (pointer: coarse) { .fine-pointer { display:none; } .opts select { min-height:36px; } .opts input[type=checkbox] { width:22px; height:22px; } #swap { width:36px !important; height:36px !important; } }
@@ -162,6 +173,19 @@ kbd { font:11px var(--mono); border:1px solid var(--line-2); padding:0 4px; colo
       <div class="swatches" id="used"></div>
     </section>
     <section class="card">
+      <p class="label">Layers</p>
+      <div class="layers" id="layers" role="group" aria-label="Layers, top first"></div>
+      <div class="layer-btns">
+        <button class="btn" id="laddu" title="New layer above this one">+ Layer</button>
+        <button class="btn icon" id="lup" title="Move this layer up" aria-label="Move layer up">↑</button>
+        <button class="btn icon" id="ldown" title="Move this layer down" aria-label="Move layer down">↓</button>
+        <button class="btn" id="lmerge" title="Merge this layer into the one below">Merge down</button>
+        <button class="btn" id="lrename" title="Rename this layer (F2)">Rename</button>
+        <button class="btn" id="ldel" title="Delete this layer from every frame" style="color:var(--danger)">Delete</button>
+      </div>
+      <p class="tiny muted" style="margin:6px 0 0">Tools draw on the selected layer. Every frame has the same layers; what you can see is what's saved.</p>
+    </section>
+    <section class="card">
       <p class="label">Preview</p>
       <div class="led"><canvas id="preview" width="64" height="32"></canvas></div>
       <div class="row" style="margin-top:8px">
@@ -215,15 +239,50 @@ const MAX = 300;   // the server's limit too (bongo/animator.py)
 function roomFor(n) { if (frames.length + n <= MAX) return true; toast(`An animation can have up to ${MAX} frames`); return false; }
 
 // -- frames and presets (js/animator-presets.js) -------------------------------------------
-function blank() { return { px: new Array(W * H).fill(null), ms: 90 }; }
+// layers: the same list for every frame (name, shown); each frame keeps its own pixels per layer in
+// `cels`, bottom first, and `px` is all its shown layers flattened (what's drawn, previewed and saved)
+let layers = [{ id: 1, name: 'Drawing', on: true }], al = 0;
+let layerSeq = 1;   // only ever goes up: an id still in the undo history or a copied frame is never reused
+const nextId = () => (layerSeq = Math.max(layerSeq, ...layers.map((l) => l.id || 0)) + 1);
+function belowLayer() {   // the shown layers under the selected one, flattened: what a brush on it sits over
+  const out = empty(), f = frames[cur];
+  for (let k = 0; k < al; k++) if (layers[k].on) f.cels[k].forEach((c, i) => { if (c) out[i] = c; });
+  return out;
+}
+const empty = () => new Array(W * H).fill(null);
+function blank() { return { px: empty(), ms: 90, cels: layers.map(empty) }; }
+function flat(f) {
+  const out = empty();
+  f.cels.forEach((cel, k) => { if (layers[k].on) cel.forEach((c, i) => { if (c) out[i] = c; }); });
+  f.px = out;
+}
+function flatAll() { frames.forEach(flat); }
+function oneLayer(list) {   // frames from a preset or an imported GIF: one layer each
+  layers = [{ id: 1, name: 'Drawing', on: true }]; al = 0;
+  list.forEach((f) => { f.cels = [f.px.slice()]; });
+  return list;
+}
+// the selected layer of the current frame, shaped like a frame so every tool can draw on it
+const target = { get px() { return frames[cur].cels[al]; }, set px(v) { frames[cur].cels[al] = v; } };
 const PRESETS = window.ANIMATOR_PRESETS || [];
 const preset = (id) => PRESETS.find((p) => p.id === id);
-function copyFrames(list) { return list.map((f) => ({ px: f.px.slice(), ms: f.ms })); }
-function starter() { return preset('ball') ? copyFrames(preset('ball').make()) : [blank()]; }
+function copyFrames(list) { return list.map((f) => ({ px: f.px.slice(), ms: f.ms, ...(f.cels ? { cels: f.cels.map((c) => c.slice()) } : {}) })); }
+function starter() { return oneLayer(preset('ball') ? copyFrames(preset('ball').make()) : [{ px: empty(), ms: 90 }]); }
 
 // -- drawing ----------------------------------------------------------------------------
-function snapshot() { undo.push(JSON.stringify({ frames, cur })); if (undo.length > 80) undo.shift(); redo = []; dirty = true; }
-function restore(s) { const o = JSON.parse(s); frames = o.frames; cur = Math.min(o.cur, frames.length - 1); renderAll(); }
+// undo keeps each step as text: just the layers' pixels (the picture is rebuilt from them), an empty one as 0
+const state = () => JSON.stringify({ frames: frames.map((f) => ({ ms: f.ms, cels: f.cels.map((c) => (c.some(Boolean) ? c : 0)) })), cur, layers, al });
+const UNDO_CHARS = 120e6;   // ~240 MB of history at most, however big the animation (or 80 steps)
+function snapshot() {
+  undo.push(state()); redo = []; dirty = true;
+  let total = undo.reduce((n, u) => n + u.length, 0);
+  while (undo.length > 1 && (undo.length > 80 || total > UNDO_CHARS)) total -= undo.shift().length;
+}
+function restore(s) {
+  const o = JSON.parse(s);
+  frames = o.frames.map((f) => ({ ms: f.ms, px: empty(), cels: f.cels.map((c) => (c === 0 ? empty() : c)) }));
+  cur = Math.min(o.cur, frames.length - 1); layers = o.layers; al = Math.min(o.al, layers.length - 1); renderAll();
+}
 const T = window.PixelTools;
 let seed = 1;
 // paint with the brush at (x, y); the mirror paints the same cells reflected
@@ -255,11 +314,11 @@ function drawGradient(f, a, b) {
 }
 function brushAt(f, x, y) {   // blur and shade, at the pixel and (with the mirror on) its reflection
   if (tool === 'glow') {   // the halo is round and soft whatever brush shape is picked
-    const at = (u) => T.glowAt(f.px, u, y, brush, colour, Number($('glowk').value), bg, stroke);
+    const at = (u) => T.glowAt(f.px, u, y, brush, colour, Number($('glowk').value), bg, stroke, under);
     at(x); if (mirror && W - 1 - x !== x) at(W - 1 - x);
     return;
   }
-  const at = (u) => tool === 'blur' ? T.blurAt(f.px, u, y, brush, shape, Number($('blurk').value), bg, stroke, seed++)
+  const at = (u) => tool === 'blur' ? T.blurAt(f.px, u, y, brush, shape, Number($('blurk').value), bg, stroke, seed++, under)
                                     : T.shadeAt(f.px, u, y, brush, shape, Number($('shadek').value), seed++, stroke);
   at(x); if (mirror && W - 1 - x !== x) at(W - 1 - x);
 }
@@ -276,6 +335,7 @@ function drawFrame(ctx, f, scale, ghost) {
 
 let hover = null, dragStart = null, dragEnd = null;
 function renderBoard() {
+  flat(frames[cur]);   // the selected layer may just have changed
   const f = frames[cur];
   drawFrame(bx, f, S, onion && cur > 0 ? frames[cur - 1] : (onion && frames.length > 1 ? frames[frames.length - 1] : null));
   if (grid) {
@@ -303,40 +363,41 @@ function cell(e) {
 let drawing = false, last = null, moving = null;
 const DRAG = new Set(['line', 'rect', 'ellipse', 'gradient']);
 const BRUSHED = new Set(['blur', 'shade', 'glow']);
-let dragBase = null, dragErase = false, stroke = null;   // stroke: pixels blurred or shaded so far, once each per stroke
+let dragBase = null, dragErase = false, stroke = null, under = null;   // under: what the selected layer sits over   // stroke: pixels blurred or shaded so far, once each per stroke
 // while dragging a shape or gradient, the frame is redrawn from how it was each move, so you see the real result
 function dragTo(x, y) {
-  const f = frames[cur]; dragEnd = [x, y]; f.px = dragBase.slice();
+  const f = target; dragEnd = [x, y]; f.px = dragBase.slice();
   if (tool === 'gradient' && x === dragStart[0] && y === dragStart[1]) return;   // a gradient needs a drag: a click alone does nothing
   if (tool === 'gradient') drawGradient(f, dragStart, dragEnd); else drawShape(f, dragStart, dragEnd, dragErase ? null : colour);
 }
 board.addEventListener('pointerdown', (e) => {
   try { board.setPointerCapture(e.pointerId); } catch { /* the pointer's already gone */ }
-  const [x, y] = cell(e), f = frames[cur];
-  if (tool === 'pick') { const c = f.px[y * W + x]; if (c) (e.button === 2 ? setColour2 : setColour)(c); setTool('pen'); return; }
+  const [x, y] = cell(e), f = target;
+  if (tool === 'pick') { const c = frames[cur].px[y * W + x]; if (c) (e.button === 2 ? setColour2 : setColour)(c); setTool('pen'); return; }
+  if (!layers[al].on) { toast(`"${layers[al].name}" is hidden: show it to draw on it`); return; }
   snapshot();
   if (tool === 'fill') { fill(f, x, y, e.button === 2 ? null : colour); renderAll(); return; }
   if (DRAG.has(tool)) { dragStart = [x, y]; dragBase = f.px.slice(); dragErase = e.button === 2; dragTo(x, y); renderBoard(); return; }
   if (tool === 'shift') { moving = { from: [x, y], px: f.px.slice() }; return; }
-  drawing = true; last = [x, y]; stroke = tool === 'glow' ? { base: new Map(), k: new Map() } : new Set();
+  drawing = true; last = [x, y]; stroke = tool === 'glow' ? { base: new Map(), k: new Map() } : new Set(); under = belowLayer();
   if (BRUSHED.has(tool)) brushAt(f, x, y); else setPx(f, x, y, tool === 'erase' || e.button === 2 ? null : colour);
   renderBoard();
 });
 board.addEventListener('pointermove', (e) => {
   const [x, y] = cell(e); hover = [x, y]; $('pos').textContent = `x ${x}, y ${y}`;
   if (dragStart) dragTo(x, y);
-  else if (moving) { frames[cur].px = shifted(moving.px, x - moving.from[0], y - moving.from[1]); }
+  else if (moving) { target.px = shifted(moving.px, x - moving.from[0], y - moving.from[1]); }
   else if (drawing) {
     const cells = lineCells(last[0], last[1], x, y).slice(1);
-    if (BRUSHED.has(tool)) cells.forEach(([a, b]) => brushAt(frames[cur], a, b));
-    else cells.forEach(([a, b]) => setPx(frames[cur], a, b, tool === 'erase' || e.buttons === 2 ? null : colour));
+    if (BRUSHED.has(tool)) cells.forEach(([a, b]) => brushAt(target, a, b));
+    else cells.forEach(([a, b]) => setPx(target, a, b, tool === 'erase' || e.buttons === 2 ? null : colour));
     last = [x, y];
   }
   renderBoard();
 });
 function strokeEnd() {   // a finished stroke, or one the browser cancelled (an edge swipe, an alert)
-  if (dragBase && frames[cur].px.every((c, i) => c === dragBase[i])) undo.pop();   // nothing changed: no undo step
-  dragStart = dragEnd = dragBase = stroke = null;
+  if (dragBase && target.px.every((c, i) => c === dragBase[i])) undo.pop();   // nothing changed: no undo step
+  dragStart = dragEnd = dragBase = stroke = under = null;
   drawing = false; moving = null; renderAll();
 }
 board.addEventListener('pointerup', strokeEnd);
@@ -368,7 +429,7 @@ const NAMES = { pen: 'Pencil', erase: 'Eraser', fill: 'Fill', line: 'Line', rect
   gradient: 'Gradient', blur: 'Blur', shade: 'Lighten and darken', glow: 'Glow', pick: 'Pick colour', shift: 'Shift drawing' };
 function setTool(t) {
   if (dragStart || drawing || moving) return;   // not mid-stroke: the shape you're drawing stays the shape you started
-  tool = t; document.querySelectorAll('[data-tool]').forEach((b) => b.classList.toggle('on', b.dataset.tool === t)); $('toolname').textContent = NAMES[t];
+  tool = t; document.querySelectorAll('[data-tool]').forEach((b) => b.classList.toggle('on', b.dataset.tool === t)); $('toolname').textContent = `${NAMES[t]} · ${layers[al].name}`;
   $('opts').querySelectorAll('[data-for]').forEach((el) => { el.hidden = !el.dataset.for.split(' ').includes(t); });
   $('gsteps-l').hidden = t !== 'gradient' || $('gstyle').value === 'smooth';
   $('ghint').textContent = $('gtype').value === 'conic' ? 'Drag to point where the colours meet' : 'Drag from the main colour to the second one';
@@ -416,16 +477,91 @@ function renderFrames() {
 }
 $('dup').onclick = () => { if (!roomFor(1)) return; snapshot(); frames.splice(cur + 1, 0, JSON.parse(JSON.stringify(frames[cur]))); cur++; renderAll(); };
 $('del').onclick = () => { if (frames.length < 2) return toast('An animation needs at least one frame'); snapshot(); frames.splice(cur, 1); cur = Math.max(0, cur - 1); renderAll(); };
-$('copy').onclick = () => { clip = JSON.parse(JSON.stringify(frames[cur])); toast(`Frame ${cur + 1} copied`); };
-$('paste').onclick = () => { if (!clip) return toast('Copy a frame first'); if (!roomFor(1)) return; snapshot(); frames.splice(cur + 1, 0, JSON.parse(JSON.stringify(clip))); cur++; renderAll(); };
+$('copy').onclick = () => { clip = { ...JSON.parse(JSON.stringify(frames[cur])), ids: layers.map((l) => l.id) }; toast(`Frame ${cur + 1} copied`); };
+$('paste').onclick = () => {
+  if (!clip) return toast('Copy a frame first'); if (!roomFor(1)) return; snapshot();
+  const f = JSON.parse(JSON.stringify(clip)), ids = f.ids; delete f.ids;
+  if (ids.every((id) => layers.some((l) => l.id === id))) f.cels = layers.map((l) => (ids.includes(l.id) ? f.cels[ids.indexOf(l.id)] : empty()));   // each layer back on its own layer, wherever it is now
+  else f.cels = layers.map((_, k) => (k === al ? f.px.slice() : empty()));   // a layer it came from is gone: paste it flat onto this layer
+  frames.splice(cur + 1, 0, f); cur++; renderAll();
+};
 $('setall').onclick = () => { const ms = Math.max(20, Math.min(5000, Number($('allms').value) || 90)); snapshot(); frames.forEach((f) => { f.ms = ms; }); renderFrames(); toast(`Every frame now shows for ${ms} ms`); };
-$('clear').onclick = () => { snapshot(); frames[cur].px.fill(null); renderAll(); };
-$('fliph').onclick = () => { snapshot(); frames[cur].px = T.flipped(frames[cur].px, true); renderAll(); };
-$('flipv').onclick = () => { snapshot(); frames[cur].px = T.flipped(frames[cur].px, false); renderAll(); };
+$('clear').onclick = () => { snapshot(); frames[cur].cels.forEach((c) => c.fill(null)); renderAll(); };   // every layer of this frame
+$('fliph').onclick = () => { snapshot(); frames[cur].cels = frames[cur].cels.map((c) => T.flipped(c, true)); renderAll(); };
+$('flipv').onclick = () => { snapshot(); frames[cur].cels = frames[cur].cels.map((c) => T.flipped(c, false)); renderAll(); };
+
+// -- layers -----------------------------------------------------------------------------
+function rename() {
+  const l = layers[al], n = (window.prompt('Layer name', l.name) || '').trim().slice(0, 24);
+  if (n && n !== l.name) { snapshot(); l.name = n; }
+  renderLayers(true);
+}
+function renderLayers(focus = false) {
+  const box = $('layers'); box.replaceChildren();
+  layers.map((l, k) => [l, k]).reverse().forEach(([l, k]) => {   // top layer first, as it stacks
+    const row = document.createElement('div');
+    row.className = 'layer' + (k === al ? ' sel' : '') + (l.on ? '' : ' hidden');
+    row.setAttribute('aria-current', String(k === al)); row.setAttribute('aria-label', `${l.name}${l.on ? '' : ', hidden'}${k === al ? ', selected' : ''}`); row.tabIndex = 0;
+    const eye = document.createElement('button'); eye.className = 'eye'; eye.type = 'button';
+    eye.innerHTML = l.on ? EYE_OPEN : EYE_SHUT; eye.title = l.on ? 'Hide this layer' : 'Show this layer';
+    eye.setAttribute('aria-label', `${l.on ? 'Hide' : 'Show'} ${l.name}`);
+    eye.onclick = (e) => { e.stopPropagation(); snapshot(); l.on = !l.on; renderAll(); $('layers').querySelectorAll('.eye')[layers.length - 1 - k]?.focus(); };
+    const c = document.createElement('canvas'); c.width = W; c.height = H;
+    drawFrame(c.getContext('2d'), { px: frames[cur].cels[k] }, 1);
+    const name = document.createElement('span'); name.className = 'name'; name.textContent = l.name; name.title = 'Double-click to rename';
+    row.append(eye, c, name);
+    row.onclick = () => { al = k; renderLayers(); };
+    row.onkeydown = (e) => {
+      if (e.target !== row) return;   // keys on the eye button are its own
+      if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); e.stopPropagation(); al = k; renderLayers(true); }
+      else if (e.key === 'F2') { e.preventDefault(); al = k; rename(); }
+      else if (e.key === 'ArrowUp' || e.key === 'ArrowDown') { e.preventDefault(); e.stopPropagation(); al = Math.max(0, Math.min(layers.length - 1, k + (e.key === 'ArrowUp' ? 1 : -1))); renderLayers(true); }
+    };
+    row.ondblclick = () => { al = k; rename(); };
+    box.append(row);
+  });
+  if (focus) box.querySelector('.layer.sel')?.focus();
+  $('ldel').disabled = layers.length < 2; $('lmerge').disabled = al === 0 || !layers[al - 1].on;
+  $('lmerge').title = al > 0 && !layers[al - 1].on ? `Show "${layers[al - 1].name}" to merge into it` : 'Merge this layer into the one below';
+  $('laddu').disabled = layers.length >= MAX_LAYERS;
+  $('toolname').textContent = `${NAMES[tool]} · ${layers[al].name}`;   // which layer you're drawing on, by the board
+  $('lup').disabled = al === layers.length - 1; $('ldown').disabled = al === 0;
+}
+const MAX_LAYERS = 8;
+const EYE_OPEN = '<svg viewBox="0 0 24 24" width="16" height="16" aria-hidden="true"><path d="M2 12s3.6-6 10-6 10 6 10 6-3.6 6-10 6S2 12 2 12z" fill="none" stroke="currentColor" stroke-width="2"/><circle cx="12" cy="12" r="3" fill="currentColor"/></svg>';
+const EYE_SHUT = '<svg viewBox="0 0 24 24" width="16" height="16" aria-hidden="true"><path d="M2 12s3.6-6 10-6 10 6 10 6-3.6 6-10 6S2 12 2 12z" fill="none" stroke="currentColor" stroke-width="2" opacity=".5"/><path d="M4 20 20 4" stroke="currentColor" stroke-width="2"/></svg>';
+$('laddu').onclick = () => {
+  if (layers.length >= MAX_LAYERS) return toast(`Up to ${MAX_LAYERS} layers`);
+  snapshot();
+  let n = layers.length + 1; while (layers.some((l) => l.name === `Layer ${n}`)) n++;
+  layers.splice(al + 1, 0, { id: nextId(), name: `Layer ${n}`, on: true });
+  frames.forEach((f) => f.cels.splice(al + 1, 0, empty())); al++; renderAll();
+};
+function moveLayer(d) {
+  const j = al + d; if (j < 0 || j >= layers.length) return; snapshot();
+  [layers[al], layers[j]] = [layers[j], layers[al]];
+  frames.forEach((f) => { [f.cels[al], f.cels[j]] = [f.cels[j], f.cels[al]]; }); al = j; renderAll();
+}
+$('lrename').onclick = rename;
+$('lup').onclick = () => moveLayer(1); $('ldown').onclick = () => moveLayer(-1);
+$('lmerge').onclick = () => {   // this layer laid over the one below, in every frame (a hidden layer adds nothing)
+  if (al === 0) return;
+  if (!layers[al - 1].on) return toast(`Show "${layers[al - 1].name}" first to merge into it`);
+  if (!layers[al].on) toast(`"${layers[al].name}" was hidden, so nothing of it was added (Undo brings it back)`);
+  snapshot();
+  frames.forEach((f) => { const below = f.cels[al - 1]; if (layers[al].on) f.cels[al].forEach((c, i) => { if (c) below[i] = c; }); f.cels.splice(al, 1); });
+  layers.splice(al, 1); al--; renderAll();
+};
+$('ldel').onclick = () => {
+  if (layers.length < 2) return; snapshot();
+  const name = layers[al].name;
+  frames.forEach((f) => f.cels.splice(al, 1)); layers.splice(al, 1); al = Math.max(0, al - 1); renderAll();
+  toast(`Deleted "${name}" from every frame: Undo brings it back`);
+};
 function move(d) { const j = cur + d; if (j < 0 || j >= frames.length) return; snapshot(); [frames[cur], frames[j]] = [frames[j], frames[cur]]; cur = j; renderAll(); }
 $('left').onclick = () => move(-1); $('right').onclick = () => move(1);
-$('undo').onclick = () => { if (undo.length) { redo.push(JSON.stringify({ frames, cur })); restore(undo.pop()); } };
-$('redo').onclick = () => { if (redo.length) { undo.push(JSON.stringify({ frames, cur })); restore(redo.pop()); } };
+$('undo').onclick = () => { if (undo.length) { redo.push(state()); restore(undo.pop()); } };
+$('redo').onclick = () => { if (redo.length) { undo.push(state()); restore(redo.pop()); } };
 
 // -- preview playback -------------------------------------------------------------------
 let playing = true, pi = 0, dir = 1, timer = null;
@@ -467,6 +603,8 @@ $('save').onclick = async () => {
 // -- keys -------------------------------------------------------------------------------
 document.addEventListener('keydown', (e) => {
   if ($('gallery').open) return;   // the presets gallery has the keyboard while it's open
+  if (dragStart || drawing || moving) return;   // mid-stroke: nothing changes the frame under the pointer
+  if (e.target.tagName === 'BUTTON' && (e.key === ' ' || e.key === 'Enter')) return;   // a focused button's own key
   if (e.altKey || ((e.ctrlKey || e.metaKey) && !'zycv'.includes(e.key.toLowerCase()))) return;   // the browser's own shortcuts stay its own
   if (e.target.tagName === 'INPUT' || e.target.tagName === 'SELECT') return;
   if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'z') { e.preventDefault(); (e.shiftKey ? $('redo') : $('undo')).click(); return; }
@@ -485,7 +623,7 @@ document.addEventListener('keydown', (e) => {
   else if (e.key === ' ') { e.preventDefault(); $('play').click(); }
 });
 
-function renderAll() { renderBoard(); renderFrames(); paintSwatches(); }
+function renderAll() { flatAll(); renderBoard(); renderFrames(); renderLayers(); paintSwatches(); }
 
 $('brush').onchange = () => { brush = Number($('brush').value) || 1; };
 $('bg').addEventListener('input', () => { bg = $('bg').value; dirty = true; renderAll(); });
@@ -554,7 +692,7 @@ function openGallery() {
 }
 function choose(p) {
   closeGallery();
-  snapshot(); frames = copyFrames(presetFrames(p.id)); cur = 0; pi = 0;
+  snapshot(); frames = oneLayer(copyFrames(presetFrames(p.id))); cur = 0; pi = 0;
   if (p.id !== 'blank') $('name').value = p.id;
   renderAll(); toast(`Started from ${p.name}: Undo brings your frames back`);
 }
@@ -572,7 +710,7 @@ $('importfile').onchange = async () => {
     const res = await fetch('/api/animator/import', { method: 'POST', credentials: 'same-origin', headers: { 'X-Bongo-Upload': '1', Accept: 'application/json' }, body: form });
     let data = {}; try { data = await res.json(); } catch { /* no body */ }
     if (!res.ok) throw new Error(data.error || (res.status === 401 ? 'This browser is not paired with the Matrix' : `${res.status} error`));
-    snapshot(); frames = data.frames; cur = 0; pi = 0;
+    snapshot(); frames = oneLayer(data.frames); cur = 0; pi = 0;
     $('name').value = file.name.replace(/\.[^.]+$/, '').replace(/[^A-Za-z0-9_-]+/g, '_').slice(0, 40) || 'animation';
     renderAll(); toast(`Imported ${frames.length} frame${frames.length === 1 ? '' : 's'}: Undo brings your old ones back`);
   } catch (e) { toast(e.message); }

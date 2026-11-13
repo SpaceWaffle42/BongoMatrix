@@ -120,19 +120,20 @@
   // blur the pixels under a brush: each becomes the average of its 3x3 neighbourhood (empty pixels
   // count as the background), `strength` 0..1 how far it moves there
   // `done`: pixels already blurred (or shaded) in this stroke, so dragging doesn't pile it up
-  function blurAt(px, x, y, size, shape, strength, background, done = null, seed = 0) {
-    const before = px.slice(), bgc = parse(background);
+  // `below`: what shows under this layer (the layers beneath, flattened), so empty pixels blend with that
+  function blurAt(px, x, y, size, shape, strength, background, done = null, seed = 0, below = null) {
+    const before = px.slice(), under = (j) => (below && below[j]) || background;
     stamp(x, y, size, shape, (i, a, b) => {
       if (done) { if (done.has(i)) return; done.add(i); }
       let r = 0, g = 0, bl = 0, n = 0;
       for (let dy = -1; dy <= 1; dy++) for (let dx = -1; dx <= 1; dx++) {
         if (!inside(a + dx, b + dy)) continue;
-        const c = before[(b + dy) * W + a + dx], v = c ? parse(c) : bgc;
+        const k = (b + dy) * W + a + dx, c = before[k], v = parse(c || under(k));
         r += v[0]; g += v[1]; bl += v[2]; n++;
       }
-      const avg = hex(r / n, g / n, bl / n), now = before[i] || background;
+      const avg = hex(r / n, g / n, bl / n), now = before[i] || under(i);
       const out = mix(now, avg, strength);
-      px[i] = !before[i] && out.toLowerCase() === background.toLowerCase() ? null : out;
+      px[i] = !before[i] && out.toLowerCase() === under(i).toLowerCase() ? null : out;
     }, seed);
   }
   // lighten or darken what's under the brush (empty pixels stay empty)
@@ -179,7 +180,7 @@
   // the glow brush: light of `colour` that fades from the centre out over `size` + 1 pixels. It only ever adds
   // light (a "screen" blend), so a drawing under it gets brighter, never tinted or darker. `stroke` keeps the
   // frame as it was and the strongest glow each pixel has had, so going over a spot never piles it up.
-  function glowAt(px, x, y, size, colour, strength, background, stroke) {
+  function glowAt(px, x, y, size, colour, strength, background, stroke, below = null) {
     const r = size + 1, light = parse(colour);
     for (let dy = -r; dy <= r; dy++) for (let dx = -r; dx <= r; dx++) {
       const a = x + dx, b = y + dy, d = Math.hypot(dx, dy);
@@ -188,9 +189,9 @@
       if (!stroke.base.has(i)) stroke.base.set(i, px[i]);
       if (k <= (stroke.k.get(i) || 0)) continue;
       stroke.k.set(i, k);
-      const was = stroke.base.get(i), under = parse(was || background);
+      const was = stroke.base.get(i), under = parse(was || (below && below[i]) || background);
       const out = hex(...under.map((v, j) => 255 - (255 - v) * (255 - light[j] * k) / 255));
-      px[i] = !was && out === hex(...parse(background)) ? null : out;   // too faint to show: stays empty
+      px[i] = !was && out === hex(...under) ? null : out;   // too faint to show: stays empty
     }
   }
   // add a soft glow of `colour` around every lit pixel that's brighter than `threshold` (0..255)
