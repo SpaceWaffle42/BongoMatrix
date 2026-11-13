@@ -171,7 +171,7 @@ def parse(payload: dict | None, fetched: float) -> Track | None:
                  int(item.get("duration_ms") or 1), bool(payload.get("is_playing")), fetched)
 
 
-_now: dict = {}                 # {"track": Track | None, "checked": time, "busy": bool, "art": {url: Image}}
+_now: dict = {}                 # {"track", "checked": started, "ok": last answered, "busy", "art": {url: Image}}
 
 
 def _check() -> None:
@@ -183,7 +183,7 @@ def _check() -> None:
             with urllib.request.urlopen(track.art_url, timeout=10) as response:  # noqa: S310 (Spotify's image host)
                 art = Image.open(io.BytesIO(response.read())).convert("RGB").resize((64, 64), Image.LANCZOS)
         with _lock:
-            _now["track"] = track
+            _now.update(track=track, ok=time.time())
             if art is not None:
                 _now["art"] = {track.art_url: art}           # just the current cover
     except (OSError, ValueError, KeyError):
@@ -204,7 +204,14 @@ def now_playing() -> tuple[Track | None, Image.Image | None]:
         return track, (_now.get("art") or {}).get(track.art_url) if track else None
 
 
+def known() -> bool:
+    """Whether Spotify has answered at least once (or never will be asked: BONGO_OFFLINE), so
+    ``now_playing`` is a real reading, however old, rather than "not asked yet"."""
+    with _lock:
+        return "ok" in _now or bool(os.environ.get("BONGO_OFFLINE"))
+
+
 def seed(track: Track | None, art: Image.Image | None = None) -> None:
     """Put a reading in place (previews, tests and the demo)."""
     with _lock:
-        _now.update(track=track, checked=time.time() + 10 ** 9, art={track.art_url: art} if track and art else {})
+        _now.update(track=track, checked=time.time() + 10 ** 9, ok=time.time(), art={track.art_url: art} if track and art else {})

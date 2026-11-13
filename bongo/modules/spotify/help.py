@@ -41,8 +41,10 @@ HELP = {
         "\"Spotify refused the sign-in\" usually means the Redirect URI on your app isn't exactly the one "
         "above (fix it on the app's page: Settings, then Edit, then Save), or the address you pasted was an "
         "old one. Either way, press Sign in with Spotify again.",
-        "The Spotify screens only show while something is playing; otherwise they hand over to the next "
-        "screen.",
+        "With Skip when not playing on (it's on unless you turn it off), the Spotify screens are skipped "
+        "altogether when nothing is playing; with it off they show \"Nothing playing\" briefly, then hand "
+        "over. A paused song stays up in grey for a while either way. A song started while the screen was "
+        "skipped shows from its next turn.",
     ],
     "links": [
         {"label": "Spotify developer dashboard", "url": "https://developer.spotify.com/dashboard"},

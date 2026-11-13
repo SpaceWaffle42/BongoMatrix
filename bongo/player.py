@@ -44,8 +44,8 @@ def play_entry(style: Style, seconds: float, panel, stop: threading.Event | None
         if live and live.skip.is_set():
             live.skip.clear()
             break
-        if getattr(style, "finished", False) and not (live and live.paused):   # a style can hand over early
-            break                                                                # (Spotify idle, a splash played through)
+        if getattr(style, "finished", False) and not (live and live.paused and shown):   # a style can hand over
+            break   # early (Spotify idle, a splash played through); Pause holds one only once it has drawn
         started = clock()
         now = style.ctx.now()
         if last is None or started - last_at >= frame_time - 1e-3:
@@ -104,10 +104,12 @@ def play(playlist: list[Entry], modules: dict[str, Module], panel, ctx_factory=C
         if live:
             live.playing(shown, upcoming, index)
         try:
-            play_entry(style, seconds, panel, stop, place=place, live=live, overlays=extras)
+            frames = play_entry(style, seconds, panel, stop, place=place, live=live, overlays=extras)
         except Exception:  # one broken module must not stop the panel
             log.exception("%s/%s failed while playing; moving on", entry.module, entry.style)
             return False
+        gone = frames == 0 and getattr(style, "finished", False)   # it skipped itself (Spotify, nothing on)
+        skipped[0] = skipped[0] + 1 if gone else 0
         return True
 
     def brightness(now, forced_sleep):
@@ -127,6 +129,7 @@ def play(playlist: list[Entry], modules: dict[str, Module], panel, ctx_factory=C
         else:
             panel.set_brightness(level)
 
+    skipped = [0]   # screens in a row that skipped themselves without a frame
     boot = schedule.boot_entry() if schedule else None
     if boot:
         run(boot, day[0])
@@ -166,3 +169,7 @@ def play(playlist: list[Entry], modules: dict[str, Module], panel, ctx_factory=C
         if not run(entry, current[(index + 1) % len(current)], where, None if asleep else overlays,
                    limit):  # where: slot in the saved playlist; limit: stop when sleep starts/ends
             stop.wait(0.2)  # never spin if every entry is broken
+        elif skipped[0] >= len(current):   # every screen skipped itself (Spotify, nothing on): dark, not a spin
+            dark = ctx_factory().canvas()
+            panel.show(place(dark) if place else dark)
+            stop.wait(1)

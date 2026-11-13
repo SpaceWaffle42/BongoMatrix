@@ -1,6 +1,7 @@
 """Spotify: what's playing now, with its cover. Cover, Backdrop and Vinyl looks, and a Ticker overlay
 that slides a slim strip up over whatever else is on. When you pause, the art goes grey; after a
-while (or straight away when nothing is playing) the screen hands over to the next one.
+while the screen hands over to the next one. With "Skip when not playing" (on by default) the screen
+is skipped altogether when nothing is playing, so it never says "nothing playing".
 
 Sign in once in Settings > Spotify (see account.py for how, and why it works that way)."""
 from __future__ import annotations
@@ -39,9 +40,19 @@ class Base(Style):
     def setup(self):
         self.small, self.mid = self.ctx.fonts("tom-thumb"), self.ctx.fonts("5x7")
         self.since = None                                    # when the music stopped (for handing over)
+        self.confirmed = False                               # with skip_when_not_playing: a song is on
+        self.waiting = False                                 # ... and Spotify hasn't answered yet: dark meanwhile
         self.started = None
         self.last_url = None
         self.changed = 0.0                                   # when the song changed (titles restart, covers slide)
+        if self.settings["skip_when_not_playing"] and account.connected():
+            track, _ = account.now_playing()                 # also starts a check if the last one is old
+            if not account.known():
+                self.waiting = True                          # the very first time: wait (dark) for an answer
+            elif track is not None and track.playing:
+                self.confirmed = True
+            else:                                            # nothing on at the last answer, however old: skipped
+                self.finished = True                         # before a frame (the check just started serves next time)
 
     def reading(self, now):
         t = time.time()
@@ -55,7 +66,24 @@ class Base(Style):
         wait = 3 if track is None else self.settings["hand_over_after"]
         if not account.connected() or (quiet and t - self.since >= wait):
             self.finished = t - self.started > 3             # always on for a moment, so it doesn't flicker past
+        if self.skipping(track, t):
+            self.finished = True
         return track, art, t
+
+    def skipping(self, track, t) -> bool:
+        """With "Skip when not playing", whether to hand over now. Once a song shows, pausing behaves as
+        ever (grey, then hands over) but the song going away ends it at once; while waiting for Spotify's
+        very first answer it stays dark, and goes if nothing's on or there's no answer in 5 s."""
+        if not (self.settings["skip_when_not_playing"] and account.connected()):
+            return False
+        if self.confirmed:
+            return track is None
+        if self.waiting:
+            if account.known() and track is not None and track.playing:
+                self.waiting, self.confirmed = False, True   # it's on: from here the screen behaves as ever
+                return False
+            return account.known() or t - self.started > 5
+        return True                                          # skipped at setup (only previews draw it)
 
     def ticker(self, img, font, x0, x1, baseline, text, t, colour):
         """``text`` between x0 and x1, scrolling (after a pause) when it's too long."""
@@ -105,6 +133,9 @@ class Base(Style):
 
     def render(self, now):
         track, art, t = self.reading(now)
+        if self.settings["skip_when_not_playing"] and account.connected() and (
+                self.waiting or (self.confirmed and track is None)):
+            return self.ctx.canvas()                         # dark while it finds out or leaves: never "nothing playing"
         if not account.connected():
             return self.message("SPOTIFY\nSIGN IN IN\nSETTINGS", (30, 215, 96))
         if track is None:
@@ -246,14 +277,15 @@ def check(settings: dict) -> None:
 MODULE = Module(
     id="spotify",
     name="Spotify",
-    description="What's playing on Spotify: the cover, title and artist. Hands over to the next screen "
-                "when nothing is playing. Sign in once in Settings > Spotify.",
+    description="What's playing on Spotify: the cover, title and artist. Skipped when nothing is playing "
+                "(turn off Skip when not playing to show \"Nothing playing\" briefly instead). "
+                "Sign in once in Settings > Spotify.",
     help=HELP,
     styles={"cover": Cover, "backdrop": Backdrop, "vinyl": Vinyl},
     overlays={"ticker": Ticker},
-    defaults={"hand_over_after": 60, "show_progress": True,
+    defaults={"skip_when_not_playing": True, "hand_over_after": 60, "show_progress": True,
               # the look (Advanced): the artist line and bar take the cover's colour unless you pick one
               "title_colour": "#FFFFFF", "match_cover": True, "artist_colour": "#1ED760"},
-    basic=("hand_over_after",),
+    basic=("skip_when_not_playing", "hand_over_after"),
     check=check,
 )
