@@ -129,6 +129,17 @@ def play(playlist: list[Entry], modules: dict[str, Module], panel, ctx_factory=C
         else:
             panel.set_brightness(level)
 
+    def show_dark(wait):
+        """A dark panel (forced sleep, or every screen skipped), still with the PIN, setup or address screen
+        over it when one is up, so pairing and setup work then too; such a screen keeps its own pace."""
+        dark = ctx_factory().canvas()
+        covered = live.overlay(dark) if live and live.overlay else dark
+        out = place(covered) if place else covered
+        panel.show(out)
+        if live:
+            live.publish(out, public=place(dark) if place else dark)
+        stop.wait(min(wait, 1 / 20) if covered is not dark else wait)
+
     skipped = [0]   # screens in a row that skipped themselves without a frame
     boot = schedule.boot_entry() if schedule else None
     if boot:
@@ -151,9 +162,7 @@ def play(playlist: list[Entry], modules: dict[str, Module], panel, ctx_factory=C
         was_asleep = asleep
         brightness(now, forced)
         if forced and not (schedule and schedule.sleep_playlist):
-            dark = ctx_factory().canvas()
-            panel.show(place(dark) if place else dark)
-            stop.wait(0.05 if getattr(panel, "ramping", False) else 1)  # dark until sleep_until or a wake
+            show_dark(0.05 if getattr(panel, "ramping", False) else 1)  # dark until sleep_until or a wake
             continue
         if forced:
             current = schedule.sleep_playlist
@@ -170,6 +179,4 @@ def play(playlist: list[Entry], modules: dict[str, Module], panel, ctx_factory=C
                    limit):  # where: slot in the saved playlist; limit: stop when sleep starts/ends
             stop.wait(0.2)  # never spin if every entry is broken
         elif skipped[0] >= len(current):   # every screen skipped itself (Spotify, nothing on): dark, not a spin
-            dark = ctx_factory().canvas()
-            panel.show(place(dark) if place else dark)
-            stop.wait(1)
+            show_dark(1)

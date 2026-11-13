@@ -39,8 +39,9 @@ class Live:
             self.entry, self.upcoming, self.started, self.index = entry, upcoming, time.time(), index
 
     def publish(self, frame: Image.Image, public: Image.Image | None = None) -> None:
-        """``frame``: what the panel shows (the paired dashboard's preview). ``public``: the same without
-        any covering screen (PIN, setup password, address), for the hub; defaults to ``frame``."""
+        """``frame``: what the panel shows (nothing on the web reads it). ``public``: the same without any
+        covering screen (PIN, setup password, address), for the hub and the dashboard's preview; defaults
+        to ``frame``."""
         with self._lock:
             self._frame = frame
             self._public = frame if public is None else public
@@ -64,7 +65,8 @@ class Live:
 
     # -- dashboard side ----------------------------------------------------------------
     def frame_png(self, public: bool = False) -> bytes | None:
-        """The latest frame as PNG; ``public``: never with the PIN, setup or address screen on it."""
+        """The latest frame as PNG; ``public``: never with the PIN, setup or address screen on it (what
+        every web page shows: the hub and the dashboard's preview alike; only the panel shows those)."""
         with self._lock:
             frame = self._public if public else self._frame
         if frame is None:

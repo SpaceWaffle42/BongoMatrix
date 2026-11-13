@@ -293,7 +293,10 @@ def create_app(*, modules, live, pairing, config_path, logs: LogBuffer | None = 
 
     @app.get("/api/frame.png")
     def frame():
-        png = live.frame_png()
+        # the dashboard's live preview: what's playing, never a covering screen. The PIN in particular
+        # must never be on a web page: a browser already paired on another address (http://10.0.0.4
+        # vs http://dev-matrix.local are separate sites) would otherwise show it while pairing
+        png = live.frame_png(public=True)
         if png is None:
             abort(404)
         return send_file(io.BytesIO(png), mimetype="image/png", max_age=0)
