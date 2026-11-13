@@ -219,7 +219,7 @@ function show(s) {
   const joining = s.state === 'joining', done = s.state === 'connected' && s.ssid;
   $('form-view').hidden = joining || done; $('joining-view').hidden = !joining; $('done-view').hidden = !done;
   $('joining-ssid').textContent = s.joining || ''; $('done-ssid').textContent = s.ssid || '';
-  showError(joining ? '' : (localError || s.error));
+  showError(joining || done ? '' : (localError || s.error));   // joined: an earlier failure no longer applies
   $('scanning').hidden = !s.scanning; $('rescan').disabled = !!s.scanning;
   if (!joining && !done) renderNets(s.networks || []);
   if (s.name && !nameTouched && !$('name').value) $('name').value = s.name;

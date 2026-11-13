@@ -22,6 +22,7 @@ with a fake NetworkManager and a fake clock.
 from __future__ import annotations
 
 import logging
+import re
 import secrets
 import shutil
 import subprocess
@@ -163,8 +164,14 @@ def plain_reason(error: str) -> str:
     low = error.lower()
     if "secrets were required" in low or "802-1x" in low or "password" in low or "psk" in low:
         return "the password wasn't accepted"
-    if "no network with ssid" in low or "not found" in low:
+    if "no network with ssid" in low or "not found" in low or "could not be found" in low:
         return "the Matrix can't see that network from here"
+    if "ip configuration" in low or "dhcp" in low:
+        return "it joined, but the network didn't give it an address (the router may only allow devices it knows)"
+    if re.search(r"\bsae\b|\bwpa3\b", low):
+        return "the network's security type (probably WPA3 only) isn't one this Matrix's Wi-Fi can use"
+    if "key-mgmt" in low:   # nmcli couldn't see the network's security when it made the profile
+        return "the Matrix couldn't tell what security that network uses (try again, or check the name)"
     if "timeout" in low or "timed out" in low:
         return "the network didn't answer in time"
     return "the network wouldn't let it join"
@@ -203,6 +210,15 @@ class Manager:
     # -- what NetworkManager knows -------------------------------------------------------------
     def devices(self) -> list[tuple[str, str, str]]:
         return [tuple(fields(ln)[:3]) for ln in self.run("-t", "-f", "DEVICE,TYPE,STATE", "device").splitlines() if ln]
+
+    def wifi_uuids(self) -> set[str]:
+        """The ids of the saved Wi-Fi connections (a try's new one is told apart from older ones by these)."""
+        out = set()
+        for ln in self.run("-t", "-f", "UUID,TYPE", "connection", "show").splitlines():
+            uuid, kind = (fields(ln) + ["", ""])[:2]
+            if kind in ("802-11-wireless", "wifi") and uuid:
+                out.add(uuid)
+        return out
 
     def saved(self) -> list[str]:
         """Saved Wi-Fi networks (connection names; NetworkManager names them after the network)."""
@@ -347,7 +363,10 @@ class Manager:
 
     def _join(self, ssid: str, password: str, hidden: bool, country: str = "", ident: int | None = None) -> bool:
         # no lock while NetworkManager tries (up to a minute): tick() leaves "joining" alone
-        known = ssid in self.saved()
+        try:
+            before = self.wifi_uuids()   # whatever was saved before this try stays saved, whatever its name
+        except RuntimeError:
+            before = None
         time.sleep(self.settle)   # let the page's answer reach the phone before the hotspot goes
         with self._lock:
             try:
@@ -368,15 +387,38 @@ class Manager:
             self.run(*args, timeout=JOIN_WAIT + 15)
         except RuntimeError as error:
             log.info("couldn't join %s: %s", ssid, error)
+            if self._landed(ssid, ident):   # NetworkManager gave up waiting, but the join finished anyway (slow DHCP)
+                log.info("…but it's on %s after all", ssid)
+                return self._joined(ssid, ident)
             with self._lock:
                 current = self._current(ident)
-            if not known and current:   # only a network that works is kept (never one a newer try just saved)
+            if current and before is not None:   # only a network that works is kept (never one a newer try just saved)
                 try:
-                    self.run("connection", "delete", ssid)
+                    for uuid in self.wifi_uuids() - before:   # the profile this try made, even if it's "Name 1"
+                        self.run("connection", "delete", "uuid", uuid)
                 except RuntimeError:
                     pass
             self._failed(ssid, f"Couldn't join {ssid}: {plain_reason(str(error))}.", ident)
             return False
+        return self._joined(ssid, ident)
+
+    def _landed(self, ssid: str, ident: int | None = None, looks: int = 5) -> bool:
+        """Whether it's on ``ssid`` after all, looking a few times (``settle`` s apart) as an address arrives."""
+        for k in range(looks):
+            with self._lock:
+                if not self._current(ident):   # given up on meanwhile: nothing to wait for
+                    return False
+            try:
+                online, now, _wired = self.link()
+            except RuntimeError:
+                online, now = False, None
+            if online and now == ssid:
+                return True
+            if k < looks - 1:
+                time.sleep(self.settle)
+        return False
+
+    def _joined(self, ssid: str, ident: int | None) -> bool:
         with self._lock:
             if not self._current(ident):   # given up on meanwhile (the watchdog), maybe a newer try: leave it be
                 return False
@@ -400,6 +442,8 @@ class Manager:
 
     # -- the state machine --------------------------------------------------------------------
     def _enter(self, state: str, note: str) -> None:
+        if state == "connected":
+            self.status.error = ""   # on a network now: an earlier "couldn't join" no longer applies
         if self.status.state != state:
             self.status.history = (self.status.history + [(round(self.clock()), state, note)])[-20:]
             self.status.state, self.status.since = state, self.clock()
