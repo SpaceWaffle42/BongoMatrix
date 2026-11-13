@@ -579,9 +579,12 @@ function tick() {
 }
 $('play').onclick = () => { playing = !playing; $('play').textContent = playing ? '❚❚ Pause' : '▶ Play'; clearTimeout(timer); if (playing) tick(); else drawFrame(px, frames[cur], 1); };
 
-// -- pretend actions ----------------------------------------------------------------------
+// -- talking to the Matrix ----------------------------------------------------------------
+// ?demo (the demo dashboard, no Matrix behind it): everything works except the three things that need one
+const DEMO = new URLSearchParams(location.search).has('demo');
 function toast(t) { const el = $('toast'); el.textContent = t; el.style.display = 'block'; clearTimeout(toast.t); toast.t = setTimeout(() => el.style.display = 'none', 2600); }
 async function send(extra) {
+  if (DEMO) return { name: `uploaded/${(extra.name || 'animation').replace(/[^A-Za-z0-9_-]+/g, '_')}.gif`, demo: true };
   const res = await fetch('/api/animator', { method: 'POST', credentials: 'same-origin',
     headers: { 'Content-Type': 'application/json', Accept: 'application/json' },
     body: JSON.stringify({ frames: frames.map((f) => ({ px: f.px, ms: f.ms })), loop: $('loop').value, background: bg, ...extra }) });
@@ -592,12 +595,12 @@ async function send(extra) {
 }
 $('show').onclick = async () => {
   $('show').disabled = true;
-  try { await send({ show: true }); toast('Playing on the Matrix for 15 seconds'); }
+  try { await send({ show: true }); toast(DEMO ? 'This is the demo: on your Matrix it plays there for 15 seconds' : 'Playing on the Matrix for 15 seconds'); }
   catch (e) { toast(e.message); } finally { $('show').disabled = false; }
 };
 $('save').onclick = async () => {
   $('save').disabled = true;
-  try { const { name } = await send({ name: $('name').value || 'animation' }); dirty = false; toast(`Saved ${name.replace('uploaded/', '')} to your media library`); }
+  try { const { name } = await send({ name: $('name').value || 'animation' }); dirty = false; toast(DEMO ? `This is the demo: on your Matrix it saves ${name.replace('uploaded/', '')} to your media library` : `Saved ${name.replace('uploaded/', '')} to your media library`); }
   catch (e) { toast(e.message); } finally { $('save').disabled = false; }
 };
 
@@ -706,6 +709,7 @@ $('import').onclick = () => $('importfile').click();
 $('importfile').onchange = async () => {
   const file = $('importfile').files[0]; $('importfile').value = '';
   if (!file) return;
+  if (DEMO) { toast('This is the demo: on your Matrix, Import turns a GIF or image into frames'); return; }
   const form = new FormData(); form.append('file', file);
   try {
     const res = await fetch('/api/animator/import', { method: 'POST', credentials: 'same-origin', headers: { 'X-Bongo-Upload': '1', Accept: 'application/json' }, body: form });

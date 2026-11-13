@@ -21,7 +21,7 @@ const ROUTES = [
   [/^\/logs$/, () => import('./logs.js')],
   [/^\/pair$/, () => import('./pair.js')],
   [/^\/animator$/, async () => ({ render(view) {  // the animator page, framed in the dashboard
-    const frame = h('iframe', { src: DEMO ? 'demo-animator.html' : 'animator.html', title: 'Animator', class: 'animator-frame' });
+    const frame = h('iframe', { src: DEMO ? 'animator.html?demo' : 'animator.html', title: 'Animator', class: 'animator-frame' });   // the real one either way
     view.append(h('div', { class: 'stack' }, frame));
   } })],
 ];
