@@ -57,15 +57,15 @@ class WordGrid(Style):
     """Word grid: a grid of letters where the words for the time light up."""
     group = "Word"
     fps = 2
-    defaults = {"colour": "#FFD28C"}
+    defaults = {"colour": "#FFD28C", "unlit_colour": "#221E1C", "background": "#000000"}
     basic = ("colour",)
 
     def render(self, now):
-        img = Image.new("RGB", (W, H))
+        img = Image.new("RGB", (W, H), _rgb(self.settings["background"]))
         font = self.ctx.fonts("tom-thumb")
         lit = lit_cells(now)
         on = _rgb(self.settings["colour"])
-        off = (34, 30, 28)
+        off = _rgb(self.settings["unlit_colour"])
         for r, row in enumerate(GRID):
             for c, ch in enumerate(row):
                 font.draw(img, c * 4, 6 + r * 5, ch, on if (r, c) in lit else off)
@@ -83,12 +83,13 @@ class WordLines(Style):
     """Word lines: the time in words on up to three lines, typed in when it changes."""
     group = "Word"
     fps = 20
-    defaults = {}
-    COLOURS = [(120, 200, 255), (200, 200, 210), (255, 255, 255)]
+    defaults = {"minutes_colour": "#78C8FF", "link_colour": "#C8C8D2", "hour_colour": "#FFFFFF", "background": "#000000"}
     TYPE = 0.1    # seconds a letter
 
     def render(self, now):
-        img = Image.new("RGB", (W, H))
+        s = self.settings
+        colours = [_rgb(s["minutes_colour"]), _rgb(s["link_colour"]), _rgb(s["hour_colour"])]
+        img = Image.new("RGB", (W, H), _rgb(s["background"]))
         small, f57 = self.ctx.fonts("tom-thumb"), self.ctx.fonts("5x7")
         words = lines(now)
         # when did these words start showing? (the phrase changes at x:x2:30, x:x7:30)
@@ -106,7 +107,7 @@ class WordLines(Style):
                 show = line[:max(0, min(len(line), int(typed - done)))]
                 done += len(line) + 2
             x = (W - font.width(line)) // 2
-            font.draw(img, x, top + i * pitch, show, self.COLOURS[i if len(words) == 3 else (0, 2)[i]])
+            font.draw(img, x, top + i * pitch, show, colours[i if len(words) == 3 else (0, 2)[i]])
         return scaled(img, self.ctx.width, self.ctx.height)
 
 

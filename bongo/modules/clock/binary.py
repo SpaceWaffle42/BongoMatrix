@@ -8,7 +8,6 @@ from bongo.module import Style
 from .common import HOURS, digits, scaled
 
 W, H = 64, 32
-COLOURS = [(255, 90, 90), (255, 90, 90), (90, 220, 120), (90, 220, 120), (90, 160, 255), (90, 160, 255)]
 
 
 class Binary(Style):
@@ -16,12 +15,18 @@ class Binary(Style):
     underneath so it can be learned."""
     group = "Binary"
     fps = 4
-    defaults = {"hours": "24", "show_digits": True}
+    defaults = {"hours": "24", "show_digits": True, "hours_colour": "#FF5A5A", "minutes_colour": "#5ADC78",
+                "seconds_colour": "#5AA0FF", "digit_colour": "#787882", "background": "#000000"}
     choices = {"hours": HOURS}
     basic = ("hours",)
 
     def render(self, now):
-        img = Image.new("RGB", (W, H))
+        s_ = self.settings
+        pairs = [s_["hours_colour"], s_["minutes_colour"], s_["seconds_colour"]]
+        colours = [tuple(int(p.lstrip("#")[i:i + 2], 16) for i in (0, 2, 4)) for p in pairs for _ in (0, 1)]
+        bg = tuple(int(s_["background"].lstrip("#")[i:i + 2], 16) for i in (0, 2, 4))
+        digit_colour = tuple(int(s_["digit_colour"].lstrip("#")[i:i + 2], 16) for i in (0, 2, 4))
+        img = Image.new("RGB", (W, H), bg)
         d = ImageDraw.Draw(img)
         small = self.ctx.fonts("tom-thumb")
         s = digits(now, self.settings["hours"], seconds=True)
@@ -35,7 +40,7 @@ class Binary(Style):
             for b in range(4):
                 y = 20 - b * 6
                 d.rectangle([x, y, x + 4, y + 4],
-                            fill=COLOURS[i] if v >> b & 1 else tuple(c // 7 for c in COLOURS[i]))
+                            fill=colours[i] if v >> b & 1 else tuple(b_ + (c - b_) // 7 for c, b_ in zip(colours[i], bg)))
             if self.settings["show_digits"]:
-                small.draw(img, x + 1, 31, ch, (120, 120, 130))
+                small.draw(img, x + 1, 31, ch, digit_colour)
         return scaled(img, self.ctx.width, self.ctx.height)

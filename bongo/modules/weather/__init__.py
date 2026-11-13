@@ -12,6 +12,9 @@ MODULE = Module(
         location="London", latitude=51.5074, longitude=-0.1278,
         units="celsius", wind_unit="kmh", refresh_minutes=10,
         scroll_location=True,  # a location too long for its space scrolls like a ticker
+        # the look (Advanced): today's colours by default; the sky changes with the weather unless turned off
+        text_colour="#FFF4DE", accent="#FFD9A8", detail_colour="#9AA1AC",
+        sky_background=True, background="#0B0C0E",
     ),
     choices={"units": ["celsius", "fahrenheit"], "wind_unit": ["kmh", "mph", "ms", "kn"]},
     basic=("location", "units", "scroll_location"),

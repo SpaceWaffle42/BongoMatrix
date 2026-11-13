@@ -14,7 +14,7 @@ from bongo.module import Module, Style
 
 from . import codes
 
-AMBER, WHITE, RULE = (255, 181, 71), (255, 255, 255), (40, 40, 46)
+RULE = (40, 40, 46)   # the divider under the label (the colours are look settings now)
 
 
 def _limit_for(settings: dict) -> list[tuple[str, int]]:
@@ -55,14 +55,17 @@ class Base(Style):
         self.small = self.ctx.fonts("tom-thumb")
         self.f57 = self.ctx.fonts("5x7")
         self.started = None
+        hexed = lambda k: tuple(int(self.settings[k].lstrip("#")[i:i + 2], 16) for i in (0, 2, 4))
+        self.WHITE, self.AMBER, self.BG = hexed("label_colour"), hexed("accent"), hexed("background")
 
     def seconds(self, now):
         if self.started is None:
             self.started = now
         return (now - self.started).total_seconds()
 
-    def ticker(self, img, x0, x1, baseline, text, t, colour=AMBER, gap=16):
+    def ticker(self, img, x0, x1, baseline, text, t, colour=None, gap=16):
         """``text`` centred between x0 and x1, or scrolling if it's too long."""
+        colour = colour or self.AMBER
         w = self.small.width(text)
         strip = Image.new("RGB", (x1 - x0, 7))
         if w <= x1 - x0:
@@ -74,7 +77,8 @@ class Base(Style):
                 self.small.draw(strip, off + k * (w + gap), 6, text, colour)
         img.paste(strip, (x0, baseline - 6), strip.convert("L").point(lambda v: 255 if v else 0))   # just the letters
 
-    def words(self, img, x0, x1, top, label, colour=WHITE):
+    def words(self, img, x0, x1, top, label, colour=None):
+        colour = colour or self.WHITE
         for i, word in enumerate(label.upper().split()[:3]):
             self.small.draw(img, x0 + (x1 - x0 - self.small.width(word)) // 2, top + i * 6, word, colour)
 
@@ -83,7 +87,7 @@ class Base(Style):
         beside it and the line along the bottom, or a bigger one full height on the left."""
         w, h = self.ctx.width, self.ctx.height
         t = self.seconds(now) if t is None else t
-        img = Image.new("RGB", (w, h))
+        img = Image.new("RGB", (w, h), self.BG)
         d = ImageDraw.Draw(img)
         small_code = codes.fitted(payload, h - 7)
         if small_code is not None and small_code.width <= 25 and h >= 30:
@@ -95,7 +99,7 @@ class Base(Style):
             self.words(img, 0, x, mid - lines * 3 + 5, label)       # centred on the code
             ax = x + b.width + 4 + (1 if int(t * 2) % 2 else 0)        # an arrow nudging at the code
             for k in range(4):
-                d.line([ax + k, mid - k, ax + k, mid + k], fill=AMBER)
+                d.line([ax + k, mid - k, ax + k, mid + k], fill=self.AMBER)
             self.ticker(img, 0, w, h - 1, scroll, t)                    # two dark rows under the code
             return img
         b = codes.fitted(payload, h)
@@ -111,10 +115,10 @@ class Base(Style):
         return img
 
     def too_small(self, img):
-        self.small.draw(img, 1, 6, "QR CODE", AMBER)
-        self.small.draw(img, 1, 12, "NEEDS A", WHITE)
-        self.small.draw(img, 1, 18, "BIGGER", WHITE)
-        self.small.draw(img, 1, 24, "SCREEN", WHITE)
+        self.small.draw(img, 1, 6, "QR CODE", self.AMBER)
+        self.small.draw(img, 1, 12, "NEEDS A", self.WHITE)
+        self.small.draw(img, 1, 18, "BIGGER", self.WHITE)
+        self.small.draw(img, 1, 24, "SCREEN", self.WHITE)
         return img
 
 
@@ -163,7 +167,7 @@ class TwoCodes(Base):
 
     def render(self, now):
         s, w, h = self.settings, self.ctx.width, self.ctx.height
-        img = Image.new("RGB", (w, h))
+        img = Image.new("RGB", (w, h), self.BG)
         a = codes.fitted(codes.link(s["url"]), h - 5)
         b = codes.fitted(codes.link(s["second_url"]), h - 5)
         if a is None or b is None or a.width + b.width + 4 > w:
@@ -176,7 +180,7 @@ class TwoCodes(Base):
             word = text.upper()
             while word and self.small.width(word) > code.width:
                 word = word[:-1]
-            self.small.draw(img, x + (code.width - self.small.width(word) + 2) // 2, h, word, AMBER)   # rows 27-31
+            self.small.draw(img, x + (code.width - self.small.width(word) + 2) // 2, h, word, self.AMBER)   # rows 27-31
         return img
 
 
@@ -187,7 +191,7 @@ class CodeOnly(Base):
 
     def render(self, now):
         w, h = self.ctx.width, self.ctx.height
-        img = Image.new("RGB", (w, h))
+        img = Image.new("RGB", (w, h), self.BG)
         b = codes.fitted(codes.link(self.settings["url"]), h)
         if b is None:
             return self.too_small(img)
@@ -197,8 +201,8 @@ class CodeOnly(Base):
             k = int(self.seconds(now) * 5) % 16
             for y in range(h):
                 if (y + k) % 16 < 3:
-                    img.putpixel((1, y), AMBER)
-                    img.putpixel((w - 2, h - 1 - y), AMBER)
+                    img.putpixel((1, y), self.AMBER)
+                    img.putpixel((w - 2, h - 1 - y), self.AMBER)
         return img
 
 
@@ -215,7 +219,7 @@ class CodeAndMessage(Standard):
             s = self.settings
             return self.coded(now, codes.link(s["url"]), s["label"], s["scroll"] or codes.shown(s["url"]), t % swap)
         w, h = self.ctx.width, self.ctx.height
-        img = Image.new("RGB", (w, h))
+        img = Image.new("RGB", (w, h), self.BG)
         big = self.ctx.fonts("6x13B")
         spaced = lambda f, text: f.width(text) + (len(text) - 1 if f is big else 0)   # big letters get a gap
         font = big if all(spaced(big, word.upper()) <= w - 2 for word in self.settings["message"].split()) else self.f57
@@ -233,7 +237,7 @@ class CodeAndMessage(Standard):
         for i, text in enumerate(lines):
             x = (w - spaced(font, text)) // 2
             for ch in text:                                  # letter by letter, a pixel apart
-                x += font.draw(img, x, top + i * pitch, ch, WHITE if i == 0 else AMBER) + (1 if font is big else 0)
+                x += font.draw(img, x, top + i * pitch, ch, self.WHITE if i == 0 else self.AMBER) + (1 if font is big else 0)
         return img
 
 
@@ -264,7 +268,9 @@ MODULE = Module(
     name="QR code",
     description="A scannable code with its address scrolling underneath: a link, guest Wi-Fi, a number to "
                 "call or text, two links side by side, or a code that swaps with a big message.",
-    defaults={"url": "example.com", "label": "SCAN ME"},
+    defaults={"url": "example.com", "label": "SCAN ME",
+              # the look (Advanced); the code itself always stays black on white, so phones can read it
+              "label_colour": "#FFFFFF", "accent": "#FFB547", "background": "#000000"},
     basic=("url", "label"),
     styles={"standard": Standard, "wifi_guests": WifiGuests, "call_or_text": CallOrText,
             "two_codes": TwoCodes, "code_only": CodeOnly, "code_and_message": CodeAndMessage},

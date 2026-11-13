@@ -41,6 +41,7 @@ def moon_image(size: int, fraction: float, waxing: bool, north: bool = True) -> 
 
 
 class Moon(Style):
+    defaults = dict(background_top="#0C1438", background_bottom="#030510")   # the night sky behind the moon
     fps = 10
 
     def setup(self):
@@ -55,7 +56,7 @@ class Moon(Style):
         now = local(now)
         age, frac, waxing = astro.moon_phase(now)
         accent, text = rgb(self.settings["accent"]), rgb(self.settings["text_colour"])
-        arr = gradient(w, h, (12, 20, 56), (3, 5, 16))
+        arr = gradient(w, h, rgb(self.settings["background_top"]), rgb(self.settings["background_bottom"]))
         t = now.timestamp()
         for sx, sy, ph, period, power in self.stars:
             b = 0.55 + 0.45 * math.sin(6.283 * t / period + ph)

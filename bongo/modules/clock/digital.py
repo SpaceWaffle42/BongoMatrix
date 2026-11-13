@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import datetime as dt
 
+import numpy as np
 from PIL import Image, ImageDraw
 
 from bongo.module import Style
@@ -16,14 +17,15 @@ class Big(Style):
     """Big numbers: large hours and minutes with a blinking colon, the date underneath."""
     group = "Digital"
     fps = 4
-    defaults = {"hours": "24", "colour": "#FFB547", "show_date": True}
-    choices = {"hours": HOURS}
+    defaults = {"hours": "24", "colour": "#FFB547", "show_date": True, "date_matches_colour": True,
+                "date_colour": "#BF8735", "background": "#000000", "font": "10x20"}
+    choices = {"hours": HOURS, "font": ["10x20", "9x18B"]}
     basic = ("hours", "colour")
 
     def render(self, now):
-        img = Image.new("RGB", (W, H))
+        img = Image.new("RGB", (W, H), _rgb(self.settings["background"]))
         d = ImageDraw.Draw(img)
-        big, small = self.ctx.fonts("10x20"), self.ctx.fonts("5x7")
+        big, small = self.ctx.fonts(self.settings["font"]), self.ctx.fonts("5x7")
         colour = _rgb(self.settings["colour"])
         hours, minutes = hm(now, self.settings["hours"]).split(":")
         colon_w = 6                                          # a 2 px colon with 2 px each side
@@ -44,7 +46,8 @@ class Big(Style):
                 d.rectangle([cx, yy, cx + 1, yy + 1], fill=colour)
         if self.settings["show_date"]:
             date = now.strftime("%a %d %b").upper()
-            small.draw(img, (W - small.width(date)) // 2, 29, date, tuple(c * 3 // 4 for c in colour))
+            dated = tuple(c * 3 // 4 for c in colour) if self.settings["date_matches_colour"] else _rgb(self.settings["date_colour"])
+            small.draw(img, (W - small.width(date)) // 2, 29, date, dated)   # a dimmer shade of the time, or your own
         return scaled(img, self.ctx.width, self.ctx.height)
 
 
@@ -122,7 +125,7 @@ class Seven(Style):
     """Seven-segment: red LED digits with the unlit segments faintly showing, small seconds."""
     group = "Digital"
     fps = 4
-    defaults = {"hours": "24", "colour": "#FF281E"}
+    defaults = {"hours": "24", "colour": "#FF281E", "background": "#000000"}
     choices = {"hours": HOURS}
     basic = ("hours", "colour")
     DW, DH, GAP, COLON, SEC_GAP = 8, 22, 2, 6, 3     # big digit size, gaps, colon zone, space before seconds
@@ -165,6 +168,11 @@ class Seven(Style):
         out = glow(img, 1.2, 0.6)
         small = self.ctx.fonts("tom-thumb")
         small.draw(out, x + (2 * self.SW + 2 - small.width("SEC")) // 2, sy - 2, "SEC", tuple(v // 2 for v in on))
+        bg = _rgb(self.settings["background"])
+        if any(bg):   # the lit LEDs (and their glow) over the background: it shows through only where they're dark
+            led = np.asarray(out, float)
+            lit = led.max(axis=2, keepdims=True) / 255
+            out = Image.fromarray(np.clip(led + np.array(bg, float) * (1 - lit), 0, 255).astype(np.uint8))
         return scaled(out, self.ctx.width, self.ctx.height)
 
 

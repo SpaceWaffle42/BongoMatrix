@@ -28,7 +28,8 @@ class Sun(Style):
     fps = 5
     # The day length in the middle ("9H 5M"): 6x10 is two sizes up from the tiny font, which was
     # hard to read on a real panel. Too wide for the canvas falls back to the tiny font.
-    defaults = dict(day_length_font="6x10")
+    # the sky follows the sun by default (dawn, day, dusk, night); turn that off for a fixed one
+    defaults = dict(day_length_font="6x10", sky_follows_sun=True, background_top="#2A6FB0", background_bottom="#9CC8E8")
     choices = {"day_length_font": names()}
 
     def setup(self):
@@ -42,7 +43,8 @@ class Sun(Style):
         elev = astro.sun_elevation(now, lat, lon)
         solar_day = (now.astimezone(dt.timezone.utc) + dt.timedelta(hours=lon / 15)).date()
         times = astro.sun_times(solar_day, lat, lon)
-        top, bottom = sky_colours(elev)
+        top, bottom = sky_colours(elev) if self.settings["sky_follows_sun"] else \
+            (rgb(self.settings["background_top"]), rgb(self.settings["background_bottom"]))
         horizon = h - 8 if h >= 20 else h - 7
         arr = gradient(w, h, top, bottom)
         arr[horizon:] = np.array(bottom) * 0.28  # ground: dark, so the times stay readable

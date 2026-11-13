@@ -83,6 +83,16 @@ class Base(Style):
             for i in range(3):
                 d.line([x + i, y + i, x + i, y + 4 - i], fill=colour)
 
+    def hex(self, name):
+        v = self.settings[name].lstrip("#")
+        return tuple(int(v[i:i + 2], 16) for i in (0, 2, 4))
+
+    def artist_colour(self, art, track):
+        """The artist line and progress bar: the cover's liveliest colour (the default), or your own."""
+        if not track.playing:
+            return GREY
+        return accent(art) if self.settings["match_cover"] else self.hex("artist_colour")
+
     def message(self, text, colour=GREY):
         img = self.ctx.canvas()
         w, h = img.size
@@ -109,15 +119,16 @@ class Base(Style):
 class Cover(Base):
     """Cover: the album art on the left; title and artist (scrolling if long), the time and a
     progress bar in the art's colour on the right."""
+    defaults = {"background": "#000000"}   # Backdrop's background is the cover itself, so only these two have one
 
     def draw(self, track, art, t):
         w, h = self.ctx.width, self.ctx.height
-        img = self.ctx.canvas()
+        img = self.ctx.canvas(self.hex("background"))
         size = min(h, w // 2)
         img.paste(art.resize((size, size), Image.LANCZOS), (0, (h - size) // 2))
         x0 = size + 2
-        col = accent(art) if track.playing else GREY
-        self.ticker(img, self.mid, x0, w, 8, track.title, t, (255, 255, 255) if track.playing else (150, 150, 150))
+        col = self.artist_colour(art, track)
+        self.ticker(img, self.mid, x0, w, 8, track.title, t, self.hex("title_colour") if track.playing else (150, 150, 150))
         self.ticker(img, self.small, x0, w, 16, track.artist, t, col)
         d = ImageDraw.Draw(img)
         if h >= 30:
@@ -144,8 +155,8 @@ class Backdrop(Base):
         img.paste(art.resize((thumb, thumb), Image.LANCZOS), (3, 3))
         d.rectangle([2, 2, thumb + 3, thumb + 3], outline=(0, 0, 0))
         x0 = thumb + 6
-        col = accent(art) if track.playing else GREY
-        self.ticker(img, self.mid, x0, w, 10, track.title, t, (255, 255, 255))
+        col = self.artist_colour(art, track)
+        self.ticker(img, self.mid, x0, w, 10, track.title, t, self.hex("title_colour"))
         self.ticker(img, self.small, x0, w, 19, track.artist, t, col)
         if h >= 30:
             self.small.draw(img, x0, 26, mmss(track.position(t)) if track.playing else "PAUSED", (190, 180, 210))
@@ -156,6 +167,7 @@ class Backdrop(Base):
 
 class Vinyl(Base):
     """Vinyl: a record spinning, with the cover as its label (it stops when you pause)."""
+    defaults = {"background": "#08080A"}
 
     def draw(self, track, art, t):
         w, h = self.ctx.width, self.ctx.height
@@ -178,11 +190,13 @@ class Vinyl(Base):
         sub[inside] = label[inside]
         c = int(r)
         a[c:c + 2, c:c + 2] = 8                              # the spindle hole
-        img = self.ctx.canvas((8, 8, 10))
-        img.paste(Image.fromarray(a.clip(0, 255).astype(np.uint8)), (0, (h - size) // 2))
+        img = self.ctx.canvas(self.hex("background"))
+        disc_img = Image.fromarray(a.clip(0, 255).astype(np.uint8))
+        disc_mask = Image.fromarray((disc * 255).astype(np.uint8))
+        img.paste(disc_img, (0, (h - size) // 2), disc_mask)
         x0 = size + 2
-        col = accent(art) if track.playing else GREY
-        self.ticker(img, self.mid, x0, w, 9, track.title, t, (255, 255, 255))
+        col = self.artist_colour(art, track)
+        self.ticker(img, self.mid, x0, w, 9, track.title, t, self.hex("title_colour"))
         self.ticker(img, self.small, x0, w, 17, track.artist, t, col)
         if h >= 30:
             self.small.draw(img, x0, 25, mmss(track.position(t)) if track.playing else "PAUSED", GREY)
@@ -216,10 +230,10 @@ class Ticker(Base):
         strip = Image.new("RGB", (w, band))
         if art is not None:
             strip.paste(art.resize((band - 2, band - 2), Image.LANCZOS), (1, 1))
-        self.ticker(strip, self.small, band, w - 1, 6, f"{track.title} - {track.artist}", t, (255, 255, 255))
+        self.ticker(strip, self.small, band, w - 1, 6, f"{track.title} - {track.artist}", t, self.hex("title_colour"))
         sd = ImageDraw.Draw(strip)
         self.bar(sd, 0, w - 1, 0 if self.settings["position"] == "bottom" else band - 1,
-                 track.position(t) / (track.duration_ms / 1000), accent(art))
+                 track.position(t) / (track.duration_ms / 1000), self.artist_colour(art, track))
         img.paste(strip.convert("RGBA"), (0, top))
         return img
 
@@ -237,7 +251,9 @@ MODULE = Module(
     help=HELP,
     styles={"cover": Cover, "backdrop": Backdrop, "vinyl": Vinyl},
     overlays={"ticker": Ticker},
-    defaults={"hand_over_after": 60, "show_progress": True},
+    defaults={"hand_over_after": 60, "show_progress": True,
+              # the look (Advanced): the artist line and bar take the cover's colour unless you pick one
+              "title_colour": "#FFFFFF", "match_cover": True, "artist_colour": "#1ED760"},
     basic=("hand_over_after",),
     check=check,
 )
