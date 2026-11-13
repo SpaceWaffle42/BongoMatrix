@@ -8,6 +8,7 @@ from __future__ import annotations
 import base64
 import collections
 import datetime as dt
+import hashlib
 import io
 import ipaddress
 import json
@@ -24,7 +25,7 @@ from pathlib import Path
 from flask import Flask, abort, jsonify, request, send_file, send_from_directory
 from werkzeug.exceptions import HTTPException
 
-from bongo import animator, config as cfg, net, netname, pets, petpack, update
+from bongo import animator, config as cfg, logo, net, netname, pets, petpack, update
 from bongo import media, places
 from bongo.fonts import Fonts, names as font_names, table as font_table
 from bongo.module import Context
@@ -210,6 +211,7 @@ def create_app(*, modules, live, pairing, config_path, logs: LogBuffer | None = 
                        playing=label(entry["module"], entry.get("style")) if entry.get("module") else None,
                        paused=status.get("paused", False), sleeping=bool(status.get("sleep_until")),
                        uptime=round(time.time() - started), warnings=warnings, picture=picture,
+                       badge=logo.badge_colour(config["web"].get("badge"), netname.mac_suffix()),
                        panel={"width": cfg.safe_area(config).panel_width, "height": cfg.safe_area(config).panel_height})
 
     @app.get("/api/public/frame.png")
@@ -232,7 +234,8 @@ def create_app(*, modules, live, pairing, config_path, logs: LogBuffer | None = 
     def network_info(config):
         suffix = netname.mac_suffix()
         return {"host": netname.host_name(config.get("name"), suffix), "suffix": suffix,
-                "address": netname.address(), "default_name": netname.DEFAULT_NAME}
+                "address": netname.address(), "default_name": netname.DEFAULT_NAME,
+                "auto_badge": logo.badge_colour(None, suffix)}   # its logo colour on the hub when none is picked
 
     @lru_cache(maxsize=128)
     def face_uri(kind, coat):
@@ -574,14 +577,16 @@ def create_app(*, modules, live, pairing, config_path, logs: LogBuffer | None = 
         for key in ("panel", "safe_area", "web"):   # merged key by key below: never replaced by null or a list
             if key in data and not isinstance(data[key], dict):
                 return jsonify(problems=[f"{key}: send an object"]), 422
-        if "web" in data:   # only the hub picture can change here; the address stays in data/config.json
+        if "web" in data:   # only the hub picture and the badge colour can change here; the address stays in data/config.json
             web, now = data["web"], current["web"]
-            if any(k != "hub_picture" and (k not in now or v != now[k] or type(v) is not type(now[k]))
+            if any(k not in ("hub_picture", "badge") and (k not in now or v != now[k] or type(v) is not type(now[k]))
                    for k, v in web.items()):
                 return jsonify(problems=["web: change the dashboard's address in data/config.json on the Pi"]), 422
             if not isinstance(web.get("hub_picture", True), bool):
                 return jsonify(problems=["web: hub_picture must be true or false"]), 422
-            data = {**data, "web": {k: v for k, v in web.items() if k == "hub_picture"}}
+            if web.get("badge") is not None and web["badge"] not in logo.COLOURS:
+                return jsonify(problems=[f"web: badge is one of {', '.join(logo.COLOURS)}, or null for automatic"]), 422
+            data = {**data, "web": {k: v for k, v in web.items() if k in ("hub_picture", "badge")}}
         merged = {**current, **data}
         for key in ("panel", "safe_area", "web"):  # these merge key by key, so a page can send just one
             if isinstance(data.get(key), dict):
@@ -738,6 +743,18 @@ def create_app(*, modules, live, pairing, config_path, logs: LogBuffer | None = 
             return jsonify(error="It's already restarting"), 409
         power.restart(what, (pairing.check(request.cookies.get(COOKIE)) or {}).get("name"))
         return jsonify(ok=True), 202
+
+    # -- the logo (bongo/logo.py): the pages' icon, and a Matrix's badge on the hub. Open to all, like the page --
+    @app.get("/logo.png")
+    def logo_png():
+        size = request.args.get("size", "32")
+        size = int(size) if size.isascii() and size.isdigit() and len(size) < 6 else 32
+        data = logo.png(request.args.get("style", "normal"), request.args.get("colour"), size,
+                        request.args.get("tile", "0") not in ("0", "false", "no"))
+        response = send_file(io.BytesIO(data), mimetype="image/png")
+        response.headers["Cache-Control"] = "public, max-age=3600"
+        response.set_etag(hashlib.sha1(data).hexdigest())
+        return response.make_conditional(request)
 
     # -- the page -----------------------------------------------------------------------------
     @app.get("/")

@@ -80,11 +80,18 @@ function deviceCard() {
   const showHost = () => { host.textContent = `${hostOf(name.value)}.local`; };
   name.addEventListener('input', showHost); showHost();
   const hubPic = h('input', { type: 'checkbox', id: 'set-hub-pic', checked: c.web?.hub_picture !== false });
+  // this Matrix's logo on the hub: the same blocks in one colour, so each Matrix is easy to tell apart
+  const BADGES = ['blue', 'red', 'tan', 'pink', 'yellow', 'green'];
+  const auto = BADGES.includes(net.auto_badge) ? net.auto_badge : null;
+  const badge = h('select', { class: 'input', id: 'set-badge' }, h('option', { value: '' }, auto ? `Chosen for you (${auto[0].toUpperCase() + auto.slice(1)})` : 'Chosen for you'), BADGES.map((b) => h('option', { value: b, selected: c.web?.badge === b }, b[0].toUpperCase() + b.slice(1))));
+  const badgeLook = h('img', { alt: '', width: 32, height: 32, onerror: (e) => { e.target.hidden = true; } });
+  const showBadge = () => { const b = badge.value || auto; badgeLook.hidden = !b; if (b) badgeLook.src = `logo.png?size=32&colour=${b}`; };
+  badge.addEventListener('change', showBadge); showBadge();
   const save = h('button', { type: 'button', class: 'btn primary' }, 'Save');
   save.onclick = () => {
     if (tz.value && zones.length && !zones.includes(tz.value)) { toast(`“${tz.value}” isn't a time zone this browser knows. Use a name like Europe/London.`, 'error'); tz.focus(); return; }
     saveConfig({ name: name.value.trim() || 'Bongo Matrix', timezone: tz.value.trim() || null,
-      panel: { ...c.panel, brightness: Number(bright.value) }, web: { hub_picture: hubPic.checked } }, 'Device settings');
+      panel: { ...c.panel, brightness: Number(bright.value) }, web: { hub_picture: hubPic.checked, badge: badge.value || null } }, 'Device settings');
   };
   return h('section', { class: 'card stack', 'aria-label': 'Device' }, h('h2', { class: 'h2' }, 'Device'),
     h('label', { class: 'field-col', for: 'set-name' }, 'Display name', name, where),
@@ -95,6 +102,7 @@ function deviceCard() {
     h('p', { class: 'muted tiny flush' }, `${c.panel?.cols || 64}×${c.panel?.rows || 32} panel · ${c.panel?.hardware_mapping || ''}`),
     h('label', { class: 'row gap-s', for: 'set-hub-pic' }, hubPic, h('span', null, 'Show what it\'s playing on the hub')),
     h('p', { class: 'muted tiny flush' }, 'The hub (matrix.local) shows a live picture of each Matrix to anyone on this Wi-Fi, including pushed messages. Its name and what\'s playing always show.'),
+    h('label', { class: 'field-col', for: 'set-badge' }, "This Matrix's logo colour on the hub", h('span', { class: 'badge-pick' }, badge, badgeLook)),
     h('div', { class: 'row end' }, save),
     restartBox());
 }

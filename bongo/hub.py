@@ -71,6 +71,9 @@ def version_key(v: str) -> tuple:
     return tuple(parts)
 
 
+BADGES = ("blue", "red", "tan", "pink", "yellow", "green")   # bongo.logo.COLOURS (kept here so the hub needs no pictures)
+
+
 def clean_card(raw) -> dict:
     """Only the fields the hub shows, each forced to its type: a card comes from another device."""
     if not isinstance(raw, dict):
@@ -82,6 +85,7 @@ def clean_card(raw) -> dict:
             "paused": bool(raw.get("paused")),
             "sleeping": bool(raw.get("sleeping")),
             "picture": raw.get("picture") is not False,   # False: its owner turned the hub picture off
+            "badge": raw.get("badge") if raw.get("badge") in BADGES else None,   # its logo's colour (older builds send none)
             "warnings": [str(w)[:80] for w in warnings[:5]] if isinstance(warnings, list) else []}
 
 
@@ -153,8 +157,8 @@ class Card:
     def public(self, now: float, newest: str, hub_id: str | None) -> dict:
         behind = bool(newest and self.peer.version and version_key(self.peer.version) < version_key(newest))
         card = dict(self.card)
-        if self.error:   # not answering (or too old): nothing from its last card is current but its name
-            card = {"name": card.get("name")}
+        if self.error:   # not answering (or too old): nothing from its last card is current but its name and colour
+            card = {"name": card.get("name"), "badge": card.get("badge")}   # and its colour, so the row keeps its shape
         # the card can't override who and where it is: those come from mDNS
         return {**card, **asdict(self.peer), "name": card.get("name") or self.peer.name, "url": self.peer.url,
                 "seen_ago": round(now - self.seen) if self.seen else None,

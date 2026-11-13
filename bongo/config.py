@@ -21,7 +21,8 @@ DEFAULTS = {
     "panel": {"rows": 32, "cols": 64, "hardware_mapping": "adafruit-hat-pwm",
               "gpio_slowdown": 4, "brightness": 80},
     "safe_area": {"top": 0, "right": 0, "bottom": 0, "left": 0},
-    # port80: plain http://name.local; hub_picture: the hub (matrix.local) may show its live picture
+    # port80: plain http://name.local; hub_picture: the hub (matrix.local) may show its live picture;
+    # badge (optional): the colour of this Matrix's logo on the hub, one of bongo.logo.COLOURS (none: picked from its id)
     "web": {"enabled": True, "host": "0.0.0.0", "port": 5000, "port80": True, "hub_picture": True},
     "playlist": [],
     # v2's default splash screen; "splash" items in the playlist play it. "boot": an optional file

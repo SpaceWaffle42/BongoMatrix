@@ -57,19 +57,24 @@ def _read(path: Path) -> Sprite:
     return Sprite(path.stem, tuple(img for img, _ in pictures), tuple(ms for _, ms in pictures), project["loop"])
 
 
-def load(name: str) -> Sprite:
+def load(name: str, own: bool = True) -> Sprite:
     """The sprite called ``name``: your own version if you've saved one from the dashboard, else the built-in
     one (also if yours can't be read). Raises FileNotFoundError if there is neither, and ValueError if the
     built-in file is broken, so a typo shows up in the tests, not as a blank patch on the panel.
 
+    ``own=False``: the built-in one only, whatever has been saved under its name (the logo: it is on pages
+    anyone on the network can open, so it must stay the size and shape it was drawn).
+
     Read once and kept until a file changes, so it costs nothing to call every frame. The pictures are
     shared: paste them, don't draw on them."""
     stem = animator.clean_project_name(name)
-    paths = [p for p in (animator.projects_dir() / f"{stem}.json", animator.BUILT_IN / f"{stem}.json") if p.is_file()]
+    places = (animator.projects_dir(), animator.BUILT_IN) if own else (animator.BUILT_IN,)
+    paths = [p for p in (place / f"{stem}.json" for place in places) if p.is_file()]
     if not paths:
         raise FileNotFoundError(f"no sprite called {name!r} in {animator.BUILT_IN} or {animator.projects_dir()}")
+    slot = stem if own else f"{stem} (built-in)"
     key = tuple((str(p), p.stat().st_mtime_ns) for p in paths)
-    if _cache.get(stem, (None,))[0] != key:
+    if _cache.get(slot, (None,))[0] != key:
         result: Sprite | str = "no file"
         for path in paths:
             try:
@@ -77,8 +82,8 @@ def load(name: str) -> Sprite:
                 break
             except (ValueError, OSError) as error:
                 result = f"the sprite {name!r} can't be read ({path.name}): {error}"
-        _cache[stem] = (key, result)   # one entry per name: a saved change takes the old one's place
-    result = _cache[stem][1]
+        _cache[slot] = (key, result)   # one entry per name: a saved change takes the old one's place
+    result = _cache[slot][1]
     if isinstance(result, str):
         raise ValueError(result)   # a fresh error each time: nothing piles up if a module asks every frame
     return result

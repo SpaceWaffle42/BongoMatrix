@@ -295,12 +295,17 @@ def _own(folder: Path) -> list[Path]:
     return sorted(p for p in folder.glob("*.json") if re.fullmatch(r"[a-z0-9][a-z0-9_-]{0,39}", p.stem) and not p.stem.endswith(("_", "-")))
 
 
+BADGE = re.compile(r"logo(_simple)?_(blue|red|tan|pink|yellow|green)")
+
+
 def projects() -> list[dict]:
     """Every project that can be opened, yours first: name, size and whether it's built in. A built-in one
     you've saved your own version of is listed once, as yours."""
     found: dict[str, dict] = {}
     for folder, built_in in ((BUILT_IN, True), (projects_dir(), False)):
         for path in _own(folder):
+            if built_in and BADGE.fullmatch(path.stem):
+                continue   # the logo in each of its six colours: used by the hub, not twelve more things to open
             try:
                 with open(path, encoding="utf-8") as f:
                     size = HEAD.search(f.read(2048))      # the size is near the top of a file the Animator wrote

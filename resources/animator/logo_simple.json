@@ -1,0 +1,3 @@
+{"format":"bongo-animation","version":1,"name":"logo_simple","width":16,"height":16,"background":"#000000","loop":"loop","palette":["#5b6ee1","#639bff","#ac3232","#d95763","#d9a066","#fbf236"],"layers":[{"name":"Blocks","on":true,"opacity":1,"mode":"normal","shared":false}],"frames":[
+{"ms":1000,"cels":["21*. 6*5 10*. 6*5 10*. 2*5 2*4 2*5 10*. 2*5 2*4 2*5 10*. 6*5 10*. 6*5 22*. 6*1 2*. 6*3 2*. 6*1 2*. 6*3 2*. 2*1 2*0 2*1 2*. 2*3 2*2 2*3 2*. 2*1 2*0 2*1 2*. 2*3 2*2 2*3 2*. 6*1 2*. 6*3 2*. 6*1 2*. 6*3 33*."]}
+]}

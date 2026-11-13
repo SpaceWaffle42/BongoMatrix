@@ -4,6 +4,8 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
 <title>Matrix hub</title>
+<link rel="icon" type="image/png" href="logo.png?size=32">
+<link rel="apple-touch-icon" href="logo.png?size=180&amp;tile">
 <style>
 :root {
   --page:#0B0C0E; --head:#0E1013; --card:#131519; --well:#08090A; --raise:#1A1D22; --line:#22262C; --line-2:#2C3139;
@@ -15,7 +17,12 @@
 }
 * { box-sizing:border-box; }
 body { margin:0; background:var(--page); color:var(--text); font:15px/1.45 var(--ui); }
-header { padding:16px; background:var(--head); border-bottom:1px solid var(--line); display:flex; gap:12px; align-items:baseline; flex-wrap:wrap; }
+header { padding:12px 16px; background:var(--head); border-bottom:1px solid var(--line); display:flex; gap:12px; align-items:center; flex-wrap:wrap; }
+header img, .name img { width:32px; height:32px; image-rendering:pixelated; flex:none; }
+.grow { flex:1 1 auto; }
+.pick { display:flex; align-items:center; gap:8px; color:var(--muted); font-size:13px; }
+.pick button { min-height:40px; padding:0 14px; background:var(--raise); color:var(--text); border:1px solid var(--line-2); font:600 13px var(--ui); cursor:pointer; margin-left:-1px; }
+.pick button[aria-pressed=true] { background:var(--amber-bg); border-color:var(--amber); color:var(--amber); position:relative; }
 header h1 { font-size:20px; margin:0; font-weight:700; }
 header p { margin:0; color:var(--muted); font-size:13px; }
 main { padding:16px; display:grid; gap:16px; grid-template-columns:repeat(auto-fill, minmax(280px, 1fr)); max-width:1200px; margin:0 auto; }
@@ -24,7 +31,8 @@ main { padding:16px; display:grid; gap:16px; grid-template-columns:repeat(auto-f
 .screen img { width:100%; height:100%; object-fit:contain; image-rendering:pixelated; }
 .screen .none { color:var(--muted); font-size:13px; }
 .body { padding:12px 14px 14px; display:flex; flex-direction:column; gap:6px; flex:1; }
-.name { font-size:17px; font-weight:650; display:flex; gap:8px; align-items:center; flex-wrap:wrap; }
+.name { font-size:17px; font-weight:650; display:flex; gap:8px; align-items:center; }
+.name .who { flex:1 1 0; min-width:0; overflow-wrap:anywhere; }
 .addr { font:13px var(--mono); color:var(--muted); }
 .playing { color:var(--soft); }
 .meta { font-size:13px; color:var(--muted); display:flex; gap:10px; flex-wrap:wrap; align-items:center; }
@@ -43,8 +51,11 @@ footer { color:var(--muted); font-size:12px; text-align:center; padding:8px 16px
 </head>
 <body>
 <header>
+  <img id="logo" alt="" width="32" height="32" onerror="this.hidden=true" onload="this.hidden=false">
   <h1>Matrix hub</h1>
   <p id="sub">Every Matrix on this network</p>
+  <span class="grow"></span>
+  <div class="pick" role="group" aria-label="Logo style"><span>Logo style</span><span><button type="button" id="logo-normal" aria-pressed="true" title="The round wall of blocks">Normal</button><button type="button" id="logo-simple" aria-pressed="false" title="Three big blocks: easier to tell apart when small">Simple</button></span></div>
 </header>
 <main id="cards" aria-live="polite"><p class="empty">Looking for Matrices…</p></main>
 <footer>Read-only: open a Matrix's dashboard to change it. Each one pairs on its own.</footer>
@@ -52,6 +63,16 @@ footer { color:var(--muted); font-size:12px; text-align:center; padding:8px 16px
 const $ = (id) => document.getElementById(id);
 const esc = (s) => String(s ?? '').replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
 let tick = 0;
+// the logo's look, Normal (the round wall) or Simple (three big blocks): remembered by this browser
+let style = 'normal', shown = [];
+try { if (localStorage.getItem('bongo-logo') === 'simple') style = 'simple'; } catch { /* no storage: Normal */ }
+function setStyle(s, keep) {
+  style = s;
+  if (keep) try { localStorage.setItem('bongo-logo', s); } catch { /* it just isn't remembered */ }
+  $('logo').src = `logo.png?size=32&style=${s}`;
+  $('logo-normal').setAttribute('aria-pressed', String(s === 'normal')); $('logo-simple').setAttribute('aria-pressed', String(s === 'simple'));
+  if (shown.length) $('cards').innerHTML = shown.map(card).join('');
+}
 
 function ago(s) {
   if (s == null) return 'not heard from yet';
@@ -69,7 +90,7 @@ function card(m) {
   return `<article class="card">
     <div class="screen">${picture}</div>
     <div class="body">
-      <div class="name">${esc(m.name)}${m.hub ? '<span class="badge hub" title="This Matrix answers at matrix.local">hub</span>' : ''}</div>
+      <div class="name">${m.badge ? `<img src="logo.png?size=32&amp;style=${style}&amp;colour=${esc(m.badge)}" alt="" width="32" height="32" onerror="this.hidden=true">` : ''}<span class="who">${esc(m.name)}</span>${m.hub ? '<span class="badge hub" title="This Matrix answers at matrix.local">hub</span>' : ''}</div>
       <div class="addr">${esc(m.address)}${m.port && m.port !== 80 ? ':' + esc(m.port) : ''}</div>
       <div class="playing">${off ? '—' : m.sleeping ? 'Asleep' : m.paused ? `Paused · ${esc(m.playing || '')}` : esc(m.playing || 'Starting')}</div>
       <div class="meta"><span><span class="dot${off ? ' off' : ''}"></span> ${ago(m.seen_ago)}</span>
@@ -92,12 +113,15 @@ async function load() {
     }
     const list = data.matrices || [];
     $('sub').textContent = list.length ? `${list.length} Matri${list.length === 1 ? 'x' : 'ces'} on this network` : 'Every Matrix on this network';
+    shown = list;
     $('cards').innerHTML = list.length ? list.map(card).join('')
       : `<p class="empty">${data.available === false ? 'The hub isn\'t running on this Matrix.' : 'Looking for Matrices…'}</p>`;
   } catch {
     $('sub').textContent = 'Can\'t reach the hub right now; trying again';
   }
 }
+$('logo-normal').onclick = () => setStyle('normal', true); $('logo-simple').onclick = () => setStyle('simple', true);
+setStyle(style);
 load(); setInterval(load, 5000);
 </script>
 </body>
