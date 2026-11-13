@@ -1,7 +1,8 @@
 """The Matrix on the network: its ``<name>.local`` name, its address on the panel, plain http on port 80.
 
 - The name in Settings becomes the Pi's host name (``Kitchen`` -> ``kitchen.local``; avahi, already on
-  Raspberry Pi OS, answers for it). Unnamed, it is ``matrix-7f3a`` from the end of its hardware address.
+  Raspberry Pi OS, answers for it, told the new name straight away as it doesn't follow a rename by
+  itself until it restarts). Unnamed, it is ``matrix-7f3a`` from the end of its hardware address.
 - It is announced as a ``_bongo._tcp`` service, so the hub (later) and phones can find it.
 - When it joins a network, its address changes or its name changes, the panel shows the name, the
   address and a QR code that opens the dashboard, for ``SHOW_SECONDS``.
@@ -73,10 +74,41 @@ def can_manage_system() -> bool:
     return os.name == "posix" and hasattr(os, "geteuid") and os.geteuid() == 0 and not os.environ.get("BONGO_OFFLINE")
 
 
-def apply_host_name(host: str, run=subprocess.run, hosts: Path = Path("/etc/hosts")) -> bool:
-    """Make ``host`` the system's name (so avahi answers for ``host.local``). Root on Linux only."""
-    if not can_manage_system() or not shutil.which("hostnamectl") or socket.gethostname() == host:
+AVAHI_BUS = ["busctl", "--system", "call", "org.freedesktop.Avahi", "/", "org.freedesktop.Avahi.Server"]
+
+
+def tell_avahi(host: str, run=subprocess.run) -> bool:
+    """Make avahi answer for ``host.local`` now (what ``avahi-set-host-name`` does, over D-Bus). avahi
+    reads the host name when it starts and doesn't notice a rename, so without this a renamed Matrix
+    kept its old .local name until a reboot. True if avahi was told; nothing happens if it's already
+    right, or there is no avahi or busctl."""
+    if not can_manage_system() or not shutil.which("busctl"):
         return False
+    try:
+        out = run(AVAHI_BUS + ["GetHostName"], check=True, capture_output=True, text=True, timeout=10).stdout
+        if out.strip() == f's "{host}"':
+            return False
+        run(AVAHI_BUS + ["SetHostName", "s", host], check=True, capture_output=True, text=True, timeout=10)
+        log.info("avahi now answers for %s.local", host)
+        return True
+    except (OSError, subprocess.SubprocessError) as error:   # avahi not running, D-Bus refused, or a timeout
+        log.warning("couldn't tell avahi the name %s: %s %s", host, error, getattr(error, "stderr", "") or "")
+        return False
+
+
+def apply_host_name(host: str, run=subprocess.run, hosts: Path = Path("/etc/hosts")) -> bool:
+    """Make ``host`` the system's name, and avahi's, so ``host.local`` works. Root on Linux only.
+    True if the system's name changed."""
+    if not can_manage_system():
+        return False
+    changed = False
+    if shutil.which("hostnamectl") and socket.gethostname() != host:
+        changed = _set_system_name(host, run, hosts)
+    tell_avahi(host, run)   # also after a rename by an older build, which avahi never heard about
+    return changed
+
+
+def _set_system_name(host: str, run, hosts: Path) -> bool:
     try:
         run(["hostnamectl", "set-hostname", host], check=True, capture_output=True, timeout=20)
         text = hosts.read_text() if hosts.exists() else ""
