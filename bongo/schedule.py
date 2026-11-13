@@ -23,8 +23,10 @@ with ``"enabled": false``.
 from __future__ import annotations
 
 import datetime as dt
+import functools
 import random
 import shutil
+import subprocess
 from dataclasses import dataclass, field
 from fractions import Fraction
 
@@ -36,7 +38,7 @@ from bongo.player import Entry
 STILL_SECONDS = 7.0
 VIDEO_CAP = 15.0   # seconds: the Media module plays a video's first 15 s (see bongo.modules.media)
 FITS = ("fit", "fill", "pixel")
-SLEEP_ENTRY_SECONDS = 60  # a sleep screen is re-shown (same file) every minute, so wakes are prompt
+SLEEP_ENTRY_SECONDS = 60  # a sleep screen is re-shown (same file) about every minute, in whole passes, so wakes are prompt
 
 
 def within(now: dt.datetime, start: str, end: str) -> bool:
@@ -60,6 +62,32 @@ def gif_pass(name: str, speed: float) -> float | None:
     if len(delays) < 2:
         return None   # one frame: a still
     return float(sum(delays) / Fraction(str(speed)) * 100 / 1000)
+
+
+@functools.lru_cache(maxsize=8)
+def _video_frames(path: str, mtime: float) -> int:
+    """How many frames the Media module gets from this video (20 fps, up to 300), decoded tiny."""
+    from bongo.modules.media import MAX_FRAMES, VIDEO_FPS
+    raw = subprocess.run(["ffmpeg", "-v", "error", "-nostdin", "-i", path, "-an", "-vf", f"fps={VIDEO_FPS},scale=2:2",
+                          "-frames:v", str(MAX_FRAMES), "-f", "rawvideo", "-pix_fmt", "rgb24", "-"],
+                         capture_output=True, timeout=120, check=True).stdout
+    return len(raw) // 12
+
+
+def video_pass(name: str, speed: float) -> float | None:
+    """Seconds for one pass of a video at ``speed`` percent, as the Media module loops it, or None
+    (not a video, missing, no ffmpeg, or it won't decode)."""
+    path = media.resolve(name)
+    if path is None or not media.is_video(path) or not (shutil.which("ffmpeg") and shutil.which("ffprobe")):
+        return None
+    try:
+        from bongo.modules.media import VIDEO_FPS
+        frames = _video_frames(str(path), path.stat().st_mtime)
+    except Exception:
+        return None
+    if frames < 2:
+        return None
+    return float(Fraction(frames * 1000 // VIDEO_FPS) / Fraction(str(speed)) * 100 / 1000)
 
 
 def hold_seconds(name: str, sources: list[str], speed: float) -> float:
@@ -199,7 +227,7 @@ class Schedule:
         if key not in _night:
             _night[key] = self.rng.choice(self.sleep_sources)
         # whole passes, so each new entry (it starts on frame 1) picks up exactly where the last left off
-        one = gif_pass(_night[key], self.sleep_speed)
+        one = gif_pass(_night[key], self.sleep_speed) or video_pass(_night[key], self.sleep_speed)
         seconds = one * max(1, round(SLEEP_ENTRY_SECONDS / one)) if one else SLEEP_ENTRY_SECONDS
         return Entry("media", self.sleep_fit, settings={"file": _night[key], "speed": self.sleep_speed / 100},
                      seconds=seconds)
