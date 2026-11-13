@@ -656,9 +656,28 @@ def create_app(*, modules, live, pairing, config_path, logs: LogBuffer | None = 
     def update_now():
         if update.busy(data_dir):
             return jsonify(error="An update is already under way"), 409
+        from bongo import power
+        if power.pending():
+            return jsonify(error="The Matrix is restarting: try again when it's back"), 409
         who = (pairing.check(request.cookies.get(COOKIE)) or {}).get("name")
         update.ask(who, data_dir)
         logging.getLogger("bongo.update").info("update requested by %s", who)
+        return jsonify(ok=True), 202
+
+    # -- restart (Settings > Device > Restart, behind a confirmation) ---------------------------
+    @app.post("/api/restart")
+    def restart_now():
+        from bongo import power
+        what = body().get("what")
+        if what not in power.COMMANDS:
+            return jsonify(error=f"what: one of {', '.join(power.COMMANDS)}"), 422
+        if not power.available():
+            return jsonify(error="Restarting only works on the Matrix itself"), 409
+        if update.busy(data_dir):
+            return jsonify(error="An update is under way: it restarts the Matrix itself when it's done"), 409
+        if power.pending():
+            return jsonify(error="It's already restarting"), 409
+        power.restart(what, (pairing.check(request.cookies.get(COOKIE)) or {}).get("name"))
         return jsonify(ok=True), 202
 
     # -- the page -----------------------------------------------------------------------------

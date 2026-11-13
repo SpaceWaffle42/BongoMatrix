@@ -415,6 +415,9 @@ body.drag-active { user-select: none; -webkit-user-select: none; }
 .item-card { padding: 12px; border: 1px solid var(--line-2); background: var(--page); }
 .item-more summary { cursor: pointer; color: var(--soft); font-size: 13px; min-height: 32px; display: flex; align-items: center; }
 .item-more[open] summary { margin-bottom: 8px; }
+.item-more summary::before { content: "▸"; margin-right: 6px; transition: transform .15s; }   /* reads as something to open */
+.item-more[open] summary::before { transform: rotate(90deg); }
+.item-more summary::-webkit-details-marker { display: none; }   /* Safari: just the one arrow */
 .eyebrow.flush { margin: 0; }
 
 /* Palette choices: an even grid, three to a row; long names truncate (full name on hover) */

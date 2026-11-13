@@ -95,7 +95,63 @@ function deviceCard() {
     h('p', { class: 'muted tiny flush' }, `${c.panel?.cols || 64}×${c.panel?.rows || 32} panel · ${c.panel?.hardware_mapping || ''}`),
     h('label', { class: 'row gap-s', for: 'set-hub-pic' }, hubPic, h('span', null, 'Show what it\'s playing on the hub')),
     h('p', { class: 'muted tiny flush' }, 'The hub (matrix.local) shows a live picture of each Matrix to anyone on this Wi-Fi, including pushed messages. Its name and what\'s playing always show.'),
-    h('div', { class: 'row end' }, save));
+    h('div', { class: 'row end' }, save),
+    restartBox());
+}
+
+/** Restart, tucked away in a closed section and never in one tap: pick what to restart, then say so
+ * again on the page (bongo/power.py). The display software is back in about 10 s, the Pi in about a minute. */
+function restartBox() {
+  const KINDS = {
+    display: ['Restart the display', 'Restart the display software? The panel and this page go quiet for about 10 seconds.', 'Restarting the display…', 'Yes, restart the display'],
+    device: ['Restart the Matrix', 'Restart the whole Matrix (the Pi)? The panel and this page go quiet for about a minute.', 'Restarting the Matrix…', 'Yes, restart the Matrix'],
+  };
+  const ask = h('div', { class: 'stack-s', role: 'group', 'aria-label': 'Confirm restart', hidden: true });
+  const status = h('p', { class: 'small flush muted', 'aria-live': 'polite' });
+  const pick = h('div', { class: 'row gap-s wrap' });
+  // after a restart: wait until it has gone (or long enough), then reload as soon as it answers again
+  const comeBack = (what, quiet) => {
+    const t0 = Date.now(), gone = what === 'display' ? 5000 : 20000;
+    let wentAway = false;
+    const tick = async () => {
+      if (Date.now() - t0 > 180000) {
+        status.className = 'small flush danger';
+        status.textContent = "Still not back. Check it's switched on and on the Wi-Fi, then reload this page.";
+        return;
+      }
+      try {
+        const r = await fetch('/api/pair/status', { cache: 'no-store', signal: AbortSignal.timeout(4000) });   // a Pi that's down can hang a request
+        if (!r.ok) throw new Error(r.status);
+        if (wentAway || Date.now() - t0 > gone) { location.reload(); return; }
+      } catch { wentAway = true; }
+      setTimeout(tick, 3000);
+    };
+    setTimeout(tick, quiet);
+  };
+  const confirmFor = (what, opener) => {
+    const [, question, doing, sure] = KINDS[what];
+    const yes = h('button', { type: 'button', class: 'btn danger-btn' }, sure);
+    const no = h('button', { type: 'button', class: 'btn ghost' }, 'Cancel');
+    no.onclick = () => { ask.hidden = true; pick.hidden = false; opener.focus(); };
+    yes.onclick = async () => {
+      yes.disabled = no.disabled = true;
+      try {
+        await post('/api/restart', { what });
+        ask.hidden = true; status.className = 'small flush warn'; status.textContent = `${doing} This page reconnects when it's back.`;
+        status.tabIndex = -1; status.focus();
+        comeBack(what, 2000);
+      } catch (err) { status.className = 'small flush danger'; status.textContent = err.message; ask.hidden = true; pick.hidden = false; opener.focus(); }
+    };
+    ask.replaceChildren(h('p', { class: 'small flush strong' }, question), h('div', { class: 'row gap-s wrap' }, yes, no));
+    pick.hidden = true; ask.hidden = false; no.focus();
+  };
+  pick.append(...Object.entries(KINDS).map(([what, [label]]) =>
+    h('button', { type: 'button', class: 'btn', onclick: (ev) => confirmFor(what, ev.currentTarget) }, `${label}…`)));
+  return h('details', { class: 'item-more' },
+    h('summary', null, 'Restart'),
+    h('div', { class: 'stack-s' },
+      h('p', { class: 'muted tiny flush' }, 'Restarting the display is enough for panel size and wiring changes. Restart the whole Matrix if it seems stuck.'),
+      pick, ask, status));
 }
 
 /** Wi-Fi: which network it's on, and "Reopen setup" for a new router or password (bongo/net.py). */

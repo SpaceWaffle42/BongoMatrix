@@ -121,7 +121,7 @@ export async function applyDraft() {
     const res = await put('/api/config', { playlist });
     S.config.playlist = clone(playlist);
     S.problems = [];
-    toast(res?.restart_needed ? 'Saved. Panel size and wiring changes take effect after the Matrix restarts.' : 'Playlist applied', 'success', 5000);
+    toast(res?.restart_needed ? 'Saved. Panel size and wiring changes take effect after a restart (Settings > Device > Restart).' : 'Playlist applied', 'success', 5000);
     paintHeader(); emit('draft');
     return true;
   } catch (err) {
@@ -141,7 +141,7 @@ export async function saveConfig(part, what = 'Settings') {
   try {
     const res = await put('/api/config', part);
     Object.assign(S.config, clone(part));
-    if (res?.restart_needed) toast('Saved. Panel size and wiring changes take effect after the Matrix restarts.', 'success', 8000);
+    if (res?.restart_needed) toast('Saved. Panel size and wiring changes take effect after a restart (Settings > Device > Restart).', 'success', 8000);
     else toast(`${what} saved`, 'success');
     return true;
   } catch (err) {
