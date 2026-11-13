@@ -11,7 +11,7 @@ from bongo.module import Style
 from .art import H, W, load, missing, no_art
 from bongo.pets import wearing
 
-from .scenes import MODES, STRIDE, record
+from .scenes import BANNER_SLIDE_MS, MODES, STRIDE, TAG_RISE_MS, record_loop
 
 # The engine's 3x5 font: tiny, and the same on every panel.
 FONT = {
@@ -38,13 +38,15 @@ def text(draw, x, y, s, colour):
     return x
 
 
-def overlay(draw, item, t, shot):
-    """Speech bubbles, Zs, banners and the name tag, drawn over the scene at ``t`` ms."""
+def overlay(draw, item, t, shot, life=float("inf")):
+    """Speech bubbles, Zs, banners and the name tag, drawn over the scene ``t`` ms after the item
+    appeared; ``life``: how long it stays, so each comes and goes gently (no Z is ever left mid-air)."""
     kind, cx, cy = item[0], int(shot.cat[0]), int(shot.cat[1])
     if kind == "zzz":
         for k in range(2):
             p = ((t / 120) + k * 12) % 24
-            if p < 20:
+            began = t - p * 120                       # when this Z set off from her head
+            if p < 20 and began >= 0 and began + 20 * 120 <= life:
                 # from her head: the sleeping poses face left, head about 10 px left of her feet point
                 text(draw, max(1, cx - 12 - int(p) // 4), cy - 14 - int(p) // 2, "Z", item[1])  # never off the left edge
     elif kind == "bubble" and (t // 600) % 2 == 0:
@@ -54,10 +56,18 @@ def overlay(draw, item, t, shot):
         text(draw, x, y, item[1], (200, 60, 40))
     elif kind == "banner":
         width = len(item[1]) * 4
-        draw.rectangle([0, 0, W - 1, 6], fill=(26, 19, 0))
-        text(draw, W - int(t / 1000 * 12) % (W + width), 1, item[1], (255, 181, 71))
-    elif kind == "tag" and t >= item[2]:
-        name, rise = item[1], min(4, int((t - item[2]) / 80))
+        shown = max(0.0, min(1.0, t / BANNER_SLIDE_MS, (life - t) / BANNER_SLIDE_MS))
+        top = -7 + round(7 * shown)                   # slides down in, and back up out
+        draw.rectangle([0, top, W - 1, top + 6], fill=(26, 19, 0))
+        moved = max(0.0, t - BANNER_SLIDE_MS)
+        x = W - int(moved / 1000 * 12)
+        if x > -width:
+            text(draw, x, top + 1, item[1], (255, 181, 71))
+    elif kind == "tag":
+        name = item[1]
+        rise = max(0, min(4, int(t / (TAG_RISE_MS / 4)), int((life - t) / (TAG_RISE_MS / 4))))
+        if rise == 0:
+            return
         tw = len(name) * 4 - 1
         x = max(1, min(W - tw - 2, cx - tw // 2))
         y = max(0, cy - 27 + (4 - rise))
@@ -70,6 +80,33 @@ def overlay(draw, item, t, shot):
     elif kind == "grumble" and (t // 330) % 2 == 0:
         for k in range(5):
             draw.point((cx - 2 + k, cy - 24 + (k + int(t / 110)) % 3), fill=(90, 90, 110))
+
+
+def lifetimes(timeline, starts, total):
+    """For each shot, its overlays with when each appeared and when it goes (ms on the loop's clock).
+    An overlay that runs on over the loop's end carries on from the start, so it never restarts."""
+    n = len(timeline)
+    lives = [[] for _ in range(n)]
+    for item in {o for shot, _ in timeline for o in shot.overlays}:
+        runs, k = [], 0
+        while k < n:
+            if item in timeline[k][0].overlays:
+                j = k
+                while j < n and item in timeline[j][0].overlays:
+                    j += 1
+                runs.append([k, j, starts[k], starts[j] if j < n else total])
+                k = j
+            else:
+                k += 1
+        if len(runs) > 1 and runs[0][0] == 0 and runs[-1][1] == n:   # across the wrap: one run
+            first, last = runs[0], runs[-1]
+            first[2], last[3] = last[2] - total, total + first[3]
+            last_end = last[3]
+            first[3] = last_end - total
+        for k0, k1, began, ended in runs:
+            for k in range(k0, k1):
+                lives[k].append((item, began, ended))
+    return lives
 
 
 def fit(scene: Image.Image, width: int, height: int) -> Image.Image:
@@ -90,18 +127,13 @@ class _Scene(Style):
         if missing(self.ctx.pet.kind):                  # a public build before a pack is imported
             return
         self.art = load(self.ctx.pet.kind, self.ctx.pet.coat, wearing(self.ctx.pet, self.ctx.now().date()))
-        self.timeline = [(shot, mode) for mode in self.modes() for shot in record(self.art, mode, self.ctx.pet.name)]
+        self.timeline = record_loop(self.art, self.modes(), self.ctx.pet.name)   # seamless: scenes link up
         self.starts, t = [], 0.0
         for shot, _ in self.timeline:
             self.starts.append(t)
             t += shot.ms
         self.total = t
-        # where each mode's run begins, so overlays (Zs, banners) count time from their own scene
-        self.run_start, begin = [], 0.0
-        for k, (shot, mode) in enumerate(self.timeline):
-            if k and self.timeline[k - 1][1] != mode:
-                begin = self.starts[k]
-            self.run_start.append(begin)
+        self.lives = lifetimes(self.timeline, self.starts, self.total)
 
     def modes(self):
         return list(self.MODE)
@@ -113,9 +145,17 @@ class _Scene(Style):
         k = bisect.bisect_right(self.starts, t) - 1
         shot = self.timeline[k][0]
         art = self.art
-        img = {"day": art.room, "empty": art.empty, "night": art.night}[shot.room].convert("RGBA")
+        rooms = {"day": art.room, "empty": art.empty, "night": art.night}
+        img = rooms[shot.room].convert("RGBA")
+        if shot.fade:   # the room changing: lights going out or up, the bowl filling or emptying
+            img = Image.blend(rooms[shot.fade[0]].convert("RGBA"), img, shot.fade[1])
         if shot.ball:
-            img.alpha_composite(art.ball, (int(shot.ball[0]) - 4, int(shot.ball[1]) - 4))
+            ball = art.ball
+            if shot.fade and "night" in (shot.fade[0], shot.room):   # dims with the light
+                lit = 1 - shot.fade[1] if shot.room == "night" else shot.fade[1]
+                ball = ball.copy()
+                ball.putalpha(ball.getchannel("A").point(lambda a: int(a * lit)))
+            img.alpha_composite(ball, (int(shot.ball[0]) - 4, int(shot.ball[1]) - 4))
         # a bee flies in front of her; a toy on the floor is behind her, except beside a sitting cat,
         # where it would hide under her tail
         flying = shot.toy and (shot.toy[0] == "bee" or shot.tag in ("meow_sit", "wash_sit"))
@@ -129,8 +169,8 @@ class _Scene(Style):
         if flying:
             self.draw_toy(img, shot.toy, t)
         draw = ImageDraw.Draw(img)
-        for item in shot.overlays:
-            overlay(draw, item, t - self.run_start[k], shot)
+        for item, began, ended in self.lives[k]:
+            overlay(draw, item, t - began, shot, ended - began)
         return fit(img.convert("RGB"), self.ctx.width, self.ctx.height)
 
     def draw_toy(self, img, toy, t):

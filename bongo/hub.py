@@ -36,6 +36,7 @@ CARD_SECONDS = 5            # the hub refreshes every card this often
 GONE_SECONDS = 90           # a Matrix not heard from this long drops off the page
 ALIVE_SECONDS = 30          # a would-be hub must have answered this recently to count (mDNS caches go stale)
 CARD_BYTES = 64 * 1024      # a card is small; never read more than this from another device
+FETCH_AT_ONCE = 8           # cards asked for at the same time
 
 
 @dataclass
@@ -229,18 +230,36 @@ class Hub:
         now = self.clock()
         with self._lock:
             peers = list(self.peers.values())
+        results: dict[str, tuple] = {}
+
+        def ask(p: Peer) -> None:
+            try:
+                results[p.id] = ("ok", self.fetch(p))
+            except OldVersion:
+                results[p.id] = ("old", None)
+            except Exception as error:
+                results[p.id] = ("gone", error)
+        # every Matrix at once (a few at a time), so slow ones cost one deadline, not one each;
+        # fetch_card's own hard deadline means every thread ends
+        for i in range(0, len(peers), FETCH_AT_ONCE):
+            batch = [threading.Thread(target=ask, args=(p,), daemon=True, name="hub-card") for p in peers[i:i + FETCH_AT_ONCE]]
+            for th in batch:
+                th.start()
+            for th in batch:
+                th.join(10)
         for p in peers:
             card = self.cards.setdefault(p.id, Card(p))
             card.peer = p
-            try:
-                card.card, card.seen, card.error = self.fetch(p), now, ""
+            kind, value = results.get(p.id, ("gone", "no answer"))
+            if kind == "ok":
+                card.card, card.seen, card.error = value, now, ""
                 self.answered[p.id] = now
-            except OldVersion:
+            elif kind == "old":
                 card.card, card.seen, card.error = {}, now, "Update it to see more"
                 self.answered[p.id] = now
-            except Exception as error:
+            else:
                 card.error = "Not answering"
-                log.debug("hub: %s didn't answer: %s", p.name, error)
+                log.debug("hub: %s didn't answer: %s", p.name, value)
         for pid in [pid for pid, c in self.cards.items() if pid not in self.peers and now - c.seen > GONE_SECONDS]:
             del self.cards[pid]
 
