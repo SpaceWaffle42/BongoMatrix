@@ -224,7 +224,9 @@ class Manager:
             if not ssid:
                 continue   # hidden networks are typed in by name on the setup page
             n = Network(ssid, int(signal or 0), security not in ("", "--"), ssid in saved, active == "yes")
-            if ssid not in seen or n.signal > seen[ssid].signal:
+            # one name can be several radios (2.4 + 5 GHz): the one it's joined to wins, then signal,
+            # or a stronger idle radio hides the connection and setup would replace a working network
+            if ssid not in seen or (n.active, n.signal) > (seen[ssid].active, seen[ssid].signal):
                 seen[ssid] = n
         return sorted(seen.values(), key=lambda n: (-n.active, -n.signal))
 
