@@ -704,6 +704,73 @@
     });
   }
 
+  // -- boot screens ---------------------------------------------------------------------------
+  // The splash wall's block (3 x 3, dark spot in the middle) in its eight colours: [face, middle]
+  const WALL = { B: ['#639bff', '#5b6ee1'], R: ['#d95763', '#ac3232'], T: ['#d9a066', '#df7126'], P: ['#d77bba', '#d95763'],
+    Y: ['#fbf236', '#d9a066'], N: ['#8f563b', '#663931'], V: ['#306082', '#3f3f74'], G: ['#6abe30', '#4b692f'] };
+  // letters three blocks wide and five tall (I is one wide); N and M are drawn so they can't be mistaken
+  const NAME = { B: ['XX.', 'X.X', 'XX.', 'X.X', 'XX.'], O: ['XXX', 'X.X', 'X.X', 'X.X', 'XXX'], N: ['XX.', 'X.X', 'X.X', 'X.X', 'X.X'],
+    G: ['XXX', 'X..', 'X.X', 'X.X', 'XXX'], M: ['X.X', 'XXX', 'XXX', 'X.X', 'X.X'], A: ['XXX', 'X.X', 'XXX', 'X.X', 'X.X'],
+    T: ['XXX', '.X.', '.X.', '.X.', '.X.'], R: ['XX.', 'X.X', 'XX.', 'X.X', 'X.X'], I: ['X', 'X', 'X', 'X', 'X'], X: ['X.X', 'X.X', '.X.', 'X.X', 'X.X'] };
+  // Reveal: a wall of blocks falls in, every block bright; then the blocks round the letters dim and the word is
+  // left lit. BONGO, then MATRIX. Each letter is one colour; the blocks round it are random wall colours, never
+  // the colour of a letter they touch, nor of the block beside or above them. Plays once (a boot screen).
+  function reveal() {
+    const COLS = 21, ROWS = 10, Y0 = 1, STEP = 40, PULL = 0.0011, TOP = 0.15;   // px per ms squared; never more than 6 px a frame, so a block can be followed
+    const fallen = (ms) => { const tc = TOP / PULL; return ms < tc ? 0.5 * PULL * ms * ms : 0.5 * PULL * tc * tc + TOP * (ms - tc); };
+    const wall = (word, colours, seed) => {
+      const at = new Map(), k = (c, r) => c + ',' + r;
+      let col = Math.floor((COLS - (word.length - 1 + [...word].reduce((w, ch) => w + NAME[ch][0].length, 0))) / 2);
+      [...word].forEach((ch, n) => {
+        NAME[ch].forEach((row, r) => [...row].forEach((on, c) => { if (on === 'X') at.set(k(col + c, 2 + r), { c: col + c, r: 2 + r, key: colours[n], letter: true }); }));
+        col += NAME[ch][0].length + 1;
+      });
+      const r01 = rng(seed);
+      for (let r = 0; r < ROWS; r++) for (let c = 0; c < COLS; c++) {
+        if (at.has(k(c, r))) continue;
+        const no = new Set([at.get(k(c - 1, r))?.key, at.get(k(c, r - 1))?.key]);
+        for (let dc = -1; dc <= 1; dc++) for (let dr = -1; dr <= 1; dr++) { const b = at.get(k(c + dc, r + dr)); if (b && b.letter) no.add(b.key); }
+        const free = Object.keys(WALL).filter((key) => !no.has(key));
+        at.set(k(c, r), { c, r, key: free[Math.floor(r01() * free.length)], letter: false });
+      }
+      return [...at.values()];
+    };
+    const out = [];
+    // one frame: every block at y(block) (null: not here yet), the blocks round the letters `lit` bright (1 to 0.3)
+    const add = (cells, ms, y, lit = 1) => {
+      const f = new Frame(ms);
+      for (const b of cells) {
+        const yy = y(b);
+        if (yy === null || yy >= H) continue;
+        const [face, mid] = WALL[b.key], full = b.letter || lit > 0.95;
+        f.rect(b.c * 3, yy, 3, 3, full ? face : dim(face, lit));
+        f.set(b.c * 3 + 1, yy + 1, full ? mid : mix(dim(mid, lit), dim(face, lit * 0.55), (1 - lit) / 0.7));   // dimmed, the middle ends a shade under its face
+      }
+      out.push(f);
+      return f;
+    };
+    [['BONGO', 'BRGPT', 1100], ['MATRIX', 'YBRGTP', 2500]].forEach(([word, colours, hold], n) => {
+      const cells = wall(word, colours, 7 + n), home = (b) => Y0 + b.r * 3;
+      // falls in, bottom row first, left to right. A block a pixel short of home waits two short, so its last
+      // step is never a one-pixel tick
+      const drop = (t) => (b) => {
+        const since = t - ((ROWS - 1 - b.r) * 60 + b.c * 12);
+        if (since < 0) return null;
+        const y = Math.round(fallen(since)) - 5;
+        return y >= home(b) ? home(b) : y === home(b) - 1 ? y - 1 : y;
+      };
+      for (let t = 2 * STEP; ; t += STEP) { const y = drop(t); add(cells, STEP, y); if (cells.every((b) => y(b) === home(b))) break; }
+      out[out.length - 1].ms = 350;
+      for (let i = 1; i <= 8; i++) add(cells, 50, home, 1 - 0.7 * i / 8);     // the rest of the wall dims; the word stays lit
+      out[out.length - 1].ms = hold;
+      // ...and drops away off the bottom, the same pull and the same top speed
+      const leave = (t) => (b) => { const since = t - ((ROWS - 1 - b.r) * 40 + b.c * 8); return since < 0 ? home(b) : home(b) + Math.round(fallen(since)); };
+      for (let t = STEP; ; t += STEP) { const y = leave(t); add(cells, STEP, y, 0.3); if (cells.every((b) => y(b) >= H)) break; }
+      out[out.length - 1].ms = n ? 200 : 240;                                  // a clear beat of black before the next word (or the loop)
+    });
+    return out;
+  }
+
   // peek(): { length, frameAt(i) } so the gallery can build a thumbnail a frame at a time
   const peek = (make) => () => { lazy = true; try { const r = make(); return Array.isArray(r) ? { length: r.length, frameAt: (i) => r[i] } : r; } finally { lazy = false; } };
   const P = (id, name, group, make, about, loops = true) => ({ id, name, group, make, about, loops, peek: peek(make) });
@@ -750,6 +817,8 @@
     P('sun', 'Sunny', 'Icons and loaders', sunnyDay, 'The sun turning, a cloud drifting by.'),
     P('storm', 'Rain cloud', 'Icons and loaders', rainCloud, 'Rain and the odd flash of lightning.'),
     P('wifi', 'Signal', 'Icons and loaders', wifiBars, 'Signal arcs lighting up.', false),
+    // boot: tools/build_sleep.py also writes it as resources/media/built-in/splash_<boot>.gif, a built-in boot and splash screen
+    Object.assign(P('boot-reveal', 'Reveal', 'Boot screens', reveal, 'A wall of blocks falls in, then dims to leave BONGO, then MATRIX.', false), { boot: 'reveal' }),
   ];
   window.ANIMATOR_PRESETS = PRESETS;
   // the drawing kit, for more presets in their own files (js/animator-sleep.js: the built-in sleep screens)
