@@ -609,9 +609,10 @@ def create_app(*, modules, live, pairing, config_path, logs: LogBuffer | None = 
         return jsonify(ok=True, restart_needed=restart_needed(merged))
 
     @lru_cache(maxsize=12)
-    def preview_style(module, style, settings_json, width, height, pet):
+    def preview_style(module, style, settings_json, width, height, pet, home_json="null"):
         return modules[module].create(style or None, json.loads(settings_json),
-                                      Context(width=width, height=height, fonts=fonts or Context().fonts, pet=pet))
+                                      Context(width=width, height=height, fonts=fonts or Context().fonts, pet=pet,
+                                              home=json.loads(home_json)))   # the Matrix's location, as on the panel
 
     @app.get("/api/preview.png")
     def preview():
@@ -626,7 +627,7 @@ def create_app(*, modules, live, pairing, config_path, logs: LogBuffer | None = 
             config = load()
             area = cfg.safe_area(config)
             style = preview_style(name, request.args.get("style", ""), settings_json, area.width, area.height,
-                                  pets.of(config))
+                                  pets.of(config), json.dumps(config.get("location"), sort_keys=True))
         except (ValueError, TypeError) as error:
             return jsonify(error=str(error)), 422
         t = number(request.args.get("t", time.time()), 0, 4_102_444_800, "t")  # up to 2100

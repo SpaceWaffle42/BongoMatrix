@@ -145,6 +145,8 @@ export function render(view, match) {
   }
 
   function fieldRow(f) {
+    if (f.name === 'own_location') return null;   // it's the switch on the place row (placeRow)
+    if (f.type === 'place' && Object.values(schemaFor(mod, styleOf(e))).flat().some((x) => x.name === 'own_location')) return placeRow(f);
     const row = h('div', { class: ['items', 'palettes', 'media', 'place'].includes(f.type) || f.swatches ? 'field wide' : 'field' });
     const id = `f-${f.name}`;
     const cur = () => (f.name in e.settings ? e.settings[f.name] : f.default);
@@ -171,6 +173,32 @@ export function render(view, match) {
           },
         }),
         h('div', { class: 'tiny muted' }, `Default: ${showDefault(f)}`));
+    };
+    paint();
+    return row;
+  }
+
+  /** A location: the Matrix's own (from Settings) unless this screen is given a different place. */
+  function placeRow(f) {
+    const row = h('div', { class: 'field wide' }), id = `f-${f.name}`;
+    const forget = () => { for (const k of ['own_location', f.name, f.latitude, f.longitude]) delete e.settings[k]; };
+    const paint = () => {
+      const home = S.config?.location, own = !home || !!e.settings.own_location;
+      row.classList.toggle('changed', !!home && own);
+      const useOwn = (on) => {
+        forget();
+        if (on) Object.assign(e.settings, { own_location: true, [f.name]: home.name, [f.latitude]: home.latitude, [f.longitude]: home.longitude });
+        changed(); paint();
+      };
+      row.replaceChildren(...[
+        h('div', { class: 'field-head' }, h('label', { class: 'field-label', for: own ? id : `${id}-own` }, humanize(f.name)), h('span', { class: 'changed-mark' }, 'its own')),
+        home ? h('label', { class: 'row gap-s small', for: `${id}-own` },
+          h('input', { type: 'checkbox', id: `${id}-own`, checked: own, onchange: (ev) => useOwn(ev.target.checked) }), h('span', null, 'Use a different place for this screen')) : null,
+        own ? placePicker(id, e.settings[f.name] ?? f.default, (v) => { e.settings[f.name] = v; changed(); },
+          (p) => { e.settings[f.latitude] = p.latitude; e.settings[f.longitude] = p.longitude; changed(); })
+          : h('p', { class: 'small flush' }, 'Uses the Matrix\'s location: ', h('span', { class: 'strong' }, home.name), '. ',
+            h('button', { type: 'button', class: 'link small', onclick: () => go('/settings') }, 'Change it in Settings')),
+        home ? null : h('p', { class: 'tiny muted flush' }, 'Set the Matrix\'s location in Settings and every weather and sky screen uses it.')].filter(Boolean));
     };
     paint();
     return row;
@@ -446,7 +474,7 @@ function itemList(f, id, v, set) {
 
 /** Type a town and pick it from a list of real places (as in v2): the name and its latitude and
  *  longitude are set together, so the location is always one that exists. Typing alone saves nothing. */
-function placePicker(id, v, set, picked) {
+export function placePicker(id, v, set, picked) {
   const input = h('input', { class: 'input', id, value: v ?? '', autocomplete: 'off', spellcheck: 'false', role: 'combobox',
     'aria-autocomplete': 'list', 'aria-expanded': 'false', 'aria-controls': `${id}-list`, placeholder: 'Start typing a town or city' });
   const list = h('ul', { class: 'place-list', id: `${id}-list`, role: 'listbox', hidden: true });

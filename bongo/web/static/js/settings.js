@@ -5,11 +5,12 @@ import { FrameLoop } from './led.js';
 import { mediaThumb, previewButton, openPreview } from './mediaview.js';
 import { S, onLeave, go, saveConfig, moduleById } from './app.js';
 import { helpButton } from './help.js';
+import { placePicker } from './editor.js';
 
 export function render(view) {
   view.append(h('div', { class: 'page-head' }, h('h1', { class: 'h1' }, 'Settings'),
     h('p', { class: 'muted flush' }, 'Each card saves on its own.')),
-  h('div', { class: 'settings-grid' }, safeAreaCard(), h('div', { class: 'stack gap-20' }, deviceCard(), wifiCard(), petCard(), spotifyCard(), updateCard(), devicesCard()), h('div', { class: 'stack gap-20' }, sleepCard(), splashCard(), mediaCard())));
+  h('div', { class: 'settings-grid' }, safeAreaCard(), h('div', { class: 'stack gap-20' }, deviceCard(), locationCard(), wifiCard(), petCard(), spotifyCard(), updateCard(), devicesCard()), h('div', { class: 'stack gap-20' }, sleepCard(), splashCard(), mediaCard())));
 }
 
 function safeAreaCard() {
@@ -109,6 +110,26 @@ function deviceCard() {
 
 /** Restart, tucked away in a closed section and never in one tap: pick what to restart, then say so
  * again on the page (bongo/power.py). The display software is back in about 10 s, the Pi in about a minute. */
+/** Where the Matrix is: every weather and sky screen uses it, unless one is given its own place. */
+function locationCard() {
+  const home = S.config.location;
+  let pick = null;
+  const save = h('button', { type: 'button', class: 'btn primary', disabled: true }, 'Save');
+  const picker = placePicker('set-location', home?.name || '', () => {}, (p) => { pick = p; save.disabled = false; });
+  const says = (where) => (where ? `Weather, sunrise and moon screens show ${where.name}. Give one its own place in its settings.`
+    : 'Not set yet: weather and sky screens use their own place (London unless changed). Pick where the Matrix is and they all use it.');
+  const desc = h('p', { class: 'muted small flush' }, says(home));
+  save.onclick = async () => {
+    if (pick && await saveConfig({ location: { name: pick.label, latitude: pick.latitude, longitude: pick.longitude } }, 'Location')) {
+      desc.textContent = says(S.config.location); save.disabled = true;
+    }
+  };
+  return h('section', { class: 'card stack', 'aria-label': 'Location', id: 'location' }, h('h2', { class: 'h2' }, 'Location'),
+    desc,
+    h('label', { class: 'field-col', for: 'set-location' }, 'Town or city', picker),
+    h('div', { class: 'row end' }, save));
+}
+
 function restartBox() {
   const KINDS = {
     display: ['Restart the display', 'Restart the display software? The panel and this page go quiet for about 10 seconds.', 'Restarting the display…', 'Yes, restart the display'],

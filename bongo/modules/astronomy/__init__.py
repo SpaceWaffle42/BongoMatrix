@@ -10,7 +10,8 @@ MODULE = Module(
     description="Moon phase with the next full or new moon, or today's sun arc. Computed offline.",
     styles={"moon": Moon, "sun": Sun},
     defaults=dict(location="London", latitude=51.5074, longitude=-0.1278,
+                  own_location=False,  # False: the Matrix's location from Settings; True: this screen's own
                   accent="#FFB547", text_colour="#FFF4DE"),
-    basic=("location",),
+    basic=("location", "own_location"),
     places={"location": ("latitude", "longitude")},  # pick a real place; coordinates follow
 )

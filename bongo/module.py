@@ -26,6 +26,7 @@ class Context:
     rng: random.Random = field(default_factory=random.Random)
     fonts: Fonts = field(default_factory=Fonts)
     pet: Pet = field(default_factory=Pet)  # the Matrix's one pet (bongo/pets.py)
+    home: dict | None = None  # the Matrix's location, set in Settings: {"name", "latitude", "longitude"}
 
     def now(self) -> dt.datetime:
         return dt.datetime.now(self.tz)
@@ -84,7 +85,9 @@ class Module:
     basic: tuple = ()
     item_fields: dict = field(default_factory=dict)
     # ``places={"location": ("latitude", "longitude")}``: the dashboard turns that setting into a place
-    # search; picking a result fills in the name and both coordinates together.
+    # search; picking a result fills in the name and both coordinates together. Such a module also has
+    # ``own_location=False`` in its defaults: until a screen is given its own place, it uses the
+    # Matrix's location from Settings (``Context.home``), see ``homed``.
     places: dict = field(default_factory=dict)
     # ``suggestions={"feeds": [{"name": "BBC Top Stories", "value": "https://...", "group": "BBC"}]}``:
     # ready-made values for a list setting, offered as one-tap "Quick add" picks in the dashboard.
@@ -133,7 +136,18 @@ class Module:
 
     def create(self, style: str | None = None, settings: dict | None = None,
                ctx: Context | None = None, overlay: bool = False) -> Style:
-        return self._style(style, overlay)(ctx or Context(), self.settings_for(style, settings, overlay))
+        ctx = ctx or Context()
+        return self._style(style, overlay)(ctx, self.settings_for(style, self.homed(settings, ctx.home), overlay))
+
+    def homed(self, settings: dict | None, home: dict | None) -> dict | None:
+        """``settings`` with the Matrix's location (``home``) in each place setting, unless this screen
+        has its own (``own_location``), or no location is set (then its own settings, or the defaults)."""
+        if not self.places or not home or (settings or {}).get("own_location"):
+            return settings
+        out = dict(settings or {})
+        for name, (lat, lon) in self.places.items():
+            out[name], out[lat], out[lon] = home["name"], home["latitude"], home["longitude"]
+        return out
 
     def _style(self, style: str | None, overlay: bool = False) -> type[Style]:
         kinds = self.overlays if overlay else self.styles

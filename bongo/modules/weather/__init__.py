@@ -10,6 +10,7 @@ MODULE = Module(
     styles={"overview": Overview, "ticker": Ticker, "forecast": Forecast},
     defaults=dict(
         location="London", latitude=51.5074, longitude=-0.1278,
+        own_location=False,  # False: the Matrix's location from Settings; True: this screen's own
         units="celsius", wind_unit="kmh", refresh_minutes=10,
         scroll_location=True,  # a location too long for its space scrolls like a ticker
         # the look (Advanced): today's colours by default; the sky changes with the weather unless turned off
@@ -17,6 +18,6 @@ MODULE = Module(
         sky_background=True, background="#0B0C0E",
     ),
     choices={"units": ["celsius", "fahrenheit"], "wind_unit": ["kmh", "mph", "ms", "kn"]},
-    basic=("location", "units", "scroll_location"),
+    basic=("location", "own_location", "units", "scroll_location"),
     places={"location": ("latitude", "longitude")},  # pick a real place; coordinates follow
 )

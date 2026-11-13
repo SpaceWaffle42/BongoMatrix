@@ -18,6 +18,8 @@ DEFAULT_PATH = Path("data/config.json")
 
 DEFAULTS = {
     "timezone": None,
+    # where the Matrix is: {"name", "latitude", "longitude"}; weather and sky screens use it unless given their own
+    "location": None,
     "panel": {"rows": 32, "cols": 64, "hardware_mapping": "adafruit-hat-pwm",
               "gpio_slowdown": 4, "brightness": 80},
     "safe_area": {"top": 0, "right": 0, "bottom": 0, "left": 0},
@@ -64,10 +66,11 @@ def context_factory(config: dict):
     tz = ZoneInfo(config["timezone"]) if config.get("timezone") else None
     area = safe_area(config)
     pet = pets.of(config)
-    return lambda: Context(width=area.width, height=area.height, tz=tz, pet=pet)
+    home = config.get("location") or None
+    return lambda: Context(width=area.width, height=area.height, tz=tz, pet=pet, home=home)
 
 
-KEYS = {"name", "timezone", "panel", "safe_area", "web", "playlist", "splash", "sleep", "overlays", "update", "pet",
+KEYS = {"name", "timezone", "location", "panel", "safe_area", "web", "playlist", "splash", "sleep", "overlays", "update", "pet",
         "wifi_country"}
 OVERLAY_KEYS = {"module", "overlay", "every", "seconds", "offset", "settings", "enabled"}
 PANEL = {"rows": (8, 128), "cols": (8, 256), "gpio_slowdown": (0, 5), "brightness": (1, 100),
@@ -140,6 +143,46 @@ def _screen_files(rule, screen: str) -> list[str]:
     return notes
 
 
+def location_problems(home) -> list[str]:
+    if home is None:
+        return []
+    ok = isinstance(home, dict) and isinstance(home.get("name"), str) and 0 < len(home["name"].strip()) <= 80 \
+        and all(isinstance(home.get(k), (int, float)) and not isinstance(home.get(k), bool) for k in ("latitude", "longitude"))
+    if not ok or not (-90 <= home["latitude"] <= 90 and -180 <= home["longitude"] <= 180):
+        return ["location: pick a place from the search (a name, latitude -90 to 90 and longitude -180 to 180)"]
+    return []
+
+
+def _adopt_location(config: dict, modules: dict[str, Module]) -> list[str]:
+    """Before 14 Nov 2026 each weather or sky screen had its own location. With no Matrix location yet,
+    take the one most of them use, and give the rest their own, so every screen shows the same place
+    as before (and new ones use the Matrix's)."""
+    if config.get("location") is not None:
+        return []
+    screens = []
+    for key in ("playlist", "overlays"):
+        for entry in config.get(key) or []:
+            module = modules.get(entry.get("module")) if isinstance(entry, dict) else None
+            if module and module.places and isinstance(entry.get("settings", {}), dict) \
+                    and not entry.get("settings", {}).get("own_location"):
+                name, (lat, lon) = next(iter(module.places.items()))
+                s = entry.get("settings") or {}
+                screens.append((entry, module, (s.get(name, module.defaults[name]), s.get(lat, module.defaults[lat]),
+                                                 s.get(lon, module.defaults[lon]))))
+    if not screens:
+        return []
+    votes = [where for _, _, where in screens]
+    name, lat, lon = max(votes, key=votes.count)   # ties: the first screen's
+    config["location"] = {"name": name, "latitude": lat, "longitude": lon}
+    notes = [f"location: the Matrix's location is now {name} (from its screens)"]
+    for entry, module, where in screens:
+        if where != (name, lat, lon):
+            key, (klat, klon) = next(iter(module.places.items()))
+            entry.setdefault("settings", {}).update({"own_location": True, key: where[0], klat: where[1], klon: where[2]})
+            notes.append(f"{entry['module']}: keeps its own location, {where[0]}")
+    return notes
+
+
 def tidy(config: dict, modules: dict[str, Module]) -> list[str]:
     """Quietly update a config saved by an older Bongo: drop settings a module no longer has and
     choices it no longer offers (a renamed palette, say), so they fall back to the defaults instead
@@ -159,6 +202,7 @@ def tidy(config: dict, modules: dict[str, Module]) -> list[str]:
     for screen in ("splash", "sleep"):
         notes += _screen_files(config.get(screen), screen)
     notes += pets.adopt(config)  # before the Pet entries lose their own name
+    notes += _adopt_location(config, modules)
     for key in ("playlist", "overlays"):  # entries of a module that moved into another one
         for i, entry in enumerate(config.get(key) or []):
             if not isinstance(entry, dict) or entry.get("module") in modules:
@@ -215,6 +259,7 @@ def validate(config: dict, modules: dict[str, Module]) -> list[str]:
     country = config.get("wifi_country")
     if country is not None and not (isinstance(country, str) and len(country) == 2 and country.isalpha() and country.isupper()):
         problems.append("wifi_country must be a two-letter country code such as GB")
+    problems += location_problems(config.get("location"))
     if config.get("timezone"):
         try:
             ZoneInfo(config["timezone"])
