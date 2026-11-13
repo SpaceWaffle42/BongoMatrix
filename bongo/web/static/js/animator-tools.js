@@ -71,7 +71,7 @@
   const BAYER = [0, 8, 2, 10, 12, 4, 14, 6, 3, 11, 1, 9, 15, 7, 13, 5].map((v) => (v + 0.5) / 16);
   const GRADIENT_TYPES = { linear: 'Straight', mirror: 'Mirrored', radial: 'Round', diamond: 'Diamond', conic: 'Sweep' };
   const GRADIENT_STYLES = { smooth: 'Smooth', steps: 'Bands', dither: 'Dithered' };
-  const GRADIENT_AREAS = { frame: 'Whole frame', region: 'One area (like fill)', drawn: 'Only what\'s drawn', empty: 'Only empty pixels' };
+  const GRADIENT_AREAS = { frame: 'Whole frame', region: 'One area (like fill)', colour: 'Same colour, anywhere', drawn: 'Only what\'s drawn', empty: 'Only empty pixels' };
   // where 0..1 along the gradient a pixel sits, for a drag from a to b
   function along(type, a, b, x, y) {
     const dx = b[0] - a[0], dy = b[1] - a[1], len = Math.hypot(dx, dy) || 1;
@@ -98,12 +98,14 @@
         into.add(i); stack.push([x + 1, y], [x - 1, y], [x, y + 1], [x, y - 1]); }
     };
     if (area === 'region' && from) { mask = new Set(); region(from, mask); if (mirror) region([W - 1 - from[0], from[1]], mask); }
+    const same = area === 'colour' && from ? px[from[1] * W + from[0]] : undefined;   // every pixel of the colour you start on
     const left = a[0] < W / 2;
     for (let y = 0; y < H; y++) for (let X = 0; X < W; X++) {
       const i = y * W + X, x = mirror && (X < W / 2) !== left ? W - 1 - X : X;   // where its colour is worked out
       if (mask && !mask.has(i)) continue;
       if (area === 'drawn' && !px[i]) continue;
       if (area === 'empty' && px[i]) continue;
+      if (same !== undefined && px[i] !== same) continue;
       let t = clamp(along(type, a, b, x, y), 0, 1);
       if (style === 'steps') t = Math.min(steps - 1, Math.floor(t * steps)) / Math.max(1, steps - 1);
       if (style === 'dither') {   // ordered dither between the stops' bands: crisp pixels, no in-between colours
@@ -174,6 +176,23 @@
   }
   // lay `src` over `dst`: drawn pixels replace, empty ones let `dst` show through
   function over(dst, src) { for (let i = 0; i < dst.length; i++) if (src[i]) dst[i] = src[i]; }
+  // the glow brush: light of `colour` that fades from the centre out over `size` + 1 pixels. It only ever adds
+  // light (a "screen" blend), so a drawing under it gets brighter, never tinted or darker. `stroke` keeps the
+  // frame as it was and the strongest glow each pixel has had, so going over a spot never piles it up.
+  function glowAt(px, x, y, size, colour, strength, background, stroke) {
+    const r = size + 1, light = parse(colour);
+    for (let dy = -r; dy <= r; dy++) for (let dx = -r; dx <= r; dx++) {
+      const a = x + dx, b = y + dy, d = Math.hypot(dx, dy);
+      if (!inside(a, b) || d > r + 0.5) continue;
+      const i = b * W + a, k = strength * Math.max(0, 1 - d / (r + 1)) ** 1.3;
+      if (!stroke.base.has(i)) stroke.base.set(i, px[i]);
+      if (k <= (stroke.k.get(i) || 0)) continue;
+      stroke.k.set(i, k);
+      const was = stroke.base.get(i), under = parse(was || background);
+      const out = hex(...under.map((v, j) => 255 - (255 - v) * (255 - light[j] * k) / 255));
+      px[i] = !was && out === hex(...parse(background)) ? null : out;   // too faint to show: stays empty
+    }
+  }
   // add a soft glow of `colour` around every lit pixel that's brighter than `threshold` (0..255)
   function glowAll(px, radius = 2, strength = 0.5, threshold = 160) {
     const lit = []; px.forEach((c, i) => { if (c && Math.max(...parse(c)) >= threshold) lit.push([i % W, Math.floor(i / W), c]); });
@@ -201,6 +220,6 @@
   }
 
   window.PixelTools = { W, H, hex, parse, mix, SHAPES, SHAPE_NAMES, tip, stamp, lineCells, rectCells, ellipseCells,
-    GRADIENT_TYPES, GRADIENT_STYLES, GRADIENT_AREAS, gradient, stopColour, blurAt, shadeAt, blurAll, glowAll, addLight, over,
+    GRADIENT_TYPES, GRADIENT_STYLES, GRADIENT_AREAS, gradient, stopColour, blurAt, shadeAt, glowAt, blurAll, glowAll, addLight, over,
     replaceColour, flipped, fill };
 })();

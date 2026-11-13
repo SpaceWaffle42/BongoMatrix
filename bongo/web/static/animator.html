@@ -117,6 +117,7 @@ kbd { font:11px var(--mono); border:1px solid var(--line-2); padding:0 4px; colo
     <button class="btn icon" data-tool="gradient" title="Gradient: drag from one colour to the other (D)">◩</button>
     <button class="btn icon" data-tool="blur" title="Blur: soften what's under the brush (B)">≋</button>
     <button class="btn icon" data-tool="shade" title="Lighten or darken what's under the brush (S)">☼</button>
+    <button class="btn icon" data-tool="glow" title="Glow: a soft halo of the main colour (H)">✺</button>
     <button class="btn icon" data-tool="pick" title="Pick colour (I)">⌖</button>
     <button class="btn icon" data-tool="shift" title="Shift the whole drawing (V)">✥</button>
     <hr>
@@ -130,10 +131,10 @@ kbd { font:11px var(--mono); border:1px solid var(--line-2); padding:0 4px; colo
     <div class="stage-top">
       <span id="pos">x –, y –</span><span>·</span><span id="toolname">Pencil</span>
       <span class="grow"></span>
-      <span class="keys"><kbd>P</kbd> pencil <kbd>E</kbd> eraser <kbd>F</kbd> fill <kbd>D</kbd> gradient <kbd>B</kbd> blur <kbd>X</kbd> swap colours <kbd>[</kbd><kbd>]</kbd> size <kbd>←</kbd><kbd>→</kbd> frames <kbd>Space</kbd> play</span>
+      <span class="keys"><kbd>P</kbd> pencil <kbd>E</kbd> eraser <kbd>F</kbd> fill <kbd>D</kbd> gradient <kbd>B</kbd> blur <kbd>S</kbd> shade <kbd>H</kbd> glow <kbd>X</kbd> swap colours <kbd>[</kbd><kbd>]</kbd> size <kbd>←</kbd><kbd>→</kbd> frames <kbd>Space</kbd> play</span>
     </div>
     <div class="opts" id="opts">
-      <label data-for="pen erase line rect ellipse blur shade">Size <select class="input" id="brush" title="Brush size ([ and ])"><option>1</option><option>2</option><option>3</option><option>4</option><option>5</option><option>6</option><option>8</option></select></label>
+      <label data-for="pen erase line rect ellipse blur shade glow">Size <select class="input" id="brush" title="Brush size ([ and ])"><option>1</option><option>2</option><option>3</option><option>4</option><option>5</option><option>6</option><option>8</option></select></label>
       <label data-for="pen erase line rect ellipse blur shade">Brush <select class="input" id="shape" title="The shape of the brush"></select></label>
       <label data-for="rect ellipse"><input type="checkbox" id="filled"> Filled</label>
       <label data-for="gradient">Shape <select class="input" id="gtype"></select></label>
@@ -142,6 +143,7 @@ kbd { font:11px var(--mono); border:1px solid var(--line-2); padding:0 4px; colo
       <label data-for="gradient">Where <select class="input" id="garea"></select></label>
       <label data-for="gradient"><input type="checkbox" id="grainbow"> Rainbow</label>
       <label data-for="blur">Strength <select class="input" id="blurk"><option value="0.35">Light</option><option value="0.65" selected>Medium</option><option value="1">Strong</option></select></label>
+      <label data-for="glow">Strength <select class="input" id="glowk"><option value="0.4">Soft</option><option value="0.65" selected>Medium</option><option value="0.9">Bright</option></select></label>
       <label data-for="shade">Effect <select class="input" id="shadek"><option value="0.15">Lighten a little</option><option value="0.35">Lighten a lot</option><option value="-0.15" selected>Darken a little</option><option value="-0.35">Darken a lot</option></select></label>
       <span data-for="gradient" class="tiny muted" id="ghint">Drag from the main colour to the second one</span>
     </div>
@@ -252,6 +254,11 @@ function drawGradient(f, a, b) {
   T.gradient(f.px, a, b, stops, { ...opts, mirror });
 }
 function brushAt(f, x, y) {   // blur and shade, at the pixel and (with the mirror on) its reflection
+  if (tool === 'glow') {   // the halo is round and soft whatever brush shape is picked
+    const at = (u) => T.glowAt(f.px, u, y, brush, colour, Number($('glowk').value), bg, stroke);
+    at(x); if (mirror && W - 1 - x !== x) at(W - 1 - x);
+    return;
+  }
   const at = (u) => tool === 'blur' ? T.blurAt(f.px, u, y, brush, shape, Number($('blurk').value), bg, stroke, seed++)
                                     : T.shadeAt(f.px, u, y, brush, shape, Number($('shadek').value), seed++, stroke);
   at(x); if (mirror && W - 1 - x !== x) at(W - 1 - x);
@@ -295,7 +302,7 @@ function cell(e) {
 }
 let drawing = false, last = null, moving = null;
 const DRAG = new Set(['line', 'rect', 'ellipse', 'gradient']);
-const BRUSHED = new Set(['blur', 'shade']);
+const BRUSHED = new Set(['blur', 'shade', 'glow']);
 let dragBase = null, dragErase = false, stroke = null;   // stroke: pixels blurred or shaded so far, once each per stroke
 // while dragging a shape or gradient, the frame is redrawn from how it was each move, so you see the real result
 function dragTo(x, y) {
@@ -311,7 +318,7 @@ board.addEventListener('pointerdown', (e) => {
   if (tool === 'fill') { fill(f, x, y, e.button === 2 ? null : colour); renderAll(); return; }
   if (DRAG.has(tool)) { dragStart = [x, y]; dragBase = f.px.slice(); dragErase = e.button === 2; dragTo(x, y); renderBoard(); return; }
   if (tool === 'shift') { moving = { from: [x, y], px: f.px.slice() }; return; }
-  drawing = true; last = [x, y]; stroke = new Set();
+  drawing = true; last = [x, y]; stroke = tool === 'glow' ? { base: new Map(), k: new Map() } : new Set();
   if (BRUSHED.has(tool)) brushAt(f, x, y); else setPx(f, x, y, tool === 'erase' || e.button === 2 ? null : colour);
   renderBoard();
 });
@@ -358,7 +365,7 @@ function paintSwatches() {
 
 // -- tools ------------------------------------------------------------------------------
 const NAMES = { pen: 'Pencil', erase: 'Eraser', fill: 'Fill', line: 'Line', rect: 'Rectangle', ellipse: 'Circle and oval',
-  gradient: 'Gradient', blur: 'Blur', shade: 'Lighten and darken', pick: 'Pick colour', shift: 'Shift drawing' };
+  gradient: 'Gradient', blur: 'Blur', shade: 'Lighten and darken', glow: 'Glow', pick: 'Pick colour', shift: 'Shift drawing' };
 function setTool(t) {
   if (dragStart || drawing || moving) return;   // not mid-stroke: the shape you're drawing stays the shape you started
   tool = t; document.querySelectorAll('[data-tool]').forEach((b) => b.classList.toggle('on', b.dataset.tool === t)); $('toolname').textContent = NAMES[t];
@@ -467,7 +474,7 @@ document.addEventListener('keydown', (e) => {
   if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'c') { e.preventDefault(); $('copy').click(); return; }
   if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'v') { e.preventDefault(); $('paste').click(); return; }
   const k = e.key.toLowerCase();
-  const map = { p: 'pen', e: 'erase', f: 'fill', l: 'line', r: 'rect', c: 'ellipse', d: 'gradient', b: 'blur', s: 'shade', i: 'pick', v: 'shift' };
+  const map = { p: 'pen', e: 'erase', f: 'fill', l: 'line', r: 'rect', c: 'ellipse', d: 'gradient', b: 'blur', s: 'shade', h: 'glow', i: 'pick', v: 'shift' };
   if (map[k]) setTool(map[k]);
   else if (k === '[' || k === ']') { const sizes = [...$('brush').options].map((o) => Number(o.value)), at = sizes.indexOf(brush);
     brush = sizes[Math.max(0, Math.min(sizes.length - 1, at + (k === ']' ? 1 : -1)))]; $('brush').value = String(brush); }
