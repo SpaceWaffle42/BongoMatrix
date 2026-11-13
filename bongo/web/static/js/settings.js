@@ -3,7 +3,8 @@ import { get, del, post, uploadMedia } from './api.js';
 import { h, icon, toast, fail, clone, same, clamp, humanize, ago, toggle } from './ui.js';
 import { FrameLoop } from './led.js';
 import { mediaThumb, previewButton, openPreview } from './mediaview.js';
-import { S, onLeave, go, saveConfig } from './app.js';
+import { S, onLeave, go, saveConfig, moduleById } from './app.js';
+import { helpButton } from './help.js';
 
 export function render(view) {
   view.append(h('div', { class: 'page-head' }, h('h1', { class: 'h1' }, 'Settings'),
@@ -187,8 +188,10 @@ function petCard() {
 function spotifyCard() {
   const body = h('div', { class: 'stack gap-s' }, h('p', { class: 'muted small flush' }, 'Loading…'));
   const card = h('section', { class: 'card stack', 'aria-label': 'Spotify' },
-    h('div', null, h('h2', { class: 'h2' }, 'Spotify'),
-      h('p', { class: 'muted small flush' }, 'Sign in once so the Spotify screens can show what you\'re playing.')), body);
+    h('div', { class: 'row between wrap gap-s' },
+      h('div', null, h('h2', { class: 'h2' }, 'Spotify'),
+        h('p', { class: 'muted small flush' }, 'Sign in once so the Spotify screens can show what you\'re playing.')),
+      helpButton(moduleById('spotify')?.help, { label: 'Step-by-step help' })), body);
   const show = (s) => {
     if (s.connected) {
       const off = h('button', { type: 'button', class: 'btn ghost danger-btn' }, 'Sign out');

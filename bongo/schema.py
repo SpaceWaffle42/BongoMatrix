@@ -63,6 +63,28 @@ def check(name: str, default, value, choices=None) -> None:
         raise ValueError(f"{name}: expected {expected}, got {value!r}")
 
 
+HELP_KEYS = {"title": str, "intro": str, "steps": list, "tips": list, "links": list,
+             "required": bool}   # required: it shows nothing until this is done
+
+
+def help_problems(help: dict) -> list[str]:
+    """What's wrong with a module's ``help`` guide (empty: fine). Checked by the tests for every module."""
+    problems = [f"help.{k}: unknown" for k in help if k not in HELP_KEYS]
+    problems += [f"help.{k}: expected {t.__name__}" for k, t in HELP_KEYS.items() if k in help and not isinstance(help[k], t)]
+    if not help.get("title") or not help.get("steps"):
+        problems.append("help: needs a title and at least one step")
+    for k in ("steps", "tips"):
+        for line in help.get(k) if isinstance(help.get(k), list) else []:
+            if not isinstance(line, str) or not line.strip() or line.count("`") % 2:
+                problems.append(f"help.{k}: {line!r} must be text with `backticks` in pairs")
+    for link in help.get("links") or []:
+        ok = isinstance(link, dict) and isinstance(link.get("label"), str) and (
+            str(link.get("url", "")).startswith("https://") or str(link.get("route", "")).startswith("/"))
+        if not ok:
+            problems.append(f"help.links: {link!r} needs a label and an https url or a /route")
+    return problems
+
+
 def describe(module) -> dict:
     """JSON-ready description of a module: shared settings and each style's own."""
     tiered = bool(module.basic or any(cls.basic for cls in module.styles.values()))
@@ -89,6 +111,7 @@ def describe(module) -> dict:
     shared_choices = module.choices
     return {
         "id": module.id, "name": module.name, "description": module.description,
+        **({"help": module.help} if module.help else {}),
         "default_style": module.default_style,
         "settings": fields(module.defaults, shared_choices, basic=module.basic),
         "styles": {name: {"settings": fields(cls.defaults, {**shared_choices, **cls.choices}, cls.swatches, cls.basic),

@@ -94,6 +94,12 @@ class Module:
     # ``renames={"old_module": {"old_style": "new_style", None: "style for entries without one"}}``:
     # entries saved for a module that has since moved into this one (config.tidy rewrites them).
     renames: dict = field(default_factory=dict)
+    # ``help``: a step-by-step guide behind a Help button, for a module that needs something set up
+    # away from the Matrix (an account, a developer app, a web address). See ``bongo.schema.HELP_KEYS``:
+    # {"title": ..., "intro": ..., "steps": [...], "tips": [...], "links": [{"label", "url" | "route"}],
+    # "required": True if it shows nothing until this is done}.
+    # Text inside `backticks` is shown as something to copy, with a Copy button.
+    help: dict | None = None
 
     @property
     def default_style(self) -> str:

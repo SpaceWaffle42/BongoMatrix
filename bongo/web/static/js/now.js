@@ -2,6 +2,7 @@
 import { post, previewPath } from './api.js';
 import { h, icon, toast, fail, same, humanize, dur, mmss, clock, reducedMotion, segmented, toggle, store } from './ui.js';
 import { FrameLoop } from './led.js';
+import { helpButton } from './help.js';
 import { S, bus, onLeave, go, href, moduleById, styleOf, entryName, draftChanged, dirtyCount, applyDraft, discardDraft, normalise } from './app.js';
 
 const COLOURS = { clock: '#FF7A3D', weather: '#5B9BE8', announcements: '#FFB547', calendar: '#E879B7',
@@ -308,12 +309,19 @@ function buildAddDialog() {
       h('h2', { class: 'h2', id: 'add-title' }, 'Add a module'),
       h('label', { class: 'field-col', for: 'add-module' }, 'Module', modSel),
       h('p', { class: 'muted small flush', id: 'add-desc' }),
+      h('div', { id: 'add-help' }),
       styleBox,
       h('label', { class: 'field-col', for: 'add-seconds' }, 'Seconds on the panel', seconds),
       h('div', { class: 'row gap-s end' },
         h('button', { type: 'button', class: 'btn ghost', onclick: () => dlg.close() }, 'Cancel'),
         h('button', { type: 'submit', class: 'btn primary', value: 'add' }, 'Add to playlist'))));
-  modSel.addEventListener('change', () => { dlg.querySelector('#add-desc').textContent = moduleById(modSel.value)?.description || ''; });
+  modSel.addEventListener('change', () => {
+    const m = moduleById(modSel.value);
+    dlg.querySelector('#add-desc').textContent = m?.description || '';
+    dlg.querySelector('#add-help').replaceChildren(...(m?.help ? [h('div', { class: 'note' }, icon('info'),
+      h('div', { class: 'stack gap-s' }, h('span', null, m.help.required ? `${m.name} needs setting up once (about five minutes) before it shows anything. Done it already? You're all set.` : `Not sure what to put in? There's a step-by-step guide.`),
+        h('div', null, helpButton(m.help, { label: 'Show me how' })))) ] : []));
+  });
   dlg.addEventListener('close', () => {
     if (dlg.returnValue !== 'add') return;
     S.draft.push(normalise({ module: modSel.value, style, seconds: Math.max(3, Number(seconds.value) || 30), settings: {} }));

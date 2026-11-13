@@ -3,6 +3,7 @@ you can always tell which one you're reading. Four styles share the feeds and co
 from bongo.module import Module
 
 from . import data
+from .help import HELP
 from .presets import FEEDS
 from .styles import Headline, Picture, Story, Ticker
 
@@ -23,4 +24,5 @@ MODULE = Module(
     verify=data.verify,      # and, when saved from the dashboard, really is RSS or Atom
     basic=("feeds", "show_summary", "headline_colour", "summary_colour"),
     suggestions={"feeds": FEEDS},  # one-tap feeds in the dashboard (v2's presets and more)
+    help=HELP,
 )

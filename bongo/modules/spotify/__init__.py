@@ -14,6 +14,7 @@ from PIL import Image, ImageDraw, ImageFilter
 from bongo.module import Module, Style
 
 from . import account
+from .help import HELP
 
 GREY, DIM = (140, 140, 150), (45, 45, 50)
 
@@ -233,6 +234,7 @@ MODULE = Module(
     name="Spotify",
     description="What's playing on Spotify: the cover, title and artist. Hands over to the next screen "
                 "when nothing is playing. Sign in once in Settings > Spotify.",
+    help=HELP,
     styles={"cover": Cover, "backdrop": Backdrop, "vinyl": Vinyl},
     overlays={"ticker": Ticker},
     defaults={"hand_over_after": 60, "show_progress": True},

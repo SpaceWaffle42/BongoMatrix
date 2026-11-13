@@ -3,6 +3,7 @@ import { previewPath, get, uploadMedia } from './api.js';
 import { h, icon, toast, clone, same, humanize, toggle, segmented, store, reducedMotion } from './ui.js';
 import { FrameLoop } from './led.js';
 import { openPreview } from './mediaview.js';
+import { helpButton } from './help.js';
 import { S, onLeave, go, href, moduleById, styleOf, entryName, applyDraft, draftChanged } from './app.js';
 
 /** Settings for a style: shared ones (unless the style redefines them) and the style's own. */
@@ -206,7 +207,8 @@ export function render(view, match) {
 
   view.append(h('div', { class: 'editor-grid' },
     h('div', { class: 'editor-form stack' }, problems,
-      h('section', { class: 'card stack', 'aria-label': 'Style' }, h('h2', { class: 'h2' }, 'Style'),
+      h('section', { class: 'card stack', 'aria-label': 'Style' },
+        h('div', { class: 'row between wrap gap-s' }, h('h2', { class: 'h2' }, 'Style'), helpButton(mod.help, { label: `Help setting up ${mod.name}` })),
         mod.description ? h('p', { class: 'muted small flush' }, mod.description) : null,
         mod.proposed ? h('div', { class: 'note' }, icon('info'), h('span', null, 'Proposed module: not built yet. The previews are prototypes, and saving it here only works in the demo.')) : null,
         styles),

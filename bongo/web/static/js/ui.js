@@ -39,6 +39,7 @@ const ICONS = {
   search: P('<circle cx="11" cy="11" r="7"/><path d="m20 20-3.5-3.5"/>'),
   info: P('<circle cx="12" cy="12" r="9"/><path d="M12 8h.01M11 12h1v4h1"/>'),
   x: P('<path d="M6 6l12 12M18 6 6 18"/>'),
+  help: P('<circle cx="12" cy="12" r="9"/><path d="M9.5 9.5a2.5 2.5 0 1 1 3.5 2.3c-.6.3-1 .8-1 1.5v.7M12 17h.01"/>'),
 };
 export const icon = (name, cls = 'ico') => h('span', { class: cls, html: ICONS[name] || '' });
 
@@ -87,14 +88,30 @@ export const store = {
   set(k, v) { try { localStorage.setItem(`bongo.${k}`, JSON.stringify(v)); } catch { /* private mode: ignore */ } },
 };
 
+/** Put ``text`` on the clipboard; true if it worked. The dashboard is plain http on the home network,
+ * where browsers usually withhold the clipboard API, so this falls back to the older copy command
+ * (with a selection that works on iPhones too) and puts focus back where it was. */
+export async function copyRaw(text, within = null) {
+  try {
+    if (window.isSecureContext && navigator.clipboard) { await navigator.clipboard.writeText(text); return true; }
+  } catch { /* fall back */ }
+  const back = document.activeElement;
+  const ta = h('textarea', { style: 'position:fixed;top:0;left:0;opacity:0;font-size:16px' });
+  ta.value = text;
+  // inside the open dialog, if any: everything behind a modal dialog is inert and can't be selected
+  const dialogs = document.querySelectorAll('dialog[open]');
+  (within || dialogs[dialogs.length - 1] || document.body).append(ta);
+  ta.focus(); ta.select(); ta.setSelectionRange(0, text.length);
+  // only claim it's copied if the whole text really was selected (the copy command says yes regardless)
+  let ok = document.activeElement === ta && ta.selectionEnd - ta.selectionStart === text.length;
+  try { ok = document.execCommand('copy') && ok; } catch { ok = false; }
+  ta.remove();
+  back?.focus?.();
+  return ok;
+}
+
 export async function copyText(text) {
-  try { await navigator.clipboard.writeText(text); }
-  catch {
-    const ta = h('textarea', { style: 'position:fixed;opacity:0' }); ta.value = text;
-    document.body.append(ta); ta.select();
-    try { document.execCommand('copy'); } finally { ta.remove(); }
-  }
-  toast('Copied');
+  toast(await copyRaw(text) ? 'Copied' : "Couldn't copy it here: select it and copy by hand", 'info');
 }
 
 /** Toggle switch: a real button with aria-pressed. */
