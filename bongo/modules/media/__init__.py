@@ -70,6 +70,7 @@ class Fit(Style):
         s = self.settings
         self.bg = rgb(s["background"])
         self.frames, self.ends = [], []
+        self.moving = False   # a GIF or video (a GIF can be one long frame); a still never "plays through"
         try:
             path = locate(s["file"])
             if path is None:
@@ -80,15 +81,17 @@ class Fit(Style):
                 for i, frame in enumerate(video_frames(str(path), path.stat().st_mtime, box)):
                     self.frames.append(self.compose(frame.convert("RGBA"), s["brightness"]))
                     self.ends.append((i + 1) * 1000 // VIDEO_FPS)
+                self.moving = True
                 return
             with Image.open(path) as im:
                 total = 0
                 for i, frame in enumerate(ImageSequence.Iterator(im)):
                     if i >= MAX_FRAMES:
                         break
-                    total += frame.info.get("duration") or 100
+                    total += max(10, int(frame.info.get("duration") or 100))   # as schedule.gif_pass counts it
                     self.frames.append(self.compose(frame.convert("RGBA"), s["brightness"]))
                     self.ends.append(total)
+            self.moving = len(self.frames) > 1   # a one-frame GIF is a still
         except Exception as error:
             logging.getLogger(__name__).warning("can't show %r: %s", s["file"], error)
             self.frames, self.ends = [self.placeholder()], [1]
@@ -121,8 +124,28 @@ class Fit(Style):
         font.draw(img, x, y, text, (200, 200, 210))
         return img
 
+    seen = None      # the time at the last frame drawn
+    began = None     # when this screen came on: an animation starts at its first frame
+    played = 0.0     # seconds played, for a splash that plays once
+    JUMP = 1.0       # a step bigger than this (or backwards) is the clock being set (NTP steps over 0.4 s), not time passing
+
     def render(self, now):
-        t = int(now.timestamp() * 1000 * self.settings["speed"]) % self.ends[-1]
+        stamp = now.timestamp()
+        if self.began is None:
+            self.began = stamp
+        if self.once:   # counted frame by frame, so the clock being set at boot can't cut a splash short
+            if self.seen is not None:
+                step = stamp - self.seen
+                self.played += step if 0 <= step <= self.JUMP else 1 / self.fps
+            self.seen = stamp
+            elapsed = self.played
+        else:           # a pure function of the time, so shared dashboard previews stay steady
+            elapsed = stamp - self.began
+        t = int(elapsed * 1000 * self.settings["speed"])
+        if self.once and self.moving and t >= self.ends[-1]:
+            self.finished = True               # played through once: hand over, on its last frame
+            return self.frames[-1].copy()
+        t %= self.ends[-1]
         return self.frames[next(i for i, e in enumerate(self.ends) if t < e)].copy()
 
 

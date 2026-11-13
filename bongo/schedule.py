@@ -55,7 +55,9 @@ def gif_pass(name: str, speed: float) -> float | None:
             delays = [Fraction(max(10, int(f.info.get("duration") or 100))) for f in ImageSequence.Iterator(im)]
     except Exception:
         return None
-    return float(sum(delays) / Fraction(str(speed)) * 100 / 1000) if delays else None
+    if len(delays) < 2:
+        return None   # one frame: a still
+    return float(sum(delays) / Fraction(str(speed)) * 100 / 1000)
 
 
 def hold_seconds(name: str, sources: list[str], speed: float) -> float:
@@ -164,14 +166,14 @@ class Schedule:
         name = bag.pop()
         _bags[key] = bag
         return Entry("media", self.splash_fit, settings={"file": name, "speed": self.splash_speed / 100},
-                     seconds=hold_seconds(name, self.splash_sources, self.splash_speed))
+                     seconds=hold_seconds(name, self.splash_sources, self.splash_speed), once=True)
 
     def boot_entry(self) -> Entry | None:
         """The start-up screen: one pass of the boot file (a still holds STILL_SECONDS)."""
         if not self.boot:
             return None
         return Entry("media", self.splash_fit, settings={"file": self.boot, "speed": self.splash_speed / 100},
-                     seconds=hold_seconds(self.boot, [self.boot], self.splash_speed))
+                     seconds=hold_seconds(self.boot, [self.boot], self.splash_speed), once=True)
 
     # -- sleep ---------------------------------------------------------------------------
     @property
@@ -188,8 +190,11 @@ class Schedule:
         key = tuple(self.sleep_sources)
         if key not in _night:
             _night[key] = self.rng.choice(self.sleep_sources)
+        # whole passes, so each new entry (it starts on frame 1) picks up exactly where the last left off
+        one = gif_pass(_night[key], self.sleep_speed)
+        seconds = one * max(1, round(SLEEP_ENTRY_SECONDS / one)) if one else SLEEP_ENTRY_SECONDS
         return Entry("media", self.sleep_fit, settings={"file": _night[key], "speed": self.sleep_speed / 100},
-                     seconds=SLEEP_ENTRY_SECONDS)
+                     seconds=seconds)
 
     def wake(self) -> None:
         """Called by the player when sleep ends, so the next night picks again."""

@@ -241,6 +241,16 @@ body.drag-active { user-select: none; -webkit-user-select: none; }
 .sleep-item { padding: 10px; border-radius: 0; background: var(--page); border: 1px solid var(--line); }
 .devices { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 8px; }
 .device { display: flex; align-items: center; gap: 12px; padding: 10px 12px; border-radius: 0; background: var(--page); border: 1px solid var(--line); }
+.device.picked { border-color: var(--amber); background: var(--amber-card); }
+.media-actions { display: flex; gap: 8px; flex: none; }
+.media-pick { flex: none; display: flex; align-items: center; justify-content: center; width: 32px; height: 32px; margin: -7px; cursor: pointer; }
+.media-pick .check { flex: none; }
+.media-single .media-pick { display: none; }
+@media (max-width: 600px) {   /* phones: the name keeps its room; Preview and Delete go underneath */
+  .media-row { flex-wrap: wrap; }
+  .media-row .grow { flex: 1 1 0; }
+  .media-actions { flex-basis: 100%; justify-content: flex-end; }
+}
 
 /* logs */
 .log-summary { display: flex; flex-wrap: wrap; gap: 24px; align-items: center; padding: 16px 18px; }

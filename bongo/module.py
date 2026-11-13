@@ -42,6 +42,7 @@ class Style:
     basic: tuple = ()  # this style's settings shown up front in the dashboard; the rest sit under Advanced
     group: str | None = None  # heading the dashboard files this style under (a Clock's "Digital", "Word"...)
     finished: bool = False  # set True in render to hand over to the next entry before its time is up
+    once: bool = False      # set by the player: play through once, then hand over (splash, boot screen)
     fps: int = 30
 
     def __init__(self, ctx: Context, settings: dict):

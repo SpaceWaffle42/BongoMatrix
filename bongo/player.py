@@ -11,6 +11,8 @@ from bongo.module import Context, Module, Style
 log = logging.getLogger(__name__)
 
 
+ONCE_SLACK = 5.0   # seconds a play-once entry may run past its expected length before it's stopped anyway
+
 @dataclass
 class Entry:
     module: str
@@ -18,6 +20,7 @@ class Entry:
     seconds: float = 30
     settings: dict = field(default_factory=dict)
     enabled: bool = True
+    once: bool = False   # play through once and hand over (splash, boot); ``seconds`` is then only a cap
 
     def build(self, modules: dict[str, Module], ctx: Context) -> Style:
         if self.module not in modules:
@@ -41,8 +44,8 @@ def play_entry(style: Style, seconds: float, panel, stop: threading.Event | None
         if live and live.skip.is_set():
             live.skip.clear()
             break
-        if getattr(style, "finished", False):               # a style can hand over early (Spotify, nothing playing)
-            break
+        if getattr(style, "finished", False) and not (live and live.paused):   # a style can hand over early
+            break                                                                # (Spotify idle, a splash played through)
         started = clock()
         now = style.ctx.now()
         if last is None or started - last_at >= frame_time - 1e-3:
@@ -88,12 +91,16 @@ def play(playlist: list[Entry], modules: dict[str, Module], panel, ctx_factory=C
             if entry is None:
                 return False
             extras = None  # overlays never cover the splash
-        seconds = entry.seconds if limit is None else max(0.0, min(entry.seconds, limit))
         try:
             style = entry.build(modules, ctx_factory())
         except Exception:
             log.exception("skipping playlist entry %s", entry.module)
             return False
+        style.once = entry.once
+        # a GIF playing once hands over itself; its expected length is only a cap, with room for a slow Pi
+        moving = entry.once and getattr(style, "moving", False)
+        cap = entry.seconds + ONCE_SLACK if moving else entry.seconds
+        seconds = cap if limit is None else max(0.0, min(cap, limit))
         if live:
             live.playing(shown, upcoming, index)
         try:

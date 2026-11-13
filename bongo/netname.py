@@ -197,7 +197,8 @@ class AddressScreen:
 
     The frame it is given is already the safe area (the player places it on the panel afterwards),
     so it lays out on ``frame.size``. The code is there for the whole ``SHOW_SECONDS``; the words sit
-    beside it (an address wraps onto two lines if it must). On a panel too narrow for both, the
+    beside it (an address wraps onto two lines if it must). On a square or tall panel (64x64) the code
+    sits on top, as large as leaves room for the words underneath. On a panel too narrow for both, the
     code shows alone. A line still too long scrolls, all such lines together, after ``HOLD``."""
 
     MIN_TEXT = 14   # px of text room worth having beside the code
@@ -241,6 +242,17 @@ class AddressScreen:
             qr = qr.resize((qr.width * scale, qr.height * scale), Image.NEAREST)
         return qr, beside
 
+    def _stacked(self, codes, w: int, h: int, lines: int) -> Image.Image | None:
+        """On a square or tall panel: the code scaled to fit above ``lines`` of words, or None."""
+        if codes is None or codes[0] is None or h * 4 < w * 3:
+            return None
+        text = words_height(lines) + 3                         # the words and the gap above them (the code has its own white margin)
+        for qr in codes:
+            scale = min((h - text) // qr.height, w // qr.width)
+            if scale >= 1:
+                return qr.resize((qr.width * scale, qr.height * scale), Image.NEAREST) if scale > 1 else qr
+        return None
+
     def overlay(self, frame: Image.Image) -> Image.Image:
         state = self._state
         if not self._showing(state):
@@ -248,18 +260,35 @@ class AddressScreen:
         name, ip, _url, codes, shown, _until = state
         w, h = frame.size
         img = Image.new("RGB", (w, h), BG)
+        tiny = self.fonts("tom-thumb")
+        ips = wrap_ip(tiny, ip or "", w)
+        top = self._stacked(codes, w, h, 1 + len(ips))
+        if top is None and len(ips) > 1:    # no room for a wrapped address under the code: one line, scrolling
+            top = self._stacked(codes, w, h, 2)
+            if top is not None:
+                ips = [ip or ""]
+        if top is not None:                 # square or tall: the code on top, the words full width beneath
+            words = words_height(1 + len(ips))
+            y0 = max(0, (h - top.height - 3 - words) // 2)            # the code and the words centred as one
+            img.paste(top, ((w - top.width) // 2, y0))
+            self._words(img, tiny, name, ip, ips, shown, 0, y0 + top.height + 3, w, words, fixed=True)
+            return img
         qr, beside = self._code(codes, w, h)
         if qr is not None and not beside:   # too narrow for words too: the code alone, centred
             img.paste(qr, ((w - qr.width) // 2, (h - qr.height) // 2))
             return img
-        tiny = self.fonts("tom-thumb")
         x = 0
         if qr is not None:
             img.paste(qr, (1, (h - qr.height) // 2))
             x = qr.width + 3
         room = w - x
-        ips = wrap_ip(tiny, ip or "", room)
-        if len(ips) > 1 and 7 * 2 + 6 > h:   # no room for three lines (32x16): one, scrolling if it must
+        self._words(img, tiny, name, ip, wrap_ip(tiny, ip or "", room), shown, x, 0, room, h)
+        return img
+
+    def _words(self, img, tiny, name, ip, ips, shown, x, top, room, h, fixed=False) -> None:
+        """The name and address, centred in the box (x, top, room wide, h tall); too long, they scroll.
+        ``fixed``: the box was sized for exactly these lines (the stacked layout), so keep them."""
+        if not fixed and len(ips) > 1 and 7 * 2 + 6 > h:   # no room for three lines (32x16): one, scrolling if it must
             ips = [ip or ""]
         lines = [(name, NAME_COLOUR, False)] + [(t, IP_COLOUR, True) for t in ips]
         widths = [ip_width(tiny, t) if is_ip else tiny.width(t) for t, _, is_ip in lines]
@@ -267,7 +296,7 @@ class AddressScreen:
         t = max(0.0, self.clock() - shown - HOLD)
         off = int(t * SPEED + 0.25) % period               # +0.25: frame-time jitter never lands on a step edge
         pitch = 9 if len(lines) == 2 else 7
-        y = (h - (pitch * (len(lines) - 1) + 5)) // 2      # top of the first line (capitals and digits: 5 rows)
+        y = top + (h - (pitch * (len(lines) - 1) + 5)) // 2   # top of the first line (capitals and digits: 5 rows)
         for (text, colour, is_ip), width in zip(lines, widths):
             line = Image.new("RGB", (room, 8), BG)
             for start in ([(room - width) // 2] if width <= room else [-off, period - off]):
@@ -277,7 +306,11 @@ class AddressScreen:
                     tiny.draw(line, start, 6, text, colour)
             img.paste(line, (x, y - 1))
             y += pitch
-        return img
+
+
+def words_height(lines: int) -> int:
+    """Rows the name and address take as ``_words`` lays them: 2 lines 9 apart, 3 lines 7 apart."""
+    return (9 if lines == 2 else 7) * (lines - 1) + 5
 
 
 def compact_url(url: str) -> str:

@@ -517,40 +517,98 @@ function devicesCard() {
 const mb = (n) => (n < 1048576 ? `${Math.max(1, Math.round(n / 1024))} KB` : `${(n / 1048576).toFixed(n < 10485760 ? 1 : 0)} MB`);
 
 function mediaCard() {
-  const list = h('ul', { class: 'devices', 'aria-live': 'polite' }, h('li', { class: 'muted' }, 'Loading…'));
+  const list = h('ul', { class: 'devices' }, h('li', { class: 'muted' }, 'Loading…'));   // the toasts say what changed
   const usage = h('p', { class: 'muted tiny flush' });
   const file = h('input', { type: 'file', class: 'sr', id: 'media-upload', accept: 'image/*,video/*,.gif,.webp,.mkv' });
   const add = h('button', { type: 'button', class: 'btn' }, icon('upload'), 'Upload…');
+  // pick several (or all) and delete them together
+  const picked = new Set();
+  let files = [], busy = false, uploading = false;
+  const all = h('input', { type: 'checkbox', class: 'check', id: 'media-all' });
+  const delPicked = h('button', { type: 'button', class: 'btn ghost danger-btn' });
+  const bar = h('div', { class: 'row between wrap gap-s media-bar' },
+    h('label', { class: 'row gap-s small', for: 'media-all' }, all, 'Select all'), delPicked);
+  const sync = () => {
+    for (const n of [...picked]) if (!files.some((f) => f.name === n)) picked.delete(n);
+    const several = files.length >= 2;   // ticking is for two or more files; one file has its own Delete
+    if (!several) picked.clear();
+    const n = picked.size;
+    all.checked = n > 0 && n === files.length;
+    all.indeterminate = n > 0 && n < files.length;
+    delPicked.disabled = busy || !n;
+    if (!busy) delPicked.replaceChildren(icon('trash'), n ? `Delete ${n} selected` : 'Delete selected');
+    bar.hidden = !several;
+    list.classList.toggle('media-single', !several);
+    all.disabled = busy;
+    list.querySelectorAll('li[data-name]').forEach((li) => {
+      const on = picked.has(li.dataset.name);
+      li.classList.toggle('picked', on);
+      li.querySelector('.media-pick input').checked = on;
+      li.querySelectorAll('.media-pick input, .media-del').forEach((el) => { el.disabled = busy; });
+    });
+    add.disabled = busy || uploading;
+  };
+  const row = (f) => {
+    const box = h('input', { type: 'checkbox', class: 'check', 'aria-label': `Select ${f.file}`,
+      onchange: () => { if (box.checked) picked.add(f.name); else picked.delete(f.name); sync(); } });
+    const li = h('li', { class: 'device media-row', 'data-name': f.name },
+      h('label', { class: 'media-pick' }, box),   // a bigger area to tap than the box itself
+      mediaThumb(f.name)[0],
+      h('div', { class: 'grow min0' }, h('div', { class: 'strong mono small name', title: f.file }, f.file), h('div', { class: 'tiny muted' }, `${f.kind} · ${mb(f.bytes)}`)),
+      h('div', { class: 'media-actions' },
+        previewButton(f.name),
+        h('button', { type: 'button', class: 'btn ghost danger-btn media-del', 'aria-label': `Delete ${f.file}`, onclick: () => remove([f]) }, 'Delete')));
+    return li;
+  };
   const load = async () => {
     try {
       const lib = await get('/api/media');
+      files = lib.folders.uploaded;
       usage.textContent = `${mb(lib.used)} of ${mb(lib.limits.library)} used · up to ${mb(lib.limits.file)} per file · ${lib.folders['built-in'].length} built-in files`;
-      list.replaceChildren(...lib.folders.uploaded.map((f) => h('li', { class: 'device' },
-        mediaThumb(f.name)[0],
-        h('div', { class: 'grow min0' }, h('div', { class: 'strong mono small name', title: f.file }, f.file), h('div', { class: 'tiny muted' }, `${f.kind} · ${mb(f.bytes)}`)),
-        previewButton(f.name),
-        h('button', { type: 'button', class: 'btn ghost danger-btn', 'aria-label': `Delete ${f.file}`, onclick: () => remove(f) }, 'Delete'))));
-      if (!lib.folders.uploaded.length) list.replaceChildren(h('li', { class: 'muted' }, 'Nothing uploaded yet. Images, GIFs and short videos work.'));
-    } catch (err) { list.replaceChildren(h('li', { class: 'danger' }, `Couldn't load media: ${err.message}`)); }
+      list.replaceChildren(...files.map(row));
+      if (!files.length) list.replaceChildren(h('li', { class: 'muted' }, 'Nothing uploaded yet. Images, GIFs and short videos work.'));
+    } catch (err) { files = []; list.replaceChildren(h('li', { class: 'danger' }, `Couldn't load media: ${err.message}`)); }
+    sync();
   };
-  const remove = async (f) => {
-    if (!confirm(`Delete ${f.file}? This can't be undone.`)) return;
-    try { await del(`/api/media/${f.name.split('/').map(encodeURIComponent).join('/')}`); toast(`Deleted ${f.file}`); load(); }
-    catch (err) { fail("Couldn't delete it")(err); }
+  /** Delete these files, one after another; ones still in use are kept and said why. */
+  const remove = async (chosen) => {
+    const names = chosen.map((f) => f.file);
+    const ask = names.length === 1 ? `Delete ${names[0]}? This can't be undone.`
+      : `Delete these ${names.length} files? This can't be undone.\n\n${names.slice(0, 8).join('\n')}${names.length > 8 ? `\n…and ${names.length - 8} more` : ''}`;
+    if (busy || !confirm(ask)) return;   // one batch at a time
+    busy = true; sync();
+    const kept = [];
+    let gone = 0;
+    for (const [k, f] of chosen.entries()) {
+      if (chosen.length > 1) delPicked.replaceChildren(icon('trash'), `Deleting ${k + 1} of ${chosen.length}…`);
+      try { await del(`/api/media/${f.name.split('/').map(encodeURIComponent).join('/')}`); gone += 1; picked.delete(f.name); }
+      catch (err) {
+        if (err.status === 404) { gone += 1; picked.delete(f.name); continue; }   // already gone: that's what was wanted
+        kept.push(err.message.includes(f.name) ? err.message.replace(f.name, f.file) : `${f.file}: ${err.message}`);
+      }
+    }
+    busy = false;
+    if (gone) toast(gone === 1 && chosen.length === 1 ? `Deleted ${names[0]}` : `Deleted ${gone} file${gone === 1 ? '' : 's'}`, 'success');
+    if (kept.length) toast(`Couldn't delete ${kept.length === 1 ? 'one file' : `${kept.length} files`}. ${kept.join(' · ')}`, 'error', 12000);
+    await load();
+    add.focus({ preventScroll: true });   // the rows were redrawn: put focus somewhere steady
   };
+  delPicked.addEventListener('click', () => remove(files.filter((f) => picked.has(f.name))));
+  all.addEventListener('change', () => { picked.clear(); if (all.checked) files.forEach((f) => picked.add(f.name)); sync(); });
   add.addEventListener('click', () => file.click());
   file.addEventListener('change', async () => {
     const pick = file.files?.[0];
     if (!pick) return;
-    add.disabled = true;
-    try { const { name } = await uploadMedia(pick); toast(`Added ${name.replace('uploaded/', '')}`, 'success'); load(); }
+    uploading = true; sync();
+    try { const { name } = await uploadMedia(pick); toast(`Added ${name.replace('uploaded/', '')}`, 'success'); }
     catch (err) { toast(err.message, 'error', 8000); }
-    finally { add.disabled = false; file.value = ''; }
+    finally { uploading = false; file.value = ''; await load(); }
   });
+  sync();
   load();
   return h('section', { class: 'card stack', 'aria-label': 'Media library' },
     h('div', { class: 'row between wrap' },
-      h('div', null, h('h2', { class: 'h2' }, 'Media library'), h('p', { class: 'muted small flush' }, 'Your uploaded images and videos. Preview one to see it as the panel draws it, or show it on the Matrix.')),
+      h('div', null, h('h2', { class: 'h2' }, 'Media library'), h('p', { class: 'muted small flush' }, 'Your uploaded images and videos. Preview one to see it as the panel draws it, or show it on the Matrix. Tick several to delete them together.')),
       h('div', null, add, file)),
-    list, usage);
+    bar, list, usage);
 }
