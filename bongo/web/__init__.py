@@ -26,6 +26,7 @@ from werkzeug.exceptions import HTTPException
 
 from bongo import animator, config as cfg, net, netname, pets, petpack, update
 from bongo import media, places
+from bongo.fonts import Fonts, names as font_names, table as font_table
 from bongo.module import Context
 from bongo.player import Entry
 from bongo.schema import describe
@@ -323,15 +324,22 @@ def create_app(*, modules, live, pairing, config_path, logs: LogBuffer | None = 
             return jsonify(error=f"unknown action {action!r}"), 400
         return jsonify(live=live.status())
 
+    def canvas(data) -> tuple[int, int]:
+        """The Animator's canvas size: what the page says it is, else the panel's."""
+        area = cfg.safe_area(load())
+        width, height = data.get("width", area.panel_width), data.get("height", area.panel_height)
+        if isinstance(width, str) and isinstance(height, str) and width.isdigit() and height.isdigit():
+            width, height = int(width), int(height)   # an upload's form fields are text
+        return animator.side(width, "width"), animator.side(height, "height")
+
     @app.post("/api/animator")
     def animator_save():
         """Frames from the Animator: saved to the media library as a GIF, or just shown on the
         Matrix for 15 s (``show``) without adding anything to the library."""
         request.max_content_length = 16 * 1024 * 1024
         data = body()
-        area = cfg.safe_area(load())
-        width, height = area.panel_width, area.panel_height
         try:
+            width, height = canvas(data)
             gif = animator.gif(data.get("frames"), width, height, data.get("background", "#000000"),
                                data.get("loop", "loop"))
             if data.get("show"):
@@ -347,6 +355,55 @@ def create_app(*, modules, live, pairing, config_path, logs: LogBuffer | None = 
             return jsonify(ok=True, name=name, live=live.status())
         logging.getLogger("bongo.web").info("animation saved: %s", name)
         return jsonify(ok=True, name=name), 201
+
+    # projects: the drawing itself, with its layers, to open again (and what modules draw sprites from)
+    @app.get("/api/animator/projects")
+    def animator_projects():
+        return jsonify(projects=animator.projects())
+
+    @app.get("/api/animator/projects/<name>")
+    def animator_project(name):
+        try:
+            return jsonify(animator.load_project(name))
+        except FileNotFoundError:
+            abort(404, "no such project")
+        except ValueError as error:
+            return jsonify(error=f"Couldn't open {name}: {error}."), 422
+
+    @app.put("/api/animator/projects/<name>")
+    def animator_project_save(name):
+        request.max_content_length = animator.MAX_PROJECT + 64 * 1024
+        try:
+            saved = animator.save_project({**body(), "name": name})
+        except ValueError as error:
+            return jsonify(error=f"Couldn't save it: {error}."), 422
+        except OSError as error:
+            logging.getLogger("bongo.web").warning("animator project not saved: %s", error)
+            return jsonify(error="Couldn't save it: the Matrix couldn't write the file (its card may be full)."), 507
+        logging.getLogger("bongo.web").info("animator project saved: %s", saved)
+        return jsonify(ok=True, name=saved)
+
+    @app.delete("/api/animator/projects/<name>")
+    def animator_project_delete(name):
+        try:
+            animator.delete_project(name)
+        except PermissionError as error:
+            abort(403, str(error))
+        except (FileNotFoundError, ValueError):
+            abort(404, "no such project")
+        logging.getLogger("bongo.web").info("animator project deleted: %s", name)
+        return jsonify(ok=True)
+
+    # the Matrix's own fonts, for the Animator's text tool
+    @app.get("/api/animator/fonts")
+    def animator_fonts():
+        return jsonify(fonts=font_names((fonts or Fonts()).directory))
+
+    @app.get("/api/animator/fonts/<name>")
+    def animator_font(name):
+        if name not in font_names((fonts or Fonts()).directory):
+            abort(404, "no such font")
+        return jsonify(font_table((fonts or Fonts())(name)))
 
     # -- Wi-Fi (bongo/net.py; only on a Pi where NetworkManager runs) ------------------------------
     def setup_client() -> bool:
@@ -435,9 +492,8 @@ def create_app(*, modules, live, pairing, config_path, logs: LogBuffer | None = 
         upload = request.files.get("file")
         if upload is None or not upload.filename:
             abort(400, "choose a GIF or picture")
-        area = cfg.safe_area(load())
         try:
-            frames = animator.frames_from(upload.read(), area.panel_width, area.panel_height)
+            frames = animator.frames_from(upload.read(), *canvas(request.form))
         except ValueError as error:
             return jsonify(error=f"Couldn't import {upload.filename}: {error}."), 422
         return jsonify(frames=frames)

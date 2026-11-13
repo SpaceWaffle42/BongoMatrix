@@ -1,9 +1,10 @@
 // Pixel tools for the Animator, shared by the editor (animator.html) and the presets
 // (animator-presets.js), so every preset is made with the same brushes, shapes, gradients and blur
 // you draw with. Everything works on one frame's pixels: an array of W*H '#rrggbb' strings or null
-// (nothing drawn: the background shows).
+// (nothing drawn: the background shows). W x H is the panel's 64 x 32 unless the editor picks a sprite
+// size with size(); the presets always draw at 64 x 32.
 (function () {
-  const W = 64, H = 32;
+  let W = 64, H = 32;
   const clamp = (v, a, b) => Math.max(a, Math.min(b, v));
   const byte = (v) => clamp(Math.round(v), 0, 255);
   const hex = (r, g, b) => '#' + [r, g, b].map((v) => byte(v).toString(16).padStart(2, '0')).join('');
@@ -220,7 +221,113 @@
       px[b * W + a] = c; stack.push([a + 1, b], [a - 1, b], [a, b + 1], [a, b - 1]); }
   }
 
-  window.PixelTools = { W, H, hex, parse, mix, SHAPES, SHAPE_NAMES, tip, stamp, lineCells, rectCells, ellipseCells,
+  function shifted(px, dx, dy) {   // the whole drawing moved; what goes off the edge is dropped
+    const out = new Array(W * H).fill(null);
+    px.forEach((c, i) => { const x = i % W + dx, y = Math.floor(i / W) + dy; if (c && inside(x, y)) out[y * W + x] = c; });
+    return out;
+  }
+
+  // -- canvas size ----------------------------------------------------------------------------
+  function size(w, h) { W = w; H = h; api.W = w; api.H = h; }
+  // a frame of w0 x h0 on a canvas of w1 x h1: the top-left corner stays put, what doesn't fit is dropped
+  function resized(px, w0, h0, w1, h1) {
+    const out = new Array(w1 * h1).fill(null);
+    for (let y = 0; y < Math.min(h0, h1); y++) for (let x = 0; x < Math.min(w0, w1); x++) out[y * w1 + x] = px[y * w0 + x];
+    return out;
+  }
+
+  // -- areas: what the selection tool lifts, moves, turns and puts back ---------------------------
+  // an area is { x, y, w, h }; a piece is { px, w, h } (its own little frame)
+  function lifted(px, r) {
+    const piece = { px: new Array(r.w * r.h).fill(null), w: r.w, h: r.h };
+    for (let b = 0; b < r.h; b++) for (let a = 0; a < r.w; a++) if (inside(r.x + a, r.y + b)) piece.px[b * r.w + a] = px[(r.y + b) * W + r.x + a];
+    return piece;
+  }
+  function cleared(px, r) {
+    const out = px.slice();
+    for (let b = 0; b < r.h; b++) for (let a = 0; a < r.w; a++) if (inside(r.x + a, r.y + b)) out[(r.y + b) * W + r.x + a] = null;
+    return out;
+  }
+  function placed(px, piece, x, y) {   // drawn pixels of the piece replace what's there; its empty ones change nothing
+    const out = px.slice();
+    piece.px.forEach((c, i) => { const a = x + i % piece.w, b = y + Math.floor(i / piece.w); if (c && inside(a, b)) out[b * W + a] = c; });
+    return out;
+  }
+  function turned(piece) {   // a quarter turn clockwise
+    const out = { px: new Array(piece.w * piece.h).fill(null), w: piece.h, h: piece.w };
+    piece.px.forEach((c, i) => { const x = i % piece.w, y = Math.floor(i / piece.w); out.px[x * out.w + (piece.h - 1 - y)] = c; });
+    return out;
+  }
+  function mirrored(piece, horizontal) {
+    const out = { px: new Array(piece.w * piece.h).fill(null), w: piece.w, h: piece.h };
+    piece.px.forEach((c, i) => { const x = i % piece.w, y = Math.floor(i / piece.w);
+      out.px[horizontal ? y * piece.w + (piece.w - 1 - x) : (piece.h - 1 - y) * piece.w + x] = c; });
+    return out;
+  }
+
+  // -- layers flattened into the picture ----------------------------------------------------------
+  // cels: one frame's pixels per layer, bottom first. A layer is { on, opacity (0..1), mode }: 'normal' lays
+  // its pixels over what's beneath (see-through by its opacity), 'light' adds them as light. Python does the
+  // same sums in bongo/animator.py (flatten), so a sprite looks the same on the panel as it does here.
+  function compose(cels, layers, background = '#000000', upTo = cels.length) {
+    const out = new Array(cels[0] ? cels[0].length : W * H).fill(null), bgc = parse(background);
+    for (let k = 0; k < upTo; k++) {
+      const l = layers[k], cel = cels[k], o = l.opacity ?? 1;
+      if (!l.on || o <= 0) continue;
+      if (o >= 1 && l.mode !== 'light') { for (let i = 0; i < cel.length; i++) if (cel[i]) out[i] = cel[i]; continue; }
+      for (let i = 0; i < cel.length; i++) {
+        if (!cel[i]) continue;
+        const a = out[i] ? parse(out[i]) : bgc, b = parse(cel[i]);
+        const c = l.mode === 'light' ? hex(a[0] + b[0] * o, a[1] + b[1] * o, a[2] + b[2] * o)
+                                     : hex(a[0] + (b[0] - a[0]) * o, a[1] + (b[1] - a[1]) * o, a[2] + (b[2] - a[2]) * o);
+        if (out[i] || c !== background.toLowerCase()) out[i] = c;   // too faint to show on nothing: stays empty
+      }
+    }
+    return out;
+  }
+
+  // -- text ---------------------------------------------------------------------------------------
+  // a font is { cap, descent, glyphs: { 'A': [advance, x offset, rows above the baseline, width, [row bits]] } }:
+  // what /api/animator/fonts/<name> sends for each of the Matrix's fonts. Tiny (3 x 5) is built in.
+  const ROWS = {
+    A: '.X.|X.X|XXX|X.X|X.X', B: 'XX.|X.X|XX.|X.X|XX.', C: '.XX|X..|X..|X..|.XX', D: 'XX.|X.X|X.X|X.X|XX.', E: 'XXX|X..|XX.|X..|XXX',
+    F: 'XXX|X..|XX.|X..|X..', G: '.XX|X..|X.X|X.X|.XX', H: 'X.X|X.X|XXX|X.X|X.X', I: 'XXX|.X.|.X.|.X.|XXX', J: '..X|..X|..X|X.X|.X.',
+    K: 'X.X|X.X|XX.|X.X|X.X', L: 'X..|X..|X..|X..|XXX', M: 'X...X|XX.XX|X.X.X|X...X|X...X', N: 'X..X|XX.X|X.XX|X..X|X..X',
+    O: '.XX.|X..X|X..X|X..X|.XX.', P: 'XX.|X.X|XX.|X..|X..', Q: '.X.|X.X|X.X|X.X|.XX', R: 'XX.|X.X|XX.|X.X|X.X', S: '.XX|X..|.X.|..X|XX.',
+    T: 'XXX|.X.|.X.|.X.|.X.', U: 'X.X|X.X|X.X|X.X|XXX', V: 'X.X|X.X|X.X|X.X|.X.', W: 'X...X|X...X|X.X.X|XX.XX|X...X', X: 'X.X|X.X|.X.|X.X|X.X',
+    Y: 'X.X|X.X|.X.|.X.|.X.', Z: 'XXX|..X|.X.|X..|XXX', 0: 'XXX|X.X|X.X|X.X|XXX', 1: '.X.|XX.|.X.|.X.|XXX', 2: 'XX.|..X|.X.|X..|XXX',
+    3: 'XX.|..X|.X.|..X|XX.', 4: 'X.X|X.X|XXX|..X|..X', 5: 'XXX|X..|XX.|..X|XX.', 6: '.XX|X..|XXX|X.X|XXX', 7: 'XXX|..X|.X.|.X.|.X.',
+    8: 'XXX|X.X|XXX|X.X|XXX', 9: 'XXX|X.X|XXX|..X|XX.', ' ': '..|..|..|..|..', '!': 'X|X|X|.|X', '.': '.|.|.|.|X', "'": 'X|X|.|.|.',
+    '-': '...|...|XXX|...|...', ':': '.|X|.|X|.', '?': 'XX.|..X|.X.|...|.X.', '%': 'XX..X|XX.X.|..X..|.X.XX|X..XX', '♥': 'X.X|XXX|XXX|.X.|...',
+  };
+  const FONT = {};   // the Tiny font as rows of X and . (the presets draw with these)
+  Object.entries(ROWS).forEach(([k, v]) => { FONT[k] = v.split('|'); });
+  const TINY = { cap: 5, descent: 0, upper: true, glyphs: {} };
+  Object.entries(FONT).forEach(([k, rows]) => { TINY.glyphs[k] = [rows[0].length + 1, 0, 5, rows[0].length, rows.map((r) => parseInt(r.replace(/X/g, '1').replace(/\./g, '0'), 2))]; });
+  const glyph = (font, ch) => font.glyphs[font.upper ? ch.toUpperCase() : ch] || font.glyphs['?'] || [0, 0, 0, 0, []];
+  const textWidth = (s, font = TINY) => [...s].reduce((w, ch) => w + glyph(font, ch)[0], 0);
+  // write s with the top of its capitals at (x, y); `set(i)` gets each pixel. Returns how wide it came out.
+  function text(s, x, y, font, set) {
+    const start = x, base = y + font.cap;
+    for (const ch of s) {
+      const [advance, xoff, top, w, rows] = glyph(font, ch);
+      rows.forEach((bits, r) => { for (let a = 0; a < w; a++) if (bits >> (w - 1 - a) & 1) { const X = x + xoff + a, Y = base - top + r; if (inside(X, Y)) set(Y * W + X); } });
+      x += advance;
+    }
+    return x - start;
+  }
+
+  // -- how it looks dimmed ------------------------------------------------------------------------
+  // a colour as the panel shows it at `percent` brightness, brought back up so the lost steps are easy to
+  // see: at 15% there are only 38 levels of each colour left, so soft dark gradients turn into bands
+  function dimmed(c, percent) {
+    if (percent >= 100) return c;
+    const k = percent / 100;
+    return hex(...parse(c).map((v) => Math.round(v * k) / k));
+  }
+
+  const api = { W, H, size, resized, hex, parse, mix, SHAPES, SHAPE_NAMES, tip, stamp, lineCells, rectCells, ellipseCells,
     GRADIENT_TYPES, GRADIENT_STYLES, GRADIENT_AREAS, gradient, stopColour, blurAt, shadeAt, glowAt, blurAll, glowAll, addLight, over,
-    replaceColour, flipped, fill };
+    replaceColour, flipped, fill, shifted, lifted, cleared, placed, turned, mirrored, compose, FONT, TINY, text, textWidth, dimmed };
+  window.PixelTools = api;
 })();

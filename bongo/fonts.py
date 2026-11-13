@@ -99,6 +99,20 @@ def names(directory: Path = FONT_DIR) -> list[str]:
     return sorted(p.stem for p in Path(directory).glob("*.bdf"))
 
 
+def table(font: BdfFont) -> dict:
+    """A font as plain data for the Animator's text tool: the printable ASCII and Latin-1 characters it
+    has, each as [advance, x offset, rows above the baseline, width, [a row's pixels as bits]]."""
+    glyphs = {}
+    for code in [*range(32, 127), *range(160, 256)]:
+        if code not in font.glyphs:
+            continue
+        dwidth, x_off, top, mask = font.glyphs[code]
+        rows = [] if mask is None else [int("".join("1" if mask.getpixel((x, y)) else "0" for x in range(mask.width)), 2)
+                                        for y in range(mask.height)]
+        glyphs[chr(code)] = [dwidth, x_off, top, mask.width if mask else 0, rows]
+    return {"cap": font.cap, "descent": font.descent, "glyphs": glyphs}
+
+
 def middle(font: BdfFont, height: int, lines: int = 1, gap: int = 1) -> int:
     """Baseline of the first line so ``lines`` lines of ``font`` sit centred in ``height``."""
     pitch = font.cap + font.descent + gap

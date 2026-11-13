@@ -52,7 +52,8 @@ main { display:grid; grid-template-columns:64px minmax(0,1fr) 250px; gap:12px; p
 @media (pointer: coarse) { .fine-pointer { display:none; } .opts select { min-height:36px; } .opts input[type=checkbox] { width:22px; height:22px; } #swap { width:36px !important; height:36px !important; } }
 @media (max-width: 560px), (pointer: coarse) { .keys { display:none; } }
 #board-wrap { background:var(--well); border:1px solid var(--line); padding:10px; overflow:auto; }
-#board { display:block; width:100%; height:auto; image-rendering:pixelated; cursor:crosshair; touch-action:none; }
+#board { display:block; width:100%; height:auto; image-rendering:pixelated; cursor:crosshair; touch-action:none; margin:0 auto; }
+#board-wrap { max-height:82vh; }
 .side { display:flex; flex-direction:column; gap:12px; }
 .label { font-size:11px; letter-spacing:.1em; text-transform:uppercase; color:var(--muted); margin:0 0 8px; }
 .swatches { display:grid; grid-template-columns:repeat(8,1fr); gap:3px; }
@@ -60,15 +61,15 @@ main { display:grid; grid-template-columns:64px minmax(0,1fr) 250px; gap:12px; p
 .swatches button.sel { outline:2px solid var(--amber); outline-offset:1px; }
 .current { display:flex; gap:8px; align-items:center; margin-bottom:8px; }
 .current input[type=color] { width:44px; height:32px; border:1px solid var(--line-2); background:none; padding:0; }
-.led { position:relative; aspect-ratio:2/1; background:#000; }
+.led { position:relative; aspect-ratio:2/1; background:#000; margin:0 auto; --w:64; --h:32; }
 .led canvas { width:100%; height:100%; display:block; image-rendering:pixelated; }
-.led::after { content:""; position:absolute; inset:0; pointer-events:none; background:radial-gradient(circle at center, transparent 52%, rgba(0,0,0,.88) 64%); background-size:calc(100%/64) calc(100%/32); }
+.led::after { content:""; position:absolute; inset:0; pointer-events:none; background:radial-gradient(circle at center, transparent 52%, rgba(0,0,0,.88) 64%); background-size:calc(100%/var(--w)) calc(100%/var(--h)); }
 .row { display:flex; gap:6px; align-items:center; flex-wrap:wrap; }
 .timeline { grid-column:1 / -1; }
 .frames { display:flex; gap:8px; overflow-x:auto; padding:4px 2px 8px; }
 .frame { flex:0 0 auto; width:116px; background:var(--card-2); border:1px solid var(--line-2); padding:5px; cursor:pointer; }
 .frame.sel { border-color:var(--amber); box-shadow:0 0 0 1px var(--amber); }
-.frame canvas { width:100%; display:block; image-rendering:pixelated; background:#000; }
+.frame canvas { width:100%; display:block; image-rendering:pixelated; background:#000; margin:0 auto; }
 .frame .meta { display:flex; justify-content:space-between; align-items:center; margin-top:4px; font:11px var(--mono); color:var(--muted); }
 .frame input { width:52px; padding:2px 4px; font-size:11px; }
 .add { flex:0 0 auto; width:70px; border:1px dashed var(--line-2); display:flex; align-items:center; justify-content:center; color:var(--muted); cursor:pointer; background:none; font-size:22px; }
@@ -94,6 +95,33 @@ main { display:grid; grid-template-columns:64px minmax(0,1fr) 250px; gap:12px; p
   .pick span { display:none; }
   .gallery header .muted { display:none; }
 }
+.menu { position:relative; }
+.menu > summary { list-style:none; }
+.menu > summary::-webkit-details-marker { display:none; }
+.menu-list { position:absolute; right:0; top:calc(100% + 4px); z-index:5; background:var(--card); border:1px solid var(--line-2); display:flex; flex-direction:column; min-width:230px; padding:4px; gap:2px; }
+.menu-list .btn { border-color:transparent; background:none; justify-content:flex-start; font-weight:500; }
+.menu-list .btn:hover { background:var(--raise); }
+.layer .name { min-width:5em; }
+.layer-opts label span { color:var(--text); font-family:var(--mono); }
+@media (pointer: coarse) { .opts .btn, .opts .input.text, .opts select, #zoom, .layer-opts select, .sheet .btn, .sheet input, .sheet select, .menu-list .btn, header .btn, .timeline .btn { min-height:36px; } .layer-opts input[type=checkbox] { width:22px; height:22px; } .layer-opts input[type=range] { height:30px; } .frame input { min-height:30px; } }
+.layer .tag { font:11px var(--mono); color:var(--muted); flex:0 1 auto; min-width:0; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+.layer-opts { display:grid; grid-template-columns:auto 1fr; gap:6px 8px; align-items:center; margin:8px 0; font-size:12px; color:var(--muted); }
+.layer-opts input[type=range] { width:100%; accent-color:var(--amber); }
+.layer-opts select { padding:3px 6px; font:12px var(--ui); }
+.layer-opts .wide { grid-column:1 / -1; display:flex; gap:6px; align-items:center; }
+.opts .input.text { width:150px; padding:4px 6px; font:12px var(--ui); }
+.opts .btn { padding:4px 8px; font-size:12px; }
+.sheet { width:min(460px, calc(100vw - 24px)); padding:0; background:var(--card); color:var(--text); border:1px solid var(--line-2); }
+.sheet::backdrop { background:rgba(0,0,0,.7); }
+.sheet .body { padding:12px 16px 16px; display:grid; grid-template-columns:auto 1fr; gap:10px 12px; align-items:center; }
+.sheet .body .wide { grid-column:1 / -1; }
+.sheet .body [hidden] { display:none; }
+.sheet .body input[type=number] { width:90px; }
+.sheet .body select { padding:6px 8px; font:13px var(--ui); }
+.projects { display:flex; flex-direction:column; gap:6px; }
+.project { display:flex; gap:8px; align-items:center; }
+.project .pick { flex:1; flex-direction:row; align-items:center; gap:10px; padding:8px 10px; }
+.project .pick b { margin:0; }
 kbd { font:11px var(--mono); border:1px solid var(--line-2); padding:0 4px; color:var(--muted); }
 @media (max-width: 900px) {
   main { grid-template-columns:minmax(0,1fr); }
@@ -105,18 +133,27 @@ kbd { font:11px var(--mono); border:1px solid var(--line-2); padding:0 4px; colo
 <body>
 <header>
   <h1><span class="crumb">Media /</span> Animator</h1>
-  <input class="input" id="name" value="bouncing_ball" aria-label="Animation name" style="width:180px">
+  <input class="input" id="name" value="bouncing_ball" aria-label="Animation name" style="width:160px">
+  <label class="muted tiny">Size <select class="input" id="csize" title="The canvas: the whole panel, or a small one for a sprite or an icon" style="font-family:var(--ui);padding:6px"></select></label>
   <span class="muted tiny" id="size">64 × 32 · 8 frames</span>
   <span class="grow"></span>
   <button class="btn" id="presets" aria-haspopup="dialog" title="Start from a ready-made animation">✦ Presets…</button>
-  <button class="btn" id="import" title="Turn a GIF or picture into frames to touch up">Import GIF…</button>
+  <button class="btn" id="open" aria-haspopup="dialog" title="Open something you saved, or one of the built-in drawings">Open…</button>
+  <details class="menu" id="more"><summary class="btn">More ▾</summary><div class="menu-list">
+    <button class="btn" id="import" title="Turn a GIF or picture into frames to touch up">Import GIF or picture…</button>
+    <button class="btn" id="openfile" title="Open a project file from this computer">Open a drawing file…</button>
+    <button class="btn" id="savefile" title="This drawing, with its layers, as a file to keep or move to another Matrix">Download this drawing as a file</button>
+    <button class="btn" id="savepng" title="Every frame in one PNG, see-through where nothing is drawn">Download all frames as one picture (PNG)</button>
+  </div></details>
   <input type="file" id="importfile" accept="image/gif,image/png,image/webp" hidden>
-  <button class="btn" id="undo" title="Undo (Ctrl+Z)">↶ Undo</button>
-  <button class="btn" id="redo" title="Redo (Ctrl+Y)">↷ Redo</button>
+  <input type="file" id="projectfile" accept=".json,application/json" hidden>
+  <button class="btn icon" id="undo" title="Undo (Ctrl+Z)" aria-label="Undo">↶</button>
+  <button class="btn icon" id="redo" title="Redo (Ctrl+Y)" aria-label="Redo">↷</button>
   <button class="btn" id="show">▶ Show on Matrix</button>
-  <button class="btn primary" id="save">Save to library</button>
+  <button class="btn" id="keep" title="Keep this drawing on the Matrix, layers and all, to open again (Ctrl+S)">Save</button>
+  <button class="btn primary" id="save" title="Save it, and add it to your media library as a GIF">Save to library</button>
 </header>
-<div class="note">Draw it here; <b>Show on Matrix</b> plays it on the panel for 15 seconds, <b>Save to library</b> adds it as a GIF to your media, ready for the playlist or as a Splash, boot or Sleep screen.</div>
+<div class="note">Draw it here; <b>Show on Matrix</b> plays it on the panel for 15 seconds. <b>Save</b> keeps the drawing with its layers, to open again; <b>Save to library</b> also adds it as a GIF to your media, ready for the playlist or as a Splash, boot or Sleep screen.<span id="demo-note" hidden> <b>This is the demo:</b> nothing is sent to a Matrix.</span></div>
 <main>
   <div class="card tools" role="toolbar" aria-label="Tools">
     <button class="btn icon on" data-tool="pen" title="Pencil (P)">✎</button>
@@ -130,7 +167,10 @@ kbd { font:11px var(--mono); border:1px solid var(--line-2); padding:0 4px; colo
     <button class="btn icon" data-tool="shade" title="Lighten or darken what's under the brush (S)">☼</button>
     <button class="btn icon" data-tool="glow" title="Glow: a soft halo of the main colour (H)">✺</button>
     <button class="btn icon" data-tool="pick" title="Pick colour (I)">⌖</button>
+    <button class="btn icon" data-tool="text" title="Text, in the Matrix's own fonts (T)">T</button>
+    <button class="btn icon" data-tool="select" title="Select an area to move, copy, flip or turn (A)">⬚</button>
     <button class="btn icon" data-tool="shift" title="Shift the whole drawing (V)">✥</button>
+    <button class="btn icon" data-tool="pan" title="Move around a zoomed-in canvas: drag it, and nothing is drawn (N)">✋</button>
     <hr>
     <button class="btn icon" id="mirror" title="Mirror drawing left/right (M)">⇋</button>
     <button class="btn icon on" id="onion" title="Onion skin: see the previous frame faintly (O)">◐</button>
@@ -141,8 +181,9 @@ kbd { font:11px var(--mono); border:1px solid var(--line-2); padding:0 4px; colo
   <div class="stage">
     <div class="stage-top">
       <span id="pos">x –, y –</span><span>·</span><span id="toolname">Pencil</span>
+      <label>Zoom <select class="input" id="zoom" title="Zoom (+ and -)" style="padding:2px 4px;font:12px var(--ui)"><option value="1">Fit</option><option value="2">2×</option><option value="3">3×</option><option value="4">4×</option><option value="6">6×</option><option value="8">8×</option></select></label>
       <span class="grow"></span>
-      <span class="keys"><kbd>P</kbd> pencil <kbd>E</kbd> eraser <kbd>F</kbd> fill <kbd>D</kbd> gradient <kbd>B</kbd> blur <kbd>S</kbd> shade <kbd>H</kbd> glow <kbd>X</kbd> swap colours <kbd>[</kbd><kbd>]</kbd> size <kbd>←</kbd><kbd>→</kbd> frames <kbd>Space</kbd> play</span>
+      <span class="keys"><kbd>P</kbd> pencil <kbd>E</kbd> eraser <kbd>F</kbd> fill <kbd>D</kbd> gradient <kbd>B</kbd> blur <kbd>S</kbd> shade <kbd>H</kbd> glow <kbd>T</kbd> text <kbd>A</kbd> select <kbd>X</kbd> swap colours <kbd>[</kbd><kbd>]</kbd> size <kbd>+</kbd><kbd>-</kbd> zoom <kbd>N</kbd> move around <kbd>←</kbd><kbd>→</kbd> frames <kbd>Space</kbd> play</span>
     </div>
     <div class="opts" id="opts">
       <label data-for="pen erase line rect ellipse blur shade glow">Size <select class="input" id="brush" title="Brush size ([ and ])"><option>1</option><option>2</option><option>3</option><option>4</option><option>5</option><option>6</option><option>8</option></select></label>
@@ -156,6 +197,18 @@ kbd { font:11px var(--mono); border:1px solid var(--line-2); padding:0 4px; colo
       <label data-for="blur">Strength <select class="input" id="blurk"><option value="0.35">Light</option><option value="0.65" selected>Medium</option><option value="1">Strong</option></select></label>
       <label data-for="glow">Strength <select class="input" id="glowk"><option value="0.4">Soft</option><option value="0.65" selected>Medium</option><option value="0.9">Bright</option></select></label>
       <label data-for="shade">Effect <select class="input" id="shadek"><option value="0.15">Lighten a little</option><option value="0.35">Lighten a lot</option><option value="-0.15" selected>Darken a little</option><option value="-0.35">Darken a lot</option></select></label>
+      <label data-for="text">Text <input class="input text" id="ttext" value="HELLO" maxlength="60" aria-label="The text to write"></label>
+      <label data-for="text">Font <select class="input" id="tfont" title="The Matrix's fonts"></select></label>
+      <span data-for="text" class="tiny muted">Click where its top-left corner goes</span>
+      <button class="btn" data-for="select" id="selall" title="Select everything (Ctrl+A)">All</button>
+      <button class="btn" data-for="select" id="selcopy" title="Copy the area (Ctrl+C)">Copy</button>
+      <button class="btn" data-for="select" id="selcut" title="Cut the area out (Ctrl+X)">Cut</button>
+      <button class="btn" data-for="select" id="selpaste" title="Paste, then drag it into place (Ctrl+V)">Paste</button>
+      <button class="btn" data-for="select" id="selfliph" title="Flip the area left to right" aria-label="Flip the area left to right">Flip ↔</button>
+      <button class="btn" data-for="select" id="selflipv" title="Flip the area upside down" aria-label="Flip the area upside down">Flip ↕</button>
+      <button class="btn" data-for="select" id="selturn" title="Turn the area a quarter turn">↻ Turn</button>
+      <button class="btn" data-for="select" id="seldel" title="Rub out what's in the area (Delete)">Delete</button>
+      <span data-for="select" class="tiny muted" id="selhint">Drag to select an area; drag inside it to move it</span>
       <span data-for="gradient" class="tiny muted" id="ghint">Drag from the main colour to the second one</span>
     </div>
     <div id="board-wrap"><canvas id="board" width="1280" height="640" aria-label="Drawing canvas, 64 by 32 pixels"></canvas></div>
@@ -183,6 +236,11 @@ kbd { font:11px var(--mono); border:1px solid var(--line-2); padding:0 4px; colo
         <button class="btn" id="lrename" title="Rename this layer (F2)">Rename</button>
         <button class="btn" id="ldel" title="Delete this layer from every frame" style="color:var(--danger)">Delete</button>
       </div>
+      <div class="layer-opts">
+        <label for="lopacity">Opacity <span id="lopacity-v">100%</span></label><input type="range" id="lopacity" min="0" max="100" step="5" value="100" title="How solid this layer is: 100 is solid">
+        <label for="lmode">Mixes as</label><select class="input" id="lmode" title="Normal covers what's under it; Adds light brightens it (glows, beams, sparkles)"></select>
+        <label class="wide" title="One drawing shown on every frame, like a background: draw it once"><input type="checkbox" id="lshared"> Same on every frame</label>
+      </div>
       <p class="tiny muted" style="margin:6px 0 0">Tools draw on the selected layer. Every frame has the same layers; what you can see is what's saved.</p>
     </section>
     <section class="card">
@@ -194,6 +252,7 @@ kbd { font:11px var(--mono); border:1px solid var(--line-2); padding:0 4px; colo
       </div>
       <div class="row" style="margin-top:8px">
         <label class="tiny muted">Plays <select class="input" id="loop" style="font-family:var(--ui)"><option value="loop">On a loop</option><option value="pingpong">There and back</option><option value="once">Once</option></select></label>
+        <label class="tiny muted" title="How it looks dimmed, brought back up so you can see it: soft dark shading turns into bands at low brightness">Dimmed <select class="input" id="dim" style="font-family:var(--ui)"></select></label>
         <label class="tiny muted">Background <input type="color" id="bg" value="#000000" title="Shown wherever nothing is drawn" style="width:36px;height:26px;padding:0;border:1px solid var(--line-2);background:none"></label>
       </div>
     </section>
@@ -204,13 +263,14 @@ kbd { font:11px var(--mono); border:1px solid var(--line-2); padding:0 4px; colo
       <p class="label" style="margin:0">Frames</p><span class="grow"></span>
       <label class="tiny muted">Every frame <input class="input" id="allms" type="number" min="20" max="5000" step="10" value="90" style="width:64px"> ms</label>
       <button class="btn" id="setall" title="Give every frame this timing">Set</button>
+      <button class="btn" id="spread" aria-haspopup="dialog" title="Fill the next frames with this layer moving, fading or cycling its colours">Spread…</button>
       <button class="btn" id="copy" title="Copy this frame (Ctrl+C)">Copy</button>
       <button class="btn" id="paste" title="Paste it after this frame (Ctrl+V)">Paste</button>
       <button class="btn" id="dup">Duplicate</button>
       <button class="btn" id="left">◀ Move</button>
       <button class="btn" id="right">Move ▶</button>
-      <button class="btn" id="fliph" title="Flip this frame left to right">⇋ Flip</button>
-      <button class="btn" id="flipv" title="Flip this frame upside down">⇵ Flip</button>
+      <button class="btn" id="fliph" title="Flip this frame left to right" aria-label="Flip this frame left to right">Flip ↔</button>
+      <button class="btn" id="flipv" title="Flip this frame upside down" aria-label="Flip this frame upside down">Flip ↕</button>
       <button class="btn" id="clear">Clear frame</button>
       <button class="btn" id="del" style="color:var(--danger)">Delete</button>
     </div>
@@ -222,507 +282,29 @@ kbd { font:11px var(--mono); border:1px solid var(--line-2); padding:0 4px; colo
   <header><h1 id="gallery-title" style="font-size:16px">Start from a preset</h1><span class="muted tiny">Every one is yours to change: it replaces your frames (Undo brings them back).</span><span class="grow"></span><button class="btn" id="gallery-close" aria-label="Close">✕</button></header>
   <div class="body" id="gallery-body"></div>
 </dialog>
+<dialog class="gallery" id="opendlg" aria-labelledby="open-title">
+  <header><h1 id="open-title" style="font-size:16px">Open a drawing</h1><span class="muted tiny">It replaces what's here (Undo brings that back).</span><span class="grow"></span><button class="btn" id="open-close" aria-label="Close">✕</button></header>
+  <div class="body" id="open-body"></div>
+</dialog>
+<dialog class="sheet" id="spreaddlg" aria-labelledby="spread-title">
+  <header><h1 id="spread-title" style="font-size:16px">Spread across frames</h1><span class="grow"></span><button class="btn" id="spread-close" aria-label="Close">✕</button></header>
+  <div class="body">
+    <p class="wide tiny muted" id="sphint" style="margin:0"></p>
+    <label for="spmode">Do what</label><select class="input" id="spmode"><option value="move">Move it</option><option value="fade">Fade it</option><option value="cycle">Cycle its colours</option></select>
+    <label for="spn">Over</label><span><input class="input" id="spn" type="number" min="2" max="120" value="8"> frames, starting with this one</span>
+    <label for="spdx" data-sp="move">Moves</label><span data-sp="move"><input class="input" id="spdx" type="number" min="-128" max="128" value="16" aria-label="Pixels to the right"> pixels right and <input class="input" id="spdy" type="number" min="-128" max="128" value="0" aria-label="Pixels down"> down by the last frame</span>
+    <label for="spfrom" data-sp="fade">Brightness</label><span data-sp="fade">from <input class="input" id="spfrom" type="number" min="0" max="200" step="5" value="100" aria-label="Brightness at the start, percent"> to <input class="input" id="spto" type="number" min="0" max="200" step="5" value="0" aria-label="Brightness at the end, percent"> %</span>
+    <label for="spease" data-sp="move fade">Pace</label><select class="input" id="spease" data-sp="move fade"></select>
+    <label for="sporder" data-sp="cycle">Order</label><select class="input" id="sporder" data-sp="cycle"></select>
+    <label class="wide" data-sp="cycle"><input type="checkbox" id="spback"> Run it the other way</label>
+    <span class="wide row" style="justify-content:flex-end"><button class="btn primary" id="spgo">Fill the frames</button></span>
+  </div>
+</dialog>
 <script src="js/animator-tools.js"></script>
+<script src="js/animator-motion.js"></script>
+<script src="js/animator-project.js"></script>
 <script src="js/animator-presets.js"></script>
 <script src="js/animator-sleep.js"></script>
-
-<script>
-const W = 64, H = 32, S = 20;
-const PALETTE = ['#000000','#ffffff','#9aa1ac','#3b4048','#ff3b30','#ff8a3d','#ffb547','#ffe066',
-                 '#4ade80','#1fbf8f','#2ec4ff','#3b6bff','#8a5cff','#ff5ccf','#8b5a2b','#f2c9a0'];
-const SAFE = { top: 1, right: 1, bottom: 1, left: 1 };
-const $ = (id) => document.getElementById(id);
-const board = $('board'), bx = board.getContext('2d');
-const preview = $('preview'), px = preview.getContext('2d');
-let frames = [], cur = 0, tool = 'pen', colour = '#ffb547', mirror = false, onion = true, grid = true, showSafe = true;
-let undo = [], redo = [], brush = 1, clip = null, dirty = false, bg = '#000000';
-const MAX = 300;   // the server's limit too (bongo/animator.py)
-function roomFor(n) { if (frames.length + n <= MAX) return true; toast(`An animation can have up to ${MAX} frames`); return false; }
-
-// -- frames and presets (js/animator-presets.js) -------------------------------------------
-// layers: the same list for every frame (name, shown); each frame keeps its own pixels per layer in
-// `cels`, bottom first, and `px` is all its shown layers flattened (what's drawn, previewed and saved)
-let layers = [{ id: 1, name: 'Drawing', on: true }], al = 0;
-let layerSeq = 1;   // only ever goes up: an id still in the undo history or a copied frame is never reused
-const nextId = () => (layerSeq = Math.max(layerSeq, ...layers.map((l) => l.id || 0)) + 1);
-function belowLayer() {   // the shown layers under the selected one, flattened: what a brush on it sits over
-  const out = empty(), f = frames[cur];
-  for (let k = 0; k < al; k++) if (layers[k].on) f.cels[k].forEach((c, i) => { if (c) out[i] = c; });
-  return out;
-}
-const empty = () => new Array(W * H).fill(null);
-function blank() { return { px: empty(), ms: 90, cels: layers.map(empty) }; }
-function flat(f) {
-  const out = empty();
-  f.cels.forEach((cel, k) => { if (layers[k].on) cel.forEach((c, i) => { if (c) out[i] = c; }); });
-  f.px = out;
-}
-function flatAll() { frames.forEach(flat); }
-function oneLayer(list) {   // frames from a preset or an imported GIF: one layer each
-  layers = [{ id: 1, name: 'Drawing', on: true }]; al = 0;
-  list.forEach((f) => { f.cels = [f.px.slice()]; });
-  return list;
-}
-// the selected layer of the current frame, shaped like a frame so every tool can draw on it
-const target = { get px() { return frames[cur].cels[al]; }, set px(v) { frames[cur].cels[al] = v; } };
-const PRESETS = window.ANIMATOR_PRESETS || [];
-const preset = (id) => PRESETS.find((p) => p.id === id);
-function copyFrames(list) { return list.map((f) => ({ px: f.px.slice(), ms: f.ms, ...(f.cels ? { cels: f.cels.map((c) => c.slice()) } : {}) })); }
-function starter() { return oneLayer(preset('ball') ? copyFrames(preset('ball').make()) : [{ px: empty(), ms: 90 }]); }
-
-// -- drawing ----------------------------------------------------------------------------
-// undo keeps each step as text: just the layers' pixels (the picture is rebuilt from them), an empty one as 0
-const state = () => JSON.stringify({ frames: frames.map((f) => ({ ms: f.ms, cels: f.cels.map((c) => (c.some(Boolean) ? c : 0)) })), cur, layers, al });
-const UNDO_CHARS = 120e6;   // ~240 MB of history at most, however big the animation (or 80 steps)
-function snapshot() {
-  undo.push(state()); redo = []; dirty = true;
-  let total = undo.reduce((n, u) => n + u.length, 0);
-  while (undo.length > 1 && (undo.length > 80 || total > UNDO_CHARS)) total -= undo.shift().length;
-}
-function restore(s) {
-  const o = JSON.parse(s);
-  frames = o.frames.map((f) => ({ ms: f.ms, px: empty(), cels: f.cels.map((c) => (c === 0 ? empty() : c)) }));
-  cur = Math.min(o.cur, frames.length - 1); layers = o.layers; al = Math.min(o.al, layers.length - 1); renderAll();
-}
-const T = window.PixelTools;
-let seed = 1;
-// paint with the brush at (x, y); the mirror paints the same cells reflected
-function setPx(f, x, y, c, size = brush) {
-  T.stamp(x, y, size, shape, (i, a, b) => {
-    f.px[i] = c;
-    const m = shape === 'dither' ? W - a : W - 1 - a;   // dither mirrors a column over, so it keeps its checkerboard
-    if (mirror && m < W) f.px[b * W + m] = c;
-  }, seed++);
-}
-function shifted(px, dx, dy) {   // the whole drawing moved; what goes off the edge is dropped
-  const out = new Array(W * H).fill(null);
-  px.forEach((c, i) => { const x = i % W + dx, y = Math.floor(i / W) + dy; if (c && x >= 0 && y >= 0 && x < W && y < H) out[y * W + x] = c; });
-  return out;
-}
-const lineCells = T.lineCells;
-function fill(f, x, y, c) { T.fill(f.px, x, y, c); }
-// a line, rectangle or oval from a to b: filled shapes are filled flat, outlines drawn with the brush
-function drawShape(f, a, b, c) {
-  if (tool === 'line') return T.lineCells(a[0], a[1], b[0], b[1]).forEach(([x, y]) => setPx(f, x, y, c));
-  const cells = (tool === 'rect' ? T.rectCells : T.ellipseCells)(a, b, filled);
-  if (filled) cells.forEach(([x, y]) => setPx(f, x, y, c, 1));
-  (filled ? (tool === 'rect' ? T.rectCells : T.ellipseCells)(a, b, false) : cells).forEach(([x, y]) => setPx(f, x, y, c));
-}
-function drawGradient(f, a, b) {
-  const stops = $('grainbow').checked ? ['#ff3b30', '#ff8a3d', '#ffe066', '#4ade80', '#2ec4ff', '#3b6bff', '#8a5cff'] : [colour, colour2];
-  const opts = { type: $('gtype').value, style: $('gstyle').value, steps: Number($('gsteps').value), area: $('garea').value, from: a };
-  T.gradient(f.px, a, b, stops, { ...opts, mirror });
-}
-function brushAt(f, x, y) {   // blur and shade, at the pixel and (with the mirror on) its reflection
-  if (tool === 'glow') {   // the halo is round and soft whatever brush shape is picked
-    const at = (u) => T.glowAt(f.px, u, y, brush, colour, Number($('glowk').value), bg, stroke, under);
-    at(x); if (mirror && W - 1 - x !== x) at(W - 1 - x);
-    return;
-  }
-  const at = (u) => tool === 'blur' ? T.blurAt(f.px, u, y, brush, shape, Number($('blurk').value), bg, stroke, seed++, under)
-                                    : T.shadeAt(f.px, u, y, brush, shape, Number($('shadek').value), seed++, stroke);
-  at(x); if (mirror && W - 1 - x !== x) at(W - 1 - x);
-}
-
-function drawFrame(ctx, f, scale, ghost) {
-  ctx.fillStyle = bg; ctx.fillRect(0, 0, W * scale, H * scale);
-  if (ghost) {
-    ctx.globalAlpha = 0.22;
-    ghost.px.forEach((c, i) => { if (c) { ctx.fillStyle = c; ctx.fillRect((i % W) * scale, Math.floor(i / W) * scale, scale, scale); } });
-    ctx.globalAlpha = 1;
-  }
-  f.px.forEach((c, i) => { if (c) { ctx.fillStyle = c; ctx.fillRect((i % W) * scale, Math.floor(i / W) * scale, scale, scale); } });
-}
-
-let hover = null, dragStart = null, dragEnd = null;
-function renderBoard() {
-  flat(frames[cur]);   // the selected layer may just have changed
-  const f = frames[cur];
-  drawFrame(bx, f, S, onion && cur > 0 ? frames[cur - 1] : (onion && frames.length > 1 ? frames[frames.length - 1] : null));
-  if (grid) {
-    bx.strokeStyle = 'rgba(255,255,255,0.07)'; bx.lineWidth = 1; bx.beginPath();
-    for (let x = 1; x < W; x++) { bx.moveTo(x * S + .5, 0); bx.lineTo(x * S + .5, H * S); }
-    for (let y = 1; y < H; y++) { bx.moveTo(0, y * S + .5); bx.lineTo(W * S, y * S + .5); }
-    bx.stroke();
-    bx.strokeStyle = 'rgba(255,255,255,0.16)'; bx.beginPath();
-    for (let x = 8; x < W; x += 8) { bx.moveTo(x * S + .5, 0); bx.lineTo(x * S + .5, H * S); }
-    for (let y = 8; y < H; y += 8) { bx.moveTo(0, y * S + .5); bx.lineTo(W * S, y * S + .5); }
-    bx.stroke();
-  }
-  if (mirror) { bx.strokeStyle = 'rgba(159,194,255,0.6)'; bx.setLineDash([8, 6]); bx.beginPath(); bx.moveTo(W * S / 2, 0); bx.lineTo(W * S / 2, H * S); bx.stroke(); bx.setLineDash([]); }
-  if (showSafe) {
-    bx.strokeStyle = 'rgba(255,181,71,0.75)'; bx.setLineDash([10, 6]); bx.lineWidth = 2;
-    bx.strokeRect(SAFE.left * S + 1, SAFE.top * S + 1, (W - SAFE.left - SAFE.right) * S - 2, (H - SAFE.top - SAFE.bottom) * S - 2);
-    bx.setLineDash([]); bx.lineWidth = 1;
-  }
-  if (hover) { bx.strokeStyle = '#fff'; bx.strokeRect(hover[0] * S + .5, hover[1] * S + .5, S - 1, S - 1); }
-}
-function cell(e) {
-  const r = board.getBoundingClientRect();
-  return [Math.floor((e.clientX - r.left) / r.width * W), Math.floor((e.clientY - r.top) / r.height * H)];
-}
-let drawing = false, last = null, moving = null;
-const DRAG = new Set(['line', 'rect', 'ellipse', 'gradient']);
-const BRUSHED = new Set(['blur', 'shade', 'glow']);
-let dragBase = null, dragErase = false, stroke = null, under = null;   // under: what the selected layer sits over   // stroke: pixels blurred or shaded so far, once each per stroke
-// while dragging a shape or gradient, the frame is redrawn from how it was each move, so you see the real result
-function dragTo(x, y) {
-  const f = target; dragEnd = [x, y]; f.px = dragBase.slice();
-  if (tool === 'gradient' && x === dragStart[0] && y === dragStart[1]) return;   // a gradient needs a drag: a click alone does nothing
-  if (tool === 'gradient') drawGradient(f, dragStart, dragEnd); else drawShape(f, dragStart, dragEnd, dragErase ? null : colour);
-}
-board.addEventListener('pointerdown', (e) => {
-  try { board.setPointerCapture(e.pointerId); } catch { /* the pointer's already gone */ }
-  const [x, y] = cell(e), f = target;
-  if (tool === 'pick') { const c = frames[cur].px[y * W + x]; if (c) (e.button === 2 ? setColour2 : setColour)(c); setTool('pen'); return; }
-  if (!layers[al].on) { toast(`"${layers[al].name}" is hidden: show it to draw on it`); return; }
-  snapshot();
-  if (tool === 'fill') { fill(f, x, y, e.button === 2 ? null : colour); renderAll(); return; }
-  if (DRAG.has(tool)) { dragStart = [x, y]; dragBase = f.px.slice(); dragErase = e.button === 2; dragTo(x, y); renderBoard(); return; }
-  if (tool === 'shift') { moving = { from: [x, y], px: f.px.slice() }; return; }
-  drawing = true; last = [x, y]; stroke = tool === 'glow' ? { base: new Map(), k: new Map() } : new Set(); under = belowLayer();
-  if (BRUSHED.has(tool)) brushAt(f, x, y); else setPx(f, x, y, tool === 'erase' || e.button === 2 ? null : colour);
-  renderBoard();
-});
-board.addEventListener('pointermove', (e) => {
-  const [x, y] = cell(e); hover = [x, y]; $('pos').textContent = `x ${x}, y ${y}`;
-  if (dragStart) dragTo(x, y);
-  else if (moving) { target.px = shifted(moving.px, x - moving.from[0], y - moving.from[1]); }
-  else if (drawing) {
-    const cells = lineCells(last[0], last[1], x, y).slice(1);
-    if (BRUSHED.has(tool)) cells.forEach(([a, b]) => brushAt(target, a, b));
-    else cells.forEach(([a, b]) => setPx(target, a, b, tool === 'erase' || e.buttons === 2 ? null : colour));
-    last = [x, y];
-  }
-  renderBoard();
-});
-function strokeEnd() {   // a finished stroke, or one the browser cancelled (an edge swipe, an alert)
-  if (dragBase && target.px.every((c, i) => c === dragBase[i])) undo.pop();   // nothing changed: no undo step
-  dragStart = dragEnd = dragBase = stroke = under = null;
-  drawing = false; moving = null; renderAll();
-}
-board.addEventListener('pointerup', strokeEnd);
-board.addEventListener('pointercancel', strokeEnd);
-board.addEventListener('pointerleave', () => { hover = null; $('pos').textContent = 'x –, y –'; renderBoard(); });
-board.addEventListener('contextmenu', (e) => e.preventDefault());
-
-// -- colour -----------------------------------------------------------------------------
-function setColour(c) { colour = c; $('colour').value = c; $('hex').textContent = c.toUpperCase(); paintSwatches(); }
-function setColour2(c) { colour2 = c; $('colour2').value = c; }
-$('colour2').addEventListener('input', (e) => setColour2(e.target.value));
-$('swap').onclick = () => { const a = colour; setColour(colour2); setColour2(a); };
-$('colour').addEventListener('input', (e) => setColour(e.target.value));
-function swatch(c, holder) {
-  const b = document.createElement('button'); b.style.background = c; b.title = c; b.setAttribute('aria-label', `Colour ${c}`);
-  if (c.toLowerCase() === colour.toLowerCase()) b.className = 'sel';
-  b.onclick = () => { setColour(c); if (tool === 'erase' || tool === 'pick') setTool('pen'); };
-  b.oncontextmenu = (e) => { e.preventDefault(); setColour2(c); };   // right-click: the second colour
-  holder.append(b);
-}
-function paintSwatches() {
-  $('swatches').replaceChildren(); PALETTE.forEach((c) => swatch(c, $('swatches')));
-  const used = [...new Set(frames.flatMap((f) => f.px).filter(Boolean))].slice(0, 16);
-  $('used').replaceChildren(); used.forEach((c) => swatch(c, $('used')));
-}
-
-// -- tools ------------------------------------------------------------------------------
-const NAMES = { pen: 'Pencil', erase: 'Eraser', fill: 'Fill', line: 'Line', rect: 'Rectangle', ellipse: 'Circle and oval',
-  gradient: 'Gradient', blur: 'Blur', shade: 'Lighten and darken', glow: 'Glow', pick: 'Pick colour', shift: 'Shift drawing' };
-function setTool(t) {
-  if (dragStart || drawing || moving) return;   // not mid-stroke: the shape you're drawing stays the shape you started
-  tool = t; document.querySelectorAll('[data-tool]').forEach((b) => b.classList.toggle('on', b.dataset.tool === t)); $('toolname').textContent = `${NAMES[t]} · ${layers[al].name}`;
-  $('opts').querySelectorAll('[data-for]').forEach((el) => { el.hidden = !el.dataset.for.split(' ').includes(t); });
-  $('gsteps-l').hidden = t !== 'gradient' || $('gstyle').value === 'smooth';
-  $('ghint').textContent = $('gtype').value === 'conic' ? 'Drag to point where the colours meet' : 'Drag from the main colour to the second one';
-}
-const options = (id, names) => $(id).replaceChildren(...Object.entries(names).map(([v, n]) => new Option(n, v)));
-options('shape', T.SHAPE_NAMES); options('gtype', T.GRADIENT_TYPES); options('gstyle', T.GRADIENT_STYLES); options('garea', T.GRADIENT_AREAS);
-let shape = 'square', filled = false, colour2 = '#3b6bff';
-$('shape').onchange = () => { shape = $('shape').value; };
-$('filled').onchange = () => { filled = $('filled').checked; };
-$('gstyle').onchange = $('gtype').onchange = () => setTool(tool);
-document.querySelectorAll('[data-tool]').forEach((b) => b.onclick = () => setTool(b.dataset.tool));
-function toggle(id, get, set) { $(id).onclick = () => { set(!get()); $(id).classList.toggle('on', get()); renderBoard(); }; }
-toggle('mirror', () => mirror, (v) => mirror = v);
-toggle('onion', () => onion, (v) => onion = v);
-toggle('grid', () => grid, (v) => grid = v);
-toggle('safe', () => showSafe, (v) => showSafe = v);
-
-// -- frames -----------------------------------------------------------------------------
-function renderFrames() {
-  const box = $('frames'); box.replaceChildren();
-  frames.forEach((f, i) => {
-    const el = document.createElement('div'); el.className = 'frame' + (i === cur ? ' sel' : '');
-    const c = document.createElement('canvas'); c.width = W * 2; c.height = H * 2; drawFrame(c.getContext('2d'), f, 2);
-    const meta = document.createElement('div'); meta.className = 'meta';
-    const n = document.createElement('span'); n.textContent = String(i + 1).padStart(2, '0');
-    const ms = document.createElement('input'); ms.className = 'input'; ms.type = 'number'; ms.min = 20; ms.max = 5000; ms.step = 10; ms.value = f.ms; ms.title = 'How long this frame shows (ms)';
-    ms.onclick = (e) => e.stopPropagation(); ms.onchange = () => { f.ms = Math.max(20, Math.min(5000, Number(ms.value) || 90)); };
-    const unit = document.createElement('span'); unit.textContent = 'ms';
-    const r = document.createElement('span'); r.append(ms, ' ', unit);
-    meta.append(n, r); el.append(c, meta);
-    el.onclick = () => { cur = i; renderAll(); };
-    box.append(el);
-  });
-  const add = document.createElement('button'); add.className = 'add'; add.textContent = '+'; add.title = 'New blank frame';
-  add.onclick = () => { if (!roomFor(1)) return; snapshot(); frames.splice(cur + 1, 0, blank()); cur++; renderAll(); };
-  box.append(add);
-  // keep the selected frame visible by scrolling the strip sideways only, never the page
-  const sel = box.children[cur];
-  if (sel) {
-    const l = sel.offsetLeft - box.offsetLeft, r = l + sel.offsetWidth;
-    if (l < box.scrollLeft) box.scrollLeft = l;
-    else if (r > box.scrollLeft + box.clientWidth) box.scrollLeft = r - box.clientWidth;
-  }
-  $('size').textContent = `64 × 32 · ${frames.length} frame${frames.length === 1 ? '' : 's'}`;
-}
-$('dup').onclick = () => { if (!roomFor(1)) return; snapshot(); frames.splice(cur + 1, 0, JSON.parse(JSON.stringify(frames[cur]))); cur++; renderAll(); };
-$('del').onclick = () => { if (frames.length < 2) return toast('An animation needs at least one frame'); snapshot(); frames.splice(cur, 1); cur = Math.max(0, cur - 1); renderAll(); };
-$('copy').onclick = () => { clip = { ...JSON.parse(JSON.stringify(frames[cur])), ids: layers.map((l) => l.id) }; toast(`Frame ${cur + 1} copied`); };
-$('paste').onclick = () => {
-  if (!clip) return toast('Copy a frame first'); if (!roomFor(1)) return; snapshot();
-  const f = JSON.parse(JSON.stringify(clip)), ids = f.ids; delete f.ids;
-  if (ids.every((id) => layers.some((l) => l.id === id))) f.cels = layers.map((l) => (ids.includes(l.id) ? f.cels[ids.indexOf(l.id)] : empty()));   // each layer back on its own layer, wherever it is now
-  else f.cels = layers.map((_, k) => (k === al ? f.px.slice() : empty()));   // a layer it came from is gone: paste it flat onto this layer
-  frames.splice(cur + 1, 0, f); cur++; renderAll();
-};
-$('setall').onclick = () => { const ms = Math.max(20, Math.min(5000, Number($('allms').value) || 90)); snapshot(); frames.forEach((f) => { f.ms = ms; }); renderFrames(); toast(`Every frame now shows for ${ms} ms`); };
-$('clear').onclick = () => { snapshot(); frames[cur].cels.forEach((c) => c.fill(null)); renderAll(); };   // every layer of this frame
-$('fliph').onclick = () => { snapshot(); frames[cur].cels = frames[cur].cels.map((c) => T.flipped(c, true)); renderAll(); };
-$('flipv').onclick = () => { snapshot(); frames[cur].cels = frames[cur].cels.map((c) => T.flipped(c, false)); renderAll(); };
-
-// -- layers -----------------------------------------------------------------------------
-function rename() {
-  const l = layers[al], n = (window.prompt('Layer name', l.name) || '').trim().slice(0, 24);
-  if (n && n !== l.name) { snapshot(); l.name = n; }
-  renderLayers(true);
-}
-function renderLayers(focus = false) {
-  const box = $('layers'); box.replaceChildren();
-  layers.map((l, k) => [l, k]).reverse().forEach(([l, k]) => {   // top layer first, as it stacks
-    const row = document.createElement('div');
-    row.className = 'layer' + (k === al ? ' sel' : '') + (l.on ? '' : ' hidden');
-    row.setAttribute('aria-current', String(k === al)); row.setAttribute('aria-label', `${l.name}${l.on ? '' : ', hidden'}${k === al ? ', selected' : ''}`); row.tabIndex = 0;
-    const eye = document.createElement('button'); eye.className = 'eye'; eye.type = 'button';
-    eye.innerHTML = l.on ? EYE_OPEN : EYE_SHUT; eye.title = l.on ? 'Hide this layer' : 'Show this layer';
-    eye.setAttribute('aria-label', `${l.on ? 'Hide' : 'Show'} ${l.name}`);
-    eye.onclick = (e) => { e.stopPropagation(); snapshot(); l.on = !l.on; renderAll(); $('layers').querySelectorAll('.eye')[layers.length - 1 - k]?.focus(); };
-    const c = document.createElement('canvas'); c.width = W; c.height = H;
-    drawFrame(c.getContext('2d'), { px: frames[cur].cels[k] }, 1);
-    const name = document.createElement('span'); name.className = 'name'; name.textContent = l.name; name.title = 'Double-click to rename';
-    row.append(eye, c, name);
-    row.onclick = () => { al = k; renderLayers(); };
-    row.onkeydown = (e) => {
-      if (e.target !== row) return;   // keys on the eye button are its own
-      if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); e.stopPropagation(); al = k; renderLayers(true); }
-      else if (e.key === 'F2') { e.preventDefault(); al = k; rename(); }
-      else if (e.key === 'ArrowUp' || e.key === 'ArrowDown') { e.preventDefault(); e.stopPropagation(); al = Math.max(0, Math.min(layers.length - 1, k + (e.key === 'ArrowUp' ? 1 : -1))); renderLayers(true); }
-    };
-    row.ondblclick = () => { al = k; rename(); };
-    box.append(row);
-  });
-  if (focus) box.querySelector('.layer.sel')?.focus();
-  $('ldel').disabled = layers.length < 2; $('lmerge').disabled = al === 0 || !layers[al - 1].on;
-  $('lmerge').title = al > 0 && !layers[al - 1].on ? `Show "${layers[al - 1].name}" to merge into it` : 'Merge this layer into the one below';
-  $('laddu').disabled = layers.length >= MAX_LAYERS;
-  $('toolname').textContent = `${NAMES[tool]} · ${layers[al].name}`;   // which layer you're drawing on, by the board
-  $('lup').disabled = al === layers.length - 1; $('ldown').disabled = al === 0;
-}
-const MAX_LAYERS = 8;
-const EYE_OPEN = '<svg viewBox="0 0 24 24" width="16" height="16" aria-hidden="true"><path d="M2 12s3.6-6 10-6 10 6 10 6-3.6 6-10 6S2 12 2 12z" fill="none" stroke="currentColor" stroke-width="2"/><circle cx="12" cy="12" r="3" fill="currentColor"/></svg>';
-const EYE_SHUT = '<svg viewBox="0 0 24 24" width="16" height="16" aria-hidden="true"><path d="M2 12s3.6-6 10-6 10 6 10 6-3.6 6-10 6S2 12 2 12z" fill="none" stroke="currentColor" stroke-width="2" opacity=".5"/><path d="M4 20 20 4" stroke="currentColor" stroke-width="2"/></svg>';
-$('laddu').onclick = () => {
-  if (layers.length >= MAX_LAYERS) return toast(`Up to ${MAX_LAYERS} layers`);
-  snapshot();
-  let n = layers.length + 1; while (layers.some((l) => l.name === `Layer ${n}`)) n++;
-  layers.splice(al + 1, 0, { id: nextId(), name: `Layer ${n}`, on: true });
-  frames.forEach((f) => f.cels.splice(al + 1, 0, empty())); al++; renderAll();
-};
-function moveLayer(d) {
-  const j = al + d; if (j < 0 || j >= layers.length) return; snapshot();
-  [layers[al], layers[j]] = [layers[j], layers[al]];
-  frames.forEach((f) => { [f.cels[al], f.cels[j]] = [f.cels[j], f.cels[al]]; }); al = j; renderAll();
-}
-$('lrename').onclick = rename;
-$('lup').onclick = () => moveLayer(1); $('ldown').onclick = () => moveLayer(-1);
-$('lmerge').onclick = () => {   // this layer laid over the one below, in every frame (a hidden layer adds nothing)
-  if (al === 0) return;
-  if (!layers[al - 1].on) return toast(`Show "${layers[al - 1].name}" first to merge into it`);
-  if (!layers[al].on) toast(`"${layers[al].name}" was hidden, so nothing of it was added (Undo brings it back)`);
-  snapshot();
-  frames.forEach((f) => { const below = f.cels[al - 1]; if (layers[al].on) f.cels[al].forEach((c, i) => { if (c) below[i] = c; }); f.cels.splice(al, 1); });
-  layers.splice(al, 1); al--; renderAll();
-};
-$('ldel').onclick = () => {
-  if (layers.length < 2) return; snapshot();
-  const name = layers[al].name;
-  frames.forEach((f) => f.cels.splice(al, 1)); layers.splice(al, 1); al = Math.max(0, al - 1); renderAll();
-  toast(`Deleted "${name}" from every frame: Undo brings it back`);
-};
-function move(d) { const j = cur + d; if (j < 0 || j >= frames.length) return; snapshot(); [frames[cur], frames[j]] = [frames[j], frames[cur]]; cur = j; renderAll(); }
-$('left').onclick = () => move(-1); $('right').onclick = () => move(1);
-$('undo').onclick = () => { if (undo.length) { redo.push(state()); restore(undo.pop()); } };
-$('redo').onclick = () => { if (redo.length) { undo.push(state()); restore(redo.pop()); } };
-
-// -- preview playback -------------------------------------------------------------------
-let playing = true, pi = 0, dir = 1, timer = null;
-function tick() {
-  if (!frames.length) return;
-  const mode = $('loop').value, n = frames.length;
-  let wait = 0;
-  if (mode === 'pingpong' && n > 2) { if (pi + dir < 0 || pi + dir >= n) dir = -dir; pi += dir; }
-  else if (mode === 'once' && pi + 1 >= n) { pi = 0; wait = 1200; }   // the preview pauses, then shows it again
-  else pi = (pi + 1) % n;
-  pi = Math.min(pi, n - 1); drawFrame(px, frames[pi], 1);
-  const speed = Math.max(10, Math.min(400, Number($('speed').value) || 100)) / 100;
-  timer = setTimeout(tick, frames[pi].ms / speed + wait);
-}
-$('play').onclick = () => { playing = !playing; $('play').textContent = playing ? '❚❚ Pause' : '▶ Play'; clearTimeout(timer); if (playing) tick(); else drawFrame(px, frames[cur], 1); };
-
-// -- talking to the Matrix ----------------------------------------------------------------
-// ?demo (the demo dashboard, no Matrix behind it): everything works except the three things that need one
-const DEMO = new URLSearchParams(location.search).has('demo');
-function toast(t) { const el = $('toast'); el.textContent = t; el.style.display = 'block'; clearTimeout(toast.t); toast.t = setTimeout(() => el.style.display = 'none', 2600); }
-async function send(extra) {
-  if (DEMO) return { name: `uploaded/${(extra.name || 'animation').replace(/[^A-Za-z0-9_-]+/g, '_')}.gif`, demo: true };
-  const res = await fetch('/api/animator', { method: 'POST', credentials: 'same-origin',
-    headers: { 'Content-Type': 'application/json', Accept: 'application/json' },
-    body: JSON.stringify({ frames: frames.map((f) => ({ px: f.px, ms: f.ms })), loop: $('loop').value, background: bg, ...extra }) });
-  let data = {};
-  try { data = await res.json(); } catch { /* no body */ }
-  if (!res.ok) throw new Error(data.error || (res.status === 401 ? 'This browser is not paired with the Matrix' : `${res.status} error`));
-  return data;
-}
-$('show').onclick = async () => {
-  $('show').disabled = true;
-  try { await send({ show: true }); toast(DEMO ? 'This is the demo: on your Matrix it plays there for 15 seconds' : 'Playing on the Matrix for 15 seconds'); }
-  catch (e) { toast(e.message); } finally { $('show').disabled = false; }
-};
-$('save').onclick = async () => {
-  $('save').disabled = true;
-  try { const { name } = await send({ name: $('name').value || 'animation' }); dirty = false; toast(DEMO ? `This is the demo: on your Matrix it saves ${name.replace('uploaded/', '')} to your media library` : `Saved ${name.replace('uploaded/', '')} to your media library`); }
-  catch (e) { toast(e.message); } finally { $('save').disabled = false; }
-};
-
-// -- keys -------------------------------------------------------------------------------
-document.addEventListener('keydown', (e) => {
-  if ($('gallery').open) return;   // the presets gallery has the keyboard while it's open
-  if (dragStart || drawing || moving) return;   // mid-stroke: nothing changes the frame under the pointer
-  if (e.target.tagName === 'BUTTON' && (e.key === ' ' || e.key === 'Enter')) return;   // a focused button's own key
-  if (e.altKey || ((e.ctrlKey || e.metaKey) && !'zycv'.includes(e.key.toLowerCase()))) return;   // the browser's own shortcuts stay its own
-  if (e.target.tagName === 'INPUT' || e.target.tagName === 'SELECT') return;
-  if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'z') { e.preventDefault(); (e.shiftKey ? $('redo') : $('undo')).click(); return; }
-  if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'y') { e.preventDefault(); $('redo').click(); return; }
-  if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'c') { e.preventDefault(); $('copy').click(); return; }
-  if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'v') { e.preventDefault(); $('paste').click(); return; }
-  const k = e.key.toLowerCase();
-  const map = { p: 'pen', e: 'erase', f: 'fill', l: 'line', r: 'rect', c: 'ellipse', d: 'gradient', b: 'blur', s: 'shade', h: 'glow', i: 'pick', v: 'shift' };
-  if (map[k]) setTool(map[k]);
-  else if (k === '[' || k === ']') { const sizes = [...$('brush').options].map((o) => Number(o.value)), at = sizes.indexOf(brush);
-    brush = sizes[Math.max(0, Math.min(sizes.length - 1, at + (k === ']' ? 1 : -1)))]; $('brush').value = String(brush); }
-  else if (k === 'x') $('swap').click();
-  else if (k === 'm') $('mirror').click(); else if (k === 'o') $('onion').click(); else if (k === 'g') $('grid').click();
-  else if (e.key === 'ArrowLeft') { cur = (cur - 1 + frames.length) % frames.length; renderAll(); }
-  else if (e.key === 'ArrowRight') { cur = (cur + 1) % frames.length; renderAll(); }
-  else if (e.key === ' ') { e.preventDefault(); $('play').click(); }
-});
-
-function renderAll() { flatAll(); renderBoard(); renderFrames(); renderLayers(); paintSwatches(); }
-
-$('brush').onchange = () => { brush = Number($('brush').value) || 1; };
-$('bg').addEventListener('input', () => { bg = $('bg').value; dirty = true; renderAll(); });
-// the presets gallery: each one plays as a little live thumbnail; picking one replaces the frames
-let galleryTimer = 0, galleryWatch = null;
-const thumbCache = new Map(), builtFrames = new Map();
-function presetFrames(id) { if (!builtFrames.has(id)) builtFrames.set(id, preset(id).make()); return builtFrames.get(id); }
-function toImage(f) {   // a frame as pixels for putImageData: much quicker than drawing 2048 squares
-  const img = new ImageData(W, H), [br, bgr, bb] = [1, 3, 5].map((k) => parseInt(bg.slice(k, k + 2), 16));
-  f.px.forEach((c, i) => { const o = i * 4;
-    if (c) { img.data[o] = parseInt(c.slice(1, 3), 16); img.data[o + 1] = parseInt(c.slice(3, 5), 16); img.data[o + 2] = parseInt(c.slice(5, 7), 16); }
-    else { img.data[o] = br; img.data[o + 1] = bgr; img.data[o + 2] = bb; }
-    img.data[o + 3] = 255; });
-  return img;
-}
-function openGallery() {
-  const body = $('gallery-body');
-  if (!body.childElementCount) {
-    const groups = [...new Set(PRESETS.map((p) => p.group))];
-    groups.forEach((g) => {
-      const h = document.createElement('h3'); h.textContent = g; body.append(h);
-      const grid = document.createElement('div'); grid.className = 'picks'; body.append(grid);
-      PRESETS.filter((p) => p.group === g).forEach((p) => {
-        const b = document.createElement('button'); b.type = 'button'; b.className = 'pick'; b.dataset.id = p.id;
-        const c = document.createElement('canvas'); c.width = W; c.height = H;
-        const name = document.createElement('b'); name.textContent = p.name;
-        const about = document.createElement('span'); about.textContent = p.about;
-        b.append(c, name, about);
-        b.onclick = () => choose(p);
-        grid.append(b);
-      });
-    });
-  }
-  // thumbnails: each preset is built once (and kept), at most one per animation frame so opening stays
-  // quick, and only the cards on screen are built and played
-  const thumbs = [...body.querySelectorAll('.pick')].map((b) => ({ ctx: b.querySelector('canvas').getContext('2d'), card: b, id: b.dataset.id, k: -1, at: 0, seen: false }));
-  galleryWatch?.disconnect();
-  galleryWatch = 'IntersectionObserver' in window ? new IntersectionObserver((es) => es.forEach((e) => { const t = thumbs.find((x) => x.card === e.target); if (t) t.seen = e.isIntersecting; }), { root: $('gallery') }) : null;   // the dialog is what scrolls
-  thumbs.forEach((t) => { if (galleryWatch) galleryWatch.observe(t.card); else t.seen = true; });
-  // each tick builds a few more thumbnail frames (about 6 ms' worth, cards on screen only); a card plays once it's whole
-  const step = (now) => {
-    const until = performance.now() + 6;
-    for (const t of thumbs) {                 // first, a still for every card on screen, so none sits black
-      if (!t.seen || performance.now() > until) continue;
-      let th = thumbCache.get(t.id);
-      if (!th) { th = { make: preset(t.id).peek(), shots: [] }; thumbCache.set(t.id, th); }
-      if (!th.shots.length) { const f = th.make.frameAt(0); th.shots.push({ img: toImage(f), ms: f.ms }); }
-      if (t.k < 0) t.ctx.putImageData(th.shots[0].img, 0, 0);
-    }
-    for (const t of thumbs) {
-      if (!t.seen) continue;
-      let th = thumbCache.get(t.id);
-      if (!th) { th = { make: preset(t.id).peek(), shots: [] }; thumbCache.set(t.id, th); }
-      while (th.shots.length < th.make.length && performance.now() < until) {
-        const f = th.make.frameAt(th.shots.length); th.shots.push({ img: toImage(f), ms: f.ms });
-        if (th.shots.length === 1) t.ctx.putImageData(th.shots[0].img, 0, 0);
-      }
-      if (th.shots.length < th.make.length) continue;
-      if (t.k >= 0 && now - t.at < th.shots[t.k].ms) continue;
-      t.at = now; t.k = (t.k + 1) % th.shots.length; t.ctx.putImageData(th.shots[t.k].img, 0, 0);
-    }
-    galleryTimer = requestAnimationFrame(step);
-  };
-  galleryTimer = requestAnimationFrame(step);
-  const dlg = $('gallery'); if (dlg.showModal) dlg.showModal(); else dlg.setAttribute('open', '');
-}
-function choose(p) {
-  closeGallery();
-  snapshot(); frames = oneLayer(copyFrames(presetFrames(p.id))); cur = 0; pi = 0;
-  if (p.id !== 'blank') $('name').value = p.id;
-  renderAll(); toast(`Started from ${p.name}: Undo brings your frames back`);
-}
-function closeGallery() { cancelAnimationFrame(galleryTimer); const dlg = $('gallery'); if (dlg.open) dlg.close(); }
-$('presets').onclick = openGallery;
-$('gallery-close').onclick = closeGallery;
-$('gallery').addEventListener('close', () => { cancelAnimationFrame(galleryTimer); galleryWatch?.disconnect(); });
-$('gallery').addEventListener('click', (e) => { if (e.target === $('gallery')) closeGallery(); });   // a click on the backdrop
-$('import').onclick = () => $('importfile').click();
-$('importfile').onchange = async () => {
-  const file = $('importfile').files[0]; $('importfile').value = '';
-  if (!file) return;
-  if (DEMO) { toast('This is the demo: on your Matrix, Import turns a GIF or image into frames'); return; }
-  const form = new FormData(); form.append('file', file);
-  try {
-    const res = await fetch('/api/animator/import', { method: 'POST', credentials: 'same-origin', headers: { 'X-Bongo-Upload': '1', Accept: 'application/json' }, body: form });
-    let data = {}; try { data = await res.json(); } catch { /* no body */ }
-    if (!res.ok) throw new Error(data.error || (res.status === 401 ? 'This browser is not paired with the Matrix' : `${res.status} error`));
-    snapshot(); frames = oneLayer(data.frames); cur = 0; pi = 0;
-    $('name').value = file.name.replace(/\.[^.]+$/, '').replace(/[^A-Za-z0-9_-]+/g, '_').slice(0, 40) || 'animation';
-    renderAll(); toast(`Imported ${frames.length} frame${frames.length === 1 ? '' : 's'}: Undo brings your old ones back`);
-  } catch (e) { toast(e.message); }
-};
-window.addEventListener('beforeunload', (e) => { if (dirty) { e.preventDefault(); e.returnValue = ''; } });   // unsaved work
-
-setTool('pen'); frames = starter(); renderAll(); tick();
-</script>
+<script src="js/animator.js"></script>
 </body>
 </html>

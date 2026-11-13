@@ -59,20 +59,7 @@
     return out;
   };
 
-  // a 3 x 5 pixel font (capitals, digits and a little punctuation)
-  const FONT = {};
-  const glyphs = {
-    A: '.X.|X.X|XXX|X.X|X.X', B: 'XX.|X.X|XX.|X.X|XX.', C: '.XX|X..|X..|X..|.XX', D: 'XX.|X.X|X.X|X.X|XX.', E: 'XXX|X..|XX.|X..|XXX',
-    F: 'XXX|X..|XX.|X..|X..', G: '.XX|X..|X.X|X.X|.XX', H: 'X.X|X.X|XXX|X.X|X.X', I: 'XXX|.X.|.X.|.X.|XXX', J: '..X|..X|..X|X.X|.X.',
-    K: 'X.X|X.X|XX.|X.X|X.X', L: 'X..|X..|X..|X..|XXX', M: 'X...X|XX.XX|X.X.X|X...X|X...X', N: 'X..X|XX.X|X.XX|X..X|X..X',
-    O: '.XX.|X..X|X..X|X..X|.XX.', P: 'XX.|X.X|XX.|X..|X..', Q: '.X.|X.X|X.X|X.X|.XX', R: 'XX.|X.X|XX.|X.X|X.X', S: '.XX|X..|.X.|..X|XX.',
-    T: 'XXX|.X.|.X.|.X.|.X.', U: 'X.X|X.X|X.X|X.X|XXX', V: 'X.X|X.X|X.X|X.X|.X.', W: 'X...X|X...X|X.X.X|XX.XX|X...X', X: 'X.X|X.X|.X.|X.X|X.X',
-    Y: 'X.X|X.X|.X.|.X.|.X.', Z: 'XXX|..X|.X.|X..|XXX', 0: 'XXX|X.X|X.X|X.X|XXX', 1: '.X.|XX.|.X.|.X.|XXX', 2: 'XX.|..X|.X.|X..|XXX',
-    3: 'XX.|..X|.X.|..X|XX.', 4: 'X.X|X.X|XXX|..X|..X', 5: 'XXX|X..|XX.|..X|XX.', 6: '.XX|X..|XXX|X.X|XXX', 7: 'XXX|..X|.X.|.X.|.X.',
-    8: 'XXX|X.X|XXX|X.X|XXX', 9: 'XXX|X.X|XXX|..X|XX.', ' ': '..|..|..|..|..', '!': 'X|X|X|.|X', '.': '.|.|.|.|X', "'": 'X|X|.|.|.',
-    '-': '...|...|XXX|...|...', ':': '.|X|.|X|.', '?': 'XX.|..X|.X.|...|.X.', '%': 'XX..X|XX.X.|..X..|.X.XX|X..XX', '♥': 'X.X|XXX|XXX|.X.|...',
-  };
-  Object.entries(glyphs).forEach(([k, v]) => { FONT[k] = v.split('|'); });
+  const FONT = T.FONT;   // the 3 x 5 Tiny font (capitals, digits and a little punctuation): js/animator-tools.js
 
   // -- from v2, remastered ----------------------------------------------------------------
   function blank() { return [new Frame()]; }
