@@ -407,7 +407,8 @@ function screenPicker(rule, idPrefix, screen) {
         const thumb = gone ? h('span', { class: 'media-thumb empty' }) : mediaThumb(f.name, opts())[0];
         return h('div', { class: 'screen-source' },
           h('label', { class: 'screen-pick', for: box.id }, box, thumb,
-            h('span', { class: 'mono small name grow min0', title: f.file }, f.file)),
+            h('span', { class: 'mono small name grow min0', title: f.file }, f.file),
+            f.kind === 'video' ? h('span', { class: 'tag' }, 'Video') : null),
           gone ? null : previewButton(f.name, opts));
       };
       // built-in and uploaded files under their own headings, so it's clear which is which
@@ -456,7 +457,7 @@ function bootPicker(rule) {
       const lib = await get('/api/media');
       const { builtIn, uploaded, shipped } = screenFiles(lib, 'splash');
       rule.boot = shipped(rule.boot);
-      const option = (f) => h('option', { value: f.name, selected: f.name === rule.boot || null }, f.file);
+      const option = (f) => h('option', { value: f.name, selected: f.name === rule.boot || null }, `${f.file}${f.kind === 'video' ? ' (video)' : ''}`);
       const group = (label, list) => (list.length ? h('optgroup', { label }, list.map(option)) : null);
       const missing = rule.boot && ![...builtIn, ...uploaded].some((f) => f.name === rule.boot) ? [{ name: rule.boot, file: `${rule.boot} (missing)` }] : [];
       sel.append(...[group('Missing', missing), group('Built in', builtIn), group('Your media', uploaded)].filter(Boolean));
