@@ -84,7 +84,7 @@
       const p = (i % 11) / 11, land = i % 11 === 0, x = Math.round(10 + 44 * tri(i / n));
       const cy = Math.round(land ? 24.6 : 23.5 - 17 * (1 - (2 * p - 1) ** 2)) + (land ? 0.5 : 0), rx = land ? 5.2 : 4.4, ry = land ? 3.4 : 4.4;
       const sw = 2 + (cy - 6) / 4.5;                                  // the shadow: wider the nearer the ball
-      f.oval(x - sw, 28, x + sw, 29, '#070b1c');
+      f.oval(x - sw, 28, x + sw, 29, dim('#2b3f8f', 0.5));
       f.disc(x, cy, rx, '#ff7a2f', ry);
       f.grad([x - 2, Math.round(cy) - 2], [x + 4, Math.round(cy) + 4], ['#ffe39a', '#ff7a2f', '#a8360e'], { type: 'radial', area: 'region', from: [x, Math.round(cy)] });
       f.set(x - 2, cy - 2, '#fff6d8');
@@ -133,7 +133,7 @@
   }
 
   function fireworks() {   // rockets climb with a trail and burst into glowing sparks that fall and fade; bursts carry over the loop
-    const shells = [[14, 8, 0, 0.02], [44, 6, 10, 0.6], [30, 11, 20, 0.35], [52, 12, 30, 0.85], [10, 10, 38, 0.15]];
+    const shells = [[14, 8, 0, 0.02], [44, 6, 10, 0.6], [30, 11, 20, 0.35], [46, 12, 30, 0.85], [17, 10, 38, 0.15]];
     return frames(48, 70, (f, i, n) => {
       f.sky(['#000000', '#0a0e24'], 0, 31);
       const sparks = [];
@@ -143,7 +143,7 @@
         const age = t - 6; if (age > 13) return;
         const fade = Math.pow(1 - age / 13, 0.6);
         for (let a = 0; a < 24; a++) {
-          const ang = a / 24 * TAU, d = 2 + age * 1.1, at = (dd, ag) => [x + Math.cos(ang) * dd, top + Math.sin(ang) * dd * 0.8 + ag * ag * 0.05];
+          const ang = a / 24 * TAU, d = 2 + age * 1.1 * (0.2 + 0.8 * rng(a * 7 + start + 1)()), at = (dd, ag) => [x + Math.cos(ang) * dd, top + Math.sin(ang) * dd * 0.8 + ag * ag * 0.05];
           if (fade < 0.12) continue;                                    // spent: gone, never darker than the sky
           sparks.push([...at(d, age), hsv(hue + (a % 2) * 0.06, 0.75, fade)]);
           if (age > 0 && fade > 0.3) sparks.push([...at(d - 1.1, age - 1), hsv(hue, 0.6, fade * 0.4)]);
@@ -218,33 +218,33 @@
   }
 
   function aquarium() {   // fish swimming through sunbeams past swaying weed, bubbles rising
-    const fishes = [[0, 8, '#ff8a3d', 1], [40, 15, '#ffe066', -1], [20, 22, '#4ad0ff', 1]];
-    return frames(38, 90, (f, i, n) => {
+    const fishes = [[0, 8, '#ff8a3d', 1, 2], [40, 15, '#ffe066', -1, 1], [20, 22, '#4ad0ff', 1, 3]];   // x, y, colour, way, crossings per loop
+    return frames(120, 90, (f, i, n) => {
       f.sky(['#2a8ac8', '#1a6aa8', '#06223f']);
       f.light((g) => [8, 26, 44].forEach((x0, k) => { const x = x0 + 3 * wave(i, n, 1, k); g.stroke(x, 0, x - 10, 28, dim('#3a8ab8', 0.5), 3); }), 2, 0.6);
       for (let x = 0; x < W; x++) for (let y = 29; y < H; y++) f.set(x, y, (x * 7 + y) % 5 ? '#c9a86a' : '#a8875a');
       f.oval(10, 27, 18, 30, '#6a6a7a'); f.shade(12, 28, 2, 0.3);
       [[6, 0], [52, 2], [58, 1]].forEach(([x, ph]) => { for (let y = 12; y < 29; y++) f.set(x + Math.sin(y / 3 + TAU * i / n + ph) * 1.4, y, y % 3 ? '#2f9a4a' : '#45c060'); });
-      fishes.forEach(([x0, y, c, dir]) => {
-        const p = (x0 / 76 + i / n) % 1, x = Math.round(dir > 0 ? -6 + 76 * p : W + 6 - 76 * p), tail = i % 2;
+      fishes.forEach(([x0, y, c, dir, laps]) => {
+        const p = (x0 / 76 + laps * i / n) % 1, x = Math.round(dir > 0 ? -6 + 76 * p : W + 6 - 76 * p), tail = Math.floor(i / 3) % 2;
         f.oval(x - 3, y - 2, x + 3, y + 2, c); f.shade(x, y + 2, 3, -0.3); f.shade(x, y - 1, 2, 0.25);
         f.set(x + 2 * dir, y - 1, '#101820');
         f.set(x - 4 * dir, y - 1 + tail, c); f.set(x - 4 * dir, y + 1 - tail, c); f.set(x - 3 * dir, y, c);
       });
-      for (let k = 0; k < 6; k++) { const p = ((i / n) * 2 + k / 6) % 1; f.set(46 + (k % 3) * 2 + Math.sin(p * 8), 28 - p * 28, '#bfe9ff'); }
+      for (let k = 0; k < 6; k++) { const p = ((i / n) * 5 + k / 6) % 1; f.set(46 + (k % 3) * 2 + Math.sin(p * 8), 28 - p * 28, '#bfe9ff'); }
     });
   }
 
   function rocketLaunch() {   // 3, 2, 1, ignition: lift-off on a glowing plume, the smoke billowing out
-    return frames(36, (i) => (i < 3 ? 400 : 70), (f, i) => {
+    return frames(30, (i) => (i < 3 ? 800 : 70), (f, i) => {
       const lift = Math.max(0, i - 5), y = Math.round(15 - lift * lift * 0.12);
       f.sky(['#03050c', mix('#18264a', '#03050c', Math.min(1, lift / 25))]);
       [[5, 4], [58, 7], [20, 2], [44, 10], [12, 14], [52, 18]].forEach(([x, s]) => f.set(x, (s + lift * 0.8) % H, '#c8d2ff'));
       if (i >= 3) {   // each puff billows out and up from the pad, then the smoke clears before the loop
-        const smoke = new Frame(), age = i - 3, clear = Math.min(1, (35 - i) / 8);
+        const smoke = new Frame(), age = i - 3, clear = Math.min(1, (29 - i) / 6);
         for (let k = 0; k < 14; k++) { const r = rng(k + 1), side = r() < 0.5 ? -1 : 1, v = 0.4 + r(), lift = r();
-          const sx = 32 + side * Math.min(30, age * v * 1.4), sy = 28.5 - lift * 2 - age * 0.12 * lift, rad = Math.min(4, 1.2 + age * 0.15);
-          if (clear > 0) smoke.disc(sx, sy, rad, mix('#03050c', mix('#9aa1ac', '#5a606a', r()), clear)); }
+          const reach = 8 + 12 * r(), sx = 32 + side * Math.min(reach, age * v * 1.4), sy = 28.5 - lift * 2 - age * 0.35 * (0.5 + lift), rad = Math.min(6, 1.2 + age * 0.2);
+          if (clear > 0) smoke.disc(sx, sy, rad, mix('#03050c', mix('#9aa1ac', '#5a606a', r()), clear * Math.max(0.3, 1 - age / 40))); }
         smoke.blur(1, true); T.over(f.px, smoke.px);
       }
       if (y > -16) {
@@ -289,7 +289,7 @@
         if (k > 0) g.set(x, y, dim(hsv(0.38 + 0.12 * Math.sin(x / 13 + TAU * i / n), 0.7, 1), k));
       } }, 1);
       [3, 17, 30, 41, 55, 60].forEach((x, k) => f.set(x, (k * 3 + 2) % 7, (k + i) % 8 < 2 ? '#ffffff' : '#9aa6c8'));
-      for (let x = 0; x < W; x++) { const top = 26 - Math.abs(((x * 3) % 8) - 4) - Math.round(Math.sin(x / 8) * 1.5); for (let y = top; y < H; y++) f.px[y * W + x] = null; }
+      for (let x = 0; x < W; x++) { const top = 21 + 2 * Math.abs((x % 7) - 3) + ((x / 7 | 0) * 5 % 3); for (let y = top; y < H; y++) f.px[y * W + x] = null; }   // a ridge of pines, 7 wide
     });
   }
 
@@ -312,10 +312,11 @@
   function lighthouse() {   // a lighthouse sweeping a soft beam over a night sea
     return frames(24, 90, (f, i, n) => {
       f.sky(['#060a1a', '#16244a'], 0, 21);
-      for (let y = 22; y < H; y++) for (let x = 0; x < W; x++) f.set(x, y, (x + y * 3 + i) % 8 === 0 ? '#3a5a8a' : mix('#12244a', '#081428', (y - 22) / 9));
+      for (let y = 22; y < H; y++) for (let x = 0; x < W; x++) f.set(x, y, (x + y * 3 + i + Math.round(2 * Math.sin(x / 5))) % 8 === 0 ? '#3a5a8a' : mix('#12244a', '#081428', (y - 22) / 9));
       const ang = TAU * i / n, bx = Math.cos(ang);
-      if (Math.abs(bx) >= 0.25 && Math.sin(ang) > -0.2) f.light((g) => {
-        for (let d = 3; d < 52; d++) for (let s = -d * 0.15; s <= d * 0.15; s++) g.set(14.5 + Math.sign(bx) * d * Math.min(1, Math.abs(bx) * 1.3), 7 + s, dim('#fff2b0', 0.5 * (1 - d / 52)));
+      const glow = 0.15 + 0.85 * (Math.sin(ang) + 1) / 2;   // brightest towards you, faint as it swings away
+      if (Math.abs(bx) >= 0.25) f.light((g) => {
+        for (let d = 3; d < 52; d++) for (let s = -d * 0.15; s <= d * 0.15; s++) g.set(14.5 + Math.sign(bx) * d * Math.min(1, Math.abs(bx) * 1.3), 7 + s, dim('#fff2b0', 0.5 * glow * (1 - d / 52)));
       }, 1);
       f.layer((g) => { g.rect(12, 9, 5, 15, '#e8e8e8'); g.grad([12, 0], [17, 0], ['#ffffff', '#8a8a96'], { area: 'drawn' }); });
       f.rect(12, 12, 5, 2, '#d23a2a'); f.rect(12, 17, 5, 2, '#d23a2a'); f.rect(16, 12, 1, 2, '#8a1a12'); f.rect(16, 17, 1, 2, '#8a1a12');
@@ -326,11 +327,11 @@
   }
 
   function rainyWindow() {   // rain running down the glass, the city's lights a soft blur behind
-    const r = rng(29), lights = Array.from({ length: 22 }, () => [r() * W, 8 + r() * 22, hsv(r() * 0.15 + (r() < 0.3 ? 0.55 : 0.05), 0.6, 0.7), 1.2 + r() * 1.6]);
+    const r = rng(29), lights = Array.from({ length: 22 }, () => [r() * W, 8 + r() * 22, hsv(r() < 0.3 ? 0.55 + r() * 0.1 : r() * 0.11, 0.8, 0.85), 1.2 + r() * 1.6, r() * TAU]);
     const drops = Array.from({ length: 16 }, () => [Math.floor(r() * W), Math.floor(r() * 36), 1 + Math.floor(r() * 2)]);
     return frames(36, 90, (f, i) => {
       f.sky(['#0a0e1c', '#1a1e30']);
-      f.light((g) => lights.forEach(([x, y, c, s]) => g.disc(x, y, s, dim(c, 0.7))), 2);
+      f.light((g) => lights.forEach(([x, y, c, s, ph]) => g.disc(x, y, s, dim(c, 0.75 + 0.25 * wave(i, 36, 1, ph)))), 2);
       drops.forEach(([x, y0, v]) => { const y = (y0 + i * v) % 36;
         f.set(x, y, '#c8d8f0'); f.set(x, y - 1, '#7a8aa8'); f.set(x, y - 2, '#3a4560'); f.shade(x, y + 1, 1, 0.2); });
       for (let x = 0; x < W; x++) f.set(x, 0, '#2a2e3a');
@@ -360,7 +361,7 @@
       for (let y = 0; y < H; y++) for (let x = 0; x < W; x++) {
         const d = Math.hypot((x - 32) / 2, y - 16) + 0.01, a = Math.atan2(y - 16, (x - 32) / 2);
         const ring = Math.floor(40 / d + i / 4) % 2, seg = Math.floor((a / Math.PI + 1) * 6 + 40 / d * 0.3) % 2;
-        f.set(x, y, dim(ring ^ seg ? '#3a9aff' : '#a23aff', Math.min(1, d / 14)));
+        f.set(x, y, dim(ring ^ seg ? '#3a9aff' : '#a23aff', Math.max(0, Math.min(1, (d - 6) / 10))));
       }
       f.light((g) => g.oval(26, 13, 38, 19, '#2a1a5a'), 2);
     });
@@ -393,7 +394,7 @@
   }
 
   function equaliser() {   // music bars dancing, coloured green to red as they rise, glowing peaks that fall slowly
-    const n = 32, level = (b, i) => Math.round(6 + 10 * Math.abs(wave(i, n, 3, b * 0.8) * Math.cos(TAU * 2 * i / n + b * 0.37)) + (b % 4 === 0 && i % 4 === 0 ? 8 : 0));
+    const n = 32, level = (b, i) => Math.round(6 + 10 * Math.abs(wave(i, n, 3, b * 0.8) * Math.cos(TAU * 2 * i / n + b * 0.37)) + (b % 4 === 0 ? Math.round(8 * Math.max(0, 1 - ((i + b) % 8) / 3)) : 0));
     const peaks = new Array(16).fill(0), held = [];
     for (let pass = 0; pass < 2; pass++) for (let i = 0; i < n; i++) {   // run twice so the peaks are settled when the loop starts
       for (let b = 0; b < 16; b++) peaks[b] = Math.max(level(b, i), peaks[b] - 1);
@@ -424,7 +425,7 @@
         const v = g[y * W + x]; next[y * W + x] = s === 3 || (v && s === 2) ? 1 : 0; }
       g = next; gens.push(g);
     }
-    return frames(n, 80, (f, i) => {
+    return frames(n, 150, (f, i) => {
       const now = gens[i], before = gens[i === 0 ? n - 1 : i - 1];   // gens[n] is gens[0] again (the test checks)
       f.light((l) => now.forEach((v, k) => { if (v) l.px[k] = dim(hsv(0.5 + (k % W) / W * 0.3, 0.6, 1), 0.5); }), 1);
       before.forEach((v, k) => { if (v && !now[k]) f.px[k] = dim(hsv(0.5 + (k % W) / W * 0.3, 0.6, 1), 0.3); });
@@ -441,8 +442,9 @@
       const [bx, by] = ball(i);
       [3, 2, 1].forEach((k) => { const [tx, ty] = ball(i - k); f.rect(tx, ty, 2, 2, dim('#ffe066', 0.5 - k * 0.13)); });
       f.light((g) => g.rect(bx, by, 2, 2, '#a89030'), 1);
-      f.rect(2, Math.min(26, Math.max(0, by - 2)), 1, 6, '#ffffff');
-      f.rect(61, Math.min(26, Math.max(0, by - 2)), 1, 6, '#ffffff');
+      const w = tri(i / n), at = (k) => Math.min(26, Math.max(0, Math.round(by * k + 15 * (1 - k)) - 2));   // w: 0 with the ball at the left, 1 at the right
+      f.rect(2, at(1 - w), 1, 6, '#ffffff');
+      f.rect(61, at(w), 1, 6, '#ffffff');
       f.rect(bx, by, 2, 2, '#ffe066');
     });
   }
@@ -517,7 +519,7 @@
       if (i < 48) { const apple = path[(Math.floor(i / 12) * 36 + 30) % path.length];
         f.light((g) => g.disc(apple[0] - 0.5, apple[1] - 0.5, 1.6, '#8a2010'), 2);
         f.rect(apple[0] - 1, apple[1] - 1, 2, 2, '#ff4a3a'); f.set(apple[0] - 1, apple[1] - 1, '#ffb0a0'); f.set(apple[0], apple[1] - 2, '#4ade80'); }
-      if (i >= 48 && i % 2) return;
+      if (i >= 48 && i % 2 === 0) return;
       for (let k = len - 1; k >= 0; k--) { const [x, y] = path[(head - k + path.length) % path.length]; f.rect(x - 1, y - 1, 2, 2, k === 0 ? '#c8ff6a' : mix('#4ade80', '#1f7a3a', k / len)); }
     });
   }
@@ -559,8 +561,8 @@
         g.grad([26, 6], [40, 26], ['#3ab060', '#1f7a3a', '#0a3a1a'], { area: 'drawn' }); });
       f.rect(30, 27, 4, 3, '#6a3e22'); f.sky(['#e6eef8', '#b8c8e0'], 30, 31);
       const lights = [[32, 8], [30, 12], [35, 13], [28, 17], [33, 18], [37, 19], [26, 22], [31, 23], [36, 24], [40, 24]];
-      const colourOf = (k) => ['#ffe066', '#ff4a5a', '#4ad0ff'][(k + i) % 3];
-      f.light((g) => { lights.forEach(([x, y], k) => g.set(x, y, dim(colourOf(k), 0.8))); g.disc(32, 3, 2, i % 6 < 3 ? '#a89030' : '#605010'); }, 1);
+      const colourOf = (k) => ['#ffe066', '#ff4a5a', '#4ad0ff'][(k + Math.floor(i / 5)) % 3];
+      f.light((g) => { lights.forEach(([x, y], k) => g.set(x, y, dim(colourOf(k), 0.8))); g.disc(32, 3, 2, i % 6 < 3 ? '#a89030' : '#605010'); }, 2);
       lights.forEach(([x, y], k) => f.set(x, y, colourOf(k)));
       f.set(32, 3, '#fff6b0'); f.set(31, 3, '#ffe066'); f.set(33, 3, '#ffe066'); f.set(32, 2, '#ffe066'); f.set(32, 4, '#ffe066');
       if (i % 6 < 3) { f.set(30, 3, '#fff6b0'); f.set(34, 3, '#fff6b0'); f.set(32, 1, '#fff6b0'); }
@@ -571,28 +573,29 @@
   function pumpkin() {   // a glowing jack-o'-lantern on a dark night, a bat flapping across the moon
     return frames(20, 100, (f, i, n) => {
       f.sky(['#120a1e', '#2a1438']);
-      f.light((g) => g.disc(52.5, 6.5, 4.5, '#4a4430'), 2); f.disc(52.5, 6.5, 4, '#f2e6c0'); f.shade(51, 5, 3, -0.08);
+      f.light((g) => g.disc(52.5, 6.5, 4.5, '#4a4430'), 2); f.disc(52.5, 6.5, 4, '#f2e6c0'); f.set(51, 5, '#d8cca0'); f.set(54, 8, '#e0d4ac');
       const glow = (i % 5 === 2) ? '#ffd06a' : (i % 4 ? '#ffb43a' : '#ffe08a');
       f.light((g) => g.oval(17, 13, 47, 31, dim('#7a3008', i % 5 === 2 ? 0.8 : 0.6)), 3);   // its glow on the night, outside it
       f.oval(21, 12, 43, 30, '#d8661a');
       f.grad([24, 13], [44, 30], ['#ff9a40', '#d8661a', '#7a2e08'], { type: 'radial', area: 'region', from: [32, 21] });   // lit from the top left
       f.line(26, 14, 26, 28, '#a84a12'); f.line(38, 14, 38, 28, '#a84a12'); f.rect(31, 10, 2, 3, '#3a6a2a');
-      const face = (c) => { f.sprite(['X...X', 'XX.XX'], 27, 17, { X: c }); f.sprite(['X.....X', 'XX.X.XX', '.XXXXX.'], 29, 24, { X: c }); };
-      for (const [dx, dy] of [[-1, 0], [1, 0], [0, -1], [0, 1]]) { f.sprite(['X...X', 'XX.XX'], 27 + dx, 17 + dy, { X: '#5a2008' }); f.sprite(['X.....X', 'XX.X.XX', '.XXXXX.'], 29 + dx, 24 + dy, { X: '#5a2008' }); }
+      const face = (c) => { f.sprite(['X.....X', 'XX...XX'], 29, 17, { X: c }); f.sprite(['X.....X', 'XX.X.XX', '.XXXXX.'], 29, 24, { X: c }); };
+      for (const [dx, dy] of [[-1, 0], [1, 0], [0, -1], [0, 1]]) { f.sprite(['X.....X', 'XX...XX'], 29 + dx, 17 + dy, { X: '#5a2008' }); f.sprite(['X.....X', 'XX.X.XX', '.XXXXX.'], 29 + dx, 24 + dy, { X: '#5a2008' }); }
       face(glow === '#ffb43a' ? '#fff0a0' : glow === '#ffd06a' ? '#ffffff' : '#fff6c0');
       const bx = (i * (W + 10) / n) % (W + 10) - 5, by = 6 + Math.round(wave(i, n, 2)), up = i % 2;
-      f.sprite(up ? ['X.....X', '.XX.XX.', '..XXX..'] : ['.......', '.XX.XX.', 'X.XXX.X'], bx - 3, by - 1, { X: '#6a5a7a' });
+      f.sprite(up ? ['X.....X', '.XX.XX.', '..XXX..'] : ['.......', '.XX.XX.', 'X.XXX.X'], bx - 3, by - 1, { X: '#a08cc0' });
+      for (let y = 0; y < 12; y++) for (let x = 46; x < 60; x++) if (f.get(x, y) === '#a08cc0' && (x - 52.5) ** 2 + (y - 6.5) ** 2 <= 4.5 ** 2) f.set(x, y, '#140a1a');   // a silhouette where it crosses the moon
     });
   }
 
   function floatingHearts() {   // glowing hearts drifting up at different depths and fading
     const r = rng(61), shape = ['XX.XX', 'XXXXX', '.XXX.', '..X..'];
     const hearts = Array.from({ length: 10 }, (_, k) => [4 + r() * 52, r(), [0.5, 1, 1.5][k % 3], r() * 6, k % 3 === 2 ? 2 : 1]);
-    return frames(32, 90, (f, i, n) => {
-      f.sky(['#1a0614', '#2a0a24']);
+    return frames(64, 60, (f, i, n) => {
+      f.sky(['#0a0208', '#1a0614']);
       const draw = (g, glow) => hearts.forEach(([x, y0, v, ph, k]) => {
         const p = (y0 + i / n * v * 2) % 1, y = 34 - p * (34 + 4 * k);
-        g.sprite(shape, x + Math.sin(TAU * i / n + ph) * 2, y, { X: dim(hsv(0.95, k === 2 ? 0.6 : 0.45, k === 2 ? 1 : 0.7), (1 - p * 0.7) * (glow ? 0.5 : 1)) }, k);
+        g.sprite(shape, x + Math.sin(TAU * i / n + ph) * 2, y, { X: dim(hsv(0.95, k === 2 ? 0.8 : 0.7, k === 2 ? 1 : 0.9), (1 - p * 0.5) * (glow ? 0.5 : 1)) }, k);
       });
       f.light((g) => draw(g, true), 2); draw(f, false);
     });
@@ -650,8 +653,8 @@
 
   function hourglass() {   // sand running through a glass hourglass, which then turns over
     const sand = (top, y) => mix('#ffe39a', '#c8902a', top ? y / 12 : 1 - y / 12);
-    return frames(27, 110, (f, i) => {
-      const t = Math.min(1, i / 22), turning = i >= 22;
+    return frames(30, (i) => (i < 22 ? 110 : 70), (f, k, n) => {
+      const i = k % n, t = Math.min(1, i / 22), turning = i >= 22;   // the turn ends upside down, full on top: frame 0 again
       if (!turning) {
         for (let y = 0; y < 12; y++) { const half = 9 - y * 0.75;
           f.line(32 - half, 3 + y, 32 + half, 3 + y, y >= 12 * t ? sand(true, y) : '#1a2030');
@@ -660,10 +663,10 @@
         if (t < 1) for (let y = 15; y < 28 - 12 * t; y++) if ((y + i) % 2) f.set(32, y, '#ffcf6a');
         f.rect(21, 2, 23, 1, '#c8a06a'); f.rect(21, 29, 23, 1, '#c8a06a');
       } else {                          // it turns over, shrinking a little so the corners stay on the panel
-        const p = (i - 21) / 6, ang = p * Math.PI, c = Math.cos(ang), sn = Math.sin(ang), s = 1 - 0.3 * Math.sin(p * Math.PI);
+        const p = (i - 21) / 9, q = p * p * (3 - 2 * p), ang = q * Math.PI, c = Math.cos(ang), sn = Math.sin(ang), s = 1 - 0.3 * Math.sin(q * Math.PI);   // eased: it starts and ends gently
         const rot = (x, y) => [32 + (x * c - y * sn) * s, 16 + (x * sn + y * c) * s];
         for (let y = -12; y <= 12; y += 0.5) { const half = Math.abs(y) * 0.75; for (let x = -half; x <= half; x += 0.5) {
-          const [px, py] = rot(x, y); f.set(px, py, y > 1.2 ? sand(false, 12 - y) : '#1a2030'); } }
+          const [px, py] = rot(x, y); f.set(px, py, y > 1.2 ? mix(sand(false, 12 - y), sand(true, 12 - y), q) : '#1a2030'); } }   // the sand ends shaded as the top bulb
         [[-11, -13], [-11, 13]].forEach(([x0, y0]) => { for (let x = 0; x <= 22; x += 0.5) { const [px, py] = rot(x0 + x, y0); f.set(px, py, '#c8a06a'); } });
       }
     });
@@ -695,12 +698,13 @@
   }
 
   function rainCloud() {   // a weather icon: a shaded grey cloud with rain falling and the odd flash of lightning
-    return frames(16, 90, (f, i) => {
-      const flash = i === 11 || i === 13;
+    const bolt = ['..XX', '.XX.', 'XXXX', '..XX', '.XX.', '.X..', 'X...'];
+    return frames(48, 90, (f, i) => {
+      const flash = i === 31 || i === 33;
       f.layer((g) => { g.disc(28, 11, 7.5, '#fff', 5.5); g.disc(37, 12, 6.5, '#fff', 4.5); g.disc(21, 13, 4.5, '#fff', 3.5); g.rect(18, 13, 25, 4, '#fff');
         g.grad([0, 6], [0, 17], flash ? ['#ffffff', '#c8d0ff'] : ['#aab4c8', '#5a6478'], { area: 'drawn' }); });
-      for (let k = 0; k < 7; k++) { const x = 20 + k * 3.5, y = 18 + ((i * 2 + k * 5) % 16); if (y < H) { f.set(x, y, '#4ad0ff'); f.set(x - 1, y - 1, '#2a7aaa'); } }
-      if (flash) { f.light((g) => g.sprite(['..X', '.X.', 'XX.', '.X.', 'X..'], 30, 18, { X: '#8a7a20' }, 2), 2); f.sprite(['..X', '.X.', 'XX.', '.X.', 'X..'], 30, 18, { X: '#ffe066' }, 2); }
+      for (let k = 0; k < 7; k++) { const x = 20 + k * 3.5, y = 18 + ((i * 2 + k * 5) % 16); if (y < H) { f.set(x, y, '#4ad0ff'); f.set(x, y - 1, '#2a7aaa'); } }
+      if (flash) { f.light((g) => g.sprite(bolt, 28, 17, { X: '#8a7a20' }, 2), 2); f.sprite(bolt, 28, 17, { X: '#ffe066' }, 2); }
     });
   }
 
@@ -754,7 +758,7 @@
     P('countdown', '3, 2, 1, GO!', 'Occasions', countdown, 'A countdown with draining rings.', false),
     P('spinner', 'Spinner', 'Icons and loaders', spinner, 'A smooth loading spinner.'),
     P('loading', 'Loading bar', 'Icons and loaders', loadingBar, 'A bar filling up, then READY.', false),
-    P('hourglass', 'Hourglass', 'Icons and loaders', hourglass, 'Sand running through, then it turns.', false),
+    P('hourglass', 'Hourglass', 'Icons and loaders', hourglass, 'Sand running through, then it turns over.'),
     P('ecg', 'Heartbeat', 'Icons and loaders', heartbeat, 'A glowing heart-monitor trace.'),
     P('sun', 'Sunny', 'Icons and loaders', sunnyDay, 'The sun turning, a cloud drifting by.'),
     P('storm', 'Rain cloud', 'Icons and loaders', rainCloud, 'Rain and the odd flash of lightning.'),
