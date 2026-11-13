@@ -244,7 +244,7 @@ const isDefault = (f, v) => same(v, f.default) || (f.type === 'colour' && String
 /** A setting counts as changed only when its value differs from the default (an explicit default is not a change). */
 const differsFrom = (f, settings) => f.name in settings && !isDefault(f, settings[f.name]);
 const showDefault = (f) => (f.default == null ? 'Auto' : typeof f.default === 'object' ? (Array.isArray(f.default) ? `${f.default.length} item${f.default.length === 1 ? '' : 's'}` : 'object')
-  : typeof f.default === 'boolean' ? (f.default ? 'On' : 'Off') : String(f.default) || '(empty)');
+  : typeof f.default === 'boolean' ? (f.default ? 'On' : 'Off') : f.labels?.[f.default] ?? (String(f.default) || '(empty)'));
 
 function rangeFor(f) {
   const d = Number(f.default), n = f.name;
@@ -273,7 +273,7 @@ function control(f, id, v, set, hooks = {}) {
   if (T === 'choice' && (Array.isArray(f.default) || (f.default === 'all' && f.choices.includes('all')))) return multiChoice(f, id, v, set);
   if (T === 'choice' && !Array.isArray(f.default)) {
     if (f.choices.length <= 4) { const s = segmented(f.choices, v, (x) => set(x)); s.setAttribute('aria-labelledby', `${id}-l`); return s; }
-    const sel = h('select', { class: 'input', id }, f.choices.map((c) => h('option', { value: c, selected: c === v }, humanize(c))));
+    const sel = h('select', { class: 'input', id }, f.choices.map((c) => h('option', { value: c, selected: c === v }, f.labels?.[c] ?? humanize(c))));
     sel.addEventListener('change', () => set(sel.value));
     return sel;
   }

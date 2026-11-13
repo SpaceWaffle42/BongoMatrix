@@ -11,6 +11,7 @@ from bongo.module import Style
 from .art import H, W, load, missing, no_art
 from bongo.pets import wearing
 
+from . import places
 from .scenes import BANNER_SLIDE_MS, MODES, STRIDE, TAG_RISE_MS, record_loop
 
 # The engine's 3x5 font: tiny, and the same on every panel.
@@ -118,15 +119,24 @@ def fit(scene: Image.Image, width: int, height: int) -> Image.Image:
     return scene.crop((x, y, x + width, y + height))
 
 
+NIGHT_ZZZ = (120, 140, 210)   # her Zs in the dark (scenes.py lights_out and waking use the same)
+
+
 class _Scene(Style):
     fps = 20
     MODE: tuple[str, ...] = ()
+    defaults = {"place": "house"}                    # where she lives: the house, or one of places.PLACES
+    choices = {"place": places.CHOICES}
+    basic = ("place",)
 
     def setup(self):
         self.art = None
         if missing(self.ctx.pet.kind):                  # a public build before a pack is imported
             return
         self.art = load(self.ctx.pet.kind, self.ctx.pet.coat, wearing(self.ctx.pet, self.ctx.now().date()))
+        self.place = places.PLACES.get(self.settings["place"])
+        day, empty, night = places.rooms(self.settings["place"]) if self.place else (self.art.room, self.art.empty, self.art.night)
+        self.rooms = {"day": day, "empty": empty, "night": night}
         self.timeline = record_loop(self.art, self.modes(), self.ctx.pet.name)   # seamless: scenes link up
         self.starts, t = [], 0.0
         for shot, _ in self.timeline:
@@ -138,17 +148,25 @@ class _Scene(Style):
     def modes(self):
         return list(self.MODE)
 
+    def room(self, which, clock):
+        """The room ("day", "empty", "night") at this moment, with the place's floor things moving."""
+        img = self.rooms[which]
+        if self.place:
+            img = img.copy()
+            self.place.back(img, clock, which)
+        return img
+
     def render(self, now):
         if self.art is None:
             return no_art(self.ctx.width, self.ctx.height, self.ctx.fonts)
-        t = (now.timestamp() * 1000) % self.total
+        clock = now.timestamp() * 1000          # the place's moving things run on this, never restarting
+        t = clock % self.total
         k = bisect.bisect_right(self.starts, t) - 1
         shot = self.timeline[k][0]
         art = self.art
-        rooms = {"day": art.room, "empty": art.empty, "night": art.night}
-        img = rooms[shot.room].convert("RGBA")
+        img = self.room(shot.room, clock).convert("RGBA")
         if shot.fade:   # the room changing: lights going out or up, the bowl filling or emptying
-            img = Image.blend(rooms[shot.fade[0]].convert("RGBA"), img, shot.fade[1])
+            img = Image.blend(self.room(shot.fade[0], clock).convert("RGBA"), img, shot.fade[1])
         if shot.ball:
             ball = art.ball
             if shot.fade and "night" in (shot.fade[0], shot.room):   # dims with the light
@@ -168,8 +186,23 @@ class _Scene(Style):
         img.alpha_composite(layer)
         if flying:
             self.draw_toy(img, shot.toy, t)
+        if self.place:   # what moves over her: snow, fireflies, leaves (crossing over as the lights change)
+            img = img.convert("RGB")
+            if shot.fade and "night" in (shot.fade[0], shot.room):
+                dark = shot.fade[1] if shot.room == "night" else 1 - shot.fade[1]
+                lit, unlit = img.copy(), img.copy()
+                self.place.front(lit, clock, False)
+                self.place.front(unlit, clock, True)
+                img = Image.blend(lit, unlit, dark)
+            else:
+                self.place.front(img, clock, shot.room == "night")
         draw = ImageDraw.Draw(img)
         for item, began, ended in self.lives[k]:
+            if item[0] == "zzz" and self.place:   # Zs that show up on a pale floor, changing with the light
+                dark = 1.0 if shot.room == "night" else 0.0
+                if shot.fade and "night" in (shot.fade[0], shot.room):
+                    dark = shot.fade[1] if shot.room == "night" else 1 - shot.fade[1]
+                item = ("zzz", tuple(round(a + (b - a) * dark) for a, b in zip(self.place.zzz, NIGHT_ZZZ)))
             overlay(draw, item, t - began, shot, ended - began)
         return fit(img.convert("RGB"), self.ctx.width, self.ctx.height)
 
@@ -205,9 +238,9 @@ DAYTIME = ["idle", "eating", "washing", "playing", "scratching", "napping", "wak
 
 class Life(_Scene):
     """Her day: the ticked modes one after another, in an order that changes each day."""
-    defaults = {"modes": DAYTIME}
-    choices = {"modes": list(MODES)}
-    basic = ("modes",)
+    defaults = {**_Scene.defaults, "modes": DAYTIME}
+    choices = {**_Scene.choices, "modes": list(MODES)}
+    basic = ("place", "modes")
 
     def modes(self):
         picked = [m for m in self.settings["modes"] if m in MODES] or ["idle"]
