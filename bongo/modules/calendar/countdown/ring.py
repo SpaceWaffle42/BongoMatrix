@@ -34,7 +34,7 @@ class Ring(Base, Style):
         if over:
             return self.done_frame(now)
         if left >= 86400:
-            n = left // 86400
+            n = self.days_left(now)
             text, unit = str(n), "DAY" if n == 1 else "DAYS"
         else:
             text, unit = f"{left // 3600:02d}:{left % 3600 // 60:02d}", "LEFT"

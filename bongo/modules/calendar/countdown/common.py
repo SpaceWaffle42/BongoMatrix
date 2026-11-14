@@ -57,6 +57,12 @@ class Base:
         progress = 1.0 if span <= 0 else min(1.0, max(0.0, (now - on.start).total_seconds() / span))
         return max(0, int(left)), progress, left <= 0
 
+    def days_left(self, now) -> int:
+        """Days to go as a calendar counts them (sleeps): on 14 November, Christmas is 41 days off,
+        whatever the time of day. The Calendar's own pages say the same."""
+        target = self.target if now.tzinfo is None or self.target.tzinfo is None else self.target.astimezone(now.tzinfo)
+        return max(1, (target.date() - now.date()).days)
+
     def idle_frame(self, now):
         """Nothing left to count down to: a quiet line of idle text (or a blank background)."""
         text = self.settings["idle_text"]
@@ -95,14 +101,22 @@ class Base:
         return img
 
     def done_frame(self, now):
-        """Target passed: done_message, fitted to the widest font that fits, with a slow pulse."""
-        msg = self.message
-        font = next((f for f in map(self.ctx.fonts, ("6x13B", "6x10", "5x7")) if f.width(msg) <= self.ctx.width - 2),
-                    self.ctx.fonts("6x10"))
+        """Target passed: what has arrived, named on a small line, and the message under it in the
+        biggest font that fits, with a slow pulse. In capitals, like the rest of the screen (the
+        lower-case letters of these fonts run together)."""
+        msg, w, h = self.message.upper(), self.ctx.width, self.ctx.height
+        # (not the bold 6x13: its capitals touch each other, and the halo joins them up)
+        font = next((f for f in map(self.ctx.fonts, ("6x10", "5x7", "tom-thumb")) if f.width(msg) <= w - 2),
+                    self.ctx.fonts("5x7"))   # too long for any: the 5x7 scrolls
         k = 0.8 + 0.2 * math.sin(now.timestamp() * 2)
         ink = tuple(int(a + (b - a) * k) for a, b in zip(self.ink, self.accent))
         ink = tuple(int(c * (0.75 + 0.25 * k)) for c in ink)
-        return self.paint(self.line(font, msg, (self.ctx.height + 10) // 2, ink, now), 1.0)
+        small = self.ctx.fonts("5x7")
+        if h >= 24 and self.title and self.title != msg:      # room for both lines, a clear row or more between
+            name = mix(self.dark, self.accent, 0.65)          # the name quieter than the news under it
+            return self.paint(self.line(small, self.title, 9, name, now)
+                              + self.line(font, msg, 9 + (h - 9 + cap(font)) // 2, ink, now), 1.0)
+        return self.paint(self.line(font, msg, (h + cap(font) + 1) // 2, ink, now), 1.0)
 
 
 def fit_font(fonts, names, text, max_w, max_h):

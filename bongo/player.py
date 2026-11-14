@@ -29,22 +29,24 @@ class Entry:
 
 
 def play_entry(style: Style, seconds: float, panel, stop: threading.Event | None = None,
-               clock=time.monotonic, place=None, live=None, overlays=None) -> int:
+               clock=time.monotonic, place=None, live=None, overlays=None, hold: bool = True) -> int:
     """Render one entry until its time is up; returns frames shown.
     ``place`` puts the module's safe-area frame onto the full panel (see SafeArea.place).
-    ``live`` (bongo.live.Live) can skip or hold the entry and sees every frame."""
+    ``live`` (bongo.live.Live) can skip or hold the entry and sees every frame. ``hold`` False: Pause
+    doesn't keep this one up (a pushed message shows for its time, then gives the paused screen back)."""
     stop = stop or threading.Event()
     frame_time = 1 / style.fps
     end = clock() + seconds
     shown = 0
     last, last_at = None, -1e9   # the style's latest frame: while a screen covers it, it keeps its own pace
     while not stop.is_set():
-        if clock() >= end and not (live and live.paused):
+        held = bool(hold and live and live.paused)
+        if clock() >= end and not held:
             break
         if live and live.skip.is_set():
             live.skip.clear()
             break
-        if getattr(style, "finished", False) and not (live and live.paused and shown):   # a style can hand over
+        if getattr(style, "finished", False) and not (held and shown):   # a style can hand over
             break   # early (Spotify idle, a splash played through); Pause holds one only once it has drawn
         started = clock()
         now = style.ctx.now()
@@ -84,7 +86,7 @@ def play(playlist: list[Entry], modules: dict[str, Module], panel, ctx_factory=C
         raise ValueError("playlist has no enabled entries")
 
     def run(entry: Entry, upcoming: Entry | None = None, index: int | None = None, extras=None,
-            limit: float | None = None) -> bool:
+            limit: float | None = None, hold: bool = True) -> bool:
         shown = entry
         if entry.module == "splash":  # a Splash item: the next file from the Splash pool
             entry = schedule.splash if schedule else None
@@ -104,7 +106,7 @@ def play(playlist: list[Entry], modules: dict[str, Module], panel, ctx_factory=C
         if live:
             live.playing(shown, upcoming, index)
         try:
-            frames = play_entry(style, seconds, panel, stop, place=place, live=live, overlays=extras)
+            frames = play_entry(style, seconds, panel, stop, place=place, live=live, overlays=extras, hold=hold)
         except Exception:  # one broken module must not stop the panel
             log.exception("%s/%s failed while playing; moving on", entry.module, entry.style)
             return False
@@ -155,7 +157,7 @@ def play(playlist: list[Entry], modules: dict[str, Module], panel, ctx_factory=C
         now = ctx_factory().now()
         pushed = live.take_push() if live else None
         if pushed:
-            run(pushed)
+            run(pushed, hold=False)   # a message shows for its own time even while paused
             continue
         forced = bool(live and live.asleep(now))
         asleep = forced or bool(schedule and schedule.asleep(now))
@@ -177,8 +179,11 @@ def play(playlist: list[Entry], modules: dict[str, Module], panel, ctx_factory=C
         entry = current[index % len(current)]
         where = None if forced else next((i for i, e in enumerate(playlist) if e is entry), None)
         limit = None if forced or not schedule else schedule.seconds_until_change(now)
-        if not run(entry, current[(index + 1) % len(current)], where, None if asleep else overlays,
-                   limit):  # where: slot in the saved playlist; limit: stop when sleep starts/ends
+        ran = run(entry, current[(index + 1) % len(current)], where, None if asleep else overlays,
+                  limit)   # where: slot in the saved playlist; limit: stop when sleep starts/ends
+        if live and live.paused and live.pushes:
+            position[key], played = index, played - 1   # a message cut in on the paused screen: come back to it after
+        if not ran:
             stop.wait(0.2)  # never spin if every entry is broken
         elif skipped[0] >= len(current):   # every screen skipped itself (Spotify, nothing on): dark, not a spin
             show_dark(1)
