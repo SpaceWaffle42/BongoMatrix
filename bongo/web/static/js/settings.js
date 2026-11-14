@@ -8,9 +8,46 @@ import { helpButton } from './help.js';
 import { placePicker } from './editor.js';
 
 export function render(view) {
+  const cards = [safeAreaCard(), deviceCard(), locationCard(), wifiCard(), petCard(), calendarsCard(), spotifyCard(), updateCard(), devicesCard(), sleepCard(), splashCard(), mediaCard()];
+  const [safe, ...rest] = cards;
   view.append(h('div', { class: 'page-head' }, h('h1', { class: 'h1' }, 'Settings'),
     h('p', { class: 'muted flush' }, 'Each card saves on its own.')),
-  h('div', { class: 'settings-grid' }, safeAreaCard(), h('div', { class: 'stack gap-20' }, deviceCard(), locationCard(), wifiCard(), petCard(), calendarsCard(), spotifyCard(), updateCard(), devicesCard()), h('div', { class: 'stack gap-20' }, sleepCard(), splashCard(), mediaCard())));
+  jumpBar(cards),
+  h('div', { class: 'settings-grid' }, safe, h('div', { class: 'stack gap-20' }, rest.slice(0, 8)), h('div', { class: 'stack gap-20' }, rest.slice(8))));
+}
+
+/** On a phone Settings is one long column of cards: a row of their names stays under the top bar.
+ *  Tap one to scroll to its card; the row marks the card you are reading. */
+function jumpBar(cards) {
+  const top = () => document.getElementById('topbar').offsetHeight;
+  const bar = h('nav', { class: 'jump-bar', 'aria-label': 'Jump to a section' });
+  const chips = cards.map((card) => h('button', { type: 'button', class: 'chip', onclick: () => {
+    const y = card.getBoundingClientRect().top + window.scrollY - top() - bar.offsetHeight - 8;
+    window.scrollTo({ top: y, behavior: matchMedia('(prefers-reduced-motion: reduce)').matches ? 'auto' : 'smooth' });
+  } }, card.getAttribute('aria-label')));
+  bar.append(...chips);
+  let at = -1;
+  const mark = () => {
+    if (!bar.offsetParent) return;   // wide screens have no bar
+    bar.style.top = `${top()}px`;
+    chips.forEach((c, k) => { c.hidden = cards[k].hidden; });   // a card the Matrix doesn't have (Wi-Fi) has no chip
+    const line = top() + bar.offsetHeight + 24;
+    const shown = cards.map((c, k) => [c, k]).filter(([c]) => !c.hidden);
+    if (!shown.length) return;
+    let now = shown[0][1];
+    for (const [c, k] of shown) if (c.getBoundingClientRect().top <= line) now = k;
+    if (window.innerHeight + window.scrollY >= document.documentElement.scrollHeight - 2) now = shown[shown.length - 1][1];   // the last card may never reach the top
+    if (now === at) return;
+    at = now;
+    chips.forEach((c, k) => c.setAttribute('aria-current', String(k === now)));
+    bar.scrollTo({ left: chips[now].offsetLeft - (bar.clientWidth - chips[now].offsetWidth) / 2, behavior: 'smooth' });
+  };
+  window.addEventListener('scroll', mark, { passive: true });
+  window.addEventListener('resize', mark);
+  const tick = setInterval(mark, 1000);   // cards load and change height after the page is drawn
+  onLeave(() => { window.removeEventListener('scroll', mark); window.removeEventListener('resize', mark); clearInterval(tick); });
+  requestAnimationFrame(mark);
+  return bar;
 }
 
 function safeAreaCard() {

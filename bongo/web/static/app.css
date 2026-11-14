@@ -248,6 +248,13 @@ body.drag-active { user-select: none; -webkit-user-select: none; }
 
 /* settings */
 .settings-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 20px; align-items: start; }
+/* Settings on one column: the cards' names in a row under the top bar, to jump between them */
+.jump-bar { display: none; position: sticky; top: 56px; z-index: 15; gap: 6px; overflow-x: auto; scrollbar-width: none; margin: 0 -28px; padding: 8px 28px; background: var(--page); border-bottom: 1px solid var(--line); }
+.jump-bar::-webkit-scrollbar { display: none; }
+.jump-bar .chip { flex: none; min-height: 40px; }
+.jump-bar .chip[aria-current="true"] { background: var(--amber-card); border-color: var(--amber); color: var(--amber-hover); }
+@media (max-width: 1100px) { .jump-bar { display: flex; } }
+@media (max-width: 719.98px) { .jump-bar { margin: 0 -16px; padding: 8px 16px; } }
 .span-2 { grid-column: 1 / -1; }
 .stepper-grid { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 12px; }
 .stepper { display: flex; flex-direction: column; gap: 6px; font-size: 13px; color: var(--soft); min-width: 0; }
