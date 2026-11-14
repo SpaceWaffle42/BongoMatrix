@@ -2,12 +2,12 @@
 import numpy as np
 from PIL import ImageDraw, ImageFilter
 
-from bongo.fonts import align_x, names
+from bongo.fonts import align_x, middle, names
 from bongo.module import Style
 
 from ..common import hm
 from .field import field
-from .metro import fitting
+from .metro import fitting, top_row
 from .palettes import CLASSIC, CLASSIC_SWATCHES, enabled_custom, rgb
 
 # Marching-squares segments per corner pattern (corners: top-left=8, top-right=4,
@@ -88,11 +88,21 @@ class Classic(Style):
 
         text, border = rgb(s["text_colour"]), rgb(s["border_colour"])
         h = self.ctx.height  # v2 used 15 and 27 on a 32-row panel
-        time_y = s["time_y"] if s["time_y"] is not None else h // 2 - 1
+        label = hm(now, s["hours"])
+        time_font, time_y = self.time_font, s["time_y"] if s["time_y"] is not None else h // 2 - 1
         date_y = s["date_y"] if s["date_y"] is not None else h - 5
+        show_date = s["show_date"]
+        if h < 26 and s["time_y"] is None and s["date_y"] is None:
+            # too short for both lines, as on Lava metro: the time wins, in the middle, in the biggest
+            # bold font that leaves a clear row above it
+            show_date = False
+            for time_font in (self.time_font, *map(self.ctx.fonts, ("9x15B", "7x13B", "6x13B", "6x10"))):
+                time_y = middle(time_font, h)
+                if time_font.width(label) <= img.width - 2 and top_row(time_font, label, time_y) >= 1:
+                    break
         for show, font, label, align, y in (
-            (s["show_time"], self.time_font, hm(now, s["hours"]), s["time_align"], time_y),
-            (s["show_date"], self.date_font, now.strftime(s["date_format"]), s["date_align"], date_y),
+            (s["show_time"], time_font, label, s["time_align"], time_y),
+            (show_date, self.date_font, now.strftime(s["date_format"]), s["date_align"], date_y),
         ):
             if show:
                 font = fitting(self.ctx.fonts, font, label, img.width)
