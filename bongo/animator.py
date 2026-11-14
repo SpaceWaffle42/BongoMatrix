@@ -174,8 +174,12 @@ def frames_from(data: bytes, width: int, height: int) -> list:
 
 
 def save(name: str, data: bytes) -> str:
-    """Into the media library as ``uploaded/<name>.gif`` (never over another file)."""
+    """Into the media library as ``uploaded/<name>.gif`` (never over another file). A name a built-in screen
+    already has (``splash_tetris_squares``) gets ``my_`` in front: an upload with a built-in file's name is
+    taken for a copy of it, and Splash and Sleep would play the built-in one, not this."""
     stem = media.clean_name(f"{name or 'animation'}.gif")
+    if media.resolve(f"built-in/{stem}"):
+        stem = f"my_{stem}"
     return media.save_upload(stem, io.BytesIO(data))
 
 
