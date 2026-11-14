@@ -15,11 +15,12 @@ class Flip(Base, Style):
         self.small = self.ctx.fonts("tom-thumb")
 
     def tile(self, text, font, w, h):
-        """One card: rounded, a touch lighter than the background, digits, hairline across the middle."""
+        """One card: rounded, a touch lighter than the background, a hairline across the middle and
+        the digits over it. (The hairline used to be drawn last and cut a row out of every digit.)"""
         card = mix(self.dark, self.ink, 0.2)
         img = Image.new("RGB", (w, h), card)
-        font.draw(img, (w - font.width(text)) // 2, (h + cap(font)) // 2, text, self.ink)
         ImageDraw.Draw(img).line([(0, h // 2), (w, h // 2)], fill=mix(self.dark, card, 0.1))
+        font.draw(img, (w - font.width(text)) // 2, (h + cap(font)) // 2, text, self.ink)
         return img
 
     def flipped(self, old, new, p):
