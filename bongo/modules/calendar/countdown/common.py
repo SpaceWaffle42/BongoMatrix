@@ -94,7 +94,7 @@ class Base:
             img.paste(self.icon, icon_at, self.icon)
         if progress is not None and self.settings["progress_bar"]:
             w, y = self.ctx.width, self.ctx.height - 1
-            filled = round(progress * w)
+            filled = min(round(progress * w), w - 1)   # never full while it's still counting, however narrow the panel
             dim = tuple(c // 5 for c in self.accent)
             for x in range(w):
                 img.putpixel((x, y), self.accent if x < filled else dim)
