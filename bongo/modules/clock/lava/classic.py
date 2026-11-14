@@ -5,6 +5,7 @@ from PIL import ImageDraw, ImageFilter
 from bongo.fonts import align_x, names
 from bongo.module import Style
 
+from ..common import hm
 from .field import field
 from .metro import fitting
 from .palettes import CLASSIC, CLASSIC_SWATCHES, enabled_custom, rgb
@@ -89,12 +90,11 @@ class Classic(Style):
         h = self.ctx.height  # v2 used 15 and 27 on a 32-row panel
         time_y = s["time_y"] if s["time_y"] is not None else h // 2 - 1
         date_y = s["date_y"] if s["date_y"] is not None else h - 5
-        for show, font, fmt, align, y in (
-            (s["show_time"], self.time_font, s["time_format"], s["time_align"], time_y),
-            (s["show_date"], self.date_font, s["date_format"], s["date_align"], date_y),
+        for show, font, label, align, y in (
+            (s["show_time"], self.time_font, hm(now, s["hours"]), s["time_align"], time_y),
+            (s["show_date"], self.date_font, now.strftime(s["date_format"]), s["date_align"], date_y),
         ):
             if show:
-                label = now.strftime(fmt)
                 font = fitting(self.ctx.fonts, font, label, img.width)
                 font.draw(img, align_x(align, font.width(label), img.width), y, label, text, border)
         return img

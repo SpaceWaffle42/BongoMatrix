@@ -8,6 +8,7 @@ from PIL import Image, ImageFilter
 from bongo.fonts import align_x, middle, names
 from bongo.module import Style
 
+from ..common import hm
 from .field import field
 from .palettes import METRO, METRO_SWATCHES, enabled_custom, metro_from, rgb
 
@@ -94,7 +95,7 @@ class Metro(Style):
             time_y = h - 14 if show_date else middle(self.time_font, h)
         labels = []
         if s["show_time"]:
-            label = now.strftime(s["time_format"])
+            label = hm(now, s["hours"])
             labels.append((fitting(self.ctx.fonts, self.time_font, label, w), label, s["time_align"], time_y, p["text"]))
         if show_date:
             date = now.strftime(s["date_format"])
