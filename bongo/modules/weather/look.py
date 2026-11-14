@@ -1,9 +1,9 @@
-"""Shared look for the weather styles: conditions, colours, anti-aliased pixel icons."""
+"""Shared look for the weather styles: conditions, colours, pixel icons."""
 from __future__ import annotations
 
-import math
-
 from PIL import Image, ImageDraw
+
+from bongo import sprites
 
 # WMO weather code -> condition
 def condition(code: int) -> str:
@@ -37,8 +37,6 @@ SKIES = {
     "clear_night": ("#0B1230", "#03050F"), "partly_night": ("#0F1528", "#04060D"),
 }
 TEXT, ACCENT, DIM = (255, 244, 222), (255, 217, 168), (154, 161, 172)
-SUN, MOON, CLOUD, CLOUD_DARK = "#FFC94A", "#E8E6D8", "#DCE3EA", "#8C97A6"
-DROP, FLAKE, BOLT = "#5AB4FF", "#FFFFFF", "#FFD23F"
 
 
 def label(code: int, is_day: bool) -> str:
@@ -58,63 +56,41 @@ def sky(code: int, is_day: bool, width: int, height: int) -> Image.Image:
     return img
 
 
+SIZES = (20, 16, 14, 11)   # the sizes every icon is drawn at: the ones the screens use
+
+
 def icon(code: int, is_day: bool, size: int, phase: float = 0.0) -> Image.Image:
-    """RGBA icon, drawn 4x large and box-downsampled so small icons stay smooth on the LEDs.
-    ``phase`` (seconds) animates rain, snow and the sun's rays."""
-    k = 4
-    s = size * k
-    img = Image.new("RGBA", (s, s))
-    d = ImageDraw.Draw(img)
+    """The RGBA icon for a weather code, ``size`` pixels square, at ``phase`` seconds into its movement (the
+    sun's rays, falling rain and snow, drifting fog, lightning).
+
+    Each is a pixel drawing made for its size, never a scaled one, so every pixel is fully on or off on the
+    LEDs: Animator projects ``resources/animator/weather_<condition>_<size>.json``. Save your own under the
+    same name from the Animator and the screens show yours (it loops, whatever it was saved as). A size
+    nothing was drawn for gets the biggest drawing that fits, in the middle; under 11 pixels the smallest
+    one is cropped to fit. The picture is shared: paste it, don't draw on it."""
     cond = condition(code)
-
-    def disc(cx, cy, r, fill):
-        d.ellipse([(cx - r) * s, (cy - r) * s, (cx + r) * s, (cy + r) * s], fill=fill)
-
-    def sun_or_moon(cx, cy, r):
-        if is_day:
-            for i in range(8):
-                a = i * math.pi / 4 + phase * 0.4
-                d.line([((cx + math.cos(a) * r * 1.35) * s, (cy + math.sin(a) * r * 1.35) * s),
-                        ((cx + math.cos(a) * r * 1.75) * s, (cy + math.sin(a) * r * 1.75) * s)],
-                       fill=SUN, width=max(1, s // 12))
-            disc(cx, cy, r, SUN)
-        else:
-            disc(cx, cy, r, MOON)
-            disc(cx + r * 0.55, cy - r * 0.35, r * 0.85, (0, 0, 0, 0))
-
-    def cloud(cy, fill, shade):
-        disc(0.34, cy + 0.02, 0.17, shade)
-        disc(0.58, cy - 0.06, 0.22, fill)
-        disc(0.33, cy, 0.16, fill)
-        disc(0.78, cy + 0.04, 0.15, fill)
-        d.rounded_rectangle([0.18 * s, cy * s, 0.92 * s, (cy + 0.19) * s], radius=0.09 * s, fill=fill)
-
-    if cond == "clear":
-        sun_or_moon(0.5, 0.5, 0.24)
-    elif cond == "partly":
-        sun_or_moon(0.36, 0.34, 0.2)
-        cloud(0.55, CLOUD, CLOUD_DARK)
-    elif cond == "fog":
-        for i, y in enumerate((0.3, 0.5, 0.7)):
-            off = 0.06 * math.sin(phase + i)
-            d.rounded_rectangle([(0.12 + off) * s, y * s, (0.88 + off) * s, (y + 0.09) * s],
-                                radius=0.045 * s, fill=CLOUD if i != 1 else CLOUD_DARK)
-    else:
-        dark = cond in ("rain", "storm")
-        cloud(0.32, CLOUD_DARK if dark else CLOUD, "#5E6875" if dark else CLOUD_DARK)
-        if cond == "rain":
-            for i, x in enumerate((0.32, 0.52, 0.72)):
-                y = 0.6 + ((phase * 0.9 + i * 0.33) % 1) * 0.28
-                d.line([(x * s, y * s), ((x - 0.05) * s, (y + 0.12) * s)], fill=DROP, width=max(1, s // 10))
-        elif cond == "snow":
-            for i, x in enumerate((0.3, 0.52, 0.74)):
-                y = 0.62 + ((phase * 0.5 + i * 0.37) % 1) * 0.28
-                disc(x + 0.03 * math.sin(phase * 2 + i), y, 0.055, FLAKE)
-        elif cond == "storm":
-            d.polygon([(0.55 * s, 0.52 * s), (0.38 * s, 0.76 * s), (0.5 * s, 0.76 * s),
-                       (0.42 * s, 0.98 * s), (0.66 * s, 0.68 * s), (0.53 * s, 0.68 * s),
-                       (0.62 * s, 0.52 * s)], fill=BOLT)
-    return img.resize((size, size), Image.Resampling.BOX)
+    name = f"weather_{cond}_night" if not is_day and cond in ("clear", "partly") else f"weather_{cond}"
+    art = None
+    for drawn in sorted(SIZES, key=lambda s: (s > size, -s if s <= size else s)):   # the biggest that fits, else the smallest
+        try:
+            sprite = sprites.load(f"{name}_{drawn}")
+            if sprite.size != (drawn, drawn):              # yours, saved at another size: the built-in one
+                sprite = sprites.load(f"{name}_{drawn}", own=False)
+        except FileNotFoundError:
+            continue
+        if sprite.loop == "once":                          # the clock never restarts, so "once" would freeze on its last frame
+            phase %= sum(sprite.ms) / 1000
+        art = sprite.at(phase)
+        if not art.getbbox() and not any(f.getbbox() for f in sprite.frames):   # yours, with nothing drawn: the built-in one
+            art = sprites.load(f"{name}_{drawn}", own=False).at(phase)
+        break
+    if art is None:
+        raise FileNotFoundError(f"no drawing of {name} in resources/animator")
+    if art.size == (size, size):
+        return art
+    out = Image.new("RGBA", (size, size))
+    out.paste(art, ((size - art.width) // 2, (size - art.height) // 2))
+    return out
 
 
 def temp_text(value: float) -> str:

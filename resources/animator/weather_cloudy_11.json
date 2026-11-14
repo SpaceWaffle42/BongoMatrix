@@ -1,0 +1,4 @@
+{"format":"bongo-animation","version":1,"name":"weather_cloudy_11","width":11,"height":11,"background":"#000000","loop":"loop","palette":["#5e6875","#8c97a6","#dce3ea"],"layers":[{"name":"Icon","on":true,"opacity":1,"mode":"normal","shared":false}],"frames":[
+{"ms":2400,"cels":["18*. 3*1 7*. 5*1 3*. 8*1 3*. 2*1 3*2 3*1 4*. 5*2 0 2*. 8*2 2*. 10*2 . 10*2 2*. 8*1 13*."]},
+{"ms":2400,"cels":["17*. 3*1 7*. 5*1 3*. 8*1 3*. 3*1 3*2 2*1 4*. 0 5*2 3*. 8*2 2*. 10*2 . 10*2 2*. 8*1 13*."]}
+]}

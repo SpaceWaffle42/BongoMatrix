@@ -1,0 +1,6 @@
+{"format":"bongo-animation","version":1,"name":"weather_fog_14","width":14,"height":14,"background":"#000000","loop":"loop","palette":["#8c97a6","#dce3ea"],"layers":[{"name":"Icon","on":true,"opacity":1,"mode":"normal","shared":false}],"frames":[
+{"ms":800,"cels":["29*. 9*1 5*. 9*1 36*. 9*0 5*. 9*0 30*. 9*1 5*. 9*1 32*."]},
+{"ms":800,"cels":["30*. 9*1 5*. 9*1 34*. 9*0 5*. 9*0 32*. 9*1 5*. 9*1 31*."]},
+{"ms":800,"cels":["29*. 9*1 5*. 9*1 36*. 9*0 5*. 9*0 30*. 9*1 5*. 9*1 32*."]},
+{"ms":800,"cels":["28*. 9*1 5*. 9*1 38*. 9*0 5*. 9*0 28*. 9*1 5*. 9*1 33*."]}
+]}

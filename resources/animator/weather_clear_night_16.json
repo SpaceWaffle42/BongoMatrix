@@ -1,0 +1,3 @@
+{"format":"bongo-animation","version":1,"name":"weather_clear_night_16","width":16,"height":16,"background":"#000000","loop":"loop","palette":["#f4e3a1"],"layers":[{"name":"Icon","on":true,"opacity":1,"mode":"normal","shared":false}],"frames":[
+{"ms":1000,"cels":["54*. 0 14*. 2*0 13*. 2*0 13*. 3*0 13*. 4*0 12*. 4*0 12*. 5*0 12*. 8*0 9*. 6*0 11*. 4*0 54*."]}
+]}
