@@ -221,6 +221,9 @@ def main(argv=None) -> int:
     if config["web"]["enabled"]:
         _start_dashboard(config, modules, live, Path(args.config))
     panel = Fader(_hardware(config))  # day <-> night brightness glides instead of jumping
+    import threading
+    live.beat()   # starting up doesn't count against it
+    threading.Thread(target=live.watch, args=(threading.Event(),), daemon=True, name="watchdog").start()
     good, first = None, True  # last config that played; the boot screen only plays at start-up
     try:
         while True:  # play() returns when the dashboard saves a new config
@@ -241,6 +244,7 @@ def main(argv=None) -> int:
                     cfg.save(good, args.config)
                     config = good
                     continue
+                live.beat()           # still alive, just nothing to show: not for the watchdog
                 live.reload.wait(10)  # nothing better to play: wait for a fix from the dashboard
             live.reload.clear()
             live.skip.clear()

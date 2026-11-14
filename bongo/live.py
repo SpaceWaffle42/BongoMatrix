@@ -9,6 +9,8 @@ from __future__ import annotations
 import collections
 import datetime as dt
 import io
+import logging
+import os
 import threading
 import time
 from dataclasses import asdict
@@ -16,9 +18,14 @@ from dataclasses import asdict
 from PIL import Image
 
 
+FROZEN_SECONDS = 180   # no frame for this long means the player is stuck (the slowest honest wait, a video
+                       # being decoded on a Pi Zero, is capped at 120 s)
+
+
 class Live:
     def __init__(self):
         self._lock = threading.Lock()
+        self.beat_at = time.monotonic()   # the player's last sign of life: every frame, and ``beat``
         self._frame: Image.Image | None = None
         self._public: Image.Image | None = None   # the same without covering screens (bongo/hub.py)
         self.entry = None           # the Entry on the panel now
@@ -45,6 +52,25 @@ class Live:
         with self._lock:
             self._frame = frame
             self._public = frame if public is None else public
+        self.beat_at = time.monotonic()
+
+    def beat(self) -> None:
+        """The player is alive though it has no frame to show (waiting for a config that can play)."""
+        self.beat_at = time.monotonic()
+
+    def watch(self, stop: threading.Event, limit: float = FROZEN_SECONDS, every: float = 5.0, frozen=None) -> None:
+        """The watchdog, on its own thread. A style that never returns freezes the panel while the
+        dashboard carries on as if all were well, and saving a fix can't reach a stuck player. So
+        after ``limit`` seconds without a frame the process ends, and systemd starts it again."""
+        while not stop.wait(every):
+            quiet = time.monotonic() - self.beat_at
+            if quiet > limit:
+                on, after = self.entry, self.upcoming
+                logging.getLogger(__name__).critical(
+                    "the panel has shown nothing for %d s (on: %s, next: %s); restarting the display", quiet,
+                    f"{on.module}/{on.style}" if on else "nothing", f"{after.module}/{after.style}" if after else "nothing")
+                (frozen or (lambda: os._exit(70)))()   # not sys.exit: the stuck thread would never let it finish
+                return
 
     def take_push(self):
         with self._lock:
