@@ -6,9 +6,11 @@ with a fixed set of values (alignments, palette names).
 """
 from __future__ import annotations
 
+import math
 import re
 
 HEX = re.compile(r"^#[0-9a-fA-F]{6}$")
+MAX_TEXT = 1000   # characters in one text setting: far more than a panel can show, short enough to draw fast
 
 
 def kind(default) -> str:
@@ -29,8 +31,14 @@ def kind(default) -> str:
     return "any"
 
 
-def check(name: str, default, value, choices=None) -> None:
-    """Raise ValueError if ``value`` can't stand in for a setting whose default is ``default``."""
+def number(value) -> bool:
+    """A real number: not True/False, and not NaN or infinity (which Python's JSON reader lets through)."""
+    return isinstance(value, (int, float)) and not isinstance(value, bool) and math.isfinite(value)
+
+
+def check(name: str, default, value, choices=None, limits=None) -> None:
+    """Raise ValueError if ``value`` can't stand in for a setting whose default is ``default``.
+    ``limits``: (lowest, highest) for a number setting, from the module's or style's ``limits``."""
     if choices == "media":  # a file from the media library
         from bongo import media
         if not media.valid_name(value):
@@ -49,18 +57,22 @@ def check(name: str, default, value, choices=None) -> None:
         return
     k = kind(default)
     ok = {
-        "auto": True,
+        "auto": value is None or number(value),   # worked out for you, or a number of your own
         "bool": isinstance(value, bool),
         "int": isinstance(value, int) and not isinstance(value, bool),
-        "number": isinstance(value, (int, float)) and not isinstance(value, bool),
+        "number": number(value),
         "colour": isinstance(value, str) and bool(HEX.match(value)),
-        "text": isinstance(value, str),
+        "text": isinstance(value, str) and len(value) <= MAX_TEXT,
         "list": isinstance(value, list),
         "object": isinstance(value, dict),
     }.get(k, True)
     if not ok:
-        expected = "a colour like #FFB547" if k == "colour" else f"a {k}"
-        raise ValueError(f"{name}: expected {expected}, got {value!r}")
+        if k == "text" and isinstance(value, str):
+            raise ValueError(f"{name}: keep it under {MAX_TEXT} characters (it has {len(value)})")
+        expected = {"colour": "a colour like #FFB547", "auto": "a number, or nothing for automatic"}.get(k, f"a {k}")
+        raise ValueError(f"{name}: expected {expected}, got {str(value)[:60]!r}")
+    if limits and number(value) and not limits[0] <= value <= limits[1]:
+        raise ValueError(f"{name}: {value} is outside {limits[0]} to {limits[1]}")
 
 
 HELP_KEYS = {"title": str, "intro": str, "steps": list, "tips": list, "links": list,
@@ -111,10 +123,12 @@ def describe(module) -> dict:
     shared_choices = module.choices
     return {
         "id": module.id, "name": module.name, "description": module.description,
+        **({"limits": {n: list(v) for n, v in module.limits.items()}} if module.limits else {}),   # [lowest, highest]
         **({"help": module.help} if module.help else {}),
         "default_style": module.default_style,
         "settings": fields(module.defaults, shared_choices, basic=module.basic),
-        "styles": {name: {"settings": fields(cls.defaults, {**shared_choices, **cls.choices}, cls.swatches, cls.basic),
+        "styles": {name: {**({"limits": {n: list(v) for n, v in cls.limits.items()}} if cls.limits else {}),
+                          "settings": fields(cls.defaults, {**shared_choices, **cls.choices}, cls.swatches, cls.basic),
                           **({"group": cls.group} if cls.group else {})}
                    for name, cls in module.styles.items()},
     }

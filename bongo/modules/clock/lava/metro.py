@@ -31,6 +31,8 @@ class Metro(Style):
     fps = 30
     choices = {"palettes": ["all", *METRO], "time_font": names(), "date_font": names()}
     swatches = {"palettes": METRO_SWATCHES}
+    limits = {"blob_count": (1, 24), "speed": (0, 10), "glow": (0, 2), "text_halo": (0, 2),
+              "time_y": (-64, 256), "date_y": (-64, 256)}
     basic = ("palettes",)
     defaults = dict(
         palettes=["magma"],       # "all" or names from palettes.METRO; enabled custom ones join in

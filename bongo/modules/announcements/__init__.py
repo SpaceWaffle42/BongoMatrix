@@ -262,6 +262,7 @@ MODULE = Module(
         background_top="#14161A", background_bottom="#08090A",
     ),
     basic=("items",),
+    limits={"rotate_seconds": (1, 3600), "scroll_speed": (1, 200)},
     item_fields={"items": [
         {"name": "title", "type": "text", "label": "Title", "placeholder": "Bin day"},
         {"name": "text", "type": "longtext", "label": "Message", "placeholder": "Green bin goes out tonight"},

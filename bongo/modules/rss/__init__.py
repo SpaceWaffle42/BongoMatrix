@@ -23,6 +23,7 @@ MODULE = Module(
     check=data.check_urls,   # every feed is an http(s) address
     verify=data.verify,      # and, when saved from the dashboard, really is RSS or Atom
     basic=("feeds", "show_summary", "headline_colour", "summary_colour"),
+    limits={"max_items": (1, 100), "refresh_minutes": (5, 1440), "rotate_seconds": (1, 3600), "scroll_speed": (1, 200)},
     suggestions={"feeds": FEEDS},  # one-tap feeds in the dashboard (v2's presets and more)
     help=HELP,
 )

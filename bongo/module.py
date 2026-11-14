@@ -39,6 +39,7 @@ class Style:
     """One look of a module. Subclass it, set ``defaults``, implement ``render``."""
     defaults: dict = {}
     choices: dict = {}  # setting name -> allowed values, for settings with a fixed set
+    limits: dict = {}  # setting name -> (lowest, highest) for a number setting; anything outside is refused
     swatches: dict = {}  # setting name -> {choice: [colours]}, so the dashboard shows each choice's colours
     basic: tuple = ()  # this style's settings shown up front in the dashboard; the rest sit under Advanced
     group: str | None = None  # heading the dashboard files this style under (a Clock's "Digital", "Word"...)
@@ -66,6 +67,9 @@ class Module:
     defaults: dict = field(default_factory=dict)
     description: str = ""
     choices: dict = field(default_factory=dict)
+    # ``limits={"blob_count": (1, 24)}``: the lowest and highest a number setting may be. A number that
+    # could stall or crash the panel needs one; the dashboard's slider and number box keep to it too.
+    limits: dict = field(default_factory=dict)
     # Overlays are styles drawn *over* whatever is playing (see bongo/overlays.py). Their
     # render returns an RGBA frame where transparent pixels let the module underneath show.
     overlays: dict[str, type[Style]] = field(default_factory=dict)
@@ -124,11 +128,14 @@ class Module:
         if unknown:
             raise ValueError(f"{self.id}: unknown setting(s) {sorted(unknown)}")
         choices = {**self.choices, **style_cls.choices}
+        limits = {**self.limits, **style_cls.limits}
         for name, value in (overrides or {}).items():
             try:
-                check(name, merged[name], value, choices.get(name))
+                check(name, merged[name], value, choices.get(name), limits.get(name))
             except ValueError as error:
                 raise ValueError(f"{self.id}: {error}") from None
+            if name in self.item_fields and isinstance(value, list) and not all(isinstance(v, dict) for v in value):
+                raise ValueError(f"{self.id}: {name}: every entry must be an object")
         merged.update(overrides or {})
         if self.check:
             try:

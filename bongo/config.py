@@ -277,6 +277,7 @@ def tidy(config: dict, modules: dict[str, Module]) -> list[str]:
             cls = module._style(style, overlay)
             known = {**module.defaults, **cls.defaults}
             choices = {**module.choices, **cls.choices}
+            limits = {**module.limits, **cls.limits}
             settings = entry["settings"]
             if module.migrate:
                 notes += [f"{key}[{i}] {note}" for note in module.migrate(settings)]
@@ -287,6 +288,16 @@ def tidy(config: dict, modules: dict[str, Module]) -> list[str]:
                 if name not in known:
                     del settings[name]
                     notes.append(f"{key}[{i}] {entry['module']}: dropped old setting {name!r}")
+                elif name in limits and isinstance(value, (int, float)) and not isinstance(value, bool) \
+                        and not limits[name][0] <= value <= limits[name][1]:   # NaN lands here too
+                    low, high = limits[name]
+                    if value != value:   # NaN: back to the default
+                        del settings[name]
+                    else:
+                        settings[name] = int(min(high, max(low, value))) if isinstance(known[name], int) \
+                            else min(high, max(low, value))
+                    notes.append(f"{key}[{i}] {entry['module']}: {name}: {value} is outside {low} to {high}, "
+                                 f"now {settings.get(name, 'the default')}")
                 elif offered is not None and isinstance(value, list):
                     kept = [v for v in value if v in offered]
                     if kept != value:

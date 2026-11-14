@@ -252,6 +252,7 @@ class Wander(Style):
     """Overlay: the cat walks across whatever is playing, right to left or left to right."""
     fps = 20
     defaults = {"direction": "both", "floor": 0}
+    limits = {"floor": (0, 64)}
     choices = {"direction": ["both", "right", "left"]}
 
     def setup(self):

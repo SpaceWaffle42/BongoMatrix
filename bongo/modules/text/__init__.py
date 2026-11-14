@@ -124,4 +124,5 @@ MODULE = Module(
     ),
     choices={"font": names(), "background_style": ["solid", "gradient"], "align": ["left", "center", "right"]},
     basic=("text", "colour", "align"),
+    limits={"speed": (1, 200), "gap": (0, 256), "y": (-64, 256)},
 )

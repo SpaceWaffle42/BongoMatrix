@@ -8,9 +8,11 @@ import { S, onLeave, go, href, moduleById, styleOf, entryName, applyDraft, draft
 
 /** Settings for a style: shared ones (unless the style redefines them) and the style's own. */
 export function schemaFor(mod, style) {
-  const own = mod?.styles?.[style]?.settings || [];
+  const limits = { ...(mod?.limits || {}), ...(mod?.styles?.[style]?.limits || {}) };   // a number's lowest and highest
+  const lim = (f) => (limits[f.name] ? { ...f, min: limits[f.name][0], max: limits[f.name][1] } : f);
+  const own = (mod?.styles?.[style]?.settings || []).map(lim);
   const names = new Set(own.map((f) => f.name));
-  return { shared: (mod?.settings || []).filter((f) => !names.has(f.name)), own };
+  return { shared: (mod?.settings || []).filter((f) => !names.has(f.name)).map(lim), own };
 }
 
 export function render(view, match) {
@@ -276,6 +278,7 @@ const showDefault = (f) => (f.default == null ? 'Auto' : typeof f.default === 'o
 
 function rangeFor(f) {
   const d = Number(f.default), n = f.name;
+  if (f.min != null && f.max != null) return { min: f.min, max: f.max, step: f.max - f.min <= 20 ? 0.05 : 0.5 };   // the module's own limits
   if (/speed/.test(n)) return f.type === 'int' ? { min: 1, max: Math.max(100, d * 3), step: 1 } : { min: 0, max: Math.max(4, d * 4), step: 0.05 };
   if (f.type === 'number' && d >= 0 && d <= 1) return { min: 0, max: 1, step: 0.05 };
   if (/brightness|glow|halo|opacity/.test(n)) return { min: 0, max: Math.max(1, d * 2), step: 0.05 };
@@ -563,6 +566,7 @@ function numberInput(f, id, v, set, label) {
   const int = f.type === 'int';
   const num = h('input', { class: 'input num', type: 'number', id, value: v ?? 0, step: int ? 1 : 'any', inputmode: int ? 'numeric' : 'decimal', 'aria-label': label });
   const r = rangeFor(f);
+  if (f.min != null) { num.min = f.min; num.max = f.max; }
   const rng = r && h('input', { type: 'range', class: 'range grow', min: r.min, max: r.max, step: int ? 1 : r.step, value: v ?? 0, 'aria-label': `${humanize(f.name)} slider` });
   num.addEventListener('input', () => {
     if (num.value === '') return;

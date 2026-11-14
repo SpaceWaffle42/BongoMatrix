@@ -287,5 +287,6 @@ MODULE = Module(
               # the look (Advanced): the artist line and bar take the cover's colour unless you pick one
               "title_colour": "#FFFFFF", "match_cover": True, "artist_colour": "#1ED760"},
     basic=("skip_when_not_playing", "hand_over_after"),
+    limits={"hand_over_after": (0, 3600)},
     check=check,
 )

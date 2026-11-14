@@ -24,6 +24,8 @@ class Classic(Style):
     fps = 33
     choices = {"palettes": ["all", *CLASSIC], "time_font": names(), "date_font": names()}
     swatches = {"palettes": CLASSIC_SWATCHES}
+    limits = {"blob_count": (1, 24), "blob_min_radius": (1, 32), "blob_max_radius": (1, 32), "blur_radius": (0, 8),
+              "drift": (0, 50), "edge_width": (0, 16), "threshold": (0.1, 10), "time_y": (-64, 256), "date_y": (-64, 256)}
     basic = ("palettes",)
     defaults = dict(
         palettes="all",          # "all" or a list of names from palettes.CLASSIC; enabled custom ones join in

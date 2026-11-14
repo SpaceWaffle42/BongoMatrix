@@ -210,6 +210,7 @@ class CodeAndMessage(Standard):
     """Code and message: swaps every few seconds between the code and a big message, so it
     reads from across the room and scans up close."""
     defaults = {"scroll": "", "message": "BOOK ONLINE", "swap": 4}
+    limits = {"swap": (1, 600)}
     basic = ("message",)
 
     def render(self, now):

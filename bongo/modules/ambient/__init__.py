@@ -24,4 +24,5 @@ MODULE = Module(
         "snow": Snow, "life": Life, "sand": Sand, "starlings": Starlings, "maze": Maze, "pipes": Pipes,
     },
     check=check,
+    limits={"speed": (0.25, 4)},
 )

@@ -186,4 +186,5 @@ MODULE = Module(
     defaults=dict(file="built-in/splash_loading_squares.gif", background="#000000", speed=1.0, brightness=1.0),
     choices={"file": "media"},  # picked from the media library (built-in/ or uploaded/)
     basic=("file",),
+    limits={"speed": (0, 8), "brightness": (0, 1)},
 )

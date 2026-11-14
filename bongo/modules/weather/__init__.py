@@ -19,5 +19,7 @@ MODULE = Module(
     ),
     choices={"units": ["celsius", "fahrenheit"], "wind_unit": ["kmh", "mph", "ms", "kn"]},
     basic=("location", "own_location", "units", "scroll_location"),
+    limits={"latitude": (-90, 90), "longitude": (-180, 180), "refresh_minutes": (5, 1440), "scroll_speed": (1, 200),
+            "columns": (1, 8), "step_hours": (1, 12)},
     places={"location": ("latitude", "longitude")},  # pick a real place; coordinates follow
 )
