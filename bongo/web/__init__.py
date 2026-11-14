@@ -152,8 +152,8 @@ def create_app(*, modules, live, pairing, config_path, logs: LogBuffer | None = 
             return None
         if path.startswith("/api/setup") and setup_client():
             return None
-        if request.method in ("GET", "HEAD") and (path.startswith("/api/public") or path == "/api/hub"):
-            return None   # read-only, nothing private: the hub page and other Matrices read these
+        if request.method in ("GET", "HEAD") and (path.startswith("/api/public") or path in ("/api/hub", "/api/health")):
+            return None   # read-only, nothing private: the hub page, other Matrices and the updater read these
         if pairing.check(request.cookies.get(COOKIE)) is None:
             return jsonify(error="not paired"), 401
         return None
@@ -180,6 +180,11 @@ def create_app(*, modules, live, pairing, config_path, logs: LogBuffer | None = 
     @app.get("/api/pair/status")
     def pair_status():
         return jsonify(paired=pairing.check(request.cookies.get(COOKIE)) is not None)
+
+    @app.get("/api/health")
+    def health():
+        # asked by the updater on this device after it restarts the display; nothing private in it
+        return jsonify(live.health())
 
     # -- what's on --------------------------------------------------------------------------
     @app.get("/api/state")

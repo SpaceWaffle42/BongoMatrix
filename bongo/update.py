@@ -5,8 +5,12 @@ replaces its own code. The dashboard writes data/update-request.json; deploy/bon
 sees it and starts deploy/bongo-update.service, which runs ``python -m bongo update --apply``:
 
     fetch <url> <branch>  ->  reset the checkout to it  ->  pip install if requirements.txt changed
-    ->  restart bongo-matrix  ->  wait for the dashboard to answer  ->  done
-    (no answer within HEALTH_SECONDS: reset back to the old commit, restart, report "rolled back")
+    ->  restart bongo-matrix  ->  wait until the display has been showing frames for a while  ->  done
+    (not within HEALTH_SECONDS: reset back to the old commit, restart, report "rolled back")
+
+If the power goes between the reset and the end of that check, the status file still says so at the
+next start: the display asks the updater to run again (``resume``), and it picks up where it stopped,
+with the same rollback.
 
 Progress and the outcome go to data/update-status.json, which the dashboard shows. Files under
 data/ (config, uploads, pairing) are git-ignored, so an update never touches them.
@@ -20,6 +24,7 @@ import re
 import subprocess
 import sys
 import time
+import urllib.error
 import urllib.request
 from pathlib import Path
 
@@ -28,7 +33,9 @@ DATA = REPO / "data"
 DEFAULT_URL = "http://gitlab.home.lan/matrix_display/bongo_matrix.git"
 DEFAULT_BRANCH = "prod_device"   # only the files the display needs (see tools/prod_tree.py)
 SERVICE = "bongo-matrix"
-HEALTH_SECONDS = 90
+HEALTH_SECONDS = 150   # for the restarted display to come good (a Pi Zero takes a while to start)
+HEALTH_HOLD = 20       # ...and how long it must stay good: a version that crashes at start-up restarts every 3 s
+HEALTH_QUIET = 45      # the longest gap between frames that still counts as playing (a big file being decoded)
 GIT_TIMEOUT = 120
 
 URL = re.compile(r"(https?|ssh)://[^\s]+|[\w.-]+@[\w.-]+:[^\s]+")
@@ -139,23 +146,73 @@ def restart_service() -> None:
     subprocess.run(["systemctl", "restart", SERVICE], check=True, timeout=60)
 
 
-def dashboard_answers(port: int) -> bool:
+def dashboard_answers(port: int):
+    """What the display says of itself: its /api/health answer; True from a version too old to have
+    one (its dashboard answering is all there is to go on); None when nothing answers."""
     try:
-        with urllib.request.urlopen(f"http://127.0.0.1:{port}/api/pair/status", timeout=3) as r:
-            return r.status == 200
-    except OSError:
-        return False
+        with urllib.request.urlopen(f"http://127.0.0.1:{port}/api/health", timeout=3) as r:
+            return json.loads(r.read())
+    except urllib.error.HTTPError as error:
+        return True if error.code == 404 else None
+    except (OSError, ValueError):
+        return None
 
 
-def healthy(port: int, seconds: float = HEALTH_SECONDS, check=dashboard_answers, sleep=time.sleep) -> bool:
-    """True once the restarted display's dashboard answers (it starts after the config loads)."""
-    waited = 0.0
+def healthy(port: int, seconds: float = HEALTH_SECONDS, check=dashboard_answers, sleep=time.sleep,
+            hold: float = HEALTH_HOLD) -> bool:
+    """True once the restarted display has run for ``hold`` seconds on end: the same run of it (not
+    one that crashes and is started again), its panel started, its player showing frames. The
+    dashboard alone answering isn't enough: it starts before the panel does."""
+    waited, good, run = 0.0, None, None
     while waited < seconds:
-        if check(port):
+        answer = check(port)
+        if isinstance(answer, dict):
+            fine = answer.get("panel") is True and isinstance(answer.get("quiet"), (int, float)) \
+                and answer["quiet"] < HEALTH_QUIET
+            if not fine:
+                good = None
+            elif good is None or answer.get("boot") != run:
+                good = waited                                # good from now; a new run starts the count again
+            run = answer.get("boot")
+        elif answer:                                         # an older version: its dashboard answers
+            good, run = (waited if good is None or run is not None else good), None
+        else:
+            good = None
+        if good is not None and waited - good >= hold:
             return True
         sleep(2)
         waited += 2
     return False
+
+
+def unfinished(data: Path = None) -> tuple[str, str] | None:
+    """(the commit before, the commit it was moving to) of an update that never reported how it ended."""
+    s = status(data) or {}
+    if s.get("state") == "installing":
+        before, target = s.get("current"), s.get("target")
+    elif s.get("state") == "restarting":
+        before, target = s.get("previous"), s.get("current")
+    else:
+        return None
+    ok = all(isinstance(c, str) and re.fullmatch(r"[0-9a-f]{40}", c) for c in (before, target))
+    return (before, target) if ok else None
+
+
+def resume(data: Path = None) -> bool:
+    """Called as the display starts. If an update was cut short (the power went between the new code
+    going in and the check that it runs), ask the updater to run again; it finishes the job or puts
+    the old version back. True if it asked. While the updater itself is running (it has just
+    restarted us), there is nothing to do."""
+    data = data or DATA
+    if unfinished(data) is None:
+        return False
+    with open(data / "update.lock", "a") as lock:
+        try:
+            fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except OSError:
+            return False                                     # the updater is at work, and watching us
+        request_path(data).write_text(json.dumps({"at": _now(), "by": "resume"}))   # the status stays: it says where to pick up
+    return True
 
 
 def _install(old: str, new: str, repo: Path, pip) -> None:
@@ -182,19 +239,29 @@ def apply(config: dict, repo: Path = REPO, data: Path = None, restart=restart_se
         except OSError:
             return report("busy", "An update is already running", data=data)
         request_path(data).unlink(missing_ok=True)
-        old = _git("rev-parse", "HEAD", repo=repo)
+        head = old = _git("rev-parse", "HEAD", repo=repo)
+        cut_short = unfinished(data)   # the last update never finished (power cut): pick it up, with its rollback
+        if cut_short:
+            try:
+                _git("cat-file", "-e", f"{cut_short[0]}^{{commit}}", repo=repo)
+                old = cut_short[0]
+            except RuntimeError:
+                cut_short = None
         try:
-            report("fetching", f"Fetching {branch} from {url}", data=data, current=old)
+            if not cut_short:          # (its status says where it stopped: keep that until this run gets further)
+                report("fetching", f"Fetching {branch} from {url}", data=data, current=old)
             _git("fetch", "--quiet", "--", url, f"refs/heads/{branch}", repo=repo)
             new = _git("rev-parse", "FETCH_HEAD", repo=repo)
         except (RuntimeError, OSError, subprocess.TimeoutExpired) as error:
-            return report("failed", f"Couldn't fetch the update: {error}", data=data, current=old)
-        if new == old:
+            if not cut_short:
+                return report("failed", f"Couldn't fetch the update: {error}", data=data, current=old)
+            new = cut_short[1]         # no network now: finish with what was fetched then
+        if new == head and not cut_short:
             return report("up_to_date", "Already up to date", data=data, current=old)
         try:
             report("installing", f"Installing {new[:8]}", data=data, current=old, target=new)
             _git("reset", "--hard", "--quiet", new, repo=repo)
-            _install(old, new, repo, pip)
+            _install(old if new != old else head, new, repo, pip)
             report("restarting", "Restarting the display", data=data, current=new, previous=old)
             restart()
             if health():

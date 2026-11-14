@@ -11,6 +11,7 @@ import datetime as dt
 import io
 import logging
 import os
+import secrets
 import threading
 import time
 from dataclasses import asdict
@@ -26,6 +27,8 @@ class Live:
     def __init__(self):
         self._lock = threading.Lock()
         self.beat_at = time.monotonic()   # the player's last sign of life: every frame, and ``beat``
+        self.boot = secrets.token_hex(4)  # this run of the display: a restart is a new one (see ``health``)
+        self.panel_up = False             # the panel has started, so frames can be shown
         self._frame: Image.Image | None = None
         self._public: Image.Image | None = None   # the same without covering screens (bongo/hub.py)
         self.entry = None           # the Entry on the panel now
@@ -57,6 +60,12 @@ class Live:
     def beat(self) -> None:
         """The player is alive though it has no frame to show (waiting for a config that can play)."""
         self.beat_at = time.monotonic()
+
+    def health(self) -> dict:
+        """For the updater (bongo/update.py): which run this is, whether the panel started, and how
+        long since the player last showed a frame. The dashboard answers before the panel starts, so
+        an answer alone doesn't mean the display works."""
+        return {"boot": self.boot, "panel": self.panel_up, "quiet": round(time.monotonic() - self.beat_at, 1)}
 
     def watch(self, stop: threading.Event, limit: float = FROZEN_SECONDS, every: float = 5.0, frozen=None) -> None:
         """The watchdog, on its own thread. A style that never returns freezes the panel while the

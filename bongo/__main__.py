@@ -130,6 +130,14 @@ def main(argv=None) -> int:
     run.add_argument("--config", default=str(cfg.DEFAULT_PATH))
     args = parser.parse_args(argv)
     logging.basicConfig(level=logging.INFO, format="%(levelname)s %(name)s: %(message)s")
+    if args.command == "run":   # first of all, before anything in a half-installed version can stop us getting here
+        try:
+            from bongo import update
+
+            if update.resume():
+                logging.warning("an update was cut short (a power cut?): asked the updater to finish it, or put the old version back")
+        except Exception as error:
+            logging.warning("couldn't check for an unfinished update: %s", error)
     modules = discover()
 
     if args.command == "list":
@@ -222,6 +230,7 @@ def main(argv=None) -> int:
         _start_dashboard(config, modules, live, Path(args.config))
     panel = Fader(_hardware(config))  # day <-> night brightness glides instead of jumping
     import threading
+    live.panel_up = True
     live.beat()   # starting up doesn't count against it
     threading.Thread(target=live.watch, args=(threading.Event(),), daemon=True, name="watchdog").start()
     good, first = None, True  # last config that played; the boot screen only plays at start-up
