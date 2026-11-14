@@ -1,7 +1,12 @@
 """PIN pairing for the dashboard, as in v2: the panel shows a PIN, the browser types it in.
 
 Paired browsers get a long random token in a cookie; only its SHA-256 is stored. Five wrong
-PINs lock pairing for a minute. A new PIN is drawn after every successful pairing.
+PINs lock pairing for a minute and draw a new PIN. A new PIN is drawn after every successful pairing.
+
+Asking for the PIN needs no pairing (how else would a first browser get in?), so anything on the
+network can ask. It can't keep the panel covered that way: one showing lasts PIN_MOST at the most
+however often it's asked for, and each showing that ends with nobody pairing makes strangers wait
+longer before the next (REST_SECONDS, doubling up to REST_MOST). A paired browser never waits.
 """
 from __future__ import annotations
 
@@ -19,6 +24,10 @@ from PIL import Image
 
 MAX_DEVICES = 8
 PIN_SECONDS = 120
+PIN_MOST = 300                       # one showing, however many times it is asked for again
+REST_SECONDS, REST_MOST = 30, 3600   # between showings nobody paired from: 30 s, doubling each time, to an hour
+FORGET_SECONDS = 6 * 3600            # ...counted afresh once the panel has been left alone this long
+                                     # (all of it is forgotten when the display restarts: an owner is never shut out)
 LOCK_AFTER, LOCK_SECONDS = 5, 60
 
 
@@ -32,6 +41,9 @@ class Pairing:
         self._lock = threading.Lock()
         self.pin = self._new_pin()
         self.showing_until = 0.0
+        self.shown_at = 0.0     # when this showing began (it can be kept up, but only to shown_at + PIN_MOST)
+        self.wasted = 0         # showings in a row that ended with nobody pairing
+        self.rest_until = 0.0   # ...and so when a browser that isn't paired may next ask
         self.failures, self.locked_until = 0, 0.0
 
     @staticmethod
@@ -54,13 +66,26 @@ class Pairing:
         os.replace(tmp, self.path)
 
     # -- the flow ------------------------------------------------------------------------
-    def show_pin(self) -> None:
+    def show_pin(self, paired: bool = True) -> float:
         """Put a PIN on the panel for PIN_SECONDS. A fresh PIN each time it appears; pressing
-        again while it's up just keeps it there, so nobody can swap it under someone typing."""
+        again while it's up just keeps it there (to PIN_MOST in all), so nobody can swap it under
+        someone typing. Returns 0, or the seconds a browser that isn't ``paired`` must wait first:
+        the panel isn't anyone's to cover for as long as they like."""
         with self._lock:
+            now = self.clock()
             if not self.showing:
-                self.pin = self._new_pin()
-            self.showing_until = self.clock() + PIN_SECONDS
+                if self.showing_until:                       # the last showing ran out with nobody pairing
+                    ended = self.showing_until
+                    self.wasted = 1 if now - ended > FORGET_SECONDS else self.wasted + 1
+                    self.showing_until = 0.0
+                    self.rest_until = ended + min(REST_MOST, REST_SECONDS * 2 ** (self.wasted - 1))
+                if not paired and now < self.rest_until:
+                    return self.rest_until - now
+                if now - self.rest_until > FORGET_SECONDS:
+                    self.wasted = 0
+                self.pin, self.shown_at = self._new_pin(), now
+            self.showing_until = max(self.showing_until, min(now + PIN_SECONDS, self.shown_at + PIN_MOST))
+            return 0.0
 
     @property
     def showing(self) -> bool:
@@ -78,6 +103,7 @@ class Pairing:
                 self.failures += 1
                 if self.failures >= LOCK_AFTER:
                     self.failures, self.locked_until = 0, now + LOCK_SECONDS
+                    self.pin = self._new_pin()   # five guesses at this one were enough: the panel shows the next
                     raise PermissionError(f"Too many wrong PINs. Pairing is paused for {LOCK_SECONDS} s.")
                 raise PermissionError(f"That PIN didn't match. {LOCK_AFTER - self.failures} tries left.")
             devices = self.devices()
@@ -89,6 +115,7 @@ class Pairing:
                             "hash": _hash(token), "paired": stamp, "seen": stamp})
             self._save(devices)
             self.failures, self.pin, self.showing_until = 0, self._new_pin(), 0.0
+            self.wasted, self.rest_until = 0, 0.0
             return token
 
     def check(self, token: str | None) -> dict | None:

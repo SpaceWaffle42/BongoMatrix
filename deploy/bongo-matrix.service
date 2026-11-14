@@ -1,7 +1,9 @@
 [Unit]
 Description=Bongo Matrix v3 display
-After=network-online.target
-Wants=network-online.target
+# Not network-online.target: that holds start-up until an address arrives (up to a minute or two
+# with no Wi-Fi, which is exactly when the panel must show the setup hotspot). The display copes
+# with no network and picks it up when it comes.
+After=network.target
 
 [Service]
 # Root is needed for GPIO access by rgbmatrix.

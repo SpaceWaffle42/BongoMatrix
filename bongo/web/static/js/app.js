@@ -3,7 +3,8 @@ import { DEMO, hooks, get, put } from './api.js';
 import { h, icon, toast, fail, clone, same } from './ui.js';
 
 /** Shared state. `draft` is the locally edited playlist; `config.playlist` is what the Matrix has. */
-export const S = { state: null, config: null, modules: null, draft: null, problems: [], online: true, polledAt: 0 };
+export const S = { state: null, config: null, modules: null, draft: null, problems: [], online: true, polledAt: 0,
+  revs: null };   // revs: the Matrix's mark for each config section as this page loaded it (see putConfig)
 export const bus = new EventTarget();
 const emit = (type) => bus.dispatchEvent(new Event(type));
 
@@ -97,7 +98,11 @@ export function normalise(entry) {
     settings: clone(entry.settings || {}), enabled: entry.enabled !== false };
 }
 export async function loadAll() {
+  // the marks first: if another device saves in between, they are older than the config, and the next
+  // save here asks rather than overwrites (the safe way round)
+  const revs = await get('/api/config/revisions').catch(() => null);
   const [config, modules, state] = await Promise.all([get('/api/config'), get('/api/modules'), get('/api/state')]);
+  S.revs = revs;
   S.config = config; S.modules = modules; S.state = state; S.online = true; S.polledAt = performance.now();
   if (!S.draft) S.draft = (config.playlist || []).map(normalise);
   paintHeader();
@@ -114,11 +119,32 @@ export const dirtyCount = () => {
 };
 export function draftChanged() { S.problems = []; paintHeader(); emit('draft'); }
 
+const SECTIONS = { playlist: 'playlist', safe_area: 'safe area', sleep: 'sleep schedule', splash: 'splash', pet: 'pet',
+  location: 'location', update: 'update source', name: 'name', timezone: 'time zone' };
+/** Save part of the config. If another phone or tab has saved the same part since this page loaded
+ *  it, the Matrix says so (409) and we ask before replacing their work with ours. */
+async function putConfig(part) {
+  const base = {};
+  if (S.revs) for (const key of Object.keys(part)) base[key] = S.revs[key] ?? '-';   // '-': it wasn't set when we loaded
+  let res;
+  try { res = await put('/api/config', Object.keys(base).length ? { ...part, _base: base } : part); }
+  catch (err) {
+    if (err.status !== 409) throw err;
+    const what = (err.data?.conflict || []).map((k) => SECTIONS[k] || k.replace(/_/g, ' ')).join(', ') || 'settings';
+    if (!confirm(`The ${what} on the Matrix changed since this page loaded it (saved from another phone or tab).\n\nOK: save yours over it.\nCancel: leave theirs. Reload this page to see it.`)) {
+      throw Object.assign(new Error('Not saved: it was changed on another device. Reload to see the latest.'), { status: 409, kept: true });
+    }
+    res = await put('/api/config', part);
+  }
+  if (res?.revisions) S.revs = res.revisions;
+  return res;
+}
+
 export async function applyDraft() {
   const playlist = S.draft.map((e) => ({ module: e.module, style: e.style || undefined, seconds: e.seconds,
     settings: e.settings, enabled: e.enabled }));
   try {
-    const res = await put('/api/config', { playlist });
+    const res = await putConfig({ playlist });
     S.config.playlist = clone(playlist);
     S.problems = [];
     toast(res?.restart_needed ? 'Saved. Panel size and wiring changes take effect after a restart (Settings > Device > Restart).' : 'Playlist applied', 'success', 5000);
@@ -126,6 +152,7 @@ export async function applyDraft() {
     return true;
   } catch (err) {
     if (err.status === 422) { S.problems = err.data?.problems || [err.message]; toast('The Matrix rejected the playlist. See the problems listed.', 'error'); emit('draft'); }
+    else if (err.kept) toast(err.message, 'error', 6000);
     else fail("Couldn't save")(err);
     return false;
   }
@@ -139,13 +166,14 @@ export function discardDraft() {
 /** Save part of the config (safe area, schedule...). Returns true on success. */
 export async function saveConfig(part, what = 'Settings') {
   try {
-    const res = await put('/api/config', part);
+    const res = await putConfig(part);
     Object.assign(S.config, clone(part));
     if (res?.restart_needed) toast('Saved. Panel size and wiring changes take effect after a restart (Settings > Device > Restart).', 'success', 8000);
     else toast(`${what} saved`, 'success');
     return true;
   } catch (err) {
-    fail(`Couldn't save ${what.toLowerCase()}`)(err);
+    if (err.kept) toast(err.message, 'error', 6000);
+    else fail(`Couldn't save ${what.toLowerCase()}`)(err);
     return false;
   }
 }

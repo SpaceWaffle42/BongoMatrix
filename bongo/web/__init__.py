@@ -163,7 +163,10 @@ def create_app(*, modules, live, pairing, config_path, logs: LogBuffer | None = 
         if time.time() - last_show[0] < 5:
             abort(429, "Wait a moment before asking again.")
         last_show[0] = time.time()
-        pairing.show_pin()
+        wait = pairing.show_pin(paired=pairing.check(request.cookies.get(COOKIE)) is not None)
+        if wait:   # shown again and again with nobody pairing: the panel gets a rest (bongo/pairing.py)
+            minutes = math.ceil(wait / 60)
+            abort(429, f"The PIN has been shown several times and nobody paired. Try again in {minutes} minute{'s' if minutes > 1 else ''}.")
         return jsonify(ok=True, seconds=120)
 
     @app.post("/api/pair")
@@ -626,9 +629,31 @@ def create_app(*, modules, live, pairing, config_path, logs: LogBuffer | None = 
     def get_config():
         return jsonify(load())
 
+    def revisions(config) -> dict:
+        """A short mark for each section of the config as it is saved now. A page keeps the marks it
+        loaded and sends them back with a save, so a save made from an old copy can be told apart."""
+        return {key: hashlib.sha1(json.dumps(value, sort_keys=True).encode()).hexdigest()[:12]
+                for key, value in config.items()}
+
+    @app.get("/api/config/revisions")
+    def get_revisions():
+        return jsonify(revisions(load()))
+
     @app.put("/api/config")
     def put_config():
         current, data = load(), body()
+        # "_base": the marks of the sections this page loaded. A section that has changed since (another
+        # phone or tab saved it) isn't silently replaced: the page is told, and asks its user. A save
+        # without "_base" (the page chose to overwrite; an older page; a script) goes through as before.
+        base = data.pop("_base", None)
+        if base is not None:
+            if not isinstance(base, dict):
+                return jsonify(problems=["_base: send an object"]), 422
+            now = revisions(current)
+            changed = sorted(key for key in data if key in base and base[key] != now.get(key, "-"))
+            if changed:
+                return jsonify(error="Changed on another device since this page loaded: " + ", ".join(changed),
+                               conflict=changed, revisions=now), 409
         for key in ("panel", "safe_area", "web"):   # merged key by key below: never replaced by null or a list
             if key in data and not isinstance(data[key], dict):
                 return jsonify(problems=[f"{key}: send an object"]), 422
@@ -653,7 +678,7 @@ def create_app(*, modules, live, pairing, config_path, logs: LogBuffer | None = 
         if problems:
             return jsonify(problems=problems), 422
         if merged == current:
-            return jsonify(ok=True, restart_needed=restart_needed(current), unchanged=True)
+            return jsonify(ok=True, restart_needed=restart_needed(current), unchanged=True, revisions=revisions(current))
         problems = verify_new(current, merged, modules)
         if problems:
             return jsonify(problems=problems), 422
@@ -661,7 +686,7 @@ def create_app(*, modules, live, pairing, config_path, logs: LogBuffer | None = 
         logging.getLogger("bongo.config").info("config saved by %s",
                                                (pairing.check(request.cookies.get(COOKIE)) or {}).get("name"))
         live.apply_config()
-        return jsonify(ok=True, restart_needed=restart_needed(merged))
+        return jsonify(ok=True, restart_needed=restart_needed(merged), revisions=revisions(load()))
 
     @lru_cache(maxsize=12)
     def preview_style(module, style, settings_json, width, height, pet, home_json="null"):
