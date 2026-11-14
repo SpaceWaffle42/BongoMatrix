@@ -59,6 +59,16 @@ def sky(code: int, is_day: bool, width: int, height: int) -> Image.Image:
 SIZES = (20, 16, 14, 11)   # the sizes every icon is drawn at: the ones the screens use
 
 
+def icon_size(room: int, most: int) -> int | None:
+    """The size to draw an icon in ``room`` pixels, at most ``most``: the biggest drawn size that fits, so on a
+    smaller screen (a safe area) the icon shrinks before any text has to. None when even the smallest
+    drawing (11) doesn't fit: the screen then makes room some other way."""
+    return next((s for s in SIZES if s <= most and INK[s] <= room), None)
+
+
+INK = {20: 19, 16: 16, 14: 14, 11: 11}   # rows each drawing really uses (the 20s keep their last row clear)
+
+
 def icon(code: int, is_day: bool, size: int, phase: float = 0.0) -> Image.Image:
     """The RGBA icon for a weather code, ``size`` pixels square, at ``phase`` seconds into its movement (the
     sun's rays, falling rain and snow, drifting fog, lightning).
