@@ -38,12 +38,17 @@ class _Weather(Style):
         return self.draw(reading, now)
 
     def waiting(self, now):
+        w, h = self.ctx.width, self.ctx.height
         img = self.backdrop(3, True)
-        cloud = icon(3, True, 14, now.timestamp())
-        img.paste(cloud, (25, 3), cloud)
+        font = self.small if self.small.width("WEATHER...") <= w else self.ctx.fonts("tom-thumb")
+        top, baseline = max(0, 3 - (32 - h + 1) // 2), h - 5     # the cloud 3 rows down, the word 5 up, on a full panel
+        if top + 14 + 1 <= baseline - font.cap:
+            cloud = icon(3, True, 14, now.timestamp())
+            img.paste(cloud, ((w - 14) // 2, top), cloud)
+        else:                                                   # no room for both: the word alone, centred
+            baseline = (h + font.cap) // 2
         dots = "." * (int(now.timestamp() * 2) % 4)
-        text = f"WEATHER{dots}"
-        self.small.draw(img, 15, 27, text, self.DIM)
+        font.draw(img, (w - font.width("WEATHER") + 1) // 2, baseline, f"WEATHER{dots}", self.DIM)
         return img
 
     def place_icon(self, img, reading_code, is_day, size, x, y, now):

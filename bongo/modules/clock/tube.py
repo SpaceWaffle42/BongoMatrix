@@ -12,7 +12,7 @@ from bongo.module import Style
 
 from .common import HOURS, colon_on, digits, scaled, tall
 
-W, H = 64, 32
+SIZE = (64, 32)     # the size it is designed at; a safe area gets slimmer tubes drawn to fit
 FADE = 0.5          # seconds a cathode takes to hand over to the next
 
 
@@ -25,9 +25,32 @@ class Nixie(Style):
     basic = ("hours",)
     SECONDS = False
 
+    DIGITS = (("9x18B", 2), ("6x13B", 2), ("9x18B", 1), ("6x10", 1), ("tom-thumb", 1))   # font, times taller
+    TUBES = ((4, 2, 4), (3, 2, 3), (2, 1, 3), (2, 1, 2), (2, 1, 1))   # room round the digit, gap, colon gap
+
     def setup(self):
-        font = self.ctx.fonts("6x10" if self.SECONDS else "9x18B")   # 5 wide, open counters, for the slim tubes
-        self.glyphs = {ch: np.asarray(tall(font, ch, 3 if self.SECONDS else 2), float) / 255 for ch in "0123456789"}
+        self.sets = {}
+        self.glyphs = self.digits(*self.DIGITS[0])
+
+    def digits(self, name, scale):
+        """The ten digits in ``name``, ``scale`` times taller, as 0-1 arrays (kept once made)."""
+        if (name, scale) not in self.sets:
+            font = self.ctx.fonts(name)
+            self.sets[name, scale] = {ch: np.asarray(tall(font, ch, scale), float) / 255 for ch in "0123456789"}
+        return self.sets[name, scale]
+
+    def fit(self, n, colons, W, H):
+        """(digits, tube width, gap, colon gap) for ``n`` tubes in W x H: the full-size tubes, else slimmer
+        and closer ones, else smaller digits. None when nothing fits (then it's drawn full size and cropped)."""
+        for name, scale in self.DIGITS:
+            glyphs = self.digits(name, scale)
+            gh, gw = (max(g.shape[k] for g in glyphs.values()) for k in (0, 1))
+            if gh + 2 > H:
+                continue
+            for room, gap, colgap in self.TUBES:
+                if n * (gw + room) + (n - 1) * gap + colgap * colons <= W:
+                    return glyphs, gw + room, gap, colgap
+        return None
 
     def shown(self, now):
         s = digits(now, self.settings["hours"], seconds=self.SECONDS)
@@ -37,14 +60,22 @@ class Nixie(Style):
         s, before = self.shown(now), self.shown(now - dt.timedelta(seconds=1))
         p = min(1.0, (now.microsecond / 1e6) / FADE)
         n = len(s)
-        tw, gap, colgap = (8, 1, 3) if self.SECONDS else (12, 2, 4)
         pairs = [n - 3 - 2 * k for k in range((n - 1) // 2)]       # where the colons go (after these tubes)
+        W, H = self.ctx.width, self.ctx.height
+        fitted = self.fit(n, len(pairs), W, H)
+        if fitted is None:
+            W, H = SIZE
+            fitted = self.fit(n, len(pairs), W, H)
+        self.glyphs, tw, gap, colgap = fitted
         total = n * tw + (n - 1) * gap + colgap * len(pairs)
+        self.size = (W, H)
         x0 = (W - total) // 2
         base = np.zeros((H, W, 3))
         light = np.zeros((H, W))
         tick = now.timestamp()
-        top, bottom = 3, 29                                         # the glass
+        glass = min(26, self.glyphs["8"].shape[0] + 6)             # rows 3 to 29 of a full panel
+        top = max(0, (H - glass) // 2)
+        bottom = min(H - 1, top + glass)
         x = x0
         lit_rows = None
         self.inside = np.zeros((H, W), bool)
@@ -73,7 +104,8 @@ class Nixie(Style):
             if i in pairs:                                          # the colon, between tube pairs
                 cx = x - gap + (gap + colgap) // 2
                 mid = (lit_rows[0] + lit_rows[1]) / 2
-                for yy in (round(mid - 4), round(mid + 4)):
+                apart = min(4, max(1, (lit_rows[1] - lit_rows[0]) // 4))
+                for yy in (round(mid - apart), round(mid + apart)):
                     light[yy, cx] = 0.9 if colon_on(now) else 0.15
                 x += colgap
         core = light[..., None] * np.array([255, 150, 60])
@@ -87,6 +119,7 @@ class Nixie(Style):
 
     def place(self, glyph, x, tw):
         """A glyph centred in the tube at ``x`` as a full-panel layer."""
+        W, H = self.size
         out = np.zeros((H, W))
         gh, gw = glyph.shape
         gx = x + (tw - gw) // 2
@@ -98,3 +131,5 @@ class Nixie(Style):
 class NixieSeconds(Nixie):
     """Nixie with seconds: six slimmer tubes for hours, minutes and seconds."""
     SECONDS = True
+    DIGITS = (("6x10", 3), ("6x10", 2), ("6x10", 1), ("tom-thumb", 1))   # 5 wide, open counters, for the slim tubes
+    TUBES = ((3, 1, 3), (2, 1, 2), (2, 1, 1), (2, 0, 1))

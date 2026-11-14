@@ -115,10 +115,15 @@ class Base(Style):
         return img
 
     def too_small(self, img):
-        self.small.draw(img, 1, 6, "QR CODE", self.AMBER)
-        self.small.draw(img, 1, 12, "NEEDS A", self.WHITE)
-        self.small.draw(img, 1, 18, "BIGGER", self.WHITE)
-        self.small.draw(img, 1, 24, "SCREEN", self.WHITE)
+        """Said on the panel when the code can't fit the safe area (a code can't be shrunk): four
+        lines where there are the rows for them, two where there aren't, centred."""
+        lines = ["QR CODE", "NEEDS A", "BIGGER", "SCREEN"] if img.height >= 24 else ["QR: NEEDS", "MORE ROOM"]
+        if max(self.small.width(line) for line in lines) > img.width:
+            lines = ["NO ROOM", "FOR QR"]
+        top = (img.height - 6 * len(lines) + 1) // 2
+        for i, line in enumerate(lines):
+            self.small.draw(img, (img.width - self.small.width(line)) // 2, top + 5 + 6 * i, line,
+                            self.AMBER if i == 0 else self.WHITE)
         return img
 
 
@@ -168,15 +173,19 @@ class TwoCodes(Base):
     def render(self, now):
         s, w, h = self.settings, self.ctx.width, self.ctx.height
         img = Image.new("RGB", (w, h), self.BG)
-        a = codes.fitted(codes.link(s["url"]), h - 5)
-        b = codes.fitted(codes.link(s["second_url"]), h - 5)
-        if a is None or b is None or a.width + b.width + 4 > w:
+        for labels in (5, 0):   # the labels' rows under the codes; a safe area too short for both keeps the codes
+            a = codes.fitted(codes.link(s["url"]), h - labels)
+            b = codes.fitted(codes.link(s["second_url"]), h - labels)
+            if a is not None and b is not None and a.width + b.width + 4 <= w:
+                break
+        else:
             return self.too_small(img)
         gap = (w - a.width - b.width) // 3
         xa, xb = gap, w - gap - b.width
-        img.paste(a, (xa, 0))
-        img.paste(b, (xb, 0))
-        for x, code, text in ((xa, a, s["label"]), (xb, b, s["second_label"])):   # capitals only: 5 rows, clear of the codes
+        top = (h - labels - max(a.height, b.height)) // 2 if not labels else 0
+        img.paste(a, (xa, top))
+        img.paste(b, (xb, top))
+        for x, code, text in ((xa, a, s["label"]), (xb, b, s["second_label"])) if labels else ():   # capitals only: 5 rows, clear of the codes
             word = text.upper()
             while word and self.small.width(word) > code.width:
                 word = word[:-1]
@@ -250,16 +259,19 @@ class Corner(Base):
     def render(self, now):
         w, h = self.ctx.width, self.ctx.height
         img = Image.new("RGBA", (w, h), (0, 0, 0, 0))
-        b = codes.block(codes.link(self.settings["url"]), 2)
-        if b.height + 2 > h or b.width + 2 > w:
+        # a 2-module quiet zone and a black moat on a full panel; inside a safe area a 1-module zone, then
+        # no moat, before giving up (a code can't be shrunk: one LED is one module)
+        for quiet, moat in ((2, 1), (1, 1), (1, 0)):
+            b = codes.block(codes.link(self.settings["url"]), quiet)
+            if b.height + 2 * moat <= h and b.width + 2 * moat <= w:
+                break
+        else:
             return img
         corner = self.settings["corner"]
-        x = w - b.width if corner.endswith("right") else 0
-        y = h - b.height if corner.startswith("bottom") else 0
-        x = max(1, x - 1) if corner.endswith("right") else min(w - b.width - 1, x + 1)
-        y = max(1, y - 1) if corner.startswith("bottom") else min(h - b.height - 1, y + 1)
+        x = w - b.width - moat if corner.endswith("right") else moat
+        y = h - b.height - moat if corner.startswith("bottom") else moat
         img.paste((0, 0, 0, 120), (0, 0, w, h))                 # the screen behind dims a little, so cameras find the code
-        img.paste((0, 0, 0, 255), (x - 1, y - 1, x + b.width + 1, y + b.height + 1))   # a black moat round it
+        img.paste((0, 0, 0, 255), (x - moat, y - moat, x + b.width + moat, y + b.height + moat))   # a black moat round it
         img.paste(b.convert("RGBA"), (x, y))
         return img
 

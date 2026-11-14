@@ -7,9 +7,6 @@ from PIL import Image
 
 from bongo.module import Style
 
-from .common import scaled
-
-W, H = 64, 32
 HOUR_WORDS = ["TWELVE", "ONE", "TWO", "THREE", "FOUR", "FIVE", "SIX", "SEVEN", "EIGHT", "NINE", "TEN", "ELEVEN"]
 MINUTE_WORDS = {5: "FIVE", 10: "TEN", 15: "QUARTER", 20: "TWENTY", 25: "TWENTY FIVE", 30: "HALF"}
 
@@ -61,15 +58,24 @@ class WordGrid(Style):
     basic = ("colour",)
 
     def render(self, now):
-        img = Image.new("RGB", (W, H), _rgb(self.settings["background"]))
+        w, h = self.ctx.width, self.ctx.height
+        img = Image.new("RGB", (w, h), _rgb(self.settings["background"]))
+        on = _rgb(self.settings["colour"])
+        if w < GRID_W or h < GRID_H:   # the grid has no room to spare: a smaller safe area gets just its lit words
+            words = fitted(lines(now), w, h, self.ctx.fonts("tom-thumb"))
+            draw_lines(img, self.ctx.fonts, words, words, [on] * len(words))
+            return img
         font = self.ctx.fonts("tom-thumb")
         lit = lit_cells(now)
-        on = _rgb(self.settings["colour"])
         off = _rgb(self.settings["unlit_colour"])
+        x0, y0 = (w - GRID_W) // 2, (h - GRID_H) // 2
         for r, row in enumerate(GRID):
             for c, ch in enumerate(row):
-                font.draw(img, c * 4, 6 + r * 5, ch, on if (r, c) in lit else off)
-        return scaled(img, self.ctx.width, self.ctx.height)
+                font.draw(img, x0 + c * 4, y0 + 5 + r * 5, ch, on if (r, c) in lit else off)
+        return img
+
+
+GRID_W, GRID_H = 16 * 4 - 1, 6 * 5   # the letters' own size: 3 x 5 each, a column between, rows touching
 
 
 def lines(now: dt.datetime) -> list[str]:
@@ -77,6 +83,29 @@ def lines(now: dt.datetime) -> list[str]:
     if link == "OCLOCK":
         return [hour, "O'CLOCK"]
     return [minutes, link, hour]
+
+
+SHORT = {"FIVE": "5", "TEN": "10", "QUARTER": "15", "TWENTY": "20", "TWENTY FIVE": "25", "HALF": "30"}
+
+
+def fitted(words: list[str], w: int, h: int, small) -> list[str]:
+    """``words`` as they fit ``w`` x ``h``: where three lines of the small font have no room (a very small
+    safe area), two lines with the minutes as a number: "25 TO" / "SEVEN"."""
+    if len(words) == 3 and (h < 18 or small.width(words[0]) > w - 2):
+        return [f"{SHORT[words[0]]} {words[1]}", words[2]]
+    return words
+
+
+def draw_lines(img, fonts, words, shown, colours) -> None:
+    """Two or three centred lines, spaced to fit the canvas, all in one font: 5x7 letters where every
+    line has the room, else the 3x5 font. ``shown``: how much of each line is typed so far."""
+    w, h = img.size
+    pitch = min(10 if len(words) == 3 else 12, h // len(words))
+    big = fonts("5x7")
+    font = big if pitch >= 8 and all(big.width(line) <= w - 2 for line in words) else fonts("tom-thumb")
+    for i, (line, show, colour) in enumerate(zip(words, shown, colours)):
+        baseline = (h - pitch * len(words)) // 2 + i * pitch + font.cap + min(2, (pitch - font.cap + 1) // 2)
+        font.draw(img, (w - font.width(line)) // 2, baseline, show, colour)
 
 
 class WordLines(Style):
@@ -89,26 +118,22 @@ class WordLines(Style):
     def render(self, now):
         s = self.settings
         colours = [_rgb(s["minutes_colour"]), _rgb(s["link_colour"]), _rgb(s["hour_colour"])]
-        img = Image.new("RGB", (W, H), _rgb(s["background"]))
-        small, f57 = self.ctx.fonts("tom-thumb"), self.ctx.fonts("5x7")
-        words = lines(now)
+        img = Image.new("RGB", (self.ctx.width, self.ctx.height), _rgb(s["background"]))
+        small = self.ctx.fonts("tom-thumb")
+        words = fitted(lines(now), img.width, img.height, small)
         # when did these words start showing? (the phrase changes at x:x2:30, x:x7:30)
         since_ms = ((now.minute * 60 + now.second + 150) % 300) * 1000 + now.microsecond // 1000
-        before = lines(now - dt.timedelta(milliseconds=since_ms + 1000))
+        before = fitted(lines(now - dt.timedelta(milliseconds=since_ms + 1000)), img.width, img.height, small)
         typed = since_ms // round(self.TYPE * 1000)       # whole letters, every 100 ms exactly
-        pitch = 10 if len(words) == 3 else 12
-        top = (H - pitch * len(words)) // 2 + 8
-        done = 0
+        done, shown = 0, []
         for i, line in enumerate(words):
-            font = f57 if f57.width(line) <= W - 2 else small
             if len(before) == len(words) and before[i] == line:
-                show = line                                  # an unchanged line stays put; only new words type in
+                shown.append(line)                           # an unchanged line stays put; only new words type in
             else:
-                show = line[:max(0, min(len(line), int(typed - done)))]
+                shown.append(line[:max(0, min(len(line), int(typed - done)))])
                 done += len(line) + 2
-            x = (W - font.width(line)) // 2
-            font.draw(img, x, top + i * pitch, show, colours[i if len(words) == 3 else (0, 2)[i]])
-        return scaled(img, self.ctx.width, self.ctx.height)
+        draw_lines(img, self.ctx.fonts, words, shown, colours if len(words) == 3 else [colours[0], colours[2]])
+        return img
 
 
 def _rgb(hex_colour: str):

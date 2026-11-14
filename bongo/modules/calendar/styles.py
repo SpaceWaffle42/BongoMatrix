@@ -309,19 +309,29 @@ class DateLine(_Base):
         date = f"{today.day} {today:%B}".upper()
         if self.small.width(date) > w - 2:
             date = f"{today.day} {today:%b}".upper()
-        f610.draw(img, (w - f610.width(weekday)) // 2, 9, weekday, self.accent)
-        self.small.draw(img, (w - self.small.width(date)) // 2, 19, date, self.ink)
         items = self.upcoming(today, 1)
+        # baselines of the weekday, the date and the line underneath: spread out with a rule on a full
+        # panel, closed up in a shorter safe area, and just the two lines, centred, where three won't fit
         if items and h >= 30:
+            first, second, third, rule = 9, 19, 30, 22
+        elif items and h >= 24:
+            first, second, third, rule = 8, 16, h, None
+        else:
+            items, third, rule = [], None, None
+            first, second = (9, 19) if h >= 30 else ((h - 16) // 2 + 8, (h - 16) // 2 + 16)
+        f610.draw(img, (w - f610.width(weekday)) // 2, first, weekday, self.accent)
+        self.small.draw(img, (w - self.small.width(date)) // 2, second, date, self.ink)
+        if items:
             d, title, own, _ = items[0]
             days = (d - today).days
             text = title.upper() if days == 0 else f"{title.upper()} - {when(days)}"
-            ImageDraw.Draw(img).line([(8, 22), (w - 9, 22)], fill=scale(self.ink, 0.15))
+            if rule:
+                ImageDraw.Draw(img).line([(8, rule), (w - 9, rule)], fill=scale(self.ink, 0.15))
             ink = self.event_ink if own else scale(self.ink, 0.7)
             if self.tiny.width(text) <= w - 2:
-                self.tiny.draw(img, (w - self.tiny.width(text)) // 2, 30, text, ink)
+                self.tiny.draw(img, (w - self.tiny.width(text)) // 2, third, text, ink)
             else:
-                Page.marquee(self, img, 0, 30, w, text, ink, now)
+                Page.marquee(self, img, 0, third, w, text, ink, now)
         return img
 
 

@@ -1,7 +1,7 @@
 """Clock: a ticking DD:HH:MM:SS (HH:MM:SS under a day) with the label above."""
 from bongo.module import Style
 
-from .common import Base
+from .common import Base, cap
 
 
 class Clock(Base, Style):
@@ -35,7 +35,19 @@ class Clock(Base, Style):
         d, r = divmod(left, 86400)
         parts = [r // 3600, r % 3600 // 60, r % 60]
         parts = [d] + parts if d else parts
-        font = self.mid if d else self.big
-        items = self.line(self.small, self.title, 8, self.accent, now)
-        items += self.groups(font, parts, self.ctx.height - 9, now)
+        w, h = self.ctx.width, self.ctx.height
+
+        def wide(f, n):
+            return f.width("00") * n + 3 * (n - 1)
+        # the usual font, else a smaller one that fits the safe area; with days, the seconds go first
+        font = next((f for f in (self.mid if d else self.big, self.ctx.fonts("5x7")) if wide(f, len(parts)) <= w), None)
+        if font is None:
+            font = next((f for f in (self.mid, self.ctx.fonts("5x7"), self.small) if wide(f, len(parts) - 1) <= w), self.small)
+            parts = parts[:-1]
+        baseline = h - max(2, 9 - (32 - h) // 2)             # 9 rows clear below on a full panel, fewer in a short one
+        if h >= 20 and baseline - cap(font) >= 9:            # room for the label above
+            items = self.line(self.small, self.title, 8, self.accent, now)
+        else:
+            items, baseline = [], (h + cap(font)) // 2
+        items += self.groups(font, parts, baseline, now)
         return self.paint(items, progress)

@@ -28,7 +28,9 @@ class Dial(Style):
 
     def render(self, now):
         c = {k: _rgb(v) for k, v in self.settings.items() if isinstance(v, str) and v.startswith("#")}
-        img = Image.new("RGB", (W * S, H * S), c["background"])
+        w, h = self.ctx.width, self.ctx.height
+        size = min(H, h, w)                                  # the face is a square as tall as the safe area allows
+        img = Image.new("RGB", (H * S, H * S), c["background"])
         d = ImageDraw.Draw(img)
         cx, cy, r = 64, 64, 54
         d.ellipse([cx - r, cy - r, cx + r, cy + r], outline=c["face_colour"], width=4)
@@ -43,17 +45,31 @@ class Dial(Style):
         hrs = now.hour % 12 + mins / 60
         _hand(d, cx, cy, hrs / 12, 30, 7, c["hand_colour"])
         _hand(d, cx, cy, mins / 60, 46, 5, c["hand_colour"])
-        out = img.resize((W, H), Image.LANCZOS)
+        out = Image.new("RGB", (w, h), c["background"])
+        top = (h - size) // 2
+        out.paste(img.resize((size, size), Image.LANCZOS), (0, top))
         if self.settings["second_hand"]:                    # drawn sharp at panel size, so it never smears
             a = now.second / 60 * 2 * math.pi                # it ticks, once a second
             od = ImageDraw.Draw(out)
-            od.line([16, 16, round(16 + 12 * math.sin(a)), round(16 - 12 * math.cos(a))], fill=c["second_colour"])
-            od.rectangle([15, 15, 16, 16], fill=tuple(min(255, v + 10) for v in c["second_colour"]))   # its pivot
-        f610 = self.ctx.fonts("6x10")                         # one font, rows 2-8, 12-18, 22-28
-        f610.draw(out, 38, 9, now.strftime("%a").upper(), c["accent"])
-        f610.draw(out, 38, 19, now.strftime("%d"), c["text_colour"])
-        f610.draw(out, 38, 29, now.strftime("%b").upper(), c["month_colour"])
-        return scaled(out, self.ctx.width, self.ctx.height)
+            mid, reach = size // 2, round(12 * size / H)
+            od.line([mid, top + mid, round(mid + reach * math.sin(a)), round(top + mid - reach * math.cos(a))],
+                    fill=c["second_colour"])
+            od.rectangle([mid - 1, top + mid - 1, mid, top + mid],
+                         fill=tuple(min(255, v + 10) for v in c["second_colour"]))   # its pivot
+        # the day, date and month beside it: one font (6x10: baselines 9, 19, 29 on a full panel), the
+        # 3x5 one where that is too wide, and the month given up before the lines would touch
+        texts = [(now.strftime("%a").upper(), c["accent"]), (now.strftime("%d"), c["text_colour"]),
+                 (now.strftime("%b").upper(), c["month_colour"])]
+        font = next((f for f in (self.ctx.fonts("6x10"), self.ctx.fonts("tom-thumb"))
+                     if size + 1 + f.width("WED") <= w), None)
+        if font is not None:
+            texts = texts if h >= 3 * font.cap + 2 else texts[:2]
+            pitch = min(10, (h - font.cap) // (len(texts) - 1))
+            first = max(font.cap, (h - (len(texts) - 1) * pitch - font.cap - 1) // 2 + font.cap)
+            x = size + min(6, w - size - font.width("WED"))
+            for i, (text, colour) in enumerate(texts):
+                font.draw(out, x, first + i * pitch, text, colour)
+        return out
 
 
 class Minimal(Style):
