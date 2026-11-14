@@ -27,6 +27,7 @@ class Context:
     fonts: Fonts = field(default_factory=Fonts)
     pet: Pet = field(default_factory=Pet)  # the Matrix's one pet (bongo/pets.py)
     home: dict | None = None  # the Matrix's location, set in Settings: {"name", "latitude", "longitude"}
+    calendar: dict | None = None  # the Calendar screens' colour coding, set in Settings > Calendars (config.calendar_look)
 
     def now(self) -> dt.datetime:
         return dt.datetime.now(self.tz)

@@ -4,6 +4,7 @@ import { h, icon, toast, clone, same, humanize, toggle, segmented, store, reduce
 import { FrameLoop } from './led.js';
 import { openPreview } from './mediaview.js';
 import { helpButton } from './help.js';
+import { iconPicker } from './iconpick.js';
 import { S, onLeave, go, href, moduleById, styleOf, entryName, applyDraft, draftChanged } from './app.js';
 
 /** Settings for a style: shared ones (unless the style redefines them) and the style's own. */
@@ -468,6 +469,9 @@ function itemList(f, id, v, set) {
         b.addEventListener('click', () => { picked.has(d) ? picked.delete(d) : picked.add(d); b.setAttribute('aria-pressed', String(picked.has(d))); put(DAY_NAMES.filter((x) => picked.has(x))); });
         return b;
       }));
+    }
+    if (fd.type === 'choice' && fd.name === 'icon') {   // each icon shown beside its name
+      return iconPicker({ id: fid, value: String(value ?? ''), options: fd.options, label: fd.label, onpick: (v) => put(v) });
     }
     if (fd.type === 'choice') {  // options: [[value, label, group?], ...]; '' means "not set"
       const option = ([v, l]) => h('option', { value: v, selected: String(value) === v || null }, l);

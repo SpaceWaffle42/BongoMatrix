@@ -48,7 +48,10 @@ class Base:
         self.title = e["title"].upper()
         self.target = on.target
         self.message = e.get("message") or self.settings["done_message"]
-        self.accent = rgb(e["colour"]) if e.get("colour") else self.module_accent
+        look = self.settings.get("_colours")                  # colour coded (Settings > Calendars)
+        ticked = e.get("holiday") and not self.settings["events"]   # a ticked holiday, not your date on one
+        plain = rgb(look["holidays"] if ticked else look["own"]) if look else self.module_accent
+        self.accent = rgb(e["colour"]) if e.get("colour") else plain
         from .events import icon_of
         name = icon_of(e) if self.settings["icons"] else None
         self.icon = icons.icon(name) if name else None

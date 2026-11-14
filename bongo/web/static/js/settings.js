@@ -6,14 +6,152 @@ import { mediaThumb, mediaTitle, previewButton, openPreview } from './mediaview.
 import { S, onLeave, go, saveConfig, moduleById } from './app.js';
 import { helpButton } from './help.js';
 import { placePicker } from './editor.js';
+import { lookEditor, keepState, comingUpCard, icons, NAMES as COLOUR_NAMES } from './calendarlook.js';
+
+/** The cards, by a name that never changes (their order is saved on the Matrix: config ``settings_layout``). */
+const CARDS = [['safe_area', () => safeAreaCard()], ['device', () => deviceCard()], ['modules', () => modulesCard()],
+  ['location', () => locationCard()], ['wifi', () => wifiCard()], ['pet', () => petCard()], ['calendars', () => calendarsCard()],
+  ['spotify', () => spotifyCard()], ['update', () => updateCard()], ['devices', () => devicesCard()], ['sleep', () => sleepCard()],
+  ['splash', () => splashCard()], ['media', () => mediaCard()], ['coming_up', () => comingUpCard(Object.keys(COLOUR_NAMES))]];
+/** As it was before cards could be moved: the safe area across the top, two columns, Coming up across the bottom. */
+const DEFAULT_LAYOUT = { top: ['safe_area'], left: ['device', 'modules', 'location', 'wifi', 'pet', 'calendars', 'spotify', 'update'],
+  right: ['devices', 'sleep', 'splash', 'media'], full: ['coming_up'] };
+const ZONES = ['top', 'left', 'right', 'full'];
+const ZONE_NAMES = { top: 'Across the top', left: 'Left column', right: 'Right column', full: 'Across the bottom' };
+
+/** The saved layout, made whole: every card exactly once (a card added in an update goes where it is by default). */
+export function layoutOf(saved) {
+  const ids = CARDS.map(([id]) => id), out = { top: [], left: [], right: [], full: [] }, seen = new Set();
+  for (const z of ZONES) for (const id of (Array.isArray(saved?.[z]) ? saved[z] : [])) if (ids.includes(id) && !seen.has(id)) { out[z].push(id); seen.add(id); }
+  for (const z of ZONES) for (const id of DEFAULT_LAYOUT[z]) if (!seen.has(id)) { out[z].push(id); seen.add(id); }
+  return out;
+}
 
 export function render(view) {
-  const cards = [safeAreaCard(), deviceCard(), modulesCard(), locationCard(), wifiCard(), petCard(), calendarsCard(), spotifyCard(), updateCard(), devicesCard(), sleepCard(), splashCard(), mediaCard()];
-  const [safe, ...rest] = cards;
-  view.append(h('div', { class: 'page-head' }, h('h1', { class: 'h1' }, 'Settings'),
+  const built = Object.fromEntries(CARDS.map(([id, make]) => [id, make()]));
+  const holders = { top: h('div', { class: 'stack gap-20' }), left: h('div', { class: 'stack gap-20 min0' }),
+    right: h('div', { class: 'stack gap-20 min0' }), full: h('div', { class: 'stack gap-20' }) };
+  const cards = [];                                   // the phone's one column, in the order shown (the jump bar follows it)
+  const bar = jumpBar(cards);
+  const place = (layout) => {                         // the same cards, moved: nothing typed in them is lost
+    for (const z of ZONES) holders[z].replaceChildren(...layout[z].map((id) => built[id]));
+    holders.top.hidden = !layout.top.length; holders.full.hidden = !layout.full.length;   // an empty place adds no gap
+    bar.follow(ZONES.flatMap((z) => layout[z]).map((id) => built[id]));
+  };
+  place(layoutOf(S.config.settings_layout));
+  const page = h('div', { class: 'view-part' },
+    h('div', { class: 'page-head' }, h('div', { class: 'row between wrap gap-s' }, h('h1', { class: 'h1' }, 'Settings'),
+      h('button', { type: 'button', class: 'btn ghost small-btn', onclick: () => rearrange(view, page, built, place) }, icon('grip'), 'Rearrange')),
     h('p', { class: 'muted flush' }, 'Each card saves on its own.')),
-  jumpBar(cards),
-  h('div', { class: 'settings-grid' }, safe, h('div', { class: 'stack gap-20' }, rest.slice(0, 8)), h('div', { class: 'stack gap-20' }, rest.slice(8))));
+    bar, holders.top, h('div', { class: 'settings-grid' }, holders.left, holders.right), holders.full);
+  view.append(page);
+}
+
+/** Rearrange: the cards as a short list of names in four places. Drag one by its handle, or use its arrows
+ *  (they carry on into the next place at either end); Save puts the page that way on every phone and computer.
+ *  The page itself is only hidden meanwhile, so anything typed in a card is kept. */
+function rearrange(view, page, built, place) {
+  const name = (id) => built[id].getAttribute('aria-label') || id;
+  const shown = (id) => !built[id].hidden;            // a card this Matrix doesn't show (Wi-Fi) isn't listed, but keeps its place
+  let layout = layoutOf(S.config.settings_layout), reset = false;
+  const said = h('p', { class: 'sr-only', 'aria-live': 'polite' });
+  const zones = {};
+  const where = (id) => ZONES.find((z) => layout[z].includes(id));
+  const tell = (id) => { const z = where(id), list = layout[z].filter(shown); said.textContent = `${name(id)}: ${ZONE_NAMES[z]}, ${list.indexOf(id) + 1} of ${list.length}`; };
+  const focusOn = (id, act) => {
+    const item = zones[where(id)].querySelector(`[data-id="${id}"]`);
+    const want = item?.querySelector(`[data-act="${act}"]`);
+    (want && !want.disabled ? want : item?.querySelector('[data-act]:not(:disabled)'))?.focus();
+  };
+  const order = () => ZONES.flatMap((z) => layout[z].filter(shown).map((id) => [z, id]));
+  const step = (id, by) => {                          // one place up or down, into the next zone at either end
+    const z = where(id), list = layout[z].filter(shown), at = list.indexOf(id);
+    const zi = ZONES.indexOf(z);
+    layout[z] = layout[z].filter((x) => x !== id);
+    if (by < 0 && at > 0) layout[z].splice(layout[z].indexOf(list[at - 1]), 0, id);
+    else if (by > 0 && at < list.length - 1) layout[z].splice(layout[z].indexOf(list[at + 1]) + 1, 0, id);
+    else if (by < 0) layout[ZONES[zi - 1]].push(id);
+    else layout[ZONES[zi + 1]].unshift(id);
+    reset = false; paint(); tell(id); focusOn(id, by < 0 ? 'up' : 'down');
+  };
+  const row = (id) => {
+    const all = order(), k = all.findIndex(([, x]) => x === id);
+    const handle = h('button', { type: 'button', class: 'handle', tabindex: '-1', 'aria-hidden': 'true', title: 'Drag to move' }, icon('grip'));
+    const item = h('li', { class: 'arrange-item', 'data-id': id }, handle, h('span', { class: 'strong grow min0' }, name(id)),
+      h('button', { type: 'button', class: 'mini-btn', 'data-act': 'up', 'aria-label': `Move ${name(id)} up`, disabled: k === 0, onclick: () => step(id, -1) }, '↑'),
+      h('button', { type: 'button', class: 'mini-btn', 'data-act': 'down', 'aria-label': `Move ${name(id)} down`, disabled: k === all.length - 1, onclick: () => step(id, 1) }, '↓'));
+    handle.addEventListener('pointerdown', (ev) => drag(ev, item, id));
+    return item;
+  };
+  const paint = () => {
+    for (const z of ZONES) {
+      const ids = layout[z].filter(shown);
+      zones[z].replaceChildren(...ids.map(row), ...(ids.length ? [] : [h('li', { class: 'arrange-empty muted small' }, 'Drag a card here')]));
+    }
+  };
+  const read = () => {                                 // the lists as they stand, with the hidden cards kept where they were
+    const now = Object.fromEntries(ZONES.map((z) => [z, [...zones[z].querySelectorAll('.arrange-item')].map((x) => x.dataset.id)]));
+    for (const z of ZONES) layout[z].forEach((id, k) => { if (!shown(id)) now[z].splice(Math.min(k, now[z].length), 0, id); });
+    return now;
+  };
+  function drag(ev, item, id) {   // like the playlist: the item follows the pointer from place to place
+    if (ev.button !== 0) return;
+    ev.preventDefault();
+    const before = JSON.stringify(layout);
+    item.classList.add('dragging'); document.body.classList.add('drag-active');
+    let raf = 0, x = ev.clientX, y = ev.clientY;
+    const put = () => {
+      const zone = ZONES.map((z) => zones[z]).find((ul) => { const r = ul.getBoundingClientRect(); return x >= r.left && x <= r.right && y >= r.top - 24 && y <= r.bottom + 24; });
+      if (!zone) return;
+      const others = [...zone.querySelectorAll('.arrange-item')].filter((o) => o !== item);
+      const next = others.find((o) => { const r = o.getBoundingClientRect(); return y < r.top + r.height / 2; });
+      zone.querySelector('.arrange-empty')?.remove();
+      if (item.parentNode !== zone || item.nextSibling !== (next || null)) zone.insertBefore(item, next || null);
+    };
+    const edge = () => {                               // near the top or bottom: scroll, and keep placing under the finger
+      const bottom = document.getElementById('tabbar')?.getBoundingClientRect().top || innerHeight;   // above the phone's tab bar
+      const by = y < 80 ? -12 : y > Math.min(innerHeight, bottom) - 80 ? 12 : 0;
+      if (by) { window.scrollBy(0, by); put(); }
+      raf = requestAnimationFrame(edge);
+    };
+    raf = requestAnimationFrame(edge);
+    const onMove = (e) => { if (e.pointerId === ev.pointerId) { x = e.clientX; y = e.clientY; put(); } };
+    const stop = (cancelled) => {
+      cancelAnimationFrame(raf);
+      window.removeEventListener('pointermove', onMove); window.removeEventListener('pointerup', up);
+      window.removeEventListener('pointercancel', up); window.removeEventListener('keydown', esc, true);
+      item.classList.remove('dragging'); document.body.classList.remove('drag-active');
+      layout = cancelled ? JSON.parse(before) : read();
+      if (!cancelled) reset = false;
+      paint(); tell(id); focusOn(id, 'down');
+    };
+    const up = () => stop(false);
+    const esc = (e) => { if (e.key === 'Escape') { e.preventDefault(); stop(true); } };
+    window.addEventListener('pointermove', onMove); window.addEventListener('pointerup', up);
+    window.addEventListener('pointercancel', up); window.addEventListener('keydown', esc, true);
+  }
+  for (const z of ZONES) zones[z] = h('ul', { class: 'arrange-zone', 'aria-label': ZONE_NAMES[z] });
+  const box = h('div', { class: 'view-part' });
+  const close = () => { box.remove(); page.hidden = false; };
+  const save = h('button', { type: 'button', class: 'btn primary' }, 'Save layout');
+  save.onclick = async () => {
+    const keep = reset ? null : layout;               // the usual order: nothing saved, so it follows future updates
+    if (await saveConfig({ settings_layout: keep }, 'Settings layout')) { place(layoutOf(keep)); close(); window.scrollTo({ top: 0 }); }
+  };
+  const usual = h('button', { type: 'button', class: 'btn ghost', onclick: () => { layout = layoutOf(null); reset = true; paint(); said.textContent = 'Back to the usual order: press Save layout to keep it'; } }, 'Usual order');
+  const cancel = h('button', { type: 'button', class: 'btn ghost', onclick: () => { close(); window.scrollTo({ top: 0 }); } }, 'Cancel');
+  const zoneCard = (z, cls, note) => h('section', { class: `card stack gap-s ${cls}` }, h('h2', { class: 'h2' }, ZONE_NAMES[z]), note ? h('p', { class: 'tiny muted flush' }, note) : null, zones[z]);
+  paint();
+  box.append(
+    h('div', { class: 'page-head' }, h('h1', { class: 'h1' }, 'Rearrange Settings'),
+      h('p', { class: 'muted flush' }, 'Drag a card by its handle, or use the arrows. On a phone the page is one column, in this order: top, left, right, bottom.')),
+    h('div', { class: 'arrange-grid' },
+      zoneCard('top', 'arrange-full', 'Full width on a computer.'), zoneCard('left', ''), zoneCard('right', ''),
+      zoneCard('full', 'arrange-full', 'Full width on a computer: for wide cards like Coming up.')),
+    h('div', { class: 'row end gap-s wrap', style: 'margin-top:16px' }, usual, cancel, save), said);
+  page.hidden = true;
+  view.append(box);
+  window.scrollTo({ top: 0 });
 }
 
 /** On a phone Settings is one long column of cards: a row of their names stays under the top bar.
@@ -21,12 +159,21 @@ export function render(view) {
 function jumpBar(cards) {
   const top = () => document.getElementById('topbar').offsetHeight;
   const bar = h('nav', { class: 'jump-bar', 'aria-label': 'Jump to a section' });
-  const chips = cards.map((card) => h('button', { type: 'button', class: 'chip', onclick: () => {
+  const chip = (card) => h('button', { type: 'button', class: 'chip', onclick: () => {
     const y = card.getBoundingClientRect().top + window.scrollY - top() - bar.offsetHeight - 8;
     window.scrollTo({ top: y, behavior: matchMedia('(prefers-reduced-motion: reduce)').matches ? 'auto' : 'smooth' });
-  } }, card.getAttribute('aria-label')));
+  } }, card.getAttribute('aria-label'));
+  const made = new Map();
+  const chips = cards.map((card) => { made.set(card, chip(card)); return made.get(card); });
   bar.append(...chips);
   let at = -1;
+  /** The cards in a new order (Settings > Rearrange): the chips follow. */
+  bar.follow = (order) => {
+    cards.splice(0, cards.length, ...order);
+    chips.splice(0, chips.length, ...order.map((card) => { if (!made.has(card)) made.set(card, chip(card)); return made.get(card); }));
+    bar.replaceChildren(...chips);
+    at = -1; requestAnimationFrame(mark);
+  };
   const mark = () => {
     if (!bar.offsetParent) return;   // wide screens have no bar
     bar.style.top = `${top()}px`;
@@ -363,7 +510,10 @@ function calendarsCard() {
       helpButton(moduleById('calendar')?.help, { label: 'Step-by-step help' })), list, formBox,
     h('p', { class: 'sr-only', 'aria-live': 'polite', id: 'cal-said' }));
   const KIND = { google: 'Google', icloud: 'iCloud', outlook: 'Outlook', other: 'Calendar link' };
-  const NAMES = { '#5AC8FA': 'Blue', '#FF6FA8': 'Pink', '#4ADE80': 'Green', '#FFB547': 'Amber', '#B98CFF': 'Purple', '#FF7A59': 'Orange', '#ECEEF1': 'White' };
+  const NAMES = COLOUR_NAMES;
+  const drafts = {};   // a word half-typed in a calendar's "icons by word", kept while the list is drawn again
+  let iconSet = {};
+  icons().then((set) => { iconSet = set; if (last) show(last); });
   const say = (msg) => { card.querySelector('#cal-said').textContent = msg; };
   let busy = false, last = null, form = null;
   const act = async (btn, job, done) => {
@@ -397,7 +547,7 @@ function calendarsCard() {
           c.only ? h('span', { class: 'tag', title: 'Only events with these words' }, `only: ${c.only}`) : null,
           c.busy ? h('span', { class: 'tag' }, 'private as Busy') : null),
         h('div', { class: 'row gap-s' }, onOff, remove)),
-      state(c), sure);
+      state(c), sure, lookEditor(c, iconSet, last?.colours || Object.keys(NAMES), drafts, show));
   };
   const makeForm = (s) => {   // made once, so a half-filled form survives the list updating
     const name = h('input', { class: 'input', id: 'cal-name', placeholder: 'Family', maxlength: 30, autocomplete: 'off' });
@@ -430,6 +580,7 @@ function calendarsCard() {
     clearTimeout(poll);
     if (s.calendars?.some((c) => c.waiting)) poll = setTimeout(() => get('/api/calendars').then(show).catch(() => {}), 3000);   // until the checks finish
     const focusId = document.activeElement?.closest?.('#calendars li')?.dataset.cal;
+    const again = keepState(list);   // open sections and focus inside a calendar's colour and icons
     if (!s.ready) {
       list.replaceChildren(h('p', { class: 'warn small flush' }, 'This needs an update first: press Update in Settings › Software, then come back.'));
       return;
@@ -439,15 +590,22 @@ function calendarsCard() {
     list.replaceChildren(...[
       s.calendars.length ? h('ul', { class: 'stack gap-s', style: 'list-style:none;padding:0;margin:0' }, ...s.calendars.map(row)) : h('p', { class: 'muted small flush' }, 'No calendars yet.'),
       s.calendars.length ? h('div', { class: 'row between wrap gap-s' }, h('span', { class: 'tiny muted' }, 'Checked again every 15 minutes, when a Calendar screen comes round.'), check) : null].filter(Boolean));
-    const again = focusId && list.querySelector(`li[data-cal="${focusId}"] .switch`);   // keep keyboard focus on that calendar
-    if (again) again.focus();
-    else if (focusId) { const head = card.querySelector('h2'); head.tabIndex = -1; head.focus(); }   // that calendar was removed
+    again();
+    if (focusId && !list.contains(document.activeElement)) {
+      const onOff = list.querySelector(`li[data-cal="${focusId}"] .switch`);   // keep keyboard focus on that calendar
+      if (onOff) onOff.focus();
+      else { const head = card.querySelector('h2'); head.tabIndex = -1; head.focus(); }   // that calendar was removed
+    }
+    window.dispatchEvent(new Event('calendars-changed'));   // Coming up follows
     if (!form) { form = makeForm(s); formBox.replaceChildren(form); }
     form.hidden = s.calendars.length >= s.most;
     formBox.querySelector('.cal-full')?.remove();
     if (form.hidden) formBox.append(h('p', { class: 'muted small flush cal-full' }, `That's ${s.most}, the most it takes.`));
   };
   get('/api/calendars').then(show).catch(() => list.replaceChildren(h('p', { class: 'muted small flush' }, "Couldn't load the calendars.")));
+  const edited = () => get('/api/calendars').then(show).catch(() => {});   // a colour changed in Coming up
+  window.addEventListener('calendar-edited', edited);
+  onLeave(() => window.removeEventListener('calendar-edited', edited));
   return card;
 }
 

@@ -5,6 +5,7 @@ import datetime as dt
 import json
 import logging
 import os
+import re
 import tempfile
 from pathlib import Path
 from zoneinfo import ZoneInfo
@@ -35,6 +36,10 @@ DEFAULTS = {
     # the dashboard's Add a module list; screens and settings are kept for switching back on. Splash, sleep
     # and pushes ("Show on the Matrix") have their own switches and still use the modules they need
     "modules_off": [],
+    # Settings > Calendars: colour code the Calendar screens by where a date comes from. Linked calendars
+    # have their own colours (bongo/calendars.py); "own" is the dates added on Calendar screens (an event's
+    # own colour wins), "holidays" the holidays ticked there. Off: each screen's own colours, as before.
+    "calendar_colours": {"code": False, "own": "#5AC8FA", "holidays": "#FF7A59"},
 }
 
 
@@ -124,17 +129,24 @@ def safe_area(config: dict) -> SafeArea:
     return SafeArea.from_config(config)
 
 
+def calendar_look(config: dict) -> dict:
+    """The Calendar screens' colour coding, with defaults for anything not set."""
+    look = config.get("calendar_colours")
+    return {**DEFAULTS["calendar_colours"], **(look if isinstance(look, dict) else {})}
+
+
 def context_factory(config: dict):
     """Modules get a canvas the size of the safe area, never the full panel."""
     tz = ZoneInfo(config["timezone"]) if config.get("timezone") else None
     area = safe_area(config)
     pet = pets.of(config)
     home = config.get("location") or None
-    return lambda: Context(width=area.width, height=area.height, tz=tz, pet=pet, home=home)
+    calendar = calendar_look(config)
+    return lambda: Context(width=area.width, height=area.height, tz=tz, pet=pet, home=home, calendar=calendar)
 
 
 KEYS = {"name", "timezone", "location", "panel", "safe_area", "web", "playlist", "splash", "sleep", "overlays", "update", "pet",
-        "wifi_country", "modules_off"}
+        "wifi_country", "modules_off", "calendar_colours", "settings_layout"}
 OVERLAY_KEYS = {"module", "overlay", "every", "seconds", "offset", "settings", "enabled"}
 PANEL = {"rows": (8, 128), "cols": (8, 256), "gpio_slowdown": (0, 5), "brightness": (1, 100),
          "chain_length": (1, 8), "parallel": (1, 3)}
@@ -368,6 +380,15 @@ def validate(config: dict, modules: dict[str, Module]) -> list[str]:
         entries = []
     for i, raw in enumerate(entries):
         problems += _entry(f"playlist[{i}]", raw, modules)
+    layout = config.get("settings_layout")   # Settings > Rearrange: which card goes where (the dashboard fills in the rest)
+    if layout is not None and not (isinstance(layout, dict) and set(layout) <= {"top", "left", "right", "full"} and all(
+            isinstance(v, list) and len(v) <= 40 and all(isinstance(x, str) and len(x) <= 40 for x in v) for v in layout.values())):
+        problems.append('settings_layout: {"top", "left", "right", "full"}: lists of card names')
+    look = config.get("calendar_colours")
+    if look is not None and not (isinstance(look, dict) and set(look) <= {"code", "own", "holidays"}
+                                 and isinstance(look.get("code", False), bool)
+                                 and all(re.fullmatch(r"#[0-9A-Fa-f]{6}", str(look.get(k, "#000000"))) for k in ("own", "holidays"))):
+        problems.append('calendar_colours: {"code": true or false, "own": "#RRGGBB", "holidays": "#RRGGBB"}')
     off = config.get("modules_off", [])
     if not (isinstance(off, list) and all(isinstance(m, str) for m in off)):
         problems.append("modules_off: a list of module names")

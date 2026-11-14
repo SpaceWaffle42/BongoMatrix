@@ -51,7 +51,10 @@ def migrate(settings: dict) -> list[str]:
 
 
 def with_linked(settings: dict, ctx) -> dict:
-    """Your own dates plus the showings of the calendars linked in Settings (from their last good copy)."""
+    """Your own dates plus the showings of the calendars linked in Settings (from their last good copy),
+    and the Matrix's colour coding (Settings > Calendars) as ``_colours``."""
+    if ctx.calendar and ctx.calendar.get("code"):
+        settings = {**settings, "_colours": ctx.calendar}
     if not settings.get("linked_calendars", True):
         return settings
     try:

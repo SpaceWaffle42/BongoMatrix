@@ -98,6 +98,7 @@ def _save(feeds: list[dict]) -> None:
 def public(feed: dict) -> dict:
     """What the dashboard may see of a calendar: everything but its link."""
     out = {k: feed.get(k) for k in ("id", "name", "colour", "on", "busy", "only")}
+    out["icons"] = icons_of(feed)
     state = _state().get(feed["id"], {})
     out.update(checked=state.get("checked"), ok=state.get("ok"), error=state.get("error"),
                count=len(state.get("events") or []), kind=kind_of(feed["url"]), waiting=feed["id"] in _queued)
@@ -130,7 +131,8 @@ def _clean(feed: dict, data: dict) -> dict:
     if not re.fullmatch(r"#[0-9A-F]{6}", colour):
         raise FeedError("Pick a colour from the list")
     only = re.sub(r"\s+", " ", str(data.get("only", feed.get("only", "")))).strip()[:80]
-    return {**feed, "name": name, "colour": colour, "only": only,
+    icons = _clean_icons(data["icons"]) if "icons" in data else feed.get("icons")
+    return {**feed, "name": name, "colour": colour, "only": only, **({"icons": icons} if icons else {}),
             "on": bool(data.get("on", feed.get("on", True))), "busy": bool(data.get("busy", feed.get("busy", False)))}
 
 
@@ -383,6 +385,54 @@ def _reset_for_tests() -> None:
 
 # -- what the Calendar screens show -------------------------------------------------------------
 
+ICON_MODES = ("guess", "one", "none")
+MOST_RULES = 20
+
+
+def icons_of(feed: dict) -> dict:
+    """A calendar's icons: guessed from each title (the default), one for every event, or none; and
+    "icons by word" rules, which come first: a title with that word (or a word starting with it) gets that icon."""
+    look = feed.get("icons") or {}
+    return {"mode": look.get("mode", "guess"), "one": look.get("one"), "rules": look.get("rules") or []}
+
+
+def _clean_icons(value) -> dict:
+    from bongo.icons import ICONS
+    if not isinstance(value, dict):
+        raise FeedError("Icons: send the icon choices")
+    mode, one = value.get("mode", "guess"), value.get("one") or None
+    if mode not in ICON_MODES:
+        raise FeedError("Icons: guess from each title, one for every event, or none")
+    if one is not None and one not in ICONS or mode == "one" and one is None:
+        raise FeedError("Pick an icon from the list")
+    rules, seen = [], set()
+    for rule in value.get("rules") or []:
+        if not (isinstance(rule, (list, tuple)) and len(rule) == 2 and isinstance(rule[0], str)):
+            raise FeedError("Icons by word: a word and an icon each")
+        word = re.sub(r"\s+", " ", str(rule[0])).strip().lower()[:30]
+        if not word or rule[1] not in ICONS:
+            raise FeedError("Icons by word: type a word and pick an icon from the list")
+        if word not in seen:
+            seen.add(word)
+            rules.append([word, rule[1]])
+    if len(rules) > MOST_RULES:
+        raise FeedError(f"Icons by word: up to {MOST_RULES} words")
+    return {"mode": mode, "one": one, "rules": rules}
+
+
+def icon_for(feed: dict, title: str) -> str | None:
+    """The icon an event of this calendar shows (see icons_of)."""
+    look, low = icons_of(feed), title.lower()
+    for word, icon in look["rules"]:
+        if re.search(r"\b" + re.escape(word), low):
+            return icon
+    if look["mode"] == "none":
+        return None
+    if look["mode"] == "one":
+        return look["one"]
+    return guess_icon(title)
+
+
 def guess_icon(title: str) -> str | None:
     low = title.lower()
     return next((icon for icon, words in ICON_WORDS.items() if re.search(words, low)), None)
@@ -421,9 +471,11 @@ def _shown(e: dict, tz, now: dt.datetime) -> dict | None:
     return ev
 
 
-def events(tz=None, now: dt.datetime | None = None, kick: bool = True) -> list[dict]:
-    """The switched-on calendars' next showings as Calendar events (soonest first, the next
-    ``SHOW_DAYS`` days, at most ``SHOW_MOST``), from the last good copy; due ones are asked for again."""
+def events(tz=None, now: dt.datetime | None = None, kick: bool = True, days: int | None = None,
+           with_calendar: bool = False) -> list[dict]:
+    """The switched-on calendars' next showings as Calendar events (soonest first, the next ``days``
+    days (default ``SHOW_DAYS``), at most ``SHOW_MOST``), from the last good copy; due ones are asked for again. Each has its
+    calendar's colour and icon; ``with_calendar`` adds which calendar it's from (``calendar``: its id)."""
     feeds = [f for f in load() if f.get("on", True)]
     if not feeds:
         return []
@@ -432,7 +484,7 @@ def events(tz=None, now: dt.datetime | None = None, kick: bool = True) -> list[d
     if isinstance(tz, str):
         tz = ZoneInfo(tz)
     now = now or (dt.datetime.now(tz) if tz else dt.datetime.now().astimezone())
-    horizon = (now + dt.timedelta(days=SHOW_DAYS)).date().isoformat()
+    horizon = (now + dt.timedelta(days=SHOW_DAYS if days is None else days)).date().isoformat()
     state, out = _state(), []
     for feed in feeds:
         st = state.get(feed["id"]) or {}
@@ -444,10 +496,12 @@ def events(tz=None, now: dt.datetime | None = None, kick: bool = True) -> list[d
                 break                                          # saved soonest first
             if not _wanted(e["title"], feed.get("only", "")) or (ev := _shown(e, tz, now)) is None:
                 continue
-            out.append({"title": e["title"][:40], "repeat": "once", **ev, "colour": feed.get("colour") or COLOURS[0]})
+            out.append((feed, {"title": e["title"][:40], "repeat": "once", **ev, "colour": feed.get("colour") or COLOURS[0]}))
             mine += 1
-    out = sorted(out, key=lambda e: (e["date"], e.get("time", "")))[:SHOW_MOST]
-    for ev in out:                                             # icons for the ones shown only
-        if icon := guess_icon(ev["title"]):
+    out = sorted(out, key=lambda fe: (fe[1]["date"], fe[1].get("time", "")))[:SHOW_MOST]
+    for feed, ev in out:                                       # icons for the ones shown only
+        if icon := icon_for(feed, ev["title"]):
             ev["icon"] = icon
-    return out
+        if with_calendar:
+            ev["calendar"] = feed["id"]
+    return [ev for _, ev in out]

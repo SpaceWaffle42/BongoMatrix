@@ -35,8 +35,12 @@ class _Base(Style):
         self.event_ink, self.bg = rgb(s["event_colour"]), rgb(s["background"])
         self.tiny, self.small = self.ctx.fonts("tom-thumb"), self.ctx.fonts("5x7")
         self.dates = []  # (spec or one-off date, title, is_own_event, icon name or None)
+        look = s.get("_colours")                              # colour coded (Settings > Calendars): a colour per date
+        self.inks = {}                                        # (title, is_own_event) -> colour, when colour coded
         for hid in s["holidays"]:
             self.dates.append((hid, holidays.label(hid), False, holidays.RULES[hid].icon))
+            if look:
+                self.inks[(holidays.label(hid), False)] = rgb(look["holidays"])
         for event in s["events"]:                             # checked by the module (countdown/events.py)
             if event.get("holiday"):
                 spec = event["holiday"]
@@ -49,24 +53,31 @@ class _Base(Style):
             if mark is None and event.get("holiday") in holidays.RULES and event.get("icon") != "none":
                 mark = holidays.RULES[event["holiday"]].icon
             self.dates.append((spec, str(event["title"]).strip(), True, mark))
+            if look:                                          # its own colour (a linked calendar's), else your dates'
+                self.inks.setdefault((str(event["title"]).strip(), True), rgb(event.get("colour") or look["own"]))
 
     def occurrence(self, spec, after: dt.date) -> dt.date | None:
         if isinstance(spec, dt.date):
             return spec if spec >= after else None
         return holidays.next_date(spec, after)
 
+    def ink_of(self, title, own, plain):
+        """A date's colour: its source's when colour coded, else ``plain`` (the screen's own colours)."""
+        return self.inks.get((title, own), plain) if self.inks else plain
+
     def upcoming(self, today: dt.date, count: int):
         found = [(d, title, own, mark) for spec, title, own, mark in self.dates if (d := self.occurrence(spec, today))]
         return sorted(found, key=lambda x: (x[0], not x[2]))[:count]
 
-    def marked(self, year: int, month: int) -> set[int]:
-        """Days of this month with a holiday or event."""
+    def marked(self, year: int, month: int) -> dict[int, tuple]:
+        """Days of this month with a holiday or event, and the colour to mark each with: the event colour,
+        or when colour coded the colour of the day's first event of yours (else its holiday's)."""
         first = dt.date(year, month, 1)
-        days = set()
-        for spec, *_ in self.dates:
+        days = {}
+        for spec, title, own, _ in sorted(self.dates, key=lambda x: not x[2]):   # your dates before holidays
             d = self.occurrence(spec, first)
             if d and (d.year, d.month) == (year, month):
-                days.add(d.day)
+                days.setdefault(d.day, self.ink_of(title, own, self.event_ink))
         return days
 
     def fit(self, font, text, width):
@@ -163,7 +174,7 @@ class Page(_Base):
             if with_icons and mark:  # centred on the item's two lines
                 tile = icons.icon(mark)
                 img.paste(tile, (x0, y - self.tiny.cap + (pitch + self.tiny.cap - 8) // 2), tile)
-            self.marquee(img, tx, y, troom, title.upper(), self.event_ink if own else self.ink, now)
+            self.marquee(img, tx, y, troom, title.upper(), self.ink_of(title, own, self.event_ink if own else self.ink), now)
             self.tiny.draw(img, tx, y + pitch, self.fit(self.tiny, when((d - today).days), troom), self.accent)
             y += pitch * 2 + 2
         return img
@@ -201,7 +212,7 @@ class Month(_Base):
                 if day == today.day:
                     ink = scale(self.accent, pulse)
                 elif day in marked:
-                    ink = scale(self.event_ink, PAST if day < today.day else 0.9)
+                    ink = scale(marked[day], PAST if day < today.day else 0.9)
                 elif day < today.day:
                     ink = scale(self.ink, BLOCK)
                 else:
@@ -342,7 +353,7 @@ class DateLine(_Base):
             text = title.upper() if days == 0 else f"{title.upper()} - {when(days)}"
             if rule:
                 ImageDraw.Draw(img).line([(8, rule), (w - 9, rule)], fill=scale(self.ink, 0.15))
-            ink = self.event_ink if own else scale(self.ink, 0.7)
+            ink = self.ink_of(title, own, self.event_ink if own else scale(self.ink, 0.7))
             if self.tiny.width(text) <= w - 2:
                 self.tiny.draw(img, (w - self.tiny.width(text)) // 2, third, text, ink)
             else:
@@ -368,10 +379,10 @@ class Week(_Base):
         cw = w // days
         x_off = (w - cw * days) // 2
         marked = {}
-        for spec, title, own, _ in self.dates:
+        for spec, title, own, _ in sorted(self.dates, key=lambda x: not x[2]):   # your dates before holidays
             day = self.occurrence(spec, start)
             if day and 0 <= (day - start).days < days:
-                marked[(day - start).days] = own or marked.get((day - start).days, False)
+                marked.setdefault((day - start).days, self.ink_of(title, own, self.event_ink if own else scale(self.ink, 0.6)))
         for k in range(days):
             day = start + dt.timedelta(days=k)
             x = x_off + k * cw
@@ -384,13 +395,13 @@ class Week(_Base):
             num = str(day.day)
             tight(img, self.tiny, x + (cw - 1 - digits_width(self.tiny, num)) // 2, 13, num, ink)
             if k in marked and h >= 20:
-                colour = self.event_ink if marked[k] else scale(self.ink, 0.6)
+                colour = marked[k]
                 d.rectangle([x + (cw - 1) // 2 - 1, 17, x + (cw - 1) // 2, 18], fill=colour)
         items = self.upcoming(today + dt.timedelta(days=1), 1)
         if items and h >= 30:
             dd, title, own, _ = items[0]
             text = f"{title.upper()} {dd:%a %d}".upper()
-            ink = self.event_ink if own else scale(self.ink, 0.7)
+            ink = self.ink_of(title, own, self.event_ink if own else scale(self.ink, 0.7))
             if self.tiny.width(text) <= w - 2:
                 self.tiny.draw(img, (w - self.tiny.width(text)) // 2, 29, text, ink)
             else:
@@ -417,11 +428,11 @@ class Numbers(_Base):
         monday = today - dt.timedelta(days=(today.weekday() + shift) % 7)
         rows = max(1, min(4, (h - 7) // 6))                   # last week, this week and what's next
         start = monday - dt.timedelta(days=7 if rows >= 3 else 0)
-        marked = set()
-        for spec, *_ in self.dates:
+        marked = {}
+        for spec, title, own, _ in sorted(self.dates, key=lambda x: not x[2]):   # your dates before holidays
             day = self.occurrence(spec, start)
             if day and (day - start).days < rows * 7:
-                marked.add(day)
+                marked.setdefault(day, self.ink_of(title, own, self.event_ink))
         title = f"{today:%B %Y}".upper() if self.tiny.width(f"{today:%B %Y}") <= w - 2 else f"{today:%b}".upper()
         self.tiny.draw(img, (w - self.tiny.width(title)) // 2, 6, title, self.accent)
         cw = w // 7
@@ -438,7 +449,7 @@ class Numbers(_Base):
                     d.rectangle([x - 1, y - self.tiny.cap, x + tw, y], fill=scale(self.accent, 0.35))
                     ink = (255, 255, 255)
                 elif day in marked:
-                    ink = self.event_ink if day > today else scale(self.event_ink, 0.45)
+                    ink = marked[day] if day > today else scale(marked[day], 0.45)
                 elif day.month != today.month:
                     ink = scale(self.ink, FAINT)
                 else:
@@ -472,7 +483,7 @@ class Dots(_Base):
                 if day == today.day:
                     ink = scale(self.accent, pulse)
                 elif day in marked:
-                    ink = self.event_ink if day > today.day else scale(self.event_ink, PAST)
+                    ink = marked[day] if day > today.day else scale(marked[day], PAST)
                 else:
                     ink = scale(self.ink, BLOCK if day < today.day else 0.5)
                 d.rectangle([x, y, x + pitch - 2, y + pitch - 2], fill=ink)
@@ -520,7 +531,7 @@ class Year(_Base):
                     if date == today:
                         px[x, y] = self.accent if blink else self.bg
                     elif day in marked[m]:
-                        px[x, y] = scale(self.event_ink, 0.5 if date < today else 1.0)
+                        px[x, y] = scale(marked[m][day], 0.5 if date < today else 1.0)
                     else:
                         px[x, y] = scale(self.ink, BLOCK if date < today else 0.45)
         return img

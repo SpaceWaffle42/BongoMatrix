@@ -555,6 +555,15 @@ def create_app(*, modules, live, pairing, config_path, logs: LogBuffer | None = 
             abort(404, "no such calendar")
         return calendar_list()
 
+    @app.get("/api/calendars/upcoming")
+    def calendars_upcoming():
+        """Settings > Calendars > Coming up: what every Calendar screen will show, with its colours."""
+        from bongo.modules.calendar.preview import coming_up
+        config = load()
+        tz = ZoneInfo(config["timezone"]) if config.get("timezone") else None
+        days = number(request.args.get("days", 56), 1, 120, "days")
+        return jsonify(coming_up(config, modules, tz, days=int(days)))
+
     @app.post("/api/calendars/refresh")
     def calendars_refresh():
         from bongo import calendars
@@ -691,11 +700,18 @@ def create_app(*, modules, live, pairing, config_path, logs: LogBuffer | None = 
         return jsonify(ok=True, restart_needed=restart_needed(merged), revisions=revisions(load()))
 
     @lru_cache(maxsize=12)
-    def preview_style(module, style, settings_json, width, height, pet, home_json="null", zone=None):
+    def preview_style(module, style, settings_json, width, height, pet, home_json="null", zone=None, calendar_json="null",
+                      calendars_seen=None):   # calendars_seen: when the linked calendars last changed, so a new copy is drawn
         return modules[module].create(style or None, json.loads(settings_json),
                                       Context(width=width, height=height, fonts=fonts or Context().fonts, pet=pet,
                                               home=json.loads(home_json),    # the Matrix's location, as on the panel
+                                              calendar=json.loads(calendar_json),   # ...its calendar colours
                                               tz=ZoneInfo(zone) if zone else None))   # ...and its time zone, not the Pi's
+
+    def calendars_changed():
+        """When the linked calendars (their settings, or what was last read from them) last changed."""
+        from bongo import calendars
+        return tuple(p.stat().st_mtime_ns if p.exists() else 0 for p in (calendars.FILE, calendars.CACHE))
 
     @app.get("/api/preview.png")
     def preview():
@@ -711,7 +727,8 @@ def create_app(*, modules, live, pairing, config_path, logs: LogBuffer | None = 
             area = cfg.safe_area(config)
             style = preview_style(name, request.args.get("style", ""), settings_json, area.width, area.height,
                                   pets.of(config), json.dumps(config.get("location"), sort_keys=True),
-                                  config.get("timezone") or None)
+                                  config.get("timezone") or None, json.dumps(cfg.calendar_look(config), sort_keys=True),
+                                  calendars_changed())
         except (ValueError, TypeError, KeyError, OSError) as error:
             return jsonify(error=str(error)), 422
         t = number(request.args.get("t", time.time()), 0, 4_102_444_800, "t")  # up to 2100
