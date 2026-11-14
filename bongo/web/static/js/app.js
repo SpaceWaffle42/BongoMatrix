@@ -108,6 +108,8 @@ export async function loadAll() {
   paintHeader();
 }
 export const moduleById = (id) => S.modules?.find((m) => m.id === id);
+/** Switched off in Settings > Modules: its screens are skipped and it isn't offered in Add a module. */
+export const moduleOff = (id) => (S.config?.modules_off || []).includes(id);
 export const styleOf = (e) => e.style || moduleById(e.module)?.default_style || '';
 export const entryName = (e) => moduleById(e?.module)?.name || humanId(e?.module);
 const humanId = (id) => String(id || '?').replace(/_/g, ' ').replace(/\b./g, (c) => c.toUpperCase());
@@ -120,7 +122,7 @@ export const dirtyCount = () => {
 export function draftChanged() { S.problems = []; paintHeader(); emit('draft'); }
 
 const SECTIONS = { playlist: 'playlist', safe_area: 'safe area', sleep: 'sleep schedule', splash: 'splash', pet: 'pet',
-  location: 'location', update: 'update source', name: 'name', timezone: 'time zone' };
+  location: 'location', update: 'update source', name: 'name', timezone: 'time zone', modules_off: 'module switches' };
 /** Save part of the config. If another phone or tab has saved the same part since this page loaded
  *  it, the Matrix says so (409) and we ask before replacing their work with ours. */
 async function putConfig(part) {

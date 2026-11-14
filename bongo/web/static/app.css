@@ -176,6 +176,12 @@ input[type="time"] { color-scheme: dark; }
   background: var(--card-2); border: 1px solid #262A31; transition: border-color .15s, box-shadow .15s, opacity .15s; }
 .pl-card.playing { background: var(--amber-card); border-color: var(--amber); }
 .pl-card.off .led-frame, .pl-card.off .pl-text { opacity: .45; }
+/* Settings > Modules: a switch and a name per module */
+.module-list { display: flex; flex-direction: column; border-top: 1px solid var(--line); }
+.module-row { display: grid; grid-template-columns: 88px minmax(0, 1fr); gap: 12px; align-items: start; padding: 10px 0; border-bottom: 1px solid var(--line); }
+.module-row .switch[aria-disabled="true"] { opacity: .6; cursor: progress; }
+.module-text { display: flex; flex-direction: column; gap: 2px; min-width: 0; }
+.module-row.off .module-text .strong, .module-row.off .module-text .small { color: var(--faint); }
 .pl-card.bad { border-color: var(--danger); box-shadow: 0 0 0 1px var(--danger) inset; }
 .pl-card.dragging { border-color: var(--amber-hover); box-shadow: 0 10px 30px rgba(0,0,0,.5), 0 0 0 2px var(--amber); transform: scale(1.02); z-index: 2; }
 .pl-text { display: flex; flex-direction: column; gap: 2px; min-width: 0; }

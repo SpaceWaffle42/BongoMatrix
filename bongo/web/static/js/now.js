@@ -3,7 +3,7 @@ import { post, previewPath } from './api.js';
 import { h, icon, toast, fail, same, humanize, dur, mmss, clock, reducedMotion, segmented, toggle, store } from './ui.js';
 import { FrameLoop } from './led.js';
 import { helpButton } from './help.js';
-import { S, bus, onLeave, go, href, moduleById, styleOf, entryName, draftChanged, dirtyCount, applyDraft, discardDraft, normalise } from './app.js';
+import { S, bus, onLeave, go, href, moduleById, moduleOff, styleOf, entryName, draftChanged, dirtyCount, applyDraft, discardDraft, normalise } from './app.js';
 
 const COLOURS = { clock: '#FF7A3D', weather: '#5B9BE8', announcements: '#FFB547', calendar: '#E879B7',
   rss: '#8B95A5', text: '#A78BFA', astronomy: '#4ADE80', media: '#2DD4BF' };
@@ -124,7 +124,7 @@ export function render(view) {
     }
     sleepBtn.replaceChildren(h('span', { class: 'strong' }, asleep ? 'Wake now' : 'Sleep now'),
       h('span', { class: 'muted small' }, asleep ? `Asleep until ${clock(new Date(L.sleep_until))}` : `Until ${/^\d{1,2}:\d{2}$/.test(S.config?.sleep?.to || '') ? S.config.sleep.to : clock(new Date(Date.now() + sleepMinutes() * 60000))}`));
-    const list = S.config?.playlist?.map(normalise).filter((x) => x.enabled) || [];
+    const list = S.config?.playlist?.map(normalise).filter((x) => x.enabled && !moduleOff(x.module)) || [];
     const at = list.findIndex((x) => matches(x, e));
     const rest = at < 0 ? list : [...list.slice(at + 1), ...list.slice(0, at)];
     upNext.replaceChildren(...rest.slice(0, 4).map((x) => h('li', null, h('span', { class: 'swatch', style: `background:${colourOf(x.module)}` }),
@@ -190,7 +190,7 @@ function renderPlaylist() {
   function paint() {
     loops.forEach((l) => l.stop()); loops = [];
     const d = S.draft || [];
-    const on = d.filter((e) => e.enabled);
+    const on = d.filter((e) => e.enabled && !moduleOff(e.module));   // a module switched off in Settings is skipped too
     const total = on.reduce((a, e) => a + Number(e.seconds || 0), 0);
     summary.textContent = `${on.length} on · loop ${dur(total, true)}`;
     loopLabel.textContent = `One full loop · ${dur(total, true)}`;
@@ -227,15 +227,18 @@ function renderPlaylist() {
     const mod = moduleById(e.module);
     const move = (to) => { const d = S.draft; const [x] = d.splice(i, 1); d.splice(to, 0, x); draftChanged(); requestAnimationFrame(() => strip.children[to]?.querySelector(to < i ? '.mv-up' : '.mv-down')?.focus()); };
     const handle = h('button', { type: 'button', class: 'handle', 'aria-label': `Drag to reorder ${entryName(e)}`, title: 'Drag to reorder' }, icon('grip'));
-    const art = h('article', { class: `pl-card${e.enabled ? '' : ' off'}${problem ? ' bad' : ''}`, role: 'listitem', 'data-i': i,
+    const modOff = moduleOff(e.module);
+    const art = h('article', { class: `pl-card${e.enabled && !modOff ? '' : ' off'}${problem ? ' bad' : ''}`, role: 'listitem', 'data-i': i,
       'aria-label': `${i + 1}. ${entryName(e)}` },
       h('div', { class: 'row between' }, handle, h('span', { class: 'badge-playing', hidden: true }, 'PLAYING'), h('span', { class: 'mono tiny muted' }, `#${i + 1}`)),
       h('div', { class: 'led-frame mini' }, canvas),
       h('div', { class: 'pl-text' }, h('span', { class: 'strong' }, entryName(e), mod?.proposed ? h('span', { class: 'tag' }, 'Proposed') : null),
-        h('span', { class: 'mono tiny muted' }, `${humanize(styleOf(e))} · ${e.enabled ? dur(e.seconds, true) : 'skipped'}`)),
+        h('span', { class: 'mono tiny muted' }, `${humanize(styleOf(e))} · ${e.enabled && !modOff ? dur(e.seconds, true) : 'skipped'}`)),
+      modOff ? h('p', { class: 'tiny muted flush' }, `${mod?.name || e.module} is switched off in `,
+        h('a', { href: href('/settings'), 'data-route': '/settings', onclick: () => setTimeout(() => document.getElementById('modules')?.scrollIntoView(), 200) }, 'Settings › Modules')) : null,
       problem ? h('p', { class: 'tiny danger flush' }, problem) : null,
       !mod ? h('p', { class: 'tiny danger flush' }, 'Module not installed') : null,
-      toggle(e.enabled, e.enabled ? 'In rotation' : 'Off', (v) => { e.enabled = v; draftChanged(); }),
+      toggle(e.enabled, e.enabled ? (modOff ? 'In rotation · module off' : 'In rotation') : 'Off', (v) => { e.enabled = v; draftChanged(); }),
       h('div', { class: 'pl-actions' },
         h('button', { type: 'button', class: 'mini-btn mv-up', 'aria-label': 'Move earlier', disabled: i === 0, onclick: () => move(i - 1) }, icon('left')),
         h('button', { type: 'button', class: 'mini-btn mv-down', 'aria-label': 'Move later', disabled: i === S.draft.length - 1, onclick: () => move(i + 1) }, icon('right')),
@@ -332,7 +335,7 @@ function buildAddDialog() {
   return {
     el: dlg,
     open() {
-      modSel.replaceChildren(...(S.modules || []).map((m) => h('option', { value: m.id }, m.proposed ? `${m.name} (proposed)` : m.name)));
+      modSel.replaceChildren(...(S.modules || []).filter((m) => !moduleOff(m.id)).map((m) => h('option', { value: m.id }, m.proposed ? `${m.name} (proposed)` : m.name)));
       modSel.dispatchEvent(new Event('change'));
       dlg.returnValue = '';
       if (dlg.showModal) dlg.showModal(); else dlg.setAttribute('open', '');

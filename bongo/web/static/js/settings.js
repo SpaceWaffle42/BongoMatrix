@@ -8,7 +8,7 @@ import { helpButton } from './help.js';
 import { placePicker } from './editor.js';
 
 export function render(view) {
-  const cards = [safeAreaCard(), deviceCard(), locationCard(), wifiCard(), petCard(), calendarsCard(), spotifyCard(), updateCard(), devicesCard(), sleepCard(), splashCard(), mediaCard()];
+  const cards = [safeAreaCard(), deviceCard(), modulesCard(), locationCard(), wifiCard(), petCard(), calendarsCard(), spotifyCard(), updateCard(), devicesCard(), sleepCard(), splashCard(), mediaCard()];
   const [safe, ...rest] = cards;
   view.append(h('div', { class: 'page-head' }, h('h1', { class: 'h1' }, 'Settings'),
     h('p', { class: 'muted flush' }, 'Each card saves on its own.')),
@@ -145,8 +145,52 @@ function deviceCard() {
     restartBox());
 }
 
-/** Restart, tucked away in a closed section and never in one tap: pick what to restart, then say so
- * again on the page (bongo/power.py). The display software is back in about 10 s, the Pi in about a minute. */
+/** Every module, with an On/Off switch like the playlist's. Off: its screens are skipped in the playlist and
+ *  overlays and it isn't offered in Add a module; its screens and settings are kept for switching back on.
+ *  Splash, sleep and "Show on the Matrix" have their own switches and keep working. */
+function modulesCard() {
+  const uses = (id) => [...(S.config.playlist || []), ...(S.config.overlays || [])].filter((e) => e.module === id).length;
+  const screens = (n) => `${n} screen${n === 1 ? '' : 's'}`;
+  const note = (m, on) => {
+    const n = uses(m.id);
+    if (on) return n ? `Used by ${screens(n)}` : 'Not in the playlist';
+    return n ? `Off: hidden from Add a module, its ${screens(n)} skipped` : 'Off: hidden from Add a module';
+  };
+  let busy = false;   // one save at a time, so two quick taps can't undo each other
+  const list = h('div', { class: 'module-list' });
+  const rows = (S.modules || []).map((m) => {
+    const on = !(S.config.modules_off || []).includes(m.id);
+    const status = h('span', { class: 'muted tiny' }, note(m, on));
+    const row = h('div', { class: `module-row${on ? '' : ' off'}` });
+    const sw = toggle(on, on ? 'On' : 'Off', async (next) => {
+      if (busy) { sw.setAttribute('aria-pressed', String(!next)); return; }
+      busy = true;
+      const all = [...list.querySelectorAll('.switch')];
+      all.forEach((b) => b.setAttribute('aria-disabled', 'true'));   // not disabled: that would drop the keyboard's focus
+      const off = new Set(S.config.modules_off || []);
+      if (next) off.delete(m.id); else off.add(m.id);
+      const label = sw.querySelector('.switch-label');
+      label.textContent = next ? 'On' : 'Off';
+      const saved = await saveConfig({ modules_off: [...off].sort() }, next ? `${m.name} on` : `${m.name} off`);
+      all.forEach((b) => b.removeAttribute('aria-disabled'));
+      busy = false;
+      const now = saved ? next : !next;     // the Matrix said no (say, it was the last one on): put the switch back
+      sw.setAttribute('aria-pressed', String(now));
+      label.textContent = now ? 'On' : 'Off';
+      row.classList.toggle('off', !now);
+      status.textContent = note(m, now);
+    });
+    sw.setAttribute('aria-label', m.name);
+    row.append(sw, h('div', { class: 'module-text' }, h('span', { class: 'strong' }, m.name, m.proposed ? h('span', { class: 'tag' }, 'Proposed') : null),
+      m.description ? h('span', { class: 'muted small' }, m.description) : null, status));
+    return row;
+  });
+  list.append(...rows);
+  return h('section', { class: 'card stack', 'aria-label': 'Modules', id: 'modules' }, h('h2', { class: 'h2' }, 'Modules'),
+    h('p', { class: 'muted small flush' }, "Switch a module off to leave it out: its screens are skipped in the playlist and overlays, and it isn't offered in Add a module. Its screens and settings are kept for when you switch it back on. Splash, sleep and Show on the Matrix have their own switches."),
+    list);
+}
+
 /** Where the Matrix is: every weather and sky screen uses it, unless one is given its own place. */
 function locationCard() {
   const home = S.config.location;
@@ -167,6 +211,8 @@ function locationCard() {
     h('div', { class: 'row end' }, save));
 }
 
+/** Restart, tucked away in a closed section and never in one tap: pick what to restart, then say so
+ * again on the page (bongo/power.py). The display software is back in about 10 s, the Pi in about a minute. */
 function restartBox() {
   const KINDS = {
     display: ['Restart the display', 'Restart the display software? The panel and this page go quiet for about 10 seconds.', 'Restarting the display…', 'Yes, restart the display'],

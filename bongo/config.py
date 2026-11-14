@@ -31,6 +31,10 @@ DEFAULTS = {
     # v2's default splash screen; "splash" items in the playlist play it. "boot": an optional file
     # played once at start-up (None: none). A splash rule without "boot" is from before 11 Nov 2026.
     "splash": {"sources": ["built-in/splash_loading_squares.gif"], "boot": None},
+    # modules switched off in Settings > Modules: their playlist and overlay screens are skipped and they're off
+    # the dashboard's Add a module list; screens and settings are kept for switching back on. Splash, sleep
+    # and pushes ("Show on the Matrix") have their own switches and still use the modules they need
+    "modules_off": [],
 }
 
 
@@ -102,10 +106,18 @@ def save(config: dict, path: Path = DEFAULT_PATH) -> None:
     _write(path, text)
 
 
+def modules_off(config: dict) -> set[str]:
+    """The modules switched off in Settings > Modules."""
+    off = config.get("modules_off")
+    return {m for m in off if isinstance(m, str)} if isinstance(off, list) else set()
+
+
 def playlist(config: dict, modules: dict[str, Module]) -> list[Entry]:
-    """Configured playlist, or one entry per module (default style) when empty."""
-    entries = [Entry(**e) for e in config["playlist"]]
-    return entries or [Entry(module=m) for m in modules]
+    """Configured playlist, or one entry per module (default style) when empty. Screens of a module
+    that's switched off are kept in the list but skipped, like a screen switched off on its own."""
+    off = modules_off(config)
+    entries = [Entry(**{**e, "enabled": e.get("enabled", True) and e["module"] not in off}) for e in config["playlist"]]
+    return entries or [Entry(module=m) for m in modules if m not in off]
 
 
 def safe_area(config: dict) -> SafeArea:
@@ -122,7 +134,7 @@ def context_factory(config: dict):
 
 
 KEYS = {"name", "timezone", "location", "panel", "safe_area", "web", "playlist", "splash", "sleep", "overlays", "update", "pet",
-        "wifi_country"}
+        "wifi_country", "modules_off"}
 OVERLAY_KEYS = {"module", "overlay", "every", "seconds", "offset", "settings", "enabled"}
 PANEL = {"rows": (8, 128), "cols": (8, 256), "gpio_slowdown": (0, 5), "brightness": (1, 100),
          "chain_length": (1, 8), "parallel": (1, 3)}
@@ -253,6 +265,10 @@ def tidy(config: dict, modules: dict[str, Module]) -> list[str]:
     for screen in ("splash", "sleep"):
         notes += _screen_files(config.get(screen), screen)
     notes += pets.adopt(config)  # before the Pet entries lose their own name
+    off = config.get("modules_off")
+    if isinstance(off, list) and any(m not in modules for m in off):   # a module that's no longer installed
+        config["modules_off"] = [m for m in off if m in modules]
+        notes.append(f"modules_off: forgot {sorted(set(off) - set(modules))} (not installed)")
     notes += _adopt_location(config, modules)
     for key in ("playlist", "overlays"):  # entries of a module that moved into another one
         for i, entry in enumerate(config.get(key) or []):
@@ -352,8 +368,20 @@ def validate(config: dict, modules: dict[str, Module]) -> list[str]:
         entries = []
     for i, raw in enumerate(entries):
         problems += _entry(f"playlist[{i}]", raw, modules)
+    off = config.get("modules_off", [])
+    if not (isinstance(off, list) and all(isinstance(m, str) for m in off)):
+        problems.append("modules_off: a list of module names")
+        off = []
+    elif unknown := [m for m in off if m not in modules]:
+        problems.append(f"modules_off: unknown modules {unknown}")
     if entries and not any(isinstance(e, dict) and e.get("enabled", True) is not False for e in entries):
         problems.append("playlist: turn at least one entry on")
+    elif entries and not any(isinstance(e, dict) and e.get("enabled", True) is not False and e.get("module") not in off
+                             for e in entries):
+        problems.append("playlist: every screen that's on belongs to a module that's switched off; switch one back on "
+                        "in Settings > Modules, or turn on another screen")
+    elif not entries and len(off) and not any(m not in off for m in modules):
+        problems.append("modules_off: leave at least one module on")
     if config.get("splash"):
         problems += screen_problems("splash", config["splash"])
     from bongo.update import problems as update_problems

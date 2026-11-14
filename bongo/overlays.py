@@ -42,7 +42,10 @@ class Overlays:
 
     @classmethod
     def from_config(cls, config: dict, modules: dict, ctx_factory) -> "Overlays":
-        return cls([Rule(**r) for r in config.get("overlays", [])], modules, ctx_factory)
+        from bongo.config import modules_off
+        off = modules_off(config)   # a module switched off in Settings > Modules: its overlays are skipped
+        return cls([Rule(**{**r, "enabled": r.get("enabled", True) and r["module"] not in off})
+                    for r in config.get("overlays", [])], modules, ctx_factory)
 
     def style(self, i: int, rule: Rule):
         if i not in self._styles:  # built on first use, then kept so it can animate
