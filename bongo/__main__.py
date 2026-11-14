@@ -139,6 +139,14 @@ def main(argv=None) -> int:
         except Exception as error:
             logging.warning("couldn't check for an unfinished update: %s", error)
     modules = discover()
+    if args.command == "run":
+        from bongo import addons
+        from bongo.sandbox import remote
+
+        addons.register(modules)   # imported modules (Settings > Modules > Import): each runs in its own child process
+        addons.keep_checking()     # ...and a look for newer versions once a day (nothing installs by itself)
+        import atexit
+        atexit.register(remote.stop_all)
 
     if args.command == "list":
         for module in modules.values():

@@ -142,7 +142,7 @@ input[type="time"] { color-scheme: dark; }
 
 /* surfaces */
 .card { padding: 20px; border-radius: 0; background: var(--card); border: 1px solid var(--line); min-width: 0; }
-.error-box { margin: 0; padding: 10px 12px; border-radius: 0; background: var(--danger-bg); border: 1px solid var(--danger-line); color: #FFB3B8; font-size: 13px; }
+.error-box { overflow-wrap: anywhere; margin: 0; padding: 10px 12px; border-radius: 0; background: var(--danger-bg); border: 1px solid var(--danger-line); color: #FFB3B8; font-size: 13px; }
 .error-box ul { margin: 6px 0 0; padding-left: 18px; font-family: var(--mono); font-size: 12px; overflow-wrap: anywhere; }
 .note { display: flex; gap: 10px; align-items: flex-start; padding: 14px 16px; border-radius: 0; background: #15181C; border: 1px solid var(--line); font-size: 13px; color: var(--soft); }
 .note .ico { color: #7AA2FF; margin-top: 1px; }
@@ -219,6 +219,24 @@ input[type="time"] { color-scheme: dark; }
 .cal-ev .when { font-size: 12px; color: var(--soft); white-space: nowrap; }
 .cal-ev .noicon { width: 32px; height: 32px; border: 1px dashed var(--line-2); }
 .cal-nothing { padding: 10px 0; margin: 0; color: var(--muted); font-size: 13px; border-bottom: 1px solid var(--line); }
+/* Settings > Modules > Import (js/modimport.js) */
+.import-panel { padding: 18px; border: 1px solid var(--amber); background: var(--amber-card, #1C1810); }
+.import-steps { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 8px; font-size: 13px; color: var(--faint); }
+.import-steps li { display: flex; gap: 10px; align-items: center; }
+.import-steps .dot { width: 10px; height: 10px; border: 1px solid var(--line-2); flex: none; border-radius: 0; }
+.import-steps li.done { color: var(--soft); } .import-steps li.done .dot { background: var(--ok); border-color: var(--ok); }
+.import-steps li.now { color: var(--text); } .import-steps li.now .dot { background: var(--amber); border-color: var(--amber); animation: import-blink .8s steps(2) infinite; }
+@keyframes import-blink { 50% { opacity: .3; } }
+@media (prefers-reduced-motion: reduce) { .import-steps li.now .dot { animation: none; } }
+.import-review { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(100%, 260px), 1fr)); gap: 20px; align-items: start; }
+.import-preview { display: block; width: 100%; aspect-ratio: 2 / 1; image-rendering: pixelated; background: #050506; border: 1px solid var(--line); }
+.import-facts { margin: 0; display: grid; grid-template-columns: auto minmax(0, 1fr); gap: 6px 14px; font-size: 13px; }
+.import-facts dt { color: var(--muted); } .import-facts dd { margin: 0; color: var(--soft); overflow-wrap: anywhere; }
+.import-facts a { color: var(--soft); }
+.site-list { margin: 0; padding: 0; list-style: none; display: flex; flex-direction: column; gap: 2px; }
+@media (max-width: 520px) { .module-row { grid-template-columns: 72px minmax(0, 1fr); gap: 8px; } }
+.module-row.flash { animation: module-flash 1.6s ease-out; }
+@keyframes module-flash { from { background: var(--amber-bg); } to { background: transparent; } }
 /* Settings > Modules: a switch and a name per module */
 .module-list { display: flex; flex-direction: column; border-top: 1px solid var(--line); }
 .module-row { display: grid; grid-template-columns: 88px minmax(0, 1fr); gap: 12px; align-items: start; padding: 10px 0; border-bottom: 1px solid var(--line); }

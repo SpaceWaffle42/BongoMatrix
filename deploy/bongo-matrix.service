@@ -16,6 +16,8 @@ NoNewPrivileges=true
 ProtectHome=read-only
 ReadWritePaths=/home/admin/matrix/data
 PrivateTmp=true
+# room for imported modules' connections through their gate (bongo/sandbox/gate.py)
+LimitNOFILE=8192
 
 [Install]
 WantedBy=multi-user.target

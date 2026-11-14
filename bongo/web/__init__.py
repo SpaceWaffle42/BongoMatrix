@@ -27,7 +27,7 @@ from flask import Flask, Response, abort, jsonify, request, send_file, send_from
 from werkzeug.exceptions import HTTPException
 
 from bongo import animator, config as cfg, logo, net, netname, pets, petpack, update
-from bongo import media, places
+from bongo import addons, media, places
 from bongo.fonts import Fonts, names as font_names, table as font_table
 from bongo.module import Context
 from bongo.player import Entry
@@ -144,7 +144,7 @@ def create_app(*, modules, live, pairing, config_path, logs: LogBuffer | None = 
         path = request.path
         if not path.startswith("/api/"):
             return None
-        upload = request.method == "POST" and path in ("/api/media", "/api/pets/import", "/api/animator/import")
+        upload = request.method == "POST" and path in ("/api/media", "/api/pets/import", "/api/animator/import", "/api/addons/upload")
         if upload and request.headers.get("X-Bongo-Upload") != "1":
             abort(415)  # a custom header: a cross-site form can't set it, and fetch would need CORS
         if request.method not in ("GET", "HEAD") and not upload and not request.is_json:
@@ -634,7 +634,128 @@ def create_app(*, modules, live, pairing, config_path, logs: LogBuffer | None = 
     # -- modules and config -------------------------------------------------------------------
     @app.get("/api/modules")
     def module_list():
-        return jsonify([describe(m) for m in modules.values()])
+        return jsonify([{**describe(m), **({"imported": True} if addons.is_imported(m) else {})} for m in modules.values()])
+
+    # -- imported modules (Settings > Modules > Import; bongo/addons.py) ------------------------------
+    def builtin_ids():
+        return [k for k, m in modules.items() if not addons.is_imported(m)]
+
+    def addon_list():
+        from bongo.sandbox import gate as gates, jail
+        blocked = gates._gate.blocked if gates._gate else {}
+        return {"modules": [addons.public(k, info, blocked.get(k)) for k, info in sorted(addons.installed().items())],
+                "enforced": jail.can_shut_in()}
+
+    @app.get("/api/addons")
+    def addons_get():
+        return jsonify(addon_list())
+
+    def one_at_a_time():
+        if addons.busy():
+            abort(409, "Another module is being checked; wait for it to finish.")
+
+    @app.post("/api/addons/check")
+    def addons_check():
+        """Fetch a module from a GitHub link, check it and try it on a test screen (the page polls the job)."""
+        url = str(body().get("url", "")).strip()
+        one_at_a_time()
+        try:
+            addons.parse_github(url)
+        except addons.ImportProblem as error:
+            return jsonify(error=str(error)), 422
+        return jsonify(addons.start(url, url=url, builtin_ids=builtin_ids()).public()), 202
+
+    @app.post("/api/addons/upload")
+    def addons_upload():
+        """The same for a .zip someone sent."""
+        request.max_content_length = addons.MOST_DOWNLOAD + 64 * 1024
+        upload = request.files.get("file")
+        if upload is None or not upload.filename:
+            abort(400, "choose the module's .zip file")
+        one_at_a_time()
+        fd, tmp = tempfile.mkstemp(suffix=".zip", dir=addons.staging())
+        with os.fdopen(fd, "wb") as f:
+            shutil.copyfileobj(upload.stream, f)
+        job = addons.start(upload.filename, upload=Path(tmp), upload_name=upload.filename, builtin_ids=builtin_ids())
+        return jsonify(job.public()), 202
+
+    @app.post("/api/addons/<module_id>/update")
+    def addons_update(module_id):
+        """Fetch a newer version of an imported module and try it; installing it is the same as at first."""
+        info = addons.installed().get(module_id)
+        if info is None:
+            abort(404, "no such module")
+        url = addons.update_link(info)
+        if url is None:
+            return jsonify(error="It wasn't installed from a GitHub release or branch: import the new version again."), 422
+        one_at_a_time()
+        return jsonify(addons.start(url, url=url, builtin_ids=builtin_ids(), update_of=module_id).public()), 202
+
+    @app.post("/api/addons/updates")
+    def addons_check_updates():
+        """Look for updates now (the Matrix also looks once a day)."""
+        addons.check_updates()
+        return jsonify(addon_list())
+
+    @app.get("/api/addons/check/<token>")
+    def addons_job(token):
+        job = addons.JOBS.get(token)
+        if job is None:
+            abort(404, "that import has expired; start it again")
+        return jsonify(job.public())
+
+    @app.delete("/api/addons/check/<token>")
+    def addons_cancel(token):
+        addons.drop(token)
+        return jsonify(ok=True)
+
+    @app.post("/api/addons/install")
+    def addons_install():
+        data = body()
+        job = addons.JOBS.get(str(data.get("token", "")))
+        if data.get("trust") is not True:
+            return jsonify(error="Tick that you trust its author first."), 422
+        if job is None or job.state != "ready":
+            return jsonify(error="That import has expired; start it again."), 404
+        if (job.manifest or {}).get("author") != data.get("author"):
+            return jsonify(error="Tick that you trust its author first."), 422
+        try:
+            info = addons.install(job.token, modules)
+        except addons.ImportProblem as error:
+            return jsonify(error=str(error)), 409
+        preview_style.cache_clear()
+        logging.getLogger("bongo.addons").info("module %s installed by %s", job.manifest["id"],
+                                               (pairing.check(request.cookies.get(COOKIE)) or {}).get("name"))
+        return jsonify({**addon_list(), "installed": job.manifest["id"], "name": info["name"]})
+
+    @app.patch("/api/addons/<module_id>")
+    def addons_change(module_id):
+        data = body()
+        if not isinstance(data.get("only_listed"), bool):
+            return jsonify(error="send only_listed: true or false"), 422
+        try:
+            addons.set_only_listed(module_id, data["only_listed"], modules)
+        except KeyError:
+            abort(404, "no such module")
+        preview_style.cache_clear()
+        return jsonify(addon_list())
+
+    @app.delete("/api/addons/<module_id>")
+    def addons_remove(module_id):
+        """Remove an imported module, and its screens from the playlist and overlays."""
+        if module_id not in addons.installed():
+            abort(404, "no such module")
+        config = load()
+        playlist = [e for e in config.get("playlist", []) if not (isinstance(e, dict) and e.get("module") == module_id)]
+        overlays = [e for e in config.get("overlays", []) if not (isinstance(e, dict) and e.get("module") == module_id)]
+        off = [m for m in config.get("modules_off", []) if m != module_id]
+        addons.remove(module_id, modules)
+        preview_style.cache_clear()
+        changed = {"playlist": playlist, "modules_off": off, **({"overlays": overlays} if "overlays" in config else {})}
+        if any(config.get(k) != v for k, v in changed.items()):
+            cfg.save({**config, **changed}, config_path)
+            live.apply_config()
+        return jsonify({**addon_list(), "screens_removed": len(config.get("playlist", [])) - len(playlist)})
 
     @app.get("/api/config")
     def get_config():
@@ -697,6 +818,10 @@ def create_app(*, modules, live, pairing, config_path, logs: LogBuffer | None = 
         logging.getLogger("bongo.config").info("config saved by %s",
                                                (pairing.check(request.cookies.get(COOKIE)) or {}).get("name"))
         live.apply_config()
+        for module_id in set(merged.get("modules_off") or []) - set(current.get("modules_off") or []):
+            if addons.is_imported(modules.get(module_id)):   # switched off: an imported module stops running at all
+                from bongo.sandbox import remote
+                remote.stop(module_id)
         return jsonify(ok=True, restart_needed=restart_needed(merged), revisions=revisions(load()))
 
     @lru_cache(maxsize=12)

@@ -7,6 +7,7 @@ import { S, onLeave, go, saveConfig, moduleById } from './app.js';
 import { helpButton } from './help.js';
 import { placePicker } from './editor.js';
 import { lookEditor, keepState, comingUpCard, icons, NAMES as COLOUR_NAMES } from './calendarlook.js';
+import { importBox, importedMore, addons } from './modimport.js';
 
 /** The cards, by a name that never changes (their order is saved on the Matrix: config ``settings_layout``). */
 const CARDS = [['safe_area', () => safeAreaCard()], ['device', () => deviceCard()], ['modules', () => modulesCard()],
@@ -304,11 +305,14 @@ function modulesCard() {
     return n ? `Off: hidden from Add a module, its ${screens(n)} skipped` : 'Off: hidden from Add a module';
   };
   let busy = false;   // one save at a time, so two quick taps can't undo each other
+  let imported = {};  // id -> what /api/addons says of it
   const list = h('div', { class: 'module-list' });
-  const rows = (S.modules || []).map((m) => {
+  const loose = h('p', { class: 'tiny warn flush', hidden: true },
+    "Imported modules aren't kept apart on this computer (it isn't a Matrix): the sites they list aren't enforced here.");
+  const row = (m) => {
     const on = !(S.config.modules_off || []).includes(m.id);
     const status = h('span', { class: 'muted tiny' }, note(m, on));
-    const row = h('div', { class: `module-row${on ? '' : ' off'}` });
+    const r = h('div', { class: `module-row${on ? '' : ' off'}`, 'data-module': m.id });
     const sw = toggle(on, on ? 'On' : 'Off', async (next) => {
       if (busy) { sw.setAttribute('aria-pressed', String(!next)); return; }
       busy = true;
@@ -324,18 +328,44 @@ function modulesCard() {
       const now = saved ? next : !next;     // the Matrix said no (say, it was the last one on): put the switch back
       sw.setAttribute('aria-pressed', String(now));
       label.textContent = now ? 'On' : 'Off';
-      row.classList.toggle('off', !now);
+      r.classList.toggle('off', !now);
       status.textContent = note(m, now);
     });
     sw.setAttribute('aria-label', m.name);
-    row.append(sw, h('div', { class: 'module-text' }, h('span', { class: 'strong' }, m.name, m.proposed ? h('span', { class: 'tag' }, 'Proposed') : null),
-      m.description ? h('span', { class: 'muted small' }, m.description) : null, status));
-    return row;
+    const info = imported[m.id];
+    r.append(sw, h('div', { class: 'module-text' }, h('span', { class: 'strong' }, m.name, m.proposed ? h('span', { class: 'tag' }, 'Proposed') : null,
+      m.imported ? h('span', { class: 'tag amber' }, 'Imported') : null),
+    m.description ? h('span', { class: 'muted small' }, m.description) : null, status,
+    ...(m.imported && info ? importedMore(m, info, changed, (id, name) => importer.update(id, name)) : [])));
+    return r;
+  };
+  const draw = () => {
+    const again = keepState(list);
+    list.replaceChildren(...(S.modules || []).map(row));
+    again();
+  };
+  const show = (res) => {
+    imported = Object.fromEntries(res.modules.map((i) => [i.id, i]));
+    loose.hidden = res.enforced !== false || !res.modules.length;
+    draw();
+  };
+  function changed(res, removed) {
+    if (removed) S.modules = (S.modules || []).filter((m) => m.id !== removed);
+    show(res);
+    if (removed) importer.button.focus();   // its row has gone: focus somewhere sensible
+  }
+  const importer = importBox(async (id) => {
+    try { S.modules = await get('/api/modules'); } catch { /* the list below catches up on the next load */ }
+    show(await addons(true));
+    const added = list.querySelector(`[data-module="${CSS.escape(id)}"]`);
+    if (added) { added.classList.add('flash'); added.querySelector('.switch')?.focus(); added.scrollIntoView({ block: 'nearest' }); }
   });
-  list.append(...rows);
-  return h('section', { class: 'card stack', 'aria-label': 'Modules', id: 'modules' }, h('h2', { class: 'h2' }, 'Modules'),
+  draw();
+  addons().then(show);
+  return h('section', { class: 'card stack', 'aria-label': 'Modules', id: 'modules' },
+    h('div', { class: 'row between wrap gap-s' }, h('h2', { class: 'h2' }, 'Modules'), importer.button),
     h('p', { class: 'muted small flush' }, "Switch a module off to leave it out: its screens are skipped in the playlist and overlays, and it isn't offered in Add a module. Its screens and settings are kept for when you switch it back on. Splash, sleep and Show on the Matrix have their own switches."),
-    list);
+    importer.panel, loose, list);
 }
 
 /** Where the Matrix is: every weather and sky screen uses it, unless one is given its own place. */
