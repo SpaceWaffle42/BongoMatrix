@@ -73,7 +73,7 @@ def load(name: str, own: bool = True) -> Sprite:
     if not paths:
         raise FileNotFoundError(f"no sprite called {name!r} in {animator.BUILT_IN} or {animator.projects_dir()}")
     slot = stem if own else f"{stem} (built-in)"
-    key = tuple((str(p), p.stat().st_mtime_ns) for p in paths)
+    key = tuple((str(p), p.stat().st_mtime_ns, p.stat().st_size) for p in paths)
     if _cache.get(slot, (None,))[0] != key:
         result: Sprite | str = "no file"
         for path in paths:

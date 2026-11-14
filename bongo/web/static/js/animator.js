@@ -648,11 +648,21 @@ $('open').onclick = async () => {
   let list;
   try { list = (await api('GET', '/api/animator/projects')).projects; } catch (e) { return say(e.message); }
   if (!list.length) return say('Nothing saved yet. Save keeps a drawing here, with its layers, to open again.');
-  for (const [title, mine] of [['Yours', true], ['Built in', false]]) {
-    const some = list.filter((p) => !p.built_in === mine);
+  // the 8 x 8 icons (bongo/icons.py) are many, so they fold away under their own heading
+  const isIcon = (p) => p.built_in && p.name.startsWith('icon_');
+  for (const [title, mine, pick] of [['Yours', true, (p) => !p.built_in], ['Built in', false, (p) => p.built_in && !isIcon(p)], ['Built in: icons for Calendar and Countdown', false, isIcon]]) {
+    const some = list.filter(pick);
     if (!some.length) continue;
-    const h = document.createElement('h3'); h.textContent = `${title} · ${some.length}`; body.append(h);
-    const rows = document.createElement('div'); rows.className = 'projects'; body.append(rows);
+    const rows = document.createElement('div'); rows.className = 'projects';
+    if (pick === isIcon) {
+      const fold = document.createElement('details'), sum = document.createElement('summary');
+      const h = document.createElement('h3'); h.textContent = `${title} · ${some.length}`; sum.append(h); sum.className = 'fold';
+      const how = document.createElement('p'); how.className = 'muted'; how.textContent = 'Change one, keep it 8 × 8 and save it under the same name: the Matrix shows yours (its first frame).';
+      fold.append(sum, how, rows); body.append(fold);
+    } else {
+      const h = document.createElement('h3'); h.textContent = `${title} · ${some.length}`; body.append(h);
+      body.append(rows);
+    }
     some.forEach((p) => {
       const row = document.createElement('div'); row.className = 'project';
       const b = document.createElement('button'); b.type = 'button'; b.className = 'pick';
