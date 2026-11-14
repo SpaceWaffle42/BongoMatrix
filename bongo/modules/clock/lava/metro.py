@@ -20,12 +20,21 @@ def _smooth(a, lo, hi):
     return t * t * (3 - 2 * t)
 
 
-def fitting(fonts, font, text, width):
-    """``font`` if ``text`` fits, else the first smaller bold font that does (e.g. HH:MM:SS)."""
-    for f in (font, *map(fonts, ("7x13B", "6x13B", "6x10"))):
-        if f.width(text) <= width - 2:
+def fitting(fonts, font, text, width, baseline=None):
+    """``font`` if ``text`` fits, else the first smaller bold font that does (e.g. HH:MM:SS). With a
+    ``baseline`` it must also leave a clear row above its lit pixels when drawn there (a short panel)."""
+    for f in (font, *map(fonts, ("9x18B", "9x15B", "7x13B", "6x13B", "6x10"))):
+        if f.width(text) <= width - 2 and (baseline is None or top_row(f, text, baseline) >= 1):
             return f
     return f
+
+
+def top_row(font, text, baseline):
+    """The first lit row of ``text`` drawn on ``baseline``."""
+    scratch = Image.new("L", (font.width(text) + 2, baseline + 40))
+    font.draw(scratch, 0, baseline + 20, text, 255)
+    box = scratch.getbbox()
+    return box[1] - 20 if box else baseline
 
 
 class Metro(Style):
@@ -96,7 +105,9 @@ class Metro(Style):
         labels = []
         if s["show_time"]:
             label = hm(now, s["hours"])
-            labels.append((fitting(self.ctx.fonts, self.time_font, label, w), label, s["time_align"], time_y, p["text"]))
+            tight = s["time_y"] is None and h < 30   # a short panel: the digits must clear the top edge
+            labels.append((fitting(self.ctx.fonts, self.time_font, label, w, time_y if tight else None), label,
+                           s["time_align"], time_y, p["text"]))
         if show_date:
             date = now.strftime(s["date_format"])
             labels.append((self.date_font, date.upper() if s["uppercase_date"] else date,

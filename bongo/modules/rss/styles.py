@@ -92,6 +92,7 @@ class _News(Style):
     # so where they're needed the wording has no W in it.
     SAYS = {"none": ((("ADD A", "NEWS FEED"), "6x10"), (("ADD A", "FEED"), "5x7"), (("ADD A", "FEED"), "tom-thumb")),
             "offline": ((("NEWS", "OFFLINE"), "6x10"), (("FEED", "OFFLINE"), "5x7"), (("FEED", "OFFLINE"), "tom-thumb"))}
+    LOADING = (("NEWS", "6x10"), ("FEED", "5x7"), ("FEED", "tom-thumb"))   # the same rule while it's fetching
 
     def summary(self, item) -> str:
         return item.summary if self.settings["show_summary"] else ""
@@ -130,12 +131,17 @@ class _News(Style):
                 font.draw(img, (w - font.width(line) + 1) // 2, base + i * (font.cap + 3), line,   # (+1: a glyph ends in a blank column)
                           self.accent if i == 0 else self.text)
             return img
-        img, font = self.backdrop.copy(), self.ctx.fonts("6x10")
-        x = max(0, (self.ctx.width - font.width("NEWS...")) // 2)
-        colour = mix(self.bg_top, self.accent, 0.45)
-        base = middle(font, self.ctx.height)
-        font.draw(img, x, base, "NEWS", colour)
-        font.draw(img, x + font.width("NEWS"), base, "." * (int(now.timestamp() * 2) % 4), colour)
+        # still fetching: the word, centred and bright enough to read across a room, over three dots that
+        # fill in turn. (It was "NEWS..." in one font: dim, pushed about by its own dots, cut off at 32 wide.)
+        img, w, h = self.backdrop.copy(), self.ctx.width, self.ctx.height
+        word, font = next(((word, f) for word, name in self.LOADING for f in (self.ctx.fonts(name),)
+                           if f.width(word) <= w - 3 and f.cap + 6 <= h), (self.LOADING[-1][0], self.tiny))
+        base = (h - (font.cap + 5)) // 2 + font.cap
+        font.draw(img, (w - font.width(word) + 1) // 2, base, word, mix(self.bg_top, self.accent, 0.9))
+        lit = int(now.timestamp() * 2) % 4
+        for i in range(3):
+            x, y = w // 2 - 5 + i * 4, base + 3
+            img.paste(self.accent if i < lit else mix(self.bg_top, self.accent, 0.3), (x, y, x + 2, y + 2))
         return img
 
 
