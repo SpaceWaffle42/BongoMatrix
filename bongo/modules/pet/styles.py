@@ -11,7 +11,7 @@ from bongo.module import Style
 from .art import H, W, load, missing, no_art
 from bongo.pets import wearing
 
-from . import places
+from . import places, roam
 from .scenes import BANNER_SLIDE_MS, HOUSE, MODES, STRIDE, TAG_RISE_MS, record_loop
 
 # The engine's 3x5 font: tiny, and the same on every panel.
@@ -86,7 +86,7 @@ def overlay(draw, item, t, shot, life=float("inf"), view=(0, 0, W, H)):
             draw.point((cx - 2 + k, max(vy, cy - 24) + (k + int(t / 110)) % 3), fill=(90, 90, 110))
 
 
-def lifetimes(timeline, starts, total):
+def lifetimes(timeline, starts, total, loop=True):
     """For each shot, its overlays with when each appeared and when it goes (ms on the loop's clock).
     An overlay that runs on over the loop's end carries on from the start, so it never restarts."""
     n = len(timeline)
@@ -102,7 +102,7 @@ def lifetimes(timeline, starts, total):
                 k = j
             else:
                 k += 1
-        if len(runs) > 1 and runs[0][0] == 0 and runs[-1][1] == n:   # across the wrap: one run
+        if loop and len(runs) > 1 and runs[0][0] == 0 and runs[-1][1] == n:   # across the wrap: one run
             first, last = runs[0], runs[-1]
             first[2], last[3] = last[2] - total, total + first[3]
             last_end = last[3]
@@ -206,8 +206,7 @@ class _Scene(Style):
         if self.art is None:
             return no_art(self.ctx.width, self.ctx.height, self.ctx.fonts)
         clock = now.timestamp() * 1000          # the place's moving things run on this, never restarting
-        t = clock % self.total
-        k = bisect.bisect_right(self.starts, t) - 1
+        t, k = self.locate(now, clock)
         shot = self.timeline[k][0]
         art = self.art
         img = self.room(shot.room, clock).convert("RGBA")
@@ -227,13 +226,17 @@ class _Scene(Style):
         flying = shot.toy and (shot.toy[0] == "bee" or shot.tag in ("meow_sit", "wash_sit"))
         if shot.toy and not flying:
             self.draw_toy(img, shot.toy, t)
+        if big:   # her ball and toy go behind what stands in front of them, as she does
+            for thing in (shot.ball, None if flying or not shot.toy else shot.toy[1:3]):
+                if thing:
+                    self.place.over(img, empty, (thing[0], thing[1] - 3))
         frame = art.animations[shot.tag][shot.index]
         x, y = int(round(shot.cat[0])) + frame.dx, int(round(shot.cat[1])) + frame.dy
         layer = Image.new("RGBA", img.size)
         layer.paste(frame.image, (x, y), frame.image)
         img.alpha_composite(layer)
         if big:
-            self.place.over(img, empty, shot.cat)
+            self.place.over(img, empty, shot.cat, shot.perch)
         if flying:
             self.draw_toy(img, shot.toy, t)
         if self.place:   # what moves over her: snow, fireflies, leaves (crossing over as the lights change)
@@ -265,17 +268,27 @@ class _Scene(Style):
         return fit(img.convert("RGB"), self.ctx.width, self.ctx.height, feet, tall, above)
 
     def focus(self, t, shot, width):
-        """What the view follows in a bigger room: where she has been over the last third of a second,
-        so it glides after her instead of whipping about when she runs (never far from her: she stays
-        on screen), and looks ahead to her ball or toy."""
-        xs, ys = [], []
-        for k in range(8):
-            cat = self.timeline[bisect.bisect_right(self.starts, (t - k * 45) % self.total) - 1][0].cat
+        """What the view follows in a bigger room: the middle of where she is over the half second
+        either side of now, so it glides with her instead of whipping about when she runs or jumps
+        (it sets off as she gathers herself; never far from her: she stays on screen), and looks ahead
+        to her ball or toy."""
+        xs, ys, last = [], [], len(self.starts) - 1
+        for k in range(-11, 12):
+            cat = self.timeline[max(0, min(last, bisect.bisect_right(self.starts, self.back(t, k * 45)) - 1))][0].cat
             xs.append(cat[0])
             ys.append(cat[1])
-        x = max(shot.cat[0] - 18, min(shot.cat[0] + 18, sum(xs) / 8))
-        y = max(shot.cat[1] - 3, min(shot.cat[1] + 3, sum(ys) / 8))
+        x = max(shot.cat[0] - 18, min(shot.cat[0] + 18, sum(xs) / len(xs)))
+        y = max(shot.cat[1] - 8, min(shot.cat[1] + 4, sum(ys) / len(ys)))
         return x + lead(shot, width, self.stage.w), y
+
+    def locate(self, now, clock):
+        """Where the loop is at this moment: (ms on the loop's clock, which shot)."""
+        t = clock % self.total
+        return t, bisect.bisect_right(self.starts, t) - 1
+
+    def back(self, t, ms):
+        """``ms`` earlier on the loop's clock."""
+        return (t - ms) % self.total
 
     def draw_toy(self, img, toy, t):
         name, x, y, flipped, bitten = toy
@@ -309,9 +322,45 @@ DAYTIME = ["idle", "eating", "washing", "playing", "scratching", "napping", "wak
 
 class Life(_Scene):
     """Her day: the ticked modes one after another, in an order that changes each day."""
-    defaults = {**_Scene.defaults, "modes": DAYTIME}
+    defaults = {**_Scene.defaults, "modes": DAYTIME, "free_roaming": True}   # (in the places that allow it: rooms.py)
     choices = {**_Scene.choices, "modes": list(MODES)}
     basic = ("place", "modes")
+
+    def setup(self):
+        super().setup()
+        self.roamer, self.window = None, None
+        if self.art is not None and self.settings["free_roaming"] and getattr(self.place, "roams", False):
+            self.roamer = roam.roamer(self.art, self.settings["place"], self.place, self.ctx.pet, self.ctx.now())
+            self.began = {}
+
+    def locate(self, now, clock):
+        """Free-roaming: there is no loop. Her last few actions are the timeline, on the real clock."""
+        if self.roamer is None:
+            return super().locate(now, clock)
+        now = roam.like(now, self.roamer.clock)
+        if self.roamer.recent and now < self.roamer.recent[0][0]:      # the clock went back: she starts afresh
+            self.roamer = roam.roamer(self.art, self.settings["place"], self.place, self.ctx.pet, now)
+        around = self.roamer.around(now)
+        if around is not self.window:
+            self.window = around
+            self.timeline, self.starts = [], []
+            for began, shots, what in around:
+                at = roam.like(began, now).timestamp() * 1000
+                for shot in shots:
+                    self.timeline.append((shot, what))
+                    self.starts.append(at)
+                    at += shot.ms
+            self.total = at
+            self.lives = lifetimes(self.timeline, self.starts, self.total, loop=False)
+            for k, items in enumerate(self.lives):     # what was already up when this window began keeps its age
+                for j, (item, start, end) in enumerate(items):
+                    if start == self.starts[0] and self.began.get(item, start) < start:
+                        items[j] = (item, self.began[item], end)
+            self.began = {item: start for items in self.lives for item, start, _ in items}
+        return clock, max(0, min(len(self.starts) - 1, bisect.bisect_right(self.starts, clock) - 1))
+
+    def back(self, t, ms):
+        return super().back(t, ms) if self.roamer is None else t - ms
 
     def modes(self):
         picked = [m for m in self.settings["modes"] if m in MODES] or ["idle"]

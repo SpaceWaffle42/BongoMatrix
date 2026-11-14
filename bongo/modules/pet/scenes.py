@@ -74,6 +74,7 @@ class Shot:
     moving: int = 0         # -1 left, 0 still, 1 right (for dust)
     toy: tuple | None = None  # (name, x, y, flipped, bitten px): a toy on the floor (or a bee in the air)
     fade: tuple | None = None  # (from room, 0..1): the room is fading from another (lights going out, the bowl filling)
+    perch: str = ""         # the furniture she is on (or jumping onto or off): it is never drawn over her
 
 
 @dataclass
@@ -88,6 +89,8 @@ class Script:
     shots: list = field(default_factory=list)
     _moving: int = 0
     fade: tuple | None = None
+    perch: str = ""
+    free: bool = False        # free-roaming (roam.py): a scene leaves the bowl as it finds it
     enter: Shot | None = None   # the last shot of the scene before (None: this scene starts the loop afresh)
     origin: tuple | None = None # where this scene starts when it starts afresh (the loop's first scene)
 
@@ -113,6 +116,8 @@ class Script:
         walks there from where she is (or, ``anywhere``, stays put if she's on the floor in view), and
         the room changes by fading: lights come up before she wakes; the bowl changes once she's there."""
         self.origin = (x, y)
+        if self.free and self.room != "night":
+            room = self.room
         if not self.entering:
             self.cat, self.room = [x, y], room
             return
@@ -186,7 +191,27 @@ class Script:
         ball = tuple(self.ball) if self.ball is not None and not dark else None   # fading: drawn, dimmed with the light
         toy = tuple(self.toy) if self.toy is not None and not dark else None
         self.shots.append(Shot(tag, i, tuple(self.cat), ball, self.room, tuple(self.overlays), ms, self._moving, toy,
-                               self.fade))
+                               self.fade, self.perch))
+
+    def jump_to(self, x, y, perch=""):
+        """A jump, from the art there is: up on her hind legs, then that stretched pose carried along
+        a thrown arc (a rise, then a fall that speeds up), and down onto all fours where she lands.
+        ``perch``: the furniture she lands on ("" for the floor)."""
+        sx, sy = self.cat
+        self.perch = perch or self.perch                     # in front of it from take-off to landing
+        for i, ms in ((0, 180), (1, 160), (2, 140)):
+            self.shot("on_hind_legs", i, ms)                 # gathers herself, stretches up
+        clear = 4 + 0.3 * abs(y - sy) + (3 if y > sy else 0)  # how far the arc clears a straight line
+        n = max(8, round((abs(y - sy) + abs(x - sx)) / 4))
+        self._moving = 0
+        for k in range(1, n):
+            u = k / n
+            self.cat = [sx + (x - sx) * u, sy + (y - sy) * u - 4 * clear * u * (1 - u)]
+            self.shot("on_hind_legs", 2, 50)
+        self.cat = [x, y]
+        self.shot("on_hind_legs", 1, 120)
+        self.perch = perch
+        self.shot("on_hind_legs", 0, 160)                    # down on all fours
 
     @property
     def elapsed(self):

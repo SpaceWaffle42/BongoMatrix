@@ -164,6 +164,10 @@ class Room:
     bed = bowl = ("", 0, 0)
     patch = (0, 0)
     cool, ambient = (0.72, 0.84, 1.3), 0.36
+    roams = False            # Life here is free-roaming (roam.py) rather than the scenes in turn
+    floor_top = 22           # the highest row her feet go on the floor (above it: the wall, the back row)
+    perches: dict = {}       # name -> (piece she sits on, her feet there, the perch to jump from: "" the floor, floor spot)
+    posts: tuple = ()        # floor spots where she stands to scratch the post on her right
 
     @property
     def needs(self) -> set:
@@ -219,12 +223,74 @@ class Room:
     def front(self, img, t, night):
         pass
 
-    def over(self, img, room, feet):
+    def blocked(self, x, y) -> bool:
+        """Her feet can't be here: off the floor, or where furniture (or her bowl) stands."""
+        w, h = self.size
+        if not (6 <= x <= w - 6 and self.floor_top <= y <= h - 3):
+            return True
+        got = pieces()
+        for name, left, base in (*self.things, self.bowl):
+            deep = 12 if name == self.bowl[0] else 7       # how far back from its front edge it stands
+            side = 2 if name == self.bowl[0] else 5       # (she stands right beside her bowl to eat)
+            if left - side <= x <= left + got[name].width + side - 1 and base - deep <= y <= base + 2:
+                return True
+        return False
+
+    def hidden(self, x, y) -> bool:
+        """Standing here she'd be out of sight behind something tall, or lying in her bed."""
+        got = pieces()
+        for name, left, base in self.things:
+            pic = got[name]
+            if base > y + 2 and left - 3 <= x <= left + pic.width + 2 and y > base - pic.height:
+                return True
+        name, left, base = self.bed
+        return left - 3 <= x <= left + got[name].width + 2 and base - got[name].height + 2 <= y <= base + 1
+
+    def clear(self, a, b) -> bool:
+        """A straight walk from a to b crosses nothing."""
+        n = max(1, int(max(abs(b[0] - a[0]), abs(b[1] - a[1])) // 2))
+        return not any(self.blocked(a[0] + (b[0] - a[0]) * k / n, a[1] + (b[1] - a[1]) * k / n) for k in range(1, n))
+
+    def route(self, a, b) -> list:
+        """The corners of a walk from a to b round the furniture (b alone if the way is clear; a
+        spot she can't stand on is left by, or reached by, the straight line)."""
+        if self.clear(a, b):
+            return [b]
+        step = 4
+        cell = lambda p: (int(round(p[0] / step)), int(round(p[1] / step)))   # noqa: E731
+        start, goal = cell(a), cell(b)
+        seen, queue = {start: None}, [start]
+        while queue and goal not in seen:
+            cx, cy = queue.pop(0)
+            for dx, dy in ((1, 0), (-1, 0), (0, 1), (0, -1), (1, 1), (1, -1), (-1, 1), (-1, -1)):
+                nxt = (cx + dx, cy + dy)
+                if nxt not in seen and (nxt == goal or not self.blocked(nxt[0] * step, nxt[1] * step)):
+                    seen[nxt] = (cx, cy)
+                    queue.append(nxt)
+        if goal not in seen:
+            return [b]
+        cells, at = [], goal
+        while at is not None:
+            cells.append((at[0] * step, at[1] * step))
+            at = seen[at]
+        cells = [a, *cells[::-1][1:-1], b]
+        out, i = [], 0
+        while i < len(cells) - 1:                      # keep only the corners: the farthest spot in a clear line
+            j = len(cells) - 1
+            while j > i + 1 and not self.clear(cells[i], cells[j]):
+                j -= 1
+            out.append(cells[j])
+            i = j
+        return out
+
+    def over(self, img, room, feet, perch=""):
         """She walks behind whatever stands in front of her: copy those things back over her from
-        ``room`` (the room as it is drawn this frame, without her)."""
+        ``room`` (the room as it is drawn this frame, without her). Not what she is sitting on."""
         got = pieces()
         for name, x, base in self.things:             # (never her bed or bowl: those lie flat under her)
             pic = got[name]
+            if name == perch:
+                continue
             if base > feet[1] + 2 and x - 12 < feet[0] < x + pic.width + 12:
                 box = (x, base - pic.height + 1, x + pic.width, base + 1)
                 img.paste(room.crop(box), box, pic.getchannel("A").point(lambda v: 255 if v > 127 else 0))
@@ -281,7 +347,9 @@ class Playroom(Room):
     name, blurb = "Playroom", "Carpet tiles, two tall cat trees to walk behind, a little house and her carrier. Fairy lights twinkle on the wall."
     size, patch = LARGE, (32, 13)
     things = (("tree_3", 0, 63), ("tree_5", 94, 63), ("carrier_1", 38, 28), ("house_4", 73, 29), ("food_5", 20, 21))
-    bed, bowl = ("bed_round", 36, 62), ("bowl_c", 74, 58)
+    bed, bowl = ("bed_round", 36, 62), ("bowl_c", 80, 58)
+    roams, floor_top = True, 32
+    perches = {"box": ("tree_3", (29, 41), "", (46, 60)), "ledge": ("tree_3", (9, 24), "box", None)}
     LIGHTS = (rgb("ffd166"), rgb("ef6f6c"), rgb("7bdff2"), rgb("b8f28a"))
 
     def floor(self, img):
