@@ -203,6 +203,17 @@ def latest(settings: dict) -> list[Item] | None:
     return items[:settings["max_items"]] or None
 
 
+def trouble(settings: dict) -> str | None:
+    """Why there are no stories, when it isn't just "still fetching": "none" (no feed is set) or
+    "offline" (the last try at every feed failed)."""
+    if not settings["feeds"]:
+        return "none"
+    with _lock:
+        if all(url not in _cache and url in _retry_at for url in settings["feeds"]):
+            return "offline"
+    return None
+
+
 def seed(url: str, feed: Feed) -> None:
     """Put a feed in the cache (previews and tests)."""
     with _lock:

@@ -22,6 +22,7 @@ import base64
 import hashlib
 import io
 import json
+import logging
 import os
 import secrets
 import threading
@@ -33,6 +34,8 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from PIL import Image
+
+log = logging.getLogger(__name__)
 
 REDIRECT = "http://127.0.0.1:8888/callback"
 SCOPES = "user-read-currently-playing user-read-playback-state"
@@ -183,9 +186,17 @@ def _check() -> None:
             with urllib.request.urlopen(track.art_url, timeout=10) as response:  # noqa: S310 (Spotify's image host)
                 art = Image.open(io.BytesIO(response.read())).convert("RGB").resize((64, 64), Image.LANCZOS)
         with _lock:
-            _now.update(track=track, ok=time.time())
+            _now.update(track=track, ok=time.time(), refused=False)
             if art is not None:
                 _now["art"] = {track.art_url: art}           # just the current cover
+    except urllib.error.HTTPError as error:
+        # 400/401/403: Spotify won't take our sign-in any more (revoked, or the app was removed). The
+        # screen just looks like "nothing playing", so say it in the log, once, not every few seconds.
+        with _lock:
+            first, _now["refused"] = error.code in (400, 401, 403) and not _now.get("refused"), error.code in (400, 401, 403)
+        if first:
+            log.warning("Spotify refused the sign-in (%s %s): connect it again in the Spotify module's settings",
+                        error.code, error.reason)
     except (OSError, ValueError, KeyError):
         pass                                                 # try again next time; the screen keeps the last reading
     finally:

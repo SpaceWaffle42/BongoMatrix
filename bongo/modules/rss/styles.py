@@ -78,7 +78,20 @@ class _News(Style):
 
     def render(self, now):
         items = data.latest(self.settings)
-        return self.waiting(now) if items is None else self.draw(items, now)
+        if items is not None:
+            self.since = None
+            return self.draw(items, now)
+        trouble = data.trouble(self.settings)
+        if trouble:   # nothing to show and nothing coming: say why, briefly, and let the next screen on
+            self.since = getattr(self, "since", None) or now
+            self.finished = (now - self.since).total_seconds() >= self.TROUBLE_SECONDS
+        return self.waiting(now, trouble)
+
+    TROUBLE_SECONDS = 5
+    # what to say, and the font to say it in, biggest first. The small fonts' W reads as an H ("NEHS"),
+    # so where they're needed the wording has no W in it.
+    SAYS = {"none": ((("ADD A", "NEWS FEED"), "6x10"), (("ADD A", "FEED"), "5x7"), (("ADD A", "FEED"), "tom-thumb")),
+            "offline": ((("NEWS", "OFFLINE"), "6x10"), (("FEED", "OFFLINE"), "5x7"), (("FEED", "OFFLINE"), "tom-thumb"))}
 
     def summary(self, item) -> str:
         return item.summary if self.settings["show_summary"] else ""
@@ -104,7 +117,19 @@ class _News(Style):
             cache[key] = wrap(font, text, width)
         return cache[key]
 
-    def waiting(self, now):
+    def waiting(self, now, trouble=None):
+        """No stories yet: NEWS... while they're fetched; what to do about it when they can't be."""
+        if trouble:
+            img, w, h = self.backdrop.copy(), self.ctx.width, self.ctx.height
+            # the first wording whose font leaves two clear columns each side and a clear row above and below
+            lines, font = next(((lines, f) for lines, name in self.SAYS[trouble] for f in (self.ctx.fonts(name),)
+                                if max(f.width(line) for line in lines) <= w - 3 and 2 * f.cap + 5 <= h),
+                               (self.SAYS[trouble][-1][0], self.tiny))
+            base = middle(font, h, lines=2, gap=3 - font.descent)
+            for i, line in enumerate(lines):
+                font.draw(img, (w - font.width(line) + 1) // 2, base + i * (font.cap + 3), line,   # (+1: a glyph ends in a blank column)
+                          self.accent if i == 0 else self.text)
+            return img
         img, font = self.backdrop.copy(), self.ctx.fonts("6x10")
         x = max(0, (self.ctx.width - font.width("NEWS...")) // 2)
         colour = mix(self.bg_top, self.accent, 0.45)

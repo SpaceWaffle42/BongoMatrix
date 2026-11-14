@@ -76,6 +76,7 @@ def parse(payload: dict, fetched: float | None = None) -> Reading:
 
 
 RETRY_SECONDS, RETRY_MOST = 60, 900   # after a failed fetch: wait a minute, doubling each time, up to 15
+OLD_SECONDS = 3 * 3600                # a reading older than this isn't "the weather" any more: don't show it as if it were
 
 _cache: dict[str, Reading] = {}
 _in_flight: set[str] = set()
@@ -111,7 +112,15 @@ def latest(settings: dict) -> Reading | None:
                 and not os.environ.get("BONGO_OFFLINE"):
             _in_flight.add(url)
             threading.Thread(target=_refresh, args=(url,), daemon=True, name="weather").start()
+    if reading is not None and time.time() - reading.fetched > max(OLD_SECONDS, settings["refresh_minutes"] * 120):
+        return None   # the network has been down for hours: yesterday's sunshine isn't shown as now
     return reading
+
+
+def failing(settings: dict) -> bool:
+    """Whether the last try to fetch this weather failed (so "no reading" means no connection, not "not yet")."""
+    with _lock:
+        return _fails.get(request_url(settings), 0) > 0
 
 
 def seed(settings: dict, reading: Reading) -> None:

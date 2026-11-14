@@ -34,10 +34,18 @@ class _Weather(Style):
     def render(self, now):
         reading = data.latest(self.settings)
         if reading is None:
-            return self.waiting(now)
+            offline = data.failing(self.settings)
+            if offline:   # nothing to show and no way to get it: say so, briefly, and let the next screen on
+                self.since = getattr(self, "since", None) or now
+                self.finished = (now - self.since).total_seconds() >= self.OFFLINE_SECONDS
+            return self.waiting(now, offline)
+        self.since = None
         return self.draw(reading, now)
 
-    def waiting(self, now):
+    OFFLINE_SECONDS = 5
+
+    def waiting(self, now, offline=False):
+        """No reading yet: a cloud and WEATHER... while it's being fetched, OFFLINE when it can't be."""
         w, h = self.ctx.width, self.ctx.height
         img = self.backdrop(3, True)
         font = self.small if self.small.width("WEATHER...") <= w else self.ctx.fonts("tom-thumb")
@@ -47,6 +55,9 @@ class _Weather(Style):
             img.paste(cloud, ((w - 14) // 2, top), cloud)
         else:                                                   # no room for both: the word alone, centred
             baseline = (h + font.cap) // 2
+        if offline:
+            font.draw(img, (w - font.width("OFFLINE") + 1) // 2, baseline, "OFFLINE", self.ACCENT)
+            return img
         dots = "." * (int(now.timestamp() * 2) % 4)
         font.draw(img, (w - font.width("WEATHER") + 1) // 2, baseline, f"WEATHER{dots}", self.DIM)
         return img
