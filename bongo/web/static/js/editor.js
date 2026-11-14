@@ -15,6 +15,8 @@ export function schemaFor(mod, style) {
   return { shared: (mod?.settings || []).filter((f) => !names.has(f.name)).map(lim), own };
 }
 
+const MANY_STYLES = 6;   // more looks than this and the editor shows the chosen one, with the rest in a picker
+
 export function render(view, match) {
   const i = Number(match[1]);
   if (!S.draft?.[i]) { toast('That playlist entry no longer exists'); go('/', { replace: true }); return; }
@@ -45,6 +47,36 @@ export function render(view, match) {
   const sections = h('div', { class: 'stack' });
   let thumbs = [];
   onLeave(() => thumbs.forEach((t) => t.stop()));
+  // A module with many looks (a Clock has 13) shows the chosen one on a line, and the rest in a
+  // picker, so its settings aren't a long scroll below the thumbnails.
+  const many = Object.keys(mod.styles).length > MANY_STYLES;
+  const kinds = [...new Set(Object.values(mod.styles).map((s) => s.group || ''))].filter(Boolean);
+  const rowCanvas = h('canvas', { class: 'led-canvas mini', 'aria-hidden': 'true' });
+  const rowName = h('span', { class: 'style-row-name' }), rowKind = h('span', { class: 'muted small' });
+  const rowLoop = many ? new FrameLoop(rowCanvas, { interval: Infinity,
+    path: () => previewPath({ module: e.module, style: styleOf(e), settings: e.settings }) }) : null;
+  onLeave(() => rowLoop?.stop());
+  const paintRow = () => { rowName.textContent = humanize(styleOf(e)); rowKind.textContent = mod.styles[styleOf(e)]?.group || ''; };
+  let picker = null;
+  function openStyles() {
+    const chips = ['', ...kinds].map((k) => h('button', { type: 'button', class: 'chip', 'aria-pressed': String(!k), onclick: (ev) => {
+      chips.forEach((c) => c.setAttribute('aria-pressed', String(c === ev.currentTarget)));
+      styles.querySelectorAll('.style-group').forEach((g) => { g.hidden = !!k && g.dataset.kind !== k; });
+    } }, k || 'All'));
+    picker = h('dialog', { class: 'dialog wide sheet', 'aria-label': `${mod.name} styles` },
+      h('div', { class: 'sheet-head' },
+        h('div', { class: 'row between' }, h('h2', { class: 'h2' }, 'Style'),
+          h('button', { type: 'button', class: 'btn ghost', 'aria-label': 'Close', onclick: () => picker.close() }, icon('x'))),
+        kinds.length > 1 ? h('div', { class: 'chip-scroll', role: 'group', 'aria-label': 'Kind of style' }, chips) : null),
+      styles);
+    const dlg = picker;
+    dlg.addEventListener('close', () => { thumbs.forEach((t) => t.stop()); thumbs = []; dlg.remove(); picker = null; });
+    dlg.addEventListener('click', (ev) => { if (ev.target === dlg) dlg.close(); });   // a tap outside closes it
+    document.body.append(dlg);
+    paintStyles();
+    if (dlg.showModal) dlg.showModal(); else dlg.setAttribute('open', '');
+    styles.querySelector('[aria-pressed="true"]')?.scrollIntoView({ block: 'center' });
+  }
 
   // -- style picker ------------------------------------------------------------------------
   function paintStyles() {
@@ -65,7 +97,7 @@ export function render(view, match) {
       groups.get(g).push(name);
     });
     if (groups.size === 1 && groups.has('')) styles.replaceChildren(...Object.keys(mod.styles).map(card));
-    else styles.replaceChildren(...[...groups].map(([g, names]) => h('div', { class: 'style-group' },
+    else styles.replaceChildren(...[...groups].map(([g, names]) => h('div', { class: 'style-group', 'data-kind': g },
       g ? h('h3', { class: 'style-group-head' }, g) : null, h('div', { class: 'style-grid' }, ...names.map(card)))));
     styles.className = groups.size === 1 && groups.has('') ? 'style-grid' : 'style-groups';
   }
@@ -88,7 +120,8 @@ export function render(view, match) {
     if (gone.length) toast(`${humanize(name)} has no ${gone.map(humanize).join(', ')}; ${gone.length > 1 ? 'those were' : 'that was'} dropped.`);
     if (reset.length) toast(`${reset.map(humanize).join(', ')} went back to ${humanize(name)}'s default${reset.length > 1 ? 's' : ''}.`);
     styles.querySelectorAll('.style-card').forEach((b) => b.setAttribute('aria-pressed', String(b.dataset.style === name)));
-    paintFields(); changed();
+    picker?.close();
+    paintRow(); paintFields(); changed();
   }
 
   // -- generated form ----------------------------------------------------------------------
@@ -241,18 +274,21 @@ export function render(view, match) {
         h('div', { class: 'row between wrap gap-s' }, h('h2', { class: 'h2' }, 'Style'), helpButton(mod.help, { label: `Help setting up ${mod.name}` })),
         mod.description ? h('p', { class: 'muted small flush' }, mod.description) : null,
         mod.proposed ? h('div', { class: 'note' }, icon('info'), h('span', null, 'Proposed module: not built yet. The previews are prototypes, and saving it here only works in the demo.')) : null,
-        styles),
+        many ? h('div', { class: 'style-row' }, h('span', { class: 'led-frame mini media-thumb' }, rowCanvas),
+          h('span', { class: 'style-row-text grow min0' }, rowName, rowKind),
+          h('button', { type: 'button', class: 'btn', onclick: openStyles }, 'Change')) : styles),
       sections),
     aside));
   let thumbTimer = 0;
-  paintStyles(); paintFields(); changed();
+  if (many) paintRow(); else paintStyles();
+  paintFields(); changed();
 
   function changed() {
     edited.hidden = same(e, original);
     sections.querySelectorAll('section').forEach((s) => s.recount?.());
     if (!Number.isFinite(preview.o.interval)) preview.refresh();
     clearTimeout(thumbTimer);
-    thumbTimer = setTimeout(() => thumbs.forEach((t) => t.refresh()), 800);
+    thumbTimer = setTimeout(() => { rowLoop?.refresh(); thumbs.forEach((t) => t.refresh()); }, 800);
   }
   function cancel() {
     if (!same(e, original) && !confirm('Throw away your edits to this module?')) return;
