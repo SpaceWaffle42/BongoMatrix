@@ -451,3 +451,11 @@ body.drag-active { user-select: none; -webkit-user-select: none; }
 .coat img { width: 100%; image-rendering: pixelated; }
 .coat:hover { border-color: var(--muted); }
 .coat[aria-checked="true"] { border-color: var(--amber); box-shadow: inset 0 0 0 1px var(--amber); background: var(--amber-bg); }
+
+/* Fingers, not a mouse: small text links and the drag handle get a target of at least 40 px, without
+   moving anything (the extra is padding inside the line, taken back by a negative margin). */
+@media (pointer: coarse) {
+  .link, a.tap { display: inline-flex; align-items: center; min-height: 40px; min-width: 40px; padding: 10px 6px; margin: -10px -6px; }
+  .link { margin: -6px -4px; }
+  .handle { min-width: 40px; min-height: 40px; }
+}

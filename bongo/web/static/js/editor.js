@@ -232,7 +232,7 @@ export function render(view, match) {
       h('div', { class: 'row between wrap' }, h('h2', { class: 'h2' }, 'Draft preview'), h('div', { class: 'row gap-s' }, playBtn, safeBtn)),
       h('div', { class: 'led-frame' }, canvas), err,
       h('p', { class: 'muted tiny flush mono' }, `Safe area T${sa.top || 0} R${sa.right || 0} B${sa.bottom || 0} L${sa.left || 0} · `,
-        h('a', { href: href('/settings'), 'data-route': '/settings' }, 'change'))),
+        h('a', { href: href('/settings'), 'data-route': '/settings', class: 'tap' }, 'change'))),
     h('div', { class: 'note' }, icon('info'), h('span', null, 'Drawn by the Matrix itself, frame by frame, with your unsaved settings. Nothing changes on the panel until you apply.')));
 
   view.append(h('div', { class: 'editor-grid' },

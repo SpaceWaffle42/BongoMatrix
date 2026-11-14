@@ -58,11 +58,12 @@ export const clamp = (v, lo, hi) => Math.min(hi, Math.max(lo, v));
 export const humanize = (s) => String(s || '').replace(/_/g, ' ').replace(/^./, (c) => c.toUpperCase());
 const pad = (n, w = 2) => String(n).padStart(w, '0');
 
-/** 72.4 -> "1:12.4" (tenths) or "1:12" */
+/** 72 -> "1:12"; with ``tenths``, 72.4 -> "1:12.4" (a whole number of seconds stays "1:12", not "1:12.0") */
 export function dur(sec, tenths = false) {
   sec = Math.max(0, Number(sec) || 0);
+  if (tenths) sec = Math.round(sec * 10) / 10;
   const m = Math.floor(sec / 60), s = sec - m * 60;
-  return tenths ? `${m}:${s.toFixed(1).padStart(4, '0')}` : `${m}:${pad(Math.floor(s))}`;
+  return tenths && Math.round(s * 10) % 10 ? `${m}:${s.toFixed(1).padStart(4, '0')}` : `${m}:${pad(Math.floor(s))}`;
 }
 export const mmss = (sec) => `${pad(Math.floor(Math.max(0, sec) / 60))}:${pad(Math.floor(Math.max(0, sec) % 60))}`;
 export const clock = (d) => `${pad(d.getHours())}:${pad(d.getMinutes())}`;
