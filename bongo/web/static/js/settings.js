@@ -645,7 +645,7 @@ function splashCard() {
   rule.boot ??= null;
   const inPlaylist = (S.config.playlist || []).filter((e) => e.module === 'splash').length;
   const body = h('div', { class: 'stack' }, screenPicker(rule, 'sp', 'splash'),
-    h('p', { class: 'muted tiny flush' }, 'Each time a Splash item comes round in the playlist it shows the next file from a shuffled list, so every one plays before any repeats. A GIF or video plays once through (a video up to 15 s); a still stays up about as long as your GIFs (7 s if there are none).'),
+    h('p', { class: 'muted tiny flush' }, 'Each time a Splash item comes round in the playlist it shows the next file in a random order, so every one plays once before any repeats, and never the same one twice running. A GIF or video plays once through (a video up to 15 s); a still stays up about as long as your GIFs (7 s if there are none).'),
     h('p', { class: 'small flush' + (inPlaylist ? ' muted' : ' warn') }, inPlaylist
       ? `In the playlist ${inPlaylist === 1 ? 'once' : `${inPlaylist} times`}. Add more, or move it, on the Playlist page.`
       : 'Not in the playlist yet: add a Splash item on the Playlist page so it plays.'),

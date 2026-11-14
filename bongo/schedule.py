@@ -9,7 +9,8 @@ Built-in files serve the screen they were made for (``splash_*`` or ``sleep_*``)
 uploaded, image, GIF or video, whatever it's called, can be a Splash, boot or Sleep screen.
 
 Splash plays wherever a ``splash`` item sits in the playlist (as in v2). Each time, the next
-file comes from a shuffled bag, so every source plays once before any repeats. ``boot`` is an
+file comes from a random order of the picked files, so every one plays once before any repeats,
+and never the same one twice running (unless only one is picked). ``boot`` is an
 optional single file played once at start-up; without one, start-up is nothing special. A GIF or a
 video plays exactly one pass at ``speed`` percent (the Media module hands over at its end); a still
 holds for the average pass of the row's GIFs when that is 5-10 s, else 7 s (v2's rule).
@@ -141,8 +142,8 @@ def screen_problems(where: str, rule, *, sleep: bool = False) -> list[str]:
     return problems
 
 
-# Shuffle bags and the night's pick outlive a config reload (which rebuilds the Schedule).
-_bags: dict[tuple, list[str]] = {}
+# The splash round and the night's pick outlive a config reload (which rebuilds the Schedule).
+_bags: dict[str, object] = {}   # "left": splash files still to play this round (next last), "done": played this round, "last": the one just shown
 _night: dict[tuple, str] = {}
 
 
@@ -191,16 +192,25 @@ class Schedule:
     # -- splash --------------------------------------------------------------------------
     @property
     def splash(self) -> Entry | None:
-        """The next Splash screen (shuffled bag: all sources play before any repeats)."""
-        if not self.splash_sources:
+        """The next Splash screen. The picked files play in a random order, each once; then a new random
+        order starts, never with the one that just played (nor the boot screen, at start-up). Picking more
+        files mid-round slots them into what's left of it; unpicked ones leave it."""
+        sources = list(dict.fromkeys(self.splash_sources))
+        if not sources:
             return None
-        key = tuple(self.splash_sources)
-        bag = _bags.get(key) or []
-        if not bag:
-            bag = list(dict.fromkeys(self.splash_sources))
-            self.rng.shuffle(bag)
-        name = bag.pop()
-        _bags[key] = bag
+        left = [s for s in _bags.get("left", []) if s in sources]
+        done = list(_bags.get("done", []))
+        if left:                                              # picked since this round began: somewhere in what's left
+            for new in (s for s in sources if s not in left and s not in done):
+                left.insert(self.rng.randrange(len(left) + 1), new)
+        else:                                                 # a new round
+            left, done = sources[:], []
+            self.rng.shuffle(left)
+            if len(left) > 1 and left[-1] == _bags.get("last"):   # not the same one twice running
+                k = self.rng.randrange(len(left) - 1)
+                left[-1], left[k] = left[k], left[-1]
+        name = left.pop()
+        _bags.update(left=left, done=done + [name], last=name)
         return Entry("media", self.splash_fit, settings={"file": name, "speed": self.splash_speed / 100},
                      seconds=hold_seconds(name, self.splash_sources, self.splash_speed), once=True)
 
@@ -208,6 +218,7 @@ class Schedule:
         """The start-up screen: one pass of the boot file (a still holds STILL_SECONDS)."""
         if not self.boot:
             return None
+        _bags["last"] = self.boot   # the first Splash after it is a different one
         return Entry("media", self.splash_fit, settings={"file": self.boot, "speed": self.splash_speed / 100},
                      seconds=hold_seconds(self.boot, [self.boot], self.splash_speed), once=True)
 
