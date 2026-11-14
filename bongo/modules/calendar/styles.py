@@ -19,6 +19,11 @@ def rgb(value: str) -> tuple:
     return tuple(int(h[i:i + 2], 16) for i in (0, 2, 4))
 
 
+PAST = 0.45    # a day or letter that has gone by: dimmer, but still read at low brightness
+FAINT = 0.3    # outside this month
+BLOCK = 0.25   # a plain square for a day or week not in play
+
+
 def scale(colour, k):
     return tuple(int(c * k) for c in colour)
 
@@ -112,6 +117,14 @@ class Page(_Base):
         mask = Image.new("L", (width, img.height))
         self.tiny.draw(mask, -offset, baseline, text, 255)
         img.paste(ink, (x, 0, x + width, img.height), mask)
+    @staticmethod
+    def lit_rows(font, text):
+        """(first, last) lit row of ``text``, counted from the row its baseline is drawn on (so first is negative)."""
+        scratch = Image.new("L", (font.width(text) + 2, font.cap + 16))
+        font.draw(scratch, 0, font.cap + 8, text, 255)
+        box = scratch.getbbox() or (0, 8, 1, font.cap + 8)
+        return box[1] - font.cap - 8, box[3] - 1 - font.cap - 8
+
     def render(self, now):
         w, h = self.ctx.width, self.ctx.height
         img = self.ctx.canvas(self.bg)
@@ -123,12 +136,14 @@ class Page(_Base):
         if self.small.cap * 2 + big.cap + 4 <= h:
             lines.append((self.small, month, scale(self.ink, 0.6)))
         left = max(f.width(t) for f, t, _ in lines)
-        block = sum(f.cap for f, _, _ in lines) + 2 * (len(lines) - 1)
+        # stacked by their lit rows, not their fonts' nominal heights: the big digits have blank rows above
+        # them, which used to push the weekday onto the panel's top row and the month onto its last
+        spans = [self.lit_rows(f, t) for f, t, _ in lines]
+        block = sum(bottom - top + 1 for top, bottom in spans) + 2 * (len(lines) - 1)
         y = (h - block) // 2
-        for font, text, ink in lines:
-            y += font.cap
-            font.draw(img, 1 + (left - font.width(text)) // 2, y, text, ink)
-            y += 2
+        for (font, text, ink), (top, bottom) in zip(lines, spans):
+            font.draw(img, 1 + (left - font.width(text)) // 2, y - top, text, ink)
+            y += bottom - top + 1 + 2
         x0 = left + 5
         room = w - x0 - 1
         if room < 16:
@@ -186,11 +201,11 @@ class Month(_Base):
                 if day == today.day:
                     ink = scale(self.accent, pulse)
                 elif day in marked:
-                    ink = scale(self.event_ink, 0.35 if day < today.day else 0.9)
+                    ink = scale(self.event_ink, PAST if day < today.day else 0.9)
                 elif day < today.day:
-                    ink = scale(self.ink, 0.12)
+                    ink = scale(self.ink, BLOCK)
                 else:
-                    ink = scale(self.ink, 0.28 if c in weekend else 0.42)
+                    ink = scale(self.ink, 0.34 if c in weekend else 0.5)
                 x, y = x_off + c * cw, y_off + r * ch
                 draw.rectangle([x, y, x + cw - 2, y + ch - 2], fill=ink)
         return img
@@ -363,7 +378,7 @@ class Week(_Base):
             is_today = day == today
             if is_today:
                 d.rectangle([x, 1, x + cw - 2, 15], fill=scale(self.accent, 0.75))
-            ink = self.bg if is_today else (scale(self.ink, 0.35) if day < today else self.ink)
+            ink = self.bg if is_today else (scale(self.ink, PAST) if day < today else self.ink)
             letter = f"{day:%a}"[0]
             self.tiny.draw(img, x + (cw - 1 - self.tiny.width(letter)) // 2, 7, letter, ink)
             num = str(day.day)
@@ -425,9 +440,9 @@ class Numbers(_Base):
                 elif day in marked:
                     ink = self.event_ink if day > today else scale(self.event_ink, 0.45)
                 elif day.month != today.month:
-                    ink = scale(self.ink, 0.18)
+                    ink = scale(self.ink, FAINT)
                 else:
-                    ink = scale(self.ink, 0.35 if day < today else 0.85)
+                    ink = scale(self.ink, PAST if day < today else 0.85)
                 tight(img, self.tiny, x, y, text, ink)
         return img
 
@@ -457,9 +472,9 @@ class Dots(_Base):
                 if day == today.day:
                     ink = scale(self.accent, pulse)
                 elif day in marked:
-                    ink = self.event_ink if day > today.day else scale(self.event_ink, 0.4)
+                    ink = self.event_ink if day > today.day else scale(self.event_ink, PAST)
                 else:
-                    ink = scale(self.ink, 0.15 if day < today.day else 0.45)
+                    ink = scale(self.ink, BLOCK if day < today.day else 0.5)
                 d.rectangle([x, y, x + pitch - 2, y + pitch - 2], fill=ink)
         left = gx - 2
         month = f"{today:%b}".upper()
@@ -493,7 +508,7 @@ class Year(_Base):
             col, row = k % cols, k // cols
             ox = gapx + col * (mw + gapx)
             oy = gapy + row * (mh + 4 + gapy) + 5
-            self.tiny.draw(img, ox, oy - 1, f"{dt.date(2000, m, 1):%b}"[0], self.accent if m == today.month else scale(self.ink, 0.35))
+            self.tiny.draw(img, ox, oy - 1, f"{dt.date(2000, m, 1):%b}"[0], self.accent if m == today.month else scale(self.ink, PAST))
             for r, week in enumerate(cal.Calendar(first).monthdayscalendar(today.year, m)):
                 for c, day in enumerate(week):
                     if not day or r >= mh:
@@ -507,7 +522,7 @@ class Year(_Base):
                     elif day in marked[m]:
                         px[x, y] = scale(self.event_ink, 0.5 if date < today else 1.0)
                     else:
-                        px[x, y] = scale(self.ink, 0.18 if date < today else 0.4)
+                        px[x, y] = scale(self.ink, BLOCK if date < today else 0.45)
         return img
 
 
@@ -587,7 +602,7 @@ class Weeks(Progress):
             elif k == int(weeks_done):
                 ink = scale(self.ink, pulse)                  # this week
             else:
-                ink = scale(self.ink, 0.12)
+                ink = scale(self.ink, BLOCK)
             d.rectangle([x, y, x + pitch - 2, y + pitch - 2], fill=ink)
         year_len = 366 if cal.isleap(now.year) else 365
         text = f"DAY {now.timetuple().tm_yday} OF {year_len}"
