@@ -75,8 +75,12 @@ def parse(payload: dict, fetched: float | None = None) -> Reading:
     )
 
 
+RETRY_SECONDS, RETRY_MOST = 60, 900   # after a failed fetch: wait a minute, doubling each time, up to 15
+
 _cache: dict[str, Reading] = {}
 _in_flight: set[str] = set()
+_fails: dict[str, int] = {}        # failed fetches in a row, per URL
+_retry_at: dict[str, float] = {}   # no new fetch before this time.time()
 _lock = threading.Lock()
 
 
@@ -85,8 +89,14 @@ def _refresh(url: str) -> None:
         reading = parse(fetch_json(url))
         with _lock:
             _cache[url] = reading
-    except Exception as error:  # network down, bad payload: keep the last good reading
-        log.warning("weather refresh failed: %s", error)
+            _fails.pop(url, None)
+            _retry_at.pop(url, None)
+    except Exception as error:  # network down, bad payload: keep the last good reading, try again later
+        with _lock:             # (not on the next frame: that was a thread and a log line 20 times a second)
+            _fails[url] = _fails.get(url, 0) + 1
+            wait = min(RETRY_SECONDS * 2 ** (_fails[url] - 1), RETRY_MOST)
+            _retry_at[url] = time.time() + wait
+        log.warning("weather refresh failed: %s; trying again in %d s", error, wait)
     finally:
         with _lock:
             _in_flight.discard(url)
@@ -97,7 +107,8 @@ def latest(settings: dict) -> Reading | None:
     with _lock:
         reading = _cache.get(url)
         stale = reading is None or time.time() - reading.fetched > settings["refresh_minutes"] * 60
-        if stale and url not in _in_flight and not os.environ.get("BONGO_OFFLINE"):
+        if stale and url not in _in_flight and time.time() >= _retry_at.get(url, 0) \
+                and not os.environ.get("BONGO_OFFLINE"):
             _in_flight.add(url)
             threading.Thread(target=_refresh, args=(url,), daemon=True, name="weather").start()
     return reading

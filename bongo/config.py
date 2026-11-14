@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import datetime as dt
 import json
+import logging
 import os
 import tempfile
 from pathlib import Path
@@ -33,22 +34,72 @@ DEFAULTS = {
 }
 
 
+log = logging.getLogger(__name__)
+_warned: set = set()   # damaged files already reported (the dashboard loads the config on every request)
+
+
+def backup_path(path: Path = DEFAULT_PATH) -> Path:
+    """The config as it was before the last save: what ``load`` falls back to if the file is damaged."""
+    return Path(path).with_name(Path(path).name + ".bak")
+
+
+def _read(path: Path) -> dict | None:
+    """A saved config, or None if the file is missing or damaged (empty, cut off, not an object)."""
+    try:
+        data = json.loads(Path(path).read_text())
+    except (OSError, ValueError):
+        return None
+    return data if isinstance(data, dict) else None
+
+
 def load(path: Path = DEFAULT_PATH) -> dict:
-    data = json.loads(Path(path).read_text()) if Path(path).exists() else {}
-    config = {**DEFAULTS, **data, "panel": {**DEFAULTS["panel"], **data.get("panel", {})},
-              "safe_area": {**DEFAULTS["safe_area"], **data.get("safe_area", {})},
-              "web": {**DEFAULTS["web"], **data.get("web", {})}}
+    """The saved config over the defaults. Never raises: a damaged file (a power cut, a bad hand edit)
+    gives the copy from before the last save, else the defaults, so the Matrix and its dashboard still
+    start and it can be put right from there."""
+    path, data = Path(path), {}
+    if path.exists():
+        data = _read(path)
+        if data is None:
+            data = _read(backup_path(path))
+            try:
+                seen = (str(path), path.stat().st_mtime_ns)
+            except OSError:
+                seen = (str(path), 0)
+            if seen not in _warned:
+                _warned.add(seen)
+                log.error("%s is damaged (empty, cut off or not a config); using %s", path,
+                          f"the copy from before the last save, {backup_path(path).name}" if data else "the defaults")
+            data = data or {}
+
+    def part(key):   # a section that isn't an object (null, a list) counts as missing
+        return {**DEFAULTS[key], **data[key]} if isinstance(data.get(key), dict) else dict(DEFAULTS[key])
+    config = {**DEFAULTS, **data, "panel": part("panel"), "safe_area": part("safe_area"), "web": part("web")}
+    if not isinstance(config["playlist"], list):
+        config["playlist"] = []
     return config
 
 
-def save(config: dict, path: Path = DEFAULT_PATH) -> None:
-    """Atomic write so a power cut never leaves half a file."""
-    path = Path(path)
-    path.parent.mkdir(parents=True, exist_ok=True)
+def _write(path: Path, text: str) -> None:
+    """Atomic and flushed to the card, so a power cut leaves the old file or the new one, never half."""
     fd, tmp = tempfile.mkstemp(dir=path.parent, suffix=".tmp")
     with os.fdopen(fd, "w") as f:
-        json.dump(config, f, indent=2)
+        f.write(text)
+        f.flush()
+        os.fsync(f.fileno())
     os.replace(tmp, path)
+
+
+def save(config: dict, path: Path = DEFAULT_PATH) -> None:
+    """Write the config, keeping the one it replaces as ``config.json.bak`` (only if that one reads fine)."""
+    path = Path(path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    text = json.dumps(config, indent=2)
+    if _read(path) is not None:
+        try:
+            _write(backup_path(path), path.read_text())
+        except OSError as error:   # no backup is no reason not to save
+            log.warning("couldn't keep a backup of %s: %s", path, error)
+    _write(path, text)
 
 
 def playlist(config: dict, modules: dict[str, Module]) -> list[Entry]:
