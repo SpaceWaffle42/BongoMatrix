@@ -39,30 +39,33 @@ def text(draw, x, y, s, colour):
     return x
 
 
-def overlay(draw, item, t, shot, life=float("inf")):
+def overlay(draw, item, t, shot, life=float("inf"), view=(0, 0, W, H)):
     """Speech bubbles, Zs, banners and the name tag, drawn over the scene ``t`` ms after the item
-    appeared; ``life``: how long it stays, so each comes and goes gently (no Z is ever left mid-air)."""
+    appeared; ``life``: how long it stays, so each comes and goes gently (no Z is ever left mid-air).
+    ``view`` is the part of the room on screen (x, y, width, height): they are kept inside it."""
     kind, cx, cy = item[0], int(shot.cat[0]), int(shot.cat[1])
+    vx, vy, vw, vh = view
     if kind == "zzz":
         for k in range(2):
             p = ((t / 120) + k * 12) % 24
             began = t - p * 120                       # when this Z set off from her head
             if p < 20 and began >= 0 and began + 20 * 120 <= life:
                 # from her head: the sleeping poses face left, head about 10 px left of her feet point
-                text(draw, max(1, cx - 12 - int(p) // 4), cy - 14 - int(p) // 2, "Z", item[1])  # never off the left edge
+                y = cy - 14 - int(p) // 2
+                if y > vy:                            # a Z that reaches the top of the screen has floated away
+                    text(draw, max(vx + 1, cx - 12 - int(p) // 4), y, "Z", item[1])  # never off the left edge
     elif kind == "bubble" and (t // 600) % 2 == 0:
-        x, y = cx + 6, cy - 22
+        x, y = min(cx + 6, vx + vw - 5), max(cy - 22, vy + 2)
         draw.rectangle([x - 1, y - 1, x + 3, y + 5], fill=(255, 250, 240))
         draw.point((x, y + 6), fill=(255, 250, 240))
         text(draw, x, y, item[1], (200, 60, 40))
     elif kind == "banner":
         width = len(item[1]) * 4
-        shown = max(0.0, min(1.0, t / BANNER_SLIDE_MS, (life - t) / BANNER_SLIDE_MS))
-        top = -7 + round(7 * shown)                   # slides down in, and back up out
-        draw.rectangle([0, top, W - 1, top + 6], fill=(26, 19, 0))
+        top = vy - 7 + banner_rows(t, life)           # slides down in, and back up out
+        draw.rectangle([vx, top, vx + vw - 1, top + 6], fill=(26, 19, 0))
         moved = max(0.0, t - BANNER_SLIDE_MS)
-        x = W - int(moved / 1000 * 12)
-        if x > -width:
+        x = vx + vw - int(moved / 1000 * 12)
+        if x > vx - width:
             text(draw, x, top + 1, item[1], (255, 181, 71))
     elif kind == "tag":
         name = item[1]
@@ -70,8 +73,8 @@ def overlay(draw, item, t, shot, life=float("inf")):
         if rise == 0:
             return
         tw = len(name) * 4 - 1
-        x = max(1, min(W - tw - 2, cx - tw // 2))
-        y = max(0, cy - 27 + (4 - rise))
+        x = max(vx + 1, min(vx + vw - tw - 2, cx - tw // 2))
+        y = max(vy, cy - 27 + (4 - rise))
         draw.rectangle([x - 1, y, x + tw, y + 6], fill=(26, 19, 0))
         text(draw, x, y + 1, name, (255, 227, 179))
     elif kind == "dust" and shot.moving and int(t / 40) % 2 == 0:
@@ -80,7 +83,7 @@ def overlay(draw, item, t, shot, life=float("inf")):
         draw.point((bx - 2 * shot.moving, cy - 3), fill=(240, 220, 190))
     elif kind == "grumble" and (t // 330) % 2 == 0:
         for k in range(5):
-            draw.point((cx - 2 + k, cy - 24 + (k + int(t / 110)) % 3), fill=(90, 90, 110))
+            draw.point((cx - 2 + k, max(vy, cy - 24) + (k + int(t / 110)) % 3), fill=(90, 90, 110))
 
 
 def lifetimes(timeline, starts, total):
@@ -110,13 +113,31 @@ def lifetimes(timeline, starts, total):
     return lives
 
 
-def fit(scene: Image.Image, width: int, height: int) -> Image.Image:
-    """The room is drawn at 64x32; a smaller safe area shows its middle, floor kept."""
+def window(width: int, height: int, feet=None, tall: int = 18, above: int = 1) -> tuple[int, int]:
+    """The room is drawn at 64x32. A smaller safe area shows the part of it the pet is in: where that
+    part starts. ``feet`` is the middle of her feet, ``tall`` her height in this pose and ``above`` the
+    rows to keep clear over her head (more while a banner is up). Sideways she is in the middle;
+    upright she stands a row above the bottom edge, or, when there isn't the height for that, her
+    head comes first. It stops at the walls. Without her: the room's middle, floor kept."""
+    if feet is None:
+        x, y = (W - width) // 2, H - height
+    else:
+        x = round(feet[0] - width / 2)
+        y = round(feet[1]) - height + 1 if tall + above + 1 <= height else round(feet[1]) - tall - above
+    return min(max(0, x), max(0, W - width)), min(max(0, y), max(0, H - height))
+
+
+def fit(scene: Image.Image, width: int, height: int, feet=None, tall: int = 18, above: int = 1) -> Image.Image:
+    """The part of the room that ``window`` picks."""
     if (width, height) == (W, H):
         return scene
-    x = max(0, (W - width) // 2)
-    y = max(0, H - height)
+    x, y = window(width, height, feet, tall, above)
     return scene.crop((x, y, x + width, y + height))
+
+
+def banner_rows(t, life):
+    """How many of the banner's seven rows are on screen ``t`` ms into its ``life``."""
+    return round(7 * max(0.0, min(1.0, t / BANNER_SLIDE_MS, (life - t) / BANNER_SLIDE_MS)))
 
 
 NIGHT_ZZZ = (120, 140, 210)   # her Zs in the dark (scenes.py lights_out and waking use the same)
@@ -197,14 +218,21 @@ class _Scene(Style):
             else:
                 self.place.front(img, clock, shot.room == "night")
         draw = ImageDraw.Draw(img)
+        w, h = min(self.ctx.width, W), min(self.ctx.height, H)
+        # a banner pushes her down as it slides in, so her face stays under it
+        above = 1 + max((banner_rows(t - began, ended - began) for item, began, ended in self.lives[k] if item[0] == "banner"), default=0)
+        if any(item[0] == "zzz" for item, _, _ in self.lives[k]):
+            above = max(above, 4)                     # room for a Z to rise
+        tall = max(frame.image.height, -frame.dy)   # her top row in this frame, counted up from her feet
+        view = (*window(w, h, shot.cat, tall, above), w, h)   # the part of the room on screen: she is in it
         for item, began, ended in self.lives[k]:
             if item[0] == "zzz" and self.place:   # Zs that show up on a pale floor, changing with the light
                 dark = 1.0 if shot.room == "night" else 0.0
                 if shot.fade and "night" in (shot.fade[0], shot.room):
                     dark = shot.fade[1] if shot.room == "night" else 1 - shot.fade[1]
                 item = ("zzz", tuple(round(a + (b - a) * dark) for a, b in zip(self.place.zzz, NIGHT_ZZZ)))
-            overlay(draw, item, t - began, shot, ended - began)
-        return fit(img.convert("RGB"), self.ctx.width, self.ctx.height)
+            overlay(draw, item, t - began, shot, ended - began, view)
+        return fit(img.convert("RGB"), self.ctx.width, self.ctx.height, shot.cat, tall, above)
 
     def draw_toy(self, img, toy, t):
         name, x, y, flipped, bitten = toy
