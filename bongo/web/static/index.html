@@ -11,12 +11,6 @@
      In ?demo mode it may be hosted under any folder and routes live in the hash, so stay relative. */
   if (!window.BONGO_DEMO && !/[?&]demo(=|&|$)/.test(location.search)) document.write('<base href="/">');
 </script>
-<link rel="preconnect" href="https://fonts.googleapis.com">
-<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-<!-- The web fonts never hold the page up: it draws at once in the system's fonts (app.css names them as
-     fall-backs) and takes these when, and if, they arrive. With the internet down but the Matrix reachable,
-     an ordinary stylesheet link left the page blank until the request gave up. -->
-<link rel="stylesheet" media="print" onload="this.media='all'" href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600&amp;family=Space+Grotesk:wght@500;600;700&amp;family=JetBrains+Mono:wght@400;500;600&amp;display=swap">
 <link rel="stylesheet" href="app.css">
 <link rel="icon" type="image/png" href="logo.png?size=32">
 <link rel="apple-touch-icon" href="logo.png?size=180&amp;tile">

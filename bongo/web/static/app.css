@@ -1,4 +1,10 @@
 /* Bongo Matrix v3 dashboard. Tokens from the approved design. */
+/* The dashboard's three fonts, served by the Matrix itself (fonts/, with their licence), so the page looks
+   the same with no internet. Each file is one variable font: every weight from 400 to 700. */
+@font-face { font-family: Inter; src: url("fonts/inter.woff2") format("woff2"); font-weight: 400 700; font-style: normal; font-display: swap; }
+@font-face { font-family: "Space Grotesk"; src: url("fonts/space-grotesk.woff2") format("woff2"); font-weight: 400 700; font-style: normal; font-display: swap; }
+@font-face { font-family: "JetBrains Mono"; src: url("fonts/jetbrains-mono.woff2") format("woff2"); font-weight: 400 700; font-style: normal; font-display: swap; }
+
 :root {
   --page: #0B0C0E; --head: #0E1013; --card: #131519; --card-2: #181B1F; --well: #08090A; --raise: #1A1D22;
   --line: #22262C; --line-2: #2C3139; --line-3: #1C1F24;

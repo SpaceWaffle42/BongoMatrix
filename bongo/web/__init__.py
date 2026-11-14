@@ -23,7 +23,7 @@ from functools import lru_cache
 from pathlib import Path
 from zoneinfo import ZoneInfo
 
-from flask import Flask, abort, jsonify, request, send_file, send_from_directory
+from flask import Flask, Response, abort, jsonify, request, send_file, send_from_directory
 from werkzeug.exceptions import HTTPException
 
 from bongo import animator, config as cfg, logo, net, netname, pets, petpack, update
@@ -852,6 +852,15 @@ def create_app(*, modules, live, pairing, config_path, logs: LogBuffer | None = 
             return send_from_directory(STATIC, "setup.html")   # a phone on the setup hotspot gets the setup page
         if path == "hub" or (path == "index.html" and request.host.split(":")[0].lower() == "matrix.local"):
             return send_from_directory(STATIC, "hub.html")     # http://matrix.local: every Matrix on the network
+        if path.startswith("fonts/") and path.endswith(".woff2") and (STATIC / f"{path}.b64").is_file():
+            # the dashboard's fonts are kept as base64 text, like the pet art (the repo holds no binary files)
+            answer = Response(font_bytes(path), mimetype="font/woff2")
+            answer.headers["Cache-Control"] = "public, max-age=604800"
+            return answer
         return send_from_directory(STATIC, path if target.is_file() else "index.html")
+
+    @lru_cache(maxsize=8)
+    def font_bytes(path: str) -> bytes:
+        return base64.b64decode((STATIC / f"{path}.b64").read_text())
 
     return app
