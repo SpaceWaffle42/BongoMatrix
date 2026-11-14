@@ -1,5 +1,7 @@
 # Bongo Matrix v3
 
+<img src="bongo/web/static/logo.svg" alt="The Bongo Matrix logo: a round wall of coloured blocks" width="96">
+
 A Raspberry Pi and a 64×32 HUB75 RGB LED panel, turned into a modular display.
 
 v3 is a ground-up rewrite. Everything up to v2 is frozen on the
