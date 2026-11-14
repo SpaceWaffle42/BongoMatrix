@@ -294,6 +294,102 @@ def toys(folder: Path, out: Path) -> str:
     return f"toys: {len(index)}"
 
 
+# Furniture for the bigger pet places (bongo/modules/pet/rooms.py): name -> where it is in the
+# kittens pack's extras/props. ("part", file, k): the k-th drawing in the file, top to bottom (most
+# files hold a front view with a second view under it). ("cell", file, size, column, row): one
+# cell of a sheet. ("bowl", column): a bowl from the bowl sheet, and the same bowl with food in it.
+_HS = "house and scratching post/"
+PROPS = {
+    "house_1": ("part", _HS + "house_1.png", 0),
+    "house_4": ("part", _HS + "house_4.png", 0), "carrier_1": ("part", _HS + "carrier_1.png", 0),
+    "post_8": ("part", _HS + "scratching_post_8.png", 0),
+    "tree_3": ("part", _HS + "scratching_post_3.png", 0), "tree_5": ("part", _HS + "scratching_post_5.png", 0),
+    "food_2": ("part", "food/food_2.png", 0), "food_5": ("part", "food/food_5.png", 0),
+        "bed_plain": ("cell", "bed/bed.png", 32, 1, 0), "bed_basket": ("cell", "bed/bed.png", 32, 0, 1),
+    "bed_round": ("cell", "bed/bed.png", 32, 2, 0), "bed_blue": ("cell", "bed/bed.png", 32, 1, 1),
+    "bowl_a": ("bowl", 0), "bowl_b": ("bowl", 6), "bowl_c": ("bowl", 9), "bowl_d": ("bowl", 13),
+}
+# Plants for them, from Last Tick's nature pack (png/<name>.png). They are drawn for a bigger
+# world than the kittens: used at half size.
+PLANTS = ("shrubs_10", "shrubs_11", "shrubs_12", "shrubs_20", "flowers_8", "flowers_12",
+          "grasses_2", "grasses_3", "grasses_4", "bonsai_3", "palms_30", "palms_33", "palms_36",
+          "palms_40", "palms_44", "cacti_13", "cacti_20", "cacti_24", "cacti_27", "cacti_31")
+
+
+def drawings(img: Image.Image) -> list:
+    """The separate drawings stacked in one file, top to bottom (split where rows are empty), trimmed."""
+    alpha, out, top = np.asarray(img.getchannel("A")).any(axis=1), [], None
+    for y in range(img.height + 1):
+        inked = y < img.height and alpha[y]
+        if inked and top is None:
+            top = y
+        elif not inked and top is not None:
+            piece = img.crop((0, top, img.width, y))
+            out.append(piece.crop(piece.getbbox()))
+            top = None
+    return out
+
+
+def half(img: Image.Image) -> Image.Image:
+    """Half size and still crisp: each 2 x 2 block becomes its most common solid colour (the lighter
+    one on a tie), or stays clear if most of it is clear."""
+    w, h = img.width // 2, img.height // 2
+    out, src = Image.new("RGBA", (w, h)), img.load()
+    dst = out.load()
+    for y in range(h):
+        for x in range(w):
+            solid = [p for p in (src[x * 2 + a, y * 2 + b] for a in (0, 1) for b in (0, 1)) if p[3] > 127]
+            if len(solid) >= 2:
+                dst[x, y] = max(sorted(set(solid)), key=lambda p: (solid.count(p), sum(p[:3])))
+    return out
+
+
+def _sheet(out: Path, name: str, imgs: dict) -> None:
+    """``<name>.json`` + ``<name>.webp.b64``: the drawings side by side, each with its rect."""
+    atlas = Image.new("RGBA", (sum(i.width for i in imgs.values()), max(i.height for i in imgs.values())))
+    x, index = 0, {}
+    for key, img in imgs.items():
+        atlas.paste(img, (x, 0))
+        index[key] = [x, 0, img.width, img.height]
+        x += img.width
+    buf = io.BytesIO()
+    atlas.save(buf, "WEBP", lossless=True, quality=100, method=6)
+    out.mkdir(parents=True, exist_ok=True)
+    (out / f"{name}.webp.b64").write_text(base64.b64encode(buf.getvalue()).decode())
+    (out / f"{name}.json").write_text(json.dumps(index, separators=(",", ":")) + "\n")
+
+
+def props(folder: Path, out: Path) -> str:
+    """The kittens pack's ``extras/props`` folder -> ``props.json`` + ``props.webp.b64``."""
+    imgs = {}
+    for name, (kind, *spec) in PROPS.items():
+        if kind == "part":
+            imgs[name] = drawings(Image.open(folder / spec[0]).convert("RGBA"))[spec[1]]
+        elif kind == "cell":
+            file, size, i, j = spec
+            cell = Image.open(folder / file).convert("RGBA").crop((i * size, j * size, (i + 1) * size, (j + 1) * size))
+            imgs[name] = cell.crop(cell.getbbox())
+        else:   # a bowl, empty and full: both cut to the empty bowl's box so they swap in place
+            bowl = Image.open(folder / "bowl" / "bowl_1.png").convert("RGBA").crop((spec[0] * 16, 0, spec[0] * 16 + 16, 16))
+            food = Image.open(folder / "bowl" / "food_progress_in_bowl_1.png").convert("RGBA").crop((16, 0, 32, 16))
+            full = bowl.copy()
+            full.alpha_composite(food)
+            box = bowl.getbbox()
+            imgs[name], imgs[name + "_full"] = bowl.crop(box), full.crop(box)
+    _sheet(out, "props", imgs)
+    return f"furniture for the bigger places: {len(imgs)} pieces"
+
+
+def plants(folder: Path, out: Path) -> str:
+    """The nature pack's ``png`` folder -> ``plants.json`` + ``plants.webp.b64`` (half size)."""
+    imgs = {}
+    for name in PLANTS:
+        small = half(Image.open(folder / f"{name}.png").convert("RGBA"))
+        imgs[name] = small.crop(small.getbbox())
+    _sheet(out, "plants", imgs)
+    return f"plants for the garden places: {len(imgs)}"
+
+
 def cats(sheets_folder: Path, out: Path, remastered: Path | None = None) -> list[str]:
     """The kittens pack's ``cats_animations`` folder -> the cat art in ``out``. The room is
     ``remastered/room_day.png`` when given (Billy's remaster), else drawn here from the pack's
@@ -385,6 +481,10 @@ def find(root: Path) -> dict:
             found["cat"] = d
         elif d.name == "animation" and any(d.glob("Bunny */Bunny *.png")) and "bunny" not in found:
             found["bunny"] = d
+        elif d.name == "props" and (d / "bed" / "bed.png").is_file() and "props" not in found:
+            found["props"] = d
+        elif d.name == "png" and (d / f"{PLANTS[0]}.png").is_file() and "plants" not in found:
+            found["plants"] = d
     return found
 
 
@@ -416,8 +516,9 @@ def import_zip(upload: Path, out: Path) -> list[str]:
             raise PackError("that file isn't a zip: upload the zip you downloaded from itch.io") from None
         packs = find(root)
         if not packs:
-            raise PackError("no Last Tick kittens or bunny pack found in that zip (looking for a "
-                            "'cats_animations' folder with Cat 10, or a bunny 'animation' folder)")
+            raise PackError("no Last Tick kittens, bunny or nature pack found in that zip (looking for a "
+                            "'cats_animations' folder with Cat 10, a bunny 'animation' folder, or the nature "
+                            "pack's 'png' folder)")
         if "bunny" in packs and "cat" not in packs and not (out / "cat.json").exists():
             raise PackError("the bunny lives in the kittens pack's room: import the kittens pack first (or both together)")
         build = Path(tmp) / "build"
@@ -426,6 +527,12 @@ def import_zip(upload: Path, out: Path) -> list[str]:
             made += cats(packs["cat"], build)
         if "bunny" in packs:
             made += bunnies(packs["bunny"], build)
+        for kind, make in (("props", props), ("plants", plants)):   # for the bigger places; a pack without
+            if kind in packs:                                       # every piece just goes without them
+                try:
+                    made.append(make(packs[kind], build))
+                except (OSError, IndexError):
+                    pass
         out.mkdir(parents=True, exist_ok=True)
         for f in build.iterdir():                            # only now, with everything built, replace the old art
             shutil.copy2(f, out / f.name)

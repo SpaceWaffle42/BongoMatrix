@@ -214,6 +214,8 @@ def forget() -> None:
     """Drop every cached atlas and frame (a pack was just imported)."""
     for f in (_index, _atlas, sheet, load, toys):
         f.cache_clear()
+    from . import places
+    places.refresh()
 
 
 def missing(kind: str = "cat") -> bool:

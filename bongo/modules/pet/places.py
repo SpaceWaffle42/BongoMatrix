@@ -547,12 +547,29 @@ class Moon:
 
 PLACES = {"garden": Garden(), "beach": Beach(), "snow": Snow(), "space": Space(), "library": Library(),
           "tatami": Tatami(), "forest": Forest(), "moon": Moon()}
-CHOICES = ["house", *PLACES]
-LABELS = {"house": "House", **{k: v.name for k, v in PLACES.items()}}
+from . import rooms as _rooms   # noqa: E402  (it uses the helpers above)
+
+BIG = _rooms.ROOMS   # bigger rooms furnished from the pet pack's props: offered where that art is
+CHOICES = ["house", *PLACES, *_rooms.available()]
+LABELS = {"house": "House", **{k: v.name for k, v in PLACES.items()}, **{k: v.label for k, v in BIG.items()}}
+
+
+def get(place: str):
+    """The place by its setting (None: the house, or a bigger room this Matrix has no art for)."""
+    return PLACES.get(place) or (BIG.get(place) if place in CHOICES else None)
 
 
 @lru_cache(maxsize=None)
 def rooms(place: str) -> tuple:
     """(day, empty bowl, night) for a place, drawn once."""
+    if place in BIG:
+        return _rooms.images(place)
     p = PLACES[place]
     return p.day(True), p.day(False), p.night()
+
+
+def refresh() -> None:
+    """A pet pack was just imported: offer the bigger rooms it brought."""
+    _rooms.forget()
+    rooms.cache_clear()
+    CHOICES[:] = ["house", *PLACES, *_rooms.available()]

@@ -12,7 +12,7 @@ from .art import H, W, load, missing, no_art
 from bongo.pets import wearing
 
 from . import places
-from .scenes import BANNER_SLIDE_MS, MODES, STRIDE, TAG_RISE_MS, record_loop
+from .scenes import BANNER_SLIDE_MS, HOUSE, MODES, STRIDE, TAG_RISE_MS, record_loop
 
 # The engine's 3x5 font: tiny, and the same on every panel.
 FONT = {
@@ -113,25 +113,49 @@ def lifetimes(timeline, starts, total):
     return lives
 
 
-def window(width: int, height: int, feet=None, tall: int = 18, above: int = 1) -> tuple[int, int]:
-    """The room is drawn at 64x32. A smaller safe area shows the part of it the pet is in: where that
-    part starts. ``feet`` is the middle of her feet, ``tall`` her height in this pose and ``above`` the
-    rows to keep clear over her head (more while a banner is up). Sideways she is in the middle;
-    upright she stands a row above the bottom edge, or, when there isn't the height for that, her
-    head comes first. It stops at the walls. Without her: the room's middle, floor kept."""
+def window(width: int, height: int, feet=None, tall: int = 18, above: int = 1, room=(W, H)) -> tuple[int, int]:
+    """The house and the small places are drawn at 64x32 (``room``: a bigger place's size). A smaller
+    safe area shows the part of the room the pet is in: where that part starts. ``feet`` is the middle
+    of her feet, ``tall`` her height in this pose and ``above`` the rows to keep clear over her head
+    (more while a banner is up). Sideways she is in the middle; upright she stands a row above the
+    bottom edge (in a room taller than the house: a third of the way up, so the floor in front of her
+    shows too), or, when there isn't the height for that, her head comes first. It stops at the walls.
+    Without her: the room's middle, floor kept."""
+    rw, rh = room
     if feet is None:
-        x, y = (W - width) // 2, H - height
+        x, y = (rw - width) // 2, rh - height
     else:
         x = round(feet[0] - width / 2)
         y = round(feet[1]) - height + 1 if tall + above + 1 <= height else round(feet[1]) - tall - above
-    return min(max(0, x), max(0, W - width)), min(max(0, y), max(0, H - height))
+        if rh > H:   # five rows of floor under her; room over her head even up on her hind legs (no hop)
+            y = min(y + max(5, height // 6), round(feet[1]) - tall - above)
+    return min(max(0, x), max(0, rw - width)), min(max(0, y), max(0, rh - height))
+
+
+def lead(shot, width: int, room_width: int = W) -> float:
+    """In a bigger room: how far the view looks ahead of her, towards her ball or toy mouse on the
+    floor, so what she is playing with is on screen too. It grows as the thing comes near and is nil
+    for anything far off, so nothing coming or going makes the view jump."""
+    far, out = width * 1.1, 0.0
+    lit = 1.0
+    if shot.fade and "night" in (shot.fade[0], shot.room):   # her ball fades with the light
+        lit = 1 - shot.fade[1] if shot.room == "night" else shot.fade[1]
+    for thing, k in ((shot.ball, lit), (shot.toy and shot.toy[0] == "mouse" and shot.toy[1:3], 1.0)):
+        if not thing:
+            continue
+        x, y = thing[0], thing[1]
+        k *= max(0.0, 1 - abs(y - shot.cat[1]) / 16)                         # only what is on the floor beside her
+        k *= max(0.0, min(1.0, (x + 8) / 16, (room_width + 8 - x) / 16))     # and not what is leaving the room
+        d = x - shot.cat[0]
+        out += d / 2 * k * max(0.0, 1 - abs(d) / far)
+    return max(-width * 0.3, min(width * 0.3, out))
 
 
 def fit(scene: Image.Image, width: int, height: int, feet=None, tall: int = 18, above: int = 1) -> Image.Image:
     """The part of the room that ``window`` picks."""
-    if (width, height) == (W, H):
+    if (width, height) == scene.size:
         return scene
-    x, y = window(width, height, feet, tall, above)
+    x, y = window(width, height, feet, tall, above, scene.size)
     return scene.crop((x, y, x + width, y + height))
 
 
@@ -155,10 +179,11 @@ class _Scene(Style):
         if missing(self.ctx.pet.kind):                  # a public build before a pack is imported
             return
         self.art = load(self.ctx.pet.kind, self.ctx.pet.coat, wearing(self.ctx.pet, self.ctx.now().date()))
-        self.place = places.PLACES.get(self.settings["place"])
+        self.place = places.get(self.settings["place"])
+        self.stage = getattr(self.place, "stage", HOUSE)   # a bigger room has its own size, bed, bowl and floor
         day, empty, night = places.rooms(self.settings["place"]) if self.place else (self.art.room, self.art.empty, self.art.night)
         self.rooms = {"day": day, "empty": empty, "night": night}
-        self.timeline = record_loop(self.art, self.modes(), self.ctx.pet.name)   # seamless: scenes link up
+        self.timeline = record_loop(self.art, self.modes(), self.ctx.pet.name, self.stage)   # seamless: scenes link up
         self.starts, t = [], 0.0
         for shot, _ in self.timeline:
             self.starts.append(t)
@@ -188,6 +213,8 @@ class _Scene(Style):
         img = self.room(shot.room, clock).convert("RGBA")
         if shot.fade:   # the room changing: lights going out or up, the bowl filling or emptying
             img = Image.blend(self.room(shot.fade[0], clock).convert("RGBA"), img, shot.fade[1])
+        big = self.stage is not HOUSE
+        empty = img.copy() if big else None   # the room without her: what's in front of her is drawn back from it
         if shot.ball:
             ball = art.ball
             if shot.fade and "night" in (shot.fade[0], shot.room):   # dims with the light
@@ -202,9 +229,11 @@ class _Scene(Style):
             self.draw_toy(img, shot.toy, t)
         frame = art.animations[shot.tag][shot.index]
         x, y = int(round(shot.cat[0])) + frame.dx, int(round(shot.cat[1])) + frame.dy
-        layer = Image.new("RGBA", (W, H))
+        layer = Image.new("RGBA", img.size)
         layer.paste(frame.image, (x, y), frame.image)
         img.alpha_composite(layer)
+        if big:
+            self.place.over(img, empty, shot.cat)
         if flying:
             self.draw_toy(img, shot.toy, t)
         if self.place:   # what moves over her: snow, fireflies, leaves (crossing over as the lights change)
@@ -218,13 +247,14 @@ class _Scene(Style):
             else:
                 self.place.front(img, clock, shot.room == "night")
         draw = ImageDraw.Draw(img)
-        w, h = min(self.ctx.width, W), min(self.ctx.height, H)
+        w, h = min(self.ctx.width, img.width), min(self.ctx.height, img.height)
+        feet = self.focus(t, shot, w) if big else shot.cat   # what the view follows
         # a banner pushes her down as it slides in, so her face stays under it
         above = 1 + max((banner_rows(t - began, ended - began) for item, began, ended in self.lives[k] if item[0] == "banner"), default=0)
         if any(item[0] == "zzz" for item, _, _ in self.lives[k]):
             above = max(above, 4)                     # room for a Z to rise
         tall = max(frame.image.height, -frame.dy)   # her top row in this frame, counted up from her feet
-        view = (*window(w, h, shot.cat, tall, above), w, h)   # the part of the room on screen: she is in it
+        view = (*window(w, h, feet, tall, above, img.size), w, h)   # the part of the room on screen: she is in it
         for item, began, ended in self.lives[k]:
             if item[0] == "zzz" and self.place:   # Zs that show up on a pale floor, changing with the light
                 dark = 1.0 if shot.room == "night" else 0.0
@@ -232,7 +262,20 @@ class _Scene(Style):
                     dark = shot.fade[1] if shot.room == "night" else 1 - shot.fade[1]
                 item = ("zzz", tuple(round(a + (b - a) * dark) for a, b in zip(self.place.zzz, NIGHT_ZZZ)))
             overlay(draw, item, t - began, shot, ended - began, view)
-        return fit(img.convert("RGB"), self.ctx.width, self.ctx.height, shot.cat, tall, above)
+        return fit(img.convert("RGB"), self.ctx.width, self.ctx.height, feet, tall, above)
+
+    def focus(self, t, shot, width):
+        """What the view follows in a bigger room: where she has been over the last third of a second,
+        so it glides after her instead of whipping about when she runs (never far from her: she stays
+        on screen), and looks ahead to her ball or toy."""
+        xs, ys = [], []
+        for k in range(8):
+            cat = self.timeline[bisect.bisect_right(self.starts, (t - k * 45) % self.total) - 1][0].cat
+            xs.append(cat[0])
+            ys.append(cat[1])
+        x = max(shot.cat[0] - 18, min(shot.cat[0] + 18, sum(xs) / 8))
+        y = max(shot.cat[1] - 3, min(shot.cat[1] + 3, sum(ys) / 8))
+        return x + lead(shot, width, self.stage.w), y
 
     def draw_toy(self, img, toy, t):
         name, x, y, flipped, bitten = toy

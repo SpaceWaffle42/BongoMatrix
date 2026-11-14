@@ -27,7 +27,7 @@ import os
 BUILT_IN = Path(__file__).resolve().parents[1] / "resources" / "pet"
 # a pack the owner imported from the dashboard (bongo/petpack.py); it wins over built-in art
 IMPORTED = Path(os.environ.get("BONGO_PET_ART", Path(__file__).resolve().parents[1] / "data" / "pet"))
-NOT_ANIMALS = {"toys"}
+NOT_ANIMALS = {"toys", "props", "plants"}   # toys, and the furniture and plants of the bigger pet places
 
 
 def art_file(name: str) -> Path:
