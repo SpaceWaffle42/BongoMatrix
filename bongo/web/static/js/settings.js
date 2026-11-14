@@ -2,7 +2,7 @@
 import { api, get, del, post, uploadMedia } from './api.js';
 import { h, icon, toast, fail, clone, same, clamp, humanize, ago, toggle } from './ui.js';
 import { FrameLoop } from './led.js';
-import { mediaThumb, previewButton, openPreview } from './mediaview.js';
+import { mediaThumb, mediaTitle, previewButton, openPreview } from './mediaview.js';
 import { S, onLeave, go, saveConfig, moduleById } from './app.js';
 import { helpButton } from './help.js';
 import { placePicker } from './editor.js';
@@ -536,9 +536,11 @@ function screenPicker(rule, idPrefix, screen) {
         const thumb = gone ? h('span', { class: 'media-thumb empty' }) : mediaThumb(f.name, opts())[0];
         return h('div', { class: 'screen-source' },
           h('label', { class: 'screen-pick', for: box.id }, box, thumb,
-            h('span', { class: 'mono small name grow min0', title: f.file }, f.file),
+            h('span', { class: 'screen-name grow min0' },
+              h('span', { class: 'screen-title' }, gone ? 'Missing file' : mediaTitle(f.name)),
+              h('span', { class: 'mono tiny muted screen-file' }, f.file.match(/[^_-]*[_-]?/g).filter(Boolean).flatMap((part, k) => (k ? [h('wbr'), part] : [part])))),   // the file name wraps after a _ or -, not mid-word
             f.kind === 'video' ? h('span', { class: 'tag' }, 'Video') : null),
-          gone ? null : previewButton(f.name, opts));
+          gone ? null : previewButton(f.name, opts, { compact: true }));
       };
       // built-in and uploaded files under their own headings, so it's clear which is which
       const section = (title, list) => (list.length ? [h('div', { class: 'screen-divider', role: 'presentation' }, `${title} · ${list.length}`), ...list.map(card)] : []);

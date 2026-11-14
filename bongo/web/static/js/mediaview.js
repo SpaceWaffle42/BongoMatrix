@@ -8,6 +8,11 @@ import { S } from './app.js';
 const FITS = ['fit', 'fill', 'pixel'];
 const entry = (name, fit, speed) => ({ module: 'media', style: fit, settings: { file: name, speed } });
 const short = (name) => name.replace(/^(built-in|uploaded)\//, '');
+/** A name to read: "built-in/splash_breakout_squares.gif" -> "Breakout squares", "my-cat.mp4" -> "My cat" */
+export const mediaTitle = (name) => {
+  const words = short(name).replace(/\.[a-z0-9]+$/i, '').replace(/^(splash|sleep)_/, '').replace(/[_-]+/g, ' ').trim();
+  return words ? words[0].toUpperCase() + words.slice(1) : short(name);
+};
 
 /** A tiny still of `name` as the panel draws it. Returns [element, loop] so the caller can stop it. */
 export function mediaThumb(name, { fit = 'fit', speed = 1 } = {}) {
@@ -17,9 +22,10 @@ export function mediaThumb(name, { fit = 'fit', speed = 1 } = {}) {
 }
 
 /** A button that opens the preview for `name`; opts() gives the current { fit, speed }. */
-export function previewButton(name, opts = () => ({})) {
-  return h('button', { type: 'button', class: 'btn ghost small-btn', 'aria-label': `Preview ${short(name)}`,
-    onclick: (ev) => { ev.preventDefault(); ev.stopPropagation(); openPreview(name, opts()); } }, icon('play'), 'Preview');
+export function previewButton(name, opts = () => ({}), { compact = false } = {}) {
+  return h('button', { type: 'button', class: `btn ghost ${compact ? 'icon-btn small-icon' : 'small-btn'}`, 'aria-label': `Preview ${short(name)}`,
+    title: compact ? 'Preview' : null,
+    onclick: (ev) => { ev.preventDefault(); ev.stopPropagation(); openPreview(name, opts()); } }, icon('play'), compact ? null : 'Preview');
 }
 
 /** Animated, full-size preview of one file, with a button to show it on the Matrix for 15 s. */
