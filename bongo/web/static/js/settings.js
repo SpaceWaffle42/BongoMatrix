@@ -1,5 +1,5 @@
 // Settings: safe area (with a big LED preview), device, splash, sleep, paired devices.
-import { get, del, post, uploadMedia } from './api.js';
+import { api, get, del, post, uploadMedia } from './api.js';
 import { h, icon, toast, fail, clone, same, clamp, humanize, ago, toggle } from './ui.js';
 import { FrameLoop } from './led.js';
 import { mediaThumb, previewButton, openPreview } from './mediaview.js';
@@ -10,7 +10,7 @@ import { placePicker } from './editor.js';
 export function render(view) {
   view.append(h('div', { class: 'page-head' }, h('h1', { class: 'h1' }, 'Settings'),
     h('p', { class: 'muted flush' }, 'Each card saves on its own.')),
-  h('div', { class: 'settings-grid' }, safeAreaCard(), h('div', { class: 'stack gap-20' }, deviceCard(), locationCard(), wifiCard(), petCard(), spotifyCard(), updateCard(), devicesCard()), h('div', { class: 'stack gap-20' }, sleepCard(), splashCard(), mediaCard())));
+  h('div', { class: 'settings-grid' }, safeAreaCard(), h('div', { class: 'stack gap-20' }, deviceCard(), locationCard(), wifiCard(), petCard(), calendarsCard(), spotifyCard(), updateCard(), devicesCard()), h('div', { class: 'stack gap-20' }, sleepCard(), splashCard(), mediaCard())));
 }
 
 function safeAreaCard() {
@@ -266,6 +266,106 @@ function petCard() {
     coatRow,
     wardrobe,
     h('div', { class: 'row end' }, save));
+}
+
+/** Linked calendars (bongo/calendars.py): Google / iPhone calendars read from their links, shown on every
+ * Calendar screen. A link is sent once and never shown again: it works like a password. */
+function calendarsCard() {
+  const list = h('div', { class: 'stack gap-s' }, h('p', { class: 'muted small flush' }, 'Loading…'));
+  const formBox = h('div');
+  const card = h('section', { class: 'card stack', 'aria-label': 'Calendars', id: 'calendars' },
+    h('div', { class: 'row between wrap gap-s' },
+      h('div', null, h('h2', { class: 'h2' }, 'Calendars'),
+        h('p', { class: 'muted small flush' }, 'Show events from your Google or iPhone calendar on the Calendar screens. Read-only: the Matrix never changes your calendar.')),
+      helpButton(moduleById('calendar')?.help, { label: 'Step-by-step help' })), list, formBox,
+    h('p', { class: 'sr-only', 'aria-live': 'polite', id: 'cal-said' }));
+  const KIND = { google: 'Google', icloud: 'iCloud', outlook: 'Outlook', other: 'Calendar link' };
+  const NAMES = { '#5AC8FA': 'Blue', '#FF6FA8': 'Pink', '#4ADE80': 'Green', '#FFB547': 'Amber', '#B98CFF': 'Purple', '#FF7A59': 'Orange', '#ECEEF1': 'White' };
+  const say = (msg) => { card.querySelector('#cal-said').textContent = msg; };
+  let busy = false, last = null, form = null;
+  const act = async (btn, job, done) => {
+    if (busy) return false;
+    busy = true; const was = btn.textContent; btn.disabled = true; btn.textContent = 'Working…';
+    try { show(await job()); if (done) { toast(done, 'success'); say(done); } return true; }
+    catch (e) { toast(e.message, 'error', 10000); say(e.message); return false; }
+    finally { busy = false; btn.disabled = false; btn.textContent = was; }
+  };
+  const state = (c) => {
+    if (c.waiting) return h('span', { class: 'muted small' }, 'Checking…');
+    if (c.error && !c.ok) return h('span', { class: 'danger small' }, `Can't read it: ${c.error}`);
+    return h('span', { class: c.error ? 'warn small' : 'muted small' }, `${c.count} event${c.count === 1 ? '' : 's'} · checked ${ago(c.checked)}`,
+      c.error ? ` · the last try failed (${c.error}), so it's showing the copy from ${ago(c.ok)}` : '');
+  };
+  const row = (c) => {
+    const remove = h('button', { type: 'button', class: 'btn ghost danger-btn small-btn' }, 'Remove');
+    const cancel = h('button', { type: 'button', class: 'btn ghost small-btn' }, 'Cancel');
+    const yes = h('button', { type: 'button', class: 'btn danger-btn small-btn' }, 'Yes, remove');
+    const sure = h('div', { class: 'row gap-s wrap', hidden: true, role: 'group', 'aria-label': `Remove ${c.name}?` },
+      h('span', { class: 'small' }, `Remove ${c.name}? Its events leave the Matrix; your calendar itself isn't touched.`), yes, cancel);
+    remove.onclick = () => { sure.hidden = false; remove.hidden = true; yes.focus(); };
+    cancel.onclick = () => { sure.hidden = true; remove.hidden = false; remove.focus(); };
+    yes.onclick = () => act(yes, () => del(`/api/calendars/${c.id}`), `${c.name} removed`);
+    const onOff = toggle(c.on !== false, `Show ${c.name}`, (on) => api('PATCH', `/api/calendars/${c.id}`, { on }).then(show)
+      .catch((e) => { toast(e.message, 'error', 8000); if (last) show(last); }), { showLabel: false });   // back as it was
+    return h('li', { class: 'stack gap-xs', 'data-cal': c.id },
+      h('div', { class: 'row between wrap gap-s' },
+        h('div', { class: 'row gap-s min0 wrap' }, h('span', { style: `display:inline-block;width:12px;height:12px;border-radius:50%;flex:none;background:${c.colour}`, 'aria-hidden': 'true' }),
+          h('span', { class: 'strong' }, c.name), h('span', { class: 'muted small' }, KIND[c.kind] || KIND.other),
+          c.only ? h('span', { class: 'tag', title: 'Only events with these words' }, `only: ${c.only}`) : null,
+          c.busy ? h('span', { class: 'tag' }, 'private as Busy') : null),
+        h('div', { class: 'row gap-s' }, onOff, remove)),
+      state(c), sure);
+  };
+  const makeForm = (s) => {   // made once, so a half-filled form survives the list updating
+    const name = h('input', { class: 'input', id: 'cal-name', placeholder: 'Family', maxlength: 30, autocomplete: 'off' });
+    const link = h('input', { class: 'input mono', id: 'cal-link', type: 'password', placeholder: 'https://calendar.google.com/… or webcal://…',
+      autocomplete: 'off', spellcheck: 'false', 'aria-describedby': 'cal-link-hint', 'data-lpignore': 'true', 'data-1p-ignore': 'true' });
+    const colour = h('select', { class: 'input', id: 'cal-colour' }, ...s.colours.map((c) => h('option', { value: c }, NAMES[c] || c)));
+    colour.value = s.colours[s.calendars.length % s.colours.length];
+    const only = h('input', { class: 'input', id: 'cal-only', placeholder: 'birthday, bins', maxlength: 80, autocomplete: 'off' });
+    const busyBox = h('input', { type: 'checkbox', id: 'cal-busy' });
+    const add = h('button', { type: 'button', class: 'btn primary' }, 'Add calendar');
+    add.onclick = async () => {
+      const ok = await act(add, () => post('/api/calendars', { name: name.value, url: link.value, colour: colour.value, only: only.value, busy: busyBox.checked }), 'Calendar added');
+      if (ok) { name.value = link.value = only.value = ''; busyBox.checked = false; colour.value = s.colours[(last?.calendars.length || 0) % s.colours.length]; }
+    };
+    return h('details', { class: 'item-more', open: s.calendars.length === 0 || null },
+      h('summary', null, 'Add a calendar'),
+      h('div', { class: 'stack gap-s', style: 'margin-top:8px' },
+        h('label', { class: 'field-col', for: name.id }, 'Name', name),
+        h('label', { class: 'field-col', for: link.id }, 'Calendar link', link),
+        h('p', { class: 'tiny muted flush', id: 'cal-link-hint' }, "Google: Settings › your calendar › Integrate calendar › Secret address in iCal format. iPhone: Calendars › (i) › Public Calendar › Share Link. It's hidden once added."),
+        h('div', { class: 'row gap-s wrap' }, h('label', { class: 'field-col', for: colour.id }, 'Colour', colour),
+          h('label', { class: 'field-col grow', for: only.id }, 'Only events with (optional)', only)),
+        h('label', { class: 'row gap-s small', for: busyBox.id }, busyBox, h('span', null, 'Show private events as Busy')),
+        h('div', { class: 'row end' }, add)));
+  };
+  let poll = null;
+  onLeave(() => clearTimeout(poll));
+  const show = (s) => {
+    last = s;
+    clearTimeout(poll);
+    if (s.calendars?.some((c) => c.waiting)) poll = setTimeout(() => get('/api/calendars').then(show).catch(() => {}), 3000);   // until the checks finish
+    const focusId = document.activeElement?.closest?.('#calendars li')?.dataset.cal;
+    if (!s.ready) {
+      list.replaceChildren(h('p', { class: 'warn small flush' }, 'This needs an update first: press Update in Settings › Software, then come back.'));
+      return;
+    }
+    const check = h('button', { type: 'button', class: 'btn ghost small-btn' }, 'Check now');
+    check.onclick = () => act(check, () => post('/api/calendars/refresh', {}), 'Checking every calendar now');
+    list.replaceChildren(...[
+      s.calendars.length ? h('ul', { class: 'stack gap-s', style: 'list-style:none;padding:0;margin:0' }, ...s.calendars.map(row)) : h('p', { class: 'muted small flush' }, 'No calendars yet.'),
+      s.calendars.length ? h('div', { class: 'row between wrap gap-s' }, h('span', { class: 'tiny muted' }, 'Checked again every 15 minutes, when a Calendar screen comes round.'), check) : null].filter(Boolean));
+    const again = focusId && list.querySelector(`li[data-cal="${focusId}"] .switch`);   // keep keyboard focus on that calendar
+    if (again) again.focus();
+    else if (focusId) { const head = card.querySelector('h2'); head.tabIndex = -1; head.focus(); }   // that calendar was removed
+    if (!form) { form = makeForm(s); formBox.replaceChildren(form); }
+    form.hidden = s.calendars.length >= s.most;
+    formBox.querySelector('.cal-full')?.remove();
+    if (form.hidden) formBox.append(h('p', { class: 'muted small flush cal-full' }, `That's ${s.most}, the most it takes.`));
+  };
+  get('/api/calendars').then(show).catch(() => list.replaceChildren(h('p', { class: 'muted small flush' }, "Couldn't load the calendars.")));
+  return card;
 }
 
 /** Spotify: sign in once so the Spotify screens can show what's playing. A Matrix has no https

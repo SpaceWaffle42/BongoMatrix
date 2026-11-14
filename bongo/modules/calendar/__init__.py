@@ -5,12 +5,15 @@ one list shared by every look (the countdowns count down to the soonest).
 The Countdown module moved in on 12 Nov 2026: saved Countdown entries become Calendar entries with
 the matching countdown look, and old Calendar dates ("11-21", "2026-11-21") take the countdown's
 form."""
+import logging
 import re
 
+from bongo import calendars
 from bongo.holidays import RULES, choice_groups, choice_labels
 from bongo.module import Module
 
 from . import countdown
+from .help import HELP
 from .countdown import events
 from .styles import DateLine, Desk, Dots, Month, Numbers, Page, Percent, Progress, Rings, Week, Weeks, Year
 
@@ -47,6 +50,18 @@ def migrate(settings: dict) -> list[str]:
     return notes
 
 
+def with_linked(settings: dict, ctx) -> dict:
+    """Your own dates plus the showings of the calendars linked in Settings (from their last good copy)."""
+    if not settings.get("linked_calendars", True):
+        return settings
+    try:
+        linked = calendars.events(ctx.tz)
+    except Exception:  # noqa: BLE001 - a calendar problem never stops the screen; it's in the log
+        logging.getLogger("bongo.calendars").exception("couldn't add the linked calendars")
+        linked = []
+    return {**settings, "events": list(settings.get("events") or []) + linked} if linked else settings
+
+
 MODULE = Module(
     id="calendar",
     name="Calendar",
@@ -60,14 +75,17 @@ MODULE = Module(
     defaults=dict(
         holidays=["christmas", "new_year", "valentines", "easter", "halloween", "bonfire_night"],
         events=[],
+        linked_calendars=True,  # also show the calendars linked in Settings > Calendars (Google, iPhone...)
         week_start="monday",
         text_colour="#ECEEF1", accent="#FFB547", event_colour="#5AC8FA", background="#0B0C0E",
         icons=False,  # an 8x8 icon beside each upcoming date (Page); the countdowns default it on
     ),
     choices={"holidays": list(RULES), "week_start": ["monday", "sunday"]},
-    basic=("events", "holidays", "week_start"),
+    basic=("events", "linked_calendars", "holidays", "week_start"),
     check=events.check,
     migrate=migrate,
+    help=HELP,
+    extend=with_linked,
     choice_names={"holidays": {"labels": choice_labels(), "groups": choice_groups()}},
     item_fields={"events": countdown.EVENT_FIELDS},
     renames={"countdown": {"days": "countdown_days", "clock": "countdown_clock", "flip": "countdown_flip",

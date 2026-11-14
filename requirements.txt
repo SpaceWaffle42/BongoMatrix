@@ -4,3 +4,5 @@ Flask>=3.1
 segno>=1.6   # QR codes (pure Python)
 zeroconf>=0.132   # mDNS for the hub at matrix.local (pure Python)
 # rgbmatrix is built from hzeller/rpi-rgb-led-matrix on the Pi, not installed from here.
+icalendar>=6.0   # linked calendars: Google / iCloud links (pure Python)
+recurring-ical-events>=3.3   # their repeating events, with moved and skipped ones

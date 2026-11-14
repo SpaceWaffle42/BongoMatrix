@@ -104,6 +104,9 @@ class Module:
     # "required": True if it shows nothing until this is done}.
     # Text inside `backticks` is shown as something to copy, with a Copy button.
     help: dict | None = None
+    # ``extend(settings, ctx)``: settings filled in from outside the entry as a screen starts (the
+    # Calendar adds the showings of your linked calendars, bongo.calendars). Returns new settings.
+    extend: Callable[[dict, Context], dict] | None = None
 
     @property
     def default_style(self) -> str:
@@ -137,7 +140,8 @@ class Module:
     def create(self, style: str | None = None, settings: dict | None = None,
                ctx: Context | None = None, overlay: bool = False) -> Style:
         ctx = ctx or Context()
-        return self._style(style, overlay)(ctx, self.settings_for(style, self.homed(settings, ctx.home), overlay))
+        settings = self.settings_for(style, self.homed(settings, ctx.home), overlay)
+        return self._style(style, overlay)(ctx, self.extend(settings, ctx) if self.extend else settings)
 
     def homed(self, settings: dict | None, home: dict | None) -> dict | None:
         """``settings`` with the Matrix's location (``home``) in each place setting, unless this screen

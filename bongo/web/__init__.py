@@ -501,6 +501,56 @@ def create_app(*, modules, live, pairing, config_path, logs: LogBuffer | None = 
             return jsonify(error=f"Couldn't import {upload.filename}: {error}."), 422
         return jsonify(frames=frames)
 
+    # -- linked calendars (bongo/calendars.py): their links never leave the Matrix -----------------
+    def calendar_list():
+        from bongo import calendars
+        try:
+            import icalendar  # noqa: F401
+            import recurring_ical_events  # noqa: F401
+            ready = True
+        except ImportError:   # an update that added them hasn't installed them yet
+            ready = False
+        return jsonify(calendars=[calendars.public(f) for f in calendars.load()], ready=ready,
+                       colours=list(calendars.COLOURS), most=calendars.MOST_CALENDARS)
+
+    @app.get("/api/calendars")
+    def calendars_get():
+        return calendar_list()
+
+    @app.post("/api/calendars")
+    def calendars_add():
+        from bongo import calendars
+        try:
+            feed = calendars.add(body())
+        except calendars.FeedError as error:
+            return jsonify(error=f"Couldn't add it: {error}."), 422
+        logging.getLogger("bongo.web").info("calendar %s added", feed["name"])
+        return calendar_list()
+
+    @app.patch("/api/calendars/<feed_id>")
+    def calendars_change(feed_id):
+        from bongo import calendars
+        try:
+            calendars.change(feed_id, body())
+        except KeyError:
+            abort(404, "no such calendar")
+        except calendars.FeedError as error:
+            return jsonify(error=f"Couldn't change it: {error}."), 422
+        return calendar_list()
+
+    @app.delete("/api/calendars/<feed_id>")
+    def calendars_remove(feed_id):
+        from bongo import calendars
+        if not calendars.remove(feed_id):
+            abort(404, "no such calendar")
+        return calendar_list()
+
+    @app.post("/api/calendars/refresh")
+    def calendars_refresh():
+        from bongo import calendars
+        calendars.refresh_all(force=True)   # in the background, one at a time: the list shows them as waiting
+        return calendar_list()
+
     # -- Spotify sign-in (bongo/modules/spotify/account.py) -------------------------------------
     @app.get("/api/spotify")
     def spotify_status():
