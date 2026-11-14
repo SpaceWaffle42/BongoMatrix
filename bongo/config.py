@@ -322,6 +322,9 @@ def validate(config: dict, modules: dict[str, Module]) -> list[str]:
     if country is not None and not (isinstance(country, str) and len(country) == 2 and country.isalpha() and country.isupper()):
         problems.append("wifi_country must be a two-letter country code such as GB")
     problems += location_problems(config.get("location"))
+    name = config.get("name")
+    if name is not None and not (isinstance(name, str) and len(name) <= 60):   # (the dashboard's status page reads it as text)
+        problems.append("name: the Matrix's name is text, up to 60 characters")
     if config.get("timezone"):
         try:
             ZoneInfo(config["timezone"])

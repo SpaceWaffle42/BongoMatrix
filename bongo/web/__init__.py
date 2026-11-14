@@ -21,6 +21,7 @@ import threading
 import time
 from functools import lru_cache
 from pathlib import Path
+from zoneinfo import ZoneInfo
 
 from flask import Flask, abort, jsonify, request, send_file, send_from_directory
 from werkzeug.exceptions import HTTPException
@@ -323,7 +324,8 @@ def create_app(*, modules, live, pairing, config_path, logs: LogBuffer | None = 
             live.paused = action == "pause"
         elif action == "sleep":
             minutes = number(data.get("minutes", 8 * 60), 1, 7 * 24 * 60, "minutes")
-            live.sleep_until = dt.datetime.now() + dt.timedelta(minutes=minutes)
+            # a moment in time, not a clock reading: the Pi's own zone may not be the one in the config
+            live.sleep_until = dt.datetime.now(dt.timezone.utc) + dt.timedelta(minutes=minutes)
             live.skip.set()
         elif action == "wake":
             live.sleep_until = None
@@ -689,10 +691,11 @@ def create_app(*, modules, live, pairing, config_path, logs: LogBuffer | None = 
         return jsonify(ok=True, restart_needed=restart_needed(merged), revisions=revisions(load()))
 
     @lru_cache(maxsize=12)
-    def preview_style(module, style, settings_json, width, height, pet, home_json="null"):
+    def preview_style(module, style, settings_json, width, height, pet, home_json="null", zone=None):
         return modules[module].create(style or None, json.loads(settings_json),
                                       Context(width=width, height=height, fonts=fonts or Context().fonts, pet=pet,
-                                              home=json.loads(home_json)))   # the Matrix's location, as on the panel
+                                              home=json.loads(home_json),    # the Matrix's location, as on the panel
+                                              tz=ZoneInfo(zone) if zone else None))   # ...and its time zone, not the Pi's
 
     @app.get("/api/preview.png")
     def preview():
@@ -707,8 +710,9 @@ def create_app(*, modules, live, pairing, config_path, logs: LogBuffer | None = 
             config = load()
             area = cfg.safe_area(config)
             style = preview_style(name, request.args.get("style", ""), settings_json, area.width, area.height,
-                                  pets.of(config), json.dumps(config.get("location"), sort_keys=True))
-        except (ValueError, TypeError) as error:
+                                  pets.of(config), json.dumps(config.get("location"), sort_keys=True),
+                                  config.get("timezone") or None)
+        except (ValueError, TypeError, KeyError, OSError) as error:
             return jsonify(error=str(error)), 422
         t = number(request.args.get("t", time.time()), 0, 4_102_444_800, "t")  # up to 2100
         tz = style.ctx.now().tzinfo
