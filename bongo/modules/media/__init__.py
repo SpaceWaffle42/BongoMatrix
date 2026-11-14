@@ -5,6 +5,7 @@ import json
 import logging
 import shutil
 import subprocess
+import threading
 
 from PIL import Image, ImageDraw, ImageSequence
 
@@ -13,6 +14,9 @@ from bongo.module import Module, Style
 
 MAX_FRAMES = 300
 VIDEO_FPS = 20
+KEPT = 6            # the last few files' finished frames (at most 300 x 64 x 32 x 3 bytes each: under 2 MB)
+lock = threading.Lock()
+ready: dict = {}    # (file, changed, size, style, canvas, background, brightness) -> (frames, ends, moving)
 
 
 @functools.lru_cache(maxsize=4)
@@ -75,26 +79,43 @@ class Fit(Style):
             path = locate(s["file"])
             if path is None:
                 raise OSError("no media")
-            if library.is_video(path):
-                # decode at up to 4x the canvas so fill/fit still have detail to scale from
-                box = (self.ctx.width * 4, self.ctx.height * 4)
-                for i, frame in enumerate(video_frames(str(path), path.stat().st_mtime, box)):
-                    self.frames.append(self.compose(frame.convert("RGBA"), s["brightness"]))
-                    self.ends.append((i + 1) * 1000 // VIDEO_FPS)
-                self.moving = True
-                return
-            with Image.open(path) as im:
-                total = 0
-                for i, frame in enumerate(ImageSequence.Iterator(im)):
-                    if i >= MAX_FRAMES:
-                        break
-                    total += max(10, int(frame.info.get("duration") or 100))   # as schedule.gif_pass counts it
-                    self.frames.append(self.compose(frame.convert("RGBA"), s["brightness"]))
-                    self.ends.append(total)
-            self.moving = len(self.frames) > 1   # a one-frame GIF is a still
+            # a playlist comes back to the same file every pass: decode and scale it once, not each time
+            # (a changed file has a new time or size, so an upload under the same name is read afresh)
+            stat = path.stat()
+            key = (str(path), stat.st_mtime, stat.st_size, type(self), self.ctx.width, self.ctx.height, self.bg, s["brightness"])
+            with lock:   # the panel and the dashboard's previews both come here
+                kept = ready.pop(key, None)
+                if kept is None:
+                    self.load(path)
+                    kept = (tuple(self.frames), tuple(self.ends), self.moving)
+                ready[key] = kept                                   # ...and it's the newest again
+                while len(ready) > KEPT:
+                    del ready[next(iter(ready))]
+            self.frames, self.ends, self.moving = kept
         except Exception as error:
             logging.getLogger(__name__).warning("can't show %r: %s", s["file"], error)
             self.frames, self.ends = [self.placeholder()], [1]
+
+    def load(self, path):
+        """Decode ``path`` into this style's finished frames."""
+        s = self.settings
+        if library.is_video(path):
+            # decode at up to 4x the canvas so fill/fit still have detail to scale from
+            box = (self.ctx.width * 4, self.ctx.height * 4)
+            for i, frame in enumerate(video_frames(str(path), path.stat().st_mtime, box)):
+                self.frames.append(self.compose(frame.convert("RGBA"), s["brightness"]))
+                self.ends.append((i + 1) * 1000 // VIDEO_FPS)
+            self.moving = True
+            return
+        with Image.open(path) as im:
+            total = 0
+            for i, frame in enumerate(ImageSequence.Iterator(im)):
+                if i >= MAX_FRAMES:
+                    break
+                total += max(10, int(frame.info.get("duration") or 100))   # as schedule.gif_pass counts it
+                self.frames.append(self.compose(frame.convert("RGBA"), s["brightness"]))
+                self.ends.append(total)
+        self.moving = len(self.frames) > 1   # a one-frame GIF is a still
 
     def compose(self, rgba, brightness):
         w, h = self.ctx.width, self.ctx.height

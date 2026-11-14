@@ -10,18 +10,41 @@ from PIL import Image
 FONT_DIR = Path(os.environ.get("BONGO_FONTS", Path(__file__).resolve().parent.parent / "resources" / "fonts"))
 
 
+class Glyphs(dict):
+    """A font's glyphs by character code: (advance, x offset, rows above the baseline, mask). A glyph's
+    mask is only made the first time it is asked for: the big fonts hold thousands of characters, and
+    making them all took half a second of the panel's time on first use."""
+
+    def __missing__(self, code):
+        raise KeyError(code)
+
+    def __getitem__(self, code):
+        glyph = dict.__getitem__(self, code)
+        if len(glyph) == 6:
+            dwidth, x_off, top, w, h, rows = glyph
+            mask = None
+            if w and h:   # a BDF row is the pixels as hex, most significant bit first: Pillow's own "1" layout
+                n = (w + 7) // 8 * 2
+                mask = Image.frombytes("1", (w, h), bytes.fromhex("".join(row[:n].ljust(n, "0") for row in rows)))
+            glyph = (dwidth, x_off, top, mask)
+            dict.__setitem__(self, code, glyph)
+        return glyph
+
+    def get(self, code, default=None):
+        return self[code] if code in self else default
+
+
 class BdfFont:
     def __init__(self, path: Path):
-        self.glyphs: dict[int, tuple[int, int, int, Image.Image | None]] = {}
+        self.glyphs: dict[int, tuple[int, int, int, Image.Image | None]] = Glyphs()
         self.ascent = 0
         with open(path, encoding="latin-1") as f:
             lines = iter(f.read().splitlines())
         for line in lines:
-            key, _, rest = line.partition(" ")
-            if key == "FONT_ASCENT":
-                self.ascent = int(rest)
-            elif key == "STARTCHAR":
+            if line.startswith("STARTCHAR"):
                 self._read_glyph(lines)
+            elif line.startswith("FONT_ASCENT"):
+                self.ascent = int(line.split()[1])
 
     def _read_glyph(self, lines):
         code = dwidth = 0
@@ -36,16 +59,7 @@ class BdfFont:
                 bbx = tuple(int(v) for v in rest.split())
             elif key == "BITMAP":
                 w, h, x_off, y_off = bbx
-                rows = [next(lines) for _ in range(h)]
-                mask = None
-                if w and h:
-                    mask = Image.new("1", (w, h))
-                    for y, row in enumerate(rows):
-                        bits, width = int(row, 16), len(row) * 4
-                        for x in range(w):
-                            if bits >> (width - 1 - x) & 1:
-                                mask.putpixel((x, y), 1)
-                self.glyphs[code] = (dwidth, x_off, y_off + h, mask)
+                dict.__setitem__(self.glyphs, code, (dwidth, x_off, y_off + h, w, h, [next(lines) for _ in range(h)]))
             elif key == "ENDCHAR":
                 return
 
