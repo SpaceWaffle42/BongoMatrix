@@ -48,7 +48,10 @@ class Live:
 
     def take_push(self):
         with self._lock:
-            return self.pushes.popleft() if self.pushes else None
+            if not self.pushes:
+                return None
+            self.skip.clear()   # the skip that came with it has done its job: it mustn't end the push itself
+            return self.pushes.popleft()   # (with nothing playing, as in a dark Sleep now, nobody else clears it)
 
     def asleep(self, now: dt.datetime) -> bool:
         until = self.sleep_until
@@ -83,7 +86,7 @@ class Live:
     def push(self, entry) -> None:
         with self._lock:
             self.pushes.append(entry)
-        self.skip.set()  # interrupt whatever is on now
+            self.skip.set()  # interrupt whatever is on now
 
     def status(self) -> dict:
         with self._lock:

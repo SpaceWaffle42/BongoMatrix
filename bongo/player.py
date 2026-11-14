@@ -139,6 +139,8 @@ def play(playlist: list[Entry], modules: dict[str, Module], panel, ctx_factory=C
         if live:
             live.publish(out, public=place(dark) if place else dark)
         stop.wait(min(wait, 1 / 20) if covered is not dark else wait)
+        if live:
+            live.skip.clear()   # nothing was playing: a Wake or Next pressed meanwhile mustn't skip the next screen
 
     skipped = [0]   # screens in a row that skipped themselves without a frame
     boot = schedule.boot_entry() if schedule else None
