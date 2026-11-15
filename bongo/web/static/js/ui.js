@@ -39,6 +39,9 @@ const ICONS = {
   search: P('<circle cx="11" cy="11" r="7"/><path d="m20 20-3.5-3.5"/>'),
   info: P('<circle cx="12" cy="12" r="9"/><path d="M12 8h.01M11 12h1v4h1"/>'),
   x: P('<path d="M6 6l12 12M18 6 6 18"/>'),
+  clock: P('<circle cx="12" cy="12" r="9"/><path d="M12 7v5l3 2"/>'),
+  warn: P('<path d="M12 3 2 21h20zM12 10v5M12 18h.01"/>'),
+  moon: P('<path d="M20 14A8 8 0 0 1 10 4a8 8 0 1 0 10 10z"/>'),
   help: P('<circle cx="12" cy="12" r="9"/><path d="M9.5 9.5a2.5 2.5 0 1 1 3.5 2.3c-.6.3-1 .8-1 1.5v.7M12 17h.01"/>'),
 };
 export const icon = (name, cls = 'ico') => h('span', { class: cls, html: ICONS[name] || '' });

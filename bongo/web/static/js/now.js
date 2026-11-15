@@ -3,7 +3,8 @@ import { post, previewPath } from './api.js';
 import { h, icon, toast, fail, same, humanize, dur, mmss, clock, reducedMotion, segmented, toggle, store } from './ui.js';
 import { FrameLoop } from './led.js';
 import { helpButton } from './help.js';
-import { S, bus, onLeave, go, href, moduleById, moduleOff, styleOf, entryName, draftChanged, dirtyCount, applyDraft, discardDraft, normalise } from './app.js';
+import { S, bus, onLeave, go, href, moduleById, moduleOff, styleOf, entryName, draftChanged, dirtyCount, applyDraft, discardDraft, normalise, matrixClock } from './app.js';
+import { playsAt, nextStart, short, spoken, gapWarning, sleepTime } from './times.js';
 
 const COLOURS = { clock: '#FF7A3D', weather: '#5B9BE8', announcements: '#FFB547', calendar: '#E879B7',
   rss: '#8B95A5', text: '#A78BFA', astronomy: '#4ADE80', media: '#2DD4BF' };
@@ -30,6 +31,9 @@ export function render(view) {
   const editBtn = h('button', { type: 'button', class: 'btn ghost' }, 'Edit');
   const safeBtn = h('button', { type: 'button', class: 'chip', 'aria-pressed': String(showSafe) }, 'Safe area');
   const stateNote = h('p', { class: 'muted small hero-note', 'aria-live': 'polite' });
+  const progress = h('div', { class: 'progress' }, h('div', { class: 'progress-track' }, bar),
+    h('div', { class: 'row between mono small muted' }, elapsedEl, nextEl));
+  const idleLink = h('a', { href: href('/playlist'), 'data-route': '/playlist', class: 'small idle-link', hidden: true }, 'Open the playlist');
   const loop = new FrameLoop(canvas, { path: () => '/api/frame.png', interval: 125,
     led: () => ({ safeArea: S.state?.safe_area, panel: S.state?.panel, showSafe }) });
   onLeave(() => loop.stop());
@@ -44,9 +48,8 @@ export function render(view) {
       h('div', null, h('div', { class: 'eyebrow' }, 'On the panel now'), h('div', { class: 'row gap-s' }, title, styleTag)),
       safeBtn),
     h('div', { class: 'led-frame' }, canvas),
-    h('div', { class: 'progress' }, h('div', { class: 'progress-track' }, bar),
-      h('div', { class: 'row between mono small muted' }, elapsedEl, nextEl)),
-    stateNote,
+    progress,
+    stateNote, idleLink,
     h('div', { class: 'row between wrap' }, h('div', { class: 'row gap-s' }, pauseBtn, nextBtn), editBtn));
 
   // -- quick controls --------------------------------------------------------------------
@@ -107,7 +110,16 @@ export function render(view) {
     const asleep = !!L.sleep_until || !!L.asleep;   // Sleep now, or the sleep hours (Settings > Sleep)
     const sleepTo = /^\d{1,2}:\d{2}$/.test(S.config?.sleep?.to || '') ? S.config.sleep.to : '';
     const wakesAt = L.sleep_hours && sleepTo ? sleepTo : L.sleep_until ? clock(new Date(L.sleep_until)) : sleepTo;   // the later of the two
-    title.textContent = asleep ? 'Sleeping' : e ? entryName(e) : 'Starting up…';
+    // nothing is set to play now: every screen in rotation has times (Timing > When it plays), and none is now
+    const now = matrixClock();
+    const timed = (S.config?.playlist || []).map(normalise).filter((x) => x.enabled && !moduleOff(x.module) && x.times.length);
+    const soonest = timed.map((x) => ({ x, at: nextStart(x.times, now) })).filter((n) => n.at)
+      .sort((a, b) => ((a.at < now) - (b.at < now)) || a.at.localeCompare(b.at))[0];
+    const idle = !!L.idle && !e && !asleep;
+    title.textContent = asleep ? 'Sleeping' : idle ? (soonest ? `Nothing is set to play until ${soonest.at}` : 'Nothing is set to play') : e ? entryName(e) : 'Starting up…';
+    idleLink.hidden = !idle;
+    progress.hidden = idle;   // nothing on: no time bar, and nothing to pause or skip
+    pauseBtn.disabled = nextBtn.disabled = idle;
     styleTag.textContent = e ? humanize(styleOf(e)) : '';
     styleTag.hidden = !e || asleep;
     pauseBtn.replaceChildren(icon(L.paused ? 'play' : 'pause'));
@@ -115,7 +127,8 @@ export function render(view) {
     const i = playingIndex(S.draft || []);
     editBtn.hidden = i < 0;
     editBtn.textContent = `Edit ${entryName(e)}`;
-    stateNote.textContent = [L.paused && 'Rotation paused: this module stays on until you resume.',
+    stateNote.textContent = [idle && soonest && `${entryName(soonest.x)} plays next, at ${soonest.at}.`,
+      L.paused && 'Rotation paused: this module stays on until you resume.',
       asleep && (wakesAt ? `Asleep until ${wakesAt}.` : 'Asleep.'), L.pushes && `${L.pushes} message${L.pushes > 1 ? 's' : ''} queued.`].filter(Boolean).join(' ');
     if (Date.now() - sliderTouched > 2500 && document.activeElement !== slider) {
       const auto = L.brightness == null;
@@ -126,13 +139,14 @@ export function render(view) {
     }
     sleepBtn.replaceChildren(h('span', { class: 'strong' }, asleep ? 'Wake now' : 'Sleep now'),
       h('span', { class: 'muted small' }, asleep ? (wakesAt ? `Asleep until ${wakesAt}` : 'Asleep') : `Until ${sleepTo || clock(new Date(Date.now() + sleepMinutes() * 60000))}`));
-    const list = S.config?.playlist?.map(normalise).filter((x) => x.enabled && !moduleOff(x.module)) || [];
+    const list = S.config?.playlist?.map(normalise).filter((x) => x.enabled && !moduleOff(x.module) && playsAt(x.times, now)) || [];
     const at = list.findIndex((x) => matches(x, e));
     const rest = at < 0 ? list : [...list.slice(at + 1), ...list.slice(0, at)];
     upNext.replaceChildren(...rest.slice(0, 4).map((x) => h('li', null, h('span', { class: 'swatch', style: `background:${colourOf(x.module)}` }),
       h('span', { class: 'grow' }, entryName(x), h('span', { class: 'muted small' }, ` · ${humanize(styleOf(x))}`)), h('span', { class: 'mono small muted' }, dur(x.seconds)))));
     tick();
     playlist.markPlaying();
+    playlist.markTimes();
   }
   function tick() {
     const L = live(), e = L.entry;
@@ -170,11 +184,13 @@ function renderPlaylist() {
   const summary = h('span', { class: 'mono small soft' });
   const strip = h('div', { class: 'strip', role: 'list' });
   const scroller = h('div', { class: 'strip-scroll' }, strip);
-  const share = h('div', { class: 'share-bar', role: 'img' });
+  const shareBar = h('div', { class: 'share-bar', role: 'img' });
   const legend = h('ul', { class: 'legend' });
   const loopLabel = h('span');
   const problems = h('div', { class: 'error-box', role: 'alert', hidden: true });
+  const gapNote = h('p', { class: 'gap-note', role: 'status', hidden: true });   // beside Apply: a time with nothing set to play
   const actions = h('div', { class: 'row gap-s wrap end' });
+  let playingNow = '';   // which screens play at this time of day: the loop bar is redrawn when that changes
   const addDialog = buildAddDialog();
   let loops = [];
   onLeave(() => loops.forEach((l) => l.stop()));
@@ -186,33 +202,82 @@ function renderPlaylist() {
       h('div', { class: 'row gap-s wrap' }, summary,
         h('button', { type: 'button', class: 'btn', onclick: () => addDialog.open() }, icon('plus'), 'Add module'))),
     problems, scroller,
-    h('div', null, share, h('div', { class: 'row between mono tiny muted mt-xs' }, h('span', null, '0:00'), loopLabel), legend),
-    actions, addDialog.el);
+    h('div', null, shareBar, h('div', { class: 'row between mono tiny muted mt-xs' }, h('span', null, '0:00'), loopLabel), legend),
+    gapNote, actions, addDialog.el);
+
+  /** In rotation, and whether each plays at this time of day (by the Matrix's own clock). */
+  const rotation = () => (S.draft || []).filter((e) => e.enabled && !moduleOff(e.module)).map((e) => ({ e, now: playsAt(e.times, matrixClock()) }));
+
+  /** The loop as it is now: its length, the share bar and its legend. A screen with times that isn't
+   *  playing now is a thin hatched mark, "not now" in the legend, and not counted. */
+  function paintLoop() {
+    const all = rotation(), on = all.filter((r) => r.now).map((r) => r.e);
+    const timed = all.some((r) => r.e.times.length);
+    const total = on.reduce((a, e) => a + Number(e.seconds || 0), 0);
+    const share = (e) => Math.round((e.seconds / (total || 1)) * 100);
+    playingNow = all.map((r) => Number(r.now)).join('');
+    summary.textContent = timed ? `${on.length} playing now · loop ${dur(total, true)}` : `${on.length} on · loop ${dur(total, true)}`;
+    loopLabel.textContent = `${timed ? 'The loop now' : 'One full loop'} · ${dur(total, true)}`;
+    const later = all.filter((r) => !r.now).map((r) => entryName(r.e));
+    shareBar.setAttribute('aria-label', `Share of ${timed ? 'the loop now' : 'one loop'}: ${on.map((e) => `${entryName(e)} ${share(e)}%`).join(', ') || 'nothing playing'}`
+      + (later.length ? `. Not playing now: ${later.join(', ')}` : ''));
+    shareBar.replaceChildren(...all.map(({ e, now }) => (now
+      ? h('div', { class: 'share-seg', title: `${entryName(e)} · ${dur(e.seconds, true)}`, style: `flex:${Number(e.seconds) || 0.01} 1 0;background:${colourOf(e.module)}` })
+      : h('div', { class: 'share-seg later', title: `${entryName(e)} · not now`, style: `background-color:${colourOf(e.module)}` }))));
+    legend.replaceChildren(...all.map(({ e, now }) => h('li', null, h('span', { class: `swatch${now ? '' : ' later'}`, style: `background-color:${colourOf(e.module)}` }),
+      `${entryName(e)} `, now ? h('span', { class: 'mono muted' }, `${share(e)}%`) : h('span', { class: 'muted' }, 'not now'))));
+    if (!all.length) shareBar.append(h('div', { class: 'share-seg empty', style: 'flex:1' }));
+  }
+
+  /** Each card's time tag, as the clock moves on: "All day", "12:00–14:00 +1" or "Not now, next 20:00". */
+  function markTimes() {
+    const now = matrixClock();
+    strip.querySelectorAll('.pl-card').forEach((c) => {
+      const e = S.draft?.[Number(c.dataset.i)], tag = c.querySelector('.when-tag');
+      if (!e || !tag) return;
+      const set = e.times.length > 0, plays = playsAt(e.times, now), counts = e.enabled && !moduleOff(e.module);
+      const later = set && !plays && counts;
+      c.classList.toggle('later', later);
+      tag.classList.toggle('set', set && !later);
+      tag.classList.toggle('not-now', later);
+      const words = later ? ['Not now', `next ${nextStart(e.times, now)}`] : [short(e.times)];
+      const text = tag.querySelector('.when-text');
+      if (text.dataset.says !== words.join('|')) {
+        text.dataset.says = words.join('|');
+        text.replaceChildren(...[h('span', null, words[0]), words[1] && h('small', null, words[1])].filter(Boolean));
+        tag.setAttribute('aria-label', set ? `${words.join(', ')}. ${entryName(e)} plays ${spoken(e.times)}. Change times` : `All day: ${entryName(e)} plays all day. Change times`);
+      }
+    });
+    if (rotation().map((r) => Number(r.now)).join('') !== playingNow) paintLoop();
+  }
 
   function paint() {
     loops.forEach((l) => l.stop()); loops = [];
     const d = S.draft || [];
     const on = d.filter((e) => e.enabled && !moduleOff(e.module));   // a module switched off in Settings is skipped too
-    const total = on.reduce((a, e) => a + Number(e.seconds || 0), 0);
-    summary.textContent = `${on.length} on · loop ${dur(total, true)}`;
-    loopLabel.textContent = `One full loop · ${dur(total, true)}`;
     const bad = new Map();
     for (const p of S.problems) { const m = /^playlist\[(\d+)\]:?\s*(.*)$/.exec(p); if (m) bad.set(Number(m[1]), m[2]); }
     problems.hidden = !S.problems.length;
     problems.replaceChildren(h('strong', null, "The Matrix didn't accept this playlist:"), h('ul', null, S.problems.map((p) => h('li', null, p))));
     strip.replaceChildren(...d.map((e, i) => cardFor(e, i, bad.get(i))),
       h('button', { type: 'button', class: 'add-tile', onclick: () => addDialog.open() }, icon('plus'), 'Add module'));
-    share.setAttribute('aria-label', `Share of one loop: ${on.map((e) => `${entryName(e)} ${Math.round((e.seconds / (total || 1)) * 100)}%`).join(', ') || 'nothing enabled'}`);
-    share.replaceChildren(...on.map((e) => h('div', { class: 'share-seg', title: `${entryName(e)} · ${dur(e.seconds, true)}`,
-      style: `flex:${Number(e.seconds) || 0.01} 1 0;background:${colourOf(e.module)}` })));
-    legend.replaceChildren(...on.map((e) => h('li', null, h('span', { class: 'swatch', style: `background:${colourOf(e.module)}` }),
-      `${entryName(e)} `, h('span', { class: 'mono muted' }, `${Math.round((e.seconds / (total || 1)) * 100)}%`))));
-    if (!on.length) share.append(h('div', { class: 'share-seg empty', style: 'flex:1' }));
+    paintLoop();
+    const gap = gapWarning(on.map((e) => e.times), sleepTime(S.config));
+    gapNote.hidden = !gap;
+    gapNote.replaceChildren(icon('warn'), h('span', null, gap));
     const n = dirtyCount();
     actions.replaceChildren(...(n ? [h('span', { class: 'pill-warn' }, `${n} unsaved change${n === 1 ? '' : 's'}`),
       h('button', { type: 'button', class: 'btn ghost', onclick: discardDraft }, 'Discard'),
       h('button', { type: 'button', class: 'btn primary', onclick: applyDraft }, 'Apply to Matrix')] : []));
     markPlaying();
+    markTimes();
+    if (Number.isInteger(S.backTo)) {   // back from the editor: to the card it was opened from
+      const back = strip.querySelector(`.pl-card[data-i="${S.backTo}"]`);
+      S.backTo = null;
+      const control = back?.querySelector(S.backToTag ? '.when-tag' : `a.mini-btn`);   // the control it was opened by: the time tag, else the pencil
+      S.backToTag = false;
+      requestAnimationFrame(() => { back?.scrollIntoView({ inline: 'center', block: 'nearest' }); control?.focus({ preventScroll: true }); });
+    }
   }
 
   function markPlaying() {
@@ -240,6 +305,8 @@ function renderPlaylist() {
         h('a', { href: href('/settings'), 'data-route': '/settings', onclick: () => setTimeout(() => document.getElementById('modules')?.scrollIntoView(), 200) }, 'Settings › Modules')) : null,
       problem ? h('p', { class: 'tiny danger flush' }, problem) : null,
       !mod ? h('p', { class: 'tiny danger flush' }, 'Module not installed') : null,
+      mod ? h('a', { class: 'when-tag', href: href(`/edit/${i}`), 'data-route': `/edit/${i}`, onclick: (ev) => { if (ev.button === 0 && !ev.ctrlKey && !ev.metaKey && !ev.shiftKey && !ev.altKey) S.toTimes = S.backToTag = true; } },
+        icon('clock'), h('span', { class: 'when-text' })) : null,
       toggle(e.enabled, e.enabled ? (modOff ? 'In rotation · module off' : 'In rotation') : 'Off', (v) => { e.enabled = v; draftChanged(); }),
       h('div', { class: 'pl-actions' },
         h('button', { type: 'button', class: 'mini-btn mv-up', 'aria-label': 'Move earlier', disabled: i === 0, onclick: () => move(i - 1) }, icon('left')),
@@ -294,7 +361,7 @@ function renderPlaylist() {
   bus.addEventListener('draft', paint);
   onLeave(() => bus.removeEventListener('draft', paint));
   paint();
-  return { el, markPlaying };
+  return { el, markPlaying, markTimes };
 }
 
 function buildAddDialog() {

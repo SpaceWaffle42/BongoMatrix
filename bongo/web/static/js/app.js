@@ -95,8 +95,11 @@ window.addEventListener('hashchange', () => { if (DEMO) render(); });
 // -- data ----------------------------------------------------------------------------------
 export function normalise(entry) {
   return { module: entry.module, style: entry.style || null, seconds: Number(entry.seconds ?? 30),
-    settings: clone(entry.settings || {}), enabled: entry.enabled !== false };
+    settings: clone(entry.settings || {}), enabled: entry.enabled !== false,
+    times: clone(Array.isArray(entry.times) ? entry.times : []) };   // times of day it plays; none: all day
 }
+/** The Matrix's own clock ("13:25"): its time zone, not this phone's. */
+export const matrixClock = () => S.state?.clock || `${String(new Date().getHours()).padStart(2, '0')}:${String(new Date().getMinutes()).padStart(2, '0')}`;
 export async function loadAll() {
   // the marks first: if another device saves in between, they are older than the config, and the next
   // save here asks rather than overwrites (the safe way round)
@@ -144,7 +147,7 @@ async function putConfig(part) {
 
 export async function applyDraft() {
   const playlist = S.draft.map((e) => ({ module: e.module, style: e.style || undefined, seconds: e.seconds,
-    settings: e.settings, enabled: e.enabled }));
+    settings: e.settings, enabled: e.enabled, times: e.times?.length ? e.times : undefined }));
   try {
     const res = await putConfig({ playlist });
     S.config.playlist = clone(playlist);

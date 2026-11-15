@@ -1,6 +1,7 @@
 """Plays a playlist: each entry is one module + style + settings for N seconds."""
 from __future__ import annotations
 
+import datetime as dt
 import logging
 import threading
 import time
@@ -21,6 +22,14 @@ class Entry:
     settings: dict = field(default_factory=dict)
     enabled: bool = True
     once: bool = False   # play through once and hand over (splash, boot); ``seconds`` is then only a cap
+    times: list = field(default_factory=list)   # [{"from": "08:00", "to": "10:00"}, ...]; none: all day
+
+    def plays_at(self, now) -> bool:
+        """Whether this screen plays at ``now`` (by the clock on the wall): all day, or inside one of its times."""
+        if not self.times:
+            return True
+        from bongo.schedule import within   # (schedule imports this module)
+        return any(within(now, t["from"], t["to"]) for t in self.times)
 
     def build(self, modules: dict[str, Module], ctx: Context) -> Style:
         if self.module not in modules:
@@ -79,8 +88,12 @@ def play(playlist: list[Entry], modules: dict[str, Module], panel, ctx_factory=C
     at start-up, fills ``splash`` items from the Splash pool and swaps in the sleep playlist, at
     sleep brightness, during its hours (an entry is cut short when sleep starts or ends). ``live``
     lets the dashboard skip, pause, push a message, force sleep and override brightness.
+    An entry with ``times`` only plays inside them: it is looked at when its turn comes, so the one on the
+    panel finishes its seconds. With nothing to play (every entry has times, none now) the panel is dark.
     ``overlays`` (bongo.overlays.Overlays) draw over the day playlist, not splash, sleep or pushes."""
     stop = stop or threading.Event()
+    if live:
+        live.idle = False
     day = [e for e in playlist if e.enabled]
     if not day:
         raise ValueError("playlist has no enabled entries")
@@ -145,11 +158,23 @@ def play(playlist: list[Entry], modules: dict[str, Module], panel, ctx_factory=C
             live.skip.clear()   # nothing was playing: a Wake or Next pressed meanwhile mustn't skip the next screen
 
     skipped = [0]   # screens in a row that skipped themselves without a frame
+    def due(now, start):
+        """Places in ``day`` that play at ``now``, in playing order from ``start``."""
+        return [k % len(day) for k in range(start, start + len(day)) if day[k % len(day)].plays_at(now)]
+
+    def after(index, entry, now):
+        """What follows ``entry``: the next one that plays when it ends (itself, if it's the only one; None: nothing)."""
+        later = due(now + dt.timedelta(seconds=entry.seconds), index + 1)
+        return day[later[0]] if later else None
+
     boot = schedule.boot_entry() if schedule else None
     if boot:
-        run(boot, day[0])
+        first = due(ctx_factory().now(), 0)
+        run(boot, day[first[0]] if first else None)
     was_asleep = False
-    position: dict[tuple, int] = {}  # where each playlist (day or sleep) left off
+    position: dict[tuple, int] = {}  # where the sleep playlist left off
+    cursor = 0                       # the place in ``day`` whose turn is next
+    again = None                     # a place to play again whatever its times (see the paused push below)
     played = 0
     while not stop.is_set() and (loops is None or played < loops * len(day)):
         if live and live.reload.is_set():
@@ -169,29 +194,52 @@ def play(playlist: list[Entry], modules: dict[str, Module], panel, ctx_factory=C
         was_asleep = asleep
         if live:
             live.sleeping, live.sleep_hours = asleep, hours
+            if asleep:
+                live.idle = False   # asleep, not "nothing set to play"
         brightness(now, asleep)
         if forced and not (schedule and schedule.sleep_playlist):
             show_dark(0.05 if getattr(panel, "ramping", False) else 1)  # dark until sleep_until or a wake
             continue
         if asleep:
             current = schedule.sleep_playlist
+            key = tuple(map(id, current))  # the list is rebuilt each pass; its entries are not
+            index = position.get(key, 0)
+            position[key] = index + 1
+            entry, upcoming, turns = current[index % len(current)], current[(index + 1) % len(current)], len(current)
+            again = None
         else:
-            current = [e for e in day if e.enabled] or day
-        key = tuple(map(id, current))  # the list is rebuilt each pass; its entries are not
-        index = position.get(key, 0)
-        position[key] = index + 1
+            now_due = due(now, cursor)   # by its times (Timing > When it plays), each time its turn comes
+            if again is not None and live and live.paused:   # the paused screen a message cut in on: back to it,
+                now_due = [again] + [k for k in now_due if k != again]   # even if its time has ended meanwhile
+            again = None                 # (resumed since: it takes its turn by its times, like any other)
+            if not now_due:              # every screen has times, and none of them is now: dark until one is
+                if live:
+                    live.idle = True
+                    if live.entry is not None:
+                        live.playing(None, None)
+                played += 1
+                show_dark(1)
+                continue
+            index = now_due[0]
+            cursor = index + 1
+            entry, upcoming, turns = day[index], after(index, day[index], now), len(now_due)
+        if live:
+            live.idle = False
         played += 1
-        entry = current[index % len(current)]
         where = None if forced else next((i for i, e in enumerate(playlist) if e is entry), None)
         if forced:                                         # Sleep now: until the moment it ends
             limit = live.sleep_left(now)
         else:
             limit = schedule.seconds_until_change(now) if schedule else None
-        ran = run(entry, current[(index + 1) % len(current)], where, None if asleep else overlays,
+        ran = run(entry, upcoming, where, None if asleep else overlays,
                   limit)   # where: slot in the saved playlist; limit: stop when sleep starts/ends
-        if live and live.paused and live.pushes:
-            position[key], played = index, played - 1   # a message cut in on the paused screen: come back to it after
+        if live and live.paused and live.pushes:   # a message cut in on the paused screen: come back to it after
+            played -= 1
+            if asleep:
+                position[key] = index
+            else:
+                cursor = again = index
         if not ran:
             stop.wait(0.2)  # never spin if every entry is broken
-        elif skipped[0] >= len(current):   # every screen skipped itself (Spotify, nothing on): dark, not a spin
+        elif skipped[0] >= turns:   # every screen skipped itself (Spotify, nothing on): dark, not a spin
             show_dark(1)

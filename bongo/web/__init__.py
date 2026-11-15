@@ -195,7 +195,9 @@ def create_app(*, modules, live, pairing, config_path, logs: LogBuffer | None = 
     def state():
         config = load()
         area = cfg.safe_area(config)
+        # clock: the Matrix's own time (its time zone, not the phone's), for "Not now · next 20:00" on the playlist
         return jsonify(live=live.status(), panel={"width": area.panel_width, "height": area.panel_height},
+                       clock=cfg.context_factory(config)().now().strftime("%H:%M"),
                        safe_area=dict(zip(("top", "right", "bottom", "left"), area.margins)),
                        uptime=round(time.time() - started), name=config.get("name", "Bongo Matrix"),
                        pet_kinds=pets.kinds(), network=network_info(config))

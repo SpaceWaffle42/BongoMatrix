@@ -5,7 +5,8 @@ import { FrameLoop } from './led.js';
 import { openPreview } from './mediaview.js';
 import { helpButton } from './help.js';
 import { iconPicker } from './iconpick.js';
-import { S, onLeave, go, href, moduleById, styleOf, entryName, applyDraft, draftChanged } from './app.js';
+import { S, onLeave, go, href, path, moduleById, styleOf, entryName, applyDraft, draftChanged, matrixClock } from './app.js';
+import { MOST_TIMES, mins, valid, joined, sentence, sleepTime, meetsSleep, suggest, moved } from './times.js';
 
 /** Settings for a style: shared ones (unless the style redefines them) and the style's own. */
 export function schemaFor(mod, style) {
@@ -136,10 +137,106 @@ export function render(view, match) {
           e.module === 'splash'  // its length comes from the picked file: one pass of a GIF
             ? h('div', { class: 'field-col' }, h('span', null, 'Length'), h('span', { class: 'muted small' }, 'One pass of the picked Splash file. Choose the files in Settings › Splash.'))
             : h('label', { class: 'field-col', for: 'f-seconds' }, 'Seconds on the panel', seconds),
-          h('div', { class: 'field-col' }, h('span', null, 'Rotation'), toggle(e.enabled, 'Enabled', (v) => { e.enabled = v; changed(); })))),
+          h('div', { class: 'field-col' }, h('span', null, 'Rotation'), toggle(e.enabled, 'Enabled', (v) => { e.enabled = v; changed(); }))),
+        whenItPlays()),
       ...[basicCard([...shared, ...own].filter((f) => !f.advanced)),
         advancedCard(shared.filter((f) => f.advanced), own.filter((f) => f.advanced))].filter(Boolean));  // none for Splash
   }
+  // -- when it plays: all day, or only at certain times of day --------------------------------
+  onLeave(() => { if (path() === '/playlist') S.backTo = i; else S.backToTag = false; });   // back at the card this was opened from, whichever way back
+  /** Scroll so ``el`` is just below whatever sticks to the top (the top bar; on a phone the preview too). */
+  function reveal(el) {
+    if (!el) return;
+    const box = el.getBoundingClientRect();
+    const over = [document.querySelector('.topbar'), document.querySelector('.editor-preview')].filter(Boolean)
+      .filter((s) => ['sticky', 'fixed'].includes(getComputedStyle(s).position))
+      .map((s) => s.getBoundingClientRect()).filter((r) => r.left < box.right && r.right > box.left && r.height < window.innerHeight * 0.6);
+    window.scrollBy(0, box.top - Math.max(0, ...over.map((r) => r.bottom)) - 12);
+  }
+  let keptTimes = [];   // the times as they were, while "All day" is chosen: choosing times again brings them back
+  function whenItPlays() {
+    const rows = h('div', { class: 'stack-s' });
+    const says = h('p', { class: 'soft flush', 'aria-live': 'polite' });
+    const asleepNote = h('p', { class: 'small sleep-note flush', hidden: true });
+    const day = h('div', { class: 'day-strip' });   // a picture of the sentence above it, so not read out again
+    const picture = h('div', { class: 'stack-s day-picture', 'aria-hidden': 'true' }, h('div', { class: 'row gap-s tiny soft day-key' }, h('span', { class: 'day-sleep key', 'aria-hidden': 'true' }), 'Sleep'), day,
+      h('div', { class: 'day-hours', 'aria-hidden': 'true' }, ['00', '04', '08', '12', '16', '20', '24'].map((t) => h('span', null, t))));
+    const add = h('button', { type: 'button', class: 'btn left', onclick: () => { e.times.push(suggest(e.times, matrixClock(), sleepTime(S.config))); paint(e.times.length - 1); changed(); } }, icon('plus'), 'Add another time');
+    const most = h('span', { class: 'small muted', hidden: true }, `That's the most: ${MOST_TIMES} times.`);
+    const some = h('div', { class: 'times-grid', id: 'f-times' }, h('div', { class: 'stack-s' }, rows, h('div', { class: 'row gap-s wrap' }, add, most)),
+      h('div', { class: 'stack-s' }, says, asleepNote, picture));
+    const radio = (label, on, pick) => h('label', null, h('input', { type: 'radio', name: 'f-when', checked: on, onchange: pick }), label);
+    const choice = h('div', { class: 'seg radios' },
+      radio('All day', !e.times.length, () => { keptTimes = e.times; e.times = []; paint(); changed(); }),
+      radio('Only at certain times', e.times.length > 0, () => { e.times = keptTimes.length ? keptTimes : [suggest([], matrixClock(), sleepTime(S.config))]; paint(0); changed(); }));
+
+    function row(t, k) {
+      const error = h('p', { class: 'tiny danger flush row gap-xs', id: `f-time-${k}-error`, role: 'alert', hidden: true });
+      const input = (key, label) => {
+        const el = h('input', { class: 'input time', type: 'time', id: `f-time-${k}-${key}`, value: t[key], required: true });
+        el.addEventListener('input', () => {
+          if (key === 'from' && el.value) { const to = moved(t, el.value).to; t.to = to; el.closest('.time-row').querySelector('[id$="-to"]').value = to; }
+          t[key] = el.value;
+          check(); summarise(); changed();
+        });
+        return h('label', { class: 'field-col', for: el.id }, label, el);
+      };
+      const from = input('from', 'From'), to = input('to', 'To');
+      function check() {
+        const problem = !t.from || !t.to ? 'Pick both times.' : mins(t.from) === mins(t.to) ? 'From and To are the same time. Change one of them, or choose All day.' : '';
+        error.hidden = !problem;
+        error.replaceChildren(...(problem ? [icon('info'), problem] : []));
+        for (const el of [from, to].map((l) => l.querySelector('input'))) {
+          const bad = !!problem && (!el.value || (el.id.endsWith('-to') && t.from && t.to));
+          el.classList.toggle('bad', bad);
+          if (bad) { el.setAttribute('aria-invalid', 'true'); el.setAttribute('aria-describedby', error.id); } else { el.removeAttribute('aria-invalid'); el.removeAttribute('aria-describedby'); }
+        }
+      }
+      check();
+      return h('fieldset', { class: 'time-set' }, h('legend', { class: 'tiny muted' }, `Time ${k + 1}`),
+        h('div', { class: 'time-row' }, from, to,
+          h('button', { type: 'button', class: 'btn ghost icon-btn', 'aria-label': `Remove time ${k + 1}${valid(t) ? `, ${t.from} to ${t.to}` : ''}`, onclick: () => {
+            e.times.splice(k, 1);
+            if (!e.times.length) keptTimes = [];
+            paint(e.times.length ? Math.max(0, k - 1) : -1, !e.times.length);
+            changed();
+          } }, icon('trash'))), error);
+    }
+    function summarise() {
+      const sleep = sleepTime(S.config), ok = e.times.filter(valid);
+      says.textContent = e.times.length === ok.length ? sentence(ok) : '';
+      asleepNote.hidden = !meetsSleep(ok, sleep);
+      asleepNote.replaceChildren(icon('moon'), sleep ? `The Matrix is asleep ${sleep.from}–${sleep.to}, so it won't play then.` : '');
+      const part = (a, b, cls) => h('span', { class: cls, style: `left:${(a / 1440) * 100}%;width:${((b - a) / 1440) * 100}%` });
+      const split = (list, cls) => list.flatMap(({ a, b }) => (b > 1440 ? [part(a, 1440, cls), part(0, b - 1440, cls)] : [part(a, b, cls)]));
+      day.replaceChildren(...split(joined(ok), 'day-on'), ...split(sleep ? joined([sleep]) : [], 'day-sleep'));
+      picture.querySelector('.day-key').hidden = !sleep;
+    }
+    /** ``focus``: the row whose From gets the focus (after Add or Remove); ``toChoice``: or the All day choice. */
+    function paint(focus, toChoice) {
+      const on = e.times.length > 0;
+      some.hidden = !on;
+      choice.querySelectorAll('input').forEach((r, k) => { r.checked = k === Number(on); });
+      rows.replaceChildren(...e.times.map(row));
+      add.disabled = e.times.length >= MOST_TIMES;
+      most.hidden = !add.disabled;
+      summarise();
+      if (toChoice) { const pick = choice.querySelector('input:checked'); pick.focus({ preventScroll: true }); reveal(document.getElementById('when-plays')); }
+      else if (focus >= 0) document.getElementById(`f-time-${focus}-from`)?.focus();
+    }
+    paint();
+    return h('fieldset', { class: 'when-plays', id: 'when-plays' }, h('legend', { class: 'strong' }, 'When it plays'), choice, some);
+  }
+  /** A time that can't be saved yet (an empty box, or From the same as To): its first box, to send the focus to. */
+  const badTime = () => { const k = e.times.findIndex((t) => !valid(t)); return k < 0 ? null : document.getElementById(`f-time-${k}-${e.times[k].from ? 'to' : 'from'}`); };
+  function timesOk() {
+    const el = badTime();
+    if (!el) return true;
+    toast("Fix the times first: each needs a From and a To, and they can't be the same.", 'error');
+    el.focus();
+    return false;
+  }
+
   const counter = (fields) => {
     const count = h('span', { class: 'tiny pill-warn changed-count' });
     count.recount = () => { const n = fields.filter((f) => differsFrom(f, e.settings)).length; count.textContent = `${n} changed`; count.hidden = !n; };
@@ -283,6 +380,10 @@ export function render(view, match) {
   let thumbTimer = 0;
   if (many) paintRow(); else paintStyles();
   paintFields(); changed();
+  if (S.toTimes) {   // opened from a playlist card's time tag: straight to When it plays
+    S.toTimes = false;
+    requestAnimationFrame(() => { const when = document.getElementById('when-plays'); when?.querySelector('input:checked')?.focus({ preventScroll: true }); reveal(when); setTimeout(() => reveal(when), 400); });   // again once the previews above have their size
+  }
 
   function changed() {
     edited.hidden = same(e, original);
@@ -295,8 +396,9 @@ export function render(view, match) {
     if (!same(e, original) && !confirm('Throw away your edits to this module?')) return;
     go('/playlist');
   }
-  function keepDraft() { S.draft[i] = clone(e); draftChanged(); go('/playlist'); }
+  function keepDraft() { if (!timesOk()) return; S.draft[i] = clone(e); draftChanged(); go('/playlist'); }
   async function apply() {
+    if (!timesOk()) return;
     S.draft[i] = clone(e);
     draftChanged();
     if (await applyDraft()) { go('/playlist'); return; }

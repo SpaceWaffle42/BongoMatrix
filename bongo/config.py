@@ -151,7 +151,9 @@ KEYS = {"name", "timezone", "location", "panel", "safe_area", "web", "playlist",
 OVERLAY_KEYS = {"module", "overlay", "every", "seconds", "offset", "settings", "enabled"}
 PANEL = {"rows": (8, 128), "cols": (8, 256), "gpio_slowdown": (0, 5), "brightness": (1, 100),
          "chain_length": (1, 8), "parallel": (1, 3)}
-ENTRY_KEYS = {"module", "style", "seconds", "settings", "enabled"}
+ENTRY_KEYS = {"module", "style", "seconds", "settings", "enabled", "times"}
+MOST_TIMES = 4   # times of day one playlist entry may have (Timing > When it plays)
+_CLOCK = re.compile(r"([01]\d|2[0-3]):[0-5]\d")
 
 
 def _number(value, low, high, whole=False) -> bool:
@@ -173,11 +175,26 @@ def _entry(where: str, raw, modules: dict[str, Module]) -> list[str]:
         return [f"{where}: enabled must be true or false"]
     if not isinstance(raw.get("settings", {}), dict) or not isinstance(raw.get("style") or "", str):
         return [f"{where}: settings must be an object and style a name"]
+    if "times" in raw and (problem := _times(raw["times"])):
+        return [f"{where}: {problem}"]
     try:
         modules[raw["module"]].settings_for(raw.get("style"), raw.get("settings", {}))
     except ValueError as error:
         return [f"{where}: {error}"]
     return []
+
+
+def _times(raw) -> str | None:
+    """What's wrong with an entry's times of day (None: nothing). Left out means all day, so a list is never empty."""
+    if not isinstance(raw, list) or not 1 <= len(raw) <= MOST_TIMES:
+        return f"times must be a list of 1 to {MOST_TIMES} times (leave it out to play all day)"
+    for t in raw:
+        if not isinstance(t, dict) or set(t) != {"from", "to"} or not all(
+                isinstance(t[k], str) and _CLOCK.fullmatch(t[k]) for k in ("from", "to")):
+            return 'each time needs "from" and "to" as HH:MM, like {"from": "08:00", "to": "10:00"}'
+        if t["from"] == t["to"]:
+            return f"a time can't start and end at {t['from']}: change one, or leave times out to play all day"
+    return None
 
 
 def _time(value) -> bool:

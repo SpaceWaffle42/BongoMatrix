@@ -570,3 +570,50 @@ body.drag-active { user-select: none; -webkit-user-select: none; }
   .link { margin: -6px -4px; }
   .handle { min-width: 40px; min-height: 40px; }
 }
+
+/* times of day (Timing > When it plays): the playlist card's tag, the editor's rows and the picture of the day */
+.when-tag { display: flex; align-items: center; gap: 8px; min-height: 44px; padding: 5px 10px; border: 1px solid var(--line-2); background: transparent;
+  color: var(--soft); font-size: 13px; font-weight: 500; line-height: 1.3; text-decoration: none; min-width: 0; }
+.when-tag:hover { color: var(--text); border-color: #3A3F47; }
+.when-tag .ico { flex: none; }
+.when-text { display: flex; flex-direction: column; min-width: 0; }
+.when-text small { font-size: 12px; font-weight: 400; }
+.when-tag.set { background: var(--amber-bg); border-color: #6B5226; color: var(--amber-hover); }
+.when-tag.not-now { background: #1E2228; border-color: #3A3F47; color: var(--text); }
+.pl-card.later .led-frame { opacity: .6; }   /* lighter than switched off, and the tag itself never dims */
+.pl-card.later .pl-text .strong { color: var(--soft); }
+.hatch, .share-seg.later, .swatch.later { background-image: repeating-linear-gradient(135deg, var(--page) 0 3px, transparent 3px 7px); }
+.share-seg.later { flex: 0 0 14px; }
+.gap-note { display: flex; gap: 10px; align-items: flex-start; margin: 0; padding: 10px 12px; background: var(--amber-bg); border: 1px solid #6B5226; color: var(--amber-hover); font-size: 13px; }
+.gap-note .ico { flex: none; margin-top: 1px; }
+.idle-link { display: inline-flex; align-items: center; min-height: 44px; align-self: flex-start; }
+.when-plays { border: 0; border-top: 1px solid var(--line); margin: 0; padding: 14px 0 0; min-width: 0; }
+.when-plays > legend { float: left; padding: 0; line-height: 52px; }
+.when-plays > .seg { float: right; }
+.seg.radios label { position: relative; flex: 1 1 auto; display: inline-flex; align-items: center; justify-content: center; min-height: 44px; padding: 6px 14px; color: var(--muted); font-size: 13px; cursor: pointer; text-align: center; }
+.seg.radios label:hover { color: var(--text); }
+.seg.radios input { position: absolute; inset: 0; width: 100%; height: 100%; margin: 0; opacity: 0; cursor: pointer; }
+.seg.radios label:has(input:checked) { background: var(--amber-bg); color: var(--amber-hover); box-shadow: inset 0 0 0 1px var(--amber); }
+.seg.radios label:has(input:focus-visible) { outline: 2px solid var(--amber); outline-offset: 2px; }
+.times-grid { clear: both; padding-top: 14px; display: grid; grid-template-columns: repeat(auto-fit, minmax(min(300px, 100%), 1fr)); gap: 16px 28px; align-items: start; }
+.time-set { border: 0; margin: 0; padding: 0; min-width: 0; display: flex; flex-direction: column; gap: 4px; }
+.time-set > legend { padding: 0; margin-bottom: 4px; }
+.time-row { display: grid; grid-template-columns: minmax(0, 136px) minmax(0, 136px) 44px; gap: 8px; align-items: end; }
+.input.time { font-family: var(--mono); color-scheme: dark; min-height: 44px; }
+#f-times .btn { min-height: 44px; }
+.time-row .btn.icon-btn { width: 44px; height: 44px; }
+.input.bad { border-color: var(--danger); }
+.sleep-note { display: flex; gap: 8px; align-items: center; color: var(--amber-hover); }
+.sleep-note .ico { flex: none; }
+.day-strip { position: relative; height: 28px; background: var(--page); border: 1px solid var(--line); }
+.day-strip span { position: absolute; top: 0; bottom: 0; }
+.day-on { background: var(--amber); }
+.day-sleep { background-image: repeating-linear-gradient(135deg, #6B7280 0 2px, transparent 2px 7px); }
+.day-strip .day-sleep { background-image: repeating-linear-gradient(135deg, #6B7280 0 2px, rgba(11, 12, 14, .55) 2px 7px); }
+.day-sleep.key { width: 22px; height: 10px; flex: none; background-color: #15181C; }
+.day-hours { display: flex; justify-content: space-between; color: var(--muted); font: 12px var(--mono); }
+@media (max-width: 719.98px) {
+  .when-plays > legend { float: none; line-height: 1.5; margin-bottom: 10px; }
+  .when-plays > .seg { float: none; display: flex; }
+  .time-row { grid-template-columns: minmax(0, 1fr) minmax(0, 1fr) 44px; }
+}

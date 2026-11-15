@@ -37,6 +37,16 @@ their own. Picking a style is just a playlist setting:
 {"module": "clock", "style": "lava_metro", "seconds": 30, "settings": {"palettes": ["ocean"]}}
 ```
 
+A playlist entry can also be given times of day (in the dashboard: its Timing card, **When it plays**):
+
+```json
+{"module": "weather", "seconds": 20, "times": [{"from": "08:00", "to": "10:00"}, {"from": "20:00", "to": "22:00"}]}
+```
+
+It then plays only inside them (up to 4; `"from"` after `"to"` runs past midnight; left out, it plays all
+day). The one on the panel finishes its seconds, the sleep hours still win, and if nothing is set to play
+the panel is blank until something is. The dashboard warns about such a gap before you apply it.
+
 See [docs/MODULES.md](docs/MODULES.md) to write a module and
 [docs/ROADMAP.md](docs/ROADMAP.md) for the remaster plan.
 

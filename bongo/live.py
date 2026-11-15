@@ -40,6 +40,7 @@ class Live:
         self.awake = False          # Wake pressed during the sleep hours: awake until they end (the player clears it)
         self.sleeping = False       # what the player is doing now (Sleep now, or the sleep hours)
         self.sleep_hours = False    # whether it's the sleep hours now (Settings > Sleep), awake or not
+        self.idle = False           # nothing is set to play now (every screen has times, and none is now)
         self.brightness: int | None = None  # dashboard override; None follows the schedule
         self.pushes: collections.deque = collections.deque(maxlen=5)
         self.overlay = None         # callable(frame) -> frame, e.g. the pairing PIN
@@ -146,5 +147,6 @@ class Live:
             "sleep_until": until.isoformat() if until else None,
             "asleep": bool(until) or self.sleeping,
             "sleep_hours": self.sleep_hours,
+            "idle": self.idle,
             "pushes": len(self.pushes),
         }
