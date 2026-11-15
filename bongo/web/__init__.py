@@ -743,11 +743,14 @@ def create_app(*, modules, live, pairing, config_path, logs: LogBuffer | None = 
             return jsonify(error="That import has expired; start it again."), 404
         if (job.manifest or {}).get("author") != data.get("author"):
             return jsonify(error="Tick that you trust its author first."), 422
+        updating = job.manifest["id"] in modules
         try:
             info = addons.install(job.token, modules)
         except addons.ImportProblem as error:
             return jsonify(error=str(error)), 409
         preview_style.cache_clear()
+        if updating:   # a new version: the panel reloads its screens, so a setting the new one no longer has is
+            live.apply_config()   # tidied away (config.tidy) now, rather than that screen being skipped until a restart
         logging.getLogger("bongo.addons").info("module %s installed by %s", job.manifest["id"],
                                                (pairing.check(request.cookies.get(COOKIE)) or {}).get("name"))
         return jsonify({**addon_list(), "installed": job.manifest["id"], "name": info["name"]})
