@@ -37,6 +37,9 @@ class Live:
         self.skip = threading.Event()
         self.paused = False
         self.sleep_until: dt.datetime | None = None
+        self.awake = False          # Wake pressed during the sleep hours: awake until they end (the player clears it)
+        self.sleeping = False       # what the player is doing now (Sleep now, or the sleep hours)
+        self.sleep_hours = False    # whether it's the sleep hours now (Settings > Sleep), awake or not
         self.brightness: int | None = None  # dashboard override; None follows the schedule
         self.pushes: collections.deque = collections.deque(maxlen=5)
         self.overlay = None         # callable(frame) -> frame, e.g. the pairing PIN
@@ -88,15 +91,22 @@ class Live:
             self.skip.clear()   # the skip that came with it has done its job: it mustn't end the push itself
             return self.pushes.popleft()   # (with nothing playing, as in a dark Sleep now, nobody else clears it)
 
-    def asleep(self, now: dt.datetime) -> bool:
+    def sleep_left(self, now: dt.datetime) -> float | None:
+        """Seconds of Sleep now left (None: not asleep that way)."""
         until = self.sleep_until
         if until is None:
-            return False
+            return None
         if until.tzinfo is None and now.tzinfo is not None:
             until = until.replace(tzinfo=now.tzinfo)
         if now.tzinfo is None and until.tzinfo is not None:
             now = now.replace(tzinfo=until.tzinfo)
-        if now >= until:
+        return (until - now).total_seconds()
+
+    def asleep(self, now: dt.datetime) -> bool:
+        left = self.sleep_left(now)
+        if left is None:
+            return False
+        if left <= 0:
             self.sleep_until = None
             return False
         return True
@@ -134,5 +144,7 @@ class Live:
             "elapsed": round(time.time() - started, 1) if entry else 0,
             "paused": self.paused, "brightness": self.brightness,
             "sleep_until": until.isoformat() if until else None,
+            "asleep": bool(until) or self.sleeping,
+            "sleep_hours": self.sleep_hours,
             "pushes": len(self.pushes),
         }

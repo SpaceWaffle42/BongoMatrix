@@ -66,7 +66,7 @@ export function render(view) {
   manBtn.onclick = () => control({ action: 'brightness', value: Number(slider.value) });
   const sleepBtn = h('button', { type: 'button', class: 'btn tile' });
   sleepBtn.onclick = () => {
-    if (live().sleep_until) control({ action: 'wake' }, 'Waking the panel');
+    if (live().sleep_until || live().asleep) control({ action: 'wake' }, 'Waking the panel');
     else control({ action: 'sleep', minutes: sleepMinutes() }, 'Panel is going to sleep');
   };
   const quick = h('section', { class: 'card stack', 'aria-label': 'Quick controls' },
@@ -104,7 +104,9 @@ export function render(view) {
   // -- live updates ------------------------------------------------------------------------
   function paint() {
     const L = live(), e = L.entry;
-    const asleep = !!L.sleep_until;
+    const asleep = !!L.sleep_until || !!L.asleep;   // Sleep now, or the sleep hours (Settings > Sleep)
+    const sleepTo = /^\d{1,2}:\d{2}$/.test(S.config?.sleep?.to || '') ? S.config.sleep.to : '';
+    const wakesAt = L.sleep_hours && sleepTo ? sleepTo : L.sleep_until ? clock(new Date(L.sleep_until)) : sleepTo;   // the later of the two
     title.textContent = asleep ? 'Sleeping' : e ? entryName(e) : 'Starting up…';
     styleTag.textContent = e ? humanize(styleOf(e)) : '';
     styleTag.hidden = !e || asleep;
@@ -114,7 +116,7 @@ export function render(view) {
     editBtn.hidden = i < 0;
     editBtn.textContent = `Edit ${entryName(e)}`;
     stateNote.textContent = [L.paused && 'Rotation paused: this module stays on until you resume.',
-      asleep && `Asleep until ${clock(new Date(L.sleep_until))}.`, L.pushes && `${L.pushes} message${L.pushes > 1 ? 's' : ''} queued.`].filter(Boolean).join(' ');
+      asleep && (wakesAt ? `Asleep until ${wakesAt}.` : 'Asleep.'), L.pushes && `${L.pushes} message${L.pushes > 1 ? 's' : ''} queued.`].filter(Boolean).join(' ');
     if (Date.now() - sliderTouched > 2500 && document.activeElement !== slider) {
       const auto = L.brightness == null;
       slider.value = auto ? (S.config?.panel?.brightness ?? 80) : L.brightness;
@@ -123,7 +125,7 @@ export function render(view) {
       autoBtn.setAttribute('aria-pressed', String(auto)); manBtn.setAttribute('aria-pressed', String(!auto));
     }
     sleepBtn.replaceChildren(h('span', { class: 'strong' }, asleep ? 'Wake now' : 'Sleep now'),
-      h('span', { class: 'muted small' }, asleep ? `Asleep until ${clock(new Date(L.sleep_until))}` : `Until ${/^\d{1,2}:\d{2}$/.test(S.config?.sleep?.to || '') ? S.config.sleep.to : clock(new Date(Date.now() + sleepMinutes() * 60000))}`));
+      h('span', { class: 'muted small' }, asleep ? (wakesAt ? `Asleep until ${wakesAt}` : 'Asleep') : `Until ${sleepTo || clock(new Date(Date.now() + sleepMinutes() * 60000))}`));
     const list = S.config?.playlist?.map(normalise).filter((x) => x.enabled && !moduleOff(x.module)) || [];
     const at = list.findIndex((x) => matches(x, e));
     const rest = at < 0 ? list : [...list.slice(at + 1), ...list.slice(0, at)];

@@ -218,7 +218,7 @@ def create_app(*, modules, live, pairing, config_path, logs: LogBuffer | None = 
             warnings.append("No picture yet")
         return jsonify(id=netname.mac_suffix(), name=config.get("name") or netname.DEFAULT_NAME, version=__version__,
                        playing=label(entry["module"], entry.get("style")) if entry.get("module") else None,
-                       paused=status.get("paused", False), sleeping=bool(status.get("sleep_until")),
+                       paused=status.get("paused", False), sleeping=bool(status.get("asleep")),
                        uptime=round(time.time() - started), warnings=warnings, picture=picture,
                        badge=logo.badge_colour(config["web"].get("badge"), netname.mac_suffix()),
                        panel={"width": cfg.safe_area(config).panel_width, "height": cfg.safe_area(config).panel_height})
@@ -326,9 +326,11 @@ def create_app(*, modules, live, pairing, config_path, logs: LogBuffer | None = 
             minutes = number(data.get("minutes", 8 * 60), 1, 7 * 24 * 60, "minutes")
             # a moment in time, not a clock reading: the Pi's own zone may not be the one in the config
             live.sleep_until = dt.datetime.now(dt.timezone.utc) + dt.timedelta(minutes=minutes)
+            live.awake = False
             live.skip.set()
         elif action == "wake":
             live.sleep_until = None
+            live.awake = True        # in the sleep hours too: awake until they end (tomorrow night sleeps as usual)
             live.skip.set()
         elif action == "brightness":
             value = data.get("value")

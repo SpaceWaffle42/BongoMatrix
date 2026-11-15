@@ -123,7 +123,7 @@ def play(playlist: list[Entry], modules: dict[str, Module], panel, ctx_factory=C
         if not schedule:
             return
         asleep = forced_sleep and schedule.sleep_brightness is not None
-        level = schedule.sleep_brightness if asleep else schedule.brightness(now)
+        level = schedule.sleep_brightness if asleep else schedule.day_brightness
         if level is None:
             return
         if hasattr(panel, "ramp_to"):  # day <-> night glides (bongo.fade)
@@ -160,25 +160,33 @@ def play(playlist: list[Entry], modules: dict[str, Module], panel, ctx_factory=C
             run(pushed, hold=False)   # a message shows for its own time even while paused
             continue
         forced = bool(live and live.asleep(now))
-        asleep = forced or bool(schedule and schedule.asleep(now))
+        hours = bool(schedule and schedule.asleep(now))    # the sleep hours (Settings > Sleep)
+        if live and live.awake and (forced or not hours):
+            live.awake = False                             # those hours are over (or Sleep now): asleep as usual next time
+        asleep = forced or (hours and not (live and live.awake))
         if was_asleep and not asleep and schedule:
             schedule.wake()  # tomorrow night picks a new Sleep screen
         was_asleep = asleep
-        brightness(now, forced)
+        if live:
+            live.sleeping, live.sleep_hours = asleep, hours
+        brightness(now, asleep)
         if forced and not (schedule and schedule.sleep_playlist):
             show_dark(0.05 if getattr(panel, "ramping", False) else 1)  # dark until sleep_until or a wake
             continue
-        if forced:
+        if asleep:
             current = schedule.sleep_playlist
         else:
-            current = [e for e in (schedule.playlist(now, day) if schedule else day) if e.enabled] or day
+            current = [e for e in day if e.enabled] or day
         key = tuple(map(id, current))  # the list is rebuilt each pass; its entries are not
         index = position.get(key, 0)
         position[key] = index + 1
         played += 1
         entry = current[index % len(current)]
         where = None if forced else next((i for i, e in enumerate(playlist) if e is entry), None)
-        limit = None if forced or not schedule else schedule.seconds_until_change(now)
+        if forced:                                         # Sleep now: until the moment it ends
+            limit = live.sleep_left(now)
+        else:
+            limit = schedule.seconds_until_change(now) if schedule else None
         ran = run(entry, current[(index + 1) % len(current)], where, None if asleep else overlays,
                   limit)   # where: slot in the saved playlist; limit: stop when sleep starts/ends
         if live and live.paused and live.pushes:
