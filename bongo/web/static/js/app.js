@@ -206,6 +206,17 @@ async function poll() {
   setTimeout(poll, 1000);
 }
 
+// A file dropped beside a drop zone mustn't make the browser open it and leave the dashboard (a drop zone
+// is anything marked data-drop: Settings > Media library).
+const draggingFiles = (ev) => [...(ev.dataTransfer?.types || [])].includes('Files');
+window.addEventListener('dragover', (ev) => {
+  if (!draggingFiles(ev)) return;
+  ev.preventDefault();
+  const over = ev.target.nodeType === 1 ? ev.target : ev.target.parentElement;   // (it can be the text inside)
+  if (!over?.closest('[data-drop]')) ev.dataTransfer.dropEffect = 'none';
+});
+window.addEventListener('drop', (ev) => { if (draggingFiles(ev)) ev.preventDefault(); });
+
 // -- boot ------------------------------------------------------------------------------------
 hooks.unauthorized = () => {
   if (path() === '/pair') return;

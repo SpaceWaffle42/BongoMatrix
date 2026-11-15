@@ -617,3 +617,13 @@ body.drag-active { user-select: none; -webkit-user-select: none; }
   .when-plays > .seg { float: none; display: flex; }
   .time-row { grid-template-columns: minmax(0, 1fr) minmax(0, 1fr) 44px; }
 }
+
+/* Settings > Media library: drag files in (or choose them) and they queue up */
+.drop-zone { display: flex; flex-direction: column; align-items: center; gap: 6px; padding: 18px 14px; border: 1px dashed #6B7280; background: var(--page); color: var(--soft); text-align: center; }
+.drop-zone > p:first-child { display: flex; flex-wrap: wrap; align-items: center; justify-content: center; gap: 10px; }
+.drop-zone .btn, .upload-queue + .btn { min-height: 44px; }
+.drop-zone.over { border-color: var(--amber); border-style: solid; background: var(--amber-bg); color: var(--amber-hover); }
+.upload-row { min-height: 66px; }
+.upload-row.failed { border-color: var(--danger-line); }
+.upload-row .btn.icon-btn { flex: none; width: 44px; height: 44px; }
+@media (pointer: coarse) { .drop-words { display: none; } }   /* nothing to drag on a phone: the button alone */

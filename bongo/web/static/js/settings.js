@@ -977,14 +977,85 @@ function devicesCard() {
 
 const mb = (n) => (n < 1048576 ? `${Math.max(1, Math.round(n / 1024))} KB` : `${(n / 1048576).toFixed(n < 10485760 ? 1 : 0)} MB`);
 
+// Media uploads: one queue for the whole page, so it carries on, and is still there with its reasons, if you leave
+// Settings and come back. ``card``: the Media library card on the page now (its queue list, library and status line).
+const UP = { queue: [], uploading: false, added: 0, failed: 0, card: null };
+/** Upload what's waiting, one file at a time; more can be added while it runs. */
+async function pumpUploads() {
+  if (UP.uploading) return;
+  UP.uploading = true;
+  for (let next = UP.queue.find((q) => q.state === 'waiting'); next; next = UP.queue.find((q) => q.state === 'waiting')) {
+    next.state = 'uploading';
+    const left = UP.queue.filter((q) => q.state === 'waiting').length;
+    UP.card?.says(`Uploading ${next.file.name}${left ? `, ${left} more waiting` : ''}`);
+    UP.card?.paint();
+    try { await uploadMedia(next.file); UP.added += 1; UP.queue.splice(UP.queue.indexOf(next), 1); }
+    catch (err) { next.state = 'failed'; next.why = err.message; UP.failed += 1; }
+    UP.card?.paint();
+    await UP.card?.load();   // each one shows in the library as it lands
+  }
+  UP.uploading = false;
+  const { added, failed } = UP;   // this run's, not ones left in the list from before
+  UP.added = UP.failed = 0;
+  if (added) toast(`Added ${added} file${added === 1 ? '' : 's'}`, 'success');
+  if (failed) toast(`${failed} file${failed === 1 ? " wasn't" : "s weren't"} added. Settings › Media library says why.`, 'error', 8000);
+  if (added || failed) UP.card?.says(`Finished: ${added} added${failed ? `, ${failed} not added` : ''}`);
+}
+window.addEventListener('beforeunload', (ev) => { if (UP.uploading) { ev.preventDefault(); ev.returnValue = ''; } });   // closing the tab would stop them
+
 function mediaCard() {
   const list = h('ul', { class: 'devices' }, h('li', { class: 'muted' }, 'Loading…'));   // the toasts say what changed
   const usage = h('p', { class: 'muted tiny flush' });
-  const file = h('input', { type: 'file', class: 'sr', id: 'media-upload', accept: 'image/*,video/*,.gif,.webp,.mkv' });
-  const add = h('button', { type: 'button', class: 'btn' }, icon('upload'), 'Upload…');
+  const file = h('input', { type: 'file', class: 'sr', id: 'media-upload', multiple: true, tabindex: '-1', 'aria-hidden': 'true', accept: 'image/*,video/*,.gif,.webp,.mkv' });
+  const add = h('button', { type: 'button', class: 'btn' }, icon('upload'), 'Choose files…');
+  // drag files in (or choose several): they wait in a queue and go to the Matrix one after another (UP, above)
+  let limit = 0;   // the biggest file the Matrix takes
+  const queueList = h('ul', { class: 'devices upload-queue', 'aria-label': 'Files to upload', hidden: true });
+  const queueSays = h('p', { class: 'sr', role: 'status' });
+  const clear = h('button', { type: 'button', class: 'btn ghost left', hidden: true, onclick: () => {
+    UP.queue = UP.queue.filter((q) => q.state !== 'failed'); paintQueue(); add.focus({ preventScroll: true });
+  } }, 'Clear the ones not added');
+  const drop = h('div', { class: 'drop-zone' },
+    h('p', { class: 'flush' }, h('span', { class: 'drop-words' }, 'Drag images and videos here, or'), add),
+    h('p', { class: 'muted tiny flush' }, 'As many as you like: they upload one after another.'));
+  const rows = new Map();   // one row per queued file, kept and updated in place, so nothing jumps under a finger
+  const paintQueue = () => {
+    queueList.hidden = !UP.queue.length;
+    for (const [q, li] of rows) if (!UP.queue.includes(q)) { li.remove(); rows.delete(q); }
+    for (const q of UP.queue) {
+      if (!rows.has(q)) {
+        rows.set(q, h('li', null,
+          h('div', { class: 'grow min0' }, h('div', { class: 'strong mono small name', title: q.file.name }, q.file.name), h('div', { class: 'upload-note' })),
+          h('button', { type: 'button', class: 'btn ghost icon-btn', onclick: () => { UP.queue.splice(UP.queue.indexOf(q), 1); paintQueue(); add.focus({ preventScroll: true }); } }, icon('x'))));
+        queueList.append(rows.get(q));
+      }
+      const li = rows.get(q), failed = q.state === 'failed';
+      li.className = `device upload-row ${q.state}`;
+      const note = li.querySelector('.upload-note');
+      note.className = `upload-note tiny ${failed ? 'danger' : 'muted'}`;
+      note.textContent = failed ? q.why   // the Matrix's own words: "Couldn't add x.txt: .txt isn't supported..."
+        : `${mb(q.file.size)} · ${q.state === 'uploading' ? 'Uploading…' : 'Waiting'}`;
+      const x = li.querySelector('button');
+      if (q.state === 'uploading' && document.activeElement === x) add.focus({ preventScroll: true });   // (it's about to go)
+      x.hidden = q.state === 'uploading';
+      x.setAttribute('aria-label', `${failed ? 'Dismiss' : "Don't upload"} ${q.file.name}`);
+    }
+    clear.hidden = UP.queue.filter((q) => q.state === 'failed').length < 2;
+  };
+  const enqueue = (list) => {
+    const picks = [...(list || [])];   // (a copy: the browser's own list empties when the input is cleared)
+    if (!picks.length) return;
+    for (const f of picks) {
+      const big = limit && f.size > limit;
+      if (big) UP.failed += 1;
+      UP.queue.push(big ? { file: f, state: 'failed', why: `Couldn't add ${f.name}: it's ${mb(f.size)}, and files can be up to ${mb(limit)}.` } : { file: f, state: 'waiting' });
+    }
+    paintQueue();
+    pumpUploads();
+  };
   // pick several (or all) and delete them together
   const picked = new Set();
-  let files = [], busy = false, uploading = false;
+  let files = [], busy = false;
   const all = h('input', { type: 'checkbox', class: 'check', id: 'media-all' });
   const delPicked = h('button', { type: 'button', class: 'btn ghost danger-btn' });
   const bar = h('div', { class: 'row between wrap gap-s media-bar' },
@@ -1007,7 +1078,7 @@ function mediaCard() {
       li.querySelector('.media-pick input').checked = on;
       li.querySelectorAll('.media-pick input, .media-del').forEach((el) => { el.disabled = busy; });
     });
-    add.disabled = busy || uploading;
+    add.disabled = busy;   // (more can be queued while others upload)
   };
   const row = (f) => {
     const box = h('input', { type: 'checkbox', class: 'check', 'aria-label': `Select ${f.file}`,
@@ -1025,8 +1096,13 @@ function mediaCard() {
     try {
       const lib = await get('/api/media');
       files = lib.folders.uploaded;
+      limit = lib.limits.file;
       usage.textContent = `${mb(lib.used)} of ${mb(lib.limits.library)} used · up to ${mb(lib.limits.file)} per file · ${lib.folders['built-in'].length} built-in files`;
+      // the rows are rebuilt: keep the focus on the same control of the same file (a file landing mustn't drop it)
+      const held = list.contains(document.activeElement) ? document.activeElement : null, heldRow = held?.closest('li[data-name]');
+      const at = heldRow ? [heldRow.dataset.name, [...heldRow.querySelectorAll('input, button, a')].indexOf(held)] : null;
       list.replaceChildren(...files.map(row));
+      if (at) (list.querySelector(`li[data-name="${CSS.escape(at[0])}"]`)?.querySelectorAll('input, button, a')[at[1]] || add).focus({ preventScroll: true });
       if (!files.length) list.replaceChildren(h('li', { class: 'muted' }, 'Nothing uploaded yet. Images, GIFs and short videos work.'));
     } catch (err) { files = []; list.replaceChildren(h('li', { class: 'danger' }, `Couldn't load media: ${err.message}`)); }
     sync();
@@ -1057,19 +1133,19 @@ function mediaCard() {
   delPicked.addEventListener('click', () => remove(files.filter((f) => picked.has(f.name))));
   all.addEventListener('change', () => { picked.clear(); if (all.checked) files.forEach((f) => picked.add(f.name)); sync(); });
   add.addEventListener('click', () => file.click());
-  file.addEventListener('change', async () => {
-    const pick = file.files?.[0];
-    if (!pick) return;
-    uploading = true; sync();
-    try { const { name } = await uploadMedia(pick); toast(`Added ${name.replace('uploaded/', '')}`, 'success'); }
-    catch (err) { toast(err.message, 'error', 8000); }
-    finally { uploading = false; file.value = ''; await load(); }
-  });
+  file.addEventListener('change', () => { enqueue(file.files); file.value = ''; });
   sync();
   load();
-  return h('section', { class: 'card stack', 'aria-label': 'Media library' },
-    h('div', { class: 'row between wrap' },
-      h('div', null, h('h2', { class: 'h2' }, 'Media library'), h('p', { class: 'muted small flush' }, 'Your uploaded images and videos. Preview one to see it as the panel draws it, or show it on the Matrix. Tick several to delete them together.')),
-      h('div', null, add, file)),
-    bar, list, usage);
+  UP.card = { paint: paintQueue, load: () => load(), says: (text) => { queueSays.textContent = text; } };   // this card shows the queue now
+  paintQueue();   // (uploads from before you left Settings are still here)
+  const card = h('section', { class: 'card stack', 'aria-label': 'Media library', 'data-drop': '' },
+    h('div', null, h('h2', { class: 'h2' }, 'Media library'), h('p', { class: 'muted small flush' }, 'Your uploaded images and videos. Preview one to see it as the panel draws it, or show it on the Matrix. Tick several to delete them together.')),
+    drop, file, queueList, clear, queueSays, bar, list, usage);
+  // files dragged anywhere onto the card are taken (dragged text or links are left alone)
+  const carriesFiles = (ev) => [...(ev.dataTransfer?.types || [])].includes('Files');
+  card.addEventListener('dragenter', (ev) => { if (!carriesFiles(ev)) return; ev.preventDefault(); drop.classList.add('over'); });
+  card.addEventListener('dragover', (ev) => { if (!carriesFiles(ev)) return; ev.preventDefault(); ev.dataTransfer.dropEffect = 'copy'; drop.classList.add('over'); });
+  card.addEventListener('dragleave', (ev) => { if (!card.contains(ev.relatedTarget)) drop.classList.remove('over'); });
+  card.addEventListener('drop', (ev) => { if (!carriesFiles(ev)) return; ev.preventDefault(); drop.classList.remove('over'); enqueue(ev.dataTransfer.files); });
+  return card;
 }
