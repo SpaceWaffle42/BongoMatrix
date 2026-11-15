@@ -46,7 +46,7 @@ class Clock(Base, Style):
             parts = parts[:-1]
         baseline = h - max(2, 9 - (32 - h) // 2)             # 9 rows clear below on a full panel, fewer in a short one
         if h >= 20 and baseline - cap(font) >= 9:            # room for the label above
-            items = self.line(self.small, self.title, 8, self.accent, now)
+            items = self.label_items(self.small, self.title, 8, self.accent, now)
         else:
             items, baseline = [], (h + cap(font)) // 2
         items += self.groups(font, parts, baseline, now)

@@ -84,6 +84,7 @@ MODULE = Module(
         icons=False,  # an 8x8 icon beside each upcoming date (Page); the countdowns default it on
     ),
     choices={"holidays": list(RULES), "week_start": ["monday", "sunday"]},
+    limits={"times_to_scroll": (1, 10)},
     basic=("events", "linked_calendars", "holidays", "week_start"),
     check=events.check,
     migrate=migrate,

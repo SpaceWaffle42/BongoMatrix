@@ -175,7 +175,8 @@ export function render(view) {
     const el = Math.min(e?.seconds || 0, (L.elapsed || 0) + (L.paused ? 0 : (performance.now() - S.polledAt) / 1000));
     bar.style.width = e?.seconds ? `${Math.min(100, (el / e.seconds) * 100)}%` : '0';
     elapsedEl.textContent = `${mmss(el)} / ${mmss(e?.seconds || 0)}`;
-    nextEl.textContent = L.paused ? 'Paused' : L.next ? `Next: ${entryName(L.next)} in ${mmss((e?.seconds || 0) - el)}` : '';
+    const left = (e?.seconds || 0) - el;   // (none left: the screen is finishing a line that scrolls)
+    nextEl.textContent = L.paused ? 'Paused' : L.next ? `Next: ${entryName(L.next)} ${left >= 1 ? `in ${mmss(left)}` : 'in a moment'}` : '';
   }
   const timer = setInterval(tick, 250);
   bus.addEventListener('state', paint);

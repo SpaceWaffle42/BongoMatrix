@@ -4,7 +4,7 @@ here runs before the module's own code is loaded, and the module never sees the 
 It answers, over stdin/stdout (``wire.py``):
     {"op": "describe"}                                  -> the module's name, settings and styles
     {"op": "create", "style", "settings", "ctx"}        -> {"h": handle}
-    {"op": "render", "h", "now"}                        -> {"finished": bool} + the frame's RGB bytes
+    {"op": "render", "h", "now", "hand_over_at"}                -> {"finished": bool, "busy": bool} + the frame's RGB bytes
     {"op": "close", "h"}  /  {"op": "bye"}
 """
 from __future__ import annotations
@@ -123,10 +123,16 @@ def serve(module, stdin, out) -> None:
                 now = dt.datetime.fromisoformat(msg["now"])
                 if zones[msg["h"]] and now.tzinfo:
                     now = now.astimezone(zones[msg["h"]])
+                ends = msg.get("hand_over_at")
+                style.hand_over_at = float(ends) if isinstance(ends, (int, float)) and not isinstance(ends, bool) else None
                 img = style.render(now)
                 if img.size != (style.ctx.width, style.ctx.height):
                     raise ValueError(f"render gave a {img.size[0]}x{img.size[1]} frame, not {style.ctx.width}x{style.ctx.height}")
-                stdout.send({"ok": True, "finished": bool(style.finished)}, img.convert("RGB").tobytes())
+                try:
+                    busy = bool(style.busy)
+                except Exception:           # a broken ``busy`` just means the screen can hand over
+                    busy = False
+                stdout.send({"ok": True, "finished": bool(style.finished), "busy": busy}, img.convert("RGB").tobytes())
             elif op == "act":
                 if msg.get("name") in module.actions:
                     screens[msg["h"]].act(msg["name"])

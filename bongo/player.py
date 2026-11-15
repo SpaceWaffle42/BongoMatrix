@@ -37,21 +37,47 @@ class Entry:
         return modules[self.module].create(self.style, self.settings, ctx)
 
 
+OVERRUN = 120.0   # s a busy screen (a line still scrolling) may stay past its time: a backstop, never reached normally
+
+
+def busy(style) -> bool:
+    """Whether a style that has had its time is still in the middle of something (``Style.busy``)."""
+    try:
+        return bool(getattr(style, "busy", False))
+    except Exception:   # a broken ``busy`` mustn't look like the screen failing: it has simply had its time
+        log.exception("%s: busy failed", type(style).__name__)
+        return False
+
+
 def play_entry(style: Style, seconds: float, panel, stop: threading.Event | None = None,
-               clock=time.monotonic, place=None, live=None, overlays=None, hold: bool = True) -> int:
+               clock=time.monotonic, place=None, live=None, overlays=None, hold: bool = True,
+               overrun: float = OVERRUN) -> int:
     """Render one entry until its time is up; returns frames shown.
     ``place`` puts the module's safe-area frame onto the full panel (see SafeArea.place).
     ``live`` (bongo.live.Live) can skip or hold the entry and sees every frame. ``hold`` False: Pause
-    doesn't keep this one up (a pushed message shows for its time, then gives the paused screen back)."""
+    doesn't keep this one up (a pushed message shows for its time, then gives the paused screen back).
+    ``overrun``: how long past its time a ``busy`` style may stay (0: the time is a hard stop)."""
     stop = stop or threading.Event()
     frame_time = 1 / style.fps
     end = clock() + seconds
+    try:
+        style.hand_over_at = style.ctx.now().timestamp() + seconds   # (Style.hand_over_at: nothing new started after this holds it up)
+    except Exception:
+        pass
     shown = 0
     last, last_at = None, -1e9   # the style's latest frame: while a screen covers it, it keeps its own pace
     while not stop.is_set():
         held = bool(hold and live and live.paused)
+        if held and getattr(style, "hand_over_at", None) is not None:
+            style.hand_over_at = None   # paused: no end in sight, so what takes turns carries on taking them
+        elif not held and hold and live and getattr(style, "hand_over_at", 0) is None:
+            try:                        # unpaused: the end is back (now, if its time has already gone)
+                style.hand_over_at = style.ctx.now().timestamp() + max(0.0, end - clock())
+            except Exception:
+                pass
         if clock() >= end and not held:
-            break
+            if not (clock() < end + min(overrun, getattr(style, "most_overrun", overrun)) and busy(style)):
+                break   # (busy: a line is still scrolling, so it gets to finish)
         if live and live.skip.is_set():
             live.skip.clear()
             break
@@ -125,7 +151,8 @@ def play(playlist: list[Entry], modules: dict[str, Module], panel, ctx_factory=C
         if live:
             live.playing(shown, upcoming, index)
         try:
-            frames = play_entry(style, seconds, panel, stop, place=place, live=live, overlays=extras, hold=hold)
+            frames = play_entry(style, seconds, panel, stop, place=place, live=live, overlays=extras, hold=hold,
+                                overrun=OVERRUN if limit is None else max(0.0, min(OVERRUN, limit - cap)))   # never into sleep
         except Exception:  # one broken module must not stop the panel
             log.exception("%s/%s failed while playing; moving on", entry.module, entry.style)
             return False

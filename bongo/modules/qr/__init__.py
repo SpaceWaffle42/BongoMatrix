@@ -11,6 +11,7 @@ from __future__ import annotations
 from PIL import Image, ImageDraw
 
 from bongo.module import Module, Style
+from bongo.scroll import HOLD, Scrolls
 
 from . import codes
 
@@ -47,7 +48,7 @@ def check(settings: dict) -> None:
             raise ValueError(problem)
 
 
-class Base(Style):
+class Base(Scrolls, Style):
     fps = 20
     SPEED = 20        # px a second the line along the bottom scrolls: one pixel a frame, no judder
 
@@ -55,12 +56,14 @@ class Base(Style):
         self.small = self.ctx.fonts("tom-thumb")
         self.f57 = self.ctx.fonts("5x7")
         self.started = None
+        self.reads = 0.0                                     # s the line along the bottom takes to go round once (0: it fits)
         hexed = lambda k: tuple(int(self.settings[k].lstrip("#")[i:i + 2], 16) for i in (0, 2, 4))
         self.WHITE, self.AMBER, self.BG = hexed("label_colour"), hexed("accent"), hexed("background")
 
     def seconds(self, now):
         if self.started is None:
             self.started = now
+        self.at = now.timestamp()
         return (now - self.started).total_seconds()
 
     def ticker(self, img, x0, x1, baseline, text, t, colour=None, gap=16):
@@ -71,15 +74,28 @@ class Base(Style):
         if w <= x1 - x0:
             self.small.draw(strip, (x1 - x0 - w) // 2, 6, text, colour)
         else:
+            self.reads = 1 + (w + gap) / self.SPEED          # held a second, then round once: the screen waits for it
+            self._note(("ticker", baseline, text), self.at - t, self.reads, self.at)
             ms = max(0, round(t * 1000) - 1000)              # whole milliseconds: an even pixel a frame
             off = -(ms * self.SPEED // 1000 % (w + gap))
             for k in (0, 1):
                 self.small.draw(strip, off + k * (w + gap), 6, text, colour)
         img.paste(strip, (x0, baseline - 6), strip.convert("L").point(lambda v: 255 if v else 0))   # just the letters
 
-    def words(self, img, x0, x1, top, label, colour=None):
+    def stacked(self, label, room):
+        """Whether ``label`` goes word above word (up to three short words), rather than along one scrolling line."""
+        words = label.upper().split()
+        return len(words) <= 3 and all(self.small.width(word) <= room for word in words)
+
+    def label_rows(self, label, room):
+        return len(label.split()) if self.stacked(label, room) else 1
+
+    def words(self, img, x0, x1, top, label, now, colour=None):
         colour = colour or self.WHITE
-        for i, word in enumerate(label.upper().split()[:3]):
+        if not self.stacked(label, x1 - x0):                 # too many words, or one too wide: along one line instead
+            self.line(img, self.small, x0, top, x1 - x0, label.upper(), colour, now)
+            return
+        for i, word in enumerate(label.upper().split()):
             self.small.draw(img, x0 + (x1 - x0 - self.small.width(word)) // 2, top + i * 6, word, colour)
 
     def coded(self, now, payload, label, scroll, t=None):
@@ -95,8 +111,8 @@ class Base(Style):
             x = (w - b.width) // 2
             img.paste(b, (x, 0))
             mid = b.height // 2
-            lines = len(label.split()[:3])
-            self.words(img, 0, x, mid - lines * 3 + 5, label)       # centred on the code
+            lines = self.label_rows(label, x)
+            self.words(img, 0, x, mid - lines * 3 + 5, label, now)  # centred on the code
             ax = x + b.width + 4 + (1 if int(t * 2) % 2 else 0)        # an arrow nudging at the code
             for k in range(4):
                 d.line([ax + k, mid - k, ax + k, mid + k], fill=self.AMBER)
@@ -108,8 +124,8 @@ class Base(Style):
         img.paste(b, (0, (h - b.height) // 2))
         x0 = b.width + 2
         if w - x0 >= 16:
-            lines = len(label.split()[:3])
-            self.words(img, x0, w, (h - 8) // 2 - lines * 3 + 5, label)
+            lines = self.label_rows(label, w - x0)
+            self.words(img, x0, w, (h - 8) // 2 - lines * 3 + 5, label, now)
             d.line([x0, h - 8, w - 1, h - 8], fill=RULE)
             self.ticker(img, x0, w, h - 1, scroll, t)
         return img
@@ -187,9 +203,10 @@ class TwoCodes(Base):
         img.paste(b, (xb, top))
         for x, code, text in ((xa, a, s["label"]), (xb, b, s["second_label"])) if labels else ():   # capitals only: 5 rows, clear of the codes
             word = text.upper()
-            while word and self.small.width(word) > code.width:
-                word = word[:-1]
-            self.small.draw(img, x + (code.width - self.small.width(word) + 2) // 2, h, word, self.AMBER)   # rows 27-31
+            if self.small.width(word) <= code.width:
+                self.small.draw(img, x + (code.width - self.small.width(word) + 2) // 2, h, word, self.AMBER)   # rows 27-31
+            else:                                            # too wide for its code: it scrolls under it
+                self.line(img, self.small, x, h, code.width, word, self.AMBER, now)
         return img
 
 
@@ -225,23 +242,30 @@ class CodeAndMessage(Standard):
     def render(self, now):
         t = self.seconds(now)
         swap = max(1, self.settings["swap"])
-        if int(t // swap) % 2 == 0:                          # the line along the bottom starts again each time
-            s = self.settings
-            return self.coded(now, codes.link(s["url"]), s["label"], s["scroll"] or codes.shown(s["url"]), t % swap)
         w, h = self.ctx.width, self.ctx.height
-        img = Image.new("RGB", (w, h), self.BG)
         big = self.ctx.fonts("6x13B")
         spaced = lambda f, text: f.width(text) + (len(text) - 1 if f is big else 0)   # big letters get a gap
-        font = big if all(spaced(big, word.upper()) <= w - 2 for word in self.settings["message"].split()) else self.f57
+        message = self.settings["message"].upper()
+        font = big if all(spaced(big, word) <= w - 2 for word in message.split()) else self.f57
         lines, line = [], ""
-        for word in self.settings["message"].upper().split():
+        for word in message.split():
             if line and spaced(font, line + " " + word) > w - 2:
                 lines.append(line)
                 line = word
             else:
                 line = (line + " " + word).strip()
         lines.append(line)
-        lines = lines[:2] if font is big else lines[:3]
+        too_long = len(lines) > (2 if font is big else 3)    # more than fits: it goes along one line instead
+        says = max(swap, HOLD + (self.f57.width(message) + 16) / 14) if too_long else swap
+        code = max(swap, self.reads)                         # the code stays until the line under it has gone round
+        if t % (code + says) < code:                         # the line along the bottom starts again each time
+            s = self.settings
+            return self.coded(now, codes.link(s["url"]), s["label"], s["scroll"] or codes.shown(s["url"]), t % (code + says))
+        img = Image.new("RGB", (w, h), self.BG)
+        if too_long:
+            self.line(img, self.f57, 1, (h + self.f57.cap) // 2, w - 2, message, self.WHITE, now,
+                      key=("message", int(t // (code + says))))   # from its first letter each time it comes round
+            return img
         pitch = font.cap + 4
         top = (h - (pitch * len(lines) - 4)) // 2 + font.cap
         for i, text in enumerate(lines):

@@ -3,6 +3,7 @@ from __future__ import annotations
 
 from bongo.fonts import align_x
 from bongo.module import Style
+from bongo.scroll import HOLD, Scrolls
 
 from . import data
 from .look import icon, icon_size, label, sky, temp_text
@@ -13,7 +14,7 @@ def rgb(hex_colour):
     return tuple(int(h[i:i + 2], 16) for i in (0, 2, 4))
 
 
-class _Weather(Style):
+class _Weather(Scrolls, Style):
     fps = 20
 
     def setup(self):
@@ -77,12 +78,9 @@ class _Weather(Style):
         return self.tiny
 
     def marquee(self, img, font, text, baseline, now, colour, speed=None):
+        """Across the whole width: starts at its first letter, holds, then goes round once before the screen moves on."""
         speed = self.settings["scroll_speed"] if speed is None else speed
-        period = font.width(text) + 24
-        x = self.ctx.width - int(now.timestamp() * speed) % period
-        while x < self.ctx.width:
-            font.draw(img, x, baseline, text, colour)
-            x += period
+        self.line(img, font, 1, baseline, self.ctx.width - 2, text, colour, now, speed=max(1, speed), gap=24)
 
 
 class Ticker(_Weather):
@@ -106,7 +104,7 @@ class Ticker(_Weather):
         font.draw(img, x, top, temp_text(r.temp), self.TEXT)
         place = min(18, room)
         if place - self.tiny.cap >= top + 1:                # under the temperature, a free row between
-            self.tiny.draw(img, x, place, self.settings["location"].upper(), self.DIM)
+            self.line(img, self.tiny, x, place, self.ctx.width - x - 1, self.settings["location"].upper(), self.DIM, now)
         unit = "km/h" if self.settings["wind_unit"] == "kmh" else self.settings["wind_unit"]
         ticker = (f"{label(r.code, r.is_day)}  ·  Feels {temp_text(r.feels)}  ·  "
                   f"H {temp_text(r.high)} L {temp_text(r.low)}  ·  Wind {round(r.wind)} {unit}  ·  "
@@ -169,7 +167,8 @@ class Overview(_Weather):
                 img.putpixel((left - 3, y), (70, 80, 96))
             lane = img.crop((left, top, w, baseline + tiny.descent + 1))  # scroll only in the space to the right
             period, speed = tiny.width(place) + 16, max(1, self.settings["scroll_speed"])
-            x = -(int(now.timestamp() * speed) % period)  # seamless: a repeat follows 16 px behind
+            t = self.scrolled(("place", baseline, place), now, HOLD + period / speed)
+            x = -(int(max(0.0, t - HOLD) * speed) % period)  # held at its start, then seamless: a repeat follows 16 px behind
             while x < lane.width:
                 tiny.draw(lane, x, tiny.cap, place, self.DIM)
                 x += period
@@ -180,12 +179,17 @@ class Overview(_Weather):
             tiny.draw(img, 1, baseline, high_low, self.DIM)
             if town:
                 tiny.draw(img, align_x("right", tiny.width(town), w, 1), baseline, town, self.DIM)
-        elif int(now.timestamp() // 4) % 2 == 0:
-            tiny.draw(img, 1, baseline, high_low, self.DIM)
-        elif tiny.width(town) <= w - 2:
-            tiny.draw(img, align_x("right", tiny.width(town), w, 1), baseline, town, self.DIM)
-        else:
-            self.marquee(img, tiny, town, baseline, now, self.DIM)
+        else:   # taking turns: high/low for 4 s, then the town for 4 s or as long as it takes to scroll through
+            speed = max(1, self.settings["scroll_speed"])
+            reads = 4.0 if tiny.width(town) <= w - 2 else HOLD + (tiny.width(town) + 24) / speed
+            t = self.scrolled(("turns", town), now, 4.0 + reads)
+            turn, t = divmod(t, 4.0 + reads)
+            if t < 4.0:
+                tiny.draw(img, 1, baseline, high_low, self.DIM)
+            elif tiny.width(town) <= w - 2:
+                tiny.draw(img, align_x("right", tiny.width(town), w, 1), baseline, town, self.DIM)
+            else:
+                self.line(img, tiny, 1, baseline, w - 2, town, self.DIM, now, speed=speed, gap=24, key=("town", turn))
 
 
 class Forecast(_Weather):

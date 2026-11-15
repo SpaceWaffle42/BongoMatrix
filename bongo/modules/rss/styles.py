@@ -7,6 +7,7 @@ from PIL import Image, ImageDraw
 
 from bongo.fonts import middle
 from bongo.module import Style
+from bongo.scroll import HOLD, Scrolls
 
 from . import data
 
@@ -18,12 +19,6 @@ def rgb(value: str) -> tuple[int, int, int]:
 
 def mix(a, b, t: float) -> tuple[int, ...]:
     return tuple(round(x + (y - x) * t) for x, y in zip(a, b))
-
-
-def fit(font, text: str, width: int) -> str:
-    while text and font.width(text) > width:
-        text = text[:-1]
-    return text
 
 
 def wrap(font, text, width):
@@ -63,7 +58,7 @@ def age(now, published) -> str:
     return f"{minutes}M" if minutes < 60 else f"{minutes // 60}H" if minutes < 1440 else f"{minutes // 1440}D"
 
 
-class _News(Style):
+class _News(Scrolls, Style):
     fps = 20
 
     def setup(self):
@@ -97,16 +92,10 @@ class _News(Style):
     def summary(self, item) -> str:
         return item.summary if self.settings["show_summary"] else ""
 
-    @staticmethod
-    def pick(items, now, seconds):
-        """(item, seconds into it): stories take turns, each for ``seconds(item)``."""
-        spans = [seconds(i) for i in items]
-        t = now.timestamp() % sum(spans)
-        for item, span in zip(items, spans):
-            if t < span:
-                return item, t
-            t -= span
-        return items[-1], 0.0
+    def pick(self, items, now, seconds):
+        """(item, seconds into it): stories take turns, each for ``seconds(item)``. A screen starts on the
+        story after the one the last news screen was showing, and stays until the one it's on is read."""
+        return self.turns(("news", tuple(self.settings["feeds"])), items, now, seconds, name=lambda i: i.title)
 
     def lines(self, font, text, width):
         """Wrapped lines, cached: spans are worked out every frame."""
@@ -150,7 +139,7 @@ class Ticker(_News):
 
     GAP = "  -  "
 
-    def line(self, font, item):
+    def parts(self, item):
         tail = first_sentence(self.summary(item))
         return item.title, (self.GAP + tail) if tail else ""
 
@@ -160,19 +149,20 @@ class Ticker(_News):
         font = next((f for f in self.sizes if f.cap + f.descent <= h - top), self.tiny)
         speed = max(1, self.settings["scroll_speed"])
 
-        def seconds(i):  # from entering on the right to gone on the left
-            head, tail = self.line(font, i)
-            return (w + font.width(head) + font.width(tail) + 8) / speed
+        def seconds(i):  # from its first letter, held, until its last has gone off on the left
+            head, tail = self.parts(i)
+            return HOLD + (font.width(head) + font.width(tail) + 2) / speed
         item, t = self.pick(items, now, seconds)
-        head, tail = self.line(font, item)
-        x, base = w - round(t * speed), top + middle(font, h - top)
+        head, tail = self.parts(item)
+        x, base = 1 - round(max(0.0, t - HOLD) * speed), top + middle(font, h - top)
         font.draw(img, x, base, head, self.text)
         if tail:
             font.draw(img, x + font.width(head), base, tail, self.body)
-        tag = fit(self.tiny, (item.source or "NEWS").upper(), w - 3)
+        tag = (item.source or "NEWS").upper()
+        room = min(self.tiny.width(tag), w - 4)                  # a source too long for the pill scrolls inside it
         draw = ImageDraw.Draw(img)
-        draw.rectangle([0, 0, self.tiny.width(tag) + 2, self.tiny.cap + 1], fill=mix(self.bg_top, self.accent, 0.22))
-        self.tiny.draw(img, 2, self.tiny.cap, tag, self.accent)
+        draw.rectangle([0, 0, room + 2, self.tiny.cap + 1], fill=mix(self.bg_top, self.accent, 0.22))
+        self.line(img, self.tiny, 2, self.tiny.cap, room, tag, self.accent, now, key=("tag", item.title))
         return img
 
 
@@ -215,13 +205,22 @@ class Headline(_News):
                 return None
         return lines if len(lines) <= limit and all(font.width(l) <= width for l in lines) else None
 
+    def card_seconds(self, item):
+        """A story's turn: ``rotate_seconds``, or longer when its headline has to scroll across on one line."""
+        w, h = self.ctx.width, self.ctx.height
+        top = self.tiny.cap + 3
+        if self.layout(item.title, w - 2, h - top):
+            return self.settings["rotate_seconds"]
+        font = next((f for f in self.sizes[3:] if f.cap + f.descent <= h - top), self.tiny)
+        return max(self.settings["rotate_seconds"], HOLD + (font.width(item.title) + 16) / max(1, self.settings["scroll_speed"]))
+
     def draw(self, items, now):
         img, w, h = self.backdrop.copy(), self.ctx.width, self.ctx.height
-        item = items[int(now.timestamp() // max(1, self.settings["rotate_seconds"])) % len(items)]
+        item, t = self.pick(items, now, self.card_seconds)
         stamp = age(now, item.published)
         edge = self.tiny.width(stamp)
-        self.tiny.draw(img, 1, self.tiny.cap, fit(self.tiny, (item.source or "NEWS").upper(), w - edge - 5),
-                       mix(self.bg_top, self.accent, 0.75))
+        self.line(img, self.tiny, 1, self.tiny.cap, w - edge - 5, (item.source or "NEWS").upper(),
+                  mix(self.bg_top, self.accent, 0.75), now, key=("source", item.title))
         self.tiny.draw(img, w - edge - 1, self.tiny.cap, stamp, mix(self.bg_top, self.text, 0.45))
         top = self.tiny.cap + 3
         fitted = self.layout(item.title, w - 2, h - top)
@@ -232,9 +231,10 @@ class Headline(_News):
                 font.draw(img, 1, base + n * (font.cap + font.descent + gap), line, self.text)
         else:  # too little room to wrap: scroll it on one line instead
             font = next((f for f in self.sizes[3:] if f.cap + f.descent <= h - top), self.tiny)
-            period = font.width(item.title) + w
-            x = w - int(now.timestamp() * self.settings["scroll_speed"]) % period
-            font.draw(img, x, top + middle(font, h - top), item.title, self.text)
+            period = font.width(item.title) + 16                       # from its first letter, held, then round
+            x = 1 - int(max(0.0, t - HOLD) * self.settings["scroll_speed"]) % period
+            for k in (0, 1):
+                font.draw(img, x + k * period, top + middle(font, h - top), item.title, self.text)
         return img
 
 
@@ -284,7 +284,7 @@ class Picture(_News):
         x0 = side + 2
         room = w - x0 - 1
         stamp = age(now, item.published) or (item.source or "NEWS").upper()
-        self.tiny.draw(img, x0, self.tiny.cap, fit(self.tiny, stamp, room), self.accent)
+        self.line(img, self.tiny, x0, self.tiny.cap, room, stamp, self.accent, now, key=("stamp", item.title))
         top = h - space
         font, rows = self.column(item, room)
         pitch = font.cap + font.descent + 1

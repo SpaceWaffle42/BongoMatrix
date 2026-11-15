@@ -35,8 +35,10 @@ class Days(Base, Style):
             text, unit = f"{left // 3600:02d}:{left % 3600 // 60:02d}", "LEFT"
         w, h = self.ctx.width, self.ctx.height
         caption = f"{unit} TO {label}"
-        if not self.fits(caption):  # too long: alternate unit / label every 3s
-            caption = unit if int(now.timestamp() // 3) % 2 == 0 else f"TO {label}"
+        if not self.fits(caption) and self.fits(f"TO {label}"):  # too long: alternate unit / label every 3s
+            half = self.scrolled(("caption", label), now, 6.0)         # both halves, from the first, before it moves on
+            caption = unit if int(half // 3) % 2 == 0 else f"TO {label}"
+        # (a label too long even on its own: the whole caption scrolls, so it can be read through)
         font = self.small if self.small.width(caption) <= w - 2 or not self.fits(caption) else self.tiny
         big, at, under = self.big, h - 13, h - 4
         tw = big.width(text)
@@ -57,7 +59,7 @@ class Days(Base, Style):
             x += 5
             icon_at = (x - 10 + (inked(big, text)[0] if h < 30 else 0), at - big.cap // 2 - 4)
         items = [(big, x, at, text, self.ink)]
-        items += self.line(font, caption, under, self.accent, now)
+        items += self.label_items(font, caption, under, self.accent, now)
         return self.paint(items, progress, icon_at)
 
     def clock(self, now, big, text, at, font, caption, under, progress):
@@ -68,7 +70,7 @@ class Days(Base, Style):
         w1, w2 = r1 - l1 + 1, r2 - l2 + 1
         x = (self.ctx.width - (w1 + 6 + w2)) // 2
         items = [(big, x - l1, at, hours, self.ink), (big, x + w1 + 6 - l2, at, minutes, self.ink)]
-        img = self.paint(items + self.line(font, caption, under, self.accent, now), progress)
+        img = self.paint(items + self.label_items(font, caption, under, self.accent, now), progress)
         tall = bottom - top + 1
         for y in (at + top + tall // 4, at + bottom - tall // 4 - 1):
             img.paste(self.ink, (x + w1 + 2, y, x + w1 + 4, y + 2))

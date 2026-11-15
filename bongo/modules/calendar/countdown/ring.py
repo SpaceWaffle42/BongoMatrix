@@ -52,7 +52,7 @@ class Ring(Base, Style):
         if has_unit:
             items.append((self.small, tx + (avail - self.small.width(unit)) // 2, top + block, unit, self.accent))
         if label_h:
-            items += self.line(self.small, self.title, h - 3, self.accent, now)
+            items += self.label_items(self.small, self.title, h - 3, self.accent, now)
         img = self.paint(items, progress)
         track, arc = self.ring(d, 3 if d >= 18 else 2, frac)
         img.paste(mix(self.dark, self.accent, .22), (2, 1), track)

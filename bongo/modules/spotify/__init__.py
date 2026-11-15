@@ -13,6 +13,7 @@ import numpy as np
 from PIL import Image, ImageDraw, ImageFilter
 
 from bongo.module import Module, Style
+from bongo.scroll import Scrolls
 
 from . import account
 from .help import HELP
@@ -33,7 +34,7 @@ def mmss(seconds: float) -> str:
     return f"{int(seconds) // 60}:{int(seconds) % 60:02d}"
 
 
-class Base(Style):
+class Base(Scrolls, Style):
     fps = 20
     SPEED = 14                                               # px a second long titles scroll
 
@@ -44,7 +45,8 @@ class Base(Style):
         self.waiting = False                                 # ... and Spotify hasn't answered yet: dark meanwhile
         self.started = None
         self.last_url = None
-        self.changed = 0.0                                   # when the song changed (titles restart, covers slide)
+        self.changed = 0.0                                   # when the cover changed (the record's spin starts there)
+        self.song, self.retitled = None, 0.0                 # the song on, and when it came on (its lines start again)
         if self.settings["skip_when_not_playing"] and account.connected():
             track, _ = account.now_playing()                 # also starts a check if the last one is old
             if not account.known():
@@ -61,6 +63,8 @@ class Base(Style):
         track, art = account.now_playing()
         if track and track.art_url != self.last_url:
             self.last_url, self.changed = track.art_url, t
+        if track and (track.title, track.artist) != self.song:   # a new song (or the first one seen): from the start
+            self.song, self.retitled = (track.title, track.artist), t
         quiet = track is None or not track.playing
         self.since = (self.since or t) if quiet else None
         wait = 3 if track is None else self.settings["hand_over_after"]
@@ -91,8 +95,9 @@ class Base(Style):
         layer = Image.new("RGB", (x1 - x0, img.height))
         if w <= x1 - x0:
             font.draw(layer, 0, baseline, text, colour)
-        else:
-            off = -int((max(0.0, t - self.changed - 1.2) * self.SPEED) % (w + 12))
+        else:   # held a moment, then round once: the screen waits for it (a new song starts it again)
+            self._note(("ticker", baseline, text), self.retitled, 1.2 + (w + 12) / self.SPEED, t)
+            off = -int((max(0.0, t - self.retitled - 1.2) * self.SPEED) % (w + 12))
             for k in (0, 1):
                 font.draw(layer, off + k * (w + 12), baseline, text, colour)
         mask = Image.fromarray((np.asarray(layer).max(2) > 0).astype(np.uint8) * 255)

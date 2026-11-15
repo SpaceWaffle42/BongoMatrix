@@ -13,7 +13,8 @@ from .tearoff import Tearoff
 
 # settings only the countdown looks have (the rest are the Calendar's)
 DEFAULTS = dict(done_message="It's here!", idle_text="", text_colour="#FFF4DE",
-                background_top="#2A0A06", background_bottom="#0E0201", progress_bar=True, icons=True)
+                background_top="#2A0A06", background_bottom="#0E0201", progress_bar=True, icons=True,
+                times_to_scroll=1)   # a title or message too long for the screen goes all the way along this many times
 STYLES = {"countdown_days": Days, "countdown_clock": Clock, "countdown_flip": Flip,
           "countdown_ring": Ring, "countdown_tearoff": Tearoff}
 

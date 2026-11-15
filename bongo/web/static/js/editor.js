@@ -555,7 +555,9 @@ const DAY_NAMES = ['mon', 'tue', 'wed', 'thu', 'fri', 'sat', 'sun'];
 function itemList(f, id, v, set) {
   const list = clone(Array.isArray(v) ? v : []);
   const box = h('div', { class: 'stack-s', id });
-  const save = () => set(clone(list.map((it) => Object.fromEntries(Object.entries(it).filter(([, x]) => x !== '' && x != null && !(Array.isArray(x) && !x.length))))), false);
+  // empty fields are left out, and so are entries with nothing filled in (a card added, or cleared, and left blank)
+  const save = () => set(clone(list.map((it) => Object.fromEntries(Object.entries(it).filter(([, x]) => x !== '' && x != null && !(Array.isArray(x) && !x.length))))
+    .filter((it) => Object.keys(it).length)), false);
   const label = humanize(f.name).replace(/s$/, '').toLowerCase();
   const input = (fd, it, fid) => {
     const value = it[fd.name] ?? '';

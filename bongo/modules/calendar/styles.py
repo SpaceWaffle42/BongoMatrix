@@ -11,6 +11,8 @@ from PIL import Image, ImageDraw
 from bongo import holidays, icons
 from bongo.module import Style
 
+from bongo.scroll import HOLD, Scrolls
+
 
 def rgb(value: str) -> tuple:
     h = str(value).lstrip("#")
@@ -28,7 +30,7 @@ def scale(colour, k):
     return tuple(int(c * k) for c in colour)
 
 
-class _Base(Style):
+class _Base(Scrolls, Style):
     def setup(self):
         s = self.settings
         self.ink, self.accent = rgb(s["text_colour"]), rgb(s["accent"])
@@ -80,11 +82,22 @@ class _Base(Style):
                 days.setdefault(d.day, self.ink_of(title, own, self.event_ink))
         return days
 
-    def fit(self, font, text, width):
-        """Trim ``text`` until it fits ``width`` px."""
-        while text and font.width(text) > width:
-            text = text[:-1]
-        return text.rstrip()
+    def marquee(self, img, x, baseline, width, text, ink, now):
+        """Draw ``text`` in a ``width``-px window, scrolling it if it's too long: held at its start, moved
+        along at 10 px/s, held at its end, and round again. It starts from the beginning when the screen
+        comes on, and the screen stays up until it has been read through once (``Scrolls``)."""
+        tw = self.tiny.width(text)
+        if tw <= width:
+            self.tiny.draw(img, x, baseline, text, ink)
+            return
+        travel = tw - width + 4
+        once = HOLD + travel / 10 + HOLD
+        need = once * max(1, int(self.settings.get("times_to_scroll", 1)))
+        t = self.scrolled(("marquee", baseline, text), now, need) % once   # (not by x: a column can move at midnight)
+        offset = int(min(travel, max(0.0, (t - HOLD) * 10)))
+        mask = Image.new("L", (width, img.height))
+        self.tiny.draw(mask, -offset, baseline, text, 255)
+        img.paste(ink, (x, 0, x + width, img.height), mask)
 
 
 def digits_width(font, text: str) -> int:
@@ -114,20 +127,8 @@ def when(days: int) -> str:
 class Page(_Base):
     """A desk-calendar page: weekday, big date and month on the left; what's next on the right."""
     fps = 12
+    defaults = {"times_to_scroll": 1}   # a title too long for its space goes all the way along this many times
 
-    def marquee(self, img, x, baseline, width, text, ink, now):
-        """Draw ``text`` in a ``width``-px window, scrolling it (pausing at the start) if it's too long."""
-        tw = self.tiny.width(text)
-        if tw <= width:
-            self.tiny.draw(img, x, baseline, text, ink)
-            return
-        travel = tw - width + 4
-        cycle = travel / 10 + 4  # 10 px/s, then a 2 s hold at each end
-        t = now.timestamp() % cycle
-        offset = int(min(travel, max(0.0, (t - 2) * 10)))
-        mask = Image.new("L", (width, img.height))
-        self.tiny.draw(mask, -offset, baseline, text, 255)
-        img.paste(ink, (x, 0, x + width, img.height), mask)
     @staticmethod
     def lit_rows(font, text):
         """(first, last) lit row of ``text``, counted from the row its baseline is drawn on (so first is negative)."""
@@ -164,7 +165,7 @@ class Page(_Base):
         count = max(1, (h + 4) // (pitch * 2 + 2))  # n items take n*(2*pitch+2) - 4 rows
         items = self.upcoming(today, count)
         if not items:
-            self.tiny.draw(img, x0, (h + self.tiny.cap) // 2, self.fit(self.tiny, "NOTHING SOON", room), scale(self.ink, 0.5))
+            self.marquee(img, x0, (h + self.tiny.cap) // 2, room, "NOTHING SOON", scale(self.ink, 0.5), now)
             return img
         block = len(items) * pitch * 2 + (len(items) - 1) * 2 - 2
         y = (h - block) // 2 + self.tiny.cap
@@ -175,7 +176,7 @@ class Page(_Base):
                 tile = icons.icon(mark)
                 img.paste(tile, (x0, y - self.tiny.cap + (pitch + self.tiny.cap - 8) // 2), tile)
             self.marquee(img, tx, y, troom, title.upper(), self.ink_of(title, own, self.event_ink if own else self.ink), now)
-            self.tiny.draw(img, tx, y + pitch, self.fit(self.tiny, when((d - today).days), troom), self.accent)
+            self.marquee(img, tx, y + pitch, troom, when((d - today).days), self.accent, now)
             y += pitch * 2 + 2
         return img
 
@@ -323,6 +324,7 @@ class DateLine(_Base):
     """Date in words: the weekday over the date, written out, with today's holiday or your event
     (or the next one) underneath."""
     fps = 12
+    defaults = {"times_to_scroll": 1}
 
     def render(self, now):
         w, h = self.ctx.width, self.ctx.height
@@ -357,7 +359,7 @@ class DateLine(_Base):
             if self.tiny.width(text) <= w - 2:
                 self.tiny.draw(img, (w - self.tiny.width(text)) // 2, third, text, ink)
             else:
-                Page.marquee(self, img, 0, third, w, text, ink, now)
+                self.marquee(img, 0, third, w, text, ink, now)
         return img
 
 
@@ -365,6 +367,7 @@ class Week(_Base):
     """This week: seven columns with the day letter and date, today lit up, a dot under days with
     something on; the next date along the bottom."""
     fps = 10
+    defaults = {"times_to_scroll": 1}
 
     def render(self, now):
         w, h = self.ctx.width, self.ctx.height
@@ -405,7 +408,7 @@ class Week(_Base):
             if self.tiny.width(text) <= w - 2:
                 self.tiny.draw(img, (w - self.tiny.width(text)) // 2, 29, text, ink)
             else:
-                Page.marquee(self, img, 0, 29, w, text, ink, now)
+                self.marquee(img, 0, 29, w, text, ink, now)
         return img
 
 

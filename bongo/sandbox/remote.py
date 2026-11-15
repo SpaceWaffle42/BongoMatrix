@@ -306,6 +306,8 @@ class RemoteStyle(Style):
             log.warning("module %s, %s: couldn't start: %s", self.spec["id"], self.style_name, error)
             self.finished = True
 
+    most_overrun = 60.0   # s an imported screen may stay past its time while busy (a built-in one: player.OVERRUN)
+
     def act(self, name):
         if self.handle is None or self.generation != self.child.generation:
             return
@@ -321,11 +323,11 @@ class RemoteStyle(Style):
             self.finished = True
             return self.blank
         try:
-            header, data = self.child.call({"op": "render", "h": self.handle, "now": now.isoformat()}, FRAME_WAIT, body=True,
+            header, data = self.child.call({"op": "render", "h": self.handle, "now": now.isoformat(), "hand_over_at": self.hand_over_at}, FRAME_WAIT, body=True,
                                            most_body=self.ctx.width * self.ctx.height * 3)
             if data is None or len(data) != self.ctx.width * self.ctx.height * 3:
                 raise ChildError("a frame of the wrong size")
-            self.finished = bool(header.get("finished"))
+            self.finished, self.busy = bool(header.get("finished")), bool(header.get("busy"))
             return Image.frombytes("RGB", (self.ctx.width, self.ctx.height), data)
         except ChildError as error:
             log.warning("module %s, %s: %s", self.spec["id"], self.style_name, error)

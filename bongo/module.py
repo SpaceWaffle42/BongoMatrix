@@ -47,6 +47,10 @@ class Style:
     basic: tuple = ()  # this style's settings shown up front in the dashboard; the rest sit under Advanced
     group: str | None = None  # heading the dashboard files this style under (a Clock's "Digital", "Word"...)
     finished: bool = False  # set True in render to hand over to the next entry before its time is up
+    busy: bool = False      # True: in the middle of something worth finishing (a line still scrolling); the
+    #                         player keeps the screen up past its time until it isn't (at most player.OVERRUN)
+    hand_over_at: float | None = None  # when the player means to hand over (a timestamp on ctx.now's clock): set by the
+    #                            player, so a style knows not to start something new it would then have to finish
     once: bool = False      # set by the player: play through once, then hand over (splash, boot screen)
     fps: int = 30
 

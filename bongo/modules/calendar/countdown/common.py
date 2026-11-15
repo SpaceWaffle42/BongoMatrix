@@ -8,6 +8,8 @@ from PIL import Image, ImageFilter
 from bongo import icons
 from bongo.holidays import label
 
+from bongo.scroll import HOLD, Scrolls
+
 
 def cap(font):
     """Cap height (the 'H') of a BDF font, measured locally so this module needs nothing new."""
@@ -20,7 +22,7 @@ def rgb(hex_colour):
     return tuple(int(h[i:i + 2], 16) for i in (0, 2, 4))
 
 
-class Base:
+class Base(Scrolls):
     """Mixin giving a style its background, text drawing and bar. Styles supply fonts and layout."""
     def setup(self):
         s, w, h = self.settings, self.ctx.width, self.ctx.height
@@ -73,15 +75,19 @@ class Base:
             return self.paint([])
         font = next((f for f in map(self.ctx.fonts, ("6x10", "5x7")) if f.width(text) <= self.ctx.width - 2),
                     self.ctx.fonts("5x7"))
-        return self.paint(self.line(font, text, (self.ctx.height + 8) // 2, self.ink, now))
+        return self.paint(self.label_items(font, text, (self.ctx.height + 8) // 2, self.ink, now))
 
-    def line(self, font, text, y, ink, now, x=None):
-        """One label centred, or scrolling if too wide. Returns draw items (font, x, y, text, ink)."""
+    def label_items(self, font, text, y, ink, now, x=None):
+        """One label centred, or scrolling if too wide: held at its start, then round and round at 14 px/s.
+        It starts from the beginning when the screen comes on, and the screen stays up until it has gone
+        round once (``Scrolls``). Returns draw items (font, x, y, text, ink)."""
         w, tw = self.ctx.width, font.width(text)
         if tw <= w - 2:
             return [(font, (w - tw) // 2 if x is None else x, y, text, ink)]
         gap = 12
-        off = int(now.timestamp() * 14) % (tw + gap)
+        need = HOLD + (tw + gap) / 14 * max(1, int(self.settings.get("times_to_scroll", 1)))
+        t = self.scrolled(("line", y, text), now, need) % need
+        off = int(max(0.0, t - HOLD) * 14) % (tw + gap)
         return [(font, 1 - off, y, text, ink), (font, 1 - off + tw + gap, y, text, ink)]
 
     def paint(self, items, progress=None, icon_at=None):
@@ -117,9 +123,9 @@ class Base:
         small = self.ctx.fonts("5x7")
         if h >= 24 and self.title and self.title != msg:      # room for both lines, a clear row or more between
             name = mix(self.dark, self.accent, 0.65)          # the name quieter than the news under it
-            return self.paint(self.line(small, self.title, 9, name, now)
-                              + self.line(font, msg, 9 + (h - 9 + cap(font)) // 2, ink, now), 1.0)
-        return self.paint(self.line(font, msg, (h + cap(font) + 1) // 2, ink, now), 1.0)
+            return self.paint(self.label_items(small, self.title, 9, name, now)
+                              + self.label_items(font, msg, 9 + (h - 9 + cap(font)) // 2, ink, now), 1.0)
+        return self.paint(self.label_items(font, msg, (h + cap(font) + 1) // 2, ink, now), 1.0)
 
 
 def fit_font(fonts, names, text, max_w, max_h):

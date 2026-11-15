@@ -3,6 +3,7 @@ import math
 
 from bongo.fonts import align_x, names
 from bongo.module import Module, Style
+from bongo.scroll import HOLD, Scrolls
 
 FALLBACK = ("6x10", "5x7", "tom-thumb")  # tried in order when static text is too wide
 
@@ -57,24 +58,31 @@ class _Base(Style):
         return img
 
 
-class Scroll(_Base):
-    defaults = dict(speed=24, gap=24)
+class Scroll(Scrolls, _Base):
+    """A marquee. It starts from the first letter when the screen comes on, and the screen stays until the
+    text has gone all the way along ``times_to_scroll`` times (longer than its seconds if need be)."""
+    defaults = dict(speed=24, gap=24, times_to_scroll=1)
 
     def render(self, now):
-        img, text, s = self.background(), self.text, self.settings
-        period = self.font.width(text) + max(0, int(s["gap"]))
+        s = self.settings
+        return self.marquee(now, self.font, s["speed"], s["gap"], s["times_to_scroll"], self.baseline(self.font))
+
+    def marquee(self, now, font, speed, gap, times, baseline):
+        img, text = self.background(), self.text
+        period = font.width(text) + max(0, int(gap))
         if period <= 0:
             return img
-        # Pure function of the clock: how far the marquee has travelled since the epoch.
-        offset = math.floor(now.timestamp() * s["speed"] + 1e-6) % period
+        # how far the marquee has travelled since this screen first drew it: held at its first letter, then along
+        need = HOLD + period / speed * max(1, int(times))
+        offset = math.floor(max(0.0, self.scrolled(("text", text), now, need) - HOLD) * speed + 1e-6) % period
         x = -offset
         while x < self.ctx.width:
-            self.font.draw(img, x, self.baseline(self.font), text, self.ink)
+            font.draw(img, x, baseline, text, self.ink)
             x += period
         return img
 
 
-class Static(_Base):
+class Static(Scrolls, _Base):
     def _split(self, font, text):
         """Best two-line split at spaces (smallest widest line), or None if neither half fits."""
         words, best = text.split(), None
@@ -86,7 +94,8 @@ class Static(_Base):
         return best and best[1]
 
     def _layout(self, text):
-        """First option that fits: (font, lines, is_fallback). Falls back to a clipped smallest font."""
+        """First option that fits: (font, lines, is_fallback). Falls back to the smallest font, which may not
+        fit (``render`` scrolls it then)."""
         w, f = self.ctx.width, self.ctx.fonts
         if f(self.settings["font"]).width(text) <= w:
             return f(self.settings["font"]), [text], False
@@ -102,13 +111,14 @@ class Static(_Base):
     def render(self, now):
         img, text, s = self.background(), self.text, self.settings
         font, lines, fallback = self._layout(text)
+        if any(font.width(line) > self.ctx.width for line in lines):   # too long even small and on two lines: it goes
+            return Scroll.marquee(self, now, self.font, 24, 24, 1, self.baseline(self.font))   # along once, in its own font
         w, h = self.ctx.width, self.ctx.height
         first = middle(font, h, len(lines))
         step = pitch(font)
         for i, line in enumerate(lines):
             tw = font.width(line)
-            # If it still overflows, align the overflow so it clips at the edge(s) cleanly.
-            x = align_x(s["align"], tw, w) if tw <= w else {"left": 0, "right": w - tw}.get(s["align"], (w - tw) // 2)
+            x = align_x(s["align"], tw, w)
             y = first + i * step if fallback else self.baseline(font)
             font.draw(img, x, y, line, self.ink)
         return img
@@ -124,5 +134,5 @@ MODULE = Module(
     ),
     choices={"font": names(), "background_style": ["solid", "gradient"], "align": ["left", "center", "right"]},
     basic=("text", "colour", "align"),
-    limits={"speed": (1, 200), "gap": (0, 256), "y": (-64, 256)},
+    limits={"speed": (1, 200), "gap": (0, 256), "y": (-64, 256), "times_to_scroll": (1, 10)},
 )
