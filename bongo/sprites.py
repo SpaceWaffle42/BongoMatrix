@@ -57,6 +57,13 @@ def _read(path: Path) -> Sprite:
     return Sprite(path.stem, tuple(img for img, _ in pictures), tuple(ms for _, ms in pictures), project["loop"])
 
 
+def read(path) -> Sprite:
+    """The sprite in one Animator project file, wherever it is. For an imported module, whose art travels
+    in its own folder: ``sprites.read(Path(__file__).parent / "art" / "fish.json")``. Raises ValueError
+    (not an Animator project) or OSError (no such file). Nothing is kept: read it once, in ``setup``."""
+    return _read(Path(path))
+
+
 def load(name: str, own: bool = True) -> Sprite:
     """The sprite called ``name``: your own version if you've saved one from the dashboard, else the built-in
     one (also if yours can't be read). Raises FileNotFoundError if there is neither, and ValueError if the
