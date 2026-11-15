@@ -289,9 +289,10 @@ function renderPlaylist() {
     gapNote.hidden = !gap;
     gapNote.replaceChildren(icon('warn'), h('span', null, gap));
     const n = dirtyCount();
-    actions.replaceChildren(...(n ? [h('span', { class: 'pill-warn' }, `${n} unsaved change${n === 1 ? '' : 's'}`),
+    const said = S.theirs ? `Changed on another device${n ? ` · ${n} unsaved here` : ''}` : `${n} unsaved change${n === 1 ? '' : 's'}`;
+    actions.replaceChildren(...(n || S.theirs ? [h('span', { class: 'pill-warn', title: S.theirs ? 'Discard shows the playlist the Matrix has now' : '' }, said),
       h('button', { type: 'button', class: 'btn ghost', onclick: discardDraft }, 'Discard'),
-      h('button', { type: 'button', class: 'btn primary', onclick: applyDraft }, 'Apply to Matrix')] : []));
+      ...(n ? [h('button', { type: 'button', class: 'btn primary', onclick: applyDraft }, 'Apply to Matrix')] : [])] : []));
     markPlaying();
     markTimes();
     if (Number.isInteger(S.backTo)) {   // back from the editor: to the card it was opened from

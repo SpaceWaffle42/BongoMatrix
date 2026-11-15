@@ -30,6 +30,7 @@ class Live:
     def __init__(self):
         self._lock = threading.Lock()
         self.beat_at = time.monotonic()   # the player's last sign of life: every frame, and ``beat``
+        self.shown = 0                    # frames the player has shown since the start (bongo/__main__.py: ``keep_playing``)
         self.boot = secrets.token_hex(4)  # this run of the display: a restart is a new one (see ``health``)
         self.panel_up = False             # the panel has started, so frames can be shown
         self._frame: Image.Image | None = None
@@ -64,6 +65,7 @@ class Live:
             self._frame = frame
             self._public = frame if public is None else public
         self.beat_at = time.monotonic()
+        self.shown += 1
 
     def beat(self) -> None:
         """The player is alive though it has no frame to show (waiting for a config that can play)."""

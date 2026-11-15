@@ -24,6 +24,12 @@ export function render(view, match) {
   if (!S.draft?.[i]) { toast('That playlist entry no longer exists'); go('/', { replace: true }); return; }
   const e = clone(S.draft[i]);
   const original = clone(e);
+  const opened = S.draft;   // the playlist this screen was opened from: if it has been swapped for another
+  const gone = () => {      // device's (Discard), index i may now be a different screen
+    if (S.draft === opened) return false;
+    toast('The playlist changed on another device, so this edit was not kept. Open the screen again.', 'error', 7000);
+    go('/playlist'); return true;
+  };
   const mod = moduleById(e.module);
   let showSafe = store.get('editorSafe', true);
 
@@ -396,9 +402,9 @@ export function render(view, match) {
     if (!same(e, original) && !confirm('Throw away your edits to this module?')) return;
     go('/playlist');
   }
-  function keepDraft() { if (!timesOk()) return; S.draft[i] = clone(e); draftChanged(); go('/playlist'); }
+  function keepDraft() { if (!timesOk() || gone()) return; S.draft[i] = clone(e); draftChanged(); go('/playlist'); }
   async function apply() {
-    if (!timesOk()) return;
+    if (!timesOk() || gone()) return;
     S.draft[i] = clone(e);
     draftChanged();
     if (await applyDraft()) { go('/playlist'); return; }

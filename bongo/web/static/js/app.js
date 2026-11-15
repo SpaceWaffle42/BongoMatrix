@@ -4,7 +4,8 @@ import { h, icon, toast, fail, clone, same } from './ui.js';
 
 /** Shared state. `draft` is the locally edited playlist; `config.playlist` is what the Matrix has. */
 export const S = { state: null, config: null, modules: null, draft: null, problems: [], online: true, polledAt: 0,
-  revs: null };   // revs: the Matrix's mark for each config section as this page loaded it (see putConfig)
+  revs: null,     // revs: the Matrix's mark for each config section as this page loaded it (see putConfig)
+  theirs: false };   // the playlist was changed on another phone or tab while this one had edits of its own (freshen)
 export const bus = new EventTarget();
 const emit = (type) => bus.dispatchEvent(new Event(type));
 
@@ -60,6 +61,7 @@ async function render() {
   paintHeader();
   view.replaceChildren();
   view.scrollTop = 0;
+  if (S.theirs) freshen();   // (out of the editor: a playlist saved elsewhere meanwhile can come in now)
   try { mod.render(view, p.match(route[0])); }
   catch (err) { console.error(err); view.append(h('p', { class: 'error-box' }, `This page failed to draw: ${err.message}`)); }
   if (p === '/playlist' && matchMedia('(min-width: 720px)').matches) document.getElementById('playlist')?.scrollIntoView();
@@ -136,12 +138,15 @@ async function putConfig(part) {
   catch (err) {
     if (err.status !== 409) throw err;
     const what = (err.data?.conflict || []).map((k) => SECTIONS[k] || k.replace(/_/g, ' ')).join(', ') || 'settings';
-    if (!confirm(`The ${what} on the Matrix changed since this page loaded it (saved from another phone or tab).\n\nOK: save yours over it.\nCancel: leave theirs. Reload this page to see it.`)) {
-      throw Object.assign(new Error('Not saved: it was changed on another device. Reload to see the latest.'), { status: 409, kept: true });
+    if (!confirm(`The ${what} on the Matrix was changed on another phone or tab since you started here.\n\nOK: replace it with this page's (the other change is lost).\nCancel: keep the other one (Discard then shows it).`)) {
+      throw Object.assign(new Error(`Not saved: it was changed on another device. ${'playlist' in part ? 'Press Discard to see it.' : 'Reload to see the latest.'}`), { status: 409, kept: true });
     }
     res = await put('/api/config', part);
   }
-  if (res?.revisions) S.revs = res.revisions;
+  if (res?.revisions) {   // the marks of what this page sent: the others still say what this page has (freshen)
+    if (!S.revs) S.revs = res.revisions;
+    else for (const key of Object.keys(part)) S.revs[key] = res.revisions[key] ?? '-';
+  }
   return res;
 }
 
@@ -151,7 +156,7 @@ export async function applyDraft() {
   try {
     const res = await putConfig({ playlist });
     S.config.playlist = clone(playlist);
-    S.problems = [];
+    S.problems = []; S.theirs = false;
     toast(res?.restart_needed ? 'Saved. Panel size and wiring changes take effect after a restart (Settings > Device > Restart).' : 'Playlist applied', 'success', 5000);
     paintHeader(); emit('draft');
     return true;
@@ -162,11 +167,51 @@ export async function applyDraft() {
     return false;
   }
 }
-export function discardDraft() {
+export async function discardDraft() {
+  await takeTheirs().catch(() => {});   // back to what the Matrix has now (another device may have saved since)
   S.draft = (S.config?.playlist || []).map(normalise);
   S.problems = [];
   paintHeader(); emit('draft');
   toast('Changes discarded');
+  if (path().startsWith('/edit')) go('/playlist', { replace: true });   // (the screen open there may not be in it now)
+}
+
+/** The playlist the Matrix has now, and its mark (the mark first: if a save lands in between, the next
+ *  save here asks rather than overwrites). */
+async function fetchTheirs() {
+  const revs = await get('/api/config/revisions');
+  const config = await get('/api/config');
+  return { playlist: config.playlist, mark: revs.playlist };
+}
+function adopt(theirs) {   // (the playlist and its mark go together: a page never has the mark without the playlist)
+  S.config.playlist = theirs.playlist;
+  S.revs = { ...(S.revs || {}), playlist: theirs.mark };
+  S.theirs = false;
+}
+export async function takeTheirs() { adopt(await fetchTheirs()); }
+
+/** Keep this page's playlist the one the Matrix has. Another phone or tab may have saved since this one
+ *  loaded it: with nothing changed here, this page simply shows the new one; with edits of its own (or a
+ *  screen open in the editor), it says so in the bar instead, and Discard there loads theirs. Without this,
+ *  a page left open shows an old playlist, and applying from it puts that old one back. */
+let freshening = false;
+export async function freshen() {
+  if (freshening || document.hidden || !S.config || DEMO || path() === '/pair') return;
+  freshening = true;
+  try {
+    if (!S.revs) { S.revs = await get('/api/config/revisions'); return; }   // (the first look failed: from now on)
+    const revs = await get('/api/config/revisions');
+    if (revs.playlist === S.revs.playlist) { if (S.theirs) { S.theirs = false; paintHeader(); emit('draft'); } return; }
+    if (dirtyCount() || path().startsWith('/edit')) { if (!S.theirs) { S.theirs = true; paintHeader(); emit('draft'); } return; }
+    const before = S.draft, was = JSON.stringify(S.draft);
+    const theirs = await fetchTheirs();
+    if (S.draft !== before || JSON.stringify(S.draft) !== was || path().startsWith('/edit')) { S.theirs = true; paintHeader(); emit('draft'); return; }   // (edited meanwhile)
+    adopt(theirs);
+    S.draft = (S.config.playlist || []).map(normalise);
+    paintHeader(); emit('draft');
+    toast('Playlist updated: it was changed on another device');
+  } catch { /* offline for a moment: the next look will do */ }
+  finally { freshening = false; }
 }
 /** Save part of the config (safe area, schedule...). Returns true on success. */
 export async function saveConfig(part, what = 'Settings') {
@@ -186,8 +231,11 @@ export async function saveConfig(part, what = 'Settings') {
 function paintHeader() {
   const n = dirtyCount();
   const bar = document.getElementById('draft-bar');
-  bar.hidden = !n || path() === '/pair';
-  document.getElementById('draft-count').textContent = `${n} unsaved change${n === 1 ? '' : 's'}`;
+  bar.hidden = !(n || S.theirs) || path() === '/pair';
+  document.getElementById('draft-apply').hidden = !n;   // (nothing changed here: applying could only put the old one back)
+  document.getElementById('draft-count').textContent = S.theirs
+    ? `Changed on another device${n ? ` · ${n} unsaved here` : ''}`   // (Discard loads theirs)
+    : `${n} unsaved change${n === 1 ? '' : 's'}`;
   document.getElementById('device-name').textContent = path() === '/pair' ? 'Not paired' : S.state?.name || 'Bongo Matrix';
   document.getElementById('device-host').textContent = DEMO ? 'demo' : location.host;
   const dot = document.getElementById('device-dot');
@@ -203,8 +251,11 @@ async function poll() {
     paintHeader();
     emit('state');
   }
+  if (++polls % 4 === 0) freshen();   // every few seconds: has another device saved the playlist?
   setTimeout(poll, 1000);
 }
+let polls = 0;
+document.addEventListener('visibilitychange', () => { if (!document.hidden) freshen(); });   // back to this tab
 
 // A file dropped beside a drop zone mustn't make the browser open it and leave the dashboard (a drop zone
 // is anything marked data-drop: Settings > Media library).

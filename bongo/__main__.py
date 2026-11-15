@@ -104,6 +104,47 @@ def _hardware(config):
         sys.exit(f"bongo: {error}")
 
 
+PLAYED = 50       # frames a config must show before a failure is no longer blamed on it (a few seconds)...
+PLAYED_FOR = 10.0  # ...or seconds it has been playing (a slow screen draws few frames)
+
+
+def keep_playing(config: dict, path, modules, live, play_config, wait: float = 10) -> None:
+    """Play ``config`` until the dashboard saves another (``live.reload``), then that one, for ever.
+
+    If a config can't even start (it fails before it has shown ``PLAYED`` frames), the last one that did
+    play is shown instead, so the panel isn't left dark; the saved file is left as it is, so nothing you
+    saved is lost (the dashboard still shows it, to be put right). A config that has been playing
+    fine and then hits a problem isn't to blame: it is simply started again."""
+    good, first = None, True   # the last config that played; the boot screen only plays at start-up
+    while True:
+        shown, since = live.shown, time.monotonic()
+        try:
+            play_config(config, first)
+            good = config
+        except Exception:  # never exit: the dashboard stays up so the config can be fixed
+            logging.exception("can't play this config")
+            if live.shown - shown >= PLAYED or time.monotonic() - since >= PLAYED_FOR:
+                good = config                     # it played: start it again, after a moment
+                first = False
+                live.reload.wait(1)
+            elif good is not None and config is not good:
+                logging.error("the saved config can't play: showing the last one that did (the saved "
+                              "one is kept, so it can be put right in the dashboard)")
+                config, first = good, False
+                continue
+            else:
+                live.beat()           # still alive, just nothing to show: not for the watchdog
+                live.reload.wait(wait)  # nothing better to play: wait for a fix from the dashboard
+        first = False
+        if not live.reload.is_set() and good is config:
+            continue                  # (started again after a problem, not a new save)
+        live.reload.clear()
+        live.skip.clear()
+        config = cfg.load(path)
+        cfg.tidy(config, modules)
+        logging.info("config reloaded")
+
+
 def main(argv=None) -> int:
     parser = argparse.ArgumentParser(prog="bongo")
     sub = parser.add_subparsers(dest="command", required=True)
@@ -241,33 +282,17 @@ def main(argv=None) -> int:
     live.panel_up = True
     live.beat()   # starting up doesn't count against it
     threading.Thread(target=live.watch, args=(threading.Event(),), daemon=True, name="watchdog").start()
-    good, first = None, True  # last config that played; the boot screen only plays at start-up
+    def play_config(config, first):
+        schedule = Schedule.from_config(config)
+        if not first:
+            schedule.boot = None  # the boot screen plays once, not after a dashboard save
+        factory = cfg.context_factory(config)
+        play(cfg.playlist(config, modules), modules, panel, factory,
+             place=cfg.safe_area(config).place, schedule=schedule, live=live,
+             overlays=Overlays.from_config(config, modules, factory))
+
     try:
-        while True:  # play() returns when the dashboard saves a new config
-            try:
-                schedule = Schedule.from_config(config)
-                if not first:
-                    schedule.boot = None  # the boot screen plays once, not after a dashboard save
-                first = False
-                factory = cfg.context_factory(config)
-                play(cfg.playlist(config, modules), modules, panel, factory,
-                     place=cfg.safe_area(config).place, schedule=schedule, live=live,
-                     overlays=Overlays.from_config(config, modules, factory))
-                good = config
-            except Exception:  # never exit: the dashboard stays up so the config can be fixed
-                logging.exception("can't play this config")
-                if good is not None and config is not good:
-                    logging.error("going back to the last config that worked")
-                    cfg.save(good, args.config)
-                    config = good
-                    continue
-                live.beat()           # still alive, just nothing to show: not for the watchdog
-                live.reload.wait(10)  # nothing better to play: wait for a fix from the dashboard
-            live.reload.clear()
-            live.skip.clear()
-            config = cfg.load(args.config)
-            cfg.tidy(config, modules)
-            logging.info("config reloaded")
+        keep_playing(config, Path(args.config), modules, live, play_config)
     except KeyboardInterrupt:
         panel.clear()
     return 1 if problems else 0

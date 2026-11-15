@@ -2,7 +2,7 @@
 // imported module adds to its row: where it came from, the sites it can reach, and Remove (bongo/addons.py).
 import { api, get, post } from './api.js';
 import { h, icon, toast, humanize } from './ui.js';
-import { S, onLeave } from './app.js';
+import { S, onLeave, takeTheirs, dirtyCount, normalise } from './app.js';
 
 const STEPS = [['fetch', 'Fetching it'], ['check', 'Checking its files'], ['try', 'Trying each of its looks on a test screen']];
 const sourceText = (s) => (!s ? '' : s.kind === 'github' ? `github.com/${s.repo}${s.ref_kind === 'branch' ? ` (${s.ref})` : ''}` : s.name || 'a .zip');
@@ -192,7 +192,12 @@ export function importedMore(m, info, changed, onUpdate) {
       yes.disabled = true;
       try {
         const res = await api('DELETE', `/api/addons/${m.id}`, {});
-        S.draft = (S.draft || []).filter((e) => e.module !== m.id);
+        const clean = !dirtyCount() && !S.theirs;   // (edits here, or another device's save not taken yet: keep the
+        S.draft = (S.draft || []).filter((e) => e.module !== m.id);   // old mark, so a later Apply still asks)
+        if (res.screens_removed && clean) {
+          await takeTheirs().catch(() => {});
+          S.draft = (S.config.playlist || []).map(normalise);
+        }
         toast(`${m.name} removed${res.screens_removed ? `, and its ${res.screens_removed} screen${res.screens_removed === 1 ? '' : 's'}` : ''}`, 'success');
         changed(res, m.id);
       } catch (e) { toast(e.message, 'error', 8000); yes.disabled = false; }
