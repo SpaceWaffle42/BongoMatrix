@@ -22,6 +22,7 @@ NIGHT = (22, 7)            # lights out from 22:00 until 07:00
 RATES = {"food": 1 / 1500, "sleep": 1 / 1100, "play": 1 / 420, "wash": 1 / 900}   # how fast each need grows, per second
 ZZZ = (200, 210, 255)      # (a room shows her Zs in its own colours, by day and by night)
 TREE_REST = 240            # seconds on the floor before she fancies the furniture again
+MARGIN = dt.timedelta(seconds=2)   # how much of her life either side of now is kept to hand
 
 
 def like(now: dt.datetime, ref: dt.datetime) -> dt.datetime:
@@ -46,10 +47,16 @@ class Roamer:
         self.grounded = start - dt.timedelta(seconds=TREE_REST)   # when she last came down off the furniture
 
     def around(self, now: dt.datetime) -> list:
-        """Her actions around ``now``: the one she's in and the two after."""
+        """Her actions around ``now``: the one she's in, and as many either side as cover MARGIN, so
+        what looks back and ahead from now (the view's glide) has them all. A new list when it changes."""
         now = like(now, self.clock)
-        while self.clock <= now or len(self.recent) < 2 or self.recent[-2][0] <= now:
-            self.recent = (self.recent + [self.next()])[-3:]
+        recent = list(self.recent)
+        while not recent or self.clock <= now + MARGIN:          # the clock: when her last action ends
+            recent.append(self.next())
+        while len(recent) > 1 and recent[1][0] <= now - MARGIN:  # gone by long enough ago
+            recent.pop(0)
+        if len(recent) != len(self.recent) or recent[0] is not self.recent[0] or recent[-1] is not self.recent[-1]:
+            self.recent = recent
         return self.recent
 
     # -- one action ---------------------------------------------------------------------------

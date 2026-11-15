@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import bisect
+import math
 import hashlib
 
 from PIL import Image, ImageDraw
@@ -132,11 +133,15 @@ def window(width: int, height: int, feet=None, tall: int = 18, above: int = 1, r
     return min(max(0, x), max(0, rw - width)), min(max(0, y), max(0, rh - height))
 
 
+PLAY = {"playing", "toy", "ball", "mouse"}   # scenes and free-roaming actions where she plays with her ball or toy mouse
+
+
 def lead(shot, width: int, room_width: int = W) -> float:
     """In a bigger room: how far the view looks ahead of her, towards her ball or toy mouse on the
-    floor, so what she is playing with is on screen too. It grows as the thing comes near and is nil
-    for anything far off, so nothing coming or going makes the view jump."""
-    far, out = width * 1.1, 0.0
+    floor, so what she is playing with is on screen too. It grows as the thing goes further from her,
+    up to a limit, and never shrinks back on its own, so the view doesn't drift towards it and back.
+    It fades for things off her floor or leaving the room, so nothing coming or going makes it jump."""
+    far, out = width / 8, 0.0                       # no further: when play stops, the view slides back that far
     lit = 1.0
     if shot.fade and "night" in (shot.fade[0], shot.room):   # her ball fades with the light
         lit = 1 - shot.fade[1] if shot.room == "night" else shot.fade[1]
@@ -147,8 +152,8 @@ def lead(shot, width: int, room_width: int = W) -> float:
         k *= max(0.0, 1 - abs(y - shot.cat[1]) / 16)                         # only what is on the floor beside her
         k *= max(0.0, min(1.0, (x + 8) / 16, (room_width + 8 - x) / 16))     # and not what is leaving the room
         d = x - shot.cat[0]
-        out += d / 2 * k * max(0.0, 1 - abs(d) / far)
-    return max(-width * 0.3, min(width * 0.3, out))
+        out += max(-far, min(far, d / 2)) * k        # half way to it, up to a limit: it only grows as it goes
+    return max(-far, min(far, out))
 
 
 def fit(scene: Image.Image, width: int, height: int, feet=None, tall: int = 18, above: int = 1) -> Image.Image:
@@ -267,28 +272,101 @@ class _Scene(Style):
             overlay(draw, item, t - began, shot, ended - began, view)
         return fit(img.convert("RGB"), self.ctx.width, self.ctx.height, feet, tall, above)
 
+    GLIDE = 600   # ms either side of now that the view's glide takes in
+    SETTLE = 200  # ms: a pause in her steps longer than this and the view starts to ease in by itself
+
+    def segments(self, t, R):
+        """The shots around ``t`` (the loop's own clock) as (start, end, shot, what), nearest first both
+        ways: back to t - R, then on to t + R. Past either end of a loop it wraps round; past
+        either end of free roaming's few actions, the end shot carries on."""
+        n, loop = len(self.starts), getattr(self, "roamer", None) is None
+        k = max(0, bisect.bisect_right(self.starts, t) - 1)
+        end = lambda i: self.starts[i + 1] if i + 1 < n else (self.total if loop else self.starts[i] + self.timeline[i][0].ms)   # noqa: E731
+        i, shift = k, 0.0
+        while True:                                     # back
+            a, b = self.starts[i] + shift, end(i) + shift
+            if not loop and i == 0:
+                a = -math.inf
+            yield a, b, *self.timeline[i]
+            if a <= t - R:
+                break
+            i -= 1
+            if i < 0:
+                i, shift = n - 1, shift - self.total
+        i, shift = k + 1, 0.0
+        while True:                                     # on
+            if i >= n:
+                if not loop:
+                    break
+                i, shift = 0, shift + self.total
+            a, b = self.starts[i] + shift, end(i) + shift
+            if a >= t + R:
+                break
+            if not loop and i == n - 1:
+                b = math.inf
+            yield a, b, *self.timeline[i]
+            i += 1
+
+    def stepped(self, t, here):
+        """When her feet last took a step walking or running (to ``here``, where they are at ``t``),
+        looking back 2 x SETTLE; None if they haven't, or if they got here some other way (a jump)."""
+        walk = False                                    # her feet got here walking or running
+        for a, b, seg, _ in self.segments(t, 2 * self.SETTLE):
+            if a > t:
+                break
+            there = (round(seg.cat[0]), round(seg.cat[1]))
+            if there != here:
+                return b if walk and t - b < 2 * self.SETTLE else None
+            walk = walk or seg.tag.startswith("walk")
+            if a <= t - 2 * self.SETTLE:
+                break
+        return None
+
+    def mean(self, t, R, width=0):
+        """Where she is, averaged over R ms either side of ``t``, the nearest moments counting most.
+        Worked out exactly from her shots, so it changes smoothly in time (sampling it would beat
+        against her steps and wobble). With ``width``: plus how far the view leans towards her ball
+        or toy mouse while she plays with it, averaged the same way."""
+        def upto(u):                                    # how much of the weight lies before t + u
+            if u <= -R:
+                return 0.0
+            if u >= R:
+                return 1.0
+            return (u + R) ** 2 / (2 * R * R) if u <= 0 else 1 - (R - u) ** 2 / (2 * R * R)
+
+        x = y = ahead = 0.0
+        for a, b, seg, what in self.segments(t, R):
+            w = upto(b - t) - upto(a - t)
+            if w <= 0:
+                continue
+            x += w * seg.cat[0]
+            y += w * seg.cat[1]
+            if width and what in PLAY:
+                ahead += w * lead(seg, width, self.stage.w)
+        return x + ahead, y
+
     def focus(self, t, shot, width):
-        """What the view follows in a bigger room: the middle of where she is over the half second
-        either side of now, so it glides with her instead of whipping about when she runs or jumps
-        (it sets off as she gathers herself; never far from her: she stays on screen), and looks ahead
-        to her ball or toy."""
-        xs, ys, last = [], [], len(self.starts) - 1
-        for k in range(-11, 12):
-            cat = self.timeline[max(0, min(last, bisect.bisect_right(self.starts, self.back(t, k * 45)) - 1))][0].cat
-            xs.append(cat[0])
-            ys.append(cat[1])
-        x = max(shot.cat[0] - 18, min(shot.cat[0] + 18, sum(xs) / len(xs)))
-        y = max(shot.cat[1] - 8, min(shot.cat[1] + 4, sum(ys) / len(ys)))
-        return x + lead(shot, width, self.stage.w), y
+        """What the view follows in a bigger room: she glides into it rather than whipping about when
+        she runs or jumps (it sets off as she gathers herself), and while she plays it leans towards
+        her ball or toy mouse. While she walks, the view takes its place only as her feet move and
+        holds still between her steps, so the room goes by on the same frames as she does. (Gliding
+        a pixel every frame while she steps two every other frame makes her shuffle to and fro on
+        screen.) Running, the same, however long her strides. When she stops, the view lets go over
+        SETTLE rather than snapping to where the glide has got to. Jumps glide every frame.
+        Never far from her: she stays on screen."""
+        cx, cy = round(shot.cat[0]), round(shot.cat[1])
+        at, last = t, self.stepped(t, (cx, cy))
+        if last is not None:                            # walking: held since her last step, and when she
+            gap = t - last                              # stops, let go gently: catching up at twice the pace
+            at = last if gap < self.SETTLE else last + 2 * (gap - self.SETTLE)
+        x, y = self.mean(min(at, t), self.GLIDE, width)
+        reach = round(width / 2) - 12                   # her middle stays this far in from the sides
+        return max(cx - reach, min(cx + reach, round(x))), max(cy - 8, min(cy + 4, round(y)))
 
     def locate(self, now, clock):
         """Where the loop is at this moment: (ms on the loop's clock, which shot)."""
         t = clock % self.total
         return t, bisect.bisect_right(self.starts, t) - 1
-
-    def back(self, t, ms):
-        """``ms`` earlier on the loop's clock."""
-        return (t - ms) % self.total
 
     def draw_toy(self, img, toy, t):
         name, x, y, flipped, bitten = toy
@@ -359,8 +437,6 @@ class Life(_Scene):
             self.began = {item: start for items in self.lives for item, start, _ in items}
         return clock, max(0, min(len(self.starts) - 1, bisect.bisect_right(self.starts, clock) - 1))
 
-    def back(self, t, ms):
-        return super().back(t, ms) if self.roamer is None else t - ms
 
     def modes(self):
         picked = [m for m in self.settings["modes"] if m in MODES] or ["idle"]
