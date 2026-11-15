@@ -774,6 +774,466 @@
   // peek(): { length, frameAt(i) } so the gallery can build a thumbnail a frame at a time
   const peek = (make) => () => { lazy = true; try { const r = make(); return Array.isArray(r) ? { length: r.length, frameAt: (i) => r[i] } : r; } finally { lazy = false; } };
   const P = (id, name, group, make, about, loops = true) => ({ id, name, group, make, about, loops, peek: peek(make) });
+  // More boot screens, all built from the wall's blocks on its 21 x 10 grid. Each plays once and ends on black,
+  // so the playlist starts from a dark panel.
+  const BC = 21, BR = 10, BY0 = 1;
+  const ease = (u) => { u = Math.max(0, Math.min(1, u)); return u * u * (3 - 2 * u); };
+  const fadeOut = (i, n, k = 8) => Math.min(1, Math.max(0, (n - 2 - i) / k));   // 1, then down to 0 over the last frames (the last is black)
+  // one block with its top-left at pixel (x, y): a 3 x 3 face with the darker spot in the middle; `hot` 0..1 whitens it
+  const blk = (f, x, y, key, a = 1, hot = 0) => {
+    if (a <= 0.02) return;
+    const [face, mid] = WALL[key];
+    f.rect(x, y, 3, 3, dim(mix(face, '#ffffff', hot), a)); f.set(x + 1, y + 1, dim(mix(mid, '#ffffff', hot), a));
+  };
+  const cell = (f, c, r, key, a = 1, hot = 0) => blk(f, c * 3, BY0 + r * 3, key, a, hot);
+  // a word in block letters, centred, its top on row `top`: Map 'c,r' -> colour key (one colour a letter)
+  const blockWord = (word, colours, top = 2) => {
+    const at = new Map();
+    let col = Math.floor((BC - (word.length - 1 + [...word].reduce((w, ch) => w + NAME[ch][0].length, 0))) / 2);
+    [...word].forEach((ch, n) => { NAME[ch].forEach((row, r) => [...row].forEach((on, c) => { if (on === 'X') at.set((col + c) + ',' + (top + r), colours[n]); })); col += NAME[ch][0].length + 1; });
+    return at;
+  };
+  const eachCell = (at, fn) => at.forEach((key, k) => { const [c, r] = k.split(',').map(Number); fn(c, r, key); });
+  const WORDS = [['BONGO', 'BRGPT'], ['MATRIX', 'YBRGTP']];
+  const KEYS = ['R', 'T', 'Y', 'G', 'B', 'V', 'P', 'N'];
+
+  function bootBuild() {   // BONGO is laid a letter at a time, each block landing white hot; a front crosses, knocking its columns out and laying MATRIX behind it; the last block rings the whole word
+    const MS = 40, out = [], drop = (t) => (t <= 0 ? 0 : t <= 6 ? Math.round(0.5 * t * t) : 18 + 6 * (t - 6));   // never more than 6 px a frame
+    const go = (t) => (t <= -2 ? 0 : t <= 0 ? -1 : drop(t));                       // a column lifts a pixel before it drops: the wind-up
+    const spell = (w) => {                                                           // the word's blocks, each with its letter and its place in that letter (bottom row first)
+      const cells = []; let col = Math.floor((BC - (WORDS[w][0].length - 1 + [...WORDS[w][0]].reduce((s, ch) => s + NAME[ch][0].length, 0))) / 2);
+      [...WORDS[w][0]].forEach((ch, n) => {
+        let k = 0;
+        for (let r = 4; r >= 0; r--) [...NAME[ch][r]].forEach((on, c) => { if (on === 'X') cells.push({ c: col + c, r: 2 + r, key: WORDS[w][1][n], n, k: k++ }); });
+        col += NAME[ch][0].length + 1;
+      });
+      return cells;
+    };
+    const A = spell(0), B = spell(1);
+    A.forEach((b) => { b.t = 1 + b.n * 3 + b.k * 1.2; });                          // the letters go up together, each a beat behind the one before
+    const T1 = Math.ceil(Math.max(...A.map((b) => b.t))) + 6 + 22;                 // BONGO stands still for 0.88 s
+    B.forEach((b) => { b.t = T1 + 5 + b.c * 0.75 + (6 - b.r) * 1.3; });            // behind the front, each column from the bottom
+    const DONE = Math.ceil(Math.max(...B.map((b) => b.t))) + 2, T2 = DONE + 8 + 22, END = T2 + 18;
+    const lay = (f, b, i, ring) => {                                                // a block comes down the last few pixels and lands hot
+      const age = i - b.t;
+      if (age < 0) return;
+      blk(f, b.c * 3, BY0 + b.r * 3 - (age < 1 ? 5 : age < 2 ? 2 : 0), b.key, 1, Math.max(ring, age < 2 ? 0.8 : 0.8 * (1 - (age - 2) / 4)));
+    };
+    for (let i = 0; i < END; i++) {
+      const f = new Frame(MS);
+      A.forEach((b) => { const dy = go(i - T1 - b.c * 0.75), y = BY0 + b.r * 3 + dy; if (dy === 0) lay(f, b, i, 0); else if (y < H) blk(f, b.c * 3, y, b.key); });
+      const ring = i >= DONE ? Math.max(0, 0.75 * (1 - (i - DONE) / 8)) : 0;       // the last block home rings the whole word
+      B.forEach((b) => { const dy = go(i - T2 - b.c * 0.5), y = BY0 + b.r * 3 + dy; if (dy === 0) lay(f, b, i, ring); else if (y < H) blk(f, b.c * 3, y, b.key); });
+      out.push(f);
+    }
+    out.push(new Frame(200));
+    return out;
+  }
+
+  function bootRain() {   // blocks rain down and the ones that land on BONGO stay; it lets go as MATRIX rains in, all but the top of the I: one last drop, and the word rings
+    const MS = 40, out = [], drop = (t) => (t <= 0 ? 0 : t <= 6 ? Math.round(0.5 * t * t) : 18 + 6 * (t - 6));
+    const go = (t) => (t <= -2 ? 0 : t <= 0 ? -1 : drop(t));
+    const r01 = rng(11), FALL = 5;
+    const shower = (w, t0, spread, step) => {                                       // when each block of the word lands: a column stacks from the bottom
+      const at = blockWord(...WORDS[w]), lands = [];
+      for (let c = 0; c < BC; c++) { let t = t0 + r01() * spread; for (let r = BR - 1; r >= 0; r--) if (at.has(c + ',' + r)) { lands.push({ c, r, key: at.get(c + ',' + r), t }); t += 2 + r01() * step; } }
+      return lands;
+    };
+    const strays = (t0, t1, n) => Array.from({ length: n }, () => ({ c: Math.floor(r01() * BC), t: t0 + r01() * Math.max(1, t1 - t0), key: 'RTYGBP'[Math.floor(r01() * 6)] }));   // the six bright colours: the rain is dimmed, and brown and navy would be lost
+    const A = shower(0, 2, 8, 3), lastA = Math.max(...A.map((b) => b.t));
+    const T1 = Math.ceil(lastA) + 4 + 22;                                           // BONGO stands still for 0.88 s
+    const letGo = Array.from({ length: BC }, () => r01() * 7), B = shower(1, T1 + 8, 7, 2.5);
+    const dot = B.find((b) => b.c === 16 && b.r === 2);                             // the top of the I comes last, on its own
+    const lastB = Math.max(...B.filter((b) => b !== dot).map((b) => b.t));
+    dot.t = Math.ceil(lastB) + 13; dot.slow = true;
+    const RING = dot.t, T2 = RING + 8 + 22, leave = Array.from({ length: BC }, () => r01() * 6), END = T2 + 16;
+    const loose = [...strays(0, lastA - 9, 20), ...strays(T1, lastB - 9, 18)];
+    for (let i = 0; i < END; i++) {
+      const f = new Frame(MS);
+      loose.forEach((b) => { const y = Math.round((i - b.t) * 4) - 3; if (i >= b.t && y < H) blk(f, b.c * 3, y, b.key, 0.5); });   // the rain that misses falls through, dimmer
+      const flight = (b) => BY0 + b.r * 3 - Math.max(0, Math.round((b.t - i) * (b.slow ? 3 : FALL)));
+      const hot = (b) => (i < b.t ? 0 : Math.max(0, 0.8 * (1 - (i - b.t) / 4)));
+      A.forEach((b) => { const y = flight(b) + go(i - T1 - letGo[b.c]); if (y > -3 && y < H) blk(f, b.c * 3, y, b.key, 1, hot(b)); });
+      const ring = i >= RING ? Math.max(0, 0.8 * (1 - (i - RING) / 8)) : 0;
+      B.forEach((b) => { const y = flight(b) + go(i - T2 - leave[b.c]); if (y > -3 && y < H) blk(f, b.c * 3, y, b.key, 1, Math.max(ring, hot(b))); });
+      out.push(f);
+    }
+    out.push(new Frame(200));
+    return out;
+  }
+
+  function bootWave() {   // a wave of blocks rolls across, lifting them as it passes, and leaves BONGO; rolls back and leaves MATRIX; a ripple runs through it, and the last wave takes it away
+    const MS = 40, out = [], words = WORDS.map(([w, c]) => blockWord(w, c));
+    const V = 1.25, CROSS = Math.ceil((BC - 1 + (BR - 1) * 0.6) / V) + 1, TAIL = 6, HOLD = 22;   // the front moves 1.25 blocks a frame
+    const T0 = 1, T1 = T0 + CROSS + TAIL + HOLD, RIP = T1 + CROSS + TAIL + HOLD, T2 = RIP + 18, END = T2 + CROSS + TAIL - 2;
+    const lift = (behind) => (behind < 1.25 ? 2 : behind < 2.5 ? 1 : 0);            // the crest carries a block up two pixels and sets it down again
+    for (let i = 0; i < END; i++) {
+      const f = new Frame(MS), pass = i < T1 ? 0 : i < T2 ? 1 : 2, t = i - [T0, T1, T2][pass];
+      for (let r = 0; r < BR; r++) for (let c = 0; c < BC; c++) {
+        const d = (pass === 1 ? BC - 1 - c : c) + r * 0.6, behind = t * V - d;      // how far the front has gone past this block
+        const old = pass ? words[pass - 1].get(c + ',' + r) : null, next = pass < 2 ? words[pass].get(c + ',' + r) : null;
+        const x = c * 3, y = BY0 + r * 3;
+        if (behind < 0) {
+          if (old) blk(f, x, y, old);
+          continue;
+        }
+        const glow = Math.max(0, 1 - behind / (TAIL * V));
+        const rb = pass === 1 ? (i - RIP) * 2.2 - (c + r * 0.6) : -1;               // the ripple: a quick bright hop through MATRIX
+        if (next) blk(f, x, y - lift(behind) - (rb >= 0 && rb < 2.2 ? 1 : 0), next, 1, Math.max(glow * 0.6, rb >= 0 ? 0.75 * (1 - rb / 5) : 0));
+        else blk(f, x, y - lift(behind), old || KEYS[(c + r) % 8], glow, glow > 0.8 ? 0.3 : 0);
+      }
+      out.push(f);
+    }
+    out.push(new Frame(200));
+    return out;
+  }
+
+  function bootSpiral() {   // one red block; blocks wind out from it until the wall is full and unwind to leave BONGO; they wind out again and unwind to leave MATRIX, which at the end winds back in to that first block
+    const order = [];
+    let c = 9, r = 4, dc = 1, dr = 0, run = 1, done = 0, turns = 0;
+    while (order.length < BC * BR && done < 4000) {
+      if (c >= 0 && c < BC && r >= 0 && r < BR) order.push([c, r]);
+      c += dc; r += dr; done++;
+      if (--run === 0) { [dc, dr] = [-dr, dc]; turns++; run = Math.ceil(turns / 2 + 0.5); }
+    }
+    const MS = 40, out = [], N = order.length, words = WORDS.map(([w, cs]) => blockWord(w, cs));
+    const wound = (t) => 1 + 2 * t + 0.2 * t * t;                                   // it starts slowly and gathers speed
+    let FILL = 0; while (wound(FILL) < N) FILL++;
+    const SEED = 9, PER = 10, AGAIN = 15, GO = Math.ceil(N / PER);
+    const FULL = SEED + FILL, UNWIND = FULL + 4, BONGO = UNWIND + GO, REWIND = BONGO + 26, FULL2 = REWIND + Math.ceil(N / AGAIN), UNWIND2 = FULL2 + 3,
+      LEFT = UNWIND2 + GO, GLINT = LEFT + 4, OUT = GLINT + 30, GONE = OUT + Math.ceil(N / 14), END = GONE + 6;
+    out.push(new Frame(MS));
+    for (let i = 1; i <= END; i++) {
+      const f = new Frame(MS), second = i >= REWIND;
+      const shown = i < SEED ? 1 : wound(i - SEED), cleared = ((second ? i - UNWIND2 : i - UNWIND)) * PER;
+      const back = (i - REWIND) * AGAIN, glint = (i - GLINT) * 14, eaten = (i - OUT) * 14;
+      order.forEach(([cc, rr], k) => {
+        if (k >= shown) return;
+        const at = cc + ',' + rr, key = words[second ? 1 : 0].get(at), gone = N - 1 - k < cleared;   // unwinds from the outside in
+        let hot = i < SEED ? 0.8 * (1 - (i - 1) / (SEED - 1)) : i < FULL ? Math.max(0, 1 - (shown - k) / 16) * 0.7 : 0;
+        if (second && i < UNWIND2 && k >= back) {                                   // winding out again: BONGO stands until the wall reaches it
+          if (words[0].has(at)) cell(f, cc, rr, words[0].get(at));
+          return;
+        }
+        if (second && i < UNWIND2) hot = Math.max(hot, 0.7 * Math.max(0, 1 - (back - k) / (AGAIN * 2)));
+        if (gone && !key) return;
+        if (k > 0 && N - 1 - k < eaten) return;                                     // at the end the word winds back in to the first block
+        if (gone) hot = Math.max(hot, 0.7 * (1 - (cleared - (N - 1 - k)) / (PER * 4)));
+        if (i >= GLINT && i < OUT) hot = Math.max(hot, glint >= k ? 0.8 * (1 - (glint - k) / 56) : 0);   // a glint runs out along the spiral
+        if (k === 0 && i >= GONE) hot = Math.min(0.9, (i - GONE + 1) * 0.3);       // the first block is the last: it flares and is gone
+        if (k === 0 && i >= END) return;
+        cell(f, cc, rr, gone ? key : KEYS[(k >> 1) % 8], 1, Math.max(0, hot));
+      });
+      out.push(f);
+    }
+    out[out.length - 1].ms = 200;
+    return out;
+  }
+
+  function bootCurtain() {   // red curtains light up, a tug runs along them and they draw back on BONGO; it is flown out and MATRIX flown in; they close and go dark
+    const out = [], MS = 50;
+    const words = WORDS.map(([w, c]) => blockWord(w, c));
+    // one frame: `lit` pairs of curtain columns alight, counted from the middle; the curtains drawn back `gap` px each side;
+    // the words flown up `fly` px (MATRIX hangs 30 px under BONGO); `tug`: the curtain column (0 outermost) that catches the light
+    const add = (ms, lit, gap, fly = 0, glint = 0, tug = -1) => {
+      const f = new Frame(ms);
+      if (gap > 0) words.forEach((at, w) => eachCell(at, (c, r, key) => { const y = BY0 + r * 3 + w * 30 - fly; if (y > -3 && y < H) blk(f, c * 3, y, key, 1, glint); }));
+      for (let c = 0; c < 11; c++) {
+        const x = c * 3 - gap;                                                     // pleats: every other column a shade darker
+        if (x <= -3 || 10 - c >= lit) continue;
+        for (let r = 0; r < BR; r++) for (const xx of [x, 60 - x]) { f.rect(xx, BY0 + r * 3, 3, 3, '#000000'); blk(f, xx, BY0 + r * 3, 'R', c % 2 ? 0.7 : 1, c === tug || c === tug + 1 ? 0.35 : 0); }
+      }
+      out.push(f);
+    };
+    add(100, 0, 0);
+    [2, 4, 6, 8, 10, 11].forEach((lit) => add(MS, lit, 0));                         // the house lights find the curtain, from the middle out
+    add(200, 11, 0);
+    for (let c = 0; c <= 10; c += 2) add(MS, 11, 0, 0, 0, c);                       // a tug runs in from the wings
+    add(100, 11, 0);
+    for (let k = 1; k <= 14; k++) add(MS, 11, Math.round(30 * ease(k / 14)));       // and they draw back on BONGO
+    [0.5, 0.3, 0.15].forEach((g) => add(MS, 11, 30, 0, g));
+    add(900, 11, 30);
+    for (let k = 1; k <= 12; k++) add(MS, 11, 30 + Math.min(3, k), Math.round(30 * ease(k / 12)));   // scene change: the curtains clear the stage for the wider word
+    [0.5, 0.3, 0.15].forEach((g) => add(MS, 11, 33, 30, g));
+    add(1200, 11, 33, 30);
+    for (let k = 1; k <= 12; k++) add(MS, 11, Math.round(33 * (1 - ease(k / 12))), 30);   // curtain
+    add(200, 11, 0, 30);
+    [10, 8, 6, 4, 2].forEach((lit) => add(MS, lit, 0, 30));                         // lights down, from the wings in
+    add(200, 0, 0, 30);
+    return out;
+  }
+
+  function bootLoading() {   // a bar fills and lights BONGO above it; a second pass turns it to MATRIX, column by column; a third clears the panel
+    const out = [], MS = 50, BAR = ['R', 'T', 'Y', 'G', 'B', 'P'];
+    const words = WORDS.map(([w, c]) => blockWord(w, c, 1));
+    // one frame: columns left of `fill` are loaded, left of `swap` are MATRIX, left of `clear` are gone; `head` is the hot column
+    const add = (ms, fill, swap = 0, clear = 0, head = -1, glint = 0, a = 1) => {
+      const f = new Frame(ms);
+      for (let c = clear; c < BC; c++) {
+        const at = words[c < swap ? 1 : 0], hot = c === head ? 0.6 : glint;
+        for (let r = 1; r <= 5; r++) { const key = at.get(c + ',' + r); if (key) cell(f, c, r, key, (c < fill ? 1 : 0.3) * a, c < fill ? hot : 0); }
+        if (c < fill) cell(f, c, 8, BAR[Math.floor(c / 3) % BAR.length], a, hot); else cell(f, c, 8, 'V', 0.5 * a);
+      }
+      out.push(f);
+    };
+    add(100, 0, 0, BC);
+    add(60, 0, 0, 0, -1, 0, 0.5); add(250, 0);                                      // the empty track, the name waiting above it
+    for (let c = 1; c <= 16; c++) add(55, c, 0, 0, c - 1);
+    add(250, 16);                                                                   // it thinks about it...
+    for (let c = 17; c <= BC; c++) add(40, c, 0, 0, c - 1);                         // ...and finishes in a rush
+    [0.6, 0.4, 0.2].forEach((g) => add(MS, BC, 0, 0, -1, g));
+    add(900, BC);
+    for (let c = 1; c <= BC; c++) add(45, BC, c, 0, c - 1);                         // the second pass: BONGO turns to MATRIX
+    [0.5, 0.3, 0.15].forEach((g) => add(MS, BC, BC, 0, -1, g));
+    add(1200, BC, BC);
+    for (let c = 1; c < BC; c++) add(35, BC, BC, c, c);                             // the third clears it
+    add(200, BC, BC, BC);
+    return out;
+  }
+
+  function bootAUnfold() {   // switch-on: a dot, a line, and the line unfolds into BONGO; folds, changes colour, unfolds into MATRIX; then folds to the line, the dot, and is gone
+    const MS = 40, out = [], MID = 4;
+    const W2 = WORDS.map(([w, c]) => {
+      const at = blockWord(w, c), col = new Array(BC).fill(null);
+      eachCell(at, (cc, r, key) => { col[cc] = key; });
+      const fill = col.slice();                                                      // the gaps take the colour of the letter beside them, so the line is whole
+      for (let cc = 1; cc < BC; cc++) if (!fill[cc]) fill[cc] = fill[cc - 1];
+      for (let cc = BC - 2; cc >= 0; cc--) if (!fill[cc]) fill[cc] = fill[cc + 1];
+      return { at, col, fill };
+    });
+    const add = (draw) => { const f = new Frame(MS); draw(f); out.push(f); };
+    const line = (f, w, gaps = 1, hot = () => 0, span = 10) => { for (let c = 10 - span; c <= 10 + span; c++) if (W2[w].col[c]) cell(f, c, MID, W2[w].col[c], 1, hot(c)); else cell(f, c, MID, W2[w].fill[c], gaps, hot(c)); };
+    const open = (f, w, u, hot = 0) => eachCell(W2[w].at, (c, r, key) => {         // u: 0 folded on the middle row, 1 open; past 1 the outer rows run a pixel over
+      const d = r - MID;
+      blk(f, c * 3, BY0 + MID * 3 + Math.round(d * 3 * Math.min(u, 1)) + (u > 1 && Math.abs(d) === 2 ? Math.sign(d) : 0), key, 1, hot);
+    });
+    const UNFOLD = [0.25, 0.6, 0.9, 1.1, 1], FOLD = [1.1, 0.9, 0.6, 0.25, 0];
+    add(() => {});
+    for (let k = 0; k < 6; k++) add((f) => cell(f, 10, MID, W2[0].fill[10], 1, 0.8 * (1 - k / 5)));        // the dot
+    for (let k = 1; k <= 10; k++) add((f) => line(f, 0, 1, (c) => (Math.abs(c - 10) === k ? 0.5 : 0), k));  // the line runs out from it
+    for (let k = 0; k < 3; k++) add((f) => line(f, 0));
+    WORDS.forEach((_, w) => {
+      UNFOLD.forEach((u, k) => add((f) => { if (k < 2) line(f, w, 0.6 - 0.3 * k); open(f, w, u); }));     // the gaps go out as the letters open
+      for (let k = 0; k < 5; k++) add((f) => open(f, w, 1, 0.5 * (1 - k / 5)));
+      for (let k = 0; k < (w ? 24 : 22); k++) add((f) => open(f, w, 1));
+      FOLD.forEach((u) => add((f) => open(f, w, u)));
+      if (w === 0) {
+        add((f) => line(f, 0, 0.5)); add((f) => line(f, 0));
+        for (let k = 0; k <= 10; k++) add((f) => { line(f, 0); line(f, 1, 1, (c) => (Math.abs(c - 10) === k ? 0.8 : 0), k); });   // the new colours run out from the middle
+        for (let k = 0; k < 2; k++) add((f) => line(f, 1));
+      }
+    });
+    for (let k = 0; k < 2; k++) add((f) => line(f, 1, 0));
+    for (let k = 9; k >= 1; k--) add((f) => line(f, 1, 0, (c) => (Math.abs(c - 10) === k ? 0.4 : 0), k));   // the line runs back in
+    for (let k = 0; k < 3; k++) add((f) => cell(f, 10, MID, W2[1].fill[10]));
+    for (let k = 1; k <= 3; k++) add((f) => cell(f, 10, MID, W2[1].fill[10], 1, 0.3 * k));                 // the dot flares
+    out.push(new Frame(200));
+    return out;
+  }
+
+  function bootCBeat() {
+    const out = [], words = WORDS.map(([w, c]) => blockWord(w, c));
+    const word = (f, at, dy, hot = 0) => eachCell(at, (c, r, key) => { const y = BY0 + r * 3 + dy; if (y > -3 && y < H) blk(f, c * 3, y, key, 1, hot); });
+    const echo = (f, at, s) => {                                                   // each letter's colour, a row further down each frame
+      const foot = new Map(); eachCell(at, (c, r, key) => { if (r === 6) foot.set(c, key); });
+      foot.forEach((key, c) => { if (s < 3) cell(f, c, 7 + s, key, 0.7); if (s > 0 && s < 4) cell(f, c, 6 + s, key, 0.35); });
+    };
+    const push = (ms, draw) => { const f = new Frame(ms); if (draw) draw(f); out.push(f); };
+    const IN = [-30, -28, -24, -18, -12, -6], BOUNCE = [[0, 0.6], [-2, 0.4], [-3, 0.2], [-2, 0.1]];   // never more than 6 px a frame
+    push(120);
+    words.forEach((at, w) => {
+      IN.forEach((dy) => push(40, (f) => { if (w) word(f, words[0], dy + 30); word(f, at, dy); }));   // the word before rolls out below as this one rolls in
+      BOUNCE.forEach(([dy, hot], s) => push(40, (f) => { word(f, at, dy, hot); echo(f, at, s); }));
+      push(w ? 1000 : 880, (f) => word(f, at, 0));                                 // the word, still
+    });
+    [2, 6, 12, 18, 24].forEach((dy) => push(40, (f) => word(f, words[1], dy)));     // third beat: it rolls away
+    push(200);
+    return out;
+  }
+
+  // Round wall: the logo is the first thing and the last. Its twelve blocks fly in from the four sides and click
+  // into the small round wall; it opens from the middle into BONGO, turns over into MATRIX, closes back to the
+  // logo, and the blocks fly off the way they came.
+
+  function bootCLogo() {
+    const out = [], words = WORDS.map(([w, c]) => blockWord(w, c));
+    const push = (ms, draw) => { const f = new Frame(ms); if (draw) draw(f); out.push(f); };
+    // the logo's blocks on the grid (columns 8 to 11, rows 3 to 6), clockwise from the top left, each with the side it comes from
+    const LOGO = [[9, 3, 'B', 0, -1], [10, 3, 'V', 0, -1], [11, 4, 'Y', 1, 0], [11, 5, 'G', 1, 0], [10, 6, 'B', 0, 1], [9, 6, 'N', 0, 1], [8, 5, 'B', -1, 0], [8, 4, 'T', -1, 0],
+      [9, 4, 'N', -1, 0], [10, 4, 'B', 1, 0], [10, 5, 'T', 1, 0], [9, 5, 'R', -1, 0]];
+    const logo = new Map(LOGO.map(([c, r, key]) => [c + ',' + r, key]));
+    const lands = (k) => 6 + Math.round(k * 1.5), LAST = lands(LOGO.length - 1);
+    const fly = (f, i) => LOGO.forEach(([c, r, key, dx, dy], k) => {                // i frames in: 6 px a frame until it is home
+      const away = Math.max(0, lands(k) - i) * 6, x = c * 3 + dx * away, y = BY0 + r * 3 + dy * away;
+      if (x > -3 && x < W && y > -3 && y < H) blk(f, x, y, key, 1, away ? 0 : Math.max(0, 0.8 - (i - lands(k)) * 0.3));
+    });
+    // a front opening from the middle (u from 0 to 11 columns): `inside` behind it, `outside` ahead, the front itself hot
+    const SPAN = 11, wipe = (f, inside, outside, u) => {
+      const seen = new Set([...inside.keys(), ...outside.keys()]);
+      seen.forEach((k) => {
+        const [c, r] = k.split(',').map(Number), d = Math.abs(c - 9.5), at = d < u ? inside : outside, key = at.get(k);
+        if (key) cell(f, c, r, key, 1, d < u && d >= u - 1.5 ? 0.6 : 0);
+      });
+    };
+    push(80);
+    for (let i = 1; i <= LAST + 2; i++) push(40, (f) => fly(f, i));
+    push(420, (f) => fly(f, 99));                                                   // the logo, whole
+    for (let u = 1; u <= SPAN + 1; u++) push(40, (f) => wipe(f, words[0], logo, u));
+    push(900, (f) => wipe(f, words[0], logo, 99));                                  // BONGO
+    for (let u = 1; u <= SPAN + 1; u++) push(40, (f) => wipe(f, words[1], words[0], u));
+    push(1100, (f) => wipe(f, words[1], words[0], 99));                             // MATRIX
+    for (let u = SPAN; u >= 0; u--) push(40, (f) => { wipe(f, words[1], new Map(), u); eachCell(logo, (c, r, key) => { if (Math.abs(c - 9.5) >= u) cell(f, c, r, key, 1, u ? 0 : 0.6); }); });
+    push(40, (f) => eachCell(logo, (c, r, key) => cell(f, c, r, key, 1, 0.3)));
+    push(560, (f) => fly(f, 99));                                                   // the last beat: the logo again
+    for (let i = LAST; i >= 0; i--) push(40, (f) => fly(f, i));                     // and off the way they came
+    push(200);
+    return out;
+  }
+
+  // Shine (the quiet one): nothing moves but light. BONGO comes up a letter at a time; a shine crosses the panel
+  // and the name behind it is MATRIX; a second shine crosses and leaves the panel dark.
+
+  function bootCShine() {
+    const out = [], words = WORDS.map(([w, c]) => blockWord(w, c)), none = new Map();
+    const push = (ms, draw) => { const f = new Frame(ms); if (draw) draw(f); out.push(f); };
+    const letter = [];                                                             // which letter of BONGO a column belongs to
+    { let col = 1; [...'BONGO'].forEach((ch, n) => { for (let k = 0; k < 3; k++) letter[col + k] = n; col += 4; }); }
+    const END = BC + 4.5 + 3, shine = (f, before, after, u) => {                    // the band's front is at column u on the top row, leaning back as it goes down
+      for (let r = 0; r < BR; r++) for (let c = 0; c < BC; c++) {
+        const d = u - (c + r * 0.5), k = c + ',' + r, key = (d >= 1 ? after : before).get(k);
+        const band = d >= 0 && d < 2;
+        if (key) cell(f, c, r, key, 1, band ? 0.75 : 0);
+        else if (band) { const was = (d >= 1 ? before : after).get(k); if (was) cell(f, c, r, was, 1, 0.75); else if (d >= 0.5 && d < 1.5) cell(f, c, r, 'T', 0.5, 0.8); }
+      }
+    };
+    push(100);
+    for (let i = 0; i < 12; i++) push(50, (f) => eachCell(words[0], (c, r, key) => { const a = [0, 0.3, 0.55, 0.8, 1][Math.max(0, Math.min(4, i + 1 - letter[c] * 2))]; cell(f, c, r, key, a); }));
+    push(850, (f) => shine(f, words[0], none, -9));                                 // BONGO
+    for (let u = 0; u <= END; u += 1.5) push(40, (f) => shine(f, words[0], words[1], u));
+    push(1050, (f) => shine(f, none, words[1], 99));                                // MATRIX
+    for (let u = 0; u <= END; u += 1.5) push(40, (f) => shine(f, words[1], none, u));
+    push(200);
+    return out;
+  }
+
+  function bootBUnfold() {   // switched on like an old television: a dot, a line, and the line opens into BONGO; it shuts to the line and opens into MATRIX; then line, dot, dark
+    const out = [], MS = 45, MID = 4, HOT = 0.75;
+    const words = WORDS.map(([w, colours]) => {                                    // each word by column: its colour there and its rows
+      const cols = new Map();
+      eachCell(blockWord(w, colours, 2), (c, r, key) => { if (!cols.has(c)) cols.set(c, { key, rows: [] }); cols.get(c).rows.push(r); });
+      cols.forEach((col) => col.rows.sort((p, q) => Math.abs(q - MID) - Math.abs(p - MID)));
+      return cols;
+    });
+    // one frame: the line reaching `span` columns either side of the middle, opened `s` (0: a line, 1: the word) into word `w`
+    const add = (ms, w, span, s = 0, a = 1) => {
+      const f = new Frame(ms);
+      for (let c = 10 - span; c <= 10 + span; c++) {
+        const col = words[w].get(c);
+        if (s === 0 || !col) { if (s < 0.3) cell(f, c, MID, 'Y', a * (s ? 0.6 : 1), HOT); continue; }
+        col.rows.forEach((r) => blk(f, c * 3, BY0 + MID * 3 + Math.round((r - MID) * 3 * s), col.key, a, HOT * (1 - s)));
+      }
+      out.push(f);
+    };
+    const open = (w, span) => { for (let k = 1; k <= 7; k++) add(MS, w, span, ease(k / 7)); };
+    const shut = (w, span) => { for (let k = 1; k <= 5; k++) add(MS, w, span, 1 - (k / 5) ** 2); };
+    add(100, 0, -1);
+    add(MS, 0, 0, 0, 0.5); add(135, 0, 0);                                          // the dot
+    [1, 2, 4, 6, 8, 9].forEach((span) => add(MS, 0, span));                         // the line
+    add(90, 0, 9);
+    open(0, 9);
+    out[out.length - 1].ms = 900;
+    shut(0, 9);
+    add(90, 0, 9); add(90, 1, 10);                                                  // the line reaches the edges: MATRIX is wider
+    open(1, 10);
+    out[out.length - 1].ms = 1200;
+    shut(1, 10);
+    add(90, 1, 10);
+    [8, 6, 4, 2, 1, 0].forEach((span) => add(MS, 1, span));                         // line, dot,
+    add(135, 1, 0); add(MS, 1, 0, 0, 0.5);
+    add(200, 1, -1);                                                                // dark
+    return out;
+  }
+
+  function bootAReels() {   // each letter is a reel of blocks: they spin down and lock one by one on BONGO, spin on and lock on MATRIX, the last reel late; then the word rings
+    const MS = 40, out = [], HOME = BY0 + 2 * 3, r01 = rng(23);
+    const drop = (t) => (t <= 0 ? 0 : t <= 6 ? Math.round(0.5 * t * t) : 18 + 6 * (t - 6));
+    const rem = (k) => (k <= 0 ? 0 : k <= 6 ? [0, -1, 1, 3, 6, 9, 13][k] : 13 + 4 * (k - 6));   // px still to run k frames before a reel locks: it slows, runs a pixel past and comes back
+    const spell = (w) => {
+      let col = Math.floor((BC - (WORDS[w][0].length - 1 + [...WORDS[w][0]].reduce((s, ch) => s + NAME[ch][0].length, 0))) / 2);
+      return [...WORDS[w][0]].map((ch, n) => { const L = { c0: col, rows: NAME[ch], wide: NAME[ch][0].length, key: WORDS[w][1][n] }; col += L.wide + 1; return L; });
+    };
+    const A = spell(0), B = spell(1);
+    A.forEach((L, n) => { L.start = 1 + 2 * n; L.lock = 13 + 4 * n; });
+    const T1 = A[4].lock + 4 + 22;                                                   // BONGO stands still for 0.88 s
+    A.forEach((L, n) => { L.out = T1 + 2 * n; });
+    B.forEach((L, n) => { L.start = T1 + 5 + 2 * n; L.lock = T1 + 17 + 4 * n + (n === 5 ? 6 : 0); });     // the last reel keeps you waiting
+    const RING = B[5].lock, T2 = RING + 8 + 22, END = T2 + 16;
+    B.forEach((L, n) => { L.out = T2 + n; });
+    [...A, ...B].forEach((L) => {                                                    // the strip that runs ahead of the letter, four clear rows below it: bright blocks in any colour but its own
+      const n = Math.max(0, Math.floor((rem(L.lock - L.start) - HOME - 27) / 3)), keys = [...'RTYGBP'].filter((k) => k !== L.key);
+      L.strip = Array.from({ length: n }, () => Array.from({ length: L.wide }, () => keys[Math.floor(r01() * keys.length)]));
+    });
+    const letter = (f, L, y, hot) => L.rows.forEach((row, r) => [...row].forEach((on, c) => { const yy = y + r * 3; if (on === 'X' && yy > -3 && yy < H) blk(f, (L.c0 + c) * 3, yy, L.key, 1, hot); }));
+    for (let i = 0; i < END; i++) {
+      const f = new Frame(MS), ring = i >= RING ? Math.max(0, 0.8 * (1 - (i - RING) / 8)) : 0;
+      [A, B].forEach((word, w) => word.forEach((L) => {
+        if (i < L.start) return;
+        const gone = i - L.out, y = HOME - rem(L.lock - i) + (gone < 0 ? 0 : gone < 2 ? -1 : drop(gone - 1));   // spinning out: a pixel up, then away
+        L.strip.forEach((row, j) => { const yy = y + 27 + j * 3; if (yy > -3 && yy < H) row.forEach((key, c) => blk(f, (L.c0 + c) * 3, yy, key, 0.6)); });
+        letter(f, L, y, Math.max(w ? ring : 0, i >= L.lock ? Math.max(0, 0.6 * (1 - (i - L.lock) / 4)) : 0));
+      }));
+      out.push(f);
+    }
+    out.push(new Frame(200));
+    return out;
+  }
+
+  function bootBBounce() {   // a hot block bounces along the panel: each letter of BONGO lights where it lands; it bounces back and turns them to MATRIX; a third pass knocks them down
+    const out = [], MS = 40, TOP = 4, REST = BY0 + (TOP - 1) * 3, HIGH = 9;
+    const fall = (t) => (t <= 0 ? 0 : t <= 6 ? Math.round(0.5 * t * t) : 18 + 6 * (t - 6));
+    const letters = WORDS.map(([w, colours]) => {                                  // each letter: its blocks, its colour and where the ball lands on it
+      let col = Math.floor((BC - (w.length - 1 + [...w].reduce((n, ch) => n + NAME[ch][0].length, 0))) / 2);
+      return [...w].map((ch, n) => {
+        const wide = NAME[ch][0].length, cells = [];
+        NAME[ch].forEach((row, r) => [...row].forEach((on, c) => { if (on === 'X') cells.push([col + c, TOP + r]); }));
+        const one = { key: colours[n], cells, x: (col + (wide >> 1)) * 3 }; col += wide + 1; return one;
+      });
+    });
+    let up = [];                                                                    // the letters showing: { one, hit: the frame it was struck, down: the frame it was knocked away }
+    const add = (ms, ball) => {
+      const f = new Frame(ms), i = out.length;
+      up = up.filter((e) => e.down === undefined || BY0 + TOP * 3 + fall(i - e.down) < H);
+      for (const e of up) {
+        const age = i - e.hit, dy = e.down === undefined ? (age < 2 ? 1 : 0) : fall(i - e.down);   // it dips a pixel under the blow
+        e.one.cells.forEach(([c, r]) => blk(f, c * 3, BY0 + r * 3 + dy, e.one.key, 1, 0.8 * Math.max(0, 1 - age / 4)));
+      }
+      if (ball) blk(f, ball[0], ball[1], 'Y', 1, 0.7);
+      out.push(f);
+    };
+    // the ball comes in from off the panel, lands on each stop in turn (strike(j) as it does) and bounces on off the far side
+    const pass = (stops, per, strike) => {
+      const dir = Math.sign(stops[stops.length - 1] - stops[0]), xs = [stops[0] - dir * 12, ...stops, stops[stops.length - 1] + dir * 12];
+      for (let j = 0; j + 1 < xs.length; j++) for (let k = 1; k <= per; k++) {
+        const u = k / per;
+        if (k === per && j < stops.length) strike(j);
+        add(MS, [Math.round(xs[j] + (xs[j + 1] - xs[j]) * u), REST - Math.round(HIGH * 4 * u * (1 - u))]);
+      }
+    };
+    const [bongo, matrix] = letters;
+    add(100, null);
+    pass(bongo.map((l) => l.x), 6, (j) => up.push({ one: bongo[j], hit: out.length }));
+    add(800, null);
+    pass(matrix.map((l) => l.x).reverse(), 6, (j) => {                             // back the other way: X takes the last O's place, R takes G's...
+      const n = matrix.length - 1 - j, old = bongo[n === 5 ? 4 : n === 4 ? -1 : n];
+      up = up.filter((e) => e.one !== old); up.push({ one: matrix[n], hit: out.length });
+    });
+    add(1050, null);
+    pass(matrix.map((l) => l.x), 5, (j) => { const e = up.find((x) => x.one === matrix[j]); e.hit = e.down = out.length; });   // and once more, knocking each one down
+    while (up.length) add(MS, null);
+    out[out.length - 1].ms = 200;
+    return out;
+  }
+
   const PRESETS = [
     P('blank', 'Blank', 'From v2, remastered', blank, 'An empty frame to start from.', false),
     P('ball', 'Bouncing ball', 'From v2, remastered', bouncingBall, 'A shaded ball bouncing there and back, squashing as it lands.'),
@@ -817,8 +1277,21 @@
     P('sun', 'Sunny', 'Icons and loaders', sunnyDay, 'The sun turning, a cloud drifting by.'),
     P('storm', 'Rain cloud', 'Icons and loaders', rainCloud, 'Rain and the odd flash of lightning.'),
     P('wifi', 'Signal', 'Icons and loaders', wifiBars, 'Signal arcs lighting up.', false),
-    // boot: tools/build_sleep.py also writes it as resources/media/built-in/splash_<boot>.gif, a built-in boot and splash screen
+    // boot: tools/build_sleep.py also writes each as resources/media/built-in/boot_<boot>.gif, a built-in boot screen
     Object.assign(P('boot-reveal', 'Reveal', 'Boot screens', reveal, 'A wall of blocks falls in, then dims to leave BONGO, then MATRIX.', false), { boot: 'reveal' }),
+    Object.assign(P('boot-c-logo', 'Round wall', 'Boot screens', bootCLogo, 'Blocks fly in to build the logo, which opens into BONGO, then MATRIX, and closes again.', false), { boot: 'round_wall' }),
+    Object.assign(P('boot-c-beat', 'Drum beat', 'Boot screens', bootCBeat, 'BONGO lands with a bounce, then MATRIX, on three even beats.', false), { boot: 'drum_beat' }),
+    Object.assign(P('boot-a-unfold', 'Unfold', 'Boot screens', bootAUnfold, 'A dot, a line, and the line unfolds into BONGO, then MATRIX, and folds away to the dot.', false), { boot: 'unfold' }),
+    Object.assign(P('boot-b-unfold', 'Switch on', 'Boot screens', bootBUnfold, 'A dot, a line, and the line opens into BONGO, then MATRIX; then line, dot, dark.', false), { boot: 'switch_on' }),
+    Object.assign(P('boot-c-shine', 'Shine', 'Boot screens', bootCShine, 'BONGO lights up, a shine crosses and leaves MATRIX, then crosses again and leaves the dark.', false), { boot: 'shine' }),
+    Object.assign(P('boot-build', 'Block by block', 'Boot screens', bootBuild, 'BONGO goes up block by block; a front knocks it out and lays MATRIX behind it.', false), { boot: 'block_by_block' }),
+    Object.assign(P('boot-rain', 'Block rain', 'Boot screens', bootRain, 'Blocks rain down and the ones that land on the name stay; one last drop tops the I.', false), { boot: 'block_rain' }),
+    Object.assign(P('boot-wave', 'Rainbow wave', 'Boot screens', bootWave, 'A wave of blocks rolls across and leaves BONGO, rolls back and leaves MATRIX, then takes it away.', false), { boot: 'rainbow_wave' }),
+    Object.assign(P('boot-spiral', 'Spiral', 'Boot screens', bootSpiral, 'Blocks wind out from one red block and unwind to leave BONGO, wind out again for MATRIX, and wind back in.', false), { boot: 'spiral' }),
+    Object.assign(P('boot-curtain', 'Curtains', 'Boot screens', bootCurtain, 'Red curtains draw back on BONGO, MATRIX is flown in, and the curtains close.', false), { boot: 'curtains' }),
+    Object.assign(P('boot-loading', 'Loading bar', 'Boot screens', bootLoading, 'A bar fills and lights BONGO, a second pass turns it to MATRIX, a third clears it.', false), { boot: 'loading_bar' }),
+    Object.assign(P('boot-a-reels', 'Reels', 'Boot screens', bootAReels, 'Reels of blocks spin and lock a letter at a time on BONGO, then MATRIX.', false), { boot: 'reels' }),
+    Object.assign(P('boot-b-bounce', 'Bouncing block', 'Boot screens', bootBBounce, 'A hot block bounces along and lights BONGO, bounces back for MATRIX, then knocks it down.', false), { boot: 'bouncing_block' }),
   ];
   window.ANIMATOR_PRESETS = PRESETS;
   // the drawing kit, for more presets in their own files (js/animator-sleep.js: the built-in sleep screens)

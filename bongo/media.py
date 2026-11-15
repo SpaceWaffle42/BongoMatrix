@@ -3,6 +3,8 @@
     built-in/   resources/media/built-in, shipped with Bongo Matrix (read-only). Only Splash and
                 Sleep screens live here: ``splash_*`` files are built-in splash screens and
                 ``sleep_*`` files are built-in sleep screens, each made for its own screen.
+                ``boot_*`` files are the built-in boot screens: splash files made to play once
+                at start-up.
     uploaded/   data/uploads, files added from the dashboard (git-ignored, like v2, so updates
                 never touch them; data/ is also where the systemd service may write)
 
@@ -39,6 +41,8 @@ MAX_UPLOAD = 50 * 1024 * 1024        # one file
 MAX_LIBRARY = 1024 * 1024 * 1024     # everything in uploaded/
 MAX_PIXELS = 16_000_000              # refuse decompression bombs
 SCREENS = ("splash", "sleep")        # screen files are named <screen>_*.ext, in either folder
+BOOT = "boot_"                       # built-in boot screens (boot_*.gif) are splash files: made to play once at start-up
+RENAMED = {"built-in/splash_reveal.gif": "built-in/boot_reveal.gif"}   # saved settings follow a built-in file's new name
 
 
 def screen_of(name) -> str | None:
@@ -46,6 +50,8 @@ def screen_of(name) -> str | None:
     if not isinstance(name, str) or "/" not in name:
         return None
     file = name.rsplit("/", 1)[1]
+    if file.startswith(BOOT):
+        return "splash"
     return next((s for s in SCREENS if file.startswith(f"{s}_")), None)
 
 
@@ -58,7 +64,10 @@ def for_screen(name, screen: str) -> bool:
 
 
 def shipped(name) -> str | None:
-    """The built-in twin of an uploaded screen file (v2 users uploaded what is now shipped), else None."""
+    """The built-in twin of an uploaded screen file (v2 users uploaded what is now shipped), or a
+    built-in file's new name if it was renamed, else None."""
+    if isinstance(name, str) and name in RENAMED:
+        return RENAMED[name]
     if not isinstance(name, str) or not name.startswith("uploaded/") or screen_of(name) is None:
         return None
     twin = "built-in/" + name.split("/", 1)[1]

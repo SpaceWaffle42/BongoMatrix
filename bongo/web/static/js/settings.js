@@ -776,7 +776,7 @@ function screenFiles(lib, screen) {
   const twins = new Set(builtIn.map((f) => f.file));   // this screen's only: a copy of another's is just yours
   const uploaded = lib.folders.uploaded.filter((f) => !twins.has(f.file) && SCREEN_TYPES.test(f.name));
   const shipped = (n) => (n && n.startsWith('uploaded/') && twins.has(n.slice(9)) ? `built-in/${n.slice(9)}` : n);
-  const usable = (n) => n.startsWith('uploaded/') || n.split('/').pop().startsWith(`${screen}_`);
+  const usable = (n) => n.startsWith('uploaded/') || (screen === 'splash' ? ['splash_', 'boot_'] : [`${screen}_`]).some((p) => n.split('/').pop().startsWith(p));
   return { builtIn, uploaded, shipped, usable };
 }
 

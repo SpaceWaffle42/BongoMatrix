@@ -91,7 +91,7 @@ export function importBox(done) {
   function review() {
     const m = job.manifest, mine = run;
     title.textContent = job.updating ? `Update ${m.name} to ${m.version}` : m.name;
-    const trust = h('input', { type: 'checkbox', class: 'check', id: 'import-trust' });
+    const trust = h('input', { type: 'checkbox', class: 'check', id: 'import-trust', 'aria-describedby': m.sites.length ? 'import-risk' : null });
     const install = h('button', { type: 'button', class: 'btn primary', disabled: true }, job.updating ? 'Update' : 'Install');
     trust.onchange = () => { install.disabled = !trust.checked; };
     install.onclick = async () => {
@@ -129,8 +129,10 @@ export function importBox(done) {
       ...(m.sites.some((x) => x.startsWith('*.')) ? [h('p', { class: 'error-box' }, `A site starting “*.” means any name under it: ${m.sites.filter((x) => x.startsWith('*.')).map((x) => x.slice(2)).join(', ')}. Only trust that if the whole of each belongs to one company you know.`)] : []),
       ...(job.new_sites?.length ? [h('p', { class: 'error-box' }, `This version also wants to reach: ${job.new_sites.join(', ')}`)] : []),
       h('div', { class: 'note' }, icon('info'), h('div', null, apart)),
+      ...(m.sites.length ? [h('p', { class: 'small flush', id: 'import-risk' }, h('strong', null, 'Shared-service risk: '),
+        "if a module lists a big service that many websites share, it may also reach those other websites. The Matrix can't tell them apart.")] : []),
       h('label', { class: 'row gap-s', for: 'import-trust', style: 'align-items:flex-start' }, trust,
-        h('span', { class: 'small' }, `I trust ${m.author}: it's their code that will run`)),
+        h('span', { class: 'small' }, m.sites.length ? `I trust ${m.author} and accept the shared-service risk. It's their code that will run.` : `I trust ${m.author}. It's their code that will run.`)),
       h('div', { class: 'row end gap-s wrap' }, install));
     title.focus();
   }
