@@ -23,6 +23,9 @@ FROZEN_SECONDS = 180   # no frame for this long means the player is stuck (the s
                        # being decoded on a Pi Zero, is capped at 120 s)
 
 
+ACT_KEEPS = 2.0        # s a pressed button waits for the screen's next frame before it is forgotten
+
+
 class Live:
     def __init__(self):
         self._lock = threading.Lock()
@@ -46,6 +49,7 @@ class Live:
         self.overlay = None         # callable(frame) -> frame, e.g. the pairing PIN
         self.index = None           # playlist position on now (None for splash, sleep, pushes)
         self.reload = threading.Event()  # config saved: the player restarts with it
+        self.acts: collections.deque = collections.deque(maxlen=8)   # (module, name, when): buttons pressed (Module.actions)
 
     # -- player side -------------------------------------------------------------------
     def playing(self, entry, upcoming, index=None) -> None:
@@ -84,6 +88,18 @@ class Live:
                     f"{on.module}/{on.style}" if on else "nothing", f"{after.module}/{after.style}" if after else "nothing")
                 (frozen or (lambda: os._exit(70)))()   # not sys.exit: the stuck thread would never let it finish
                 return
+
+    def take_acts(self) -> list:
+        """The buttons pressed for the module on the panel now, in order. Ones for any other module are dropped,
+        and so are stale ones (pressed while nothing was drawing: a dark panel), so nothing happens long after."""
+        if not self.acts:
+            return []
+        with self._lock:
+            on = self.entry.module if self.entry else None
+            fresh = time.monotonic() - ACT_KEEPS
+            names = [name for module, name, when in self.acts if module == on and when >= fresh]
+            self.acts.clear()
+        return names
 
     def take_push(self):
         with self._lock:
@@ -128,6 +144,11 @@ class Live:
         """Ask the player to restart from the saved config (safe area, playlist, schedule)."""
         self.reload.set()
         self.skip.set()
+
+    def act(self, module: str, name: str) -> None:
+        """A button of ``module`` was pressed: its screen on the panel hears of it before its next frame."""
+        with self._lock:
+            self.acts.append((module, name, time.monotonic()))
 
     def push(self, entry) -> None:
         with self._lock:

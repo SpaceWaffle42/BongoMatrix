@@ -48,7 +48,10 @@ def describe(module) -> dict:
         styles[str(name)] = {"defaults": _plain(cls.defaults), "choices": _plain(cls.choices), "limits": _plain(cls.limits),
                              "swatches": _plain(cls.swatches), "basic": _plain(cls.basic), "group": cls.group,
                              "fps": max(1, min(60, int(cls.fps)))}
+    from bongo.schema import actions
+
     return {"id": module.id, "name": module.name, "description": module.description, "defaults": _plain(module.defaults),
+            "actions": actions(module.actions),
             "choices": _plain(module.choices), "limits": _plain(module.limits), "basic": _plain(module.basic),
             "item_fields": _plain(module.item_fields), "suggestions": _plain(module.suggestions),
             "choice_names": _plain(module.choice_names), "help": _plain(module.help), "styles": styles}
@@ -76,7 +79,7 @@ def context(info: dict):
 
     return Context(width=int(info.get("width", 64)), height=int(info.get("height", 32)),
                    tz=ZoneInfo(info["tz"]) if info.get("tz") else None, rng=random.Random(info.get("seed")),
-                   home=info.get("home"), calendar=info.get("calendar"))
+                   home=info.get("home"), calendar=info.get("calendar"), preview=bool(info.get("preview")))
 
 
 class _Numbered:
@@ -124,6 +127,10 @@ def serve(module, stdin, out) -> None:
                 if img.size != (style.ctx.width, style.ctx.height):
                     raise ValueError(f"render gave a {img.size[0]}x{img.size[1]} frame, not {style.ctx.width}x{style.ctx.height}")
                 stdout.send({"ok": True, "finished": bool(style.finished)}, img.convert("RGB").tobytes())
+            elif op == "act":
+                if msg.get("name") in module.actions:
+                    screens[msg["h"]].act(msg["name"])
+                stdout.send({"ok": True})
             elif op == "close":
                 screens.pop(msg.get("h"), None), zones.pop(msg.get("h"), None)
                 stdout.send({"ok": True})

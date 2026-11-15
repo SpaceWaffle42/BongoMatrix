@@ -28,6 +28,8 @@ class Context:
     pet: Pet = field(default_factory=Pet)  # the Matrix's one pet (bongo/pets.py)
     home: dict | None = None  # the Matrix's location, set in Settings: {"name", "latitude", "longitude"}
     calendar: dict | None = None  # the Calendar screens' colour coding, set in Settings > Calendars (config.calendar_look)
+    preview: bool = False  # True: a picture for the dashboard (possibly of a made-up moment), not the screen on the panel.
+    #                        A module that keeps something going between frames must not let a preview move it on.
 
     def now(self) -> dt.datetime:
         return dt.datetime.now(self.tz)
@@ -58,6 +60,10 @@ class Style:
 
     def render(self, now: dt.datetime) -> Image.Image:
         raise NotImplementedError
+
+    def act(self, name: str) -> None:
+        """Someone pressed one of the module's buttons (``Module.actions``) while this screen is on the panel.
+        Called between frames: note what was asked and return at once; ``render`` shows it."""
 
 
 @dataclass(frozen=True)
@@ -112,6 +118,10 @@ class Module:
     # ``extend(settings, ctx)``: settings filled in from outside the entry as a screen starts (the
     # Calendar adds the showings of your linked calendars, bongo.calendars). Returns new settings.
     extend: Callable[[dict, Context], dict] | None = None
+    # ``actions={"feed": "Feed"}``: buttons the dashboard shows while one of this module's screens is on the
+    # panel (name -> the words on the button). Pressing one calls that screen's ``Style.act(name)``. Always
+    # optional extras: a screen must be complete with nobody pressing anything. See ``bongo.schema.actions``.
+    actions: dict = field(default_factory=dict)
 
     @property
     def default_style(self) -> str:

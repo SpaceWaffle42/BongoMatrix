@@ -33,6 +33,26 @@ export function render(view) {
   const stateNote = h('p', { class: 'muted small hero-note', 'aria-live': 'polite' });
   const progress = h('div', { class: 'progress' }, h('div', { class: 'progress-track' }, bar),
     h('div', { class: 'row between mono small muted' }, elapsedEl, nextEl));
+  // the module's own buttons (its ``actions``: an aquarium's Feed), only while it is the one on the panel
+  const acts = h('div', { class: 'row gap-s wrap hero-acts', role: 'group', hidden: true });
+  const actsSay = h('p', { class: 'sr', role: 'status' });
+  let actsFor = '', actsBusy = false;
+  const paintActs = (e, off) => {
+    const m = e && !off ? moduleById(e.module) : null, list = m?.actions || [];
+    const key = list.length ? `${m.id}:${list.map((a) => a.name).join()}` : '';
+    if (key === actsFor) return;      // the same buttons: left alone, so nothing moves under a finger
+    actsFor = key;
+    if (acts.contains(document.activeElement)) pauseBtn.focus({ preventScroll: true });   // (they are about to change or go)
+    acts.hidden = !list.length;
+    if (list.length) acts.setAttribute('aria-label', `${m.name} buttons`);
+    acts.replaceChildren(...list.map((a) => h('button', { type: 'button', class: 'btn', onclick: async () => {
+      if (actsBusy) return;           // one press at a time (not disabled: that would drop the keyboard's focus)
+      actsBusy = true; setTimeout(() => { actsBusy = false; }, 300);
+      actsSay.textContent = '';
+      try { await post('/api/act', { module: m.id, name: a.name }); setTimeout(() => { actsSay.textContent = `${a.label}: done`; }, 50); }
+      catch (err) { fail(a.label)(err); }
+    } }, a.label)));
+  };
   const idleLink = h('a', { href: href('/playlist'), 'data-route': '/playlist', class: 'small idle-link', hidden: true }, 'Open the playlist');
   const loop = new FrameLoop(canvas, { path: () => '/api/frame.png', interval: 125,
     led: () => ({ safeArea: S.state?.safe_area, panel: S.state?.panel, showSafe }) });
@@ -50,7 +70,8 @@ export function render(view) {
     h('div', { class: 'led-frame' }, canvas),
     progress,
     stateNote, idleLink,
-    h('div', { class: 'row between wrap' }, h('div', { class: 'row gap-s' }, pauseBtn, nextBtn), editBtn));
+    h('div', { class: 'row between wrap' }, h('div', { class: 'row gap-s' }, pauseBtn, nextBtn), editBtn),
+    acts, actsSay);   // (last: Pause and Next never move when these come and go)
 
   // -- quick controls --------------------------------------------------------------------
   const bVal = h('span', { class: 'mono strong' });
@@ -122,6 +143,7 @@ export function render(view) {
     pauseBtn.disabled = nextBtn.disabled = idle;
     styleTag.textContent = e ? humanize(styleOf(e)) : '';
     styleTag.hidden = !e || asleep;
+    paintActs(e, idle || (asleep && !e));
     pauseBtn.replaceChildren(icon(L.paused ? 'play' : 'pause'));
     pauseBtn.setAttribute('aria-label', L.paused ? 'Resume rotation' : 'Pause rotation');
     const i = playingIndex(S.draft || []);

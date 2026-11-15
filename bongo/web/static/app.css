@@ -162,6 +162,7 @@ input[type="time"] { color-scheme: dark; }
 .hero-title { overflow-wrap: anywhere; }
 .hero-note:empty { display: none; }
 .hero-note { margin: -6px 0 0; }
+.hero-acts .btn { min-height: 44px; }
 .progress { display: flex; flex-direction: column; gap: 8px; }
 .progress-track { height: 6px; border-radius: 0; background: var(--line); overflow: hidden; }
 .progress-fill { height: 100%; width: 0; background: var(--amber); transition: width .25s linear; }

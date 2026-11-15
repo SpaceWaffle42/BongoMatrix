@@ -36,6 +36,24 @@ def number(value) -> bool:
     return isinstance(value, (int, float)) and not isinstance(value, bool) and math.isfinite(value)
 
 
+ACTION = re.compile(r"[a-z][a-z0-9_]{0,23}\Z")
+MOST_ACTIONS, MAX_LABEL = 6, 20
+
+
+def actions(value) -> dict:
+    """A module's buttons (``Module.actions``), checked: {name: the words on the button}. Raises ValueError."""
+    if not isinstance(value, dict):
+        raise ValueError("actions must be {name: label}")
+    if len(value) > MOST_ACTIONS:
+        raise ValueError(f"at most {MOST_ACTIONS} actions")
+    for name, label in value.items():
+        if not isinstance(name, str) or not ACTION.match(name):
+            raise ValueError(f"action name {name!r}: lower-case letters, digits and _ (up to 24), starting with a letter")
+        if not isinstance(label, str) or not 1 <= len(label.strip()) <= MAX_LABEL or label != label.strip() or not label.isprintable():
+            raise ValueError(f"action {name}: its label must be 1 to {MAX_LABEL} characters")
+    return dict(value)
+
+
 def check(name: str, default, value, choices=None, limits=None) -> None:
     """Raise ValueError if ``value`` can't stand in for a setting whose default is ``default``.
     ``limits``: (lowest, highest) for a number setting, from the module's or style's ``limits``."""
@@ -130,6 +148,7 @@ def describe(module) -> dict:
         "id": module.id, "name": module.name, "description": module.description,
         **({"limits": {n: list(v) for n, v in module.limits.items()}} if module.limits else {}),   # [lowest, highest]
         **({"help": module.help} if module.help else {}),
+        **({"actions": [{"name": n, "label": label} for n, label in module.actions.items()]} if module.actions else {}),
         "default_style": module.default_style,
         "settings": fields(module.defaults, shared_choices, basic=module.basic),
         "styles": {name: {**({"limits": {n: list(v) for n, v in cls.limits.items()}} if cls.limits else {}),

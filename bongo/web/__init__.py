@@ -341,6 +341,26 @@ def create_app(*, modules, live, pairing, config_path, logs: LogBuffer | None = 
             return jsonify(error=f"unknown action {action!r}"), 400
         return jsonify(live=live.status())
 
+    last_act = {}
+
+    @app.post("/api/act")
+    def act():
+        """Press one of a module's buttons (``Module.actions``): only while that module is on the panel."""
+        data = body()
+        wanted, name = data.get("module"), data.get("name")
+        module = modules.get(wanted) if isinstance(wanted, str) else None
+        if module is None or not isinstance(name, str) or name not in module.actions:
+            return jsonify(error="no such button"), 404
+        on = live.entry
+        if on is None or on.module != module.id:
+            return jsonify(error=f"{module.name} isn't on the panel right now"), 409
+        at = time.monotonic()
+        if at - last_act.get((module.id, name), 0.0) < 0.25 or at - last_act.get(None, 0.0) < 0.1:   # one button held down,
+            return jsonify(error="too fast: give it a moment"), 429                                    # or several in turn
+        last_act[(module.id, name)] = last_act[None] = at
+        live.act(module.id, name)
+        return jsonify(ok=True)
+
     def canvas(data) -> tuple[int, int]:
         """The Animator's canvas size: what the page says it is, else the panel's."""
         area = cfg.safe_area(load())
@@ -835,7 +855,8 @@ def create_app(*, modules, live, pairing, config_path, logs: LogBuffer | None = 
                                       Context(width=width, height=height, fonts=fonts or Context().fonts, pet=pet,
                                               home=json.loads(home_json),    # the Matrix's location, as on the panel
                                               calendar=json.loads(calendar_json),   # ...its calendar colours
-                                              tz=ZoneInfo(zone) if zone else None))   # ...and its time zone, not the Pi's
+                                              tz=ZoneInfo(zone) if zone else None,    # ...and its time zone, not the Pi's
+                                              preview=True))
 
     def calendars_changed():
         """When the linked calendars (their settings, or what was last read from them) last changed."""

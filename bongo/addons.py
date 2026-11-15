@@ -319,7 +319,7 @@ def try_out(dest: Path, manifest: dict, uid: int) -> tuple[dict, str]:
             for name in module.styles:
                 if time.monotonic() - started > TRY_WAIT:
                     raise ImportProblem("it took too long to draw its screens")
-                style = module.create(name, None, Context(width=size[0], height=size[1]))
+                style = module.create(name, None, Context(width=size[0], height=size[1], preview=True))
                 if style.handle is None:
                     raise ImportProblem(f"its “{name.replace('_', ' ').capitalize()}” look didn't start ({child.error or 'see the Logs page'})")
                 for k in range(30 if (size == (64, 32) and name == module.default_style) else 2):

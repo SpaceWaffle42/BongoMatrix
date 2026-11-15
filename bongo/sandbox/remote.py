@@ -292,7 +292,8 @@ class RemoteStyle(Style):
         self.child = child(self.spec)
         self.blank = self.ctx.canvas()
         self.info = {"width": self.ctx.width, "height": self.ctx.height, "tz": getattr(self.ctx.tz, "key", None),
-                     "seed": self.ctx.rng.getrandbits(32), "home": self.ctx.home, "calendar": self.ctx.calendar}
+                     "seed": self.ctx.rng.getrandbits(32), "home": self.ctx.home, "calendar": self.ctx.calendar,
+                     "preview": self.ctx.preview}
         self._create()
 
     def _create(self):
@@ -304,6 +305,14 @@ class RemoteStyle(Style):
         except ChildError as error:
             log.warning("module %s, %s: couldn't start: %s", self.spec["id"], self.style_name, error)
             self.finished = True
+
+    def act(self, name):
+        if self.handle is None or self.generation != self.child.generation:
+            return
+        try:
+            self.child.call({"op": "act", "h": self.handle, "name": name}, FRAME_WAIT)
+        except ChildError as error:
+            log.warning("module %s, %s: the %s button: %s", self.spec["id"], self.style_name, name, error)
 
     def render(self, now):
         if self.handle is not None and (self.generation != self.child.generation or not self.child.alive()):
@@ -338,4 +347,4 @@ def build(described: dict, spec: dict) -> Module:
                   limits={k: tuple(v) for k, v in (described.get("limits") or {}).items()},
                   basic=tuple(described.get("basic") or ()), item_fields=described.get("item_fields") or {},
                   suggestions=described.get("suggestions") or {}, choice_names=described.get("choice_names") or {},
-                  help=described.get("help") or None)
+                  help=described.get("help") or None, actions=described.get("actions") or {})

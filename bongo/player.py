@@ -59,6 +59,12 @@ def play_entry(style: Style, seconds: float, panel, stop: threading.Event | None
             break   # early (Spotify idle, a splash played through); Pause holds one only once it has drawn
         started = clock()
         now = style.ctx.now()
+        for name in (live.take_acts() if live and live.acts else ()):   # buttons pressed in the dashboard (Module.actions)
+            try:
+                style.act(name)
+            except Exception:   # a broken button mustn't end the screen
+                log.exception("%s: the %r button failed", type(style).__name__, name)
+            last = None         # redraw now, whatever its pace
         if last is None or started - last_at >= frame_time - 1e-3:
             last, last_at = style.render(now), started
             if overlays:
@@ -198,6 +204,8 @@ def play(playlist: list[Entry], modules: dict[str, Module], panel, ctx_factory=C
                 live.idle = False   # asleep, not "nothing set to play"
         brightness(now, asleep)
         if forced and not (schedule and schedule.sleep_playlist):
+            if live.entry is not None:
+                live.playing(None, None)   # nothing is on a dark panel (so nothing there has buttons to press)
             show_dark(0.05 if getattr(panel, "ramping", False) else 1)  # dark until sleep_until or a wake
             continue
         if asleep:
