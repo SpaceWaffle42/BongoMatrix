@@ -49,11 +49,16 @@ def check(name: str, default, value, choices=None, limits=None) -> None:
             raise ValueError(f"{name}: expected a list")
         return
     if choices is not None:
-        allowed = choices if not isinstance(value, list) else None
-        if allowed is not None and value not in allowed:
-            raise ValueError(f"{name}: {value!r} is not one of {list(allowed)}")
-        if isinstance(value, list) and any(v not in choices for v in value):
-            raise ValueError(f"{name}: {[v for v in value if v not in choices]} not in {list(choices)}")
+        many = isinstance(default, list) or (default == "all" and "all" in choices)   # several can be picked (or "all")
+        if isinstance(value, list):
+            if not many:
+                raise ValueError(f"{name}: pick one of {list(choices)}, not a list")
+            if any(v not in choices for v in value):
+                raise ValueError(f"{name}: {[v for v in value if v not in choices]} not in {list(choices)}")
+        elif many and not (value == "all" and "all" in choices):
+            raise ValueError(f"{name}: expected a list of {list(choices)}")
+        elif value not in choices:
+            raise ValueError(f"{name}: {value!r} is not one of {list(choices)}")
         return
     k = kind(default)
     ok = {

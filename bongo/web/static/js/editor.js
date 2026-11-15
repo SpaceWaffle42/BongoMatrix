@@ -442,7 +442,7 @@ function control(f, id, v, set, hooks = {}) {
   }
   if (T === 'choice' && (Array.isArray(f.default) || (f.default === 'all' && f.choices.includes('all')))) return multiChoice(f, id, v, set);
   if (T === 'choice' && !Array.isArray(f.default)) {
-    if (f.choices.length <= 4) { const s = segmented(f.choices, v, (x) => set(x)); s.setAttribute('aria-labelledby', `${id}-l`); return s; }
+    if (f.choices.length <= 4) { const s = segmented(f.choices.map((c) => [c, f.labels?.[c] ?? humanize(c)]), v, (x) => set(x)); s.setAttribute('aria-labelledby', `${id}-l`); return s; }
     const sel = h('select', { class: 'input', id }, f.choices.map((c) => h('option', { value: c, selected: c === v }, f.labels?.[c] ?? humanize(c))));
     sel.addEventListener('change', () => set(sel.value));
     return sel;
