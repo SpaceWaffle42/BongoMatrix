@@ -30,8 +30,9 @@ DEFAULTS = {
     "web": {"enabled": True, "host": "0.0.0.0", "port": 5000, "port80": True, "hub_picture": True},
     "playlist": [],
     # v2's default splash screen; "splash" items in the playlist play it. "boot": an optional file
-    # played once at start-up (None: none). A splash rule without "boot" is from before 11 Nov 2026.
-    "splash": {"sources": ["built-in/splash_loading_squares.gif"], "boot": None},
+    # played once at start-up (None: none; a new Matrix gets Round wall). A splash rule without "boot" is
+    # from before 11 Nov 2026 and stays without one.
+    "splash": {"sources": ["built-in/splash_loading_squares.gif"], "boot": "built-in/boot_round_wall.gif"},
     # modules switched off in Settings > Modules: their playlist and overlay screens are skipped and they're off
     # the dashboard's Add a module list; screens and settings are kept for switching back on. Splash, sleep
     # and pushes ("Show on the Matrix") have their own switches and still use the modules they need
