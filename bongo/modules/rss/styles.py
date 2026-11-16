@@ -22,16 +22,18 @@ def mix(a, b, t: float) -> tuple[int, ...]:
 
 
 def wrap(font, text, width):
-    """Lines no wider than ``width``; a word longer than the line is hard-broken."""
+    """Lines no wider than ``width``; a word longer than the line is broken with a hyphen ("Environ-" / "ment")."""
     lines = [""]
     for word in text.split():
         while font.width(word) > width:
-            cut = len(word)
-            while cut > 1 and font.width(word[:cut]) > width:
+            cut = max(1, len(word) - 1)   # (at least a letter a line, however narrow: it always finishes)
+            while cut > 1 and font.width(word[:cut] + "-") > width:
                 cut -= 1
+            if len(word) - cut < 3 and cut - (3 - (len(word) - cut)) >= 3:
+                cut -= 3 - (len(word) - cut)   # no one- or two-letter tail ("residen-" / "ts"): "resid-" / "ents"
             if lines[-1]:
                 lines.append("")
-            lines[-1], word = word[:cut], word[cut:]
+            lines[-1], word = (word[:cut] + "-" if font.width(word[:cut] + "-") <= width else word[:cut]), word[cut:]
             lines.append("")
         trial = f"{lines[-1]} {word}".strip()
         if font.width(trial) <= width:
@@ -47,6 +49,34 @@ def first_sentence(text: str, limit: int = 160) -> str:
         if stop in text[:limit]:
             return text[:text.index(stop, 0, limit) + 1]
     return text if len(text) <= limit else text[:limit].rsplit(" ", 1)[0] + "..."
+
+
+READ = 0.07      # s to read a letter: how long a line of story text stays before the next comes up
+LINE = 1.2       # s each new line stays at least
+MOVE = 0.4       # s for the text to move up a line
+
+
+def crawl(lines, rows, start=0.0, pace=1.0):
+    """When text taller than its window moves up, a line at a time: [(when the move to line k+1 starts)],
+    and when the last line has had its time. The first ``rows`` lines are given time to be read first,
+    then each line that comes up its own (``READ`` a letter, ``LINE`` at least), times ``pace``."""
+    first = start + max(HOLD, sum(len(l) for l in lines[:rows]) * READ) * pace
+    moves, t = [], first
+    for line in lines[rows:]:
+        moves.append(t)
+        t += MOVE + max(LINE, len(line) * READ) * pace
+    return moves, t
+
+
+def climbed(moves, t, pitch) -> int:
+    """Pixels the text has moved up at ``t`` (each move eased in and out)."""
+    done = sum(1 for m in moves if m + MOVE <= t)
+    going = next((m for m in moves if m <= t < m + MOVE), None)
+    part = 0.0
+    if going is not None:
+        p = (t - going) / MOVE
+        part = p * p * (3 - 2 * p)
+    return round((done + part) * pitch)
 
 
 def age(now, published) -> str:
@@ -241,7 +271,7 @@ class Headline(_News):
 class Picture(_News):
     """The story's thumbnail on the left; its age and headline on the right, crawling upwards
     when it's longer than the space. Stories without a picture get a tinted tile instead."""
-    defaults = {"rotate_seconds": 10, "scroll_speed": 6}
+    defaults = {"rotate_seconds": 10}   # (its text moves a line at a time, at reading pace: no scroll speed)
 
     def tile(self, item, side):
         thumb = data.image(item.image)
@@ -257,8 +287,6 @@ class Picture(_News):
         font.draw(img, (side - font.width(letter)) // 2, middle(font, side), letter, mix(self.bg_bottom, self.accent, 0.7))
         return img
 
-    HOLD = 1.5  # seconds still at the start and at the end of a crawl
-
     def column(self, item, room):
         """(font, [(line, colour)]) for the text column: headline lines, a gap, story lines."""
         small = self.ctx.fonts("5x7")  # 5x7 unless a word would have to be broken; then tom-thumb
@@ -273,12 +301,16 @@ class Picture(_News):
         img, w, h = self.backdrop.copy(), self.ctx.width, self.ctx.height
         side = min(h, round(w * 0.42))
         room, space = w - side - 3, h - self.tiny.cap - 2
-        speed = max(1, self.settings["scroll_speed"])
 
-        def seconds(i):  # long stories stay up until they've crawled all the way
+        def plan(i):   # (font, rows, pitch, rows that fit, moves, when it's all been read)
             font, rows = self.column(i, room)
-            travel = max(0, len(rows) * (font.cap + font.descent + 1) - space)
-            return max(self.settings["rotate_seconds"], travel / speed + 2 * self.HOLD) if travel else self.settings["rotate_seconds"]
+            pitch = font.cap + font.descent + 1
+            fit = max(1, space // pitch)
+            moves, read = crawl([line for line, _ in rows], fit) if len(rows) > fit else ([], max(HOLD, sum(len(l) for l, _ in rows) * READ))
+            return font, rows, pitch, fit, moves, read
+
+        def seconds(i):  # a long story stays up until its last line has been read
+            return max(self.settings["rotate_seconds"], plan(i)[5] + HOLD)
         item, elapsed = self.pick(items, now, seconds)
         img.paste(self.tile(item, side), (0, (h - side) // 2))
         x0 = side + 2
@@ -286,11 +318,9 @@ class Picture(_News):
         stamp = age(now, item.published) or (item.source or "NEWS").upper()
         self.line(img, self.tiny, x0, self.tiny.cap, room, stamp, self.accent, now, key=("stamp", item.title))
         top = h - space
-        font, rows = self.column(item, room)
-        pitch = font.cap + font.descent + 1
-        travel = max(0, len(rows) * pitch - space)
-        offset = int(min(travel, max(0.0, (elapsed - self.HOLD) * speed))) if travel else 0
-        area = img.crop((x0, top, x0 + room, h))  # draw clipped to the column
+        font, rows, pitch, fit, moves, _ = plan(item)
+        offset = climbed(moves, elapsed, pitch)
+        area = img.crop((x0, top, x0 + room, top + fit * pitch))   # whole lines only: none half cut off at rest
         for n, (line, colour) in enumerate(rows):
             if line:
                 font.draw(area, 0, font.cap + n * pitch - offset, line, colour)
@@ -299,10 +329,11 @@ class Picture(_News):
 
 
 class Story(Headline):
-    """v2's layout: the headline on a row of its own (sliding across once if it's too wide), and the
-    story text below it in its own colour, crawling up once the headline has been read."""
+    """v2's layout: the headline on a row of its own, and the story text below it in its own colour.
+    Both start together: the headline, if it's too wide, slides across once (held at its first letter
+    first); the text moves up a line at a time, each line given time to be read. The story stays up until
+    both are done."""
     defaults = {"scroll_speed": 12}
-    HOLD = 2.0  # seconds before the text starts to move, and at its end
     GAP = 16    # pixels between a sliding headline and its repeat
 
     def setup(self):
@@ -310,20 +341,28 @@ class Story(Headline):
         self.head = self.ctx.fonts("6x10") if self.ctx.height >= 20 else self.ctx.fonts("5x7")
         self.small = self.ctx.fonts("5x7") if self.ctx.width >= 40 else self.tiny
         self.row = self.head.cap + self.head.descent + 1
+        self.pitch = self.small.cap + self.small.descent + 1
+        self.fit = max(1, (self.ctx.height - self.row - 1) // self.pitch)   # whole lines of text below the headline
 
-    def timing(self, item):
-        """(headline slide seconds, text travel in pixels)."""
-        w, speed = self.ctx.width, max(1, self.settings["scroll_speed"])
-        wide = self.head.width(item.title) > w - 2
-        slide = (self.head.width(item.title) + self.GAP) / speed if wide else 0.0
-        text = self.lines(self.small, self.summary(item), w - 2)
-        pitch = self.small.cap + self.small.descent + 1
-        return slide, max(0, len(text) * pitch - (self.ctx.height - self.row - 1))
+    def slide(self, item) -> float:
+        """Seconds for a too-wide headline to go across once (0: it fits)."""
+        wide = self.head.width(item.title) > self.ctx.width - 2
+        return (self.head.width(item.title) + self.GAP) / max(1, self.settings["scroll_speed"]) if wide else 0.0
+
+    def plan(self, item):
+        """(text lines, moves, when the last line has been read)."""
+        text = self.lines(self.small, self.summary(item), self.ctx.width - 2)
+        if len(text) <= self.fit:
+            return text, [], max(HOLD, sum(len(l) for l in text) * READ)
+        moves, read = crawl(text, self.fit)
+        slide = self.slide(item)        # a long headline takes a while: the text takes its time too (up to
+        if slide and read < HOLD + slide:   # twice as long a line), so the story is still there to read after it
+            moves, read = crawl(text, self.fit, pace=min(2.0, (HOLD + slide) / read))
+        return text, moves, read
 
     def seconds(self, item):
-        slide, travel = self.timing(item)
-        speed = max(1, self.settings["scroll_speed"])
-        return max(self.settings["rotate_seconds"], max(slide, self.HOLD) + travel / speed + self.HOLD)
+        slide = self.slide(item)
+        return max(self.settings["rotate_seconds"], (HOLD + slide + 1.0) if slide else 0.0, self.plan(item)[2] + HOLD)
 
     def draw(self, items, now):
         if not any(self.summary(i) for i in items):  # nothing but headlines: the card shows them best
@@ -331,24 +370,23 @@ class Story(Headline):
         img, w, h = self.backdrop.copy(), self.ctx.width, self.ctx.height
         item, t = self.pick(items, now, self.seconds)
         speed = max(1, self.settings["scroll_speed"])
-        slide, travel = self.timing(item)
-        # headline row: slides across once, seamlessly, then rests at its start
+        slide = self.slide(item)
+        # headline row: held at its first letter, slides across once, seamlessly, then rests at its start
         head = img.crop((0, 0, w, self.row))
-        x = 1 - (round(t * speed) if t < slide else 0)
+        x = 1 - (round((t - HOLD) * speed) if HOLD < t < HOLD + slide else 0)
         self.head.draw(head, x, self.head.cap, item.title, self.text)
         if x < 1:
             self.head.draw(head, x + self.head.width(item.title) + self.GAP, self.head.cap, item.title, self.text)
         img.paste(head, (0, 0))
         ImageDraw.Draw(img).line([(0, self.row - 1), (w - 1, self.row - 1)], fill=mix(self.bg_top, self.accent, 0.35))
-        # story text: waits until the headline has been read, then crawls up
-        text = self.summary(item)
+        # story text, at the same time: a line at a time, whole lines only
+        text, moves, _ = self.plan(item)
         if not text:
             return img
-        area = img.crop((0, self.row + 1, w, h))
-        pitch = self.small.cap + self.small.descent + 1
-        start = max(slide, self.HOLD)
-        offset = int(min(travel, max(0.0, (t - start) * speed)))
-        for n, line in enumerate(self.lines(self.small, text, w - 2)):
-            self.small.draw(area, 1, self.small.cap + n * pitch - offset, line, self.body)
-        img.paste(area, (0, self.row + 1))
+        top = self.row + 1
+        area = img.crop((0, top, w, min(h, top + self.fit * self.pitch)))
+        offset = climbed(moves, t, self.pitch)
+        for n, line in enumerate(text):
+            self.small.draw(area, 1, self.small.cap + n * self.pitch - offset, line, self.body)
+        img.paste(area, (0, top))
         return img
