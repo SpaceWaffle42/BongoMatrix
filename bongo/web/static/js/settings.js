@@ -198,8 +198,13 @@ function jumpBar(cards) {
   return bar;
 }
 
+// The whole display: chained panels side by side, parallel chains stacked (as bongo/safe_area.py sizes frames).
+function displaySize(p) {
+  return { width: (p?.cols || 64) * (p?.chain_length || 1), height: (p?.rows || 32) * (p?.parallel || 1) };
+}
+
 function safeAreaCard() {
-  const panel = { width: S.config.panel?.cols || 64, height: S.config.panel?.rows || 32 };
+  const panel = displaySize(S.config.panel);
   let saved = { top: 0, right: 0, bottom: 0, left: 0, ...S.config.safe_area };
   const sa = clone(saved);
   const canvas = h('canvas', { class: 'led-canvas', role: 'img', 'aria-label': 'Live panel with the hidden border tinted red and the visible area outlined' });
@@ -285,7 +290,7 @@ function deviceCard() {
       here && here !== tz.value ? h('button', { type: 'button', class: 'link small left', onclick: () => { tz.value = here; } }, `Use this browser's: ${here}`) : null),
     h('datalist', { id: 'tz-list' }, zones.map((z) => h('option', { value: z }))),
     h('label', { class: 'field-col', for: 'set-bright' }, h('span', { class: 'row between' }, h('span', null, 'Panel brightness (daytime)'), bVal), bright),
-    h('p', { class: 'muted tiny flush' }, `${c.panel?.cols || 64}×${c.panel?.rows || 32} panel · ${c.panel?.hardware_mapping || ''}`),
+    h('p', { class: 'muted tiny flush' }, `${displaySize(c.panel).width}×${displaySize(c.panel).height} panel · ${c.panel?.hardware_mapping || ''}`),
     h('label', { class: 'row gap-s', for: 'set-hub-pic' }, hubPic, h('span', null, 'Show what it\'s playing on the hub')),
     h('p', { class: 'muted tiny flush' }, 'The hub (matrix.local) shows a live picture of each Matrix to anyone on this Wi-Fi, including pushed messages. Its name and what\'s playing always show.'),
     h('label', { class: 'field-col', for: 'set-badge' }, "This Matrix's logo colour on the hub", h('span', { class: 'badge-pick' }, badge, badgeLook)),
@@ -842,7 +847,9 @@ function splashCard() {
   const save = h('button', { type: 'button', class: 'btn primary' }, 'Save');
   save.onclick = () => {
     if (on && !rule.sources.length) { toast('Tick at least one file for the splash', 'error'); return; }
-    saveConfig({ splash: on ? { ...rule, enabled: true } : null }, 'Splash');
+    // switched off: kept, so switching it back on brings back the files, speed, fit and boot screen
+    const files = rule.sources.length ? rule.sources : start?.sources?.length ? start.sources : ['built-in/splash_loading_squares.gif'];
+    saveConfig({ splash: { ...rule, sources: on ? rule.sources : files, enabled: on } }, 'Splash');
   };
   return h('section', { class: 'card stack', 'aria-label': 'Splash' },
     h('div', { class: 'row between wrap' }, h('div', null, h('h2', { class: 'h2' }, 'Splash'), h('p', { class: 'muted small flush' }, 'Plays wherever you put a Splash item in the playlist.')),
@@ -894,8 +901,13 @@ function sleepCard() {
   const save = h('button', { type: 'button', class: 'btn primary' }, 'Save');
   save.onclick = () => {
     if (on && (!from.value || !to.value)) { toast('Set both times', 'error'); return; }
+    if (on && from.value === to.value) { toast(`Sleep can't start and end at ${from.value}: change one`, 'error'); return; }   // (it would sleep all day)
     if (on && !sleep.sources.length) { toast('Tick at least one file for the sleep screen', 'error'); return; }
-    saveConfig({ sleep: on ? { ...sleep, enabled: true, from: from.value, to: to.value, brightness: clamp(Number(bright.value) || 15, 1, 100) } : null }, 'Sleep schedule');
+    // switched off: kept (times, brightness, fade, files), so switching it back on brings them back
+    const pair = (a, b) => (a && b && a !== b ? { from: a, to: b } : null);   // (the Matrix won't take From == Until)
+    const keep = on ? {} : { ...(pair(from.value, to.value) || pair(s?.from, s?.to) || { from: '23:00', to: '07:00' }),
+      sources: sleep.sources.length ? sleep.sources : s?.sources?.length ? s.sources : ['built-in/sleep_default.gif'] };
+    saveConfig({ sleep: { ...sleep, from: from.value, to: to.value, brightness: clamp(Number(bright.value) || 15, 1, 100), ...keep, enabled: on } }, 'Sleep schedule');
   };
   return h('section', { class: 'card stack', 'aria-label': 'Sleep' },
     h('div', { class: 'row between wrap' }, h('div', null, h('h2', { class: 'h2' }, 'Sleep'), h('p', { class: 'muted small flush' }, 'Dims the panel overnight and shows a calm screen.')),

@@ -4,10 +4,11 @@ from PIL import ImageDraw, ImageFilter
 
 from bongo.fonts import align_x, middle, names
 from bongo.module import Style
+from bongo.scroll import Scrolls
 
 from ..common import hm
 from .field import field
-from .metro import fitting, top_row
+from .metro import date_font, fitting, top_row
 from .palettes import CLASSIC, CLASSIC_SWATCHES, enabled_custom, rgb
 
 # Marching-squares segments per corner pattern (corners: top-left=8, top-right=4,
@@ -21,7 +22,7 @@ EDGES = {
 }
 
 
-class Classic(Style):
+class Classic(Scrolls, Style):
     fps = 33
     choices = {"palettes": ["all", *CLASSIC], "time_font": names(), "date_font": names()}
     swatches = {"palettes": CLASSIC_SWATCHES}
@@ -100,11 +101,19 @@ class Classic(Style):
                 time_y = middle(time_font, h)
                 if time_font.width(label) <= img.width - 2 and top_row(time_font, label, time_y) >= 1:
                     break
-        for show, font, label, align, y in (
-            (s["show_time"], time_font, label, s["time_align"], time_y),
-            (show_date, self.date_font, now.strftime(s["date_format"]), s["date_align"], date_y),
-        ):
-            if show:
-                font = fitting(self.ctx.fonts, font, label, img.width)
-                font.draw(img, align_x(align, font.width(label), img.width), y, label, text, border)
+        if s["show_time"]:
+            time_font = fitting(self.ctx.fonts, time_font, label, img.width)
+            time_font.draw(img, align_x(s["time_align"], time_font.width(label), img.width), time_y, label, text, border)
+        if show_date:
+            date = now.strftime(s["date_format"])
+            auto = s["time_y"] is None and s["date_y"] is None and s["show_time"]   # (your own positions: your call)
+            # no taller than the room under the time (a clear row between that their outlines share), and
+            # a date too long even in a smaller font scrolls and is read through rather than being cut off
+            rows = date_y - time_y - 2 if auto else None
+            font, fits = date_font(self.ctx.fonts, self.date_font, date, img.width, rows)
+            if fits:
+                font.draw(img, align_x(s["date_align"], font.width(date), img.width), date_y, date, text, border)
+            else:
+                Scrolls.line(self, img, font, 1, date_y,  # (self.line is the wax's edge colour here)
+                             img.width - 2, date, text, now, outline=border, key=("date", date))
         return img

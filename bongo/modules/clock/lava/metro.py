@@ -7,6 +7,7 @@ from PIL import Image, ImageFilter
 
 from bongo.fonts import align_x, middle, names
 from bongo.module import Style
+from bongo.scroll import Scrolls
 
 from ..common import hm
 from .field import field
@@ -29,6 +30,15 @@ def fitting(fonts, font, text, width, baseline=None):
     return f
 
 
+def date_font(fonts, font, text, width, rows=None):
+    """(font, fits) for the date: ``font``, or a smaller one that fits ``width`` as ``fitting`` does for the
+    time. With ``rows`` (the room between the time and the date's baseline) it must be no taller than that,
+    so it never runs into the time. If none fits the width, the biggest that fits the rows scrolls instead."""
+    shrink = [f for f in (font, *map(fonts, ("9x18B", "9x15B", "7x13B", "6x13B", "6x10"))) if rows is None or f.cap <= rows]
+    shrink = shrink or [f for f in map(fonts, ("5x7", "tom-thumb")) if f.cap <= rows] or [fonts("tom-thumb")]
+    return next(((f, True) for f in shrink if f.width(text) <= width - 2), (shrink[0], False))
+
+
 def top_row(font, text, baseline):
     """The first lit row of ``text`` drawn on ``baseline``."""
     scratch = Image.new("L", (font.width(text) + 2, baseline + 40))
@@ -37,7 +47,7 @@ def top_row(font, text, baseline):
     return box[1] - 20 if box else baseline
 
 
-class Metro(Style):
+class Metro(Scrolls, Style):
     fps = 30
     choices = {"palettes": ["all", *METRO], "time_font": names(), "date_font": names()}
     swatches = {"palettes": METRO_SWATCHES}
@@ -108,21 +118,34 @@ class Metro(Style):
             tight = s["time_y"] is None and h < 30   # a short panel: the digits must clear the top edge
             labels.append((fitting(self.ctx.fonts, self.time_font, label, w, time_y if tight else None), label,
                            s["time_align"], time_y, p["text"]))
+        scrolling = None    # a date too long for the width, even in a smaller font: it scrolls (and is read through)
         if show_date:
             date = now.strftime(s["date_format"])
-            labels.append((self.date_font, date.upper() if s["uppercase_date"] else date,
-                           s["date_align"], date_y, p["accent"]))
+            date = date.upper() if s["uppercase_date"] else date
+            auto = s["time_y"] is None and s["date_y"] is None and s["show_time"]   # (your own positions: your call)
+            font, fits = date_font(self.ctx.fonts, self.date_font, date, w, date_y - time_y - 1 if auto else None)
+            if fits:
+                labels.append((font, date, s["date_align"], date_y, p["accent"]))
+            else:
+                scrolling = (font, date, date_y)
         placed = [(font, label, align_x(align, font.width(label), w), y, ink)
                   for font, label, align, y, ink in labels]
-        if s["text_halo"] and placed:
+        if s["text_halo"] and (placed or scrolling):
             # Soft dark halo hugging the glyphs keeps text readable over bright wax.
             mask = Image.new("L", img.size)
             for font, label, x, y, _ in placed:
                 font.draw(mask, x, y, label, 255)
+            if scrolling:
+                self.date_line(mask, *scrolling, 255, now)
             mask = mask.filter(ImageFilter.MaxFilter(3)).filter(ImageFilter.GaussianBlur(1))
             mask = mask.point(lambda v: int(v * s["text_halo"]))
             dark = Image.new("RGB", img.size, tuple(int(c) for c in p["bg_bottom"]))
             img = Image.composite(dark, img, mask)
         for font, label, x, y, ink in placed:
             font.draw(img, x, y, label, tuple(int(c) for c in ink))
+        if scrolling:
+            self.date_line(img, *scrolling, tuple(int(c) for c in p["accent"]), now)
         return img
+
+    def date_line(self, img, font, date, baseline, ink, now):
+        self.line(img, font, 1, baseline, self.ctx.width - 2, date, ink, now, key=("date", date))

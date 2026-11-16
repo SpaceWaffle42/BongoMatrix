@@ -32,8 +32,10 @@ class SafeArea:
     def from_config(cls, config: dict) -> "SafeArea":
         margins = config.get("safe_area") or {}
         panel = config["panel"]
+        # the whole display: panels chained side by side, and parallel chains stacked (as HardwarePanel drives them)
         return cls(**{k: int(margins.get(k, 0)) for k in ("top", "right", "bottom", "left")},
-                   panel_width=panel["cols"], panel_height=panel["rows"])
+                   panel_width=panel["cols"] * int(panel.get("chain_length") or 1),
+                   panel_height=panel["rows"] * int(panel.get("parallel") or 1))
 
     @property
     def width(self) -> int:

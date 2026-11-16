@@ -79,7 +79,7 @@ function blank() { return { px: empty(), ms: 90, cels: layers.map((l, k) => (l.s
 function flat(f) { f.px = T.compose(f.cels, layers, bg); }
 function flatAll() { frames.forEach(flat); }
 function oneLayer(list) {   // frames from a preset or an imported GIF: one layer each
-  layers = [newLayer(1, 'Drawing')]; al = 0;
+  layers = [newLayer(nextId(), 'Drawing')]; al = 0;   // a new id: a frame copied before must not take it for its own layer
   list.forEach((f) => { f.cels = [f.px.slice()]; });
   return list;
 }
@@ -636,7 +636,9 @@ function openDialog(dlg) { if (dlg.open) return; if (dlg.showModal) dlg.showModa
 function load(d, what) {   // a project (from the Matrix or a file) replaces the drawing; Undo brings the old one back
   snapshot(true); sel = null;
   setSize(d.w, d.h);
-  layers = d.layers; layerSeq = Math.max(layerSeq, layers.length); frames = d.frames.map((f) => ({ ms: f.ms, px: empty(), cels: f.cels }));
+  // new ids (a file numbers its layers 1, 2...): a frame copied from the old drawing then pastes flat, not onto a stranger's layer
+  const fresh = d.layers.map((l) => ({ ...l, id: nextId() }));
+  layers = fresh; frames = d.frames.map((f) => ({ ms: f.ms, px: empty(), cels: f.cels }));
   al = layers.length - 1; cur = 0; pi = 0; bg = d.bg; $('bg').value = bg; $('loop').value = d.loop; $('name').value = d.name;
   savedAs = null; renderAll(); toast(`Opened ${what}: Undo brings back what was here`);
 }
@@ -847,7 +849,7 @@ $('importfile').onchange = async () => {
     if (w !== W || h !== H) return toast('The canvas changed size while that was importing: import it again');
     snapshot(true); sel = null; savedAs = null; frames = oneLayer(data.frames.map((f) => ({ ...f, ms: clamp(f.ms, 20, 5000) }))); cur = 0; pi = 0;
     $('name').value = file.name.replace(/\.[^.]+$/, '').replace(/[^A-Za-z0-9_-]+/g, '_').slice(0, 40) || 'animation';
-    renderAll(); toast(`Imported ${frames.length} frame${frames.length === 1 ? '' : 's'}: Undo brings your old ones back`);
+    renderAll(); toast(`Imported ${data.note || `${frames.length} frame${frames.length === 1 ? '' : 's'}`}: Undo brings your old ones back`);
   } catch (e) { toast(e.message); }
 };
 window.addEventListener('beforeunload', (e) => { if (dirty) { e.preventDefault(); e.returnValue = ''; } });   // unsaved work

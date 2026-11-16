@@ -1,6 +1,6 @@
 // Shell: shared state, routing, header/nav, polling and the playlist draft.
 import { DEMO, hooks, get, put } from './api.js';
-import { h, icon, toast, fail, clone, same } from './ui.js';
+import { h, icon, toast, fail, clone, same, humanize } from './ui.js';
 
 /** Shared state. `draft` is the locally edited playlist; `config.playlist` is what the Matrix has. */
 export const S = { state: null, config: null, modules: null, draft: null, problems: [], online: true, polledAt: 0,
@@ -108,7 +108,7 @@ export async function loadAll() {
   const revs = await get('/api/config/revisions').catch(() => null);
   const [config, modules, state] = await Promise.all([get('/api/config'), get('/api/modules'), get('/api/state')]);
   S.revs = revs;
-  S.config = config; S.modules = modules; S.state = state; S.online = true; S.polledAt = performance.now();
+  S.config = config; S.modules = modules; S.state = state; S.online = true; S.polledAt = S.stateAt = performance.now();
   if (!S.draft) S.draft = (config.playlist || []).map(normalise);
   paintHeader();
 }
@@ -118,6 +118,30 @@ export const moduleOff = (id) => (S.config?.modules_off || []).includes(id);
 export const styleOf = (e) => e.style || moduleById(e.module)?.default_style || '';
 export const entryName = (e) => moduleById(e?.module)?.name || humanId(e?.module);
 const humanId = (id) => String(id || '?').replace(/_/g, ' ').replace(/\b./g, (c) => c.toUpperCase());
+/** A problem the Matrix found, in words. "playlist[0]: text: speed: 500 is outside 1 to 200" is the first
+ *  screen's: { i: 0, text: 'Speed: 500 is outside 1 to 200', where: 'Screen #1 (Text)' }. */
+/** A capital to start, unless it starts with an address (https://...), which stays as it is. */
+const capital = (t) => (/^[a-z][\w+.-]*:\/\//.test(t) ? t : t.replace(/^./, (c) => c.toUpperCase()));
+export function problemOf(p) {
+  const m = /^playlist\[(\d+)\]:?\s*([\s\S]*)$/.exec(p);
+  if (!m) return { i: null, text: p, where: '' };
+  const i = Number(m[1]), e = S.draft?.[i];
+  const text = m[2].replace(/^([\w-]+):(?!\/\/)\s*(?=\S)/, (all, id) => (id === e?.module ? '' : all))   // (its module's name is said already)
+    .replace(/^([a-z][a-z0-9_]*):(?!\/\/)/, (all, key) => `${humanize(key)}:`);   // (not https://...)
+  return { i, text: capital(text), where: e ? `Screen #${i + 1} (${entryName(e)})` : `Screen #${i + 1}` };
+}
+/** Any problem the Matrix found, in words: "Screen #2 (Text): ...", "Overlay #1: ...", "sleep.from: ..." is
+ *  "From: ...", and "playlist: turn at least one entry on" is "Turn at least one entry on". */
+export function problemLine(p) {
+  const q = problemOf(p);
+  if (q.where) return `${q.where}: ${q.text}`;
+  const o = /^overlays\[(\d+)\]:?\s*([\s\S]*)$/.exec(p);
+  if (o) return `Overlay #${Number(o[1]) + 1}: ${capital(o[2])}`;
+  const k = /^([a-z_]+)((?:\.[a-z_]+)*):(?!\/\/)\s*([\s\S]*)$/.exec(p);
+  if (!k) return p;
+  if (k[1] === 'playlist' && !k[2]) return capital(k[3]);
+  return `${humanize((k[2] ? k[2].split('.').pop() : k[1]))}: ${k[3]}`;
+}
 
 export const dirtyCount = () => {
   const saved = (S.config?.playlist || []).map(normalise), d = S.draft || [];
@@ -222,6 +246,7 @@ export async function saveConfig(part, what = 'Settings') {
     else toast(`${what} saved`, 'success');
     return true;
   } catch (err) {
+    if (err.data?.problems?.length) err.message = err.data.problems.map(problemLine).join(' · ');   // (in words, not config keys)
     if (err.kept) toast(err.message, 'error', 6000);
     else fail(`Couldn't save ${what.toLowerCase()}`)(err);
     return false;
@@ -246,7 +271,7 @@ function paintHeader() {
 // -- polling ---------------------------------------------------------------------------------
 async function poll() {
   if (!document.hidden && S.config && path() !== '/pair') {
-    try { S.state = await get('/api/state'); S.online = true; S.polledAt = performance.now(); }
+    try { S.state = await get('/api/state'); S.online = true; S.polledAt = S.stateAt = performance.now(); }
     catch (err) { S.online = err.status !== 0 ? S.online : false; }
     paintHeader();
     emit('state');
@@ -287,6 +312,7 @@ if (DEMO) document.getElementById('demo-badge').hidden = false;
   try {
     const { paired } = await get('/api/pair/status');
     if (!paired && path() !== '/pair') { sessionStorageSet('bongo.after', path()); go('/pair', { replace: true }); poll(); return; }
+    if (paired && path() === '/pair') history.replaceState(null, '', DEMO ? '#/' : '/');   // paired already: nothing to do there
   } catch (err) {
     showOffline(document.getElementById('view'), err);
     setTimeout(boot, 5000);

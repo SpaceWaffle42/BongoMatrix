@@ -29,6 +29,7 @@ import time
 import urllib.error
 import urllib.request
 import zipfile
+import zlib
 from pathlib import Path
 
 log = logging.getLogger("bongo.addons")
@@ -191,11 +192,24 @@ def unpack(archive: Path, dest: Path, builtin_ids=()) -> dict:
             else:
                 raise ImportProblem(f"it isn't a Matrix module: there's no {MANIFEST} at the top")
         dest.mkdir(parents=True, exist_ok=True)
+        inside = dest.resolve()
         for e in entries:
-            target = dest / e.filename[len(top):]
-            target.parent.mkdir(parents=True, exist_ok=True)
-            with zf.open(e) as src, open(target, "wb") as out:
-                shutil.copyfileobj(src, out)
+            # checked again once the top folder is dropped: "top//etc/x" only becomes "/etc/x" then
+            name = e.filename[len(top):]
+            parts = name.split("/")
+            kind = stat.S_IFMT(e.external_attr >> 16)
+            if (not name or name.startswith("/") or any(p in ("", ".", "..") for p in parts)
+                    or kind not in (0, stat.S_IFREG)):        # only plain files (no links, devices or pipes)
+                raise ImportProblem(f"it has a file it can't unpack safely: {e.filename[:80]}")
+            target = dest / name
+            if not target.resolve().is_relative_to(inside):
+                raise ImportProblem(f"it has a file it can't unpack safely: {e.filename[:80]}")
+            try:                                       # (a damaged zip, or a file and a folder of the same name)
+                target.parent.mkdir(parents=True, exist_ok=True)
+                with zf.open(e) as src, open(target, "wb") as out:
+                    shutil.copyfileobj(src, out)
+            except (OSError, EOFError, zipfile.BadZipFile, zlib.error):
+                raise ImportProblem(f"couldn't unpack {e.filename[:80]}: the .zip may be damaged") from None
     try:
         manifest = json.loads((dest / MANIFEST).read_text())
     except (OSError, ValueError):
@@ -443,48 +457,74 @@ def busy() -> bool:
 _cancelled: list[Job] = []
 
 
+TOKEN = re.compile(r"[A-Za-z0-9_-]{12}")       # what ``start`` makes: 9 random bytes, base64 for links
+
+
 def drop(token: str) -> None:
-    job = JOBS.pop(token, None)
-    if job is not None and job.running:                  # its thread tidies up when it finishes
-        job.cancelled = True
-        _cancelled[:] = [j for j in _cancelled if j.running] + [job]
-        return
-    shutil.rmtree(staging() / token, ignore_errors=True)
+    if not isinstance(token, str) or not TOKEN.fullmatch(token):
+        return                                       # never a path: "..", say, would empty the whole data folder
+    with _lock:                                      # (never in the middle of an install: it moves this very folder)
+        job = JOBS.get(token)
+        if job is not None and job.state in ("installing", "installed"):
+            return                                   # install tidies its own folder away
+        JOBS.pop(token, None)
+        if job is not None and job.running:              # its thread tidies up when it finishes
+            job.cancelled = True
+            _cancelled[:] = [j for j in _cancelled if j.running] + [job]
+            return
+        shutil.rmtree(staging() / token, ignore_errors=True)
 
 
 def install(token: str, modules: dict) -> dict:
     """Keep a module that's been tried out: it goes in data/modules/<id> and into ``modules``."""
     from bongo.sandbox import remote
 
-    job = JOBS.get(token)
-    if job is None or job.state != "ready":
-        raise ImportProblem("that import has expired; start it again")
-    module_id = job.manifest["id"]
     with _lock:
+        job = JOBS.get(token)
+        if job is not None and job.state in ("installing", "installed"):
+            raise ImportProblem("that module has already been installed")   # (Install pressed twice)
+        if job is None or job.state != "ready" or job.dir is None or not job.dir.is_dir():
+            raise ImportProblem("that import has expired; start it again")
+        module_id = job.manifest["id"]
         state = load_state()
         have = state["modules"].get(module_id, {})
         if module_id in modules and not is_imported(modules[module_id]):
             raise ImportProblem(f"the Matrix already has a module called {module_id}")
-        remote.stop(module_id)
+        job.state = "installing"                       # claimed, under the lock: a second press can't move it in again
         target = folder() / module_id
-        folder().mkdir(parents=True, exist_ok=True)
         old = target.with_name(f".{module_id}-old")
-        shutil.rmtree(old, ignore_errors=True)
-        if target.exists():
-            target.rename(old)
-        shutil.move(str(job.dir), target)
-        shutil.rmtree(old, ignore_errors=True)
-        info = {**job.manifest, "source": job.origin, "described": job.described,
-                "installed": dt.datetime.now().astimezone().isoformat(timespec="seconds"),
-                "uid": have.get("uid") or free_uid(state), "only_listed": have.get("only_listed", True)}
-        info.pop("id")
-        info.pop("update", None)
-        state["modules"][module_id] = info
-        save_state(state)
-    drop(token)
-    module = remote.build(info["described"], spec_for(module_id, info))
-    object.__setattr__(module, "_imported", True)
-    modules[module_id] = module
+        aside = False                                  # this install moved the version that was there aside
+        try:
+            remote.stop(module_id)
+            folder().mkdir(parents=True, exist_ok=True)
+            shutil.rmtree(old, ignore_errors=True)
+            if target.exists():
+                target.rename(old)
+                aside = True
+            shutil.move(str(job.dir), target)
+            shutil.rmtree(old, ignore_errors=True)
+            info = {**job.manifest, "source": job.origin, "described": job.described,
+                    "installed": dt.datetime.now().astimezone().isoformat(timespec="seconds"),
+                    "uid": have.get("uid") or free_uid(state), "only_listed": have.get("only_listed", True)}
+            info.pop("id")
+            info.pop("update", None)
+            state["modules"][module_id] = info
+            save_state(state)
+            module = remote.build(info["described"], spec_for(module_id, info))
+            object.__setattr__(module, "_imported", True)
+            # ``modules`` is shared with the player and other requests: they read it through list(...) (a copy
+            # taken in one go), and changes to it are made one at a time here
+            modules[module_id] = module
+        except BaseException:
+            if aside and old.exists():                 # the move didn't finish: the version that was there goes back
+                if target.exists() and job.dir.is_dir():
+                    shutil.rmtree(target, ignore_errors=True)
+                if not target.exists():
+                    old.rename(target)
+            job.state = "ready" if job.dir.is_dir() else "failed"
+            raise
+        job.state = "installed"                        # kept (not dropped) so a late second press is told so
+    shutil.rmtree(staging() / token, ignore_errors=True)
     log.info("module %s %s installed from %s", module_id, info["version"], (job.origin or {}).get("url") or (job.origin or {}).get("name"))
     return info
 
@@ -502,7 +542,8 @@ def set_only_listed(module_id: str, only_listed: bool, modules: dict) -> dict:
     remote.stop(module_id)
     module = remote.build(info["described"], spec_for(module_id, info))
     object.__setattr__(module, "_imported", True)
-    modules[module_id] = module
+    with _lock:
+        modules[module_id] = module
     log.warning("module %s: %s", module_id, "only the sites it lists" if only_listed else "ANY site, and the home network")
     return info
 
@@ -511,20 +552,20 @@ def remove(module_id: str, modules: dict) -> None:
     from bongo.sandbox import remote
     from bongo.sandbox.gate import gate
 
-    with _lock:
+    with _lock:                                      # all of it: never half-removed while it's installed again
         state = load_state()
         if state["modules"].pop(module_id, None) is None:
             raise KeyError(module_id)
         save_state(state)
-    remote.stop(module_id)
-    try:
-        gate().forget(module_id)
-    except OSError:
-        pass
-    if is_imported(modules.get(module_id)):
-        modules.pop(module_id, None)
-    shutil.rmtree(folder() / module_id, ignore_errors=True)
-    shutil.rmtree(work_dir(module_id), ignore_errors=True)
+        remote.stop(module_id)
+        try:
+            gate().forget(module_id)
+        except OSError:
+            pass
+        if is_imported(modules.get(module_id)):
+            modules.pop(module_id, None)
+        shutil.rmtree(folder() / module_id, ignore_errors=True)
+        shutil.rmtree(work_dir(module_id), ignore_errors=True)
     log.info("module %s removed", module_id)
 
 

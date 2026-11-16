@@ -51,13 +51,13 @@ def within(now: dt.datetime, start: str, end: str) -> bool:
 
 
 def gif_pass(name: str, speed: float) -> float | None:
-    """Seconds for one pass of a GIF at ``speed`` percent (frame delays floored at 10 ms), or None."""
+    """Seconds for one pass of an animated picture (GIF, WebP or PNG) at ``speed`` percent, counting
+    the frames the Media module plays (frame delays floored at 10 ms), or None."""
     path = media.resolve(name)
-    if path is None or path.suffix.lower() != ".gif":
+    if path is None or media.is_video(path):
         return None
     try:
-        with Image.open(path) as im:
-            delays = [Fraction(max(10, int(f.info.get("duration") or 100))) for f in ImageSequence.Iterator(im)]
+        delays = [Fraction(ms) for ms in media.frame_times(path)]
     except Exception:
         return None
     if len(delays) < 2:
@@ -241,7 +241,7 @@ class Schedule:
         one = gif_pass(_night[key], self.sleep_speed) or video_pass(_night[key], self.sleep_speed)
         seconds = one * max(1, round(SLEEP_ENTRY_SECONDS / one)) if one else SLEEP_ENTRY_SECONDS
         return Entry("media", self.sleep_fit, settings={"file": _night[key], "speed": self.sleep_speed / 100},
-                     seconds=seconds)
+                     seconds=seconds, looping=True)   # whole passes only line up if it never stops on its last frame
 
     def wake(self) -> None:
         """Called by the player when sleep ends, so the next night picks again."""
@@ -257,10 +257,15 @@ class Schedule:
         if not (self.sleeps and self.sleep_from and self.sleep_to):
             return None
         mark = dt.time.fromisoformat(self.sleep_to if self.asleep(now) else self.sleep_from)
-        when = dt.datetime.combine(now.date(), mark, tzinfo=now.tzinfo)
-        if when <= now:
-            when += dt.timedelta(days=1)
-        return (when - now).total_seconds()
+        if now.tzinfo is None:
+            when = dt.datetime.combine(now.date(), mark)
+            return ((when if when > now else when + dt.timedelta(days=1)) - now).total_seconds()
+        # In UTC, as subtracting in one zone ignores a clock change in between. On the night the clocks go
+        # back the mark can come round twice (fold 0 and 1): the next one still ahead is the change.
+        utc = now.astimezone(dt.timezone.utc)
+        ahead = ((dt.datetime.combine(now.date() + dt.timedelta(days=day), mark, tzinfo=now.tzinfo).replace(fold=fold)
+                  .astimezone(dt.timezone.utc) - utc).total_seconds() for day in (0, 1) for fold in (0, 1))
+        return min(s for s in ahead if s > 0)
 
     def brightness(self, now: dt.datetime) -> int | None:
         if self.asleep(now) and self.sleep_brightness is not None:

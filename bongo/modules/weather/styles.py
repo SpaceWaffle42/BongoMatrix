@@ -149,47 +149,53 @@ class Overview(_Weather):
         self.bottom_line(img, f"H{round(r.high)} L{round(r.low)}", h - 1, now)
         return img
 
+    LANE = 20   # px (five letters): the narrowest a scrolling location may be beside high/low before they take turns
+
     def bottom_line(self, img, high_low, baseline, now):
         """High/low on the left, the location on the right, never drawn over each other.
         With ``scroll_location`` (default) a location too long for its space scrolls there as a
-        ticker; without it the town alone is shown, taking turns with high/low if need be."""
+        ticker; without it the town alone is shown. Where there isn't room for both (a small
+        screen, or a wide high/low such as H-12 L-24), they take turns."""
         w, tiny = self.ctx.width, self.tiny
         place = self.settings["location"].strip().upper()
-        if self.settings["scroll_location"] and place:
-            left = tiny.width(high_low) + 4
+        town = place if self.settings["scroll_location"] else place.split(",")[0].strip()  # "CHELTENHAM, ENGLAND, GB" -> CHELTENHAM
+        left = tiny.width(high_low) + 4
+        if not town and tiny.width(high_low) > w - 2:  # no town, and high/low too wide even alone: it scrolls
+            self.line(img, tiny, 1, baseline, w - 2, high_low, self.DIM, now, speed=max(1, self.settings["scroll_speed"]), gap=24)
+            return
+        if not town or left + tiny.width(town) <= w - (1 if self.settings["scroll_location"] else 2):
             tiny.draw(img, 1, baseline, high_low, self.DIM)
-            if tiny.width(place) <= w - left - 1:
-                tiny.draw(img, align_x("right", tiny.width(place), w, 1), baseline, place, self.DIM)
-                return
+            if town:
+                tiny.draw(img, align_x("right", tiny.width(town), w, 1), baseline, town, self.DIM)
+            return
+        if self.settings["scroll_location"] and left + 3 + self.LANE <= w:
             top = baseline - tiny.cap
+            tiny.draw(img, 1, baseline, high_low, self.DIM)
             left += 3  # a gap and a thin divider, so high/low and the ticker read as two things
             for y in range(top, baseline + 1):
                 img.putpixel((left - 3, y), (70, 80, 96))
             lane = img.crop((left, top, w, baseline + tiny.descent + 1))  # scroll only in the space to the right
-            period, speed = tiny.width(place) + 16, max(1, self.settings["scroll_speed"])
-            t = self.scrolled(("place", baseline, place), now, HOLD + period / speed)
+            period, speed = tiny.width(town) + 16, max(1, self.settings["scroll_speed"])
+            t = self.scrolled(("place", baseline, town), now, HOLD + period / speed)
             x = -(int(max(0.0, t - HOLD) * speed) % period)  # held at its start, then seamless: a repeat follows 16 px behind
             while x < lane.width:
-                tiny.draw(lane, x, tiny.cap, place, self.DIM)
+                tiny.draw(lane, x, tiny.cap, town, self.DIM)
                 x += period
             img.paste(lane, (left, top))
             return
-        town = place.split(",")[0].strip()  # "CHELTENHAM, ENGLAND, GB" -> CHELTENHAM
-        if not town or tiny.width(high_low) + 4 + tiny.width(town) <= w - 2:
-            tiny.draw(img, 1, baseline, high_low, self.DIM)
-            if town:
-                tiny.draw(img, align_x("right", tiny.width(town), w, 1), baseline, town, self.DIM)
-        else:   # taking turns: high/low for 4 s, then the town for 4 s or as long as it takes to scroll through
-            speed = max(1, self.settings["scroll_speed"])
-            reads = 4.0 if tiny.width(town) <= w - 2 else HOLD + (tiny.width(town) + 24) / speed
-            t = self.scrolled(("turns", town), now, 4.0 + reads)
-            turn, t = divmod(t, 4.0 + reads)
-            if t < 4.0:
-                tiny.draw(img, 1, baseline, high_low, self.DIM)
-            elif tiny.width(town) <= w - 2:
-                tiny.draw(img, align_x("right", tiny.width(town), w, 1), baseline, town, self.DIM)
-            else:
-                self.line(img, tiny, 1, baseline, w - 2, town, self.DIM, now, speed=speed, gap=24, key=("town", turn))
+        # taking turns: each for 4 s, or as long as it takes to scroll through if it's wider than the screen
+        speed = max(1, self.settings["scroll_speed"])
+
+        def reads(text):
+            return 4.0 if tiny.width(text) <= w - 2 else HOLD + (tiny.width(text) + 24) / speed
+
+        t = self.scrolled(("turns", town), now, reads(high_low) + reads(town))
+        turn, t = divmod(t, reads(high_low) + reads(town))
+        text, right = (high_low, False) if t < reads(high_low) else (town, True)
+        if tiny.width(text) <= w - 2:
+            tiny.draw(img, align_x("right", tiny.width(text), w, 1) if right else 1, baseline, text, self.DIM)
+        else:
+            self.line(img, tiny, 1, baseline, w - 2, text, self.DIM, now, speed=speed, gap=24, key=(text, turn))
 
 
 class Forecast(_Weather):
@@ -215,6 +221,7 @@ class Forecast(_Weather):
         upcoming = [h for h in r.hours if h.time >= here][::step][:cols]
         width = self.ctx.width // max(1, cols)
         stamp_at, icon_at, temp_at, size = self.rows()
+        font, temps = self.column_temps([h.temp for h in upcoming], width - 1)
         for i, hour in enumerate(upcoming):
             x0 = i * width
             if i:
@@ -224,6 +231,20 @@ class Forecast(_Weather):
             self.tiny.draw(img, x0 + (width - self.tiny.width(stamp)) // 2 + 1, stamp_at, stamp, self.DIM)
             if size:
                 self.place_icon(img, hour.code, hour.is_day, size, x0 + (width - size) // 2 + 1, icon_at, now)
-            t = temp_text(hour.temp)
-            self.temp_font.draw(img, x0 + (width - self.temp_font.width(t)) // 2 + 1, temp_at, t, self.TEXT)
+            t = temps[i]
+            if font.width(t) <= width - 1:
+                font.draw(img, x0 + (width - font.width(t)) // 2 + 1, temp_at, t, self.TEXT)
+            else:   # wider than its column even in the smallest font: it scrolls there rather than run into the next
+                self.line(img, font, x0 + 1, temp_at, width - 1, t, self.TEXT, now, key=("temp", i, t))
         return img
+
+    def column_temps(self, values, room):
+        """The font and words for the row of temperatures, all alike: as chosen if every one fits its column
+        (``room`` px), else without the degree sign (-22 not -22°), else in the smallest font. Without the
+        sign, which reads as a break, bare numbers keep 2 px more to themselves, so neighbouring columns
+        don't run together (-44-53 or 107110)."""
+        for font, sign in ((self.temp_font, True), (self.temp_font, False), (self.tiny, False)):
+            temps = [temp_text(v) if sign else temp_text(v).rstrip("°") for v in values]
+            if all(font.width(t) <= (room if sign else room - 2) for t in temps):
+                return font, temps
+        return font, temps

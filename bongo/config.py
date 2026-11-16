@@ -1,6 +1,7 @@
 """Device configuration: panel options, timezone and the playlist (data/config.json)."""
 from __future__ import annotations
 
+import copy
 import datetime as dt
 import json
 import logging
@@ -81,9 +82,11 @@ def load(path: Path = DEFAULT_PATH) -> dict:
                           f"the copy from before the last save, {backup_path(path).name}" if data else "the defaults")
             data = data or {}
 
+    defaults = copy.deepcopy(DEFAULTS)   # a copy: tidy() and the dashboard change the config in place
+
     def part(key):   # a section that isn't an object (null, a list) counts as missing
-        return {**DEFAULTS[key], **data[key]} if isinstance(data.get(key), dict) else dict(DEFAULTS[key])
-    config = {**DEFAULTS, **data, "panel": part("panel"), "safe_area": part("safe_area"), "web": part("web")}
+        return {**defaults[key], **data[key]} if isinstance(data.get(key), dict) else defaults[key]
+    config = {**defaults, **data, "panel": part("panel"), "safe_area": part("safe_area"), "web": part("web")}
     if not isinstance(config["playlist"], list):
         config["playlist"] = []
     return config
@@ -122,8 +125,9 @@ def playlist(config: dict, modules: dict[str, Module]) -> list[Entry]:
     """Configured playlist, or one entry per module (default style) when empty. Screens of a module
     that's switched off are kept in the list but skipped, like a screen switched off on its own."""
     off = modules_off(config)
-    entries = [Entry(**{**e, "enabled": e.get("enabled", True) and e["module"] not in off}) for e in config["playlist"]]
-    return entries or [Entry(module=m) for m in modules if m not in off]
+    entries = [Entry(**{**e, "enabled": e.get("enabled", True) and e["module"] not in off})
+               for e in config["playlist"] if isinstance(e, dict)]   # (validate() reports anything else)
+    return entries or [Entry(module=m) for m in list(modules) if m not in off]   # (a copy: an import may change it)
 
 
 def safe_area(config: dict) -> SafeArea:
@@ -246,6 +250,12 @@ def location_problems(home) -> list[str]:
     return []
 
 
+def _listed(config: dict, key: str) -> list:
+    """The playlist or overlays as a list; a hand-edited ``true`` or ``5`` is left for validate() to report."""
+    value = config.get(key)
+    return value if isinstance(value, list) else []
+
+
 def _adopt_location(config: dict, modules: dict[str, Module]) -> list[str]:
     """Before 14 Nov 2026 each weather or sky screen had its own location. With no Matrix location yet,
     take the one most of them use, and give the rest their own, so every screen shows the same place
@@ -254,7 +264,7 @@ def _adopt_location(config: dict, modules: dict[str, Module]) -> list[str]:
         return []
     screens = []
     for key in ("playlist", "overlays"):
-        for entry in config.get(key) or []:
+        for entry in _listed(config, key):
             module = modules.get(entry.get("module")) if isinstance(entry, dict) else None
             if module and module.places and isinstance(entry.get("settings", {}), dict) \
                     and not entry.get("settings", {}).get("own_location"):
@@ -294,17 +304,18 @@ def tidy(config: dict, modules: dict[str, Module]) -> list[str]:
             notes.append("splash: now a playlist item; added one at the top of the playlist")
     for screen in ("splash", "sleep"):
         notes += _screen_files(config.get(screen), screen)
-    notes += pets.adopt(config)  # before the Pet entries lose their own name
+    if all(isinstance(config.get(key) or [], list) for key in ("playlist", "overlays")):   # (else validate() says so)
+        notes += pets.adopt(config)  # before the Pet entries lose their own name
     off = config.get("modules_off")
     if isinstance(off, list) and any(m not in modules for m in off):   # a module that's no longer installed
         config["modules_off"] = [m for m in off if m in modules]
         notes.append(f"modules_off: forgot {sorted(set(off) - set(modules))} (not installed)")
     notes += _adopt_location(config, modules)
     for key in ("playlist", "overlays"):  # entries of a module that moved into another one
-        for i, entry in enumerate(config.get(key) or []):
+        for i, entry in enumerate(_listed(config, key)):
             if not isinstance(entry, dict) or entry.get("module") in modules:
                 continue
-            for module in modules.values():
+            for module in list(modules.values()):
                 styles = module.renames.get(entry.get("module"))
                 if styles is not None and entry.get("style") in styles:
                     old = f"{entry['module']}/{entry.get('style') or 'default'}"
@@ -312,7 +323,7 @@ def tidy(config: dict, modules: dict[str, Module]) -> list[str]:
                     notes.append(f"{key}[{i}] {old} is now {module.id}/{entry['style']}")
                     break
     for key in ("playlist", "overlays"):
-        for i, entry in enumerate(config.get(key) or []):
+        for i, entry in enumerate(_listed(config, key)):
             if not isinstance(entry, dict) or entry.get("module") not in modules or not isinstance(entry.get("settings"), dict):
                 continue
             module, overlay = modules[entry["module"]], key == "overlays"
@@ -419,7 +430,7 @@ def validate(config: dict, modules: dict[str, Module]) -> list[str]:
                              for e in entries):
         problems.append("playlist: every screen that's on belongs to a module that's switched off; switch one back on "
                         "in Settings > Modules, or turn on another screen")
-    elif not entries and len(off) and not any(m not in off for m in modules):
+    elif not entries and len(off) and not any(m not in off for m in list(modules)):
         problems.append("modules_off: leave at least one module on")
     if config.get("splash"):
         problems += screen_problems("splash", config["splash"])
@@ -456,6 +467,10 @@ def validate(config: dict, modules: dict[str, Module]) -> list[str]:
             for key in ("from", "to"):
                 if not _time(sleep.get(key)):
                     problems.append(f"sleep.{key}: use a time like 23:00")
+            if sleep.get("enabled", True) is not False and _time(sleep.get("from")) and _time(sleep.get("to")) \
+                    and dt.time.fromisoformat(sleep["from"]) == dt.time.fromisoformat(sleep["to"]):   # (else asleep all day;
+                # switched off it's never asleep, so it can always be saved off)
+                problems.append(f"sleep: a time can't start and end at {sleep['from']}: change one")
             if sleep.get("brightness") is not None and not _number(sleep["brightness"], 0, 100, whole=True):
                 problems.append("sleep.brightness: must be a whole number from 0 to 100")
     return problems

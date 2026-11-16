@@ -1,5 +1,5 @@
-"""Days: a big day count with a small label; under a day it becomes HH:MM."""
-from .common import Base
+"""Days: a big day count with a small label; under a day it becomes HH:MM (M:SS under an hour)."""
+from .common import Base, time_left
 from PIL import Image
 
 from bongo.module import Style
@@ -32,7 +32,7 @@ class Days(Base, Style):
             n = self.days_left(now)
             text, unit = str(n), "DAY" if n == 1 else "DAYS"
         else:
-            text, unit = f"{left // 3600:02d}:{left % 3600 // 60:02d}", "LEFT"
+            text, unit = time_left(left), "LEFT"
         w, h = self.ctx.width, self.ctx.height
         caption = f"{unit} TO {label}"
         if not self.fits(caption) and self.fits(f"TO {label}"):  # too long: alternate unit / label every 3s

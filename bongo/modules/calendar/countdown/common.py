@@ -1,6 +1,7 @@
 """Shared by the countdown styles: picking the event, gradient, text halo, progress bar, done state."""
 import datetime as dt
 import math
+from functools import lru_cache
 
 import numpy as np
 from PIL import Image, ImageFilter
@@ -15,6 +16,41 @@ def cap(font):
     """Cap height (the 'H') of a BDF font, measured locally so this module needs nothing new."""
     glyph = font.glyphs.get(ord("H"))
     return glyph[2] if glyph else font.ascent
+
+
+@lru_cache(maxsize=4096)
+def ink(font, text) -> tuple[int, int]:
+    """(first, last + 1) lit column of ``text`` drawn at x = 0: a font's width counts the blank column
+    after each glyph, which is a pixel too many when fitting digits to a small card."""
+    m = Image.new("L", (font.width(text) + 4, 40))
+    font.draw(m, 2, 30, text, 255)
+    box = m.getbbox()
+    return (box[0] - 2, box[2] - 2) if box else (0, 0)
+
+
+@lru_cache(maxsize=64)
+def colon_drop(font) -> int:
+    """Rows a font's colon hangs below its digits (one, in the 6x10 and 7x13B), to lift it by."""
+    lit = [Image.new("L", (font.width(t) + 2, 40)) for t in ("0", ":")]
+    for m, t in zip(lit, ("0", ":")):
+        font.draw(m, 0, 30, t, 255)
+    return max(0, (lit[1].getbbox() or (0, 0, 0, 0))[3] - (lit[0].getbbox() or (0, 0, 0, 0))[3])
+
+
+def time_left(left: int) -> str:
+    """Under a day HH:MM, and under ten minutes M:SS ("9:59", "0:30"): the last minute used to sit at
+    "00:00". One digit before the colon can't be taken for HH:MM's two ("12:04" could be either)."""
+    if left >= 600:
+        return f"{left // 3600:02d}:{left % 3600 // 60:02d}"
+    return f"{left // 60}:{left % 60:02d}"
+
+
+def seconds(a, b) -> float:
+    """Seconds from ``a`` to ``b``, by the real clock: two times in the same zone subtract by the wall
+    clock in Python, which put a countdown an hour out on the days the clocks change."""
+    if a.tzinfo is not None and b.tzinfo is not None:
+        a, b = a.astimezone(dt.timezone.utc), b.astimezone(dt.timezone.utc)
+    return (b - a).total_seconds()
 
 
 def rgb(hex_colour):
@@ -57,9 +93,9 @@ class Base(Scrolls):
         from .events import icon_of
         name = icon_of(e) if self.settings["icons"] else None
         self.icon = icons.icon(name) if name else None
-        left = (on.target - now).total_seconds()
-        span = (on.target - on.start).total_seconds()
-        progress = 1.0 if span <= 0 else min(1.0, max(0.0, (now - on.start).total_seconds() / span))
+        left = seconds(now, on.target)
+        span = seconds(on.start, on.target)
+        progress = 1.0 if span <= 0 else min(1.0, max(0.0, seconds(on.start, now) / span))
         return max(0, int(left)), progress, left <= 0
 
     def days_left(self, now) -> int:
@@ -126,6 +162,16 @@ class Base(Scrolls):
             return self.paint(self.label_items(small, self.title, 9, name, now)
                               + self.label_items(font, msg, 9 + (h - 9 + cap(font)) // 2, ink, now), 1.0)
         return self.paint(self.label_items(font, msg, (h + cap(font) + 1) // 2, ink, now), 1.0)
+
+
+def time_items(font, x, y, text, ink_colour):
+    """Draw items for ``text`` with any colon lifted level with the digits (``colon_drop``)."""
+    items = []
+    for part in text.partition(":"):
+        if part:
+            items.append((font, x, y - (colon_drop(font) if part == ":" else 0), part, ink_colour))
+            x += font.width(part)
+    return items
 
 
 def fit_font(fonts, names, text, max_w, max_h):

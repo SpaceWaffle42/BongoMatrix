@@ -70,17 +70,18 @@ class Base(Scrolls, Style):
         """``text`` centred between x0 and x1, or scrolling if it's too long."""
         colour = colour or self.AMBER
         w = self.small.width(text)
-        strip = Image.new("RGB", (x1 - x0, 7))
+        # the letters go on a mask, not straight on a black strip, so a black (or very dark) colour still shows
+        letters = Image.new("L", (x1 - x0, 7))
         if w <= x1 - x0:
-            self.small.draw(strip, (x1 - x0 - w) // 2, 6, text, colour)
+            self.small.draw(letters, (x1 - x0 - w) // 2, 6, text, 255)
         else:
             self.reads = 1 + (w + gap) / self.SPEED          # held a second, then round once: the screen waits for it
             self._note(("ticker", baseline, text), self.at - t, self.reads, self.at)
             ms = max(0, round(t * 1000) - 1000)              # whole milliseconds: an even pixel a frame
             off = -(ms * self.SPEED // 1000 % (w + gap))
             for k in (0, 1):
-                self.small.draw(strip, off + k * (w + gap), 6, text, colour)
-        img.paste(strip, (x0, baseline - 6), strip.convert("L").point(lambda v: 255 if v else 0))   # just the letters
+                self.small.draw(letters, off + k * (w + gap), 6, text, 255)
+        img.paste(colour, (x0, baseline - 6, x1, baseline + 1), letters.point(lambda v: 255 if v else 0))
 
     def stacked(self, label, room):
         """Whether ``label`` goes word above word (up to three short words), rather than along one scrolling line."""

@@ -82,26 +82,34 @@ class Minimal(Style):
 
     def render(self, now):
         c = {k: _rgb(v) for k, v in self.settings.items() if isinstance(v, str) and v.startswith("#")}
-        img = Image.new("RGB", (W * S, H * S), c["background"])
+        w, h = self.ctx.width, self.ctx.height
+        img = Image.new("RGB", (w * S, h * S), c["background"])
         d = ImageDraw.Draw(img)
-        cx, cy, rx, ry = W * S // 2, 64, 110, 50
+        # drawn to fit the whole canvas (a full panel: an ellipse 110 x 50 about 128, 64 at 4x), so a
+        # safe area or a bigger panel keeps the ring and hands inside it and the background everywhere
+        cx, cy = w * S // 2, h * S // 2
+        rx, ry = round(w * S / 2 * 110 / 128), round(h * S / 2 * 50 / 64)
+        k = min(w / W, h / H)                                # how much thicker (or thinner) than on a full panel
+        thick = lambda px: max(S - 1, round(px * k))         # (never under a pixel)
         dots = []                                            # the ring, set later on whole LEDs (no smeared dashes)
-        for k in range(60):
-            a = k / 60 * 2 * math.pi
-            dots.append((round((cx + rx * math.sin(a)) / S - 0.5), round((cy - ry * math.cos(a)) / S - 0.5)))
+        for n in range(60):
+            a = n / 60 * 2 * math.pi
+            dots.append((min(w - 1, max(0, round((cx + rx * math.sin(a)) / S - 0.5))),
+                         min(h - 1, max(0, round((cy - ry * math.cos(a)) / S - 0.5)))))
         sec = now.second + now.microsecond / 1e6
         mins = now.minute + sec / 60
         hrs = now.hour % 12 + mins / 60
-        _hand(d, cx, cy, hrs / 12, 26, 9, c["hour_hand_colour"], rx / ry)
-        _hand(d, cx, cy, mins / 60, 42, 5, c["minute_hand_colour"], rx / ry)
-        d.ellipse([cx - 5, cy - 5, cx + 5, cy + 5], fill=c["centre_colour"])
-        out = img.resize((W, H), Image.LANCZOS)
-        for k, (x, y) in enumerate(dots):
-            if k <= now.second:
-                out.putpixel((x, y), c["second_colour"] if k == now.second else c["seconds_gone_colour"])
-            elif k % 5 == 0:
+        _hand(d, cx, cy, hrs / 12, 26 * ry / 50, thick(9), c["hour_hand_colour"], rx / ry)
+        _hand(d, cx, cy, mins / 60, 42 * ry / 50, thick(5), c["minute_hand_colour"], rx / ry)
+        r = thick(5)
+        d.ellipse([cx - r, cy - r, cx + r, cy + r], fill=c["centre_colour"])
+        out = img.resize((w, h), Image.LANCZOS)
+        for n, (x, y) in enumerate(dots):
+            if n <= now.second:
+                out.putpixel((x, y), c["second_colour"] if n == now.second else c["seconds_gone_colour"])
+            elif n % 5 == 0:
                 out.putpixel((x, y), c["dot_colour"])
-        return scaled(out, self.ctx.width, self.ctx.height)
+        return scaled(out, w, h, c["background"])
 
 
 def _rgb(hex_colour: str):

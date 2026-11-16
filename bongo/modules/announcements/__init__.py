@@ -61,7 +61,12 @@ def is_active(item, now):
 
 
 def active(items, now):
-    return [i for i in items if is_active(i, now)]
+    """The notices on now. One with neither a title nor a message is left out: it would only be a blank screen."""
+    return [i for i in items if is_active(i, now) and has_words(i)]
+
+
+def has_words(item):
+    return bool(str(item.get("title") or "").strip() or str(item.get("text") or "").strip())
 
 
 def wrap(text, font, width, lines=0):
@@ -102,6 +107,18 @@ class Base(Scrolls):
 
     def fonts(self, *names):
         return [self.F[n] for n in names]
+
+    def ink_rows(self, font, text):
+        """(first, last) row ``text`` really lights, relative to its baseline: some glyphs (a 5x7 "y")
+        reach further than the font says."""
+        key = (id(font), text)
+        cache = self.__dict__.setdefault("_ink", {})
+        if key not in cache:
+            m = Image.new("L", (font.width(text) + 2, 80))
+            font.draw(m, 0, 50, text, 255)
+            box = m.getbbox()
+            cache[key] = (box[1] - 50, box[3] - 51) if box else (-font.cap, -1)
+        return cache[key]
 
     def reads(self, item) -> float:
         """Seconds for this look to show ``item`` all the way through once (0: it fits, nothing moves)."""
@@ -178,7 +195,8 @@ class Banner(Base, Style):
         """(title font, body font, title bar height) for this notice on this screen."""
         h, title = self.ctx.height, item.get("title", "")
         bold = self.F["6x10" if h >= 28 else "5x7"]
-        bar = bold.cap + 3 if title else 0
+        # the rule goes under the title's lowest lit row (its descenders), with a dim row between
+        bar = max(bold.cap + 3, 1 + bold.cap + self.ink_rows(bold, title)[1] + 3) if title else 0
         body = next((f for f in self.fonts("10x20", "9x18B", "7x13B", "6x10", "5x7", "tom-thumb")
                      if f.cap + f.descent + 2 <= h - bar), self.F["tom-thumb"])
         return bold, body, bar
@@ -192,9 +210,11 @@ class Banner(Base, Style):
         w, h, title = self.ctx.width, self.ctx.height, item.get("title", "")
         acc = self.accent(item)
         bold, body, bar = self.faces(item)
-        area = h - bar
-        img = self.paint(self.scroll(body, item.get("text", ""), bar + middle(body, area), self.ink, t,
-                                     self.settings["scroll_speed"]))
+        area, text = h - bar, item.get("text", "")
+        baseline = bar + middle(body, area)
+        if title:   # the body's top row stays below the rule rather than going under it
+            baseline = max(baseline, bar - self.ink_rows(body, text)[0])
+        img = self.paint(self.scroll(body, text, baseline, self.ink, t, self.settings["scroll_speed"]))
         if title:  # lit title on a dim tinted bar with an accent rule; drawn last so no halo dims it
             img.paste(tuple(c // 5 for c in acc), (0, 0, w, bar - 1))
             img.paste(acc, (0, bar - 1, w, bar))
@@ -242,26 +262,53 @@ class Card(Base, Style):
 
 
 class Flash(Base, Style):
+    """The title pulses on its own; a notice with a message too shows the title, then the message, by turns."""
     fps = 15
+    FONTS = ("7x13B", "6x13B", "6x10", "5x7", "tom-thumb")
+
+    def parts(self, item):
+        return [p for p in (str(item.get("title") or ""), str(item.get("text") or "")) if p.strip()] or [""]
+
+    def fit(self, text):
+        return layout(text, self.fonts(*self.FONTS), self.ctx.width - 2, self.ctx.height - 2, 2)
+
+    def part_reads(self, text):
+        """Seconds to read one part: 0 if it fits (it stays still), else the time to scroll through it."""
+        return 0.0 if self.fit(text) else self.scrolls(self.F["5x7"], text, 20)
+
+    def phases(self, item):
+        """(text, seconds) for each part in turn: with two, each has at least a 3 s pulse."""
+        parts = self.parts(item)
+        if len(parts) == 1:
+            return [(parts[0], self.part_reads(parts[0]))]
+        return [(p, max(3.0, self.part_reads(p))) for p in parts]
 
     def reads(self, item):
-        w, h, title = self.ctx.width, self.ctx.height, item.get("title") or item.get("text", "")
-        fonts = self.fonts("7x13B", "6x13B", "6x10", "5x7", "tom-thumb")
-        return 0.0 if layout(title, fonts, w - 2, h - 2, 2) else self.scrolls(self.F["5x7"], title, 20)
+        return sum(seconds for _, seconds in self.phases(item))
 
     def draw(self, item, t, now):
-        w, h, title = self.ctx.width, self.ctx.height, item.get("title") or item.get("text", "")
+        w, h = self.ctx.width, self.ctx.height
+        phases = self.phases(item)
+        text = phases[0][0]
+        if len(phases) > 1:                                  # title, then message (as many times as asked to be read):
+            rounds = max(1, int(self.settings["times_to_scroll"]))
+            spare = max(0.0, self.span(item) / rounds - sum(seconds for _, seconds in phases))
+            phases = [(text, seconds + spare / 2) for text, seconds in phases]   # a longer turn shares out evenly
+            t %= sum(seconds for _, seconds in phases)
+            for text, seconds in phases:
+                if t < seconds:
+                    break
+                t -= seconds
         k = 0.5 + 0.5 * math.sin(now.timestamp() * 2 * math.pi / 3)  # 3 s breathing cycle
         bg = tuple(int(c * (.15 + .3 * k)) for c in self.accent(item))
         img = Image.new("RGB", (w, h), bg)
-        fonts = self.fonts("7x13B", "6x13B", "6x10", "5x7", "tom-thumb")
-        fit = layout(title, fonts, w - 2, h - 2, 2)
+        fit = self.fit(text)
         if fit:
             f, lines = fit
             items = self.centred(f, lines, middle(f, h, len(lines)) - f.cap, self.ink)
         else:
             f = self.F["5x7"]
-            items = self.scroll(f, title, middle(f, h), self.ink, t, 20)
+            items = self.scroll(f, text, middle(f, h), self.ink, t, 20)
         for f, x, y, txt, ink in items:
             f.draw(img, x, y, txt, ink, outline=tuple(c // 3 for c in bg))
         return img
@@ -322,7 +369,7 @@ class Ribbon(Base, Style):
 
 MODULE = Module(
     id="announcements", name="Announcements",
-    description="Scheduled notices that rotate: Banner scrolls the text, Card fits it, Flash pulses a title.",
+    description="Scheduled notices that rotate: Banner scrolls the text, Card fits it, Flash pulses the title, then the message.",
     styles={"banner": Banner, "card": Card, "flash": Flash},
     overlays={"ribbon": Ribbon},
     defaults=dict(

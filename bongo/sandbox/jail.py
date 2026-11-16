@@ -35,6 +35,7 @@ SIOCSIFFLAGS, IFF_UP, IFF_LOOPBACK, IFF_RUNNING = 0x8914, 0x1, 0x8, 0x40
 PR_SET_NO_NEW_PRIVS, PR_SET_PDEATHSIG = 38, 1
 LIMITS = {resource.RLIMIT_AS: 512 << 20, resource.RLIMIT_NOFILE: 128, resource.RLIMIT_NPROC: 32,
           resource.RLIMIT_FSIZE: 64 << 20, resource.RLIMIT_CORE: 0}
+NICE = 10                                        # how much less CPU priority a child has than the display
 
 
 def can_shut_in() -> bool:
@@ -235,6 +236,10 @@ def _shut_in(spec: dict) -> None:
 def enter(spec: dict) -> None:
     """Called first thing in the child, before the module's code is loaded."""
     global ENFORCED
+    try:                                        # below the display: a module that spins can't slow the panel's frames
+        os.nice(NICE)
+    except OSError:
+        pass
     if spec.get("jail"):
         _shut_in(spec)
         ENFORCED = True

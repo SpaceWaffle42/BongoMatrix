@@ -1,5 +1,6 @@
 """Text: your own words on the panel. ``scroll`` is a marquee, ``static`` stays put."""
 import math
+import re
 
 from bongo.fonts import align_x, names
 from bongo.module import Module, Style
@@ -17,6 +18,19 @@ def pitch(font, gap: int = 1) -> int:
 def middle(font, height: int, lines: int = 1, gap: int = 1) -> int:
     """Baseline of the first line so ``lines`` lines sit centred in ``height``."""
     return (height - (lines * pitch(font, gap) - gap)) // 2 + font.glyphs[ord("H")][2]
+
+
+# typed or pasted characters some fonts lack (tom-thumb has no dashes or curly quotes), and their plain
+# stand-ins, so they don't show as "?"
+PLAIN = {"\u2014": "-", "\u2013": "-", "\u2018": "'", "\u2019": "'", "\u201c": '"', "\u201d": '"',
+         "\u2026": "...", "\u00a0": " "}
+
+
+def readable(font, text: str) -> str:
+    """``text`` as ``font`` can draw it on one line: line breaks become spaces, and a dash or curly quote
+    the font hasn't got becomes its plain one."""
+    text = re.sub(r"\s*[\r\n]+\s*", " ", text).replace("\t", " ")
+    return "".join(PLAIN.get(c, c) if ord(c) not in font.glyphs else c for c in text)
 
 
 def colour(value: str) -> tuple:
@@ -68,7 +82,7 @@ class Scroll(Scrolls, _Base):
         return self.marquee(now, self.font, s["speed"], s["gap"], s["times_to_scroll"], self.baseline(self.font))
 
     def marquee(self, now, font, speed, gap, times, baseline):
-        img, text = self.background(), self.text
+        img, text = self.background(), readable(font, self.text)
         period = font.width(text) + max(0, int(gap))
         if period <= 0:
             return img
@@ -97,15 +111,17 @@ class Static(Scrolls, _Base):
         """First option that fits: (font, lines, is_fallback). Falls back to the smallest font, which may not
         fit (``render`` scrolls it then)."""
         w, f = self.ctx.width, self.ctx.fonts
-        if f(self.settings["font"]).width(text) <= w:
-            return f(self.settings["font"]), [text], False
+        own = f(self.settings["font"])
+        if own.width(readable(own, text)) <= w:
+            return own, [readable(own, text)], False
         for name in FALLBACK[:2]:
-            if f(name).width(text) <= w:
-                return f(name), [text], True
+            if f(name).width(readable(f(name), text)) <= w:
+                return f(name), [readable(f(name), text)], True
         for name in FALLBACK[:2]:
-            if (lines := self._split(f(name), text)):
+            if (lines := self._split(f(name), readable(f(name), text))):
                 return f(name), list(lines), True
         tiny = f(FALLBACK[2])
+        text = readable(tiny, text)
         return tiny, list(self._split(tiny, text) or [text]) if tiny.width(text) > w else [text], True
 
     def render(self, now):

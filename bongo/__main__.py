@@ -51,6 +51,7 @@ def _start_dashboard(config, modules, live, config_path) -> None:
 
     logs = LogBuffer()
     logging.getLogger().addHandler(logs)
+    logging.getLogger("werkzeug").setLevel(logging.WARNING)   # not a line per request: they would fill the Logs page in a minute
     from bongo import __version__, hub as hubs, net, netname, setup_screen
 
     network = None

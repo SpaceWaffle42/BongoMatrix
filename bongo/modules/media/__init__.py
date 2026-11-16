@@ -1,6 +1,5 @@
 """Media: show an image, animated GIF or short video (fit, fill or pixel-art scaling).
-Video is decoded once by ffmpeg (if installed) at 20 fps, up to 15 s, then loops like a GIF."""
-import functools
+Video is decoded by ffmpeg (if installed) at 20 fps, up to 15 s, then loops like a GIF."""
 import json
 import logging
 import shutil
@@ -12,34 +11,77 @@ from PIL import Image, ImageDraw, ImageSequence
 from bongo import media as library
 from bongo.module import Module, Style
 
-MAX_FRAMES = 300
+MAX_FRAMES = library.MAX_FRAMES
 VIDEO_FPS = 20
-KEPT = 6            # the last few files' finished frames (at most 300 x 64 x 32 x 3 bytes each: under 2 MB)
-lock = threading.Lock()
-ready: dict = {}    # (file, changed, size, style, canvas, background, brightness) -> (frames, ends, moving)
+KEPT = 6            # the last few files' finished frames: up to 300 x canvas x 3 bytes each (1.8 MB at 64 x 32, 11 MB for six)
+lock = threading.Lock()   # guards `ready` and `loading` only: never held while a file decodes
+ready: dict = {}    # (file, changed, size, style, canvas, background, brightness) -> (frames, ends, moving, plays)
+loading: dict = {}  # the same keys -> a lock held while that one picture is decoded
 
 
-@functools.lru_cache(maxsize=4)
-def video_frames(path: str, mtime: float, box: tuple[int, int]) -> tuple:
-    """Decode up to MAX_FRAMES frames of ``path``, scaled to fit ``box``, as RGB images.
-    Cached by path + mtime, so a looping playlist doesn't decode the file every time."""
+def video_size(path: str) -> tuple[int, int]:
+    """The size a video is shown at: ffmpeg turns a phone's portrait video upright as it decodes, and
+    stretches pixels that aren't square (SAR), so the stored width and height alone would squash it."""
     if not (shutil.which("ffmpeg") and shutil.which("ffprobe")):
         raise OSError("ffmpeg is not installed")
     probe = subprocess.run(["ffprobe", "-v", "error", "-select_streams", "v:0", "-show_entries",
-                            "stream=width,height", "-of", "json", path],
-                           capture_output=True, timeout=20, check=True)
+                            "stream=width,height,sample_aspect_ratio:stream_tags=rotate:stream_side_data=rotation",
+                            "-of", "json", path], capture_output=True, timeout=20, check=True)
     stream = json.loads(probe.stdout)["streams"][0]
-    k = min(box[0] / stream["width"], box[1] / stream["height"], 1.0)
-    w, h = max(2, int(stream["width"] * k) // 2 * 2), max(2, int(stream["height"] * k) // 2 * 2)
-    raw = subprocess.run(["ffmpeg", "-v", "error", "-nostdin", "-i", path, "-an",
-                          "-vf", f"fps={VIDEO_FPS},scale={w}:{h}:flags=area", "-frames:v", str(MAX_FRAMES),
-                          "-f", "rawvideo", "-pix_fmt", "rgb24", "-"],
-                         capture_output=True, timeout=120, check=True).stdout
-    size = w * h * 3
-    frames = tuple(Image.frombytes("RGB", (w, h), raw[i:i + size]) for i in range(0, len(raw) - size + 1, size))
-    if not frames:
-        raise OSError("no video frames")
-    return frames
+    w, h = float(stream["width"]), float(stream["height"])
+    try:
+        num, den = (int(v) for v in str(stream.get("sample_aspect_ratio", "1:1")).split(":"))
+        if num > 0 and den > 0:
+            w = w * num / den
+    except ValueError:
+        pass
+    turns = [stream.get("tags", {}).get("rotate")] + [d.get("rotation") for d in stream.get("side_data_list", [])]
+    for turn in turns:   # older ffmpeg tags it "rotate", newer gives a display matrix's "rotation"
+        try:
+            if turn is not None and round(float(turn)) % 180 == 90:
+                w, h = h, w
+                break
+        except ValueError:
+            pass
+    return max(1, round(w)), max(1, round(h))
+
+
+def video_frames(path: str, size: tuple[int, int]):
+    """Up to MAX_FRAMES frames of ``path`` at ``size``, as RGB images, one at a time: decoded at the size
+    they're shown, so only one small frame is ever held here (a Pi Zero has 512 MB)."""
+    w, h = size
+    proc = subprocess.Popen(["ffmpeg", "-v", "error", "-nostdin", "-i", path, "-an",
+                             "-vf", f"fps={VIDEO_FPS},scale={w}:{h}:flags=area,setsar=1", "-frames:v", str(MAX_FRAMES),
+                             "-f", "rawvideo", "-pix_fmt", "rgb24", "-"],
+                            stdout=subprocess.PIPE, stderr=subprocess.DEVNULL)
+    stop = threading.Timer(120, proc.kill)   # a file ffmpeg gets stuck on
+    stop.start()
+    try:
+        while len(raw := proc.stdout.read(w * h * 3)) == w * h * 3:
+            yield Image.frombytes("RGB", (w, h), raw)
+    finally:
+        stop.cancel()
+        proc.kill()
+        proc.wait()
+        proc.stdout.close()
+
+
+def plays(im) -> int:
+    """How many times the file asks to be played (0: for ever). A GIF without a loop count plays once, as
+    a browser plays it (the Animator's "Plays: Once"); a GIF's count is repeats after the first play."""
+    loop = im.info.get("loop")
+    if im.format == "GIF":
+        return 1 if loop is None else (0 if loop == 0 else loop + 1)
+    return loop if isinstance(loop, int) and loop > 0 else 0
+
+
+def keep(key, kept):
+    """Keep a file's finished frames as the newest, dropping the oldest past KEPT."""
+    with lock:
+        ready.pop(key, None)
+        ready[key] = kept
+        while len(ready) > KEPT:
+            del ready[next(iter(ready))]
 
 
 def rgb(hex_colour):
@@ -84,37 +126,62 @@ class Fit(Style):
             stat = path.stat()
             key = (str(path), stat.st_mtime, stat.st_size, type(self), self.ctx.width, self.ctx.height, self.bg, s["brightness"])
             with lock:   # the panel and the dashboard's previews both come here
-                kept = ready.pop(key, None)
-                if kept is None:
-                    self.load(path)
-                    kept = (tuple(self.frames), tuple(self.ends), self.moving)
-                ready[key] = kept                                   # ...and it's the newest again
-                while len(ready) > KEPT:
-                    del ready[next(iter(ready))]
-            self.frames, self.ends, self.moving = kept
+                kept = ready.get(key)
+                busy = loading.setdefault(key, threading.Lock()) if kept is None else None
+            if busy is not None:
+                # decoded under this picture's own lock, so a big file never holds up other screens
+                with busy:
+                    with lock:
+                        kept = ready.get(key)   # another screen may have just decoded it
+                    try:
+                        if kept is None:
+                            self.load(path)
+                            kept = (tuple(self.frames), tuple(self.ends), self.moving, self.plays)
+                        keep(key, kept)   # kept before its lock goes, so no screen arriving now decodes it again
+                    finally:
+                        with lock:
+                            loading.pop(key, None)
+            else:
+                keep(key, kept)
+            self.frames, self.ends, self.moving, self.plays = kept
         except Exception as error:
             logging.getLogger(__name__).warning("can't show %r: %s", s["file"], error)
-            self.frames, self.ends = [self.placeholder()], [1]
+            self.frames, self.ends, self.moving, self.plays = [self.placeholder()], [1], False, 0
+
+    plays = 0         # how many passes the file asks for (0: for ever)
+    looping = False   # set by the player: loop whatever the file asks (Sleep re-shows it in whole passes)
 
     def load(self, path):
         """Decode ``path`` into this style's finished frames."""
         s = self.settings
         if library.is_video(path):
-            # decode at up to 4x the canvas so fill/fit still have detail to scale from
-            box = (self.ctx.width * 4, self.ctx.height * 4)
-            for i, frame in enumerate(video_frames(str(path), path.stat().st_mtime, box)):
+            shown = video_size(str(path))
+            size = self.target(*shown)
+            if size[0] > shown[0] or size[1] > shown[1]:
+                size = shown   # a small video: decoded as it is, enlarged below like a small GIF
+            for i, frame in enumerate(video_frames(str(path), size)):
                 self.frames.append(self.compose(frame.convert("RGBA"), s["brightness"]))
                 self.ends.append((i + 1) * 1000 // VIDEO_FPS)
+            if not self.frames:
+                raise OSError("no video frames")
             self.moving = True
             return
         with Image.open(path) as im:
-            total = 0
-            for i, frame in enumerate(ImageSequence.Iterator(im)):
-                if i >= MAX_FRAMES:
-                    break
-                total += max(10, int(frame.info.get("duration") or 100))   # as schedule.gif_pass counts it
-                self.frames.append(self.compose(frame.convert("RGBA"), s["brightness"]))
-                self.ends.append(total)
+            total, turn, self.plays = 0, library.orientation(im), plays(im)
+            most = library.frames_played(im.width, im.height, library.frame_count(im))
+            try:
+                for i, frame in enumerate(ImageSequence.Iterator(im)):
+                    if i >= most:
+                        break
+                    rgba = library.rgba(frame, turn)   # decodes the frame: a WebP frame's time is read then
+                    total += max(10, int(frame.info.get("duration") or 100))   # as schedule.gif_pass counts it
+                    self.frames.append(self.compose(rgba, s["brightness"]))
+                    self.ends.append(total)
+            except library.CUT_OFF as error:
+                if not self.frames:
+                    raise
+                # a cut-off download: play the frames that came through, as a browser does
+                logging.getLogger(__name__).info("%s: %d frames, the rest won't decode (%s)", path.name, len(self.frames), error)
         self.moving = len(self.frames) > 1   # a one-frame GIF is a still
 
     def compose(self, rgba, brightness):
@@ -166,6 +233,8 @@ class Fit(Style):
         if self.once and self.moving and t >= self.ends[-1]:
             self.finished = True               # played through once: hand over, on its last frame
             return self.frames[-1].copy()
+        if self.plays and not self.looping and t >= self.plays * self.ends[-1]:
+            return self.frames[-1].copy()      # played as many times as the file asks: it stays on its last frame
         t %= self.ends[-1]
         return self.frames[next(i for i, e in enumerate(self.ends) if t < e)].copy()
 

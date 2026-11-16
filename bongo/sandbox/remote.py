@@ -35,6 +35,17 @@ class ChildError(Exception):
     pass
 
 
+class Busy(ChildError):
+    """Another screen of the same module (a preview being set up, say) has its child just now: nothing is wrong."""
+
+
+FRAME_LOCK_WAIT = 0.25  # s a frame waits for its child; busy longer, the screen keeps its last frame
+IDLE = 10 * 60          # s with only previews asking and none for this long: the child is stopped (started again
+                        # when next needed). One that has had a screen on the panel is kept: a cold start would hold
+                        # up the panel each time round the playlist
+WATCH_EVERY = 5         # s between looks at each child's memory and when it was last asked for anything
+
+
 class _Reader:
     """Reads a child's stdout with a deadline (a hung module mustn't hang the panel)."""
 
@@ -87,6 +98,8 @@ class Child:
         self.error = ""
         self.retired = False      # replaced or stopped from outside: it never starts again (its screens hand over)
         self.asked = 0            # each request's number; its answer must carry it
+        self.used = time.monotonic()   # when a screen or preview last asked it for anything (``IDLE``)
+        self.on_panel = False          # it has drawn a screen for the panel, not only previews
 
     def alive(self) -> bool:
         return self.proc is not None and self.proc.poll() is None
@@ -165,9 +178,10 @@ class Child:
         log.warning("module %s stopped: %s", self.spec["id"], why)
         self.stop()
 
-    def call(self, msg: dict, wait: float, body: bool = False, most_body: int = wire.MOST_BODY):
-        if not self.lock.acquire(timeout=wait + 1):
-            raise ChildError("busy")
+    def call(self, msg: dict, wait: float, body: bool = False, most_body: int = wire.MOST_BODY, lock_wait: float | None = None):
+        if not self.lock.acquire(timeout=wait + 1 if lock_wait is None else lock_wait):
+            raise Busy("busy")
+        self.used = time.monotonic()
         try:
             if not self.alive():
                 self._start()
@@ -180,6 +194,7 @@ class Child:
 
     def describe(self) -> dict:
         with self.lock:
+            self.used = time.monotonic()
             if not self.alive():
                 self._start()
             return self.described
@@ -220,15 +235,16 @@ _watch_lock = threading.Lock()
 
 
 def _watch(c: Child):
-    """Every few seconds: a module using too much memory (all its processes together) is stopped."""
+    """Every few seconds: a module using too much memory (all its processes together) is stopped, and so is one
+    started only for previews that nobody has asked for anything for a while, so it isn't left using the CPU."""
     with _watch_lock:
         _watched[:] = [w for w in _watched if w.alive() and w is not c] + [c]
-        if len(_watched) > 1 or not jail.can_shut_in():
+        if len(_watched) > 1:
             return
 
     def run():
         while True:
-            time.sleep(5)
+            time.sleep(WATCH_EVERY)
             with _watch_lock:
                 now = [w for w in _watched if w.alive()]
                 _watched[:] = now
@@ -238,6 +254,14 @@ def _watch(c: Child):
                         return
                 continue
             for w in now:
+                if not w.on_panel and time.monotonic() - w.used > IDLE and w.lock.acquire(blocking=False):
+                    try:                             # (never while a screen is asking it something)
+                        if time.monotonic() - w.used > IDLE:
+                            log.info("module %s: not used for a while, stopped until it's next needed", w.spec["id"])
+                            w.stop()
+                    finally:
+                        w.lock.release()
+                    continue
                 used = jail.memory_of(w.spec["uid"])
                 if used > MOST_MEMORY:
                     w.error = f"used too much memory ({used >> 20} MB)"
@@ -298,6 +322,8 @@ class RemoteStyle(Style):
 
     def _create(self):
         self.handle = None
+        if not self.ctx.preview:
+            self.child.on_panel = True
         try:
             header = self.child.call({"op": "create", "style": self.style_name, "settings": self.settings, "ctx": self.info}, CREATE_WAIT)
             self.handle, self.generation = header["h"], self.child.generation
@@ -324,11 +350,16 @@ class RemoteStyle(Style):
             return self.blank
         try:
             header, data = self.child.call({"op": "render", "h": self.handle, "now": now.isoformat(), "hand_over_at": self.hand_over_at}, FRAME_WAIT, body=True,
-                                           most_body=self.ctx.width * self.ctx.height * 3)
+                                           most_body=self.ctx.width * self.ctx.height * 3, lock_wait=FRAME_LOCK_WAIT)
             if data is None or len(data) != self.ctx.width * self.ctx.height * 3:
                 raise ChildError("a frame of the wrong size")
             self.finished, self.busy = bool(header.get("finished")), bool(header.get("busy"))
-            return Image.frombytes("RGB", (self.ctx.width, self.ctx.height), data)
+            self.last = Image.frombytes("RGB", (self.ctx.width, self.ctx.height), data)
+            return self.last
+        except Busy:
+            # another screen of this module has its child (a preview being set up): this one is fine, it shows
+            # its last frame again and asks next frame, rather than going black and ending
+            return getattr(self, "last", self.blank)
         except ChildError as error:
             log.warning("module %s, %s: %s", self.spec["id"], self.style_name, error)
             self.handle = None

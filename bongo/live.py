@@ -115,10 +115,10 @@ class Live:
         until = self.sleep_until
         if until is None:
             return None
-        if until.tzinfo is None and now.tzinfo is not None:
-            until = until.replace(tzinfo=now.tzinfo)
-        if now.tzinfo is None and until.tzinfo is not None:
-            now = now.replace(tzinfo=until.tzinfo)
+        # A naive time is the Pi's own local time (ctx.now() with no timezone set), so astimezone() reads it
+        # right; giving it the other's zone would be off by the Pi's UTC offset (hours, in Berlin or New York).
+        if (until.tzinfo is None) != (now.tzinfo is None):
+            until, now = until.astimezone(), now.astimezone()
         return (until - now).total_seconds()
 
     def asleep(self, now: dt.datetime) -> bool:

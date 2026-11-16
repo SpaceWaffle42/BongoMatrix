@@ -89,15 +89,34 @@ class Base(Scrolls, Style):
             return account.known() or t - self.started > 5
         return True                                          # skipped at setup (only previews draw it)
 
-    def ticker(self, img, font, x0, x1, baseline, text, t, colour):
-        """``text`` between x0 and x1, scrolling (after a pause) when it's too long."""
+    TEXT_ROOM = 22   # px the title and artist keep beside the cover: on a small screen the cover shrinks first (32 = 8 + 2 + 22)
+
+    def art_size(self, most):
+        """The cover's (or record's) size: ``most`` on a full panel, smaller where it would leave the words
+        too little room, but never under 8 px."""
+        return max(8, min(most, self.ctx.width - 2 - self.TEXT_ROOM))
+
+    def baselines(self, title, artist):
+        """Where the title and artist go: as on a full panel where they fit, else (a short screen, with no
+        room for the time row) the two lines centred, so the artist isn't cut off at the bottom."""
+        h = self.ctx.height
+        if h >= 30 or artist + self.small.descent <= h:
+            return title, artist
+        block = self.mid.cap + self.mid.descent + 1 + self.small.cap + self.small.descent
+        title = (h - block) // 2 + self.mid.cap
+        return title, title + self.mid.descent + 1 + self.small.cap
+
+    def ticker(self, img, font, x0, x1, baseline, text, t, colour, start=None):
+        """``text`` between x0 and x1, scrolling (after a pause) when it's too long; ``start``: when it may
+        begin (by default when the song came on)."""
+        start = self.retitled if start is None else start
         w = font.width(text)
         layer = Image.new("RGB", (x1 - x0, img.height))
         if w <= x1 - x0:
             font.draw(layer, 0, baseline, text, colour)
         else:   # held a moment, then round once: the screen waits for it (a new song starts it again)
-            self._note(("ticker", baseline, text), self.retitled, 1.2 + (w + 12) / self.SPEED, t)
-            off = -int((max(0.0, t - self.retitled - 1.2) * self.SPEED) % (w + 12))
+            self._note(("ticker", baseline, text), start, 1.2 + (w + 12) / self.SPEED, t)
+            off = -int((max(0.0, t - start - 1.2) * self.SPEED) % (w + 12))
             for k in (0, 1):
                 font.draw(layer, off + k * (w + 12), baseline, text, colour)
         mask = Image.fromarray((np.asarray(layer).max(2) > 0).astype(np.uint8) * 255)
@@ -160,12 +179,13 @@ class Cover(Base):
     def draw(self, track, art, t):
         w, h = self.ctx.width, self.ctx.height
         img = self.ctx.canvas(self.hex("background"))
-        size = min(h, w // 2)
+        size = self.art_size(min(h, w // 2))
         img.paste(art.resize((size, size), Image.LANCZOS), (0, (h - size) // 2))
         x0 = size + 2
         col = self.artist_colour(art, track)
-        self.ticker(img, self.mid, x0, w, 8, track.title, t, self.hex("title_colour") if track.playing else (150, 150, 150))
-        self.ticker(img, self.small, x0, w, 16, track.artist, t, col)
+        title, artist = self.baselines(8, 16)
+        self.ticker(img, self.mid, x0, w, title, track.title, t, self.hex("title_colour") if track.playing else (150, 150, 150))
+        self.ticker(img, self.small, x0, w, artist, track.artist, t, col)
         d = ImageDraw.Draw(img)
         if h >= 30:
             self.pause_icon(d, x0 + 1, 21, not track.playing, (200, 200, 200))
@@ -187,13 +207,17 @@ class Backdrop(Base):
         bg = big.crop((0, top, w, top + h)).filter(ImageFilter.GaussianBlur(3))
         img = Image.fromarray((np.asarray(bg) * 0.35).astype(np.uint8))
         d = ImageDraw.Draw(img)
-        thumb = min(22, h - 8)
-        img.paste(art.resize((thumb, thumb), Image.LANCZOS), (3, 3))
-        d.rectangle([2, 2, thumb + 3, thumb + 3], outline=(0, 0, 0))
-        x0 = thumb + 6
+        thumb = min(22, h - 8, w - 6 - self.TEXT_ROOM)
+        if thumb >= 8:
+            img.paste(art.resize((thumb, thumb), Image.LANCZOS), (3, 3))
+            d.rectangle([2, 2, thumb + 3, thumb + 3], outline=(0, 0, 0))
+            x0 = thumb + 6
+        else:   # too small to make out: the blurred cover behind is enough, and the words get the width
+            x0 = 2
         col = self.artist_colour(art, track)
-        self.ticker(img, self.mid, x0, w, 10, track.title, t, self.hex("title_colour"))
-        self.ticker(img, self.small, x0, w, 19, track.artist, t, col)
+        title, artist = self.baselines(10, 19)
+        self.ticker(img, self.mid, x0, w, title, track.title, t, self.hex("title_colour"))
+        self.ticker(img, self.small, x0, w, artist, track.artist, t, col)
         if h >= 30:
             self.small.draw(img, x0, 26, mmss(track.position(t)) if track.playing else "PAUSED", (190, 180, 210))
             if self.settings["show_progress"]:
@@ -207,7 +231,7 @@ class Vinyl(Base):
 
     def draw(self, track, art, t):
         w, h = self.ctx.width, self.ctx.height
-        r = min(h, w // 2) / 2 - 0.5
+        r = self.art_size(min(h, w // 2)) / 2 - 0.5
         spin = (t - self.changed) * 3.5 if track.playing else 0.0
         size = int(2 * r + 1)
         a = np.zeros((size, size, 3)) + 8
@@ -232,8 +256,9 @@ class Vinyl(Base):
         img.paste(disc_img, (0, (h - size) // 2), disc_mask)
         x0 = size + 2
         col = self.artist_colour(art, track)
-        self.ticker(img, self.mid, x0, w, 9, track.title, t, self.hex("title_colour"))
-        self.ticker(img, self.small, x0, w, 17, track.artist, t, col)
+        title, artist = self.baselines(9, 17)
+        self.ticker(img, self.mid, x0, w, title, track.title, t, self.hex("title_colour"))
+        self.ticker(img, self.small, x0, w, artist, track.artist, t, col)
         if h >= 30:
             self.small.draw(img, x0, 25, mmss(track.position(t)) if track.playing else "PAUSED", GREY)
             if self.settings["show_progress"]:
@@ -250,6 +275,7 @@ class Ticker(Base):
     def setup(self):
         super().setup()
         self.shown = 0.0                                     # 0 hidden .. 1 fully up
+        self.arrived = None                                  # when the strip was last fully up
 
     def render(self, now):
         w, h = self.ctx.width, self.ctx.height
@@ -258,6 +284,10 @@ class Ticker(Base):
         self.finished = False                                # an overlay never ends an entry
         want = 1.0 if track and track.playing else 0.0
         self.shown += max(-0.12, min(0.12, want - self.shown))
+        if self.shown < 1:
+            self.arrived = None
+        elif self.arrived is None:
+            self.arrived = t
         if self.shown <= 0 or track is None:
             return img
         band = 9
@@ -266,7 +296,9 @@ class Ticker(Base):
         strip = Image.new("RGB", (w, band))
         if art is not None:
             strip.paste(art.resize((band - 2, band - 2), Image.LANCZOS), (1, 1))
-        self.ticker(strip, self.small, band, w - 1, 6, f"{track.title} - {track.artist}", t, self.hex("title_colour"))
+        # the words wait at their start until the strip is fully up, so its first letters are seen
+        start = t if self.arrived is None else max(self.retitled, self.arrived)
+        self.ticker(strip, self.small, band, w - 1, 6, f"{track.title} - {track.artist}", t, self.hex("title_colour"), start)
         sd = ImageDraw.Draw(strip)
         self.bar(sd, 0, w - 1, 0 if self.settings["position"] == "bottom" else band - 1,
                  track.position(t) / (track.duration_ms / 1000), self.artist_colour(art, track))

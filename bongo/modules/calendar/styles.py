@@ -191,17 +191,21 @@ class Month(_Base):
         today = now.date()
         first = 0 if self.settings["week_start"] == "monday" else 6
         weeks = cal.Calendar(first).monthdayscalendar(today.year, today.month)
-        name = f"{today:%B}".upper()
-        right = f"{today:%a} {today.day}".upper()
-        if self.tiny.width(name) + self.tiny.width(right) + 4 > w:
-            name = f"{today:%b}".upper()
+        # the month and the date along the top, shortened until they fit side by side, the name left out
+        # last of all; never one over the other (a small panel had "DEC" under "THU 31")
+        full, short, right = f"{today:%B}".upper(), f"{today:%b}".upper(), f"{today:%a} {today.day}".upper()
+        name, right = next(((n, r) for n, r in ((full, right), (short, right), (short, str(today.day)))
+                            if self.tiny.width(n) + self.tiny.width(r) + 4 <= w), ("", str(today.day)))
         top = self.tiny.cap + 1
+        grid_top = top + 2 if h - top - 2 >= 2 * len(weeks) - 1 else top + 1   # (closed up on a short panel)
+        if h - grid_top < 2 * len(weeks) - 1:                 # no room for the grid under them: the grid alone
+            name = right = ""
+            grid_top = 0
         self.tiny.draw(img, 1, top, name, self.ink)
         self.tiny.draw(img, w - 1 - self.tiny.width(right), top, right, self.accent)
-        grid_top = top + 2
         cw, ch = w // 7, max(2, (h - grid_top) // len(weeks))
         x_off = (w - cw * 7) // 2 + 1
-        y_off = grid_top + (h - grid_top - ch * len(weeks)) // 2
+        y_off = grid_top + max(0, (h - grid_top - ch * len(weeks)) // 2)
         marked = self.marked(today.year, today.month)
         pulse = 0.75 + 0.25 * math.sin(now.timestamp() * 3)
         weekend = {5, 6} if first == 0 else {0, 6}  # column indexes of Sat/Sun
@@ -297,19 +301,27 @@ class Desk(_Base):
         today = now.date()
         pw = min(w - 2, 40)
         x0 = (w - pw) // 2
-        band = max(7, h // 4)
-        d.rectangle([x0, 2, x0 + pw - 1, h - 1], fill=scale(self.ink, 0.3))          # the paper, gently lit
-        d.rectangle([x0, 2, x0 + pw - 1, 2 + band], fill=scale(self.accent, 0.8))    # the month band
+        roomy = h >= 24
+        # on a short panel the rings and band shrink so the date below still fits whole
+        top, band = (2, max(7, h // 4)) if roomy else (1, 6)
+        d.rectangle([x0, top, x0 + pw - 1, h - 1], fill=scale(self.ink, 0.3))          # the paper, gently lit
+        d.rectangle([x0, top, x0 + pw - 1, top + band], fill=scale(self.accent, 0.8))  # the month band
         for k in range(4):                                                           # binder rings
             rx = x0 + 5 + k * (pw - 10) // 3
-            d.rectangle([rx - 1, 0, rx, 2], fill=scale(self.ink, 0.6))
+            d.rectangle([rx - 1, 0, rx, top], fill=scale(self.ink, 0.6))
         month = f"{today:%B}".upper()
         if self.tiny.width(month) > pw - 6:
             month = f"{today:%b}".upper()
-        self.tiny.draw(img, x0 + (pw - self.tiny.width(month)) // 2, 2 + band - 1, month, self.bg)
-        big = next((f for f in map(self.ctx.fonts, ("10x20", "6x13B", "5x7")) if f.cap + 9 <= h - band - 3), self.small)
+        self.tiny.draw(img, x0 + (pw - self.tiny.width(month)) // 2, top + band - (1 if roomy else 0), month, self.bg)
         day = str(today.day)
-        base = 2 + band + 2 + big.cap
+        if roomy:
+            big = next((f for f in map(self.ctx.fonts, ("10x20", "6x13B", "5x7")) if f.cap + 9 <= h - band - 3), self.small)
+            base = 2 + band + 2 + big.cap
+        else:                                                 # the biggest digits that fit the paper, centred on it
+            paper = h - (top + band + 1)
+            fonts = [(f, -Page.lit_rows(f, day)[0]) for f in map(self.ctx.fonts, ("6x13B", "5x7", "tom-thumb"))]
+            big, lit = next(((f, n) for f, n in fonts if n + 2 <= paper), fonts[-1])
+            base = top + band + 1 + (paper - lit) // 2 + lit
         tight(img, big, x0 + (pw - digits_width(big, day)) // 2, base, day, self.ink)
         weekday = f"{today:%A}".upper()
         if self.tiny.width(weekday) > pw - 2:
@@ -376,9 +388,11 @@ class Week(_Base):
         today = now.date()
         shift = 0 if self.settings["week_start"] == "monday" else 1
         start = today - dt.timedelta(days=(today.weekday() + shift) % 7)
-        days = 7 if w >= 56 else 5                            # a small canvas shows today and two either side
-        if days == 5:
-            start = today - dt.timedelta(days=2)
+        # seven columns if each has room for two digits and a gap (9 px); else today and two (or one)
+        # either side: at 57 px wide the dates ran together ("28293031")
+        days = next((n for n in (7, 5, 3) if w // n >= 9), 3)
+        if days < 7:
+            start = today - dt.timedelta(days=days // 2)
         cw = w // days
         x_off = (w - cw * days) // 2
         marked = {}
@@ -401,14 +415,15 @@ class Week(_Base):
                 colour = marked[k]
                 d.rectangle([x + (cw - 1) // 2 - 1, 17, x + (cw - 1) // 2, 18], fill=colour)
         items = self.upcoming(today + dt.timedelta(days=1), 1)
-        if items and h >= 30:
+        if items and h >= 26:                                 # the next date along the bottom, clear of the dots
             dd, title, own, _ = items[0]
             text = f"{title.upper()} {dd:%a %d}".upper()
             ink = self.ink_of(title, own, self.event_ink if own else scale(self.ink, 0.7))
+            base = min(29, h - 1)
             if self.tiny.width(text) <= w - 2:
-                self.tiny.draw(img, (w - self.tiny.width(text)) // 2, 29, text, ink)
+                self.tiny.draw(img, (w - self.tiny.width(text)) // 2, base, text, ink)
             else:
-                self.marquee(img, 0, 29, w, text, ink, now)
+                self.marquee(img, 0, base, w, text, ink, now)
         return img
 
 
@@ -416,13 +431,14 @@ class Week(_Base):
 
 class Numbers(_Base):
     """Numbers: the month name over a calendar grid of day numbers for the weeks around today,
-    today's number lit and underlined, your dates coloured."""
+    today's number lit and underlined, your dates coloured. On panels narrower than 63 pixels it
+    shows as Dots."""
     fps = 2
 
     def render(self, now):
         w, h = self.ctx.width, self.ctx.height
-        if w < 56 or h < 26:                                  # too small for seven columns of numbers
-            return Dots.render(self, now)
+        if w // 7 < 9 or h < 26:                              # too small for seven columns of numbers with a
+            return Dots.render(self, now)                     # gap between them (at 57 px they ran together)
         img = self.ctx.canvas(self.bg)
         d = ImageDraw.Draw(img)
         today = now.date()
@@ -473,7 +489,12 @@ class Dots(_Base):
         first = 0 if self.settings["week_start"] == "monday" else 6
         weeks = cal.Calendar(first).monthdayscalendar(today.year, today.month)
         marked = self.marked(today.year, today.month)
-        pitch = 4 if len(weeks) * 4 <= h else 3            # 2x2 dots on a small canvas
+        date, month = str(today.day), f"{today:%b}".upper()
+        # the dots shrink (3x3, 2x2, then single pixels) before the month's letters do, so that the month
+        # and the date beside them are never cut off
+        fits = [(p, f) for f in (self.small, self.tiny) for p in (4, 3, 2)
+                if (p < 4 or len(weeks) * 4 <= h) and f.width(month) <= w - (7 * p - 1) - 4]
+        pitch, label = fits[0] if fits else (2, self.tiny)
         gw, gh = 7 * pitch - 1, len(weeks) * pitch - 1
         gx = w - gw - 2
         gy = (h - gh) // 2
@@ -491,12 +512,14 @@ class Dots(_Base):
                     ink = scale(self.ink, BLOCK if day < today.day else 0.5)
                 d.rectangle([x, y, x + pitch - 2, y + pitch - 2], fill=ink)
         left = gx - 2
-        month = f"{today:%b}".upper()
         big = self.ctx.fonts("10x20") if left >= 22 and h >= 28 else self.small
-        day = str(today.day)
-        top = (h - (self.small.cap + 4 + big.cap)) // 2 + self.small.cap
-        self.small.draw(img, (left - self.small.width(month)) // 2, top, month, self.accent)
-        big.draw(img, (left - big.width(day)) // 2, top + 4 + big.cap, day, self.ink)
+        gap = min(4, h - 2 - label.cap - big.cap)             # closed up on a short panel, rather than cut
+        if gap < 1:
+            label = self.tiny
+            gap = max(1, min(4, h - 2 - label.cap - big.cap))
+        top = (h - (label.cap + gap + big.cap)) // 2 + label.cap
+        label.draw(img, (left - label.width(month)) // 2, top, month, self.accent)
+        big.draw(img, (left - big.width(date)) // 2, top + gap + big.cap, date, self.ink)
         return img
 
 
@@ -510,8 +533,16 @@ class Year(_Base):
         img = self.ctx.canvas(self.bg)
         today = now.date()
         first = 0 if self.settings["week_start"] == "monday" else 6
-        cols, mw, mh = 6, 7, 6
-        months = range(1, 13) if h >= 24 else range(1 + (today.month - 1) // 6 * 6, 7 + (today.month - 1) // 6 * 6)
+        mw, mh = 7, 6
+        cols = min(6, (w - 1) // (mw + 1))                    # six months a row, fewer on a narrow panel
+        rows = 2 if h >= 24 else 1
+        if cols * rows >= 12:
+            months = range(1, 13)
+        elif cols == 6:                                       # one row: this half of the year
+            months = range(1 + (today.month - 1) // 6 * 6, 7 + (today.month - 1) // 6 * 6)
+        else:                                                 # as many as fit, up to this month (Nov and Dec
+            start = max(1, today.month - cols * rows + 1)     # used to fall off the edge)
+            months = range(start, start + cols * rows)
         gapx = max(1, (w - cols * mw) // (cols + 1))
         rows = len(months) // cols
         gapy = max(1, (h - rows * (mh + 4)) // (rows + 1))
@@ -550,13 +581,15 @@ class Rings(Progress):
     def render(self, now):
         w, h = self.ctx.width, self.ctx.height
         S = 4
-        size = h - 2                                          # a pixel clear of the edges
+        size = min(h - 2, w - 3 - 14)                         # a pixel clear of the edges; on a tall panel, small
+                                                              # enough to leave the percentages room beside it
         big = Image.new("RGB", (size * S, size * S), self.bg)
         d = ImageDraw.Draw(big)
         frac, names = self.fractions(now), self.labels(now)
         bars = [b for b in ("year", "month", "week", "day") if b in self.settings["bars"]] or ["year"]
         c = size * S / 2
         bars = bars[:3] if size < 24 else bars                # three rings on a small canvas, each big enough to read
+        bars = bars[:max(1, (h - self.tiny.cap) // (7 if h >= 28 else 6) + 1)]   # and no more than their lines fit
         step = 14 if size >= 24 else 10
         for k, bar in enumerate(bars):
             r = c - 4 - k * step
@@ -577,7 +610,7 @@ class Rings(Progress):
         mask = Image.fromarray(((a.max(-1) > 0) * 255).astype(np.uint8))   # unlit dots stay as they were
         legend = 30 if w - size - 3 >= 30 else 14
         x0 = (w - size - 2 - legend) // 2
-        img.paste(ring, (x0, 1), mask)
+        img.paste(ring, (x0, (h - size) // 2), mask)
         pitch = 7 if h >= 28 else 6
         y = (h - len(bars) * pitch) // 2 + self.tiny.cap + 1
         for k, bar in enumerate(bars):
@@ -604,6 +637,8 @@ class Weeks(Progress):
         frac = self.fractions(now)["year"]
         cols, rows = 13, 4
         pitch = max(3, min((w - 2) // cols, (h - 9) // rows))
+        while pitch > 2 and rows * pitch - 1 + 3 + self.tiny.cap > h:   # the squares shrink so the day line fits
+            pitch -= 1
         gx = (w - cols * pitch + 1) // 2
         block = rows * pitch - 1 + 3 + self.tiny.cap
         gy = (h - block) // 2
@@ -639,7 +674,12 @@ class Percent(Progress):
         bar = bars[int(now.timestamp() // self.HOLD) % len(bars)]
         f = min(1.0, max(0.0, self.fractions(now)[bar]))
         big = self.ctx.fonts("10x20" if h >= 30 else "6x13B")
-        base = 17 if h >= 30 else big.cap + 1
+        base = 17
+        if h < 30:                                            # the number and the words under it, centred; the
+            # number smaller where both won't fit (a short panel cut the words off)
+            big, lit = next(((f, -Page.lit_rows(f, "0")[0]) for f in map(self.ctx.fonts, ("6x13B", "6x10", "5x7"))
+                             if -Page.lit_rows(f, "0")[0] + 3 + self.tiny.cap <= h), (self.ctx.fonts("5x7"), 6))
+            base = (h - (lit + 3 + self.tiny.cap)) // 2 + lit
         num = f"{int(f * 100)}"
         pct_w = self.small.width("%")
         x = (w - big.width(num) - pct_w - 1) // 2

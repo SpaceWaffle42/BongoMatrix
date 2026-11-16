@@ -1,10 +1,10 @@
 // Now playing (hero preview, transport, quick controls, push) and the playlist filmstrip.
 import { post, previewPath } from './api.js';
-import { h, icon, toast, fail, same, humanize, dur, mmss, clock, reducedMotion, segmented, toggle, store } from './ui.js';
+import { h, icon, toast, fail, same, humanize, dur, mmss, reducedMotion, segmented, toggle, store } from './ui.js';
 import { FrameLoop } from './led.js';
 import { helpButton } from './help.js';
-import { S, bus, onLeave, go, href, moduleById, moduleOff, styleOf, entryName, draftChanged, dirtyCount, applyDraft, discardDraft, normalise, matrixClock } from './app.js';
-import { playsAt, nextStart, short, spoken, gapWarning, sleepTime } from './times.js';
+import { S, bus, onLeave, go, href, moduleById, moduleOff, styleOf, entryName, draftChanged, dirtyCount, applyDraft, discardDraft, normalise, matrixClock, problemOf, problemLine } from './app.js';
+import { playsAt, nextStart, short, spoken, gapWarning, sleepTime, mins, hhmm } from './times.js';
 
 const COLOURS = { clock: '#FF7A3D', weather: '#5B9BE8', announcements: '#FFB547', calendar: '#E879B7',
   rss: '#8B95A5', text: '#A78BFA', astronomy: '#4ADE80', media: '#2DD4BF' };
@@ -113,7 +113,7 @@ export function render(view) {
     if (!msg.value.trim()) { msg.focus(); toast('Type a message first', 'error'); return; }
     try {
       await post('/api/push', { text: msg.value.trim(), title: ttl.value.trim(), seconds: Number(secs.value) });
-      toast('Message sent to the panel', 'success'); msg.value = '';
+      toast('Message sent to the panel', 'success'); msg.value = ''; ttl.value = '';
     } catch (err) { fail("Couldn't push the message")(err); }
   });
 
@@ -129,8 +129,9 @@ export function render(view) {
   function paint() {
     const L = live(), e = L.entry;
     const asleep = !!L.sleep_until || !!L.asleep;   // Sleep now, or the sleep hours (Settings > Sleep)
-    const sleepTo = /^\d{1,2}:\d{2}$/.test(S.config?.sleep?.to || '') ? S.config.sleep.to : '';
-    const wakesAt = L.sleep_hours && sleepTo ? sleepTo : L.sleep_until ? clock(new Date(L.sleep_until)) : sleepTo;   // the later of the two
+    const sleepTo = sleepTime(S.config)?.to || '';   // (only while the sleep hours are switched on)
+    // by the Matrix's clock, not this phone's: they can be in different time zones
+    const wakesAt = L.sleep_hours && sleepTo ? sleepTo : L.sleep_until ? matrixIn((epoch(L.sleep_until) - matrixEpoch()) / 60000) : sleepTo;   // the later of the two
     // nothing is set to play now: every screen in rotation has times (Timing > When it plays), and none is now
     const now = matrixClock();
     const timed = (S.config?.playlist || []).map(normalise).filter((x) => x.enabled && !moduleOff(x.module) && x.times.length);
@@ -139,8 +140,9 @@ export function render(view) {
     const idle = !!L.idle && !e && !asleep;
     title.textContent = asleep ? 'Sleeping' : idle ? (soonest ? `Nothing is set to play until ${soonest.at}` : 'Nothing is set to play') : e ? entryName(e) : 'Starting up…';
     idleLink.hidden = !idle;
-    progress.hidden = idle;   // nothing on: no time bar, and nothing to pause or skip
-    pauseBtn.disabled = nextBtn.disabled = idle;
+    progress.hidden = idle || asleep;   // nothing on, or asleep: no time bar, and nothing to pause or skip
+    pauseBtn.disabled = nextBtn.disabled = idle || asleep;
+    pauseBtn.hidden = nextBtn.hidden = asleep;
     styleTag.textContent = e ? humanize(styleOf(e)) : '';
     styleTag.hidden = !e || asleep;
     paintActs(e, idle || (asleep && !e));
@@ -160,12 +162,15 @@ export function render(view) {
       autoBtn.setAttribute('aria-pressed', String(auto)); manBtn.setAttribute('aria-pressed', String(!auto));
     }
     sleepBtn.replaceChildren(h('span', { class: 'strong' }, asleep ? 'Wake now' : 'Sleep now'),
-      h('span', { class: 'muted small' }, asleep ? (wakesAt ? `Asleep until ${wakesAt}` : 'Asleep') : `Until ${sleepTo || clock(new Date(Date.now() + sleepMinutes() * 60000))}`));
+      h('span', { class: 'muted small' }, asleep ? (wakesAt ? `Asleep until ${wakesAt}` : 'Asleep') : `Until ${sleepTo || matrixIn(sleepMinutes())}`));
     const list = S.config?.playlist?.map(normalise).filter((x) => x.enabled && !moduleOff(x.module) && playsAt(x.times, now)) || [];
     const at = list.findIndex((x) => matches(x, e));
     const rest = at < 0 ? list : [...list.slice(at + 1), ...list.slice(0, at)];
     upNext.replaceChildren(...rest.slice(0, 4).map((x) => h('li', null, h('span', { class: 'swatch', style: `background:${colourOf(x.module)}` }),
       h('span', { class: 'grow' }, entryName(x), h('span', { class: 'muted small' }, ` · ${humanize(styleOf(x))}`)), h('span', { class: 'mono small muted' }, dur(x.seconds)))));
+    if (!rest.length) {   // one screen (or none) playing now: say so, rather than an empty card
+      upNext.append(h('li', { class: 'muted small' }, list.length ? `Only ${entryName(list[0])} is in rotation, so it stays on.` : 'Nothing else is set to play now.'));
+    }
     tick();
     playlist.markPlaying();
     playlist.markTimes();
@@ -192,14 +197,28 @@ export function render(view) {
   }
 }
 
-/** Minutes until the configured sleep "to" time (e.g. 07:00), else 8 hours. */
+// The time on the Matrix, never this phone's clock (it can be in another time zone, or just wrong): the
+// Matrix's own time when /api/state was polled ("now", ISO with its offset), plus the time since.
+const ISO = /^(\d{4}-\d\d-\d\dT(\d\d):(\d\d):(\d\d)(?:\.(\d{1,3})\d*)?)([+-]\d\d:\d\d|Z)$/;
+/** An ISO time as a moment (ms), with any microseconds cut to milliseconds. */
+const epoch = (iso) => { const m = ISO.exec(iso || ''); return m ? Date.parse(`${m[1].replace(/\.\d+$/, '')}.${(m[5] || '0').padEnd(3, '0')}${m[6]}`) : Date.parse(iso); };
+const since = () => performance.now() - (S.stateAt ?? performance.now());
+/** The moment it is now, by the Matrix (ms). */
+const matrixEpoch = () => { const t = epoch(S.state?.now); return Number.isFinite(t) ? t + since() : Date.now(); };
+/** The time on the Matrix now, in minutes since its midnight (with seconds). */
+function matrixMinutes() {
+  const m = ISO.exec(S.state?.now || '');
+  const at = m ? Number(m[2]) * 60 + Number(m[3]) + Number(m[4]) / 60 : mins(matrixClock());   // (an older Matrix: to the minute)
+  return ((((at + since() / 60000) % 1440) + 1440) % 1440);
+}
+/** "07:00": the Matrix's clock this many minutes from now. */
+const matrixIn = (minutes) => hhmm(Math.round(matrixMinutes() + minutes));
+/** Minutes until the sleep hours end (e.g. 07:00) on the Matrix's clock, else 8 hours. */
 function sleepMinutes() {
-  const to = S.config?.sleep?.to;
-  if (!/^\d{1,2}:\d{2}$/.test(to || '')) return 480;
-  const [hh, mm] = to.split(':').map(Number), now = new Date(), end = new Date(now);
-  end.setHours(hh, mm, 0, 0);
-  if (end <= now) end.setDate(end.getDate() + 1);
-  return Math.max(1, Math.round((end - now) / 60000));
+  const to = mins(sleepTime(S.config)?.to);
+  if (!Number.isFinite(to)) return 480;
+  const left = (((to - matrixMinutes()) % 1440) + 1440) % 1440;
+  return left < 0.5 ? left + 1440 : left;
 }
 
 // -- playlist filmstrip --------------------------------------------------------------------------
@@ -279,9 +298,9 @@ function renderPlaylist() {
     const d = S.draft || [];
     const on = d.filter((e) => e.enabled && !moduleOff(e.module));   // a module switched off in Settings is skipped too
     const bad = new Map();
-    for (const p of S.problems) { const m = /^playlist\[(\d+)\]:?\s*(.*)$/.exec(p); if (m) bad.set(Number(m[1]), m[2]); }
+    for (const p of S.problems) { const q = problemOf(p); if (q.i !== null) bad.set(q.i, q.text); }
     problems.hidden = !S.problems.length;
-    problems.replaceChildren(h('strong', null, "The Matrix didn't accept this playlist:"), h('ul', null, S.problems.map((p) => h('li', null, p))));
+    problems.replaceChildren(h('strong', null, "The Matrix didn't accept this playlist:"), h('ul', null, S.problems.map((p) => h('li', null, problemLine(p)))));
     strip.replaceChildren(...d.map((e, i) => cardFor(e, i, bad.get(i))),
       h('button', { type: 'button', class: 'add-tile', onclick: () => addDialog.open() }, icon('plus'), 'Add module'));
     paintLoop();

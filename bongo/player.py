@@ -22,6 +22,7 @@ class Entry:
     settings: dict = field(default_factory=dict)
     enabled: bool = True
     once: bool = False   # play through once and hand over (splash, boot); ``seconds`` is then only a cap
+    looping: bool = False   # loop even a GIF made to play once (Sleep: shown again and again in whole passes)
     times: list = field(default_factory=list)   # [{"from": "08:00", "to": "10:00"}, ...]; none: all day
 
     def plays_at(self, now) -> bool:
@@ -51,15 +52,17 @@ def busy(style) -> bool:
 
 def play_entry(style: Style, seconds: float, panel, stop: threading.Event | None = None,
                clock=time.monotonic, place=None, live=None, overlays=None, hold: bool = True,
-               overrun: float = OVERRUN) -> int:
+               overrun: float = OVERRUN, until: float | None = None) -> int:
     """Render one entry until its time is up; returns frames shown.
     ``place`` puts the module's safe-area frame onto the full panel (see SafeArea.place).
     ``live`` (bongo.live.Live) can skip or hold the entry and sees every frame. ``hold`` False: Pause
     doesn't keep this one up (a pushed message shows for its time, then gives the paused screen back).
-    ``overrun``: how long past its time a ``busy`` style may stay (0: the time is a hard stop)."""
+    ``overrun``: how long past its time a ``busy`` style may stay (0: the time is a hard stop).
+    ``until``: seconds to a hard end that even Pause doesn't hold (sleep starting or ending)."""
     stop = stop or threading.Event()
     frame_time = 1 / style.fps
     end = clock() + seconds
+    hard = None if until is None else clock() + until
     try:
         style.hand_over_at = style.ctx.now().timestamp() + seconds   # (Style.hand_over_at: nothing new started after this holds it up)
     except Exception:
@@ -75,11 +78,14 @@ def play_entry(style: Style, seconds: float, panel, stop: threading.Event | None
                 style.hand_over_at = style.ctx.now().timestamp() + max(0.0, end - clock())
             except Exception:
                 pass
+        if hard is not None and clock() >= hard:
+            break   # sleep starts or ends: paused or not, the player moves on to it
         if clock() >= end and not held:
             if not (clock() < end + min(overrun, getattr(style, "most_overrun", overrun)) and busy(style)):
                 break   # (busy: a line is still scrolling, so it gets to finish)
         if live and live.skip.is_set():
             live.skip.clear()
+            style.nexted = True   # (Next, not the screen: ``run`` doesn't count it as skipping itself)
             break
         if getattr(style, "finished", False) and not (held and shown):   # a style can hand over
             break   # early (Spotify idle, a splash played through); Pause holds one only once it has drawn
@@ -117,7 +123,7 @@ def play(playlist: list[Entry], modules: dict[str, Module], panel, ctx_factory=C
          stop: threading.Event | None = None, loops: int | None = None, place=None,
          schedule=None, live=None, overlays=None) -> None:
     """Cycle the playlist until ``stop`` (or ``loops`` passes). A ``Schedule`` plays its boot screen
-    at start-up, fills ``splash`` items from the Splash pool and swaps in the sleep playlist, at
+    at start-up (unless that's in the night), fills ``splash`` items from the Splash pool and swaps in the sleep playlist, at
     sleep brightness, during its hours (an entry is cut short when sleep starts or ends). ``live``
     lets the dashboard skip, pause, push a message, force sleep and override brightness.
     An entry with ``times`` only plays inside them: it is looked at when its turn comes, so the one on the
@@ -131,7 +137,7 @@ def play(playlist: list[Entry], modules: dict[str, Module], panel, ctx_factory=C
         raise ValueError("playlist has no enabled entries")
 
     def run(entry: Entry, upcoming: Entry | None = None, index: int | None = None, extras=None,
-            limit: float | None = None, hold: bool = True) -> bool:
+            limit: float | None = None, hold: bool = True, edge: bool = True) -> bool:
         shown = entry
         if entry.module == "splash":  # a Splash item: the next file from the Splash pool
             entry = schedule.splash if schedule else None
@@ -144,6 +150,7 @@ def play(playlist: list[Entry], modules: dict[str, Module], panel, ctx_factory=C
             log.exception("skipping playlist entry %s", entry.module)
             return False
         style.once = entry.once
+        style.looping = entry.looping
         # a GIF playing once hands over itself; its expected length is only a cap, with room for a slow Pi
         moving = entry.once and getattr(style, "moving", False)
         cap = entry.seconds + ONCE_SLACK if moving else entry.seconds
@@ -152,11 +159,13 @@ def play(playlist: list[Entry], modules: dict[str, Module], panel, ctx_factory=C
             live.playing(shown, upcoming, index)
         try:
             frames = play_entry(style, seconds, panel, stop, place=place, live=live, overlays=extras, hold=hold,
-                                overrun=OVERRUN if limit is None else max(0.0, min(OVERRUN, limit - cap)))   # never into sleep
+                                overrun=OVERRUN if limit is None else max(0.0, min(OVERRUN, limit - cap)),   # never into sleep
+                                until=limit if edge else None)   # (edge: the limit is sleep starting or ending)
         except Exception:  # one broken module must not stop the panel
             log.exception("%s/%s failed while playing; moving on", entry.module, entry.style)
             return False
-        gone = frames == 0 and getattr(style, "finished", False)   # it skipped itself (Spotify, nothing on)
+        gone = frames == 0 and not getattr(style, "nexted", False)   # it skipped itself (Spotify, nothing on),
+        # or had no time at all: never a spin. (Next pressed before its first frame isn't the screen's doing.)
         skipped[0] = skipped[0] + 1 if gone else 0
         return True
 
@@ -190,10 +199,13 @@ def play(playlist: list[Entry], modules: dict[str, Module], panel, ctx_factory=C
         if live:
             live.skip.clear()   # nothing was playing: a Wake or Next pressed meanwhile mustn't skip the next screen
 
-    skipped = [0]   # screens in a row that skipped themselves without a frame
+    skipped = [0]   # screens in a row that skipped themselves without a frame (or failed)
+    splashes = bool(schedule and schedule.splash_sources)   # Splash switched off: its items have nothing to play
+
     def due(now, start):
         """Places in ``day`` that play at ``now``, in playing order from ``start``."""
-        return [k % len(day) for k in range(start, start + len(day)) if day[k % len(day)].plays_at(now)]
+        return [k % len(day) for k in range(start, start + len(day))
+                if day[k % len(day)].plays_at(now) and (splashes or day[k % len(day)].module != "splash")]
 
     def after(index, entry, now):
         """What follows ``entry``: the next one that plays when it ends (itself, if it's the only one; None: nothing)."""
@@ -202,12 +214,17 @@ def play(playlist: list[Entry], modules: dict[str, Module], panel, ctx_factory=C
 
     boot = schedule.boot_entry() if schedule else None
     if boot:
-        first = due(ctx_factory().now(), 0)
-        run(boot, day[first[0]] if first else None)
+        now = ctx_factory().now()
+        night = bool(live and live.asleep(now)) or schedule.asleep(now)
+        brightness(now, night)   # before the boot screen: the panel opens at day brightness
+        if not night:            # (starting up in the night goes straight to the sleep screen)
+            first = due(now, 0)
+            run(boot, day[first[0]] if first else None, limit=schedule.seconds_until_change(now))   # (not into sleep)
     was_asleep = False
     position: dict[tuple, int] = {}  # where the sleep playlist left off
     cursor = 0                       # the place in ``day`` whose turn is next
     again = None                     # a place to play again whatever its times (see the paused push below)
+    resume = None                    # the place paused when sleep cut it short: held again in the morning
     played = 0
     while not stop.is_set() and (loops is None or played < loops * len(day)):
         if live and live.reload.is_set():
@@ -222,8 +239,11 @@ def play(playlist: list[Entry], modules: dict[str, Module], panel, ctx_factory=C
         if live and live.awake and (forced or not hours):
             live.awake = False                             # those hours are over (or Sleep now): asleep as usual next time
         asleep = forced or (hours and not (live and live.awake))
-        if was_asleep and not asleep and schedule:
+        woke = was_asleep and not asleep
+        if woke and schedule:
             schedule.wake()  # tomorrow night picks a new Sleep screen
+        if not (live and live.paused):
+            resume = None
         was_asleep = asleep
         if live:
             live.sleeping, live.sleep_hours = asleep, hours
@@ -244,9 +264,11 @@ def play(playlist: list[Entry], modules: dict[str, Module], panel, ctx_factory=C
             again = None
         else:
             now_due = due(now, cursor)   # by its times (Timing > When it plays), each time its turn comes
+            if woke and resume is not None:   # paused through the night: the morning holds the same screen
+                again = resume
             if again is not None and live and live.paused:   # the paused screen a message cut in on: back to it,
                 now_due = [again] + [k for k in now_due if k != again]   # even if its time has ended meanwhile
-            again = None                 # (resumed since: it takes its turn by its times, like any other)
+            again = resume = None        # (resumed since: it takes its turn by its times, like any other)
             if not now_due:              # every screen has times, and none of them is now: dark until one is
                 if live:
                     live.idle = True
@@ -266,8 +288,11 @@ def play(playlist: list[Entry], modules: dict[str, Module], panel, ctx_factory=C
             limit = live.sleep_left(now)
         else:
             limit = schedule.seconds_until_change(now) if schedule else None
+        edge = not (live and live.awake and hours)   # woken in the sleep hours: their end changes nothing
         ran = run(entry, upcoming, where, None if asleep else overlays,
-                  limit)   # where: slot in the saved playlist; limit: stop when sleep starts/ends
+                  limit, edge=edge)   # where: slot in the saved playlist; limit: stop when sleep starts/ends
+        if live and live.paused and not asleep:
+            resume = index           # (the night may cut it short)
         if live and live.paused and live.pushes:   # a message cut in on the paused screen: come back to it after
             played -= 1
             if asleep:
@@ -275,6 +300,8 @@ def play(playlist: list[Entry], modules: dict[str, Module], panel, ctx_factory=C
             else:
                 cursor = again = index
         if not ran:
+            skipped[0] += 1   # a screen that can't be built or broke counts as skipped too
+        if skipped[0] >= turns:   # every screen skipped itself (Spotify, nothing on) or failed: dark, not a spin,
+            show_dark(1)          # and a frame, so the watchdog doesn't take a broken screen for a stuck player
+        elif not ran:
             stop.wait(0.2)  # never spin if every entry is broken
-        elif skipped[0] >= turns:   # every screen skipped itself (Spotify, nothing on): dark, not a spin
-            show_dark(1)

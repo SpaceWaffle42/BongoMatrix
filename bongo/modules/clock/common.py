@@ -56,10 +56,11 @@ def ink_box(font, text: str):
     return m.getbbox() or (0, 30, 0, 30)
 
 
-def scaled(img: Image.Image, width: int, height: int) -> Image.Image:
-    """Styles draw on 64 x 32; a different canvas gets the drawing centred (or cropped) on it."""
+def scaled(img: Image.Image, width: int, height: int, background=(0, 0, 0)) -> Image.Image:
+    """Styles draw on 64 x 32; a different canvas gets the drawing centred (or cropped) on it, on the
+    style's ``background`` so the edges match the middle."""
     if img.size == (width, height):
         return img
-    out = Image.new("RGB", (width, height))
+    out = Image.new("RGB", (width, height), background)
     out.paste(img, ((width - img.width) // 2, (height - img.height) // 2))
     return out

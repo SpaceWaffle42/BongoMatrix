@@ -238,8 +238,31 @@ class Gate:
                 if name.strip().lower() == b"host" and value.strip().decode("ascii", "replace").rsplit(":", 1)[0].strip("[]").lower() != host.lower():
                     self._blocked(module_id, value.strip().decode("ascii", "replace"))
                     return self._refuse(client, "403 Forbidden", "the Host header names a different site")
+            # One request per connection: only this request's Host is checked, so a second one kept alive on the
+            # same connection could name any other site on that server. It's sent with "Connection: close", and
+            # nothing after its own body is passed on
+            lines, length, sizes, named = [], 0, 0, False
+            for line in others.split(b"\r\n"):
+                name = line.partition(b":")[0].strip().lower()
+                if name == b"transfer-encoding":
+                    return self._refuse(client, "411 Length Required", "send a Content-Length (not chunked)")
+                if name == b"content-length":
+                    # plain digits, given once: the site must read the same body length as the gate does
+                    value = line.partition(b":")[2].strip()
+                    sizes += 1
+                    if sizes > 1 or not value.isdigit() or len(value) > 15:
+                        return self._refuse(client, "400 Bad Request", "one Content-Length, a whole number")
+                    length = int(value)
+                named = named or name == b"host"
+                if line and name not in (b"connection", b"keep-alive", b"proxy-connection"):
+                    lines.append(line)
+            if not named:                            # the site is told which of its names was asked for
+                where = f"[{host}]" if ":" in host else host
+                lines.append(f"Host: {where}{'' if port == 80 else f':{port}'}".encode())
             path = url.path or "/"
-            send = f"{method} {path}{'?' + url.query if url.query else ''} {version}\r\n".encode() + others + rest
+            send = (f"{method} {path}{'?' + url.query if url.query else ''} {version}\r\n".encode()
+                    + b"".join(line + b"\r\n" for line in lines) + b"Connection: close\r\n\r\n" + rest[:length])
+            body_left = length - len(rest[:length])
         else:
             return self._refuse(client, "400 Bad Request", "not a web request")
         if not host_ok(host, port, sites):
@@ -270,7 +293,7 @@ class Gate:
                 _pipe(out, client)
                 done.set()
             threading.Thread(target=back, daemon=True).start()
-            _pipe(client, out)
+            _pipe(client, out, None if send is None else body_left)
             done.wait(TIMEOUT)
 
 
@@ -296,10 +319,14 @@ def server_name(hello: bytes) -> str | None:
     return None
 
 
-def _pipe(a, b):
+def _pipe(a, b, most=None):
+    """Copy ``a`` to ``b`` until ``a`` ends; with ``most``, only that many bytes (the rest is read and dropped)."""
     try:
         while data := a.recv(65536):
-            b.sendall(data)
+            if most is not None:
+                data, most = data[:most], most - len(data[:most])
+            if data:
+                b.sendall(data)
     except OSError:
         pass
     finally:

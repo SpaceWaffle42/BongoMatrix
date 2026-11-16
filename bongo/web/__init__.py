@@ -15,6 +15,7 @@ import json
 import logging
 import math
 import os
+import re
 import shutil
 import tempfile
 import threading
@@ -34,7 +35,7 @@ from bongo.player import Entry
 from bongo.schema import describe
 
 STATIC = Path(__file__).with_name("static")
-HARDWARE = ("rows", "cols", "hardware_mapping", "gpio_slowdown")  # panel keys fixed until a restart
+HARDWARE = ("rows", "cols", "hardware_mapping", "gpio_slowdown", "chain_length", "parallel")  # panel keys fixed until a restart
 COOKIE = "bongo_device"
 YEAR = 365 * 86400
 
@@ -49,7 +50,7 @@ class LogBuffer(logging.Handler):
     def emit(self, record):
         self.records.append({
             "t": record.created, "level": record.levelname, "source": record.name.rsplit(".", 1)[-1],
-            "message": record.getMessage(),
+            "message": re.sub(r"\x1b\[[0-9;]*[A-Za-z]", "", record.getMessage()),   # no terminal colour codes
             "trace": self.formatter.formatException(record.exc_info) if record.exc_info and self.formatter else
                      (logging.Formatter().formatException(record.exc_info) if record.exc_info else ""),
         })
@@ -103,6 +104,7 @@ def create_app(*, modules, live, pairing, config_path, logs: LogBuffer | None = 
     logs = logs or LogBuffer()
     started = started or time.time()
     render_lock = threading.Lock()  # preview styles are cached and keep state between frames
+    save_lock = threading.Lock()    # read, change and write the config one save at a time, so none is lost
     # the panel driver reads these once when it starts; a saved change waits for a restart
     running_panel = dict(cfg.load(config_path)["panel"])
 
@@ -199,6 +201,8 @@ def create_app(*, modules, live, pairing, config_path, logs: LogBuffer | None = 
         # clock: the Matrix's own time (its time zone, not the phone's), for "Not now · next 20:00" on the playlist
         return jsonify(live=live.status(), panel={"width": area.panel_width, "height": area.panel_height},
                        clock=cfg.context_factory(config)().now().strftime("%H:%M"),
+                       now=(lambda t: (t if t.tzinfo else t.astimezone()).isoformat(timespec="milliseconds"))(   # ...to the second,
+                           cfg.context_factory(config)().now()),                    # with its offset, for Sleep now
                        safe_area=dict(zip(("top", "right", "bottom", "left"), area.margins)),
                        uptime=round(time.time() - started), name=config.get("name", "Bongo Matrix"),
                        pet_kinds=pets.kinds(), network=network_info(config))
@@ -381,7 +385,7 @@ def create_app(*, modules, live, pairing, config_path, logs: LogBuffer | None = 
             gif = animator.gif(data.get("frames"), width, height, data.get("background", "#000000"),
                                data.get("loop", "loop"))
             if data.get("show"):
-                name = animator.save_preview(gif)
+                name = animator.save_preview(gif, cfg.safe_area(load()))   # cut to the safe area, as the guide shows
             else:
                 name = animator.save(str(data.get("name", "animation")), gif)
         except ValueError as error:
@@ -485,12 +489,13 @@ def create_app(*, modules, live, pairing, config_path, logs: LogBuffer | None = 
             abort(409, "Setup isn't open, or it's already trying a network. Give it a minute.")
         name = str(body.get("name") or "").strip()[:40]
         if name or country:   # "Name this Matrix" is the same as Settings > Display name
-            config = load()
-            if name:
-                config["name"] = name
-            if country:
-                config["wifi_country"] = country
-            cfg.save(config, config_path)
+            with save_lock:
+                config = load()
+                if name:
+                    config["name"] = name
+                if country:
+                    config["wifi_country"] = country
+                cfg.save(config, config_path)
         logging.getLogger("bongo.net").info("setup page: trying %s", ssid)
         return jsonify(network.status.public()), 202
 
@@ -530,11 +535,12 @@ def create_app(*, modules, live, pairing, config_path, logs: LogBuffer | None = 
         upload = request.files.get("file")
         if upload is None or not upload.filename:
             abort(400, "choose a GIF or picture")
+        cut = []   # a note if not every frame came in
         try:
-            frames = animator.frames_from(upload.read(), *canvas(request.form))
+            frames = animator.frames_from(upload.read(), *canvas(request.form), cut)
         except ValueError as error:
             return jsonify(error=f"Couldn't import {upload.filename}: {error}."), 422
-        return jsonify(frames=frames)
+        return jsonify(frames=frames, note=cut[0] if cut else None)
 
     # -- linked calendars (bongo/calendars.py): their links never leave the Matrix -----------------
     def calendar_list():
@@ -635,9 +641,9 @@ def create_app(*, modules, live, pairing, config_path, logs: LogBuffer | None = 
             name, fit = data["file"], data.get("fit", "fit")
             if "media" not in modules:
                 return jsonify(error="no media module installed"), 409
-            if fit not in modules["media"].styles:
+            if not isinstance(fit, str) or fit not in modules["media"].styles:   # (a list can't even be looked up)
                 return jsonify(error=f"fit: one of {', '.join(modules['media'].styles)}"), 422
-            if media.resolve(name) is None or (name.startswith("built-in/") and media.screen_of(name) is None):
+            if not isinstance(name, str) or media.resolve(name) is None or (name.startswith("built-in/") and media.screen_of(name) is None):
                 return jsonify(error=f"no such media file: {name}"), 404
             speed = number(data.get("speed", 1), 0.1, 4, "speed")
             live.push(Entry("media", fit, seconds, {"file": name, "speed": speed}))
@@ -659,11 +665,11 @@ def create_app(*, modules, live, pairing, config_path, logs: LogBuffer | None = 
     # -- modules and config -------------------------------------------------------------------
     @app.get("/api/modules")
     def module_list():
-        return jsonify([{**describe(m), **({"imported": True} if addons.is_imported(m) else {})} for m in modules.values()])
+        return jsonify([{**describe(m), **({"imported": True} if addons.is_imported(m) else {})} for m in list(modules.values())])   # (a copy: an install may change it meanwhile)
 
     # -- imported modules (Settings > Modules > Import; bongo/addons.py) ------------------------------
     def builtin_ids():
-        return [k for k, m in modules.items() if not addons.is_imported(m)]
+        return [k for k, m in list(modules.items()) if not addons.is_imported(m)]
 
     def addon_list():
         from bongo.sandbox import gate as gates, jail
@@ -731,6 +737,11 @@ def create_app(*, modules, live, pairing, config_path, logs: LogBuffer | None = 
 
     @app.delete("/api/addons/check/<token>")
     def addons_cancel(token):
+        job = addons.JOBS.get(token)
+        if job is None:   # only a job's own token ever names a folder to tidy away
+            abort(404, "that import has expired; start it again")
+        if job.state in ("installing", "installed"):   # leaving the page mid-install: it carries on
+            return jsonify(error="That module is being installed, or already has been."), 409
         addons.drop(token)
         return jsonify(ok=True)
 
@@ -740,6 +751,8 @@ def create_app(*, modules, live, pairing, config_path, logs: LogBuffer | None = 
         job = addons.JOBS.get(str(data.get("token", "")))
         if data.get("trust") is not True:
             return jsonify(error="Tick that you trust its author first."), 422
+        if job is not None and job.state in ("installing", "installed"):   # Install pressed twice
+            return jsonify(error="That module has already been installed."), 409
         if job is None or job.state != "ready":
             return jsonify(error="That import has expired; start it again."), 404
         if (job.manifest or {}).get("author") != data.get("author"):
@@ -773,15 +786,21 @@ def create_app(*, modules, live, pairing, config_path, logs: LogBuffer | None = 
         """Remove an imported module, and its screens from the playlist and overlays."""
         if module_id not in addons.installed():
             abort(404, "no such module")
-        config = load()
-        playlist = [e for e in config.get("playlist", []) if not (isinstance(e, dict) and e.get("module") == module_id)]
-        overlays = [e for e in config.get("overlays", []) if not (isinstance(e, dict) and e.get("module") == module_id)]
-        off = [m for m in config.get("modules_off", []) if m != module_id]
-        addons.remove(module_id, modules)
-        preview_style.cache_clear()
-        changed = {"playlist": playlist, "modules_off": off, **({"overlays": overlays} if "overlays" in config else {})}
-        if any(config.get(k) != v for k, v in changed.items()):
-            cfg.save({**config, **changed}, config_path)
+        with save_lock:   # (a save landing between reading the config and writing it back would be lost)
+            config = load()
+            playlist = [e for e in config.get("playlist", []) if not (isinstance(e, dict) and e.get("module") == module_id)]
+            overlays = [e for e in config.get("overlays", []) if not (isinstance(e, dict) and e.get("module") == module_id)]
+            off = [m for m in config.get("modules_off", []) if m != module_id]
+            try:
+                addons.remove(module_id, modules)
+            except KeyError:   # removed by another press a moment ago
+                abort(404, "no such module")
+            preview_style.cache_clear()
+            changed = {"playlist": playlist, "modules_off": off, **({"overlays": overlays} if "overlays" in config else {})}
+            save = any(config.get(k) != v for k, v in changed.items())
+            if save:
+                cfg.save({**config, **changed}, config_path)
+        if save:
             live.apply_config()
         return jsonify({**addon_list(), "screens_removed": len(config.get("playlist", [])) - len(playlist)})
 
@@ -801,7 +820,16 @@ def create_app(*, modules, live, pairing, config_path, logs: LogBuffer | None = 
 
     @app.put("/api/config")
     def put_config():
-        current, data = load(), body()
+        sent = body()
+        for _ in range(5):   # (only again when another save landed while this one was being checked)
+            answer = save_config(dict(sent))
+            if answer is not None:
+                return answer
+        # not 409: that tells the page another phone changed this section, and it offers to replace theirs
+        return jsonify(error="The Matrix was busy saving; try again.", busy=True), 503
+
+    def save_config(data):
+        current = load()
         # "_base": the marks of the sections this page loaded. A section that has changed since (another
         # phone or tab saved it) isn't silently replaced: the page is told, and asks its user. A save
         # without "_base" (the page chose to overwrite; an older page; a script) goes through as before.
@@ -817,6 +845,9 @@ def create_app(*, modules, live, pairing, config_path, logs: LogBuffer | None = 
         for key in ("panel", "safe_area", "web"):   # merged key by key below: never replaced by null or a list
             if key in data and not isinstance(data[key], dict):
                 return jsonify(problems=[f"{key}: send an object"]), 422
+        for side, value in (data.get("safe_area") or {}).items():   # 1e999 would overflow turning it into pixels
+            if isinstance(value, float) and not math.isfinite(value):
+                return jsonify(problems=[f"safe_area: {side} must be a number of pixels"]), 422
         if "web" in data:   # only the hub picture and the badge colour can change here; the address stays in data/config.json
             web, now = data["web"], current["web"]
             if any(k not in ("hub_picture", "badge") and (k not in now or v != now[k] or type(v) is not type(now[k]))
@@ -842,7 +873,12 @@ def create_app(*, modules, live, pairing, config_path, logs: LogBuffer | None = 
         problems = verify_new(current, merged, modules)
         if problems:
             return jsonify(problems=problems), 422
-        cfg.save(merged, config_path)
+        # checked without the lock (a feed may take seconds to verify); saved under it only if nobody else
+        # saved in between. If someone did, it's all checked again against theirs, so neither change is lost
+        with save_lock:
+            if load() != current:
+                return None
+            cfg.save(merged, config_path)
         logging.getLogger("bongo.config").info("config saved by %s",
                                                (pairing.check(request.cookies.get(COOKIE)) or {}).get("name"))
         live.apply_config()
@@ -921,6 +957,7 @@ def create_app(*, modules, live, pairing, config_path, logs: LogBuffer | None = 
             name = media.save_upload(upload.filename, upload.stream)
         except ValueError as error:
             return jsonify(error=f"Couldn't add {upload.filename}: {error}."), 422
+        preview_style.cache_clear()   # a new file may reuse a deleted one's name: never show the old picture
         logging.getLogger("bongo.web").info("media uploaded: %s", name)
         return jsonify(ok=True, name=name), 201
 
@@ -935,6 +972,7 @@ def create_app(*, modules, live, pairing, config_path, logs: LogBuffer | None = 
             abort(403, str(error))
         except FileNotFoundError:
             abort(404, "no such file")
+        preview_style.cache_clear()
         logging.getLogger("bongo.web").info("media deleted: %s", name)
         return jsonify(ok=True)
 
@@ -989,7 +1027,7 @@ def create_app(*, modules, live, pairing, config_path, logs: LogBuffer | None = 
     def restart_now():
         from bongo import power
         what = body().get("what")
-        if what not in power.COMMANDS:
+        if not isinstance(what, str) or what not in power.COMMANDS:   # (a list can't even be looked up)
             return jsonify(error=f"what: one of {', '.join(power.COMMANDS)}"), 422
         if not power.available():
             return jsonify(error="Restarting only works on the Matrix itself"), 409

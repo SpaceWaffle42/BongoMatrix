@@ -5,6 +5,7 @@
 """
 from __future__ import annotations
 
+import calendar
 import datetime as dt
 import re
 
@@ -65,7 +66,10 @@ def date_in_year(spec: str, year: int) -> dt.date:
         elif m := re.fullmatch(r"(1st|2nd|3rd|4th|5th|last)-(%s)-(\d\d)" % "|".join(DAYS), s):
             day = _nth_weekday(year, ORDINALS[m[1]], DAYS.index(m[2]), int(m[3]))
         elif m := re.fullmatch(r"(\d\d)-(\d\d)", s):
-            day = dt.date(year, int(m[1]), int(m[2]))
+            month, mday = int(m[1]), int(m[2])
+            if (month, mday) == (2, 29) and not calendar.isleap(year):
+                mday = 28                     # a leap-day birthday is kept on 28 Feb in other years
+            day = dt.date(year, month, mday)
         else:
             raise ValueError
     except ValueError as e:

@@ -1,5 +1,5 @@
 // Pair view: ask the panel for a PIN, type it here, get the cookie.
-import { DEMO, post } from './api.js';
+import { DEMO, get, post } from './api.js';
 import { h, toast, store } from './ui.js';
 import { S, go } from './app.js';
 import { drawLed } from './led.js';
@@ -74,7 +74,11 @@ export function render(view) {
     finally { setTimeout(() => { showBtn.disabled = false; }, 5000); }
   };
   showBtn.addEventListener('click', () => showPin());
-  showPin(true);  // the PIN only works while it's on the panel, so put it up straight away
+  (async () => {   // the PIN only works while it's on the panel, so put it up straight away...
+    try { if ((await get('/api/pair/status')).paired) { go('/', { replace: true }); return; } }   // ...unless this browser is paired already
+    catch { /* can't tell: ask for the PIN anyway */ }
+    if (document.body.classList.contains('pairing')) showPin(true);   // (still on this page)
+  })();
 
   const form = h('form', { class: 'pair-form', novalidate: true },
     h('div', null, h('div', { class: 'eyebrow' }, 'Step 2 · Enter it here'), h('h1', { class: 'h1' }, 'Pair this browser')),

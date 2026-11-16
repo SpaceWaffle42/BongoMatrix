@@ -46,7 +46,7 @@ def colour(value, background):
     return tuple(int(value[i:i + 2], 16) for i in (1, 3, 5))
 
 
-def encode_gif(frames: list[tuple[Image.Image, int]], loop: bool = True) -> bytes:
+def encode_gif(frames: list[tuple[Image.Image, int]], loop: bool = True, nearest: bool = True) -> bytes:
     """One GIF from RGB pictures of one size and how long each shows: repeated frames merged into one
     longer one, and one shared palette for the whole animation, so a colour never shifts from frame to
     frame. Up to 256 colours are kept exactly; with more, 224 are picked by median cut plus the 32 colours
@@ -90,6 +90,8 @@ def encode_gif(frames: list[tuple[Image.Image, int]], loop: bool = True) -> byte
         img.putpalette(flat + [0] * (768 - len(flat)))
         pictures.append(img)
         times.append(merged[k][1])
+    if nearest:   # a GIF keeps hundredths: nearest, not cut down (nearest=False: as the built-in screens were made)
+        times = [max(10, 10 * math.floor(t / 10 + 0.5)) for t in times]
     out = io.BytesIO()
     pictures[0].save(out, "GIF", save_all=True, append_images=pictures[1:], duration=times,
                      optimize=False, disposal=1, **({"loop": 0} if loop else {}))
@@ -145,31 +147,46 @@ def gif(frames: list, width: int, height: int, background: str = "#000000", loop
     return encode_gif(pictures, loop=loop != "once")
 
 
-def frames_from(data: bytes, width: int, height: int) -> list:
+def frames_from(data: bytes, width: int, height: int, cut: list | None = None) -> list:
     """A GIF, PNG or WebP (still or animated) as Animator frames: each frame fitted inside the panel,
-    centred, transparent and black pixels left as background, its own timing kept (up to ``MAX_FRAMES``)."""
+    centred, transparent and black pixels left as background, its own timing kept (up to ``MAX_FRAMES``).
+    If not every frame comes in, a note saying so is added to ``cut``."""
     try:
         img = Image.open(io.BytesIO(data))
+        # the size is in the header: a small file can still unpack to gigabytes, so look before decoding
+        if img.width * img.height > media.MAX_PIXELS:
+            raise ValueError(f"that picture is too large ({img.width}×{img.height}); keep it under 16 megapixels")
         img.load()
-    except (UnidentifiedImageError, OSError):
+    except (UnidentifiedImageError, Image.DecompressionBombError, *media.CUT_OFF):
         raise ValueError("that isn't a picture the Animator can read (try a GIF, PNG or WebP)") from None
     frames = []
-    most = min(MAX_FRAMES, MAX_PIXELS // (width * height))   # a bigger canvas takes fewer frames
-    for k, frame in enumerate(ImageSequence.Iterator(img)):
-        if k >= most:
-            break
-        rgba = frame.convert("RGBA")
-        scale = min(width / rgba.width, height / rgba.height)
-        size = (max(1, round(rgba.width * scale)), max(1, round(rgba.height * scale)))
-        if size != rgba.size:   # shrinking smooths; growing a small sprite keeps its hard pixels
-            rgba = rgba.resize(size, Image.Resampling.LANCZOS if scale < 1 else Image.Resampling.NEAREST)
-        canvas = Image.new("RGBA", (width, height))
-        canvas.paste(rgba, ((width - size[0]) // 2, (height - size[1]) // 2))
-        rgba_px = canvas.tobytes()   # (getdata is deprecated in newer Pillow)
-        px = [None if rgba_px[i + 3] < 128 or not any(rgba_px[i:i + 3]) else "#%02x%02x%02x" % tuple(rgba_px[i:i + 3])
-              for i in range(0, len(rgba_px), 4)]   # black is an LED that's off: the background
-        ms = int(frame.info.get("duration") or img.info.get("duration") or 100)
-        frames.append({"px": px, "ms": max(20, min(10_000, ms))})
+    most = min(MAX_FRAMES, MAX_PIXELS // (width * height),   # a bigger canvas takes fewer frames
+               media.frames_played(img.width, img.height, total := media.frame_count(img)))   # ...and so does a bigger picture
+    turn = media.orientation(img)
+    try:
+        for k, frame in enumerate(ImageSequence.Iterator(img)):
+            if k >= most:
+                break
+            rgba = media.rgba(frame, turn)   # upright, and 16-bit greys brought down to 8 bits
+            scale = min(width / rgba.width, height / rgba.height)
+            size = (max(1, round(rgba.width * scale)), max(1, round(rgba.height * scale)))
+            if size != rgba.size:   # shrinking smooths; growing a small sprite keeps its hard pixels
+                rgba = rgba.resize(size, Image.Resampling.LANCZOS if scale < 1 else Image.Resampling.NEAREST)
+            canvas = Image.new("RGBA", (width, height))
+            canvas.paste(rgba, ((width - size[0]) // 2, (height - size[1]) // 2))
+            rgba_px = canvas.tobytes()   # (getdata is deprecated in newer Pillow)
+            px = [None if rgba_px[i + 3] < 128 or not any(rgba_px[i:i + 3]) else "#%02x%02x%02x" % tuple(rgba_px[i:i + 3])
+                  for i in range(0, len(rgba_px), 4)]   # black is an LED that's off: the background
+            ms = int(frame.info.get("duration") or img.info.get("duration") or 100)   # read once the frame is decoded (WebP)
+            frames.append({"px": px, "ms": max(20, min(10_000, ms))})
+    except media.CUT_OFF:
+        if not frames:
+            raise ValueError("that isn't a picture the Animator can read (try a GIF, PNG or WebP)") from None
+        if cut is not None:   # a cut-off file: the frames that came through
+            cut.append(f"only the first {len(frames)} frames (the rest won't read)")
+        return frames
+    if cut is not None and total > len(frames):
+        cut.append(f"the first {len(frames)} of its {total} frames (all that fit)")
     return frames
 
 
@@ -183,7 +200,17 @@ def save(name: str, data: bytes) -> str:
     return media.save_upload(stem, io.BytesIO(data))
 
 
-def save_preview(data: bytes) -> str:
+def save_preview(data: bytes, area=None) -> str:
+    """For "Show on Matrix": kept out of the library. With a safe area (``area``, a SafeArea), a drawing the
+    size of the whole panel is cut down to the part the frame leaves visible, just as the Animator's dashed
+    guide shows it: shrinking it to fit instead would merge one-pixel lines."""
+    if area is not None and any(area.margins):
+        with Image.open(io.BytesIO(data)) as im:
+            if im.size == (area.panel_width, area.panel_height):
+                box = (area.left, area.top, area.left + area.width, area.top + area.height)
+                pictures = [(frame.convert("RGB").crop(box), int(frame.info.get("duration") or 100))
+                            for frame in ImageSequence.Iterator(im)]
+                data = encode_gif(pictures, loop="loop" in im.info)
     path = media.UPLOADED / ".animator" / "preview.gif"
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_bytes(data)

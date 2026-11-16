@@ -5,7 +5,7 @@ import { FrameLoop } from './led.js';
 import { openPreview } from './mediaview.js';
 import { helpButton } from './help.js';
 import { iconPicker } from './iconpick.js';
-import { S, onLeave, go, href, path, moduleById, styleOf, entryName, applyDraft, draftChanged, matrixClock } from './app.js';
+import { S, onLeave, go, href, path, moduleById, styleOf, entryName, applyDraft, draftChanged, matrixClock, problemOf, problemLine } from './app.js';
 import { MOST_TIMES, mins, valid, joined, sentence, sleepTime, meetsSleep, suggest, moved } from './times.js';
 
 /** Settings for a style: shared ones (unless the style redefines them) and the style's own. */
@@ -136,13 +136,20 @@ export function render(view, match) {
   function paintFields() {
     const { shared, own } = schemaFor(mod, styleOf(e));
     const seconds = h('input', { class: 'input', type: 'number', id: 'f-seconds', min: 1, max: 3600, step: 'any', value: e.seconds });
-    seconds.addEventListener('input', () => { const v = Number(seconds.value); if (v > 0) { e.seconds = v; changed(); } });
+    const secondsError = h('span', { class: 'tiny danger row gap-xs', id: 'f-seconds-error', role: 'alert', hidden: true }, icon('info'), 'Give it a number of seconds from 1 to 3600.');
+    seconds.addEventListener('input', () => {
+      const v = Number(seconds.value), ok = seconds.value.trim() !== '' && v >= 1 && v <= 3600;
+      seconds.classList.toggle('bad', !ok);
+      secondsError.hidden = ok;
+      if (ok) { seconds.removeAttribute('aria-invalid'); seconds.removeAttribute('aria-describedby'); e.seconds = v; changed(); }
+      else { seconds.setAttribute('aria-invalid', 'true'); seconds.setAttribute('aria-describedby', secondsError.id); }   // (Save and Apply wait for a good one)
+    });
     sections.replaceChildren(
       h('section', { class: 'card stack', 'aria-label': 'Timing' }, h('h2', { class: 'h2' }, 'Timing'),
         h('div', { class: 'grid-2' },
           e.module === 'splash'  // its length comes from the picked file: one pass of a GIF
             ? h('div', { class: 'field-col' }, h('span', null, 'Length'), h('span', { class: 'muted small' }, 'One pass of the picked Splash file. Choose the files in Settings › Splash.'))
-            : h('label', { class: 'field-col', for: 'f-seconds' }, 'Seconds on the panel', seconds),
+            : h('label', { class: 'field-col', for: 'f-seconds' }, 'Seconds on the panel', seconds, secondsError),
           h('div', { class: 'field-col' }, h('span', null, 'Rotation'), toggle(e.enabled, 'Enabled', (v) => { e.enabled = v; changed(); }))),
         whenItPlays()),
       ...[basicCard([...shared, ...own].filter((f) => !f.advanced)),
@@ -235,6 +242,14 @@ export function render(view, match) {
   }
   /** A time that can't be saved yet (an empty box, or From the same as To): its first box, to send the focus to. */
   const badTime = () => { const k = e.times.findIndex((t) => !valid(t)); return k < 0 ? null : document.getElementById(`f-time-${k}-${e.times[k].from ? 'to' : 'from'}`); };
+  /** Seconds that can't be saved (empty, 0, over an hour): say so, and don't save. */
+  function secondsOk() {
+    const el = document.getElementById('f-seconds');
+    if (!el || el.getAttribute('aria-invalid') !== 'true') return true;
+    toast('Fix the seconds first: a number from 1 to 3600.', 'error');
+    el.focus();
+    return false;
+  }
   function timesOk() {
     const el = badTime();
     if (!el) return true;
@@ -402,15 +417,15 @@ export function render(view, match) {
     if (!same(e, original) && !confirm('Throw away your edits to this module?')) return;
     go('/playlist');
   }
-  function keepDraft() { if (!timesOk() || gone()) return; S.draft[i] = clone(e); draftChanged(); go('/playlist'); }
+  function keepDraft() { if (!timesOk() || !secondsOk() || gone()) return; S.draft[i] = clone(e); draftChanged(); go('/playlist'); }
   async function apply() {
-    if (!timesOk() || gone()) return;
+    if (!timesOk() || !secondsOk() || gone()) return;
     S.draft[i] = clone(e);
     draftChanged();
     if (await applyDraft()) { go('/playlist'); return; }
-    const mine = S.problems.filter((p) => !/^playlist\[\d+\]/.test(p) || p.startsWith(`playlist[${i}]`));
+    const mine = S.problems.map(problemOf).filter((q) => q.i === null || q.i === i).map((q) => q.text);   // this screen's, without "playlist[2]:"
     problems.hidden = !S.problems.length;
-    problems.replaceChildren(h('strong', null, "The Matrix didn't accept this:"), h('ul', null, (mine.length ? mine : S.problems).map((p) => h('li', null, p))));
+    problems.replaceChildren(h('strong', null, "The Matrix didn't accept this:"), h('ul', null, (mine.length ? mine : S.problems.map(problemLine)).map((p) => h('li', null, p))));
     problems.scrollIntoView({ block: 'nearest' });
   }
 }
