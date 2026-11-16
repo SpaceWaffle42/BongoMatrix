@@ -79,6 +79,15 @@ def climbed(moves, t, pitch) -> int:
     return round((done + part) * pitch)
 
 
+def glided(moves, t, pitch) -> int:
+    """Pixels the text has moved up at ``t`` when it glides steadily instead of a line at a time: it leaves
+    when the first move would and is all the way up when the last would be, so it takes the same time."""
+    if not moves:
+        return 0
+    start, end = moves[0], moves[-1] + MOVE
+    return round(len(moves) * pitch * min(1.0, max(0.0, (t - start) / (end - start))))
+
+
 def age(now, published) -> str:
     if published is None:
         return ""
@@ -333,7 +342,10 @@ class Story(Headline):
     Both start together: the headline, if it's too wide, slides across once (held at its first letter
     first); the text moves up a line at a time, each line given time to be read. The story stays up until
     both are done."""
-    defaults = {"scroll_speed": 12}
+    # stop_at_each_line: the text moves up a line and stops while it's read (off: it glides up steadily,
+    # taking the same time overall, and stops once the last lines are up)
+    defaults = {"scroll_speed": 12, "stop_at_each_line": True}
+    basic = ("stop_at_each_line",)   # (shown with the main settings, not under More)
     GAP = 16    # pixels between a sliding headline and its repeat
 
     def setup(self):
@@ -385,7 +397,7 @@ class Story(Headline):
             return img
         top = self.row + 1
         area = img.crop((0, top, w, min(h, top + self.fit * self.pitch)))
-        offset = climbed(moves, t, self.pitch)
+        offset = climbed(moves, t, self.pitch) if self.settings["stop_at_each_line"] else glided(moves, t, self.pitch)
         for n, line in enumerate(text):
             self.small.draw(area, 1, self.small.cap + n * self.pitch - offset, line, self.body)
         img.paste(area, (0, top))

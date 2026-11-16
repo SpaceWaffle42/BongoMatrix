@@ -11,7 +11,7 @@ MODULE = Module(
     id="rss",
     name="News",
     description="News from RSS and Atom feeds: a scrolling ticker, a headline card, the story (headline "
-                "on top, its text moving up a line at a time below, like v2) or the story's picture beside it.",
+                "on top, its text moving up below, a line at a time or gliding, like v2) or the story's picture beside it.",
     styles={"ticker": Ticker, "headline": Headline, "story": Story, "picture": Picture},
     defaults=dict(
         feeds=["https://feeds.bbci.co.uk/news/rss.xml"], max_items=20, refresh_minutes=15,

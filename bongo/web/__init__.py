@@ -77,17 +77,18 @@ def verify_new(current: dict, merged: dict, modules: dict) -> list[str]:
     """Run modules' slow checks (e.g. "is this really an RSS feed?") on entries whose settings are
     new in this save. Unchanged entries aren't re-checked, so a feed being down for a while
     doesn't stop you saving something else."""
-    seen = {(e.get("module"), json.dumps(e.get("settings") or {}, sort_keys=True)) for _, e in _entries(current)}
+    key_of = lambda e: (e.get("module"), e.get("style"), json.dumps(e.get("settings") or {}, sort_keys=True))
+    seen = {key_of(e) for _, e in _entries(current)}
     jobs = {}
     for where, e in _entries(merged):
         module = modules.get(e.get("module"))
-        key = (e.get("module"), json.dumps(e.get("settings") or {}, sort_keys=True))
+        key = key_of(e)
         if module and module.verify and key not in seen and key not in jobs.values():
             jobs[where] = key
     problems = []
-    for where, (mid, settings) in jobs.items():
+    for where, (mid, style, settings) in jobs.items():
         module = modules[mid]
-        merged_settings = module.settings_for(None, json.loads(settings))
+        merged_settings = module.settings_for(style, json.loads(settings))   # (its style: a setting only it has)
         problems += [f"{where}: {p}" for p in module.verify(merged_settings)]
     return problems
 
