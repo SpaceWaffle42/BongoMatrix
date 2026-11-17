@@ -35,6 +35,8 @@ from bongo.player import Entry
 from bongo.schema import describe
 
 STATIC = Path(__file__).with_name("static")
+ATTRIBUTION = Path(__file__).resolve().parents[2] / "resources" / "media" / "attribution"
+ATTRIBUTION_FILES = ("openweather_logo.webp", "openweather.svg", "openweather.png")
 HARDWARE = ("rows", "cols", "hardware_mapping", "gpio_slowdown", "chain_length", "parallel", "limit_refresh")  # panel keys fixed until a restart
 COOKIE = "bongo_device"
 YEAR = 365 * 86400
@@ -232,7 +234,20 @@ def create_app(*, modules, live, pairing, config_path, logs: LogBuffer | None = 
                        safe_area=dict(zip(("top", "right", "bottom", "left"), area.margins)),
                        uptime=round(time.time() - started), name=config.get("name", "Bongo Matrix"),
                        build=build,   # the pages as they are now: a tab left open across an update sees it change
-                       pet_kinds=pets.kinds(), network=network_info(config))
+                       pet_kinds=pets.kinds(), network=network_info(config), trouble=troubles())
+
+    def troubles() -> dict:
+        """What stops a module's screens showing anything (Module.trouble), by module: the dashboard says it on them."""
+        out = {}
+        for mid, module in list(modules.items()):
+            try:
+                said = module.trouble() if getattr(module, "trouble", None) else None
+            except Exception:   # a broken check mustn't break the dashboard
+                logging.getLogger("bongo.web").exception("%s: trouble failed", mid)
+                said = None
+            if said:
+                out[mid] = str(said)
+        return out
 
     # -- the public card and the hub (bongo/hub.py): read-only, open to the local network ------------
     @app.get("/api/public")
@@ -660,6 +675,34 @@ def create_app(*, modules, live, pairing, config_path, logs: LogBuffer | None = 
         account.forget()
         return jsonify(connected=False)
 
+    # -- the OpenWeather API key (bongo/modules/weather/key.py): never sent back, only whether there is one ----
+    def weather_status(**more):
+        from bongo.modules.weather import data, key
+        return jsonify(saved=bool(key.get()), trouble=data.trouble(), **more)
+
+    @app.get("/api/weather")
+    def weather_key_status():
+        return weather_status()
+
+    @app.put("/api/weather")
+    def weather_key_save():
+        from bongo.modules.weather import data, key
+        new = key.clean(body().get("key", ""))
+        if not key.valid(new):
+            return jsonify(error="An OpenWeather API key is 32 letters and numbers. Copy it again from My API keys, "
+                                 "whole." if new else "Paste your OpenWeather API key first."), 422
+        key.save(new)   # (saved even if OpenWeather says no for now: a new key can take up to two hours to work)
+        home = load().get("location") or {}
+        problems = data.verify(new, home.get("latitude", 51.5074), home.get("longitude", -0.1278))
+        logging.getLogger("bongo.web").info("OpenWeather key saved%s", " (not working yet)" if problems else "")
+        return weather_status(problems=problems)
+
+    @app.delete("/api/weather")
+    def weather_key_forget():
+        from bongo.modules.weather import key
+        key.forget()
+        return weather_status()
+
     @app.post("/api/push")
     def push():
         data = body()
@@ -961,11 +1004,17 @@ def create_app(*, modules, live, pairing, config_path, logs: LogBuffer | None = 
     @app.get("/api/places")
     def place_search():
         """Real places matching what's typed, for location settings (name -> coordinates)."""
+        from bongo.modules.weather import data as weather
         query = request.args.get("q", "")
         try:
             return jsonify(places=places.search(query))
+        except places.NoKey as error:   # the dashboard offers latitude and longitude by hand instead
+            return jsonify(error=str(error), needs_key=True), 409
+        except weather.Refused:
+            return jsonify(error="Your OpenWeather API key isn't working yet, so places can't be searched. "
+                                 "Type the latitude and longitude instead.", needs_key=True), 409
         except (OSError, ValueError) as error:
-            logging.getLogger("bongo.web").warning("place search failed: %s", error)
+            logging.getLogger("bongo.web").warning("place search failed: %s", weather.hide(error))
             return jsonify(error="Couldn't search for places just now; check the Matrix's internet connection."), 502
 
     # -- devices and logs ---------------------------------------------------------------------
@@ -1078,6 +1127,14 @@ def create_app(*, modules, live, pairing, config_path, logs: LogBuffer | None = 
         response.headers["Cache-Control"] = "public, max-age=3600"
         response.set_etag(hashlib.sha1(data).hexdigest())
         return response.make_conditional(request)
+
+    @app.get("/attribution/<name>")
+    def attribution(name):
+        """Logos data providers ask for (resources/media/attribution): OpenWeather's, in its Help and settings."""
+        if name not in ATTRIBUTION_FILES or not (ATTRIBUTION / name).is_file():
+            abort(404)
+        response = send_from_directory(ATTRIBUTION, name, max_age=86400)
+        return response
 
     # -- the page -----------------------------------------------------------------------------
     @app.get("/")

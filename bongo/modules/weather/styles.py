@@ -1,11 +1,16 @@
-"""Three looks of the same reading: ticker, overview and forecast."""
+"""Three looks of the same reading: ticker, overview and forecast. Each opens on OpenWeather's credit (credit.py)."""
 from __future__ import annotations
+
+import time
+
+from PIL import Image
 
 from bongo.fonts import align_x
 from bongo.module import Style
 from bongo.scroll import HOLD, Scrolls
 
 from . import data
+from .credit import Credit
 from .look import icon, icon_size, label, sky, temp_text
 
 
@@ -25,6 +30,12 @@ class _Weather(Scrolls, Style):
         self.tiny = self.ctx.fonts("tom-thumb")
         self.temp_font = self.ctx.fonts(s["temperature_font"])
         self.TEXT, self.ACCENT, self.DIM = rgb(s["text_colour"]), rgb(s["accent"]), rgb(s["detail_colour"])
+        self.began = self.shown_at = self.held = self.since = self.last = None   # (see render)
+        self.with_credit, self.loaded, self._credit = True, False, None
+        if not self.ctx.preview:
+            data.latest(s)               # a fetch starts now if one is due (or a fresh try of a key refused before)
+            if data.trouble():           # no key, or OpenWeather refuses it: skipped before a frame is drawn
+                self.finished = True
 
     def backdrop(self, code, is_day):
         """The weather's own sky (the default), or a plain colour."""
@@ -32,35 +43,90 @@ class _Weather(Scrolls, Style):
             return sky(code, is_day, self.ctx.width, self.ctx.height)
         return self.ctx.canvas(rgb(self.settings["background"]))
 
-    def render(self, now):
-        reading = data.latest(self.settings)
-        if reading is None:
-            offline = data.failing(self.settings)
-            if offline:   # nothing to show and no way to get it: say so, briefly, and let the next screen on
-                self.since = getattr(self, "since", None) or now
-                self.finished = (now - self.since).total_seconds() >= self.OFFLINE_SECONDS
-            return self.waiting(now, offline)
-        self.since = None
-        return self.draw(reading, now)
-
+    clock = staticmethod(time.monotonic)   # the credit's own clock: a wall clock put right (or back) mustn't move it
+    FADE = 0.4                             # s the credit takes to fade into the weather
+    WEATHER_FOR = 5.0                      # s of weather a screen needs after its credit; less time than that: the weather straight away
     OFFLINE_SECONDS = 5
 
-    def waiting(self, now, offline=False):
-        """No reading yet: a cloud and WEATHER... while it's being fetched, OFFLINE when it can't be."""
+    def render(self, now):
+        """The credit (also the loading screen) for one full pass and while the weather is fetched, then
+        the weather, faded in. With no API key, or one OpenWeather refuses, the screen hands over at once
+        (in a preview: a card saying so)."""
+        trouble = data.trouble()
+        t = self.clock()
+        if trouble:
+            if self.ctx.preview:
+                return self.needs_key(trouble)
+            self.finished = True               # (refused while the credit was up: it hands over on the credit, not the card)
+            return self.loading(t - self.began) if self.began is not None else self.needs_key(trouble)
+        reading = data.latest(self.settings)
+        if self.began is None:
+            self.began = t
+            left = None if self.hand_over_at is None else self.hand_over_at - now.timestamp()
+            self.with_credit = not self.ctx.preview and (left is None or left >= self.credit.minimum + self.WEATHER_FOR - 0.01)
+        T, before, self.last = t - self.began, self.last, t - self.began
+        if self.shown_at is None:
+            if reading is None:
+                if data.failing(self.settings):   # nothing to show and no way to get it: say so, briefly, and let the next screen on
+                    self.since = self.since or t
+                    self.finished = t - self.since >= self.OFFLINE_SECONDS
+                    return self.waiting(now, True)
+                self.since = None
+                return self.loading(T)
+            hold = self.credit.handover(before, T) if self.with_credit else T
+            if hold is None:
+                return self.loading(T)
+            self.shown_at = t
+            self.held = hold if self.loaded else None
+        if reading is None:          # (hours old since: nothing to show as the weather now)
+            return self.loading(T)
+        img = self.draw(reading, now)
+        k = (t - self.shown_at) / self.FADE
+        if self.held is not None and k < 1:   # the credit fades out as the weather comes in; its bar and cloud carry on
+            img = Image.blend(self.credit.frame(T, hold=self.held), img, max(0.0, k))
+        return img
+
+    def loading(self, T):
+        self.loaded = True
+        return self.credit.frame(T)
+
+    @property
+    def credit(self):
+        if self._credit is None:
+            self._credit = Credit(self)
+        return self._credit
+
+    def needs_key(self, trouble):
+        """A card for the dashboard's preview: what's missing (the panel skips the screen instead)."""
         w, h = self.ctx.width, self.ctx.height
         img = self.backdrop(3, True)
-        font = self.small if self.small.width("WEATHER...") <= w else self.ctx.fonts("tom-thumb")
+        says = ([["WEATHER", "NEEDS AN", "API KEY"], ["NEEDS", "API KEY"], ["NO KEY"]] if trouble == data.NO_KEY else
+                [["API KEY", "NOT", "WORKING"], ["KEY NOT", "WORKING"], ["NO KEY"]])
+        for lines in says:
+            for font in (self.small, self.tiny):
+                tall = len(lines) * font.cap + 2 * (len(lines) - 1)
+                if tall <= h - 2 and all(font.width(x) <= w - 1 for x in lines):
+                    y = (h - tall) // 2
+                    for n, text in enumerate(lines):
+                        y += font.cap
+                        colour = self.DIM if (text == "WEATHER") else self.ACCENT
+                        font.draw(img, max(1, (w - font.width(text) + 1) // 2), y, text, colour)
+                        y += 2
+                    return img
+        return img
+
+    def waiting(self, now, offline=False):
+        """OFFLINE, with a cloud above it where there's room: the weather can't be fetched."""
+        w, h = self.ctx.width, self.ctx.height
+        img = self.backdrop(3, True)
+        font = self.small if self.small.width("OFFLINE") <= w else self.ctx.fonts("tom-thumb")
         top, baseline = max(0, 3 - (32 - h + 1) // 2), h - 5     # the cloud 3 rows down, the word 5 up, on a full panel
         if top + 14 + 1 <= baseline - font.cap:
             cloud = icon(3, True, 14, now.timestamp())
             img.paste(cloud, ((w - 14) // 2, top), cloud)
         else:                                                   # no room for both: the word alone, centred
             baseline = (h + font.cap) // 2
-        if offline:
-            font.draw(img, (w - font.width("OFFLINE") + 1) // 2, baseline, "OFFLINE", self.ACCENT)
-            return img
-        dots = "." * (int(now.timestamp() * 2) % 4)
-        font.draw(img, (w - font.width("WEATHER") + 1) // 2, baseline, f"WEATHER{dots}", self.DIM)
+        font.draw(img, (w - font.width("OFFLINE") + 1) // 2, baseline, "OFFLINE", self.ACCENT)
         return img
 
     def place_icon(self, img, reading_code, is_day, size, x, y, now):
@@ -199,7 +265,7 @@ class Overview(_Weather):
 
 
 class Forecast(_Weather):
-    """v2 OpenWeather Forecast: the next few hours as columns of time, icon and temperature."""
+    """v2 OpenWeather Forecast: now and the next few 3-hour slots as columns of time, icon and temperature."""
     defaults = {"columns": 4, "step_hours": 3, "temperature_font": "5x7"}
     choices = {"temperature_font": ["5x7", "tom-thumb"]}
 
@@ -213,21 +279,43 @@ class Forecast(_Weather):
                 return stamp_at, icon_at, temp_at, size
         return 5, 6, h - 1, None
 
+    def columns(self, r):
+        """How many columns: as set, as many as stay readable (15 px each)."""
+        return max(1, min(self.settings["columns"], self.ctx.width // 15))
+
+    def stamps(self, hours, width):
+        """The times over the columns: 15, 18... Where the place's clock is off the hour (India: 20:30) they
+        say so (8:30, 20:30) if every one fits its column with a pixel clear each side; if not, the hour
+        alone (20), like the rest, rather than fewer columns."""
+        whole = [h.time.strftime("%H") for h in hours]
+        if all(h.time.minute == 0 for h in hours):
+            return whole
+        exact = [f"{h.time.hour}:{h.time.minute:02d}" for h in hours]
+        return exact if all(self.tiny.width(t) - 1 <= width - 3 for t in exact) else whole
+
+    def upcoming(self, r, now):
+        """Now, then the forecast every ``step_hours``: OpenWeather's is every 3 hours, so the step is rounded
+        to whole 3-hour slots (1 to 4 hours: each slot; 6: every other one...). Which slots are still to come
+        goes by the place's own clock, not the Matrix's (a screen with its own place elsewhere)."""
+        every = max(1, round(self.settings["step_hours"] / 3))
+        here = r.here() or now.replace(tzinfo=None)
+        later = [h for h in r.hours if h.time > here]
+        return ([data.Hour(here, r.temp, r.code, r.is_day)] + later[every - 1::every])[:self.columns(r)]
+
     def draw(self, r, now):
-        step = self.settings["step_hours"]
-        cols = max(1, min(self.settings["columns"], self.ctx.width // 15))  # keep columns readable
+        cols = self.columns(r)
         img = self.backdrop(r.code, r.is_day)
-        here = now.replace(tzinfo=None, minute=0, second=0, microsecond=0)
-        upcoming = [h for h in r.hours if h.time >= here][::step][:cols]
+        upcoming = self.upcoming(r, now)
         width = self.ctx.width // max(1, cols)
         stamp_at, icon_at, temp_at, size = self.rows()
         font, temps = self.column_temps([h.temp for h in upcoming], width - 1)
+        stamps = self.stamps(upcoming[1:], width)
         for i, hour in enumerate(upcoming):
             x0 = i * width
             if i:
                 for y in range(4, self.ctx.height - 4):
                     img.putpixel((x0, y), tuple(c // 3 for c in img.getpixel((x0, y))))
-            stamp = "NOW" if i == 0 else hour.time.strftime("%H")
+            stamp = "NOW" if i == 0 else stamps[i - 1]
             self.tiny.draw(img, x0 + (width - self.tiny.width(stamp)) // 2 + 1, stamp_at, stamp, self.DIM)
             if size:
                 self.place_icon(img, hour.code, hour.is_day, size, x0 + (width - size) // 2 + 1, icon_at, now)

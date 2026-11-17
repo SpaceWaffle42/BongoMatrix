@@ -2,7 +2,7 @@
 import { post, previewPath } from './api.js';
 import { h, icon, toast, fail, same, humanize, dur, mmss, reducedMotion, segmented, toggle, store } from './ui.js';
 import { FrameLoop } from './led.js';
-import { helpButton } from './help.js';
+import { helpButton, troubleNote, creditLine } from './help.js';
 import { S, bus, onLeave, go, href, moduleById, moduleOff, styleOf, entryName, draftChanged, dirtyCount, applyDraft, discardDraft, normalise, matrixClock, problemOf, problemLine } from './app.js';
 import { playsAt, nextStart, short, spoken, gapWarning, sleepTime, mins, hhmm } from './times.js';
 
@@ -247,8 +247,12 @@ function renderPlaylist() {
     h('div', null, shareBar, h('div', { class: 'row between mono tiny muted mt-xs' }, h('span', null, '0:00'), loopLabel), legend),
     gapNote, actions, addDialog.el);
 
-  /** In rotation, and whether each plays at this time of day (by the Matrix's own clock). */
-  const rotation = () => (S.draft || []).filter((e) => e.enabled && !moduleOff(e.module)).map((e) => ({ e, now: playsAt(e.times, matrixClock()) }));
+  /** In rotation, and whether each plays at this time of day (by the Matrix's own clock). A screen that skips
+   *  itself meanwhile (Module.trouble: Weather with no API key) doesn't play either. */
+  const rotation = () => (S.draft || []).filter((e) => e.enabled && !moduleOff(e.module)).map((e) => {
+    const skipped = !!S.state?.trouble?.[e.module];
+    return { e, skipped, now: !skipped && playsAt(e.times, matrixClock()) };
+  });
 
   /** The loop as it is now: its length, the share bar and its legend. A screen with times that isn't
    *  playing now is a thin hatched mark, "not now" in the legend, and not counted. */
@@ -260,14 +264,15 @@ function renderPlaylist() {
     playingNow = all.map((r) => Number(r.now)).join('');
     summary.textContent = timed ? `${on.length} playing now · loop ${dur(total, true)}` : `${on.length} on · loop ${dur(total, true)}`;
     loopLabel.textContent = `${timed ? 'The loop now' : 'One full loop'} · ${dur(total, true)}`;
-    const later = all.filter((r) => !r.now).map((r) => entryName(r.e));
+    const later = all.filter((r) => !r.now).map((r) => `${entryName(r.e)}${r.skipped ? ' (skipped)' : ''}`);
     shareBar.setAttribute('aria-label', `Share of ${timed ? 'the loop now' : 'one loop'}: ${on.map((e) => `${entryName(e)} ${share(e)}%`).join(', ') || 'nothing playing'}`
       + (later.length ? `. Not playing now: ${later.join(', ')}` : ''));
-    shareBar.replaceChildren(...all.map(({ e, now }) => (now
+    const notNow = (skipped) => (skipped ? 'skipped' : 'not now');
+    shareBar.replaceChildren(...all.map(({ e, now, skipped }) => (now
       ? h('div', { class: 'share-seg', title: `${entryName(e)} · ${dur(e.seconds, true)}`, style: `flex:${Number(e.seconds) || 0.01} 1 0;background:${colourOf(e.module)}` })
-      : h('div', { class: 'share-seg later', title: `${entryName(e)} · not now`, style: `background-color:${colourOf(e.module)}` }))));
-    legend.replaceChildren(...all.map(({ e, now }) => h('li', null, h('span', { class: `swatch${now ? '' : ' later'}`, style: `background-color:${colourOf(e.module)}` }),
-      `${entryName(e)} `, now ? h('span', { class: 'mono muted' }, `${share(e)}%`) : h('span', { class: 'muted' }, 'not now'))));
+      : h('div', { class: 'share-seg later', title: `${entryName(e)} · ${notNow(skipped)}`, style: `background-color:${colourOf(e.module)}` }))));
+    legend.replaceChildren(...all.map(({ e, now, skipped }) => h('li', null, h('span', { class: `swatch${now ? '' : ' later'}`, style: `background-color:${colourOf(e.module)}` }),
+      `${entryName(e)} `, now ? h('span', { class: 'mono muted' }, `${share(e)}%`) : h('span', { class: 'muted' }, notNow(skipped)))));
     if (!all.length) shareBar.append(h('div', { class: 'share-seg empty', style: 'flex:1' }));
   }
 
@@ -347,6 +352,7 @@ function renderPlaylist() {
       modOff ? h('p', { class: 'tiny muted flush' }, `${mod?.name || e.module} is switched off in `,
         h('a', { href: href('/settings'), 'data-route': '/settings', onclick: () => setTimeout(() => document.getElementById('modules')?.scrollIntoView(), 200) }, 'Settings › Modules')) : null,
       problem ? h('p', { class: 'tiny danger flush' }, problem) : null,
+      mod && e.enabled && !modOff ? troubleNote(mod, { short: true }) : null,   // (Weather with no API key: why it's skipped)
       !mod ? h('p', { class: 'tiny danger flush' }, 'Module not installed') : null,
       mod ? h('a', { class: 'when-tag', href: href(`/edit/${i}`), 'data-route': `/edit/${i}`, onclick: (ev) => { if (ev.button === 0 && !ev.ctrlKey && !ev.metaKey && !ev.shiftKey && !ev.altKey) S.toTimes = S.backToTag = true; } },
         icon('clock'), h('span', { class: 'when-text' })) : null,
@@ -435,6 +441,7 @@ function buildAddDialog() {
     dlg.querySelector('#add-desc').textContent = m?.description || '';
     dlg.querySelector('#add-help').replaceChildren(...(m?.help ? [h('div', { class: 'note' }, icon('info'),
       h('div', { class: 'stack gap-s' }, h('span', null, m.help.required ? `${m.name} needs setting up once (about five minutes) before it shows anything. Done it already? You're all set.` : `Not sure what to put in? There's a step-by-step guide.`),
+        creditLine(m.help.credit),
         h('div', null, helpButton(m.help, { label: 'Show me how' })))) ] : []));
   });
   dlg.addEventListener('close', () => {

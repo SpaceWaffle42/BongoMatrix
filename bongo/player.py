@@ -222,9 +222,19 @@ def play(playlist: list[Entry], modules: dict[str, Module], panel, ctx_factory=C
         return [k % len(day) for k in range(start, start + len(day))
                 if day[k % len(day)].plays_at(now) and (splashes or day[k % len(day)].module != "splash")]
 
+    def troubled(entry) -> bool:
+        """Whether ``entry``'s screens skip themselves just now (Module.trouble: Weather with no API key)."""
+        module = modules.get(entry.module)
+        try:
+            return bool(module and getattr(module, "trouble", None) and module.trouble())
+        except Exception:   # a broken check counts as nothing wrong: the screen says for itself
+            return False
+
     def after(index, entry, now):
-        """What follows ``entry``: the next one that plays when it ends (itself, if it's the only one; None: nothing)."""
+        """What follows ``entry``: the next one that plays when it ends (itself, if it's the only one; None: nothing).
+        One that will skip itself (``troubled``) isn't what's next: the dashboard's Up next would be wrong."""
         later = due(now + dt.timedelta(seconds=entry.seconds), index + 1)
+        later = [k for k in later if not troubled(day[k])]
         return day[later[0]] if later else None
 
     boot = schedule.boot_entry() if schedule else None

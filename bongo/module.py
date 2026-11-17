@@ -129,6 +129,13 @@ class Module:
     # panel (name -> the words on the button). Pressing one calls that screen's ``Style.act(name)``. Always
     # optional extras: a screen must be complete with nobody pressing anything. See ``bongo.schema.actions``.
     actions: dict = field(default_factory=dict)
+    # ``notes={"step_hours": "Rounded to the forecast's 3-hour steps."}``: a short line the dashboard shows
+    # under a setting, for one whose effect isn't what its name alone suggests.
+    notes: dict = field(default_factory=dict)
+    # ``trouble()``: what stops every screen of this module showing anything right now, in a few words
+    # ("Add your OpenWeather API key"), or None. The dashboard shows it on those screens, beside the
+    # Help guide; the screens themselves hand over at once meanwhile.
+    trouble: Callable[[], str | None] | None = None
 
     @property
     def default_style(self) -> str:

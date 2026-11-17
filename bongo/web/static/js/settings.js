@@ -1,10 +1,10 @@
 // Settings: safe area (with a big LED preview), device, splash, sleep, paired devices.
-import { api, get, del, post, uploadMedia } from './api.js';
+import { api, get, del, post, put, uploadMedia } from './api.js';
 import { h, icon, toast, fail, clone, same, clamp, humanize, ago, toggle } from './ui.js';
 import { FrameLoop } from './led.js';
 import { mediaThumb, mediaTitle, previewButton, openPreview } from './mediaview.js';
 import { S, onLeave, go, saveConfig, moduleById } from './app.js';
-import { helpButton } from './help.js';
+import { helpButton, creditLine } from './help.js';
 import { placePicker } from './editor.js';
 import { lookEditor, keepState, comingUpCard, icons, NAMES as COLOUR_NAMES } from './calendarlook.js';
 import { importBox, importedMore, addons } from './modimport.js';
@@ -12,10 +12,10 @@ import { importBox, importedMore, addons } from './modimport.js';
 /** The cards, by a name that never changes (their order is saved on the Matrix: config ``settings_layout``). */
 const CARDS = [['safe_area', () => safeAreaCard()], ['device', () => deviceCard()], ['modules', () => modulesCard()],
   ['location', () => locationCard()], ['wifi', () => wifiCard()], ['pet', () => petCard()], ['calendars', () => calendarsCard()],
-  ['spotify', () => spotifyCard()], ['update', () => updateCard()], ['devices', () => devicesCard()], ['sleep', () => sleepCard()],
+  ['spotify', () => spotifyCard()], ['weather', () => weatherCard()], ['update', () => updateCard()], ['devices', () => devicesCard()], ['sleep', () => sleepCard()],
   ['splash', () => splashCard()], ['media', () => mediaCard()], ['coming_up', () => comingUpCard(Object.keys(COLOUR_NAMES))]];
 /** As it was before cards could be moved: the safe area across the top, two columns, Coming up across the bottom. */
-const DEFAULT_LAYOUT = { top: ['safe_area'], left: ['device', 'modules', 'location', 'wifi', 'pet', 'calendars', 'spotify', 'update'],
+const DEFAULT_LAYOUT = { top: ['safe_area'], left: ['device', 'modules', 'location', 'wifi', 'pet', 'calendars', 'spotify', 'weather', 'update'],
   right: ['devices', 'sleep', 'splash', 'media'], full: ['coming_up'] };
 const ZONES = ['top', 'left', 'right', 'full'];
 const ZONE_NAMES = { top: 'Across the top', left: 'Left column', right: 'Right column', full: 'Across the bottom' };
@@ -722,7 +722,51 @@ function spotifyCard() {
   return card;
 }
 
-const SCREEN_TYPES = /\.(gif|png|jpe?g|webp|bmp|mp4|mov|webm|mkv|avi|m4v)$/i;   // bongo/media.py IMAGES | VIDEOS
+/** Weather: the OpenWeather API key, entered once for every Weather screen. The Matrix keeps it to itself
+ * (data/openweather.json, not the config) and only ever says whether there is one and whether it works. */
+function weatherCard() {
+  const body = h('div', { class: 'stack gap-s' }, h('p', { class: 'muted small flush' }, 'Loading…'));
+  const card = h('section', { class: 'card stack', id: 'weather', 'aria-label': 'Weather' },
+    h('div', { class: 'row between wrap gap-s' },
+      h('div', null, h('h2', { class: 'h2' }, 'Weather'),
+        h('p', { class: 'muted small flush' }, 'Your OpenWeather API key, for every Weather screen.')),
+      helpButton(moduleById('weather')?.help, { label: 'Step-by-step help' })), body);
+  const status = (s) => {
+    if (!s.saved) return h('div', { class: 'note trouble', role: 'status' }, icon('warn'), h('div', { class: 'stack gap-s' },
+      h('strong', null, 'Add your OpenWeather API key'),
+      h('span', null, 'It\'s free. Until there is one, the Weather screens are skipped. Step-by-step help shows you how to get one.')));
+    if (s.trouble) return h('div', { class: 'note trouble', role: 'status' }, icon('warn'), h('div', { class: 'stack gap-s' },
+      h('strong', null, 'Your OpenWeather API key isn\'t working'),
+      h('span', null, 'A new key can take up to two hours to start working: the Weather screens are skipped until it does, '
+        + 'then come back by themselves. Still not working after that? Copy it again from My API keys, whole, and save it again.')));
+    return h('p', { class: 'small flush row gap-s' }, h('span', { class: 'dot ok', 'aria-hidden': 'true' }), h('span', null, 'API key saved. The Weather screens use it.'));
+  };
+  const show = (s) => {
+    const input = h('input', { class: 'input mono grow', id: 'weather-key', type: 'password', autocomplete: 'off', spellcheck: 'false',
+      placeholder: s.saved ? 'Paste a new key' : 'Paste your API key', 'aria-label': 'OpenWeather API key' });
+    const save = h('button', { type: 'submit', class: 'btn primary' }, 'Save');
+    const form = h('form', { class: 'stack gap-s' }, h('label', { class: 'field-col', for: input.id }, 'OpenWeather API key',
+      h('div', { class: 'row gap-s wrap' }, input, save)));
+    form.onsubmit = async (ev) => {
+      ev.preventDefault();
+      save.disabled = true;
+      try {
+        const res = await put('/api/weather', { key: input.value });
+        if (res.problems?.length) toast(res.problems.join(' '), 'error', 10000);
+        else toast('OpenWeather API key saved', 'success');
+        show(res);
+      } catch (e) { toast(e.message, 'error', 8000); save.disabled = false; }
+    };
+    const off = s.saved ? h('button', { type: 'button', class: 'btn ghost danger-btn' }, 'Remove key') : null;
+    if (off) off.onclick = async () => { try { show(await del('/api/weather')); toast('OpenWeather API key removed'); } catch (e) { fail("Couldn't remove the key")(e); } };
+    body.replaceChildren(status(s), form, h('div', { class: 'row between wrap gap-s' },
+      creditLine(moduleById('weather')?.help?.credit), off));
+  };
+  get('/api/weather').then(show).catch(() => body.replaceChildren(h('p', { class: 'muted small flush' }, "Couldn't load the Weather settings.")));
+  return card;
+}
+
+const SCREEN_TYPES =/\.(gif|png|jpe?g|webp|bmp|mp4|mov|webm|mkv|avi|m4v)$/i;   // bongo/media.py IMAGES | VIDEOS
 
 /** Software updates: what's running, check and pull the latest, and (advanced) where updates come from. */
 const UPDATE_WORDS = {

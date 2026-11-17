@@ -35,6 +35,8 @@ from pathlib import Path
 
 from PIL import Image
 
+from bongo import private
+
 log = logging.getLogger(__name__)
 
 REDIRECT = "http://127.0.0.1:8888/callback"
@@ -74,11 +76,7 @@ def load() -> dict:
 
 
 def save(data: dict) -> None:
-    FILE.parent.mkdir(parents=True, exist_ok=True)
-    tmp = FILE.with_suffix(".tmp")
-    tmp.write_text(json.dumps(data))
-    os.chmod(tmp, 0o600)
-    tmp.replace(FILE)
+    private.write(FILE, json.dumps(data))   # (yours alone from the start; two saves at once can't collide)
 
 
 def connected() -> bool:

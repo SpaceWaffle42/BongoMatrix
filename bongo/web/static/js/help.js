@@ -1,7 +1,47 @@
 // Help guides: a Help button that opens a module's step-by-step setup guide (module.help, from the
 // Matrix: see bongo/module.py). Text in `backticks` is something to copy, with its own Copy button.
 import { h, icon, copyRaw } from './ui.js';
-import { href } from './app.js';
+import { S, bus, onLeave, href, path } from './app.js';
+
+/** Whose data a module shows (help.credit): their logo, linked to their site, and the words they ask for.
+ * The logo is the Matrix's own copy (/attribution/...); where it can't load (the demo), their name instead. */
+export function creditLine(credit) {
+  if (!credit) return null;
+  const logo = h('img', { src: credit.image, alt: credit.text.split(' ').pop() || 'Logo', height: 38, class: 'credit-logo', loading: 'lazy' });
+  logo.onerror = () => logo.replaceWith(h('span', { class: 'strong' }, logo.alt));
+  return h('p', { class: 'credit-line small flush' },
+    h('a', { href: credit.url, target: '_blank', rel: 'noopener noreferrer', 'aria-label': `${credit.text} (opens their website)` }, logo),
+    h('span', { class: 'muted' }, credit.text));
+}
+
+/** What stops a module's screens showing anything right now (Module.trouble, sent with /api/state),
+ * for one module: its words, then a way to put it right. ``short``: one line (a playlist card). Kept up to
+ * date as the state is polled; hidden while there's nothing wrong. */
+export function troubleNote(mod, { short = false } = {}) {
+  const el = h(short ? 'p' : 'div', { class: short ? 'tiny warn flush pl-trouble' : 'note trouble', role: 'status', hidden: true });
+  const fix = (mod?.help?.links || []).find((l) => l.route);
+  const goFix = () => setTimeout(() => document.getElementById(mod.id)?.scrollIntoView({ block: 'start' }), 200);   // (Settings: its card)
+  let was = null;
+  const paint = () => {
+    const said = S.state?.trouble?.[mod?.id] || null;
+    if (said === was) return;
+    was = said;
+    el.hidden = !said;
+    if (!said) { el.replaceChildren(); return; }
+    const link = fix && fix.route !== path()
+      ? h('a', { class: short ? '' : 'btn small-btn', href: href(fix.route), 'data-route': fix.route, onclick: goFix }, fix.label) : null;
+    el.replaceChildren(...(short
+      ? [icon('warn'), ` ${said}: skipped until it works. `, link].filter(Boolean)
+      : [icon('warn'), h('div', { class: 'stack gap-s' }, h('strong', null, said),
+        h('span', null, `${mod.name} screens are skipped until it works.`),
+        h('div', { class: 'row gap-s wrap' }, link, helpButton(mod.help, { label: 'Show me how' })))]));
+  };
+  const polled = () => (el.isConnected ? paint() : bus.removeEventListener('state', polled));   // (a card redrawn since: let it go)
+  paint();
+  bus.addEventListener('state', polled);
+  onLeave(() => bus.removeEventListener('state', polled));
+  return el;
+}
 
 /** A "Help" button for a module's guide (null when the module has none). */
 export function helpButton(guide, { label = 'Help', cls = 'btn ghost small-btn' } = {}) {
@@ -49,6 +89,7 @@ export function openHelp(guide) {
       h('div', { class: 'row between' }, h('h2', { class: 'h2', id: 'help-title' }, guide.title),
         h('button', { type: 'button', class: 'btn ghost', 'aria-label': 'Close', onclick: () => dlg.close() }, icon('x'))),
       guide.intro ? h('p', { class: 'muted small flush' }, guide.intro) : null,
+      creditLine(guide.credit),
       h('ol', { class: 'help-steps' }, ...guide.steps.map((s) => h('li', null, ...line(s)))),
       links.length ? h('div', { class: 'row gap-s wrap' }, ...links.map((l) => l.url
         ? h('a', { class: 'btn small-btn', href: l.url, target: '_blank', rel: 'noopener noreferrer' }, l.label, ' ↗')

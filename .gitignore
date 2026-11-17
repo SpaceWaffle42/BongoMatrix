@@ -11,6 +11,8 @@ report.xml
 resources/media/*
 !resources/media/built-in/
 !resources/media/built-in/**
+!resources/media/attribution/
+!resources/media/attribution/**
 
 # Demo sprite sheets: generated when publishing the dashboard demo
 bongo/web/static/demo/

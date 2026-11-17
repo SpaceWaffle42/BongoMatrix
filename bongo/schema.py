@@ -101,7 +101,8 @@ def check(name: str, default, value, choices=None, limits=None) -> None:
 
 
 HELP_KEYS = {"title": str, "intro": str, "steps": list, "tips": list, "links": list,
-             "required": bool}   # required: it shows nothing until this is done
+             "required": bool,   # required: it shows nothing until this is done
+             "credit": dict}     # whose data it shows: {"image": "/attribution/...", "url": "https://...", "text": ...}
 
 
 def help_problems(help: dict) -> list[str]:
@@ -120,6 +121,10 @@ def help_problems(help: dict) -> list[str]:
             for k, start in (("url", "https://"), ("route", "/")) if k in link)   # good route and a bad url is a bad link
         if not ok:
             problems.append(f"help.links: {link!r} needs a label and an https url or a /route")
+    credit = help.get("credit")
+    if isinstance(credit, dict) and not (str(credit.get("image", "")).startswith("/attribution/")
+                                         and str(credit.get("url", "")).startswith("https://") and credit.get("text")):
+        problems.append("help.credit: needs an /attribution/ image, an https url and its text")
     return problems
 
 
@@ -145,6 +150,7 @@ def describe(module) -> dict:
                 return {"type": "choice", "choices": list(choices[n]), **extra, **module.choice_names.get(n, {})}
             return {"type": kind(d)}
         return [{"name": n, "default": d, **typed(n, d), "advanced": tiered and n not in basic,
+                 **({"note": module.notes[n]} if n in module.notes else {}),
                  **({"marks": [list(m) for m in module.marks[n]]} if n in module.marks else {})}
                 for n, d in defaults.items()]
     shared_choices = module.choices

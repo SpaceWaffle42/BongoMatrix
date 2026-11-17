@@ -3,7 +3,7 @@ import { previewPath, get, uploadMedia } from './api.js';
 import { h, icon, toast, clone, same, humanize, toggle, segmented, store, reducedMotion } from './ui.js';
 import { FrameLoop } from './led.js';
 import { openPreview } from './mediaview.js';
-import { helpButton } from './help.js';
+import { helpButton, troubleNote } from './help.js';
 import { iconPicker } from './iconpick.js';
 import { S, onLeave, go, href, path, moduleById, styleOf, entryName, applyDraft, draftChanged, matrixClock, problemOf, problemLine } from './app.js';
 import { MOST_TIMES, mins, valid, joined, sentence, sleepTime, meetsSleep, suggest, moved } from './times.js';
@@ -326,6 +326,7 @@ export function render(view, match) {
             paintFields(); changed();
           },
         }),
+        ...(f.note ? [h('div', { class: 'tiny muted' }, f.note)] : []),   // (Module.notes: what it does, where the name doesn't say)
         h('div', { class: 'tiny muted' }, `Default: ${showDefault(f)}`));
     };
     paint();
@@ -392,6 +393,7 @@ export function render(view, match) {
       h('section', { class: 'card stack', 'aria-label': 'Style' },
         h('div', { class: 'row between wrap gap-s' }, h('h2', { class: 'h2' }, 'Style'), helpButton(mod.help, { label: `Help setting up ${mod.name}` })),
         mod.description ? h('p', { class: 'muted small flush' }, mod.description) : null,
+        troubleNote(mod),   // what stops it showing anything (no API key...), and how to put it right
         mod.proposed ? h('div', { class: 'note' }, icon('info'), h('span', null, 'Proposed module: not built yet. The previews are prototypes, and saving it here only works in the demo.')) : null,
         many ? h('div', { class: 'style-row' }, h('span', { class: 'led-frame mini media-thumb' }, rowCanvas),
           h('span', { class: 'style-row-text grow min0' }, rowName, rowKind),
@@ -645,7 +647,8 @@ function itemList(f, id, v, set) {
  *  longitude are set together, so the location is always one that exists. Typing alone saves nothing. */
 export function placePicker(id, v, set, picked) {
   const input = h('input', { class: 'input', id, value: v ?? '', autocomplete: 'off', spellcheck: 'false', role: 'combobox',
-    'aria-autocomplete': 'list', 'aria-expanded': 'false', 'aria-controls': `${id}-list`, placeholder: 'Start typing a town or city' });
+    'aria-autocomplete': 'list', 'aria-expanded': 'false', 'aria-controls': `${id}-list`, placeholder: 'Start typing a town or city',
+    maxlength: 80 });   // (the longest name the Matrix keeps)
   const list = h('ul', { class: 'place-list', id: `${id}-list`, role: 'listbox', hidden: true });
   const note = h('span', { class: 'tiny muted', role: 'status' }, v ? `Using ${v}` : '');
   let results = [], active = -1, timer = 0, seq = 0;
@@ -668,7 +671,8 @@ export function placePicker(id, v, set, picked) {
   input.addEventListener('input', () => {
     clearTimeout(timer);
     const q = input.value.trim();
-    note.textContent = q && q !== v ? 'Pick a place from the list to use it.' : (v ? `Using ${v}` : '');
+    note.textContent = q && q !== v ? (manual.hidden ? 'Pick a place from the list to use it.' : 'Then type where it is below and press Use these.')
+      : (v ? `Using ${v}` : '');
     if (q.length < 2) { results = []; paint(); return; }
     timer = setTimeout(async () => {
       const mine = ++seq;
@@ -677,9 +681,39 @@ export function placePicker(id, v, set, picked) {
         if (mine !== seq) return;
         results = res.places || []; active = results.length ? 0 : -1; paint();
         if (!results.length) note.textContent = `No places called “${q}” found. Try another spelling.`;
-      } catch (err) { if (mine === seq) note.textContent = err.message; }
+      } catch (err) {
+        if (mine !== seq) return;
+        if (err.data?.needs_key) byHand(err.message);
+        else note.textContent = err.message;
+      }
     }, 250);
   });
+  // No OpenWeather key (place search uses OpenWeather's): say so, link to it, and take the coordinates typed in
+  const manual = h('div', { class: 'stack-s', hidden: true });
+  const keyNote = h('span', { class: 'tiny muted', role: 'status', hidden: true });   // (under "Using London", not in its place)
+  const byHand = (why) => {
+    keyNote.hidden = false;
+    keyNote.replaceChildren(why.replace(/\.?$/, '. '), h('a', { href: href('/settings'), 'data-route': '/settings',
+      onclick: () => setTimeout(() => document.getElementById('weather')?.scrollIntoView(), 200) }, 'Settings › Weather'));
+    if (!manual.hidden) return;
+    const num = (name, lo, hi) => h('input', { class: 'input mono', type: 'number', step: 'any', min: lo, max: hi, id: `${id}-${name}`,
+      inputmode: 'decimal', placeholder: name === 'lat' ? 'e.g. 51.5074' : 'e.g. -0.1278' });
+    const lat = num('lat', -90, 90), lon = num('lon', -180, 180);
+    const use = h('button', { type: 'button', class: 'btn small-btn' }, 'Use these');
+    use.onclick = () => {
+      const a = Number(lat.value), b = Number(lon.value);
+      if (lat.value === '' || lon.value === '' || !(Math.abs(a) <= 90) || !(Math.abs(b) <= 180)) {
+        note.textContent = 'Latitude is -90 to 90 and longitude -180 to 180 (a map app shows both for any place).'; return;
+      }
+      const name = input.value.trim() || `${a.toFixed(4)}, ${b.toFixed(4)}`;
+      choose({ label: name, name, region: '', country: '', latitude: Math.round(a * 1e4) / 1e4, longitude: Math.round(b * 1e4) / 1e4 });
+    };
+    manual.replaceChildren(h('span', { class: 'tiny muted' }, 'Or type where it is (the name above is what the screens show):'),
+      h('div', { class: 'row gap-s wrap' }, h('label', { class: 'field-col', for: lat.id }, 'Latitude', lat),
+        h('label', { class: 'field-col', for: lon.id }, 'Longitude', lon), use));
+    manual.hidden = false;
+  };
+  get('/api/places?q=').catch((err) => { if (err.data?.needs_key) byHand(err.message); });   // (no key: say so at once)
   input.addEventListener('keydown', (ev) => {
     if (list.hidden) return;
     if (ev.key === 'ArrowDown' || ev.key === 'ArrowUp') {
@@ -688,7 +722,7 @@ export function placePicker(id, v, set, picked) {
     else if (ev.key === 'Escape') close();
   });
   input.addEventListener('blur', () => setTimeout(close, 100));
-  return h('div', { class: 'place-picker stack-s' }, h('div', { class: 'place-box' }, input, list), note);
+  return h('div', { class: 'place-picker stack-s' }, h('div', { class: 'place-box' }, input, list), note, keyNote, manual);
 }
 
 /** Pick a file from the media library (built-in/ and uploaded/), or upload a new one. */

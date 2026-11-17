@@ -156,6 +156,15 @@ input[type="time"] { color-scheme: dark; }
 .error-box ul { margin: 6px 0 0; padding-left: 18px; font-family: var(--mono); font-size: 12px; overflow-wrap: anywhere; }
 .note { display: flex; gap: 10px; align-items: flex-start; padding: 14px 16px; border-radius: 0; background: #15181C; border: 1px solid var(--line); font-size: 13px; color: var(--soft); }
 .note .ico { color: #7AA2FF; margin-top: 1px; }
+/* whose data a module shows (help.credit): their logo (white: made for a dark page like this one) and the words */
+.credit-line { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; }
+.credit-line a { display: inline-flex; align-items: center; min-height: 40px; }
+.credit-logo { height: 38px; width: auto; display: block; }   /* (its own 55 px: sharp at this size) */
+/* a module's screens are skipped (Module.trouble: no API key...): the note says why, in the warning colour */
+.note.trouble { border-color: #5A4A1A; background: var(--amber-bg); }
+.note.trouble .ico, .note.trouble strong { color: var(--warn); }
+.note[hidden], .pl-trouble[hidden] { display: none; }
+.pl-trouble .ico { vertical-align: -2px; }
 .page-head { display: flex; flex-direction: column; gap: 4px; }
 .offline { max-width: 520px; display: flex; flex-direction: column; gap: 12px; align-items: flex-start; }
 

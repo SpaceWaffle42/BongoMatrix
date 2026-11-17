@@ -255,7 +255,8 @@ def location_problems(home) -> list[str]:
     ok = isinstance(home, dict) and isinstance(home.get("name"), str) and 0 < len(home["name"].strip()) <= 80 \
         and all(isinstance(home.get(k), (int, float)) and not isinstance(home.get(k), bool) for k in ("latitude", "longitude"))
     if not ok or not (-90 <= home["latitude"] <= 90 and -180 <= home["longitude"] <= 180):
-        return ["location: pick a place from the search (a name, latitude -90 to 90 and longitude -180 to 180)"]
+        return ["location: needs a name (up to 80 characters), latitude -90 to 90 and longitude -180 to 180: "
+                "pick a place from the search, or type them"]
     return []
 
 
