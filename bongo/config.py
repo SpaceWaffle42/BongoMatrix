@@ -95,11 +95,18 @@ def load(path: Path = DEFAULT_PATH) -> dict:
 def _write(path: Path, text: str) -> None:
     """Atomic and flushed to the card, so a power cut leaves the old file or the new one, never half."""
     fd, tmp = tempfile.mkstemp(dir=path.parent, suffix=".tmp")
-    with os.fdopen(fd, "w") as f:
-        f.write(text)
-        f.flush()
-        os.fsync(f.fileno())
-    os.replace(tmp, path)
+    try:
+        with os.fdopen(fd, "w") as f:
+            f.write(text)
+            f.flush()
+            os.fsync(f.fileno())
+        os.replace(tmp, path)
+    except OSError:   # a full card, say: the file being replaced is untouched; don't leave the half-written one behind
+        try:
+            os.unlink(tmp)
+        except OSError:
+            pass
+        raise
 
 
 def save(config: dict, path: Path = DEFAULT_PATH) -> None:

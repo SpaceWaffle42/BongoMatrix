@@ -142,6 +142,16 @@ def create_app(*, modules, live, pairing, config_path, logs: LogBuffer | None = 
     def http_error(error):
         return jsonify(error=error.description if error.code < 500 else "server error"), error.code
 
+    @app.errorhandler(OSError)
+    def disk(error):
+        import errno
+        if error.errno not in (errno.ENOSPC, errno.EDQUOT, errno.EROFS):
+            return crash(error)
+        logging.getLogger("bongo.web").error("couldn't write to the SD card: %s (%s)", error, request.path)
+        full = error.errno != errno.EROFS
+        return jsonify(error="The Matrix's SD card is full, so that couldn't be saved. Delete some media (Settings > Media) and try again."
+                       if full else "The Matrix's SD card can't be written to just now, so that couldn't be saved."), 507
+
     @app.errorhandler(Exception)
     def crash(error):
         logging.getLogger("bongo.web").exception("dashboard request failed: %s", request.path)

@@ -218,6 +218,10 @@ class Gate:
     def _forward(self, client, module_id, sites, deadline):
         head, rest = self._read_head(client, deadline)
         first, _, others = head.partition(b"\r\n")
+        if b"\n" in first or b"\r" in first or b"\n" in others.replace(b"\r\n", b"") or b"\r" in others.replace(b"\r\n", b""):
+            # a line break on its own inside a header: the gate reads one header there, some servers read two (a
+            # second Host, a Transfer-Encoding), so what was checked isn't what the site would act on
+            return self._refuse(client, "400 Bad Request", "a header has a bare line break in it")
         try:
             method, target, version = first.decode("ascii").split(" ")
         except ValueError:

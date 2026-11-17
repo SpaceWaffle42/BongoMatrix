@@ -91,9 +91,16 @@ def save_state(state: dict) -> None:
     path = state_file()
     path.parent.mkdir(parents=True, exist_ok=True)
     fd, tmp = tempfile.mkstemp(dir=path.parent, prefix=".modules-")
-    with os.fdopen(fd, "w") as f:
-        json.dump(state, f, indent=1)
-    os.replace(tmp, path)
+    try:
+        with os.fdopen(fd, "w") as f:
+            json.dump(state, f, indent=1)
+        os.replace(tmp, path)
+    except OSError:   # (a full card: nothing half-written is left behind)
+        try:
+            os.unlink(tmp)
+        except OSError:
+            pass
+        raise
 
 
 def installed() -> dict[str, dict]:
