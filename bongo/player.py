@@ -53,7 +53,7 @@ def busy(style) -> bool:
 
 def play_entry(style: Style, seconds: float, panel, stop: threading.Event | None = None,
                clock=time.monotonic, place=None, live=None, overlays=None, hold: bool = True,
-               overrun: float = OVERRUN, until: float | None = None, lit=None) -> int:
+               overrun: float = OVERRUN, until: float | None = None, lit=None, cover: bool = True) -> int:
     """Render one entry until its time is up; returns frames shown.
     ``place`` puts the module's safe-area frame onto the full panel (see SafeArea.place).
     ``live`` (bongo.live.Live) can skip or hold the entry and sees every frame. ``hold`` False: Pause
@@ -61,7 +61,8 @@ def play_entry(style: Style, seconds: float, panel, stop: threading.Event | None
     ``overrun``: how long past its time a ``busy`` style may stay (0: the time is a hard stop).
     ``until``: seconds to a hard end that even Pause doesn't hold (sleep starting or ending).
     ``lit(covered)``: told each frame whether a covering screen (PIN, setup, address) is up, so the panel can
-    be bright enough to read it at night."""
+    be bright enough to read it at night. ``cover`` False: none of those screens over this one (the boot
+    screen: it comes before anything else; they follow it)."""
     stop = stop or threading.Event()
     frame_time = 1 / style.fps
     end = clock() + seconds
@@ -107,7 +108,7 @@ def play_entry(style: Style, seconds: float, panel, stop: threading.Event | None
         frame = last
         wait = frame_time
         under = frame             # what's playing, without any covering screen: the hub's public picture
-        if live and live.overlay:
+        if live and live.overlay and cover:
             covered = live.overlay(frame)
             if covered is not frame:   # a screen over the style (PIN, address) scrolls at 20 fps whatever the style's rate;
                 frame, wait = covered, min(frame_time, 1 / 20)   # the style underneath still renders at its own
@@ -128,7 +129,7 @@ def play(playlist: list[Entry], modules: dict[str, Module], panel, ctx_factory=C
          stop: threading.Event | None = None, loops: int | None = None, place=None,
          schedule=None, live=None, overlays=None) -> None:
     """Cycle the playlist until ``stop`` (or ``loops`` passes). A ``Schedule`` plays its boot screen
-    at start-up (unless that's in the night), fills ``splash`` items from the Splash pool and swaps in the sleep playlist, at
+    at start-up before anything else (in the sleep hours at sleep brightness), fills ``splash`` items from the Splash pool and swaps in the sleep playlist, at
     sleep brightness, during its hours (an entry is cut short when sleep starts or ends). ``live``
     lets the dashboard skip, pause, push a message, force sleep and override brightness.
     An entry with ``times`` only plays inside them: it is looked at when its turn comes, so the one on the
@@ -142,7 +143,8 @@ def play(playlist: list[Entry], modules: dict[str, Module], panel, ctx_factory=C
         raise ValueError("playlist has no enabled entries")
 
     def run(entry: Entry, upcoming: Entry | None = None, index: int | None = None, extras=None,
-            limit: float | None = None, hold: bool = True, edge: bool = True, bright: bool = False) -> bool:
+            limit: float | None = None, hold: bool = True, edge: bool = True, bright: bool = False,
+            cover: bool = True) -> bool:
         shown = entry
         if entry.module == "splash":  # a Splash item: the next file from the Splash pool
             entry = schedule.splash if schedule else None
@@ -166,7 +168,8 @@ def play(playlist: list[Entry], modules: dict[str, Module], panel, ctx_factory=C
             frames = play_entry(style, seconds, panel, stop, place=place, live=live, overlays=extras, hold=hold,
                                 overrun=OVERRUN if limit is None else max(0.0, min(OVERRUN, limit - cap)),   # never into sleep
                                 until=limit if edge else None,   # (edge: the limit is sleep starting or ending)
-                                lit=(lambda covered: lift(True)) if bright else lift)   # (a pushed message: all of it)
+                                lit=(lambda covered: lift(True)) if bright else lift,   # (a pushed message: all of it)
+                                cover=cover)
             lift(False)
         except Exception as error:  # one broken module must not stop the panel
             broken(f"{entry.module}/{entry.style} failed while playing; moving on", entry, error)
@@ -257,13 +260,13 @@ def play(playlist: list[Entry], modules: dict[str, Module], panel, ctx_factory=C
         return day[later[0]] if later else None
 
     boot = schedule.boot_entry() if schedule else None
-    if boot:
+    if boot:   # the start-up screen comes first, day or night, before any other screen (PIN, Wi-Fi setup, address)
         now = ctx_factory().now()
         night = bool(live and live.asleep(now)) or schedule.asleep(now)
-        brightness(now, night)   # before the boot screen: the panel opens at day brightness
-        if not night:            # (starting up in the night goes straight to the sleep screen)
-            first = due(now, 0)
-            run(boot, day[first[0]] if first else None, limit=schedule.seconds_until_change(now))   # (not into sleep)
+        brightness(now, night)   # in the sleep hours at sleep brightness: a restart at 03:00 mustn't light the room
+        first = due(now, 0)
+        run(boot, day[first[0]] if first else None, limit=schedule.seconds_until_change(now),   # (not into sleep)
+            cover=False)
     was_asleep = False
     position: dict[tuple, int] = {}  # where the sleep playlist left off
     cursor = 0                       # the place in ``day`` whose turn is next
