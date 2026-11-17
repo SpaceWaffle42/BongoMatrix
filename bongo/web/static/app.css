@@ -517,6 +517,7 @@ body.drag-active { user-select: none; -webkit-user-select: none; }
 .media-thumb { width: 64px; flex: 0 0 64px; }
 .media-thumb.empty { height: 32px; background: #050506; }
 .dialog.wide { width: min(640px, calc(100vw - 32px)); }
+@media (max-width: 719.98px) { .dialog.wide.sheet { width: 100vw; max-width: 100vw; } }   /* (the rule above came after the sheet's and won: 358 px on a 390 px phone) */
 /* help guides (js/help.js) */
 .help .h3 { font: 600 14px/1.3 var(--head-font); color: var(--text); }
 .help-steps, .help-tips { margin: 0; padding-left: 22px; display: flex; flex-direction: column; gap: 10px; font-size: 14px; line-height: 1.5; color: var(--soft); }

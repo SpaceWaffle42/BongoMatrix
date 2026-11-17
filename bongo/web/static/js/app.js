@@ -351,6 +351,11 @@ document.getElementById('draft-apply').addEventListener('click', applyDraft);
 document.getElementById('draft-discard').addEventListener('click', discardDraft);
 document.querySelector('.brand').setAttribute('href', href('/'));
 window.addEventListener('beforeunload', (e) => { if (dirtyCount()) { e.preventDefault(); e.returnValue = ''; } });
+// Back takes you off the page a dialog belongs to (the style picker, a preview): it goes too, instead of staying
+// open over the next page, still editing a screen that's no longer there
+const shutDialogs = () => document.querySelectorAll('dialog[open]').forEach((d) => { try { d.close(); } catch { /* already gone */ } });
+window.addEventListener('popstate', shutDialogs);
+window.addEventListener('hashchange', shutDialogs);
 if (DEMO) document.getElementById('demo-badge').hidden = false;
 
 (async function boot() {
