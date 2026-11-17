@@ -33,6 +33,8 @@ from dataclasses import dataclass, field
 log = logging.getLogger("bongo.net")
 
 SETUP_AFTER = 5 * 60     # trying saved networks this long before setup opens
+SETUP_AFTER_NEW = 90     # ...on a Matrix no browser has paired with yet: someone is setting it up, and its saved
+                         # network (one put in the image, a typo in Raspberry Pi Imager) isn't going to turn up
 SETUP_IDLE = 15 * 60     # setup closes after this long with nobody using it
 RECHECK = 2 * 60         # while setup is open: look for a saved network this often
 NUDGE = 60               # while connecting: ask NetworkManager to try the strongest saved network
@@ -211,7 +213,8 @@ class Manager:
     """The connection state machine. ``tick()`` every few seconds (``run`` does it on a thread)."""
 
     def __init__(self, suffix: str, run=nmcli, clock=time.monotonic, password=setup_password, settle: float = 2.0,
-                 country=apply_country, unblock=unblock_radio):
+                 country=apply_country, unblock=unblock_radio, settled=lambda: True):
+        self.settled = settled             # whether a browser has ever paired (else setup opens sooner)
         self.suffix, self.run, self.clock, self.password, self.settle = suffix, run, clock, password, settle
         self.country, self.unblock = country, unblock
         self._radio_on = False             # the radio has been switched on once (``wake_radio``)
@@ -592,8 +595,10 @@ class Manager:
                 return st.state
             if st.state in ("starting", "connected"):
                 self._enter("connecting", "looking for a saved network")
-            if not self.saved() or now - st.since >= SETUP_AFTER:
-                self.open_setup("no saved network yet" if not self.saved() else "no saved network for 5 minutes")
+            wait = SETUP_AFTER if self.settled() else SETUP_AFTER_NEW
+            if not self.saved() or now - st.since >= wait:
+                self.open_setup("no saved network yet" if not self.saved() else
+                                "no saved network for 5 minutes" if wait == SETUP_AFTER else "its saved network isn't here")
             elif now - self.last_nudge >= NUDGE:
                 self.nudge()
             return self.status.state

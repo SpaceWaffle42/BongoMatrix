@@ -96,7 +96,12 @@ def _start_dashboard(config, modules, live, config_path) -> None:
             net.apply_country(config["wifi_country"])
         elif not net.current_country():         # none at all (not even from Raspberry Pi Imager): Wi-Fi stays off without one
             net.apply_country("GB")
-        network = net.Manager(netname.mac_suffix())
+        def settled() -> bool:   # a browser has paired: it has been set up, so a lost network gets the full 5 minutes
+            try:
+                return bool(json.loads((config_path.parent / "paired-devices.json").read_text()))
+            except (OSError, ValueError):
+                return False
+        network = net.Manager(netname.mac_suffix(), settled=settled)
         net.captive_rule()   # phones joining the setup hotspot are sent to the setup page
         threading.Thread(target=network.run_forever, args=(threading.Event(),), daemon=True, name="wifi").start()
     pairing = Pairing(config_path.parent / "paired-devices.json")
