@@ -313,6 +313,9 @@ def main(argv=None) -> int:
     # and exit handlers run (the hub says goodbye on mDNS, so another Matrix can take matrix.local)
     signal.signal(signal.SIGTERM, signal.default_int_handler)
     live = Live()
+    from bongo.panel import panel_driver
+    if driver := panel_driver():   # before the dashboard starts: its port being taken would be the message otherwise
+        sys.exit(f"bongo: the panel is already being driven by pid {driver}; stop it first (sudo systemctl stop bongo-matrix)")
     if config["web"]["enabled"]:
         _start_dashboard(config, modules, live, Path(args.config))
     panel = Fader(_hardware(config))  # day <-> night brightness glides instead of jumping

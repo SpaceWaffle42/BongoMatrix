@@ -37,6 +37,27 @@ def claim_panel(path: Path = LOCK_PATH):
     return handle  # keep a reference: closing it releases the lock
 
 
+def panel_driver(path: Path | None = None) -> str | None:
+    """Who is driving the panel now (a pid, as text), or None if nobody is. Only a look: nothing is claimed.
+    ``bongo run`` asks before it starts its dashboard, so a second one says "the panel is already being
+    driven" and not "port 5000 is in use"."""
+    import fcntl
+
+    path = path or LOCK_PATH
+    try:
+        handle = open(path, "a+")
+    except OSError:
+        return None
+    with handle:
+        try:
+            fcntl.flock(handle, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError:
+            handle.seek(0)
+            return handle.read().strip() or "another process"
+        fcntl.flock(handle, fcntl.LOCK_UN)
+    return None
+
+
 class HardwarePanel:
     """64x32 HUB75 panel through hzeller/rpi-rgb-led-matrix."""
 

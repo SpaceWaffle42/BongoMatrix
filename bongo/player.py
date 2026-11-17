@@ -38,6 +38,7 @@ class Entry:
         return modules[self.module].create(self.style, self.settings, ctx)
 
 
+SAY_AGAIN = 600.0  # s before a screen that is still broken is mentioned in the log again (one line)
 OVERRUN = 120.0   # s a busy screen (a line still scrolling) may stay past its time: a backstop, never reached normally
 
 
@@ -150,8 +151,8 @@ def play(playlist: list[Entry], modules: dict[str, Module], panel, ctx_factory=C
             extras = None  # overlays never cover the splash
         try:
             style = entry.build(modules, ctx_factory())
-        except Exception:
-            log.exception("skipping playlist entry %s", entry.module)
+        except Exception as error:
+            broken(f"skipping playlist entry {entry.module}", entry, error)
             return False
         style.once = entry.once
         style.looping = entry.looping
@@ -167,13 +168,31 @@ def play(playlist: list[Entry], modules: dict[str, Module], panel, ctx_factory=C
                                 until=limit if edge else None,   # (edge: the limit is sleep starting or ending)
                                 lit=(lambda covered: lift(True)) if bright else lift)   # (a pushed message: all of it)
             lift(False)
-        except Exception:  # one broken module must not stop the panel
-            log.exception("%s/%s failed while playing; moving on", entry.module, entry.style)
+        except Exception as error:  # one broken module must not stop the panel
+            broken(f"{entry.module}/{entry.style} failed while playing; moving on", entry, error)
             return False
         gone = frames == 0 and not getattr(style, "nexted", False)   # it skipped itself (Spotify, nothing on),
         # or had no time at all: never a spin. (Next pressed before its first frame isn't the screen's doing.)
         skipped[0] = skipped[0] + 1 if gone else 0
         return True
+
+    said: dict[tuple, float] = {}   # a broken screen's problem -> when it was last logged
+
+    def broken(what, entry, error):
+        """Log a screen that can't be built or failed, in full the first time and then one line every
+        ``SAY_AGAIN`` s: a playlist of nothing but broken screens came round twice a second, each time with a
+        whole traceback (some 250,000 a day on the SD card)."""
+        key = (entry.module, entry.style, type(error).__name__, str(error))
+        now = time.monotonic()
+        if key not in said:
+            log.error("%s", what, exc_info=error)
+        elif now - said[key] >= SAY_AGAIN:
+            log.error("%s (still: %s: %s)", what, type(error).__name__, error)
+        else:
+            return
+        if len(said) > 200:
+            said.clear()
+        said[key] = now
 
     def brightness(now, forced_sleep):
         if not hasattr(panel, "set_brightness"):
