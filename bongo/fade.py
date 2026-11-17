@@ -37,6 +37,7 @@ class Fader:
     def __init__(self, panel, clock=time.monotonic):
         self.panel, self.clock = panel, clock
         self.level: float | None = None          # what the panel is showing now
+        self.floor: float | None = None          # ...is never below this while it's set (``lift``)
         self._ramp: tuple[float, float, float, float, str] | None = None  # start, end, t0, seconds, curve
 
     def __getattr__(self, name):
@@ -61,6 +62,15 @@ class Fader:
             return
         self._ramp = (self.level, float(level), self.clock(), float(seconds), curve)
 
+    def lift(self, floor: float | None) -> None:
+        """While ``floor`` is set the panel is at least that bright, whatever level it's at or gliding to: a
+        PIN, the address or a pushed message must be readable at night. None: back to its own level."""
+        if floor == self.floor:
+            return
+        self.floor = floor
+        if self.level is not None:
+            self._apply(self.level)
+
     def tick(self) -> None:
         if not self._ramp:
             return
@@ -78,6 +88,6 @@ class Fader:
 
     def _apply(self, level: float) -> None:
         self.level = level
-        whole = max(1, min(100, round(level)))
+        whole = max(1, min(100, round(max(level, self.floor or 0))))
         if hasattr(self.panel, "set_brightness"):
             self.panel.set_brightness(whole)

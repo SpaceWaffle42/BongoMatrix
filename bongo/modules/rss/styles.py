@@ -51,16 +51,39 @@ def first_sentence(text: str, limit: int = 160) -> str:
     return text if len(text) <= limit else text[:limit].rsplit(" ", 1)[0] + "..."
 
 
-READ = 0.07      # s to read a letter: how long a line of story text stays before the next comes up
-LINE = 1.2       # s each new line stays at least
+READ = 0.07      # s to read a letter at the "slow" text speed: how long a line of story text stays before the next comes up
+LINE = 1.2       # s each new line stays at least (at "slow")
 MOVE = 0.4       # s for the text to move up a line
+# text_speed (Story and Picture): how quickly the story text moves up, apart from the headline's scroll_speed:
+# 1 (slowest) to 100 (fastest), with named points along the way. Each line's time to be read is READ's and
+# LINE's times its pace ("slow": the pace the text had when its headline fitted); between the named points
+# the pace changes evenly (each step the same share faster). The first lines always get HOLD at least.
+TEXT_SPEEDS = {"slow": 25, "normal": 50, "fast": 75, "faster": 100}     # the named points (the dashboard's marks)
+PACES = ((1, 2.0), (25, 1.0), (50, 0.7), (75, 0.5), (100, 0.35))      # (text_speed, pace) to interpolate between
+
+
+def pace(speed) -> float:
+    """How much longer (over 1) or shorter (under 1) than the "slow" pace each line of text stays at ``speed``."""
+    speed = TEXT_SPEEDS.get(speed, speed) if isinstance(speed, str) else speed   # (a name saved before it was a number)
+    try:
+        speed = min(100.0, max(1.0, float(speed)))
+    except (TypeError, ValueError):
+        speed = TEXT_SPEEDS["normal"]
+    for (a, pa), (b, pb) in zip(PACES, PACES[1:]):
+        if speed <= b:
+            return pa * (pb / pa) ** ((speed - a) / (b - a))
+    return PACES[-1][1]
+
+
+def pace_of(settings) -> float:
+    return pace(settings.get("text_speed", TEXT_SPEEDS["normal"]))
 
 
 def crawl(lines, rows, start=0.0, pace=1.0):
     """When text taller than its window moves up, a line at a time: [(when the move to line k+1 starts)],
     and when the last line has had its time. The first ``rows`` lines are given time to be read first,
     then each line that comes up its own (``READ`` a letter, ``LINE`` at least), times ``pace``."""
-    first = start + max(HOLD, sum(len(l) for l in lines[:rows]) * READ) * pace
+    first = start + max(HOLD, sum(len(l) for l in lines[:rows]) * READ * pace)
     moves, t = [], first
     for line in lines[rows:]:
         moves.append(t)
@@ -280,7 +303,7 @@ class Headline(_News):
 class Picture(_News):
     """The story's thumbnail on the left; its age and headline on the right, crawling upwards
     when it's longer than the space. Stories without a picture get a tinted tile instead."""
-    defaults = {"rotate_seconds": 10}   # (its text moves a line at a time, at reading pace: no scroll speed)
+    defaults = {"rotate_seconds": 10, "text_speed": 50}   # (its text moves a line at a time: no scroll speed)
 
     def tile(self, item, side):
         thumb = data.image(item.image)
@@ -315,7 +338,9 @@ class Picture(_News):
             font, rows = self.column(i, room)
             pitch = font.cap + font.descent + 1
             fit = max(1, space // pitch)
-            moves, read = crawl([line for line, _ in rows], fit) if len(rows) > fit else ([], max(HOLD, sum(len(l) for l, _ in rows) * READ))
+            pace = pace_of(self.settings)
+            moves, read = (crawl([line for line, _ in rows], fit, pace=pace) if len(rows) > fit
+                           else ([], max(HOLD, sum(len(l) for l, _ in rows) * READ * pace)))
             return font, rows, pitch, fit, moves, read
 
         def seconds(i):  # a long story stays up until its last line has been read
@@ -339,13 +364,13 @@ class Picture(_News):
 
 class Story(Headline):
     """v2's layout: the headline on a row of its own, and the story text below it in its own colour.
-    Both start together: the headline, if it's too wide, slides across once (held at its first letter
-    first); the text moves up a line at a time, each line given time to be read. The story stays up until
-    both are done."""
+    Both start together, each at its own speed: the headline, if it's too wide, slides across once (held at
+    its first letter first) at ``scroll_speed``; the text moves up a line at a time at ``text_speed``, each
+    line given time to be read. The story stays up until both are done."""
     # stop_at_each_line: the text moves up a line and stops while it's read (off: it glides up steadily,
     # taking the same time overall, and stops once the last lines are up)
-    defaults = {"scroll_speed": 12, "stop_at_each_line": True}
-    basic = ("stop_at_each_line",)   # (shown with the main settings, not under More)
+    defaults = {"scroll_speed": 12, "text_speed": 50, "stop_at_each_line": True}
+    basic = ("text_speed", "stop_at_each_line")   # (shown with the main settings, not under More)
     GAP = 16    # pixels between a sliding headline and its repeat
 
     def setup(self):
@@ -364,13 +389,10 @@ class Story(Headline):
     def plan(self, item):
         """(text lines, moves, when the last line has been read)."""
         text = self.lines(self.small, self.summary(item), self.ctx.width - 2)
+        pace = pace_of(self.settings)   # (its own: a long headline sliding across doesn't slow the text down)
         if len(text) <= self.fit:
-            return text, [], max(HOLD, sum(len(l) for l in text) * READ)
-        moves, read = crawl(text, self.fit)
-        slide = self.slide(item)        # a long headline takes a while: the text takes its time too (up to
-        if slide and read < HOLD + slide:   # twice as long a line), so the story is still there to read after it
-            moves, read = crawl(text, self.fit, pace=min(2.0, (HOLD + slide) / read))
-        return text, moves, read
+            return text, [], max(HOLD, sum(len(l) for l in text) * READ * pace)
+        return (text, *crawl(text, self.fit, pace=pace))
 
     def seconds(self, item):
         slide = self.slide(item)

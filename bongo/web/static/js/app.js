@@ -25,16 +25,28 @@ const ROUTES = [
   [/^\/animator$/, async () => ({ render(view) {  // the animator page, framed in the dashboard
     const frame = h('iframe', { src: DEMO ? 'animator.html?demo' : 'animator.html', title: 'Animator', class: 'animator-frame' });   // the real one either way
     view.append(h('div', { class: 'stack' }, frame));
+    // Its own "unsaved work" warning only fires when the whole page goes; tapping another tab just removed the
+    // frame, and the drawing with it. So the dashboard asks the frame before it leaves this page
+    mayLeave = () => {
+      let unsaved = false;
+      try { unsaved = !!frame.contentWindow?.bongoUnsaved?.(); } catch { /* not loaded yet */ }
+      return !unsaved || confirm("Your drawing isn't saved. Leave the Animator and lose it?");
+    };
+    onLeave(() => { mayLeave = null; });
   } })],
 ];
 
 // -- routing -------------------------------------------------------------------------------
 export const path = () => (DEMO ? decodeURIComponent(location.hash.slice(1)) || '/' : location.pathname) || '/';
 export const href = (p) => (DEMO ? `#${p}` : p);
+let mayLeave = null;   // set by a page that can hold unsaved work of its own (the Animator): false keeps you there
 export function go(p, { replace = false } = {}) {
   if (p === path()) { render(); return; }
+  if (mayLeave && !mayLeave()) return;
+  if (S.stale && !DEMO && !dirtyCount()) { location.assign(p); return; }   // updated since this page loaded: the next page comes fresh
   if (DEMO) { replace ? location.replace(`#${p}`) : (location.hash = p); return; } // hashchange renders
   history[replace ? 'replaceState' : 'pushState'](null, '', p);
+  shownAt = p;
   render();
 }
 
@@ -53,7 +65,20 @@ async function render() {
   if (p !== '/pair' && !S.config) {
     try { await loadAll(); } catch (err) { if (err.status !== 401) showOffline(view, err); return; }
   }
-  const mod = await route[1]();
+  let mod;
+  try { mod = await route[1](); }
+  catch (err) {
+    // The page's script didn't arrive (the Matrix was restarting, a Wi-Fi blip). The browser remembers a failed
+    // load, so trying this page again does nothing until the dashboard itself is loaded afresh: say so
+    console.error(err);
+    if (seq === renderSeq) {
+      view.replaceChildren(h('div', { class: 'card offline' },
+        h('h1', { class: 'h2' }, "This page didn't load"),
+        h('p', { class: 'muted' }, "The Matrix didn't answer just then. Reload to try again; anything you've saved is safe."),
+        h('button', { class: 'btn primary', type: 'button', onclick: () => location.reload() }, 'Reload')));
+    }
+    return;
+  }
   if (seq !== renderSeq) return;
   document.body.dataset.route = p.startsWith('/edit') ? '/edit' : p;
   document.body.classList.toggle('pairing', p === '/pair');
@@ -91,7 +116,13 @@ document.addEventListener('click', (e) => {
   e.preventDefault();
   go(a.dataset.route);
 });
-window.addEventListener('popstate', () => { if (!DEMO) render(); });
+let shownAt = path();   // the page on screen (the address has already changed when Back is pressed)
+window.addEventListener('popstate', () => {
+  if (DEMO) return;
+  if (mayLeave && path() !== shownAt && !mayLeave()) { history.pushState(null, '', shownAt); return; }   // Back, declined: stay
+  shownAt = path();
+  render();
+});
 window.addEventListener('hashchange', () => { if (DEMO) render(); });
 
 // -- data ----------------------------------------------------------------------------------
@@ -181,7 +212,7 @@ export async function applyDraft() {
     const res = await putConfig({ playlist });
     S.config.playlist = clone(playlist);
     S.problems = []; S.theirs = false;
-    toast(res?.restart_needed ? 'Saved. Panel size and wiring changes take effect after a restart (Settings > Device > Restart).' : 'Playlist applied', 'success', 5000);
+    toast(res?.restart_needed ? 'Saved. This needs a restart to take effect (Settings > Device > Restart).' : 'Playlist applied', 'success', 5000);
     paintHeader(); emit('draft');
     return true;
   } catch (err) {
@@ -242,7 +273,7 @@ export async function saveConfig(part, what = 'Settings') {
   try {
     const res = await putConfig(part);
     Object.assign(S.config, clone(part));
-    if (res?.restart_needed) toast('Saved. Panel size and wiring changes take effect after a restart (Settings > Device > Restart).', 'success', 8000);
+    if (res?.restart_needed) toast('Saved. This needs a restart to take effect (Settings > Device > Restart).', 'success', 8000);
     else toast(`${what} saved`, 'success');
     return true;
   } catch (err) {
@@ -271,7 +302,7 @@ function paintHeader() {
 // -- polling ---------------------------------------------------------------------------------
 async function poll() {
   if (!document.hidden && S.config && path() !== '/pair') {
-    try { S.state = await get('/api/state'); S.online = true; S.polledAt = S.stateAt = performance.now(); }
+    try { S.state = await get('/api/state'); S.online = true; S.polledAt = S.stateAt = performance.now(); updated(); }
     catch (err) { S.online = err.status !== 0 ? S.online : false; }
     paintHeader();
     emit('state');
@@ -280,6 +311,20 @@ async function poll() {
   setTimeout(poll, 1000);
 }
 let polls = 0;
+
+/** The Matrix's pages changed since this one loaded (an update): this tab has the old styles and may fetch new
+ *  scripts, which don't fit together. With nothing unsaved it reloads; otherwise it says so, and the next page
+ *  you open comes fresh (``go``). */
+function updated() {
+  const build = S.state?.build;
+  if (!build) return;
+  if (!S.build) { S.build = build; return; }
+  if (build === S.build || S.stale) return;
+  S.stale = true;
+  const busy = dirtyCount() || path().startsWith('/edit') || path() === '/animator' || document.querySelector('dialog[open]');
+  if (!busy) { location.reload(); return; }
+  toast('The Matrix has been updated. Finish what you are doing, then reload this page for the new version.', 'info', 15000);
+}
 document.addEventListener('visibilitychange', () => { if (!document.hidden) freshen(); });   // back to this tab
 
 // A file dropped beside a drop zone mustn't make the browser open it and leave the dashboard (a drop zone

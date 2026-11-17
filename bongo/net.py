@@ -43,6 +43,11 @@ SETUP_SUBNET = "10.42.0.0/24"
 CAPTIVE = "/etc/NetworkManager/dnsmasq-shared.d/bongo-setup.conf"
 JOIN_WAIT = 50          # s NetworkManager may take to join a network from the setup page
 JOIN_LIMIT = 3 * 60     # a join still going after this long is given up (setup reopens)
+SEEN_WAIT = 15          # s to wait for a network to show in the list once the hotspot has gone (the radio turns round)
+# The setup hotspot is plain WPA2 with AES and no protected management frames: NetworkManager's own defaults
+# (it offers WPA3 and PMF where it thinks it can) make many phones answer "incorrect password".
+HOTSPOT_SECURITY = ("wifi-sec.key-mgmt", "wpa-psk", "wifi-sec.proto", "rsn", "wifi-sec.pairwise", "ccmp",
+                    "wifi-sec.group", "ccmp", "wifi-sec.pmf", "disable")
 COUNTRIES = ("GB", "IE", "US", "CA", "AU", "NZ", "DE", "FR", "ES", "IT", "NL", "BE", "PT", "SE", "NO", "DK",
              "FI", "PL", "AT", "CH", "JP", "IN", "ZA", "AE", "SG")
 WORDS = ("kite", "lamp", "moss", "pier", "reef", "sand", "tide", "wave", "palm", "star", "neon", "fern")
@@ -148,6 +153,16 @@ def apply_country(code: str, run=subprocess.run) -> bool:
     return False
 
 
+def unblock_radio(run=subprocess.run) -> None:
+    """Switch the Wi-Fi radio on if something left it blocked (an image with a country set but the radio still
+    off: nothing else unblocks it, and the setup hotspot can then never start)."""
+    if shutil.which("rfkill"):
+        try:
+            run(["rfkill", "unblock", "wifi"], capture_output=True, timeout=10)
+        except (OSError, subprocess.SubprocessError) as error:
+            log.info("couldn't unblock the Wi-Fi radio: %s", error)
+
+
 def valid_join(ssid: str, password: str) -> str | None:
     """What's wrong with a network name and password from the setup page, or None."""
     if not ssid or len(ssid.encode()) > 32:
@@ -196,9 +211,11 @@ class Manager:
     """The connection state machine. ``tick()`` every few seconds (``run`` does it on a thread)."""
 
     def __init__(self, suffix: str, run=nmcli, clock=time.monotonic, password=setup_password, settle: float = 2.0,
-                 country=apply_country):
+                 country=apply_country, unblock=unblock_radio):
         self.suffix, self.run, self.clock, self.password, self.settle = suffix, run, clock, password, settle
-        self.country = country
+        self.country, self.unblock = country, unblock
+        self._radio_on = False             # the radio has been switched on once (``wake_radio``)
+        self._ssids: tuple = ((), {})      # (saved connection names, network name -> connection name)
         self.status = Status(since=clock())
         self.last_nudge = self.last_check = self.last_used = -1e9
         self._lock = threading.RLock()
@@ -229,12 +246,39 @@ class Manager:
                 out.append(name)
         return out
 
+    def saved_networks(self) -> dict[str, str]:
+        """Network name -> the saved connection for it. A connection isn't always named after its network:
+        Raspberry Pi Imager's is "preconfigured", an image's own can be anything. (Asked again only when the
+        list of saved connections changes.)"""
+        names = tuple(self.saved())
+        if names != self._ssids[0]:
+            found = {}
+            for name in names:
+                try:
+                    ssid = self.run("-g", "802-11-wireless.ssid", "connection", "show", name).strip()
+                except RuntimeError:
+                    ssid = ""
+                found.setdefault(ssid or name, name)
+            self._ssids = (names, found)
+        return self._ssids[1]
+
+    def wake_radio(self) -> None:
+        """Once, before the first look: the radio on, whatever left it off."""
+        if self._radio_on:
+            return
+        self._radio_on = True
+        self.unblock()
+        try:
+            self.run("radio", "wifi", "on", timeout=10)
+        except RuntimeError as error:
+            log.info("couldn't switch Wi-Fi on: %s", error)
+
     def scan(self, rescan: bool = False) -> list[Network]:
         """Networks in range, strongest first, one entry per name."""
         args = ["-t", "-f", "ACTIVE,SSID,SIGNAL,SECURITY", "device", "wifi", "list"]
         if rescan:
             args += ["--rescan", "yes"]
-        saved, seen = set(self.saved()), {}
+        saved, seen = set(self.saved_networks()), {}
         for ln in self.run(*args).splitlines():
             active, ssid, signal, security = (fields(ln) + ["", "", "", ""])[:4]
             if not ssid:
@@ -280,13 +324,29 @@ class Manager:
             if not (keep_password and self._setup_pw):
                 self._setup_pw = self.password()
             ssid, pw = f"Matrix-Setup-{self.suffix.upper()}", self._setup_pw
-            self.run("device", "wifi", "hotspot", "ifname", self.wifi or "wlan0", "con-name", HOTSPOT,
-                     "ssid", ssid, "password", pw)
+            self._hotspot(ssid, pw)
             self.status.hotspot = {"ssid": ssid, "password": pw}   # before the state: screens never see setup without it
             self._enter("setup", why)
             self.status.bands = self.bands()
             self.last_check = self.last_used = self.clock()
             log.info("setup opened (%s): join %s", why, ssid)
+
+    def _hotspot(self, ssid: str, pw: str) -> None:
+        """Start the setup hotspot from a profile of our own (``HOTSPOT_SECURITY``); if NetworkManager won't
+        take that, its own one-line hotspot, as before."""
+        dev = self.wifi or "wlan0"
+        try:
+            try:
+                self.run("connection", "delete", HOTSPOT)
+            except RuntimeError:
+                pass   # none left from last time
+            self.run("connection", "add", "type", "wifi", "ifname", dev, "con-name", HOTSPOT, "autoconnect", "no",
+                     "ssid", ssid, "802-11-wireless.mode", "ap", "802-11-wireless.band", "bg",
+                     "ipv4.method", "shared", "ipv6.method", "disabled", *HOTSPOT_SECURITY, "wifi-sec.psk", pw)
+            self.run("connection", "up", HOTSPOT, timeout=40)
+        except RuntimeError as error:
+            log.info("setup hotspot: its own profile didn't start (%s); trying NetworkManager's", error)
+            self.run("device", "wifi", "hotspot", "ifname", dev, "con-name", HOTSPOT, "ssid", ssid, "password", pw)
 
     def close_setup(self, why: str) -> None:
         with self._lock:
@@ -377,14 +437,23 @@ class Manager:
         if country:
             self.country(country)
         args = ["--wait", str(JOIN_WAIT), "device", "wifi", "connect", ssid] + \
-            (["password", password] if password else []) + (["hidden", "yes"] if hidden else []) + \
-            ["ifname", self.wifi or "wlan0"]
+            (["password", password] if password else []) + ["ifname", self.wifi or "wlan0"]
         try:
-            try:
-                self.run("device", "wifi", "rescan", timeout=15)
-            except RuntimeError:
-                pass   # "scanning not allowed" right after the hotspot goes: connect scans anyway
-            self.run(*args, timeout=JOIN_WAIT + 15)
+            if hidden:   # never in a scan, so nmcli can't tell its security: a profile that says so
+                self._join_by_profile(ssid, password, hidden=True)
+            else:
+                self._wait_until_seen(ssid, ident)
+                try:
+                    self.run(*args, timeout=JOIN_WAIT + 15)
+                except RuntimeError as error:
+                    low = str(error).lower()
+                    if not ("no network with ssid" in low or "key-mgmt" in low) or not self._current(ident):
+                        raise
+                    # the list wasn't back yet (the radio was the hotspot a moment ago): once more, spelled out
+                    log.info("couldn't join %s at first (%s): trying once more", ssid, error)
+                    self._forget_new(before)
+                    time.sleep(self.settle)
+                    self._join_by_profile(ssid, password, hidden=False)
         except RuntimeError as error:
             log.info("couldn't join %s: %s", ssid, error)
             if self._landed(ssid, ident):   # NetworkManager gave up waiting, but the join finished anyway (slow DHCP)
@@ -392,15 +461,44 @@ class Manager:
                 return self._joined(ssid, ident)
             with self._lock:
                 current = self._current(ident)
-            if current and before is not None:   # only a network that works is kept (never one a newer try just saved)
-                try:
-                    for uuid in self.wifi_uuids() - before:   # the profile this try made, even if it's "Name 1"
-                        self.run("connection", "delete", "uuid", uuid)
-                except RuntimeError:
-                    pass
+            if current:   # only a network that works is kept (never one a newer try just saved)
+                self._forget_new(before)
             self._failed(ssid, f"Couldn't join {ssid}: {plain_reason(str(error))}.", ident)
             return False
         return self._joined(ssid, ident)
+
+    def _forget_new(self, before: set | None) -> None:
+        """Delete the profiles a try made (whatever saved before it stays, whatever its name)."""
+        if before is None:
+            return
+        try:
+            for uuid in self.wifi_uuids() - before:   # even if it's "Name 1"
+                self.run("connection", "delete", "uuid", uuid)
+        except RuntimeError:
+            pass
+
+    def _wait_until_seen(self, ssid: str, ident: int | None = None) -> bool:
+        """Look around until ``ssid`` is in the list (up to ``SEEN_WAIT``): straight after the hotspot goes the
+        radio needs a few seconds, and joining before then fails as if the network weren't there."""
+        end = self.clock() + SEEN_WAIT
+        while True:
+            try:
+                if any(n.ssid == ssid for n in self.scan(rescan=True)):
+                    return True
+            except RuntimeError:
+                pass   # "scanning not allowed" just now: look again in a moment
+            if self.clock() >= end or not self._current(ident):
+                return False
+            time.sleep(max(self.settle, 0.01))
+            if self.settle <= 0:   # (the tests' clock doesn't move by itself)
+                return False
+
+    def _join_by_profile(self, ssid: str, password: str, hidden: bool) -> None:
+        """Join from a profile that names the security itself (a hidden network, or one the list doesn't show)."""
+        self.run("connection", "add", "type", "wifi", "ifname", self.wifi or "wlan0", "con-name", ssid, "ssid", ssid,
+                 *(("802-11-wireless.hidden", "yes") if hidden else ()),
+                 *(("wifi-sec.key-mgmt", "wpa-psk", "wifi-sec.psk", password) if password else ()))
+        self.run("--wait", str(JOIN_WAIT), "connection", "up", ssid, timeout=JOIN_WAIT + 15)
 
     def _landed(self, ssid: str, ident: int | None = None, looks: int = 5) -> bool:
         """Whether it's on ``ssid`` after all, looking a few times (``settle`` s apart) as an address arrives."""
@@ -452,16 +550,23 @@ class Manager:
     def nudge(self) -> None:
         """Ask NetworkManager to bring up the strongest saved network in range (it may be waiting)."""
         self.last_nudge = self.clock()
-        for n in self.scan(rescan=True):
+        try:
+            nearby = self.scan(rescan=True)
+        except RuntimeError as error:   # "scanning not allowed" straight after another look: next time
+            log.info("couldn't look for networks: %s", error)
+            return
+        names = self.saved_networks()
+        for n in nearby:
             if n.saved:
                 try:
-                    self.run("connection", "up", n.ssid, timeout=40)
+                    self.run("connection", "up", names.get(n.ssid, n.ssid), timeout=40)
                     return
                 except RuntimeError as error:
                     log.info("couldn't join %s: %s", n.ssid, error)
 
     def tick(self) -> str:
         with self._lock:
+            self.wake_radio()
             now, st = self.clock(), self.status
             if st.state == "joining":
                 if now - st.since > JOIN_LIMIT:   # NetworkManager never answered: don't leave it offline
@@ -494,12 +599,17 @@ class Manager:
             return self.status.state
 
     def run_forever(self, stop: threading.Event) -> None:
+        failed, said = 0, None
         while not stop.is_set():
             try:
                 self.tick()
-            except Exception:   # NetworkManager hiccups must never stop the player
-                log.exception("network check failed")
-            stop.wait(TICK)
+                failed, said = 0, None
+            except Exception as error:   # NetworkManager hiccups must never stop the player
+                failed += 1
+                if str(error) != said:   # said once, not every few seconds for as long as it lasts
+                    said = str(error)
+                    log.warning("network check failed (it keeps trying): %s", error, exc_info=not isinstance(error, RuntimeError))
+            stop.wait(min(TICK * 2 ** min(failed, 4), 60) if failed else TICK)   # 10, 20, 40, 60 s between failed tries
 
 
 def available() -> bool:
@@ -507,7 +617,12 @@ def available() -> bool:
     from bongo.netname import can_manage_system
     if not (can_manage_system() and shutil.which("nmcli")):
         return False
-    try:
-        return "running" in nmcli("-t", "-f", "RUNNING", "general", timeout=10)
-    except (RuntimeError, OSError, subprocess.SubprocessError):
-        return False
+    for wait in (0, 2, 4, 8):   # on a slow first boot NetworkManager may still be starting: asked a few times
+        time.sleep(wait)
+        try:
+            if "running" in nmcli("-t", "-f", "RUNNING", "general", timeout=10):
+                return True
+        except (RuntimeError, OSError, subprocess.SubprocessError):
+            pass
+    log.warning("NetworkManager isn't running here: Wi-Fi setup is off until the display restarts")
+    return False

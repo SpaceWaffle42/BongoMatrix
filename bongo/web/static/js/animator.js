@@ -853,6 +853,7 @@ $('importfile').onchange = async () => {
   } catch (e) { toast(e.message); }
 };
 window.addEventListener('beforeunload', (e) => { if (dirty) { e.preventDefault(); e.returnValue = ''; } });   // unsaved work
+window.bongoUnsaved = () => dirty;   // ...and the dashboard asks before it takes this frame away (app.js)
 
 // -- start --------------------------------------------------------------------------------
 setSize(W, H); dimPicker(15); setTool('pen'); frames = starter(); renderAll(); tick();

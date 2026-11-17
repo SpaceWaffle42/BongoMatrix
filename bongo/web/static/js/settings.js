@@ -295,7 +295,44 @@ function deviceCard() {
     h('p', { class: 'muted tiny flush' }, 'The hub (matrix.local) shows a live picture of each Matrix to anyone on this Wi-Fi, including pushed messages. Its name and what\'s playing always show.'),
     h('label', { class: 'field-col', for: 'set-badge' }, "This Matrix's logo colour on the hub", h('span', { class: 'badge-pick' }, badge, badgeLook)),
     h('div', { class: 'row end' }, save),
+    panelTimingBox(),
     restartBox());
+}
+
+/** Advanced: how the panel is driven. Both settings are read once when the display starts, so a change waits
+ *  for a restart; saving says so. */
+function panelTimingBox() {
+  const p = S.config.panel || {};
+  const SLOW = { 0: '0 · none', 1: '1 · Pi Zero, Pi 2', 2: '2 · Pi Zero 2, Pi 3', 3: '3', 4: '4 · Pi 4', 5: '5' };
+  const slow = h('select', { class: 'input', id: 'set-slowdown' },
+    Object.entries(SLOW).map(([v, label]) => h('option', { value: v, selected: Number(v) === (p.gpio_slowdown ?? 4) ? '' : null }, label)));
+  const limit = h('input', { class: 'input', id: 'set-refresh', type: 'number', inputmode: 'numeric', min: 0, max: 1000, step: 10,
+    value: p.limit_refresh || '', placeholder: 'No limit' });
+  const note = h('p', { class: 'small flush warn', role: 'status', hidden: true });
+  const save = h('button', { type: 'button', class: 'btn primary' }, 'Save panel timing');
+  save.onclick = async () => {
+    const hz = limit.value.trim() === '' ? 0 : Number(limit.value);
+    if (!Number.isInteger(hz) || hz < 0 || hz > 1000) { toast('Refresh rate limit: a whole number from 0 to 1000 (0 or empty for no limit).', 'error'); limit.focus(); return; }
+    const was = S.config.panel || {};
+    const changed = Number(slow.value) !== (was.gpio_slowdown ?? 4) || hz !== (was.limit_refresh || 0);
+    save.disabled = true;
+    const ok = await saveConfig({ panel: { ...was, gpio_slowdown: Number(slow.value), limit_refresh: hz } }, 'Panel timing');
+    save.disabled = false;
+    if (ok && changed) {
+      note.textContent = 'Saved. These settings need a restart to take effect: open Restart below and choose "Restart the display".';
+      note.hidden = false;
+    }
+  };
+  return h('details', { class: 'item-more' },
+    h('summary', null, 'Advanced: panel timing'),
+    h('div', { class: 'stack-s' },
+      h('p', { class: 'muted tiny flush' }, 'For a panel that flickers or shows garbage. Changes here need a restart of the display to take effect.'),
+      h('label', { class: 'field-col', for: 'set-slowdown' }, 'GPIO slowdown', slow),
+      h('p', { class: 'muted tiny flush' }, 'How much the Matrix slows its signals for the panel. Too high and the panel refreshes slowly, which shows as flicker; too low and it shows garbage. Go down one step at a time.'),
+      h('label', { class: 'field-col', for: 'set-refresh' }, 'Refresh rate limit (Hz)', limit),
+      h('p', { class: 'muted tiny flush' }, 'Holds the panel to a steady refresh rate. Leave empty for no limit. If the flicker is uneven, try 120, then lower.'),
+      note,
+      h('div', { class: 'row end' }, save)));
 }
 
 /** Every module, with an On/Off switch like the playlist's. Off: its screens are skipped in the playlist and

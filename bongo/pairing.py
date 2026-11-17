@@ -1,7 +1,9 @@
 """PIN pairing for the dashboard, as in v2: the panel shows a PIN, the browser types it in.
 
-Paired browsers get a long random token in a cookie; only its SHA-256 is stored. Five wrong
-PINs lock pairing for a minute and draw a new PIN. A new PIN is drawn after every successful pairing.
+Paired browsers get a long random token in a cookie; only its SHA-256 is stored. Five wrong PINs
+from one address stop that address trying for a minute (nobody else: a stranger on the network can't
+lock the owner out). After GUESSES wrong PINs in all, from anywhere, a new PIN is drawn and the panel
+shows it. A new PIN is drawn after every successful pairing.
 
 Asking for the PIN needs no pairing (how else would a first browser get in?), so anything on the
 network can ask. It can't keep the panel covered that way: one showing lasts PIN_MOST at the most
@@ -28,7 +30,8 @@ PIN_MOST = 300                       # one showing, however many times it is ask
 REST_SECONDS, REST_MOST = 30, 3600   # between showings nobody paired from: 30 s, doubling each time, to an hour
 FORGET_SECONDS = 6 * 3600            # ...counted afresh once the panel has been left alone this long
                                      # (all of it is forgotten when the display restarts: an owner is never shut out)
-LOCK_AFTER, LOCK_SECONDS = 5, 60
+LOCK_AFTER, LOCK_SECONDS = 5, 60     # wrong PINs from one address, and how long that address then waits
+GUESSES = 20                         # wrong PINs at one PIN, from all addresses together, before a new one is drawn
 
 
 def _hash(token: str) -> str:
@@ -44,7 +47,8 @@ class Pairing:
         self.shown_at = 0.0     # when this showing began (it can be kept up, but only to shown_at + PIN_MOST)
         self.wasted = 0         # showings in a row that ended with nobody pairing
         self.rest_until = 0.0   # ...and so when a browser that isn't paired may next ask
-        self.failures, self.locked_until = 0, 0.0
+        self.wrong: dict[str, list] = {}   # address -> [wrong PINs in a row, when it may try again]
+        self.guessed = 0                    # wrong PINs at the one showing now, from anyone
 
     @staticmethod
     def _new_pin() -> str:
@@ -83,7 +87,7 @@ class Pairing:
                     return self.rest_until - now
                 if now - self.rest_until > FORGET_SECONDS:
                     self.wasted = 0
-                self.pin, self.shown_at = self._new_pin(), now
+                self.pin, self.shown_at, self.guessed = self._new_pin(), now, 0
             self.showing_until = max(self.showing_until, min(now + PIN_SECONDS, self.shown_at + PIN_MOST))
             return 0.0
 
@@ -91,21 +95,28 @@ class Pairing:
     def showing(self) -> bool:
         return self.clock() < self.showing_until
 
-    def pair(self, pin: str, name: str) -> str:
-        """Returns a new device token, or raises PermissionError with a readable reason."""
+    def pair(self, pin: str, name: str, who: str = "") -> str:
+        """Returns a new device token, or raises PermissionError with a readable reason. ``who``: the
+        address asking, so its wrong PINs count against it and nobody else."""
         with self._lock:
             now = self.clock()
-            if now < self.locked_until:
-                raise PermissionError(f"Too many wrong PINs. Try again in {int(self.locked_until - now) + 1} s.")
+            mine = self.wrong.get(who) or [0, 0.0]
+            if now < mine[1]:
+                raise PermissionError(f"Too many wrong PINs. Try again in {int(mine[1] - now) + 1} s.")
             if not self.showing:  # the PIN only works while it's on the panel
                 raise PermissionError("Show a PIN on the panel first, then type it here.")
             if not secrets.compare_digest(str(pin).replace(" ", "").encode(), self.pin.encode()):
-                self.failures += 1
-                if self.failures >= LOCK_AFTER:
-                    self.failures, self.locked_until = 0, now + LOCK_SECONDS
-                    self.pin = self._new_pin()   # five guesses at this one were enough: the panel shows the next
+                if len(self.wrong) > 200:    # (never grows without end: the ones no longer waiting are forgotten)
+                    self.wrong = {k: v for k, v in self.wrong.items() if v[1] > now}
+                mine[0] += 1
+                self.wrong[who] = mine
+                self.guessed += 1
+                if self.guessed >= GUESSES:   # enough guesses at this one, whoever made them: the panel shows the next
+                    self.pin, self.guessed = self._new_pin(), 0
+                if mine[0] >= LOCK_AFTER:
+                    mine[0], mine[1] = 0, now + LOCK_SECONDS
                     raise PermissionError(f"Too many wrong PINs. Pairing is paused for {LOCK_SECONDS} s.")
-                raise PermissionError(f"That PIN didn't match. {LOCK_AFTER - self.failures} tries left.")
+                raise PermissionError(f"That PIN didn't match. {LOCK_AFTER - mine[0]} tries left.")
             devices = self.devices()
             if len(devices) >= MAX_DEVICES:
                 raise PermissionError(f"This display already has {MAX_DEVICES} paired devices. Remove one first.")
@@ -114,7 +125,8 @@ class Pairing:
             devices.append({"id": secrets.token_hex(4), "name": (name or "Browser").strip()[:40],
                             "hash": _hash(token), "paired": stamp, "seen": stamp})
             self._save(devices)
-            self.failures, self.pin, self.showing_until = 0, self._new_pin(), 0.0
+            self.wrong.pop(who, None)
+            self.pin, self.showing_until, self.guessed = self._new_pin(), 0.0, 0
             self.wasted, self.rest_until = 0, 0.0
             return token
 

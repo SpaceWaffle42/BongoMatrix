@@ -110,6 +110,9 @@ def register(modules: dict) -> None:
     """Add every installed module to ``modules`` (from its description: nothing of it runs until it's played)."""
     from bongo.sandbox import remote
 
+    if not JOBS:   # the display has just started: an import left unfinished by the last run can't be finished now
+        shutil.rmtree(DATA / "module-staging", ignore_errors=True)
+
     for module_id, info in installed().items():
         if module_id in modules and not getattr(modules[module_id], "_imported", False):
             log.warning("imported module %s clashes with a built-in module: skipped", module_id)
@@ -325,6 +328,12 @@ def try_out(dest: Path, manifest: dict, uid: int) -> tuple[dict, str]:
             raise ImportProblem("its MODULE.id doesn't match its " + MANIFEST)
         if described.get("name") != manifest["name"]:
             raise ImportProblem(f"its MODULE.name ({described.get('name')!r}) doesn't match the name in its {MANIFEST}")
+        if described.get("help") is not None:   # its Help guide is shown in the dashboard: text, and https links only
+            from bongo.schema import help_problems
+            guide = described["help"]
+            wrong = help_problems(guide) if isinstance(guide, dict) else ["help: must be an object"]
+            if wrong:
+                raise ImportProblem(f"its Help guide isn't right ({wrong[0]})")
         module = remote.build(described, spec)
         remote.CHILDREN[spec["id"]] = child
         when = dt.datetime.now().astimezone()

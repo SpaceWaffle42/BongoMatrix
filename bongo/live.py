@@ -31,6 +31,7 @@ class Live:
         self._lock = threading.Lock()
         self.beat_at = time.monotonic()   # the player's last sign of life: every frame, and ``beat``
         self.shown = 0                    # frames the player has shown since the start (bongo/__main__.py: ``keep_playing``)
+        self.frame_at = None              # when the last of them was shown (``health``)
         self.boot = secrets.token_hex(4)  # this run of the display: a restart is a new one (see ``health``)
         self.panel_up = False             # the panel has started, so frames can be shown
         self._frame: Image.Image | None = None
@@ -64,7 +65,7 @@ class Live:
         with self._lock:
             self._frame = frame
             self._public = frame if public is None else public
-        self.beat_at = time.monotonic()
+        self.beat_at = self.frame_at = time.monotonic()
         self.shown += 1
 
     def beat(self) -> None:
@@ -75,7 +76,10 @@ class Live:
         """For the updater (bongo/update.py): which run this is, whether the panel started, and how
         long since the player last showed a frame. The dashboard answers before the panel starts, so
         an answer alone doesn't mean the display works."""
-        return {"boot": self.boot, "panel": self.panel_up, "quiet": round(time.monotonic() - self.beat_at, 1)}
+        return {"boot": self.boot, "panel": self.panel_up, "quiet": round(time.monotonic() - self.beat_at, 1),
+                # frames shown by this run, and how long since the last (None: never one). "quiet" also counts
+                # the player saying it's alive with nothing to show, so it can't tell a dark panel from a working one
+                "frames": self.shown, "frame_age": None if self.frame_at is None else round(time.monotonic() - self.frame_at, 1)}
 
     def watch(self, stop: threading.Event, limit: float = FROZEN_SECONDS, every: float = 5.0, frozen=None) -> None:
         """The watchdog, on its own thread. A style that never returns freezes the panel while the

@@ -123,6 +123,16 @@ textarea.input { resize: vertical; line-height: 1.45; font-size: 12.5px; }
 input[type="time"] { color-scheme: dark; }
 .range { width: 100%; min-height: 28px; accent-color: var(--amber); }
 .range.dim { opacity: .55; }
+/* a slider's named points (Module.marks), under it where the thumb sits at each (a 16 px thumb's centre) */
+.range-row { align-items: flex-start; }
+.range-with-marks { min-width: 0; }
+.range-marks { position: relative; height: 22px; margin-top: -2px; }
+.range-mark { position: absolute; left: calc(var(--at) * (100% - 16px) + 8px); transform: translateX(-50%);
+  background: none; border: 0; padding: 2px 4px; font: inherit; font-size: 12px; color: var(--muted); cursor: pointer; white-space: nowrap; }
+.range-mark.start { transform: translateX(-8px); }               /* (one at either end stays inside the row) */
+.range-mark.end { transform: translateX(calc(-100% + 8px)); }
+.range-mark:hover { color: var(--text); }
+@media (max-width: 520px) { .range-mark { padding: 2px 1px; font-size: 11px; } }   /* (a phone: Fast and Faster stay apart) */
 .check { width: 18px; height: 18px; accent-color: var(--amber); }
 .field-col { display: flex; flex-direction: column; gap: 6px; font-size: 13px; color: var(--soft); min-width: 0; }
 .swatch-input { width: 44px; height: 42px; padding: 3px; border-radius: 0; border: 1px solid var(--line-2); background: var(--page); flex: none; }

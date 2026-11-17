@@ -24,7 +24,7 @@ DEFAULTS = {
     # where the Matrix is: {"name", "latitude", "longitude"}; weather and sky screens use it unless given their own
     "location": None,
     "panel": {"rows": 32, "cols": 64, "hardware_mapping": "adafruit-hat-pwm",
-              "gpio_slowdown": 4, "brightness": 80},
+              "gpio_slowdown": 4, "brightness": 80, "limit_refresh": 0},
     "safe_area": {"top": 0, "right": 0, "bottom": 0, "left": 0},
     # port80: plain http://name.local; hub_picture: the hub (matrix.local) may show its live picture;
     # badge (optional): the colour of this Matrix's logo on the hub, one of bongo.logo.COLOURS (none: picked from its id)
@@ -153,7 +153,9 @@ def context_factory(config: dict):
 KEYS = {"name", "timezone", "location", "panel", "safe_area", "web", "playlist", "splash", "sleep", "overlays", "update", "pet",
         "wifi_country", "modules_off", "calendar_colours", "settings_layout"}
 OVERLAY_KEYS = {"module", "overlay", "every", "seconds", "offset", "settings", "enabled"}
-PANEL = {"rows": (8, 128), "cols": (8, 256), "gpio_slowdown": (0, 5), "brightness": (1, 100),
+# limit_refresh: Hz the panel's refresh is held to (0: as fast as it goes). A slower Pi under load refreshes
+# unevenly, which shows as flicker; a steady rate a little under its slowest is calmer (Settings > Device)
+PANEL = {"rows": (8, 128), "cols": (8, 256), "gpio_slowdown": (0, 5), "brightness": (1, 100), "limit_refresh": (0, 1000),
          "chain_length": (1, 8), "parallel": (1, 3)}
 ENTRY_KEYS = {"module", "style", "seconds", "settings", "enabled", "times"}
 MOST_TIMES = 4   # times of day one playlist entry may have (Timing > When it plays)

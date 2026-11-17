@@ -80,7 +80,9 @@ def check(name: str, default, value, choices=None, limits=None) -> None:
         return
     k = kind(default)
     ok = {
-        "auto": value is None or number(value),   # worked out for you, or a number of your own
+        # worked out for you, or a row of your own: a whole number (they are all pixel positions; 0.5 passed
+        # here and then failed every frame)
+        "auto": value is None or (isinstance(value, int) and not isinstance(value, bool)),
         "bool": isinstance(value, bool),
         "int": isinstance(value, int) and not isinstance(value, bool),
         "number": number(value),
@@ -92,7 +94,7 @@ def check(name: str, default, value, choices=None, limits=None) -> None:
     if not ok:
         if k == "text" and isinstance(value, str):
             raise ValueError(f"{name}: keep it under {MAX_TEXT} characters (it has {len(value)})")
-        expected = {"colour": "a colour like #FFB547", "auto": "a number, or nothing for automatic"}.get(k, f"a {k}")
+        expected = {"colour": "a colour like #FFB547", "auto": "a whole number, or nothing for automatic"}.get(k, f"a {k}")
         raise ValueError(f"{name}: expected {expected}, got {str(value)[:60]!r}")
     if limits and number(value) and not limits[0] <= value <= limits[1]:
         raise ValueError(f"{name}: {value} is outside {limits[0]} to {limits[1]}")
@@ -113,8 +115,9 @@ def help_problems(help: dict) -> list[str]:
             if not isinstance(line, str) or not line.strip() or line.count("`") % 2:
                 problems.append(f"help.{k}: {line!r} must be text with `backticks` in pairs")
     for link in help.get("links") or []:
-        ok = isinstance(link, dict) and isinstance(link.get("label"), str) and (
-            str(link.get("url", "")).startswith("https://") or str(link.get("route", "")).startswith("/"))
+        ok = isinstance(link, dict) and isinstance(link.get("label"), str) and ("url" in link or "route" in link) and all(
+            isinstance(link[k], str) and link[k].startswith(start)   # each one given must be right: a link with a
+            for k, start in (("url", "https://"), ("route", "/")) if k in link)   # good route and a bad url is a bad link
         if not ok:
             problems.append(f"help.links: {link!r} needs a label and an https url or a /route")
     return problems
@@ -141,7 +144,8 @@ def describe(module) -> dict:
                 extra = {"swatches": swatches[n]} if n in swatches else {}
                 return {"type": "choice", "choices": list(choices[n]), **extra, **module.choice_names.get(n, {})}
             return {"type": kind(d)}
-        return [{"name": n, "default": d, **typed(n, d), "advanced": tiered and n not in basic}
+        return [{"name": n, "default": d, **typed(n, d), "advanced": tiered and n not in basic,
+                 **({"marks": [list(m) for m in module.marks[n]]} if n in module.marks else {})}
                 for n, d in defaults.items()]
     shared_choices = module.choices
     return {

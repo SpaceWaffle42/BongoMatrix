@@ -41,8 +41,10 @@ class Busy(ChildError):
 
 FRAME_LOCK_WAIT = 0.25  # s a frame waits for its child; busy longer, the screen keeps its last frame
 IDLE = 10 * 60          # s with only previews asking and none for this long: the child is stopped (started again
-                        # when next needed). One that has had a screen on the panel is kept: a cold start would hold
-                        # up the panel each time round the playlist
+                        # when next needed)
+PANEL_IDLE = 30 * 60    # ...and one that has had a screen on the panel, this long after its last frame: round a
+                        # playlist it's asked again long before (a cold start each time would hold the panel up),
+                        # but taken out of the playlist it doesn't go on running, and using the network, for ever
 WATCH_EVERY = 5         # s between looks at each child's memory and when it was last asked for anything
 
 
@@ -83,6 +85,8 @@ class _Writer:
 
 MOST_LINES = 20       # lines of a module's output logged per 10 s (the rest is skipped)
 MOST_MEMORY = 300 << 20
+MOST_DISK = 100 << 20   # bytes a module may keep in its data folder: over that it's stopped and the folder emptied
+                        # (each file has its own limit, jail.LIMITS, but nothing else stopped it filling the SD card)
 
 
 class Child:
@@ -254,13 +258,23 @@ def _watch(c: Child):
                         return
                 continue
             for w in now:
-                if not w.on_panel and time.monotonic() - w.used > IDLE and w.lock.acquire(blocking=False):
+                idle = PANEL_IDLE if w.on_panel else IDLE
+                if time.monotonic() - w.used > idle and w.lock.acquire(blocking=False):
                     try:                             # (never while a screen is asking it something)
-                        if time.monotonic() - w.used > IDLE:
+                        if time.monotonic() - w.used > idle:
                             log.info("module %s: not used for a while, stopped until it's next needed", w.spec["id"])
                             w.stop()
                     finally:
                         w.lock.release()
+                    continue
+                kept = jail.disk_of(w.spec["data"], MOST_DISK)
+                if kept > MOST_DISK:
+                    w.error = f"kept too much on the SD card (over {MOST_DISK >> 20} MB): its data folder was emptied"
+                    log.warning("module %s stopped: %s", w.spec["id"], w.error)
+                    w.crashes.append(time.monotonic())
+                    with w.lock:
+                        w.stop()
+                    jail.empty(w.spec["data"])
                     continue
                 used = jail.memory_of(w.spec["uid"])
                 if used > MOST_MEMORY:
@@ -316,7 +330,9 @@ class RemoteStyle(Style):
         self.child = child(self.spec)
         self.blank = self.ctx.canvas()
         self.info = {"width": self.ctx.width, "height": self.ctx.height, "tz": getattr(self.ctx.tz, "key", None),
-                     "seed": self.ctx.rng.getrandbits(32), "home": self.ctx.home, "calendar": self.ctx.calendar,
+                     # not the Matrix's location (Settings): the import screen says a module can't see your settings,
+                     # and where you live is one of them. A module that needs a place asks for it in its own settings
+                     "seed": self.ctx.rng.getrandbits(32), "home": None, "calendar": self.ctx.calendar,
                      "preview": self.ctx.preview}
         self._create()
 

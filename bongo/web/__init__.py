@@ -35,7 +35,7 @@ from bongo.player import Entry
 from bongo.schema import describe
 
 STATIC = Path(__file__).with_name("static")
-HARDWARE = ("rows", "cols", "hardware_mapping", "gpio_slowdown", "chain_length", "parallel")  # panel keys fixed until a restart
+HARDWARE = ("rows", "cols", "hardware_mapping", "gpio_slowdown", "chain_length", "parallel", "limit_refresh")  # panel keys fixed until a restart
 COOKIE = "bongo_device"
 YEAR = 365 * 86400
 
@@ -68,6 +68,15 @@ def media_uses(config: dict):
         yield "the boot screen", boot
 
 
+def static_build() -> str:
+    """A short mark for the dashboard's own files (names, sizes, when they changed): different after an update."""
+    mark = hashlib.sha1()
+    for path in sorted(p for p in STATIC.rglob("*") if p.is_file()):
+        stat = path.stat()
+        mark.update(f"{path.relative_to(STATIC)}:{stat.st_size}:{stat.st_mtime_ns};".encode())
+    return mark.hexdigest()[:12]
+
+
 def _entries(config: dict):
     for i, e in enumerate(config.get("playlist") or []):
         if isinstance(e, dict):
@@ -95,6 +104,7 @@ def verify_new(current: dict, merged: dict, modules: dict) -> list[str]:
 
 
 PACK_UPLOAD = 300 * 1024 * 1024  # a pet pack zip from itch.io
+FONT_FILE = re.compile(r"fonts/[A-Za-z0-9_-]+\.woff2")   # the dashboard's own fonts, by plain file name only
 
 
 def create_app(*, modules, live, pairing, config_path, logs: LogBuffer | None = None,
@@ -103,6 +113,7 @@ def create_app(*, modules, live, pairing, config_path, logs: LogBuffer | None = 
     app.config["MAX_CONTENT_LENGTH"] = 64 * 1024  # a whole config is a few KB
     logs = logs or LogBuffer()
     started = started or time.time()
+    build = static_build()
     render_lock = threading.Lock()  # preview styles are cached and keep state between frames
     save_lock = threading.Lock()    # read, change and write the config one save at a time, so none is lost
     # the panel driver reads these once when it starts; a saved change waits for a restart
@@ -110,7 +121,7 @@ def create_app(*, modules, live, pairing, config_path, logs: LogBuffer | None = 
 
     def restart_needed(config) -> bool:
         return any(config["panel"].get(k) != running_panel.get(k) for k in HARDWARE)
-    last_show = [0.0]
+    last_show: dict[str, float] = {}   # address -> when it last asked for the PIN (browsers that aren't paired)
 
     def body() -> dict:
         data = request.get_json(silent=True)
@@ -164,10 +175,15 @@ def create_app(*, modules, live, pairing, config_path, logs: LogBuffer | None = 
 
     @app.post("/api/pair/show")
     def pair_show():
-        if time.time() - last_show[0] < 5:
-            abort(429, "Wait a moment before asking again.")
-        last_show[0] = time.time()
-        wait = pairing.show_pin(paired=pairing.check(request.cookies.get(COOKIE)) is not None)
+        paired = pairing.check(request.cookies.get(COOKIE)) is not None
+        if not paired:   # each address has its own 5 s between asks, and a paired browser none: a stranger asking
+            who, now = request.remote_addr or "", time.time()   # over and over can't make the owner wait
+            if now - last_show.get(who, 0.0) < 5:
+                abort(429, "Wait a moment before asking again.")
+            if len(last_show) > 200:
+                last_show.clear()
+            last_show[who] = now
+        wait = pairing.show_pin(paired=paired)
         if wait:   # shown again and again with nobody pairing: the panel gets a rest (bongo/pairing.py)
             minutes = math.ceil(wait / 60)
             abort(429, f"The PIN has been shown several times and nobody paired. Try again in {minutes} minute{'s' if minutes > 1 else ''}.")
@@ -177,7 +193,7 @@ def create_app(*, modules, live, pairing, config_path, logs: LogBuffer | None = 
     def pair():
         data = body()
         try:
-            token = pairing.pair(str(data.get("pin", ""))[:12], str(data.get("name", "")))
+            token = pairing.pair(str(data.get("pin", ""))[:12], str(data.get("name", "")), request.remote_addr or "")
         except PermissionError as error:
             return jsonify(error=str(error)), 403
         response = jsonify(ok=True)
@@ -205,6 +221,7 @@ def create_app(*, modules, live, pairing, config_path, logs: LogBuffer | None = 
                            cfg.context_factory(config)().now()),                    # with its offset, for Sleep now
                        safe_area=dict(zip(("top", "right", "bottom", "left"), area.margins)),
                        uptime=round(time.time() - started), name=config.get("name", "Bongo Matrix"),
+                       build=build,   # the pages as they are now: a tab left open across an update sees it change
                        pet_kinds=pets.kinds(), network=network_info(config))
 
     # -- the public card and the hub (bongo/hub.py): read-only, open to the local network ------------
@@ -910,6 +927,8 @@ def create_app(*, modules, live, pairing, config_path, logs: LogBuffer | None = 
         name = request.args.get("module", "")
         if name not in modules:
             return jsonify(error="unknown module"), 404
+        if addons.is_imported(modules[name]) and name in cfg.modules_off(load()):
+            return jsonify(error="that module is switched off"), 409   # off means its code doesn't run at all
         try:
             settings = json.loads(request.args.get("settings", "{}"))
             settings_json = json.dumps(settings, sort_keys=True)
@@ -1061,7 +1080,7 @@ def create_app(*, modules, live, pairing, config_path, logs: LogBuffer | None = 
             return send_from_directory(STATIC, "setup.html")   # a phone on the setup hotspot gets the setup page
         if path == "hub" or (path == "index.html" and request.host.split(":")[0].lower() == "matrix.local"):
             return send_from_directory(STATIC, "hub.html")     # http://matrix.local: every Matrix on the network
-        if path.startswith("fonts/") and path.endswith(".woff2") and (STATIC / f"{path}.b64").is_file():
+        if FONT_FILE.fullmatch(path) and (STATIC / f"{path}.b64").is_file():   # (never a path out of fonts/)
             # the dashboard's fonts are kept as base64 text, like the pet art (the repo holds no binary files)
             answer = Response(font_bytes(path), mimetype="font/woff2")
             answer.headers["Cache-Control"] = "public, max-age=604800"

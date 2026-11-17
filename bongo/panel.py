@@ -41,7 +41,7 @@ class HardwarePanel:
     """64x32 HUB75 panel through hzeller/rpi-rgb-led-matrix."""
 
     def __init__(self, rows=32, cols=64, hardware_mapping="adafruit-hat-pwm",
-                 gpio_slowdown=4, brightness=100, chain_length=1, parallel=1):
+                 gpio_slowdown=4, brightness=100, chain_length=1, parallel=1, limit_refresh=0):
         self._lock = claim_panel()
         from rgbmatrix import RGBMatrix, RGBMatrixOptions  # only exists on the Pi
 
@@ -50,6 +50,8 @@ class HardwarePanel:
         opts.chain_length, opts.parallel = chain_length, parallel
         opts.hardware_mapping = hardware_mapping
         opts.gpio_slowdown = gpio_slowdown
+        if limit_refresh:   # hold the refresh to a steady rate (0: no limit, the library's own default)
+            opts.limit_refresh_rate_hz = int(limit_refresh)
         opts.brightness = brightness
         opts.drop_privileges = False
         self.matrix = RGBMatrix(options=opts)

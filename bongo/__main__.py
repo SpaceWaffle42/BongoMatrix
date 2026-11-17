@@ -14,13 +14,49 @@ import logging
 import sys
 import time
 
-from bongo import config as cfg
-from bongo.fade import Fader
-from bongo.module import Context
-from bongo.panel import RecordingPanel
-from bongo.registry import discover
-from bongo.safe_area import SafeArea
-from bongo.schedule import Schedule
+
+def rescue(error: Exception, argv: list[str] | None = None) -> int:
+    """This version can't even be loaded: the power went while an update was going in (new code, and a library
+    it needs not yet installed). Nothing here uses anything but Python's own library and bongo/update.py, which
+    does the same, so it still runs: the display asks the updater to finish the job or put the old version
+    back, and the updater does it. Without this the display restarted for ever with a dark panel."""
+    from pathlib import Path
+
+    from bongo import update
+
+    argv = sys.argv[1:] if argv is None else argv
+    logging.basicConfig(level=logging.INFO, format="%(levelname)s %(name)s: %(message)s")
+    logging.error("this version can't start: %s: %s", type(error).__name__, error)
+    if argv[:1] == ["update"] and "--apply" in argv:
+        path = Path(argv[argv.index("--config") + 1]) if "--config" in argv[:-1] else update.DATA / "config.json"
+        try:
+            config = json.loads(path.read_text())
+        except (OSError, ValueError):
+            config = {}
+        result = update.apply(config if isinstance(config, dict) else {})
+        print(result["message"])
+        return 0 if result["state"] in ("updated", "up_to_date") else 1
+    if argv[:1] == ["run"]:
+        try:
+            if update.resume():
+                logging.warning("an update was cut short (a power cut?): asked the updater to finish it, or put the old version back")
+        except Exception as problem:  # noqa: BLE001
+            logging.warning("couldn't check for an unfinished update: %s", problem)
+    return 1
+
+
+try:
+    from bongo import config as cfg
+    from bongo.fade import Fader
+    from bongo.module import Context
+    from bongo.panel import RecordingPanel
+    from bongo.registry import discover
+    from bongo.safe_area import SafeArea
+    from bongo.schedule import Schedule
+except Exception as error:  # noqa: BLE001 - whatever stops it loading
+    if __name__ != "__main__":
+        raise
+    sys.exit(rescue(error))
 
 
 def _setting(text: str):
@@ -92,7 +128,8 @@ def _start_dashboard(config, modules, live, config_path) -> None:
              and netname.redirect_server(80, port, config["web"]["host"], override=lambda: (
                  f"http://{net.SETUP_ADDRESS}:{port}/setup"
                  if network and network.status.state in ("setup", "joining") else None)) is not None)
-    watch = netname.Watch(address, lambda: cfg.load(config_path), port, plain, __version__, started=started)
+    watch = netname.Watch(address, lambda: cfg.load(config_path), port, plain, __version__, started=started,
+                          paired=lambda: bool(pairing.devices()))
     threading.Thread(target=watch.run, args=(threading.Event(),), daemon=True, name="network").start()
 
 

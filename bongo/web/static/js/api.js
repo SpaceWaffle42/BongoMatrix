@@ -12,23 +12,37 @@ export class ApiError extends Error {
 /** Set by app.js: called whenever any request comes back 401. */
 export const hooks = { unauthorized() {} };
 
+/** ms a request may take before it's given up. One that never answered (a half-open Wi-Fi connection, a stalled
+ *  Pi) used to wait for ever: the status poll stopped for good with the dot still green, and Apply said nothing. */
+export const limits = { read: 15000, change: 45000, upload: 15 * 60000 };
+
+function timed(path, init, ms) {
+  const stop = new AbortController();
+  const timer = setTimeout(() => stop.abort(), ms);
+  return fetch(path, { ...init, signal: stop.signal }).finally(() => clearTimeout(timer));
+}
+const SLOW = "The Matrix didn't answer in time. Check it's on and on this network, then try again.";
+
 function send(method, path, body) {
   if (DEMO) return demo().then((d) => d.fetch(method, path, body));
   const init = { method, credentials: 'same-origin', cache: 'no-store', headers: { Accept: 'application/json' } };
+  let ms = limits.read;
   if (body instanceof FormData) {  // file upload: multipart, marked with the header the server checks
     init.headers['X-Bongo-Upload'] = '1';
     init.body = body;
+    ms = limits.upload;
   } else if (method !== 'GET') {
     init.headers['Content-Type'] = 'application/json';
     init.body = JSON.stringify(body ?? {});
+    ms = limits.change;            // (a save may check a new feed, which takes seconds)
   }
-  return fetch(path, init);
+  return timed(path, init, ms);
 }
 
 export async function api(method, path, body) {
   let res;
   try { res = await send(method, path, body); }
-  catch { throw new ApiError(0, "Can't reach the Matrix. Is it switched on and on this network?"); }
+  catch (err) { throw new ApiError(0, err?.name === 'AbortError' ? SLOW : "Can't reach the Matrix. Is it switched on and on this network?"); }
   let data = null;
   try { data = await res.json(); } catch { /* empty or non-JSON body */ }
   if (res.status === 401 && !path.startsWith('/api/pair')) {
@@ -52,7 +66,7 @@ export const uploadMedia = (file) => { const f = new FormData(); f.append('file'
 export async function image(path) {
   if (DEMO) return (await demo()).image(path);
   let res;
-  try { res = await fetch(path, { credentials: 'same-origin', cache: 'no-store' }); }
+  try { res = await timed(path, { credentials: 'same-origin', cache: 'no-store' }, limits.read); }
   catch { throw new ApiError(0, 'Offline'); }
   if (res.status === 401) { hooks.unauthorized(); throw new ApiError(401, 'This browser is not paired'); }
   if (res.status === 404) return null;

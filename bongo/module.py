@@ -110,6 +110,9 @@ class Module:
     # ``choice_names={"holidays": {"labels": {"eid_al_fitr": "Eid al-Fitr"}, "groups": {"eid_al_fitr": "Islamic"}}}``:
     # how the dashboard words a choice setting's values, and the headings it groups them under.
     choice_names: dict = field(default_factory=dict)
+    # ``marks={"text_speed": [[25, "Slow"], [50, "Normal"]]}``: named points along a number setting's slider in
+    # the dashboard (it can still be set anywhere between its limits; the slider snaps to a mark it's dragged near).
+    marks: dict = field(default_factory=dict)
     # ``renames={"old_module": {"old_style": "new_style", None: "style for entries without one"}}``:
     # entries saved for a module that has since moved into this one (config.tidy rewrites them).
     renames: dict = field(default_factory=dict)

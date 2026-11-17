@@ -127,10 +127,26 @@ def status(data: Path = None) -> dict | None:
 STALE_SECONDS = 600  # a request or step older than this was never picked up (no updater installed?)
 
 
+def running(data: Path = None) -> bool:
+    """Whether the updater is at work right now (it holds data/update.lock from start to finish)."""
+    try:
+        with open((data or DATA) / "update.lock", "a") as lock:
+            try:
+                fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            except OSError:
+                return True
+            fcntl.flock(lock, fcntl.LOCK_UN)
+    except OSError:
+        pass
+    return False
+
+
 def busy(data: Path = None, now: dt.datetime | None = None) -> bool:
     s = status(data) or {}
     if s.get("state") not in ("requested", "fetching", "installing", "restarting"):
         return False
+    if running(data):   # however long it has been: pip on a Pi Zero can take more than ten minutes, and a second
+        return True     # request then would wipe the note a power cut needs to pick the update up again
     try:
         age = ((now or dt.datetime.now(dt.timezone.utc)) - dt.datetime.fromisoformat(s["at"])).total_seconds()
     except (KeyError, TypeError, ValueError):
@@ -159,7 +175,7 @@ def dashboard_answers(port: int):
 
 
 def healthy(port: int, seconds: float = HEALTH_SECONDS, check=dashboard_answers, sleep=time.sleep,
-            hold: float = HEALTH_HOLD) -> bool:
+            hold: float = HEALTH_HOLD, need_frames: bool = True) -> bool:
     """True once the restarted display has run for ``hold`` seconds on end: the same run of it (not
     one that crashes and is started again), its panel started, its player showing frames. The
     dashboard alone answering isn't enough: it starts before the panel does."""
@@ -169,6 +185,11 @@ def healthy(port: int, seconds: float = HEALTH_SECONDS, check=dashboard_answers,
         if isinstance(answer, dict):
             fine = answer.get("panel") is True and isinstance(answer.get("quiet"), (int, float)) \
                 and answer["quiet"] < HEALTH_QUIET
+            if fine and need_frames and "frames" in answer:
+                # frames really shown, and lately: "quiet" alone stays low for 45 s after start-up with no frame
+                # at all, and for ever while the player waits, alive, with nothing it can play
+                age = answer.get("frame_age")
+                fine = bool(answer["frames"]) and isinstance(age, (int, float)) and age < HEALTH_QUIET
             if not fine:
                 good = None
             elif good is None or answer.get("boot") != run:
@@ -231,7 +252,10 @@ def apply(config: dict, repo: Path = REPO, data: Path = None, restart=restart_se
     data = data or repo / "data"
     url, branch = source(config)
     port = (config.get("web") or {}).get("port", 5000)
-    health = health or (lambda: healthy(port))
+    if health is None:
+        before = dashboard_answers(port)   # was the version being replaced showing frames? If it wasn't (a config
+        dark = isinstance(before, dict) and before.get("frames") == 0   # that can't play), the new one needn't either
+        health = lambda: healthy(port, need_frames=not dark)   # noqa: E731
     data.mkdir(parents=True, exist_ok=True)
     with open(data / "update.lock", "w") as lock:
         try:

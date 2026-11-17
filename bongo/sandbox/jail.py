@@ -116,6 +116,44 @@ def memory_of(uid: int) -> int:
     return sum(rss for _, rss in _processes_of(uid)) if can_shut_in() and uid >= 61000 else 0
 
 
+def disk_of(folder: str, enough: int | None = None) -> int:
+    """Bytes of files under a module's data folder (it stops counting once past ``enough``)."""
+    total, todo = 0, [folder]
+    while todo:
+        try:
+            with os.scandir(todo.pop()) as entries:
+                for entry in entries:
+                    try:
+                        if entry.is_dir(follow_symlinks=False):
+                            todo.append(entry.path)
+                        else:
+                            total += entry.stat(follow_symlinks=False).st_size
+                    except OSError:
+                        continue
+        except OSError:
+            continue
+        if enough is not None and total > enough:
+            break
+    return total
+
+
+def empty(folder: str) -> None:
+    """Delete everything in a module's data folder (the folder itself stays, with its owner)."""
+    import shutil
+    try:
+        with os.scandir(folder) as entries:
+            for entry in entries:
+                if entry.is_dir(follow_symlinks=False):
+                    shutil.rmtree(entry.path, ignore_errors=True)
+                else:
+                    try:
+                        os.unlink(entry.path)
+                    except OSError:
+                        pass
+    except OSError:
+        pass
+
+
 # -- in the child ----------------------------------------------------------------------------------------
 _libc = None
 

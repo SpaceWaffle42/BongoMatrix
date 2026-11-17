@@ -434,7 +434,8 @@ const isDefault = (f, v) => same(v, f.default) || (f.type === 'colour' && String
 /** A setting counts as changed only when its value differs from the default (an explicit default is not a change). */
 const differsFrom = (f, settings) => f.name in settings && !isDefault(f, settings[f.name]);
 const showDefault = (f) => (f.default == null ? 'Auto' : typeof f.default === 'object' ? (Array.isArray(f.default) ? `${f.default.length} item${f.default.length === 1 ? '' : 's'}` : 'object')
-  : typeof f.default === 'boolean' ? (f.default ? 'On' : 'Off') : f.labels?.[f.default] ?? (String(f.default) || '(empty)'));
+  : typeof f.default === 'boolean' ? (f.default ? 'On' : 'Off') : f.labels?.[f.default] ?? (String(f.default) || '(empty)'))
+  + (f.marks?.find(([x]) => x === f.default) ? ` (${f.marks.find(([x]) => x === f.default)[1]})` : '');   // Default: 50 (Normal)
 
 function rangeFor(f) {
   const d = Number(f.default), n = f.name;
@@ -738,8 +739,36 @@ function numberInput(f, id, v, set, label) {
     const x = int ? Math.round(Number(num.value)) : Number(num.value);
     if (Number.isFinite(x)) { set(x); if (rng) rng.value = x; }
   });
-  rng?.addEventListener('input', () => { num.value = rng.value; set(int ? Math.round(Number(rng.value)) : Number(rng.value)); });
-  return rng ? h('div', { class: 'row gap-s' }, rng, num) : num;
+  // Named points along the slider (Module.marks: Text speed's Slow, Normal...): ticks and words under it to tap,
+  // and dragging near one snaps to it. Anywhere in between can still be set (the arrow keys, or the number).
+  const marks = rng && Array.isArray(f.marks) ? f.marks.filter(([x]) => x >= r.min && x <= r.max) : [];
+  let dragging = false;
+  rng?.addEventListener('pointerdown', () => { dragging = true; });
+  for (const done of ['pointerup', 'pointercancel', 'change', 'keydown']) rng?.addEventListener(done, () => { dragging = false; });
+  rng?.addEventListener('input', () => {
+    let x = int ? Math.round(Number(rng.value)) : Number(rng.value);
+    const near = dragging && marks.find(([m]) => Math.abs(m - x) <= (r.max - r.min) * 0.025);
+    if (near) { x = near[0]; rng.value = x; }
+    num.value = x;
+    set(x);
+  });
+  if (!rng) return num;
+  if (!marks.length) return h('div', { class: 'row gap-s' }, rng, num);
+  const list = h('datalist', { id: `${id}-marks` }, marks.map(([x, label]) => h('option', { value: x, label })));
+  rng.setAttribute('list', list.id);
+  const at = (x) => (x - r.min) / (r.max - r.min);
+  const words = h('div', { class: 'range-marks', 'aria-hidden': 'true' }, marks.map(([x, label]) => h('button', {
+    type: 'button', class: `range-mark${at(x) < 0.06 ? ' start' : at(x) > 0.94 ? ' end' : ''}`, tabindex: -1, style: `--at:${at(x)}`,
+    onclick: () => { rng.value = x; num.value = x; set(x); said(); } }, label)));
+  rng.setAttribute('aria-valuetext', '');
+  const said = () => {   // what a screen reader hears: the number, and the mark's name when it's on one
+    const on = marks.find(([m]) => m === Number(rng.value));
+    rng.setAttribute('aria-valuetext', on ? `${rng.value}, ${on[1]}` : String(rng.value));
+  };
+  said();
+  rng.addEventListener('input', said);
+  num.addEventListener('input', said);
+  return h('div', { class: 'row gap-s range-row' }, h('div', { class: 'grow range-with-marks' }, rng, list, words), num);
 }
 
 function chips(f, id, v, set) {

@@ -5,7 +5,16 @@ from bongo.module import Module
 from . import data
 from .help import HELP
 from .presets import FEEDS
-from .styles import Headline, Picture, Story, Ticker
+from .styles import TEXT_SPEEDS, Headline, Picture, Story, Ticker
+
+
+def migrate(settings: dict) -> list[str]:
+    """Text speed was briefly slow / normal / fast / faster: now the number each of those is on its slider."""
+    named = settings.get("text_speed")
+    if isinstance(named, str):
+        settings["text_speed"] = TEXT_SPEEDS.get(named, TEXT_SPEEDS["normal"])
+        return [f"rss: text_speed {named!r} is now {settings['text_speed']}"]
+    return []
 
 MODULE = Module(
     id="rss",
@@ -23,7 +32,10 @@ MODULE = Module(
     check=data.check_urls,   # every feed is an http(s) address
     verify=data.verify,      # and, when saved from the dashboard, really is RSS or Atom
     basic=("feeds", "show_summary", "headline_colour", "summary_colour"),
-    limits={"max_items": (1, 100), "refresh_minutes": (5, 1440), "rotate_seconds": (1, 3600), "scroll_speed": (1, 200)},
+    limits={"max_items": (1, 100), "refresh_minutes": (5, 1440), "rotate_seconds": (1, 3600), "scroll_speed": (1, 200),
+            "text_speed": (1, 100)},
+    marks={"text_speed": [[v, name.capitalize()] for name, v in TEXT_SPEEDS.items()]},   # Story and Picture
+    migrate=migrate,
     suggestions={"feeds": FEEDS},  # one-tap feeds in the dashboard (v2's presets and more)
     help=HELP,
 )

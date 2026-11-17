@@ -30,6 +30,8 @@ from PIL import Image
 log = logging.getLogger("bongo.net")
 
 SHOW_SECONDS = 10
+FIRST_SECONDS = 60   # ...the first time, on a Matrix no browser has paired with yet (someone is setting it up)
+REMIND = 60          # ...and it comes back this long after it last went, until one has
 CHECK_SECONDS = 10
 DEFAULT_NAME = "Bongo Matrix"   # the name a Matrix has before you give it one
 AVAHI = Path("/etc/avahi/services")
@@ -237,8 +239,10 @@ class AddressScreen:
 
     def __init__(self, fonts, clock=time.monotonic):
         self.fonts, self.clock = fonts, clock
-        # (name, ip, url, code, shown, until) in one tuple: show() swaps it whole, overlay() reads it once
-        self._state: tuple = ("", None, "", None, 0.0, 0.0)
+        # (name, ip, url, code, shown, until, seconds) in one tuple: show() swaps it whole, overlay() reads it once.
+        # shown is None until the panel first draws it: its time counts from then, not from when the address was
+        # noticed (the dashboard starts before the panel, and a slow start used up the whole showing unseen)
+        self._state: tuple = ("", None, "", None, 0.0, 0.0, SHOW_SECONDS)
 
     @property
     def name(self) -> str:
@@ -248,17 +252,22 @@ class AddressScreen:
     def showing(self) -> bool:
         return self._showing(self._state)
 
-    def _showing(self, state) -> bool:
-        return self.clock() < state[5] and bool(state[1])
+    @property
+    def ended(self) -> float:
+        """When the last showing went (never, while one is up or waiting for the panel)."""
+        state = self._state
+        return float("inf") if self._showing(state) else state[5]
 
-    def show(self, name: str, ip: str | None, url: str, host: str = "") -> None:
+    def _showing(self, state) -> bool:
+        return bool(state[1]) and (state[4] is None or self.clock() < state[5])
+
+    def show(self, name: str, ip: str | None, url: str, host: str = "", seconds: float = SHOW_SECONDS) -> None:
         tiny = self.fonts("tom-thumb")
         label = readable(tiny, name)
         if label.count("?") * 2 > len(label) and host:
             label = host.upper()      # a name the panel can't write (emoji, CJK): its network name instead
         codes = (qr_image(url), qr_image(compact_url(url))) if ip else (None, None)
-        now = self.clock()
-        self._state = (label, ip, url, codes, now, now + SHOW_SECONDS)   # one assignment: never half new
+        self._state = (label, ip, url, codes, None, 0.0, seconds)   # one assignment: never half new
 
     def _code(self, codes, w: int, h: int) -> tuple[Image.Image | None, bool]:
         """(the code, scaled as large as fits; whether text fits beside it)."""
@@ -289,7 +298,13 @@ class AddressScreen:
         state = self._state
         if not self._showing(state):
             return frame
-        name, ip, _url, codes, shown, _until = state
+        if state[4] is None:                # the panel's first frame of it: its time starts now
+            now = self.clock()
+            if self._state is state:        # (unless show() swapped in a newer one this instant)
+                self._state = state = (*state[:4], now, now + state[6], state[6])
+            else:
+                state = (*state[:4], now, now + state[6], state[6])
+        name, ip, _url, codes, shown, _until, _seconds = state
         w, h = frame.size
         img = Image.new("RGB", (w, h), BG)
         tiny = self.fonts("tom-thumb")
@@ -380,12 +395,13 @@ class Watch:
 
     def __init__(self, screen: AddressScreen, read_config, port: int, plain_http: bool, version: str,
                  suffix: str | None = None, get_address=address, set_host=apply_host_name, publish=announce,
-                 started: float | None = None):
+                 started: float | None = None, paired=lambda: True):
         self.screen, self.read_config, self.port, self.plain_http, self.version = screen, read_config, port, plain_http, version
         self.suffix = suffix or mac_suffix()
         self.get_address, self.set_host, self.publish = get_address, set_host, publish
         self.seen: tuple | None = None
         self.started = time.time() if started is None else started
+        self.paired = paired   # whether any browser has paired: until one has, the address keeps coming back
 
     def url(self, ip: str) -> str:
         return f"http://{ip}/" if self.plain_http else f"http://{ip}:{self.port}/"
@@ -396,6 +412,9 @@ class Watch:
         name = (config.get("name") or DEFAULT_NAME).strip() or DEFAULT_NAME
         host, ip = host_name(name, self.suffix), self.get_address()
         if (host, name, ip) == self.seen:
+            if ip and not self.paired() and self.screen.clock() - self.screen.ended >= REMIND:
+                self.screen.show(name, ip, self.url(ip), host)   # nobody has paired yet: here it is again
+                return True
             return False
         if self.seen is None or self.seen[0] != host:
             self.set_host(host)
@@ -403,7 +422,7 @@ class Watch:
             self.publish(name, self.port, self.version, self.suffix, started=self.started)
         self.seen = (host, name, ip)
         if ip:
-            self.screen.show(name, ip, self.url(ip), host)
+            self.screen.show(name, ip, self.url(ip), host, FIRST_SECONDS if not self.paired() else SHOW_SECONDS)
             log.info("on the network as %s.local, %s", host, ip)
         return bool(ip)
 
