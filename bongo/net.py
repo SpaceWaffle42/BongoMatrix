@@ -43,6 +43,7 @@ HOTSPOT = "bongo-setup"  # NetworkManager's name for the setup hotspot connectio
 SETUP_ADDRESS = "10.42.0.1"   # NetworkManager's address for itself on a shared (hotspot) connection
 SETUP_SUBNET = "10.42.0.0/24"
 CAPTIVE = "/etc/NetworkManager/dnsmasq-shared.d/bongo-setup.conf"
+AWAKE = "/etc/NetworkManager/conf.d/bongo-wifi-awake.conf"   # Wi-Fi power saving off (``wifi_awake``)
 JOIN_WAIT = 50          # s NetworkManager may take to join a network from the setup page
 JOIN_LIMIT = 3 * 60     # a join still going after this long is given up (setup reopens)
 SEEN_WAIT = 15          # s to wait for a network to show in the list once the hotspot has gone (the radio turns round)
@@ -209,6 +210,30 @@ def captive_rule(path: str = CAPTIVE) -> bool:
         return False
 
 
+def wifi_awake(path: str = AWAKE, run=subprocess.run, device: str = "wlan0") -> bool:
+    """Turn the Wi-Fi chip's power saving off, now and for every network joined later. With it on (the Pi's
+    default), the chip dozes between beacons and misses broadcasts: a phone can't find or reach the Matrix
+    (its name, and often its address) while a PC that already knew it still can. A Matrix is always plugged
+    in, so it has nothing to save. Root only."""
+    rule = "# Bongo Matrix: keep the Wi-Fi awake (power saving drops broadcasts: phones lose the Matrix)\n" \
+           "[connection]\nwifi.powersave = 2\n"
+    try:
+        from pathlib import Path
+        target = Path(path)
+        if not target.parent.is_dir():
+            return False
+        if not target.exists() or target.read_text() != rule:
+            target.write_text(rule)    # (NetworkManager reads it when it next joins a network)
+    except OSError:
+        return False
+    if shutil.which("iw"):             # the network it's on now, without dropping it
+        try:
+            run(["iw", "dev", device, "set", "power_save", "off"], check=True, capture_output=True, timeout=10)
+        except (OSError, subprocess.SubprocessError) as error:
+            log.warning("couldn't turn Wi-Fi power saving off: %s", error)
+    return True
+
+
 class Manager:
     """The connection state machine. ``tick()`` every few seconds (``run`` does it on a thread)."""
 
@@ -276,11 +301,13 @@ class Manager:
         except RuntimeError as error:
             log.info("couldn't switch Wi-Fi on: %s", error)
 
-    def scan(self, rescan: bool = False) -> list[Network]:
-        """Networks in range, strongest first, one entry per name."""
+    def scan(self, rescan: bool | None = None) -> list[Network]:
+        """Networks in range, strongest first, one entry per name. ``rescan``: True looks around now; False
+        only reads what the radio last saw; None lets NetworkManager decide (it looks if its list is over 30 s
+        old). Looking around takes the Pi Zero's one radio off its network for a moment."""
         args = ["-t", "-f", "ACTIVE,SSID,SIGNAL,SECURITY", "device", "wifi", "list"]
-        if rescan:
-            args += ["--rescan", "yes"]
+        if rescan is not None:
+            args += ["--rescan", "yes" if rescan else "no"]
         saved, seen = set(self.saved_networks()), {}
         for ln in self.run(*args).splitlines():
             active, ssid, signal, security = (fields(ln) + ["", "", "", ""])[:4]
@@ -304,7 +331,7 @@ class Manager:
             if kind == "ethernet":
                 online = wired = True
             elif kind == "wifi":
-                active = [n for n in self.scan() if n.active]
+                active = [n for n in self.scan(rescan=False) if n.active]   # (every 5 s: never a scan)
                 if active and active[0].ssid:
                     online, ssid = True, active[0].ssid
         return online, ssid, wired

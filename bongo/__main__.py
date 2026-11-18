@@ -103,6 +103,7 @@ def _start_dashboard(config, modules, live, config_path) -> None:
                 return False
         network = net.Manager(netname.mac_suffix(), settled=settled)
         net.captive_rule()   # phones joining the setup hotspot are sent to the setup page
+        net.wifi_awake()     # power saving off: it drops the broadcasts phones find the Matrix by
         threading.Thread(target=network.run_forever, args=(threading.Event(),), daemon=True, name="wifi").start()
     pairing = Pairing(config_path.parent / "paired-devices.json")
     fonts = Context().fonts
