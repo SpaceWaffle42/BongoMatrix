@@ -485,7 +485,59 @@ function restartBox() {
       pick, ask, status));
 }
 
-/** Wi-Fi: which network it's on, and "Reopen setup" for a new router or password (bongo/net.py). */
+/** The networks the Matrix remembers and rejoins by itself, one row each, with Forget (a dev network, an old
+ * router): asked first, in the row itself. ``wired``: on a cable, so this page stays up whatever is forgotten.
+ * ``reload`` null: an older Matrix that can't forget. */
+function savedNetworks(saved, reload, wired) {
+  const heading = h('span', { class: 'field-label', id: 'saved-nets-label' }, 'Saved networks');
+  const status = h('p', { class: 'small flush danger', role: 'alert', hidden: true });
+  let i = 0;
+  const row = (s) => {
+    const extra = s.names.filter((n) => n !== s.ssid);   // Raspberry Pi Imager's "preconfigured", say
+    const line = h('div', { class: 'saved-net row between gap-s' },
+      h('span', { class: 'grow min0 saved-net-name' }, s.ssid, extra.length ? h('span', { class: 'muted tiny' }, ` (saved as ${extra.join(', ')})`) : null),
+      s.current ? h('span', { class: 'tag' }, 'Connected') : null);
+    const item = h('div', { class: 'stack-s', role: 'listitem' }, line);
+    if (!reload) return item;
+    const forget = h('button', { type: 'button', class: 'btn small-btn', 'aria-label': `Forget ${s.ssid}` }, 'Forget');
+    const ask = h('div', { class: 'stack-s', role: 'group', hidden: true });
+    const cancel = () => { ask.hidden = true; forget.hidden = false; forget.focus(); };
+    ask.addEventListener('keydown', (e) => { if (e.key === 'Escape') { e.preventDefault(); cancel(); } });
+    forget.onclick = () => {
+      const question = h('p', { class: 'small flush', id: `forget-q-${i++}` }, s.current
+        ? `Forget ${s.ssid}? The Matrix is on it now: it leaves straight away and joins another saved network in range, or opens setup (within 5 minutes if other saved networks are just out of range).${wired ? '' : ' This page goes offline until it\'s back on Wi-Fi.'}`
+        : `Forget ${s.ssid}? The Matrix won't join it again unless you add it from setup.`);
+      const yes = h('button', { type: 'button', class: 'btn small-btn danger-btn' }, 'Forget');
+      const no = h('button', { type: 'button', class: 'btn small-btn ghost' }, 'Cancel');
+      ask.setAttribute('aria-describedby', question.id);
+      no.onclick = cancel;
+      yes.onclick = async () => {
+        yes.disabled = no.disabled = true;
+        try {
+          await post('/api/network/forget', { ssid: s.ssid });
+          toast(s.current && !wired   // (a toast: the card is drawn afresh)
+            ? `Forgot ${s.ssid}. The Matrix is leaving it: this page comes back once it's on another saved network.`
+            : `Forgot ${s.ssid}. The Matrix won't join it again.`, s.current ? 'info' : 'success', 8000);
+          await reload();
+          document.getElementById('saved-nets-label')?.focus();   // (the row it was in has gone)
+        } catch (e) { status.hidden = false; status.textContent = e.message; cancel(); }
+      };
+      ask.replaceChildren(question, h('div', { class: 'row gap-s wrap' }, yes, no));
+      forget.hidden = true; ask.hidden = false; no.focus();
+    };
+    line.append(forget);
+    item.append(ask);
+    return item;
+  };
+  heading.tabIndex = -1;
+  return h('div', { class: 'stack-s' }, heading,
+    h('p', { class: 'muted tiny flush' }, 'The Matrix rejoins these by itself. Forget one it shouldn’t use any more, such as a dev network or an old router.'),
+    h('div', { class: 'saved-nets', role: 'list', 'aria-labelledby': heading.id }, ...saved.map(row)),
+    status);
+}
+
+/** Wi-Fi: which network it's on, its saved networks (with Forget), and "Reopen setup" for a new router or
+ * password (bongo/net.py). */
 function wifiCard() {
   const body = h('div', { class: 'stack gap-s' }, h('p', { class: 'muted small flush' }, 'Loading…'));
   const card = h('section', { class: 'card stack', 'aria-label': 'Wi-Fi' }, h('h2', { class: 'h2' }, 'Wi-Fi'), body);
@@ -495,7 +547,8 @@ function wifiCard() {
     const what = n.wired ? 'On a cable' : n.ssid ? `On ${n.ssid}` : STATES[n.state] || n.state;
     const rows = [h('div', { class: 'row between wrap' }, h('span', { class: 'strong' }, what), h('span', { class: 'muted small' }, STATES[n.state] || ''))];
     if (n.hotspot) rows.push(h('p', { class: 'small flush' }, 'Join ', h('span', { class: 'mono strong' }, n.hotspot.ssid), ' with password ', h('span', { class: 'mono strong' }, n.hotspot.password), ' to choose a network.'));
-    if (n.saved?.length) rows.push(h('p', { class: 'muted tiny flush' }, `Saved: ${n.saved.join(', ')}`));
+    const saved = n.saved_networks || (n.saved || []).map((name) => ({ ssid: name, names: [name], current: false }));   // (an older Matrix: names only)
+    if (saved.length) rows.push(savedNetworks(saved, n.saved_networks ? load : null, n.wired));
     if (!(n.bands || []).includes('5')) rows.push(h('p', { class: 'muted tiny flush' }, 'This Matrix only has 2.4 GHz Wi-Fi (a Pi Zero): a 5 GHz-only network won\'t show up. Use your router\'s 2.4 GHz band or a USB Wi-Fi adapter.'));
     const reopen = h('button', { type: 'button', class: 'btn' }, 'Reopen setup');
     reopen.onclick = async () => {

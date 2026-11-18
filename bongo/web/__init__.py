@@ -558,7 +558,26 @@ def create_app(*, modules, live, pairing, config_path, logs: LogBuffer | None = 
                 scan = [vars(n) for n in network.scan()][:12]
             except RuntimeError:
                 pass
-        return jsonify(managed=True, **network.status.public(), networks=scan, saved=network.saved())
+        try:
+            saved = network.saved_list()
+        except RuntimeError:
+            saved = []
+        return jsonify(managed=True, **network.status.public(), networks=scan,
+                       saved=[n for s in saved for n in s["names"]], saved_networks=saved)
+
+    @app.post("/api/network/forget")
+    def network_forget():
+        """Settings > Wi-Fi > Forget: the Matrix deletes a saved network and never joins it again."""
+        if network is None:
+            return jsonify(error="Wi-Fi isn't managed on this machine."), 409
+        ssid = str((request.get_json(silent=True) or {}).get("ssid") or "")
+        try:
+            if not ssid or not network.forget(ssid):
+                abort(404, "That network isn't saved on this Matrix.")
+        except RuntimeError as error:
+            abort(409, str(error) if "setup page" in str(error) else "The Matrix couldn't forget it just now. Try again.")
+        logging.getLogger("bongo.net").info("%s forgotten by %s", ssid, (pairing.check(request.cookies.get(COOKIE)) or {}).get("name"))
+        return jsonify(network.status.public())
 
     @app.post("/api/network/setup")
     def network_setup():

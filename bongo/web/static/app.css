@@ -519,6 +519,12 @@ body.drag-active { user-select: none; -webkit-user-select: none; }
 .screen-name { display: flex; flex-direction: column; gap: 2px; }
 .screen-title { font-weight: 500; overflow-wrap: anywhere; }
 .screen-file { overflow-wrap: break-word; }   /* the real file name, small, on as many lines as it needs */
+/* Settings > Wi-Fi: saved networks, one a row, each with Forget */
+.saved-nets { display: flex; flex-direction: column; border: 1px solid var(--line); }
+.saved-nets > * { padding: 8px 10px; }
+.saved-nets > * + * { border-top: 1px solid var(--line); }
+.saved-net { align-items: center; min-height: 34px; }
+.saved-net-name { overflow-wrap: anywhere; }
 .btn.icon-btn.small-icon { width: 40px; height: 40px; flex: none; font-size: 16px; }
 .device .name { display: block; align-self: stretch; max-width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .stack-xs { display: flex; flex-direction: column; align-items: flex-start; gap: 3px; }

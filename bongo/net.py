@@ -243,7 +243,7 @@ class Manager:
         self.suffix, self.run, self.clock, self.password, self.settle = suffix, run, clock, password, settle
         self.country, self.unblock = country, unblock
         self._radio_on = False             # the radio has been switched on once (``wake_radio``)
-        self._ssids: tuple = ((), {})      # (saved connection names, network name -> connection name)
+        self._ssids: tuple = ((), {}, {})  # (saved connection names, network -> connection, connection -> network)
         self.status = Status(since=clock())
         self.last_nudge = self.last_check = self.last_used = -1e9
         self._lock = threading.RLock()
@@ -274,21 +274,59 @@ class Manager:
                 out.append(name)
         return out
 
+    def saved_list(self) -> list[dict]:
+        """The saved networks for Settings > Wi-Fi, one each: its name, the connections saved for it (two for one
+        network happen: Raspberry Pi Imager's "preconfigured" and one joined from setup), and whether the
+        Matrix is on it now."""
+        on = self.status.ssid if self.status.state == "connected" else None
+        out: dict[str, dict] = {}
+        for name, ssid in self.network_of().items():
+            out.setdefault(ssid, {"ssid": ssid, "names": [], "current": ssid == on})["names"].append(name)
+        return list(out.values())
+
+    def forget(self, ssid: str) -> bool:
+        """Settings > Wi-Fi > Forget: delete every connection saved for the network ``ssid``, so the Matrix never
+        joins it again (a dev network, an old router). The one it's on now can go too: it leaves it, joins
+        another saved network in range, or opens setup (straight away if none is left, else after
+        ``SETUP_AFTER``). False: nothing saved for it. Not while it's trying a network from the setup page
+        (``RuntimeError``: NetworkManager refused)."""
+        with self._lock:
+            if self.status.state == "joining":
+                raise RuntimeError("It's trying a network from the setup page. Give it a minute.")
+            names = {n for n, s in self.network_of().items() if s == ssid}
+            if not names:
+                return False
+            for ln in self.run("-t", "-f", "UUID,NAME,TYPE", "connection", "show").splitlines():
+                uuid, label, kind = (fields(ln) + ["", "", ""])[:3]
+                if label in names and label != HOTSPOT and kind in ("802-11-wireless", "wifi") and uuid:
+                    self.run("connection", "delete", "uuid", uuid)
+            self.last_nudge = -1e9        # (if it was the one it was on: look for another straight away)
+            if self.status.state == "connected" and self.status.ssid == ssid:
+                self.status.ssid = None
+                self._enter("connecting", f"forgot {ssid}")
+            return True
+
     def saved_networks(self) -> dict[str, str]:
         """Network name -> the saved connection for it. A connection isn't always named after its network:
         Raspberry Pi Imager's is "preconfigured", an image's own can be anything. (Asked again only when the
         list of saved connections changes.)"""
+        self.network_of()
+        return self._ssids[1]
+
+    def network_of(self) -> dict[str, str]:
+        """Saved connection -> the network it's for (every connection, two for one network included)."""
         names = tuple(self.saved())
         if names != self._ssids[0]:
-            found = {}
+            found, each = {}, {}
             for name in names:
                 try:
                     ssid = self.run("-g", "802-11-wireless.ssid", "connection", "show", name).strip()
                 except RuntimeError:
                     ssid = ""
+                each[name] = ssid or name
                 found.setdefault(ssid or name, name)
-            self._ssids = (names, found)
-        return self._ssids[1]
+            self._ssids = (names, found, each)
+        return self._ssids[2]
 
     def wake_radio(self) -> None:
         """Once, before the first look: the radio on, whatever left it off."""
