@@ -55,7 +55,7 @@ footer { color:var(--muted); font-size:12px; text-align:center; padding:8px 16px
   <h1>Matrix hub</h1>
   <p id="sub">Every Matrix on this network</p>
   <span class="grow"></span>
-  <div class="pick" role="group" aria-label="Logo style"><span>Logo style</span><span><button type="button" id="logo-normal" aria-pressed="true" title="The round wall of blocks">Normal</button><button type="button" id="logo-simple" aria-pressed="false" title="Three big blocks: easier to tell apart when small">Simple</button></span></div>
+  <div class="pick" role="group" aria-label="View"><span>View</span><span><button type="button" id="logo-normal" aria-pressed="true" title="Each Matrix's live picture, and the round-wall logo">Normal</button><button type="button" id="logo-simple" aria-pressed="false" title="Just the details: no pictures, and the three-block logo (easier to tell apart when small)">Simple</button></span></div>
 </header>
 <main id="cards" aria-live="polite"><p class="empty">Looking for Matrices…</p></main>
 <footer>Read-only: open a Matrix's dashboard to change it. Each one pairs on its own.</footer>
@@ -63,7 +63,8 @@ footer { color:var(--muted); font-size:12px; text-align:center; padding:8px 16px
 const $ = (id) => document.getElementById(id);
 const esc = (s) => String(s ?? '').replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
 let tick = 0;
-// the logo's look, Normal (the round wall) or Simple (three big blocks): remembered by this browser
+// the view, remembered by this browser: Normal (each Matrix's live picture, the round-wall logo) or Simple (just the
+// details on each card, no pictures, and the three-block logo)
 let style = 'normal', shown = [];
 try { if (localStorage.getItem('bongo-logo') === 'simple') style = 'simple'; } catch { /* no storage: Normal */ }
 function setStyle(s, keep) {
@@ -83,12 +84,13 @@ function ago(s) {
 
 function card(m) {
   const off = !!m.error;
-  const picture = off ? '<span class="none">No picture</span>'
+  const picture = style === 'simple' ? null   // (Simple: just the details, and no picture fetched every 5 s)
+    : off ? '<span class="none">No picture</span>'
     : m.picture === false ? '<span class="none">Picture turned off</span>'
     : `<img alt="What ${esc(m.name)} is showing" src="${esc(m.url)}api/public/frame.png?t=${tick}">`;
   const warnings = off ? [m.error] : (m.warnings || []);
   return `<article class="card">
-    <div class="screen">${picture}</div>
+    ${picture === null ? '' : `<div class="screen">${picture}</div>`}
     <div class="body">
       <div class="name">${m.badge ? `<img src="logo.png?size=32&amp;style=${style}&amp;colour=${esc(m.badge)}" alt="" width="32" height="32" onerror="this.hidden=true">` : ''}<span class="who">${esc(m.name)}</span>${m.hub ? '<span class="badge hub" title="This Matrix answers at matrix.local">hub</span>' : ''}</div>
       <div class="addr">${esc(m.address)}${m.port && m.port !== 80 ? ':' + esc(m.port) : ''}</div>
