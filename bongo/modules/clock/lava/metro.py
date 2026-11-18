@@ -11,6 +11,7 @@ from bongo.scroll import Scrolls
 
 from ..common import hm
 from .field import field
+from .glide import Glides
 from .palettes import METRO, METRO_SWATCHES, enabled_custom, metro_from, rgb
 
 SAMPLES = 2  # supersampling per axis for smooth edges
@@ -47,7 +48,8 @@ def top_row(font, text, baseline):
     return box[1] - 20 if box else baseline
 
 
-class Metro(Scrolls, Style):
+class Metro(Glides, Scrolls, Style):
+    BLOB_SETTINGS = ("blob_count", "speed")
     fps = 30
     choices = {"palettes": ["all", *METRO], "time_font": names(), "date_font": names()}
     swatches = {"palettes": METRO_SWATCHES}
@@ -69,7 +71,7 @@ class Metro(Scrolls, Style):
         pool = [METRO[n] for n in names] + [
             metro_from(c["background"], c["wax"], c["highlight"]) for c in enabled_custom(s["custom_palettes"])]
         p = {k: np.array(rgb(v), float) for k, v in rng.choice(pool).items()}
-        self.p = p
+        self.p = self.target = p
         # Each blob: lane, rise/sink period, phase, sway, size, breathing.
         self.blobs = [dict(
             x=w * (i + rng.uniform(0.2, 0.8)) / s["blob_count"],
@@ -79,8 +81,8 @@ class Metro(Scrolls, Style):
         ) for i in range(s["blob_count"])]
         n = SAMPLES
         self.ys, self.xs = (np.mgrid[0:h * n, 0:w * n] + 0.5) / n - 0.5
-        rows = np.linspace(0, 1, h * n)[:, None, None]
-        self.background = (1 - rows) * p["bg_top"] + rows * p["bg_bottom"]
+        self.rows = np.linspace(0, 1, h * n)[:, None, None]
+        self.background = self._background(p)
         self.time_font, self.date_font = self.ctx.fonts(s["time_font"]), self.ctx.fonts(s["date_font"])
 
     def _positions(self, t):
@@ -91,7 +93,20 @@ class Metro(Scrolls, Style):
                    h / 2 - rise * (h / 2 + 2),
                    b["r"] * (1 + 0.15 * math.sin(2 * math.pi * t / b["breathe"])))
 
+    def _background(self, p):
+        return (1 - self.rows) * p["bg_top"] + self.rows * p["bg_bottom"]
+
+    def colours_now(self):
+        """The palette as last shown: where a screen after this one glides from."""
+        if getattr(self, "_glide", None) and self._glide[2] is None:   # never drawn: still the one before's
+            return self._glide[0]
+        return self.p
+
     def render(self, now):
+        k, start = self.glide(now, self.target)
+        if start is not None or self.p is not self.target:   # gliding (or just finished): this frame's palette
+            self.p = self.target if start is None else {key: start[key] + (v - start[key]) * k for key, v in self.target.items()}
+            self.background = self._background(self.p)
         s, p = self.settings, self.p
         g = field(self.xs, self.ys, self._positions(now.timestamp() * s["speed"]))[..., None]
         halo = s["glow"] * _smooth(g, 0.12, 0.95)

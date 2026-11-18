@@ -2,6 +2,7 @@
 custom palettes; each pass picks one palette at random from the ones you have ticked (like v2)."""
 from ..common import HOURS
 from .classic import Classic
+from .glide import GLIDE, MOST
 from .metro import Metro
 from .palettes import check_custom, enabled_custom
 
@@ -42,6 +43,9 @@ DEFAULTS = dict(
     time_align="center", date_align="center",
     # Your own palettes, shared by both styles: a name and three colours (see palettes.py).
     custom_palettes=[],
+    # Back to back (one Lava screen alone, say): seconds the colours take to glide into the next screen's;
+    # 0: a straight cut.
+    transition_seconds=GLIDE,
 )
 CHOICES = {"hours": HOURS, "time_align": ["left", "center", "right"], "date_align": ["left", "center", "right"],
            "custom_palettes": "palettes"}
@@ -51,7 +55,9 @@ def lava(cls, name):
     """A Lava style as a Clock style: filed under "Lava", with the shared settings as its own."""
     return type(name, (cls,), {"group": "Lava", "defaults": {**DEFAULTS, **cls.defaults},
                                "choices": {**CHOICES, **cls.choices},
-                               "basic": ("show_time", "show_date", "hours", "custom_palettes", *cls.basic),
+                               "basic": ("show_time", "show_date", "hours", "custom_palettes", *cls.basic,
+                                         "transition_seconds"),
+                               "limits": {**cls.limits, "transition_seconds": (0, MOST)},
                                "__doc__": cls.__doc__})
 
 

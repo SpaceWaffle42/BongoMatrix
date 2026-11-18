@@ -32,6 +32,7 @@ class _Weather(Scrolls, Style):
         self.TEXT, self.ACCENT, self.DIM = rgb(s["text_colour"]), rgb(s["accent"]), rgb(s["detail_colour"])
         self.began = self.shown_at = self.held = self.since = self.last = None   # (see render)
         self.with_credit, self.loaded, self._credit = True, False, None
+        self.credited = False   # the weather was on just before this: no credit again (see follow)
         if not self.ctx.preview:
             data.latest(s)               # a fetch starts now if one is due (or a fresh try of a key refused before)
             if data.trouble():           # no key, or OpenWeather refuses it: skipped before a frame is drawn
@@ -42,6 +43,14 @@ class _Weather(Scrolls, Style):
         if self.settings["sky_background"]:
             return sky(code, is_day, self.ctx.width, self.ctx.height)
         return self.ctx.canvas(rgb(self.settings["background"]))
+
+    def follow(self, before) -> None:
+        """Back to back with a Weather screen that got as far as the weather: OpenWeather has just had its
+        credit, so this one goes straight to the weather (and the same screen's lines carry on scrolling)."""
+        if isinstance(before, _Weather) and before.shown_at is not None:
+            self.credited = True
+            if type(before) is type(self) and before.settings == self.settings:
+                self._lines = dict(vars(before).get("_lines", {}))
 
     clock = staticmethod(time.monotonic)   # the credit's own clock: a wall clock put right (or back) mustn't move it
     FADE = 0.4                             # s the credit takes to fade into the weather
@@ -63,7 +72,7 @@ class _Weather(Scrolls, Style):
         if self.began is None:
             self.began = t
             left = None if self.hand_over_at is None else self.hand_over_at - now.timestamp()
-            self.with_credit = not self.ctx.preview and (left is None or left >= self.credit.minimum + self.WEATHER_FOR - 0.01)
+            self.with_credit = not self.ctx.preview and not self.credited and (left is None or left >= self.credit.minimum + self.WEATHER_FOR - 0.01)
         T, before, self.last = t - self.began, self.last, t - self.began
         if self.shown_at is None:
             if reading is None:

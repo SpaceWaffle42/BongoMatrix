@@ -437,7 +437,7 @@ const isDefault = (f, v) => same(v, f.default) || (f.type === 'colour' && String
 const differsFrom = (f, settings) => f.name in settings && !isDefault(f, settings[f.name]);
 const showDefault = (f) => (f.default == null ? 'Auto' : typeof f.default === 'object' ? (Array.isArray(f.default) ? `${f.default.length} item${f.default.length === 1 ? '' : 's'}` : 'object')
   : typeof f.default === 'boolean' ? (f.default ? 'On' : 'Off') : f.labels?.[f.default] ?? (String(f.default) || '(empty)'))
-  + (f.marks?.find(([x]) => x === f.default) ? ` (${f.marks.find(([x]) => x === f.default)[1]})` : '');   // Default: 50 (Normal)
+  + (f.marks?.find(([x, n]) => x === f.default && n !== 'Default') ? ` (${f.marks.find(([x]) => x === f.default)[1]})` : '');   // Default: 50 (Normal)
 
 function rangeFor(f) {
   const d = Number(f.default), n = f.name;

@@ -37,6 +37,17 @@ class Sim(Style):
     def draw(self) -> np.ndarray:
         raise NotImplementedError
 
+    OWN = frozenset({"ctx", "settings", "hand_over_at", "once", "looping", "finished", "nexted"})   # (the player's)
+
+    def follow(self, before) -> None:
+        """Back to back with the same style and settings: the world carries on where it was, rather than
+        starting again (sand keeps filling, the maze keeps being carved, the starlings stay mid-swoop)."""
+        if type(before) is not type(self) or before.settings != self.settings or before.started is None:
+            return
+        for name, value in vars(before).items():
+            if name not in self.OWN:
+                setattr(self, name, value)
+
     def render(self, now):
         if self.started is None:
             self.started = now

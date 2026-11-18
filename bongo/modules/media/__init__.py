@@ -217,6 +217,16 @@ class Fit(Style):
     played = 0.0     # seconds played, for a splash that plays once
     JUMP = 1.0       # a step bigger than this (or backwards) is the clock being set (NTP steps over 0.4 s), not time passing
 
+    def follow(self, before) -> None:
+        """Back to back with the same file and settings: a looping animation carries on where it was rather
+        than jumping back to its first frame. One that plays once (a splash) or a set number of times
+        starts from the beginning, as ever."""
+        if (type(before) is not type(self) or before.settings != self.settings or before.began is None
+                or self.once or before.once or not self.moving
+                or any(s.plays and not s.looping for s in (self, before))):   # (both screens looping)
+            return
+        self.began = before.began
+
     def render(self, now):
         stamp = now.timestamp()
         if self.began is None:

@@ -9,6 +9,7 @@ from bongo.scroll import Scrolls
 from ..common import hm
 from .field import field
 from .metro import date_font, fitting, top_row
+from .glide import Glides
 from .palettes import CLASSIC, CLASSIC_SWATCHES, enabled_custom, rgb
 
 # Marching-squares segments per corner pattern (corners: top-left=8, top-right=4,
@@ -22,7 +23,8 @@ EDGES = {
 }
 
 
-class Classic(Scrolls, Style):
+class Classic(Glides, Scrolls, Style):
+    BLOB_SETTINGS = ("blob_count", "blob_min_radius", "blob_max_radius", "drift")
     fps = 33
     choices = {"palettes": ["all", *CLASSIC], "time_font": names(), "date_font": names()}
     swatches = {"palettes": CLASSIC_SWATCHES}
@@ -69,10 +71,24 @@ class Classic(Scrolls, Style):
             if not 0 <= b[1] < h:
                 b[3], b[1] = -b[3], min(max(b[1], 0), h - 1)
 
+    def carry(self, before):
+        super().carry(before)
+        self.last = before.last   # (the wax keeps its pace across the handover)
+
+    def colours_now(self):
+        """(outside, inside, line) as last shown: where a screen after this one glides from."""
+        if getattr(self, "_glide", None) and self._glide[2] is None:   # never drawn: still the one before's
+            return self._glide[0]
+        return getattr(self, "_shown", None) or (self.outside, self.inside, self.line)
+
     def render(self, now):
         s = self.settings
         self._step(now)
-        img = self.ctx.canvas(self.outside)
+        target = tuple(tuple(c) for c in (self.outside, self.inside, self.line))
+        k, start = self.glide(now, target)
+        outside, wax, edge = self._shown = target if start is None else tuple(
+            tuple(round(a + (b - a) * k) for a, b in zip(c1, c2)) for c1, c2 in zip(start, target))
+        img = self.ctx.canvas(outside)
         draw = ImageDraw.Draw(img)
         inside = field(self.xs, self.ys, ((b[0], b[1], b[4]) for b in self.blobs)) > s["threshold"]
         # Corner pattern of every cell at once, then draw only the cells that are on.
@@ -80,11 +96,11 @@ class Classic(Scrolls, Style):
         for y, x in zip(*np.nonzero(squares)):
             square = int(squares[y, x])
             if square == 15:
-                draw.rectangle([x, y, x + 1, y + 1], fill=self.inside)
+                draw.rectangle([x, y, x + 1, y + 1], fill=wax)
                 continue
             edges = EDGES[square]
             for (x1, y1), (x2, y2) in zip(edges[::2], edges[1::2]):
-                draw.line((x + x1, y + y1, x + x2, y + y2), fill=self.line, width=s["edge_width"])
+                draw.line((x + x1, y + y1, x + x2, y + y2), fill=edge, width=s["edge_width"])
         img = img.filter(ImageFilter.BoxBlur(s["blur_radius"]))
 
         text, border = rgb(s["text_colour"]), rgb(s["border_colour"])

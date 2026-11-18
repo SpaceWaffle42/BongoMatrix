@@ -56,6 +56,20 @@ class Base(Scrolls, Style):
             else:                                            # nothing on at the last answer, however old: skipped
                 self.finished = True                         # before a frame (the check just started serves next time)
 
+    CARRIED = ("started", "last_url", "changed", "song", "retitled", "_lines")
+
+    def follow(self, before) -> None:
+        """Back to back with the same style and settings, and the same song still on: the record keeps its
+        spin and the title and artist carry on scrolling. A new song starts afresh, as ever."""
+        if type(before) is not type(self) or before.settings != self.settings or before.song is None:
+            return
+        track, _ = account.now_playing()
+        if track is None or (track.title, track.artist) != before.song:
+            return
+        for name in self.CARRIED:
+            if name in vars(before):
+                setattr(self, name, dict(vars(before)[name]) if name == "_lines" else vars(before)[name])
+
     def reading(self, now):
         t = time.time()
         if self.started is None:

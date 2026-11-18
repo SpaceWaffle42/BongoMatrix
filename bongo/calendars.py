@@ -269,7 +269,8 @@ def refresh(feed: dict, fetch=None, keep: bool = True) -> None:
     fetch = fetch or fetch_url
     started = time.time()
     try:
-        events = parse(fetch(feed["url"]), dt.datetime.now(dt.timezone.utc), feed.get("busy", False))
+        # (the one clock, ``now_s``: what counts as still to come is worked out from it everywhere else too)
+        events = parse(fetch(feed["url"]), dt.datetime.fromtimestamp(now_s(), dt.timezone.utc), feed.get("busy", False))
     except ImportError:
         error = FeedError("the calendar reader isn't installed yet: update the Matrix")
     except FeedError as e:

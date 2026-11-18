@@ -35,6 +35,9 @@ MODULE = Module(
     },
     check=check,
     migrate=lava_migrate,
+    marks={"transition_seconds": [[0, "Cut"], [2.5, "Default"]]},   # (Lava: dragging near one snaps to it)
+    notes={"transition_seconds": "When a Lava screen plays back to back, how long its colours take to glide into "
+                                 "the next one's. 0: a straight cut."},
     # Lava Lamp entries saved before 12 Nov 2026 are Clock entries now (config.tidy)
     renames={"lava_lamp": {"classic": "lava_classic", "metro": "lava_metro", None: "lava_classic"}},
 )

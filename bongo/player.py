@@ -158,6 +158,11 @@ def play(playlist: list[Entry], modules: dict[str, Module], panel, ctx_factory=C
             return False
         style.once = entry.once
         style.looping = entry.looping
+        if hasattr(style, "follow") and before[0] is not None:   # back to back with the one before (Lava's colour glide)
+            try:
+                style.follow(before[0])
+            except Exception:   # a hand-over that goes wrong is only a cut
+                log.exception("%s: follow failed", type(style).__name__)
         # a GIF playing once hands over itself; its expected length is only a cap, with room for a slow Pi
         moving = entry.once and getattr(style, "moving", False)
         cap = entry.seconds + ONCE_SLACK if moving else entry.seconds
@@ -174,6 +179,10 @@ def play(playlist: list[Entry], modules: dict[str, Module], panel, ctx_factory=C
         except Exception as error:  # one broken module must not stop the panel
             broken(f"{entry.module}/{entry.style} failed while playing; moving on", entry, error)
             return False
+        if frames:
+            before[0] = style   # (one that skipped itself was never on the panel: the next carries on from the one before)
+        if getattr(style, "nexted", False):
+            before[0] = None    # Next pressed: the next screen starts afresh, even the same one again
         gone = frames == 0 and not getattr(style, "nexted", False)   # it skipped itself (Spotify, nothing on),
         # or had no time at all: never a spin. (Next pressed before its first frame isn't the screen's doing.)
         skipped[0] = skipped[0] + 1 if gone else 0
@@ -225,6 +234,7 @@ def play(playlist: list[Entry], modules: dict[str, Module], panel, ctx_factory=C
     def show_dark(wait):
         """A dark panel (forced sleep, or every screen skipped), still with the PIN, setup or address screen
         over it when one is up, so pairing and setup work then too; such a screen keeps its own pace."""
+        before[0] = None   # (after a dark panel the next screen starts afresh: nothing to carry on from)
         dark = ctx_factory().canvas()
         covered = live.overlay(dark) if live and live.overlay else dark
         lift(covered is not dark)
@@ -236,6 +246,7 @@ def play(playlist: list[Entry], modules: dict[str, Module], panel, ctx_factory=C
         if live:
             live.skip.clear()   # nothing was playing: a Wake or Next pressed meanwhile mustn't skip the next screen
 
+    before = [None]   # the screen played last, for a screen that carries on from it (``Style.follow``)
     skipped = [0]   # screens in a row that skipped themselves without a frame (or failed)
     splashes = bool(schedule and schedule.splash_sources)   # Splash switched off: its items have nothing to play
 
