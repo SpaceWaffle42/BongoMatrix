@@ -11,7 +11,7 @@ from bongo.scroll import HOLD, Scrolls
 
 from . import data
 from .credit import Credit
-from .look import icon, icon_size, label, sky, temp_text
+from .look import INK, icon, icon_size, label, sky, temp_text
 
 
 def rgb(hex_colour):
@@ -349,11 +349,12 @@ class Forecast(_Weather):
 
 class Classic(_Weather):
     """v2's Weather layout: NOW over the temperature on the left, the high (pink) over the low (cyan) on the
-    right, a line across, and the place, sky, feels-like and humidity going by underneath. On a black
-    background by default, in v2's colours (each can be changed under Advanced).
+    right, the weather's icon between them, a line across, and the place, sky, feels-like and humidity going
+    by underneath. On a black background by default, in v2's colours (each can be changed under Advanced).
 
     On a smaller screen (a safe area) the gaps close first, then NOW goes, then the line; the high and low
-    join the ticker only when there's no room for them beside the temperature."""
+    join the ticker only when there's no room for them beside the temperature. The icon takes the room
+    that's left and never moves anything: smaller first, then left out."""
     defaults = {"scroll_speed": 20, "temperature_font": "5x7", "sky_background": False, "background": "#000000",
                 "text_colour": "#DCD5D5", "accent": "#FFB300", "detail_colour": "#66A1D2",
                 "high_colour": "#FF71CE", "low_colour": "#01CDFE"}
@@ -369,7 +370,8 @@ class Classic(_Weather):
 
     def plan(self, temp, high, low):
         """Where everything goes on this screen: {"now", "temp", "high", "low": (x, baseline) or None,
-        "line": its row or None, "ticker": its baseline, "font": the temperature's}. On a full 64x32 panel
+        "line": its row or None, "ticker": its baseline, "font": the temperature's, "icon": (x, y, size) or
+        None}. On a full 64x32 panel
         exactly v2's: NOW on rows 2 to 6, the temperature on 11 to 16, high and low on 3 to 7 and 10 to 14
         (from x 35), the line on row 20 and the ticker on 26 to 30 (a g or y down to 31). Shorter: the gap
         under the line closes, then the gap at the top, then NOW goes, then the line, and only
@@ -404,7 +406,7 @@ class Classic(_Weather):
         else:
             row, margin = None, max(0, min(2, (spare - 1) // 2))
         top = margin
-        out = {"font": font, "ticker": ticker, "line": row, "now": None, "high": None, "low": None}
+        out = {"font": font, "ticker": ticker, "line": row, "now": None, "high": None, "low": None, "icon": None}
         if with_now:
             out["now"] = (1, top + cap)                         # v2: baseline 7
             out["temp"] = (2, top + cap + 4 + font.cap)         # v2: baseline 17
@@ -414,7 +416,28 @@ class Classic(_Weather):
             first = top + (1 if with_now else (block - stack) // 2)
             out["high"] = (hl_x, first + cap)                   # v2: baselines 8 and 15
             out["low"] = (hl_x, first + cap + 2 + cap)
+        left = max(2 + font.width(temp), 1 + self.tiny.width("NOW") if with_now else 0)   # the first column free of them
+        floor = (row if line else ticker - cap) - 1             # the icon stays above this row: one free under it
+        out["icon"] = self.icon_spot(left, hl_x, max(four.width(high), four.width(low)) if side else None, top, block, floor)
         return out
+
+    ICON = 14   # px: the biggest the icon is drawn here (a 16 would touch the words either side)
+
+    def icon_spot(self, left, hl_x, hl_wide, top, block, floor):
+        """(x, y, size) for the icon, or None: level with the words (the ``block`` rows from ``top``), in
+        the gap they leave, a column clear each side. Between the temperature and the high and low (in the
+        middle); or, where that's too narrow, just after them; with the high and low in the ticker, just
+        after the temperature."""
+        w = self.ctx.width
+        gaps = [(left + 1, hl_x - 1), (hl_x + hl_wide + 1, w)] if hl_wide is not None else [(left + 2, w - 1)]
+        best = None
+        for n, (a, b) in enumerate(gaps):
+            size = icon_size(floor - top, min(self.ICON, b - a))
+            if size and (best is None or size > best[2]):
+                slack = (b - a - size) // 2
+                x = a + (slack if hl_wide is not None and n == 0 else min(slack, 3))   # (open to the right: it keeps close)
+                best = (x, max(0, min(top + (block - INK[size]) // 2, floor - INK[size])), size)
+        return best
 
     def draw(self, r, now):
         u = self.unit()
@@ -425,6 +448,9 @@ class Classic(_Weather):
         if p["now"]:
             self.tiny.draw(img, *p["now"], "NOW", self.TEXT)        # (tom-thumb: in 4x6 the N reads as an H)
         p["font"].draw(img, *p["temp"], temp, self.TEXT)
+        if p["icon"]:
+            x, y, size = p["icon"]
+            self.place_icon(img, r.code, r.is_day, size, x, y, now)
         place = self.settings["location"].strip()
         if not self.settings["scroll_location"]:                # the town alone: "London", not "London, England, GB"
             place = place.split(",")[0].strip()
