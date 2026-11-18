@@ -10,7 +10,7 @@ const entry = (name, fit, speed) => ({ module: 'media', style: fit, settings: { 
 const short = (name) => name.replace(/^(built-in|uploaded)\//, '');
 /** A name to read: "built-in/splash_breakout_squares.gif" -> "Breakout squares", "my-cat.mp4" -> "My cat" */
 export const mediaTitle = (name) => {
-  const words = short(name).replace(/\.[a-z0-9]+$/i, '').replace(/^(splash|sleep)_/, '').replace(/[_-]+/g, ' ').trim();
+  const words = short(name).replace(/\.[a-z0-9]+$/i, '').replace(/^(splash|sleep|boot)_/, '').replace(/[_-]+/g, ' ').trim();
   return words ? words[0].toUpperCase() + words.slice(1) : short(name);
 };
 

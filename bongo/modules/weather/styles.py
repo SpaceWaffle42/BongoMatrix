@@ -1,4 +1,4 @@
-"""Three looks of the same reading: ticker, overview and forecast. Each opens on OpenWeather's credit (credit.py)."""
+"""Four looks of the same reading: ticker, overview, forecast and classic (v2's). Each opens on OpenWeather's credit (credit.py)."""
 from __future__ import annotations
 
 import time
@@ -345,3 +345,100 @@ class Forecast(_Weather):
             if all(font.width(t) <= (room if sign else room - 2) for t in temps):
                 return font, temps
         return font, temps
+
+
+class Classic(_Weather):
+    """v2's Weather layout: NOW over the temperature on the left, the high (pink) over the low (cyan) on the
+    right, a line across, and the place, sky, feels-like and humidity going by underneath. On a black
+    background by default, in v2's colours (each can be changed under Advanced).
+
+    On a smaller screen (a safe area) the gaps close first, then NOW goes, then the line; the high and low
+    join the ticker only when there's no room for them beside the temperature."""
+    defaults = {"scroll_speed": 20, "temperature_font": "5x7", "sky_background": False, "background": "#000000",
+                "text_colour": "#DCD5D5", "accent": "#FFB300", "detail_colour": "#66A1D2",
+                "high_colour": "#FF71CE", "low_colour": "#01CDFE"}
+    choices = {"temperature_font": ["5x7", "6x10", "6x13B", "7x13B"]}
+
+    def setup(self):
+        super().setup()
+        self.four = self.ctx.fonts("4x6")
+        self.HIGH, self.LOW = rgb(self.settings["high_colour"]), rgb(self.settings["low_colour"])
+
+    def unit(self):
+        return "F" if self.settings["units"] == "fahrenheit" else "C"
+
+    def plan(self, temp, high, low):
+        """Where everything goes on this screen: {"now", "temp", "high", "low": (x, baseline) or None,
+        "line": its row or None, "ticker": its baseline, "font": the temperature's}. On a full 64x32 panel
+        exactly v2's: NOW on rows 2 to 6, the temperature on 11 to 16, high and low on 3 to 7 and 10 to 14
+        (from x 35), the line on row 20 and the ticker on 26 to 30 (a g or y down to 31). Shorter: the gap
+        under the line closes, then the gap at the top, then NOW goes, then the line, and only
+        then do high and low join the ticker; taller: the block
+        sits in the middle of the room over the line."""
+        w, h, four = self.ctx.width, self.ctx.height, self.four
+        cap, drop = four.cap, max(1, four.descent)
+        room = h - cap - drop - 1                               # rows over the ticker, one left free
+        font = next((f for f in (self.temp_font, self.ctx.fonts("6x10"), self.small, four) if f.cap <= self.temp_font.cap
+                     and f.width(temp) + 2 <= w and f.cap <= room), four)   # (smaller only where it must be)
+        hl_x = max(min(35, w * 35 // 64), 2 + font.width(temp) + 3)   # v2: x 35, clear of the temperature
+        wide = hl_x + max(four.width(high), four.width(low)) <= w
+        stack = 2 * cap + 2                                     # high over low, baselines 7 apart
+        ticker = h - drop                                       # (its baseline: letters above it, a g's tail on it)
+        for with_now, line, side in ((1, 1, 1), (0, 1, 1), (0, 0, 1), (1, 1, 0), (0, 1, 0), (0, 0, 0)):
+            if side and not wide:
+                continue
+            block = max(cap + 4 + font.cap if with_now else font.cap, (stack + (1 if with_now else 0)) if side else 0)
+            # rows from the top: margin, block, [3 free, the line], gap, ticker; v2: 2, 15, 3, 1, 5, 6
+            spare = h - (block + cap + drop + (4 if line else 0))
+            if spare >= 1:                                      # at least one free row over the ticker
+                break
+        else:                                                   # (a tiny screen: the temperature and the ticker)
+            with_now = line = side = 0
+            block, spare = font.cap, 1
+        if line:
+            margin = min(2, spare - 1)                          # (the gap under the line closes up first)
+            row = ticker - cap - (spare - margin) - 1           # the line
+            if h > 32:                                          # taller: v2's gap under it, the block in the middle above
+                row = ticker - cap - 6
+                margin = max(0, (row - 3 - block) // 2)
+        else:
+            row, margin = None, max(0, min(2, (spare - 1) // 2))
+        top = margin
+        out = {"font": font, "ticker": ticker, "line": row, "now": None, "high": None, "low": None}
+        if with_now:
+            out["now"] = (1, top + cap)                         # v2: baseline 7
+            out["temp"] = (2, top + cap + 4 + font.cap)         # v2: baseline 17
+        else:
+            out["temp"] = (2, top + (block - font.cap) // 2 + font.cap)
+        if side:
+            first = top + (1 if with_now else (block - stack) // 2)
+            out["high"] = (hl_x, first + cap)                   # v2: baselines 8 and 15
+            out["low"] = (hl_x, first + cap + 2 + cap)
+        return out
+
+    def draw(self, r, now):
+        u = self.unit()
+        temp, high, low = f"{round(r.temp)}{u}", f"H {round(r.high)}", f"L {round(r.low)}"
+        p = self.plan(temp, high, low)
+        img = self.backdrop(r.code, r.is_day)
+        four = self.four
+        if p["now"]:
+            self.tiny.draw(img, *p["now"], "NOW", self.TEXT)        # (tom-thumb: in 4x6 the N reads as an H)
+        p["font"].draw(img, *p["temp"], temp, self.TEXT)
+        place = self.settings["location"].strip()
+        if not self.settings["scroll_location"]:                # the town alone: "London", not "London, England, GB"
+            place = place.split(",")[0].strip()
+        parts = [place, label(r.code, r.is_day), f"Feels {round(r.feels)}{u}",
+                 f"Humidity {r.humidity}%"]
+        if p["high"]:
+            four.draw(img, *p["high"], high, self.HIGH)
+            four.draw(img, *p["low"], low, self.LOW)
+        else:                                                   # no room beside the temperature: they go by too
+            parts.insert(2, f"H {round(r.high)} L {round(r.low)}")
+        if p["line"] is not None:
+            for x in range(self.ctx.width):
+                img.putpixel((x, p["line"]), self.DIM)
+        text = " | ".join(x for x in parts if x)
+        self.line(img, four, 0, p["ticker"], self.ctx.width, text, self.ACCENT, now,
+                  speed=max(1, self.settings["scroll_speed"]), gap=24)
+        return img

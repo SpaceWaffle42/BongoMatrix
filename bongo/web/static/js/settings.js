@@ -2,7 +2,7 @@
 import { api, get, del, post, put, uploadMedia } from './api.js';
 import { h, icon, toast, fail, clone, same, clamp, humanize, ago, toggle } from './ui.js';
 import { FrameLoop } from './led.js';
-import { mediaThumb, mediaTitle, previewButton, openPreview } from './mediaview.js';
+import { mediaThumb, mediaTitle, previewButton } from './mediaview.js';
 import { S, onLeave, go, saveConfig, moduleById } from './app.js';
 import { helpButton, creditLine } from './help.js';
 import { placePicker } from './editor.js';
@@ -866,6 +866,26 @@ function screenFiles(lib, screen) {
   return { builtIn, uploaded, shipped, usable };
 }
 
+/** One file in a screen's list (Splash, Sleep, the boot screen): its tick box or radio button, a moving
+ * thumbnail, its name with the real file name under it, and a Preview button. */
+function screenRow(f, input, opts) {
+  const gone = f.file.endsWith('(missing)');
+  const thumb = gone ? h('span', { class: 'media-thumb empty' }) : mediaThumb(f.name, opts())[0];
+  return h('div', { class: 'screen-source' },
+    h('label', { class: 'screen-pick', for: input.id }, input, thumb,
+      h('span', { class: 'screen-name grow min0' },
+        h('span', { class: 'screen-title' }, gone ? 'Missing file' : mediaTitle(f.name)),
+        h('span', { class: 'mono tiny muted screen-file' }, f.file.match(/[^_-]*[_-]?/g).filter(Boolean).flatMap((part, k) => (k ? [h('wbr'), part] : [part])))),   // the file name wraps after a _ or -, not mid-word
+      f.kind === 'video' ? h('span', { class: 'tag' }, 'Video') : null),
+    gone ? null : previewButton(f.name, opts, { compact: true }));
+}
+
+/** Built-in and uploaded files under their own headings, so it's clear which is which. */
+function screenSections(row, missing, builtIn, uploaded) {
+  const section = (title, list) => (list.length ? [h('div', { class: 'screen-divider', role: 'presentation' }, `${title} · ${list.length}`), ...list.map(row)] : []);
+  return [...section('Missing', missing), ...section('Built in', builtIn), ...section('Your media', uploaded)];
+}
+
 /** Pick the files a Splash or Sleep screen draws from (built-in screens and your own media), plus speed and fit. */
 function screenPicker(rule, idPrefix, screen) {
   rule.sources ||= [];
@@ -889,19 +909,9 @@ function screenPicker(rule, idPrefix, screen) {
         box.addEventListener('change', () => {
           rule.sources = box.checked ? [...new Set([...rule.sources, f.name])] : rule.sources.filter((n) => n !== f.name);
         });
-        const gone = f.file.endsWith('(missing)');
-        const thumb = gone ? h('span', { class: 'media-thumb empty' }) : mediaThumb(f.name, opts())[0];
-        return h('div', { class: 'screen-source' },
-          h('label', { class: 'screen-pick', for: box.id }, box, thumb,
-            h('span', { class: 'screen-name grow min0' },
-              h('span', { class: 'screen-title' }, gone ? 'Missing file' : mediaTitle(f.name)),
-              h('span', { class: 'mono tiny muted screen-file' }, f.file.match(/[^_-]*[_-]?/g).filter(Boolean).flatMap((part, k) => (k ? [h('wbr'), part] : [part])))),   // the file name wraps after a _ or -, not mid-word
-            f.kind === 'video' ? h('span', { class: 'tag' }, 'Video') : null),
-          gone ? null : previewButton(f.name, opts, { compact: true }));
+        return screenRow(f, box, opts);
       };
-      // built-in and uploaded files under their own headings, so it's clear which is which
-      const section = (title, list) => (list.length ? [h('div', { class: 'screen-divider', role: 'presentation' }, `${title} · ${list.length}`), ...list.map(card)] : []);
-      grid.replaceChildren(...section('Missing', missing), ...section('Built in', builtIn), ...section('Your media', uploaded));
+      grid.replaceChildren(...screenSections(card, missing, builtIn, uploaded));
       if (!files.length && !missing.length) grid.replaceChildren(h('p', { class: 'muted small flush' }, 'Nothing to pick from yet. Upload an image, GIF or video in the Media library.'));
     } catch (err) { grid.replaceChildren(h('p', { class: 'danger small' }, `Couldn't list media: ${err.message}`)); }
   })();
@@ -938,27 +948,36 @@ function splashCard() {
     body, h('div', { class: 'row end' }, save));
 }
 
-/** The boot screen: one Splash file played once when the Matrix starts, or none. */
+/** The boot screen: one Splash file played once when the Matrix starts, or none. The same list as
+ * Splash's and Sleep's (thumbnail, name, Preview), with one choice instead of tick boxes. */
 function bootPicker(rule) {
-  const sel = h('select', { class: 'input', id: 'sp-boot' }, h('option', { value: '' }, 'None (start straight into the playlist)'));
-  sel.addEventListener('change', () => { rule.boot = sel.value || null; });
+  const grid = h('div', { class: 'screen-sources', role: 'radiogroup', 'aria-label': 'Boot screen' }, h('p', { class: 'muted small flush' }, 'Loading media…'));
   (async () => {
     try {
       const lib = await get('/api/media');
       const { builtIn, uploaded, shipped } = screenFiles(lib, 'splash');
       rule.boot = shipped(rule.boot);
-      const option = (f) => h('option', { value: f.name, selected: f.name === rule.boot || null }, `${f.file}${f.kind === 'video' ? ' (video)' : ''}`);
-      const group = (label, list) => (list.length ? h('optgroup', { label }, list.map(option)) : null);
-      const missing = rule.boot && ![...builtIn, ...uploaded].some((f) => f.name === rule.boot) ? [{ name: rule.boot, file: `${rule.boot} (missing)` }] : [];
-      sel.append(...[group('Missing', missing), group('Built in', builtIn), group('Your media', uploaded)].filter(Boolean));
-    } catch { /* the list stays at "None"; saving keeps whatever was set */ }
+      const known = new Set([...builtIn, ...uploaded].map((f) => f.name));
+      const missing = rule.boot && !known.has(rule.boot) ? [{ name: rule.boot, file: `${rule.boot} (missing)` }] : [];
+      const boots = [...builtIn].sort((a, b) => (b.file.startsWith('boot_') - a.file.startsWith('boot_')));   // boot screens first
+      const opts = () => ({ fit: rule.fit || 'fit', speed: (rule.speed ?? 100) / 100 });
+      let i = 0;
+      const pick = (name) => {
+        const radio = h('input', { type: 'radio', name: 'sp-boot', id: `sp-boot-${i++}`, value: name ?? '', checked: (rule.boot ?? null) === name });
+        radio.addEventListener('change', () => { if (radio.checked) rule.boot = name; });
+        return radio;
+      };
+      const none = pick(null);
+      const nothing = h('div', { class: 'screen-source' },
+        h('label', { class: 'screen-pick', for: none.id }, none, h('span', { class: 'media-thumb empty' }),
+          h('span', { class: 'screen-name grow min0' }, h('span', { class: 'screen-title' }, 'None'),
+            h('span', { class: 'tiny muted' }, 'Start straight into the playlist'))));
+      grid.replaceChildren(nothing, ...screenSections((f) => screenRow(f, pick(f.name), opts), missing, boots, uploaded));
+    } catch (err) { grid.replaceChildren(h('p', { class: 'danger small' }, `Couldn't list media: ${err.message}`)); }   // (saving keeps whatever was set)
   })();
-  const opts = () => ({ fit: rule.fit || 'fit', speed: (rule.speed ?? 100) / 100 });
-  const preview = h('button', { type: 'button', class: 'btn small-btn' }, 'Preview');
-  preview.onclick = () => { if (rule.boot) openPreview(rule.boot, opts()); else toast('Pick a boot screen first'); };
   return h('div', { class: 'stack-s' },
-    h('label', { class: 'field-col', for: sel.id }, 'Boot screen', h('div', { class: 'row gap-s' }, sel, preview)),
-    h('p', { class: 'muted tiny flush' }, 'Plays once when the Matrix starts, before the playlist: a built-in splash or anything of your own, ticked above or not.'));
+    h('span', { class: 'field-label' }, 'Boot screen'), grid,
+    h('p', { class: 'muted tiny flush' }, 'Plays once when the Matrix starts, before the playlist: a built-in boot screen or splash, or anything of your own, whether or not it’s ticked in the list above. It plays at the Speed and Fit above.'));
 }
 
 function sleepCard() {
