@@ -1,4 +1,4 @@
-"""Four looks of the same reading: ticker, overview, forecast and classic (v2's). Each opens on OpenWeather's credit (credit.py)."""
+"""Five looks of the same reading: ticker, overview, forecast, days and classic (v2's). Each opens on OpenWeather's credit (credit.py)."""
 from __future__ import annotations
 
 import time
@@ -11,7 +11,7 @@ from bongo.scroll import HOLD, Scrolls
 
 from . import data
 from .credit import Credit
-from .look import INK, icon, icon_size, label, sky, temp_text
+from .look import INK, condition, icon, icon_size, label, sky, temp_text
 
 
 def rgb(hex_colour):
@@ -28,7 +28,7 @@ class _Weather(Scrolls, Style):
         self.mid = self.ctx.fonts("6x13B")
         self.small = self.ctx.fonts("5x7")
         self.tiny = self.ctx.fonts("tom-thumb")
-        self.temp_font = self.ctx.fonts(s["temperature_font"])
+        self.temp_font = self.ctx.fonts(s.get("temperature_font", "tom-thumb"))
         self.TEXT, self.ACCENT, self.DIM = rgb(s["text_colour"]), rgb(s["accent"]), rgb(s["detail_colour"])
         self.began = self.shown_at = self.held = self.since = self.last = None   # (see render)
         self.with_credit, self.loaded, self._credit = True, False, None
@@ -347,6 +347,84 @@ class Forecast(_Weather):
         return font, temps
 
 
+class Days(Forecast):
+    """Today and the next few days as columns: the day, its icon, its high over its low. From the same
+    5-day forecast as the hours, so up to five days.
+
+    On a shorter screen (a safe area) the gaps close first, then the icons go, then the lows."""
+    defaults = {"columns": 4}
+    choices = {}
+    NAMES = ("MON", "TUE", "WED", "THU", "FRI", "SAT", "SUN")
+    WORST = (95, 71, 51, 45, 3, 1, 0)   # a tie between two skies goes to the one further up this list
+    FULL = 4                            # forecast slots (of 8) a day needs to be shown: fewer says little about it
+
+    def days(self, r, now):
+        """[(date, code, high, low)]: today as it is now (its high and low over the whole day), then each
+        later day the forecast covers well: its commonest sky in the daytime, its highest and lowest."""
+        here = r.here() or now.replace(tzinfo=None)
+        out = [(here.date(), r.code, r.is_day, r.high, r.low)]
+        later = {}
+        for h in r.hours:
+            if h.time.date() > here.date():
+                later.setdefault(h.time.date(), []).append(h)
+        for date in sorted(later):
+            slots = later[date]
+            if len(slots) < self.FULL:
+                continue
+            lit = [h for h in slots if h.is_day] or slots
+            kinds = {}
+            for h in lit:
+                kinds[condition(h.code)] = kinds.get(condition(h.code), 0) + 1
+            rank = [condition(c) for c in self.WORST]
+            kind = max(kinds, key=lambda k: (kinds[k], -rank.index(k) if k in rank else -99))
+            code = next(h.code for h in lit if condition(h.code) == kind)
+            out.append((date, code, True, max(h.temp for h in slots), min(h.temp for h in slots)))
+        return out[:self.columns(r)]
+
+    def rows(self):
+        """(the day's baseline, the icon's top row or None, the high's baseline, the low's baseline or None)."""
+        h, cap = self.ctx.height, self.tiny.cap
+        if h >= 3 * cap + INK[11] + 3:                      # all four, a free row between each (29 rows)
+            spare = h - (3 * cap + INK[11] + 3)
+            more = 1 if spare >= 3 else 0                   # a full panel: a second free row over the icon
+            top = (spare - more) // 2                       # (taller: the whole column in the middle)
+            icon_at = top + cap + 1 + more
+            high_at = icon_at + INK[11] + 1 + cap
+            return top + cap, icon_at, high_at, high_at + 1 + cap
+        if h >= 3 * cap + 2:                                # no icons
+            gap = min(3, (h - 3 * cap) // 2)
+            top = (h - 3 * cap - 2 * gap) // 2
+            return top + cap, None, top + 2 * cap + gap, top + 3 * cap + 2 * gap
+        return cap, None, min(h, 2 * cap + 1), None         # the day and its high
+
+    def draw(self, r, now):
+        img = self.backdrop(r.code, r.is_day)
+        days = self.days(r, now)
+        width = self.ctx.width // max(1, len(days))
+        day_at, icon_at, high_at, low_at = self.rows()
+        font, highs = self.column_temps([d[3] for d in days], width - 2)   # (a column clear of the line between days)
+        font, lows = self.column_temps([d[4] for d in days], width - 2)
+        if any(t.endswith("°") for t in highs) != any(t.endswith("°") for t in lows):   # both rows alike
+            highs, lows = [t.rstrip("°") for t in highs], [t.rstrip("°") for t in lows]
+        for i, (date, code, is_day, high, low) in enumerate(days):
+            x0 = i * width
+            if i:
+                for y in range(4, self.ctx.height - 4):
+                    img.putpixel((x0, y), tuple(c // 3 for c in img.getpixel((x0, y))))
+            name = self.NAMES[date.weekday()]
+            self.tiny.draw(img, x0 + (width - self.tiny.width(name)) // 2 + 1, day_at, name, self.ACCENT if i == 0 else self.DIM)
+            if icon_at is not None:
+                self.place_icon(img, code, is_day, 11, x0 + (width - 11) // 2 + 1, icon_at, now)
+            for text, at, colour in ((highs[i], high_at, self.TEXT), (lows[i], low_at, self.DIM)):
+                if at is None:
+                    continue
+                if font.width(text) <= width - 1:
+                    font.draw(img, x0 + (width - font.width(text)) // 2 + 1, at, text, colour)
+                else:
+                    self.line(img, font, x0 + 1, at, width - 1, text, colour, now, key=("temp", at, i, text))
+        return img
+
+
 class Classic(_Weather):
     """v2's Weather layout: NOW over the temperature on the left, the high (pink) over the low (cyan) on the
     right, the weather's icon between them, a line across, and the place, sky, feels-like and humidity going
@@ -425,11 +503,11 @@ class Classic(_Weather):
 
     def icon_spot(self, left, hl_x, hl_wide, top, block, floor):
         """(x, y, size) for the icon, or None: level with the words (the ``block`` rows from ``top``), in
-        the gap they leave, a column clear each side. Between the temperature and the high and low (in the
+        the gap they leave, two columns clear of the words each side. Between the temperature and the high and low (in the
         middle); or, where that's too narrow, just after them; with the high and low in the ticker, just
         after the temperature."""
         w = self.ctx.width
-        gaps = [(left + 1, hl_x - 1), (hl_x + hl_wide + 1, w)] if hl_wide is not None else [(left + 2, w - 1)]
+        gaps = [(left + 2, hl_x - 2), (hl_x + hl_wide + 2, w - 1)] if hl_wide is not None else [(left + 2, w - 1)]
         best = None
         for n, (a, b) in enumerate(gaps):
             size = icon_size(floor - top, min(self.ICON, b - a))

@@ -1,17 +1,17 @@
-"""Weather from OpenWeather (free plan, with your own API key: Settings > Weather). Four styles share
+"""Weather from OpenWeather (free plan, with your own API key: Settings > Weather). Five styles share
 one location and one reading; each opens on OpenWeather's credit while the weather loads."""
 from bongo.module import Module
 
 from . import data
 from .help import HELP
-from .styles import Classic, Forecast, Overview, Ticker
+from .styles import Classic, Days, Forecast, Overview, Ticker
 
 MODULE = Module(
     id="weather",
     name="Weather",
     description="Current conditions and the next few hours, from OpenWeather. Needs a free OpenWeather API key "
                 "(Settings > Weather).",
-    styles={"overview": Overview, "ticker": Ticker, "forecast": Forecast, "classic": Classic},
+    styles={"overview": Overview, "ticker": Ticker, "forecast": Forecast, "days": Days, "classic": Classic},
     defaults=dict(
         location="London", latitude=51.5074, longitude=-0.1278,
         own_location=False,  # False: the Matrix's location from Settings; True: this screen's own
