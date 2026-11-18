@@ -80,6 +80,7 @@ details li { margin:6px 0; }
         <label class="check"><input type="checkbox" id="hidden-net"> It's a hidden network</label>
       </div>
       <p id="chosen" class="muted">Choose a network above.</p>
+      <p id="saved-pw" class="muted" hidden aria-live="polite">Uses its saved password. <button class="link" id="other-pw" type="button">Type a different one</button></p>
       <div id="pw-wrap">
         <label for="password">Password</label>
         <div class="row">
@@ -146,20 +147,31 @@ function renderNets(nets, force) {
   list.querySelectorAll('button').forEach((b) => { b.onclick = () => choose(nets[Number(b.dataset.i)]); });
 }
 
-function needsPassword() { return manual ? false : !!(chosen && chosen.secure && !chosen.saved); }
-
-function choose(net) {
-  if (!chosen || chosen.ssid !== net.ssid) $('password').value = '';   // never carry one network's password to another
-  manual = false; chosen = net; $('manual').hidden = true; clearLocal();
-  $('chosen').textContent = net.saved && net.secure ? `Network: ${net.ssid} (saved: leave the password empty to use the saved one)` : `Network: ${net.ssid}`;
-  $('pw-wrap').hidden = !net.secure;
-  renderNets(state.networks || [], true);
-  update();
-  if (net.secure) $('password').focus();
+// A saved network joins with the password it already has: nothing to type, unless that password was refused
+// (state.retype) or you choose to type a different one.
+let typing = false;
+function useSaved() { return !manual && !!(chosen && chosen.secure && chosen.saved && state.retype !== chosen.ssid) && !typing; }
+function needsPassword() { return manual ? false : !!(chosen && chosen.secure && !useSaved()); }
+function showPassword() {
+  const saved = useSaved();
+  $('saved-pw').hidden = !saved;
+  $('pw-wrap').hidden = !(manual || (chosen && chosen.secure)) || saved;
 }
 
+function choose(net) {
+  if (!chosen || chosen.ssid !== net.ssid) { $('password').value = ''; typing = false; }   // never carry one network's password to another
+  manual = false; chosen = net; $('manual').hidden = true; clearLocal();
+  $('chosen').textContent = `Network: ${net.ssid}`;
+  showPassword();
+  renderNets(state.networks || [], true);
+  update();
+  if (!$('pw-wrap').hidden) $('password').focus(); else $('join').focus();
+}
+$('other-pw').onclick = () => { typing = true; showPassword(); update(); $('password').focus(); };
+$('password').addEventListener('input', () => { if (chosen) typing = true; });   // (what's typed is never hidden away)
+
 $('manual-toggle').onclick = () => {
-  manual = true; chosen = null; $('manual').hidden = false; $('pw-wrap').hidden = false; clearLocal();
+  manual = true; chosen = null; typing = false; $('manual').hidden = false; clearLocal(); showPassword();
   $('password').value = '';   // never carry a listed network's password to a typed-in one
   $('chosen').textContent = 'Type the network\'s exact name.';
   renderNets(state.networks || [], true); $('ssid').focus(); update();
@@ -183,7 +195,7 @@ $('show').onclick = () => {
 function wanted() {
   const ssid = manual ? $('ssid').value : chosen && chosen.ssid;
   const secure = manual || (chosen && chosen.secure);
-  return { ssid: ssid || '', password: secure ? $('password').value : '', hidden: manual && $('hidden-net').checked,
+  return { ssid: ssid || '', password: secure && !useSaved() ? $('password').value : '', hidden: manual && $('hidden-net').checked,
     country: countryTouched ? $('country').value : '' };   // only a country the person chose: never overwrite one set already
 }
 function problem({ ssid, password }) {
@@ -231,6 +243,7 @@ function show(s) {
     sel.innerHTML = s.countries.map((c) => `<option value="${c}">${esc(COUNTRY_NAMES[c] || c)}</option>`).join('');
   }
   if (s.country && !countryTouched) sel.value = s.country;
+  if (!joining && !done && chosen) { showPassword(); update(); }   // (a saved password just refused: ask for it now)
 }
 
 async function poll() {

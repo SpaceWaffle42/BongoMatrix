@@ -111,12 +111,13 @@ class Status:
 
     error: str = ""                    # why the last join from the setup page failed
     joining: str | None = None         # the network it's trying while state is "joining"
+    retype: str | None = None          # a saved network whose saved password was refused: the setup page asks for it
     scanning: bool = False             # setup's hotspot is briefly off while it looks around
 
     def public(self) -> dict:
         return {"state": self.state, "ssid": self.ssid, "wired": self.wired, "since": self.since,
                 "hotspot": self.hotspot, "note": self.note, "bands": list(self.bands),
-                "error": self.error, "joining": self.joining, "scanning": self.scanning}
+                "error": self.error, "joining": self.joining, "scanning": self.scanning, "retype": self.retype}
 
 
 def current_country(run=subprocess.run) -> str | None:
@@ -506,8 +507,16 @@ class Manager:
             self.country(country)
         args = ["--wait", str(JOIN_WAIT), "device", "wifi", "connect", ssid] + \
             (["password", password] if password else []) + ["ifname", self.wifi or "wlan0"]
+        try:   # a saved network with no password typed: its own saved connection, with the password it keeps
+            mine = self.saved_networks().get(ssid) if not password else None
+        except RuntimeError:
+            mine = None
         try:
-            if hidden:   # never in a scan, so nmcli can't tell its security: a profile that says so
+            if mine:
+                if not hidden:                             # (a hidden one never shows in a list: no use waiting)
+                    self._wait_until_seen(ssid, ident)
+                self.run("--wait", str(JOIN_WAIT), "connection", "up", mine, timeout=JOIN_WAIT + 15)
+            elif hidden:   # never in a scan, so nmcli can't tell its security: a profile that says so
                 self._join_by_profile(ssid, password, hidden=True)
             else:
                 self._wait_until_seen(ssid, ident)
@@ -524,6 +533,13 @@ class Manager:
                     self._join_by_profile(ssid, password, hidden=False)
         except RuntimeError as error:
             log.info("couldn't join %s: %s", ssid, error)
+            if mine and plain_reason(str(error)) == "the password wasn't accepted":
+                with self._lock:
+                    if self._current(ident):
+                        self.status.retype = ssid      # the setup page asks for the password this time
+                if not self._landed(ssid, ident):
+                    self._failed(ssid, f"Couldn't join {ssid}: its saved password wasn't accepted. Type its password.", ident)
+                    return False
             if self._landed(ssid, ident):   # NetworkManager gave up waiting, but the join finished anyway (slow DHCP)
                 log.info("…but it's on %s after all", ssid)
                 return self._joined(ssid, ident)
@@ -531,6 +547,13 @@ class Manager:
                 current = self._current(ident)
             if current:   # only a network that works is kept (never one a newer try just saved)
                 self._forget_new(before)
+            with self._lock:
+                if self._current(ident) and password and plain_reason(str(error)) == "the password wasn't accepted":
+                    try:   # a network saved before this try: its password may have just been changed, so ask next time
+                        if ssid in self.saved_networks():
+                            self.status.retype = ssid
+                    except RuntimeError:
+                        pass
             self._failed(ssid, f"Couldn't join {ssid}: {plain_reason(str(error))}.", ident)
             return False
         return self._joined(ssid, ident)
@@ -588,7 +611,7 @@ class Manager:
         with self._lock:
             if not self._current(ident):   # given up on meanwhile (the watchdog), maybe a newer try: leave it be
                 return False
-            self.status.joining = None
+            self.status.joining = self.status.retype = None
             self._enter("connected", f"on {ssid}")
             self.status.ssid, self._setup_pw = ssid, None
         log.info("joined %s from the setup page", ssid)
@@ -625,7 +648,7 @@ class Manager:
             return
         names = self.saved_networks()
         for n in nearby:
-            if n.saved:
+            if n.saved:   # (one whose saved password was refused too: the refusal may have been a weak signal)
                 try:
                     self.run("connection", "up", names.get(n.ssid, n.ssid), timeout=40)
                     return
@@ -647,7 +670,7 @@ class Manager:
                     self.last_check = now
                     try:
                         self.nearby = self.scan(rescan=True) or self.nearby
-                        back = [n for n in self.nearby if n.saved]
+                        back = [n for n in self.nearby if n.saved and n.ssid != st.retype]   # (not one whose saved password was refused: setup stays open to type it)
                     except RuntimeError:
                         back = []
                     if back:
@@ -655,6 +678,8 @@ class Manager:
                 return self.status.state
             online, ssid, wired = self.link()
             st.ssid, st.wired = ssid, wired
+            if online and ssid is not None and ssid == st.retype:
+                st.retype = None                           # on it after all (the router's password put back, say)
             if online:
                 self._enter("connected", "on a cable" if wired else f"on {ssid}")
                 return st.state
