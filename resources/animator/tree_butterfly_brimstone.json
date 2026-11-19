@@ -1,0 +1,5 @@
+{"format":"bongo-animation","version":1,"name":"tree_butterfly_brimstone","width":5,"height":3,"background":"#000000","loop":"pingpong","palette":["#e8d23c","#e8e0c0","#fff27a"],"layers":[{"name":"Butterfly","on":true,"opacity":1,"mode":"normal","shared":false}],"frames":[
+{"ms":90,"cels":["2*0 . 2*0 2 0 1 0 2 . 2 . 2 ."]},
+{"ms":90,"cels":[". 0 . 0 2*. 2 1 2 3*. 1 2*."]},
+{"ms":90,"cels":["2*. 0 3*. 2 1 2 6*."]}
+]}

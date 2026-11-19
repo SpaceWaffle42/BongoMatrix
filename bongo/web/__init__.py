@@ -27,7 +27,7 @@ from zoneinfo import ZoneInfo
 from flask import Flask, Response, abort, jsonify, request, send_file, send_from_directory
 from werkzeug.exceptions import HTTPException
 
-from bongo import animator, config as cfg, logo, net, netname, pets, petpack, update
+from bongo import animator, config as cfg, logo, net, netname, pets, petpack, sprite_preview, update
 from bongo import addons, media, places
 from bongo.fonts import Fonts, names as font_names, table as font_table
 from bongo.module import Context
@@ -240,13 +240,24 @@ def create_app(*, modules, live, pairing, config_path, logs: LogBuffer | None = 
         # asked by the updater on this device after it restarts the display; nothing private in it
         return jsonify(live.health())
 
+    def live_status(config) -> dict:
+        """``live.status()`` and ``brightness_ends``: when a brightness set by hand ends, by the Matrix's own clock
+        ("16:07", put into words where the card's sunrise and sunset are: bongo.daylight.clock), or None."""
+        from bongo import daylight
+        status, until = live.status(), live.brightness_until
+        try:
+            ends = daylight.clock(until, cfg.context_factory(config)().now()) if status["brightness_until"] and until else None
+        except Exception:   # (a time zone that can't be read: the page shows no time)
+            ends = None
+        return {**status, "brightness_ends": ends}
+
     # -- what's on --------------------------------------------------------------------------
     @app.get("/api/state")
     def state():
         config = load()
         area = cfg.safe_area(config)
         # clock: the Matrix's own time (its time zone, not the phone's), for "Not now · next 20:00" on the playlist
-        return jsonify(live=live.status(), panel={"width": area.panel_width, "height": area.panel_height},
+        return jsonify(live=live_status(config), panel={"width": area.panel_width, "height": area.panel_height},
                        clock=cfg.context_factory(config)().now().strftime("%H:%M"),
                        now=(lambda t: (t if t.tzinfo else t.astimezone()).isoformat(timespec="milliseconds"))(   # ...to the second,
                            cfg.context_factory(config)().now()),                    # with its offset, for Sleep now
@@ -416,10 +427,20 @@ def create_app(*, modules, live, pairing, config_path, logs: LogBuffer | None = 
             live.skip.set()
         elif action == "brightness":
             value = data.get("value")
-            live.brightness = None if value is None else int(number(value, 1, 100, "brightness"))
+            # by hand: with Follow daylight on it lasts until the next sunrise, sunset or sleep change. The player
+            # says when; asked here the same way, so this answer already has it (the Now page says "until 16:07" at once)
+            live.set_brightness(None if value is None else int(number(value, 1, 100, "brightness")))
+            if value is not None:
+                try:
+                    from bongo.schedule import Schedule
+                    config = load()
+                    rule = Schedule.from_config(config)
+                    live.held_brightness(cfg.context_factory(config)().now(), rule.next_change if rule.daylight else None)
+                except Exception:   # (a config that can't say: the player works it out at its next look)
+                    logging.getLogger("bongo.web").exception("couldn't say when the brightness set by hand ends")
         else:
             return jsonify(error=f"unknown action {action!r}"), 400
-        return jsonify(live=live.status())
+        return jsonify(live=live_status(load()))
 
     last_act = {}
 
@@ -457,10 +478,11 @@ def create_app(*, modules, live, pairing, config_path, logs: LogBuffer | None = 
         data = body()
         try:
             width, height = canvas(data)
+            made = {}   # how many colours it uses, and whether a GIF's 256 are fewer
             gif = animator.gif(data.get("frames"), width, height, data.get("background", "#000000"),
-                               data.get("loop", "loop"))
+                               data.get("loop", "loop"), made)
             if data.get("show"):
-                name = animator.save_preview(gif, cfg.safe_area(load()))   # cut to the safe area, as the guide shows
+                name = animator.save_preview(gif, cfg.safe_area(load()), made)   # cut to the safe area, as the guide shows
             else:
                 name = animator.save(str(data.get("name", "animation")), gif)
         except ValueError as error:
@@ -469,9 +491,9 @@ def create_app(*, modules, live, pairing, config_path, logs: LogBuffer | None = 
             if "media" not in modules:
                 return jsonify(error="no media module installed"), 409
             live.push(Entry("media", "pixel", 15, {"file": name}))
-            return jsonify(ok=True, name=name, live=live.status())
+            return jsonify(ok=True, name=name, live=live.status(), **made)
         logging.getLogger("bongo.web").info("animation saved: %s", name)
-        return jsonify(ok=True, name=name), 201
+        return jsonify(ok=True, name=name, **made), 201
 
     # projects: the drawing itself, with its layers, to open again (and what modules draw sprites from)
     @app.get("/api/animator/projects")
@@ -499,6 +521,84 @@ def create_app(*, modules, live, pairing, config_path, logs: LogBuffer | None = 
             return jsonify(error="Couldn't save it: the Matrix couldn't write the file (its card may be full)."), 507
         logging.getLogger("bongo.web").info("animator project saved: %s", saved)
         return jsonify(ok=True, name=saved)
+
+    sprite_slot = threading.BoundedSemaphore(1)   # one of these being drawn at a time: they are the costliest thing the Animator asks of a Pi
+
+    @app.post("/api/animator/projects/<name>/where-used")
+    def animator_where_used(name):
+        """The screens that draw the sprite called ``name``, twice each as small GIFs: with the built-in drawing and
+        with the one sent (a project, as for Save; not saved). Drawn for this request only (bongo/sprite_preview.py)."""
+        request.max_content_length = animator.MAX_PROJECT + 64 * 1024
+        try:
+            stem = animator.clean_project_name(name)
+            sprite_preview.built_in(stem)
+            mine = sprite_preview.drawing(body(), stem)
+        except sprite_preview.Unknown:
+            return jsonify(error=f"There is no built-in drawing called {name}."), 404
+        except ValueError as error:
+            return jsonify(error=f"Couldn't read that drawing: {error}."), 422
+        if not sprite_slot.acquire(timeout=sprite_preview.SLOT_WAIT):
+            return jsonify(error="The Matrix is busy drawing another one; try again in a moment."), 429
+        try:
+            config = load()
+            area = cfg.safe_area(config)
+            zone = config.get("timezone") or None
+            result = sprite_preview.render(modules, stem, mine, area, fonts=fonts, pet=pets.of(config), home=config.get("location"),
+                                           tz=ZoneInfo(zone) if zone else None, calendar=cfg.calendar_look(config))
+        finally:
+            sprite_slot.release()
+        return jsonify(result)
+
+    @app.get("/api/animator/projects/<name>/thumb.png")
+    def animator_project_thumb(name):
+        try:
+            data, rev = animator.thumbnail(name)
+        except FileNotFoundError:
+            abort(404, "no such project")
+        except (ValueError, OSError):
+            abort(404, "that project can't be drawn")
+        response = send_file(io.BytesIO(data), mimetype="image/png")
+        # the list's ?v= is the rev: a picture for the current rev never changes, so the browser keeps it for good
+        response.headers["Cache-Control"] = "private, max-age=31536000, immutable" if request.args.get("v") == rev else "private, no-cache"
+        response.set_etag(rev)
+        return response.make_conditional(request)
+
+    def _copy_to(make):
+        """Rename or copy: the new name comes in the body ({"to": ..., "replace": true once the owner has agreed to replace something})."""
+        data = body()
+        try:
+            return jsonify(ok=True, name=make(data.get("to"), data.get("replace") is True))
+        except animator.Exists as taken:
+            return jsonify(error=f"There's already a drawing called \"{taken.name}\".", exists=taken.kind, name=taken.name), 409
+        except PermissionError as error:
+            abort(403, str(error))
+        except FileNotFoundError:
+            abort(404, "no such project")
+        except ValueError as error:
+            return jsonify(error=f"{str(error)[:1].upper()}{str(error)[1:]}."), 422
+        except OSError as error:
+            logging.getLogger("bongo.web").warning("animator project not written: %s", error)
+            return jsonify(error="The Matrix couldn't write the file (its card may be full)."), 507
+
+    @app.post("/api/animator/projects/<name>/rename")
+    def animator_project_rename(name):
+        def make(to, replace):
+            if not isinstance(to, str):
+                raise ValueError("Give it a new name")
+            new = animator.rename_project(name, to, replace)
+            logging.getLogger("bongo.web").info("animator project renamed: %s to %s", name, new)
+            return new
+        return _copy_to(make)
+
+    @app.post("/api/animator/projects/<name>/duplicate")
+    def animator_project_duplicate(name):
+        def make(to, replace):
+            if to is not None and not isinstance(to, str):
+                raise ValueError("Give it a new name")
+            new = animator.duplicate_project(name, to, replace)
+            logging.getLogger("bongo.web").info("animator project copied: %s to %s", name, new)
+            return new
+        return _copy_to(make)
 
     @app.delete("/api/animator/projects/<name>")
     def animator_project_delete(name):
@@ -624,14 +724,19 @@ def create_app(*, modules, live, pairing, config_path, logs: LogBuffer | None = 
 
     @app.post("/api/animator/import")
     def animator_import():
-        """A GIF or picture turned into Animator frames to touch up (nothing is saved)."""
+        """A GIF or picture turned into Animator frames to touch up (nothing is saved). ``fit``: ``whole`` (the
+        picture fitted inside the canvas) or ``fill`` (covers it, the edges cut off); ``black``: ``empty`` (black
+        pixels are left see-through) or ``keep``."""
         request.max_content_length = 8 * 1024 * 1024
         upload = request.files.get("file")
         if upload is None or not upload.filename:
             abort(400, "choose a GIF or picture")
         cut = []   # a note if not every frame came in
         try:
-            frames = animator.frames_from(upload.read(), *canvas(request.form), cut)
+            fit, black = request.form.get("fit", "whole"), request.form.get("black", "empty")
+            if fit not in ("whole", "fill") or black not in ("empty", "keep"):
+                abort(400, "fit is whole or fill; black is empty or keep")
+            frames = animator.frames_from(upload.read(), *canvas(request.form), cut, fill=fit == "fill", black=black == "keep")
         except ValueError as error:
             return jsonify(error=f"Couldn't import {upload.filename}: {error}."), 422
         return jsonify(frames=frames, note=cut[0] if cut else None)
@@ -1083,6 +1188,38 @@ def create_app(*, modules, live, pairing, config_path, logs: LogBuffer | None = 
         except (OSError, ValueError) as error:
             logging.getLogger("bongo.web").warning("place search failed: %s", weather.hide(error))
             return jsonify(error="Couldn't search for places just now; check the Matrix's internet connection."), 502
+
+    @app.get("/api/daylight")
+    def daylight_curve():
+        """Today's brightness through the day, for the graph in Settings > Device (Follow daylight): as saved,
+        or as the card's sliders stand (?day=&dark=&gradual=). Worked out by the code the player uses
+        (Schedule.level), so the graph can't say anything the panel doesn't do."""
+        from bongo import daylight
+        from bongo.schedule import Schedule
+        config = load()
+        draft, panel = {**daylight.settings(config), "follow": True}, dict(config["panel"])
+        for name, key, low, into in (("day", "brightness", 1, panel), ("dark", "after_dark", 1, draft), ("gradual", "gradual", 0, draft)):
+            if name in request.args:
+                into[key] = int(number(request.args[name], low, 100, name))
+        out = {"place": None, "sleep_level": None}
+        try:
+            home = config.get("location")
+            schedule = Schedule.from_config({**config, "panel": panel, "daylight": draft})
+            light = schedule.daylight
+            out = {"place": home["name"] if daylight.located(home) and isinstance(home.get("name"), str) else None,
+                   "sleep_level": schedule.sleep_brightness if schedule.sleeps and schedule.sleep_from else None}
+            if light is None:   # no location: nothing to follow, and the panel keeps the plain daytime brightness
+                return jsonify(**out, needs_location=True)
+            drawn = daylight.curve(schedule, cfg.context_factory(config)().now())
+            if not all(math.isfinite(level) for level in [drawn["now"]["level"], *(v for _, v in drawn["points"])]):
+                raise ArithmeticError("the brightness came out as something that isn't a number")
+        except Exception:
+            # the player carries on at the daytime brightness when the sun can't be worked out (Schedule.level);
+            # the card is told as plainly, never with an error page. One line in the log, with the reason.
+            daylight.failed("drawing today's brightness")
+            return jsonify(**out, trouble="Couldn't work out today's daylight. The panel keeps going; see Logs for why.")
+        return jsonify(**out, day=round(light.day), dark=round(light.dark), gradual=round(light.gradual), word=daylight.word(light.gradual),
+                       **drawn)
 
     # -- devices and logs ---------------------------------------------------------------------
     @app.get("/api/media")

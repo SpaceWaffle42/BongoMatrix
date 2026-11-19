@@ -237,15 +237,17 @@
   }
 
   // -- areas: what the selection tool lifts, moves, turns and puts back ---------------------------
-  // an area is { x, y, w, h }; a piece is { px, w, h } (its own little frame)
+  // an area is { x, y, w, h }; a piece is { px, w, h } (its own little frame). Either may have a `mask`: w*h of
+  // 1 or 0, which pixels of the box are in it (picked by colour); without one the whole box is
+  const inMask = (r, a, b) => !r.mask || r.mask[b * r.w + a];
   function lifted(px, r) {
-    const piece = { px: new Array(r.w * r.h).fill(null), w: r.w, h: r.h };
-    for (let b = 0; b < r.h; b++) for (let a = 0; a < r.w; a++) if (inside(r.x + a, r.y + b)) piece.px[b * r.w + a] = px[(r.y + b) * W + r.x + a];
+    const piece = { px: new Array(r.w * r.h).fill(null), w: r.w, h: r.h, ...(r.mask ? { mask: r.mask.slice() } : {}) };
+    for (let b = 0; b < r.h; b++) for (let a = 0; a < r.w; a++) if (inside(r.x + a, r.y + b) && inMask(r, a, b)) piece.px[b * r.w + a] = px[(r.y + b) * W + r.x + a];
     return piece;
   }
   function cleared(px, r) {
     const out = px.slice();
-    for (let b = 0; b < r.h; b++) for (let a = 0; a < r.w; a++) if (inside(r.x + a, r.y + b)) out[(r.y + b) * W + r.x + a] = null;
+    for (let b = 0; b < r.h; b++) for (let a = 0; a < r.w; a++) if (inside(r.x + a, r.y + b) && inMask(r, a, b)) out[(r.y + b) * W + r.x + a] = null;
     return out;
   }
   function placed(px, piece, x, y) {   // drawn pixels of the piece replace what's there; its empty ones change nothing
@@ -253,17 +255,17 @@
     piece.px.forEach((c, i) => { const a = x + i % piece.w, b = y + Math.floor(i / piece.w); if (c && inside(a, b)) out[b * W + a] = c; });
     return out;
   }
-  function turned(piece) {   // a quarter turn clockwise
-    const out = { px: new Array(piece.w * piece.h).fill(null), w: piece.h, h: piece.w };
-    piece.px.forEach((c, i) => { const x = i % piece.w, y = Math.floor(i / piece.w); out.px[x * out.w + (piece.h - 1 - y)] = c; });
+  // a new w x h piece whose pixel (x, y) is the old one's pixel from(x, y), its mask moved the same way
+  function remap(piece, w, h, from) {
+    const out = { px: new Array(w * h).fill(null), w, h, ...(piece.mask ? { mask: new Array(w * h).fill(0) } : {}) };
+    for (let y = 0; y < h; y++) for (let x = 0; x < w; x++) { const j = from(x, y); out.px[y * w + x] = piece.px[j]; if (out.mask) out.mask[y * w + x] = piece.mask[j]; }
     return out;
   }
-  function mirrored(piece, horizontal) {
-    const out = { px: new Array(piece.w * piece.h).fill(null), w: piece.w, h: piece.h };
-    piece.px.forEach((c, i) => { const x = i % piece.w, y = Math.floor(i / piece.w);
-      out.px[horizontal ? y * piece.w + (piece.w - 1 - x) : (piece.h - 1 - y) * piece.w + x] = c; });
-    return out;
-  }
+  const turned = (piece) => remap(piece, piece.h, piece.w, (x, y) => (piece.h - 1 - x) * piece.w + y);   // a quarter turn clockwise
+  const mirrored = (piece, horizontal) => remap(piece, piece.w, piece.h, (x, y) => (horizontal ? y * piece.w + piece.w - 1 - x : (piece.h - 1 - y) * piece.w + x));
+  // stretched or shrunk to w x h, nearest pixel (each takes the old pixel under its middle), so it stays crisp:
+  // twice the size is every pixel doubled, and half of that is the original again
+  const scaled = (piece, w, h) => remap(piece, w, h, (x, y) => Math.floor((y + 0.5) * piece.h / h) * piece.w + Math.floor((x + 0.5) * piece.w / w));
 
   // -- layers flattened into the picture ----------------------------------------------------------
   // cels: one frame's pixels per layer, bottom first. A layer is { on, opacity (0..1), mode }: 'normal' lays
@@ -306,6 +308,17 @@
   Object.entries(FONT).forEach(([k, rows]) => { TINY.glyphs[k] = [rows[0].length + 1, 0, 5, rows[0].length, rows.map((r) => parseInt(r.replace(/X/g, '1').replace(/\./g, '0'), 2))]; });
   const glyph = (font, ch) => font.glyphs[font.upper ? ch.toUpperCase() : ch] || font.glyphs['?'] || [0, 0, 0, 0, []];
   const textWidth = (s, font = TINY) => [...s].reduce((w, ch) => w + glyph(font, ch)[0], 0);
+  // the columns s actually lights, from where it starts: { left, right }, or null if it lights none (spaces).
+  // Not the advance widths: a letter's spacing after it (or a blank column in its bitmap) isn't drawn
+  function textInk(s, font = TINY) {
+    let x = 0, left = Infinity, right = -Infinity;
+    for (const ch of s) {
+      const [advance, xoff, , w, rows] = glyph(font, ch), bits = rows.reduce((a, r) => a | r, 0);
+      for (let a = 0; a < w; a++) if (bits >> (w - 1 - a) & 1) { left = Math.min(left, x + xoff + a); right = Math.max(right, x + xoff + a); }
+      x += advance;
+    }
+    return left <= right ? { left, right } : null;
+  }
   // write s with the top of its capitals at (x, y); `set(i)` gets each pixel. Returns how wide it came out.
   function text(s, x, y, font, set) {
     const start = x, base = y + font.cap;
@@ -328,6 +341,6 @@
 
   const api = { W, H, size, resized, hex, parse, mix, SHAPES, SHAPE_NAMES, tip, stamp, lineCells, rectCells, ellipseCells,
     GRADIENT_TYPES, GRADIENT_STYLES, GRADIENT_AREAS, gradient, stopColour, blurAt, shadeAt, glowAt, blurAll, glowAll, addLight, over,
-    replaceColour, flipped, fill, shifted, lifted, cleared, placed, turned, mirrored, compose, FONT, TINY, text, textWidth, dimmed };
+    replaceColour, flipped, fill, shifted, lifted, cleared, placed, turned, mirrored, scaled, compose, FONT, TINY, text, textWidth, textInk, dimmed };
   window.PixelTools = api;
 })();

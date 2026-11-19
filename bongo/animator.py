@@ -46,11 +46,13 @@ def colour(value, background):
     return tuple(int(value[i:i + 2], 16) for i in (1, 3, 5))
 
 
-def encode_gif(frames: list[tuple[Image.Image, int]], loop: bool = True, nearest: bool = True) -> bytes:
+def encode_gif(frames: list[tuple[Image.Image, int]], loop: bool = True, nearest: bool = True, report: dict | None = None) -> bytes:
     """One GIF from RGB pictures of one size and how long each shows: repeated frames merged into one
     longer one, and one shared palette for the whole animation, so a colour never shifts from frame to
     frame. Up to 256 colours are kept exactly; with more, 224 are picked by median cut plus the 32 colours
-    those serve worst (error x how often), and every pixel takes the nearest. No dithering."""
+    those serve worst (error x how often), and every pixel takes the nearest. No dithering. ``report``, if given, is
+    filled with ``colours`` (how many different colours the animation uses) and ``reduced`` (more than a GIF's 256,
+    so some are only close in the GIF)."""
     if not frames:
         raise ValueError("an animation needs at least one frame")
     size = frames[0][0].size
@@ -67,6 +69,8 @@ def encode_gif(frames: list[tuple[Image.Image, int]], loop: bool = True, nearest
     colours, where, counts = np.unique(np.stack([m[0] for m in merged]), return_inverse=True, return_counts=True)
     where = where.reshape(len(merged), size[1], size[0])
     rgb = np.stack([(colours >> 16) & 255, (colours >> 8) & 255, colours & 255], axis=1).astype(np.int32)
+    if report is not None:
+        report.update(colours=len(colours), reduced=len(colours) > 256)
     if len(colours) <= 256:   # few enough to keep every one exactly
         palette, index = rgb, np.arange(len(colours))
     else:
@@ -128,8 +132,8 @@ def side(value, name: str) -> int:
     return value
 
 
-def gif(frames: list, width: int, height: int, background: str = "#000000", loop: str = "loop") -> bytes:
-    """The frames as an animated GIF (``loop``: loop, once or pingpong)."""
+def gif(frames: list, width: int, height: int, background: str = "#000000", loop: str = "loop", report: dict | None = None) -> bytes:
+    """The frames as an animated GIF (``loop``: loop, once or pingpong). ``report``: see ``encode_gif``."""
     if not isinstance(frames, list) or not frames:
         raise ValueError("an animation needs at least one frame")
     budget(width, height, len(frames))
@@ -144,44 +148,64 @@ def gif(frames: list, width: int, height: int, background: str = "#000000", loop
         pictures.append((img, max(20, min(10_000, _ms(f.get("ms", 100), k)))))
     if loop == "pingpong" and len(pictures) > 2:
         pictures += pictures[-2:0:-1]
-    return encode_gif(pictures, loop=loop != "once")
+    return encode_gif(pictures, loop=loop != "once", report=report)
 
 
-def frames_from(data: bytes, width: int, height: int, cut: list | None = None) -> list:
-    """A GIF, PNG or WebP (still or animated) as Animator frames: each frame fitted inside the panel,
-    centred, transparent and black pixels left as background, its own timing kept (up to ``MAX_FRAMES``).
-    If not every frame comes in, a note saying so is added to ``cut``."""
+# what an import reads: what the media library takes (bongo/media.py IMAGES), MPO being how Pillow names some phones' JPEGs.
+# Anything else Pillow can open (EPS, which can start Ghostscript, PDF, TIFF, ICO...) is refused here.
+IMPORTABLE = ("GIF", "PNG", "WEBP", "JPEG", "MPO", "BMP")
+STILL = ("JPEG", "MPO", "BMP")   # a photo or bitmap is one picture, even if the file holds a second (an MPO's)
+UNREADABLE = "that isn't a picture the Animator can read (try a GIF, PNG, JPEG or WebP)"
+
+
+def frames_from(data: bytes, width: int, height: int, cut: list | None = None, fill: bool = False, black: bool = False) -> list:
+    """A GIF, PNG, JPEG, BMP or WebP (still or animated) as Animator frames, each frame brought to the canvas and its own
+    timing kept (up to ``MAX_FRAMES``). ``fill`` False: the whole picture fitted inside, centred; True: it covers the
+    canvas and the edges that don't fit are cut off. Transparent pixels are left as background, and so are black ones
+    (an LED that's off) unless ``black`` says to keep them as drawn black. If not every frame comes in, a note
+    saying so is added to ``cut``."""
     try:
         img = Image.open(io.BytesIO(data))
+        if img.format not in IMPORTABLE:   # (checked before anything is decoded: EPS would start Ghostscript)
+            raise UnidentifiedImageError(img.format)
         # the size is in the header: a small file can still unpack to gigabytes, so look before decoding
         if img.width * img.height > media.MAX_PIXELS:
             raise ValueError(f"that picture is too large ({img.width}×{img.height}); keep it under 16 megapixels")
         img.load()
     except (UnidentifiedImageError, Image.DecompressionBombError, *media.CUT_OFF):
-        raise ValueError("that isn't a picture the Animator can read (try a GIF, PNG or WebP)") from None
+        raise ValueError(UNREADABLE) from None
     frames = []
     most = min(MAX_FRAMES, MAX_PIXELS // (width * height),   # a bigger canvas takes fewer frames
                media.frames_played(img.width, img.height, total := media.frame_count(img)))   # ...and so does a bigger picture
+    if img.format in STILL:
+        most, total = 1, 1
     turn = media.orientation(img)
     try:
         for k, frame in enumerate(ImageSequence.Iterator(img)):
             if k >= most:
                 break
             rgba = media.rgba(frame, turn)   # upright, and 16-bit greys brought down to 8 bits
-            scale = min(width / rgba.width, height / rgba.height)
+            pick = max if fill else min
+            scale = pick(width / rgba.width, height / rgba.height)
             size = (max(1, round(rgba.width * scale)), max(1, round(rgba.height * scale)))
+            if fill:
+                size = (max(width, size[0]), max(height, size[1]))   # (rounding must never leave a gap)
             if size != rgba.size:   # shrinking smooths; growing a small sprite keeps its hard pixels
                 rgba = rgba.resize(size, Image.Resampling.LANCZOS if scale < 1 else Image.Resampling.NEAREST)
             canvas = Image.new("RGBA", (width, height))
-            canvas.paste(rgba, ((width - size[0]) // 2, (height - size[1]) // 2))
+            if fill:   # the middle of it, as the Media module's Fill does
+                x, y = (size[0] - width) // 2, (size[1] - height) // 2
+                canvas.paste(rgba.crop((x, y, x + width, y + height)), (0, 0))
+            else:
+                canvas.paste(rgba, ((width - size[0]) // 2, (height - size[1]) // 2))
             rgba_px = canvas.tobytes()   # (getdata is deprecated in newer Pillow)
-            px = [None if rgba_px[i + 3] < 128 or not any(rgba_px[i:i + 3]) else "#%02x%02x%02x" % tuple(rgba_px[i:i + 3])
-                  for i in range(0, len(rgba_px), 4)]   # black is an LED that's off: the background
+            px = [None if rgba_px[i + 3] < 128 or (not black and not any(rgba_px[i:i + 3])) else "#%02x%02x%02x" % tuple(rgba_px[i:i + 3])
+                  for i in range(0, len(rgba_px), 4)]   # black is an LED that's off: the background (unless asked to keep it)
             ms = int(frame.info.get("duration") or img.info.get("duration") or 100)   # read once the frame is decoded (WebP)
             frames.append({"px": px, "ms": max(20, min(10_000, ms))})
     except media.CUT_OFF:
         if not frames:
-            raise ValueError("that isn't a picture the Animator can read (try a GIF, PNG or WebP)") from None
+            raise ValueError(UNREADABLE) from None
         if cut is not None:   # a cut-off file: the frames that came through
             cut.append(f"only the first {len(frames)} frames (the rest won't read)")
         return frames
@@ -200,17 +224,18 @@ def save(name: str, data: bytes) -> str:
     return media.save_upload(stem, io.BytesIO(data))
 
 
-def save_preview(data: bytes, area=None) -> str:
+def save_preview(data: bytes, area=None, report: dict | None = None) -> str:
     """For "Show on Matrix": kept out of the library. With a safe area (``area``, a SafeArea), a drawing the
     size of the whole panel is cut down to the part the frame leaves visible, just as the Animator's dashed
-    guide shows it: shrinking it to fit instead would merge one-pixel lines."""
+    guide shows it: shrinking it to fit instead would merge one-pixel lines. ``report``: see ``encode_gif`` (what is
+    shown, once cut)."""
     if area is not None and any(area.margins):
         with Image.open(io.BytesIO(data)) as im:
             if im.size == (area.panel_width, area.panel_height):
                 box = (area.left, area.top, area.left + area.width, area.top + area.height)
                 pictures = [(frame.convert("RGB").crop(box), int(frame.info.get("duration") or 100))
                             for frame in ImageSequence.Iterator(im)]
-                data = encode_gif(pictures, loop="loop" in im.info)
+                data = encode_gif(pictures, loop="loop" in im.info, report=report)
     path = media.UPLOADED / ".animator" / "preview.gif"
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_bytes(data)
@@ -275,7 +300,7 @@ def check_project(data) -> dict:
             raise ValueError("a layer is normal or adds light")
         kept_layers.append({"name": str(layer.get("name") or f"Layer {k + 1}")[:24], "on": layer.get("on") is not False,
                             "opacity": int(opacity) if opacity in (0, 1) else float(opacity), "mode": layer.get("mode", "normal"),
-                            "shared": layer.get("shared") is True})
+                            "shared": layer.get("shared") is True, **({"locked": True} if layer.get("locked") is True else {})})   # locked: kept only when it is
     frames = data.get("frames")
     if not isinstance(frames, list) or not frames:
         raise ValueError(f"a project has 1 to {MAX_FRAMES} frames")
@@ -345,7 +370,7 @@ def projects() -> list[dict]:
                     size = (None, whole["width"], whole["height"])
                 found[path.stem] = {"name": path.stem, "width": int(size[1]), "height": int(size[2]),
                                     "built_in": built_in, "replaces_built_in": not built_in and path.stem in found,
-                                    "bytes": path.stat().st_size}
+                                    "bytes": path.stat().st_size, "rev": _rev(path)}
             except (OSError, ValueError, KeyError, TypeError, RecursionError):
                 continue   # not one of ours: leave it alone
     return sorted(found.values(), key=lambda p: (p["built_in"], p["name"]))
@@ -367,6 +392,21 @@ def read_project(path: Path) -> dict:
     return check_project({**data, "name": path.stem} if isinstance(data, dict) else data)
 
 
+def _write(text: str, target: Path) -> None:
+    """The file's text onto the card, whole or not at all."""
+    fd, tmp = tempfile.mkstemp(dir=target.parent, prefix=".saving-", suffix=".json")
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as out:
+            out.write(text)
+            out.flush()
+            os.fsync(out.fileno())   # whole on the card before it takes the old one's place: a pulled plug loses nothing
+        os.chmod(tmp, 0o644)
+        os.replace(tmp, target)
+    finally:
+        if os.path.exists(tmp):
+            os.unlink(tmp)
+
+
 def save_project(data) -> str:
     """Keep a project in data/animator under its own name (saving again replaces it). Returns the name."""
     project = check_project(data)
@@ -378,18 +418,86 @@ def save_project(data) -> str:
     target = folder / f"{project['name']}.json"
     if not target.exists() and len(_own(folder)) >= MAX_PROJECTS:
         raise ValueError(f"there are already {MAX_PROJECTS} saved drawings; delete one you don't need first")
-    fd, tmp = tempfile.mkstemp(dir=folder, prefix=".saving-", suffix=".json")
-    try:
-        with os.fdopen(fd, "w", encoding="utf-8") as out:
-            out.write(text)
-            out.flush()
-            os.fsync(out.fileno())   # whole on the card before it takes the old one's place: a pulled plug loses nothing
-        os.chmod(tmp, 0o644)
-        os.replace(tmp, target)
-    finally:
-        if os.path.exists(tmp):
-            os.unlink(tmp)
+    _write(text, target)
     return project["name"]
+
+
+class Exists(Exception):
+    """A rename or copy would land on a name that is taken: ``kind`` is "own" (one of yours) or "built_in"
+    (a built-in drawing, which yours would then replace wherever a module draws it)."""
+    def __init__(self, name: str, kind: str):
+        super().__init__(name)
+        self.name, self.kind = name, kind
+
+
+def _mine(name: str) -> Path:
+    """The file of one of your own projects (built-in ones are nobody's to rename)."""
+    path = projects_dir() / f"{clean_project_name(name)}.json"
+    if not path.is_file():
+        if (BUILT_IN / path.name).is_file():
+            raise PermissionError("built-in projects can't be renamed or copied: open one and save it under a new name")
+        raise FileNotFoundError(name)
+    return path
+
+
+def _target(new: str, replace: bool, old: Path | None = None) -> Path:
+    """Where a renamed or copied project goes; ``Exists`` if that name is taken and ``replace`` isn't set."""
+    stem = clean_project_name(new)
+    target = projects_dir() / f"{stem}.json"
+    if old is not None and target == old:
+        return target
+    if not replace:
+        if target.exists():
+            raise Exists(stem, "own")
+        if (BUILT_IN / target.name).is_file():
+            raise Exists(stem, "built_in")
+    return target
+
+
+def rename_project(old: str, new: str, replace: bool = False) -> str:
+    """Rename one of your projects (the new file is whole on the card before the old one goes). A name that's
+    taken, yours or a built-in one, raises ``Exists`` unless ``replace``. Returns the new name."""
+    path = _mine(old)
+    target = _target(new, replace, path)
+    if target == path:
+        return path.stem
+    project = {**read_project(path), "name": target.stem}
+    _write(dumps(project), target)
+    path.unlink()
+    return target.stem
+
+
+def copy_name(name: str) -> str:
+    """A free name for a copy of ``name``: ``name_copy``, ``name_copy2``..."""
+    taken = {p.stem for p in _own(projects_dir())} | {p.stem for p in _own(BUILT_IN)}
+    for n in range(1, 1000):
+        tail = "_copy" + (str(n) if n > 1 else "")
+        stem = name[:40 - len(tail)].rstrip("_-") + tail
+        if stem not in taken:
+            return stem
+    raise ValueError("too many copies of that one")
+
+
+def _to_copy(name: str) -> Path:
+    """The file a copy is made from: yours, or else the built-in one of that name (copied as one of yours)."""
+    path = projects_dir() / f"{clean_project_name(name)}.json"
+    if path.is_file():
+        return path
+    if (BUILT_IN / path.name).is_file():
+        return BUILT_IN / path.name
+    raise FileNotFoundError(name)
+
+
+def duplicate_project(name: str, new: str | None = None, replace: bool = False) -> str:
+    """A copy of one of your projects, or of a built-in one, as one of yours under a new name (``name_copy`` if none
+    is given: never a built-in's name, so a copy never replaces one unasked). Returns that name."""
+    path = _to_copy(name)
+    target = _target(new if new else copy_name(path.stem), replace)
+    if not target.exists() and len(_own(projects_dir())) >= MAX_PROJECTS:
+        raise ValueError(f"there are already {MAX_PROJECTS} saved drawings; delete one you don't need first")
+    target.parent.mkdir(parents=True, exist_ok=True)   # a built-in copied before anything of yours was saved
+    _write(dumps({**read_project(path), "name": target.stem}), target)
+    return target.stem
 
 
 def delete_project(name: str) -> None:
@@ -400,6 +508,41 @@ def delete_project(name: str) -> None:
             raise PermissionError("built-in projects can't be deleted")
         raise FileNotFoundError(name)
     path.unlink()
+
+
+# -- a picture of each project, for the Open list ---------------------------------------------------
+THUMB_FRAMES = 12      # how far into a drawing to look for a frame with something in it
+_thumbs: dict = {}     # (path, rev) -> PNG: a saved or deleted drawing has another rev or path, so never a stale one
+MAX_THUMBS = 700
+
+
+def _rev(path: Path) -> str:
+    """Changes whenever the file does (saving writes a new file): the picture's cache key, in the browser and here."""
+    st = path.stat()
+    return f"{st.st_mtime_ns:x}-{st.st_size:x}"
+
+
+def thumbnail(name: str) -> tuple[bytes, str]:
+    """A PNG at the drawing's own size (the page scales it up, crisp) of its first frame that isn't empty,
+    on its background colour, and the rev it belongs to. Made on first ask and kept."""
+    path = _path(name)
+    if path is None:
+        raise FileNotFoundError(name)
+    key = (str(path), _rev(path))
+    if key not in _thumbs:
+        project = read_project(path)
+        project["frames"] = project["frames"][:THUMB_FRAMES]   # flatten reads every frame it is given
+        shots = flatten(project)
+        bg = tuple(int(project["background"][i:i + 2], 16) for i in (1, 3, 5))
+        pick = next((img for img, _ in shots if img.getchannel("A").getbbox() is not None), shots[0][0])
+        flat = Image.new("RGB", pick.size, bg)
+        flat.paste(pick, mask=pick.getchannel("A"))
+        out = io.BytesIO()
+        flat.save(out, "PNG", optimize=True)
+        while len(_thumbs) >= MAX_THUMBS:
+            _thumbs.pop(next(iter(_thumbs)))
+        _thumbs[key] = out.getvalue()
+    return _thumbs[key], key[1]
 
 
 def _byte(value: float) -> int:

@@ -1,0 +1,4 @@
+{"format":"bongo-animation","version":1,"name":"tree_robin","width":8,"height":6,"background":"#000000","loop":"loop","palette":["#1c1410","#7e6c4c","#a08c64","#c8905c","#d0a070","#f05a1e","#f2ece0","#ff7a2e"],"layers":[{"name":"Robin","on":true,"opacity":1,"mode":"normal","shared":false}],"frames":[
+{"ms":400,"cels":["4*. 2*2 5*. 2 7 0 7 4 1 2*2 3*7 3*. 1 2 2*5 7 4*. 2 2*6 7 5*. 3 . 3 2*."]},
+{"ms":400,"cels":["4*. 2*2 5*. 2 0 2*7 4 . 3*2 2*7 2*. 2*1 2 2*5 7 4*. 2 2*6 7 5*. 3 . 3 2*."]}
+]}

@@ -38,6 +38,7 @@ class Entry:
         return modules[self.module].create(self.style, self.settings, ctx)
 
 
+FOLLOW_EVERY = 30.0   # s between looks at the brightness while a screen is up (Follow daylight: the sun has moved on)
 SAY_AGAIN = 600.0  # s before a screen that is still broken is mentioned in the log again (one line)
 OVERRUN = 120.0   # s a busy screen (a line still scrolling) may stay past its time: a backstop, never reached normally
 
@@ -138,6 +139,7 @@ def play(playlist: list[Entry], modules: dict[str, Module], panel, ctx_factory=C
     stop = stop or threading.Event()
     if live:
         live.idle = False
+        live.rules_changed()   # (a brightness set by hand under the last settings: it ends by this schedule's rule)
     day = [e for e in playlist if e.enabled]
     if not day:
         raise ValueError("playlist has no enabled entries")
@@ -173,7 +175,7 @@ def play(playlist: list[Entry], modules: dict[str, Module], panel, ctx_factory=C
             frames = play_entry(style, seconds, panel, stop, place=place, live=live, overlays=extras, hold=hold,
                                 overrun=OVERRUN if limit is None else max(0.0, min(OVERRUN, limit - cap)),   # never into sleep
                                 until=limit if edge else None,   # (edge: the limit is sleep starting or ending)
-                                lit=(lambda covered: lift(True)) if bright else lift,   # (a pushed message: all of it)
+                                lit=(lambda covered: each_frame(True)) if bright else each_frame,   # (a pushed message: all of it)
                                 cover=cover)
             lift(False)
         except Exception as error:  # one broken module must not stop the panel
@@ -206,30 +208,65 @@ def play(playlist: list[Entry], modules: dict[str, Module], panel, ctx_factory=C
             said.clear()
         said[key] = now
 
+    following = bool(schedule and schedule.daylight)   # Follow daylight (bongo/daylight.py)
+    look_at = [float("inf")]   # time.monotonic() when a screen that is still up has its brightness looked at again
+    seen = {"hand": None, "asleep": False, "mode": None, "fade_ends": 0.0, "awake": None}
+
+    dims = hasattr(panel, "set_brightness")
+
     def brightness(now, forced_sleep):
-        if not hasattr(panel, "set_brightness"):
+        if not dims:
             return
-        if live and live.brightness is not None:  # the dashboard's override: straight there
-            panel.set_brightness(live.brightness)
+        seen["asleep"] = forced_sleep
+        by_hand = live.held_brightness(now, schedule.next_change if following else None) if live else None
+        seen["hand"] = by_hand
+        timed = by_hand is not None and live.brightness_until is not None
+        look_at[0] = time.monotonic() + FOLLOW_EVERY if following or timed else float("inf")
+        if following:   # what a covering screen is lifted to (``lift``): the brightness the panel would have awake
+            seen["awake"] = round(schedule.level(now, asleep=False, rising=False))
+        if by_hand is not None:  # set by hand: straight there
+            seen["mode"] = "hand"
+            panel.set_brightness(by_hand)
+            if live:
+                live.level = by_hand
             return
         if not schedule:
             return
         asleep = forced_sleep and schedule.sleep_brightness is not None
-        level = schedule.sleep_brightness if asleep else schedule.day_brightness
+        level = schedule.level(now, asleep=forced_sleep, rising=not (live and live.woke_early))
         if level is None:
             return
-        if hasattr(panel, "ramp_to"):  # day <-> night glides (bongo.fade)
-            panel.ramp_to(level, schedule.fade_seconds, schedule.fade_curve)
-        else:
+        level = max(1, min(100, round(level)))
+        mode, was = "sleep" if asleep else "day", seen["mode"]
+        seen["mode"] = mode
+        if live:
+            live.level = level
+        if not hasattr(panel, "ramp_to"):
             panel.set_brightness(level)
+        elif following and mode == was == "day":
+            # the sun moving on: a point or two at a time, spread over the time to the next look, so nothing
+            # is seen to step. (A day <-> night glide still under way keeps its own length.)
+            left = seen["fade_ends"] - time.monotonic()
+            panel.ramp_to(level, max(FOLLOW_EVERY, left), schedule.fade_curve if left > 0 else "linear")
+        else:   # day <-> night, and back from a brightness set by hand: the glide set in Settings > Sleep (bongo.fade)
+            seen["fade_ends"] = time.monotonic() + schedule.fade_seconds
+            panel.ramp_to(level, schedule.fade_seconds, schedule.fade_curve)
 
     def lift(on):
         """A covering screen (PIN, setup, address) or a pushed message is up: day brightness while it is, so it
-        can be read in the sleep hours too. A brightness set by hand in the dashboard is left as it is."""
+        can be read in the sleep hours too (with Follow daylight: what the daylight asks for now). A brightness
+        set by hand in the dashboard is left as it is."""
         if not hasattr(panel, "lift"):
             return
-        day = schedule.day_brightness if schedule else None
+        day = seen["awake"] if seen["awake"] is not None else (schedule.day_brightness if schedule else None)
         panel.lift(day if on and day is not None and not (live and live.brightness is not None) else None)
+
+    def each_frame(covered):
+        """Told by the screen that is up, every frame: whether something covers it; and the moment to look at the
+        brightness again without waiting for the next screen (set by hand just now, or the sun has moved on)."""
+        lift(covered)
+        if dims and ((live is not None and live.brightness != seen["hand"]) or time.monotonic() >= look_at[0]):
+            brightness(ctx_factory().now(), seen["asleep"])
 
     def show_dark(wait):
         """A dark panel (forced sleep, or every screen skipped), still with the PIN, setup or address screen
@@ -296,7 +333,10 @@ def play(playlist: list[Entry], modules: dict[str, Module], panel, ctx_factory=C
         hours = bool(schedule and schedule.asleep(now))    # the sleep hours (Settings > Sleep)
         if live and live.awake and (forced or not hours):
             live.awake = False                             # those hours are over (or Sleep now): asleep as usual next time
+            live.woke_early = not forced                   # ...and the panel is up already: no gentle rise after them
         asleep = forced or (hours and not (live and live.awake))
+        if live and asleep:
+            live.woke_early = False
         woke = was_asleep and not asleep
         if woke and schedule:
             schedule.wake()  # tomorrow night picks a new Sleep screen

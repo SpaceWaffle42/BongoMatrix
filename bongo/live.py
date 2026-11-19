@@ -45,8 +45,14 @@ class Live:
         self.awake = False          # Wake pressed during the sleep hours: awake until they end (the player clears it)
         self.sleeping = False       # what the player is doing now (Sleep now, or the sleep hours)
         self.sleep_hours = False    # whether it's the sleep hours now (Settings > Sleep), awake or not
+        self.woke_early = False     # Wake was pressed in the sleep hours that have just ended: the panel is up already,
+        #                             so no gentle rise after them (Follow daylight; the player clears it when it next sleeps)
         self.idle = False           # nothing is set to play now (every screen has times, and none is now)
-        self.brightness: int | None = None  # dashboard override; None follows the schedule
+        self.brightness: int | None = None  # set by hand (``set_brightness``); None follows the schedule
+        self.brightness_until: dt.datetime | None = None   # when that ends by itself (None: when it is cleared)
+        self._brightness_new = False        # set by hand since the player last looked: it says how long it lasts
+        self._brightness_given = False      # ...unless whoever set it gave its end (kept whatever the settings say)
+        self.level: int | None = None       # the brightness the player has the panel at, or gliding to (by hand or not)
         self.pushes: collections.deque = collections.deque(maxlen=5)
         self.overlay = None         # callable(frame) -> frame, e.g. the pairing PIN
         self.index = None           # playlist position on now (None for splash, sleep, pushes)
@@ -156,6 +162,43 @@ class Live:
         with self._lock:
             self.acts.append((module, name, time.monotonic()))
 
+    def set_brightness(self, level: int | None, until: dt.datetime | None = None) -> None:
+        """Hold the panel at ``level`` (1 to 100) whatever the schedule says; None: follow the schedule again.
+        This is how anything sets the brightness by hand: the dashboard's slider, or a module passing on a
+        dimmer from somewhere else. ``until``: the moment it ends by itself (an aware time). Left out, the
+        player decides: with Follow daylight on, the next sunrise, sunset or start or end of the sleep hours;
+        without, it stays until it's cleared."""
+        with self._lock:
+            self.brightness = None if level is None else max(1, min(100, int(level)))
+            self.brightness_until = until if level is not None else None
+            self._brightness_given = level is not None and until is not None
+            self._brightness_new = level is not None and until is None
+
+    def rules_changed(self) -> None:
+        """The settings that say how long a brightness set by hand lasts may have changed (the player has started
+        with a saved config: Follow daylight switched on or off, new sleep hours, another place). One that is
+        held, and whose end nobody gave, gets its end worked out again by the rule now in force, from now."""
+        with self._lock:
+            if self.brightness is not None and not self._brightness_given:
+                self._brightness_new = True
+
+    def held_brightness(self, now: dt.datetime, ends=None) -> int | None:
+        """Player side: the brightness set by hand that holds at ``now`` (None: none, or it has just ended).
+        ``ends(now)``: when one set without an end is to end (None: not by itself)."""
+        with self._lock:
+            if self.brightness is None:
+                return None
+            if self._brightness_new:
+                self._brightness_new = False
+                self.brightness_until = ends(now) if ends else None
+            until = self.brightness_until
+            if until is not None:
+                if (until.tzinfo is None) != (now.tzinfo is None):   # (as in ``sleep_left``: a naive time is the Pi's own)
+                    until, now = until.astimezone(), now.astimezone()
+                if now >= until:
+                    self.brightness = self.brightness_until = None
+            return self.brightness
+
     def push(self, entry) -> None:
         with self._lock:
             self.pushes.append(entry)
@@ -165,12 +208,16 @@ class Live:
         with self._lock:
             entry, upcoming, started, index = self.entry, self.upcoming, self.started, self.index
         until = self.sleep_until  # read once: the player may clear it meanwhile
+        by_hand, hand_until = self.brightness, self.brightness_until
         def describe(e):
             return None if e is None else {k: v for k, v in asdict(e).items() if k != "enabled"}
         return {
             "entry": describe(entry), "next": describe(upcoming), "index": index,
             "elapsed": round(time.time() - started, 1) if entry else 0,
-            "paused": self.paused, "brightness": self.brightness,
+            "paused": self.paused, "brightness": by_hand,
+            # brightness_until: when the one set by hand ends by itself; level: what the panel is at, by hand or not
+            "brightness_until": hand_until.isoformat() if by_hand is not None and hand_until else None,
+            "level": self.level,
             "sleep_until": until.isoformat() if until else None,
             "asleep": bool(until) or self.sleeping,
             "sleep_hours": self.sleep_hours,

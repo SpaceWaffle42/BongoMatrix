@@ -156,9 +156,13 @@ export function render(view) {
       asleep && (wakesAt ? `Asleep until ${wakesAt}.` : 'Asleep.'), L.pushes && `${L.pushes} message${L.pushes > 1 ? 's' : ''} queued.`].filter(Boolean).join(' ');
     if (Date.now() - sliderTouched > 2500 && document.activeElement !== slider) {
       const auto = L.brightness == null;
-      slider.value = auto ? (S.config?.panel?.brightness ?? 80) : L.brightness;
+      // Follow daylight (Settings > Device): Auto is wherever the daylight has it now, and one set by hand
+      // here ends by itself at the next sunrise, sunset or sleep change
+      const follows = S.config?.daylight?.follow === true && !!S.config?.location && L.level != null;
+      slider.value = auto ? (follows ? L.level : S.config?.panel?.brightness ?? 80) : L.brightness;
       slider.classList.toggle('dim', auto);
-      bVal.textContent = auto ? `Auto · ${slider.value}%` : `${slider.value}%`;
+      bVal.textContent = auto ? `Auto · ${slider.value}%`
+        : L.brightness_ends ? `${slider.value}% until ${L.brightness_ends}` : `${slider.value}%`;   // (the Matrix's own words for the time)
       autoBtn.setAttribute('aria-pressed', String(auto)); manBtn.setAttribute('aria-pressed', String(!auto));
     }
     sleepBtn.replaceChildren(h('span', { class: 'strong' }, asleep ? 'Wake now' : 'Sleep now'),

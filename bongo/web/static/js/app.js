@@ -104,7 +104,7 @@ function showOffline(view, err) {
 function paintNav(p) {
   const active = p.startsWith('/edit') ? '/playlist' : p;
   const link = ([to, long, short, ic], cls) => h('a', {
-    href: href(to), class: cls, 'data-route': to, 'aria-current': active === to ? 'page' : null,
+    href: href(to), class: cls, 'data-route': to, 'aria-current': active === to ? 'page' : null, title: cls === 'tab' ? null : long,   // (the name, where the side menu is only icons: the Animator)
   }, icon(ic), h('span', null, cls === 'tab' ? short : long));
   document.getElementById('sidenav').replaceChildren(...NAV.map((n) => link(n, 'side-link')));
   document.getElementById('tabbar').replaceChildren(...NAV.map((n) => link(n, 'tab')));
@@ -125,6 +125,8 @@ window.addEventListener('popstate', () => {
   render();
 });
 window.addEventListener('hashchange', () => { if (DEMO) render(); });
+// the Animator's ≡ sheet on a phone: "Leave the Animator" (through go(), so its unsaved-work question still asks)
+window.addEventListener('message', (e) => { if (e.origin === location.origin && e.data && e.data.type === 'animator-leave' && path() === '/animator') go('/'); });
 
 // -- data ----------------------------------------------------------------------------------
 export function normalise(entry) {

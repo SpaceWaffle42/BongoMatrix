@@ -10,6 +10,7 @@ import { lookEditor, keepState, comingUpCard, icons, NAMES as COLOUR_NAMES } fro
 import { importBox, importedMore, addons } from './modimport.js';
 import { DEMO } from './api.js';
 import * as deeplink from './deeplink.js';
+import { brightnessBox } from './daylight.js';
 
 /** The cards, by a name that never changes (their order is saved on the Matrix: config ``settings_layout``). */
 const CARDS = [['safe_area', () => safeAreaCard()], ['device', () => deviceCard()], ['modules', () => modulesCard()],
@@ -258,9 +259,7 @@ function deviceCard() {
   let zones = [];
   try { zones = Intl.supportedValuesOf('timeZone'); } catch { /* older browser: free text */ }
   const here = (() => { try { return Intl.DateTimeFormat().resolvedOptions().timeZone; } catch { return ''; } })();
-  const bright = h('input', { type: 'range', class: 'range', id: 'set-bright', min: 1, max: 100, value: c.panel?.brightness ?? 80 });
-  const bVal = h('span', { class: 'mono strong' }, `${bright.value}%`);
-  bright.addEventListener('input', () => { bVal.textContent = `${bright.value}%`; });
+  const bright = brightnessBox(c);   // the daytime brightness, and Follow daylight (js/daylight.js)
   // the name it answers to on the network, as the Matrix makes it (bongo/netname.py host_name)
   const net = S.state?.network || {};
   const hostOf = (v) => {
@@ -283,15 +282,16 @@ function deviceCard() {
   const save = h('button', { type: 'button', class: 'btn primary' }, 'Save');
   save.onclick = () => {
     if (tz.value && zones.length && !zones.includes(tz.value)) { toast(`“${tz.value}” isn't a time zone this browser knows. Use a name like Europe/London.`, 'error'); tz.focus(); return; }
-    saveConfig({ name: name.value.trim() || 'Bongo Matrix', timezone: tz.value.trim() || null,
-      panel: { ...c.panel, brightness: Number(bright.value) }, web: { hub_picture: hubPic.checked, badge: badge.value || null } }, 'Device settings');
+    const { brightness, daylight } = bright.value();
+    saveConfig({ name: name.value.trim() || 'Bongo Matrix', timezone: tz.value.trim() || null, daylight,
+      panel: { ...c.panel, brightness }, web: { hub_picture: hubPic.checked, badge: badge.value || null } }, 'Device settings');
   };
   return h('section', { class: 'card stack', 'aria-label': 'Device' }, h('h2', { class: 'h2' }, 'Device'),
     h('label', { class: 'field-col', for: 'set-name' }, 'Display name', name, where),
     h('label', { class: 'field-col', for: 'set-tz' }, 'Time zone', tz,
       here && here !== tz.value ? h('button', { type: 'button', class: 'link small left', onclick: () => { tz.value = here; } }, `Use this browser's: ${here}`) : null),
     h('datalist', { id: 'tz-list' }, zones.map((z) => h('option', { value: z }))),
-    h('label', { class: 'field-col', for: 'set-bright' }, h('span', { class: 'row between' }, h('span', null, 'Panel brightness (daytime)'), bVal), bright),
+    bright.el,
     h('p', { class: 'muted tiny flush' }, `${displaySize(c.panel).width}×${displaySize(c.panel).height} panel · ${c.panel?.hardware_mapping || ''}`),
     h('label', { class: 'row gap-s', for: 'set-hub-pic' }, hubPic, h('span', null, 'Show what it\'s playing on the hub')),
     h('p', { class: 'muted tiny flush' }, 'The hub (matrix.local) shows a live picture of each Matrix to anyone on this Wi-Fi, including pushed messages. Its name and what\'s playing always show.'),

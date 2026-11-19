@@ -126,11 +126,17 @@ def sun_times(date: dt.date, lat: float, lon: float):
     return rise, set_
 
 
-def sun_elevation(t: dt.datetime, lat: float, lon: float) -> float:
-    """Sun's height above the horizon in degrees (no refraction)."""
+def sun_heights(t: dt.datetime, lat: float, lon: float) -> tuple[float, float]:
+    """(the sun's height above the horizon now, the highest it gets that day) in degrees, no refraction. The
+    second is worked out from where the sun is now, so it glides through the year with no step at midnight."""
     t = _utc(t)
     decl, eq = _sun(t)
     minutes = t.hour * 60 + t.minute + t.second / 60 + t.microsecond / 6e7
     ha = (minutes + eq + 4 * lon) / 4 - 180
     s = _sin(lat) * _sin(decl) + cos(radians(lat)) * cos(radians(decl)) * cos(radians(ha))
-    return degrees(asin(max(-1.0, min(1.0, s))))
+    return degrees(asin(max(-1.0, min(1.0, s)))), 90 - abs(lat - decl)
+
+
+def sun_elevation(t: dt.datetime, lat: float, lon: float) -> float:
+    """Sun's height above the horizon in degrees (no refraction)."""
+    return sun_heights(t, lat, lon)[0]

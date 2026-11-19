@@ -7,79 +7,496 @@
 <link rel="icon" type="image/png" href="logo.png?size=32">
 <link rel="apple-touch-icon" href="logo.png?size=180&amp;tile">
 <style>
+@font-face { font-family:Inter; src:url("fonts/inter.woff2") format("woff2"); font-weight:400 700; font-style:normal; font-display:swap; }
+@font-face { font-family:"Space Grotesk"; src:url("fonts/space-grotesk.woff2") format("woff2"); font-weight:400 700; font-style:normal; font-display:swap; }
+@font-face { font-family:"JetBrains Mono"; src:url("fonts/jetbrains-mono.woff2") format("woff2"); font-weight:400 700; font-style:normal; font-display:swap; }
 :root {
   --page:#0B0C0E; --head:#0E1013; --card:#131519; --card-2:#181B1F; --well:#08090A; --raise:#1A1D22;
-  --line:#22262C; --line-2:#2C3139; --text:#ECEEF1; --soft:#C9CED6; --muted:#9AA1AC;
+  --line:#22262C; --line-2:#2C3139; --text:#ECEEF1; --soft:#C9CED6; --muted:#9AA1AC; --faint:#8A919C;
   --amber:#FFB547; --amber-hover:#FFCB7A; --ink:#1A1300; --amber-bg:#2A2114; --danger:#FF8A92;
-  --ui: Inter, system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+  --ui: Inter, system-ui, -apple-system, "Segoe UI", Roboto, sans-serif; --head-font:"Space Grotesk", Inter, sans-serif;
   --mono: "JetBrains Mono", ui-monospace, Menlo, Consolas, monospace;
   color-scheme: dark;
 }
 * { box-sizing:border-box; }
-body { margin:0; background:var(--page); color:var(--text); font:14px/1.45 var(--ui); }
-header { display:flex; align-items:center; gap:12px; padding:12px 16px; background:var(--head); border-bottom:1px solid var(--line); flex-wrap:wrap; }
-header h1 { font-size:17px; margin:0; font-weight:650; }
-header .crumb { color:var(--muted); }
-.grow { flex:1 1 auto; }
+html, body { margin:0; }
+body { background:var(--page); color:var(--text); font:14px/1.45 var(--ui); }
+button { font:inherit; color:inherit; }
+.i { display:block; flex:none; }
+.grow { flex:1 1 auto; min-width:0; }
 .input { background:var(--well); border:1px solid var(--line-2); color:var(--text); padding:7px 9px; font:13px var(--mono); border-radius:0; }
-.btn { background:var(--raise); color:var(--text); border:1px solid var(--line-2); padding:7px 12px; font:600 13px var(--ui); cursor:pointer; border-radius:0; display:inline-flex; gap:6px; align-items:center; }
+select.input { font-family:var(--ui); }
+.btn { background:var(--raise); color:var(--text); border:1px solid var(--line-2); padding:7px 12px; font:600 13px var(--ui); cursor:pointer; border-radius:0; display:inline-flex; gap:6px; align-items:center; white-space:nowrap; --icon-bg:var(--raise); }
 .btn:hover { border-color:var(--muted); }
 .btn.primary { background:var(--amber); color:var(--ink); border-color:var(--amber); }
 .btn.primary:hover { background:var(--amber-hover); }
-.btn.on { background:var(--amber-bg); border-color:var(--amber); color:var(--amber); }
+.btn.on { background:var(--amber-bg); border-color:var(--amber); color:var(--amber); --icon-bg:var(--amber-bg); }
 .btn.icon { width:36px; height:36px; justify-content:center; padding:0; font-size:15px; }
-main { display:grid; grid-template-columns:64px minmax(0,1fr) 250px; gap:12px; padding:12px 16px; }
-.card { background:var(--card); border:1px solid var(--line); padding:10px; }
-.tools { display:flex; flex-direction:column; gap:6px; align-items:center; }
-.tools hr { width:100%; border:0; border-top:1px solid var(--line); margin:4px 0; }
-.stage { display:flex; flex-direction:column; gap:8px; min-width:0; }
-.stage-top { display:flex; gap:8px; align-items:center; color:var(--muted); font:12px var(--mono); flex-wrap:wrap; }
-.opts { display:flex; gap:6px 12px; align-items:center; flex-wrap:wrap; min-height:30px; font-size:12px; color:var(--muted); }
-.opts label { display:inline-flex; gap:5px; align-items:center; }
-.opts select { padding:3px 6px; font:12px var(--ui); }
-.opts [hidden] { display:none; }
-.layers { display:flex; flex-direction:column; gap:4px; margin-bottom:8px; }
-.layer { display:flex; align-items:center; gap:8px; padding:4px 6px; border:1px solid var(--line-2); background:none; color:var(--text); font:inherit; font-size:13px; text-align:left; cursor:pointer; }
-.layer.sel { border-color:var(--amber); }
-.layer canvas { width:48px; height:24px; image-rendering:pixelated; background:#000; flex:none; }
-.layer .name { flex:1; min-width:0; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
-.layer .eye { width:30px; height:30px; display:grid; place-items:center; flex:none; border:1px solid var(--line-2); background:none; color:var(--text); cursor:pointer; padding:0; }
-.layer.hidden .name, .layer.hidden canvas { opacity:.4; }
-.layer-btns { display:flex; gap:6px; flex-wrap:wrap; }
-.layer:focus-visible { outline:2px solid var(--amber); outline-offset:1px; }
 .btn:disabled { opacity:.4; cursor:default; }
-@media (pointer: coarse) { .layer .eye { width:38px; height:38px; } .layer-btns .btn { min-height:36px; } }
-.swatch-col { display:inline-flex; flex-direction:column; align-items:center; gap:2px; font-size:11px; color:var(--muted); }
-#colour2 { width:44px; height:32px; border:1px solid var(--line-2); background:none; padding:0; }
-@media (pointer: coarse) { .fine-pointer { display:none; } .opts select { min-height:36px; } .opts input[type=checkbox] { width:22px; height:22px; } #swap { width:36px !important; height:36px !important; } }
-@media (max-width: 560px), (pointer: coarse) { .keys { display:none; } }
-#board-wrap { background:var(--well); border:1px solid var(--line); padding:10px; overflow:auto; }
-#board { display:block; width:100%; height:auto; image-rendering:pixelated; cursor:crosshair; touch-action:none; margin:0 auto; }
-#board-wrap { max-height:82vh; }
-.side { display:flex; flex-direction:column; gap:12px; }
-.label { font-size:11px; letter-spacing:.1em; text-transform:uppercase; color:var(--muted); margin:0 0 8px; }
-.swatches { display:grid; grid-template-columns:repeat(8,1fr); gap:3px; }
-.swatches button { aspect-ratio:1; border:1px solid var(--line-2); padding:0; cursor:pointer; border-radius:0; }
-.swatches button.sel { outline:2px solid var(--amber); outline-offset:1px; }
-.current { display:flex; gap:8px; align-items:center; margin-bottom:8px; }
-.current input[type=color] { width:44px; height:32px; border:1px solid var(--line-2); background:none; padding:0; }
-.led { position:relative; aspect-ratio:2/1; background:#000; margin:0 auto; --w:64; --h:32; }
-.led canvas { width:100%; height:100%; display:block; image-rendering:pixelated; }
-.led::after { content:""; position:absolute; inset:0; pointer-events:none; background:radial-gradient(circle at center, transparent 52%, rgba(0,0,0,.88) 64%); background-size:calc(100%/var(--w)) calc(100%/var(--h)); }
-.row { display:flex; gap:6px; align-items:center; flex-wrap:wrap; }
-.timeline { grid-column:1 / -1; }
-.frames { display:flex; gap:8px; overflow-x:auto; padding:4px 2px 8px; }
-.frame { flex:0 0 auto; width:116px; background:var(--card-2); border:1px solid var(--line-2); padding:5px; cursor:pointer; }
-.frame.sel { border-color:var(--amber); box-shadow:0 0 0 1px var(--amber); }
-.frame canvas { width:100%; display:block; image-rendering:pixelated; background:#000; margin:0 auto; }
-.frame .meta { display:flex; justify-content:space-between; align-items:center; margin-top:4px; font:11px var(--mono); color:var(--muted); }
-.frame input { width:52px; padding:2px 4px; font-size:11px; }
-.add { flex:0 0 auto; width:70px; border:1px dashed var(--line-2); display:flex; align-items:center; justify-content:center; color:var(--muted); cursor:pointer; background:none; font-size:22px; }
-.add:hover { border-color:var(--amber); color:var(--amber); }
+.btn.danger { color:var(--danger); }
+.ib { width:36px; height:36px; display:inline-grid; place-items:center; background:var(--raise); border:1px solid var(--line-2); color:var(--soft); padding:0; flex:none; cursor:pointer; border-radius:0; --icon-bg:var(--raise); }
+.ib:hover { border-color:var(--muted); color:var(--text); }
+.ib.sm { width:30px; height:30px; background:none; --icon-bg:var(--page); }
+.ib.on { background:var(--amber-bg); border-color:var(--amber); color:var(--amber); --icon-bg:var(--amber-bg); }
+.ib:disabled { opacity:.4; cursor:default; }
+.label { font-size:11px; letter-spacing:.1em; text-transform:uppercase; color:var(--muted); margin:0; font-weight:600; }
 .muted { color:var(--muted); }
 .tiny { font-size:12px; }
-.note { background:var(--amber-bg); border:1px solid #4a3a1c; color:var(--soft); padding:8px 12px; margin:12px 16px 0; font-size:13px; }
-#toast { position:fixed; bottom:18px; left:50%; transform:translateX(-50%); background:var(--raise); border:1px solid var(--amber); padding:9px 14px; display:none; }
+.row { display:flex; gap:6px; align-items:center; flex-wrap:wrap; }
+kbd { font:11px var(--mono); border:1px solid var(--line-2); padding:1px 5px; color:var(--soft); background:var(--card-2); }
+#toast { position:fixed; bottom:18px; left:50%; transform:translateX(-50%); background:var(--raise); border:1px solid var(--amber); padding:9px 14px; display:none; z-index:60; max-width:calc(100vw - 24px); pointer-events:none; }   /* (never in the way of a tap) */
+
+/* ---------- the page: one grid, nothing scrolls (layout C) ---------- */
+body { height:100vh; height:100dvh; overflow:hidden; display:grid;
+  grid-template-rows:60px 52px 42px minmax(0,1fr) var(--tl-h,120px); grid-template-columns:minmax(0,1fr);
+  grid-template-areas:"head" "tools" "ctx" "work" "time"; }
+
+/* header: name, size, presets, File, undo/redo, help, show and the two saves */
+header.top { grid-area:head; display:flex; align-items:center; gap:8px; padding:0 16px; background:var(--head); border-bottom:1px solid var(--line); min-width:0; position:relative; z-index:20; }
+header.top h1 { font:600 16px var(--head-font); margin:0 6px 0 0; white-space:nowrap; }
+header.top .btn { height:36px; }
+header.top #name { width:140px; height:36px; }
+#csize { height:36px; padding:0 8px; }
+#size { display:none; }
+.tag { font-size:11.5px; color:var(--info, #9FC2FF); border:1px solid #3B4A66; padding:1px 7px; white-space:nowrap; }
+.fin { display:inline-flex; align-items:center; gap:9px; height:46px; padding:0 13px 0 11px; background:var(--raise); border:1px solid var(--line-2); color:var(--text); text-align:left; white-space:nowrap; flex:none; cursor:pointer; border-radius:0; --icon-bg:var(--raise); }
+.fin:hover { border-color:var(--muted); }
+.fin .t { display:flex; flex-direction:column; line-height:1.2; }
+.fin b { font-size:13px; font-weight:600; } .fin small { font-size:11.5px; color:var(--muted); }
+.fin.primary { background:var(--amber); border-color:var(--amber); color:var(--ink); --icon-bg:var(--amber); }
+.fin.primary:hover { background:var(--amber-hover); }
+.fin.primary small { color:#5a4210; }
+.fin:disabled { opacity:.5; cursor:default; }
+.savegrp { display:flex; gap:8px; align-items:center; position:relative; }
+#savebtn { display:none; }
+.savemenu { display:contents; }
+.menu { position:relative; }
+.menu > summary { list-style:none; }
+.menu > summary::-webkit-details-marker { display:none; }
+#more:not([open]) .menu-list { display:none; }
+.menu-list { position:absolute; left:0; top:calc(100% + 6px); z-index:30; background:var(--card); border:1px solid var(--line-2); box-shadow:0 12px 32px rgba(0,0,0,.6); display:flex; flex-direction:column; width:312px; padding:6px; gap:0; }
+.mi { display:grid; grid-template-columns:24px 1fr; gap:2px 10px; align-items:center; padding:8px 10px; color:var(--text); background:none; border:0; text-align:left; width:100%; font-size:13.5px; cursor:pointer; border-radius:0; white-space:normal; }
+.mi[hidden] { display:none; }
+.mi:hover, .mi:focus-visible { background:var(--raise); outline:none; }
+.mi .i { color:var(--soft); }
+.mi small { grid-column:2; color:var(--muted); font-size:12px; line-height:1.35; }
+.mhr { height:1px; background:var(--line); margin:4px 0; }
+.mlab { font-size:10.5px; letter-spacing:.08em; text-transform:uppercase; color:var(--faint); padding:6px 10px 2px; }
+
+/* the tools: one row, grouped */
+.toolbar { grid-area:tools; display:flex; align-items:center; gap:2px; padding:0 12px; background:var(--card); border-bottom:1px solid var(--line); min-width:0; position:relative; z-index:10; }
+.tb { width:42px; height:42px; display:grid; place-items:center; background:none; border:1px solid transparent; color:var(--soft); padding:0; position:relative; flex:none; cursor:pointer; border-radius:0; --icon-bg:var(--card); }
+.tb:hover { background:var(--raise); --icon-bg:var(--raise); }
+.tb.on { background:var(--amber-bg); border-color:var(--amber); color:var(--amber); --icon-bg:var(--amber-bg); }
+.tb:focus-visible, .ib:focus-visible, .btn:focus-visible, .fin:focus-visible { outline:2px solid var(--amber); outline-offset:1px; }
+.tb .car { position:absolute; right:0; bottom:0; width:14px; height:14px; }   /* the corner triangle: its options */
+.tb .car::after { content:""; position:absolute; right:2px; bottom:2px; border-left:5px solid transparent; border-bottom:5px solid currentColor; opacity:.85; }
+.tlab { display:none; }
+.gsep { width:1px; height:26px; background:var(--line-2); margin:0 8px; flex:none; }
+.glab { font-size:10px; letter-spacing:.08em; text-transform:uppercase; color:var(--faint); margin:0 6px 0 2px; writing-mode:vertical-rl; transform:rotate(180deg); height:34px; text-align:center; flex:none; }
+.pos { font:12px var(--mono); white-space:nowrap; color:var(--muted); margin-right:6px; }
+.zoomw { display:inline-flex; align-items:center; gap:6px; color:var(--muted); }
+#zoom { height:32px; padding:0 6px; }
+
+/* the options bar for the tool: #opts */
+.ctx { grid-area:ctx; display:flex; align-items:center; gap:8px; padding:0 16px; font-size:13px; color:var(--muted); border-bottom:1px solid var(--line); background:var(--page); min-width:0; position:relative; z-index:8; white-space:nowrap; }
+.ctx .tool { color:var(--text); font-weight:600; flex:none; margin-right:4px; }
+.ctx label { display:inline-flex; align-items:center; gap:6px; white-space:nowrap; }
+.ctx select, .ctx .input { height:32px; padding:0 8px; font:13px var(--ui); }
+.ctx .btn { height:32px; font-size:12px; padding:0 10px; }
+.ctx .ib { width:32px; height:32px; background:var(--raise); }
+.ctx [hidden] { display:none !important; }
+.ctx input[type=checkbox] { accent-color:var(--amber); width:15px; height:15px; margin:0; }
+.ctx .hint { color:var(--muted); font-size:12.5px; overflow:hidden; text-overflow:ellipsis; min-width:0; }
+.ctx .row { flex-wrap:nowrap; gap:4px; }
+.tawrap { position:relative; width:170px; height:32px; flex:none; display:inline-block; }
+.tawrap textarea { position:absolute; left:0; top:0; width:170px; height:32px; resize:none; overflow:hidden; font:13px/1.4 var(--mono); padding:6px 8px; z-index:12; }
+.tawrap textarea:focus { height:auto; min-height:32px; max-height:calc(4 * 1.4em + 14px); overflow:auto; border-color:var(--amber); box-shadow:0 10px 24px rgba(0,0,0,.55); outline:none; }
+
+/* the middle: colour strip, the canvas, the layer rail */
+.work { grid-area:work; display:grid; grid-template-columns:92px minmax(0,1fr) 76px; min-height:0; position:relative; }
+.well { background:var(--well); container-type:size; display:flex; min-height:0; min-width:0; overflow:hidden; position:relative; --pad:20px; }
+.well.zoomed { overflow:auto; }
+#board { display:block; flex:none; margin:auto; image-rendering:pixelated; cursor:crosshair; touch-action:none; max-width:none; }
+.playtag { position:absolute; left:8px; top:8px; display:none; align-items:center; gap:8px; background:rgba(11,12,14,.88); border:1px solid var(--line-2); padding:5px 10px; font-size:12px; color:var(--soft); z-index:9; pointer-events:none; }
+body.playing-canvas .playtag { display:flex; }
+
+.pal { padding:10px; border-right:1px solid var(--line); background:var(--card); display:flex; flex-direction:column; gap:8px; overflow:hidden; min-height:0; }
+.pal > * { flex:none; }
+.fgbg { position:relative; width:70px; height:62px; }
+.fgbg input[type=color] { position:absolute; width:42px; height:42px; border:1px solid var(--line-2); padding:0; background:none; cursor:pointer; -webkit-appearance:none; appearance:none; }
+.fgbg input[type=color]::-webkit-color-swatch-wrapper { padding:0; }
+.fgbg input[type=color]::-webkit-color-swatch { border:0; }
+.fgbg input[type=color]::-moz-color-swatch { border:0; }
+#colour { left:0; top:0; z-index:2; outline:2px solid var(--amber); outline-offset:1px; }
+#colour2 { right:0; bottom:0; }
+#swap { position:absolute; right:-4px; top:-4px; width:26px; height:26px; border:0; background:none; }
+.hexrow { display:flex; align-items:center; justify-content:space-between; gap:4px; }
+#hex { font:11px var(--mono); color:var(--soft); }
+#recolour .lbl { display:none; }
+.pseg2 { display:grid; grid-template-columns:1fr 1fr; border:1px solid var(--line-2); }
+.pseg2 button { height:24px; background:none; border:0; font-size:11px; color:var(--muted); padding:0; cursor:pointer; }
+.pseg2 button.on { background:var(--amber-bg); color:var(--amber); }
+.swatches { display:grid; grid-template-columns:repeat(2,1fr); gap:4px; }
+.swatches button { aspect-ratio:1; border:1px solid var(--line-2); padding:0; cursor:pointer; border-radius:0; width:100%; }
+.swatches button.sel { outline:2px solid var(--amber); outline-offset:1px; }
+.pal .pal-l, .pal .used-l { display:none; }
+.pal.show-used #swatches, .pal:not(.show-used) #used { display:none; }
+
+.lrail { border-left:1px solid var(--line); background:var(--card); display:flex; flex-direction:column; align-items:center; gap:6px; padding:8px 0; overflow:hidden; min-height:0; }
+.lrail .lh { display:flex; flex-direction:column; align-items:center; gap:2px; font-size:10px; letter-spacing:.06em; text-transform:uppercase; color:var(--muted); background:none; border:0; padding:4px 0; cursor:pointer; }
+.lrail .lh[aria-expanded=true] { color:var(--amber); }
+.lthumbs { display:flex; flex-direction:column; gap:6px; align-items:center; overflow:hidden; min-height:0; }
+.lth { position:relative; width:60px; border:1px solid var(--line-2); padding:2px; background:var(--card-2); cursor:pointer; color:var(--muted); }
+.lth canvas { display:block; width:100%; height:auto; image-rendering:pixelated; background:repeating-conic-gradient(#1c1f24 0 25%, #121418 0 50%) 0 0/8px 8px; }
+.lth.sel { border-color:var(--amber); box-shadow:0 0 0 1px var(--amber); }
+.lth.off canvas { opacity:.4; }
+.lth .bd[hidden] { display:none; }
+.lth .bd { position:absolute; right:4px; top:4px; width:18px; height:18px; background:var(--card); border:1px solid var(--line-2); display:grid; place-items:center; color:var(--amber); }
+.lth span { display:block; font-size:10px; text-align:center; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; padding-top:2px; }
+.drawer { position:absolute; right:76px; top:0; bottom:0; width:300px; background:var(--card); border-left:1px solid var(--line-2); box-shadow:-16px 0 30px rgba(0,0,0,.5); padding:10px 12px; display:none; z-index:6; overflow:auto; }
+.drawer.open { display:block; }
+.drawer .dh { display:flex; align-items:center; justify-content:space-between; margin-bottom:8px; }
+.layers { display:flex; flex-direction:column; gap:4px; margin-bottom:8px; }
+.layer { display:flex; align-items:center; gap:8px; padding:3px 4px; border:1px solid var(--line-2); background:var(--card); color:var(--text); font:inherit; font-size:13px; text-align:left; cursor:pointer; }
+.layer.sel { border-color:var(--amber); background:#17150f; }
+.layer canvas { width:48px; height:24px; image-rendering:pixelated; background:repeating-conic-gradient(#1c1f24 0 25%, #121418 0 50%) 0 0/8px 8px; flex:none; }
+.layer .name { flex:1; min-width:5em; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+.layer .eye { width:30px; height:30px; display:grid; place-items:center; flex:none; border:1px solid var(--line-2); background:none; color:var(--soft); cursor:pointer; padding:0; }
+.layer.hidden .name, .layer.hidden canvas { opacity:.4; }
+.layer:focus-visible { outline:2px solid var(--amber); outline-offset:1px; }
+.layer .tag { font:10px var(--mono); color:var(--muted); border:0; padding:0; flex:0 1 auto; min-width:0; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+.layer-btns { display:flex; gap:4px; flex-wrap:wrap; }
+.layer-btns .btn { height:32px; font-size:12px; padding:0 9px; }
+.layer-btns .btn.icon { width:32px; padding:0; }
+#ldel { color:var(--danger); }
+.layer-opts { display:grid; grid-template-columns:auto 1fr; gap:8px 10px; align-items:center; margin:12px 0 8px; font-size:12px; color:var(--muted); }
+.layer-opts input[type=range] { width:100%; accent-color:var(--amber); }
+.layer-opts select { height:32px; padding:0 8px; font:13px var(--ui); }
+.layer-opts .wide { grid-column:1 / -1; display:flex; gap:6px; align-items:center; }
+.layer-opts label span { color:var(--text); font-family:var(--mono); }
+.layer-opts input[type=checkbox] { accent-color:var(--amber); }
+.drawer .tip { font-size:12px; color:var(--muted); margin:6px 0 0; }
+
+/* the timeline: transport (with the Preview window when it's on), then the frame strip */
+.tline { grid-area:time; display:grid; grid-template-columns:auto minmax(0,1fr); border-top:1px solid var(--line); background:var(--card); min-width:0; min-height:0; overflow:hidden; }
+.trans { display:flex; align-items:center; gap:12px; padding:0 14px; border-right:1px solid var(--line); }
+.led { position:relative; background:#000; flex:none; container-type:size; display:grid; place-items:center; }
+.ledc { position:relative; aspect-ratio:2 / 1; --w:64; --h:32; }   /* the canvas's own shape, as big as the box allows (setSize) */
+.ledc canvas { position:absolute; inset:0; width:100%; height:100%; display:block; image-rendering:pixelated; }
+.ledc::after { content:""; position:absolute; inset:0; pointer-events:none; background:radial-gradient(circle at center, transparent 56%, rgba(0,0,0,.88) 70%); background-size:calc(100% / var(--w)) calc(100% / var(--h)); }   /* the panel look: one dot per LED */
+.trans .led { width:192px; height:96px; display:none; }
+body.pv-on .trans .led { display:block; }
+body.playing-canvas .trans .led { display:block; position:fixed; z-index:7; cursor:pointer; }   /* over the board, the same box (js/animator-layout.js) */
+.tctl { display:flex; flex-direction:column; gap:6px; }
+.trow { display:flex; align-items:center; gap:6px; font-size:12px; color:var(--muted); white-space:nowrap; }
+.bigplay { width:44px; height:44px; display:grid; place-items:center; background:var(--amber); color:var(--ink); border:0; flex:none; cursor:pointer; padding:0; }
+.bigplay:hover { background:var(--amber-hover); }
+.fpos { font:13px var(--mono); color:var(--text); min-width:52px; text-align:center; }
+.fpos small { color:var(--muted); font-size:12px; }
+.loopw { display:inline-flex; align-items:center; gap:4px; color:var(--soft); height:30px; padding-left:8px; border:1px solid var(--line-2); background:var(--well); }
+.loopw select { height:28px; border:0; background:none; padding:0 4px; font:12.5px var(--ui); color:var(--text); }
+.pvtog { display:inline-flex; align-items:center; gap:6px; height:30px; padding:0 9px; border:1px solid var(--line-2); background:var(--raise); color:var(--soft); font-size:12px; flex:none; cursor:pointer; }
+body.pv-on .pvtog { border-color:var(--amber); background:var(--amber-bg); color:var(--amber); }
+.fwrap { display:flex; flex-direction:column; min-width:0; min-height:0; padding:5px 12px 4px; position:relative; }
+.fhead { display:flex; align-items:center; gap:6px; height:32px; font-size:12px; color:var(--muted); white-space:nowrap; min-width:0; overflow:hidden; flex:none; }
+.fhead .btn { height:30px; font-size:12px; padding:0 9px; }
+.fhead .ib { width:30px; height:30px; }
+#ftotal { font-family:var(--mono); color:var(--soft); flex:none; }
+.fhead { container-type:inline-size; }
+@container (max-width:560px) { .fnote { display:none !important; } }   /* no room to read it: it's in the tooltip, and a click on the total shows it */
+.fnote { margin:0; min-width:0; flex:0 1 auto; overflow-wrap:anywhere; color:var(--faint); font-size:11.5px; line-height:1.25; white-space:normal; display:-webkit-box; -webkit-box-orient:vertical; -webkit-line-clamp:2; overflow:hidden; cursor:help; }
+.fnote[hidden] { display:none; }
+.single, .ranged { display:contents; }
+.ranged > * { display:none !important; }
+.fwrap.s-range .ranged > * { display:inline-flex !important; }
+.fwrap.s-range .single > * { display:none !important; }
+#fr-count { color:var(--amber); }
+.scrub { position:relative; height:4px; background:var(--line-2); margin:1px 0 5px; flex:none; }
+.scrub i { position:absolute; left:0; top:0; bottom:0; width:0; background:var(--amber); }
+.frames { display:flex; gap:5px; overflow-x:auto; overflow-y:hidden; padding:0 0 2px; min-height:0; scrollbar-width:none; }   /* the scrubber shows where; the wheel scrolls it sideways */
+.frames::-webkit-scrollbar { display:none; }
+.frame { flex:0 0 auto; width:84px; background:var(--card-2); border:1px solid var(--line-2); padding:3px; cursor:pointer; position:relative; }
+.frame.sel { border-color:var(--amber); box-shadow:0 0 0 1px var(--amber); }
+.frame canvas { width:100%; display:block; image-rendering:pixelated; background:#000; margin:0 auto; max-height:48px; object-fit:contain; }
+.frame .meta { display:flex; justify-content:space-between; align-items:center; margin-top:2px; font:10.5px var(--mono); color:var(--muted); gap:2px; white-space:nowrap; }
+.frame .meta > span:last-child { display:flex; align-items:center; gap:2px; }
+.frame input { width:36px; padding:0 2px; height:16px; font:10.5px var(--mono); text-align:right; border-color:var(--line); -moz-appearance:textfield; }
+.frame input::-webkit-inner-spin-button, .frame input::-webkit-outer-spin-button { -webkit-appearance:none; margin:0; }   /* the arrow keys still step in 50s */
+.frame .tv { display:none; }
+.frame .unit.odd, .frame .tv.odd { color:var(--amber); }
+.add { flex:0 0 auto; width:48px; border:1px dashed var(--line-2); display:flex; align-items:center; justify-content:center; color:var(--muted); cursor:pointer; background:none; font-size:22px; }
+.add:hover { border-color:var(--amber); color:var(--amber); }
+/* choosing several frames and dragging them (js/animator-frames.js): a tick and an amber edge on each selected card */
+.frame { user-select:none; -webkit-user-select:none; -webkit-touch-callout:none; }
+.frame.picked { border-color:var(--amber); }
+.frames.multi .frame.picked::before { content:"\2713"; position:absolute; top:3px; left:3px; width:16px; height:16px; background:var(--amber); color:var(--ink); font:700 11px/16px var(--ui); text-align:center; pointer-events:none; z-index:1; }
+.frame.lifting { opacity:.35; }
+.frames:focus-visible { outline:2px solid var(--amber); outline-offset:-2px; }
+.frames.dragging, .frames.dragging .frame { cursor:grabbing; }
+.fr-drop { position:fixed; width:3px; background:var(--amber); box-shadow:0 0 0 1px #000; pointer-events:none; z-index:60; display:none; }
+.fr-lift { position:fixed; left:0; top:0; pointer-events:none; z-index:61; width:72px; padding:3px; background:var(--card-2); border:1px solid var(--amber); box-shadow:0 6px 18px rgba(0,0,0,.6); }
+.fr-lift canvas { display:block; width:100%; image-rendering:pixelated; background:#000; }
+.fr-lift b { position:absolute; top:-9px; right:-9px; min-width:20px; height:20px; padding:0 4px; background:var(--amber); color:var(--ink); font:700 12px/20px var(--ui); text-align:center; }
+
+/* popovers: the onion skin's and the tracing picture's options, play options, timing, the frame menu, help */
+.pop { position:fixed; z-index:40; background:var(--card); border:1px solid var(--line-2); box-shadow:0 12px 32px rgba(0,0,0,.6); padding:6px; display:none; max-width:calc(100vw - 16px); }
+.pop.open { display:block; }
+.popf { display:flex; flex-direction:column; gap:10px; font-size:13px; color:var(--soft); padding:8px; min-width:250px; }
+.popf .r { display:flex; align-items:center; gap:8px; }
+.popf .r > span:first-child { min-width:64px; }
+.popf select, .popf .input { height:32px; padding:0 8px; font:13px var(--ui); }
+.popf input[type=range] { accent-color:var(--amber); flex:1; }
+.popf input[type=checkbox] { accent-color:var(--amber); }
+.popf .note, .pop .note { font-size:11.5px; color:var(--faint); margin:0; white-space:normal; line-height:1.4; }
+.popf h3 { margin:0; }
+.keys { display:grid; grid-template-columns:auto 1fr auto 1fr; gap:6px 10px; font-size:12.5px; align-items:center; padding:4px 8px 8px; }
+.keys kbd { justify-self:start; }
+#helppop { width:460px; }
+#notepop { width:320px; }
+
+/* the Animator inside the dashboard: (nothing of its own; app.css shapes the frame) */
+
+/* ---------- laptop ---------- */
+@media (max-width:1300px) and (min-width:601px) and (min-height:501px) {   /* (a phone has its own layout below) */
+  body { --tl-h:112px; }
+  header.top { padding:0 12px; gap:6px; } header.top h1 { display:none; }
+  .toolbar { padding:0 8px; } .toolbar .tb { width:38px; height:40px; } .gsep { margin:0 4px; } .glab { display:none; }
+  .work { grid-template-columns:84px minmax(0,1fr) 72px; } .pal { padding:8px; gap:6px; }
+  .fgbg { width:62px; height:56px; } .fgbg input[type=color] { width:38px; height:38px; } .pal .swatches { gap:3px; }
+  .drawer { right:72px; }
+  .frame { width:72px; } .frame .unit { display:none; } .frame .unit.odd { display:inline; } .frame input { width:30px; }
+  .trans { padding:0 10px; gap:10px; } .fin { padding:0 10px 0 9px; }
+  .ctx { padding:0 12px; gap:6px; } .ctx .hint.wide-hint { display:none; }
+  .fhead .rlab, #ftime .lbl { display:none; }
+}
+@media (max-width:1160px) and (min-width:601px) and (min-height:501px) {
+  #show small, .fin small { display:none; } .fin { height:40px; }
+  #savebtn { display:inline-flex; }
+  .savemenu { display:none; position:absolute; right:0; top:calc(100% + 6px); z-index:30; background:var(--card); border:1px solid var(--line-2); box-shadow:0 12px 32px rgba(0,0,0,.6); padding:6px; flex-direction:column; gap:6px; width:260px; }
+  .savemenu.open { display:flex; }
+  .savemenu .fin { height:52px; width:100%; } .savemenu .fin small { display:block; }
+  #presets .lbl { display:none; } #presets { padding:0 9px; }
+  header.top #name { width:116px; }
+  .toolbar .tb { width:36px; height:38px; } .gsep { margin:0 2px; } #pos { display:none; }
+  .fnote { display:none !important; }
+  .fhead .single .lbl { display:none; }
+  .trans .led { width:160px; height:80px; }
+  .ctx .opt-hint { display:none; }
+}
+@media (max-width:1000px) and (min-width:601px) and (min-height:501px) { .toolbar { overflow-x:auto; scrollbar-width:none; } }
+@media (max-height:680px) and (min-width:601px) { .pal .swatches { grid-template-columns:repeat(3,1fr); gap:2px; } .pal { gap:5px; } }
+@media (min-width:601px) and (min-height:501px) { .po { display:none !important; } }
+#scrim { display:none; }
+
+/* ---------- phone: canvas on top, Play and a strip of frames, a panel per tab, the dock (one DOM: js/animator-layout.js
+   moves the toolbar, options, colours, layers and frames into the panel's tabs) ---------- */
+@media (max-width:600px), (max-height:500px) and (orientation:landscape) {
+  .wo { display:none !important; }
+  body { display:flex; flex-direction:column; grid-template-areas:none; }
+  body > *, .well, .trans { flex:none; }   /* (the well and the transport are the body's own items: .work and .tline are display:contents) */
+  .work, .tline, .tctl, .trow { display:contents; }
+  .lrail, .drawer .dh, #help, header.top h1, #pos, .glab, .gsep, .toolbar > .grow, #fprev, #fnext, #fpos, #playgear, #ftime, #fadd, #dup, #del, .fhead .single, #scrub, .ctx .tool, #althint, #ghint, #selhint, .palseg, #palseg { display:none !important; }
+  /* header */
+  header.top { height:56px; padding:0 4px; gap:2px; position:static; z-index:auto; }   /* (no stacking of its own: its sheets go over the scrim) */
+  body.sheet-open #scrim { display:block; position:fixed; inset:0; z-index:44; background:rgba(0,0,0,.55); }
+  header.top .ib { width:44px; height:44px; background:none; border-color:transparent; }
+  #more > summary { width:44px; height:44px; padding:0; justify-content:center; background:none; border:0; }
+  .phname { flex:1; min-width:0; display:flex; flex-direction:column; line-height:1.2; padding-left:2px; }
+  .phname b { font:600 15px var(--head-font); white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
+  .phname #size { display:block; font-size:11.5px; color:var(--muted); white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
+  header.top > .grow { display:none; }
+  .savegrp { display:block; }
+  #savebtn { display:inline-flex; height:44px; padding:0 10px 0 12px; }
+  #savebtn small { display:none; }
+  /* sheets: the File menu (≡), Save, View, popovers: from the bottom, over a dimmed page */
+  #filemenu, .savemenu.open, .bsheet.open, .pop.open { position:fixed; left:0; right:0; top:auto; bottom:0; width:auto; max-width:none; max-height:80%; overflow:auto; z-index:45;
+    background:var(--card); border:0; border-top:1px solid var(--line-2); box-shadow:0 -14px 30px rgba(0,0,0,.55); padding:6px 10px 12px; display:flex; flex-direction:column; gap:0; }
+  .bsheet:not(.open) { display:none; }
+  #filemenu { left:0 !important; right:0 !important; }   /* (the wide menu's own placing is inline) */
+  .shh { display:flex; align-items:center; justify-content:space-between; min-height:44px; }
+  .shh .ib { width:44px; height:44px; background:none; border:0; }
+  .shh::before { content:""; position:absolute; left:calc(50% - 20px); top:6px; width:40px; height:4px; background:var(--line-2); }
+  #filemenu .mi, #fmenu .mi { min-height:50px; font-size:15px; border-bottom:1px solid var(--line); grid-template-columns:28px 1fr; }
+  #filemenu .mi small { display:none; }
+  #filemenu .mhr, #filemenu .mlab { display:none; }
+  .fileslot { display:flex; flex-direction:column; }
+  .fileslot > * { min-height:50px; border-bottom:1px solid var(--line); }
+  .csizew, .namew { display:flex; align-items:center; gap:12px; font-size:15px; padding:0 10px; }
+  .namew > span { width:96px; flex:none; } .csizew > span { width:96px; } header.top .namew #name, .namew #name { flex:1; width:auto; height:46px; font-size:15px; min-width:0; }
+  .csizew > span { flex:none; }
+  .csizew #csize { flex:1; height:46px; }
+  #presets { background:none; border:0; border-bottom:1px solid var(--line); justify-content:flex-start; gap:10px; font:400 15px var(--ui); height:auto; padding:0 10px; }
+  #presets .lbl { display:inline; }
+  .savemenu:not(.open) { display:none; }
+  .savemenu .fin, #show { width:100%; height:auto; min-height:64px; padding:10px 12px; margin-bottom:6px; gap:14px; white-space:normal; }
+  .savemenu .fin b { font-size:15px; } .savemenu .fin small { display:block; font-size:13px; }
+  .savemenu .fin.primary { background:var(--card-2); color:var(--text); border-color:var(--amber); }
+  .savemenu .fin.primary b, .savemenu .fin.primary .i { color:var(--amber); } .savemenu .fin.primary small { color:var(--muted); }
+  /* the canvas: the whole width, 2:1, with the zoom pill on it */
+  .well { width:100%; aspect-ratio:2 / 1; --pad:0px; touch-action:none; }
+  .zoomw { position:absolute; right:6px; top:6px; z-index:3; height:46px; padding:0 0 0 10px; background:rgba(11,12,14,.82); border:1px solid var(--line-2); color:var(--soft); }
+  .zoomw #zoom { height:44px; border:0; background:none; font:13px var(--mono); padding:0 6px; }
+  /* the transport row: Play, the Preview (when on), a strip of small frames, the readout, the Preview switch */
+  .trans { display:flex; align-items:center; gap:6px; padding:4px 6px; height:56px; border-right:0; border-bottom:1px solid var(--line); background:var(--page); }
+  body.pv-on .trans { height:68px; }
+  #play { order:0; } .trans .led { order:1; width:112px; height:56px; } .mini { order:2; } .rd { order:3; } #pvtog { order:4; }
+  .mini { display:flex; gap:2px; overflow:hidden; flex:1; min-width:0; height:44px; align-items:center; touch-action:none; cursor:pointer; }
+  .mini canvas { width:30px; height:15px; image-rendering:pixelated; opacity:.75; flex:none; background:#000; }
+  .mini canvas.c { outline:2px solid var(--amber); opacity:1; width:44px; height:22px; }
+  .rd { font:12px var(--mono); color:var(--soft); white-space:nowrap; text-align:right; line-height:1.3; }
+  body.pv-on .rd { display:none; }
+  #pvtog { width:44px; height:44px; padding:0; justify-content:center; background:none; } #pvtog .lbl { display:none; }
+  /* the panel and the dock */
+  .deck { flex:1 1 auto; min-height:0; display:flex; flex-direction:column; padding:8px; overflow:hidden; }
+  .dk { display:none; flex-direction:column; gap:5px; flex:1; min-height:0; overflow-y:auto; overflow-x:hidden; }
+  body.d-draw #dk-draw, body.d-colour #dk-colour, body.d-layers #dk-layers, body.d-frames #dk-frames { display:flex; }
+  .dock { flex:none; display:grid; grid-template-columns:repeat(4,1fr); height:calc(64px + env(safe-area-inset-bottom)); padding:0 4px env(safe-area-inset-bottom); background:var(--head); border-top:1px solid var(--line); }
+  .dock button { display:flex; flex-direction:column; align-items:center; justify-content:center; gap:3px; background:none; border:0; border-top:2px solid transparent; color:var(--muted); font-size:11.5px; cursor:pointer; }
+  .dock button.on { color:var(--amber); border-top-color:var(--amber); background:#15130e; }
+  #toast { bottom:calc(76px + env(safe-area-inset-bottom)); }
+  /* Draw: every tool, Mirror, Onion, View…; the tool's options; quick colours; the right-click key */
+  .toolbar { display:grid; grid-template-columns:repeat(6,minmax(0,1fr)); gap:4px; padding:0; border:0; background:none; flex:none; }
+  .toolbar > * { order:3; }
+  .toolbar > [data-tool=pen], .toolbar > [data-tool=erase], .toolbar > [data-tool=fill], .toolbar > [data-tool=line], .toolbar > [data-tool=rect], .toolbar > [data-tool=ellipse],
+  .toolbar > [data-tool=gradient], .toolbar > [data-tool=blur], .toolbar > [data-tool=shade], .toolbar > [data-tool=glow] { order:1; }
+  .toolbar > [data-tool=pick] { order:2; }
+  .toolbar .tb, .vg .tb { width:100%; height:56px; border:1px solid var(--line-2); background:var(--card-2); display:flex; flex-direction:column; align-items:center; justify-content:center; gap:3px; --icon-bg:var(--card-2); }
+  .toolbar .tb.on, .vg .tb.on { border-color:var(--amber); background:var(--amber-bg); --icon-bg:var(--amber-bg); }
+  .tb .i { width:22px; height:22px; }
+  .tlab { display:block; font-size:10.5px; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; max-width:100%; }
+  .tb .car { display:none; }
+  .ctx { display:flex; flex-wrap:wrap; gap:6px; padding:0; border:0; background:none; white-space:normal; flex:none; font-size:14px; min-height:46px; }
+  .ctx label { min-height:46px; }
+  .ctx select, .ctx .input { height:46px; font-size:14px; padding:0 10px; }
+  .ctx .btn { height:46px; min-width:46px; justify-content:center; font-size:13px; }
+  .ctx .ib { width:46px; height:46px; }
+  .ctx input[type=checkbox] { width:22px; height:22px; }
+  .ctx .hint { white-space:normal; font-size:12px; flex-basis:100%; }
+  .ctx > label[data-for="text"].tlabel { flex:1 1 100%; }
+  .ctx .lab-t { display:none; }
+  .tawrap { flex:1; width:auto; height:46px; } .tawrap textarea { width:100%; height:46px; padding:12px 10px; font-size:15px; }
+  .tawrap textarea:focus { height:auto; min-height:46px; }
+  #selbtns { display:contents; }
+  .ctx > label:has(#selby) { flex:1 1 150px; } #selby { flex:1; min-width:0; }
+  .ctx .lab-s { display:none; }
+  #selcopy, #selcut, #selpaste, #selfliph, #selturn, #selbig, #selsmall { order:4; } #selbig, #selsmall { width:46px; padding:0; }
+  .ctx > label:has(#selkeep) { order:5; flex:1; } #selflipv { order:6; } #seldel { order:7; width:auto; padding:0 14px; }
+  #seldel::after { content:"Delete"; margin-left:8px; font-size:14px; font-weight:600; }
+  #seldel { display:inline-flex; color:var(--danger); }
+  .qcol { display:grid; grid-template-columns:repeat(8,minmax(0,1fr)); gap:3px; flex:none; }
+  .qcol button { height:44px; border:1px solid var(--line-2); padding:0; cursor:pointer; border-radius:0; }
+  .qcol .main { outline:2px solid var(--amber); outline-offset:-4px; box-shadow:inset 0 0 0 4px var(--page); }
+  .qcol .all { display:grid; place-items:center; border-style:dashed; background:none; color:var(--muted); }
+  .usedl { display:flex; justify-content:space-between; align-items:center; font-size:12.5px; color:var(--muted); min-height:44px; flex:none; }
+  .lnk { background:none; border:0; color:var(--amber); font-size:13px; padding:0 2px; min-height:44px; display:inline-flex; gap:6px; align-items:center; cursor:pointer; }
+  body.t-select #qcol, body.t-select #qused, body.t-select #usedl { display:none; }
+  body.t-gradient #qused, body.t-gradient #usedl, body.t-text #qused, body.t-text #usedl { display:none; }   /* (two rows of options) */
+  .ctx > .grow { display:none; }
+  .pop.open::before { content:""; display:block; width:40px; height:4px; background:var(--line-2); margin:2px auto 8px; flex:none; }
+  .hold { margin-top:auto; display:grid; grid-template-columns:1fr 1fr; gap:6px; flex:none; padding-top:4px; }
+  .hk { height:60px; display:flex; align-items:center; gap:10px; padding:0 12px; border:1px solid var(--line-2); background:var(--card); color:var(--text); text-align:left; line-height:1.2; --icon-bg:var(--card); }
+  .hk b { font-size:14px; display:block; } .hk small { font-size:11.5px; color:var(--muted); }
+  .hk.alt { border-style:dashed; cursor:pointer; }
+  .hk.alt.on { border:1px solid var(--amber); background:var(--amber-bg); color:var(--amber); --icon-bg:var(--amber-bg); }
+  body.pinched #pinchcard { display:none; } body.pinched .hold { grid-template-columns:1fr; }
+  /* Colour */
+  .pal { padding:0; border:0; background:none; gap:8px; overflow:visible; display:flex; }
+  .fgbg { width:auto; height:46px; display:flex; gap:8px; align-items:center; }
+  .fgbg input[type=color] { position:static; width:64px; height:46px; outline:0; }
+  #colour { outline:2px solid var(--amber); outline-offset:-4px; box-shadow:inset 0 0 0 4px var(--page); }
+  #swap { position:static; order:1; width:46px; height:46px; border:1px solid var(--line-2); background:var(--raise); } #colour2 { order:2; }
+  .pal .pal-l, .pal .used-l { display:block; margin:6px 0 0; font-size:13px; color:var(--muted); }
+  .pal.show-used #swatches, .pal:not(.show-used) #used { display:grid; }
+  .pal .swatches { grid-template-columns:repeat(8,minmax(0,1fr)); gap:3px; }
+  .pal .swatches button { aspect-ratio:auto; height:44px; }
+  #recolour { position:static; width:100%; height:46px; margin-top:6px; background:var(--raise); border:1px solid var(--line-2); display:flex; gap:10px; justify-content:center; font-weight:600; color:var(--text); }
+  #recolour .lbl { display:inline; }
+  .hexrow { position:static; order:9; display:block; }
+  /* Layers */
+  .drawer { position:static; display:block; width:auto; border:0; box-shadow:none; padding:0; overflow:visible; background:none; }
+  .layer { min-height:50px; padding:2px 4px; }
+  .layer .eye { width:46px; height:46px; }
+  .layer canvas { width:64px !important; height:32px !important; }
+  .layer-btns { display:grid; grid-template-columns:repeat(4,minmax(0,1fr)); gap:4px; }
+  .layer-btns .btn, .layer-btns .btn.icon { height:46px; width:auto; font-size:13px; justify-content:center; padding:0 4px; white-space:normal; line-height:1.1; gap:4px; }
+  .layer-btns .icon > .po { display:inline !important; }
+  .layer-opts { gap:4px 10px; font-size:13px; }
+  .layer-opts select { height:46px; }
+  .layer-opts input[type=range] { height:44px; }
+  .layer-opts label.wide { min-height:46px; } .layer-opts input[type=checkbox] { width:22px; height:22px; }
+  .drawer .tip { display:none; }
+  /* Frames: a grid of cards, then the actions */
+  .fwrap { padding:0; flex:1; min-height:0; display:flex; flex-direction:column; }
+  .fhead { height:auto; min-height:46px; font-size:13px; white-space:normal; }
+  .fhead .label { display:none; }
+  #ftotal { font-family:var(--ui); color:var(--soft); font-size:14px; }
+  .frames { display:grid; grid-template-columns:repeat(4,minmax(0,1fr)); gap:5px; overflow-y:auto; overflow-x:hidden; flex:1; min-height:0; align-content:start; }
+  .frame { width:auto; }
+  .frame canvas { max-height:none; }
+  .frame input, .frame .unit { display:none; }
+  .frame .tv { display:inline; }
+  .frame .tv.odd { outline:1px solid var(--amber); padding:0 2px; }
+  .frame .meta { font-size:12px; }
+  .add { width:auto; min-height:60px; }
+  .fnote, .fnote[hidden] { display:none; }
+  .fnote:not([hidden]) { display:block; -webkit-line-clamp:unset; font-size:12.5px; color:var(--faint); margin:4px 0 0; cursor:default; flex:none; }
+  .fhint { font-size:12.5px; color:var(--faint); margin:4px 0 0; line-height:1.35; flex:none; }
+  .fact { display:grid; grid-template-columns:repeat(5,minmax(0,1fr)); gap:4px; flex:none; margin-top:6px; }
+  #fact > button { height:56px; display:flex; flex-direction:column; align-items:center; justify-content:center; gap:3px; background:var(--card); border:1px solid var(--line-2); color:var(--soft); font-size:11px; padding:0; width:auto; }
+  #fact > button .rlab { display:block !important; }
+  #fact > .danger { color:var(--danger); }
+  .fact .danger { color:var(--danger); }
+  #fmore .po { display:block; }
+  .fmore-phone { display:flex; flex-direction:column; gap:6px; padding:6px 0 0; }
+  .fmore-phone > .btn, .fmore-phone .loopw { min-height:50px; font-size:15px; justify-content:flex-start; }
+  .fmore-phone .loopw select { height:46px; font-size:15px; flex:1; }
+  .fmore-phone .pop { display:block; position:static; box-shadow:none; border:0; padding:0; background:none; }
+  /* View… */
+  .vg { display:grid; grid-template-columns:repeat(4,minmax(0,1fr)); gap:4px; }
+  .vrow { display:flex; align-items:center; gap:8px; min-height:50px; font-size:14px; color:var(--soft); flex-wrap:wrap; }
+  .seg { display:inline-flex; border:1px solid var(--line-2); }
+  .seg button { height:44px; min-width:52px; padding:0 12px; background:none; border:0; color:var(--soft); font-size:13px; cursor:pointer; }
+  .seg button.on { background:var(--amber-bg); color:var(--amber); }
+  #vslot .pop { display:block; position:static; box-shadow:none; border:0; padding:0; background:none; }
+  #vslot .popf { padding:6px 0; min-width:0; }
+  #vslot select, #vslot .btn, .popf .input, .popf select { height:46px; font-size:14px; }
+  #vslot input[type=range] { height:44px; }
+  #vslot .r { min-height:46px; flex-wrap:wrap; }
+  #vslot input[type=checkbox], .pop input[type=checkbox] { width:22px; height:22px; }
+  body:not(.has-trace) #traceopts { display:none; }
+  .pop .r { min-height:46px; } .pop .btn { min-height:46px; }
+  #bg { width:64px !important; height:44px !important; }
+  #helppop, #notepop { display:none !important; }
+}
+@media (max-width:600px) and (max-height:760px) { #qused { display:none !important; } #used > :nth-child(n+9), #hex { display:none; } }   /* (the Colour tab fits: the 8 most used) */
+@media (max-width:600px) and (max-height:839px) { #usedl { display:none !important; } #pinchcard { display:none; } .hold { grid-template-columns:1fr; } .hk { height:52px; } .toolbar .tb { height:52px; } }
+@media (max-height:500px) and (orientation:landscape) {
+  body { display:grid; grid-template-columns:minmax(0,1fr) 300px; grid-template-rows:48px minmax(0,1fr) auto 56px; }
+  header.top { grid-column:1 / -1; grid-row:1; height:48px; }
+  .well { grid-column:1; grid-row:2; width:auto; aspect-ratio:auto; --pad:12px; }
+  .trans { grid-column:1; grid-row:3 / 5; height:72px !important; border-bottom:0; border-top:1px solid var(--line); }
+  .deck { grid-column:2; grid-row:2 / 4; border-left:1px solid var(--line); padding:6px; }
+  .dock { grid-column:2; grid-row:4; height:56px; border-left:1px solid var(--line); padding-bottom:0; }
+  .dock button { font-size:10.5px; }
+  .toolbar .tb { height:44px; } .tlab { display:none; }
+  #usedl, #qused, #pinchcard { display:none !important; }
+  .hold { grid-template-columns:1fr; margin-top:0; padding-top:0; order:1; } .hk { height:48px; } .hk small { display:none; }
+  #qcol { order:2; }   /* (short of room: the tools, their options and the right-click key first; colours under them, and in the Colour tab) */
+  .dk { gap:4px; }
+  .qcol { grid-template-columns:repeat(6,minmax(0,1fr)); } #qcol > :nth-child(n+6):not(:last-child) { display:none; }
+  .frames { grid-template-columns:repeat(3,minmax(0,1fr)); }
+  .fhint { display:none; } .fhead { min-height:30px; } #ftotal { font-size:13px; }
+  .pal .swatches { grid-template-columns:repeat(6,minmax(0,1fr)); }
+  .layer-btns { grid-template-columns:repeat(2,minmax(0,1fr)); }
+  #fact > button { height:48px; }
+}
+
+/* the dialogs (unchanged) */
+dialog header { display:flex; align-items:center; gap:12px; padding:12px 16px; background:var(--head); border-bottom:1px solid var(--line); flex-wrap:wrap; }
+dialog header h1 { font-size:17px; margin:0; font-weight:650; }
+dialog .btn { height:auto; }
+.sheet .swatches { grid-template-columns:repeat(8,1fr); gap:3px; }
 .gallery { width:min(920px, calc(100vw - 24px)); max-height:calc(100vh - 40px); padding:0; background:var(--card); color:var(--text); border:1px solid var(--line-2); }
 .gallery::backdrop { background:rgba(0,0,0,.7); }
 .gallery header { position:sticky; top:0; z-index:1; }
@@ -90,6 +507,7 @@ main { display:grid; grid-template-columns:64px minmax(0,1fr) 250px; gap:12px; p
 .pick { display:flex; flex-direction:column; justify-content:flex-start; background:var(--card-2); border:1px solid var(--line-2); padding:6px; text-align:left; color:var(--text); cursor:pointer; font:inherit; border-radius:0; }
 .pick:hover, .pick:focus-visible { border-color:var(--amber); outline:none; }
 .pick canvas { width:100%; aspect-ratio:2/1; display:block; image-rendering:pixelated; background:#000; }
+.pick em.fit { display:block; margin-top:3px; font-style:normal; font-size:11px; color:var(--amber); }
 .pick b { display:block; margin-top:5px; font-size:13px; }
 .pick span { display:block; color:var(--muted); font-size:12px; line-height:1.35; }
 @media (max-width: 560px) {
@@ -97,26 +515,21 @@ main { display:grid; grid-template-columns:64px minmax(0,1fr) 250px; gap:12px; p
   .pick span { display:none; }
   .gallery header .muted { display:none; }
 }
-.menu { position:relative; }
-.menu > summary { list-style:none; }
-.menu > summary::-webkit-details-marker { display:none; }
-.menu-list { position:absolute; right:0; top:calc(100% + 4px); z-index:5; background:var(--card); border:1px solid var(--line-2); display:flex; flex-direction:column; min-width:230px; padding:4px; gap:2px; }
-.menu-list .btn { border-color:transparent; background:none; justify-content:flex-start; font-weight:500; }
-.menu-list .btn:hover { background:var(--raise); }
-.layer .name { min-width:5em; }
-.layer-opts label span { color:var(--text); font-family:var(--mono); }
-@media (pointer: coarse) { .opts .btn, .opts .input.text, .opts select, #zoom, .layer-opts select, .sheet .btn, .sheet input, .sheet select, .menu-list .btn, header .btn, .timeline .btn { min-height:36px; } .layer-opts input[type=checkbox] { width:22px; height:22px; } .layer-opts input[type=range] { height:30px; } .frame input { min-height:30px; } }
-.layer .tag { font:11px var(--mono); color:var(--muted); flex:0 1 auto; min-width:0; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
-.layer-opts { display:grid; grid-template-columns:auto 1fr; gap:6px 8px; align-items:center; margin:8px 0; font-size:12px; color:var(--muted); }
-.layer-opts input[type=range] { width:100%; accent-color:var(--amber); }
-.layer-opts select { padding:3px 6px; font:12px var(--ui); }
-.layer-opts .wide { grid-column:1 / -1; display:flex; gap:6px; align-items:center; }
-.opts .input.text { width:150px; padding:4px 6px; font:12px var(--ui); }
-.opts .btn { padding:4px 8px; font-size:12px; }
+@media (pointer: coarse) { .sheet .btn, .sheet input, .sheet select { min-height:36px; } }
+#whereused { width:min(760px, calc(100vw - 24px)); }
+#whereused .pair { display:grid; grid-template-columns:1fr 1fr; gap:12px; }
+#whereused figure { margin:0; min-width:0; }
+#whereused figcaption { font-size:12px; font-weight:600; color:var(--muted); margin-bottom:4px; }
+#whereused img { display:block; width:100%; height:auto; image-rendering:pixelated; background:#000; border:1px solid var(--line-2); }
+#whereused .where-notes p { margin:0 0 6px; font-size:13px; color:var(--soft, var(--muted)); }
+@media (max-width: 480px) { #whereused .pair { gap:8px; } }
 .sheet { width:min(460px, calc(100vw - 24px)); padding:0; background:var(--card); color:var(--text); border:1px solid var(--line-2); }
 .sheet::backdrop { background:rgba(0,0,0,.7); }
 .sheet .body { padding:12px 16px 16px; display:grid; grid-template-columns:auto 1fr; gap:10px 12px; align-items:center; }
 .sheet .body .wide { grid-column:1 / -1; }
+.sheet .body label.wide:not([hidden]) { display:flex; flex-direction:row; gap:6px; align-items:flex-start; }
+.sheet .body label.wide > input[type=checkbox] { flex:none; margin-top:calc((1lh - 13px) / 2); margin-bottom:0; }   /* level with the first line when the words run onto two */
+@media (pointer: coarse) { .sheet .body label.wide > input[type=checkbox] { width:22px; height:22px; min-height:0; margin-top:calc((1lh - 22px) / 2); } }   /* a finger's size, not a button's height */
 .sheet .body [hidden] { display:none; }
 .sheet .body input[type=number] { width:90px; }
 .sheet .body select { padding:6px 8px; font:13px var(--ui); }
@@ -126,169 +539,323 @@ summary.fold h3 { display:inline; }
 .project { display:flex; gap:8px; align-items:center; }
 .project .pick { flex:1; flex-direction:row; align-items:center; gap:10px; padding:8px 10px; }
 .project .pick b { margin:0; }
-kbd { font:11px var(--mono); border:1px solid var(--line-2); padding:0 4px; color:var(--muted); }
-@media (max-width: 900px) {
-  main { grid-template-columns:minmax(0,1fr); }
-  .tools { flex-direction:row; flex-wrap:wrap; }
-  .tools hr { display:none; }
-}
+.gallery [hidden] { display:none !important; }
+.gallery header .input[type=search] { flex:0 1 200px; min-width:0; padding:6px 9px; font:13px var(--ui); }
+.project .pick .thumb { flex:none; width:96px; height:48px; display:grid; place-items:center; background:var(--well); border:1px solid var(--line); }
+.project .pick .thumb img { display:block; image-rendering:pixelated; max-width:none; }
+.project .pick .txt { min-width:0; display:flex; flex-direction:column; }
+.project .pick span.about { display:block; }
+.project .pick b { overflow-wrap:anywhere; }
+.project .acts { display:flex; gap:6px; flex:none; }
+@media (pointer: coarse) { .gallery header .input[type=search], .project .acts .btn { min-height:36px; } }
+@media (max-width: 560px) { .project { flex-wrap:wrap; } .project .pick { flex:1 1 100%; } .project .acts { flex:1 1 100%; } .project .acts .btn { flex:1; justify-content:center; } .gallery header .input[type=search] { flex:1 1 120px; } }
 </style>
 </head>
 <body>
-<header>
-  <h1><span class="crumb">Media /</span> Animator</h1>
-  <input class="input" id="name" value="bouncing_ball" aria-label="Animation name" style="width:160px">
-  <label class="muted tiny">Size <select class="input" id="csize" title="The canvas: the whole panel, or a small one for a sprite or an icon" style="font-family:var(--ui);padding:6px"></select></label>
+<header class="top">
+  <h1>Animator</h1>
+  <label class="namew" id="namew"><span class="po">Name</span><input class="input" id="name" value="bouncing_ball" aria-label="Animation name" maxlength="40"></label>
+  <span class="tag" id="demo-note" hidden>Demo: nothing is sent</span>
+  <label id="csizew" class="csizew"><span class="po">Canvas size</span><select class="input" id="csize" aria-label="Canvas size" title="The canvas: the whole panel, or a small one for a sprite or an icon"></select></label>
   <span class="muted tiny" id="size">64 × 32 · 8 frames</span>
-  <span class="grow"></span>
-  <button class="btn" id="presets" aria-haspopup="dialog" title="Start from a ready-made animation">✦ Presets…</button>
-  <button class="btn" id="open" aria-haspopup="dialog" title="Open something you saved, or one of the built-in drawings">Open…</button>
-  <details class="menu" id="more"><summary class="btn">More ▾</summary><div class="menu-list">
-    <button class="btn" id="import" title="Turn a GIF or picture into frames to touch up">Import GIF or picture…</button>
-    <button class="btn" id="openfile" title="Open a project file from this computer">Open a drawing file…</button>
-    <button class="btn" id="savefile" title="This drawing, with its layers, as a file to keep or move to another Matrix">Download this drawing as a file</button>
-    <button class="btn" id="savepng" title="Every frame in one PNG, see-through where nothing is drawn">Download all frames as one picture (PNG)</button>
+  <button class="btn" id="presets" aria-haspopup="dialog" title="Start from a ready-made animation"><svg class="i" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 3l1.8 5.4L19 10l-5.2 1.6L12 17l-1.8-5.4L5 10l5.2-1.6z"/><path d="M18.5 15.5l.8 2.2 2.2.8-2.2.8-.8 2.2-.8-2.2-2.2-.8 2.2-.8z"/></svg><span class="lbl">Presets…</span></button>
+  <details class="menu" id="more"><summary class="btn" aria-label="File"><span class="po menuic"><svg class="i" width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M4 6.5h16M4 12h16M4 17.5h16"/></svg></span><span class="wo"><svg class="i" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M3 6.5h6l2 2h10v11H3z"/></svg></span><span class="wo">File</span><span class="wo"><svg class="i" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M6 9l6 6 6-6"/></svg></span></summary><div class="menu-list" id="filemenu">
+    <div class="shh po"><span class="label" id="filettl">Animation</span><button class="ib sm" id="filex" type="button" title="Close" aria-label="Close"><svg class="i" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M6 6l12 12M18 6L6 18"/></svg></button></div>
+    <div class="po fileslot" id="fileslot"></div>
+    <button class="mi" id="open" aria-haspopup="dialog" title="Open something you saved, or one of the built-in drawings"><svg class="i" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M3 6.5h6l2 2h10v11H3z"/></svg>Open a saved drawing…</button>
+    <button class="mi" id="import" title="Bring in a GIF, PNG, JPEG, BMP or WebP to touch up"><svg class="i" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 3.5v11M7.5 10l4.5 4.5 4.5-4.5"/><path d="M4 15.5v5h16v-5"/></svg>Import a GIF or picture…<small>GIF, PNG, JPEG, BMP or WebP: replace, new layer or new frames</small></button>
+    <button class="mi" id="trace" title="Show a picture from this device faintly on the canvas to draw over. It stays on this page: it isn't sent, saved or part of the drawing"><svg class="i" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="3" y="4.5" width="18" height="15" stroke-dasharray="2.6 2.2"/><path d="M5.5 17l4.5-5 3.5 3.5 2-2 3 3.5"/><circle cx="15.5" cy="9" r="1.5"/></svg>Picture to trace over…<small>Stays on this device; never part of the drawing</small></button>
+    <button class="mi" id="where" aria-haspopup="dialog" title="Before saving over one of the Matrix's built-in drawings: see the screens that draw it, with this drawing in place, next to the built-in one. Nothing is saved"><svg class="i" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="10.5" cy="10.5" r="6"/><path d="M15 15l5.5 5.5"/></svg>See it where it's used…<small>The screens that draw a built-in drawing, with this one in its place</small></button>
+    <div class="mhr"></div><div class="mlab">To and from this computer</div>
+    <button class="mi" id="savefile" title="This drawing, with its layers, as a file to keep or move to another Matrix"><svg class="i" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M4 4h12.5L20 7.5V20H4z"/><path d="M8 4v5h7V4"/><rect x="7.5" y="13" width="9" height="7"/></svg>Download this drawing</button>
+    <button class="mi" id="savepng" title="Every frame in one PNG, see-through where nothing is drawn"><svg class="i" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="3" y="5" width="18" height="14"/><path d="M7 5v14M17 5v14M3 9h4M3 15h4M17 9h4M17 15h4"/></svg>Download every frame as one picture</button>
+    <button class="mi" id="openfile" title="Open a project file from this computer"><svg class="i" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 3.5v11M7.5 10l4.5 4.5 4.5-4.5"/><path d="M4 15.5v5h16v-5"/></svg>Open a drawing file…</button>
+    <button class="mi po" id="leave" type="button" hidden><svg class="i" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M15 5l-7 7 7 7"/></svg>Leave the Animator</button>
   </div></details>
-  <input type="file" id="importfile" accept="image/gif,image/png,image/webp" hidden>
+  <div class="phname po" id="phname"><b id="phnm">bouncing_ball</b></div>
+  <input type="file" id="importfile" accept="image/gif,image/png,image/webp,image/jpeg,image/bmp,.gif,.png,.webp,.jpg,.jpeg,.bmp" hidden>
   <input type="file" id="projectfile" accept=".json,application/json" hidden>
-  <button class="btn icon" id="undo" title="Undo (Ctrl+Z)" aria-label="Undo">↶</button>
-  <button class="btn icon" id="redo" title="Redo (Ctrl+Y)" aria-label="Redo">↷</button>
-  <button class="btn" id="show">▶ Show on Matrix</button>
-  <button class="btn" id="keep" title="Keep this drawing on the Matrix, layers and all, to open again (Ctrl+S)">Save</button>
-  <button class="btn primary" id="save" title="Save it, and add it to your media library as a GIF">Save to library</button>
+  <input type="file" id="tracefile" accept="image/*" hidden>
+  <span class="grow"></span>
+  <button class="ib" id="undo" title="Undo (Ctrl+Z)" aria-label="Undo"><svg class="i" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M9 14L4 9l5-5"/><path d="M4 9h10.5a5.5 5.5 0 010 11H11"/></svg></button>
+  <button class="ib" id="redo" title="Redo (Ctrl+Y)" aria-label="Redo"><svg class="i" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M15 14l5-5-5-5"/><path d="M20 9H9.5a5.5 5.5 0 000 11H13"/></svg></button>
+  <button class="ib" id="help" title="Keyboard keys (?)" aria-label="Keyboard keys" aria-haspopup="true" aria-expanded="false"><svg class="i" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="9"/><path d="M9.4 9.4a2.7 2.7 0 015.2 1c0 1.8-2.6 2.3-2.6 3.8"/><circle cx="12" cy="17.2" r=".6" fill="currentColor"/></svg></button>
+  <div class="savegrp" id="savegrp">
+    <button class="fin" id="show" title="Play it on the Matrix for 15 seconds. Nothing is saved"><svg class="i" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="2.5" y="5" width="19" height="12"/><g fill="currentColor" stroke="none"><circle cx="6" cy="8.5" r="1"/><circle cx="9.3" cy="8.5" r="1"/><circle cx="12.6" cy="8.5" r="1"/><circle cx="6" cy="12" r="1"/><circle cx="9.3" cy="12" r="1"/><circle cx="15.9" cy="12" r="1"/><circle cx="12.6" cy="13.5" r="1" opacity="0"/></g><path d="M8 21h8M12 17v4"/></svg><span class="t"><b>Show on Matrix</b><small>plays 15 s, not saved</small></span></button>
+    <button class="fin primary" id="savebtn" aria-haspopup="true" aria-expanded="false" title="Save the drawing, or save it and add it to your library"><span class="t"><b>Save</b></span><svg class="i" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M6 9l6 6 6-6"/></svg></button>
+    <div class="savemenu" id="savemenu">
+      <div class="shh po"><span class="label">Save or show</span><button class="ib sm" id="savex" type="button" title="Close" aria-label="Close"><svg class="i" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M6 6l12 12M18 6L6 18"/></svg></button></div>
+      <button class="fin" id="keep" title="Keep this drawing on the Matrix, layers and all, to open again (Ctrl+S)"><svg class="i" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M4 4h12.5L20 7.5V20H4z"/><path d="M8 4v5h7V4"/><rect x="7.5" y="13" width="9" height="7"/></svg><span class="t"><b>Save drawing</b><small>to change later</small></span></button>
+      <button class="fin primary" id="save" title="Save it, and add it to your media library as a GIF, ready for the playlist or as a Splash, boot or Sleep screen"><svg class="i" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="3.5" y="7.5" width="13" height="13"/><path d="M7 4h13.5v13.5"/><path d="M10 11v6M7 14h6"/></svg><span class="t"><b>Save + add to library</b><small>as a GIF for playlists</small></span></button>
+    </div>
+  </div>
 </header>
-<div class="note">Draw it here; <b>Show on Matrix</b> plays it on the panel for 15 seconds. <b>Save</b> keeps the drawing with its layers, to open again; <b>Save to library</b> also adds it as a GIF to your media, ready for the playlist or as a Splash, boot or Sleep screen.<span id="demo-note" hidden> <b>This is the demo:</b> nothing is sent to a Matrix.</span></div>
-<main>
-  <div class="card tools" role="toolbar" aria-label="Tools">
-    <button class="btn icon on" data-tool="pen" title="Pencil (P)">✎</button>
-    <button class="btn icon" data-tool="erase" title="Eraser (E)">⌫</button>
-    <button class="btn icon" data-tool="fill" title="Fill (F)">▧</button>
-    <button class="btn icon" data-tool="line" title="Line (L)">╱</button>
-    <button class="btn icon" data-tool="rect" title="Rectangle (R)">▭</button>
-    <button class="btn icon" data-tool="ellipse" title="Circle and oval (C)">◯</button>
-    <button class="btn icon" data-tool="gradient" title="Gradient: drag from one colour to the other (D)">◩</button>
-    <button class="btn icon" data-tool="blur" title="Blur: soften what's under the brush (B)">≋</button>
-    <button class="btn icon" data-tool="shade" title="Lighten or darken what's under the brush (S)">☼</button>
-    <button class="btn icon" data-tool="glow" title="Glow: a soft halo of the main colour (H)">✺</button>
-    <button class="btn icon" data-tool="pick" title="Pick colour (I)">⌖</button>
-    <button class="btn icon" data-tool="text" title="Text, in the Matrix's own fonts (T)">T</button>
-    <button class="btn icon" data-tool="select" title="Select an area to move, copy, flip or turn (A)">⬚</button>
-    <button class="btn icon" data-tool="shift" title="Shift the whole drawing (V)">✥</button>
-    <button class="btn icon" data-tool="pan" title="Move around a zoomed-in canvas: drag it, and nothing is drawn (N)">✋</button>
-    <hr>
-    <button class="btn icon" id="mirror" title="Mirror drawing left/right (M)">⇋</button>
-    <button class="btn icon on" id="onion" title="Onion skin: see the previous frame faintly (O)">◐</button>
-    <button class="btn icon on" id="grid" title="Pixel grid (G)">#</button>
-    <button class="btn icon on" id="safe" title="Show the safe area">▢</button>
-  </div>
 
-  <div class="stage">
-    <div class="stage-top">
-      <span id="pos">x –, y –</span><span>·</span><span id="toolname">Pencil</span>
-      <label>Zoom <select class="input" id="zoom" title="Zoom (+ and -)" style="padding:2px 4px;font:12px var(--ui)"><option value="1">Fit</option><option value="2">2×</option><option value="3">3×</option><option value="4">4×</option><option value="6">6×</option><option value="8">8×</option></select></label>
+<nav class="toolbar" id="toolbar" role="toolbar" aria-label="Tools">
+  <span class="glab" aria-hidden="true">Draw</span>
+  <button class="tb on" data-tool="pen" title="Pencil (P)"><svg class="i" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M4.5 19.5l1-4.2L15.6 5.2a1.8 1.8 0 012.6 0l.6.6a1.8 1.8 0 010 2.6L8.7 18.5z"/><path d="M13.6 7.2l3.2 3.2"/><path d="M5.5 15.3l3.2 3.2"/></svg><span class="tlab">Pencil</span></button>
+  <button class="tb" data-tool="erase" title="Eraser (E)"><svg class="i" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M9 19.5L4.3 14.8a1.6 1.6 0 010-2.3l8.2-8.2a1.6 1.6 0 012.3 0l4.9 4.9a1.6 1.6 0 010 2.3L12 19.5z"/><path d="M8.2 8.6l7.2 7.2"/><path d="M12 19.5h8"/></svg><span class="tlab">Eraser</span></button>
+  <button class="tb" data-tool="fill" title="Fill (F)"><svg class="i" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M10.5 3.5l7.6 7.6-6.4 6.4a1.6 1.6 0 01-2.3 0l-5.3-5.3a1.6 1.6 0 010-2.3z"/><path d="M4.4 10.9h13.4" /><path d="M5 11l5.6 5.6 6.4-5.5z" fill="currentColor" stroke="none"/><path d="M20 15.2s-1.8 2.2-1.8 3.4a1.8 1.8 0 003.6 0c0-1.2-1.8-3.4-1.8-3.4z" fill="currentColor" stroke="none"/></svg><span class="tlab">Fill</span></button>
+  <button class="tb" data-tool="pick" title="Pick colour (I)"><svg class="i" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M14.2 6.6l3.2 3.2"/><path d="M15.6 8.2L7 16.8l-2.8.8.8-2.8 8.6-8.6"/><path d="M13.6 6.2l2.3-2.3a2 2 0 012.8 0l1.4 1.4a2 2 0 010 2.8l-2.3 2.3z" fill="currentColor"/></svg><span class="tlab">Pick</span></button>
+  <span class="gsep"></span><span class="glab" aria-hidden="true">Shape</span>
+  <button class="tb" data-tool="line" title="Line (L)"><svg class="i" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M6.5 17.5l11-11"/><rect x="3" y="17" width="4" height="4" fill="currentColor" stroke="none"/><rect x="17" y="3" width="4" height="4" fill="currentColor" stroke="none"/></svg><span class="tlab">Line</span></button>
+  <button class="tb" data-tool="rect" title="Rectangle (R)"><svg class="i" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="3.5" y="6" width="17" height="12"/></svg><span class="tlab">Rectangle</span></button>
+  <button class="tb" data-tool="ellipse" title="Circle and oval (C)"><svg class="i" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="8"/></svg><span class="tlab">Circle</span></button>
+  <button class="tb" data-tool="gradient" title="Gradient: drag from one colour to the other (D)"><svg class="i" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="3.5" y="3.5" width="17" height="17"/><path d="M3.5 3.5h5.5v17H3.5z" fill="currentColor" stroke="none"/><g fill="currentColor" stroke="none"><rect x="10.5" y="5.5" width="2.2" height="2.2"/><rect x="10.5" y="10.9" width="2.2" height="2.2"/><rect x="10.5" y="16.3" width="2.2" height="2.2"/><rect x="14.6" y="8.2" width="2.2" height="2.2"/><rect x="14.6" y="13.6" width="2.2" height="2.2"/></g></svg><span class="tlab">Gradient</span></button>
+  <span class="gsep"></span><span class="glab" aria-hidden="true">Effect</span>
+  <button class="tb" data-tool="blur" title="Blur: soften what's under the brush (B)"><svg class="i" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 3.2s6.2 6.6 6.2 11a6.2 6.2 0 01-12.4 0c0-4.4 6.2-11 6.2-11z"/><path d="M9.2 14.6a2.9 2.9 0 002.8 2.9" opacity=".8"/></svg><span class="tlab">Blur</span></button>
+  <button class="tb" data-tool="shade" title="Lighten or darken what's under the brush (S)"><svg class="i" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="8"/><path d="M12 4a8 8 0 010 16z" fill="currentColor" stroke="none"/></svg><span class="tlab">Shade</span></button>
+  <button class="tb" data-tool="glow" title="Glow: a soft halo of the main colour (H)"><svg class="i" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="2.6" fill="currentColor"/><path d="M12 2.8v3.4M12 17.8v3.4M2.8 12h3.4M17.8 12h3.4M5.5 5.5l2.3 2.3M16.2 16.2l2.3 2.3M18.5 5.5l-2.3 2.3M7.8 16.2l-2.3 2.3"/></svg><span class="tlab">Glow</span></button>
+  <button class="tb" data-tool="text" title="Text, in the Matrix's own fonts (T)"><svg class="i" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M5 7V4.5h14V7"/><path d="M12 4.5v15"/><path d="M9 19.5h6"/></svg><span class="tlab">Text</span></button>
+  <span class="gsep"></span><span class="glab" aria-hidden="true">Move</span>
+  <button class="tb" data-tool="select" title="Select an area to move, copy, flip or turn (A)"><svg class="i" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="3.5" y="5" width="17" height="14" stroke-dasharray="3 2.6"/></svg><span class="tlab">Select</span></button>
+  <button class="tb" data-tool="shift" title="Shift the whole drawing (V)"><svg class="i" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 3v18M3 12h18"/><path d="M9.5 5.5L12 3l2.5 2.5M9.5 18.5L12 21l2.5-2.5M5.5 9.5L3 12l2.5 2.5M18.5 9.5L21 12l-2.5 2.5"/></svg><span class="tlab">Shift</span></button>
+  <button class="tb" data-tool="pan" title="Move around a zoomed-in canvas: drag it, and nothing is drawn (N)"><svg class="i" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M8 12.5V6.2a1.5 1.5 0 013 0V11"/><path d="M11 10.5V4.7a1.5 1.5 0 013 0V11"/><path d="M14 10.8V6.2a1.5 1.5 0 013 0V14a6.5 6.5 0 01-6.5 6.5h-.6a5.6 5.6 0 01-4.4-2.1l-2.6-3.3a1.6 1.6 0 012.4-2.1L8 15"/></svg><span class="tlab">Move</span></button>
+  <span class="gsep"></span><span class="glab" aria-hidden="true">View</span>
+  <button class="tb" id="mirror" title="Mirror drawing left/right (M)" aria-label="Mirror"><svg class="i" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 2.8v18.4" stroke-dasharray="2.4 2.2"/><path d="M9 7L3.5 17H9z"/><path d="M15 7l5.5 10H15z" fill="currentColor"/></svg><span class="tlab">Mirror</span></button>
+  <button class="tb on" id="onion" title="Onion skin: see the frames either side faintly (O). Hold it, or right-click, for its options" aria-label="Onion skin"><svg class="i" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="3" y="3.5" width="12.5" height="10" stroke-dasharray="2.6 2.2"/><rect x="8.5" y="10.5" width="12.5" height="10" fill="var(--icon-bg, #131519)"/></svg><span class="tlab">Onion</span><span class="car" data-opens="onionopts" title="Onion skin options"></span></button>
+  <button class="tb on" id="grid" title="Pixel grid (G)" aria-label="Pixel grid"><svg class="i" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="3.5" y="3.5" width="17" height="17"/><path d="M9.2 3.5v17M14.8 3.5v17M3.5 9.2h17M3.5 14.8h17"/></svg><span class="tlab">Grid</span></button>
+  <button class="tb on" id="safe" title="Show the safe area" aria-label="Safe area"><svg class="i" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="3" y="4.5" width="18" height="15"/><path d="M7 8.5h3M7 8.5v2.5M17 8.5h-3M17 8.5v2.5M7 15.5h3M7 15.5V13M17 15.5h-3M17 15.5V13"/></svg><span class="tlab">Safe area</span></button>
+  <button class="tb" id="centre" title="Centre lines: the middle of the canvas, or of the safe area when it shows" aria-label="Centre lines"><svg class="i" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="3" y="4.5" width="18" height="15" opacity=".45"/><path d="M12 2v20M1.5 12h21" stroke-dasharray="2.4 2"/></svg><span class="tlab">Centre</span></button>
+  <button class="tb" id="tracebtn" aria-pressed="false" title="A picture to trace over: never part of the drawing. Hold it, or right-click, for its options" aria-label="Picture to trace over"><svg class="i" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="3" y="4.5" width="18" height="15" stroke-dasharray="2.6 2.2"/><path d="M5.5 17l4.5-5 3.5 3.5 2-2 3 3.5"/><circle cx="15.5" cy="9" r="1.5"/></svg><span class="tlab">Picture</span><span class="car" data-opens="traceopts" title="Picture options"></span></button>
+  <button class="tb po" id="viewbtn" aria-haspopup="true" title="Grid, safe area, centre lines, onion skin, a picture to trace, the Preview"><svg class="i" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M2.5 12S6 5.5 12 5.5 21.5 12 21.5 12 18 18.5 12 18.5 2.5 12 2.5 12z"/><circle cx="12" cy="12" r="2.8"/></svg><span class="tlab">View…</span></button>
+  <span class="grow"></span>
+  <span class="pos" id="pos">x –, y –</span>
+  <label class="zoomw" id="zoomw" title="Zoom (+ and -)"><svg class="i" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="10.5" cy="10.5" r="6.5"/><path d="M15.5 15.5L21 21M10.5 7.5v6M7.5 10.5h6"/></svg><select class="input" id="zoom" aria-label="Zoom"><option value="1">Fit</option><option value="2">2×</option><option value="3">3×</option><option value="4">4×</option><option value="6">6×</option><option value="8">8×</option></select></label>
+</nav>
+
+<div class="ctx" id="opts">
+  <span class="tool" id="toolname">Pencil</span>
+  <label data-for="pen erase line rect ellipse blur shade glow">Size <select class="input" id="brush" title="Brush size ([ and ])"><option>1</option><option>2</option><option>3</option><option>4</option><option>5</option><option>6</option><option>8</option></select></label>
+  <label data-for="pen erase line rect ellipse blur shade">Brush <select class="input" id="shape" title="The shape of the brush"></select></label>
+  <label data-for="rect ellipse"><input type="checkbox" id="filled"> Filled</label>
+  <label data-for="gradient">Shape <select class="input" id="gtype"></select></label>
+  <label data-for="gradient">Look <select class="input" id="gstyle"></select></label>
+  <label data-for="gradient" id="gsteps-l">Levels <select class="input" id="gsteps"><option>2</option><option>3</option><option selected>4</option><option>5</option><option>6</option><option>8</option></select></label>
+  <label data-for="gradient">Where <select class="input" id="garea"></select></label>
+  <label data-for="gradient"><input type="checkbox" id="grainbow"> Rainbow</label>
+  <label data-for="blur">Strength <select class="input" id="blurk"><option value="0.35">Light</option><option value="0.65" selected>Medium</option><option value="1">Strong</option></select></label>
+  <label data-for="glow">Strength <select class="input" id="glowk"><option value="0.4">Soft</option><option value="0.65" selected>Medium</option><option value="0.9">Bright</option></select></label>
+  <label data-for="shade">Effect <select class="input" id="shadek"><option value="0.15">Lighten a little</option><option value="0.35">Lighten a lot</option><option value="-0.15" selected>Darken a little</option><option value="-0.35">Darken a lot</option></select></label>
+  <label data-for="text" class="tlabel"><span class="lab-t">Text</span> <span class="tawrap"><textarea class="input text" id="ttext" rows="1" maxlength="120" aria-label="The text to write: Enter starts a new line">HELLO</textarea></span></label>
+  <label data-for="text">Font <select class="input" id="tfont" title="The Matrix's fonts"></select></label>
+  <span data-for="text" class="row" role="group" aria-label="Line the text up"><button class="ib" data-align="left" aria-pressed="false" aria-label="Left" title="Line it up on the left edge (tap again to place it anywhere)"><svg class="i" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M4 6h16M4 10h10M4 14h16M4 18h10"/></svg></button><button class="ib" data-align="centre" aria-pressed="false" aria-label="Centre" title="Centre it (tap again to place it anywhere)"><svg class="i" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M4 6h16M7 10h10M4 14h16M7 18h10"/></svg></button><button class="ib" data-align="right" aria-pressed="false" aria-label="Right" title="Line it up on the right edge (tap again to place it anywhere)"><svg class="i" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M4 6h16M10 10h10M4 14h16M10 18h10"/></svg></button></span>
+  <span data-for="text" class="hint opt-hint" id="thint">Click where its top-left corner goes</span>
+  <label data-for="select"><span class="lab-s">Select</span> <select class="input" id="selby" title="Drag out an area, or click a colour to select it"><option value="area">An area</option><option value="joined">A colour, where it joins up</option><option value="all">A colour, all of it on this layer</option></select></label>
+  <button class="btn" data-for="select" id="selall" title="Select everything (Ctrl+A)">All</button>
+  <button class="btn" data-for="select" id="selinvert" title="Select everything on this layer that isn't selected"><svg class="i" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="3.5" y="3.5" width="17" height="17" stroke-dasharray="2.6 2.2"/><rect x="8" y="8" width="8" height="8" fill="currentColor"/></svg><span>Invert</span></button>
+  <span class="row" data-for="select" id="selbtns">
+    <button class="ib" id="selcopy" title="Copy the area (Ctrl+C)" aria-label="Copy the area"><svg class="i" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="8" y="8" width="12" height="12"/><path d="M16 8V4H4v12h4"/></svg></button>
+    <button class="ib" id="selcut" title="Cut the area out (Ctrl+X)" aria-label="Cut the area out"><svg class="i" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="6.5" cy="17.5" r="3"/><circle cx="17.5" cy="17.5" r="3"/><path d="M8.6 15.4L19 3.5M15.4 15.4L5 3.5"/></svg></button>
+    <button class="ib" id="selpaste" title="Paste, then drag it into place (Ctrl+V)" aria-label="Paste"><svg class="i" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="5" y="4.5" width="14" height="16.5"/><path d="M9 4.5V3h6v1.5M9 9.5h6M9 13h6M9 16.5h4"/></svg></button>
+    <button class="ib" id="selfliph" title="Flip the area left to right" aria-label="Flip the area left to right"><svg class="i" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 3v18" stroke-dasharray="2.4 2.2"/><path d="M9 7L3.5 17H9zM15 7l5.5 10H15z"/></svg></button>
+    <button class="ib" id="selflipv" title="Flip the area upside down" aria-label="Flip the area upside down"><svg class="i" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M3 12h18" stroke-dasharray="2.4 2.2"/><path d="M7 9L17 3.5V9zM7 15l10 5.5V15z"/></svg></button>
+    <button class="ib" id="selturn" title="Turn the area a quarter turn" aria-label="Turn the area a quarter turn"><svg class="i" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M20 12a8 8 0 11-2.4-5.7"/><path d="M20 4v4.5h-4.5"/></svg></button>
+    <button class="btn" id="selbig" title="Make it exactly twice the size" aria-label="Make the area twice the size">×2</button>
+    <button class="btn" id="selsmall" title="Make it exactly half the size" aria-label="Make the area half the size">÷2</button>
+  </span>
+  <label data-for="select" title="Resizing keeps its proportions (or hold Shift)"><input type="checkbox" id="selkeep"> Keep shape</label>
+  <button class="ib" data-for="select" id="seldel" title="Rub out what's in the area (Delete)" aria-label="Rub out what's in the area"><svg class="i" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M4 6.5h16M9.5 6.5V4h5v2.5M6.5 6.5l1 13.5h9l1-13.5"/><path d="M10 10.5v6M14 10.5v6"/></svg></button>
+  <span data-for="select" class="hint opt-hint" id="selhint">Drag to select an area; drag inside it to move it, or its corners and sides to resize it</span>
+  <span data-for="gradient" class="hint opt-hint" id="ghint">Drag from the main colour to the second one</span>
+  <span class="grow"></span>
+  <span class="hint wide-hint" id="althint">Right-click rubs out · on Pick or a swatch it sets the second colour</span>
+</div>
+
+<div class="work" id="work">
+  <aside class="pal" id="pal" aria-label="Colours">
+    <div class="fgbg">
+      <input type="color" id="colour" value="#ffb547" aria-label="Main colour" title="Main colour">
+      <input type="color" id="colour2" value="#3b6bff" aria-label="Second colour" title="Second colour: gradients go from the main colour to this one; right-click draws with it on Pick and swatches">
+      <button class="ib sm" id="swap" title="Swap main and second colour (X)" aria-label="Swap colours"><svg class="i" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M7 4L4 7l3 3"/><path d="M4 7h11a5 5 0 015 5"/><path d="M17 20l3-3-3-3"/><path d="M20 17H9a5 5 0 01-5-5"/></svg></button>
+    </div>
+    <div class="hexrow"><span id="hex">#FFB547</span><button class="ib sm" id="recolour" aria-haspopup="dialog" title="Change a colour…: swap one colour for another, in this frame or all of them" aria-label="Change a colour…"><svg class="i" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="7.5" cy="12" r="4" fill="currentColor"/><circle cx="17" cy="12" r="4"/><path d="M11.8 9.8l1.6 2.2-1.6 2.2" stroke-width="1.5"/></svg><span class="lbl">Change a colour…</span></button></div>
+    <div class="pseg2" id="palseg" role="group" aria-label="Which colours"><button type="button" class="on" data-pal="all" aria-pressed="true" title="The palette">All</button><button type="button" data-pal="used" aria-pressed="false" title="The colours in this animation, most used first">Used</button></div>
+    <p class="pal-l">Palette · hold a swatch for the second colour</p>
+    <div class="swatches" id="swatches"></div>
+    <p class="used-l">In this animation</p>
+    <div class="swatches" id="used"></div>
+  </aside>
+  <div class="well" id="board-wrap">
+    <canvas id="board" width="1280" height="640" aria-label="Drawing canvas, 64 by 32 pixels"></canvas>
+  </div>
+  <aside class="lrail" id="lrail" aria-label="Layers">
+    <button class="lh" id="layersbtn" aria-expanded="false" aria-controls="layerdrawer" title="Layers: show the list, with its buttons"><svg class="i" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 3.5l9 5-9 5-9-5z"/><path d="M3 12.5l9 5 9-5"/><path d="M3 16.5l9 5 9-5" opacity=".6"/></svg><span>Layers</span></button>
+    <div class="lthumbs" id="lthumbs"></div>
+    <button class="ib sm" id="lrailadd" title="New layer above this one" aria-label="New layer"><svg class="i" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 5v14M5 12h14"/></svg></button>
+  </aside>
+  <div class="drawer" id="layerdrawer" role="region" aria-label="Layers">
+    <div class="dh"><p class="label">Layers · top first</p><button class="ib sm" id="layersclose" title="Close (Esc)" aria-label="Close the layers"><svg class="i" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M6 6l12 12M18 6L6 18"/></svg></button></div>
+    <div class="layers" id="layers" role="group" aria-label="Layers, top first"></div>
+    <div class="layer-btns">
+      <button class="btn" id="laddu" title="New layer above this one"><svg class="i" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 5v14M5 12h14"/></svg><span>Layer</span></button>
+      <button class="btn" id="ldup" title="Copy this layer, on every frame, into a new layer above it"><svg class="i" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="8" y="8" width="12" height="12"/><path d="M16 8V4H4v12h4"/></svg><span>Duplicate</span></button>
+      <button class="btn" id="llock" aria-pressed="false" title="Lock this layer: nothing can draw on it or change it until it's unlocked"><svg class="i" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="5" y="10.5" width="14" height="10"/><path d="M8 10.5V7.5a4 4 0 018 0v3"/></svg><span>Lock</span></button>
+      <button class="btn icon" id="lup" title="Move this layer up" aria-label="Move layer up"><svg class="i" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 19V5M6 11l6-6 6 6"/></svg><span class="po">Up</span></button>
+      <button class="btn icon" id="ldown" title="Move this layer down" aria-label="Move layer down"><svg class="i" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 5v14M6 13l6 6 6-6"/></svg><span class="po">Down</span></button>
+      <button class="btn" id="lmerge" title="Merge this layer into the one below"><svg class="i" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M7 4v5a5 5 0 005 5 5 5 0 005-5V4"/><path d="M12 14v6.5M9 17.5l3 3 3-3"/></svg><span>Merge down</span></button>
+      <button class="btn" id="lrename" title="Rename this layer (F2)">Rename</button>
+      <button class="btn" id="ldel" title="Delete this layer from every frame"><svg class="i" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M4 6.5h16M9.5 6.5V4h5v2.5M6.5 6.5l1 13.5h9l1-13.5"/><path d="M10 10.5v6M14 10.5v6"/></svg><span>Delete</span></button>
+    </div>
+    <div class="layer-opts">
+      <label for="lopacity">Opacity <span id="lopacity-v">100%</span></label><input type="range" id="lopacity" min="0" max="100" step="5" value="100" title="How solid this layer is: 100 is solid">
+      <label for="lmode">Mixes as</label><select class="input" id="lmode" title="Normal covers what's under it; Adds light brightens it (glows, beams, sparkles)"></select>
+      <label class="wide" title="One drawing shown on every frame, like a background: draw it once"><input type="checkbox" id="lshared"> Same on every frame</label>
+    </div>
+    <p class="tip">Tools draw on the selected layer. Double-click a name to rename it. A locked layer can't be drawn on, changed or deleted until it's unlocked.</p>
+  </div>
+</div>
+
+<section class="tline" id="tline" aria-label="Timeline">
+  <div class="trans" id="trans">
+    <div class="led" id="led" title="The Preview, as the panel shows it: click to play or stop"><div class="ledc"><canvas id="preview" width="64" height="32" aria-label="Preview, as the panel shows it"></canvas></div><div class="playtag" id="playtag"><svg class="i" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="2.5" y="5" width="19" height="14"/><g fill="currentColor" stroke="none"><circle cx="6.5" cy="9" r="1.2"/><circle cx="10.2" cy="9" r="1.2"/><circle cx="13.9" cy="9" r="1.2"/><circle cx="17.6" cy="9" r="1.2"/><circle cx="6.5" cy="12.5" r="1.2"/><circle cx="10.2" cy="12.5" r="1.2"/><circle cx="13.9" cy="12.5" r="1.2"/><circle cx="17.6" cy="12.5" r="1.2"/><circle cx="6.5" cy="16" r="1.2"/><circle cx="10.2" cy="16" r="1.2"/><circle cx="13.9" cy="16" r="1.2"/><circle cx="17.6" cy="16" r="1.2"/></g></svg>Playing on the canvas, as the panel shows it · drawing is paused</div></div>
+    <div class="tctl">
+      <div class="trow">
+        <button class="bigplay" id="play" aria-label="Pause" title="Play or pause (Space)"><svg class="i" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M7.5 5v14M16.5 5v14" stroke-width="3"/></svg></button>
+        <button class="ib sm" id="fprev" title="The frame before (←)" aria-label="The frame before"><svg class="i" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M16 5v14l-9-7z" fill="currentColor"/></svg></button>
+        <span class="fpos" id="fpos">1 <small>/ 1</small></span>
+        <button class="ib sm" id="fnext" title="The frame after (→)" aria-label="The frame after"><svg class="i" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M8 5v14l9-7z" fill="currentColor"/></svg></button>
+      </div>
+      <div class="trow">
+        <label class="loopw" id="loopw" title="How it plays"><svg class="i" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M17 3.5l3 3-3 3"/><path d="M20 6.5H8a4.5 4.5 0 00-4.5 4.5v1"/><path d="M7 20.5l-3-3 3-3"/><path d="M4 17.5h12a4.5 4.5 0 004.5-4.5v-1"/></svg><select id="loop" aria-label="How it plays"><option value="loop">On a loop</option><option value="pingpong">There and back</option><option value="once">Once</option></select></label>
+        <button class="ib sm" id="playgear" aria-haspopup="true" aria-expanded="false" title="Speed, dimmed, background" aria-label="Play options"><svg class="i" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M4 7h10M18 7h2M4 17h4M12 17h8"/><circle cx="16" cy="7" r="2"/><circle cx="10" cy="17" r="2"/></svg></button>
+        <button class="pvtog" id="pvtog" aria-pressed="false" title="The Preview window: plays it as the panel shows it, while you draw (W)"><svg class="i" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="2.5" y="5" width="19" height="14"/><g fill="currentColor" stroke="none"><circle cx="6.5" cy="9" r="1.2"/><circle cx="10.2" cy="9" r="1.2"/><circle cx="13.9" cy="9" r="1.2"/><circle cx="17.6" cy="9" r="1.2"/><circle cx="6.5" cy="12.5" r="1.2"/><circle cx="10.2" cy="12.5" r="1.2"/><circle cx="13.9" cy="12.5" r="1.2"/><circle cx="17.6" cy="12.5" r="1.2"/><circle cx="6.5" cy="16" r="1.2"/><circle cx="10.2" cy="16" r="1.2"/><circle cx="13.9" cy="16" r="1.2"/><circle cx="17.6" cy="16" r="1.2"/></g></svg><span class="lbl">Preview</span></button>
+      </div>
+    </div>
+    <div class="mini po" id="mini" aria-hidden="true"></div>
+    <span class="rd po" id="prd"></span>
+  </div>
+  <div class="fwrap" id="fwrap">
+    <div class="fhead" id="fhead">
+      <p class="label">Frames</p><span id="ftotal" title="How many frames, and how long one play-through lasts on the Matrix"></span>
+      <p class="fnote" id="fnote" hidden></p>
       <span class="grow"></span>
-      <span class="keys"><kbd>P</kbd> pencil <kbd>E</kbd> eraser <kbd>F</kbd> fill <kbd>D</kbd> gradient <kbd>B</kbd> blur <kbd>S</kbd> shade <kbd>H</kbd> glow <kbd>T</kbd> text <kbd>A</kbd> select <kbd>X</kbd> swap colours <kbd>[</kbd><kbd>]</kbd> size <kbd>+</kbd><kbd>-</kbd> zoom <kbd>N</kbd> move around <kbd>←</kbd><kbd>→</kbd> frames <kbd>Space</kbd> play</span>
+      <span class="single">
+        <button class="btn" id="fadd" title="A new blank frame after this one"><svg class="i" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 5v14M5 12h14"/></svg><span class="lbl">Add</span></button>
+        <button class="btn" id="dup" title="A copy of this frame, after it"><svg class="i" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="8" y="8" width="12" height="12"/><path d="M16 8V4H4v12h4"/></svg><span class="lbl">Duplicate</span></button>
+        <button class="btn" id="spread" aria-haspopup="dialog" title="Fill the next frames with this layer moving, fading or cycling its colours">Spread…</button>
+        <button class="btn" id="ftime" aria-haspopup="true" aria-expanded="false" title="Timing: how long frames show"><svg class="i" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="8.5"/><path d="M12 7.5V12l3 2"/></svg><span class="lbl">Timing…</span></button>
+        <button class="ib sm" id="del" title="Delete this frame" aria-label="Delete this frame"><svg class="i" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M4 6.5h16M9.5 6.5V4h5v2.5M6.5 6.5l1 13.5h9l1-13.5"/><path d="M10 10.5v6M14 10.5v6"/></svg></button>
+      </span>
+      <!-- the chosen frames' buttons: js/animator-frames.js wires them and adds .s-range to #fwrap while several are chosen (or a phone's select mode) -->
+      <span class="ranged">
+        <span id="fr-count" aria-live="polite"></span>
+        <button class="btn" id="fr-dup" title="Duplicate the picked frames"><svg class="i" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="8" y="8" width="12" height="12"/><path d="M16 8V4H4v12h4"/></svg><span class="rlab">Duplicate</span></button>
+        <button class="btn" id="fr-rev" title="Reverse the picked frames' order"><svg class="i" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M4 8h13l-3-3M20 16H7l3 3"/></svg><span class="rlab">Reverse</span></button>
+        <button class="btn" id="fr-time" aria-haspopup="true" title="Set the picked frames' time"><svg class="i" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="8.5"/><path d="M12 7.5V12l3 2"/></svg><span class="rlab">Time…</span></button>
+        <button class="btn danger" id="fr-del" title="Delete the picked frames"><svg class="i" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M4 6.5h16M9.5 6.5V4h5v2.5M6.5 6.5l1 13.5h9l1-13.5"/><path d="M10 10.5v6M14 10.5v6"/></svg><span class="rlab">Delete</span></button>
+        <button class="ib sm" id="fr-none" title="Done: just this frame stays chosen (Esc)" aria-label="Done choosing frames"><svg class="i" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M6 6l12 12M18 6L6 18"/></svg></button>
+      </span>
+      <button class="ib sm" id="fmore" aria-haspopup="true" aria-expanded="false" title="More: copy, paste, move, flip, clear" aria-label="More frame actions"><svg class="i" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="5.5" cy="12" r="1.4" fill="currentColor"/><circle cx="12" cy="12" r="1.4" fill="currentColor"/><circle cx="18.5" cy="12" r="1.4" fill="currentColor"/></svg><span class="po rlab">More</span></button>
     </div>
-    <div class="opts" id="opts">
-      <label data-for="pen erase line rect ellipse blur shade glow">Size <select class="input" id="brush" title="Brush size ([ and ])"><option>1</option><option>2</option><option>3</option><option>4</option><option>5</option><option>6</option><option>8</option></select></label>
-      <label data-for="pen erase line rect ellipse blur shade">Brush <select class="input" id="shape" title="The shape of the brush"></select></label>
-      <label data-for="rect ellipse"><input type="checkbox" id="filled"> Filled</label>
-      <label data-for="gradient">Shape <select class="input" id="gtype"></select></label>
-      <label data-for="gradient">Look <select class="input" id="gstyle"></select></label>
-      <label data-for="gradient" id="gsteps-l">Levels <select class="input" id="gsteps"><option>2</option><option>3</option><option selected>4</option><option>5</option><option>6</option><option>8</option></select></label>
-      <label data-for="gradient">Where <select class="input" id="garea"></select></label>
-      <label data-for="gradient"><input type="checkbox" id="grainbow"> Rainbow</label>
-      <label data-for="blur">Strength <select class="input" id="blurk"><option value="0.35">Light</option><option value="0.65" selected>Medium</option><option value="1">Strong</option></select></label>
-      <label data-for="glow">Strength <select class="input" id="glowk"><option value="0.4">Soft</option><option value="0.65" selected>Medium</option><option value="0.9">Bright</option></select></label>
-      <label data-for="shade">Effect <select class="input" id="shadek"><option value="0.15">Lighten a little</option><option value="0.35">Lighten a lot</option><option value="-0.15" selected>Darken a little</option><option value="-0.35">Darken a lot</option></select></label>
-      <label data-for="text">Text <input class="input text" id="ttext" value="HELLO" maxlength="60" aria-label="The text to write"></label>
-      <label data-for="text">Font <select class="input" id="tfont" title="The Matrix's fonts"></select></label>
-      <span data-for="text" class="tiny muted">Click where its top-left corner goes</span>
-      <button class="btn" data-for="select" id="selall" title="Select everything (Ctrl+A)">All</button>
-      <button class="btn" data-for="select" id="selcopy" title="Copy the area (Ctrl+C)">Copy</button>
-      <button class="btn" data-for="select" id="selcut" title="Cut the area out (Ctrl+X)">Cut</button>
-      <button class="btn" data-for="select" id="selpaste" title="Paste, then drag it into place (Ctrl+V)">Paste</button>
-      <button class="btn" data-for="select" id="selfliph" title="Flip the area left to right" aria-label="Flip the area left to right">Flip ↔</button>
-      <button class="btn" data-for="select" id="selflipv" title="Flip the area upside down" aria-label="Flip the area upside down">Flip ↕</button>
-      <button class="btn" data-for="select" id="selturn" title="Turn the area a quarter turn">↻ Turn</button>
-      <button class="btn" data-for="select" id="seldel" title="Rub out what's in the area (Delete)">Delete</button>
-      <span data-for="select" class="tiny muted" id="selhint">Drag to select an area; drag inside it to move it</span>
-      <span data-for="gradient" class="tiny muted" id="ghint">Drag from the main colour to the second one</span>
-    </div>
-    <div id="board-wrap"><canvas id="board" width="1280" height="640" aria-label="Drawing canvas, 64 by 32 pixels"></canvas></div>
-  </div>
-
-  <div class="side">
-    <section class="card">
-      <p class="label">Colour</p>
-      <div class="current"><label class="swatch-col"><input type="color" id="colour" value="#ffb547" aria-label="Main colour">Main</label><span class="tiny muted" style="font-family:var(--mono)" id="hex">#FFB547</span>
-        <button class="btn icon" id="swap" title="Swap main and second colour (X)" aria-label="Swap colours" style="width:28px;height:28px">⇄</button>
-        <label class="swatch-col"><input type="color" id="colour2" value="#3b6bff" aria-label="Second colour" title="Second colour: gradients go from the main colour to this one">Second</label></div>
-      <div class="swatches" id="swatches"></div>
-      <p class="tiny muted fine-pointer" style="margin:6px 0 0">Right-click a swatch for the second colour.</p>
-      <p class="label" style="margin-top:12px">In this animation</p>
-      <div class="swatches" id="used"></div>
-    </section>
-    <section class="card">
-      <p class="label">Layers</p>
-      <div class="layers" id="layers" role="group" aria-label="Layers, top first"></div>
-      <div class="layer-btns">
-        <button class="btn" id="laddu" title="New layer above this one">+ Layer</button>
-        <button class="btn icon" id="lup" title="Move this layer up" aria-label="Move layer up">↑</button>
-        <button class="btn icon" id="ldown" title="Move this layer down" aria-label="Move layer down">↓</button>
-        <button class="btn" id="lmerge" title="Merge this layer into the one below">Merge down</button>
-        <button class="btn" id="lrename" title="Rename this layer (F2)">Rename</button>
-        <button class="btn" id="ldel" title="Delete this layer from every frame" style="color:var(--danger)">Delete</button>
-      </div>
-      <div class="layer-opts">
-        <label for="lopacity">Opacity <span id="lopacity-v">100%</span></label><input type="range" id="lopacity" min="0" max="100" step="5" value="100" title="How solid this layer is: 100 is solid">
-        <label for="lmode">Mixes as</label><select class="input" id="lmode" title="Normal covers what's under it; Adds light brightens it (glows, beams, sparkles)"></select>
-        <label class="wide" title="One drawing shown on every frame, like a background: draw it once"><input type="checkbox" id="lshared"> Same on every frame</label>
-      </div>
-      <p class="tiny muted" style="margin:6px 0 0">Tools draw on the selected layer. Every frame has the same layers; what you can see is what's saved.</p>
-    </section>
-    <section class="card">
-      <p class="label">Preview</p>
-      <div class="led"><canvas id="preview" width="64" height="32"></canvas></div>
-      <div class="row" style="margin-top:8px">
-        <button class="btn" id="play">❚❚ Pause</button>
-        <label class="tiny muted">Speed <input class="input" id="speed" type="number" min="10" max="400" value="100" style="width:64px">%</label>
-      </div>
-      <div class="row" style="margin-top:8px">
-        <label class="tiny muted">Plays <select class="input" id="loop" style="font-family:var(--ui)"><option value="loop">On a loop</option><option value="pingpong">There and back</option><option value="once">Once</option></select></label>
-        <label class="tiny muted" title="How it looks dimmed, brought back up so you can see it: soft dark shading turns into bands at low brightness">Dimmed <select class="input" id="dim" style="font-family:var(--ui)"></select></label>
-        <label class="tiny muted">Background <input type="color" id="bg" value="#000000" title="Shown wherever nothing is drawn" style="width:36px;height:26px;padding:0;border:1px solid var(--line-2);background:none"></label>
-      </div>
-    </section>
-  </div>
-
-  <section class="card timeline">
-    <div class="row" style="margin-bottom:8px">
-      <p class="label" style="margin:0">Frames</p><span class="grow"></span>
-      <label class="tiny muted">Every frame <input class="input" id="allms" type="number" min="20" max="5000" step="10" value="90" style="width:64px"> ms</label>
-      <button class="btn" id="setall" title="Give every frame this timing">Set</button>
-      <button class="btn" id="spread" aria-haspopup="dialog" title="Fill the next frames with this layer moving, fading or cycling its colours">Spread…</button>
-      <button class="btn" id="copy" title="Copy this frame (Ctrl+C)">Copy</button>
-      <button class="btn" id="paste" title="Paste it after this frame (Ctrl+V)">Paste</button>
-      <button class="btn" id="dup">Duplicate</button>
-      <button class="btn" id="left">◀ Move</button>
-      <button class="btn" id="right">Move ▶</button>
-      <button class="btn" id="fliph" title="Flip this frame left to right" aria-label="Flip this frame left to right">Flip ↔</button>
-      <button class="btn" id="flipv" title="Flip this frame upside down" aria-label="Flip this frame upside down">Flip ↕</button>
-      <button class="btn" id="clear">Clear frame</button>
-      <button class="btn" id="del" style="color:var(--danger)">Delete</button>
-    </div>
+    <div class="scrub" id="scrub" aria-hidden="true"><i></i></div>
     <div class="frames" id="frames"></div>
+  </div>
+</section>
+
+<div class="deck po" id="deck">
+  <section class="dk" id="dk-draw" aria-label="Draw">
+    <div class="qcol" id="qcol" aria-label="Quick colours"></div>
+    <div class="usedl" id="usedl"><span>In this animation</span><button class="lnk" id="qrecolour" type="button"><svg class="i" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="7.5" cy="12" r="4" fill="currentColor"/><circle cx="17" cy="12" r="4"/><path d="M11.8 9.8l1.6 2.2-1.6 2.2" stroke-width="1.5"/></svg>Change a colour…</button></div>
+    <div class="qcol" id="qused" aria-label="Colours in this animation"></div>
+    <div class="hold">
+      <button class="hk alt" id="altkey" type="button" aria-pressed="false" title="Hold it with one thumb and draw with the other: rubs out, or on Pick or a swatch sets the second colour. A tap works for the next stroke"><svg class="i" width="26" height="26" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="3" y="3" width="11" height="11" fill="currentColor"/><rect x="10" y="10" width="11" height="11" fill="var(--icon-bg, #131519)"/></svg><span><b>Hold = right-click</b><small>rub out, or pick a 2nd colour</small></span></button>
+      <div class="hk" id="pinchcard"><svg class="i" width="26" height="26" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M7 7l-3-3M4 4v4M4 4h4M17 17l3 3M20 20v-4M20 20h-4"/><circle cx="9.5" cy="9.5" r="1.8"/><circle cx="14.5" cy="14.5" r="1.8"/></svg><span><b>Two fingers</b><small>pinch to zoom, drag to move</small></span></div>
+    </div>
   </section>
-</main>
+  <section class="dk" id="dk-colour" aria-label="Colour"></section>
+  <section class="dk" id="dk-layers" aria-label="Layers"></section>
+  <section class="dk" id="dk-frames" aria-label="Frames">
+    <p class="fhint" id="fhint">Tap a frame to draw on it. Hold one to choose several, then tap others; hold and drag to move them.</p>
+    <div class="fact" id="fact"></div>
+  </section>
+</div>
+<nav class="dock po" id="dock" aria-label="Panels">
+  <button type="button" data-dock="draw" class="on" aria-pressed="true"><svg class="i" width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M4.5 19.5l1-4.2L15.6 5.2a1.8 1.8 0 012.6 0l.6.6a1.8 1.8 0 010 2.6L8.7 18.5z"/><path d="M13.6 7.2l3.2 3.2"/><path d="M5.5 15.3l3.2 3.2"/></svg><span>Draw</span></button>
+  <button type="button" data-dock="colour" aria-pressed="false"><svg class="i" width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 3a9 9 0 100 18c1.4 0 2-1 1.6-2.2-.5-1.4.3-2.8 1.8-2.8H18a3 3 0 003-3c0-5.5-4-10-9-10z"/><circle cx="7.5" cy="11" r="1.3" fill="currentColor"/><circle cx="10.5" cy="7" r="1.3" fill="currentColor"/><circle cx="15.5" cy="7.5" r="1.3" fill="currentColor"/></svg><span>Colour</span></button>
+  <button type="button" data-dock="layers" aria-pressed="false"><svg class="i" width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 3.5l9 5-9 5-9-5z"/><path d="M3 12.5l9 5 9-5"/><path d="M3 16.5l9 5 9-5" opacity=".6"/></svg><span>Layers</span></button>
+  <button type="button" data-dock="frames" aria-pressed="false"><svg class="i" width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="3" y="5" width="18" height="14"/><path d="M7 5v14M17 5v14M3 9h4M3 15h4M17 9h4M17 15h4"/></svg><span>Frames</span></button>
+</nav>
+<div class="bsheet po" id="viewsheet" role="dialog" aria-label="View">
+  <div class="shh"><span class="label">View</span><button class="ib sm" id="viewx" type="button" title="Close" aria-label="Close"><svg class="i" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M6 6l12 12M18 6L6 18"/></svg></button></div>
+  <div class="vg" id="vtiles"></div>
+  <div id="vslot"></div>
+  <div class="vrow"><span>Preview</span><span class="seg" role="group" aria-label="The Preview window"><button type="button" data-pv="0">Off</button><button type="button" data-pv="1">On</button></span><span class="note">plays it as the panel shows it, while you draw</span></div>
+</div>
+<div class="pop" id="onionopts" role="dialog" aria-label="Onion skin options"><div class="popf">
+  <p class="label">Onion skin</p>
+  <label class="r"><span>Show</span><select class="input" id="onionshow" title="Which frames show faintly: previous in red, next in blue"></select></label>
+  <label class="r"><span>Strength</span><select class="input" id="onionk"></select></label>
+  <p class="note">Red is the frame before, blue the frame after.</p>
+</div></div>
+<div class="pop" id="traceopts" role="dialog" aria-label="Picture to trace over"><div class="popf">
+  <p class="label">Picture to trace over</p>
+  <label class="r"><span>Sits</span><select class="input" id="tracewhere" title="The picture to trace over: never part of the drawing"><option value="over" selected>Over the drawing</option><option value="under">Under the drawing</option></select></label>
+  <label class="r"><span>Strength</span><input type="range" id="tracek" min="10" max="100" step="5" value="45"></label>
+  <div class="r"><label class="r"><input type="checkbox" id="traceon" checked> Show it</label><span class="grow"></span><button class="btn" id="traceanother" type="button">Another picture…</button><button class="btn danger" id="tracedel" title="Take the picture away">Remove</button></div>
+  <p class="note">It stays on this device: never sent, saved or part of the drawing.</p>
+</div></div>
+<div class="pop" id="playopts" role="dialog" aria-label="Play options"><div class="popf">
+  <p class="label">Playing</p>
+  <label class="r"><span>Speed</span><input class="input" id="speed" type="number" min="10" max="400" value="100" style="width:80px"> %</label>
+  <label class="r" title="How it looks dimmed, brought back up so you can see it: soft dark shading turns into bands at low brightness"><span>Dimmed</span><select class="input" id="dim"></select></label>
+  <label class="r"><span>Background</span><input type="color" id="bg" value="#000000" title="Shown wherever nothing is drawn" style="width:44px;height:30px;padding:0;border:1px solid var(--line-2);background:none"></label>
+</div></div>
+<div class="pop" id="timepop" role="dialog" aria-label="Timing"><div class="popf">
+  <p class="label">Timing</p>
+  <label class="r"><span>This frame</span><input class="input" id="fms" type="number" min="50" max="5000" step="50" value="100" style="width:90px" title="How long this frame shows. The arrows go in 50s; any time from 20 to 5000 can be typed"> ms</label>
+  <div class="r"><label class="r"><span>Every frame</span><input class="input" id="allms" type="number" min="50" max="5000" step="50" value="100" style="width:90px" title="The arrows go in 50s; any time from 20 to 5000 can be typed"> ms</label><button class="btn" id="setall" title="Give every frame this timing. The Matrix draws every 50 ms, so multiples of 50 play exactly as set">Set</button></div>
+  <p class="note">The Matrix draws every 50 ms, so multiples of 50 play exactly as set.</p>
+</div></div>
+<div class="pop" id="fmenu" role="menu" aria-label="Frame actions">
+  <button class="mi" id="copy" title="Copy this frame (Ctrl+C)"><svg class="i" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="8" y="8" width="12" height="12"/><path d="M16 8V4H4v12h4"/></svg>Copy this frame</button>
+  <button class="mi" id="paste" title="Paste it after this frame (Ctrl+V)"><svg class="i" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="5" y="4.5" width="14" height="16.5"/><path d="M9 4.5V3h6v1.5M9 9.5h6M9 13h6M9 16.5h4"/></svg>Paste after this frame</button>
+  <div class="mhr"></div>
+  <button class="mi" id="left" title="Move this frame one place earlier"><svg class="i" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M16 5v14l-9-7z" fill="currentColor"/></svg>Move earlier</button>
+  <button class="mi" id="right" title="Move this frame one place later"><svg class="i" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M8 5v14l9-7z" fill="currentColor"/></svg>Move later</button>
+  <div class="mhr"></div>
+  <button class="mi" id="fliph" title="Flip this frame left to right" aria-label="Flip this frame left to right"><svg class="i" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 3v18" stroke-dasharray="2.4 2.2"/><path d="M9 7L3.5 17H9zM15 7l5.5 10H15z"/></svg>Flip left to right</button>
+  <button class="mi" id="flipv" title="Flip this frame upside down" aria-label="Flip this frame upside down"><svg class="i" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M3 12h18" stroke-dasharray="2.4 2.2"/><path d="M7 9L17 3.5V9zM7 15l10 5.5V15z"/></svg>Flip upside down</button>
+  <button class="mi" id="clear" title="Rub out every layer of this frame"><svg class="i" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M9 19.5L4.3 14.8a1.6 1.6 0 010-2.3l8.2-8.2a1.6 1.6 0 012.3 0l4.9 4.9a1.6 1.6 0 010 2.3L12 19.5z"/><path d="M8.2 8.6l7.2 7.2"/><path d="M12 19.5h8"/></svg>Clear this frame</button>
+  <div class="fmore-phone po" id="fmphone"></div>
+</div>
+<div class="pop" id="helppop" role="dialog" aria-label="Keyboard keys">
+  <p class="label" style="padding:6px 8px">Keyboard keys</p>
+  <div class="keys">
+    <kbd>P</kbd><span>Pencil</span><kbd>E</kbd><span>Eraser</span>
+    <kbd>F</kbd><span>Fill</span><kbd>I</kbd><span>Pick colour</span>
+    <kbd>L</kbd><span>Line</span><kbd>R</kbd><span>Rectangle</span>
+    <kbd>C</kbd><span>Circle</span><kbd>D</kbd><span>Gradient</span>
+    <kbd>B</kbd><span>Blur</span><kbd>S</kbd><span>Lighten/darken</span>
+    <kbd>H</kbd><span>Glow</span><kbd>T</kbd><span>Text</span>
+    <kbd>A</kbd><span>Select</span><kbd>V</kbd><span>Shift</span>
+    <kbd>N</kbd><span>Move around</span><kbd>M</kbd><span>Mirror</span>
+    <kbd>O</kbd><span>Onion skin</span><kbd>G</kbd><span>Grid</span>
+    <kbd>W</kbd><span>Preview window</span><kbd>X</kbd><span>Swap colours</span>
+    <kbd>[ ]</kbd><span>Brush size</span><kbd>+ −</kbd><span>Zoom</span>
+    <kbd>← →</kbd><span>Frames</span><kbd>Space</kbd><span>Play/pause</span>
+    <kbd>Ctrl+Z</kbd><span>Undo</span><kbd>Ctrl+Y</kbd><span>Redo</span>
+    <kbd>Ctrl+S</kbd><span>Save drawing</span><kbd>Ctrl+A</kbd><span>Select all</span>
+    <kbd>Ctrl+C V X</kbd><span>Copy, paste, cut</span><kbd>F2</kbd><span>Rename a layer</span>
+  </div>
+  <p class="note" style="padding:0 8px 6px">Right-click rubs out (pencil, fill, shapes, text); on Pick or a swatch it sets the second colour. Rest the mouse on any button to see its key.</p>
+</div>
+<div class="pop" id="notepop" role="dialog" aria-label="About the frame times"><p class="note" id="notetext" style="padding:6px 8px;font-size:12.5px;color:var(--soft)"></p></div>
 <div id="toast" role="status"></div>
 <dialog class="gallery" id="gallery" aria-labelledby="gallery-title">
-  <header><h1 id="gallery-title" style="font-size:16px">Start from a preset</h1><span class="muted tiny">Every one is yours to change: it replaces your frames (Undo brings them back).</span><span class="grow"></span><button class="btn" id="gallery-close" aria-label="Close">✕</button></header>
+  <header><h1 id="gallery-title" style="font-size:16px">Start from a preset</h1><span class="muted tiny">Every one is yours to change: it replaces your frames (Undo brings them back).</span><span class="grow"></span><input class="input" id="gallery-filter" type="search" placeholder="Find a preset" aria-label="Find a preset by name" autocomplete="off"><button class="btn" id="gallery-close" aria-label="Close">✕</button></header>
   <div class="body" id="gallery-body"></div>
 </dialog>
 <dialog class="gallery" id="opendlg" aria-labelledby="open-title">
-  <header><h1 id="open-title" style="font-size:16px">Open a drawing</h1><span class="muted tiny">It replaces what's here (Undo brings that back).</span><span class="grow"></span><button class="btn" id="open-close" aria-label="Close">✕</button></header>
+  <header><h1 id="open-title" style="font-size:16px">Open a drawing</h1><span class="muted tiny">It replaces what's here (Undo brings that back).</span><span class="grow"></span><input class="input" id="open-filter" type="search" placeholder="Find a drawing" aria-label="Find a drawing by name" autocomplete="off"><button class="btn" id="open-close" aria-label="Close">✕</button></header>
+  <p class="muted tiny" id="open-status" role="status" style="margin:0;padding:8px 16px 0" hidden></p>
   <div class="body" id="open-body"></div>
+</dialog>
+<dialog class="gallery" id="whereused" aria-labelledby="where-title">
+  <header><h1 id="where-title" style="font-size:16px">Where it is used</h1><span class="grow"></span><button class="btn" id="where-close" aria-label="Close">✕</button></header>
+  <p class="muted tiny" id="where-status" role="status" style="margin:0;padding:8px 16px 0" hidden></p>
+  <div class="body" id="where-body"></div>
+  <div class="body where-notes" id="where-notes" hidden></div>
 </dialog>
 <dialog class="sheet" id="spreaddlg" aria-labelledby="spread-title">
   <header><h1 id="spread-title" style="font-size:16px">Spread across frames</h1><span class="grow"></span><button class="btn" id="spread-close" aria-label="Close">✕</button></header>
@@ -296,20 +863,81 @@ kbd { font:11px var(--mono); border:1px solid var(--line-2); padding:0 4px; colo
     <p class="wide tiny muted" id="sphint" style="margin:0"></p>
     <label for="spmode">Do what</label><select class="input" id="spmode"><option value="move">Move it</option><option value="fade">Fade it</option><option value="cycle">Cycle its colours</option></select>
     <label for="spn">Over</label><span><input class="input" id="spn" type="number" min="2" max="120" value="8"> frames, starting with this one</span>
-    <label for="spdx" data-sp="move">Moves</label><span data-sp="move"><input class="input" id="spdx" type="number" min="-128" max="128" value="16" aria-label="Pixels to the right"> pixels right and <input class="input" id="spdy" type="number" min="-128" max="128" value="0" aria-label="Pixels down"> down by the last frame</span>
+    <label class="wide" data-sp="move"><input type="checkbox" id="spwrap"> Wrap round the edges: what goes off one side comes in on the other</label>
+    <label for="spway" data-sp="move" class="spwrapped">How far</label><select class="input spwrapped" id="spway" data-sp="move"><option value="">As far as I say below</option><option value="right">One full trip right</option><option value="left">One full trip left</option><option value="down">One full trip down</option><option value="up">One full trip up</option><option value="downright">One full trip down and right</option><option value="downleft">One full trip down and left</option><option value="upright">One full trip up and right</option><option value="upleft">One full trip up and left</option></select>
+    <label for="spdx" data-sp="move" class="spby">Moves</label><span data-sp="move" class="spby"><input class="input" id="spdx" type="number" min="-128" max="128" value="16" aria-label="Pixels to the right"> pixels right and <input class="input" id="spdy" type="number" min="-128" max="128" value="0" aria-label="Pixels down"> down by the last frame</span>
     <label for="spfrom" data-sp="fade">Brightness</label><span data-sp="fade">from <input class="input" id="spfrom" type="number" min="0" max="200" step="5" value="100" aria-label="Brightness at the start, percent"> to <input class="input" id="spto" type="number" min="0" max="200" step="5" value="0" aria-label="Brightness at the end, percent"> %</span>
     <label for="spease" data-sp="move fade">Pace</label><select class="input" id="spease" data-sp="move fade"></select>
+    <p class="wide tiny muted" id="sptrip" data-sp="move" style="margin:0"></p>
     <label for="sporder" data-sp="cycle">Order</label><select class="input" id="sporder" data-sp="cycle"></select>
     <label class="wide" data-sp="cycle"><input type="checkbox" id="spback"> Run it the other way</label>
+    <p class="wide tiny" id="sperr" role="alert" style="margin:0;color:var(--danger)"></p>
     <span class="wide row" style="justify-content:flex-end"><button class="btn primary" id="spgo">Fill the frames</button></span>
   </div>
 </dialog>
+<dialog class="sheet" id="fr-timedlg" aria-labelledby="fr-time-title">
+  <header><h1 id="fr-time-title" style="font-size:16px">Time for frames</h1><span class="grow"></span><button class="btn" id="fr-time-close" aria-label="Close">✕</button></header>
+  <div class="body">
+    <p class="wide tiny muted" id="fr-time-now" style="margin:0"></p>
+    <label for="fr-how">Do what</label><select class="input" id="fr-how"><option value="set">Give each the same time</option><option value="add">Make each longer or shorter</option></select>
+    <label for="fr-ms" id="fr-ms-l">Each shows for</label><span><input class="input" id="fr-ms" type="number" min="50" max="5000" step="50" value="100" title="The arrows go in 50s; any time from 20 can be typed"> <span id="fr-ms-u">ms</span></span>
+    <p class="wide tiny muted" id="fr-timenote" style="margin:0"></p>
+    <p class="wide tiny" id="fr-timeerr" role="alert" style="margin:0;color:var(--danger)"></p>
+    <span class="wide row" style="justify-content:flex-end"><button class="btn primary" id="fr-timego">Set the time</button></span>
+  </div>
+</dialog>
+<dialog class="sheet" id="draftdlg" aria-labelledby="draft-title">
+  <header><h1 id="draft-title" style="font-size:16px">Carry on where you left off?</h1></header>
+  <div class="body">
+    <canvas class="wide" id="draft-pic" width="64" height="32" style="width:100%; max-height:200px; object-fit:contain; image-rendering:pixelated; background:#000"></canvas>
+    <p class="wide" id="draft-text" style="margin:0"></p>
+    <span class="wide row" style="justify-content:flex-end; gap:8px"><button class="btn" id="draft-drop">Throw it away</button><button class="btn primary" id="draft-use">Carry on</button></span>
+  </div>
+</dialog>
+<dialog class="sheet" id="importdlg" aria-labelledby="import-title">
+  <header><h1 id="import-title" style="font-size:16px">Bring it in</h1><span class="grow"></span><button class="btn" id="im-close" aria-label="Close">✕</button></header>
+  <div class="body">
+    <p class="wide tiny muted" id="imfile" style="margin:0;overflow-wrap:anywhere"></p>
+    <label for="imwhere">Where</label><select class="input" id="imwhere"><option value="replace">Replace the drawing</option><option value="layer">A new layer on this frame</option><option value="frames">New frames after this one</option></select>
+    <label for="imfit">Fit</label><select class="input" id="imfit"><option value="whole">Show the whole picture</option><option value="fill">Fill the canvas, crop the edges</option></select>
+    <label class="wide" title="On: black pixels become empty, so what's behind shows through. Off: black stays black, as drawn (best for a photo)"><input type="checkbox" id="imblack" checked> Treat black as empty</label>
+    <p class="wide tiny muted" id="imhint" style="margin:0"></p>
+    <p class="wide tiny" id="imerr" role="alert" style="margin:0;color:var(--danger)"></p>
+    <span class="wide row" style="justify-content:flex-end"><button class="btn" id="imcancel">Cancel</button><button class="btn primary" id="imgo">Import</button></span>
+  </div>
+</dialog>
+<dialog class="sheet" id="recolourdlg" aria-labelledby="recolour-title">
+  <header><h1 id="recolour-title" style="font-size:16px">Change a colour</h1><span class="grow"></span><button class="btn" id="recolour-close" aria-label="Close">✕</button></header>
+  <div class="body">
+    <label for="rcfrom">Change</label><span class="row"><input type="color" id="rcfrom" value="#ffb547"><span class="tiny muted" style="font-family:var(--mono)" id="rcfrom-hex">#FFB547</span><button class="btn" id="rcpick" type="button" title="Close this and click the colour on the drawing"><svg class="i" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M14.2 6.6l3.2 3.2"/><path d="M15.6 8.2L7 16.8l-2.8.8.8-2.8 8.6-8.6"/><path d="M13.6 6.2l2.3-2.3a2 2 0 012.8 0l1.4 1.4a2 2 0 010 2.8l-2.3 2.3z" fill="currentColor"/></svg> Pick it from the drawing</button></span>
+    <div class="wide swatches" id="rcused" aria-label="Colours in this animation"></div>
+    <label for="rcto">To</label><span><input type="color" id="rcto" value="#3b6bff"></span>
+    <label for="rcframes">In</label><select class="input" id="rcframes"><option value="one">This frame</option><option value="all">Every frame</option></select>
+    <label for="rclayers">On</label><select class="input" id="rclayers"><option value="one">This layer</option><option value="all">Every layer</option></select>
+    <label class="wide" id="rcsel-l"><input type="checkbox" id="rcsel" checked> Only inside the selection</label>
+    <label class="wide"><input type="checkbox" id="rcnear"> And colours close to it</label>
+    <p class="wide tiny" id="rcmsg" role="alert" style="margin:0;color:var(--danger)"></p>
+    <span class="wide row" style="justify-content:flex-end"><button class="btn primary" id="rcgo">Change it</button></span>
+  </div>
+</dialog>
 <script src="js/animator-tools.js"></script>
+<script src="js/animator-timing.js"></script>
 <script src="js/animator-motion.js"></script>
 <script src="js/animator-project.js"></script>
+<script src="js/animator-import.js"></script>
+<script src="js/animator-ask.js"></script>
+<script src="js/animator-open.js"></script>
+<script src="js/animator-where.js"></script>
 <script src="js/animator-presets.js"></script>
 <script src="js/animator-sleep.js"></script>
 <script src="js/animator-splash.js"></script>
+<script src="js/animator-sizes.js"></script>
+<script src="js/animator-engine.js"></script>
+<script src="js/animator-aids.js"></script>
+<script src="js/animator-select.js"></script>
+<script src="js/animator-layout.js"></script>
+<script src="js/animator-touch.js"></script>
+<script src="js/animator-frames.js"></script>
 <script src="js/animator.js"></script>
 </body>
 </html>

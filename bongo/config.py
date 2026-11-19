@@ -11,7 +11,7 @@ import tempfile
 from pathlib import Path
 from zoneinfo import ZoneInfo
 
-from bongo import media, pets
+from bongo import daylight, media, pets
 from bongo.module import Context, Module
 from bongo.player import Entry
 from bongo.safe_area import SafeArea
@@ -42,6 +42,9 @@ DEFAULTS = {
     # have their own colours (bongo/calendars.py); "own" is the dates added on Calendar screens (an event's
     # own colour wins), "holidays" the holidays ticked there. Off: each screen's own colours, as before.
     "calendar_colours": {"code": False, "own": "#5AC8FA", "holidays": "#FF7A59"},
+    # Settings > Device > Follow daylight (bongo/daylight.py): the panel goes from after_dark to panel.brightness
+    # with the sun at the Matrix's location; gradual 0 (Quick) to 100 (Gradual). Off: one daytime brightness, as before.
+    "daylight": dict(daylight.DEFAULTS),
 }
 
 
@@ -86,7 +89,8 @@ def load(path: Path = DEFAULT_PATH) -> dict:
 
     def part(key):   # a section that isn't an object (null, a list) counts as missing
         return {**defaults[key], **data[key]} if isinstance(data.get(key), dict) else defaults[key]
-    config = {**defaults, **data, "panel": part("panel"), "safe_area": part("safe_area"), "web": part("web")}
+    config = {**defaults, **data, "panel": part("panel"), "safe_area": part("safe_area"), "web": part("web"),
+              "daylight": part("daylight")}
     if not isinstance(config["playlist"], list):
         config["playlist"] = []
     return config
@@ -158,7 +162,7 @@ def context_factory(config: dict):
 
 
 KEYS = {"name", "timezone", "location", "panel", "safe_area", "web", "playlist", "splash", "sleep", "overlays", "update", "pet",
-        "wifi_country", "modules_off", "calendar_colours", "settings_layout"}
+        "wifi_country", "modules_off", "calendar_colours", "settings_layout", "daylight"}
 OVERLAY_KEYS = {"module", "overlay", "every", "seconds", "offset", "settings", "enabled"}
 # limit_refresh: Hz the panel's refresh is held to (0: as fast as it goes). A slower Pi under load refreshes
 # unevenly, which shows as flicker; a steady rate a little under its slowest is calmer (Settings > Device)
@@ -389,6 +393,7 @@ def validate(config: dict, modules: dict[str, Module]) -> list[str]:
     if country is not None and not (isinstance(country, str) and len(country) == 2 and country.isalpha() and country.isupper()):
         problems.append("wifi_country must be a two-letter country code such as GB")
     problems += location_problems(config.get("location"))
+    problems += daylight.problems(config.get("daylight"))
     name = config.get("name")
     if name is not None and not (isinstance(name, str) and len(name) <= 60):   # (the dashboard's status page reads it as text)
         problems.append("name: the Matrix's name is text, up to 60 characters")

@@ -232,6 +232,20 @@ def latest(settings: dict) -> Reading | None:
     return converted(reading, settings["units"], settings["wind_unit"])
 
 
+def cached(latitude: float, longitude: float) -> Reading | None:
+    """The last reading kept for this place, in °C and m/s, without ever fetching one (None: no key, none
+    kept yet, or hours old). For screens that only take their colour from the weather (the Seasonal Tree):
+    a Weather screen for the same place keeps it fresh."""
+    key = keys.get()
+    if not key:
+        return None
+    with _lock:
+        reading = _cache.get(_slot(latitude, longitude, key))
+    if reading is None or time.time() - reading.fetched > OLD_SECONDS:
+        return None
+    return reading
+
+
 def failing(settings: dict) -> bool:
     """Whether the last try to fetch this weather failed (so "no reading" means no connection, not "not yet")."""
     with _lock:

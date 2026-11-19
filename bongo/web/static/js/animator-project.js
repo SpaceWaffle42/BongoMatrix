@@ -4,7 +4,7 @@
 //
 //   { "format": "bongo-animation", "version": 1, "name": "moon", "width": 16, "height": 16,
 //     "background": "#000000", "loop": "loop", "palette": ["#fff4de", ...],
-//     "layers": [{ "name": "Drawing", "on": true, "opacity": 1, "mode": "normal", "shared": false }],
+//     "layers": [{ "name": "Drawing", "on": true, "opacity": 1, "mode": "normal", "shared": false }],   (+ "locked": true, only when it is)
 //     "frames": [{ "ms": 90, "cels": ["64*. 3 3 12*a ..."] }, { "ms": 90, "cels": ["="] }] }
 //
 // A cel is one layer's pixels in one frame, row by row, as runs: "12*a" is twelve pixels of palette colour a
@@ -51,7 +51,7 @@
       return { ms: f.ms, cels: out };
     });
     return { format: FORMAT, version: VERSION, name: doc.name, width: doc.w, height: doc.h, background: doc.bg, loop: doc.loop, palette,
-      layers: doc.layers.map((l) => ({ name: l.name, on: l.on !== false, opacity: l.opacity ?? 1, mode: l.mode || 'normal', shared: !!l.shared })), frames };
+      layers: doc.layers.map((l) => ({ name: l.name, on: l.on !== false, opacity: l.opacity ?? 1, mode: l.mode || 'normal', shared: !!l.shared, ...(l.locked === true ? { locked: true } : {}) })), frames };
   }
   // as text: a line per frame, so a change to one frame is one changed line
   function stringify(file) {
@@ -67,7 +67,7 @@
     if (!Array.isArray(file.palette) || file.palette.some((c) => typeof c !== 'string' || !/^#[0-9a-f]{6}$/i.test(c))) throw new Error('its colours aren\'t ones the Animator knows');
     const palette = file.palette.map((c) => c.toLowerCase());
     const layers = (file.layers || []).map((l, k) => ({ id: k + 1, name: String(l.name || `Layer ${k + 1}`).slice(0, 24), on: l.on !== false,
-      opacity: Number.isFinite(Number(l.opacity ?? 1)) ? Math.max(0, Math.min(1, Number(l.opacity ?? 1))) : 1, mode: MODES[l.mode] ? l.mode : 'normal', shared: !!l.shared }));
+      opacity: Number.isFinite(Number(l.opacity ?? 1)) ? Math.max(0, Math.min(1, Number(l.opacity ?? 1))) : 1, mode: MODES[l.mode] ? l.mode : 'normal', shared: !!l.shared, ...(l.locked === true ? { locked: true } : {}) }));
     if (!layers.length || layers.length > MAX_LAYERS) throw new Error(`a project has 1 to ${MAX_LAYERS} layers`);
     if (!Array.isArray(file.frames) || !file.frames.length) throw new Error(`a project has 1 to ${MAX_FRAMES} frames`);
     if (file.frames.length > maxFrames(w, h)) throw new Error(`at ${w} × ${h} an animation can have up to ${maxFrames(w, h)} frames`);

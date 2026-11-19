@@ -6,7 +6,8 @@
 // their loop: the frame after the last is the first again (tests/test_web_static.py checks it).
 (function () {
   const T = window.PixelTools;
-  const W = 64, H = 32, TAU = Math.PI * 2;
+  let W = 64, H = 32;   // the canvas being drawn on: set from PixelTools at the start of every make() (see P), so a preset draws at any size
+  const TAU = Math.PI * 2;
 
   // -- a little drawing kit -------------------------------------------------------------------
   const { hex, parse, mix } = T;
@@ -52,7 +53,8 @@
   // n frames from draw(frame, i, n); `frameAt(i)` draws any frame, so a test can check frame n is frame 0 again
   let lazy = false;   // set by peek(): frames() then hands back how to draw each frame, without drawing them all
   const frames = (n, ms, draw) => {
-    const at = (i) => { const f = new Frame(typeof ms === 'function' ? ms(i % n) : ms); draw(f, i, n); return f; };
+    const w = W, h = H;   // a frame drawn later (the gallery's thumbnails) is still drawn on the canvas this one was made for
+    const at = (i) => { W = w; H = h; const f = new Frame(typeof ms === 'function' ? ms(i % n) : ms); draw(f, i, n); return f; };
     if (lazy) return { length: n, frameAt: at };
     const out = Array.from({ length: n }, (_, i) => at(i));
     Object.defineProperty(out, 'frameAt', { value: at });
@@ -94,11 +96,11 @@
     return frames(24, 70, (f, i, n) => {
       f.light((g) => st.forEach(([sx, sy, z0]) => {
         const z = 1 - ((z0 + i / n) % 1); if (z > 0.3) return;
-        const k = 0.18 / Math.max(z, 0.06); g.set(32 + sx * 96 * k, 16 + sy * 48 * k, dim('#9ab8ff', 0.8));
+        const k = 0.18 / Math.max(z, 0.06); g.set(W / 2 + sx * W * 1.5 * k, H / 2 + sy * H * 1.5 * k, dim('#9ab8ff', 0.8));
       }), 1);
       st.forEach(([sx, sy, z0]) => {
         const z = 1 - ((z0 + i / n) % 1), k = 0.18 / Math.max(z, 0.06);
-        const x = 32 + sx * 96 * k, y = 16 + sy * 48 * k, b = Math.min(1, (1 - z) * 1.4);
+        const x = W / 2 + sx * W * 1.5 * k, y = H / 2 + sy * H * 1.5 * k, b = Math.min(1, (1 - z) * 1.4);
         f.set(x, y, hex(150 + 105 * b, 160 + 95 * b, 200 + 55 * b));
         if (z < 0.25) f.set(x - Math.sign(sx), y - Math.sign(sy), dim('#c8d6ff', b * 0.6));   // the streak trails behind
       });
@@ -106,11 +108,11 @@
   }
 
   function digitalRain() {   // falling code: glowing heads fading to deep green, every column back where it began after 48 frames
-    const r = rng(5), cols = Array.from({ length: 24 }, () => [Math.floor(r() * W), Math.floor(r() * 48), 1 + Math.floor(r() * 2), 5 + Math.floor(r() * 9)]);
-    return frames(48, 70, (f, i) => {
+    const r = rng(5), span = H + 16, cols = Array.from({ length: Math.round(W * 3 / 8) }, () => [Math.floor(r() * W), Math.floor(r() * span), 1 + Math.floor(r() * 2), 5 + Math.floor(r() * 9)]);
+    return frames(span, 70, (f, i) => {
       const heads = [];
       cols.forEach(([x, y0, v, len]) => {
-        const head = (y0 + i * v) % 48;
+        const head = (y0 + i * v) % span;
         for (let t = 0; t < len; t++) { const y = head - t; if (y < 0 || y >= H) continue;
           f.set(x, y, t === 0 ? '#e8ffe8' : t < 2 ? '#6dff8a' : mix('#22b04a', '#062a12', t / len)); }
         if (head < H) heads.push([x, head]);
@@ -331,7 +333,7 @@
     return frames(30, 70, (f, i, n) => {
       const t = TAU * i / n;
       for (let y = 0; y < H; y++) for (let x = 0; x < W; x++) {
-        const v = Math.sin(x / 6 + t) + Math.sin(y / 4 - t) + Math.sin((x + y) / 9 + t) + Math.sin(Math.hypot(x - 32, y - 16) / 5 - t);
+        const v = Math.sin(x / 6 + t) + Math.sin(y / 4 - t) + Math.sin((x + y) / 9 + t) + Math.sin(Math.hypot(x - W / 2, y - H / 2) / 5 - t);
         f.set(x, y, hsv(v / 8 + i / n, 0.8, 0.85));
       }
     });
@@ -346,16 +348,16 @@
   function tunnel() {   // diving through a ringed tunnel, darkening into the distance
     return frames(16, 60, (f, i) => {
       for (let y = 0; y < H; y++) for (let x = 0; x < W; x++) {
-        const d = Math.hypot((x - 32) / 2, y - 16) + 0.01, a = Math.atan2(y - 16, (x - 32) / 2);
+        const d = Math.hypot((x - W / 2) / 2, y - H / 2) + 0.01, a = Math.atan2(y - H / 2, (x - W / 2) / 2);
         const ring = Math.floor(40 / d + i / 4) % 2, seg = Math.floor((a / Math.PI + 1) * 6 + 40 / d * 0.3) % 2;
         f.set(x, y, dim(ring ^ seg ? '#3a9aff' : '#a23aff', Math.max(0, Math.min(1, (d - 6) / 10))));
       }
-      f.light((g) => g.oval(26, 13, 38, 19, '#2a1a5a'), 2);
+      f.light((g) => g.oval(W / 2 - 6, H / 2 - 3, W / 2 + 6, H / 2 + 3, '#2a1a5a'), 2);
     });
   }
 
   function ripple() {   // drops falling into still water, two soft rings spreading from each
-    const drops = [[20, 14, 0], [44, 18, 8], [32, 10, 16]];
+    const drops = [[20 / 64 * W, 14 / 32 * H, 0], [44 / 64 * W, 18 / 32 * H, 8], [32 / 64 * W, 10 / 32 * H, 16]];
     return frames(24, 80, (f, i, n) => {
       for (let y = 0; y < H; y++) for (let x = 0; x < W; x++) {
         let h = 0;
@@ -370,29 +372,29 @@
   function spiral() {   // a hypnotic spiral turning, its arms shading from gold to pink
     return frames(16, 70, (f, i) => {
       for (let y = 0; y < H; y++) for (let x = 0; x < W; x++) {
-        const a = Math.atan2(y - 15.5, x - 31.5), d = Math.hypot(x - 31.5, y - 15.5);
+        const a = Math.atan2(y - (H - 1) / 2, x - (W - 1) / 2), d = Math.hypot(x - (W - 1) / 2, y - (H - 1) / 2);
         if (Math.floor((a / Math.PI + 1) * 3 + d / 3 - i / 4) % 2) f.set(x, y, '#ffb547');
         else f.set(x, y, '#2a1a4a');
       }
       const arms = new Frame(); arms.px = f.px.map((c) => (c === '#ffb547' ? c : null));
-      arms.grad([31, 15], [31, 0], ['#fff0b0', '#ffb547', '#ff5ccf'], { type: 'radial', area: 'drawn' });
+      arms.grad([Math.floor((W - 1) / 2), Math.floor((H - 1) / 2)], [Math.floor((W - 1) / 2), 0], ['#fff0b0', '#ffb547', '#ff5ccf'], { type: 'radial', area: 'drawn' });
       T.over(f.px, arms.px);
     });
   }
 
   function equaliser() {   // music bars dancing, coloured green to red as they rise, glowing peaks that fall slowly
-    const n = 32, level = (b, i) => Math.round(6 + 10 * Math.abs(wave(i, n, 3, b * 0.8) * Math.cos(TAU * 2 * i / n + b * 0.37)) + (b % 4 === 0 ? Math.round(8 * Math.max(0, 1 - ((i + b) % 8) / 3)) : 0));
-    const peaks = new Array(16).fill(0), held = [];
+    const n = 32, bars = Math.floor(W / 4), up = H / 32, level = (b, i) => Math.round(up * (6 + 10 * Math.abs(wave(i, n, 3, b * 0.8) * Math.cos(TAU * 2 * i / n + b * 0.37)) + (b % 4 === 0 ? Math.round(8 * Math.max(0, 1 - ((i + b) % 8) / 3)) : 0)));
+    const peaks = new Array(bars).fill(0), held = [];
     for (let pass = 0; pass < 2; pass++) for (let i = 0; i < n; i++) {   // run twice so the peaks are settled when the loop starts
-      for (let b = 0; b < 16; b++) peaks[b] = Math.max(level(b, i), peaks[b] - 1);
+      for (let b = 0; b < bars; b++) peaks[b] = Math.max(level(b, i), peaks[b] - 1);
       if (pass) held[i] = peaks.slice();
     }
     return frames(n, 80, (f, i) => {
       const k = i % n;
-      for (let b = 0; b < 16; b++) f.rect(b * 4, 32 - level(b, k), 3, level(b, k), '#4ade80');
-      f.grad([0, 31], [0, 6], ['#4ade80', '#ffe066', '#ff3b30'], { area: 'drawn' });
-      f.light((g) => { for (let b = 0; b < 16; b++) g.rect(b * 4, 31 - held[k][b], 3, 1, '#6a6a6a'); }, 1);
-      for (let b = 0; b < 16; b++) f.rect(b * 4, 31 - held[k][b], 3, 1, '#ffffff');
+      for (let b = 0; b < bars; b++) f.rect(b * 4, H - level(b, k), 3, level(b, k), '#4ade80');
+      f.grad([0, H - 1], [0, Math.round(6 * up)], ['#4ade80', '#ffe066', '#ff3b30'], { area: 'drawn' });
+      f.light((g) => { for (let b = 0; b < bars; b++) g.rect(b * 4, H - 1 - held[k][b], 3, 1, '#6a6a6a'); }, 1);
+      for (let b = 0; b < bars; b++) f.rect(b * 4, H - 1 - held[k][b], 3, 1, '#ffffff');
     });
   }
 
@@ -577,11 +579,11 @@
 
   function floatingHearts() {   // glowing hearts drifting up at different depths and fading
     const r = rng(61), shape = ['XX.XX', 'XXXXX', '.XXX.', '..X..'];
-    const hearts = Array.from({ length: 10 }, (_, k) => [4 + r() * 52, r(), [0.5, 1, 1.5][k % 3], r() * 6, k % 3 === 2 ? 2 : 1]);
+    const hearts = Array.from({ length: 10 }, (_, k) => [4 + r() * (W - 12), r(), [0.5, 1, 1.5][k % 3], r() * 6, k % 3 === 2 ? 2 : 1]);
     return frames(64, 60, (f, i, n) => {
       f.sky(['#0a0208', '#1a0614']);
       const draw = (g, glow) => hearts.forEach(([x, y0, v, ph, k]) => {
-        const p = (y0 + i / n * v * 2) % 1, y = 34 - p * (34 + 4 * k);
+        const p = (y0 + i / n * v * 2) % 1, y = H + 2 - p * (H + 2 + 4 * k);
         g.sprite(shape, x + Math.sin(TAU * i / n + ph) * 2, y, { X: dim(hsv(0.95, k === 2 ? 0.8 : 0.7, k === 2 ? 1 : 0.9), (1 - p * 0.5) * (glow ? 0.5 : 1)) }, k);
       });
       f.light((g) => draw(g, true), 2); draw(f, false);
@@ -589,9 +591,9 @@
   }
 
   function confetti() {   // confetti tumbling down in every colour, catching the light as it turns
-    const r = rng(71), bits = Array.from({ length: 60 }, (_, k) => [r() * W, k * 38 / 60, 1 + (k % 2), r() * 6, hsv(r(), 0.75, 1), k % 2]);
-    return frames(38, 70, (f, i, n) => bits.forEach(([x, y0, v, ph, c, ph2]) => {
-      const y = (y0 + i * v) % 38 - 3, flip = (i + ph2) % 2, xx = x + Math.sin(TAU * i / n * 2 + ph) * 2;
+    const span = H + 6, count = Math.round(60 * W * H / 2048), r = rng(71), bits = Array.from({ length: count }, (_, k) => [r() * W, k * span / count, 1 + (k % 2), r() * 6, hsv(r(), 0.75, 1), k % 2]);
+    return frames(span, 70, (f, i, n) => bits.forEach(([x, y0, v, ph, c, ph2]) => {
+      const y = (y0 + i * v) % span - 3, flip = (i + ph2) % 2, xx = x + Math.sin(TAU * i / n * 2 + ph) * 2;
       const lit = flip ? mix(c, '#ffffff', 0.3) : mix(c, '#000000', 0.25);
       f.set(xx, y, lit); if (flip) f.set(xx + 1, y, lit); else f.set(xx, y + 1, lit);
     }));
@@ -773,7 +775,8 @@
 
   // peek(): { length, frameAt(i) } so the gallery can build a thumbnail a frame at a time
   const peek = (make) => () => { lazy = true; try { const r = make(); return Array.isArray(r) ? { length: r.length, frameAt: (i) => r[i] } : r; } finally { lazy = false; } };
-  const P = (id, name, group, make, about, loops = true) => ({ id, name, group, make, about, loops, peek: peek(make) });
+  const onCanvas = (make) => (...a) => { W = T.W; H = T.H; return make(...a); };   // make() draws at the size PixelTools is set to
+  const P = (id, name, group, make, about, loops = true) => ({ id, name, group, make: onCanvas(make), about, loops, peek: peek(onCanvas(make)) });
   // More boot screens, all built from the wall's blocks on its 21 x 10 grid. Each plays once and ends on black,
   // so the playlist starts from a dark panel.
   const BC = 21, BR = 10, BY0 = 1;

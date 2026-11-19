@@ -1,0 +1,8 @@
+{"format":"bongo-animation","version":1,"name":"tree_firefly","width":3,"height":3,"background":"#000000","loop":"loop","palette":["#3a4a10","#9ab520","#e8f56b","#fbffd0"],"layers":[{"name":"Glow","on":true,"opacity":1,"mode":"light","shared":false}],"frames":[
+{"ms":150,"cels":[". 0 . 0 1 0 . 0 ."]},
+{"ms":150,"cels":[". 1 . 1 2 1 . 1 ."]},
+{"ms":300,"cels":[". 2 . 2 3 2 . 2 ."]},
+{"ms":150,"cels":[". 1 . 1 2 1 . 1 ."]},
+{"ms":150,"cels":["4*. 0 4*."]},
+{"ms":600,"cels":["9*."]}
+]}

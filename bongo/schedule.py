@@ -33,7 +33,7 @@ from fractions import Fraction
 
 from PIL import Image, ImageSequence
 
-from bongo import fade, media
+from bongo import daylight, fade, media
 from bongo.player import Entry
 
 STILL_SECONDS = 7.0
@@ -162,6 +162,7 @@ class Schedule:
     day_brightness: int | None = None
     fade_seconds: float = fade.DEFAULT_SECONDS
     fade_curve: str = fade.DEFAULT_CURVE
+    daylight: daylight.Daylight | None = None   # Follow daylight (bongo/daylight.py); None: one daytime brightness
     rng: random.Random = field(default_factory=random.Random)
 
     @classmethod
@@ -187,6 +188,7 @@ class Schedule:
             day_brightness=config.get("panel", {}).get("brightness"),
             fade_seconds=sleep.get("fade", fade.DEFAULT_SECONDS),
             fade_curve=sleep.get("curve", fade.DEFAULT_CURVE),
+            daylight=daylight.Daylight.from_config(config),
         )
 
     # -- splash --------------------------------------------------------------------------
@@ -271,6 +273,51 @@ class Schedule:
         if self.asleep(now) and self.sleep_brightness is not None:
             return self.sleep_brightness
         return self.day_brightness
+
+    # -- brightness through the day (bongo/daylight.py) ----------------------------------------
+    def since_sleep(self, now: dt.datetime) -> float | None:
+        """Seconds since the sleep hours last ended, by the clock on the wall (None: no sleep hours, or it's them now)."""
+        if not (self.sleeps and self.sleep_from and self.sleep_to) or self.asleep(now):
+            return None
+        t, end = now.time(), dt.time.fromisoformat(self.sleep_to)
+        return ((t.hour - end.hour) * 3600 + (t.minute - end.minute) * 60 + t.second - end.second + t.microsecond / 1e6) % 86400
+
+    def level(self, now: dt.datetime, asleep: bool | None = None, rising: bool = True, lit: float | None = None) -> float | None:
+        """The brightness the panel should be at (None: nothing set). ``asleep``: whether it is showing its sleep
+        screen (left out: by the sleep hours). Asleep it's the sleep brightness; otherwise the daytime brightness,
+        or with Follow daylight the daylight's, rising to it from the sleep brightness over the first
+        ``daylight.WAKE_MINUTES`` after the sleep hours (``rising`` False: without that). ``lit``: the daylight's
+        level at ``now`` if the caller has worked it out already."""
+        if asleep is None:
+            asleep = self.asleep(now)
+        if asleep and self.sleep_brightness is not None:
+            return self.sleep_brightness
+        if self.daylight is None:
+            return self.day_brightness
+        try:
+            level = self.daylight.level(now) if lit is None else lit
+            since = self.since_sleep(now) if rising and self.sleep_brightness is not None else None
+            if since is not None and since < daylight.WAKE_MINUTES * 60:
+                level = self.sleep_brightness + (level - self.sleep_brightness) * since / (daylight.WAKE_MINUTES * 60)
+            return level
+        except Exception:   # the panel never stops for this: the plain daytime brightness, and one line in the log
+            daylight.failed("working out the brightness")
+            return self.day_brightness
+
+    def next_change(self, now: dt.datetime) -> dt.datetime | None:
+        """The next sunrise or sunset (with Follow daylight), or start or end of the sleep hours, after ``now``:
+        when a brightness set by hand ends. A moment in UTC; None: none of them is coming (a polar summer with
+        no sleep hours)."""
+        when = daylight.aware(now).astimezone(dt.timezone.utc)
+        try:
+            ahead = [t for t, _ in self.daylight.sun_events(now) if t > when] if self.daylight else []
+        except Exception:   # (as in ``level``: then only the sleep hours end it)
+            daylight.failed("finding the next sunrise and sunset")
+            ahead = []
+        seconds = self.seconds_until_change(now)
+        if seconds is not None:
+            ahead.append(when + dt.timedelta(seconds=seconds))
+        return min(ahead, default=None)
 
     def playlist(self, now: dt.datetime, day: list[Entry]) -> list[Entry]:
         return self.sleep_playlist if self.asleep(now) else day
