@@ -5,7 +5,7 @@
 // Every one is a calm, seamless six-second loop at 20 fps (120 frames of 50 ms): the frame after the last
 // is the first again. Mostly black (the panel is dim at night and black is off), soft light, nothing sudden.
 (function () {
-  const { W, H, TAU, Frame, frames, rng, wave, dim, P } = window.AnimatorKit;
+  const { W, H, TAU, Frame, frames, hsv, rng, wave, dim, P } = window.AnimatorKit;
   const T = window.PixelTools;
   const { hex, mix } = T;
   const N = 120, MS = 50, LOOP = N * MS;
@@ -252,21 +252,35 @@
     });
   }
 
-  function aurora() {   // slow curtains of aurora, rays shimmering through them, over a ridge of pines
-    const stars = starsOf(27, 10, 3);
-    const r = rng(8), trees = Array.from({ length: 11 }, (_, k) => [3 + k * 6 + Math.floor(r() * 3), 6 + Math.floor(r() * 6)]);
+  function aurora() {   // the Northern lights preset, made for the night: one ribbon rippling slowly from green to teal,
+    // a few stars, and the preset's ridge of pines black against a thin glow along the treetops. The sky stays black (no glow over
+    // the whole panel), the ribbon is narrow with a clean edge (no faint fringe for a dim panel to flicker on), and
+    // the glow holds still, so all that moves is the light itself.
+    const stars = starsOf(27, 4, 4);
+    const r = rng(12), trees = [];   // pines of a few heights, as the preset's ridge but less even, so they read as a forest
+    for (let x = 1 + Math.floor(r() * 3); x < W + 4; x += 6 + Math.floor(r() * 3)) trees.push([x, 5 + Math.floor(r() * 5)]);
+    const ridge = Array.from({ length: W }, (_, x) => Math.min(29, ...trees.map(([cx, h]) => 29 - h + 2 * Math.abs(x - cx))));
+    const FLOOR = 22;   // below this a colour is left off: on a dim panel it would only shimmer at random
     return loop((f, u) => {
-      twinkle(f, stars, u, 0.14, 0.45);
-      for (let y = 18; y < H; y++) for (let x = 0; x < W; x++) f.set(x, y, dim('#164a3c', Math.min(1, (y - 18) / 10)));   // the horizon glow
-      f.light((g) => { for (let y = 3; y < 28; y++) for (let x = 0; x < W; x++) {
-        const top = 5 + 3 * Math.sin(TAU * (x / 40 + u)) + 2 * Math.sin(TAU * (x / 17 - 2 * u));
-        const d = y - top; if (d < -1 || d > 16) continue;
-        const ray = 0.55 + 0.45 * Math.sin(TAU * (x / 5.3 + 3 * u)) * Math.sin(TAU * (x / 11 - 2 * u));   // vertical rays
-        const k = (d < 0 ? 0.4 * (1 + d) : (1 - d / 16) ** 1.4) * ray * (0.5 + 0.5 * (0.5 + 0.5 * Math.sin(TAU * (x / 23 - u))));
-        if (k > 0) g.set(x, y, dim(mix(mix('#b8ffd8', '#3dff8a', Math.min(1, Math.max(0, d) / 3)), '#5a8aff', Math.max(0, d - 3) / 9), 0.8 * k));
-      } }, 1, 1);
-      pines(f, trees, '#06100c');   // black silhouettes against the glow
-      for (let x = 0; x < W; x++) for (let y = 29 + Math.round(Math.sin(x / 7) * 0.8); y < H; y++) f.px[y * W + x] = '#06100c';
+      for (let x = 0; x < W; x++) for (let d = 1; d <= 2; d++) f.set(x, ridge[x] - d, dim('#2c8a90', 0.53 - 0.11 * d));   // a thin glow along the treetops
+      f.light((g) => { for (let x = 0; x < W; x++) {
+        const centre = 8 + 3 * Math.sin(TAU * (x / 44 + u)) + 0.8 * Math.sin(x / 5 - TAU * u);
+        const shimmer = 0.74 + 0.26 * Math.sin(x / 4 + TAU * 2 * u);   // rays drifting along it
+        const colour = hsv(0.39 + 0.09 * Math.sin(x / 13 + TAU * u), 0.75, 1);
+        for (let y = 0; y < ridge[x]; y++) {
+          const k = Math.max(0, 1 - Math.abs(y - centre) / 4), v = 0.8 * k * k * (3 - 2 * k) * shimmer;
+          if (v > 0.18) g.set(x, y, dim(colour, v));
+        }
+      } }, 1, 0.85);
+      stars.forEach(([x, y, ph, k]) => {   // behind the ribbon: a star fades out as the light passes over it, never adds to it
+        const here = f.get(x, y), lit = here ? Math.max(...[1, 3, 5].map((j) => parseInt(here.slice(j, j + 2), 16))) : 0;
+        const v = (0.22 + 0.3 * breath(u, k, ph)) * Math.max(0, 1 - lit / 40);
+        if (v > 0) f.set(x, y, here ? mix(here, '#cfd8ff', v * (1 - lit / 255)) : dim('#cfd8ff', v));
+      });
+      for (let i = 0; i < W * H; i++) {
+        const c = f.px[i], y = Math.floor(i / W);
+        if (y >= ridge[i % W] || (c && Math.max(...[1, 3, 5].map((k) => parseInt(c.slice(k, k + 2), 16))) < FLOOR)) f.px[i] = null;
+      }
     });
   }
 
@@ -354,7 +368,7 @@
     S('moon_phases', 'Moon phases', moonPhases, 'The moon waning and waxing beside a star.'),
     S('counting_sheep', 'Counting sheep', countingSheep, 'Sheep leaping a fence under a little moon.'),
     S('shooting_star', 'Shooting star', shootingStar, 'Twinkling stars over the hills, one shooting by.'),
-    S('aurora', 'Aurora', aurora, 'Northern lights swaying over the pines.'),
+    S('aurora', 'Aurora', aurora, 'Northern lights rippling slowly over the pines.'),
     S('rain', 'Rain', rain, 'Soft rain rippling a puddle.'),
     S('candle', 'Candle', candle, 'A flickering candle and its warm glow.'),
     S('snow', 'Snow', snow, 'Snow drifting down onto a bank.'),
